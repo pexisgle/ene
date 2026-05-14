@@ -1,9 +1,13 @@
 use std::path::{Path, PathBuf};
 use crate::error::AiCoreError;
+use crate::sandbox::permission::{PermissionGate, DestructiveAction};
+
+pub mod permission;
 
 /// サンドボックス設定 — 許可ディレクトリと制限
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
+    pub enabled: bool,
     pub allowed_directories: Vec<PathBuf>,
     pub writable_directories: Vec<PathBuf>,
     pub blocked_commands: Vec<String>,
@@ -23,6 +27,7 @@ impl Default for SandboxConfig {
             cwd
         };
         Self {
+            enabled: true,
             allowed_directories: vec![canonical_cwd.clone()],
             writable_directories: vec![canonical_cwd],
             blocked_commands: vec![
@@ -107,5 +112,24 @@ impl SandboxConfig {
             }
         }
         Ok(())
+    }
+
+    /// 破壊的操作のパーミッションをチェック
+    pub fn check_permission(
+        &self,
+        action: DestructiveAction,
+        target: &str,
+        description: &str,
+    ) -> Result<(), AiCoreError> {
+        let gate = PermissionGate::default_with_sandbox(self);
+        match gate.check_destructive(action, target, description) {
+            Ok(()) => Ok(()),
+            Err(req) => Err(AiCoreError::PermissionDenied(format!(
+                "{:?} on {} requires approval: {}",
+                action,
+                req.description,
+                target
+            ))),
+        }
     }
 }

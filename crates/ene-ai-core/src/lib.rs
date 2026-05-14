@@ -30,9 +30,12 @@ pub use error::AiCoreError;
 pub use memory::{MemoryStore, ConversationSummary, RecalledSummary, KeyFact};
 pub use session::ConversationSession;
 pub use stream::{run_ai_with_tools, AiStreamEvent};
-pub use tools::{ToolDefinition, ToolRegistry, ToolCallResult};
+pub use tools::{ToolDefinition, ToolRegistry, ToolCallResult, ToolCategory};
 pub use tool_factory::ToolRegistryBuilder;
 pub use utils::{truncate, init_memory};
+
+// Cowork Agent 新機能の公開エクスポート
+pub use sandbox::permission::{PermissionGate, PermissionLevel, PermissionRequest, DestructiveAction};
 
 // Legacy module aliases for external code using old paths
 pub mod memory_store {

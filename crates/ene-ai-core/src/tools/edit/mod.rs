@@ -68,23 +68,41 @@ pub fn detect_line_ending(text: &str) -> &str {
     if text.contains("\r\n") { "\r\n" } else { "\n" }
 }
 
-/// Levenshtein distance
+/// Levenshtein distance (using strsim crate)
 pub fn levenshtein(a: &str, b: &str) -> usize {
-    if a.is_empty() || b.is_empty() {
-        return a.len().max(b.len());
+    strsim::levenshtein(a, b)
+}
+
+/// 類似度に基づく最良マッチを見つける
+pub fn find_best_match<'a>(needle: &str, haystack: &'a str) -> Option<(usize, &'a str, f64)> {
+    if needle.is_empty() {
+        return None;
     }
-    let mut matrix = vec![vec![0; b.len() + 1]; a.len() + 1];
-    for i in 0..=a.len() { matrix[i][0] = i; }
-    for j in 0..=b.len() { matrix[0][j] = j; }
-    for i in 1..=a.len() {
-        for j in 1..=b.len() {
-            let cost = if a.as_bytes()[i - 1] == b.as_bytes()[j - 1] { 0 } else { 1 };
-            matrix[i][j] = (matrix[i - 1][j] + 1)
-                .min(matrix[i][j - 1] + 1)
-                .min(matrix[i - 1][j - 1] + cost);
+    let needle_len = needle.len();
+    let mut best: Option<(usize, &'a str, f64)> = None;
+
+    // スライディングウィンドウで最も類似した部分文字列を探す
+    let max_window = (needle_len * 2).max(100);
+    let step = needle_len.max(1);
+
+    for start in (0..haystack.len().saturating_sub(needle_len / 2)).step_by(step) {
+        let end = (start + max_window).min(haystack.len());
+        let window = &haystack[start..end];
+        let dist = strsim::levenshtein(needle, window);
+        let max_len = needle_len.max(window.len());
+        let similarity = if max_len == 0 {
+            1.0
+        } else {
+            1.0 - (dist as f64 / max_len as f64)
+        };
+
+        if similarity >= 0.7 {
+            if best.map_or(true, |(_, _, b_sim)| similarity > b_sim) {
+                best = Some((start, window, similarity));
+            }
         }
     }
-    matrix[a.len()][b.len()]
+    best
 }
 
 pub async fn edit(

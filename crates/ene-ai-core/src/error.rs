@@ -38,6 +38,12 @@ pub enum AiCoreError {
     ShellOutputTooLarge(usize),
     #[error("Undo failed: {0}")]
     UndoError(String),
+    #[error("Browser automation error: {0}")]
+    BrowserError(String),
+    #[error("App/GUI automation error: {0}")]
+    AppError(String),
+    #[error("Web search error: {0}")]
+    WebSearchError(String),
     #[error("Unknown error: {0}")]
     Unknown(String),
 }

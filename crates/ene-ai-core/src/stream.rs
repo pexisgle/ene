@@ -21,6 +21,20 @@ pub enum AiStreamEvent {
     SpecialToken(String),
     ToolCallStart { name: String, arguments: String },
     ToolCallResult { name: String, result: String },
+    /// パーミッション要求（Phase 2: UI 連携）
+    PermissionRequired {
+        request_id: String,
+        action: String,
+        target: String,
+        description: String,
+    },
+    /// タスク進捗（Phase 2: バックグラウンド実行）
+    TaskProgress {
+        task_id: String,
+        step: usize,
+        total_steps: usize,
+        description: String,
+    },
     SessionSplit { summary: String, reason: String },
     Finished,
     Error(String),

@@ -45,6 +45,18 @@ pub enum AiStreamEvent {
     SpecialToken(String),
     ToolCallStart { name: String, arguments: String },
     ToolCallResult { name: String, result: String },
+    PermissionRequired {
+        request_id: String,
+        action: String,
+        target: String,
+        description: String,
+    },
+    TaskProgress {
+        task_id: String,
+        step: usize,
+        total_steps: usize,
+        description: String,
+    },
     Finished,
     Error(String),
 }
@@ -381,6 +393,22 @@ fn poll_ai_worker(
                 if let Ok(mut guard) = runtime_state.worker_rx.lock() {
                     *guard = None;
                 }
+            }
+            CoreAiStreamEvent::PermissionRequired { request_id, action, target, description } => {
+                stream_writer.write(AiStreamEvent::PermissionRequired {
+                    request_id,
+                    action,
+                    target,
+                    description,
+                });
+            }
+            CoreAiStreamEvent::TaskProgress { task_id, step, total_steps, description } => {
+                stream_writer.write(AiStreamEvent::TaskProgress {
+                    task_id,
+                    step,
+                    total_steps,
+                    description,
+                });
             }
             CoreAiStreamEvent::SpecialToken(_) => {}
             CoreAiStreamEvent::SessionSplit { summary, reason } => {

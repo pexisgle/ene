@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-async-openai = { version = "0.37.0", features = ["chat-completion", "embedding"] }
+async-openai = { version = "0.38.2", features = ["chat-completion", "embedding"] }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 serde = { workspace = true }
@@ -29,10 +29,16 @@ dashmap = "6"
 diff = "0.1"
 walkdir = "2"
 lazy_static = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 hf-hub = { version = "0.5.0", default-features = false, features = ["rustls-tls", "tokio"] }
 candle-core = "0.10"
 candle-nn = "0.10"
-tokenizers = "0.22"
+tokenizers = "0.23"
 dirs = "6"
 tracing = "0.1"
+strsim = "0.11"
+enigo = "0.3"
+urlencoding = "2.1"
+
+# Browser automation (Phase 3)
+chromiumoxide = "0.9"

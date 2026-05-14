@@ -77,6 +77,7 @@ fn build_sandbox_config(settings: &AiSettings) -> SandboxConfig {
     };
 
     SandboxConfig {
+        enabled: settings.sandbox.enabled,
         allowed_directories: canonicalize_dirs(&settings.sandbox.allowed_directories),
         writable_directories: canonicalize_dirs(&settings.sandbox.writable_directories),
         blocked_commands: settings.sandbox.blocked_commands.clone(),

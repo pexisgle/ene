@@ -1227,6 +1227,8 @@ fn apply_ai_stream_events(
             AiStreamEvent::SpecialToken(_) => {}
             AiStreamEvent::ToolCallStart { .. } => {}
             AiStreamEvent::ToolCallResult { .. } => {}
+            AiStreamEvent::PermissionRequired { .. } => {}
+            AiStreamEvent::TaskProgress { .. } => {}
         }
     }
 }

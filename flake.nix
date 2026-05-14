@@ -67,6 +67,10 @@
                 # GTK3 (provides gdk-3.0, atk, etc.)
                 gtk3
                 libxkbcommon
+                # xdotool / libxdo for enigo (GUI automation)
+                xdotool
+                # Chromium for browser automation (Phase 3)
+                chromium
               ];
             RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
             LD_LIBRARY_PATH = lib.makeLibraryPath [
@@ -78,13 +82,19 @@
               libXi
               libxcursor
               libxkbcommon
+              xdotool
             ];
             LIBCLANG_PATH="${llvmPackages.libclang.lib}/lib";
             # OpenSSL environment変数 (native-tls用)
             OPENSSL_DIR = "${pkgs.openssl.dev}";
             OPENSSL_LIB_DIR = "${pkgs.openssl.out}/lib";
             OPENSSL_INCLUDE_DIR = "${pkgs.openssl.dev}/include";
-            PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
+            PKG_CONFIG_PATH = lib.concatStringsSep ":" [
+              "${pkgs.openssl.dev}/lib/pkgconfig"
+              "${pkgs.xdotool}/lib/pkgconfig"
+            ];
+            # libxdo (enigo dependency)
+            NIX_LDFLAGS = "-L${pkgs.xdotool}/lib";
             shellHook = lib.optionalString (lib.strings.hasInfix "linux" system) ''
               appindicator_compat_dir="$(mktemp -d -t ene-appindicator-compat-XXXXXX)"
               ln -sfn ${libayatana-appindicator}/lib/libayatana-appindicator3.so.1 "$appindicator_compat_dir/libappindicator3.so.1"

@@ -57,6 +57,22 @@ where
                 session.record_assistant_response();
                 println!();
             }
+            AiStreamEvent::PermissionRequired { request_id, action, target, description } => {
+                println!("\n{}", style::warning(format!(
+                    "[Permission Required] {} on {} ({})",
+                    action, target, description
+                )));
+                println!("{}", style::warning(format!(
+                    "To approve, use: approve_permission {}",
+                    request_id
+                )));
+            }
+            AiStreamEvent::TaskProgress { task_id, step, total_steps, description } => {
+                println!("\n{}", style::header(format!(
+                    "[Task {}] Step {}/{}: {}",
+                    task_id, step, total_steps, description
+                )));
+            }
             AiStreamEvent::Error(err) => {
                 println!("\n[Error] {}", err);
             }
