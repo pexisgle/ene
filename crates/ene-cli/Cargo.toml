@@ -1,0 +1,14 @@
+[package]
+name = "ene-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ene-ai-core = { path = "../ene-ai-core" }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+serde_json = { workspace = true }
+dialoguer = "0.12"
+console = "0.16.3"
+clap = { version = "4", features = ["derive"] }
+futures-core = "0.3"

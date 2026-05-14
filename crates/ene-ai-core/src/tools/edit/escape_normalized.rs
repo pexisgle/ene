@@ -1,0 +1,65 @@
+pub fn escape_normalized_replace(content: &str, old: &str, new: &str, replace_all: bool) -> Option<String> {
+    let unescape = |s: &str| -> String {
+        let mut result = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                match chars.next() {
+                    Some('n') => result.push('\n'),
+                    Some('t') => result.push('\t'),
+                    Some('r') => result.push('\r'),
+                    Some('\\') => result.push('\\'),
+                    Some('"') => result.push('"'),
+                    Some('\'') => result.push('\''),
+                    Some('`') => result.push('`'),
+                    Some('$') => result.push('$'),
+                    Some(other) => { result.push('\\'); result.push(other); }
+                    None => result.push('\\'),
+                }
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    };
+
+    let unescaped_find = unescape(old);
+
+    if content.contains(&unescaped_find) {
+        if replace_all {
+            return Some(content.replace(&unescaped_find, new));
+        }
+        let first = content.find(&unescaped_find)?;
+        let last = content.rfind(&unescaped_find)?;
+        if first != last { return None; }
+        return Some(content[..first].to_string() + new + &content[first + unescaped_find.len()..]);
+    }
+
+    let lines: Vec<&str> = content.lines().collect();
+    let find_lines: Vec<&str> = unescaped_find.lines().collect();
+    let mut results = Vec::new();
+
+    for i in 0..=lines.len().saturating_sub(find_lines.len().max(1)) {
+        let block = lines[i..(i + find_lines.len()).min(lines.len())].join("\n");
+        let unescaped_block = unescape(&block);
+        if unescaped_block == unescaped_find {
+            let mut start_idx = 0usize;
+            for k in 0..i { start_idx += lines[k].len() + 1; }
+            let mut end_idx = start_idx;
+            for k in 0..find_lines.len().min(lines.len() - i) {
+                end_idx += lines[i + k].len();
+                if k < find_lines.len() - 1 && i + k + 1 < lines.len() { end_idx += 1; }
+            }
+            results.push((start_idx, end_idx));
+        }
+    }
+
+    if results.is_empty() { return None; }
+    if !replace_all && results.len() > 1 { return None; }
+
+    let mut result = content.to_string();
+    for (start, end) in results.iter().rev() {
+        result = result[..*start].to_string() + new + &result[*end..];
+    }
+    Some(result)
+}

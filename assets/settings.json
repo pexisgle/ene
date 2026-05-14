@@ -1,0 +1,19 @@
+{
+  "$schema": "./settings.schema.json",
+  "version": 1,
+  "character": {
+    "selected_character_name": "Alicia",
+    "character_position": [-1.261557, 0.21307433, 0.0]
+  },
+  "ai": {
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key": "",
+    "user_name": "pexisgle",
+    "model": "deepseek/deepseek-v4-flash",
+    "memory": {
+      "enabled": true,
+      "topic_change_threshold": 0.4,
+      "gguf_quantization": "F16"
+    }
+  }
+}

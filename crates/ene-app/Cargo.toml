@@ -1,0 +1,33 @@
+[package]
+name = "ene-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ene-ai-core = { path = "../ene-ai-core" }
+bevy = { version = "0.18.1", features = ["dynamic_linking"] }
+bevy_egui = "0.39.1"
+bevy_vrm1 = "0.7.1"
+log = { version = "*", features = ["max_level_debug", "release_max_level_warn"] }
+png = "0.18.1"
+tray-icon = { version = "0.24", default-features = false, features = ["gtk"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "3", features = ["wayland-data-control"] }
+gtk = "0.18.2"
+raw-window-handle = "0.6.2"
+wayland-client = { version = "0.31.14", features = ["system"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+raw-window-handle = "0.6.2"
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

@@ -1,0 +1,9 @@
+/target
+.direnv
+.idea
+.vscode
+.opencode
+.fastembed_cache
+
+# User runtime data (generated on first launch)
+dev.pexisgle.Ene/
