@@ -443,14 +443,11 @@ flowchart TD
 flowchart TD
     A[ストリーミングテキスト受信<br/>（run_ai_with_tools から TextDelta）] --> B[コンシューマー側で解析<br/>（ai_bridge.rs / CLI main.rs）]
     B --> C[split_text_and_special_tokens]
-    C --> D{&lt;|...|&gt; トークン存在?}
-    D -->|はい| E[extract_emotion_from_act_token]
+    C --> D{<|...|> トークン存在?}
+    D -->|はい| E[extract_emotion_from_token]
     D -->|いいえ| F[通常テキストとして処理]
-    E --> G{JSON形式?}
-    G -->|はい| H[emotionフィールド抽出]
-    G -->|いいえ| I[キーワードフォールバック解析]
-    H --> J[SpecialToken イベント出力]
-    I --> J
+    E --> G[emo:以降の感情名を抽出]
+    G --> H[SpecialToken イベント出力]
     J --> K[VRM表情更新]
 
     style A fill:#f9f,stroke:#333
@@ -459,10 +456,10 @@ flowchart TD
 
 > **注意**: `stream.rs` 自体は SpecialToken の解析を行わない。`TextDelta(String)` を raw テキストで配信し、解析はコンシューマー側（`ai_bridge.rs` / CLI `main.rs`）で実施される。
 
-### ACTトークン形式
+### Emotion Token Format
 
 ```
-<|ACT:{"emotion":"happy"}|>
+<|emo:happy|>
 ```
 
 ---
