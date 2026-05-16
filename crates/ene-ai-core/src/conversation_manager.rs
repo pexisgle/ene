@@ -1,17 +1,17 @@
-use std::sync::Arc;
+use crate::config::AiSettings;
+use crate::embedding::{EmbeddingProvider, cosine_similarity};
+use crate::error::AiCoreError;
+use crate::memory::store::{KeyFact, MemoryStore};
+use crate::summarizer;
 use async_openai::types::chat::Role;
 use chrono::{DateTime, Utc};
+use std::sync::Arc;
 use tokio::sync::oneshot;
-use crate::config::AiSettings;
-use crate::embedding::{cosine_similarity, EmbeddingProvider};
-use crate::error::AiCoreError;
-use crate::memory::store::{MemoryStore, KeyFact};
-use crate::summarizer;
 
 #[derive(Debug)]
 pub enum SessionBoundary {
     Continue,
-    Split { reason: SplitReason },
+    Split(SplitReason),
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +45,21 @@ pub struct PendingSplitTask {
     pub rx: oneshot::Receiver<Result<SplitResult, AiCoreError>>,
 }
 
+/// セッション分割タスクの入力パラメータ
+pub struct SplitTaskInput {
+    pub last_input_embedding: Option<Vec<f32>>,
+    pub last_message_time: Option<DateTime<Utc>>,
+    pub current_turn_count: usize,
+    pub user_input: String,
+    pub settings: AiSettings,
+    pub history: Vec<(Role, String)>,
+    pub session_id: String,
+    pub card_name: String,
+    pub user_name: String,
+    pub store: Arc<MemoryStore>,
+    pub embedder: Arc<dyn EmbeddingProvider>,
+}
+
 pub async fn check_boundary(
     last_input_embedding: Option<&Vec<f32>>,
     last_message_time: Option<DateTime<Utc>>,
@@ -63,26 +78,22 @@ pub async fn check_boundary(
         if elapsed_minutes >= settings.memory.session_timeout_minutes
             && current_turn_count >= settings.memory.min_turns_before_split
         {
-            return SessionBoundary::Split {
-                reason: SplitReason::Timeout { elapsed_minutes },
-            };
+            return SessionBoundary::Split(SplitReason::Timeout { elapsed_minutes });
         }
     }
 
-    if let Some(prev_embedding) = last_input_embedding {
-        if current_turn_count >= settings.memory.min_turns_before_split {
-            match embedder.embed_query(user_input).await {
-                Ok(current_embedding) => {
-                    let similarity = cosine_similarity(prev_embedding, &current_embedding);
-                    if similarity < settings.memory.topic_change_threshold {
-                        return SessionBoundary::Split {
-                            reason: SplitReason::TopicChange { similarity },
-                        };
-                    }
+    if let Some(prev_embedding) = last_input_embedding
+        && current_turn_count >= settings.memory.min_turns_before_split
+    {
+        match embedder.embed_query(user_input).await {
+            Ok(current_embedding) => {
+                let similarity = cosine_similarity(prev_embedding, &current_embedding);
+                if similarity < settings.memory.topic_change_threshold {
+                    return SessionBoundary::Split(SplitReason::TopicChange { similarity });
                 }
-                Err(e) => {
-                    eprintln!("[Session] Embedding error for boundary check: {}", e);
-                }
+            }
+            Err(e) => {
+                eprintln!("[Session] Embedding error for boundary check: {}", e);
             }
         }
     }
@@ -174,12 +185,16 @@ pub async fn execute_split(
         }
     }
 
-    let existing_facts = store.get_all_keyfacts(card_name)
-        .unwrap_or_default();
+    let existing_facts = store.get_all_keyfacts(card_name).unwrap_or_default();
 
     let summary_result = summarizer::summarize_conversation(
-        settings, history, card_name, user_name, &existing_facts,
-    ).await?;
+        settings,
+        history,
+        card_name,
+        user_name,
+        &existing_facts,
+    )
+    .await?;
 
     let summary_embedding = embed_session_messages(embedder.as_ref(), history).await?;
 
@@ -202,20 +217,7 @@ pub async fn execute_split(
     })
 }
 
-pub fn spawn_split_task(
-    pending_split: &mut Option<PendingSplitTask>,
-    last_input_embedding: Option<Vec<f32>>,
-    last_message_time: Option<DateTime<Utc>>,
-    current_turn_count: usize,
-    user_input: String,
-    settings: AiSettings,
-    history: Vec<(Role, String)>,
-    session_id: String,
-    card_name: String,
-    user_name: String,
-    store: Arc<MemoryStore>,
-    embedder: Arc<dyn EmbeddingProvider>,
-) {
+pub fn spawn_split_task(pending_split: &mut Option<PendingSplitTask>, input: SplitTaskInput) {
     if pending_split.is_some() {
         return;
     }
@@ -223,6 +225,20 @@ pub fn spawn_split_task(
     let (tx, rx) = oneshot::channel();
 
     tokio::spawn(async move {
+        let SplitTaskInput {
+            last_input_embedding,
+            last_message_time,
+            current_turn_count,
+            user_input,
+            settings,
+            history,
+            session_id,
+            card_name,
+            user_name,
+            store,
+            embedder,
+        } = input;
+
         let boundary = check_boundary(
             last_input_embedding.as_ref(),
             last_message_time,
@@ -230,17 +246,24 @@ pub fn spawn_split_task(
             &settings,
             &user_input,
             embedder.as_ref(),
-        ).await;
+        )
+        .await;
 
         let result = match boundary {
-            SessionBoundary::Split { reason } => {
+            SessionBoundary::Split(reason) => {
                 execute_split(
-                    &history, &session_id, &card_name, &user_name, &store, &embedder, &settings, reason,
-                ).await
+                    &history,
+                    &session_id,
+                    &card_name,
+                    &user_name,
+                    &store,
+                    &embedder,
+                    &settings,
+                    reason,
+                )
+                .await
             }
-            SessionBoundary::Continue => {
-                Err(AiCoreError::Unknown("no split needed".to_string()))
-            }
+            SessionBoundary::Continue => Err(AiCoreError::SplitNotNeeded),
         };
 
         let _ = tx.send(result);
@@ -249,10 +272,10 @@ pub fn spawn_split_task(
     *pending_split = Some(PendingSplitTask { rx });
 }
 
-pub fn poll_split_result(pending_split: &mut Option<PendingSplitTask>) -> Option<Result<SplitResult, AiCoreError>> {
-    let Some(mut task) = pending_split.take() else {
-        return None;
-    };
+pub fn poll_split_result(
+    pending_split: &mut Option<PendingSplitTask>,
+) -> Option<Result<SplitResult, AiCoreError>> {
+    let mut task = pending_split.take()?;
 
     match task.rx.try_recv() {
         Ok(result) => Some(result),
@@ -260,9 +283,7 @@ pub fn poll_split_result(pending_split: &mut Option<PendingSplitTask>) -> Option
             *pending_split = Some(task);
             None
         }
-        Err(oneshot::error::TryRecvError::Closed) => {
-            Some(Err(AiCoreError::Unknown("split task channel closed".to_string())))
-        }
+        Err(oneshot::error::TryRecvError::Closed) => Some(Err(AiCoreError::ChannelClosed)),
     }
 }
 

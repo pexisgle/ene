@@ -1,8 +1,8 @@
-use std::path::Path;
-use crate::sandbox::SandboxConfig;
-use crate::error::AiCoreError;
-use super::undo_manager::{UndoEntry, UndoManager};
 use super::definition::ToolDefinition;
+use super::undo_manager::{UndoEntry, UndoManager};
+use crate::error::AiCoreError;
+use crate::sandbox::SandboxConfig;
+use std::path::Path;
 
 pub fn tool_definition() -> ToolDefinition {
     ToolDefinition {
@@ -47,13 +47,16 @@ pub async fn apply_patch(
     let normalized = patch_text.replace("\r\n", "\n").replace("\r", "\n");
     let trimmed = normalized.trim();
 
-    if trimmed == "*** Begin Patch\n*** End Patch" || trimmed == "*** Begin Patch\n\n*** End Patch" {
-        return Err(AiCoreError::ToolExecutionError("Patch rejected: empty patch".to_string()));
+    if trimmed == "*** Begin Patch\n*** End Patch" || trimmed == "*** Begin Patch\n\n*** End Patch"
+    {
+        return Err(AiCoreError::ToolExecutionError(
+            "Patch rejected: empty patch".to_string(),
+        ));
     }
 
     if !trimmed.starts_with("*** Begin Patch") || !trimmed.ends_with("*** End Patch") {
         return Err(AiCoreError::ToolExecutionError(
-            "Patch must start with '*** Begin Patch' and end with '*** End Patch'".to_string()
+            "Patch must start with '*** Begin Patch' and end with '*** End Patch'".to_string(),
         ));
     }
 
@@ -62,7 +65,8 @@ pub async fn apply_patch(
     let lines: Vec<&str> = trimmed.lines().collect();
     let mut i = 1; // Skip "*** Begin Patch"
 
-    while i < lines.len() - 1 { // Skip "*** End Patch"
+    while i < lines.len() - 1 {
+        // Skip "*** End Patch"
         let line = lines[i].trim();
 
         if line.starts_with("*** Update File:") {
@@ -93,34 +97,44 @@ pub async fn apply_patch(
         } else if line.is_empty() {
             i += 1;
         } else {
-            return Err(AiCoreError::ToolExecutionError(
-                format!("Unknown patch directive at line {}: {}", i + 1, line)
-            ));
+            return Err(AiCoreError::ToolExecutionError(format!(
+                "Unknown patch directive at line {}: {}",
+                i + 1,
+                line
+            )));
         }
     }
 
     if operations.is_empty() {
-        return Err(AiCoreError::ToolExecutionError("Patch contains no operations".to_string()));
+        return Err(AiCoreError::ToolExecutionError(
+            "Patch contains no operations".to_string(),
+        ));
     }
 
     // 検証フェーズ - すべての操作が有効か確認
     let mut validated = Vec::new();
     for op in &operations {
         match op {
-            PatchOperation::Update { path, old_content, .. } => {
+            PatchOperation::Update {
+                path, old_content, ..
+            } => {
                 let resolved = sandbox.resolve_and_check(Path::new(path), true)?;
                 if !resolved.exists() {
                     return Err(AiCoreError::FileNotFound(format!(
-                        "Patch verification failed: File to update does not exist: {}", path
+                        "Patch verification failed: File to update does not exist: {}",
+                        path
                     )));
                 }
-                let current = tokio::fs::read_to_string(&resolved).await
-                    .map_err(|e| AiCoreError::ToolExecutionError(format!(
-                        "Patch verification failed: Cannot read {}: {}", path, e
-                    )))?;
+                let current = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
+                    AiCoreError::ToolExecutionError(format!(
+                        "Patch verification failed: Cannot read {}: {}",
+                        path, e
+                    ))
+                })?;
                 if !current.contains(old_content) {
                     return Err(AiCoreError::ToolExecutionError(format!(
-                        "Patch verification failed: old_content not found in {}. The file may have changed.", path
+                        "Patch verification failed: old_content not found in {}. The file may have changed.",
+                        path
                     )));
                 }
                 validated.push((resolved, op.clone()));
@@ -133,7 +147,8 @@ pub async fn apply_patch(
                 let resolved = sandbox.resolve_and_check(Path::new(path), true)?;
                 if !resolved.exists() {
                     return Err(AiCoreError::FileNotFound(format!(
-                        "Patch verification failed: File to delete does not exist: {}", path
+                        "Patch verification failed: File to delete does not exist: {}",
+                        path
                     )));
                 }
                 validated.push((resolved, op.clone()));
@@ -147,10 +162,19 @@ pub async fn apply_patch(
 
     for (resolved, op) in validated {
         match op {
-            PatchOperation::Update { old_content, new_content, .. } => {
+            PatchOperation::Update {
+                old_content,
+                new_content,
+                ..
+            } => {
                 let original = tokio::fs::read(&resolved).await.ok();
-                let current = tokio::fs::read_to_string(&resolved).await
-                    .map_err(|e| AiCoreError::ToolExecutionError(format!("Cannot read {}: {}", resolved.display(), e)))?;
+                let current = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
+                    AiCoreError::ToolExecutionError(format!(
+                        "Cannot read {}: {}",
+                        resolved.display(),
+                        e
+                    ))
+                })?;
 
                 // Simple replace (must be unique match)
                 let first = current.find(&old_content);
@@ -161,24 +185,39 @@ pub async fn apply_patch(
                         resolved.display()
                     )));
                 }
-                let pos = first.ok_or_else(|| AiCoreError::ToolExecutionError(format!(
-                    "Patch failed: old_content not found in {}", resolved.display()
-                )))?;
+                let pos = first.ok_or_else(|| {
+                    AiCoreError::ToolExecutionError(format!(
+                        "Patch failed: old_content not found in {}",
+                        resolved.display()
+                    ))
+                })?;
 
-                let updated = current[..pos].to_string() + &new_content + &current[pos + old_content.len()..];
-                tokio::fs::write(&resolved, updated).await
-                    .map_err(|e| AiCoreError::ToolExecutionError(format!("Cannot write {}: {}", resolved.display(), e)))?;
+                let updated =
+                    current[..pos].to_string() + &new_content + &current[pos + old_content.len()..];
+                tokio::fs::write(&resolved, updated).await.map_err(|e| {
+                    AiCoreError::ToolExecutionError(format!(
+                        "Cannot write {}: {}",
+                        resolved.display(),
+                        e
+                    ))
+                })?;
 
                 undo_ops.push(UndoEntry::restore_file(resolved.clone(), original));
                 summary.push(format!("M {}", resolved.display()));
             }
             PatchOperation::Add { content, .. } => {
                 if let Some(parent) = resolved.parent() {
-                    tokio::fs::create_dir_all(parent).await
-                        .map_err(|e| AiCoreError::ToolExecutionError(format!("Cannot create directory: {e}")))?;
+                    tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                        AiCoreError::ToolExecutionError(format!("Cannot create directory: {e}"))
+                    })?;
                 }
-                tokio::fs::write(&resolved, &content).await
-                    .map_err(|e| AiCoreError::ToolExecutionError(format!("Cannot write {}: {}", resolved.display(), e)))?;
+                tokio::fs::write(&resolved, &content).await.map_err(|e| {
+                    AiCoreError::ToolExecutionError(format!(
+                        "Cannot write {}: {}",
+                        resolved.display(),
+                        e
+                    ))
+                })?;
 
                 undo_ops.push(UndoEntry::delete_created_file(resolved.clone()));
                 summary.push(format!("A {}", resolved.display()));
@@ -191,11 +230,21 @@ pub async fn apply_patch(
                 };
 
                 if resolved.is_dir() {
-                    tokio::fs::remove_dir_all(&resolved).await
-                        .map_err(|e| AiCoreError::ToolExecutionError(format!("Cannot delete {}: {}", resolved.display(), e)))?;
+                    tokio::fs::remove_dir_all(&resolved).await.map_err(|e| {
+                        AiCoreError::ToolExecutionError(format!(
+                            "Cannot delete {}: {}",
+                            resolved.display(),
+                            e
+                        ))
+                    })?;
                 } else {
-                    tokio::fs::remove_file(&resolved).await
-                        .map_err(|e| AiCoreError::ToolExecutionError(format!("Cannot delete {}: {}", resolved.display(), e)))?;
+                    tokio::fs::remove_file(&resolved).await.map_err(|e| {
+                        AiCoreError::ToolExecutionError(format!(
+                            "Cannot delete {}: {}",
+                            resolved.display(),
+                            e
+                        ))
+                    })?;
                 }
 
                 undo_ops.push(UndoEntry::restore_file(resolved.clone(), original));
@@ -207,21 +256,34 @@ pub async fn apply_patch(
     // Undoエントリを1つにまとめる
     undo_manager.push(session_id, UndoEntry::new("patch", undo_ops));
 
-    Ok(format!("Patch applied successfully.\n{}", summary.join("\n")))
+    Ok(format!(
+        "Patch applied successfully.\n{}",
+        summary.join("\n")
+    ))
 }
 
 #[derive(Clone)]
 enum PatchOperation {
-    Update { path: String, old_content: String, new_content: String },
-    Add { path: String, content: String },
-    Delete { path: String },
+    Update {
+        path: String,
+        old_content: String,
+        new_content: String,
+    },
+    Add {
+        path: String,
+        content: String,
+    },
+    Delete {
+        path: String,
+    },
 }
 
 fn parse_code_block(lines: &[&str], start: usize) -> Result<(String, usize), AiCoreError> {
     if start >= lines.len() || !lines[start].trim().starts_with("```") {
-        return Err(AiCoreError::ToolExecutionError(
-            format!("Expected code block starting with ``` at line {}", start + 1)
-        ));
+        return Err(AiCoreError::ToolExecutionError(format!(
+            "Expected code block starting with ``` at line {}",
+            start + 1
+        )));
     }
 
     let mut content = Vec::new();
@@ -237,22 +299,91 @@ fn parse_code_block(lines: &[&str], start: usize) -> Result<(String, usize), AiC
     }
 
     Err(AiCoreError::ToolExecutionError(
-        "Unclosed code block in patch".to_string()
+        "Unclosed code block in patch".to_string(),
     ))
 }
 
-fn parse_update_block(lines: &[&str], start: usize) -> Result<(String, String, usize), AiCoreError> {
+fn parse_update_block(
+    lines: &[&str],
+    start: usize,
+) -> Result<(String, String, usize), AiCoreError> {
     // Parse old content block
     let (old_content, consumed1) = parse_code_block(lines, start)?;
     let next = start + consumed1 + 1;
 
     // Parse new content block
     if next >= lines.len() || !lines[next].trim().starts_with("```") {
-        return Err(AiCoreError::ToolExecutionError(
-            format!("Expected second code block for new content at line {}", next + 1)
-        ));
+        return Err(AiCoreError::ToolExecutionError(format!(
+            "Expected second code block for new content at line {}",
+            next + 1
+        )));
     }
     let (new_content, consumed2) = parse_code_block(lines, next)?;
 
     Ok((old_content, new_content, consumed1 + 1 + consumed2))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_code_block_simple() {
+        let lines = vec![
+            "```",
+            "content line 1",
+            "content line 2",
+            "```",
+            "next line",
+        ];
+        let (content, consumed) = parse_code_block(&lines, 0).unwrap();
+        assert_eq!(content, "content line 1\ncontent line 2");
+        assert_eq!(consumed, 3);
+    }
+
+    #[test]
+    fn test_parse_code_block_with_lang() {
+        let lines = vec!["```rust", "fn main() {}", "```", "next"];
+        let (content, consumed) = parse_code_block(&lines, 0).unwrap();
+        assert_eq!(content, "fn main() {}");
+        assert_eq!(consumed, 2);
+    }
+
+    #[test]
+    fn test_parse_code_block_empty() {
+        let lines = vec!["```", "```", "next"];
+        let (content, consumed) = parse_code_block(&lines, 0).unwrap();
+        assert_eq!(content, "");
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn test_parse_code_block_missing_start() {
+        let lines = vec!["not a code block", "next"];
+        let result = parse_code_block(&lines, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_code_block_unclosed() {
+        let lines = vec!["```", "content", "more content"];
+        let result = parse_code_block(&lines, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_update_block() {
+        let lines = vec!["```", "old content", "```", "```", "new content", "```"];
+        let (old, new, consumed) = parse_update_block(&lines, 0).unwrap();
+        assert_eq!(old, "old content");
+        assert_eq!(new, "new content");
+        assert_eq!(consumed, 5);
+    }
+
+    #[test]
+    fn test_parse_update_block_missing_second_block() {
+        let lines = vec!["```", "old content", "```", "not a code block"];
+        let result = parse_update_block(&lines, 0);
+        assert!(result.is_err());
+    }
 }
