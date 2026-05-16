@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
-use dashmap::DashMap;
 use super::definition::ToolDefinition;
+use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 
 /// Todoアイテム
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,7 +78,13 @@ impl TodoStore {
                         "in_progress" => "[~]",
                         _ => "[ ]",
                     };
-                    output.push(format!("{} {} {} (priority: {})", status_icon, item.content, i + 1, item.priority));
+                    output.push(format!(
+                        "{} {} {} (priority: {})",
+                        status_icon,
+                        item.content,
+                        i + 1,
+                        item.priority
+                    ));
                 }
                 output.join("\n")
             }
@@ -91,5 +97,9 @@ impl TodoStore {
 pub fn update_todos(store: &TodoStore, session_id: &str, todos: Vec<TodoItem>) -> String {
     let pending = todos.iter().filter(|x| x.status != "completed").count();
     store.update(session_id, todos.clone());
-    format!("Updated todo list: {} pending tasks\n{}", pending, serde_json::to_string_pretty(&todos).unwrap_or_default())
+    format!(
+        "Updated todo list: {} pending tasks\n{}",
+        pending,
+        serde_json::to_string_pretty(&todos).unwrap_or_default()
+    )
 }

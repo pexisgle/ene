@@ -1,3 +1,5 @@
+#[cfg(target_os = "windows")]
+use bevy::window::{Monitor, PrimaryMonitor, WindowMode, WindowPosition};
 use bevy::{
     anti_alias::{fxaa::Fxaa, smaa::Smaa, taa::TemporalAntiAliasing},
     camera::ScalingMode,
@@ -5,8 +7,6 @@ use bevy::{
     prelude::*,
     window::PrimaryWindow,
 };
-#[cfg(target_os = "windows")]
-use bevy::window::{Monitor, PrimaryMonitor, WindowMode, WindowPosition};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -20,7 +20,13 @@ impl Plugin for ScenePlugin {
         app.init_resource::<PrimaryWindowPresentationBootstrap>()
             .init_resource::<FramePacingState>()
             .add_systems(Startup, (spawn_camera_3d, spawn_light))
-            .add_systems(Update, (bootstrap_primary_window_presentation, apply_graphics_settings))
+            .add_systems(
+                Update,
+                (
+                    bootstrap_primary_window_presentation,
+                    apply_graphics_settings,
+                ),
+            )
             .add_systems(PostUpdate, pace_frame_rate);
     }
 }

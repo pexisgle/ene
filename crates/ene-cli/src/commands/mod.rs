@@ -39,17 +39,26 @@ fn handle_prompt(ctx: &AppContext) {
             println!("{}", sys);
             println!("---------------------");
         }
-        if let Some(phi) = ene_ai_core::prompt_builder::build_expression_phi(card) {
-            let phi_expanded = ene_ai_core::character_card::expand_cbs_macros(
-                &phi,
+
+        if !ctx.session.conversation_history.is_empty() && !card.data.mes_example.trim().is_empty()
+        {
+            println!("--- Example Messages (shown when history is empty) ---");
+            let ex = ene_ai_core::character_card::expand_cbs_macros(
+                &card.data.mes_example,
                 card.data.get_character_name(),
                 &ctx.settings.user_name,
             );
-            if !phi_expanded.trim().is_empty() {
-                println!("--- Expression Protocol (ACT tokens) ---");
-                println!("{}", phi_expanded);
-                println!("----------------------------------------");
-            }
+            println!("{}", ex);
+            println!("----------------------------------------------------");
+        }
+
+        if ctx.settings.memory.enabled {
+            println!("--- Recalled Summaries ---");
+            println!(
+                "Up to {} past conversation summaries will be injected dynamically based on embedding similarity.",
+                ctx.settings.memory.summary_recall_limit
+            );
+            println!("----------------------------");
         }
 
         if let Some(store) = &ctx.session.memory_store {
@@ -64,6 +73,44 @@ fn handle_prompt(ctx: &AppContext) {
                 }
             }
         }
+
+        if !ctx.session.conversation_history.is_empty() {
+            println!(
+                "--- Conversation History ({} messages) ---",
+                ctx.session.conversation_history.len()
+            );
+            println!("(Use /history to view full content)");
+            println!("----------------------------------------");
+        }
+
+        if let Some(phi) = ene_ai_core::prompt_builder::build_expression_phi(card) {
+            let phi_expanded = ene_ai_core::character_card::expand_cbs_macros(
+                &phi,
+                card.data.get_character_name(),
+                &ctx.settings.user_name,
+            );
+            if !phi_expanded.trim().is_empty() {
+                println!("--- Expression Protocol (ACT tokens) ---");
+                println!("{}", phi_expanded);
+                println!("----------------------------------------");
+            }
+        }
+
+        if ctx.settings.tool_calling_enabled {
+            let tools = ctx.registry.list_tools();
+            if !tools.is_empty() {
+                println!("--- Tool Definitions ({} tools) ---", tools.len());
+                for tool in &tools {
+                    println!("- {}", tool.name);
+                    println!("  Description: {}", tool.description);
+                    println!(
+                        "  Parameters: {}",
+                        serde_json::to_string_pretty(&tool.parameters).unwrap_or_default()
+                    );
+                }
+                println!("---------------------------------");
+            }
+        }
     } else {
         println!("No character card loaded.");
     }
@@ -75,7 +122,10 @@ fn handle_card(arg: &str, ctx: &mut AppContext) {
     } else {
         match ctx.session.load_card(arg) {
             Ok(exprs) => {
-                println!("Card loaded successfully. Found {} expressions.", exprs.len());
+                println!(
+                    "Card loaded successfully. Found {} expressions.",
+                    exprs.len()
+                );
                 ctx.settings.character_card_path = arg.to_string();
             }
             Err(e) => println!("Failed to load card: {}", e),
@@ -92,10 +142,19 @@ fn handle_config(ctx: &AppContext) {
     println!("Tool Calling: {}", ctx.settings.tool_calling_enabled);
     println!("Memory Enabled: {}", ctx.settings.memory.enabled);
     if ctx.settings.memory.enabled {
-        println!("Memory DB: {}", ctx.settings.resolve_memory_db_path().display());
+        println!(
+            "Memory DB: {}",
+            ctx.settings.resolve_memory_db_path().display()
+        );
         println!("Embedding Model: {}", ctx.settings.memory.embedding_model);
-        println!("Summary Recall Limit: {}", ctx.settings.memory.summary_recall_limit);
-        println!("Similarity Threshold: {}", ctx.settings.memory.similarity_threshold);
+        println!(
+            "Summary Recall Limit: {}",
+            ctx.settings.memory.summary_recall_limit
+        );
+        println!(
+            "Similarity Threshold: {}",
+            ctx.settings.memory.similarity_threshold
+        );
     }
     println!("----------------------");
 }
@@ -122,7 +181,9 @@ fn handle_help() {
     println!("  /session info    - Show current session info");
     println!("  /session split   - Manually split session");
     println!("  /session summaries - Show past conversation summaries");
-    println!("  /prompt          - View the system prompt and key facts");
+    println!(
+        "  /prompt          - View the complete prompt sent to the AI (system, tools, memory, etc.)"
+    );
     println!("  /quit            - Exit the CLI");
 }
 

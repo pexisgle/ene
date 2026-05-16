@@ -2,11 +2,9 @@
 //!
 //! セッション分割時に呼び出され、会話履歴を構造化された要約に変換する。
 
-use async_openai::{
-    types::chat::{
-        ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-        CreateChatCompletionRequestArgs, Role, ResponseFormat, ResponseFormatJsonSchema,
-    },
+use async_openai::types::chat::{
+    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
+    CreateChatCompletionRequestArgs, ResponseFormat, ResponseFormatJsonSchema, Role,
 };
 use serde::{Deserialize, Serialize};
 
@@ -61,14 +59,15 @@ pub async fn summarize_conversation(
     let existing_facts_str = if existing_facts.is_empty() {
         "なし".to_string()
     } else {
-        existing_facts.iter()
+        existing_facts
+            .iter()
             .map(|f| format!("- {}: {}", f.key, f.value))
             .collect::<Vec<_>>()
             .join("\n")
     };
 
     let system_prompt = format!(
-r#"あなたは会話分析の専門家です。与えられた会話履歴を分析し、重要な情報のみを抽出して JSON 形式で出力してください。
+        r#"あなたは会話分析の専門家です。与えられた会話履歴を分析し、重要な情報のみを抽出して JSON 形式で出力してください。
 
 ## 出力形式（純粋な JSON のみを返してください）
 {{
@@ -123,19 +122,18 @@ r#"あなたは会話分析の専門家です。与えられた会話履歴を�
 
     let user_prompt = format!(
         "【既存の事実リスト】\n{}\n\n以下の会話履歴を分析して、指定された JSON 形式で要約と最新の事実リストを作成してください。\n\n---\n{}\n---",
-        existing_facts_str,
-        conversation_text
+        existing_facts_str, conversation_text
     );
 
     let sys_msg = ChatCompletionRequestSystemMessageArgs::default()
         .content(system_prompt)
         .build()
-        .map_err(|e| AiCoreError::Unknown(format!("Failed to build system msg: {e}")))?;
+        .map_err(|e| AiCoreError::PromptBuildError(format!("system message: {e}")))?;
 
     let user_msg = ChatCompletionRequestUserMessageArgs::default()
         .content(user_prompt)
         .build()
-        .map_err(|e| AiCoreError::Unknown(format!("Failed to build user msg: {e}")))?;
+        .map_err(|e| AiCoreError::PromptBuildError(format!("user message: {e}")))?;
 
     let schema = serde_json::json!({
         "type": "object",
@@ -169,16 +167,16 @@ r#"あなたは会話分析の専門家です。与えられた会話履歴を�
                 name: "ConversationSummaryResult".to_string(),
                 schema: Some(schema),
                 strict: Some(true),
-            }
+            },
         })
         .build()
-        .map_err(|e| AiCoreError::Unknown(format!("Failed to build request: {e}")))?;
+        .map_err(|e| AiCoreError::PromptBuildError(format!("request: {e}")))?;
 
     let response = client
         .chat()
         .create(request)
         .await
-        .map_err(|e| AiCoreError::Unknown(format!("Summarization API error: {e}")))?;
+        .map_err(|e| AiCoreError::ApiRequestError(format!("summarization: {e}")))?;
 
     let content = response
         .choices

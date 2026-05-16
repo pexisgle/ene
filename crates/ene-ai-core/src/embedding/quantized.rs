@@ -70,11 +70,7 @@ impl RotaryEmbedding {
         Ok(Self { cos, sin })
     }
 
-    fn apply(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-    ) -> Result<(Tensor, Tensor), AiCoreError> {
+    fn apply(&self, q: &Tensor, k: &Tensor) -> Result<(Tensor, Tensor), AiCoreError> {
         let (_b, _num_heads, seq_len, _head_dim) = q
             .dims4()
             .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE q dims: {e}")))?;
@@ -90,10 +86,18 @@ impl RotaryEmbedding {
             .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE sin narrow: {e}")))?
             .to_dtype(q.dtype())
             .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE sin dtype: {e}")))?;
-        let q_embed = rope_precomputed(&q.contiguous()
-            .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE q contig: {e}")))?, &cos, &sin)?;
-        let k_embed = rope_precomputed(&k.contiguous()
-            .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE k contig: {e}")))?, &cos, &sin)?;
+        let q_embed = rope_precomputed(
+            &q.contiguous()
+                .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE q contig: {e}")))?,
+            &cos,
+            &sin,
+        )?;
+        let k_embed = rope_precomputed(
+            &k.contiguous()
+                .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE k contig: {e}")))?,
+            &cos,
+            &sin,
+        )?;
         Ok((q_embed, k_embed))
     }
 }
@@ -110,8 +114,8 @@ impl MlpBlock {
             .gate_proj
             .forward(x)
             .map_err(|e| AiCoreError::EmbeddingError(format!("MLP gate: {e}")))?;
-        let gate = ops::silu(&gate)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("MLP silu: {e}")))?;
+        let gate =
+            ops::silu(&gate).map_err(|e| AiCoreError::EmbeddingError(format!("MLP silu: {e}")))?;
         let up = self
             .up_proj
             .forward(x)
@@ -138,7 +142,6 @@ struct AttentionBlock {
     num_kv_heads: usize,
     num_kv_groups: usize,
     head_dim: usize,
-    hidden_size: usize,
     rotary_emb: Arc<RotaryEmbedding>,
 }
 
@@ -207,7 +210,10 @@ impl AttentionBlock {
 
         let scale = 1.0 / (self.head_dim as f64).sqrt();
         let scores = q
-            .matmul(&k.transpose(2, 3).map_err(|e| AiCoreError::EmbeddingError(format!("attn kT: {e}")))?)
+            .matmul(
+                &k.transpose(2, 3)
+                    .map_err(|e| AiCoreError::EmbeddingError(format!("attn kT: {e}")))?,
+            )
             .map_err(|e| AiCoreError::EmbeddingError(format!("attn scores: {e}")))?
             .affine(scale, 0.0)
             .map_err(|e| AiCoreError::EmbeddingError(format!("attn scale: {e}")))?;
@@ -221,7 +227,7 @@ impl AttentionBlock {
         let ctx = ctx
             .transpose(1, 2)
             .map_err(|e| AiCoreError::EmbeddingError(format!("attn transpose back: {e}")))?
-            .reshape((b, l, self.hidden_size))
+            .reshape((b, l, self.num_heads * self.head_dim))
             .map_err(|e| AiCoreError::EmbeddingError(format!("attn reshape back: {e}")))?;
 
         self.o_proj
@@ -337,48 +343,72 @@ fn load_model(
 
     let num_heads = md_get("qwen3.attention.head_count")?
         .to_u32()
-        .map_err(|e| AiCoreError::EmbeddingError(format!("head_count: {e}")))? as usize;
+        .map_err(|e| AiCoreError::EmbeddingError(format!("head_count: {e}")))?
+        as usize;
     let num_kv_heads = md_get("qwen3.attention.head_count_kv")?
         .to_u32()
-        .map_err(|e| AiCoreError::EmbeddingError(format!("head_count_kv: {e}")))? as usize;
+        .map_err(|e| AiCoreError::EmbeddingError(format!("head_count_kv: {e}")))?
+        as usize;
     let head_dim = md_get("qwen3.attention.key_length")?
         .to_u32()
-        .map_err(|e| AiCoreError::EmbeddingError(format!("key_length: {e}")))? as usize;
+        .map_err(|e| AiCoreError::EmbeddingError(format!("key_length: {e}")))?
+        as usize;
     let num_layers = md_get("qwen3.block_count")?
         .to_u32()
-        .map_err(|e| AiCoreError::EmbeddingError(format!("block_count: {e}")))? as usize;
+        .map_err(|e| AiCoreError::EmbeddingError(format!("block_count: {e}")))?
+        as usize;
     let hidden_size = md_get("qwen3.embedding_length")?
         .to_u32()
-        .map_err(|e| AiCoreError::EmbeddingError(format!("embedding_length: {e}")))? as usize;
+        .map_err(|e| AiCoreError::EmbeddingError(format!("embedding_length: {e}")))?
+        as usize;
     let max_seq_len = md_get("qwen3.context_length")?
         .to_u32()
-        .map_err(|e| AiCoreError::EmbeddingError(format!("context_length: {e}")))? as usize;
+        .map_err(|e| AiCoreError::EmbeddingError(format!("context_length: {e}")))?
+        as usize;
     let rms_norm_eps = md_get("qwen3.attention.layer_norm_rms_epsilon")?
         .to_f32()
         .map_err(|e| AiCoreError::EmbeddingError(format!("rms_epsilon: {e}")))?;
     let rope_theta = md_get("qwen3.rope.freq_base")?
         .to_f32()
-        .map_err(|e| AiCoreError::EmbeddingError(format!("freq_base: {e}")))? as f64;
+        .map_err(|e| AiCoreError::EmbeddingError(format!("freq_base: {e}")))?
+        as f64;
     let num_kv_groups = num_heads / num_kv_heads;
 
     tracing::info!(
         "[Embedding] GGUF config: {} layers, {} heads ({} kv), {} dim, {} head_dim",
-        num_layers, num_heads, num_kv_heads, hidden_size, head_dim,
+        num_layers,
+        num_heads,
+        num_kv_heads,
+        hidden_size,
+        head_dim,
     );
 
     let embed_weight = load_tensor(&ct, &mut file, "token_embd.weight", device)?;
     let embed_tokens = candle_nn::Embedding::new(embed_weight, hidden_size);
 
     let rotary_emb = Arc::new(RotaryEmbedding::new(
-        head_dim, max_seq_len, rope_theta, device,
+        head_dim,
+        max_seq_len,
+        rope_theta,
+        device,
     )?);
 
     let mut layers = Vec::with_capacity(num_layers);
     for i in 0..num_layers {
         let prefix = format!("blk.{i}");
 
-        let q_norm_weight = load_tensor(&ct, &mut file, &format!("{prefix}.attn_q_norm.weight"), device)?;
-        let k_norm_weight = load_tensor(&ct, &mut file, &format!("{prefix}.attn_k_norm.weight"), device)?;
+        let q_norm_weight = load_tensor(
+            &ct,
+            &mut file,
+            &format!("{prefix}.attn_q_norm.weight"),
+            device,
+        )?;
+        let k_norm_weight = load_tensor(
+            &ct,
+            &mut file,
+            &format!("{prefix}.attn_k_norm.weight"),
+            device,
+        )?;
 
         let attn = AttentionBlock {
             q_proj: candle_nn::Linear::new(
@@ -394,7 +424,12 @@ fn load_model(
                 None,
             ),
             o_proj: candle_nn::Linear::new(
-                load_tensor(&ct, &mut file, &format!("{prefix}.attn_output.weight"), device)?,
+                load_tensor(
+                    &ct,
+                    &mut file,
+                    &format!("{prefix}.attn_output.weight"),
+                    device,
+                )?,
                 None,
             ),
             q_norm_weight,
@@ -405,7 +440,6 @@ fn load_model(
             num_kv_heads,
             num_kv_groups,
             head_dim,
-            hidden_size,
             rotary_emb: rotary_emb.clone(),
         };
 
@@ -427,7 +461,12 @@ fn load_model(
         layers.push(LayerBlock {
             self_attn: attn,
             mlp,
-            ln1_weight: load_tensor(&ct, &mut file, &format!("{prefix}.attn_norm.weight"), device)?,
+            ln1_weight: load_tensor(
+                &ct,
+                &mut file,
+                &format!("{prefix}.attn_norm.weight"),
+                device,
+            )?,
             ln2_weight: load_tensor(&ct, &mut file, &format!("{prefix}.ffn_norm.weight"), device)?,
             ln_eps: rms_norm_eps,
         });
@@ -445,7 +484,9 @@ fn load_model(
 
     tracing::info!(
         "[Embedding] GGUF model loaded: {} layers, {} hidden, {} heads",
-        num_layers, hidden_size, num_heads,
+        num_layers,
+        hidden_size,
+        num_heads,
     );
 
     Ok((model, metadata))
@@ -465,19 +506,17 @@ pub fn resolve_gguf_paths(
             let api = hf_hub::api::tokio::ApiBuilder::new()
                 .with_cache_dir(model_dir)
                 .build()
-                .map_err(|e| AiCoreError::EmbeddingError(format!("Failed to create HF API: {e}")))?;
+                .map_err(|e| {
+                    AiCoreError::EmbeddingError(format!("Failed to create HF API: {e}"))
+                })?;
 
             let repo_id = match model_name_owned.as_str() {
-                "jina-embeddings-v5-text-nano" => {
-                    "jinaai/jina-embeddings-v5-text-nano-retrieval"
-                }
-                "jina-embeddings-v5-text-small" => {
-                    "jinaai/jina-embeddings-v5-text-small-retrieval"
-                }
+                "jina-embeddings-v5-text-nano" => "jinaai/jina-embeddings-v5-text-nano-retrieval",
+                "jina-embeddings-v5-text-small" => "jinaai/jina-embeddings-v5-text-small-retrieval",
                 _ => {
                     return Err(AiCoreError::EmbeddingError(format!(
                         "Unknown model: {model_name_owned}"
-                    )))
+                    )));
                 }
             };
 
@@ -506,15 +545,13 @@ pub fn resolve_gguf_paths(
                 _ => unreachable!(),
             };
 
-            let gguf_path = repo
-                .get(&gguf_filename)
-                .await
-                .map_err(|e| AiCoreError::EmbeddingError(format!("Failed to download GGUF: {e}")))?;
+            let gguf_path = repo.get(&gguf_filename).await.map_err(|e| {
+                AiCoreError::EmbeddingError(format!("Failed to download GGUF: {e}"))
+            })?;
 
-            let tokenizer_path = repo
-                .get("tokenizer.json")
-                .await
-                .map_err(|e| AiCoreError::EmbeddingError(format!("Failed to download tokenizer: {e}")))?;
+            let tokenizer_path = repo.get("tokenizer.json").await.map_err(|e| {
+                AiCoreError::EmbeddingError(format!("Failed to download tokenizer: {e}"))
+            })?;
 
             tracing::info!(
                 "[Embedding] GGUF model ready: {} ({} bytes)",
@@ -597,8 +634,8 @@ impl GgufEmbeddingProvider {
     }
 }
 
-use async_trait::async_trait;
 use super::EmbeddingProvider;
+use async_trait::async_trait;
 
 #[async_trait]
 impl EmbeddingProvider for GgufEmbeddingProvider {

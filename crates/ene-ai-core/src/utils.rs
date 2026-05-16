@@ -53,3 +53,40 @@ pub fn init_memory(
 
     Ok((Arc::new(store), Arc::from(embedder)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_within_limit() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_at_limit() {
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_exceeds_limit() {
+        assert_eq!(truncate("hello world", 5), "hello...");
+    }
+
+    #[test]
+    fn test_truncate_unicode() {
+        let text = "こんにちは世界";
+        // truncate uses char_indices().nth(max_chars) which gives index after max_chars chars
+        assert_eq!(truncate(text, 3), "こんに...");
+    }
+
+    #[test]
+    fn test_truncate_empty() {
+        assert_eq!(truncate("", 5), "");
+    }
+
+    #[test]
+    fn test_truncate_zero_limit() {
+        assert_eq!(truncate("hello", 0), "...");
+    }
+}

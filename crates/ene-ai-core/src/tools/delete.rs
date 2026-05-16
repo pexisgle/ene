@@ -1,8 +1,8 @@
-use std::path::Path;
-use crate::sandbox::SandboxConfig;
-use crate::error::AiCoreError;
-use super::undo_manager::UndoManager;
 use super::definition::ToolDefinition;
+use super::undo_manager::UndoManager;
+use crate::error::AiCoreError;
+use crate::sandbox::SandboxConfig;
+use std::path::Path;
 
 pub fn tool_definition() -> ToolDefinition {
     ToolDefinition {
@@ -10,7 +10,8 @@ pub fn tool_definition() -> ToolDefinition {
         description: concat!(
             "Deletes a file or directory from the local filesystem. ",
             "Use with caution. Set recursive=true to delete directories and their contents."
-        ).to_string(),
+        )
+        .to_string(),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
@@ -33,21 +34,26 @@ pub async fn delete(
     let resolved = sandbox.resolve_and_check(path, true)?;
 
     if !resolved.exists() {
-        return Err(AiCoreError::FileNotFound(format!("Path not found: {}", resolved.display())));
+        return Err(AiCoreError::FileNotFound(format!(
+            "Path not found: {}",
+            resolved.display()
+        )));
     }
 
     let is_dir = resolved.is_dir();
 
     if is_dir && !recursive {
-        return Err(AiCoreError::ToolExecutionError(
-            format!("Path is a directory. Use recursive=true to delete directories: {}", resolved.display())
-        ));
+        return Err(AiCoreError::ToolExecutionError(format!(
+            "Path is a directory. Use recursive=true to delete directories: {}",
+            resolved.display()
+        )));
     }
 
     if is_dir {
         // ディレクトリ削除
-        tokio::fs::remove_dir_all(&resolved).await
-            .map_err(|e| AiCoreError::ToolExecutionError(format!("Failed to delete directory: {e}")))?;
+        tokio::fs::remove_dir_all(&resolved).await.map_err(|e| {
+            AiCoreError::ToolExecutionError(format!("Failed to delete directory: {e}"))
+        })?;
 
         undo_manager.push_delete_created_file(session_id, "delete", resolved.clone());
 
@@ -56,7 +62,8 @@ pub async fn delete(
         // ファイル削除 - バックアップを取得
         let original = tokio::fs::read(&resolved).await.ok();
 
-        tokio::fs::remove_file(&resolved).await
+        tokio::fs::remove_file(&resolved)
+            .await
             .map_err(|e| AiCoreError::ToolExecutionError(format!("Failed to delete file: {e}")))?;
 
         undo_manager.push_restore_file(session_id, "delete", resolved.clone(), original);

@@ -1,8 +1,8 @@
 use super::definition::{ToolDefinition, ToolRegistry};
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose};
 use image::{DynamicImage, imageops::FilterType};
 use std::io::Cursor;
-use base64::{Engine as _, engine::general_purpose};
 
 pub struct ScreenshotToolRegistry {
     scale_percent: u32,
@@ -41,14 +41,18 @@ impl ScreenshotToolRegistry {
         // 2. Fallback to primary monitor (or first monitor)
         if target_image.is_none() {
             if let Ok(monitors) = xcap::Monitor::all() {
-                let primary = monitors.iter().find(|m| m.is_primary().unwrap_or(false)).unwrap_or_else(|| &monitors[0]);
+                let primary = monitors
+                    .iter()
+                    .find(|m| m.is_primary().unwrap_or(false))
+                    .unwrap_or_else(|| &monitors[0]);
                 if let Ok(img) = primary.capture_image() {
                     target_image = Some(DynamicImage::ImageRgba8(img));
                 }
             }
         }
 
-        let image = target_image.ok_or_else(|| "Failed to capture any window or monitor".to_string())?;
+        let image =
+            target_image.ok_or_else(|| "Failed to capture any window or monitor".to_string())?;
 
         // 3. Resize if needed
         let final_image = if self.scale_percent > 0 && self.scale_percent < 100 {
@@ -87,7 +91,8 @@ impl ToolRegistry for ScreenshotToolRegistry {
         let image = self.capture_screen()?;
 
         let mut buf = Cursor::new(Vec::new());
-        image.write_to(&mut buf, image::ImageFormat::Png)
+        image
+            .write_to(&mut buf, image::ImageFormat::Png)
             .map_err(|e| format!("Failed to encode image to PNG: {}", e))?;
 
         let b64 = general_purpose::STANDARD.encode(buf.into_inner());

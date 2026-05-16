@@ -4,19 +4,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct AiSettings {
-    #[serde(rename = "provider_name")]
     pub provider_name: String,
-    #[serde(rename = "model")]
     pub model: String,
-    #[serde(rename = "base_url")]
     pub base_url: String,
-    #[serde(rename = "api_key")]
     pub api_key: String,
-    #[serde(rename = "character_card_path")]
     pub character_card_path: String,
-    #[serde(rename = "user_name")]
     pub user_name: String,
-    #[serde(rename = "runtime_rules")]
     pub runtime_rules: String,
     pub tool_calling_enabled: bool,
     pub max_tool_call_rounds: usize,

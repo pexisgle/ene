@@ -63,9 +63,7 @@ fn enqueue_ai_special_tokens(
             continue;
         };
 
-        if let Some(emotion) =
-            ene_ai_core::special_token::extract_emotion_from_act_token(token)
-        {
+        if let Some(emotion) = ene_ai_core::special_token::extract_emotion_from_token(token) {
             emotion_queue.commands.push_back(EmotionCommand {
                 emotion,
                 target_time: time.elapsed_secs_f64(),

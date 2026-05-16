@@ -1,5 +1,5 @@
-use crate::error::AiCoreError;
 use super::definition::ToolDefinition;
+use crate::error::AiCoreError;
 
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -12,7 +12,8 @@ pub fn tool_definition() -> ToolDefinition {
             "Fetches content from a URL. ",
             "Returns the content in the requested format (text, markdown, or html). ",
             "Useful for reading documentation, APIs, or web pages."
-        ).to_string(),
+        )
+        .to_string(),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
@@ -33,18 +34,22 @@ pub async fn webfetch(
 ) -> Result<String, AiCoreError> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(AiCoreError::ToolExecutionError(
-            "URL must start with http:// or https://".to_string()
+            "URL must start with http:// or https://".to_string(),
         ));
     }
 
-    let timeout_secs = timeout.unwrap_or(DEFAULT_TIMEOUT_SECS).min(MAX_TIMEOUT_SECS);
+    let timeout_secs = timeout
+        .unwrap_or(DEFAULT_TIMEOUT_SECS)
+        .min(MAX_TIMEOUT_SECS);
     let format = format.unwrap_or("markdown");
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         .build()
-        .map_err(|e| AiCoreError::ToolExecutionError(format!("Failed to create HTTP client: {e}")))?;
+        .map_err(|e| {
+            AiCoreError::ToolExecutionError(format!("Failed to create HTTP client: {e}"))
+        })?;
 
     let accept_header = match format {
         "text" => "text/plain;q=1.0, text/html;q=0.8, */*;q=0.1",
@@ -63,7 +68,9 @@ pub async fn webfetch(
     let status = response.status();
     if !status.is_success() {
         return Err(AiCoreError::ToolExecutionError(format!(
-            "HTTP request returned status: {} {}", status.as_u16(), status.canonical_reason().unwrap_or("Unknown")
+            "HTTP request returned status: {} {}",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("Unknown")
         )));
     }
 
@@ -71,17 +78,18 @@ pub async fn webfetch(
     if let Some(len) = content_length {
         if len > MAX_RESPONSE_SIZE as u64 {
             return Err(AiCoreError::ToolExecutionError(
-                "Response too large (exceeds 5MB limit)".to_string()
+                "Response too large (exceeds 5MB limit)".to_string(),
             ));
         }
     }
 
-    let bytes = response.bytes().await
-        .map_err(|e| AiCoreError::ToolExecutionError(format!("Failed to read response body: {e}")))?;
+    let bytes = response.bytes().await.map_err(|e| {
+        AiCoreError::ToolExecutionError(format!("Failed to read response body: {e}"))
+    })?;
 
     if bytes.len() > MAX_RESPONSE_SIZE {
         return Err(AiCoreError::ToolExecutionError(
-            "Response too large (exceeds 5MB limit)".to_string()
+            "Response too large (exceeds 5MB limit)".to_string(),
         ));
     }
 
@@ -121,7 +129,13 @@ fn html_to_text(html: &str) -> String {
             } else if name.starts_with("/script") || name.starts_with("/style") {
                 skip_script = false;
             }
-            if name == "br" || name == "br/" || name == "p" || name == "/p" || name == "div" || name == "/div" {
+            if name == "br"
+                || name == "br/"
+                || name == "p"
+                || name == "/p"
+                || name == "div"
+                || name == "/div"
+            {
                 text.push('\n');
             }
             continue;
@@ -166,7 +180,10 @@ fn html_to_markdown(html: &str) -> String {
         if c == '>' {
             in_tag = false;
             let full_tag = tag_name.to_lowercase();
-            let name: String = full_tag.chars().take_while(|c| c.is_alphanumeric() || *c == '/').collect();
+            let name: String = full_tag
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '/')
+                .collect();
 
             if name.starts_with("script") || name.starts_with("style") {
                 skip_script = true;
@@ -174,7 +191,9 @@ fn html_to_markdown(html: &str) -> String {
                 skip_script = false;
             }
 
-            if skip_script { continue; }
+            if skip_script {
+                continue;
+            }
 
             match name.as_str() {
                 "h1" => md.push_str("\n# "),
@@ -218,7 +237,9 @@ fn html_to_markdown(html: &str) -> String {
             continue;
         }
         if in_tag {
-            if tag_name.is_empty() && c.is_alphabetic() || tag_name.starts_with('/') && c.is_alphabetic() {
+            if tag_name.is_empty() && c.is_alphabetic()
+                || tag_name.starts_with('/') && c.is_alphabetic()
+            {
                 tag_name.push(c);
             } else if !tag_name.is_empty() {
                 attrs.push(c);

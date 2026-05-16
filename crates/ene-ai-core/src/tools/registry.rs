@@ -1,6 +1,6 @@
 use super::definition::{ToolDefinition, ToolRegistry};
-use crate::sandbox::SandboxConfig;
 use super::undo_manager::UndoManager;
+use crate::sandbox::SandboxConfig;
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 
@@ -17,6 +17,7 @@ pub struct OpencodeToolRegistry {
     undo_manager: UndoManager,
     session_id: Arc<Mutex<String>>,
     todo_store: super::todo::TodoStore,
+    browser_store: super::browser::BrowserSessionStore,
 }
 
 impl OpencodeToolRegistry {
@@ -26,6 +27,7 @@ impl OpencodeToolRegistry {
             undo_manager: UndoManager::new(),
             session_id: Arc::new(Mutex::new("default".to_string())),
             todo_store: super::todo::TodoStore::new(),
+            browser_store: super::browser::BrowserSessionStore::new(),
         }
     }
 
@@ -73,8 +75,8 @@ impl ToolRegistry for OpencodeToolRegistry {
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, String> {
-        let args: serde_json::Value = serde_json::from_str(arguments)
-            .map_err(|e| format!("Invalid JSON arguments: {e}"))?;
+        let args: serde_json::Value =
+            serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON arguments: {e}"))?;
 
         match name {
             // filesystem_tools
@@ -82,9 +84,14 @@ impl ToolRegistry for OpencodeToolRegistry {
                 let file_path = args["filePath"].as_str().ok_or("filePath is required")?;
                 let offset = args["offset"].as_u64().map(|v| v as usize);
                 let limit = args["limit"].as_u64().map(|v| v as usize);
-                super::read::read(std::path::Path::new(file_path), offset, limit, &self.sandbox)
-                    .await
-                    .map_err(|e| e.to_string())
+                super::read::read(
+                    std::path::Path::new(file_path),
+                    offset,
+                    limit,
+                    &self.sandbox,
+                )
+                .await
+                .map_err(|e| e.to_string())
             }
             "write" => {
                 let file_path = args["filePath"].as_str().ok_or("filePath is required")?;
@@ -144,11 +151,9 @@ impl ToolRegistry for OpencodeToolRegistry {
                 .await
                 .map_err(|e| e.to_string())
             }
-            "undo" => {
-                super::undo_tool::undo(&self.undo_manager, &self.current_session_id())
-                    .await
-                    .map_err(|e| e.to_string())
-            }
+            "undo" => super::undo_tool::undo(&self.undo_manager, &self.current_session_id())
+                .await
+                .map_err(|e| e.to_string()),
             "patch" => {
                 let patch_text = args["patchText"].as_str().ok_or("patchText is required")?;
                 super::patch::apply_patch(
@@ -163,7 +168,9 @@ impl ToolRegistry for OpencodeToolRegistry {
             // shell_tools
             "shell" => {
                 let command = args["command"].as_str().ok_or("command is required")?;
-                let description = args["description"].as_str().ok_or("description is required")?;
+                let description = args["description"]
+                    .as_str()
+                    .ok_or("description is required")?;
                 let timeout = args["timeout"].as_u64();
                 let workdir = args["workdir"].as_str();
                 super::shell::shell_exec(command, description, timeout, workdir, &self.sandbox)
@@ -179,9 +186,25 @@ impl ToolRegistry for OpencodeToolRegistry {
                 let wait_ms = args["wait_ms"].as_u64();
                 let scroll_x = args["scroll_x"].as_i64().map(|v| v as i32);
                 let scroll_y = args["scroll_y"].as_i64().map(|v| v as i32);
-                super::browser::browser_exec(action, url, selector, text, wait_ms, scroll_x, scroll_y)
-                    .await
-                    .map_err(|e| e.to_string())
+                let format = args["format"].as_str();
+                let extract = args["extract"].as_str();
+                let trim = args["trim"].as_bool();
+                super::browser::browser_exec(
+                    &self.browser_store,
+                    &self.current_session_id(),
+                    action,
+                    url,
+                    selector,
+                    text,
+                    wait_ms,
+                    scroll_x,
+                    scroll_y,
+                    format,
+                    extract,
+                    trim,
+                )
+                .await
+                .map_err(|e| e.to_string())
             }
             // app_tools
             "app" => {
@@ -216,22 +239,29 @@ impl ToolRegistry for OpencodeToolRegistry {
             // utility_tools
             "todo" => {
                 let todos = args["todos"].as_array().ok_or("todos is required")?;
-                let items: Vec<super::todo::TodoItem> = todos.iter()
+                let items: Vec<super::todo::TodoItem> = todos
+                    .iter()
                     .map(|t| super::todo::TodoItem {
                         content: t["content"].as_str().unwrap_or("").to_string(),
                         status: t["status"].as_str().unwrap_or("pending").to_string(),
                         priority: t["priority"].as_str().unwrap_or("medium").to_string(),
                     })
                     .collect();
-                Ok(super::todo::update_todos(&self.todo_store, &self.current_session_id(), items))
+                Ok(super::todo::update_todos(
+                    &self.todo_store,
+                    &self.current_session_id(),
+                    items,
+                ))
             }
             "question" => {
-                let questions = args["questions"].as_array().ok_or("questions is required")?;
-                let qs: Vec<String> = questions.iter()
+                let questions = args["questions"]
+                    .as_array()
+                    .ok_or("questions is required")?;
+                let qs: Vec<String> = questions
+                    .iter()
                     .filter_map(|q| q.as_str().map(|s| s.to_string()))
                     .collect();
-                super::question::question(qs)
-                    .map_err(|e| e.to_string())
+                super::question::question(qs).map_err(|e| e.to_string())
             }
             _ => Err(format!("Unknown tool: {}", name)),
         }

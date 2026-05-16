@@ -1,9 +1,5 @@
-use ene_ai_core::{
-    config::AiSettings,
-    session::ConversationSession,
-    run_ai_with_tools,
-};
 use crate::{registry, stream};
+use ene_ai_core::{config::AiSettings, run_ai_with_tools, session::ConversationSession};
 
 pub async fn run(settings: &AiSettings, session: &ConversationSession, prompt_override: &str) {
     let prompt = if prompt_override.trim().is_empty() {

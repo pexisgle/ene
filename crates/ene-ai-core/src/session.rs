@@ -1,11 +1,11 @@
-use std::sync::Arc;
-use async_openai::types::chat::Role;
-use chrono::{DateTime, Utc};
-use crate::character_card::{resolve_expressions, CharacterCardV3, ResolvedExpression};
+use crate::character_card::{CharacterCardV3, ResolvedExpression, resolve_expressions};
 use crate::conversation_manager::generate_session_id;
 use crate::embedding::EmbeddingProvider;
 use crate::memory::store::MemoryStore;
 use crate::special_token::split_text_and_special_tokens;
+use async_openai::types::chat::Role;
+use chrono::{DateTime, Utc};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct ConversationSession {
@@ -68,11 +68,7 @@ impl ConversationSession {
         }
     }
 
-    pub fn init_memory(
-        &mut self,
-        store: Arc<MemoryStore>,
-        embedder: Arc<dyn EmbeddingProvider>,
-    ) {
+    pub fn init_memory(&mut self, store: Arc<MemoryStore>, embedder: Arc<dyn EmbeddingProvider>) {
         self.memory_store = Some(store);
         self.embedding_provider = Some(embedder);
     }
@@ -98,12 +94,14 @@ impl ConversationSession {
     }
 
     pub fn add_user_message(&mut self, input: &str) {
-        self.conversation_history.push((Role::User, input.to_string()));
+        self.conversation_history
+            .push((Role::User, input.to_string()));
         self.trim_history();
     }
 
     pub fn add_assistant_message(&mut self, text: &str) {
-        self.conversation_history.push((Role::Assistant, text.to_string()));
+        self.conversation_history
+            .push((Role::Assistant, text.to_string()));
         self.trim_history();
     }
 

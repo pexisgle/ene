@@ -83,12 +83,16 @@ pub struct ResolvedExpression {
 /// and as the base that card overrides are merged on top of.
 fn default_expressions() -> Vec<ResolvedExpression> {
     [
-        ("neutral",   "Default resting expression",               "neutral"),
-        ("happy",     "Feeling joyful, excited, or pleased",      "happy"),
-        ("sad",       "Feeling down, disappointed, or sorrowful", "sad"),
-        ("angry",     "Feeling frustrated or upset",              "angry"),
-        ("relaxed",   "Feeling calm, content, or at ease",        "relaxed"),
-        ("surprised", "Feeling shocked or caught off guard",      "surprised"),
+        ("neutral", "Default resting expression", "neutral"),
+        ("happy", "Feeling joyful, excited, or pleased", "happy"),
+        ("sad", "Feeling down, disappointed, or sorrowful", "sad"),
+        ("angry", "Feeling frustrated or upset", "angry"),
+        ("relaxed", "Feeling calm, content, or at ease", "relaxed"),
+        (
+            "surprised",
+            "Feeling shocked or caught off guard",
+            "surprised",
+        ),
     ]
     .into_iter()
     .map(|(name, desc, vrm_key)| ResolvedExpression {
@@ -134,11 +138,14 @@ pub fn resolve_expressions(card: &CharacterCardV3) -> Vec<ResolvedExpression> {
             } else {
                 ovr.vrm.clone()
             };
-            map.insert(ovr.name.clone(), ResolvedExpression {
-                name: ovr.name.clone(),
-                description: ovr.description.clone(),
-                vrm,
-            });
+            map.insert(
+                ovr.name.clone(),
+                ResolvedExpression {
+                    name: ovr.name.clone(),
+                    description: ovr.description.clone(),
+                    vrm,
+                },
+            );
         }
     }
 
@@ -163,7 +170,6 @@ impl CharacterCardData {
     }
 }
 
-
 pub fn expand_cbs_macros(text: &str, char_name: &str, user_name: &str) -> String {
     let mut result = text.to_string();
 
@@ -175,15 +181,11 @@ pub fn expand_cbs_macros(text: &str, char_name: &str, user_name: &str) -> String
     // {{user}} -> user name
     result = result.replace("{{user}}", user_name);
 
-    // Simple regex-less replacement for custom macros. 
+    // Simple regex-less replacement for custom macros.
     // For a robust implementation, we would use regex.
-    
+
     // {{random:...}} or {{pick:...}}
-    fn expand_template_macro(
-        result: &mut String,
-        prefix: &str,
-        handler: impl Fn(&str) -> String,
-    ) {
+    fn expand_template_macro(result: &mut String, prefix: &str, handler: impl Fn(&str) -> String) {
         while let Some(start) = result.find(prefix) {
             if let Some(end_rel) = result[start..].find("}}") {
                 let end = start + end_rel;

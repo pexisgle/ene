@@ -1,7 +1,7 @@
-use std::path::Path;
-use crate::sandbox::SandboxConfig;
-use crate::error::AiCoreError;
 use super::definition::ToolDefinition;
+use crate::error::AiCoreError;
+use crate::sandbox::SandboxConfig;
+use std::path::Path;
 
 const MAX_RESULTS: usize = 100;
 
@@ -37,7 +37,11 @@ pub fn grep_tool_definition() -> ToolDefinition {
 }
 
 /// glob パターンでファイルを検索
-pub async fn glob_search(pattern: &str, path: Option<&str>, sandbox: &SandboxConfig) -> Result<String, AiCoreError> {
+pub async fn glob_search(
+    pattern: &str,
+    path: Option<&str>,
+    sandbox: &SandboxConfig,
+) -> Result<String, AiCoreError> {
     let base = if let Some(p) = path {
         let resolved = sandbox.resolve_and_check(Path::new(p), false)?;
         resolved
@@ -46,7 +50,10 @@ pub async fn glob_search(pattern: &str, path: Option<&str>, sandbox: &SandboxCon
     };
 
     if !base.is_dir() {
-        return Err(AiCoreError::FileNotFound(format!("glob path must be a directory: {}", base.display())));
+        return Err(AiCoreError::FileNotFound(format!(
+            "glob path must be a directory: {}",
+            base.display()
+        )));
     }
 
     let pattern_path = base.join(pattern);
@@ -62,7 +69,11 @@ pub async fn glob_search(pattern: &str, path: Option<&str>, sandbox: &SandboxCon
                 }
             }
         }
-        Err(e) => return Err(AiCoreError::ToolExecutionError(format!("Invalid glob pattern: {e}"))),
+        Err(e) => {
+            return Err(AiCoreError::ToolExecutionError(format!(
+                "Invalid glob pattern: {e}"
+            )));
+        }
     }
 
     let truncated = files.len() > MAX_RESULTS;
@@ -97,7 +108,9 @@ pub async fn grep_search(
     sandbox: &SandboxConfig,
 ) -> Result<String, AiCoreError> {
     if pattern.is_empty() {
-        return Err(AiCoreError::ToolExecutionError("pattern is required".to_string()));
+        return Err(AiCoreError::ToolExecutionError(
+            "pattern is required".to_string(),
+        ));
     }
 
     let re = regex::Regex::new(pattern)
@@ -137,7 +150,10 @@ pub async fn grep_search(
         // include フィルタ
         if let Some(inc) = include {
             let file_name = file_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if !glob::Pattern::new(inc).map(|p| p.matches(file_name)).unwrap_or(false) {
+            if !glob::Pattern::new(inc)
+                .map(|p| p.matches(file_name))
+                .unwrap_or(false)
+            {
                 continue;
             }
         }
@@ -184,7 +200,15 @@ pub async fn grep_search(
         return Ok("No files found".to_string());
     }
 
-    let mut output = vec![format!("Found {} matches{}", total, if truncated { format!(" (showing first {})", MAX_RESULTS) } else { "".to_string() })];
+    let mut output = vec![format!(
+        "Found {} matches{}",
+        total,
+        if truncated {
+            format!(" (showing first {})", MAX_RESULTS)
+        } else {
+            "".to_string()
+        }
+    )];
 
     let mut current_file = "";
     for (path, line_num, text) in &matches {

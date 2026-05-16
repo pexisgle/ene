@@ -1,6 +1,6 @@
-use std::path::{Path, PathBuf};
 use crate::error::AiCoreError;
-use crate::sandbox::permission::{PermissionGate, DestructiveAction};
+use crate::sandbox::permission::{DestructiveAction, PermissionGate};
+use std::path::{Path, PathBuf};
 
 pub mod permission;
 
@@ -48,21 +48,31 @@ impl Default for SandboxConfig {
 
 impl SandboxConfig {
     /// パスを正規化して許可チェック
-    pub fn resolve_and_check(&self, path: &Path, require_writable: bool) -> Result<PathBuf, AiCoreError> {
+    pub fn resolve_and_check(
+        &self,
+        path: &Path,
+        require_writable: bool,
+    ) -> Result<PathBuf, AiCoreError> {
         // 存在しないファイルの場合、親ディレクトリをチェック
         let check_path = if path.exists() {
-            std::fs::canonicalize(path).map_err(|e| AiCoreError::SandboxViolation(format!("Cannot resolve path: {e}")))?
+            std::fs::canonicalize(path)
+                .map_err(|e| AiCoreError::SandboxViolation(format!("Cannot resolve path: {e}")))?
         } else {
             // 親ディレクトリが存在するか確認
             let abs = if path.is_absolute() {
                 path.to_path_buf()
             } else {
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(path)
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(path)
             };
             if let Some(parent) = abs.parent() {
                 if parent.exists() {
-                    let canonical_parent = std::fs::canonicalize(parent)
-                        .map_err(|e| AiCoreError::SandboxViolation(format!("Cannot resolve parent directory: {e}")))?;
+                    let canonical_parent = std::fs::canonicalize(parent).map_err(|e| {
+                        AiCoreError::SandboxViolation(format!(
+                            "Cannot resolve parent directory: {e}"
+                        ))
+                    })?;
                     canonical_parent.join(abs.file_name().unwrap_or_default())
                 } else {
                     return Err(AiCoreError::SandboxViolation(format!(
@@ -102,8 +112,9 @@ impl SandboxConfig {
     /// コマンドがブロックリストにマッチするかチェック
     pub fn is_command_blocked(&self, command: &str) -> Result<(), AiCoreError> {
         for pattern in &self.blocked_commands {
-            let re = regex::Regex::new(pattern)
-                .map_err(|e| AiCoreError::ConfigError(format!("Invalid blocked command pattern: {e}")))?;
+            let re = regex::Regex::new(pattern).map_err(|e| {
+                AiCoreError::ConfigError(format!("Invalid blocked command pattern: {e}"))
+            })?;
             if re.is_match(command) {
                 return Err(AiCoreError::CommandBlocked(format!(
                     "Command matches blocked pattern: {}",
@@ -126,9 +137,7 @@ impl SandboxConfig {
             Ok(()) => Ok(()),
             Err(req) => Err(AiCoreError::PermissionDenied(format!(
                 "{:?} on {} requires approval: {}",
-                action,
-                req.description,
-                target
+                action, req.description, target
             ))),
         }
     }

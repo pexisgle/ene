@@ -1,26 +1,33 @@
-use async_openai::{
-    types::chat::{
-        CreateChatCompletionRequestArgs, ChatCompletionRequestAssistantMessageArgs,
-        ChatCompletionRequestMessageContentPartImageArgs,
-        ChatCompletionRequestMessageContentPartTextArgs,
-        ChatCompletionRequestToolMessageArgs, ChatCompletionRequestUserMessageArgs,
-        ImageUrlArgs,
-    },
-};
-use tokio_stream::Stream;
 use crate::client::build_openai_client;
 use crate::config::AiSettings;
-use crate::session::ConversationSession;
-use crate::prompt_builder::build_messages;
 use crate::memory::store::RecalledSummary;
+use crate::prompt_builder::build_messages;
+use crate::session::ConversationSession;
+use async_openai::types::chat::{
+    ChatCompletionMessageToolCall as ToolCall, ChatCompletionMessageToolCallChunk as ToolCallChunk,
+    ChatCompletionMessageToolCalls as ToolCalls,
+    ChatCompletionRequestAssistantMessageArgs as AssistantMsgArgs, ChatCompletionRequestMessage,
+    ChatCompletionRequestMessageContentPartImageArgs as ImagePartArgs,
+    ChatCompletionRequestMessageContentPartTextArgs as TextPartArgs,
+    ChatCompletionRequestToolMessageArgs as ToolMsgArgs,
+    ChatCompletionRequestUserMessageArgs as UserMsgArgs, CreateChatCompletionRequestArgs,
+    FunctionCall, FunctionCallStream, ImageUrlArgs,
+};
 use async_stream::stream;
+use tokio_stream::Stream;
 
 #[derive(Debug)]
 pub enum AiStreamEvent {
     TextDelta(String),
     SpecialToken(String),
-    ToolCallStart { name: String, arguments: String },
-    ToolCallResult { name: String, result: String },
+    ToolCallStart {
+        name: String,
+        arguments: String,
+    },
+    ToolCallResult {
+        name: String,
+        result: String,
+    },
     /// パーミッション要求（Phase 2: UI 連携）
     PermissionRequired {
         request_id: String,
@@ -35,7 +42,10 @@ pub enum AiStreamEvent {
         total_steps: usize,
         description: String,
     },
-    SessionSplit { summary: String, reason: String },
+    SessionSplit {
+        summary: String,
+        reason: String,
+    },
     Finished,
     Error(String),
 }
@@ -44,7 +54,7 @@ pub async fn run_ai_with_tools(
     settings: &AiSettings,
     session: &ConversationSession,
     user_input: &str,
-    registry: std::sync::Arc<dyn crate::tool::ToolRegistry>,
+    registry: std::sync::Arc<dyn crate::tools::ToolRegistry>,
 ) -> Result<impl Stream<Item = AiStreamEvent> + 'static, crate::error::AiCoreError> {
     let base_url = settings.resolve_base_url()?;
     let api_key = settings.resolve_api_key();
@@ -57,7 +67,11 @@ pub async fn run_ai_with_tools(
     let model = settings.model.clone();
 
     let memory_enabled = settings.memory.enabled;
-    let mem_store = if memory_enabled { session.memory_store.clone() } else { None };
+    let mem_store = if memory_enabled {
+        session.memory_store.clone()
+    } else {
+        None
+    };
     let card_name = session.card_name().to_string();
     let session_id = session.session_id.clone();
     let summary_recall_limit = settings.memory.summary_recall_limit;
@@ -65,7 +79,9 @@ pub async fn run_ai_with_tools(
 
     let key_facts = if settings.memory.enabled {
         if let Some(store) = &session.memory_store {
-            store.get_all_keyfacts(session.card_name()).unwrap_or_default()
+            store
+                .get_all_keyfacts(session.card_name())
+                .unwrap_or_default()
         } else {
             vec![]
         }
@@ -80,7 +96,8 @@ pub async fn run_ai_with_tools(
             let session_id = session.session_id.clone();
             let input_text = user_input.to_string();
             tokio::spawn(async move {
-                if let Err(e) = store_clone.insert_log(&session_id, &card_name, "user", &input_text) {
+                if let Err(e) = store_clone.insert_log(&session_id, &card_name, "user", &input_text)
+                {
                     tracing::error!("[Memory] Failed to save user log: {}", e);
                 }
             });
@@ -168,88 +185,88 @@ pub async fn run_ai_with_tools(
                 }
             };
 
-            let mut current_tool_calls: Vec<async_openai::types::chat::ChatCompletionMessageToolCallChunk> = Vec::new();
-            let mut assistant_content = String::new();
+    let mut current_tool_calls: Vec<ToolCallChunk> = Vec::new();
+    let mut assistant_content = String::new();
 
-            use tokio_stream::StreamExt;
-            while let Some(chunk_res) = stream.next().await {
-                match chunk_res {
-                    Ok(chunk) => {
-                        if let Some(choice) = chunk.choices.first() {
-                            if let Some(content_delta) = &choice.delta.content {
-                                assistant_content.push_str(content_delta);
-                                yield AiStreamEvent::TextDelta(content_delta.clone());
-                            }
-
-                            if let Some(tool_calls_delta) = &choice.delta.tool_calls {
-                                accumulate_tool_calls(&mut current_tool_calls, tool_calls_delta);
-                            }
-                        }
+    use tokio_stream::StreamExt;
+    while let Some(chunk_res) = stream.next().await {
+        match chunk_res {
+            Ok(chunk) => {
+                if let Some(choice) = chunk.choices.first() {
+                    if let Some(content_delta) = &choice.delta.content {
+                        assistant_content.push_str(content_delta);
+                        yield AiStreamEvent::TextDelta(content_delta.clone());
                     }
-                    Err(e) => {
-                        yield AiStreamEvent::Error(e.to_string());
-                        return;
+
+                    if let Some(tool_calls_delta) = &choice.delta.tool_calls {
+                        accumulate_tool_calls(&mut current_tool_calls, tool_calls_delta);
                     }
                 }
             }
+            Err(e) => {
+                yield AiStreamEvent::Error(e.to_string());
+                return;
+            }
+        }
+    }
 
-            if !current_tool_calls.is_empty() {
-                let tool_calls = finalize_tool_calls(current_tool_calls);
+    if !current_tool_calls.is_empty() {
+        let tool_calls = finalize_tool_calls(current_tool_calls);
 
-                let mut asst_msg_builder = ChatCompletionRequestAssistantMessageArgs::default();
-                asst_msg_builder.tool_calls(tool_calls.clone());
-                if !assistant_content.is_empty() {
-                    asst_msg_builder.content(assistant_content);
-                }
+        let mut asst_msg_builder = AssistantMsgArgs::default();
+        asst_msg_builder.tool_calls(tool_calls.clone());
+        if !assistant_content.is_empty() {
+            asst_msg_builder.content(assistant_content);
+        }
 
-                let asst_msg = match asst_msg_builder.build() {
-                    Ok(m) => m.into(),
-                    Err(e) => {
-                        yield AiStreamEvent::Error(format!("Failed to build assistant message: {}", e));
-                        return;
-                    }
+        let asst_msg = match asst_msg_builder.build() {
+            Ok(m) => m.into(),
+            Err(e) => {
+                yield AiStreamEvent::Error(format!("Failed to build assistant message: {}", e));
+                return;
+            }
+        };
+        messages.push(asst_msg);
+
+        registry.set_session_id(&session_id_for_tools);
+
+        for tool_call_enum in tool_calls {
+            if let ToolCalls::Function(call) = tool_call_enum {
+                let name = call.function.name.clone();
+                let args = call.function.arguments.clone();
+
+                yield AiStreamEvent::ToolCallStart { name: name.clone(), arguments: args.clone() };
+
+                let result = match registry.call_tool(&name, &args).await {
+                    Ok(res) => res,
+                    Err(e) => format!("Error executing tool: {}", e),
                 };
-                messages.push(asst_msg);
 
-                registry.set_session_id(&session_id_for_tools);
+                yield AiStreamEvent::ToolCallResult { name, result: result.clone() };
 
-                for tool_call_enum in tool_calls {
-                    if let async_openai::types::chat::ChatCompletionMessageToolCalls::Function(call) = tool_call_enum {
-                        let name = call.function.name.clone();
-                        let args = call.function.arguments.clone();
+                let (final_tool_text, screenshot_data) = extract_screenshot(&result);
 
-                        yield AiStreamEvent::ToolCallStart { name: name.clone(), arguments: args.clone() };
-
-                        let result = match registry.call_tool(&name, &args).await {
-                            Ok(res) => res,
-                            Err(e) => format!("Error executing tool: {}", e),
-                        };
-
-                        yield AiStreamEvent::ToolCallResult { name, result: result.clone() };
-
-                        let (final_tool_text, screenshot_data) = extract_screenshot(&result);
-
-                        let tool_msg = match ChatCompletionRequestToolMessageArgs::default()
-                            .tool_call_id(call.id.clone())
-                            .content(final_tool_text)
-                            .build() {
-                                Ok(m) => m,
-                                Err(e) => {
-                                    yield AiStreamEvent::Error(format!("Failed to build tool message: {}", e));
-                                    return;
-                                }
-                            };
-                        messages.push(tool_msg.into());
-
-                        if let Some(b64_data) = screenshot_data {
-                            if let Some(user_msg) = build_screenshot_message(b64_data) {
-                                messages.push(user_msg);
-                            }
+                let tool_msg = match ToolMsgArgs::default()
+                    .tool_call_id(call.id.clone())
+                    .content(final_tool_text)
+                    .build() {
+                        Ok(m) => m,
+                        Err(e) => {
+                            yield AiStreamEvent::Error(format!("Failed to build tool message: {}", e));
+                            return;
                         }
+                    };
+                messages.push(tool_msg.into());
+
+                if let Some(b64_data) = screenshot_data {
+                    if let Some(user_msg) = build_screenshot_message(b64_data) {
+                        messages.push(user_msg);
                     }
                 }
-                round += 1;
-                continue;
+            }
+        }
+        round += 1;
+        continue;
             } else {
                 if !assistant_content.is_empty() {
                     if let Some(store) = mem_store.clone() {
@@ -283,7 +300,9 @@ async fn search_summaries(
         return vec![];
     }
 
-    let Some(store) = mem_store else { return vec![] };
+    let Some(store) = mem_store else {
+        return vec![];
+    };
 
     let query_vec = match pending_embedding {
         Some(v) => v.clone(),
@@ -297,7 +316,12 @@ async fn search_summaries(
         return vec![];
     }
 
-    match store.search_summaries(&query_vec, card_name, summary_recall_limit, similarity_threshold) {
+    match store.search_summaries(
+        &query_vec,
+        card_name,
+        summary_recall_limit,
+        similarity_threshold,
+    ) {
         Ok(summaries) => summaries,
         Err(e) => {
             tracing::error!("[Memory] Summary search error: {}", e);
@@ -307,18 +331,21 @@ async fn search_summaries(
 }
 
 fn accumulate_tool_calls(
-    current_tool_calls: &mut Vec<async_openai::types::chat::ChatCompletionMessageToolCallChunk>,
-    tool_calls_delta: &[async_openai::types::chat::ChatCompletionMessageToolCallChunk],
+    current_tool_calls: &mut Vec<ToolCallChunk>,
+    tool_calls_delta: &[ToolCallChunk],
 ) {
     for tc_delta in tool_calls_delta {
         let idx = tc_delta.index as usize;
         if idx >= current_tool_calls.len() {
-            current_tool_calls.resize(idx + 1, async_openai::types::chat::ChatCompletionMessageToolCallChunk {
-                index: tc_delta.index,
-                id: None,
-                r#type: None,
-                function: None,
-            });
+            current_tool_calls.resize(
+                idx + 1,
+                ToolCallChunk {
+                    index: tc_delta.index,
+                    id: None,
+                    r#type: None,
+                    function: None,
+                },
+            );
         }
         let target = &mut current_tool_calls[idx];
         if let Some(id) = &tc_delta.id {
@@ -329,7 +356,7 @@ fn accumulate_tool_calls(
         }
         if let Some(func_delta) = &tc_delta.function {
             if target.function.is_none() {
-                target.function = Some(async_openai::types::chat::FunctionCallStream {
+                target.function = Some(FunctionCallStream {
                     name: None,
                     arguments: None,
                 });
@@ -339,28 +366,25 @@ fn accumulate_tool_calls(
                     target_func.name = Some(target_func.name.clone().unwrap_or_default() + name);
                 }
                 if let Some(args) = &func_delta.arguments {
-                    target_func.arguments = Some(target_func.arguments.clone().unwrap_or_default() + args);
+                    target_func.arguments =
+                        Some(target_func.arguments.clone().unwrap_or_default() + args);
                 }
             }
         }
     }
 }
 
-fn finalize_tool_calls(
-    current_tool_calls: Vec<async_openai::types::chat::ChatCompletionMessageToolCallChunk>,
-) -> Vec<async_openai::types::chat::ChatCompletionMessageToolCalls> {
+fn finalize_tool_calls(current_tool_calls: Vec<ToolCallChunk>) -> Vec<ToolCalls> {
     let mut tool_calls = Vec::new();
     for tc in current_tool_calls {
         if let Some(func) = tc.function {
-            tool_calls.push(async_openai::types::chat::ChatCompletionMessageToolCalls::Function(
-                async_openai::types::chat::ChatCompletionMessageToolCall {
-                    id: tc.id.unwrap_or_default(),
-                    function: async_openai::types::chat::FunctionCall {
-                        name: func.name.unwrap_or_default(),
-                        arguments: func.arguments.unwrap_or_default(),
-                    },
-                }
-            ));
+            tool_calls.push(ToolCalls::Function(ToolCall {
+                id: tc.id.unwrap_or_default(),
+                function: FunctionCall {
+                    name: func.name.unwrap_or_default(),
+                    arguments: func.arguments.unwrap_or_default(),
+                },
+            }));
         }
     }
     tool_calls
@@ -370,24 +394,27 @@ fn extract_screenshot(result: &str) -> (String, Option<String>) {
     if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(result) {
         if json_val.get("type").and_then(|v| v.as_str()) == Some("screenshot") {
             if let Some(data) = json_val.get("data").and_then(|v| v.as_str()) {
-                return ("[Screenshot successfully captured and sent to vision system]".to_string(), Some(data.to_string()));
+                return (
+                    "[Screenshot successfully captured and sent to vision system]".to_string(),
+                    Some(data.to_string()),
+                );
             }
         }
     }
     (result.to_string(), None)
 }
 
-fn build_screenshot_message(b64_data: String) -> Option<async_openai::types::chat::ChatCompletionRequestMessage> {
+fn build_screenshot_message(b64_data: String) -> Option<ChatCompletionRequestMessage> {
     let img_url = ImageUrlArgs::default().url(b64_data).build().ok()?;
-    let text_part = ChatCompletionRequestMessageContentPartTextArgs::default()
+    let text_part = TextPartArgs::default()
         .text("Here is the screenshot.")
-        .build().ok()?;
-    let img_part = ChatCompletionRequestMessageContentPartImageArgs::default()
-        .image_url(img_url)
-        .build().ok()?;
-    let user_msg = ChatCompletionRequestUserMessageArgs::default()
+        .build()
+        .ok()?;
+    let img_part = ImagePartArgs::default().image_url(img_url).build().ok()?;
+    let user_msg = UserMsgArgs::default()
         .content(vec![text_part.into(), img_part.into()])
-        .build().ok()?;
+        .build()
+        .ok()?;
     Some(user_msg.into())
 }
 
@@ -397,5 +424,7 @@ pub async fn run_ai_stream(
     user_input: &str,
 ) -> Result<impl Stream<Item = AiStreamEvent> + 'static, String> {
     let registry = std::sync::Arc::new(crate::tools::builtin::BuiltinToolRegistry::new());
-    run_ai_with_tools(settings, session, user_input, registry).await.map_err(|e| e.to_string())
+    run_ai_with_tools(settings, session, user_input, registry)
+        .await
+        .map_err(|e| e.to_string())
 }

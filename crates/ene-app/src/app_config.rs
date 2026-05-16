@@ -1,10 +1,10 @@
 use bevy::prelude::*;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use bevy::window::CompositeAlphaMode;
 #[cfg(target_os = "windows")]
 use bevy::window::PresentMode;
 use bevy::window::{WindowLevel, WindowMode, WindowPlugin, WindowResolution};
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-use bevy::window::CompositeAlphaMode;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -242,12 +242,10 @@ impl CharacterSettings {
         let selected_motion = characters
             .get(selected_character)
             .and_then(|entry| {
-                entry.default_motion.as_ref().and_then(|dm| {
-                    entry
-                        .motion_paths
-                        .iter()
-                        .position(|m| m.ends_with(dm))
-                })
+                entry
+                    .default_motion
+                    .as_ref()
+                    .and_then(|dm| entry.motion_paths.iter().position(|m| m.ends_with(dm)))
             })
             .unwrap_or(0);
 
@@ -294,7 +292,11 @@ impl CharacterSettings {
     }
 
     pub fn sync_card_path(&mut self) {
-        let path = format!("{}/{}", self.assets_dir.display(), self.current_character_card());
+        let path = format!(
+            "{}/{}",
+            self.assets_dir.display(),
+            self.current_character_card()
+        );
         self.ai.character_card_path = path;
     }
 
@@ -410,12 +412,21 @@ impl AppSettings {
 
     fn apply_to(&self, s: &mut CharacterSettings) {
         if !self.character.selected_character_name.is_empty() {
-            if let Some(idx) = s.characters.iter().position(|c| c.name == self.character.selected_character_name) {
+            if let Some(idx) = s
+                .characters
+                .iter()
+                .position(|c| c.name == self.character.selected_character_name)
+            {
                 s.selected_character = idx;
                 let entry = &s.characters[idx];
-                s.ai.character_card_path = format!("{}/{}", s.assets_dir.display(), entry.card_path);
+                s.ai.character_card_path =
+                    format!("{}/{}", s.assets_dir.display(), entry.card_path);
                 if !self.character.selected_motion_path.is_empty() {
-                    if let Some(m) = entry.motion_paths.iter().position(|p| p == &self.character.selected_motion_path) {
+                    if let Some(m) = entry
+                        .motion_paths
+                        .iter()
+                        .position(|p| p == &self.character.selected_motion_path)
+                    {
                         s.selected_motion = m;
                     }
                 }
@@ -463,8 +474,15 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
                 if file_path.is_dir() {
                     continue;
                 }
-                let relative = format!("characters/{}/{}", folder, file_path.file_name().unwrap().to_string_lossy());
-                if file_path.extension().is_some_and(|e| e.eq_ignore_ascii_case("vrm")) {
+                let relative = format!(
+                    "characters/{}/{}",
+                    folder,
+                    file_path.file_name().unwrap().to_string_lossy()
+                );
+                if file_path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("vrm"))
+                {
                     vrm_paths.push(relative);
                 }
             }
@@ -476,8 +494,15 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
                 if file_path.is_dir() {
                     continue;
                 }
-                let relative = format!("characters/{}/motions/{}", folder, file_path.file_name().unwrap().to_string_lossy());
-                if file_path.extension().is_some_and(|e| e.eq_ignore_ascii_case("vrma")) {
+                let relative = format!(
+                    "characters/{}/motions/{}",
+                    folder,
+                    file_path.file_name().unwrap().to_string_lossy()
+                );
+                if file_path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("vrma"))
+                {
                     motion_paths.push(relative);
                 }
             }
@@ -502,11 +527,7 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
 fn read_charactor_json_meta(path: &Path) -> Option<(String, Option<String>)> {
     let content = fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let name = v
-        .get("data")?
-        .get("name")?
-        .as_str()?
-        .to_string();
+    let name = v.get("data")?.get("name")?.as_str()?.to_string();
     let default_motion = v
         .get("data")?
         .get("extensions")?

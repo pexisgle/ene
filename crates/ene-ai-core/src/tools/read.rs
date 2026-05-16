@@ -1,7 +1,7 @@
-use std::path::Path;
-use crate::sandbox::SandboxConfig;
-use crate::error::AiCoreError;
 use super::definition::ToolDefinition;
+use crate::error::AiCoreError;
+use crate::sandbox::SandboxConfig;
+use std::path::Path;
 
 const MAX_LINE_LENGTH: usize = 2000;
 const MAX_LINE_SUFFIX: &str = "... (line truncated)";
@@ -31,7 +31,12 @@ pub fn tool_definition() -> ToolDefinition {
 }
 
 /// ファイルまたはディレクトリを読み取る
-pub async fn read(path: &Path, offset: Option<usize>, limit: Option<usize>, sandbox: &SandboxConfig) -> Result<String, AiCoreError> {
+pub async fn read(
+    path: &Path,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    sandbox: &SandboxConfig,
+) -> Result<String, AiCoreError> {
     let resolved = sandbox.resolve_and_check(path, false)?;
 
     if !resolved.exists() {
@@ -43,7 +48,9 @@ pub async fn read(path: &Path, offset: Option<usize>, limit: Option<usize>, sand
             let mut entries = entries;
             while let Ok(Some(entry)) = entries.next_entry().await {
                 if let Ok(name) = entry.file_name().into_string() {
-                    if name.to_lowercase().contains(&base.to_lowercase()) || base.to_lowercase().contains(&name.to_lowercase()) {
+                    if name.to_lowercase().contains(&base.to_lowercase())
+                        || base.to_lowercase().contains(&name.to_lowercase())
+                    {
                         suggestions.push(format!("{}", entry.path().display()));
                         if suggestions.len() >= 3 {
                             break;
@@ -53,7 +60,10 @@ pub async fn read(path: &Path, offset: Option<usize>, limit: Option<usize>, sand
             }
         }
         if suggestions.is_empty() {
-            return Err(AiCoreError::FileNotFound(format!("File not found: {}", resolved.display())));
+            return Err(AiCoreError::FileNotFound(format!(
+                "File not found: {}",
+                resolved.display()
+            )));
         } else {
             return Err(AiCoreError::FileNotFound(format!(
                 "File not found: {}\n\nDid you mean one of these?\n{}",
@@ -63,19 +73,24 @@ pub async fn read(path: &Path, offset: Option<usize>, limit: Option<usize>, sand
         }
     }
 
-    let metadata = tokio::fs::metadata(&resolved).await
-        .map_err(|e| AiCoreError::FileNotFound(format!("Cannot stat {}: {}", resolved.display(), e)))?;
+    let metadata = tokio::fs::metadata(&resolved).await.map_err(|e| {
+        AiCoreError::FileNotFound(format!("Cannot stat {}: {}", resolved.display(), e))
+    })?;
 
     if metadata.is_dir() {
         return read_directory(&resolved, offset, limit).await;
     }
 
     // バイナリチェック
-    let sample = tokio::fs::read(&resolved).await
-        .map_err(|e| AiCoreError::FileNotFound(format!("Cannot read {}: {}", resolved.display(), e)))?;
+    let sample = tokio::fs::read(&resolved).await.map_err(|e| {
+        AiCoreError::FileNotFound(format!("Cannot read {}: {}", resolved.display(), e))
+    })?;
 
     if is_binary_file(&resolved, &sample) {
-        return Err(AiCoreError::FileNotFound(format!("Cannot read binary file: {}", resolved.display())));
+        return Err(AiCoreError::FileNotFound(format!(
+            "Cannot read binary file: {}",
+            resolved.display()
+        )));
     }
 
     let text = String::from_utf8_lossy(&sample);
@@ -89,7 +104,10 @@ pub async fn read(path: &Path, offset: Option<usize>, limit: Option<usize>, sand
         let end = (start + limit.unwrap_or(default_limit)).min(lines.len());
         let sliced = &lines[start..end];
 
-        let mut output = format!("<path>{}</path>\n<type>file</type>\n<content>\n", resolved.display());
+        let mut output = format!(
+            "<path>{}</path>\n<type>file</type>\n<content>\n",
+            resolved.display()
+        );
         for (i, line) in sliced.iter().enumerate() {
             let line_num = start + i + 1;
             let truncated = if line.len() > MAX_LINE_LENGTH {
@@ -123,7 +141,10 @@ pub async fn read(path: &Path, offset: Option<usize>, limit: Option<usize>, sand
     let end = (start + limit.unwrap_or(default_limit)).min(lines.len());
     let sliced = &lines[start..end];
 
-    let mut output = format!("<path>{}</path>\n<type>file</type>\n<content>\n", resolved.display());
+    let mut output = format!(
+        "<path>{}</path>\n<type>file</type>\n<content>\n",
+        resolved.display()
+    );
     for (i, line) in sliced.iter().enumerate() {
         let line_num = start + i + 1;
         let truncated = if line.len() > MAX_LINE_LENGTH {
@@ -146,15 +167,23 @@ pub async fn read(path: &Path, offset: Option<usize>, limit: Option<usize>, sand
             next
         ));
     } else {
-        output.push_str(&format!("\n(End of file - total {} lines)\n</content>", lines.len()));
+        output.push_str(&format!(
+            "\n(End of file - total {} lines)\n</content>",
+            lines.len()
+        ));
     }
 
     Ok(output)
 }
 
-async fn read_directory(path: &Path, offset: Option<usize>, limit: Option<usize>) -> Result<String, AiCoreError> {
-    let mut entries = tokio::fs::read_dir(path).await
-        .map_err(|e| AiCoreError::FileNotFound(format!("Cannot read directory {}: {}", path.display(), e)))?;
+async fn read_directory(
+    path: &Path,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<String, AiCoreError> {
+    let mut entries = tokio::fs::read_dir(path).await.map_err(|e| {
+        AiCoreError::FileNotFound(format!("Cannot read directory {}: {}", path.display(), e))
+    })?;
 
     let mut items = Vec::new();
     while let Ok(Some(entry)) = entries.next_entry().await {
@@ -176,7 +205,10 @@ async fn read_directory(path: &Path, offset: Option<usize>, limit: Option<usize>
     let sliced = &items[start..end];
     let truncated = end < items.len();
 
-    let mut output = format!("<path>{}</path>\n<type>directory</type>\n<entries>\n", path.display());
+    let mut output = format!(
+        "<path>{}</path>\n<type>directory</type>\n<entries>\n",
+        path.display()
+    );
     for item in sliced {
         output.push_str(&format!("{}\n", item));
     }
@@ -195,12 +227,15 @@ async fn read_directory(path: &Path, offset: Option<usize>, limit: Option<usize>
 }
 
 fn is_binary_file(path: &Path, bytes: &[u8]) -> bool {
-    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     match ext.as_str() {
-        "zip" | "tar" | "gz" | "exe" | "dll" | "so" | "class" | "jar" | "war"
-        | "7z" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx"
-        | "odt" | "ods" | "odp" | "bin" | "dat" | "obj" | "o"
-        | "a" | "lib" | "wasm" | "pyc" | "pyo" => return true,
+        "zip" | "tar" | "gz" | "exe" | "dll" | "so" | "class" | "jar" | "war" | "7z" | "doc"
+        | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "odt" | "ods" | "odp" | "bin" | "dat"
+        | "obj" | "o" | "a" | "lib" | "wasm" | "pyc" | "pyo" => return true,
         _ => {}
     }
 

@@ -1,5 +1,5 @@
-mod app_config;
 mod ai_bridge;
+mod app_config;
 mod character;
 mod platform;
 mod resources;
@@ -8,14 +8,14 @@ mod settings_ui;
 mod tray;
 mod window_drag;
 
-use bevy::prelude::*;
 use bevy::asset::AssetPlugin;
 use bevy::light::DirectionalLightShadowMap;
+use bevy::prelude::*;
 use bevy_egui::EguiPlugin;
 use bevy_vrm1::prelude::*;
 
-use app_config::{CharacterSettings, DEFAULT_SHADOW_QUALITY, window_plugin};
 use ai_bridge::AiPlugin;
+use app_config::{CharacterSettings, DEFAULT_SHADOW_QUALITY, window_plugin};
 use character::CharacterPlugin;
 use scene::ScenePlugin;
 use settings_ui::SettingsUiPlugin;
@@ -34,12 +34,10 @@ fn main() {
         })
         .insert_resource(ClearColor(Color::NONE))
         .add_plugins((
-            DefaultPlugins
-                .set(window_plugin())
-                .set(AssetPlugin {
-                    file_path: assets_dir.to_string_lossy().into(),
-                    ..default()
-                }),
+            DefaultPlugins.set(window_plugin()).set(AssetPlugin {
+                file_path: assets_dir.to_string_lossy().into(),
+                ..default()
+            }),
             EguiPlugin::default(),
             VrmPlugin,
             VrmaPlugin,

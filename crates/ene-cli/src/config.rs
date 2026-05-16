@@ -1,9 +1,5 @@
-use ene_ai_core::{
-    config::AiSettings,
-    session::ConversationSession,
-    init_memory,
-};
 use crate::style;
+use ene_ai_core::{config::AiSettings, init_memory, session::ConversationSession};
 
 pub fn init() -> (AiSettings, ConversationSession) {
     let assets_dir = ene_ai_core::resources::ensure_resource_dirs();
@@ -61,7 +57,10 @@ pub fn init() -> (AiSettings, ConversationSession) {
                         e
                     ))
                 );
-                eprintln!("{}", style::warning("[Memory] Continuing without long-term memory."));
+                eprintln!(
+                    "{}",
+                    style::warning("[Memory] Continuing without long-term memory.")
+                );
             }
         }
     }

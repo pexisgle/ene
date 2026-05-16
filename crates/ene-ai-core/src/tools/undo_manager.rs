@@ -1,8 +1,8 @@
+use chrono::Utc;
+use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use dashmap::DashMap;
 use uuid::Uuid;
-use chrono::Utc;
 
 /// 1回のツール実行に対するアンドゥ情報
 #[derive(Debug, Clone)]
@@ -24,7 +24,10 @@ impl UndoEntry {
     }
 
     pub fn restore_file(path: PathBuf, original_content: Option<Vec<u8>>) -> UndoOperation {
-        UndoOperation::RestoreFile { path, original_content }
+        UndoOperation::RestoreFile {
+            path,
+            original_content,
+        }
     }
 
     pub fn delete_created_file(path: PathBuf) -> UndoOperation {
@@ -41,9 +44,7 @@ pub enum UndoOperation {
         original_content: Option<Vec<u8>>,
     },
     /// 作成されたファイルを削除
-    DeleteCreatedFile {
-        path: PathBuf,
-    },
+    DeleteCreatedFile { path: PathBuf },
 }
 
 /// セッション単位の Undo スタック
@@ -71,18 +72,36 @@ impl UndoManager {
     }
 
     /// ファイル復元操作を記録
-    pub fn push_restore_file(&self, session_id: &str, tool_name: &str, path: PathBuf, original_content: Option<Vec<u8>>) {
-        self.push(session_id, UndoEntry::new(tool_name, vec![UndoEntry::restore_file(path, original_content)]));
+    pub fn push_restore_file(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        path: PathBuf,
+        original_content: Option<Vec<u8>>,
+    ) {
+        self.push(
+            session_id,
+            UndoEntry::new(
+                tool_name,
+                vec![UndoEntry::restore_file(path, original_content)],
+            ),
+        );
     }
 
     /// 作成ファイル削除操作を記録
     pub fn push_delete_created_file(&self, session_id: &str, tool_name: &str, path: PathBuf) {
-        self.push(session_id, UndoEntry::new(tool_name, vec![UndoEntry::delete_created_file(path)]));
+        self.push(
+            session_id,
+            UndoEntry::new(tool_name, vec![UndoEntry::delete_created_file(path)]),
+        );
     }
 
     /// 最新の操作を元に戻す
     pub async fn undo(&self, session_id: &str) -> Result<Vec<String>, String> {
-        let mut stack = self.stacks.get_mut(session_id).ok_or("No undo history for this session")?;
+        let mut stack = self
+            .stacks
+            .get_mut(session_id)
+            .ok_or("No undo history for this session")?;
         let entry = stack.pop_back().ok_or("Undo stack is empty")?;
 
         let mut logs = Vec::new();
@@ -90,30 +109,39 @@ impl UndoManager {
 
         for op in entry.operations {
             match op {
-                UndoOperation::RestoreFile { path, original_content } => {
-                    match original_content {
-                        Some(content) => {
-                            tokio::fs::write(&path, content).await
-                                .map_err(|e| format!("Failed to restore file {}: {}", path.display(), e))?;
-                            logs.push(format!("Restored file: {}", path.display()));
-                        }
-                        None => {
-                            if path.exists() {
-                                tokio::fs::remove_file(&path).await
-                                    .map_err(|e| format!("Failed to remove created file {}: {}", path.display(), e))?;
-                                logs.push(format!("Removed created file: {}", path.display()));
-                            }
+                UndoOperation::RestoreFile {
+                    path,
+                    original_content,
+                } => match original_content {
+                    Some(content) => {
+                        tokio::fs::write(&path, content).await.map_err(|e| {
+                            format!("Failed to restore file {}: {}", path.display(), e)
+                        })?;
+                        logs.push(format!("Restored file: {}", path.display()));
+                    }
+                    None => {
+                        if path.exists() {
+                            tokio::fs::remove_file(&path).await.map_err(|e| {
+                                format!("Failed to remove created file {}: {}", path.display(), e)
+                            })?;
+                            logs.push(format!("Removed created file: {}", path.display()));
                         }
                     }
-                }
+                },
                 UndoOperation::DeleteCreatedFile { path } => {
                     if path.exists() {
                         if path.is_file() {
-                            tokio::fs::remove_file(&path).await
-                                .map_err(|e| format!("Failed to delete created file {}: {}", path.display(), e))?;
+                            tokio::fs::remove_file(&path).await.map_err(|e| {
+                                format!("Failed to delete created file {}: {}", path.display(), e)
+                            })?;
                         } else if path.is_dir() {
-                            tokio::fs::remove_dir_all(&path).await
-                                .map_err(|e| format!("Failed to delete created directory {}: {}", path.display(), e))?;
+                            tokio::fs::remove_dir_all(&path).await.map_err(|e| {
+                                format!(
+                                    "Failed to delete created directory {}: {}",
+                                    path.display(),
+                                    e
+                                )
+                            })?;
                         }
                         logs.push(format!("Deleted created path: {}", path.display()));
                     }

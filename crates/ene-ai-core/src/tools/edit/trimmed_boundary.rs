@@ -1,6 +1,13 @@
-pub fn trimmed_boundary_replace(content: &str, old: &str, new: &str, replace_all: bool) -> Option<String> {
+pub fn trimmed_boundary_replace(
+    content: &str,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+) -> Option<String> {
     let trimmed_find = old.trim();
-    if trimmed_find == old { return None; }
+    if trimmed_find == old {
+        return None;
+    }
 
     let mut results = Vec::new();
 
@@ -23,8 +30,12 @@ pub fn trimmed_boundary_replace(content: &str, old: &str, new: &str, replace_all
         } else {
             let first = content.find(trimmed_find)?;
             let last = content.rfind(trimmed_find)?;
-            if first != last { return None; }
-            return Some(content[..first].to_string() + new + &content[first + trimmed_find.len()..]);
+            if first != last {
+                return None;
+            }
+            return Some(
+                content[..first].to_string() + new + &content[first + trimmed_find.len()..],
+            );
         }
     }
 
@@ -35,22 +46,76 @@ pub fn trimmed_boundary_replace(content: &str, old: &str, new: &str, replace_all
         let block = lines[i..i + find_lines.len()].join("\n");
         if block.trim() == trimmed_find {
             let mut start_idx = 0usize;
-            for k in 0..i { start_idx += lines[k].len() + 1; }
+            for k in 0..i {
+                start_idx += lines[k].len() + 1;
+            }
             let mut end_idx = start_idx;
             for k in 0..find_lines.len() {
                 end_idx += lines[i + k].len();
-                if k < find_lines.len() - 1 { end_idx += 1; }
+                if k < find_lines.len() - 1 {
+                    end_idx += 1;
+                }
             }
             results.push((start_idx, end_idx));
         }
     }
 
-    if results.is_empty() { return None; }
-    if !replace_all && results.len() > 1 { return None; }
+    if results.is_empty() {
+        return None;
+    }
+    if !replace_all && results.len() > 1 {
+        return None;
+    }
 
     let mut result = content.to_string();
     for (start, end) in results.iter().rev() {
         result = result[..*start].to_string() + new + &result[*end..];
     }
     Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_trimmed_match() {
+        let content = "  foo bar  ";
+        let result = trimmed_boundary_replace(content, "  foo bar  ", "QUX", false);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_trimmed_already_no_whitespace() {
+        let content = "foo bar";
+        let result = trimmed_boundary_replace(content, "foo bar", "QUX", false);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_multi_line_trimmed() {
+        let content = "  foo\n  bar  \n";
+        // old with extra whitespace that when trimmed matches content's trimmed version
+        let old = "  foo\n  bar  ";
+        let result = trimmed_boundary_replace(content, old, "QUX", false);
+        // trimmed_boundary only applies when old.trim() != old
+        // Here old.trim() = "foo\nbar", content = "  foo\n  bar  \n"
+        // content.contains("foo\nbar") is false because content has extra spaces
+        // So it falls through to line-by-line trimmed matching
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_no_match() {
+        let content = "foo bar baz";
+        let result = trimmed_boundary_replace(content, "  qux  ", "QUX", false);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_replace_all() {
+        let content = "  foo  foo  ";
+        let result = trimmed_boundary_replace(content, "  foo  ", "QUX", true);
+        assert!(result.is_some());
+    }
 }

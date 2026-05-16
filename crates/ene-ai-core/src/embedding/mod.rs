@@ -1,8 +1,8 @@
 mod quantized;
 
-use std::time::Instant;
-use async_trait::async_trait;
 use async_openai::types::embeddings::CreateEmbeddingRequestArgs;
+use async_trait::async_trait;
+use std::time::Instant;
 
 use crate::client::build_openai_client;
 use crate::error::AiCoreError;
@@ -45,9 +45,15 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
             .model(&self.model)
             .input(text)
             .build()
-            .map_err(|e| AiCoreError::EmbeddingError(format!("Failed to build embedding request: {e}")))?;
+            .map_err(|e| {
+                AiCoreError::EmbeddingError(format!("Failed to build embedding request: {e}"))
+            })?;
 
-        let response = self.client.embeddings().create(request).await
+        let response = self
+            .client
+            .embeddings()
+            .create(request)
+            .await
             .map_err(|e| AiCoreError::EmbeddingError(format!("Embedding API call failed: {e}")))?;
         let elapsed = start.elapsed();
 
@@ -58,8 +64,10 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
             elapsed.as_secs_f64() * 1000.0,
         );
 
-        let embedding = response.data.into_iter().next()
-            .ok_or_else(|| AiCoreError::EmbeddingError("Empty embedding response".to_string()))?;
+        let embedding =
+            response.data.into_iter().next().ok_or_else(|| {
+                AiCoreError::EmbeddingError("Empty embedding response".to_string())
+            })?;
 
         Ok(embedding.embedding)
     }

@@ -1,9 +1,9 @@
+use super::definition::ToolDefinition;
+use crate::error::AiCoreError;
+use crate::sandbox::SandboxConfig;
+use crate::tools::truncate::Truncate;
 use std::path::Path;
 use std::time::Duration;
-use crate::sandbox::SandboxConfig;
-use crate::error::AiCoreError;
-use crate::tools::truncate::Truncate;
-use super::definition::ToolDefinition;
 
 pub fn tool_definition() -> ToolDefinition {
     ToolDefinition {
@@ -39,7 +39,10 @@ pub async fn shell_exec(
     sandbox.is_command_blocked(command)?;
 
     let cwd = if let Some(wd) = workdir {
-        sandbox.resolve_and_check(Path::new(wd), true)?.to_string_lossy().to_string()
+        sandbox
+            .resolve_and_check(Path::new(wd), true)?
+            .to_string_lossy()
+            .to_string()
     } else {
         std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
@@ -79,7 +82,11 @@ pub async fn shell_exec(
 
     let result = match output {
         Ok(Ok(o)) => o,
-        Ok(Err(e)) => return Err(AiCoreError::ToolExecutionError(format!("Failed to execute command: {e}"))),
+        Ok(Err(e)) => {
+            return Err(AiCoreError::ToolExecutionError(format!(
+                "Failed to execute command: {e}"
+            )));
+        }
         Err(_) => return Err(AiCoreError::ShellTimeout(timeout_ms)),
     };
 
@@ -107,11 +114,23 @@ pub async fn shell_exec(
 
     let mut output_text = truncated.content;
     if result.status.code() != Some(0) {
-        output_text = format!("[Exit code: {}]\n{}", result.status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".to_string()), output_text);
+        output_text = format!(
+            "[Exit code: {}]\n{}",
+            result
+                .status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "?".to_string()),
+            output_text
+        );
     }
 
     if truncated.truncated {
-        output_text.push_str(&format!("\n\n(Shell output was truncated. Full output: {} bytes, {} lines)", full_output.len(), full_output.lines().count()));
+        output_text.push_str(&format!(
+            "\n\n(Shell output was truncated. Full output: {} bytes, {} lines)",
+            full_output.len(),
+            full_output.lines().count()
+        ));
     }
 
     // Description を先頭に追加

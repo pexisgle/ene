@@ -19,7 +19,7 @@ pub enum AiCoreError {
     #[error("Configuration error: {0}")]
     ConfigError(String),
     #[error("Memory store error: {0}")]
-    MemoryStoreError(String),
+    MemoryStoreError(#[from] rusqlite::Error),
     #[error("Embedding error: {0}")]
     EmbeddingError(String),
     #[error("Sandbox violation: {0}")]
@@ -44,18 +44,16 @@ pub enum AiCoreError {
     AppError(String),
     #[error("Web search error: {0}")]
     WebSearchError(String),
+    #[error("Prompt building failed: {0}")]
+    PromptBuildError(String),
+    #[error("API request failed: {0}")]
+    ApiRequestError(String),
+    #[error("Split not needed")]
+    SplitNotNeeded,
+    #[error("Task channel closed")]
+    ChannelClosed,
+    #[error("Regex error: {0}")]
+    RegexError(#[from] regex::Error),
     #[error("Unknown error: {0}")]
     Unknown(String),
-}
-
-impl From<rusqlite::Error> for AiCoreError {
-    fn from(e: rusqlite::Error) -> Self {
-        AiCoreError::MemoryStoreError(e.to_string())
-    }
-}
-
-impl From<regex::Error> for AiCoreError {
-    fn from(e: regex::Error) -> Self {
-        AiCoreError::Unknown(format!("Regex error: {}", e))
-    }
 }

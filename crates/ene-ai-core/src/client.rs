@@ -1,4 +1,4 @@
-use async_openai::{config::OpenAIConfig, Client};
+use async_openai::{Client, config::OpenAIConfig};
 
 /// OpenAI互換クライアントを構築する
 pub fn build_openai_client(base_url: &str, api_key: &str) -> Client<OpenAIConfig> {

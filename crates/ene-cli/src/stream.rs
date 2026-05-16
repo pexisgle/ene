@@ -1,11 +1,7 @@
+use crate::style;
+use ene_ai_core::{session::ConversationSession, stream::AiStreamEvent, truncate};
 use std::io::{self, Write};
 use tokio_stream::StreamExt;
-use ene_ai_core::{
-    session::ConversationSession,
-    stream::AiStreamEvent,
-    truncate,
-};
-use crate::style;
 
 pub async fn process_stream<S>(stream: S, session: &mut ConversationSession)
 where
@@ -24,7 +20,7 @@ where
                 }
                 for token in special_tokens {
                     if let Some(emotion) =
-                        ene_ai_core::special_token::extract_emotion_from_act_token(&token)
+                        ene_ai_core::special_token::extract_emotion_from_token(&token)
                     {
                         print!("{}", style::emotion(format!("[Emotion: {}]", emotion)));
                     } else {
@@ -34,7 +30,10 @@ where
                 }
             }
             AiStreamEvent::ToolCallStart { name, arguments } => {
-                println!("\n{}", style::header(format!("[Tool Calling: {}({})]", name, arguments)));
+                println!(
+                    "\n{}",
+                    style::header(format!("[Tool Calling: {}({})]", name, arguments))
+                );
             }
             AiStreamEvent::ToolCallResult { name: _, result } => {
                 println!("{}\n", style::success(format!("[Tool Result: {}]", result)));
@@ -43,10 +42,7 @@ where
                 println!("\n{}", style::warning(format!("[Session] {} ", reason)));
                 println!(
                     "{}",
-                    style::warning(format!(
-                        "[Session] Summary: {}",
-                        truncate(&summary, 80)
-                    ))
+                    style::warning(format!("[Session] Summary: {}", truncate(&summary, 80)))
                 );
             }
             AiStreamEvent::Finished => {
@@ -57,21 +53,40 @@ where
                 session.record_assistant_response();
                 println!();
             }
-            AiStreamEvent::PermissionRequired { request_id, action, target, description } => {
-                println!("\n{}", style::warning(format!(
-                    "[Permission Required] {} on {} ({})",
-                    action, target, description
-                )));
-                println!("{}", style::warning(format!(
-                    "To approve, use: approve_permission {}",
-                    request_id
-                )));
+            AiStreamEvent::PermissionRequired {
+                request_id,
+                action,
+                target,
+                description,
+            } => {
+                println!(
+                    "\n{}",
+                    style::warning(format!(
+                        "[Permission Required] {} on {} ({})",
+                        action, target, description
+                    ))
+                );
+                println!(
+                    "{}",
+                    style::warning(format!(
+                        "To approve, use: approve_permission {}",
+                        request_id
+                    ))
+                );
             }
-            AiStreamEvent::TaskProgress { task_id, step, total_steps, description } => {
-                println!("\n{}", style::header(format!(
-                    "[Task {}] Step {}/{}: {}",
-                    task_id, step, total_steps, description
-                )));
+            AiStreamEvent::TaskProgress {
+                task_id,
+                step,
+                total_steps,
+                description,
+            } => {
+                println!(
+                    "\n{}",
+                    style::header(format!(
+                        "[Task {}] Step {}/{}: {}",
+                        task_id, step, total_steps, description
+                    ))
+                );
             }
             AiStreamEvent::Error(err) => {
                 println!("\n[Error] {}", err);

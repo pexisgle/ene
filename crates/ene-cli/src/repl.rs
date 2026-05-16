@@ -1,7 +1,7 @@
-use ene_ai_core::{
-    spawn_split_task, poll_split_result, run_ai_with_tools, truncate,
-};
 use crate::{commands, context::AppContext, stream, style};
+use ene_ai_core::{
+    SplitTaskInput, poll_split_result, run_ai_with_tools, spawn_split_task, truncate,
+};
 
 pub async fn run(ctx: &mut AppContext) {
     loop {
@@ -37,7 +37,10 @@ async fn check_session_split(ctx: &mut AppContext, input: &str) {
     if let Some(result) = poll_split_result(&mut ctx.pending_split) {
         match result {
             Ok(result) => {
-                println!("\n{}", style::warning(format!("[Session] {} ", result.reason)));
+                println!(
+                    "\n{}",
+                    style::warning(format!("[Session] {} ", result.reason))
+                );
                 println!(
                     "{}",
                     style::warning(format!(
@@ -52,15 +55,21 @@ async fn check_session_split(ctx: &mut AppContext, input: &str) {
                         .map(|f| format!("{}:{}", f.key, f.value))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    println!("{}", style::warning(format!("[Session] 重要な事実: {}", facts_str)));
+                    println!(
+                        "{}",
+                        style::warning(format!("[Session] 重要な事実: {}", facts_str))
+                    );
                 }
                 ctx.session.reset_session();
                 ctx.session.session_id = result.new_session_id;
                 println!("{}\n", style::warning("[Session] 新しい会話を開始します。"));
             }
             Err(e) => {
-                if e.to_string() != "no split needed" {
-                    eprintln!("{}", style::error(format!("[Session] 要約生成エラー: {}", e)));
+                if !matches!(e, ene_ai_core::AiCoreError::SplitNotNeeded) {
+                    eprintln!(
+                        "{}",
+                        style::error(format!("[Session] 要約生成エラー: {}", e))
+                    );
                 }
             }
         }
@@ -71,17 +80,19 @@ async fn check_session_split(ctx: &mut AppContext, input: &str) {
     {
         spawn_split_task(
             &mut ctx.pending_split,
-            ctx.session.last_input_embedding.clone(),
-            ctx.session.last_message_time,
-            ctx.session.current_turn_count,
-            input.to_string(),
-            ctx.settings.clone(),
-            ctx.session.conversation_history.clone(),
-            ctx.session.session_id.clone(),
-            ctx.session.card_name().to_string(),
-            ctx.settings.user_name.clone(),
-            store.clone(),
-            embedder.clone(),
+            SplitTaskInput {
+                last_input_embedding: ctx.session.last_input_embedding.clone(),
+                last_message_time: ctx.session.last_message_time,
+                current_turn_count: ctx.session.current_turn_count,
+                user_input: input.to_string(),
+                settings: ctx.settings.clone(),
+                history: ctx.session.conversation_history.clone(),
+                session_id: ctx.session.session_id.clone(),
+                card_name: ctx.session.card_name().to_string(),
+                user_name: ctx.settings.user_name.clone(),
+                store: store.clone(),
+                embedder: embedder.clone(),
+            },
         );
     }
 }

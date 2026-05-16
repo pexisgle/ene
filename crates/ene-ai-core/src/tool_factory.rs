@@ -23,17 +23,21 @@ impl ToolRegistryBuilder {
     }
 
     pub fn with_builtin(mut self) -> Self {
-        self.registries.push(Box::new(crate::tools::builtin::BuiltinToolRegistry::new()));
+        self.registries
+            .push(Box::new(crate::tools::builtin::BuiltinToolRegistry::new()));
         self
     }
 
     pub fn with_screenshot(mut self, scale_percent: u32) -> Self {
-        self.registries.push(Box::new(crate::tools::screenshot::ScreenshotToolRegistry::new(scale_percent)));
+        self.registries.push(Box::new(
+            crate::tools::screenshot::ScreenshotToolRegistry::new(scale_percent),
+        ));
         self
     }
 
     pub fn with_sandbox(mut self, config: crate::sandbox::SandboxConfig) -> Self {
-        self.registries.push(Box::new(crate::tools::OpencodeToolRegistry::new(config)));
+        self.registries
+            .push(Box::new(crate::tools::OpencodeToolRegistry::new(config)));
         self
     }
 
@@ -43,6 +47,8 @@ impl ToolRegistryBuilder {
     }
 
     pub fn build(self) -> Arc<dyn ToolRegistry> {
-        Arc::new(crate::tools::composite::CompositeToolRegistry::new(self.registries))
+        Arc::new(crate::tools::composite::CompositeToolRegistry::new(
+            self.registries,
+        ))
     }
 }

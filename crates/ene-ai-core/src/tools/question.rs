@@ -1,5 +1,5 @@
-use crate::error::AiCoreError;
 use super::definition::ToolDefinition;
+use crate::error::AiCoreError;
 
 pub fn tool_definition() -> ToolDefinition {
     ToolDefinition {
@@ -27,10 +27,13 @@ pub fn tool_definition() -> ToolDefinition {
 /// CLI/GUI側で対応する
 pub fn question(questions: Vec<String>) -> Result<String, AiCoreError> {
     if questions.is_empty() {
-        return Err(AiCoreError::ToolExecutionError("No questions provided".to_string()));
+        return Err(AiCoreError::ToolExecutionError(
+            "No questions provided".to_string(),
+        ));
     }
 
-    let formatted: Vec<String> = questions.iter()
+    let formatted: Vec<String> = questions
+        .iter()
         .enumerate()
         .map(|(i, q)| format!("{}. {}", i + 1, q))
         .collect();

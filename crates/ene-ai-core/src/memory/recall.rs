@@ -1,5 +1,5 @@
-use chrono::Utc;
 use super::store::RecalledSummary;
+use chrono::Utc;
 
 /// 過去の会話要約をプロンプトに注入するテキストブロックに整形する
 pub fn format_summaries_for_prompt(summaries: &[RecalledSummary]) -> String {
@@ -8,11 +8,16 @@ pub fn format_summaries_for_prompt(summaries: &[RecalledSummary]) -> String {
     }
 
     let now = Utc::now();
-    let mut lines = vec!["[Past Conversation Summaries — relevant previous conversations]".to_string()];
+    let mut lines =
+        vec!["[Past Conversation Summaries — relevant previous conversations]".to_string()];
 
     for s in summaries {
         let age = format_age(now - s.entry.ended_at);
-        lines.push(format!("- ({}) Summary: {}", age, truncate_str(&s.entry.summary, 300)));
+        lines.push(format!(
+            "- ({}) Summary: {}",
+            age,
+            truncate_str(&s.entry.summary, 300)
+        ));
     }
 
     lines.join("\n")
@@ -24,13 +29,25 @@ fn format_age(dur: chrono::Duration) -> String {
         "just now".to_string()
     } else if total_seconds < 3600 {
         let mins = total_seconds / 60;
-        if mins == 1 { "1 minute ago".to_string() } else { format!("{} minutes ago", mins) }
+        if mins == 1 {
+            "1 minute ago".to_string()
+        } else {
+            format!("{} minutes ago", mins)
+        }
     } else if total_seconds < 86400 {
         let hours = total_seconds / 3600;
-        if hours == 1 { "1 hour ago".to_string() } else { format!("{} hours ago", hours) }
+        if hours == 1 {
+            "1 hour ago".to_string()
+        } else {
+            format!("{} hours ago", hours)
+        }
     } else {
         let days = total_seconds / 86400;
-        if days == 1 { "1 day ago".to_string() } else { format!("{} days ago", days) }
+        if days == 1 {
+            "1 day ago".to_string()
+        } else {
+            format!("{} days ago", days)
+        }
     }
 }
 

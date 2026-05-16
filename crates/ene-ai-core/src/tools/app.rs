@@ -6,8 +6,8 @@
 //! - マウスカーソルの移動とクリック
 //! - クリップボードの読み書き
 
-use crate::error::AiCoreError;
 use super::definition::ToolDefinition;
+use crate::error::AiCoreError;
 use enigo::{Keyboard, Mouse};
 
 pub fn tool_definition() -> ToolDefinition {
@@ -51,7 +51,8 @@ pub async fn app_exec(
     match action {
         "list_windows" => list_windows().await,
         "focus_window" => {
-            let title = window_title.ok_or_else(|| AiCoreError::AppError("window_title required".to_string()))?;
+            let title = window_title
+                .ok_or_else(|| AiCoreError::AppError("window_title required".to_string()))?;
             focus_window(title).await
         }
         "type_text" => {
@@ -67,15 +68,16 @@ pub async fn app_exec(
             let my = y.ok_or_else(|| AiCoreError::AppError("y required".to_string()))?;
             mouse_move(mx, my).await
         }
-        "mouse_click" => {
-            mouse_click(button.unwrap_or("left")).await
-        }
+        "mouse_click" => mouse_click(button.unwrap_or("left")).await,
         "clipboard_read" => clipboard_read().await,
         "clipboard_write" => {
             let txt = text.ok_or_else(|| AiCoreError::AppError("text required".to_string()))?;
             clipboard_write(txt).await
         }
-        _ => Err(AiCoreError::AppError(format!("Unknown app action: {}", action))),
+        _ => Err(AiCoreError::AppError(format!(
+            "Unknown app action: {}",
+            action
+        ))),
     }
 }
 
@@ -103,10 +105,16 @@ async fn focus_window(title: &str) -> Result<String, AiCoreError> {
         let app_name = window.app_name().unwrap_or_default();
         if win_title.contains(title) || app_name.contains(title) {
             // xcap does not support focusing directly; we use enigo
-            return Ok(format!("Found window: {} ({}). Focus requires platform-specific implementation.", win_title, app_name));
+            return Ok(format!(
+                "Found window: {} ({}). Focus requires platform-specific implementation.",
+                win_title, app_name
+            ));
         }
     }
-    Err(AiCoreError::AppError(format!("Window not found: {}", title)))
+    Err(AiCoreError::AppError(format!(
+        "Window not found: {}",
+        title
+    )))
 }
 
 async fn type_text(text: &str) -> Result<String, AiCoreError> {
@@ -114,7 +122,8 @@ async fn type_text(text: &str) -> Result<String, AiCoreError> {
     tokio::task::spawn_blocking(move || {
         let mut enigo = enigo::Enigo::new(&enigo::Settings::default())
             .map_err(|e| AiCoreError::AppError(format!("Failed to initialize enigo: {e}")))?;
-        enigo.text(&text)
+        enigo
+            .text(&text)
             .map_err(|e| AiCoreError::AppError(format!("Type failed: {e}")))?;
         Ok::<_, AiCoreError>("Text typed successfully.".to_string())
     })
@@ -131,44 +140,56 @@ async fn press_key(key: &str) -> Result<String, AiCoreError> {
         // Simple key mapping
         match key.as_str() {
             "return" | "enter" => {
-                enigo.key(enigo::Key::Return, enigo::Direction::Click)
+                enigo
+                    .key(enigo::Key::Return, enigo::Direction::Click)
                     .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
             }
             "escape" => {
-                enigo.key(enigo::Key::Escape, enigo::Direction::Click)
+                enigo
+                    .key(enigo::Key::Escape, enigo::Direction::Click)
                     .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
             }
             "tab" => {
-                enigo.key(enigo::Key::Tab, enigo::Direction::Click)
+                enigo
+                    .key(enigo::Key::Tab, enigo::Direction::Click)
                     .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
             }
             "space" => {
-                enigo.key(enigo::Key::Space, enigo::Direction::Click)
+                enigo
+                    .key(enigo::Key::Space, enigo::Direction::Click)
                     .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
             }
             "backspace" => {
-                enigo.key(enigo::Key::Backspace, enigo::Direction::Click)
+                enigo
+                    .key(enigo::Key::Backspace, enigo::Direction::Click)
                     .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
             }
             "ctrl+c" => {
-                enigo.key(enigo::Key::Control, enigo::Direction::Press)
+                enigo
+                    .key(enigo::Key::Control, enigo::Direction::Press)
                     .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
-                enigo.key(enigo::Key::Unicode('c'), enigo::Direction::Click)
+                enigo
+                    .key(enigo::Key::Unicode('c'), enigo::Direction::Click)
                     .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
-                enigo.key(enigo::Key::Control, enigo::Direction::Release)
+                enigo
+                    .key(enigo::Key::Control, enigo::Direction::Release)
                     .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
             }
             "ctrl+v" => {
-                enigo.key(enigo::Key::Control, enigo::Direction::Press)
+                enigo
+                    .key(enigo::Key::Control, enigo::Direction::Press)
                     .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
-                enigo.key(enigo::Key::Unicode('v'), enigo::Direction::Click)
+                enigo
+                    .key(enigo::Key::Unicode('v'), enigo::Direction::Click)
                     .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
-                enigo.key(enigo::Key::Control, enigo::Direction::Release)
+                enigo
+                    .key(enigo::Key::Control, enigo::Direction::Release)
                     .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
             }
             _ if key.len() == 1 => {
                 let c = key.chars().next().unwrap();
-                enigo.key(enigo::Key::Unicode(c), enigo::Direction::Click)
+                enigo
+                    .key(enigo::Key::Unicode(c), enigo::Direction::Click)
                     .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
             }
             _ => {
@@ -185,7 +206,8 @@ async fn mouse_move(x: i32, y: i32) -> Result<String, AiCoreError> {
     tokio::task::spawn_blocking(move || {
         let mut enigo = enigo::Enigo::new(&enigo::Settings::default())
             .map_err(|e| AiCoreError::AppError(format!("Failed to initialize enigo: {e}")))?;
-        enigo.move_mouse(x, y, enigo::Coordinate::Abs)
+        enigo
+            .move_mouse(x, y, enigo::Coordinate::Abs)
             .map_err(|e| AiCoreError::AppError(format!("Mouse move failed: {e}")))?;
         Ok::<_, AiCoreError>(format!("Mouse moved to ({}, {})", x, y))
     })
@@ -203,7 +225,8 @@ async fn mouse_click(button: &str) -> Result<String, AiCoreError> {
             "middle" => enigo::Button::Middle,
             _ => enigo::Button::Left,
         };
-        enigo.button(btn, enigo::Direction::Click)
+        enigo
+            .button(btn, enigo::Direction::Click)
             .map_err(|e| AiCoreError::AppError(format!("Mouse click failed: {e}")))?;
         Ok::<_, AiCoreError>(format!("Mouse {} click performed", button))
     })

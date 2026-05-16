@@ -1,4 +1,9 @@
-pub fn escape_normalized_replace(content: &str, old: &str, new: &str, replace_all: bool) -> Option<String> {
+pub fn escape_normalized_replace(
+    content: &str,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+) -> Option<String> {
     let unescape = |s: &str| -> String {
         let mut result = String::with_capacity(s.len());
         let mut chars = s.chars().peekable();
@@ -13,7 +18,10 @@ pub fn escape_normalized_replace(content: &str, old: &str, new: &str, replace_al
                     Some('\'') => result.push('\''),
                     Some('`') => result.push('`'),
                     Some('$') => result.push('$'),
-                    Some(other) => { result.push('\\'); result.push(other); }
+                    Some(other) => {
+                        result.push('\\');
+                        result.push(other);
+                    }
                     None => result.push('\\'),
                 }
             } else {
@@ -31,7 +39,9 @@ pub fn escape_normalized_replace(content: &str, old: &str, new: &str, replace_al
         }
         let first = content.find(&unescaped_find)?;
         let last = content.rfind(&unescaped_find)?;
-        if first != last { return None; }
+        if first != last {
+            return None;
+        }
         return Some(content[..first].to_string() + new + &content[first + unescaped_find.len()..]);
     }
 
@@ -44,22 +54,73 @@ pub fn escape_normalized_replace(content: &str, old: &str, new: &str, replace_al
         let unescaped_block = unescape(&block);
         if unescaped_block == unescaped_find {
             let mut start_idx = 0usize;
-            for k in 0..i { start_idx += lines[k].len() + 1; }
+            for k in 0..i {
+                start_idx += lines[k].len() + 1;
+            }
             let mut end_idx = start_idx;
             for k in 0..find_lines.len().min(lines.len() - i) {
                 end_idx += lines[i + k].len();
-                if k < find_lines.len() - 1 && i + k + 1 < lines.len() { end_idx += 1; }
+                if k < find_lines.len() - 1 && i + k + 1 < lines.len() {
+                    end_idx += 1;
+                }
             }
             results.push((start_idx, end_idx));
         }
     }
 
-    if results.is_empty() { return None; }
-    if !replace_all && results.len() > 1 { return None; }
+    if results.is_empty() {
+        return None;
+    }
+    if !replace_all && results.len() > 1 {
+        return None;
+    }
 
     let mut result = content.to_string();
     for (start, end) in results.iter().rev() {
         result = result[..*start].to_string() + new + &result[*end..];
     }
     Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_escape_newline() {
+        let content = "foo\nbar\n";
+        let result = escape_normalized_replace(content, "foo\\nbar", "QUX", false);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "QUX\n");
+    }
+
+    #[test]
+    fn test_escape_tab() {
+        let content = "foo\tbar\n";
+        let result = escape_normalized_replace(content, "foo\\tbar", "QUX", false);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "QUX\n");
+    }
+
+    #[test]
+    fn test_no_escape_needed() {
+        let content = "foo bar baz";
+        let result = escape_normalized_replace(content, "bar", "QUX", false);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "foo QUX baz");
+    }
+
+    #[test]
+    fn test_multiple_matches_reject() {
+        let content = "foo\nbar\nfoo\nbar\n";
+        let result = escape_normalized_replace(content, "foo\\nbar", "QUX", false);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_replace_all() {
+        let content = "foo\nbar\nfoo\nbar\n";
+        let result = escape_normalized_replace(content, "foo\\nbar", "QUX", true);
+        assert!(result.is_some());
+    }
 }

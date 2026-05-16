@@ -1,11 +1,8 @@
-use std::sync::Arc;
 use ene_ai_core::{
-    config::AiSettings,
-    mcp_client::McpToolRegistry,
-    sandbox::SandboxConfig,
-    tool::ToolRegistry,
-    tool_factory::ToolRegistryBuilder,
+    config::AiSettings, mcp_client::McpToolRegistry, sandbox::SandboxConfig,
+    tool_factory::ToolRegistryBuilder, tools::ToolRegistry,
 };
+use std::sync::Arc;
 
 pub async fn build(settings: &AiSettings) -> Arc<dyn ToolRegistry> {
     if settings.mcp_servers.is_empty() {
@@ -46,20 +43,18 @@ pub async fn build(settings: &AiSettings) -> Arc<dyn ToolRegistry> {
     }
 
     let mut registries: Vec<Box<dyn ToolRegistry>> = vec![
-        Box::new(ene_ai_core::builtin_tools::BuiltinToolRegistry::new()),
-        Box::new(
-            ene_ai_core::screenshot_tool::ScreenshotToolRegistry::new(
-                settings.screenshot_scale_percent,
-            ),
-        ),
+        Box::new(ene_ai_core::BuiltinToolRegistry::new()),
+        Box::new(ene_ai_core::ScreenshotToolRegistry::new(
+            settings.screenshot_scale_percent,
+        )),
     ];
     if settings.sandbox.enabled {
-        registries.push(Box::new(
-            ene_ai_core::tools::OpencodeToolRegistry::new(build_sandbox_config(settings)),
-        ));
+        registries.push(Box::new(ene_ai_core::tools::OpencodeToolRegistry::new(
+            build_sandbox_config(settings),
+        )));
     }
     registries.push(Box::new(mcp));
-    Arc::new(ene_ai_core::composite_registry::CompositeToolRegistry::new(registries))
+    Arc::new(ene_ai_core::CompositeToolRegistry::new(registries))
 }
 
 fn build_sandbox_config(settings: &AiSettings) -> SandboxConfig {

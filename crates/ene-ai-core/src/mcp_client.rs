@@ -1,9 +1,9 @@
 use crate::tools::definition::{ToolDefinition, ToolRegistry};
 use async_trait::async_trait;
 use rmcp::serve_client;
-use rmcp::transport::child_process::{TokioChildProcess, ConfigureCommandExt};
-use tokio::process::Command;
+use rmcp::transport::child_process::{ConfigureCommandExt, TokioChildProcess};
 use std::sync::{Arc, RwLock};
+use tokio::process::Command;
 
 pub struct McpServerConnection {
     pub name: String,
@@ -34,11 +34,12 @@ impl McpToolRegistry {
             }
         });
 
-        let client = serve_client((), TokioChildProcess::new(cmd).map_err(|e| e.to_string())?).await
+        let client = serve_client((), TokioChildProcess::new(cmd).map_err(|e| e.to_string())?)
+            .await
             .map_err(|e| e.to_string())?;
 
         let mcp_tools_resp = client.list_tools(None).await.map_err(|e| e.to_string())?;
-        
+
         let mut tools = Vec::new();
         for t in mcp_tools_resp.tools {
             tools.push(ToolDefinition {
@@ -57,7 +58,7 @@ impl McpToolRegistry {
 
         Ok(())
     }
-    
+
     // HTTP transport connection can be added similarly
 }
 
@@ -88,17 +89,16 @@ impl ToolRegistry for McpToolRegistry {
         let client = client_opt.ok_or_else(|| format!("Tool {} not found in MCP", name))?;
 
         // Parse arguments to serde_json::Value
-        let args_val: serde_json::Value = serde_json::from_str(arguments)
-            .map_err(|e| e.to_string())?;
-        
+        let args_val: serde_json::Value =
+            serde_json::from_str(arguments).map_err(|e| e.to_string())?;
+
         let mut params = rmcp::model::CallToolRequestParams::new(name.to_string());
         if let Some(obj) = args_val.as_object() {
             params = params.with_arguments(obj.clone());
         }
-        
-        let result = client.call_tool(params).await
-            .map_err(|e| e.to_string())?;
-        
+
+        let result = client.call_tool(params).await.map_err(|e| e.to_string())?;
+
         Ok(serde_json::to_string(&result.content).map_err(|e| e.to_string())?)
     }
 }

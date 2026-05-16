@@ -1,10 +1,7 @@
-use std::sync::Arc;
 use ene_ai_core::{
-    config::AiSettings,
-    session::ConversationSession,
-    PendingSplitTask,
-    tool::ToolRegistry,
+    PendingSplitTask, config::AiSettings, session::ConversationSession, tools::ToolRegistry,
 };
+use std::sync::Arc;
 
 pub struct AppContext {
     pub settings: AiSettings,

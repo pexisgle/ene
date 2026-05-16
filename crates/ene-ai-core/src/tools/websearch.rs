@@ -1,8 +1,8 @@
 //! Web検索ツール (websearch_tools)
 //! Phase 2: 検索 API 統合（DuckDuckGo、Tavily、Brave Search API 等）
 
-use crate::error::AiCoreError;
 use super::definition::ToolDefinition;
+use crate::error::AiCoreError;
 
 pub fn tool_definition() -> ToolDefinition {
     ToolDefinition {
@@ -11,7 +11,8 @@ pub fn tool_definition() -> ToolDefinition {
             "Searches the web for latest information and technical references. ",
             "Supports multiple search backends (DuckDuckGo, Tavily, Brave). ",
             "Returns summarized search results with titles, snippets, and URLs."
-        ).to_string(),
+        )
+        .to_string(),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
@@ -37,7 +38,10 @@ pub async fn websearch(
         "duckduckgo" => search_duckduckgo(query, limit).await,
         "tavily" => search_tavily(query, limit).await,
         "brave" => search_brave(query, limit).await,
-        _ => Err(AiCoreError::WebSearchError(format!("Unknown backend: {}", backend))),
+        _ => Err(AiCoreError::WebSearchError(format!(
+            "Unknown backend: {}",
+            backend
+        ))),
     }
 }
 
@@ -72,7 +76,13 @@ async fn search_duckduckgo(query: &str, limit: usize) -> Result<String, AiCoreEr
 
     let mut output = format!("Search results for '{}' (DuckDuckGo):\n\n", query);
     for (i, result) in results.iter().enumerate() {
-        output.push_str(&format!("{}. {}\n   {}\n   URL: {}\n\n", i + 1, result.title, result.snippet, result.url));
+        output.push_str(&format!(
+            "{}. {}\n   {}\n   URL: {}\n\n",
+            i + 1,
+            result.title,
+            result.snippet,
+            result.url
+        ));
     }
     Ok(output)
 }
@@ -99,7 +109,9 @@ struct SearchResult {
 
 fn parse_duckduckgo_html(html: &str, limit: usize) -> Vec<SearchResult> {
     let mut results = Vec::new();
-    let re_result = match regex::Regex::new(r#"<div class="result__body"[^>]*>.*?<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?<a[^>]*class="result__snippet"[^>]*>(.*?)</a>.*?</div>"#) {
+    let re_result = match regex::Regex::new(
+        r#"<div class="result__body"[^>]*>.*?<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?<a[^>]*class="result__snippet"[^>]*>(.*?)</a>.*?</div>"#,
+    ) {
         Ok(re) => re,
         Err(_) => return results,
     };
@@ -111,12 +123,18 @@ fn parse_duckduckgo_html(html: &str, limit: usize) -> Vec<SearchResult> {
         let url = html_unescape(&cap[1]);
         let title = html_unescape(&cap[2]);
         let snippet = html_unescape(&cap[3]);
-        results.push(SearchResult { title, snippet, url });
+        results.push(SearchResult {
+            title,
+            snippet,
+            url,
+        });
     }
 
     // Fallback: try alternative selectors
     if results.is_empty() {
-        let re_alt = match regex::Regex::new(r#"<h[^>]*>.*?<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?</h[^>]*>.*?<p[^>]*>(.*?)</p>"#) {
+        let re_alt = match regex::Regex::new(
+            r#"<h[^>]*>.*?<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?</h[^>]*>.*?<p[^>]*>(.*?)</p>"#,
+        ) {
             Ok(re) => re,
             Err(_) => return results,
         };
@@ -127,7 +145,11 @@ fn parse_duckduckgo_html(html: &str, limit: usize) -> Vec<SearchResult> {
             let url = html_unescape(&cap[1]);
             let title = html_unescape(&cap[2]);
             let snippet = html_unescape(&cap[3]);
-            results.push(SearchResult { title, snippet, url });
+            results.push(SearchResult {
+                title,
+                snippet,
+                url,
+            });
         }
     }
 

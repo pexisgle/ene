@@ -8,14 +8,15 @@ use tokio_stream::StreamExt;
 use crate::app_config::CharacterSettings;
 use crate::character::ResolvedExpressionMap;
 use ene_ai_core::{
-    init_memory, truncate,
-    spawn_split_task, poll_split_result,
-    PendingSplitTask,
-    session::ConversationSession,
-    stream::{AiStreamEvent as CoreAiStreamEvent, run_ai_with_tools},
-    tool::ToolRegistry,
-    tool_factory::ToolRegistryBuilder,
+    PendingSplitTask, SplitTaskInput, init_memory,
     mcp_client::McpToolRegistry,
+    poll_split_result,
+    session::ConversationSession,
+    spawn_split_task,
+    stream::{AiStreamEvent as CoreAiStreamEvent, run_ai_with_tools},
+    tool_factory::ToolRegistryBuilder,
+    tools::ToolRegistry,
+    truncate,
 };
 
 pub struct AiPlugin;
@@ -28,7 +29,13 @@ impl Plugin for AiPlugin {
             .init_resource::<AiTokioRuntime>()
             .add_systems(
                 Update,
-                (enqueue_ai_requests, process_embedding, start_next_ai_request, poll_ai_worker).chain(),
+                (
+                    enqueue_ai_requests,
+                    process_embedding,
+                    start_next_ai_request,
+                    poll_ai_worker,
+                )
+                    .chain(),
             );
     }
 }
@@ -43,8 +50,14 @@ pub struct AiRequestEvent {
 pub enum AiStreamEvent {
     TextDelta(String),
     SpecialToken(String),
-    ToolCallStart { name: String, arguments: String },
-    ToolCallResult { name: String, result: String },
+    ToolCallStart {
+        name: String,
+        arguments: String,
+    },
+    ToolCallResult {
+        name: String,
+        result: String,
+    },
     PermissionRequired {
         request_id: String,
         action: String,
@@ -99,7 +112,10 @@ impl Default for AiRuntimeState {
 }
 
 impl AiRuntimeState {
-    fn init_memory_from_settings(&mut self, settings: &ene_ai_core::config::AiSettings) -> Result<(), String> {
+    fn init_memory_from_settings(
+        &mut self,
+        settings: &ene_ai_core::config::AiSettings,
+    ) -> Result<(), String> {
         let (store, embedder) = init_memory(settings)?;
         self.session.init_memory(store, embedder);
         Ok(())
@@ -232,33 +248,49 @@ fn start_next_ai_request(
     if settings.ai.memory.enabled && settings.ai.memory.auto_session_split {
         let split_params = {
             let session = &runtime_state.session;
-            session.memory_store.as_ref().zip(session.embedding_provider.as_ref()).map(|(store, embedder)| {
-                (
-                    session.last_input_embedding.clone(),
-                    session.last_message_time,
-                    session.current_turn_count,
-                    session.conversation_history.clone(),
-                    session.session_id.clone(),
-                    session.card_name().to_string(),
-                    store.clone(),
-                    embedder.clone(),
-                )
-            })
+            session
+                .memory_store
+                .as_ref()
+                .zip(session.embedding_provider.as_ref())
+                .map(|(store, embedder)| {
+                    (
+                        session.last_input_embedding.clone(),
+                        session.last_message_time,
+                        session.current_turn_count,
+                        session.conversation_history.clone(),
+                        session.session_id.clone(),
+                        session.card_name().to_string(),
+                        store.clone(),
+                        embedder.clone(),
+                    )
+                })
         };
-        if let Some((last_input_embedding, last_message_time, current_turn_count, history, session_id, card_name, store, embedder)) = split_params {
+        if let Some((
+            last_input_embedding,
+            last_message_time,
+            current_turn_count,
+            history,
+            session_id,
+            card_name,
+            store,
+            embedder,
+        )) = split_params
+        {
             spawn_split_task(
                 &mut runtime_state.pending_split,
-                last_input_embedding,
-                last_message_time,
-                current_turn_count,
-                user_input.clone(),
-                settings.ai.clone(),
-                history,
-                session_id,
-                card_name,
-                settings.ai.user_name.clone(),
-                store,
-                embedder,
+                SplitTaskInput {
+                    last_input_embedding,
+                    last_message_time,
+                    current_turn_count,
+                    user_input: user_input.clone(),
+                    settings: settings.ai.clone(),
+                    history,
+                    session_id,
+                    card_name,
+                    user_name: settings.ai.user_name.clone(),
+                    store,
+                    embedder,
+                },
             );
         }
     }
@@ -280,7 +312,9 @@ fn start_next_ai_request(
             embed_rx,
         )) {
             Ok(Ok(Ok(embedding))) => {
-                runtime_state.session.set_pending_embedding(embedding.clone());
+                runtime_state
+                    .session
+                    .set_pending_embedding(embedding.clone());
                 runtime_state.session.set_last_input_embedding(embedding);
             }
             Ok(Ok(Err(e))) => {
@@ -312,9 +346,17 @@ fn poll_ai_worker(
             match result {
                 Ok(split_result) => {
                     eprintln!("\x1b[33m[Session] {} \x1b[0m", split_result.reason);
-                    eprintln!("\x1b[33m[Session] 会話を要約して保存しました: {}\x1b[0m", truncate(&split_result.summary, 80));
+                    eprintln!(
+                        "\x1b[33m[Session] 会話を要約して保存しました: {}\x1b[0m",
+                        truncate(&split_result.summary, 80)
+                    );
                     if !split_result.key_facts.is_empty() {
-                        let facts_str = split_result.key_facts.iter().map(|f| format!("{}:{}", f.key, f.value)).collect::<Vec<_>>().join(", ");
+                        let facts_str = split_result
+                            .key_facts
+                            .iter()
+                            .map(|f| format!("{}:{}", f.key, f.value))
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         eprintln!("\x1b[33m[Session] 重要な事実: {}\x1b[0m", facts_str);
                     }
                     runtime_state.session.reset_session();
@@ -322,7 +364,7 @@ fn poll_ai_worker(
                     eprintln!("\x1b[33m[Session] 新しい会話を開始します。\x1b[0m");
                 }
                 Err(e) => {
-                    if e.to_string() != "no split needed" {
+                    if !matches!(e, ene_ai_core::AiCoreError::SplitNotNeeded) {
                         eprintln!("\x1b[31m[Session] 要約生成エラー: {}\x1b[0m", e);
                     }
                 }
@@ -394,7 +436,12 @@ fn poll_ai_worker(
                     *guard = None;
                 }
             }
-            CoreAiStreamEvent::PermissionRequired { request_id, action, target, description } => {
+            CoreAiStreamEvent::PermissionRequired {
+                request_id,
+                action,
+                target,
+                description,
+            } => {
                 stream_writer.write(AiStreamEvent::PermissionRequired {
                     request_id,
                     action,
@@ -402,7 +449,12 @@ fn poll_ai_worker(
                     description,
                 });
             }
-            CoreAiStreamEvent::TaskProgress { task_id, step, total_steps, description } => {
+            CoreAiStreamEvent::TaskProgress {
+                task_id,
+                step,
+                total_steps,
+                description,
+            } => {
                 stream_writer.write(AiStreamEvent::TaskProgress {
                     task_id,
                     step,
@@ -418,13 +470,9 @@ fn poll_ai_worker(
     }
 }
 
-async fn build_registry(
-    settings: &ene_ai_core::config::AiSettings,
-) -> Arc<dyn ToolRegistry> {
+async fn build_registry(settings: &ene_ai_core::config::AiSettings) -> Arc<dyn ToolRegistry> {
     if settings.mcp_servers.is_empty() {
-        return ToolRegistryBuilder::new()
-            .with_builtin()
-            .build();
+        return ToolRegistryBuilder::new().with_builtin().build();
     }
 
     let mcp = McpToolRegistry::new();
@@ -452,9 +500,8 @@ async fn build_registry(
         }
     }
 
-    let mut registries = vec![
-        Box::new(ene_ai_core::builtin_tools::BuiltinToolRegistry::new()) as Box<dyn ToolRegistry>,
-    ];
+    let mut registries: Vec<Box<dyn ToolRegistry>> =
+        vec![Box::new(ene_ai_core::BuiltinToolRegistry::new())];
     registries.push(Box::new(mcp));
-    Arc::new(ene_ai_core::composite_registry::CompositeToolRegistry::new(registries))
+    Arc::new(ene_ai_core::CompositeToolRegistry::new(registries))
 }

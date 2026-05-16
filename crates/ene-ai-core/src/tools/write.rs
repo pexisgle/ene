@@ -1,8 +1,8 @@
-use std::path::Path;
-use crate::sandbox::SandboxConfig;
-use crate::error::AiCoreError;
-use super::undo_manager::UndoManager;
 use super::definition::ToolDefinition;
+use super::undo_manager::UndoManager;
+use crate::error::AiCoreError;
+use crate::sandbox::SandboxConfig;
+use std::path::Path;
 
 pub fn tool_definition() -> ToolDefinition {
     ToolDefinition {
@@ -36,8 +36,9 @@ pub async fn write(
 
     // 親ディレクトリ作成
     if let Some(parent) = resolved.parent() {
-        tokio::fs::create_dir_all(parent).await
-            .map_err(|e| AiCoreError::SandboxViolation(format!("Cannot create parent directory: {e}")))?;
+        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            AiCoreError::SandboxViolation(format!("Cannot create parent directory: {e}"))
+        })?;
     }
 
     // 既存ファイルのバックアップ
@@ -49,11 +50,17 @@ pub async fn write(
 
     let content_bytes = content.as_bytes();
     if content_bytes.len() > sandbox.max_write_bytes {
-        return Err(AiCoreError::FileTooLarge(content_bytes.len(), sandbox.max_write_bytes));
+        return Err(AiCoreError::FileTooLarge(
+            content_bytes.len(),
+            sandbox.max_write_bytes,
+        ));
     }
 
     // BOM 検出・保持
-    let has_bom = original.as_ref().map(|b| b.starts_with(&[0xEF, 0xBB, 0xBF])).unwrap_or(false);
+    let has_bom = original
+        .as_ref()
+        .map(|b| b.starts_with(&[0xEF, 0xBB, 0xBF]))
+        .unwrap_or(false);
     let output = if has_bom {
         let mut with_bom = vec![0xEF, 0xBB, 0xBF];
         with_bom.extend_from_slice(content_bytes);
@@ -62,7 +69,8 @@ pub async fn write(
         content_bytes.to_vec()
     };
 
-    tokio::fs::write(&resolved, output).await
+    tokio::fs::write(&resolved, output)
+        .await
         .map_err(|e| AiCoreError::ToolExecutionError(format!("Failed to write file: {e}")))?;
 
     // Undo 記録

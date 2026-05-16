@@ -1,5 +1,5 @@
-use super::undo_manager::UndoManager;
 use super::definition::ToolDefinition;
+use super::undo_manager::UndoManager;
 use crate::error::AiCoreError;
 
 pub fn tool_definition() -> ToolDefinition {
@@ -15,7 +15,9 @@ pub fn tool_definition() -> ToolDefinition {
 }
 
 pub async fn undo(undo_manager: &UndoManager, session_id: &str) -> Result<String, AiCoreError> {
-    let logs = undo_manager.undo(session_id).await
+    let logs = undo_manager
+        .undo(session_id)
+        .await
         .map_err(AiCoreError::UndoError)?;
     Ok(format!("Undo successful:\n{}", logs.join("\n")))
 }

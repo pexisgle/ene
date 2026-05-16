@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Initializes the app's data directory. On first launch, copies default assets
 /// from the distribution location into the OS-standard data directory.
@@ -16,7 +16,10 @@ pub fn ensure_resource_dirs() -> PathBuf {
     if !assets_dir.exists() {
         let source = find_source_dir();
         if let Some(src) = source {
-            eprintln!("[Resources] Deploying default assets to {}", assets_dir.display());
+            eprintln!(
+                "[Resources] Deploying default assets to {}",
+                assets_dir.display()
+            );
             if let Err(e) = fs::create_dir_all(&assets_dir) {
                 eprintln!("[Resources] Failed to create assets dir: {e}");
                 return assets_dir;
@@ -79,7 +82,9 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), String> {
     fs::create_dir_all(dst).map_err(|e| format!("Failed to create {}: {e}", dst.display()))?;
     for entry in fs::read_dir(src).map_err(|e| format!("Failed to read {}: {e}", src.display()))? {
         let entry = entry.map_err(|e| format!("Entry error: {e}"))?;
-        let file_type = entry.file_type().map_err(|e| format!("File type error: {e}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("File type error: {e}"))?;
         let dst_path = dst.join(entry.file_name());
         if file_type.is_dir() {
             copy_dir_all(&entry.path(), &dst_path)?;
