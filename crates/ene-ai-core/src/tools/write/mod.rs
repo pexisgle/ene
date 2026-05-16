@@ -24,7 +24,6 @@ pub fn tool_definition() -> ToolDefinition {
     }
 }
 
-/// ファイルを書き込む（上書き含む）
 pub async fn write(
     path: &Path,
     content: &str,
@@ -34,14 +33,12 @@ pub async fn write(
 ) -> Result<String, AiCoreError> {
     let resolved = sandbox.resolve_and_check(path, true)?;
 
-    // 親ディレクトリ作成
     if let Some(parent) = resolved.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|e| {
             AiCoreError::SandboxViolation(format!("Cannot create parent directory: {e}"))
         })?;
     }
 
-    // 既存ファイルのバックアップ
     let original = if resolved.exists() {
         Some(tokio::fs::read(&resolved).await.ok()).flatten()
     } else {
@@ -56,7 +53,6 @@ pub async fn write(
         ));
     }
 
-    // BOM 検出・保持
     let has_bom = original
         .as_ref()
         .map(|b| b.starts_with(&[0xEF, 0xBB, 0xBF]))
@@ -73,7 +69,6 @@ pub async fn write(
         .await
         .map_err(|e| AiCoreError::ToolExecutionError(format!("Failed to write file: {e}")))?;
 
-    // Undo 記録
     undo_manager.push_restore_file(session_id, "write", resolved.clone(), original);
 
     Ok("Wrote file successfully.".to_string())

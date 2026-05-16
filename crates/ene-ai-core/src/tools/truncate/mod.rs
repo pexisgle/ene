@@ -19,7 +19,7 @@ impl Truncate {
         let mut hit_bytes = false;
 
         for line in lines.iter().take(max_lines) {
-            let size = line.len() + if out.is_empty() { 0 } else { 1 }; // +1 for newline
+            let size = line.len() + if out.is_empty() { 0 } else { 1 };
             if bytes + size > max_bytes {
                 hit_bytes = true;
                 break;

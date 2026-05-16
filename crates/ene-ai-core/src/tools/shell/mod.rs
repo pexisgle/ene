@@ -1,7 +1,9 @@
+mod platform;
+
 use super::definition::ToolDefinition;
+use super::truncate::Truncate;
 use crate::error::AiCoreError;
 use crate::sandbox::SandboxConfig;
-use crate::tools::truncate::Truncate;
 use std::path::Path;
 use std::time::Duration;
 
@@ -27,7 +29,6 @@ pub fn tool_definition() -> ToolDefinition {
     }
 }
 
-/// シェルコマンドを実行
 pub async fn shell_exec(
     command: &str,
     description: &str,
@@ -35,7 +36,6 @@ pub async fn shell_exec(
     workdir: Option<&str>,
     sandbox: &SandboxConfig,
 ) -> Result<String, AiCoreError> {
-    // ブロックコマンドチェック
     sandbox.is_command_blocked(command)?;
 
     let cwd = if let Some(wd) = workdir {
@@ -52,42 +52,18 @@ pub async fn shell_exec(
     let timeout_ms = timeout.unwrap_or(sandbox.shell_timeout_ms);
     let timeout_duration = Duration::from_millis(timeout_ms);
 
-    #[cfg(unix)]
-    let output = {
-        tokio::time::timeout(
-            timeout_duration,
-            tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(command)
-                .current_dir(&cwd)
-                .stdin(std::process::Stdio::null())
-                .output(),
-        )
-        .await
-    };
+    let result = platform::execute_shell_command(command, &cwd, timeout_duration).await;
 
-    #[cfg(windows)]
-    let output = {
-        tokio::time::timeout(
-            timeout_duration,
-            tokio::process::Command::new("cmd")
-                .arg("/C")
-                .arg(command)
-                .current_dir(&cwd)
-                .stdin(std::process::Stdio::null())
-                .output(),
-        )
-        .await
-    };
-
-    let result = match output {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => {
+    let result = match result {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            return Err(AiCoreError::ShellTimeout(timeout_ms));
+        }
+        Err(e) => {
             return Err(AiCoreError::ToolExecutionError(format!(
                 "Failed to execute command: {e}"
             )));
         }
-        Err(_) => return Err(AiCoreError::ShellTimeout(timeout_ms)),
     };
 
     let stdout = String::from_utf8_lossy(&result.stdout);
@@ -105,7 +81,6 @@ pub async fn shell_exec(
         full_output = "(no output)".to_string();
     }
 
-    // 出力圧縮
     let truncated = Truncate::tail(
         &full_output,
         sandbox.max_shell_output_lines,
@@ -133,7 +108,6 @@ pub async fn shell_exec(
         ));
     }
 
-    // Description を先頭に追加
     let final_output = format!("# {}\n{}", description, output_text);
 
     Ok(final_output)

@@ -1,11 +1,13 @@
+mod binary;
+
 use super::definition::ToolDefinition;
 use crate::error::AiCoreError;
 use crate::sandbox::SandboxConfig;
+use binary::is_binary_file;
 use std::path::Path;
 
 const MAX_LINE_LENGTH: usize = 2000;
 const MAX_LINE_SUFFIX: &str = "... (line truncated)";
-const SAMPLE_BYTES: usize = 4096;
 
 pub fn tool_definition() -> ToolDefinition {
     ToolDefinition {
@@ -30,7 +32,6 @@ pub fn tool_definition() -> ToolDefinition {
     }
 }
 
-/// ファイルまたはディレクトリを読み取る
 pub async fn read(
     path: &Path,
     offset: Option<usize>,
@@ -40,7 +41,6 @@ pub async fn read(
     let resolved = sandbox.resolve_and_check(path, false)?;
 
     if !resolved.exists() {
-        // 候補を探す
         let dir = resolved.parent().unwrap_or(Path::new("."));
         let base = resolved.file_name().and_then(|s| s.to_str()).unwrap_or("");
         let mut suggestions = Vec::new();
@@ -81,7 +81,6 @@ pub async fn read(
         return read_directory(&resolved, offset, limit).await;
     }
 
-    // バイナリチェック
     let sample = tokio::fs::read(&resolved).await.map_err(|e| {
         AiCoreError::FileNotFound(format!("Cannot read {}: {}", resolved.display(), e))
     })?;
@@ -95,9 +94,7 @@ pub async fn read(
 
     let text = String::from_utf8_lossy(&sample);
 
-    // サイズチェック
     if sample.len() > sandbox.max_read_bytes {
-        // 大きいファイルは行単位で制限
         let lines: Vec<&str> = text.lines().collect();
         let default_limit = 2000usize;
         let start = offset.unwrap_or(1).saturating_sub(1);
@@ -224,35 +221,4 @@ async fn read_directory(
     }
 
     Ok(output)
-}
-
-fn is_binary_file(path: &Path, bytes: &[u8]) -> bool {
-    let ext = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    match ext.as_str() {
-        "zip" | "tar" | "gz" | "exe" | "dll" | "so" | "class" | "jar" | "war" | "7z" | "doc"
-        | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "odt" | "ods" | "odp" | "bin" | "dat"
-        | "obj" | "o" | "a" | "lib" | "wasm" | "pyc" | "pyo" => return true,
-        _ => {}
-    }
-
-    if bytes.is_empty() {
-        return false;
-    }
-
-    let mut non_printable = 0usize;
-    for &b in bytes.iter().take(SAMPLE_BYTES.min(bytes.len())) {
-        if b == 0 {
-            return true;
-        }
-        if b < 9 || (b > 13 && b < 32) {
-            non_printable += 1;
-        }
-    }
-
-    let checked = SAMPLE_BYTES.min(bytes.len());
-    non_printable > checked / 3
 }

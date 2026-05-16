@@ -22,9 +22,6 @@ pub fn tool_definition() -> ToolDefinition {
     }
 }
 
-/// ユーザーに質問する
-/// Phase 1: 簡易実装 - 質問をストリームイベントとして出力し、
-/// CLI/GUI側で対応する
 pub fn question(questions: Vec<String>) -> Result<String, AiCoreError> {
     if questions.is_empty() {
         return Err(AiCoreError::ToolExecutionError(

@@ -1,7 +1,10 @@
+mod parser;
+
 use super::definition::ToolDefinition;
 use super::undo_manager::{UndoEntry, UndoManager};
 use crate::error::AiCoreError;
 use crate::sandbox::SandboxConfig;
+use parser::PatchOperation;
 use std::path::Path;
 
 pub fn tool_definition() -> ToolDefinition {
@@ -22,22 +25,6 @@ pub fn tool_definition() -> ToolDefinition {
     }
 }
 
-/// パッチテキストを解析して複数ファイルに適用
-/// パッチフォーマット:
-/// *** Begin Patch
-/// *** Update File: path/to/file.txt
-/// ```text
-/// old content
-/// ```
-/// ```text
-/// new content
-/// ```
-/// *** Add File: path/to/new.txt
-/// ```text
-/// content
-/// ```
-/// *** Delete File: path/to/old.txt
-/// *** End Patch
 pub async fn apply_patch(
     patch_text: &str,
     sandbox: &SandboxConfig,
@@ -60,19 +47,17 @@ pub async fn apply_patch(
         ));
     }
 
-    // パッチブロックをパース
     let mut operations = Vec::new();
     let lines: Vec<&str> = trimmed.lines().collect();
-    let mut i = 1; // Skip "*** Begin Patch"
+    let mut i = 1;
 
     while i < lines.len() - 1 {
-        // Skip "*** End Patch"
         let line = lines[i].trim();
 
         if line.starts_with("*** Update File:") {
             let file_path = line["*** Update File:".len()..].trim();
             let start = i + 1;
-            let (old_content, new_content, consumed) = parse_update_block(&lines, start)?;
+            let (old_content, new_content, consumed) = parser::parse_update_block(&lines, start)?;
             operations.push(PatchOperation::Update {
                 path: file_path.to_string(),
                 old_content,
@@ -82,7 +67,7 @@ pub async fn apply_patch(
         } else if line.starts_with("*** Add File:") {
             let file_path = line["*** Add File:".len()..].trim();
             let start = i + 1;
-            let (content, consumed) = parse_code_block(&lines, start)?;
+            let (content, consumed) = parser::parse_code_block(&lines, start)?;
             operations.push(PatchOperation::Add {
                 path: file_path.to_string(),
                 content,
@@ -111,7 +96,6 @@ pub async fn apply_patch(
         ));
     }
 
-    // 検証フェーズ - すべての操作が有効か確認
     let mut validated = Vec::new();
     for op in &operations {
         match op {
@@ -156,7 +140,6 @@ pub async fn apply_patch(
         }
     }
 
-    // 適用フェーズ - Undoバックアップを取得してから実行
     let mut undo_ops = Vec::new();
     let mut summary = Vec::new();
 
@@ -176,7 +159,6 @@ pub async fn apply_patch(
                     ))
                 })?;
 
-                // Simple replace (must be unique match)
                 let first = current.find(&old_content);
                 let last = current.rfind(&old_content);
                 if first != last {
@@ -253,137 +235,10 @@ pub async fn apply_patch(
         }
     }
 
-    // Undoエントリを1つにまとめる
     undo_manager.push(session_id, UndoEntry::new("patch", undo_ops));
 
     Ok(format!(
         "Patch applied successfully.\n{}",
         summary.join("\n")
     ))
-}
-
-#[derive(Clone)]
-enum PatchOperation {
-    Update {
-        path: String,
-        old_content: String,
-        new_content: String,
-    },
-    Add {
-        path: String,
-        content: String,
-    },
-    Delete {
-        path: String,
-    },
-}
-
-fn parse_code_block(lines: &[&str], start: usize) -> Result<(String, usize), AiCoreError> {
-    if start >= lines.len() || !lines[start].trim().starts_with("```") {
-        return Err(AiCoreError::ToolExecutionError(format!(
-            "Expected code block starting with ``` at line {}",
-            start + 1
-        )));
-    }
-
-    let mut content = Vec::new();
-    let mut i = start + 1;
-
-    while i < lines.len() {
-        let line = lines[i];
-        if line.trim() == "```" {
-            return Ok((content.join("\n"), i - start));
-        }
-        content.push(line);
-        i += 1;
-    }
-
-    Err(AiCoreError::ToolExecutionError(
-        "Unclosed code block in patch".to_string(),
-    ))
-}
-
-fn parse_update_block(
-    lines: &[&str],
-    start: usize,
-) -> Result<(String, String, usize), AiCoreError> {
-    // Parse old content block
-    let (old_content, consumed1) = parse_code_block(lines, start)?;
-    let next = start + consumed1 + 1;
-
-    // Parse new content block
-    if next >= lines.len() || !lines[next].trim().starts_with("```") {
-        return Err(AiCoreError::ToolExecutionError(format!(
-            "Expected second code block for new content at line {}",
-            next + 1
-        )));
-    }
-    let (new_content, consumed2) = parse_code_block(lines, next)?;
-
-    Ok((old_content, new_content, consumed1 + 1 + consumed2))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_code_block_simple() {
-        let lines = vec![
-            "```",
-            "content line 1",
-            "content line 2",
-            "```",
-            "next line",
-        ];
-        let (content, consumed) = parse_code_block(&lines, 0).unwrap();
-        assert_eq!(content, "content line 1\ncontent line 2");
-        assert_eq!(consumed, 3);
-    }
-
-    #[test]
-    fn test_parse_code_block_with_lang() {
-        let lines = vec!["```rust", "fn main() {}", "```", "next"];
-        let (content, consumed) = parse_code_block(&lines, 0).unwrap();
-        assert_eq!(content, "fn main() {}");
-        assert_eq!(consumed, 2);
-    }
-
-    #[test]
-    fn test_parse_code_block_empty() {
-        let lines = vec!["```", "```", "next"];
-        let (content, consumed) = parse_code_block(&lines, 0).unwrap();
-        assert_eq!(content, "");
-        assert_eq!(consumed, 1);
-    }
-
-    #[test]
-    fn test_parse_code_block_missing_start() {
-        let lines = vec!["not a code block", "next"];
-        let result = parse_code_block(&lines, 0);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_code_block_unclosed() {
-        let lines = vec!["```", "content", "more content"];
-        let result = parse_code_block(&lines, 0);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_update_block() {
-        let lines = vec!["```", "old content", "```", "```", "new content", "```"];
-        let (old, new, consumed) = parse_update_block(&lines, 0).unwrap();
-        assert_eq!(old, "old content");
-        assert_eq!(new, "new content");
-        assert_eq!(consumed, 5);
-    }
-
-    #[test]
-    fn test_parse_update_block_missing_second_block() {
-        let lines = vec!["```", "old content", "```", "not a code block"];
-        let result = parse_update_block(&lines, 0);
-        assert!(result.is_err());
-    }
 }

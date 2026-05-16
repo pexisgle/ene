@@ -23,7 +23,6 @@ pub fn tool_definition() -> ToolDefinition {
     }
 }
 
-/// ファイルまたはディレクトリを削除
 pub async fn delete(
     path: &Path,
     recursive: bool,
@@ -50,7 +49,6 @@ pub async fn delete(
     }
 
     if is_dir {
-        // ディレクトリ削除
         tokio::fs::remove_dir_all(&resolved).await.map_err(|e| {
             AiCoreError::ToolExecutionError(format!("Failed to delete directory: {e}"))
         })?;
@@ -59,7 +57,6 @@ pub async fn delete(
 
         Ok(format!("Deleted directory: {}", resolved.display()))
     } else {
-        // ファイル削除 - バックアップを取得
         let original = tokio::fs::read(&resolved).await.ok();
 
         tokio::fs::remove_file(&resolved)

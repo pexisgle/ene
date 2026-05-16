@@ -4,14 +4,6 @@ use crate::sandbox::SandboxConfig;
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 
-/// OpenCode 準拠のツールレジストリ（Cowork Agent 拡張版）
-/// 5つのツールカテゴリを統合:
-/// 1. filesystem_tools: read, write, edit, glob, grep, delete, undo, patch
-/// 2. shell_tools: shell
-/// 3. browser_tools: browser
-/// 4. app_tools: app
-/// 5. websearch_tools: webfetch, websearch
-/// 6. utility_tools: todo, question, screenshot
 pub struct OpencodeToolRegistry {
     sandbox: SandboxConfig,
     undo_manager: UndoManager,
@@ -50,7 +42,6 @@ impl ToolRegistry for OpencodeToolRegistry {
 
     fn list_tools(&self) -> Vec<ToolDefinition> {
         vec![
-            // filesystem_tools
             super::read::tool_definition(),
             super::write::tool_definition(),
             super::edit::tool_definition(),
@@ -59,16 +50,11 @@ impl ToolRegistry for OpencodeToolRegistry {
             super::delete::tool_definition(),
             super::undo_tool::tool_definition(),
             super::patch::tool_definition(),
-            // shell_tools
             super::shell::tool_definition(),
-            // browser_tools
             super::browser::tool_definition(),
-            // app_tools
             super::app::tool_definition(),
-            // websearch_tools
             super::webfetch::tool_definition(),
             super::websearch::tool_definition(),
-            // utility_tools
             super::todo::tool_definition(),
             super::question::tool_definition(),
         ]
@@ -79,7 +65,6 @@ impl ToolRegistry for OpencodeToolRegistry {
             serde_json::from_str(arguments).map_err(|e| format!("Invalid JSON arguments: {e}"))?;
 
         match name {
-            // filesystem_tools
             "read" => {
                 let file_path = args["filePath"].as_str().ok_or("filePath is required")?;
                 let offset = args["offset"].as_u64().map(|v| v as usize);
@@ -165,7 +150,6 @@ impl ToolRegistry for OpencodeToolRegistry {
                 .await
                 .map_err(|e| e.to_string())
             }
-            // shell_tools
             "shell" => {
                 let command = args["command"].as_str().ok_or("command is required")?;
                 let description = args["description"]
@@ -177,7 +161,6 @@ impl ToolRegistry for OpencodeToolRegistry {
                     .await
                     .map_err(|e| e.to_string())
             }
-            // browser_tools
             "browser" => {
                 let action = args["action"].as_str().ok_or("action is required")?;
                 let url = args["url"].as_str();
@@ -206,7 +189,6 @@ impl ToolRegistry for OpencodeToolRegistry {
                 .await
                 .map_err(|e| e.to_string())
             }
-            // app_tools
             "app" => {
                 let action = args["action"].as_str().ok_or("action is required")?;
                 let window_title = args["window_title"].as_str();
@@ -219,7 +201,6 @@ impl ToolRegistry for OpencodeToolRegistry {
                     .await
                     .map_err(|e| e.to_string())
             }
-            // websearch_tools
             "webfetch" => {
                 let url = args["url"].as_str().ok_or("url is required")?;
                 let format = args["format"].as_str();
@@ -236,7 +217,6 @@ impl ToolRegistry for OpencodeToolRegistry {
                     .await
                     .map_err(|e| e.to_string())
             }
-            // utility_tools
             "todo" => {
                 let todos = args["todos"].as_array().ok_or("todos is required")?;
                 let items: Vec<super::todo::TodoItem> = todos

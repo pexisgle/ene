@@ -1,52 +1,12 @@
-//! Web検索ツール (websearch_tools)
-//! Phase 2: 検索 API 統合（DuckDuckGo、Tavily、Brave Search API 等）
-
-use super::definition::ToolDefinition;
 use crate::error::AiCoreError;
 
-pub fn tool_definition() -> ToolDefinition {
-    ToolDefinition {
-        name: "websearch".to_string(),
-        description: concat!(
-            "Searches the web for latest information and technical references. ",
-            "Supports multiple search backends (DuckDuckGo, Tavily, Brave). ",
-            "Returns summarized search results with titles, snippets, and URLs."
-        )
-        .to_string(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string", "description": "The search query" },
-                "backend": { "type": "string", "enum": ["duckduckgo", "tavily", "brave"], "description": "Search backend to use. Defaults to duckduckgo." },
-                "limit": { "type": "integer", "description": "Maximum number of results (default 5, max 10)" }
-            },
-            "required": ["query"]
-        }),
-    }
+pub struct SearchResult {
+    pub title: String,
+    pub snippet: String,
+    pub url: String,
 }
 
-/// Web検索を実行
-pub async fn websearch(
-    query: &str,
-    backend: Option<&str>,
-    limit: Option<usize>,
-) -> Result<String, AiCoreError> {
-    let backend = backend.unwrap_or("duckduckgo");
-    let limit = limit.unwrap_or(5).min(10);
-
-    match backend {
-        "duckduckgo" => search_duckduckgo(query, limit).await,
-        "tavily" => search_tavily(query, limit).await,
-        "brave" => search_brave(query, limit).await,
-        _ => Err(AiCoreError::WebSearchError(format!(
-            "Unknown backend: {}",
-            backend
-        ))),
-    }
-}
-
-async fn search_duckduckgo(query: &str, limit: usize) -> Result<String, AiCoreError> {
-    // DuckDuckGo HTML API (no API key required)
+pub async fn search_duckduckgo(query: &str, limit: usize) -> Result<String, AiCoreError> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
@@ -87,24 +47,16 @@ async fn search_duckduckgo(query: &str, limit: usize) -> Result<String, AiCoreEr
     Ok(output)
 }
 
-async fn search_tavily(_query: &str, _limit: usize) -> Result<String, AiCoreError> {
-    // Tavily API requires API key; stub for now
+pub async fn search_tavily(_query: &str, _limit: usize) -> Result<String, AiCoreError> {
     Err(AiCoreError::WebSearchError(
         "Tavily backend requires TAVILY_API_KEY environment variable. Please configure it or use 'duckduckgo' backend.".to_string()
     ))
 }
 
-async fn search_brave(_query: &str, _limit: usize) -> Result<String, AiCoreError> {
-    // Brave Search API requires API key; stub for now
+pub async fn search_brave(_query: &str, _limit: usize) -> Result<String, AiCoreError> {
     Err(AiCoreError::WebSearchError(
         "Brave backend requires BRAVE_API_KEY environment variable. Please configure it or use 'duckduckgo' backend.".to_string()
     ))
-}
-
-struct SearchResult {
-    title: String,
-    snippet: String,
-    url: String,
 }
 
 fn parse_duckduckgo_html(html: &str, limit: usize) -> Vec<SearchResult> {
@@ -130,7 +82,6 @@ fn parse_duckduckgo_html(html: &str, limit: usize) -> Vec<SearchResult> {
         });
     }
 
-    // Fallback: try alternative selectors
     if results.is_empty() {
         let re_alt = match regex::Regex::new(
             r#"<h[^>]*>.*?<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?</h[^>]*>.*?<p[^>]*>(.*?)</p>"#,
@@ -164,7 +115,6 @@ fn html_unescape(html: &str) -> String {
     result = result.replace("&quot;", "\"");
     result = result.replace("&#39;", "'");
     result = result.replace("&nbsp;", " ");
-    // Strip HTML tags
     let re = regex::Regex::new(r"<[^>]+>").unwrap_or_else(|_| regex::Regex::new("").unwrap());
     result = re.replace_all(&result, "").to_string();
     result.trim().to_string()

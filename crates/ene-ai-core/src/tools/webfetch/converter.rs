@@ -1,115 +1,4 @@
-use super::definition::ToolDefinition;
-use crate::error::AiCoreError;
-
-const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
-const DEFAULT_TIMEOUT_SECS: u64 = 30;
-const MAX_TIMEOUT_SECS: u64 = 120;
-
-pub fn tool_definition() -> ToolDefinition {
-    ToolDefinition {
-        name: "webfetch".to_string(),
-        description: concat!(
-            "Fetches content from a URL. ",
-            "Returns the content in the requested format (text, markdown, or html). ",
-            "Useful for reading documentation, APIs, or web pages."
-        )
-        .to_string(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "url": { "type": "string", "description": "The URL to fetch content from (must start with http:// or https://)" },
-                "format": { "type": "string", "description": "The format to return: text, markdown, or html. Defaults to markdown.", "enum": ["text", "markdown", "html"] },
-                "timeout": { "type": "integer", "description": "Optional timeout in seconds (max 120)" }
-            },
-            "required": ["url"]
-        }),
-    }
-}
-
-/// URLからコンテンツを取得
-pub async fn webfetch(
-    url: &str,
-    format: Option<&str>,
-    timeout: Option<u64>,
-) -> Result<String, AiCoreError> {
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err(AiCoreError::ToolExecutionError(
-            "URL must start with http:// or https://".to_string(),
-        ));
-    }
-
-    let timeout_secs = timeout
-        .unwrap_or(DEFAULT_TIMEOUT_SECS)
-        .min(MAX_TIMEOUT_SECS);
-    let format = format.unwrap_or("markdown");
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        .build()
-        .map_err(|e| {
-            AiCoreError::ToolExecutionError(format!("Failed to create HTTP client: {e}"))
-        })?;
-
-    let accept_header = match format {
-        "text" => "text/plain;q=1.0, text/html;q=0.8, */*;q=0.1",
-        "html" => "text/html;q=1.0, text/plain;q=0.8, */*;q=0.1",
-        _ => "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    };
-
-    let response = client
-        .get(url)
-        .header("Accept", accept_header)
-        .header("Accept-Language", "en-US,en;q=0.9")
-        .send()
-        .await
-        .map_err(|e| AiCoreError::ToolExecutionError(format!("HTTP request failed: {e}")))?;
-
-    let status = response.status();
-    if !status.is_success() {
-        return Err(AiCoreError::ToolExecutionError(format!(
-            "HTTP request returned status: {} {}",
-            status.as_u16(),
-            status.canonical_reason().unwrap_or("Unknown")
-        )));
-    }
-
-    let content_length = response.content_length();
-    if let Some(len) = content_length {
-        if len > MAX_RESPONSE_SIZE as u64 {
-            return Err(AiCoreError::ToolExecutionError(
-                "Response too large (exceeds 5MB limit)".to_string(),
-            ));
-        }
-    }
-
-    let bytes = response.bytes().await.map_err(|e| {
-        AiCoreError::ToolExecutionError(format!("Failed to read response body: {e}"))
-    })?;
-
-    if bytes.len() > MAX_RESPONSE_SIZE {
-        return Err(AiCoreError::ToolExecutionError(
-            "Response too large (exceeds 5MB limit)".to_string(),
-        ));
-    }
-
-    let _content_type = match format {
-        "html" => "text/html",
-        "text" => "text/plain",
-        _ => "text/html", // default to html for markdown conversion
-    };
-
-    let body = String::from_utf8_lossy(&bytes);
-
-    match format {
-        "html" => Ok(body.to_string()),
-        "text" => Ok(html_to_text(&body)),
-        "markdown" | _ => Ok(html_to_markdown(&body)),
-    }
-}
-
-fn html_to_text(html: &str) -> String {
-    // Simple HTML to text conversion
+pub fn html_to_text(html: &str) -> String {
     let mut text = String::new();
     let mut in_tag = false;
     let mut skip_script = false;
@@ -151,7 +40,6 @@ fn html_to_text(html: &str) -> String {
         }
     }
 
-    // Clean up whitespace
     let lines: Vec<&str> = text.lines().collect();
     let cleaned: Vec<String> = lines
         .iter()
@@ -162,8 +50,7 @@ fn html_to_text(html: &str) -> String {
     cleaned.join("\n")
 }
 
-fn html_to_markdown(html: &str) -> String {
-    // Simple HTML to markdown conversion
+pub fn html_to_markdown(html: &str) -> String {
     let mut md = String::new();
     let mut in_tag = false;
     let mut tag_name = String::new();
@@ -222,7 +109,6 @@ fn html_to_markdown(html: &str) -> String {
                 "li" => md.push_str("- "),
                 "/li" => md.push('\n'),
                 "a" => {
-                    // Extract href from attrs
                     if let Some(href_start) = attrs.find("href=\"") {
                         let rest = &attrs[href_start + 7..];
                         if let Some(_end) = rest.find('"') {
@@ -253,7 +139,6 @@ fn html_to_markdown(html: &str) -> String {
         }
     }
 
-    // Clean up
     let lines: Vec<&str> = md.lines().collect();
     let cleaned: Vec<String> = lines
         .iter()
