@@ -18,7 +18,7 @@ pub fn extract_markdown(html: &str, extract: &str, trim: bool) -> String {
         html.to_string()
     };
 
-    let md = html2md::parse_html(&html_input);
+    let md = htmd::convert(&html_input).unwrap_or_default();
     normalize_text(&md)
 }
 
