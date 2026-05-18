@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-crate-type = ["rlib", "cdylib"]
+crate-type = ["lib"]
 
 [dependencies]
 async-openai = { version = "0.38.2", features = ["chat-completion", "embedding"] }

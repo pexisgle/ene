@@ -37,6 +37,9 @@
               ]
               ++ lib.optionals (lib.strings.hasInfix "linux" system) [
                 # for Linux
+                # Faster linker
+                mold
+                clang
                 # Audio (Linux only)
                 alsa-lib
                 # Tray indicator compatibility library
