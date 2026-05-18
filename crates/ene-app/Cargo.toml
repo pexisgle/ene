@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 ene-ai-core = { path = "../ene-ai-core" }
-bevy = { version = "0.18.1" }
+bevy = { version = "0.18.1", features = ["dynamic_linking"] }
 bevy_egui = "0.39.1"
 bevy_vrm1 = "0.7.1"
 log = { version = "*", features = ["max_level_debug", "release_max_level_warn"] }
