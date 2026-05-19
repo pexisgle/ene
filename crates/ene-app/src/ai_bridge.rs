@@ -133,7 +133,7 @@ fn enqueue_ai_requests(
     }
 }
 
-/// 非同期embeddingタスクの完了をポーリング（ゲームループをブロックしない）
+/// Poll for asynchronous embedding task completion without blocking the game loop.
 fn process_embedding(
     mut runtime_state: ResMut<AiRuntimeState>,
     settings: Res<CharacterSettings>,
@@ -144,8 +144,6 @@ fn process_embedding(
         return;
     }
 
-    // embeddingが完了したかチェック（フラグで管理）
-    // 完了していれば次の処理へ
     runtime_state.embedding_in_progress = false;
     launch_ai_request(&mut runtime_state, &settings, &rt, &mut stream_writer);
 }
@@ -295,27 +293,27 @@ fn start_next_ai_request(
         }
     }
 
-    // Embed asynchronously without blocking the game loop
+    // Embed asynchronously without blocking the game loop.
+    // If the embedding takes longer than 50ms, we defer to the next frame
+    // via the embedding_in_progress flag and process_embedding system.
     if let Some(embedder) = runtime_state.session.embedding_provider.clone() {
         let user_input_clone = user_input.clone();
+        let session_ptr = &mut runtime_state.session;
 
-        // Store embedding result via channel to avoid blocking
         let (embed_tx, embed_rx) = tokio::sync::oneshot::channel();
         rt.0.spawn(async move {
             let result = embedder.embed_query(&user_input_clone).await;
             let _ = embed_tx.send(result);
         });
 
-        // Poll for embedding result
         match rt.0.block_on(tokio::time::timeout(
             std::time::Duration::from_millis(50),
             embed_rx,
         )) {
             Ok(Ok(Ok(embedding))) => {
-                runtime_state
-                    .session
+                session_ptr
                     .set_pending_embedding(embedding.clone());
-                runtime_state.session.set_last_input_embedding(embedding);
+                session_ptr.set_last_input_embedding(embedding);
             }
             Ok(Ok(Err(e))) => {
                 eprintln!("[Embedding] Error: {}", e);
@@ -324,7 +322,6 @@ fn start_next_ai_request(
                 eprintln!("[Embedding] Channel closed without value");
             }
             Err(_) => {
-                // Embedding still in progress, wait for next frame
                 runtime_state.embedding_in_progress = true;
                 return;
             }
@@ -346,8 +343,7 @@ fn poll_ai_worker(
             match result {
                 Ok(split_result) => {
                     eprintln!("\x1b[33m[Session] {} \x1b[0m", split_result.reason);
-                    eprintln!(
-                        "\x1b[33m[Session] 会話を要約して保存しました: {}\x1b[0m",
+                    eprintln!("\x1b[33m[Session] Conversation summarized and saved: {}\x1b[0m",
                         truncate(&split_result.summary, 80)
                     );
                     if !split_result.key_facts.is_empty() {
@@ -357,15 +353,15 @@ fn poll_ai_worker(
                             .map(|f| format!("{}:{}", f.key, f.value))
                             .collect::<Vec<_>>()
                             .join(", ");
-                        eprintln!("\x1b[33m[Session] 重要な事実: {}\x1b[0m", facts_str);
+                        eprintln!("\x1b[33m[Session] Key facts: {}\x1b[0m", facts_str);
                     }
                     runtime_state.session.reset_session();
                     runtime_state.session.session_id = split_result.new_session_id;
-                    eprintln!("\x1b[33m[Session] 新しい会話を開始します。\x1b[0m");
+                    eprintln!("\x1b[33m[Session] Starting new conversation.\x1b[0m");
                 }
                 Err(e) => {
                     if !matches!(e, ene_ai_core::AiCoreError::SplitNotNeeded) {
-                        eprintln!("\x1b[31m[Session] 要約生成エラー: {}\x1b[0m", e);
+                        eprintln!("\x1b[31m[Session] Summary generation error: {}\x1b[0m", e);
                     }
                 }
             }

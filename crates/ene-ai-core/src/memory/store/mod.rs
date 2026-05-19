@@ -1,12 +1,33 @@
 use crate::error::AiCoreError;
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use diesel::prelude::*;
+use diesel::sqlite::SqliteConnection;
+use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use std::path::Path;
 use std::sync::Mutex;
 
-mod schema;
-mod serialization;
-use serialization::{bytes_to_f32_vec, f32_slice_to_bytes};
+mod models;
+use models::{
+    EmbeddingBlob, NewConversationLog, NewConversationSummary, NewKeyFact,
+    NewToolEmbedding,
+};
+
+const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
+
+pub fn init_sqlite_vec(conn: &mut SqliteConnection) -> Result<(), AiCoreError> {
+    use rusqlite::ffi::sqlite3_auto_extension;
+    use sqlite_vec::sqlite3_vec_init;
+    // SAFETY: sqlite3_auto_extension expects a function pointer cast to a void pointer.
+    // sqlite3_vec_init is a C function with the correct signature (extern "C" fn()),
+    // and transmuting it to *const () is a well-known pattern for registering SQLite
+    // extensions. The function pointer remains valid for the lifetime of the process.
+    unsafe {
+        sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_vec_init as *const ())));
+    }
+    conn.run_pending_migrations(MIGRATIONS)
+        .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?;
+    Ok(())
+}
 
 /// キーバリュー型の事実
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -16,7 +37,7 @@ pub struct KeyFact {
 }
 
 /// 会話要約エントリ
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConversationSummary {
     pub id: i64,
     pub session_id: String,
@@ -36,13 +57,18 @@ pub struct RecalledSummary {
 
 /// SQLite ベースの長期記憶ストア
 pub struct MemoryStore {
-    conn: Mutex<Connection>,
+    conn: Mutex<SqliteConnection>,
     pub embedding_dim: usize,
 }
 
-// Safety: `rusqlite::Connection` is `!Send`, but we always access it through
-// `std::sync::Mutex`, ensuring only one thread uses it at a time.
-// This is a common and safe pattern for sharing a SQLite connection across threads.
+// SAFETY: MemoryStore is Send + Sync because:
+// - The SqliteConnection is wrapped in a Mutex, ensuring only one thread can access
+//   the connection at any given time.
+// - SqliteConnection does not implement Send/Sync by default because raw SQLite
+//   connections are not thread-safe. However, by serializing all access through
+//   the Mutex, we guarantee the same safety property that Send/Sync require:
+//   no concurrent mutable access from multiple threads.
+// - The embedding_dim field is Copy and inherently thread-safe.
 unsafe impl Send for MemoryStore {}
 unsafe impl Sync for MemoryStore {}
 
@@ -53,31 +79,35 @@ fn parse_dt(s: &str) -> DateTime<Utc> {
 }
 
 impl MemoryStore {
-    fn init(conn: Connection, embedding_dim: usize) -> Result<Self, AiCoreError> {
-        schema::init_sqlite_vec();
-        let store = Self {
+    fn init(mut conn: SqliteConnection, embedding_dim: usize) -> Result<Self, AiCoreError> {
+        init_sqlite_vec(&mut conn)?;
+        Ok(Self {
             conn: Mutex::new(conn),
             embedding_dim,
-        };
-        schema::initialize_schema(&store.conn.lock().unwrap())?;
-        Ok(store)
+        })
     }
 
     pub fn open(path: &Path, embedding_dim: usize) -> Result<Self, AiCoreError> {
-        Self::init(Connection::open(path)?, embedding_dim)
+        let path_str = path.to_str().ok_or_else(|| {
+            AiCoreError::MemoryStoreConnectionError("Invalid path".to_string())
+        })?;
+        Self::init(
+            SqliteConnection::establish(path_str)
+                .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?,
+            embedding_dim,
+        )
     }
 
     pub fn open_in_memory(embedding_dim: usize) -> Result<Self, AiCoreError> {
-        Self::init(Connection::open_in_memory()?, embedding_dim)
+        Self::init(
+            SqliteConnection::establish(":memory:")
+                .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?,
+            embedding_dim,
+        )
     }
 
     // ── Conversation Summaries ────────────────────────────────────────────────
 
-    /// 会話要約を保存する（keyfactsも同時に保存）
-    ///
-    /// keyfacts の処理ルール:
-    /// - value が空文字 `""` の場合 → その key の既存事実を削除
-    /// - value が通常値の場合 → 新規挿入（get_all_keyfacts で最新値が自動選択される）
     pub fn insert_summary(
         &self,
         session_id: &str,
@@ -87,42 +117,56 @@ impl MemoryStore {
         embedding: &[f32],
         ended_at: DateTime<Utc>,
     ) -> Result<i64, AiCoreError> {
-        let blob = f32_slice_to_bytes(embedding);
         let now = Utc::now().to_rfc3339();
         let ended_str = ended_at.to_rfc3339();
 
-        let conn = self.conn.lock().unwrap();
-        let tx = conn.unchecked_transaction()?;
+        let mut conn = self.conn.lock().unwrap();
 
-        tx.execute(
-            "INSERT INTO conversation_summaries
-             (session_id, card_name, summary, embedding, created_at, ended_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![session_id, card_name, summary, blob, now, ended_str],
-        )?;
+        conn.transaction(|conn| {
+            let new_summary = NewConversationSummary {
+                session_id,
+                card_name,
+                summary,
+                embedding: EmbeddingBlob(embedding.to_vec()),
+                created_at: &now,
+                ended_at: &ended_str,
+            };
 
-        let summary_id = tx.last_insert_rowid();
+            diesel::insert_into(crate::schema::conversation_summaries::table)
+                .values(&new_summary)
+                .execute(conn)?;
 
-        for fact in key_facts {
-            if fact.value.is_empty() {
-                tx.execute(
-                    "DELETE FROM conversation_keyfacts WHERE card_name = ?1 AND key = ?2",
-                    params![card_name, fact.key],
-                )?;
-            } else {
-                tx.execute(
-                    "INSERT INTO conversation_keyfacts (card_name, summary_id, key, value, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![card_name, summary_id, fact.key, fact.value, now],
-                )?;
+            let summary_id: i64 = diesel::select(diesel::dsl::sql::<diesel::sql_types::BigInt>(
+                "last_insert_rowid()",
+            ))
+            .get_result(conn)?;
+
+            for fact in key_facts {
+                if fact.value.is_empty() {
+                    diesel::delete(
+                        crate::schema::conversation_keyfacts::table
+                            .filter(crate::schema::conversation_keyfacts::card_name.eq(card_name))
+                            .filter(crate::schema::conversation_keyfacts::key.eq(&fact.key)),
+                    )
+                    .execute(conn)?;
+                } else {
+                    let new_fact = NewKeyFact {
+                        card_name,
+                        summary_id: Some(summary_id),
+                        key: &fact.key,
+                        value: &fact.value,
+                        created_at: &now,
+                    };
+                    diesel::insert_into(crate::schema::conversation_keyfacts::table)
+                        .values(&new_fact)
+                        .execute(conn)?;
+                }
             }
-        }
 
-        tx.commit()?;
-        Ok(summary_id)
+            Ok(summary_id)
+        })
     }
 
-    /// 要約をベクトル検索する（sqlite-vec 使用）
     pub fn search_summaries(
         &self,
         query_embedding: &[f32],
@@ -130,166 +174,130 @@ impl MemoryStore {
         limit: usize,
         similarity_threshold: f32,
     ) -> Result<Vec<RecalledSummary>, AiCoreError> {
-        let query_blob = f32_slice_to_bytes(query_embedding);
-        let conn = self.conn.lock().unwrap();
+        let query_blob = EmbeddingBlob(query_embedding.to_vec());
+        let mut conn = self.conn.lock().unwrap();
 
-        let mut stmt = conn.prepare(
-            "SELECT id, session_id, card_name, summary, embedding, created_at, ended_at,
-                    1.0 - vec_distance_cosine(embedding, ?2) AS similarity
-             FROM conversation_summaries
-             WHERE card_name = ?1
-               AND (1.0 - vec_distance_cosine(embedding, ?2)) >= ?3
-             ORDER BY similarity DESC
-             LIMIT ?4",
-        )?;
+        let query = "SELECT id, session_id, card_name, summary, embedding, created_at, ended_at,
+                            1.0 - vec_distance_cosine(embedding, ?) AS similarity
+                     FROM conversation_summaries
+                     WHERE card_name = ?
+                       AND (1.0 - vec_distance_cosine(embedding, ?)) >= ?
+                     ORDER BY similarity DESC
+                     LIMIT ?";
 
-        let rows = stmt.query_map(
-            params![card_name, query_blob, similarity_threshold, limit as i64],
-            |row| {
-                let blob: Vec<u8> = row.get(4)?;
-                let created_str: String = row.get(5)?;
-                let ended_str: String = row.get(6)?;
-                let similarity: f64 = row.get(7)?;
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    blob,
-                    created_str,
-                    ended_str,
-                    similarity as f32,
-                ))
-            },
-        )?;
+        let results = diesel::sql_query(query)
+            .bind::<diesel::sql_types::Binary, _>(&query_blob)
+            .bind::<diesel::sql_types::Text, _>(card_name)
+            .bind::<diesel::sql_types::Binary, _>(&query_blob)
+            .bind::<diesel::sql_types::Float, _>(similarity_threshold)
+            .bind::<diesel::sql_types::BigInt, _>(limit as i64)
+            .load::<SearchSummaryRow>(&mut *conn)?;
 
-        let mut results = Vec::new();
-        for row_result in rows {
-            let (id, sid, cn, summary, blob, ca, ea, sim) =
-                row_result.map_err(AiCoreError::MemoryStoreError)?;
-
-            let embedding = bytes_to_f32_vec(&blob);
-
-            results.push(RecalledSummary {
-                entry: ConversationSummary {
-                    id,
-                    session_id: sid,
-                    card_name: cn,
-                    summary,
-                    embedding,
-                    created_at: parse_dt(&ca),
-                    ended_at: parse_dt(&ea),
-                },
-                similarity: sim,
-            });
-        }
-
-        Ok(results)
+        results
+            .into_iter()
+            .map(|row| {
+                Ok(RecalledSummary {
+                    entry: ConversationSummary {
+                        id: row.id,
+                        session_id: row.session_id,
+                        card_name: row.card_name,
+                        summary: row.summary,
+                        embedding: row.embedding.0,
+                        created_at: parse_dt(&row.created_at),
+                        ended_at: parse_dt(&row.ended_at),
+                    },
+                    similarity: row.similarity,
+                })
+            })
+            .collect()
     }
 
-    /// 直近の要約を取得する
     pub fn list_recent_summaries(
         &self,
         card_name: &str,
         limit: usize,
     ) -> Result<Vec<ConversationSummary>, AiCoreError> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, session_id, card_name, summary, embedding, created_at, ended_at
-             FROM conversation_summaries
-             WHERE card_name = ?1
-             ORDER BY created_at DESC
-             LIMIT ?2",
-        )?;
+        use crate::schema::conversation_summaries::dsl;
 
-        let rows = stmt.query_map(params![card_name, limit as i64], |row| {
-            let blob: Vec<u8> = row.get(4)?;
-            let created_str: String = row.get(5)?;
-            let ended_str: String = row.get(6)?;
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                blob,
-                created_str,
-                ended_str,
-            ))
-        })?;
+        let mut conn = self.conn.lock().unwrap();
+        let rows = dsl::conversation_summaries
+            .filter(dsl::card_name.eq(card_name))
+            .order(dsl::created_at.desc())
+            .limit(limit as i64)
+            .select(models::ConversationSummaryRow::as_select())
+            .load(&mut *conn)?;
 
-        let mut entries = Vec::new();
-        for r in rows {
-            let (id, sid, cn, summary, blob, ca, ea) = r.map_err(AiCoreError::MemoryStoreError)?;
-            entries.push(ConversationSummary {
-                id,
-                session_id: sid,
-                card_name: cn,
-                summary,
-                embedding: bytes_to_f32_vec(&blob),
-                created_at: parse_dt(&ca),
-                ended_at: parse_dt(&ea),
-            });
-        }
-
-        Ok(entries)
+        rows.into_iter()
+            .map(|row| {
+                Ok(ConversationSummary {
+                    id: row.id,
+                    session_id: row.session_id,
+                    card_name: row.card_name,
+                    summary: row.summary,
+                    embedding: row.embedding.0,
+                    created_at: parse_dt(&row.created_at),
+                    ended_at: parse_dt(&row.ended_at),
+                })
+            })
+            .collect()
     }
 
-    /// 要約数を返す
     pub fn count_summaries(&self, card_name: &str) -> Result<i64, AiCoreError> {
-        let conn = self.conn.lock().unwrap();
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM conversation_summaries WHERE card_name = ?1",
-            params![card_name],
-            |row| row.get(0),
-        )?;
+        use crate::schema::conversation_summaries::dsl;
+
+        let mut conn = self.conn.lock().unwrap();
+        let count = dsl::conversation_summaries
+            .filter(dsl::card_name.eq(card_name))
+            .count()
+            .get_result(&mut *conn)?;
         Ok(count)
     }
 
-    /// 要約を削除する（関連keyfactsも削除）
     pub fn delete_summary(&self, id: i64) -> Result<usize, AiCoreError> {
-        let conn = self.conn.lock().unwrap();
-        let tx = conn.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM conversation_keyfacts WHERE summary_id = ?1",
-            params![id],
-        )?;
-        let count = tx.execute(
-            "DELETE FROM conversation_summaries WHERE id = ?1",
-            params![id],
-        )?;
-        tx.commit()?;
-        Ok(count)
+        use crate::schema::{conversation_keyfacts, conversation_summaries};
+
+        let mut conn = self.conn.lock().unwrap();
+        conn.transaction(|conn| {
+            diesel::delete(
+                conversation_keyfacts::table
+                    .filter(conversation_keyfacts::summary_id.eq(id)),
+            )
+            .execute(conn)?;
+
+            let count = diesel::delete(
+                conversation_summaries::table.filter(conversation_summaries::id.eq(id)),
+            )
+            .execute(conn)?;
+
+            Ok(count)
+        })
     }
 
     // ── Key Facts ─────────────────────────────────────────────────────────────
 
-    /// キャラクターの全keyfactsを取得（keyでソート、重複は最新のvalue）
     pub fn get_all_keyfacts(&self, card_name: &str) -> Result<Vec<KeyFact>, AiCoreError> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT key, value FROM (
-                SELECT key, value, ROW_NUMBER() OVER (PARTITION BY key ORDER BY created_at DESC) as rn
-                FROM conversation_keyfacts
-                WHERE card_name = ?1
-            ) WHERE rn = 1
-            ORDER BY key ASC",
-        )?;
+        let mut conn = self.conn.lock().unwrap();
 
-        let rows = stmt.query_map(params![card_name], |row| {
-            Ok(KeyFact {
-                key: row.get(0)?,
-                value: row.get(1)?,
+        let query = "SELECT key, value FROM (
+            SELECT key, value, ROW_NUMBER() OVER (PARTITION BY key ORDER BY created_at DESC) as rn
+            FROM conversation_keyfacts
+            WHERE card_name = ?
+        ) WHERE rn = 1
+        ORDER BY key ASC";
+
+        let rows = diesel::sql_query(query)
+            .bind::<diesel::sql_types::Text, _>(card_name)
+            .load::<KeyFactQueryResult>(&mut *conn)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| KeyFact {
+                key: row.key,
+                value: row.value,
             })
-        })?;
-
-        let mut facts = Vec::new();
-        for r in rows {
-            facts.push(r.map_err(AiCoreError::MemoryStoreError)?);
-        }
-        Ok(facts)
+            .collect())
     }
 
-    /// 特定のkeyfactを更新する（UPSERT）
     pub fn upsert_keyfact(
         &self,
         card_name: &str,
@@ -297,34 +305,45 @@ impl MemoryStore {
         value: &str,
     ) -> Result<(), AiCoreError> {
         let now = Utc::now().to_rfc3339();
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO conversation_keyfacts (card_name, summary_id, key, value, created_at)
-             VALUES (?1, 0, ?2, ?3, ?4)",
-            params![card_name, key, value, now],
-        )?;
+        let mut conn = self.conn.lock().unwrap();
+
+        let new_fact = NewKeyFact {
+            card_name,
+            summary_id: Some(0),
+            key,
+            value,
+            created_at: &now,
+        };
+
+        diesel::insert_into(crate::schema::conversation_keyfacts::table)
+            .values(&new_fact)
+            .execute(&mut *conn)?;
+
         Ok(())
     }
 
-    /// 特定のkeyfactを削除する
     pub fn delete_keyfact(&self, card_name: &str, key: &str) -> Result<usize, AiCoreError> {
-        let conn = self.conn.lock().unwrap();
-        let count = conn.execute(
-            "DELETE FROM conversation_keyfacts WHERE card_name = ?1 AND key = ?2",
-            params![card_name, key],
-        )?;
+        use crate::schema::conversation_keyfacts::dsl;
+
+        let mut conn = self.conn.lock().unwrap();
+        let count = diesel::delete(
+            dsl::conversation_keyfacts
+                .filter(dsl::card_name.eq(card_name))
+                .filter(dsl::key.eq(key)),
+        )
+        .execute(&mut *conn)?;
         Ok(count)
     }
 
-    /// keyfacts数を返す
     pub fn count_keyfacts(&self, card_name: &str) -> Result<i64, AiCoreError> {
-        let conn = self.conn.lock().unwrap();
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(DISTINCT key) FROM conversation_keyfacts WHERE card_name = ?1",
-            params![card_name],
-            |row| row.get(0),
-        )?;
-        Ok(count)
+        let mut conn = self.conn.lock().unwrap();
+
+        let query = "SELECT COUNT(DISTINCT key) as count FROM conversation_keyfacts WHERE card_name = ?";
+        let result: CountResult = diesel::sql_query(query)
+            .bind::<diesel::sql_types::Text, _>(card_name)
+            .get_result(&mut *conn)?;
+
+        Ok(result.count)
     }
 
     // ── Conversation Logs ─────────────────────────────────────────────────────
@@ -337,49 +356,186 @@ impl MemoryStore {
         content: &str,
     ) -> Result<i64, AiCoreError> {
         let now = Utc::now().to_rfc3339();
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO conversation_logs (session_id, card_name, role, content, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![session_id, card_name, role, content, now],
-        )?;
-        Ok(conn.last_insert_rowid())
+        let mut conn = self.conn.lock().unwrap();
+
+        let new_log = NewConversationLog {
+            session_id,
+            card_name,
+            role,
+            content,
+            created_at: &now,
+        };
+
+        diesel::insert_into(crate::schema::conversation_logs::table)
+            .values(&new_log)
+            .execute(&mut *conn)?;
+
+        let id: i64 = diesel::select(diesel::dsl::sql::<diesel::sql_types::BigInt>(
+            "last_insert_rowid()",
+        ))
+        .get_result(&mut *conn)?;
+
+        Ok(id)
     }
 
     pub fn get_logs_by_session(
         &self,
         session_id: &str,
     ) -> Result<Vec<(String, String, String)>, AiCoreError> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT role, content, created_at FROM conversation_logs
-             WHERE session_id = ?1 ORDER BY created_at ASC",
-        )?;
-        let rows = stmt.query_map(params![session_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        let mut result = Vec::new();
-        for r in rows {
-            result.push(r.map_err(AiCoreError::MemoryStoreError)?);
-        }
-        Ok(result)
+        use crate::schema::conversation_logs::dsl;
+
+        let mut conn = self.conn.lock().unwrap();
+        let rows = dsl::conversation_logs
+            .filter(dsl::session_id.eq(session_id))
+            .order(dsl::created_at.asc())
+            .select(models::ConversationLogRow::as_select())
+            .load(&mut *conn)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.role, row.content, row.created_at))
+            .collect())
     }
+
+    // ── Tool Embeddings ─────────────────────────────────────────────────────
+
+    pub fn upsert_tool_embedding(
+        &self,
+        tool_name: &str,
+        version_hash: &str,
+        embedding: &[f32],
+    ) -> Result<(), AiCoreError> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.conn.lock().unwrap();
+
+        let new_embedding = NewToolEmbedding {
+            tool_name,
+            version_hash,
+            embedding: EmbeddingBlob(embedding.to_vec()),
+            created_at: &now,
+        };
+
+        diesel::insert_into(crate::schema::tool_embeddings::table)
+            .values(&new_embedding)
+            .on_conflict(crate::schema::tool_embeddings::tool_name)
+            .do_update()
+            .set((
+                crate::schema::tool_embeddings::version_hash.eq(&new_embedding.version_hash),
+                crate::schema::tool_embeddings::embedding.eq(&new_embedding.embedding),
+                crate::schema::tool_embeddings::created_at.eq(&new_embedding.created_at),
+            ))
+            .execute(&mut *conn)?;
+
+        Ok(())
+    }
+
+    pub fn list_tool_embeddings(
+        &self,
+    ) -> Result<Vec<(String, String, Vec<f32>)>, AiCoreError> {
+        use crate::schema::tool_embeddings::dsl;
+
+        let mut conn = self.conn.lock().unwrap();
+        let rows = dsl::tool_embeddings
+            .select(models::ToolEmbeddingRow::as_select())
+            .load(&mut *conn)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.tool_name, row.version_hash, row.embedding.0))
+            .collect())
+    }
+
+    pub fn delete_tool_embedding(&self, tool_name: &str) -> Result<usize, AiCoreError> {
+        use crate::schema::tool_embeddings::dsl;
+
+        let mut conn = self.conn.lock().unwrap();
+        let count = diesel::delete(dsl::tool_embeddings.filter(dsl::tool_name.eq(tool_name)))
+            .execute(&mut *conn)?;
+        Ok(count)
+    }
+
+    pub fn search_tools(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        similarity_threshold: f32,
+    ) -> Result<Vec<(String, f32)>, AiCoreError> {
+        let query_blob = EmbeddingBlob(query_embedding.to_vec());
+
+        let mut conn = self.conn.lock().unwrap();
+        let query = "SELECT tool_name,
+                            1.0 - vec_distance_cosine(embedding, ?) AS similarity
+                     FROM tool_embeddings
+                     WHERE (1.0 - vec_distance_cosine(embedding, ?)) >= ?
+                     ORDER BY similarity DESC
+                     LIMIT ?";
+
+        let rows = diesel::sql_query(query)
+            .bind::<diesel::sql_types::Binary, _>(&query_blob)
+            .bind::<diesel::sql_types::Binary, _>(&query_blob)
+            .bind::<diesel::sql_types::Float, _>(similarity_threshold)
+            .bind::<diesel::sql_types::BigInt, _>(limit as i64)
+            .load::<SearchToolRow>(&mut *conn)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.tool_name, row.similarity))
+            .collect())
+    }
+}
+
+#[derive(diesel::QueryableByName)]
+struct SearchSummaryRow {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    id: i64,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    session_id: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    card_name: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    summary: String,
+    #[diesel(sql_type = diesel::sql_types::Binary)]
+    embedding: EmbeddingBlob,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    created_at: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    ended_at: String,
+    #[diesel(sql_type = diesel::sql_types::Float)]
+    similarity: f32,
+}
+
+#[derive(diesel::QueryableByName)]
+struct KeyFactQueryResult {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    key: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    value: String,
+}
+
+#[derive(diesel::QueryableByName)]
+struct CountResult {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    count: i64,
+}
+
+#[derive(diesel::QueryableByName)]
+struct SearchToolRow {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    tool_name: String,
+    #[diesel(sql_type = diesel::sql_types::Float)]
+    similarity: f32,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::serialization::{bytes_to_f32_vec, f32_slice_to_bytes};
+    use super::models::EmbeddingBlob;
     use super::*;
 
     #[test]
     fn test_roundtrip_bytes() {
         let original = vec![1.0_f32, 0.5, -0.25, 0.0];
-        let bytes = f32_slice_to_bytes(&original);
-        let restored = bytes_to_f32_vec(&bytes);
+        let blob = EmbeddingBlob(original.clone());
+        let restored = blob.0;
         for (a, b) in original.iter().zip(restored.iter()) {
             assert!((a - b).abs() < 1e-7, "Mismatch: {} != {}", a, b);
         }
@@ -425,14 +581,19 @@ mod tests {
             },
         ];
         let now = Utc::now().to_rfc3339();
-        let conn = store.conn.lock().unwrap();
+        let mut conn = store.conn.lock().unwrap();
         for f in &facts {
-            conn.execute(
-                "INSERT INTO conversation_keyfacts (card_name, summary_id, key, value, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params!["char", summary_id, f.key, f.value, now],
-            )
-            .unwrap();
+            let new_fact = NewKeyFact {
+                card_name: "char",
+                summary_id: Some(summary_id),
+                key: &f.key,
+                value: &f.value,
+                created_at: &now,
+            };
+            diesel::insert_into(crate::schema::conversation_keyfacts::table)
+                .values(&new_fact)
+                .execute(&mut *conn)
+                .unwrap();
         }
         drop(conn);
 
@@ -460,13 +621,18 @@ mod tests {
             .unwrap();
 
         let now = Utc::now().to_rfc3339();
-        let conn = store.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO conversation_keyfacts (card_name, summary_id, key, value, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params!["char", summary_id, "job", "engineer", now],
-        )
-        .unwrap();
+        let mut conn = store.conn.lock().unwrap();
+        let new_fact = NewKeyFact {
+            card_name: "char",
+            summary_id: Some(summary_id),
+            key: "job",
+            value: "engineer",
+            created_at: &now,
+        };
+        diesel::insert_into(crate::schema::conversation_keyfacts::table)
+            .values(&new_fact)
+            .execute(&mut *conn)
+            .unwrap();
         drop(conn);
 
         store.delete_summary(summary_id).unwrap();
@@ -483,19 +649,20 @@ mod tests {
             .unwrap();
 
         let now = Utc::now().to_rfc3339();
-        let conn = store.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO conversation_keyfacts (card_name, summary_id, key, value, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params!["char", summary_id, "job", "engineer", now],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO conversation_keyfacts (card_name, summary_id, key, value, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params!["char", summary_id, "hobby", "guitar", now],
-        )
-        .unwrap();
+        let mut conn = store.conn.lock().unwrap();
+        for (k, v) in &[("job", "engineer"), ("hobby", "guitar")] {
+            let new_fact = NewKeyFact {
+                card_name: "char",
+                summary_id: Some(summary_id),
+                key: k,
+                value: v,
+                created_at: &now,
+            };
+            diesel::insert_into(crate::schema::conversation_keyfacts::table)
+                .values(&new_fact)
+                .execute(&mut *conn)
+                .unwrap();
+        }
         drop(conn);
 
         assert_eq!(store.get_all_keyfacts("char").unwrap().len(), 2);
