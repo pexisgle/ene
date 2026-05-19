@@ -111,12 +111,48 @@ pub async fn run_ai_with_tools(
     let history = session.conversation_history.clone();
     let runtime_rules = settings.runtime_rules.clone();
     let user_name = settings.user_name.clone();
-    let tools = registry.list_tools();
     let tool_calling_enabled = settings.tool_calling_enabled;
     let max_rounds = settings.max_tool_call_rounds;
     let session_id_for_tools = session.session_id.clone();
+    let tool_rag_enabled = settings.memory.tool_rag_enabled;
+    let tool_rag_limit = settings.memory.tool_rag_limit;
+    let tool_rag_always_include = settings.memory.tool_rag_always_include.clone();
+    let embedding_provider = session.embedding_provider.clone();
 
     Ok(stream! {
+        // ── Tool RAG: ユーザー入力に関連するツールのみを動的に選択 ──
+        let tools = if tool_rag_enabled && tool_calling_enabled {
+            if let Some(embedder) = embedding_provider.as_ref() {
+                let store_ref = mem_store.as_ref().map(|s| s.as_ref());
+                if let Err(e) = registry.ensure_index_built(embedder.as_ref(), store_ref).await {
+                    tracing::warn!("[ToolRAG] Failed to build index: {}", e);
+                }
+                let query_embedding = match embedder.embed_query(&user_input).await {
+                    Ok(emb) => Some(emb),
+                    Err(e) => {
+                        tracing::warn!("[ToolRAG] Failed to embed query: {}", e);
+                        None
+                    }
+                };
+                let mut relevant = registry.list_relevant_tools(query_embedding.as_deref(), tool_rag_limit);
+                // 常に含めるツールが漏れていれば追加
+                let all_tools = registry.list_tools();
+                let all_map: std::collections::HashMap<String, _> = all_tools.into_iter().map(|t| (t.name.clone(), t)).collect();
+                for name in &tool_rag_always_include {
+                    if !relevant.iter().any(|t| &t.name == name) {
+                        if let Some(tool) = all_map.get(name) {
+                            relevant.push(tool.clone());
+                        }
+                    }
+                }
+                relevant
+            } else {
+                registry.list_tools()
+            }
+        } else {
+            registry.list_tools()
+        };
+
         let recalled_summaries = search_summaries(
             memory_enabled,
             &mem_store,
@@ -418,13 +454,4 @@ fn build_screenshot_message(b64_data: String) -> Option<ChatCompletionRequestMes
     Some(user_msg.into())
 }
 
-pub async fn run_ai_stream(
-    settings: &AiSettings,
-    session: &ConversationSession,
-    user_input: &str,
-) -> Result<impl Stream<Item = AiStreamEvent> + 'static, String> {
-    let registry = std::sync::Arc::new(crate::tools::builtin::BuiltinToolRegistry::new());
-    run_ai_with_tools(settings, session, user_input, registry)
-        .await
-        .map_err(|e| e.to_string())
-}
+

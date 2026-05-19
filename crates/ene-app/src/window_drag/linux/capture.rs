@@ -15,7 +15,6 @@ use crate::scene::{BASE_CAMERA_POSITION, BASE_LOOK_TARGET, MainViewCamera};
 
 const REGION_RECT_MIN_WIDTH_CELLS: u32 = 8;
 const REGION_RECT_MIN_HEIGHT_CELLS: u32 = 8;
-const REGION_RECT_STRIDE_DIVISOR: usize = 1;
 const MASK_TEXTURE_FORMAT: TextureFormat = TextureFormat::R8Unorm;
 const MAX_VIEWPORT_COMPENSATION_DISTANCE: f32 = 128.0;
 const MAX_VIEWPORT_COMPENSATION_DISTANCE_SQUARED: f32 =
@@ -344,8 +343,8 @@ fn extract_rectangles_from_mask(
 
     let min_width = (REGION_RECT_MIN_WIDTH_CELLS as usize).min(width).max(1);
     let min_height = (REGION_RECT_MIN_HEIGHT_CELLS as usize).min(height).max(1);
-    let step_x = (min_width / REGION_RECT_STRIDE_DIVISOR).max(1);
-    let step_y = (min_height / REGION_RECT_STRIDE_DIVISOR).max(1);
+    let step_x = min_width;
+    let step_y = min_height;
 
     build_tile_starts(width, min_width, step_x, &mut rect_buffers.x_starts);
     build_tile_starts(height, min_height, step_y, &mut rect_buffers.y_starts);

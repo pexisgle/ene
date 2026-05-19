@@ -41,7 +41,6 @@ pub fn find_chrome_executable() -> Option<PathBuf> {
         "/usr/bin/chromium-browser",
         "/usr/local/bin/google-chrome",
         "/usr/local/bin/chromium",
-        "/home/pexisgle/.nix-profile/bin/google-chrome",
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         "/Applications/Chromium.app/Contents/MacOS/Chromium",
     ];
