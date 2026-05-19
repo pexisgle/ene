@@ -28,6 +28,8 @@ pub fn tool_definition() -> ToolDefinition {
             },
             "required": ["action"]
         }),
+        category: Some(super::ToolCategory::App),
+        keywords: vec!["gui".to_string(), "automation".to_string(), "mouse".to_string(), "keyboard".to_string(), "clipboard".to_string(), "window".to_string()],
     }
 }
 

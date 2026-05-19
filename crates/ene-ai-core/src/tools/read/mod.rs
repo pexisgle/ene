@@ -29,6 +29,8 @@ pub fn tool_definition() -> ToolDefinition {
             },
             "required": ["filePath"]
         }),
+        category: Some(super::ToolCategory::Filesystem),
+        keywords: vec!["read".to_string(), "file".to_string(), "directory".to_string(), "view".to_string()],
     }
 }
 

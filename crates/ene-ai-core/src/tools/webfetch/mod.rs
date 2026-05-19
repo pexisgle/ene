@@ -26,6 +26,8 @@ pub fn tool_definition() -> ToolDefinition {
             },
             "required": ["url"]
         }),
+        category: Some(super::ToolCategory::Browser),
+        keywords: vec!["fetch".to_string(), "url".to_string(), "web".to_string(), "download".to_string(), "html".to_string()],
     }
 }
 

@@ -7,7 +7,7 @@ use crate::sandbox::SandboxConfig;
 
 const MAX_RESULTS: usize = 100;
 
-pub fn glob_tool_definition() -> ToolDefinition {
+    pub fn glob_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "glob".to_string(),
         description: "Fast file pattern matching tool that works with any codebase size. Supports glob patterns like '**/*.rs' or 'src/**/*.ts'. Returns matching file paths sorted by modification time.".to_string(),
@@ -19,6 +19,8 @@ pub fn glob_tool_definition() -> ToolDefinition {
             },
             "required": ["pattern"]
         }),
+        category: Some(super::ToolCategory::Filesystem),
+        keywords: vec!["glob".to_string(), "search".to_string(), "find".to_string(), "files".to_string()],
     }
 }
 
@@ -35,6 +37,8 @@ pub fn grep_tool_definition() -> ToolDefinition {
             },
             "required": ["pattern"]
         }),
+        category: Some(super::ToolCategory::Filesystem),
+        keywords: vec!["grep".to_string(), "search".to_string(), "regex".to_string(), "content".to_string()],
     }
 }
 

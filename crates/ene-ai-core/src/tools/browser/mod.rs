@@ -33,6 +33,8 @@ pub fn tool_definition() -> ToolDefinition {
             "- 'main': Content within <main> tag (falls back to <body> if not found)\n",
             "- 'full': Entire document including <head> and <html> tags"
         ).to_string(),
+        category: Some(super::ToolCategory::Browser),
+        keywords: vec!["browser".to_string(), "web".to_string(), "navigate".to_string(), "click".to_string(), "chrome".to_string(), "scrape".to_string()],
         parameters: serde_json::json!({
             "type": "object",
             "properties": {

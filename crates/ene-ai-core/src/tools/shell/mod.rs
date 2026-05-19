@@ -26,6 +26,8 @@ pub fn tool_definition() -> ToolDefinition {
             },
             "required": ["command", "description"]
         }),
+        category: Some(super::ToolCategory::Shell),
+        keywords: vec!["shell".to_string(), "command".to_string(), "execute".to_string(), "terminal".to_string(), "bash".to_string()],
     }
 }
 

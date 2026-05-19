@@ -22,6 +22,8 @@ pub fn tool_definition() -> ToolDefinition {
             },
             "required": ["patchText"]
         }),
+        category: Some(super::ToolCategory::Filesystem),
+        keywords: vec!["patch".to_string(), "multi-file".to_string(), "batch".to_string(), "change".to_string()],
     }
 }
 

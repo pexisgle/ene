@@ -46,6 +46,8 @@ impl McpToolRegistry {
                 name: t.name.to_string(),
                 description: t.description.map(|d| d.to_string()).unwrap_or_default(),
                 parameters: serde_json::Value::Object(t.input_schema.as_ref().clone()),
+                category: None,
+                keywords: vec![],
             });
         }
 

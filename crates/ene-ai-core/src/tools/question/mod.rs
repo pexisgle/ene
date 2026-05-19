@@ -19,6 +19,8 @@ pub fn tool_definition() -> ToolDefinition {
             },
             "required": ["questions"]
         }),
+        category: Some(super::ToolCategory::Utility),
+        keywords: vec!["question".to_string(), "ask".to_string(), "clarify".to_string(), "confirm".to_string()],
     }
 }
 

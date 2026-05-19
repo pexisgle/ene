@@ -51,6 +51,8 @@ pub fn tool_definition() -> ToolDefinition {
             },
             "required": ["filePath", "oldString", "newString"]
         }),
+        category: Some(super::ToolCategory::Filesystem),
+        keywords: vec!["edit".to_string(), "replace".to_string(), "modify".to_string(), "file".to_string()],
     }
 }
 

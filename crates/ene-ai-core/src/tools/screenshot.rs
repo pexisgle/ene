@@ -79,6 +79,8 @@ impl ToolRegistry for ScreenshotToolRegistry {
                     "properties": {},
                     "required": []
                 }),
+                category: Some(super::ToolCategory::Utility),
+                keywords: vec!["screenshot".to_string(), "image".to_string(), "capture".to_string(), "screen".to_string()],
             }
         ]
     }

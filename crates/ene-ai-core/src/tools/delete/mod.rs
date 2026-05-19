@@ -20,6 +20,8 @@ pub fn tool_definition() -> ToolDefinition {
             },
             "required": ["path"]
         }),
+        category: Some(super::ToolCategory::Filesystem),
+        keywords: vec!["delete".to_string(), "remove".to_string(), "file".to_string(), "directory".to_string()],
     }
 }
 

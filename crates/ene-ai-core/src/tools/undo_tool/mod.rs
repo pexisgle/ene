@@ -11,6 +11,8 @@ pub fn tool_definition() -> ToolDefinition {
             "properties": {},
             "required": []
         }),
+        category: Some(super::ToolCategory::Utility),
+        keywords: vec!["undo".to_string(), "revert".to_string(), "rollback".to_string()],
     }
 }
 

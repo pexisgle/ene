@@ -19,7 +19,9 @@ pub enum AiCoreError {
     #[error("Configuration error: {0}")]
     ConfigError(String),
     #[error("Memory store error: {0}")]
-    MemoryStoreError(#[from] rusqlite::Error),
+    MemoryStoreError(#[from] diesel::result::Error),
+    #[error("Memory store connection error: {0}")]
+    MemoryStoreConnectionError(String),
     #[error("Embedding error: {0}")]
     EmbeddingError(String),
     #[error("Sandbox violation: {0}")]

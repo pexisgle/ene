@@ -29,7 +29,7 @@
             buildInputs =
               [
                 # Rust dependencies
-                (rust-bin.nightly.latest.default.override { extensions = [ "rust-src" ]; })
+                (rust-bin.nightly.latest.default.override { extensions = [ "rust-src" "rustc-codegen-cranelift-preview" ]; })
                 pkg-config
                 rustPlatform.bindgenHook
                 # OpenSSL (required for native-tls)

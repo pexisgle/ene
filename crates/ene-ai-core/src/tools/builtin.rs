@@ -23,6 +23,8 @@ impl ToolRegistry for BuiltinToolRegistry {
                     "properties": {},
                     "required": []
                 }),
+                category: Some(super::ToolCategory::Utility),
+                keywords: vec!["time".to_string(), "date".to_string()],
             },
             ToolDefinition {
                 name: "get_system_info".to_string(),
@@ -32,6 +34,8 @@ impl ToolRegistry for BuiltinToolRegistry {
                     "properties": {},
                     "required": []
                 }),
+                category: Some(super::ToolCategory::Utility),
+                keywords: vec!["system".to_string(), "os".to_string(), "platform".to_string()],
             },
         ]
     }

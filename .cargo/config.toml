@@ -4,3 +4,12 @@ rustflags = [
     "-Zshare-generics=y",
     "-C", "link-arg=-fuse-ld=mold",
 ]
+
+[unstable]
+codegen-backend = true
+
+[profile.dev]
+codegen-backend = "cranelift"
+
+[profile.dev.package."*"]
+codegen-backend = "llvm"

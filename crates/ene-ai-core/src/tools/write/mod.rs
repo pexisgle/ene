@@ -21,6 +21,8 @@ pub fn tool_definition() -> ToolDefinition {
             },
             "required": ["filePath", "content"]
         }),
+        category: Some(super::ToolCategory::Filesystem),
+        keywords: vec!["write".to_string(), "create".to_string(), "file".to_string()],
     }
 }
 

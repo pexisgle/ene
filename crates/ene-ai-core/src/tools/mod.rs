@@ -5,6 +5,7 @@ pub mod composite;
 pub mod definition;
 pub mod delete;
 pub mod edit;
+pub mod filesystem;
 pub mod patch;
 pub mod question;
 pub mod read;
