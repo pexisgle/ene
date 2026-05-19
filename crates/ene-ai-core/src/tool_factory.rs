@@ -13,12 +13,14 @@ use std::sync::Arc;
 /// ```
 pub struct ToolRegistryBuilder {
     registries: Vec<Box<dyn ToolRegistry>>,
+    store: Option<Arc<crate::memory::store::MemoryStore>>,
 }
 
 impl ToolRegistryBuilder {
     pub fn new() -> Self {
         Self {
             registries: Vec::new(),
+            store: None,
         }
     }
 
@@ -41,14 +43,28 @@ impl ToolRegistryBuilder {
         self
     }
 
+    pub fn with_sandbox_settings(mut self, settings: &crate::config::AiSandboxSettings) -> Self {
+        self.registries
+            .push(Box::new(crate::tools::OpencodeToolRegistry::new(settings.to_sandbox_config())));
+        self
+    }
+
     pub fn add_registry(mut self, registry: Box<dyn ToolRegistry>) -> Self {
         self.registries.push(registry);
         self
     }
 
+    pub fn with_store(mut self, store: Arc<crate::memory::store::MemoryStore>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
     pub fn build(self) -> Arc<dyn ToolRegistry> {
-        Arc::new(crate::tools::composite::CompositeToolRegistry::new(
-            self.registries,
-        ))
+        let composite = crate::tools::composite::CompositeToolRegistry::new(self.registries);
+        let composite = match self.store {
+            Some(store) => composite.with_store(store),
+            None => composite,
+        };
+        Arc::new(composite)
     }
 }

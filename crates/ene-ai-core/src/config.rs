@@ -68,6 +68,13 @@ pub struct AiMemorySettings {
     /// 要約をプロンプトに注入する最大数
     pub summary_recall_limit: usize,
 
+    // ── Tool RAG ─────────────────────────────────────────────────────────────
+    /// Tool RAG設定 — ユーザー入力に関連するツールのみを動的に選択してtoken消費を抑制
+    pub tool_rag_enabled: bool,
+    pub tool_rag_limit: usize,
+    /// 常に含めるツール名（RAG絞り込み後も必ず残す）
+    pub tool_rag_always_include: Vec<String>,
+
     // ── Summarization Model ──────────────────────────────────────────────────
     /// 要約生成に使うモデル（空の場合はチャット用モデルを使用）
     pub summarization_model: String,
@@ -122,6 +129,9 @@ impl Default for AiMemorySettings {
             topic_change_threshold: 0.5,
             min_turns_before_split: 3,
             summary_recall_limit: 3,
+            tool_rag_enabled: true,
+            tool_rag_limit: 6,
+            tool_rag_always_include: vec!["question".to_string(), "todo".to_string(), "get_current_time".to_string()],
             summarization_model: String::new(),
             summarization_base_url: String::new(),
         }
@@ -145,6 +155,35 @@ impl Default for AiSandboxSettings {
             shell_timeout_ms: 120_000,
             max_shell_output_bytes: 50 * 1024,
             max_shell_output_lines: 2000,
+        }
+    }
+}
+
+impl AiSandboxSettings {
+    pub fn to_sandbox_config(&self) -> crate::sandbox::SandboxConfig {
+        let canonicalize_dirs = |dirs: &[String]| -> Vec<std::path::PathBuf> {
+            dirs.iter()
+                .map(|s| {
+                    let p = std::path::PathBuf::from(s);
+                    if p.exists() {
+                        std::fs::canonicalize(&p).unwrap_or(p)
+                    } else {
+                        p
+                    }
+                })
+                .collect()
+        };
+
+        crate::sandbox::SandboxConfig {
+            enabled: self.enabled,
+            allowed_directories: canonicalize_dirs(&self.allowed_directories),
+            writable_directories: canonicalize_dirs(&self.writable_directories),
+            blocked_commands: self.blocked_commands.clone(),
+            max_read_bytes: self.max_read_bytes,
+            max_write_bytes: self.max_write_bytes,
+            shell_timeout_ms: self.shell_timeout_ms,
+            max_shell_output_bytes: self.max_shell_output_bytes,
+            max_shell_output_lines: self.max_shell_output_lines,
         }
     }
 }
