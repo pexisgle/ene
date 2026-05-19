@@ -70,11 +70,17 @@ impl PermissionGate {
         Err(req)
     }
 
-    /// シンプルな許可チェック（Phase 1 互換）
-    pub fn check_simple(_request: &PermissionRequest) -> PermissionLevel {
-        // Phase 1: すべて自動承認
-        // Phase 2 で UI 連携を実装
-        PermissionLevel::Allow
+    /// シンプルな許可チェック
+    pub fn check_simple(request: &PermissionRequest) -> PermissionLevel {
+        match request.level {
+            PermissionLevel::Allow => PermissionLevel::Allow,
+            PermissionLevel::RequiresApproval { .. } => PermissionLevel::Deny {
+                reason: "Approval UI not yet implemented".to_string(),
+            },
+            PermissionLevel::Deny { ref reason } => PermissionLevel::Deny {
+                reason: reason.clone(),
+            },
+        }
     }
 }
 

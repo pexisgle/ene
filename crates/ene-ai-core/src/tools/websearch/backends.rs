@@ -47,16 +47,121 @@ pub async fn search_duckduckgo(query: &str, limit: usize) -> Result<String, AiCo
     Ok(output)
 }
 
-pub async fn search_tavily(_query: &str, _limit: usize) -> Result<String, AiCoreError> {
-    Err(AiCoreError::WebSearchError(
-        "Tavily backend requires TAVILY_API_KEY environment variable. Please configure it or use 'duckduckgo' backend.".to_string()
-    ))
+pub async fn search_tavily(query: &str, _limit: usize) -> Result<String, AiCoreError> {
+    let api_key = std::env::var("TAVILY_API_KEY").map_err(|_| {
+        AiCoreError::WebSearchError(
+            "TAVILY_API_KEY environment variable is not set".to_string(),
+        )
+    })?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| AiCoreError::WebSearchError(format!("HTTP client error: {e}")))?;
+
+    let response = client
+        .post("https://api.tavily.com/search")
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "api_key": api_key,
+            "query": query,
+        }))
+        .send()
+        .await
+        .map_err(|e| AiCoreError::WebSearchError(format!("Request failed: {e}")))?;
+
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| AiCoreError::WebSearchError(format!("Parse failed: {e}")))?;
+
+    let results = json["results"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| {
+                    Some(SearchResult {
+                        title: r["title"].as_str()?.to_string(),
+                        snippet: r["content"].as_str()?.to_string(),
+                        url: r["url"].as_str()?.to_string(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if results.is_empty() {
+        return Ok("No results found.".to_string());
+    }
+
+    let mut output = format!("Search results for '{}' (Tavily):\n\n", query);
+    for (i, result) in results.iter().enumerate() {
+        output.push_str(&format!(
+            "{}. {}\n   {}\n   URL: {}\n\n",
+            i + 1,
+            result.title,
+            result.snippet,
+            result.url
+        ));
+    }
+    Ok(output)
 }
 
-pub async fn search_brave(_query: &str, _limit: usize) -> Result<String, AiCoreError> {
-    Err(AiCoreError::WebSearchError(
-        "Brave backend requires BRAVE_API_KEY environment variable. Please configure it or use 'duckduckgo' backend.".to_string()
-    ))
+pub async fn search_brave(query: &str, _limit: usize) -> Result<String, AiCoreError> {
+    let api_key = std::env::var("BRAVE_API_KEY").map_err(|_| {
+        AiCoreError::WebSearchError(
+            "BRAVE_API_KEY environment variable is not set".to_string(),
+        )
+    })?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| AiCoreError::WebSearchError(format!("HTTP client error: {e}")))?;
+
+    let response = client
+        .get("https://api.search.brave.com/res/v1/web/search")
+        .header("X-Subscription-Token", &api_key)
+        .query(&[("q", query)])
+        .send()
+        .await
+        .map_err(|e| AiCoreError::WebSearchError(format!("Request failed: {e}")))?;
+
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| AiCoreError::WebSearchError(format!("Parse failed: {e}")))?;
+
+    let results = json["web"]["results"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| {
+                    Some(SearchResult {
+                        title: r["title"].as_str()?.to_string(),
+                        snippet: r["description"].as_str()?.to_string(),
+                        url: r["url"].as_str()?.to_string(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if results.is_empty() {
+        return Ok("No results found.".to_string());
+    }
+
+    let mut output = format!("Search results for '{}' (Brave):\n\n", query);
+    for (i, result) in results.iter().enumerate() {
+        output.push_str(&format!(
+            "{}. {}\n   {}\n   URL: {}\n\n",
+            i + 1,
+            result.title,
+            result.snippet,
+            result.url
+        ));
+    }
+    Ok(output)
 }
 
 fn parse_duckduckgo_html(html: &str, limit: usize) -> Vec<SearchResult> {

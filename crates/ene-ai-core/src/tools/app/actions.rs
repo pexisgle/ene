@@ -153,9 +153,13 @@ pub async fn mouse_click(button: &str) -> Result<String, AiCoreError> {
 }
 
 pub async fn clipboard_read() -> Result<String, AiCoreError> {
-    Ok("[Clipboard Read] Clipboard access requires a clipboard library (arboard). This is a stub for Phase 3.".to_string())
+    Err(AiCoreError::AppError(
+        "Clipboard read is not yet implemented. Requires a clipboard library (arboard).".to_string(),
+    ))
 }
 
 pub async fn clipboard_write(_text: &str) -> Result<String, AiCoreError> {
-    Ok("[Clipboard Write] Clipboard access requires a clipboard library (arboard). This is a stub for Phase 3.".to_string())
+    Err(AiCoreError::AppError(
+        "Clipboard write is not yet implemented. Requires a clipboard library (arboard).".to_string(),
+    ))
 }
