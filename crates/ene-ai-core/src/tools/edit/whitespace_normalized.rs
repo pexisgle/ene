@@ -1,3 +1,11 @@
+use std::sync::OnceLock;
+
+static WHITESPACE_RE: OnceLock<regex::Regex> = OnceLock::new();
+
+fn whitespace_re() -> &'static regex::Regex {
+    WHITESPACE_RE.get_or_init(|| regex::Regex::new(r"\s+").unwrap())
+}
+
 pub fn whitespace_normalized_replace(
     content: &str,
     old: &str,
@@ -5,11 +13,7 @@ pub fn whitespace_normalized_replace(
     replace_all: bool,
 ) -> Option<String> {
     let normalize = |t: &str| -> String {
-        regex::Regex::new(r"\s+")
-            .unwrap()
-            .replace_all(t, " ")
-            .trim()
-            .to_string()
+        whitespace_re().replace_all(t, " ").trim().to_string()
     };
     let normalized_find = normalize(old);
 

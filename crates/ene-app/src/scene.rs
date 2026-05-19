@@ -7,7 +7,6 @@ use bevy::{
     prelude::*,
     window::PrimaryWindow,
 };
-use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::app_config::{AntialiasingMode, CharacterSettings};
@@ -130,7 +129,11 @@ fn pace_frame_rate(settings: Res<CharacterSettings>, mut pacing: ResMut<FramePac
 
     let elapsed = now.duration_since(last_frame_end);
     if elapsed < target_frame_duration {
-        thread::sleep(target_frame_duration - elapsed);
+        let sleep_duration = target_frame_duration - elapsed;
+        if sleep_duration.as_millis() > 2 {
+            std::thread::sleep(sleep_duration - Duration::from_millis(1));
+        }
+        std::hint::spin_loop();
     }
 
     pacing.last_frame_end = Some(Instant::now());

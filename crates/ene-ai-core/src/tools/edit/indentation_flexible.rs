@@ -1,3 +1,11 @@
+use std::sync::OnceLock;
+
+static INDENT_RE: OnceLock<regex::Regex> = OnceLock::new();
+
+fn indent_re() -> &'static regex::Regex {
+    INDENT_RE.get_or_init(|| regex::Regex::new(r"^(\s*)").unwrap())
+}
+
 pub fn indentation_flexible_replace(
     content: &str,
     old: &str,
@@ -8,7 +16,7 @@ pub fn indentation_flexible_replace(
         let lines: Vec<&str> = t.lines().collect();
         let non_empty: Vec<&str> = lines
             .iter()
-            .filter(|l| l.trim().len() > 0)
+            .filter(|l| !l.trim().is_empty())
             .copied()
             .collect();
         if non_empty.is_empty() {
@@ -17,8 +25,7 @@ pub fn indentation_flexible_replace(
         let min_indent = non_empty
             .iter()
             .map(|l| {
-                regex::Regex::new(r"^(\s*)")
-                    .unwrap()
+                indent_re()
                     .captures(l)
                     .and_then(|c| c.get(1))
                     .map(|m| m.len())
