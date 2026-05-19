@@ -1,7 +1,7 @@
 mod platform;
 
 use super::definition::ToolDefinition;
-use super::truncate::Truncate;
+use super::utility::truncate::Truncate;
 use crate::error::AiCoreError;
 use crate::sandbox::SandboxConfig;
 use std::path::Path;

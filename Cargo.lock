@@ -3619,6 +3619,7 @@ name = "ene-ai-core"
 version = "0.1.0"
 dependencies = [
  "active-win-pos-rs",
+ "arboard",
  "async-openai",
  "async-stream",
  "async-trait",

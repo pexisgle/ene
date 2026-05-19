@@ -1,7 +1,7 @@
 mod parser;
 
 use super::definition::ToolDefinition;
-use super::undo_manager::{UndoEntry, UndoManager};
+use super::utility::undo_manager::{UndoEntry, UndoManager};
 use crate::error::AiCoreError;
 use crate::sandbox::SandboxConfig;
 use parser::PatchOperation;

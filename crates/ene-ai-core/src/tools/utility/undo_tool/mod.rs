@@ -1,4 +1,4 @@
-use super::definition::ToolDefinition;
+use super::super::definition::ToolDefinition;
 use super::undo_manager::UndoManager;
 use crate::error::AiCoreError;
 
@@ -11,7 +11,7 @@ pub fn tool_definition() -> ToolDefinition {
             "properties": {},
             "required": []
         }),
-        category: Some(super::ToolCategory::Utility),
+        category: Some(super::super::ToolCategory::Utility),
         keywords: vec!["undo".to_string(), "revert".to_string(), "rollback".to_string()],
     }
 }

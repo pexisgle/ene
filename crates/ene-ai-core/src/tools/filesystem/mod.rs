@@ -1,5 +1,6 @@
 use super::definition::ToolDefinition;
-use super::{ToolCategory, undo_manager::UndoManager};
+use super::utility::undo_manager::UndoManager;
+use super::ToolCategory;
 use crate::sandbox::SandboxConfig;
 use std::path::Path;
 

@@ -1,4 +1,4 @@
-use super::definition::{ToolDefinition, ToolRegistry};
+use super::super::definition::{ToolDefinition, ToolRegistry};
 use async_trait::async_trait;
 use chrono::Local;
 
@@ -23,7 +23,7 @@ impl ToolRegistry for BuiltinToolRegistry {
                     "properties": {},
                     "required": []
                 }),
-                category: Some(super::ToolCategory::Utility),
+                category: Some(super::super::ToolCategory::Utility),
                 keywords: vec!["time".to_string(), "date".to_string()],
             },
             ToolDefinition {
@@ -34,7 +34,7 @@ impl ToolRegistry for BuiltinToolRegistry {
                     "properties": {},
                     "required": []
                 }),
-                category: Some(super::ToolCategory::Utility),
+                category: Some(super::super::ToolCategory::Utility),
                 keywords: vec!["system".to_string(), "os".to_string(), "platform".to_string()],
             },
         ]

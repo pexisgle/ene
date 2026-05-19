@@ -1,6 +1,6 @@
 mod store;
 
-use super::definition::ToolDefinition;
+use super::super::definition::ToolDefinition;
 pub use store::{TodoItem, TodoStore};
 
 pub fn tool_definition() -> ToolDefinition {
@@ -29,7 +29,7 @@ pub fn tool_definition() -> ToolDefinition {
             },
             "required": ["todos"]
         }),
-        category: Some(super::ToolCategory::Utility),
+        category: Some(super::super::ToolCategory::Utility),
         keywords: vec!["todo".to_string(), "task".to_string(), "track".to_string(), "plan".to_string()],
     }
 }

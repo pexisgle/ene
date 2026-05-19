@@ -1,32 +1,25 @@
 pub mod app;
 pub mod browser;
-pub mod builtin;
 pub mod composite;
+pub mod core;
 pub mod definition;
 pub mod delete;
 pub mod edit;
 pub mod filesystem;
 pub mod patch;
-pub mod question;
 pub mod read;
-pub mod registry;
-pub mod screenshot;
 pub mod search;
 pub mod shell;
-pub mod todo;
-pub mod truncate;
-pub mod undo_manager;
-pub mod undo_tool;
-pub mod webfetch;
-pub mod websearch;
+pub mod utility;
+pub mod web;
 pub mod write;
 
-pub use builtin::BuiltinToolRegistry;
 pub use composite::CompositeToolRegistry;
+pub use core::EneToolRegistry;
 pub use definition::{ToolCallResult, ToolDefinition, ToolRegistry};
-pub use registry::OpencodeToolRegistry;
-pub use screenshot::ScreenshotToolRegistry;
-pub use undo_manager::{UndoEntry, UndoManager, UndoOperation, backup_file};
+pub use utility::builtin::BuiltinToolRegistry;
+pub use utility::screenshot::ScreenshotToolRegistry;
+pub use utility::undo_manager::{UndoEntry, UndoManager, UndoOperation, backup_file};
 
 /// ツールカテゴリ
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

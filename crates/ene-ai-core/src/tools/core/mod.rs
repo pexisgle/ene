@@ -1,26 +1,26 @@
 use super::definition::{ToolDefinition, ToolRegistry};
-use super::todo::TodoItem;
-use super::undo_manager::UndoManager;
+use super::utility::todo::TodoItem;
+use super::utility::undo_manager::UndoManager;
 use crate::sandbox::SandboxConfig;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 
-pub struct OpencodeToolRegistry {
+pub struct EneToolRegistry {
     sandbox: SandboxConfig,
     undo_manager: UndoManager,
     session_id: Arc<Mutex<String>>,
-    todo_store: super::todo::TodoStore,
+    todo_store: super::utility::todo::TodoStore,
     browser_store: super::browser::BrowserSessionStore,
 }
 
-impl OpencodeToolRegistry {
+impl EneToolRegistry {
     pub fn new(sandbox: SandboxConfig) -> Self {
         Self {
             sandbox,
             undo_manager: UndoManager::new(),
             session_id: Arc::new(Mutex::new("default".to_string())),
-            todo_store: super::todo::TodoStore::new(),
+            todo_store: super::utility::todo::TodoStore::new(),
             browser_store: super::browser::BrowserSessionStore::new(),
         }
     }
@@ -84,11 +84,27 @@ struct AppArgs {
     #[serde(default)]
     key: Option<String>,
     #[serde(default)]
+    key_combo: Option<String>,
+    #[serde(default)]
     x: Option<i32>,
     #[serde(default)]
     y: Option<i32>,
     #[serde(default)]
+    x2: Option<i32>,
+    #[serde(default)]
+    y2: Option<i32>,
+    #[serde(default)]
     button: Option<String>,
+    #[serde(default)]
+    count: Option<u32>,
+    #[serde(default)]
+    relative: Option<bool>,
+    #[serde(default)]
+    amount: Option<i32>,
+    #[serde(default)]
+    direction: Option<String>,
+    #[serde(default)]
+    scale_percent: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -120,7 +136,7 @@ struct QuestionArgs {
 }
 
 #[async_trait]
-impl ToolRegistry for OpencodeToolRegistry {
+impl ToolRegistry for EneToolRegistry {
     fn set_session_id(&self, session_id: &str) {
         if let Ok(mut id) = self.session_id.lock() {
             *id = session_id.to_string();
@@ -130,14 +146,14 @@ impl ToolRegistry for OpencodeToolRegistry {
     fn list_tools(&self) -> Vec<ToolDefinition> {
         vec![
             super::filesystem::tool_definition(),
-            super::undo_tool::tool_definition(),
+            super::utility::undo_tool::tool_definition(),
             super::shell::tool_definition(),
             super::browser::tool_definition(),
             super::app::tool_definition(),
-            super::webfetch::tool_definition(),
-            super::websearch::tool_definition(),
-            super::todo::tool_definition(),
-            super::question::tool_definition(),
+            super::web::webfetch::tool_definition(),
+            super::web::websearch::tool_definition(),
+            super::utility::todo::tool_definition(),
+            super::utility::question::tool_definition(),
         ]
     }
 
@@ -155,7 +171,7 @@ impl ToolRegistry for OpencodeToolRegistry {
                 )
                 .await
             }
-            "undo" => super::undo_tool::undo(&self.undo_manager, &self.current_session_id())
+            "undo" => super::utility::undo_tool::undo(&self.undo_manager, &self.current_session_id())
                 .await
                 .map_err(|e| e.to_string()),
             "shell" => {
@@ -199,9 +215,17 @@ impl ToolRegistry for OpencodeToolRegistry {
                     args.window_title.as_deref(),
                     args.text.as_deref(),
                     args.key.as_deref(),
+                    args.key_combo.as_deref(),
                     args.x,
                     args.y,
+                    args.x2,
+                    args.y2,
                     args.button.as_deref(),
+                    args.count,
+                    args.relative,
+                    args.amount,
+                    args.direction.as_deref(),
+                    args.scale_percent,
                 )
                 .await
                 .map_err(|e| e.to_string())
@@ -209,21 +233,21 @@ impl ToolRegistry for OpencodeToolRegistry {
             "webfetch" => {
                 let args: WebFetchArgs =
                     serde_json::from_str(arguments).map_err(|e| format!("Invalid arguments for webfetch: {e}"))?;
-                super::webfetch::webfetch(&args.url, args.format.as_deref(), args.timeout)
+                super::web::webfetch::webfetch(&args.url, args.format.as_deref(), args.timeout)
                     .await
                     .map_err(|e| e.to_string())
             }
             "websearch" => {
                 let args: WebSearchArgs =
                     serde_json::from_str(arguments).map_err(|e| format!("Invalid arguments for websearch: {e}"))?;
-                super::websearch::websearch(&args.query, args.backend.as_deref(), args.limit)
+                super::web::websearch::websearch(&args.query, args.backend.as_deref(), args.limit)
                     .await
                     .map_err(|e| e.to_string())
             }
             "todo" => {
                 let args: TodoArgs =
                     serde_json::from_str(arguments).map_err(|e| format!("Invalid arguments for todo: {e}"))?;
-                Ok(super::todo::update_todos(
+                Ok(super::utility::todo::update_todos(
                     &self.todo_store,
                     &self.current_session_id(),
                     args.todos,
@@ -232,7 +256,7 @@ impl ToolRegistry for OpencodeToolRegistry {
             "question" => {
                 let args: QuestionArgs =
                     serde_json::from_str(arguments).map_err(|e| format!("Invalid arguments for question: {e}"))?;
-                super::question::question(args.questions).map_err(|e| e.to_string())
+                super::utility::question::question(args.questions).map_err(|e| e.to_string())
             }
             _ => Err(format!("Unknown tool: {}", name)),
         }

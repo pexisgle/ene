@@ -1,6 +1,6 @@
 mod backends;
 
-use super::definition::ToolDefinition;
+use super::super::definition::ToolDefinition;
 use crate::error::AiCoreError;
 
 pub fn tool_definition() -> ToolDefinition {
@@ -21,7 +21,7 @@ pub fn tool_definition() -> ToolDefinition {
             },
             "required": ["query"]
         }),
-        category: Some(super::ToolCategory::WebSearch),
+        category: Some(super::super::ToolCategory::WebSearch),
         keywords: vec!["search".to_string(), "web".to_string(), "google".to_string(), "internet".to_string(), "lookup".to_string()],
     }
 }

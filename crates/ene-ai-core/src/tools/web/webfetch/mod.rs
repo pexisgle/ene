@@ -1,6 +1,6 @@
 mod converter;
 
-use super::definition::ToolDefinition;
+use super::super::definition::ToolDefinition;
 use crate::error::AiCoreError;
 use converter::{html_to_markdown, html_to_text};
 
@@ -26,7 +26,7 @@ pub fn tool_definition() -> ToolDefinition {
             },
             "required": ["url"]
         }),
-        category: Some(super::ToolCategory::Browser),
+        category: Some(super::super::ToolCategory::Browser),
         keywords: vec!["fetch".to_string(), "url".to_string(), "web".to_string(), "download".to_string(), "html".to_string()],
     }
 }

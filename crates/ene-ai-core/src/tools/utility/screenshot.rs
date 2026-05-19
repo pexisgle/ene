@@ -1,4 +1,4 @@
-use super::definition::{ToolDefinition, ToolRegistry};
+use super::super::definition::{ToolDefinition, ToolRegistry};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose};
 use image::{DynamicImage, imageops::FilterType};
@@ -79,7 +79,7 @@ impl ToolRegistry for ScreenshotToolRegistry {
                     "properties": {},
                     "required": []
                 }),
-                category: Some(super::ToolCategory::Utility),
+                category: Some(super::super::ToolCategory::Utility),
                 keywords: vec!["screenshot".to_string(), "image".to_string(), "capture".to_string(), "screen".to_string()],
             }
         ]

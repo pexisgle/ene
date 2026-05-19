@@ -49,7 +49,7 @@ pub async fn build(settings: &AiSettings) -> Arc<dyn ToolRegistry> {
         )),
     ];
     if settings.sandbox.enabled {
-        registries.push(Box::new(ene_ai_core::tools::OpencodeToolRegistry::new(
+        registries.push(Box::new(ene_ai_core::tools::EneToolRegistry::new(
             settings.sandbox.to_sandbox_config(),
         )));
     }

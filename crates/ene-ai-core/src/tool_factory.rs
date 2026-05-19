@@ -26,26 +26,26 @@ impl ToolRegistryBuilder {
 
     pub fn with_builtin(mut self) -> Self {
         self.registries
-            .push(Box::new(crate::tools::builtin::BuiltinToolRegistry::new()));
+            .push(Box::new(crate::tools::utility::builtin::BuiltinToolRegistry::new()));
         self
     }
 
     pub fn with_screenshot(mut self, scale_percent: u32) -> Self {
         self.registries.push(Box::new(
-            crate::tools::screenshot::ScreenshotToolRegistry::new(scale_percent),
+            crate::tools::utility::screenshot::ScreenshotToolRegistry::new(scale_percent),
         ));
         self
     }
 
     pub fn with_sandbox(mut self, config: crate::sandbox::SandboxConfig) -> Self {
         self.registries
-            .push(Box::new(crate::tools::OpencodeToolRegistry::new(config)));
+            .push(Box::new(crate::tools::core::EneToolRegistry::new(config)));
         self
     }
 
     pub fn with_sandbox_settings(mut self, settings: &crate::config::AiSandboxSettings) -> Self {
         self.registries
-            .push(Box::new(crate::tools::OpencodeToolRegistry::new(settings.to_sandbox_config())));
+            .push(Box::new(crate::tools::core::EneToolRegistry::new(settings.to_sandbox_config())));
         self
     }
 
