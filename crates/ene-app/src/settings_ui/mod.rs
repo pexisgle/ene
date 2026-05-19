@@ -1,13 +1,15 @@
+mod widgets;
+
 use crate::ai_bridge::{AiRequestEvent, AiStreamEvent};
 use crate::app_config::{
-    CharacterSettings, SETTINGS_WINDOW_HEIGHT, SETTINGS_WINDOW_WIDTH, cycle_antialiasing_mode,
-    cycle_mask_render_downsample, cycle_shadow_quality, cycle_target_fps, target_fps_label,
+    CharacterSettings, SETTINGS_WINDOW_HEIGHT, SETTINGS_WINDOW_WIDTH, target_fps_label,
 };
 use crate::character::{CharacterAnimationControl, EmotionCommand, EmotionQueue};
 use bevy::camera::RenderTarget;
 use bevy::prelude::*;
 use bevy::window::{WindowLevel, WindowRef, WindowResolution};
 use bevy_egui::{EguiContext, EguiMultipassSchedule, PrimaryEguiContext, egui};
+use widgets::{apply_action, render_cycle_row, render_numeric_row, render_toggle_row};
 
 #[derive(bevy::ecs::schedule::ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
 struct SettingsWindowContextPass;
@@ -390,7 +392,6 @@ fn render_settings_window(
             })
             .response;
 
-        // Start native window drag on the exact press frame for better Wayland reliability.
         let should_start_drag = header_response.hovered()
             && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
         if should_start_drag {
@@ -423,643 +424,458 @@ fn render_settings_window(
 
         match input_state.current_page {
             SettingsPageKind::Character => {
-                ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Character");
-                        if ui.button("<").clicked() {
-                            apply_action(
-                                SettingsButtonAction::PrevCharacter,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                        }
-                        ui.add_sized(
-                            [220.0, 0.0],
-                            egui::Label::new(
-                                SettingsValueKind::Character
-                                    .current_text(&settings, &animation_control),
-                            ),
-                        );
-                        if ui.button(">").clicked() {
-                            apply_action(
-                                SettingsButtonAction::NextCharacter,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("Motion");
-                        if ui.button("<").clicked() {
-                            apply_action(
-                                SettingsButtonAction::PrevMotion,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                        }
-                        ui.add_sized(
-                            [220.0, 0.0],
-                            egui::Label::new(
-                                SettingsValueKind::Motion
-                                    .current_text(&settings, &animation_control),
-                            ),
-                        );
-                        if ui.button(">").clicked() {
-                            apply_action(
-                                SettingsButtonAction::NextMotion,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("Animation");
-                        if ui.button("Toggle").clicked() {
-                            apply_action(
-                                SettingsButtonAction::TogglePlay,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                        }
-                        ui.add_sized(
-                            [220.0, 0.0],
-                            egui::Label::new(
-                                SettingsValueKind::AnimationState
-                                    .current_text(&settings, &animation_control),
-                            ),
-                        );
-                    });
-
-                    if cfg!(target_os = "linux") {
-                        ui.horizontal(|ui| {
-                            ui.label("Debug Overlay");
-                            if ui.button("Toggle").clicked() {
-                                apply_action(
-                                    SettingsButtonAction::ToggleDebugOverlay,
-                                    &mut settings,
-                                    &mut animation_control,
-                                    &mut ai_request_writer,
-                                );
-                            }
-                            ui.add_sized(
-                                [220.0, 0.0],
-                                egui::Label::new(
-                                    SettingsValueKind::DebugOverlay
-                                        .current_text(&settings, &animation_control),
-                                ),
-                            );
-                        });
-
-                        ui.horizontal(|ui| {
-                            ui.label("Mask Downsample");
-                            if ui.button("<").clicked() {
-                                apply_action(
-                                    SettingsButtonAction::MaskDownsampleDown,
-                                    &mut settings,
-                                    &mut animation_control,
-                                    &mut ai_request_writer,
-                                );
-                            }
-                            ui.add_sized(
-                                [220.0, 0.0],
-                                egui::Label::new(
-                                    SettingsValueKind::MaskRenderDownsample
-                                        .current_text(&settings, &animation_control),
-                                ),
-                            );
-                            if ui.button(">").clicked() {
-                                apply_action(
-                                    SettingsButtonAction::MaskDownsampleUp,
-                                    &mut settings,
-                                    &mut animation_control,
-                                    &mut ai_request_writer,
-                                );
-                            }
-                        });
-                    }
-
-                    ui.horizontal(|ui| {
-                        ui.label("LookAt Strength");
-                        if ui.button("-").clicked() {
-                            apply_action(
-                                SettingsButtonAction::LookAtStrengthDown,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                            input_state.look_at_strength =
-                                format!("{:.2}", settings.look_at_strength);
-                        }
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut input_state.look_at_strength)
-                                .desired_width(220.0),
-                        );
-                        let commit = response.changed()
-                            || (response.lost_focus()
-                                && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-                        if commit
-                            && SettingsValueKind::LookAtStrength
-                                .apply_input(input_state.look_at_strength.trim(), &mut settings)
-                                .is_ok()
-                        {
-                            settings.clamp_runtime_values();
-                        }
-                        if ui.button("+").clicked() {
-                            apply_action(
-                                SettingsButtonAction::LookAtStrengthUp,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                            input_state.look_at_strength =
-                                format!("{:.2}", settings.look_at_strength);
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("Model Scale");
-                        if ui.button("-").clicked() {
-                            apply_action(
-                                SettingsButtonAction::ModelScaleDown,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                            input_state.model_scale = format!("{:.2}", settings.model_scale);
-                        }
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut input_state.model_scale)
-                                .desired_width(220.0),
-                        );
-                        let commit = response.changed()
-                            || (response.lost_focus()
-                                && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-                        if commit
-                            && SettingsValueKind::ModelScale
-                                .apply_input(input_state.model_scale.trim(), &mut settings)
-                                .is_ok()
-                        {
-                            settings.clamp_runtime_values();
-                        }
-                        if ui.button("+").clicked() {
-                            apply_action(
-                                SettingsButtonAction::ModelScaleUp,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                            input_state.model_scale = format!("{:.2}", settings.model_scale);
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("Character Pos X");
-                        if ui.button("-").clicked() {
-                            apply_action(
-                                SettingsButtonAction::CharacterPosXDown,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                            input_state.character_pos_x =
-                                format!("{:+.2}", settings.character_position.x);
-                        }
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut input_state.character_pos_x)
-                                .desired_width(220.0),
-                        );
-                        let commit = response.changed()
-                            || (response.lost_focus()
-                                && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-                        if commit
-                            && SettingsValueKind::CharacterPositionX
-                                .apply_input(input_state.character_pos_x.trim(), &mut settings)
-                                .is_ok()
-                        {
-                            settings.clamp_runtime_values();
-                        }
-                        if ui.button("+").clicked() {
-                            apply_action(
-                                SettingsButtonAction::CharacterPosXUp,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                            input_state.character_pos_x =
-                                format!("{:+.2}", settings.character_position.x);
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("Character Pos Y");
-                        if ui.button("-").clicked() {
-                            apply_action(
-                                SettingsButtonAction::CharacterPosYDown,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                            input_state.character_pos_y =
-                                format!("{:+.2}", settings.character_position.y);
-                        }
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut input_state.character_pos_y)
-                                .desired_width(220.0),
-                        );
-                        let commit = response.changed()
-                            || (response.lost_focus()
-                                && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-                        if commit
-                            && SettingsValueKind::CharacterPositionY
-                                .apply_input(input_state.character_pos_y.trim(), &mut settings)
-                                .is_ok()
-                        {
-                            settings.clamp_runtime_values();
-                        }
-                        if ui.button("+").clicked() {
-                            apply_action(
-                                SettingsButtonAction::CharacterPosYUp,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                            input_state.character_pos_y =
-                                format!("{:+.2}", settings.character_position.y);
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("Character Pos Z");
-                        if ui.button("-").clicked() {
-                            apply_action(
-                                SettingsButtonAction::CharacterPosZDown,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                            input_state.character_pos_z =
-                                format!("{:+.2}", settings.character_position.z);
-                        }
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut input_state.character_pos_z)
-                                .desired_width(220.0),
-                        );
-                        let commit = response.changed()
-                            || (response.lost_focus()
-                                && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-                        if commit
-                            && SettingsValueKind::CharacterPositionZ
-                                .apply_input(input_state.character_pos_z.trim(), &mut settings)
-                                .is_ok()
-                        {
-                            settings.clamp_runtime_values();
-                        }
-                        if ui.button("+").clicked() {
-                            apply_action(
-                                SettingsButtonAction::CharacterPosZUp,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                            input_state.character_pos_z =
-                                format!("{:+.2}", settings.character_position.z);
-                        }
-                    });
-
-                    ui.separator();
-                    ui.label("Manual Expressions (Test)");
-                    ui.horizontal(|ui| {
-                        for emotion in ["happy", "sad", "angry", "relaxed", "surprised", "neutral"]
-                        {
-                            if ui.button(emotion).clicked() {
-                                emotion_queue.commands.push_back(EmotionCommand {
-                                    emotion: emotion.to_string(),
-                                    target_time: time.elapsed_secs_f64(),
-                                    hold_secs: 4.0,
-                                });
-                            }
-                        }
-                    });
-                });
+                render_character_page(
+                    ui,
+                    &mut settings,
+                    &mut animation_control,
+                    &mut ai_request_writer,
+                    &mut input_state,
+                    &mut emotion_queue,
+                    &time,
+                );
             }
             SettingsPageKind::Graphics => {
-                ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Target FPS");
-                        if ui.button("<").clicked() {
-                            apply_action(
-                                SettingsButtonAction::TargetFpsDown,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                        }
-                        ui.add_sized(
-                            [220.0, 0.0],
-                            egui::Label::new(
-                                SettingsValueKind::TargetFps
-                                    .current_text(&settings, &animation_control),
-                            ),
-                        );
-                        if ui.button(">").clicked() {
-                            apply_action(
-                                SettingsButtonAction::TargetFpsUp,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("Shadow Quality");
-                        if ui.button("<").clicked() {
-                            apply_action(
-                                SettingsButtonAction::ShadowQualityDown,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                        }
-                        ui.add_sized(
-                            [220.0, 0.0],
-                            egui::Label::new(
-                                SettingsValueKind::ShadowQuality
-                                    .current_text(&settings, &animation_control),
-                            ),
-                        );
-                        if ui.button(">").clicked() {
-                            apply_action(
-                                SettingsButtonAction::ShadowQualityUp,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("Antialiasing");
-                        if ui.button("<").clicked() {
-                            apply_action(
-                                SettingsButtonAction::AntialiasingModeDown,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                        }
-                        ui.add_sized(
-                            [220.0, 0.0],
-                            egui::Label::new(
-                                SettingsValueKind::AntialiasingMode
-                                    .current_text(&settings, &animation_control),
-                            ),
-                        );
-                        if ui.button(">").clicked() {
-                            apply_action(
-                                SettingsButtonAction::AntialiasingModeUp,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                        }
-                    });
-                });
+                render_graphics_page(
+                    ui,
+                    &mut settings,
+                    &mut animation_control,
+                    &mut ai_request_writer,
+                );
             }
             SettingsPageKind::Ai => {
-                ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Character Card");
-                        ui.add_sized(
-                            [220.0, 0.0],
-                            egui::Label::new(settings.current_character_card()),
-                        );
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("User Name");
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut input_state.ai_user_name)
-                                .desired_width(f32::INFINITY),
-                        );
-                        if response.changed() {
-                            let _ = SettingsValueKind::AiUserName
-                                .apply_input(input_state.ai_user_name.trim(), &mut settings);
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("Runtime Rules");
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut input_state.ai_runtime_rules)
-                                .desired_width(f32::INFINITY),
-                        );
-                        if response.changed() {
-                            let _ = SettingsValueKind::AiRuntimeRules
-                                .apply_input(&input_state.ai_runtime_rules, &mut settings);
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("Provider Name");
-                        ui.add_sized(
-                            [280.0, 0.0],
-                            egui::Label::new(
-                                SettingsValueKind::AiProviderName
-                                    .current_text(&settings, &animation_control),
-                            ),
-                        );
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("Model");
-                        ui.add_sized(
-                            [280.0, 0.0],
-                            egui::Label::new(
-                                SettingsValueKind::AiModel
-                                    .current_text(&settings, &animation_control),
-                            ),
-                        );
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("Base URL");
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut input_state.ai_base_url)
-                                .desired_width(f32::INFINITY),
-                        );
-                        if response.changed() {
-                            let _ = SettingsValueKind::AiBaseUrl
-                                .apply_input(input_state.ai_base_url.trim(), &mut settings);
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("API Key");
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut input_state.ai_api_key)
-                                .password(true)
-                                .desired_width(f32::INFINITY),
-                        );
-                        if response.changed() {
-                            let _ = SettingsValueKind::AiApiKey
-                                .apply_input(input_state.ai_api_key.trim(), &mut settings);
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("Chat Input");
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut input_state.ai_chat_input)
-                                .desired_width(f32::INFINITY)
-                                .hint_text("message to AI"),
-                        );
-                        let send_clicked = ui.button("Send").clicked();
-                        if response.changed() {
-                            let _ = SettingsValueKind::AiChatInput
-                                .apply_input(input_state.ai_chat_input.as_str(), &mut settings);
-                        }
-                        let send_with_enter =
-                            response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        if send_clicked || send_with_enter {
-                            let _ = SettingsValueKind::AiChatInput
-                                .apply_input(input_state.ai_chat_input.as_str(), &mut settings);
-                            apply_action(
-                                SettingsButtonAction::SendAiChat,
-                                &mut settings,
-                                &mut animation_control,
-                                &mut ai_request_writer,
-                            );
-                            input_state.ai_chat_input.clear();
-                        }
-                    });
-
-                    ui.separator();
-                    ui.label("Memory Settings");
-
-                    ui.horizontal(|ui| {
-                        let memory_checked = ui
-                            .checkbox(
-                                &mut input_state.ai_memory_enabled,
-                                "Enable Long-term Memory",
-                            )
-                            .clicked();
-                        if memory_checked {
-                            input_state.ai_memory_enabled = !input_state.ai_memory_enabled;
-                            settings.ai.memory.enabled = input_state.ai_memory_enabled;
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("Embedding Provider");
-                        let mut current_provider = input_state.ai_embedding_provider.clone();
-                        egui::ComboBox::from_id_salt("embedding_provider")
-                            .selected_text(&current_provider)
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut current_provider,
-                                    "api".to_string(),
-                                    "API (OpenAI-compatible)",
-                                );
-                                ui.selectable_value(
-                                    &mut current_provider,
-                                    "local".to_string(),
-                                    "Local (GGUF / Candle)",
-                                );
-                            });
-                        if current_provider != input_state.ai_embedding_provider {
-                            input_state.ai_embedding_provider = current_provider.clone();
-                            settings.ai.memory.embedding_provider_type =
-                                match current_provider.as_str() {
-                                    "local" => ene_ai_core::EmbeddingProviderType::Local,
-                                    _ => ene_ai_core::EmbeddingProviderType::Api,
-                                };
-                            // Update default model when switching provider
-                            match current_provider.as_str() {
-                                "local" => {
-                                    settings.ai.memory.embedding_model =
-                                        "jina-embeddings-v5-text-nano".to_string();
-                                    settings.ai.memory.embedding_dimensions = None;
-                                    input_state.ai_embedding_model =
-                                        settings.ai.memory.embedding_model.clone();
-                                    input_state.ai_embedding_dimensions = "auto".to_string();
-                                }
-                                _ => {
-                                    settings.ai.memory.embedding_model =
-                                        "text-embedding-3-small".to_string();
-                                    settings.ai.memory.embedding_dimensions = Some(1536);
-                                    input_state.ai_embedding_model =
-                                        settings.ai.memory.embedding_model.clone();
-                                    input_state.ai_embedding_dimensions = settings
-                                        .ai
-                                        .memory
-                                        .embedding_dimensions
-                                        .map(|d| d.to_string())
-                                        .unwrap_or_default();
-                                }
-                            }
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("Model");
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut input_state.ai_embedding_model)
-                                .desired_width(f32::INFINITY),
-                        );
-                        if response.changed() {
-                            settings.ai.memory.embedding_model =
-                                input_state.ai_embedding_model.clone();
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("Dimensions");
-                        if input_state.ai_embedding_provider == "local" {
-                            ui.add_sized([100.0, 0.0], egui::Label::new("auto (from model)"));
-                        } else {
-                            let response = ui.add(
-                                egui::TextEdit::singleline(
-                                    &mut input_state.ai_embedding_dimensions,
-                                )
-                                .desired_width(100.0),
-                            );
-                            if response.changed() {
-                                if let Ok(dims) =
-                                    input_state.ai_embedding_dimensions.parse::<usize>()
-                                {
-                                    settings.ai.memory.embedding_dimensions = Some(dims);
-                                }
-                            }
-                        }
-                    });
-
-                    ui.separator();
-                    ui.label("Latest Response");
-                    egui::ScrollArea::vertical()
-                        .max_height(180.0)
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            if settings.ai_latest_response.is_empty() {
-                                ui.weak("(empty)");
-                            } else {
-                                ui.label(&settings.ai_latest_response);
-                            }
-                        });
-                });
+                render_ai_page(
+                    ui,
+                    &mut settings,
+                    &mut animation_control,
+                    &mut ai_request_writer,
+                    &mut input_state,
+                );
             }
         }
 
         ui.add_space(8.0);
         ui.separator();
         ui.small("F1: Open/Close  |  Esc: Hide  |  A/D,W/S: Char/Motion");
+    });
+}
+
+fn render_character_page(
+    ui: &mut egui::Ui,
+    settings: &mut CharacterSettings,
+    animation_control: &mut CharacterAnimationControl,
+    ai_request_writer: &mut MessageWriter<AiRequestEvent>,
+    input_state: &mut SettingsInputState,
+    emotion_queue: &mut EmotionQueue,
+    time: &Time,
+) {
+    ui.vertical(|ui| {
+        if let Some(action) = render_cycle_row(
+            ui,
+            "Character",
+            SettingsValueKind::Character,
+            settings,
+            animation_control,
+            SettingsButtonAction::PrevCharacter,
+            SettingsButtonAction::NextCharacter,
+        ) {
+            apply_action(action, settings, animation_control, ai_request_writer);
+        }
+
+        if let Some(action) = render_cycle_row(
+            ui,
+            "Motion",
+            SettingsValueKind::Motion,
+            settings,
+            animation_control,
+            SettingsButtonAction::PrevMotion,
+            SettingsButtonAction::NextMotion,
+        ) {
+            apply_action(action, settings, animation_control, ai_request_writer);
+        }
+
+        if let Some(action) = render_toggle_row(
+            ui,
+            "Animation",
+            SettingsValueKind::AnimationState,
+            settings,
+            animation_control,
+            SettingsButtonAction::TogglePlay,
+        ) {
+            apply_action(action, settings, animation_control, ai_request_writer);
+        }
+
+        if cfg!(target_os = "linux") {
+            if let Some(action) = render_toggle_row(
+                ui,
+                "Debug Overlay",
+                SettingsValueKind::DebugOverlay,
+                settings,
+                animation_control,
+                SettingsButtonAction::ToggleDebugOverlay,
+            ) {
+                apply_action(action, settings, animation_control, ai_request_writer);
+            }
+
+            if let Some(action) = render_cycle_row(
+                ui,
+                "Mask Downsample",
+                SettingsValueKind::MaskRenderDownsample,
+                settings,
+                animation_control,
+                SettingsButtonAction::MaskDownsampleDown,
+                SettingsButtonAction::MaskDownsampleUp,
+            ) {
+                apply_action(action, settings, animation_control, ai_request_writer);
+            }
+        }
+
+        if let Some(action) = render_numeric_row(
+            ui,
+            "LookAt Strength",
+            &mut input_state.look_at_strength,
+            SettingsValueKind::LookAtStrength,
+            settings,
+            SettingsButtonAction::LookAtStrengthDown,
+            SettingsButtonAction::LookAtStrengthUp,
+            |s| format!("{:.2}", s.look_at_strength),
+        ) {
+            apply_action(action, settings, animation_control, ai_request_writer);
+        }
+
+        if let Some(action) = render_numeric_row(
+            ui,
+            "Model Scale",
+            &mut input_state.model_scale,
+            SettingsValueKind::ModelScale,
+            settings,
+            SettingsButtonAction::ModelScaleDown,
+            SettingsButtonAction::ModelScaleUp,
+            |s| format!("{:.2}", s.model_scale),
+        ) {
+            apply_action(action, settings, animation_control, ai_request_writer);
+        }
+
+        if let Some(action) = render_numeric_row(
+            ui,
+            "Character Pos X",
+            &mut input_state.character_pos_x,
+            SettingsValueKind::CharacterPositionX,
+            settings,
+            SettingsButtonAction::CharacterPosXDown,
+            SettingsButtonAction::CharacterPosXUp,
+            |s| format!("{:+.2}", s.character_position.x),
+        ) {
+            apply_action(action, settings, animation_control, ai_request_writer);
+        }
+
+        if let Some(action) = render_numeric_row(
+            ui,
+            "Character Pos Y",
+            &mut input_state.character_pos_y,
+            SettingsValueKind::CharacterPositionY,
+            settings,
+            SettingsButtonAction::CharacterPosYDown,
+            SettingsButtonAction::CharacterPosYUp,
+            |s| format!("{:+.2}", s.character_position.y),
+        ) {
+            apply_action(action, settings, animation_control, ai_request_writer);
+        }
+
+        if let Some(action) = render_numeric_row(
+            ui,
+            "Character Pos Z",
+            &mut input_state.character_pos_z,
+            SettingsValueKind::CharacterPositionZ,
+            settings,
+            SettingsButtonAction::CharacterPosZDown,
+            SettingsButtonAction::CharacterPosZUp,
+            |s| format!("{:+.2}", s.character_position.z),
+        ) {
+            apply_action(action, settings, animation_control, ai_request_writer);
+        }
+
+        ui.separator();
+        ui.label("Manual Expressions (Test)");
+        ui.horizontal(|ui| {
+            for emotion in ["happy", "sad", "angry", "relaxed", "surprised", "neutral"] {
+                if ui.button(emotion).clicked() {
+                    emotion_queue.commands.push_back(EmotionCommand {
+                        emotion: emotion.to_string(),
+                        target_time: time.elapsed_secs_f64(),
+                        hold_secs: 4.0,
+                    });
+                }
+            }
+        });
+    });
+}
+
+fn render_graphics_page(
+    ui: &mut egui::Ui,
+    settings: &mut CharacterSettings,
+    animation_control: &mut CharacterAnimationControl,
+    ai_request_writer: &mut MessageWriter<AiRequestEvent>,
+) {
+    ui.vertical(|ui| {
+        if let Some(action) = render_cycle_row(
+            ui,
+            "Target FPS",
+            SettingsValueKind::TargetFps,
+            settings,
+            animation_control,
+            SettingsButtonAction::TargetFpsDown,
+            SettingsButtonAction::TargetFpsUp,
+        ) {
+            apply_action(action, settings, animation_control, ai_request_writer);
+        }
+
+        if let Some(action) = render_cycle_row(
+            ui,
+            "Shadow Quality",
+            SettingsValueKind::ShadowQuality,
+            settings,
+            animation_control,
+            SettingsButtonAction::ShadowQualityDown,
+            SettingsButtonAction::ShadowQualityUp,
+        ) {
+            apply_action(action, settings, animation_control, ai_request_writer);
+        }
+
+        if let Some(action) = render_cycle_row(
+            ui,
+            "Antialiasing",
+            SettingsValueKind::AntialiasingMode,
+            settings,
+            animation_control,
+            SettingsButtonAction::AntialiasingModeDown,
+            SettingsButtonAction::AntialiasingModeUp,
+        ) {
+            apply_action(action, settings, animation_control, ai_request_writer);
+        }
+    });
+}
+
+fn render_ai_page(
+    ui: &mut egui::Ui,
+    settings: &mut CharacterSettings,
+    animation_control: &mut CharacterAnimationControl,
+    ai_request_writer: &mut MessageWriter<AiRequestEvent>,
+    input_state: &mut SettingsInputState,
+) {
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            ui.label("Character Card");
+            ui.add_sized(
+                [220.0, 0.0],
+                egui::Label::new(settings.current_character_card()),
+            );
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("User Name");
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut input_state.ai_user_name)
+                    .desired_width(f32::INFINITY),
+            );
+            if response.changed() {
+                let _ = SettingsValueKind::AiUserName
+                    .apply_input(input_state.ai_user_name.trim(), settings);
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Runtime Rules");
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut input_state.ai_runtime_rules)
+                    .desired_width(f32::INFINITY),
+            );
+            if response.changed() {
+                let _ = SettingsValueKind::AiRuntimeRules
+                    .apply_input(&input_state.ai_runtime_rules, settings);
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Provider Name");
+            ui.add_sized(
+                [280.0, 0.0],
+                egui::Label::new(
+                    SettingsValueKind::AiProviderName
+                        .current_text(settings, animation_control),
+                ),
+            );
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Model");
+            ui.add_sized(
+                [280.0, 0.0],
+                egui::Label::new(
+                    SettingsValueKind::AiModel
+                        .current_text(settings, animation_control),
+                ),
+            );
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Base URL");
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut input_state.ai_base_url)
+                    .desired_width(f32::INFINITY),
+            );
+            if response.changed() {
+                let _ = SettingsValueKind::AiBaseUrl
+                    .apply_input(input_state.ai_base_url.trim(), settings);
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("API Key");
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut input_state.ai_api_key)
+                    .password(true)
+                    .desired_width(f32::INFINITY),
+            );
+            if response.changed() {
+                let _ = SettingsValueKind::AiApiKey
+                    .apply_input(input_state.ai_api_key.trim(), settings);
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Chat Input");
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut input_state.ai_chat_input)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("message to AI"),
+            );
+            let send_clicked = ui.button("Send").clicked();
+            if response.changed() {
+                let _ = SettingsValueKind::AiChatInput
+                    .apply_input(input_state.ai_chat_input.as_str(), settings);
+            }
+            let send_with_enter =
+                response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if send_clicked || send_with_enter {
+                let _ = SettingsValueKind::AiChatInput
+                    .apply_input(input_state.ai_chat_input.as_str(), settings);
+                apply_action(
+                    SettingsButtonAction::SendAiChat,
+                    settings,
+                    animation_control,
+                    ai_request_writer,
+                );
+                input_state.ai_chat_input.clear();
+            }
+        });
+
+        ui.separator();
+        ui.label("Memory Settings");
+
+        ui.horizontal(|ui| {
+            let mut checked = input_state.ai_memory_enabled;
+            ui.checkbox(&mut checked, "Enable Long-term Memory");
+            if checked != input_state.ai_memory_enabled {
+                input_state.ai_memory_enabled = checked;
+                settings.ai.memory.enabled = checked;
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Embedding Provider");
+            let mut current_provider = input_state.ai_embedding_provider.clone();
+            egui::ComboBox::from_id_salt("embedding_provider")
+                .selected_text(&current_provider)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut current_provider,
+                        "api".to_string(),
+                        "API (OpenAI-compatible)",
+                    );
+                    ui.selectable_value(
+                        &mut current_provider,
+                        "local".to_string(),
+                        "Local (GGUF / Candle)",
+                    );
+                });
+            if current_provider != input_state.ai_embedding_provider {
+                input_state.ai_embedding_provider = current_provider.clone();
+                settings.ai.memory.embedding_provider_type =
+                    match current_provider.as_str() {
+                        "local" => ene_ai_core::EmbeddingProviderType::Local,
+                        _ => ene_ai_core::EmbeddingProviderType::Api,
+                    };
+                match current_provider.as_str() {
+                    "local" => {
+                        settings.ai.memory.embedding_model =
+                            "jina-embeddings-v5-text-nano".to_string();
+                        settings.ai.memory.embedding_dimensions = None;
+                        input_state.ai_embedding_model =
+                            settings.ai.memory.embedding_model.clone();
+                        input_state.ai_embedding_dimensions = "auto".to_string();
+                    }
+                    _ => {
+                        settings.ai.memory.embedding_model =
+                            "text-embedding-3-small".to_string();
+                        settings.ai.memory.embedding_dimensions = Some(1536);
+                        input_state.ai_embedding_model =
+                            settings.ai.memory.embedding_model.clone();
+                        input_state.ai_embedding_dimensions = settings
+                            .ai
+                            .memory
+                            .embedding_dimensions
+                            .map(|d| d.to_string())
+                            .unwrap_or_default();
+                    }
+                }
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Model");
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut input_state.ai_embedding_model)
+                    .desired_width(f32::INFINITY),
+            );
+            if response.changed() {
+                settings.ai.memory.embedding_model =
+                    input_state.ai_embedding_model.clone();
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Dimensions");
+            if input_state.ai_embedding_provider == "local" {
+                ui.add_sized([100.0, 0.0], egui::Label::new("auto (from model)"));
+            } else {
+                let response = ui.add(
+                    egui::TextEdit::singleline(
+                        &mut input_state.ai_embedding_dimensions,
+                    )
+                    .desired_width(100.0),
+                );
+                if response.changed() {
+                    if let Ok(dims) =
+                        input_state.ai_embedding_dimensions.parse::<usize>()
+                    {
+                        settings.ai.memory.embedding_dimensions = Some(dims);
+                    }
+                }
+            }
+        });
+
+        ui.separator();
+        ui.label("Latest Response");
+        egui::ScrollArea::vertical()
+            .max_height(180.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                if settings.ai_latest_response.is_empty() {
+                    ui.weak("(empty)");
+                } else {
+                    ui.label(&settings.ai_latest_response);
+                }
+            });
     });
 }
 
@@ -1118,137 +934,6 @@ fn apply_settings_window_visibility(
     if let Some(window_entity) = window_entities.window.take() {
         commands.entity(window_entity).despawn();
     }
-}
-
-fn apply_action(
-    action: SettingsButtonAction,
-    settings: &mut CharacterSettings,
-    animation_control: &mut CharacterAnimationControl,
-    ai_request_writer: &mut MessageWriter<AiRequestEvent>,
-) {
-    match action {
-        SettingsButtonAction::PrevCharacter => {
-            settings.selected_character =
-                cycle_index(settings.selected_character, settings.characters.len(), -1);
-            settings.selected_motion = 0;
-            settings.sync_card_path();
-            settings.needs_respawn = true;
-        }
-        SettingsButtonAction::NextCharacter => {
-            settings.selected_character =
-                cycle_index(settings.selected_character, settings.characters.len(), 1);
-            settings.selected_motion = 0;
-            settings.sync_card_path();
-            settings.needs_respawn = true;
-        }
-        SettingsButtonAction::PrevMotion => {
-            settings.selected_motion = cycle_index(
-                settings.selected_motion,
-                settings.current_entry().motion_paths.len(),
-                -1,
-            );
-            settings.needs_respawn = true;
-        }
-        SettingsButtonAction::NextMotion => {
-            settings.selected_motion = cycle_index(
-                settings.selected_motion,
-                settings.current_entry().motion_paths.len(),
-                1,
-            );
-            settings.needs_respawn = true;
-        }
-        SettingsButtonAction::TogglePlay => {
-            animation_control.toggle_playing();
-        }
-        SettingsButtonAction::ToggleDebugOverlay => {
-            settings.debug_overlay_visible = !settings.debug_overlay_visible;
-        }
-        SettingsButtonAction::MaskDownsampleDown => {
-            settings.mask_render_downsample =
-                cycle_mask_render_downsample(settings.mask_render_downsample, -1);
-        }
-        SettingsButtonAction::MaskDownsampleUp => {
-            settings.mask_render_downsample =
-                cycle_mask_render_downsample(settings.mask_render_downsample, 1);
-        }
-        SettingsButtonAction::TargetFpsDown => {
-            settings.target_fps = cycle_target_fps(settings.target_fps, -1);
-        }
-        SettingsButtonAction::TargetFpsUp => {
-            settings.target_fps = cycle_target_fps(settings.target_fps, 1);
-        }
-        SettingsButtonAction::ShadowQualityDown => {
-            settings.shadow_quality = cycle_shadow_quality(settings.shadow_quality, -1);
-        }
-        SettingsButtonAction::ShadowQualityUp => {
-            settings.shadow_quality = cycle_shadow_quality(settings.shadow_quality, 1);
-        }
-        SettingsButtonAction::AntialiasingModeDown => {
-            settings.antialiasing_mode = cycle_antialiasing_mode(settings.antialiasing_mode, -1);
-        }
-        SettingsButtonAction::AntialiasingModeUp => {
-            settings.antialiasing_mode = cycle_antialiasing_mode(settings.antialiasing_mode, 1);
-        }
-        SettingsButtonAction::LookAtStrengthDown => {
-            adjust_f32(&mut settings.look_at_strength, -0.05);
-        }
-        SettingsButtonAction::LookAtStrengthUp => {
-            adjust_f32(&mut settings.look_at_strength, 0.05);
-        }
-        SettingsButtonAction::ModelScaleDown => {
-            adjust_f32(&mut settings.model_scale, -0.05);
-        }
-        SettingsButtonAction::ModelScaleUp => {
-            adjust_f32(&mut settings.model_scale, 0.05);
-        }
-        SettingsButtonAction::CharacterPosXDown => {
-            adjust_f32(&mut settings.character_position.x, -0.05);
-        }
-        SettingsButtonAction::CharacterPosXUp => {
-            adjust_f32(&mut settings.character_position.x, 0.05);
-        }
-        SettingsButtonAction::CharacterPosYDown => {
-            adjust_f32(&mut settings.character_position.y, -0.05);
-        }
-        SettingsButtonAction::CharacterPosYUp => {
-            adjust_f32(&mut settings.character_position.y, 0.05);
-        }
-        SettingsButtonAction::CharacterPosZDown => {
-            adjust_f32(&mut settings.character_position.z, -0.05);
-        }
-        SettingsButtonAction::CharacterPosZUp => {
-            adjust_f32(&mut settings.character_position.z, 0.05);
-        }
-        SettingsButtonAction::SendAiChat => {
-            send_ai_request(settings, ai_request_writer);
-        }
-    }
-
-    settings.clamp_runtime_values();
-}
-
-fn send_ai_request(
-    settings: &mut CharacterSettings,
-    ai_request_writer: &mut MessageWriter<AiRequestEvent>,
-) {
-    let user_input = settings.ai_chat_input.trim();
-    if user_input.is_empty() {
-        return;
-    }
-
-    ai_request_writer.write(AiRequestEvent {
-        user_input: user_input.to_string(),
-    });
-    settings.ai_chat_input.clear();
-    settings.ai_latest_response.clear();
-}
-
-fn cycle_index(index: usize, len: usize, step: isize) -> usize {
-    ((index as isize + step).rem_euclid(len as isize)) as usize
-}
-
-fn adjust_f32(value: &mut f32, delta: f32) {
-    *value += delta;
 }
 
 fn apply_ai_stream_events(

@@ -68,7 +68,7 @@ async fn handle_split(ctx: &mut AppContext) {
         "{}",
         style::header("[Session] 手動でセッションを分割しています...")
     );
-    let reason = SplitReason::Timeout { elapsed_minutes: 0 };
+    let reason = SplitReason::Manual;
     match execute_split(
         &ctx.session.conversation_history,
         &ctx.session.session_id,

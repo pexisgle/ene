@@ -19,7 +19,7 @@ pub async fn run(settings: &AiSettings, session: &ConversationSession, prompt_ov
     } else {
         let mut fresh = ConversationSession::new();
         let assets_dir = ene_ai_core::paths::assets_dir();
-        let card_path = format!("{}/characters/Alicia/charactor.json", assets_dir.display());
+        let card_path = format!("{}/characters/Alicia/character.json", assets_dir.display());
         if let Err(_err) = fresh.load_card(&sandbox_settings.character_card_path) {
             if let Err(err2) = fresh.load_card(&card_path) {
                 println!("Warning: Failed to load default card: {}", err2);
@@ -38,7 +38,7 @@ pub async fn run(settings: &AiSettings, session: &ConversationSession, prompt_ov
             stream::process_stream(stream, &mut sandbox_session).await;
         }
         Err(err) => {
-            println!("[Error] Failed to start stream: {}", err);
+            eprintln!("[Error] Failed to start stream: {}", err);
         }
     }
 }

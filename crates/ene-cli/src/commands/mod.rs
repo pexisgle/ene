@@ -21,9 +21,10 @@ pub async fn execute(input: &str, ctx: &mut AppContext) {
         "/help" => handle_help(),
         "/tools" => handle_tools(ctx),
         "/undo" => handle_undo(ctx).await,
+        "/tooltest" => handle_tooltest(arg, ctx).await,
         "/memory" => memory::execute(arg, ctx).await,
         "/session" => session::execute(arg, ctx).await,
-        _ => println!("Unknown command: {}", cmd),
+        _ => eprintln!("Unknown command: {}", cmd),
     }
 }
 
@@ -42,7 +43,7 @@ fn handle_prompt(ctx: &AppContext) {
 
         if !ctx.session.conversation_history.is_empty() && !card.data.mes_example.trim().is_empty()
         {
-            println!("--- Example Messages (shown when history is empty) ---");
+            println!("--- Example Messages ---");
             let ex = ene_ai_core::character_card::expand_cbs_macros(
                 &card.data.mes_example,
                 card.data.get_character_name(),
@@ -127,8 +128,9 @@ fn handle_card(arg: &str, ctx: &mut AppContext) {
                     exprs.len()
                 );
                 ctx.settings.character_card_path = arg.to_string();
+                save_config(ctx);
             }
-            Err(e) => println!("Failed to load card: {}", e),
+            Err(e) => eprintln!("Failed to load card: {}", e),
         }
     }
 }
@@ -197,6 +199,29 @@ fn handle_tools(ctx: &AppContext) {
 async fn handle_undo(ctx: &mut AppContext) {
     match ctx.registry.call_tool("undo", "{}").await {
         Ok(result) => println!("{}", style::success(format!("[Undo] {}", result))),
-        Err(e) => println!("{}", style::error(format!("[Undo Failed] {}", e))),
+        Err(e) => eprintln!("{}", style::error(format!("[Undo Failed] {}", e))),
+    }
+}
+
+async fn handle_tooltest(arg: &str, ctx: &mut AppContext) {
+    let prompt = if arg.trim().is_empty() {
+        "Use the get_current_time tool and reply with the time only.".to_string()
+    } else {
+        arg.trim().to_string()
+    };
+    println!("{}", style::header(format!("[ToolTest] Running: {}", prompt)));
+    crate::tooltest::run(&ctx.settings, &ctx.session, &prompt).await;
+}
+
+fn save_config(ctx: &AppContext) {
+    let config_path = ene_ai_core::paths::config_file_path();
+    if let Some(parent) = config_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let config = serde_json::json!({
+        "ai": ctx.settings,
+    });
+    if let Err(e) = std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap_or_default()) {
+        eprintln!("[Config] Failed to save settings: {}", e);
     }
 }

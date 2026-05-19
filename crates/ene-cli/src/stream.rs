@@ -89,7 +89,7 @@ where
                 );
             }
             AiStreamEvent::Error(err) => {
-                println!("\n[Error] {}", err);
+                eprintln!("\n[Error] {}", err);
             }
             AiStreamEvent::SpecialToken(_) => {}
         }
