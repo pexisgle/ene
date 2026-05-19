@@ -81,59 +81,42 @@ impl AntialiasingMode {
 }
 
 pub fn normalize_mask_render_downsample(value: u32) -> u32 {
-    MASK_RENDER_DOWNSAMPLE_CHOICES
-        .into_iter()
-        .min_by_key(|candidate| candidate.abs_diff(value))
-        .unwrap_or(DEFAULT_MASK_RENDER_DOWNSAMPLE)
+    cycle_choice(&MASK_RENDER_DOWNSAMPLE_CHOICES, value, 0, DEFAULT_MASK_RENDER_DOWNSAMPLE)
 }
 
 pub fn cycle_mask_render_downsample(current: u32, step: isize) -> u32 {
-    let current = normalize_mask_render_downsample(current);
-    let index = MASK_RENDER_DOWNSAMPLE_CHOICES
-        .iter()
-        .position(|candidate| *candidate == current)
-        .unwrap_or(1);
-    let len = MASK_RENDER_DOWNSAMPLE_CHOICES.len() as isize;
-    let next_index = (index as isize + step).rem_euclid(len) as usize;
-    MASK_RENDER_DOWNSAMPLE_CHOICES[next_index]
+    cycle_choice(&MASK_RENDER_DOWNSAMPLE_CHOICES, current, step, DEFAULT_MASK_RENDER_DOWNSAMPLE)
 }
 
 pub fn normalize_target_fps(value: u32) -> u32 {
-    TARGET_FPS_CHOICES
-        .into_iter()
-        .min_by_key(|candidate| candidate.abs_diff(value))
-        .unwrap_or(DEFAULT_TARGET_FPS)
+    cycle_choice(&TARGET_FPS_CHOICES, value, 0, DEFAULT_TARGET_FPS)
 }
 
 pub fn cycle_target_fps(current: u32, step: isize) -> u32 {
-    let current = normalize_target_fps(current);
-    let index = TARGET_FPS_CHOICES
-        .iter()
-        .position(|candidate| *candidate == current)
-        .unwrap_or(1);
-    let len = TARGET_FPS_CHOICES.len() as isize;
-    let next_index = (index as isize + step).rem_euclid(len) as usize;
-    TARGET_FPS_CHOICES[next_index]
+    cycle_choice(&TARGET_FPS_CHOICES, current, step, DEFAULT_TARGET_FPS)
 }
 
 pub fn cycle_shadow_quality(current: ShadowQuality, step: isize) -> ShadowQuality {
-    let index = SHADOW_QUALITY_CHOICES
-        .iter()
-        .position(|candidate| *candidate == current)
-        .unwrap_or(1);
-    let len = SHADOW_QUALITY_CHOICES.len() as isize;
-    let next_index = (index as isize + step).rem_euclid(len) as usize;
-    SHADOW_QUALITY_CHOICES[next_index]
+    cycle_choice(&SHADOW_QUALITY_CHOICES, current, step, DEFAULT_SHADOW_QUALITY)
 }
 
 pub fn cycle_antialiasing_mode(current: AntialiasingMode, step: isize) -> AntialiasingMode {
-    let index = ANTIALIASING_MODE_CHOICES
+    cycle_choice(&ANTIALIASING_MODE_CHOICES, current, step, DEFAULT_ANTIALIASING_MODE)
+}
+
+fn cycle_choice<T: Copy + PartialEq>(
+    choices: &[T],
+    current: T,
+    step: isize,
+    _default: T,
+) -> T {
+    let index = choices
         .iter()
         .position(|candidate| *candidate == current)
         .unwrap_or(1);
-    let len = ANTIALIASING_MODE_CHOICES.len() as isize;
+    let len = choices.len() as isize;
     let next_index = (index as isize + step).rem_euclid(len) as usize;
-    ANTIALIASING_MODE_CHOICES[next_index]
+    choices[next_index]
 }
 
 pub fn target_fps_label(target_fps: u32) -> String {
@@ -215,7 +198,7 @@ pub struct CharacterSettings {
 }
 
 impl CharacterSettings {
-    pub fn discover(assets_dir: &Path, default_vrm: String, _default_vrma: String) -> Self {
+    pub fn discover(assets_dir: &Path, default_vrm: String) -> Self {
         let mut characters = discover_characters(assets_dir);
 
         if characters.is_empty() {
@@ -224,7 +207,7 @@ impl CharacterSettings {
                 folder: DEFAULT_CHARACTER_NAME.to_string(),
                 vrm_paths: vec![DEFAULT_VRM_PATH.to_string()],
                 motion_paths: vec![DEFAULT_VRMA_PATH.to_string()],
-                card_path: format!("characters/{}/charactor.json", DEFAULT_CHARACTER_NAME),
+                card_path: format!("characters/{}/character.json", DEFAULT_CHARACTER_NAME),
                 default_motion: None,
             });
         }
@@ -234,7 +217,7 @@ impl CharacterSettings {
             .position(|c| c.vrm_paths.iter().any(|v| v == &default_vrm))
             .unwrap_or(0);
 
-        let default_card_path = format!("characters/{}/charactor.json", DEFAULT_CHARACTER_NAME);
+        let default_card_path = format!("characters/{}/character.json", DEFAULT_CHARACTER_NAME);
         let selected_card_path = characters
             .get(selected_character)
             .map(|c| c.card_path.clone())
@@ -411,6 +394,9 @@ impl AppSettings {
     }
 
     fn apply_to(&self, s: &mut CharacterSettings) {
+        if self.version > CONFIG_VERSION {
+            eprintln!("[Config] Config version {} is newer than supported version {}; loading with defaults", self.version, CONFIG_VERSION);
+        }
         if !self.character.selected_character_name.is_empty() {
             if let Some(idx) = s
                 .characters
@@ -459,12 +445,16 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
             continue;
         }
         let folder = path.file_name().unwrap().to_string_lossy().to_string();
-        let card_path = path.join("charactor.json");
+        let card_path = path.join("character.json")
+            .exists()
+            .then(|| path.join("character.json"))
+            .or_else(|| path.join("charactor.json").exists().then(|| path.join("charactor.json")))
+            .unwrap_or_else(|| path.join("character.json"));
         if !card_path.exists() {
             continue;
         }
         let (name, default_motion) =
-            read_charactor_json_meta(&card_path).unwrap_or((folder.clone(), None));
+            read_character_json_meta(&card_path).unwrap_or((folder.clone(), None));
 
         let mut vrm_paths = Vec::new();
         let mut motion_paths = Vec::new();
@@ -515,7 +505,7 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
             folder: folder.clone(),
             vrm_paths,
             motion_paths,
-            card_path: format!("characters/{}/charactor.json", folder),
+            card_path: format!("characters/{}/character.json", folder),
             default_motion,
         };
         out.push(entry);
@@ -524,7 +514,7 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
     out
 }
 
-fn read_charactor_json_meta(path: &Path) -> Option<(String, Option<String>)> {
+fn read_character_json_meta(path: &Path) -> Option<(String, Option<String>)> {
     let content = fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
     let name = v.get("data")?.get("name")?.as_str()?.to_string();

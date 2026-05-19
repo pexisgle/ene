@@ -1,4 +1,5 @@
 use super::store::RecalledSummary;
+use crate::utils::truncate;
 use chrono::Utc;
 
 /// 過去の会話要約をプロンプトに注入するテキストブロックに整形する
@@ -16,7 +17,7 @@ pub fn format_summaries_for_prompt(summaries: &[RecalledSummary]) -> String {
         lines.push(format!(
             "- ({}) Summary: {}",
             age,
-            truncate_str(&s.entry.summary, 300)
+            truncate(&s.entry.summary, 300)
         ));
     }
 
@@ -48,18 +49,6 @@ fn format_age(dur: chrono::Duration) -> String {
         } else {
             format!("{} days ago", days)
         }
-    }
-}
-
-fn truncate_str(s: &str, max_chars: usize) -> &str {
-    if s.chars().count() <= max_chars {
-        s
-    } else {
-        let mut idx = 0;
-        for (i, _) in s.char_indices().take(max_chars) {
-            idx = i;
-        }
-        &s[..idx]
     }
 }
 

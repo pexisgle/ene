@@ -26,7 +26,7 @@ pub fn init() -> (AiSettings, ConversationSession) {
 
     if settings.character_card_path.is_empty() {
         settings.character_card_path =
-            format!("{}/characters/Alicia/charactor.json", assets_dir.display());
+            format!("{}/characters/Alicia/character.json", assets_dir.display());
     }
 
     let mut session = ConversationSession::new();
