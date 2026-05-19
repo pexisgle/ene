@@ -18,6 +18,7 @@ pub enum SessionBoundary {
 pub enum SplitReason {
     Timeout { elapsed_minutes: u64 },
     TopicChange { similarity: f32 },
+    Manual,
 }
 
 impl std::fmt::Display for SplitReason {
@@ -28,6 +29,9 @@ impl std::fmt::Display for SplitReason {
             }
             SplitReason::TopicChange { similarity } => {
                 write!(f, "トピック変更を検出 (類似度: {:.2})", similarity)
+            }
+            SplitReason::Manual => {
+                write!(f, "手動により会話を分割")
             }
         }
     }

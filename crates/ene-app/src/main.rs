@@ -24,8 +24,8 @@ use window_drag::WindowDragPlugin;
 
 fn main() {
     let assets_dir = resources::ensure_resource_dirs();
-    let (default_vrm, default_vrma) = app_config::read_cli_paths();
-    let settings = CharacterSettings::discover(&assets_dir, default_vrm, default_vrma);
+    let (default_vrm, _default_vrma) = app_config::read_cli_paths();
+    let settings = CharacterSettings::discover(&assets_dir, default_vrm);
 
     App::new()
         .insert_resource(settings)
