@@ -7,7 +7,6 @@ use std::sync::Arc;
 /// ```ignore
 /// let registry = ToolRegistryBuilder::new()
 ///     .with_builtin()
-///     .with_screenshot(50)
 ///     .with_sandbox(sandbox_config)
 ///     .build();
 /// ```
@@ -27,13 +26,6 @@ impl ToolRegistryBuilder {
     pub fn with_builtin(mut self) -> Self {
         self.registries
             .push(Box::new(crate::tools::utility::builtin::BuiltinToolRegistry::new()));
-        self
-    }
-
-    pub fn with_screenshot(mut self, scale_percent: u32) -> Self {
-        self.registries.push(Box::new(
-            crate::tools::utility::screenshot::ScreenshotToolRegistry::new(scale_percent),
-        ));
         self
     }
 

@@ -34,7 +34,7 @@ pub use session::ConversationSession;
 pub use stream::{AiStreamEvent, run_ai_with_tools};
 pub use tool_factory::ToolRegistryBuilder;
 pub use tools::{
-    BuiltinToolRegistry, CompositeToolRegistry, ScreenshotToolRegistry, ToolCallResult,
+    BuiltinToolRegistry, CompositeToolRegistry, ToolCallResult,
     ToolCategory, ToolDefinition, ToolRegistry, UndoEntry, UndoManager, UndoOperation, backup_file,
 };
 pub use utils::{init_memory, truncate};

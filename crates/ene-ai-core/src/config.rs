@@ -17,8 +17,6 @@ pub struct AiSettings {
 
     pub memory: AiMemorySettings,
 
-    pub screenshot_scale_percent: u32,
-
     pub sandbox: AiSandboxSettings,
 }
 
@@ -202,7 +200,6 @@ impl Default for AiSettings {
             max_tool_call_rounds: 10,
             mcp_servers: Vec::new(),
             memory: AiMemorySettings::default(),
-            screenshot_scale_percent: 50,
             sandbox: AiSandboxSettings::default(),
         }
     }
