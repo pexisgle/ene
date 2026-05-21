@@ -10,3 +10,5 @@ assets/models/
 # Runtime database files
 **/memory.db
 memory:
+
+.env
