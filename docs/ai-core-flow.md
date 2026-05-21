@@ -10,9 +10,16 @@ Ene の AI-Core は、LLM との対話、ツール呼び出し、長期記憶、
 
 ```
 crates/
-├── ene-ai-core/    # AI コアライブラリ（LLM連携、ツール、記憶、サンドボックス）
-├── ene-app/        # Bevy ベースの GUI デスクトップアプリ（VRM キャラクターオーバーレイ）
-└── ene-cli/        # テスト・直接AI対話用インタラクティブCLI
+├── ene-ai-core/        # AI コアライブラリ（LLM連携、ツールホスト管理、記憶、サンドボックス）
+├── ene-app/            # Bevy ベースの GUI デスクトップアプリ（VRM キャラクターオーバーレイ）
+├── ene-cli/            # テスト・直接AI対話用インタラクティブCLI
+├── ene-tool-proto/     # IPC プロトコル・SDK（ToolProvider trait, run_tool_server, UDS 通信）
+└── ene-tools/          # 個別ツールバイナリ（IPC 経由で ene-ai-core と通信）
+    ├── app/            # GUI 自動化ツールバイナリ
+    ├── browser/        # ブラウザ自動化ツールバイナリ
+    ├── fs/             # ファイルシステムツールバイナリ
+    ├── utility/        # ユーティリティツールバイナリ
+    └── web/            # Web検索・フェッチツールバイナリ
 ```
 
 ---
@@ -50,14 +57,20 @@ graph TB
     end
 
     subgraph Tools
-        ToolRegistry["ToolRegistry Trait"]
-        ToolRegistryBuilder["ToolRegistryBuilder<br/>（tool_factory）"]
-        BuiltinTools["BuiltinToolRegistry<br/>（時間・システム情報）"]
-        OpencodeTools["OpencodeToolRegistry<br/>（filesystem/shell/browser/app/web等）"]
-        ScreenshotTools["ScreenshotToolRegistry<br/>（スクリーンキャプチャ）"]
+        ToolHostMgr["ToolHostManager<br/>（バイナリ発見・起動・監視）"]
+        IpcReg["IpcToolRegistry<br/>（各ツールバイナリとIPC通信）"]
+        CompReg["CompositeToolRegistry<br/>（IPC + MCP + Screenshot統合）"]
         McpTools["McpToolRegistry<br/>（外部MCPサーバー）"]
-        CompositeTools["CompositeToolRegistry<br/>（統合レジストリ）"]
+        ScreenshotTools["ScreenshotToolRegistry<br/>（スクリーンキャプチャ）"]
         UndoManager["UndoManager<br/>（ファイル操作取り消し）"]
+    end
+
+    subgraph ToolBinaries["ツールバイナリ（別プロセス）"]
+        FsBin["ene-tools-fs<br/>（ファイルシステム）"]
+        WebBin["ene-tools-web<br/>（Web検索/フェッチ）"]
+        UtilityBin["ene-tools-utility<br/>（ユーティリティ）"]
+        AppBin["ene-tools-app<br/>（GUI自動化）"]
+        BrowserBin["ene-tools-browser<br/>（ブラウザ自動化）"]
     end
 
     subgraph Sandbox
@@ -74,7 +87,7 @@ graph TB
     PromptBuilder <--> CharacterCard
     ConversationSession <--> StreamEngine
     StreamEngine --> PromptBuilder
-    StreamEngine --> ToolRegistry
+StreamEngine --> ToolHostMgr
     StreamEngine --> Client
     Client --> StreamEngine
 
@@ -86,20 +99,18 @@ graph TB
     GgufEmbedding --> Embedding
     Embedding --> MemoryStore
 
-    ToolRegistry --> BuiltinTools
-    ToolRegistry --> OpencodeTools
-    ToolRegistry --> ScreenshotTools
-    ToolRegistry --> McpTools
-    ToolRegistry --> CompositeTools
-    ToolRegistryBuilder --> OpencodeTools
-    OpencodeTools --> UndoManager
+    ToolHostMgr --> IpcReg
+    IpcReg --> FsBin
+    IpcReg --> WebBin
+    IpcReg --> UtilityBin
+    IpcReg --> AppBin
+    IpcReg --> BrowserBin
 
-    CompositeTools --> BuiltinTools
-    CompositeTools --> OpencodeTools
-    CompositeTools --> ScreenshotTools
-    CompositeTools --> McpTools
+    CompReg --> IpcReg
+    CompReg --> McpTools
+    CompReg --> ScreenshotTools
 
-    OpencodeTools --> SandboxConfig
+    FsBin --> SandboxConfig
     SandboxConfig --> PermissionGate
 ```
 
@@ -117,7 +128,7 @@ sequenceDiagram
     participant Stream as run_ai_with_tools()
     participant Prompt as prompt_builder
     participant LLM as LLM API
-    participant Tools as ToolRegistry
+    participant Tools as ToolRegistry<br/>（Composite → IPC）
     participant Memory as MemoryStore
     participant Consumer as コンシューマー<br/>（ai_bridge / CLI main）
 
@@ -363,7 +374,80 @@ flowchart LR
 
 ## 7. ツールシステム
 
-### 7.1 ツールレジストリ構成
+### 7.1 IPC ツールアーキテクチャ
+
+各ツール種別は独立したバイナリプロセスとして動作し、ene-ai-core とは UDS（Unix Domain Socket）経由の IPC で通信する。
+
+```mermaid
+graph LR
+    subgraph ene-ai-core
+        THM["ToolHostManager<br/>（起動・監視・クラッシュ耐性）"]
+        ITR["IpcToolRegistry<br/>（UDS通信・自動再接続）"]
+        CTR["CompositeToolRegistry<br/>（IPC + MCP + Screenshot統合）"]
+    end
+
+    subgraph ツールバイナリ
+        FS["ene-tools-fs"]
+        WB["ene-tools-web"]
+        UT["ene-tools-utility"]
+        AP["ene-tools-app"]
+        BR["ene-tools-browser"]
+    end
+
+    THM -->|"spawn &監視"| FS
+    THM -->|"spawn &監視"| WB
+    THM -->|"spawn &監視"| UT
+    THM -->|"spawn &監視"| AP
+    THM -->|"spawn &監視"| BR
+
+    ITR -->|"UDS IPC"| FS
+    ITR -->|"UDS IPC"| WB
+    ITR -->|"UDS IPC"| UT
+    ITR -->|"UDS IPC"| AP
+    ITR -->|"UDS IPC"| BR
+
+    CTR --> ITR
+```
+
+#### 起動フロー
+
+1. `ToolHostManager` が `<exe_dir>/tools/` と `app_data_dir()/tools/` からバイナリを発見
+2. `settings.json` の `tools.enabled` にリストされたツールのみ起動
+3. 各ツールバイナリは `run_tool_server()` で UDS リスナーを起動
+4. `IpcToolRegistry` が各ソケットに接続し、`Initialize` → `ListTools` → `CallTool` の順で通信
+5. 全 `IpcToolRegistry` を `CompositeToolRegistry` に統合して `ToolRegistry` trait を実装
+
+#### クラッシュ耐性
+
+- `ToolHostManager` はプロセス終了を検知すると指数バックオフで再起動（最大5回、500ms〜30s）
+- `IpcToolRegistry` は接続断時に自動再接続（最大5回、指数バックオフ）
+- 再接続時は `Initialize`（サンドボックス設定など）を再送
+- UDS ソケットパーミッションは `0600` に設定（Unix only）
+
+### 7.2 IPC プロトコル（ene-tool-proto）
+
+```mermaid
+sequenceDiagram
+    participant Core as ene-ai-core
+    participant Tool as ツールバイナリ
+
+    Core->>Tool: Connect (UDS)
+    Core->>Tool: Initialize { sandbox }
+    Tool-->>Core: Ack
+
+    Core->>Tool: ListTools
+    Tool-->>Core: Tools { definitions }
+
+    loop ツール呼び出し
+        Core->>Tool: CallTool { name, arguments }
+        Tool-->>Core: CallResult { result } / Error
+    end
+
+    Core->>Tool: SetSessionId { session_id }
+    Tool-->>Core: Ack
+```
+
+### 7.3 ツールレジストリ構成
 
 ```mermaid
 classDiagram
@@ -372,68 +456,25 @@ classDiagram
         +list_tools() Vec~ToolDefinition~
         +list_relevant_tools(query_embedding, limit) Vec~ToolDefinition~
         +call_tool(name, args) Future~Result&lt;String, String&gt;~
-        +set_session_id(session_id) "デフォルト実装: no-op"
+        +set_session_id(session_id)
         +ensure_index_built(embedder, store) Future~Result&lt;void, String&gt;~
     }
 
-    class ToolDefinition {
-        +name: String
-        +description: String
-        +parameters: Value
-        +category: ToolCategory
-        +keywords: Vec~String~
-        +embedding_text() String
+    class ToolHostManager {
+        +new(settings, sandbox)
+        +spawn_enabled_tools()
+        +processes: Vec~Arc~Mutex~ToolProcess~~
     }
+    note for ToolHostManager "バイナリ発見・起動・監視\nクラッシュ時自動再起動"
 
-    class ToolCategory {
-        <<enumeration>>
-        Filesystem
-        Shell
-        Browser
-        App
-        WebSearch
-        Utility
+    class IpcToolRegistry {
+        +socket_path: PathBuf
+        +stream: Mutex~Option~UnixStream~~
+        +tools: Mutex~Vec~ToolDefinition~~
+        +ensure_connected()
+        +send_with_reconnect()
     }
-
-    class ToolRegistryBuilder {
-        +with_builtin()
-        +with_screenshot(scale_percent)
-        +with_sandbox(config)
-        +with_sandbox_settings(settings)
-        +with_store(store)
-        +add_registry(registry)
-        +build() Arc~ToolRegistry~
-    }
-
-    class BuiltinToolRegistry {
-        +get_current_time
-        +get_system_info
-    }
-
-    class OpencodeToolRegistry {
-        -sandbox: SandboxConfig
-        -undo_manager: UndoManager
-        -session_id: String
-        -todo_store: TodoStore
-        -browser_store: BrowserSessionStore
-        +filesystem (read/write/edit/delete/glob/grep/patch)
-        +shell
-        +browser (navigate/click/type/wait/screenshot/get_content/scroll/close)
-        +app (list_windows/focus_window/type_text/press_key/mouse_move/mouse_click/clipboard)
-        +webfetch
-        +websearch (duckduckgo/tavily/brave)
-        +undo
-        +todo
-        +question
-    }
-
-    class ScreenshotToolRegistry {
-        +take_screenshot
-    }
-
-    class McpToolRegistry {
-        +dynamic_tools
-    }
+    note for IpcToolRegistry "UDS経由でツールバイナリと通信\n接続断時自動再接続"
 
     class CompositeToolRegistry {
         -registries: Vec~Box~
@@ -444,29 +485,60 @@ classDiagram
         +ensure_index_built()
     }
 
-    ToolRegistry <|.. BuiltinToolRegistry
-    ToolRegistry <|.. OpencodeToolRegistry
-    ToolRegistry <|.. ScreenshotToolRegistry
-    ToolRegistry <|.. McpToolRegistry
+    class McpToolRegistry {
+        +dynamic_tools
+    }
+
+    class ScreenshotToolRegistry {
+        +take_screenshot
+    }
+
+    ToolRegistry <|.. IpcToolRegistry
     ToolRegistry <|.. CompositeToolRegistry
-    CompositeToolRegistry *-- ToolRegistry
-    ToolRegistryBuilder --> OpencodeToolRegistry
-    ToolDefinition --> ToolCategory
+    ToolRegistry <|.. McpToolRegistry
+    ToolRegistry <|.. ScreenshotToolRegistry
+    CompositeToolRegistry *-- IpcToolRegistry
+    CompositeToolRegistry *-- McpToolRegistry
+    CompositeToolRegistry *-- ScreenshotToolRegistry
+    ToolHostManager --> IpcToolRegistry : 管理
 ```
 
-### 7.2 OpencodeToolRegistry ツール一覧
+### 7.4 ツール一覧（IPC バイナリ別）
 
+#### ene-tools-fs
 | ツール | 説明 |
 |--------|------|
-| `filesystem` | 統一ファイルシステム操作（action: read/write/edit/delete/glob/grep/patch）。readは行番号付き出力、offset/limit対応。writeは事前読み込み必須、Undoエントリ作成。editは9段階の置換戦略（simple/line_trimmed/block_anchor/whitespace_normalized/indentation_flexible/escape_normalized/trimmed_boundary/context_aware/multi_occurrence）、Levenshtein距離計算、ファイルロック付き。patchはマルチファイルパッチ適用 |
+| `filesystem` | 統一ファイルシステム操作（action: read/write/edit/delete/glob/grep/patch）。サンドボックス制約適用 |
 | `shell` | コマンド実行（タイムアウト、作業ディレクトリ指定可能、サンドボックス適用） |
-| `browser` | Chromiumブラウザ自動化（CDP）。action: navigate/click/type/wait/screenshot/get_content/scroll/close。セッションごとに状態永続化。get_contentはmarkdown/html形式、trim/extractオプションでトークン削減 |
-| `app` | OSレベルGUI自動化（enigo/xcap）。action: list_windows/focus_window/type_text/press_key/mouse_move/mouse_click/clipboard_read/clipboard_write |
+| `undo` | 直前のファイル操作を取り消し（セッションごとUndoスタック） |
+
+#### ene-tools-web
+| ツール | 説明 |
+|--------|------|
 | `webfetch` | URLコンテンツ取得（format/timeout指定可能） |
 | `websearch` | ウェブ検索（backend: duckduckgo/tavily/brave、limit指定可能） |
-| `undo` | 直前のファイル操作を取り消し（セッションごとUndoスタック） |
+
+#### ene-tools-utility
+| ツール | 説明 |
+|--------|------|
 | `todo` | タスクリスト管理（セッションごとTodoStore） |
 | `question` | ユーザーへの質問 |
+
+#### ene-tools-app
+| ツール | 説明 |
+|--------|------|
+| `app` | OSレベルGUI自動化（enigo/xcap）。action: list_windows/focus_window/type_text/press_key/mouse_move/mouse_click/clipboard_read/clipboard_write |
+
+#### ene-tools-browser
+| ツール | 説明 |
+|--------|------|
+| `browser` | Chromiumブラウザ自動化（CDP）。action: navigate/click/type/wait/screenshot/get_content/scroll/close。セッションごとに状態永続化 |
+
+#### インプロセスツール（IPC バイナリなし）
+| ツール | 説明 |
+|--------|------|
+| `screenshot` | スクリーンキャプチャ（ScreenshotToolRegistry、インプロセス） |
+| MCP ツール | 外部MCPサーバーからの動的ツール（McpToolRegistry） |
 
 ---
 
@@ -572,23 +644,16 @@ flowchart TD
     E --> G{--tooltest?}
     F --> G
     G -->|はい| H[ツールテスト実行して終了]
-    G -->|いいえ| I[ツールレジストリ構築]
-    I --> J[ToolRegistryBuilder]
-    J --> K[with_builtin]
-    J --> L[with_screenshot]
-    J --> M[with_sandbox_settings<br/>（サンドボックス有効時）]
-    J --> N[with_store<br/>（メモリ有効時）]
-    K --> O[CompositeToolRegistry統合]
-    L --> O
-    M --> O
-    N --> O
-    O --> P[インタラクティブループ開始]
-    P --> Q[ユーザー入力読み込み<br/>（dialoguer::Input）]
-    Q --> R[コマンド処理<br/>（/help, /config, /card等）]
-    R --> S[セッション境界チェック]
-    S --> T[埋め込みタスク生成]
-    T --> U[run_ai_with_tools 実行]
-    U --> V[イベントストリーム出力]
+    G -->|いいえ| I[ToolHostManager 構築<br/>settings.json の tools.enabled に基づき<br/>バイナリ発見・起動]
+    I --> J[IpcToolRegistry で各ツールに接続<br/>Initialize → ListTools]
+    J --> K[CompositeToolRegistry 統合<br/>（IPC + MCP + Screenshot）]
+    K --> L[インタラクティブループ開始]
+    L --> M[ユーザー入力読み込み<br/>（dialoguer::Input）]
+    M --> N[コマンド処理<br/>（/help, /config, /card等）]
+    N --> O[セッション境界チェック]
+    O --> P[埋め込みタスク生成]
+    P --> Q[run_ai_with_tools 実行]
+    Q --> R[イベントストリーム出力]
 ```
 
 ---
@@ -597,8 +662,10 @@ flowchart TD
 
 | パターン | 説明 |
 |----------|------|
-| **Traitベースツールシステム** | `ToolRegistry` トレイトにより、プラグ可能なツールソース（builtin、MCP、ファイルシステム、スクリーンショット、ブラウザ、GUI自動化） |
-| **コンポジットパターン** | `CompositeToolRegistry` が複数のレジストリを1つに統合 |
+| **IPC ツールアーキテクチャ** | 各ツール種別を独立バイナリプロセスに分離。UDS（Unix Domain Socket）経由でIPC通信。クラッシュ耐性（自動再起動＋指数バックオフ）、ユーザープラグイン対応（`app_data_dir()/tools/`） |
+| **ToolHostManager** | バイナリ発見・起動・監視。`settings.json` の `tools.enabled` に基づき選択的起動。プロセスクラッシュ時に指数バックオフで再起動（MAX_RESTARTS=5） |
+| **IpcToolRegistry 自動再接続** | 接続断時に指数バックオフで自動再接続（MAX_RETRIES=5）。再接続成功時に Initialize・ListTools を再送 |
+| **コンポジットパターン** | `CompositeToolRegistry` が IPC（IpcToolRegistry）、MCP、Screenshot を1つの `ToolRegistry` に統合 |
 | **Tool RAG** | `ToolDefinition`の`keywords`と`category`から埋め込みを生成、`tool_embeddings`テーブルに保存。ユーザー入力とのコサイン類似度で動的にツールを選択しtoken消費を抑制 |
 | **非同期ストリーミング** | `tokio_stream::Stream` によるAI応答の逐次配信 |
 | **イベント駆動アーキテクチャ（GUI）** | Bevyメッセージ（`AiRequestEvent`、`AiStreamEvent`）でAI処理とレンダリングを分離 |
@@ -607,8 +674,9 @@ flowchart TD
 | **GGUFローカル埋め込み** | CandleフレームワークによるGGUF量子化モデルのローカル推論（`GgufEmbeddingProvider`） |
 | **メッセージMax-pooling** | セッションメッセージを個別にembedし、各次元で最大値を採用。挨拶などの情報量ゼロのメッセージによる意味の希釈を防止 |
 | **Undoシステム** | セッションごとのUndoスタックでファイル操作を追跡・ロールバック |
-| **サンドボックスセキュリティ** | パス正規化 + プレフィックスマッチング + 正規表現コマンドブロック |
+| **サンドボックスセキュリティ** | パス正規化 + プレフィックスマッチング + 正規表現コマンドブロック。FsToolProvider に `set_sandbox()` でIPC経由で設定配信 |
 | **CBS式展開** | キャラクターカードの`{{char}}`/`{{user}}`式を自動展開 |
+| **UDS セキュリティ** | ソケットパーミッション `0600` で所有者のみアクセス可能（Unix only） |
 
 ---
 
@@ -617,7 +685,7 @@ flowchart TD
 | ファイル | 目的 |
 |----------|------|
 | `crates/ene-ai-core/src/lib.rs` | クレートルート（再エクスポート） |
-| `crates/ene-ai-core/src/config.rs` | 設定構造体（AiSettings、Memory、Sandbox、MCP） |
+| `crates/ene-ai-core/src/config.rs` | 設定構造体（AiSettings、Memory、Sandbox、MCP、AiToolSettings） |
 | `crates/ene-ai-core/src/session.rs` | ConversationSession（会話状態管理） |
 | `crates/ene-ai-core/src/stream.rs` | run_ai_with_tools（ストリーミングエンジン + Tool RAG） |
 | `crates/ene-ai-core/src/prompt_builder.rs` | メッセージ構築 + CBS式展開 + 表現プロトコル |
@@ -625,7 +693,7 @@ flowchart TD
 | `crates/ene-ai-core/src/client.rs` | OpenAIクライアント構築（build_openai_client） |
 | `crates/ene-ai-core/src/error.rs` | AiCoreError エラー型 |
 | `crates/ene-ai-core/src/utils.rs` | ユーティリティ（truncate、init_memory） |
-| `crates/ene-ai-core/src/paths.rs` | パス解決ユーティリティ |
+| `crates/ene-ai-core/src/paths.rs` | パス解決（builtin_tools_dir, user_tools_dir, tool_socket_dir） |
 | `crates/ene-ai-core/src/resources.rs` | リソース管理 |
 | `crates/ene-ai-core/src/schema.rs` | Dieselスキーマ定義（自動生成） |
 | `crates/ene-ai-core/src/embedding/mod.rs` | テキスト埋め込みプロバイダー（Api/Gguf） |
@@ -634,44 +702,41 @@ flowchart TD
 | `crates/ene-ai-core/src/conversation_manager.rs` | セッション境界関数（check_boundary、execute_split等） |
 | `crates/ene-ai-core/src/special_token.rs` | emoトークン解析（感情表現） |
 | `crates/ene-ai-core/src/mcp_client.rs` | MCPクライアント |
-| `crates/ene-ai-core/src/tool_factory.rs` | ToolRegistryBuilder |
+| `crates/ene-ai-core/src/tool_factory.rs` | ToolRegistryBuilder（ToolHostManager 用設定構築） |
+| `crates/ene-ai-core/src/tool_host_manager.rs` | ToolHostManager（バイナリ発見・起動・監視・クラッシュ再起動） |
+| `crates/ene-ai-core/src/ipc_client.rs` | IpcToolRegistry（UDS IPC通信・自動再接続） |
 | `crates/ene-ai-core/src/memory/mod.rs` | メモリモジュール |
-| `crates/ene-ai-core/src/memory/store/mod.rs` | SQLiteメモリストレージ（Diesel + sqlite-vec） |
+| `crates/ene-ai-core/src/memory/store/mod.rs` | SQLiteメモリストア（Diesel + sqlite-vec） |
 | `crates/ene-ai-core/src/memory/store/models.rs` | Dieselモデル定義 |
 | `crates/ene-ai-core/src/memory/recall.rs` | 要約フォーマット |
 | `crates/ene-ai-core/src/sandbox/mod.rs` | サンドボックス設定 |
 | `crates/ene-ai-core/src/sandbox/permission.rs` | 権限ゲート（PermissionGate、PermissionLevel） |
 | `crates/ene-ai-core/src/tools/mod.rs` | ツールモジュール + ToolCategory列挙型 |
 | `crates/ene-ai-core/src/tools/definition.rs` | ToolRegistryトレイト + ToolDefinition |
-| `crates/ene-ai-core/src/tools/registry.rs` | OpencodeToolRegistry（統合ツールレジストリ） |
-| `crates/ene-ai-core/src/tools/composite.rs` | 統合レジストリ |
-| `crates/ene-ai-core/src/tools/builtin.rs` | 組み込みツール |
-| `crates/ene-ai-core/src/tools/screenshot.rs` | スクリーンショットツール |
+| `crates/ene-ai-core/src/tools/composite.rs` | 統合レジストリ（IPC + MCP + Screenshot） |
+| `crates/ene-ai-core/src/tools/utility/` | インプロセスユーティリティ |
 | `crates/ene-ai-core/src/tools/undo_manager.rs` | Undoシステム |
-| `crates/ene-ai-core/src/tools/undo_tool/mod.rs` | Undoツール |
-| `crates/ene-ai-core/src/tools/filesystem/mod.rs` | 統一ファイルシステムツール（read/write/edit/delete/glob/grep/patch） |
-| `crates/ene-ai-core/src/tools/read/mod.rs` | 読み込み実装（offset/limit/binary対応） |
-| `crates/ene-ai-core/src/tools/write/mod.rs` | 書き込み実装 |
-| `crates/ene-ai-core/src/tools/edit/mod.rs` | 編集ツール（9段階置換戦略） |
-| `crates/ene-ai-core/src/tools/delete/mod.rs` | 削除実装 |
-| `crates/ene-ai-core/src/tools/search/mod.rs` | glob/grep検索 |
-| `crates/ene-ai-core/src/tools/patch/mod.rs` | パッチ適用 |
-| `crates/ene-ai-core/src/tools/shell/mod.rs` | シェル実行ツール |
-| `crates/ene-ai-core/src/tools/shell/platform.rs` | プラットフォーム固有シェル実装 |
-| `crates/ene-ai-core/src/tools/browser/mod.rs` | ブラウザ自動化ツール（CDP） |
-| `crates/ene-ai-core/src/tools/browser/chrome.rs` | Chrome実行ファイル検出 |
-| `crates/ene-ai-core/src/tools/browser/session.rs` | ブラウザセッション管理 |
-| `crates/ene-ai-core/src/tools/browser/extract.rs` | DOM抽出・変換 |
-| `crates/ene-ai-core/src/tools/app/mod.rs` | GUI自動化ツール（enigo/xcap） |
-| `crates/ene-ai-core/src/tools/app/actions.rs` | GUI操作実装 |
-| `crates/ene-ai-core/src/tools/webfetch/mod.rs` | Webフェッチツール |
-| `crates/ene-ai-core/src/tools/webfetch/converter.rs` | コンテンツ変換 |
-| `crates/ene-ai-core/src/tools/websearch/mod.rs` | ウェブ検索ツール |
-| `crates/ene-ai-core/src/tools/websearch/backends.rs` | 検索バックエンド（DuckDuckGo/Tavily/Brave） |
-| `crates/ene-ai-core/src/tools/todo/mod.rs` | Todo管理 |
-| `crates/ene-ai-core/src/tools/todo/store.rs` | Todoストア |
-| `crates/ene-ai-core/src/tools/question/mod.rs` | 質問ツール |
-| `crates/ene-ai-core/src/tools/truncate/mod.rs` | 出力切り詰めユーティリティ |
+| **ene-tool-proto** | |
+| `crates/ene-tool-proto/src/lib.rs` | ToolProvider trait、再エクスポート |
+| `crates/ene-tool-proto/src/types.rs` | IpcRequest, IpcResponse, ToolDefinition（IPCプロトコル型） |
+| `crates/ene-tool-proto/src/ipc.rs` | UDS 読み書きユーティリティ（write_ipc_request, read_ipc_response） |
+| `crates/ene-tool-proto/src/server.rs` | run_tool_server()（ツールバイナリのエントリーポイント）、UDS 0600 パーミッション |
+| `crates/ene-tool-proto/src/registry.rs` | HostRegistry（ツール名→ハンドラマッピング） |
+| `crates/ene-tool-proto/src/sandbox.rs` | SandboxConfigData（IPC сериализация用サンドボックス設定） |
+| `crates/ene-tool-proto/src/error.rs` | IPC エラー型 |
+| **ツールバイナリ** | |
+| `crates/ene-tools/fs/src/main.rs` | ene-tools-fs バイナリエントリポイント |
+| `crates/ene-tools/fs/src/provider.rs` | FsToolProvider（filesystem, shell, undo） |
+| `crates/ene-tools/fs/src/sandbox.rs` | Sandbox 型（SandboxConfigData からの変換） |
+| `crates/ene-tools/web/src/main.rs` | ene-tools-web バイナリエントリポイント |
+| `crates/ene-tools/web/src/provider.rs` | WebToolProvider（websearch, webfetch） |
+| `crates/ene-tools/utility/src/main.rs` | ene-tools-utility バイナリエントリポイント |
+| `crates/ene-tools/utility/src/provider.rs` | UtilityToolProvider（todo, question） |
+| `crates/ene-tools/app/src/main.rs` | ene-tools-app バイナリエントリポイント |
+| `crates/ene-tools/app/src/provider.rs` | AppToolProvider（GUI自動化） |
+| `crates/ene-tools/browser/src/main.rs` | ene-tools-browser バイナリエントリポイント |
+| `crates/ene-tools/browser/src/provider.rs` | BrowserToolProvider（ブラウザ自動化） |
+| **アプリケーション** | |
 | `crates/ene-app/src/main.rs` | GUIエントリーポイント |
 | `crates/ene-app/src/app_config.rs` | アプリ設定（CharacterSettings） |
 | `crates/ene-app/src/character.rs` | キャラクタープラグイン |

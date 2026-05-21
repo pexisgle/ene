@@ -351,14 +351,14 @@ async fn main() {
 - [x] `ene-ai-core/src/config.rs` に `AiToolSettings` 追加（enabled フィールド）
 - [x] `ene-cli`/`ene-app` を `ToolHostManager` 使用に更新
 
-### Phase 4: 最適化・安定化（未着手）
+### Phase 4: 最適化・安定化
 
-- [ ] **4.1** ホストプロセスのクラッシュ耐性
-  - [ ] 自動再起動（指数バックオフ）
-  - [ ] `IpcToolRegistry` の自動再接続
-- [ ] **4.2** セキュリティ強化
-  - [ ] UDS パーミッション設定（0600）
-  - [ ] ホストプロセスの権限分離
+- [x] **4.1** ホストプロセスのクラッシュ耐性
+  - [x] 自動再起動（指数バックオフ）— `ToolProcess::restart()` with `MAX_RESTARTS=5`, `BASE_DELAY_MS=500`
+  - [x] `IpcToolRegistry` の自動再接続 — `ensure_connected()` with exponential backoff, `send_with_reconnect()` で1回リトライ
+- [x] **4.2** セキュリティ強化
+  - [x] UDS パーミッション設定（0600）— `server.rs` で `bind()` 後に `chmod 0o600`
+  - [ ] ホストプロセスの権限分離（将来的に別ユーザーで実行可能に）
 - [ ] **4.3** パフォーマンス
   - [ ] IPC のベンチマーク測定
   - [ ] 必要に応じてバイナリプロトコル（MessagePack等）への移行検討
