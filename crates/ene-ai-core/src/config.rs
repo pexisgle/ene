@@ -18,6 +18,8 @@ pub struct AiSettings {
     pub memory: AiMemorySettings,
 
     pub sandbox: AiSandboxSettings,
+
+    pub tools: AiToolSettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -92,6 +94,30 @@ pub struct AiSandboxSettings {
     pub shell_timeout_ms: u64,
     pub max_shell_output_bytes: usize,
     pub max_shell_output_lines: usize,
+}
+
+/// ツール設定 — 起動するツールバイナリとカスタムツール
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "snake_case")]
+pub struct AiToolSettings {
+    /// 有効にするビルトインツール名のリスト
+    /// ビルトインツール: "fs", "web", "browser", "utility", "app"
+    /// 空の場合は何も起動しない
+    pub enabled: Vec<String>,
+}
+
+impl Default for AiToolSettings {
+    fn default() -> Self {
+        Self {
+            enabled: vec![
+                "fs".to_string(),
+                "web".to_string(),
+                "browser".to_string(),
+                "utility".to_string(),
+                "app".to_string(),
+            ],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,6 +246,7 @@ impl Default for AiSettings {
             mcp_servers: Vec::new(),
             memory: AiMemorySettings::default(),
             sandbox: AiSandboxSettings::default(),
+            tools: AiToolSettings::default(),
         }
     }
 }

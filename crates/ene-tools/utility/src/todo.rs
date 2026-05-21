@@ -1,5 +1,5 @@
 use dashmap::DashMap;
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
+use ene_tool_proto::{ToolCategory, ToolDefinition};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

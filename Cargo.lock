@@ -3635,49 +3635,33 @@ checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 name = "ene-ai-core"
 version = "0.1.0"
 dependencies = [
- "active-win-pos-rs",
- "arboard",
- "ashpd",
  "async-openai",
  "async-stream",
  "async-trait",
- "base64 0.22.1",
  "candle-core",
  "candle-nn",
- "chromiumoxide",
  "chrono",
  "dashmap",
  "diesel",
  "diesel_migrations",
- "diff",
  "dirs",
  "ene-tool-proto",
- "enigo",
- "glob",
  "hf-hub",
- "htmd",
- "image",
  "indexmap",
- "pipewire",
  "rand 0.10.1",
  "regex",
  "reqwest 0.13.3",
  "rmcp",
  "rusqlite",
- "scraper",
  "serde",
  "serde_json",
  "sqlite-vec",
- "strsim",
  "thiserror 2.0.18",
  "tokenizers 0.23.1",
  "tokio",
  "tokio-stream",
  "tracing",
- "urlencoding",
  "uuid",
- "walkdir",
- "xcap",
 ]
 
 [[package]]
@@ -3783,20 +3767,6 @@ dependencies = [
  "tokio",
  "uuid",
  "walkdir",
-]
-
-[[package]]
-name = "ene-tools-host"
-version = "0.1.0"
-dependencies = [
- "ene-tool-proto",
- "ene-tools-app",
- "ene-tools-browser",
- "ene-tools-fs",
- "ene-tools-utility",
- "ene-tools-web",
- "serde_json",
- "tokio",
 ]
 
 [[package]]

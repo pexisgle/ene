@@ -1,7 +1,11 @@
-use ene_tool_proto::{ToolDefinition, ToolError, ToolProvider};
+use crate::{SandboxConfigData, ToolDefinition, ToolError, ToolProvider};
+use async_trait::async_trait;
 use std::collections::HashMap;
 
 /// 複数の ToolProvider を集約し、ツール名でディスパッチするレジストリ
+///
+/// ユーザーがカスタムツールバイナリで複数の Provider を束ねたい場合に使用できる。
+/// 個別ツールバイナリでは通常1つの Provider だけで十分。
 pub struct HostRegistry {
     providers: Vec<Box<dyn ToolProvider>>,
     tool_index: HashMap<String, usize>,
@@ -44,5 +48,30 @@ impl HostRegistry {
         for provider in &self.providers {
             provider.set_session_id(session_id);
         }
+    }
+
+    pub fn set_sandbox(&self, sandbox: &SandboxConfigData) {
+        for provider in &self.providers {
+            provider.set_sandbox(sandbox);
+        }
+    }
+}
+
+#[async_trait]
+impl ToolProvider for HostRegistry {
+    fn list_tools(&self) -> Vec<ToolDefinition> {
+        self.list_tools()
+    }
+
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
+        self.call_tool(name, arguments).await
+    }
+
+    fn set_session_id(&self, session_id: &str) {
+        self.set_session_id(session_id);
+    }
+
+    fn set_sandbox(&self, sandbox: &SandboxConfigData) {
+        self.set_sandbox(sandbox);
     }
 }

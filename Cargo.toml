@@ -4,7 +4,6 @@ members = [
     "crates/ene-app",
     "crates/ene-cli",
     "crates/ene-tool-proto",
-    "crates/ene-tools-host",
     "crates/ene-tools/utility",
     "crates/ene-tools/web",
     "crates/ene-tools/app",

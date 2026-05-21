@@ -3,10 +3,14 @@ name = "ene-tools-fs"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "ene-tools-fs"
+path = "src/main.rs"
+
 [dependencies]
 ene-tool-proto = { path = "../../ene-tool-proto" }
 ene-tools-utility = { path = "../utility" }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "fs", "process", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "fs", "process", "time", "net"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }

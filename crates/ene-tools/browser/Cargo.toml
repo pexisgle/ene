@@ -17,3 +17,7 @@ serde = { workspace = true }
 async-trait = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 regex = { workspace = true }
+
+[[bin]]
+name = "ene-tools-browser"
+path = "src/main.rs"

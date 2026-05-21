@@ -23,16 +23,9 @@ diesel_migrations = { version = "2.2", features = ["sqlite"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 sqlite-vec = "0.1"
 rmcp = { version = "1.5", features = ["client", "transport-child-process", "transport-streamable-http-client"] }
-xcap = "0.9.4"
-active-win-pos-rs = "0.10.1"
-base64 = "0.22"
-image = "0.25"
 regex = "1"
-glob = "0.3"
 uuid = { version = "1", features = ["v4"] }
 dashmap = "6"
-diff = "0.1"
-walkdir = "2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 hf-hub = { version = "0.5.0", default-features = false, features = ["rustls-tls", "tokio"] }
 candle-core = "0.10"
@@ -40,15 +33,4 @@ candle-nn = "0.10"
 tokenizers = "0.23"
 dirs = "6"
 tracing = "0.1"
-strsim = "0.11"
-enigo = "0.6"
-arboard = "3.6"
-urlencoding = "2.1"
-chromiumoxide = "0.9"
-scraper = "0.27"
-htmd = "0.5"
 ene-tool-proto = { path = "../ene-tool-proto" }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-ashpd = { version = "0.13", default-features = false, features = ["tokio", "screenshot", "screencast", "pipewire"] }
-pipewire = "0.9"

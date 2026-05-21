@@ -1,6 +1,8 @@
 pub mod error;
 pub mod ipc;
+pub mod registry;
 pub mod sandbox;
+pub mod server;
 pub mod types;
 
 pub use error::ToolError;
@@ -8,7 +10,9 @@ pub use ipc::{
     IpcRequest, IpcResponse, read_ipc_request, read_ipc_response, write_ipc_request,
     write_ipc_response,
 };
+pub use registry::HostRegistry;
 pub use sandbox::SandboxConfigData;
+pub use server::run_tool_server;
 pub use types::{ToolCallResult, ToolCategory, ToolDefinition};
 
 use async_trait::async_trait;
@@ -27,4 +31,7 @@ pub trait ToolProvider: Send + Sync {
 
     /// 現在のセッションIDを設定（Undo等で使用）
     fn set_session_id(&self, session_id: &str);
+
+    /// サンドボックス設定を受信（FSツール等で使用。デフォルトは無操作）
+    fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
 }

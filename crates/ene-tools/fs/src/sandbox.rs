@@ -142,3 +142,128 @@ impl SandboxConfig {
         }
     }
 }
+
+impl From<ene_tool_proto::SandboxConfigData> for SandboxConfig {
+    fn from(data: ene_tool_proto::SandboxConfigData) -> Self {
+        let canonicalize_dirs = |dirs: Vec<String>| -> Vec<PathBuf> {
+            dirs.into_iter()
+                .map(|s| {
+                    let p = PathBuf::from(s);
+                    if p.exists() {
+                        std::fs::canonicalize(&p).unwrap_or(p)
+                    } else {
+                        p
+                    }
+                })
+                .collect()
+        };
+
+        Self {
+            enabled: data.enabled,
+            allowed_directories: canonicalize_dirs(data.allowed_directories),
+            writable_directories: canonicalize_dirs(data.writable_directories),
+            blocked_commands: data.blocked_commands,
+            max_read_bytes: data.max_read_bytes,
+            max_write_bytes: data.max_write_bytes,
+            shell_timeout_ms: data.shell_timeout_ms,
+            max_shell_output_bytes: data.max_shell_output_bytes,
+            max_shell_output_lines: data.max_shell_output_lines,
+        }
+    }
+}
+
+/// SandboxConfig + UndoManager + session_id の統合型
+///
+/// ツール実装者は Sandbox だけを意識すればよい。
+/// アクセス制御（check_readable / check_writable / check_command）と
+/// 操作追跡（track_xxx）および Undo 実行を一つに束ねる。
+pub struct Sandbox {
+    config: SandboxConfig,
+    undo: crate::undo_manager::UndoManager,
+    session_id: std::sync::RwLock<String>,
+}
+
+impl Sandbox {
+    pub fn new(config: SandboxConfig) -> Self {
+        Self {
+            config,
+            undo: crate::undo_manager::UndoManager::new(),
+            session_id: std::sync::RwLock::new(String::new()),
+        }
+    }
+
+    pub fn config(&self) -> &SandboxConfig {
+        &self.config
+    }
+
+    pub fn undo_manager(&self) -> &crate::undo_manager::UndoManager {
+        &self.undo
+    }
+
+    pub fn session_id(&self) -> String {
+        self.session_id.read().unwrap().clone()
+    }
+
+    pub fn set_session_id(&self, id: &str) {
+        *self.session_id.write().unwrap() = id.to_string();
+    }
+
+    /// 読み取りパス検証
+    pub fn check_readable(&self, path: &Path) -> Result<PathBuf, ToolError> {
+        self.config.resolve_and_check(path, false)
+    }
+
+    /// 書き込みパス検証
+    pub fn check_writable(&self, path: &Path) -> Result<PathBuf, ToolError> {
+        self.config.resolve_and_check(path, true)
+    }
+
+    /// コマンド検証
+    pub fn check_command(&self, cmd: &str) -> Result<(), ToolError> {
+        self.config.is_command_blocked(cmd)
+    }
+
+    /// 既存ファイルの上書きを記録
+    pub fn track_overwrite(&self, original_content: Option<Vec<u8>>, path: &Path) {
+        self.undo.push_restore_file(
+            &self.session_id(),
+            "filesystem",
+            path.to_path_buf(),
+            original_content,
+        );
+    }
+
+    /// 新規ファイル作成を記録
+    pub fn track_creation(&self, path: &Path) {
+        self.undo
+            .push_delete_created_file(&self.session_id(), "filesystem", path.to_path_buf());
+    }
+
+    /// ファイル削除を記録
+    pub fn track_deletion(&self, original_content: Option<Vec<u8>>, path: &Path) {
+        self.undo.push_restore_file(
+            &self.session_id(),
+            "filesystem",
+            path.to_path_buf(),
+            original_content,
+        );
+    }
+
+    /// パッチ適用を記録（複数ファイル操作を1つのUndoエントリに）
+    pub fn track_patch(&self, operations: Vec<crate::undo_manager::UndoOperation>) {
+        self.undo
+            .push(&self.session_id(), crate::undo_manager::UndoEntry::new("patch", operations));
+    }
+
+    /// 直前の操作を取り消し
+    pub async fn undo_last(&self) -> Result<String, ToolError> {
+        let logs = self
+            .undo
+            .undo(&self.session_id())
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                message: format!("Undo failed: {e}"),
+            })?;
+        Ok(logs.join("\n"))
+    }
+}

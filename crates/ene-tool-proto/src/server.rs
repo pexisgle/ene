@@ -1,0 +1,109 @@
+use crate::{IpcRequest, IpcResponse, ToolProvider, read_ipc_request, write_ipc_response};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::net::UnixListener;
+
+/// ツールプロバイダをIPCサーバーとして起動する
+///
+/// 環境変数 `ENE_TOOL_SOCKET` からソケットパスを読み取り、
+/// Unix Domain Socket でリクエストを待ち受ける。
+/// `Shutdown` リクエストを受信すると終了する。
+///
+/// # 使用例
+///
+/// ```ignore
+/// #[tokio::main]
+/// async fn main() {
+///     let provider = MyToolProvider::new();
+///     ene_tool_proto::run_tool_server(Box::new(provider)).await;
+/// }
+/// ```
+pub async fn run_tool_server(
+    provider: Box<dyn ToolProvider>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let socket_path = std::env::var("ENE_TOOL_SOCKET")
+        .unwrap_or_else(|_| "/tmp/ene-tool.sock".to_string());
+    let socket_path = PathBuf::from(&socket_path);
+
+    if socket_path.exists() {
+        std::fs::remove_file(&socket_path)?;
+    }
+
+    let listener = UnixListener::bind(&socket_path)?;
+    eprintln!("[tool-server] Listening on {}", socket_path.display());
+
+    let provider: Arc<dyn ToolProvider> = provider.into();
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+
+    loop {
+        tokio::select! {
+            result = listener.accept() => {
+                let (mut stream, _) = result?;
+                let provider = Arc::clone(&provider);
+                let shutdown = Arc::clone(&shutdown);
+                tokio::spawn(async move {
+                    loop {
+                        match read_ipc_request(&mut stream).await {
+                            Ok(None) => break,
+                            Ok(Some(req)) => {
+                                let is_shutdown = matches!(req, IpcRequest::Shutdown);
+                                let resp = dispatch(provider.as_ref(), &req).await;
+                                if let Err(e) = write_ipc_response(&mut stream, &resp).await {
+                                    eprintln!("[tool-server] Failed to write response: {e}");
+                                    break;
+                                }
+                                if is_shutdown {
+                                    shutdown.notify_one();
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[tool-server] IPC read error: {e}");
+                                let _ = write_ipc_response(
+                                    &mut stream,
+                                    &IpcResponse::Error { message: e.to_string() },
+                                )
+                                .await;
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+            _ = shutdown.notified() => {
+                break;
+            }
+        }
+    }
+
+    let _ = std::fs::remove_file(&socket_path);
+    eprintln!("[tool-server] Shutting down");
+    Ok(())
+}
+
+async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse {
+    match req {
+        IpcRequest::Initialize { sandbox } => {
+            provider.set_sandbox(sandbox);
+            IpcResponse::Ack
+        }
+        IpcRequest::ListTools => {
+            IpcResponse::Tools {
+                tools: provider.list_tools(),
+            }
+        }
+        IpcRequest::CallTool { name, arguments } => match provider.call_tool(name, arguments).await
+        {
+            Ok(result) => IpcResponse::CallResult {
+                result: Ok(result),
+            },
+            Err(e) => IpcResponse::CallResult { result: Err(e) },
+        },
+        IpcRequest::SetSessionId { session_id } => {
+            provider.set_session_id(session_id);
+            IpcResponse::Ack
+        }
+        IpcRequest::Ping => IpcResponse::Pong,
+        IpcRequest::Shutdown => IpcResponse::Ack,
+    }
+}

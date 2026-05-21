@@ -17,6 +17,7 @@ pub mod special_token;
 pub mod stream;
 pub mod summarizer;
 pub mod tool_factory;
+pub mod tool_host_manager;
 pub mod tools;
 pub mod utils;
 
@@ -34,8 +35,9 @@ pub use memory::{ConversationSummary, KeyFact, MemoryStore, RecalledSummary};
 pub use session::ConversationSession;
 pub use stream::{AiStreamEvent, run_ai_with_tools};
 pub use tool_factory::ToolRegistryBuilder;
+pub use tool_host_manager::ToolHostManager;
 pub use tools::{
-    BuiltinToolRegistry, CompositeToolRegistry, ToolCallResult, ToolCategory, ToolDefinition,
+    CompositeToolRegistry, ToolCallResult, ToolCategory, ToolDefinition,
     ToolRegistry, UndoEntry, UndoManager, UndoOperation, backup_file,
 };
 pub use utils::{init_memory, truncate};

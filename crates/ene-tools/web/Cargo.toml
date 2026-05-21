@@ -14,3 +14,7 @@ urlencoding = "2.1"
 serde_json = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
+
+[[bin]]
+name = "ene-tools-web"
+path = "src/main.rs"

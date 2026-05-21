@@ -1,67 +1,122 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError, ToolProvider};
+use ene_tool_proto::{ToolDefinition, ToolError, ToolProvider};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
-pub struct FsToolProvider;
+use crate::sandbox::Sandbox;
+
+pub struct FsToolProvider {
+    sandbox: Arc<RwLock<Option<Sandbox>>>,
+}
+
+impl FsToolProvider {
+    pub fn new() -> Self {
+        Self {
+            sandbox: Arc::new(RwLock::new(None)),
+        }
+    }
+}
+
+impl Default for FsToolProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl ToolProvider for FsToolProvider {
     fn list_tools(&self) -> Vec<ToolDefinition> {
         vec![
-            ToolDefinition {
-                name: "filesystem".to_string(),
-                description: "Performs file system operations. Supports read, write, edit, delete, search, patch, and list.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "action": { "type": "string", "description": "The filesystem action to perform" }
-                    },
-                    "required": ["action"]
-                }),
-                category: Some(ToolCategory::Filesystem),
-                keywords: vec!["fs".to_string(), "file".to_string(), "directory".to_string()],
-            },
-            ToolDefinition {
-                name: "shell".to_string(),
-                description: "Executes shell commands.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "command": { "type": "string", "description": "The shell command to execute" }
-                    },
-                    "required": ["command"]
-                }),
-                category: Some(ToolCategory::Shell),
-                keywords: vec!["shell".to_string(), "command".to_string(), "bash".to_string()],
-            },
-            ToolDefinition {
-                name: "undo".to_string(),
-                description: "Reverts the most recent file operation.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }),
-                category: Some(ToolCategory::Utility),
-                keywords: vec!["undo".to_string(), "revert".to_string()],
-            },
+            crate::filesystem::tool_definition(),
+            crate::shell::tool_definition(),
+            crate::undo_tool::tool_definition(),
         ]
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
+        let guard = self.sandbox.read().await;
+        let default_sandbox;
+        let sandbox = match guard.as_ref() {
+            Some(s) => s,
+            None => {
+                default_sandbox = Sandbox::new(Default::default());
+                &default_sandbox
+            }
+        };
+        let session_id = sandbox.session_id();
+
         match name {
-            "filesystem" | "shell" | "undo" => Err(ToolError::ExecutionFailed {
-                message: format!(
-                    "Tool '{}' is being migrated to IPC host. Not yet fully implemented in ene-tools-fs.",
-                    name
-                ),
-            }),
+            "filesystem" => {
+                let args: serde_json::Value = serde_json::from_str(arguments).map_err(|e| {
+                    ToolError::InvalidArguments {
+                        message: format!("Failed to parse filesystem arguments: {e}"),
+                    }
+                })?;
+                let action = args["action"].as_str().ok_or_else(|| ToolError::InvalidArguments {
+                    message: "Missing 'action' field in filesystem arguments".to_string(),
+                })?;
+                crate::filesystem::execute(
+                    action,
+                    &args,
+                    sandbox.config(),
+                    sandbox.undo_manager(),
+                    &session_id,
+                )
+                .await
+                .map_err(|e| ToolError::ExecutionFailed { message: e })
+            }
+            "shell" => {
+                let args: serde_json::Value = serde_json::from_str(arguments).map_err(|e| {
+                    ToolError::InvalidArguments {
+                        message: format!("Failed to parse shell arguments: {e}"),
+                    }
+                })?;
+                let command = args["command"].as_str().ok_or_else(|| ToolError::InvalidArguments {
+                    message: "Missing 'command' field".to_string(),
+                })?;
+                let description = args["description"].as_str().unwrap_or("");
+                let timeout = args["timeout"].as_u64();
+                let workdir = args["workdir"].as_str();
+                crate::shell::shell_exec(
+                    command,
+                    description,
+                    timeout,
+                    workdir,
+                    sandbox.config(),
+                )
+                .await
+            }
+            "undo" => crate::undo_tool::undo(sandbox.undo_manager(), &session_id).await,
             _ => Err(ToolError::NotFound {
                 tool_name: name.to_string(),
             }),
         }
     }
 
-    fn set_session_id(&self, _session_id: &str) {
-        // FS tools will use session_id for undo tracking in future
+    fn set_session_id(&self, session_id: &str) {
+        let rt = tokio::runtime::Handle::try_current().ok();
+        if let Some(handle) = rt {
+            let sandbox = Arc::clone(&self.sandbox);
+            let id = session_id.to_string();
+            let _ = handle.block_on(async move {
+                let guard = sandbox.read().await;
+                if let Some(s) = guard.as_ref() {
+                    s.set_session_id(&id);
+                }
+            });
+        }
+    }
+
+    fn set_sandbox(&self, data: &ene_tool_proto::SandboxConfigData) {
+        let rt = tokio::runtime::Handle::try_current().ok();
+        if let Some(handle) = rt {
+            let sandbox = Arc::clone(&self.sandbox);
+            let data = data.clone();
+            let _ = handle.block_on(async move {
+                let new_sandbox = Sandbox::new(data.into());
+                let mut guard = sandbox.write().await;
+                *guard = Some(new_sandbox);
+            });
+        }
     }
 }
