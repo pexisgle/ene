@@ -5,8 +5,7 @@
 .opencode
 .fastembed_cache
 
-# User runtime data (generated on first launch)
-dev.pexisgle.Ene/
+assets/models/
 
 # Runtime database files
 **/memory.db

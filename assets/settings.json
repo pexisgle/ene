@@ -9,7 +9,7 @@
     "base_url": "https://openrouter.ai/api/v1",
     "api_key": "",
     "user_name": "pexisgle",
-    "model": "deepseek/deepseek-v4-flash",
+    "model": "google/gemma-4-31b-it",
     "memory": {
       "enabled": true,
       "topic_change_threshold": 0.4,
