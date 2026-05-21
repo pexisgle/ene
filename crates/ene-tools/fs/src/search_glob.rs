@@ -1,6 +1,6 @@
-use super::MAX_RESULTS;
-use crate::error::ToolError;
 use crate::sandbox::SandboxConfig;
+use crate::search::MAX_RESULTS;
+use ene_tool_proto::ToolError;
 use std::path::Path;
 
 pub async fn glob_search(
@@ -16,10 +16,9 @@ pub async fn glob_search(
     };
 
     if !base.is_dir() {
-        return Err(ToolError::FileNotFound(format!(
-            "glob path must be a directory: {}",
-            base.display()
-        )));
+        return Err(ToolError::ExecutionFailed {
+            message: format!("glob path must be a directory: {}", base.display()),
+        });
     }
 
     let pattern_path = base.join(pattern);
@@ -36,9 +35,9 @@ pub async fn glob_search(
             }
         }
         Err(e) => {
-            return Err(ToolError::ToolExecutionError(format!(
-                "Invalid glob pattern: {e}"
-            )));
+            return Err(ToolError::ExecutionFailed {
+                message: format!("Invalid glob pattern: {e}"),
+            });
         }
     }
 

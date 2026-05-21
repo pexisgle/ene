@@ -1,7 +1,7 @@
-use super::definition::ToolDefinition;
-use super::utility::undo_manager::UndoManager;
-use crate::error::ToolError;
 use crate::sandbox::SandboxConfig;
+use crate::undo_manager::UndoManager;
+use ene_tool_proto::ToolDefinition;
+use ene_tool_proto::ToolError;
 use std::path::Path;
 
 pub fn tool_definition() -> ToolDefinition {
@@ -21,7 +21,7 @@ pub fn tool_definition() -> ToolDefinition {
             },
             "required": ["filePath", "content"]
         }),
-        category: Some(super::ToolCategory::Filesystem),
+        category: Some(ene_tool_proto::ToolCategory::Filesystem),
         keywords: vec!["write".to_string(), "create".to_string(), "file".to_string()],
     }
 }
@@ -36,9 +36,11 @@ pub async fn write(
     let resolved = sandbox.resolve_and_check(path, true)?;
 
     if let Some(parent) = resolved.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            ToolError::SandboxViolation(format!("Cannot create parent directory: {e}"))
-        })?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| ToolError::SandboxViolation {
+                message: format!("Cannot create parent directory: {e}"),
+            })?;
     }
 
     let original = if resolved.exists() {
@@ -49,10 +51,13 @@ pub async fn write(
 
     let content_bytes = content.as_bytes();
     if content_bytes.len() > sandbox.max_write_bytes {
-        return Err(ToolError::FileTooLarge(
-            content_bytes.len(),
-            sandbox.max_write_bytes,
-        ));
+        return Err(ToolError::ExecutionFailed {
+            message: format!(
+                "File too large: {} bytes exceeds maximum of {} bytes",
+                content_bytes.len(),
+                sandbox.max_write_bytes
+            ),
+        });
     }
 
     let has_bom = original
@@ -69,7 +74,9 @@ pub async fn write(
 
     tokio::fs::write(&resolved, output)
         .await
-        .map_err(|e| ToolError::ToolExecutionError(format!("Failed to write file: {e}")))?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to write file: {e}"),
+        })?;
 
     undo_manager.push_restore_file(session_id, "write", resolved.clone(), original);
 

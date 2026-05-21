@@ -1,9 +1,9 @@
-mod platform;
+use crate::shell_platform;
 
-use super::definition::ToolDefinition;
-use super::utility::truncate::Truncate;
-use crate::error::ToolError;
 use crate::sandbox::SandboxConfig;
+use ene_tool_proto::ToolDefinition;
+use ene_tool_proto::ToolError;
+use ene_tools_utility::truncate::Truncate;
 use std::path::Path;
 use std::time::Duration;
 
@@ -26,7 +26,7 @@ pub fn tool_definition() -> ToolDefinition {
             },
             "required": ["command", "description"]
         }),
-        category: Some(super::ToolCategory::Shell),
+        category: Some(ene_tool_proto::ToolCategory::Shell),
         keywords: vec!["shell".to_string(), "command".to_string(), "execute".to_string(), "terminal".to_string(), "bash".to_string()],
     }
 }
@@ -54,17 +54,19 @@ pub async fn shell_exec(
     let timeout_ms = timeout.unwrap_or(sandbox.shell_timeout_ms);
     let timeout_duration = Duration::from_millis(timeout_ms);
 
-    let result = platform::execute_shell_command(command, &cwd, timeout_duration).await;
+    let result = shell_platform::execute_shell_command(command, &cwd, timeout_duration).await;
 
     let result = match result {
         Ok(o) => o,
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-            return Err(ToolError::Timeout { message: timeout_ms });
+            return Err(ToolError::Timeout {
+                message: format!("Command timed out after {} ms", timeout_ms),
+            });
         }
         Err(e) => {
-            return Err(ToolError::ExecutionFailed { message: format!(
-                "Failed to execute command: {e}"
-            ) });
+            return Err(ToolError::ExecutionFailed {
+                message: format!("Failed to execute command: {e}"),
+            });
         }
     };
 

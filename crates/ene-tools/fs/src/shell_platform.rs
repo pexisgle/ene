@@ -24,6 +24,9 @@ pub async fn execute_shell_command(
 
     match tokio::time::timeout(timeout_duration, fut).await {
         Ok(result) => result,
-        Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "Command timed out")),
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "Command timed out",
+        )),
     }
 }

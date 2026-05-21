@@ -1,5 +1,5 @@
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError, ToolProvider};
 use async_trait::async_trait;
+use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError, ToolProvider};
 
 pub struct FsToolProvider;
 
@@ -49,12 +49,15 @@ impl ToolProvider for FsToolProvider {
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         match name {
-            "filesystem" | "shell" | "undo" => {
-                Err(ToolError::ExecutionFailed {
-                    message: format!("Tool '{}' is being migrated to IPC host. Not yet fully implemented in ene-tools-fs.", name),
-                })
-            }
-            _ => Err(ToolError::NotFound { tool_name: name.to_string() }),
+            "filesystem" | "shell" | "undo" => Err(ToolError::ExecutionFailed {
+                message: format!(
+                    "Tool '{}' is being migrated to IPC host. Not yet fully implemented in ene-tools-fs.",
+                    name
+                ),
+            }),
+            _ => Err(ToolError::NotFound {
+                tool_name: name.to_string(),
+            }),
         }
     }
 

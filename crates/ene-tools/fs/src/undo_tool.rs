@@ -1,6 +1,6 @@
-use super::super::definition::ToolDefinition;
 use super::undo_manager::UndoManager;
-use crate::error::ToolError;
+use ene_tool_proto::ToolDefinition;
+use ene_tool_proto::ToolError;
 
 pub fn tool_definition() -> ToolDefinition {
     ToolDefinition {
@@ -11,7 +11,7 @@ pub fn tool_definition() -> ToolDefinition {
             "properties": {},
             "required": []
         }),
-        category: Some(super::super::ToolCategory::Utility),
+        category: Some(ene_tool_proto::ToolCategory::Utility),
         keywords: vec!["undo".to_string(), "revert".to_string(), "rollback".to_string()],
     }
 }
@@ -20,6 +20,8 @@ pub async fn undo(undo_manager: &UndoManager, session_id: &str) -> Result<String
     let logs = undo_manager
         .undo(session_id)
         .await
-        .map_err(ToolError::UndoError)?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Undo failed: {e}"),
+        })?;
     Ok(format!("Undo successful:\n{}", logs.join("\n")))
 }

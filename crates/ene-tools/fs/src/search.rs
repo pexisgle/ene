@@ -1,13 +1,13 @@
-mod glob;
-mod grep;
+use crate::search_glob;
+use crate::search_grep;
 
-use super::definition::ToolDefinition;
-use crate::error::ToolError;
 use crate::sandbox::SandboxConfig;
+use ene_tool_proto::ToolDefinition;
+use ene_tool_proto::ToolError;
 
-const MAX_RESULTS: usize = 100;
+pub const MAX_RESULTS: usize = 100;
 
-    pub fn glob_tool_definition() -> ToolDefinition {
+pub fn glob_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "glob".to_string(),
         description: "Fast file pattern matching tool that works with any codebase size. Supports glob patterns like '**/*.rs' or 'src/**/*.ts'. Returns matching file paths sorted by modification time.".to_string(),
@@ -19,7 +19,7 @@ const MAX_RESULTS: usize = 100;
             },
             "required": ["pattern"]
         }),
-        category: Some(super::ToolCategory::Filesystem),
+        category: Some(ene_tool_proto::ToolCategory::Filesystem),
         keywords: vec!["glob".to_string(), "search".to_string(), "find".to_string(), "files".to_string()],
     }
 }
@@ -37,7 +37,7 @@ pub fn grep_tool_definition() -> ToolDefinition {
             },
             "required": ["pattern"]
         }),
-        category: Some(super::ToolCategory::Filesystem),
+        category: Some(ene_tool_proto::ToolCategory::Filesystem),
         keywords: vec!["grep".to_string(), "search".to_string(), "regex".to_string(), "content".to_string()],
     }
 }
@@ -47,7 +47,7 @@ pub async fn glob_search(
     path: Option<&str>,
     sandbox: &SandboxConfig,
 ) -> Result<String, ToolError> {
-    glob::glob_search(pattern, path, sandbox).await
+    search_glob::glob_search(pattern, path, sandbox).await
 }
 
 pub async fn grep_search(
@@ -56,5 +56,5 @@ pub async fn grep_search(
     include: Option<&str>,
     sandbox: &SandboxConfig,
 ) -> Result<String, ToolError> {
-    grep::grep_search(pattern, path, include, sandbox).await
+    search_grep::grep_search(pattern, path, include, sandbox).await
 }

@@ -1,4 +1,4 @@
-use crate::error::ToolError;
+use ene_tool_proto::ToolError;
 
 #[derive(Clone)]
 pub enum PatchOperation {
@@ -18,10 +18,12 @@ pub enum PatchOperation {
 
 pub fn parse_code_block(lines: &[&str], start: usize) -> Result<(String, usize), ToolError> {
     if start >= lines.len() || !lines[start].trim().starts_with("```") {
-        return Err(ToolError::ToolExecutionError(format!(
-            "Expected code block starting with ``` at line {}",
-            start + 1
-        )));
+        return Err(ToolError::ExecutionFailed {
+            message: format!(
+                "Expected code block starting with ``` at line {}",
+                start + 1
+            ),
+        });
     }
 
     let mut content = Vec::new();
@@ -36,9 +38,9 @@ pub fn parse_code_block(lines: &[&str], start: usize) -> Result<(String, usize),
         i += 1;
     }
 
-    Err(ToolError::ToolExecutionError(
-        "Unclosed code block in patch".to_string(),
-    ))
+    Err(ToolError::ExecutionFailed {
+        message: "Unclosed code block in patch".to_string(),
+    })
 }
 
 pub fn parse_update_block(
@@ -49,10 +51,12 @@ pub fn parse_update_block(
     let next = start + consumed1 + 1;
 
     if next >= lines.len() || !lines[next].trim().starts_with("```") {
-        return Err(ToolError::ToolExecutionError(format!(
-            "Expected second code block for new content at line {}",
-            next + 1
-        )));
+        return Err(ToolError::ExecutionFailed {
+            message: format!(
+                "Expected second code block for new content at line {}",
+                next + 1
+            ),
+        });
     }
     let (new_content, consumed2) = parse_code_block(lines, next)?;
 

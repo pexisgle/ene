@@ -1,9 +1,9 @@
-mod binary;
+use crate::read_binary;
 
-use super::definition::ToolDefinition;
-use crate::error::ToolError;
 use crate::sandbox::SandboxConfig;
-use binary::is_binary_file;
+use ene_tool_proto::ToolDefinition;
+use ene_tool_proto::ToolError;
+use read_binary::is_binary_file;
 use std::path::Path;
 
 const MAX_LINE_LENGTH: usize = 2000;
@@ -29,7 +29,7 @@ pub fn tool_definition() -> ToolDefinition {
             },
             "required": ["filePath"]
         }),
-        category: Some(super::ToolCategory::Filesystem),
+        category: Some(ene_tool_proto::ToolCategory::Filesystem),
         keywords: vec!["read".to_string(), "file".to_string(), "directory".to_string(), "view".to_string()],
     }
 }
@@ -62,36 +62,41 @@ pub async fn read(
             }
         }
         if suggestions.is_empty() {
-            return Err(ToolError::FileNotFound(format!(
-                "File not found: {}",
-                resolved.display()
-            )));
+            return Err(ToolError::ExecutionFailed {
+                message: format!("File not found: {}", resolved.display()),
+            });
         } else {
-            return Err(ToolError::FileNotFound(format!(
-                "File not found: {}\n\nDid you mean one of these?\n{}",
-                resolved.display(),
-                suggestions.join("\n")
-            )));
+            return Err(ToolError::ExecutionFailed {
+                message: format!(
+                    "File not found: {}\n\nDid you mean one of these?\n{}",
+                    resolved.display(),
+                    suggestions.join("\n")
+                ),
+            });
         }
     }
 
-    let metadata = tokio::fs::metadata(&resolved).await.map_err(|e| {
-        ToolError::FileNotFound(format!("Cannot stat {}: {}", resolved.display(), e))
-    })?;
+    let metadata =
+        tokio::fs::metadata(&resolved)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                message: format!("Cannot stat {}: {}", resolved.display(), e),
+            })?;
 
     if metadata.is_dir() {
         return read_directory(&resolved, offset, limit).await;
     }
 
-    let sample = tokio::fs::read(&resolved).await.map_err(|e| {
-        ToolError::FileNotFound(format!("Cannot read {}: {}", resolved.display(), e))
-    })?;
+    let sample = tokio::fs::read(&resolved)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Cannot read {}: {}", resolved.display(), e),
+        })?;
 
     if is_binary_file(&resolved, &sample) {
-        return Err(ToolError::FileNotFound(format!(
-            "Cannot read binary file: {}",
-            resolved.display()
-        )));
+        return Err(ToolError::ExecutionFailed {
+            message: format!("Cannot read binary file: {}", resolved.display()),
+        });
     }
 
     let text = String::from_utf8_lossy(&sample);
@@ -129,11 +134,13 @@ pub async fn read(
     let lines: Vec<&str> = text.lines().collect();
     let start = offset.unwrap_or(1).saturating_sub(1);
     if start > lines.len() && !(lines.is_empty() && start == 0) {
-        return Err(ToolError::FileNotFound(format!(
-            "Offset {} is out of range for this file ({} lines)",
-            start + 1,
-            lines.len()
-        )));
+        return Err(ToolError::ExecutionFailed {
+            message: format!(
+                "Offset {} is out of range for this file ({} lines)",
+                start + 1,
+                lines.len()
+            ),
+        });
     }
 
     let default_limit = 2000usize;
@@ -180,9 +187,11 @@ async fn read_directory(
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> Result<String, ToolError> {
-    let mut entries = tokio::fs::read_dir(path).await.map_err(|e| {
-        ToolError::FileNotFound(format!("Cannot read directory {}: {}", path.display(), e))
-    })?;
+    let mut entries = tokio::fs::read_dir(path)
+        .await
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Cannot read directory {}: {}", path.display(), e),
+        })?;
 
     let mut items = Vec::new();
     while let Ok(Some(entry)) = entries.next_entry().await {

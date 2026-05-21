@@ -1,6 +1,6 @@
-use super::MAX_RESULTS;
-use crate::error::ToolError;
 use crate::sandbox::SandboxConfig;
+use crate::search::MAX_RESULTS;
+use ene_tool_proto::ToolError;
 use std::path::Path;
 
 pub async fn grep_search(
@@ -10,13 +10,14 @@ pub async fn grep_search(
     sandbox: &SandboxConfig,
 ) -> Result<String, ToolError> {
     if pattern.is_empty() {
-        return Err(ToolError::ExecutionFailed { message: 
-            "pattern is required".to_string(),
-         });
+        return Err(ToolError::ExecutionFailed {
+            message: "pattern is required".to_string(),
+        });
     }
 
-    let re = regex::Regex::new(pattern)
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Invalid regex pattern: {e}") })?;
+    let re = regex::Regex::new(pattern).map_err(|e| ToolError::ExecutionFailed {
+        message: format!("Invalid regex pattern: {e}"),
+    })?;
 
     let base = if let Some(p) = path {
         let resolved = sandbox.resolve_and_check(Path::new(p), false)?;

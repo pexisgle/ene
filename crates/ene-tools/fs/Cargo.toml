@@ -5,7 +5,8 @@ edition = "2024"
 
 [dependencies]
 ene-tool-proto = { path = "../../ene-tool-proto" }
-tokio = { workspace = true }
+ene-tools-utility = { path = "../utility" }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "fs", "process", "time"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }

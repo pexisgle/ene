@@ -1,8 +1,6 @@
-use crate::error::ToolError;
-use crate::sandbox::permission::{DestructiveAction, PermissionGate};
+use crate::permission::{DestructiveAction, PermissionGate};
+use ene_tool_proto::ToolError;
 use std::path::{Path, PathBuf};
-
-pub mod permission;
 
 /// サンドボックス設定 — 許可ディレクトリと制限
 #[derive(Debug, Clone)]
@@ -55,8 +53,9 @@ impl SandboxConfig {
     ) -> Result<PathBuf, ToolError> {
         // 存在しないファイルの場合、親ディレクトリをチェック
         let check_path = if path.exists() {
-            std::fs::canonicalize(path)
-                .map_err(|e| ToolError::SandboxViolation(format!("Cannot resolve path: {e}")))?
+            std::fs::canonicalize(path).map_err(|e| ToolError::SandboxViolation {
+                message: format!("Cannot resolve path: {e}"),
+            })?
         } else {
             // 親ディレクトリが存在するか確認
             let abs = if path.is_absolute() {
@@ -68,17 +67,15 @@ impl SandboxConfig {
             };
             if let Some(parent) = abs.parent() {
                 if parent.exists() {
-                    let canonical_parent = std::fs::canonicalize(parent).map_err(|e| {
-                        ToolError::SandboxViolation(format!(
-                            "Cannot resolve parent directory: {e}"
-                        ))
-                    })?;
+                    let canonical_parent =
+                        std::fs::canonicalize(parent).map_err(|e| ToolError::SandboxViolation {
+                            message: format!("Cannot resolve parent directory: {e}"),
+                        })?;
                     canonical_parent.join(abs.file_name().unwrap_or_default())
                 } else {
-                    return Err(ToolError::SandboxViolation(format!(
-                        "Parent directory does not exist: {}",
-                        parent.display()
-                    )));
+                    return Err(ToolError::SandboxViolation {
+                        message: format!("Parent directory does not exist: {}", parent.display()),
+                    });
                 }
             } else {
                 abs
@@ -102,24 +99,25 @@ impl SandboxConfig {
             }
         }
 
-        Err(ToolError::SandboxViolation(format!(
-            "Path not allowed: {}. Allowed dirs: {:?}",
-            check_path.display(),
-            allowed
-        )))
+        Err(ToolError::SandboxViolation {
+            message: format!(
+                "Path not allowed: {}. Allowed dirs: {:?}",
+                check_path.display(),
+                allowed
+            ),
+        })
     }
 
     /// コマンドがブロックリストにマッチするかチェック
     pub fn is_command_blocked(&self, command: &str) -> Result<(), ToolError> {
         for pattern in &self.blocked_commands {
-            let re = regex::Regex::new(pattern).map_err(|e| {
-                ToolError::ConfigError(format!("Invalid blocked command pattern: {e}"))
+            let re = regex::Regex::new(pattern).map_err(|e| ToolError::Internal {
+                message: format!("Invalid blocked command pattern: {e}"),
             })?;
             if re.is_match(command) {
-                return Err(ToolError::CommandBlocked(format!(
-                    "Command matches blocked pattern: {}",
-                    pattern
-                )));
+                return Err(ToolError::SandboxViolation {
+                    message: format!("Command matches blocked pattern: {}", pattern),
+                });
             }
         }
         Ok(())
@@ -135,10 +133,12 @@ impl SandboxConfig {
         let gate = PermissionGate::default_with_sandbox(self);
         match gate.check_destructive(action, target, description) {
             Ok(()) => Ok(()),
-            Err(req) => Err(ToolError::PermissionDenied(format!(
-                "{:?} on {} requires approval: {}",
-                action, req.description, target
-            ))),
+            Err(req) => Err(ToolError::PermissionDenied {
+                message: format!(
+                    "{:?} on {} requires approval: {}",
+                    action, req.description, target
+                ),
+            }),
         }
     }
 }

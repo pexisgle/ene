@@ -12,9 +12,7 @@ pub fn whitespace_normalized_replace(
     new: &str,
     replace_all: bool,
 ) -> Option<String> {
-    let normalize = |t: &str| -> String {
-        whitespace_re().replace_all(t, " ").trim().to_string()
-    };
+    let normalize = |t: &str| -> String { whitespace_re().replace_all(t, " ").trim().to_string() };
     let normalized_find = normalize(old);
 
     let lines: Vec<&str> = content.lines().collect();

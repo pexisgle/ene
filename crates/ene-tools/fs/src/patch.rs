@@ -1,10 +1,10 @@
-mod parser;
+use crate::patch_parser;
 
-use super::definition::ToolDefinition;
-use super::utility::undo_manager::{UndoEntry, UndoManager};
-use crate::error::ToolError;
 use crate::sandbox::SandboxConfig;
-use parser::PatchOperation;
+use crate::undo_manager::{UndoEntry, UndoManager};
+use ene_tool_proto::ToolDefinition;
+use ene_tool_proto::ToolError;
+use patch_parser::PatchOperation;
 use std::path::Path;
 
 pub fn tool_definition() -> ToolDefinition {
@@ -22,7 +22,7 @@ pub fn tool_definition() -> ToolDefinition {
             },
             "required": ["patchText"]
         }),
-        category: Some(super::ToolCategory::Filesystem),
+        category: Some(ene_tool_proto::ToolCategory::Filesystem),
         keywords: vec!["patch".to_string(), "multi-file".to_string(), "batch".to_string(), "change".to_string()],
     }
 }
@@ -38,15 +38,16 @@ pub async fn apply_patch(
 
     if trimmed == "*** Begin Patch\n*** End Patch" || trimmed == "*** Begin Patch\n\n*** End Patch"
     {
-        return Err(ToolError::ToolExecutionError(
-            "Patch rejected: empty patch".to_string(),
-        ));
+        return Err(ToolError::ExecutionFailed {
+            message: "Patch rejected: empty patch".to_string(),
+        });
     }
 
     if !trimmed.starts_with("*** Begin Patch") || !trimmed.ends_with("*** End Patch") {
-        return Err(ToolError::ToolExecutionError(
-            "Patch must start with '*** Begin Patch' and end with '*** End Patch'".to_string(),
-        ));
+        return Err(ToolError::ExecutionFailed {
+            message: "Patch must start with '*** Begin Patch' and end with '*** End Patch'"
+                .to_string(),
+        });
     }
 
     let mut operations = Vec::new();
@@ -59,7 +60,8 @@ pub async fn apply_patch(
         if line.starts_with("*** Update File:") {
             let file_path = line["*** Update File:".len()..].trim();
             let start = i + 1;
-            let (old_content, new_content, consumed) = parser::parse_update_block(&lines, start)?;
+            let (old_content, new_content, consumed) =
+                patch_parser::parse_update_block(&lines, start)?;
             operations.push(PatchOperation::Update {
                 path: file_path.to_string(),
                 old_content,
@@ -69,7 +71,7 @@ pub async fn apply_patch(
         } else if line.starts_with("*** Add File:") {
             let file_path = line["*** Add File:".len()..].trim();
             let start = i + 1;
-            let (content, consumed) = parser::parse_code_block(&lines, start)?;
+            let (content, consumed) = patch_parser::parse_code_block(&lines, start)?;
             operations.push(PatchOperation::Add {
                 path: file_path.to_string(),
                 content,
@@ -84,18 +86,16 @@ pub async fn apply_patch(
         } else if line.is_empty() {
             i += 1;
         } else {
-            return Err(ToolError::ToolExecutionError(format!(
-                "Unknown patch directive at line {}: {}",
-                i + 1,
-                line
-            )));
+            return Err(ToolError::ExecutionFailed {
+                message: format!("Unknown patch directive at line {}: {}", i + 1, line),
+            });
         }
     }
 
     if operations.is_empty() {
-        return Err(ToolError::ToolExecutionError(
-            "Patch contains no operations".to_string(),
-        ));
+        return Err(ToolError::ExecutionFailed {
+            message: "Patch contains no operations".to_string(),
+        });
     }
 
     let mut validated = Vec::new();
@@ -106,22 +106,25 @@ pub async fn apply_patch(
             } => {
                 let resolved = sandbox.resolve_and_check(Path::new(path), true)?;
                 if !resolved.exists() {
-                    return Err(ToolError::FileNotFound(format!(
-                        "Patch verification failed: File to update does not exist: {}",
-                        path
-                    )));
+                    return Err(ToolError::ExecutionFailed {
+                        message: format!(
+                            "Patch verification failed: File to update does not exist: {}",
+                            path
+                        ),
+                    });
                 }
                 let current = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
-                    ToolError::ToolExecutionError(format!(
-                        "Patch verification failed: Cannot read {}: {}",
-                        path, e
-                    ))
+                    ToolError::ExecutionFailed {
+                        message: format!("Patch verification failed: Cannot read {}: {}", path, e),
+                    }
                 })?;
                 if !current.contains(old_content) {
-                    return Err(ToolError::ToolExecutionError(format!(
-                        "Patch verification failed: old_content not found in {}. The file may have changed.",
-                        path
-                    )));
+                    return Err(ToolError::ExecutionFailed {
+                        message: format!(
+                            "Patch verification failed: old_content not found in {}. The file may have changed.",
+                            path
+                        ),
+                    });
                 }
                 validated.push((resolved, op.clone()));
             }
@@ -132,10 +135,12 @@ pub async fn apply_patch(
             PatchOperation::Delete { path } => {
                 let resolved = sandbox.resolve_and_check(Path::new(path), true)?;
                 if !resolved.exists() {
-                    return Err(ToolError::FileNotFound(format!(
-                        "Patch verification failed: File to delete does not exist: {}",
-                        path
-                    )));
+                    return Err(ToolError::ExecutionFailed {
+                        message: format!(
+                            "Patch verification failed: File to delete does not exist: {}",
+                            path
+                        ),
+                    });
                 }
                 validated.push((resolved, op.clone()));
             }
@@ -154,36 +159,34 @@ pub async fn apply_patch(
             } => {
                 let original = tokio::fs::read(&resolved).await.ok();
                 let current = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
-                    ToolError::ToolExecutionError(format!(
-                        "Cannot read {}: {}",
-                        resolved.display(),
-                        e
-                    ))
+                    ToolError::ExecutionFailed {
+                        message: format!("Cannot read {}: {}", resolved.display(), e),
+                    }
                 })?;
 
                 let first = current.find(&old_content);
                 let last = current.rfind(&old_content);
                 if first != last {
-                    return Err(ToolError::ToolExecutionError(format!(
-                        "Patch failed: old_content found multiple times in {}. Patch cannot be applied safely.",
-                        resolved.display()
-                    )));
+                    return Err(ToolError::ExecutionFailed {
+                        message: format!(
+                            "Patch failed: old_content found multiple times in {}. Patch cannot be applied safely.",
+                            resolved.display()
+                        ),
+                    });
                 }
-                let pos = first.ok_or_else(|| {
-                    ToolError::ToolExecutionError(format!(
+                let pos = first.ok_or_else(|| ToolError::ExecutionFailed {
+                    message: format!(
                         "Patch failed: old_content not found in {}",
                         resolved.display()
-                    ))
+                    ),
                 })?;
 
                 let updated =
                     current[..pos].to_string() + &new_content + &current[pos + old_content.len()..];
                 tokio::fs::write(&resolved, updated).await.map_err(|e| {
-                    ToolError::ToolExecutionError(format!(
-                        "Cannot write {}: {}",
-                        resolved.display(),
-                        e
-                    ))
+                    ToolError::ExecutionFailed {
+                        message: format!("Cannot write {}: {}", resolved.display(), e),
+                    }
                 })?;
 
                 undo_ops.push(UndoEntry::restore_file(resolved.clone(), original));
@@ -192,15 +195,15 @@ pub async fn apply_patch(
             PatchOperation::Add { content, .. } => {
                 if let Some(parent) = resolved.parent() {
                     tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                        ToolError::ToolExecutionError(format!("Cannot create directory: {e}"))
+                        ToolError::ExecutionFailed {
+                            message: format!("Cannot create directory: {e}"),
+                        }
                     })?;
                 }
                 tokio::fs::write(&resolved, &content).await.map_err(|e| {
-                    ToolError::ToolExecutionError(format!(
-                        "Cannot write {}: {}",
-                        resolved.display(),
-                        e
-                    ))
+                    ToolError::ExecutionFailed {
+                        message: format!("Cannot write {}: {}", resolved.display(), e),
+                    }
                 })?;
 
                 undo_ops.push(UndoEntry::delete_created_file(resolved.clone()));
@@ -215,19 +218,15 @@ pub async fn apply_patch(
 
                 if resolved.is_dir() {
                     tokio::fs::remove_dir_all(&resolved).await.map_err(|e| {
-                        ToolError::ToolExecutionError(format!(
-                            "Cannot delete {}: {}",
-                            resolved.display(),
-                            e
-                        ))
+                        ToolError::ExecutionFailed {
+                            message: format!("Cannot delete {}: {}", resolved.display(), e),
+                        }
                     })?;
                 } else {
                     tokio::fs::remove_file(&resolved).await.map_err(|e| {
-                        ToolError::ToolExecutionError(format!(
-                            "Cannot delete {}: {}",
-                            resolved.display(),
-                            e
-                        ))
+                        ToolError::ExecutionFailed {
+                            message: format!("Cannot delete {}: {}", resolved.display(), e),
+                        }
                     })?;
                 }
 

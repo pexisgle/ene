@@ -1,7 +1,7 @@
-use super::definition::ToolDefinition;
-use super::utility::undo_manager::UndoManager;
-use crate::error::ToolError;
 use crate::sandbox::SandboxConfig;
+use crate::undo_manager::UndoManager;
+use ene_tool_proto::ToolDefinition;
+use ene_tool_proto::ToolError;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -51,7 +51,7 @@ pub fn tool_definition() -> ToolDefinition {
             },
             "required": ["filePath", "oldString", "newString"]
         }),
-        category: Some(super::ToolCategory::Filesystem),
+        category: Some(ene_tool_proto::ToolCategory::Filesystem),
         keywords: vec!["edit".to_string(), "replace".to_string(), "modify".to_string(), "file".to_string()],
     }
 }
@@ -124,29 +124,33 @@ pub async fn edit(
     session_id: &str,
 ) -> Result<String, ToolError> {
     if old_string == new_string {
-        return Err(ToolError::ToolExecutionError(
-            "No changes to apply: oldString and newString are identical.".to_string(),
-        ));
+        return Err(ToolError::ExecutionFailed {
+            message: "No changes to apply: oldString and newString are identical.".to_string(),
+        });
     }
 
     let resolved = sandbox.resolve_and_check(path, true)?;
 
     if !resolved.exists() {
-        return Err(ToolError::FileNotFound(format!(
-            "File not found: {}",
-            resolved.display()
-        )));
+        return Err(ToolError::ExecutionFailed {
+            message: format!("File not found: {}", resolved.display()),
+        });
     }
 
     let lock = get_lock(&resolved);
     let _permit = lock
         .acquire()
         .await
-        .map_err(|e| ToolError::ToolExecutionError(format!("Lock error: {e}")))?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Lock error: {e}"),
+        })?;
 
-    let content = tokio::fs::read_to_string(&resolved)
-        .await
-        .map_err(|e| ToolError::ToolExecutionError(format!("Cannot read file: {e}")))?;
+    let content =
+        tokio::fs::read_to_string(&resolved)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                message: format!("Cannot read file: {e}"),
+            })?;
 
     let original = content.clone();
     let ending = detect_line_ending(&content);
@@ -190,13 +194,13 @@ pub async fn edit(
             let simple_matches: Vec<_> =
                 normalized_content.match_indices(&normalized_old).collect();
             if simple_matches.len() > 1 && !replace_all {
-                return Err(ToolError::ToolExecutionError(
+                return Err(ToolError::ExecutionFailed { message:
                     "Found multiple matches for oldString. Provide more surrounding context to make the match unique.".to_string()
-                ));
+                });
             }
-            return Err(ToolError::ToolExecutionError(
+            return Err(ToolError::ExecutionFailed { message:
                 "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.".to_string()
-            ));
+            });
         }
     };
 
@@ -208,7 +212,9 @@ pub async fn edit(
 
     tokio::fs::write(&resolved, final_content)
         .await
-        .map_err(|e| ToolError::ToolExecutionError(format!("Failed to write file: {e}")))?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to write file: {e}"),
+        })?;
 
     undo_manager.push_restore_file(
         session_id,
