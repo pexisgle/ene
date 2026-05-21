@@ -18,7 +18,10 @@ pub fn ensure_resource_dirs() -> PathBuf {
 
     #[cfg(debug_assertions)]
     {
-        eprintln!("[Resources] Dev build: using source assets at {}", assets_dir.display());
+        eprintln!(
+            "[Resources] Dev build: using source assets at {}",
+            assets_dir.display()
+        );
         assets_dir
     }
 

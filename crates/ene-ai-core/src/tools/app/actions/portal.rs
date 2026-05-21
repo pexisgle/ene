@@ -54,7 +54,9 @@ pub async fn capture_screen_portal(scale_percent: u32) -> Result<DynamicImage, A
 
 #[cfg(not(target_os = "linux"))]
 pub async fn capture_screen_portal(_scale_percent: u32) -> Result<DynamicImage, AiCoreError> {
-    Err(AiCoreError::AppError("Portal not available on this platform".to_string()))
+    Err(AiCoreError::AppError(
+        "Portal not available on this platform".to_string(),
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -106,7 +108,9 @@ pub async fn capture_window_portal(scale_percent: u32) -> Result<DynamicImage, A
 
 #[cfg(not(target_os = "linux"))]
 pub async fn capture_window_portal(_scale_percent: u32) -> Result<DynamicImage, AiCoreError> {
-    Err(AiCoreError::AppError("Portal not available on this platform".to_string()))
+    Err(AiCoreError::AppError(
+        "Portal not available on this platform".to_string(),
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -180,11 +184,10 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, AiCoreError> {
                 return;
             }
 
-            let (media_type, media_subtype) =
-                match spa::param::format_utils::parse_format(param) {
-                    Ok(v) => v,
-                    Err(_) => return,
-                };
+            let (media_type, media_subtype) = match spa::param::format_utils::parse_format(param) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
 
             if media_type != spa::param::format::MediaType::Video
                 || media_subtype != spa::param::format::MediaSubtype::Raw
@@ -210,8 +213,7 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, AiCoreError> {
                 | spa::param::video::VideoFormat::BGRA
                 | spa::param::video::VideoFormat::RGBx
                 | spa::param::video::VideoFormat::BGRx => 4,
-                spa::param::video::VideoFormat::RGB
-                | spa::param::video::VideoFormat::BGR => 3,
+                spa::param::video::VideoFormat::RGB | spa::param::video::VideoFormat::BGR => 3,
                 _ => 4,
             };
 
@@ -251,11 +253,7 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, AiCoreError> {
 
             let mut pixels = vec![0u8; data_size];
             unsafe {
-                std::ptr::copy_nonoverlapping(
-                    raw_data.as_ptr(),
-                    pixels.as_mut_ptr(),
-                    data_size,
-                );
+                std::ptr::copy_nonoverlapping(raw_data.as_ptr(), pixels.as_mut_ptr(), data_size);
             }
             s.pixels = Some(pixels);
 
@@ -317,10 +315,7 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, AiCoreError> {
             Fraction,
             spa::utils::Fraction { num: 60, denom: 1 },
             spa::utils::Fraction { num: 0, denom: 1 },
-            spa::utils::Fraction {
-                num: 240,
-                denom: 1
-            }
+            spa::utils::Fraction { num: 240, denom: 1 }
         ),
     );
     let values: Vec<u8> = spa::pod::serialize::PodSerializer::serialize(
@@ -363,14 +358,12 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, AiCoreError> {
         }
         match bpp {
             4 => DynamicImage::ImageRgba8(
-                image::RgbaImage::from_raw(width, height, rgba).ok_or_else(|| {
-                    AiCoreError::AppError("Invalid image dimensions".to_string())
-                })?,
+                image::RgbaImage::from_raw(width, height, rgba)
+                    .ok_or_else(|| AiCoreError::AppError("Invalid image dimensions".to_string()))?,
             ),
             _ => DynamicImage::ImageRgba8(
-                image::RgbaImage::from_raw(width, height, rgba).ok_or_else(|| {
-                    AiCoreError::AppError("Invalid image dimensions".to_string())
-                })?,
+                image::RgbaImage::from_raw(width, height, rgba)
+                    .ok_or_else(|| AiCoreError::AppError("Invalid image dimensions".to_string()))?,
             ),
         }
     } else if is_bgr && bpp == 3 {
@@ -379,21 +372,18 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, AiCoreError> {
             chunk.swap(0, 2);
         }
         DynamicImage::ImageRgb8(
-            image::RgbImage::from_raw(width, height, rgb).ok_or_else(|| {
-                AiCoreError::AppError("Invalid image dimensions".to_string())
-            })?,
+            image::RgbImage::from_raw(width, height, rgb)
+                .ok_or_else(|| AiCoreError::AppError("Invalid image dimensions".to_string()))?,
         )
     } else if bpp == 4 {
         DynamicImage::ImageRgba8(
-            image::RgbaImage::from_raw(width, height, pixels.clone()).ok_or_else(|| {
-                AiCoreError::AppError("Invalid image dimensions".to_string())
-            })?,
+            image::RgbaImage::from_raw(width, height, pixels.clone())
+                .ok_or_else(|| AiCoreError::AppError("Invalid image dimensions".to_string()))?,
         )
     } else {
         DynamicImage::ImageRgb8(
-            image::RgbImage::from_raw(width, height, pixels.clone()).ok_or_else(|| {
-                AiCoreError::AppError("Invalid image dimensions".to_string())
-            })?,
+            image::RgbImage::from_raw(width, height, pixels.clone())
+                .ok_or_else(|| AiCoreError::AppError("Invalid image dimensions".to_string()))?,
         )
     };
 
@@ -498,17 +488,11 @@ fn sway_find_windows(node: &serde_json::Value, windows: &mut Vec<String>) {
     if node_type == "con" || node_type == "floating_con" {
         let name = node["name"].as_str().unwrap_or("");
         let app_id = node["app_id"].as_str().unwrap_or("");
-        let class = node["window_properties"]["class"]
-            .as_str()
-            .unwrap_or("");
+        let class = node["window_properties"]["class"].as_str().unwrap_or("");
         let has_window = node["window"].as_i64().is_some();
 
         if has_window || !name.is_empty() || !app_id.is_empty() || !class.is_empty() {
-            let display_id = if !app_id.is_empty() {
-                app_id
-            } else {
-                class
-            };
+            let display_id = if !app_id.is_empty() { app_id } else { class };
             if !name.is_empty() || !display_id.is_empty() {
                 windows.push(format!("{} ({})", name, display_id));
             }
@@ -758,7 +742,9 @@ pub fn list_windows_wayland() -> Result<String, AiCoreError> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn list_windows_wayland() -> Result<String, AiCoreError> {
-    Err(AiCoreError::AppError("Wayland not available on this platform".to_string()))
+    Err(AiCoreError::AppError(
+        "Wayland not available on this platform".to_string(),
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -777,5 +763,7 @@ pub fn focus_window_wayland(title: &str) -> Result<String, AiCoreError> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn focus_window_wayland(_title: &str) -> Result<String, AiCoreError> {
-    Err(AiCoreError::AppError("Wayland not available on this platform".to_string()))
+    Err(AiCoreError::AppError(
+        "Wayland not available on this platform".to_string(),
+    ))
 }

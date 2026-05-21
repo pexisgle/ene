@@ -4,6 +4,7 @@ pub mod config;
 pub mod conversation_manager;
 pub mod embedding;
 pub mod error;
+pub mod ipc_client;
 pub mod mcp_client;
 pub mod memory;
 pub mod paths;
@@ -15,7 +16,6 @@ pub mod session;
 pub mod special_token;
 pub mod stream;
 pub mod summarizer;
-pub mod ipc_client;
 pub mod tool_factory;
 pub mod tools;
 pub mod utils;
@@ -26,8 +26,8 @@ pub use conversation_manager::{
     execute_split, generate_session_id, poll_split_result, spawn_split_task,
 };
 pub use embedding::{
-    ApiEmbeddingProvider, EmbeddingProvider, GgufEmbeddingProvider, create_embedding_provider,
-    cosine_similarity,
+    ApiEmbeddingProvider, EmbeddingProvider, GgufEmbeddingProvider, cosine_similarity,
+    create_embedding_provider,
 };
 pub use error::AiCoreError;
 pub use memory::{ConversationSummary, KeyFact, MemoryStore, RecalledSummary};
@@ -35,8 +35,8 @@ pub use session::ConversationSession;
 pub use stream::{AiStreamEvent, run_ai_with_tools};
 pub use tool_factory::ToolRegistryBuilder;
 pub use tools::{
-    BuiltinToolRegistry, CompositeToolRegistry, ToolCallResult,
-    ToolCategory, ToolDefinition, ToolRegistry, UndoEntry, UndoManager, UndoOperation, backup_file,
+    BuiltinToolRegistry, CompositeToolRegistry, ToolCallResult, ToolCategory, ToolDefinition,
+    ToolRegistry, UndoEntry, UndoManager, UndoOperation, backup_file,
 };
 pub use utils::{init_memory, truncate};
 

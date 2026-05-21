@@ -79,8 +79,14 @@ impl CompositeToolRegistry {
                 let text = tool.embedding_text();
                 match embedder.embed(&text).await {
                     Ok(embedding) => {
-                        if let Err(e) = store.upsert_tool_embedding(&tool.name, &current_hash, &embedding) {
-                            tracing::warn!("[ToolRAG] Failed to persist embedding for '{}': {}", tool.name, e);
+                        if let Err(e) =
+                            store.upsert_tool_embedding(&tool.name, &current_hash, &embedding)
+                        {
+                            tracing::warn!(
+                                "[ToolRAG] Failed to persist embedding for '{}': {}",
+                                tool.name,
+                                e
+                            );
                         }
                         indexed += 1;
                     }
@@ -111,7 +117,11 @@ impl ToolRegistry for CompositeToolRegistry {
         tools
     }
 
-    fn list_relevant_tools(&self, query_embedding: Option<&[f32]>, limit: usize) -> Vec<ToolDefinition> {
+    fn list_relevant_tools(
+        &self,
+        query_embedding: Option<&[f32]>,
+        limit: usize,
+    ) -> Vec<ToolDefinition> {
         let all_tools = self.list_tools();
         let (Some(emb), Some(store)) = (query_embedding, self.store.as_ref()) else {
             return all_tools;
@@ -125,10 +135,8 @@ impl ToolRegistry for CompositeToolRegistry {
             }
         };
 
-        let all_map: HashMap<String, ToolDefinition> = all_tools
-            .into_iter()
-            .map(|t| (t.name.clone(), t))
-            .collect();
+        let all_map: HashMap<String, ToolDefinition> =
+            all_tools.into_iter().map(|t| (t.name.clone(), t)).collect();
 
         search_results
             .into_iter()

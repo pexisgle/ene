@@ -150,18 +150,66 @@ pub async fn press_key(key: &str) -> Result<String, AiCoreError> {
                     .key(enigo::Key::CapsLock, Direction::Click)
                     .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
             }
-            "f1" => { enigo.key(enigo::Key::F1, Direction::Click).map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?; }
-            "f2" => { enigo.key(enigo::Key::F2, Direction::Click).map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?; }
-            "f3" => { enigo.key(enigo::Key::F3, Direction::Click).map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?; }
-            "f4" => { enigo.key(enigo::Key::F4, Direction::Click).map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?; }
-            "f5" => { enigo.key(enigo::Key::F5, Direction::Click).map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?; }
-            "f6" => { enigo.key(enigo::Key::F6, Direction::Click).map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?; }
-            "f7" => { enigo.key(enigo::Key::F7, Direction::Click).map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?; }
-            "f8" => { enigo.key(enigo::Key::F8, Direction::Click).map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?; }
-            "f9" => { enigo.key(enigo::Key::F9, Direction::Click).map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?; }
-            "f10" => { enigo.key(enigo::Key::F10, Direction::Click).map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?; }
-            "f11" => { enigo.key(enigo::Key::F11, Direction::Click).map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?; }
-            "f12" => { enigo.key(enigo::Key::F12, Direction::Click).map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?; }
+            "f1" => {
+                enigo
+                    .key(enigo::Key::F1, Direction::Click)
+                    .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
+            }
+            "f2" => {
+                enigo
+                    .key(enigo::Key::F2, Direction::Click)
+                    .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
+            }
+            "f3" => {
+                enigo
+                    .key(enigo::Key::F3, Direction::Click)
+                    .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
+            }
+            "f4" => {
+                enigo
+                    .key(enigo::Key::F4, Direction::Click)
+                    .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
+            }
+            "f5" => {
+                enigo
+                    .key(enigo::Key::F5, Direction::Click)
+                    .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
+            }
+            "f6" => {
+                enigo
+                    .key(enigo::Key::F6, Direction::Click)
+                    .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
+            }
+            "f7" => {
+                enigo
+                    .key(enigo::Key::F7, Direction::Click)
+                    .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
+            }
+            "f8" => {
+                enigo
+                    .key(enigo::Key::F8, Direction::Click)
+                    .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
+            }
+            "f9" => {
+                enigo
+                    .key(enigo::Key::F9, Direction::Click)
+                    .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
+            }
+            "f10" => {
+                enigo
+                    .key(enigo::Key::F10, Direction::Click)
+                    .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
+            }
+            "f11" => {
+                enigo
+                    .key(enigo::Key::F11, Direction::Click)
+                    .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
+            }
+            "f12" => {
+                enigo
+                    .key(enigo::Key::F12, Direction::Click)
+                    .map_err(|e| AiCoreError::AppError(format!("Key press failed: {e}")))?;
+            }
             _ if key.len() == 1 => {
                 let c = key.chars().next().unwrap();
                 enigo
@@ -228,10 +276,7 @@ pub async fn key_combo(combo: &str) -> Result<String, AiCoreError> {
             return Err(AiCoreError::AppError("Empty key combo".to_string()));
         }
 
-        let keys: Vec<enigo::Key> = parts
-            .iter()
-            .filter_map(|p| parse_key(p))
-            .collect();
+        let keys: Vec<enigo::Key> = parts.iter().filter_map(|p| parse_key(p)).collect();
 
         if keys.len() != parts.len() {
             let unrecognized: Vec<&&str> = parts
@@ -314,7 +359,13 @@ pub async fn mouse_click(button: &str, count: Option<u32>) -> Result<String, AiC
     .map_err(|e| AiCoreError::AppError(format!("Task failed: {e}")))?
 }
 
-pub async fn mouse_drag(start_x: i32, start_y: i32, end_x: i32, end_y: i32, button: &str) -> Result<String, AiCoreError> {
+pub async fn mouse_drag(
+    start_x: i32,
+    start_y: i32,
+    end_x: i32,
+    end_y: i32,
+    button: &str,
+) -> Result<String, AiCoreError> {
     let button = button.to_string();
     tokio::task::spawn_blocking(move || {
         let mut enigo = enigo::Enigo::new(&enigo::Settings::default())
@@ -341,7 +392,10 @@ pub async fn mouse_drag(start_x: i32, start_y: i32, end_x: i32, end_y: i32, butt
             .button(btn, Direction::Release)
             .map_err(|e| AiCoreError::AppError(format!("Mouse release failed: {e}")))?;
 
-        Ok::<_, AiCoreError>(format!("Dragged from ({},{}) to ({},{}) with {} button", start_x, start_y, end_x, end_y, button))
+        Ok::<_, AiCoreError>(format!(
+            "Dragged from ({},{}) to ({},{}) with {} button",
+            start_x, start_y, end_x, end_y, button
+        ))
     })
     .await
     .map_err(|e| AiCoreError::AppError(format!("Task failed: {e}")))?
@@ -402,7 +456,10 @@ pub async fn list_monitors() -> Result<String, AiCoreError> {
         for monitor in monitors {
             let name = monitor.name().unwrap_or_else(|_| "Unknown".to_string());
             let id = monitor.id();
-            let id_str = match id { Ok(v) => v.to_string(), Err(_) => "?".to_string() };
+            let id_str = match id {
+                Ok(v) => v.to_string(),
+                Err(_) => "?".to_string(),
+            };
             let is_primary = monitor.is_primary().unwrap_or(false);
             let width = monitor.width().unwrap_or(0);
             let height = monitor.height().unwrap_or(0);
@@ -459,7 +516,8 @@ fn capture_screen_xcap(scale_percent: u32) -> Result<DynamicImage, AiCoreError> 
         }
     }
 
-    let image = target_image.ok_or_else(|| AiCoreError::AppError("Failed to capture screen".to_string()))?;
+    let image = target_image
+        .ok_or_else(|| AiCoreError::AppError("Failed to capture screen".to_string()))?;
 
     let final_image = if scale_percent > 0 && scale_percent < 100 {
         let nwidth = (image.width() as f32 * (scale_percent as f32 / 100.0)) as u32;
@@ -472,7 +530,10 @@ fn capture_screen_xcap(scale_percent: u32) -> Result<DynamicImage, AiCoreError> 
     Ok(final_image)
 }
 
-fn capture_window_by_title_xcap(title: &str, scale_percent: u32) -> Result<DynamicImage, AiCoreError> {
+fn capture_window_by_title_xcap(
+    title: &str,
+    scale_percent: u32,
+) -> Result<DynamicImage, AiCoreError> {
     let windows = xcap::Window::all()
         .map_err(|e| AiCoreError::AppError(format!("Failed to enumerate windows: {e}")))?;
 
@@ -495,7 +556,10 @@ fn capture_window_by_title_xcap(title: &str, scale_percent: u32) -> Result<Dynam
         }
     }
 
-    Err(AiCoreError::AppError(format!("Window not found: {}", title)))
+    Err(AiCoreError::AppError(format!(
+        "Window not found: {}",
+        title
+    )))
 }
 
 fn encode_image_to_data_uri(image: DynamicImage) -> Result<String, AiCoreError> {
@@ -527,7 +591,10 @@ pub async fn screenshot(scale_percent: Option<u32>) -> Result<String, AiCoreErro
     Ok(result.to_string())
 }
 
-pub async fn capture_window(title: &str, scale_percent: Option<u32>) -> Result<String, AiCoreError> {
+pub async fn capture_window(
+    title: &str,
+    scale_percent: Option<u32>,
+) -> Result<String, AiCoreError> {
     let scale_percent = scale_percent.unwrap_or(50);
 
     let image = if portal::detect_wayland() {

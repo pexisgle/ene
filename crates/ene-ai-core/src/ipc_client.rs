@@ -1,9 +1,9 @@
-use crate::tools::definition::{ToolDefinition, ToolRegistry};
 use crate::tools::ToolCategory;
+use crate::tools::definition::{ToolDefinition, ToolRegistry};
 use async_trait::async_trait;
 use ene_tool_proto::{
-    read_ipc_response, write_ipc_request, IpcRequest, IpcResponse, SandboxConfigData,
-    ToolCategory as ProtoCategory, ToolDefinition as ProtoToolDefinition,
+    IpcRequest, IpcResponse, SandboxConfigData, ToolCategory as ProtoCategory,
+    ToolDefinition as ProtoToolDefinition, read_ipc_response, write_ipc_request,
 };
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -73,9 +73,7 @@ impl IpcToolRegistry {
         write_ipc_request(stream, &req)
             .await
             .map_err(|e| e.to_string())?;
-        let resp = read_ipc_response(stream)
-            .await
-            .map_err(|e| e.to_string())?;
+        let resp = read_ipc_response(stream).await.map_err(|e| e.to_string())?;
         resp.ok_or("Connection closed by tool host".to_string())
     }
 }

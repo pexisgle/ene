@@ -1,6 +1,6 @@
 use crate::actions;
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError, ToolProvider};
 use async_trait::async_trait;
+use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError, ToolProvider};
 use serde::Deserialize;
 
 pub struct AppToolProvider;
@@ -110,11 +110,14 @@ impl ToolProvider for AppToolProvider {
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         if name != "app" {
-            return Err(ToolError::NotFound { tool_name: name.to_string() });
+            return Err(ToolError::NotFound {
+                tool_name: name.to_string(),
+            });
         }
-        let args: AppArgs = serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
-            message: format!("Invalid arguments for app: {e}"),
-        })?;
+        let args: AppArgs =
+            serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
+                message: format!("Invalid arguments for app: {e}"),
+            })?;
         actions::app_exec(
             &args.action,
             args.window_title.as_deref(),
@@ -131,7 +134,8 @@ impl ToolProvider for AppToolProvider {
             args.amount,
             args.direction.as_deref(),
             args.scale_percent,
-        ).await
+        )
+        .await
     }
 
     fn set_session_id(&self, _session_id: &str) {

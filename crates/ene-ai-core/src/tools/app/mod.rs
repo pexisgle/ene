@@ -102,7 +102,8 @@ pub async fn app_exec(
             actions::press_key(k).await
         }
         "key_combo" => {
-            let combo = key_combo.ok_or_else(|| AiCoreError::AppError("key_combo required".to_string()))?;
+            let combo =
+                key_combo.ok_or_else(|| AiCoreError::AppError("key_combo required".to_string()))?;
             actions::key_combo(combo).await
         }
         "mouse_move" => {

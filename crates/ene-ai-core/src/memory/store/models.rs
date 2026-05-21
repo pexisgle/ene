@@ -13,9 +13,7 @@ impl FromSql<Binary, Sqlite> for EmbeddingBlob {
         let raw_bytes = bytes.read_blob();
         let vec = raw_bytes
             .chunks_exact(4)
-            .map(|chunk| {
-                f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
-            })
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
             .collect();
         Ok(EmbeddingBlob(vec))
     }

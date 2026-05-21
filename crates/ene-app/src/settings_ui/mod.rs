@@ -717,8 +717,7 @@ fn render_ai_page(
             ui.add_sized(
                 [280.0, 0.0],
                 egui::Label::new(
-                    SettingsValueKind::AiProviderName
-                        .current_text(settings, animation_control),
+                    SettingsValueKind::AiProviderName.current_text(settings, animation_control),
                 ),
             );
         });
@@ -728,8 +727,7 @@ fn render_ai_page(
             ui.add_sized(
                 [280.0, 0.0],
                 egui::Label::new(
-                    SettingsValueKind::AiModel
-                        .current_text(settings, animation_control),
+                    SettingsValueKind::AiModel.current_text(settings, animation_control),
                 ),
             );
         });
@@ -817,26 +815,22 @@ fn render_ai_page(
                 });
             if current_provider != input_state.ai_embedding_provider {
                 input_state.ai_embedding_provider = current_provider.clone();
-                settings.ai.memory.embedding_provider_type =
-                    match current_provider.as_str() {
-                        "local" => ene_ai_core::EmbeddingProviderType::Local,
-                        _ => ene_ai_core::EmbeddingProviderType::Api,
-                    };
+                settings.ai.memory.embedding_provider_type = match current_provider.as_str() {
+                    "local" => ene_ai_core::EmbeddingProviderType::Local,
+                    _ => ene_ai_core::EmbeddingProviderType::Api,
+                };
                 match current_provider.as_str() {
                     "local" => {
                         settings.ai.memory.embedding_model =
                             "jina-embeddings-v5-text-nano".to_string();
                         settings.ai.memory.embedding_dimensions = None;
-                        input_state.ai_embedding_model =
-                            settings.ai.memory.embedding_model.clone();
+                        input_state.ai_embedding_model = settings.ai.memory.embedding_model.clone();
                         input_state.ai_embedding_dimensions = "auto".to_string();
                     }
                     _ => {
-                        settings.ai.memory.embedding_model =
-                            "text-embedding-3-small".to_string();
+                        settings.ai.memory.embedding_model = "text-embedding-3-small".to_string();
                         settings.ai.memory.embedding_dimensions = Some(1536);
-                        input_state.ai_embedding_model =
-                            settings.ai.memory.embedding_model.clone();
+                        input_state.ai_embedding_model = settings.ai.memory.embedding_model.clone();
                         input_state.ai_embedding_dimensions = settings
                             .ai
                             .memory
@@ -855,8 +849,7 @@ fn render_ai_page(
                     .desired_width(f32::INFINITY),
             );
             if response.changed() {
-                settings.ai.memory.embedding_model =
-                    input_state.ai_embedding_model.clone();
+                settings.ai.memory.embedding_model = input_state.ai_embedding_model.clone();
             }
         });
 
@@ -866,15 +859,11 @@ fn render_ai_page(
                 ui.add_sized([100.0, 0.0], egui::Label::new("auto (from model)"));
             } else {
                 let response = ui.add(
-                    egui::TextEdit::singleline(
-                        &mut input_state.ai_embedding_dimensions,
-                    )
-                    .desired_width(100.0),
+                    egui::TextEdit::singleline(&mut input_state.ai_embedding_dimensions)
+                        .desired_width(100.0),
                 );
                 if response.changed() {
-                    if let Ok(dims) =
-                        input_state.ai_embedding_dimensions.parse::<usize>()
-                    {
+                    if let Ok(dims) = input_state.ai_embedding_dimensions.parse::<usize>() {
                         settings.ai.memory.embedding_dimensions = Some(dims);
                     }
                 }

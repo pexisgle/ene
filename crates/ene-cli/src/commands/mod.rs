@@ -209,7 +209,10 @@ async fn handle_tooltest(arg: &str, ctx: &mut AppContext) {
     } else {
         arg.trim().to_string()
     };
-    println!("{}", style::header(format!("[ToolTest] Running: {}", prompt)));
+    println!(
+        "{}",
+        style::header(format!("[ToolTest] Running: {}", prompt))
+    );
     crate::tooltest::run(&ctx.settings, &ctx.session, &prompt).await;
 }
 
@@ -221,7 +224,10 @@ fn save_config(ctx: &AppContext) {
     let config = serde_json::json!({
         "ai": ctx.settings,
     });
-    if let Err(e) = std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap_or_default()) {
+    if let Err(e) = std::fs::write(
+        &config_path,
+        serde_json::to_string_pretty(&config).unwrap_or_default(),
+    ) {
         eprintln!("[Config] Failed to save settings: {}", e);
     }
 }

@@ -129,7 +129,11 @@ impl Default for AiMemorySettings {
             summary_recall_limit: 3,
             tool_rag_enabled: true,
             tool_rag_limit: 6,
-            tool_rag_always_include: vec!["question".to_string(), "todo".to_string(), "get_current_time".to_string()],
+            tool_rag_always_include: vec![
+                "question".to_string(),
+                "todo".to_string(),
+                "get_current_time".to_string(),
+            ],
             summarization_model: String::new(),
             summarization_base_url: String::new(),
         }

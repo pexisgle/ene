@@ -176,9 +176,7 @@ pub fn render_numeric_row(
             action = Some(down_action);
             *text_buffer = format_fn(settings);
         }
-        let response = ui.add(
-            egui::TextEdit::singleline(text_buffer).desired_width(220.0),
-        );
+        let response = ui.add(egui::TextEdit::singleline(text_buffer).desired_width(220.0));
         let commit = response.changed()
             || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
         if commit && value_kind.apply_input(text_buffer.trim(), settings).is_ok() {
@@ -224,10 +222,16 @@ fn cycle_target_fps(current: u32, step: isize) -> u32 {
     crate::app_config::cycle_target_fps(current, step)
 }
 
-fn cycle_shadow_quality(current: crate::app_config::ShadowQuality, step: isize) -> crate::app_config::ShadowQuality {
+fn cycle_shadow_quality(
+    current: crate::app_config::ShadowQuality,
+    step: isize,
+) -> crate::app_config::ShadowQuality {
     crate::app_config::cycle_shadow_quality(current, step)
 }
 
-fn cycle_antialiasing_mode(current: crate::app_config::AntialiasingMode, step: isize) -> crate::app_config::AntialiasingMode {
+fn cycle_antialiasing_mode(
+    current: crate::app_config::AntialiasingMode,
+    step: isize,
+) -> crate::app_config::AntialiasingMode {
     crate::app_config::cycle_antialiasing_mode(current, step)
 }

@@ -28,8 +28,9 @@ impl ToolRegistryBuilder {
     }
 
     pub fn with_builtin(mut self) -> Self {
-        self.registries
-            .push(Box::new(crate::tools::utility::builtin::BuiltinToolRegistry::new()));
+        self.registries.push(Box::new(
+            crate::tools::utility::builtin::BuiltinToolRegistry::new(),
+        ));
         self
     }
 
@@ -41,12 +42,18 @@ impl ToolRegistryBuilder {
 
     pub fn with_sandbox_settings(mut self, settings: &crate::config::AiSandboxSettings) -> Self {
         self.registries
-            .push(Box::new(crate::tools::core::EneToolRegistry::new(settings.to_sandbox_config())));
+            .push(Box::new(crate::tools::core::EneToolRegistry::new(
+                settings.to_sandbox_config(),
+            )));
         self
     }
 
     /// IPC版ツールホストに接続する
-    pub fn with_ipc(mut self, socket_path: impl Into<PathBuf>, settings: &crate::config::AiSandboxSettings) -> Self {
+    pub fn with_ipc(
+        mut self,
+        socket_path: impl Into<PathBuf>,
+        settings: &crate::config::AiSandboxSettings,
+    ) -> Self {
         self.ipc = Some((socket_path.into(), settings.to_sandbox_config_data()));
         self
     }

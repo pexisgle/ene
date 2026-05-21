@@ -37,15 +37,20 @@ pub async fn capture_screen_portal(scale_percent: u32) -> Result<DynamicImage, T
         .modal(false)
         .send()
         .await
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Portal screenshot request failed: {e}") })?
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Portal screenshot request failed: {e}"),
+        })?
         .response()
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Portal screenshot response failed: {e}") })?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Portal screenshot response failed: {e}"),
+        })?;
 
     let uri = response.uri();
     let path = uri.as_str().strip_prefix("file://").unwrap_or(uri.as_str());
 
-    let image = image::open(path)
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to open screenshot file: {e}") })?;
+    let image = image::open(path).map_err(|e| ToolError::ExecutionFailed {
+        message: format!("Failed to open screenshot file: {e}"),
+    })?;
 
     let _ = std::fs::remove_file(path);
 
@@ -54,7 +59,9 @@ pub async fn capture_screen_portal(scale_percent: u32) -> Result<DynamicImage, T
 
 #[cfg(not(target_os = "linux"))]
 pub async fn capture_screen_portal(_scale_percent: u32) -> Result<DynamicImage, ToolError> {
-    Err(ToolError::ExecutionFailed { message: "Portal not available on this platform".to_string() })
+    Err(ToolError::ExecutionFailed {
+        message: "Portal not available on this platform".to_string(),
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -65,12 +72,16 @@ pub async fn capture_window_portal(scale_percent: u32) -> Result<DynamicImage, T
 
     let proxy = Screencast::new()
         .await
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to create Screencast proxy: {e}") })?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to create Screencast proxy: {e}"),
+        })?;
 
     let session = proxy
         .create_session(Default::default())
         .await
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to create screencast session: {e}") })?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to create screencast session: {e}"),
+        })?;
 
     let source_opts = SelectSourcesOptions::default()
         .set_cursor_mode(CursorMode::Hidden)
@@ -80,33 +91,43 @@ pub async fn capture_window_portal(scale_percent: u32) -> Result<DynamicImage, T
     proxy
         .select_sources(&session, source_opts)
         .await
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to select sources: {e}") })?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to select sources: {e}"),
+        })?;
 
     let response = proxy
         .start(&session, None, StartCastOptions::default())
         .await
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to start screencast: {e}") })?
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to start screencast: {e}"),
+        })?
         .response()
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Screencast start response failed: {e}") })?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Screencast start response failed: {e}"),
+        })?;
 
     let streams = response.streams();
     if streams.is_empty() {
-        return Err(ToolError::ExecutionFailed { message: 
-            "No PipeWire streams returned from screencast".to_string(),
-         });
+        return Err(ToolError::ExecutionFailed {
+            message: "No PipeWire streams returned from screencast".to_string(),
+        });
     }
 
     let node_id = streams[0].pipe_wire_node_id();
 
     tokio::task::spawn_blocking(move || capture_pipewire_frame(node_id))
         .await
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("PipeWire task failed: {e}") })?
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("PipeWire task failed: {e}"),
+        })?
         .map(|img| resize_image(img, scale_percent))
 }
 
 #[cfg(not(target_os = "linux"))]
 pub async fn capture_window_portal(_scale_percent: u32) -> Result<DynamicImage, ToolError> {
-    Err(ToolError::ExecutionFailed { message: "Portal not available on this platform".to_string() })
+    Err(ToolError::ExecutionFailed {
+        message: "Portal not available on this platform".to_string(),
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -120,15 +141,21 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
 
     pw::init();
 
-    let mainloop = pw::main_loop::MainLoopRc::new(None)
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to create PipeWire mainloop: {e}") })?;
+    let mainloop =
+        pw::main_loop::MainLoopRc::new(None).map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to create PipeWire mainloop: {e}"),
+        })?;
 
-    let context = pw::context::ContextRc::new(&mainloop, None)
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to create PipeWire context: {e}") })?;
+    let context =
+        pw::context::ContextRc::new(&mainloop, None).map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to create PipeWire context: {e}"),
+        })?;
 
     let core = context
         .connect_rc(None)
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to connect PipeWire core: {e}") })?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to connect PipeWire core: {e}"),
+        })?;
 
     struct CaptureState {
         pixels: Option<Vec<u8>>,
@@ -159,7 +186,9 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
             *pw::keys::MEDIA_ROLE => "Screen",
         },
     )
-    .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to create PipeWire stream: {e}") })?;
+    .map_err(|e| ToolError::ExecutionFailed {
+        message: format!("Failed to create PipeWire stream: {e}"),
+    })?;
 
     let state_for_listener = state.clone();
     let _listener = stream
@@ -180,11 +209,10 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
                 return;
             }
 
-            let (media_type, media_subtype) =
-                match spa::param::format_utils::parse_format(param) {
-                    Ok(v) => v,
-                    Err(_) => return,
-                };
+            let (media_type, media_subtype) = match spa::param::format_utils::parse_format(param) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
 
             if media_type != spa::param::format::MediaType::Video
                 || media_subtype != spa::param::format::MediaSubtype::Raw
@@ -210,8 +238,7 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
                 | spa::param::video::VideoFormat::BGRA
                 | spa::param::video::VideoFormat::RGBx
                 | spa::param::video::VideoFormat::BGRx => 4,
-                spa::param::video::VideoFormat::RGB
-                | spa::param::video::VideoFormat::BGR => 3,
+                spa::param::video::VideoFormat::RGB | spa::param::video::VideoFormat::BGR => 3,
                 _ => 4,
             };
 
@@ -251,11 +278,7 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
 
             let mut pixels = vec![0u8; data_size];
             unsafe {
-                std::ptr::copy_nonoverlapping(
-                    raw_data.as_ptr(),
-                    pixels.as_mut_ptr(),
-                    data_size,
-                );
+                std::ptr::copy_nonoverlapping(raw_data.as_ptr(), pixels.as_mut_ptr(), data_size);
             }
             s.pixels = Some(pixels);
 
@@ -264,7 +287,9 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
             }
         })
         .register()
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to register stream listener: {e}") })?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to register stream listener: {e}"),
+        })?;
 
     let obj = spa::pod::object!(
         spa::utils::SpaTypes::ObjectParamFormat,
@@ -317,22 +342,22 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
             Fraction,
             spa::utils::Fraction { num: 60, denom: 1 },
             spa::utils::Fraction { num: 0, denom: 1 },
-            spa::utils::Fraction {
-                num: 240,
-                denom: 1
-            }
+            spa::utils::Fraction { num: 240, denom: 1 }
         ),
     );
     let values: Vec<u8> = spa::pod::serialize::PodSerializer::serialize(
         std::io::Cursor::new(Vec::new()),
         &spa::pod::Value::Object(obj),
     )
-    .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to serialize pod: {e}") })?
+    .map_err(|e| ToolError::ExecutionFailed {
+        message: format!("Failed to serialize pod: {e}"),
+    })?
     .0
     .into_inner();
 
-    let pod = Pod::from_bytes(&values)
-        .ok_or_else(|| ToolError::ExecutionFailed { message: "Failed to parse pod from bytes".to_string() })?;
+    let pod = Pod::from_bytes(&values).ok_or_else(|| ToolError::ExecutionFailed {
+        message: "Failed to parse pod from bytes".to_string(),
+    })?;
     let mut params = [pod];
 
     stream
@@ -342,7 +367,9 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
             pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
             &mut params,
         )
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to connect PipeWire stream: {e}") })?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to connect PipeWire stream: {e}"),
+        })?;
 
     mainloop.run();
 
@@ -350,52 +377,63 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
     let pixels = s
         .pixels
         .as_ref()
-        .ok_or_else(|| ToolError::ExecutionFailed { message: "No frame captured from PipeWire".to_string() })?;
+        .ok_or_else(|| ToolError::ExecutionFailed {
+            message: "No frame captured from PipeWire".to_string(),
+        })?;
     let width = s.width;
     let height = s.height;
     let is_bgr = s.is_bgr;
     let bpp = s.bpp;
 
-    let image = if is_bgr && bpp >= 4 {
-        let mut rgba = pixels.clone();
-        for chunk in rgba.chunks_exact_mut(bpp as usize) {
-            chunk.swap(0, 2);
-        }
-        match bpp {
-            4 => DynamicImage::ImageRgba8(
-                image::RgbaImage::from_raw(width, height, rgba).ok_or_else(|| {
-                    ToolError::ExecutionFailed { message: "Invalid image dimensions".to_string() }
+    let image =
+        if is_bgr && bpp >= 4 {
+            let mut rgba = pixels.clone();
+            for chunk in rgba.chunks_exact_mut(bpp as usize) {
+                chunk.swap(0, 2);
+            }
+            match bpp {
+                4 => DynamicImage::ImageRgba8(
+                    image::RgbaImage::from_raw(width, height, rgba).ok_or_else(|| {
+                        ToolError::ExecutionFailed {
+                            message: "Invalid image dimensions".to_string(),
+                        }
+                    })?,
+                ),
+                _ => DynamicImage::ImageRgba8(
+                    image::RgbaImage::from_raw(width, height, rgba).ok_or_else(|| {
+                        ToolError::ExecutionFailed {
+                            message: "Invalid image dimensions".to_string(),
+                        }
+                    })?,
+                ),
+            }
+        } else if is_bgr && bpp == 3 {
+            let mut rgb = pixels.clone();
+            for chunk in rgb.chunks_exact_mut(3) {
+                chunk.swap(0, 2);
+            }
+            DynamicImage::ImageRgb8(image::RgbImage::from_raw(width, height, rgb).ok_or_else(
+                || ToolError::ExecutionFailed {
+                    message: "Invalid image dimensions".to_string(),
+                },
+            )?)
+        } else if bpp == 4 {
+            DynamicImage::ImageRgba8(
+                image::RgbaImage::from_raw(width, height, pixels.clone()).ok_or_else(|| {
+                    ToolError::ExecutionFailed {
+                        message: "Invalid image dimensions".to_string(),
+                    }
                 })?,
-            ),
-            _ => DynamicImage::ImageRgba8(
-                image::RgbaImage::from_raw(width, height, rgba).ok_or_else(|| {
-                    ToolError::ExecutionFailed { message: "Invalid image dimensions".to_string() }
+            )
+        } else {
+            DynamicImage::ImageRgb8(
+                image::RgbImage::from_raw(width, height, pixels.clone()).ok_or_else(|| {
+                    ToolError::ExecutionFailed {
+                        message: "Invalid image dimensions".to_string(),
+                    }
                 })?,
-            ),
-        }
-    } else if is_bgr && bpp == 3 {
-        let mut rgb = pixels.clone();
-        for chunk in rgb.chunks_exact_mut(3) {
-            chunk.swap(0, 2);
-        }
-        DynamicImage::ImageRgb8(
-            image::RgbImage::from_raw(width, height, rgb).ok_or_else(|| {
-                ToolError::ExecutionFailed { message: "Invalid image dimensions".to_string() }
-            })?,
-        )
-    } else if bpp == 4 {
-        DynamicImage::ImageRgba8(
-            image::RgbaImage::from_raw(width, height, pixels.clone()).ok_or_else(|| {
-                ToolError::ExecutionFailed { message: "Invalid image dimensions".to_string() }
-            })?,
-        )
-    } else {
-        DynamicImage::ImageRgb8(
-            image::RgbImage::from_raw(width, height, pixels.clone()).ok_or_else(|| {
-                ToolError::ExecutionFailed { message: "Invalid image dimensions".to_string() }
-            })?,
-        )
-    };
+            )
+        };
 
     Ok(image)
 }
@@ -469,17 +507,23 @@ fn list_windows_hyprland() -> Result<String, ToolError> {
     let output = std::process::Command::new("hyprctl")
         .args(["clients", "-j"])
         .output()
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to run hyprctl: {e}") })?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to run hyprctl: {e}"),
+        })?;
 
     if !output.status.success() {
-        return Err(ToolError::ExecutionFailed { message: format!(
-            "hyprctl failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ) });
+        return Err(ToolError::ExecutionFailed {
+            message: format!(
+                "hyprctl failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        });
     }
 
-    let clients: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to parse hyprctl JSON: {e}") })?;
+    let clients: Vec<serde_json::Value> =
+        serde_json::from_slice(&output.stdout).map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to parse hyprctl JSON: {e}"),
+        })?;
 
     let mut windows = Vec::new();
     for client in &clients {
@@ -498,17 +542,11 @@ fn sway_find_windows(node: &serde_json::Value, windows: &mut Vec<String>) {
     if node_type == "con" || node_type == "floating_con" {
         let name = node["name"].as_str().unwrap_or("");
         let app_id = node["app_id"].as_str().unwrap_or("");
-        let class = node["window_properties"]["class"]
-            .as_str()
-            .unwrap_or("");
+        let class = node["window_properties"]["class"].as_str().unwrap_or("");
         let has_window = node["window"].as_i64().is_some();
 
         if has_window || !name.is_empty() || !app_id.is_empty() || !class.is_empty() {
-            let display_id = if !app_id.is_empty() {
-                app_id
-            } else {
-                class
-            };
+            let display_id = if !app_id.is_empty() { app_id } else { class };
             if !name.is_empty() || !display_id.is_empty() {
                 windows.push(format!("{} ({})", name, display_id));
             }
@@ -532,17 +570,23 @@ fn list_windows_sway() -> Result<String, ToolError> {
     let output = std::process::Command::new("swaymsg")
         .args(["-t", "get_tree"])
         .output()
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to run swaymsg: {e}") })?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to run swaymsg: {e}"),
+        })?;
 
     if !output.status.success() {
-        return Err(ToolError::ExecutionFailed { message: format!(
-            "swaymsg failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ) });
+        return Err(ToolError::ExecutionFailed {
+            message: format!(
+                "swaymsg failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        });
     }
 
-    let tree: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to parse sway tree JSON: {e}") })?;
+    let tree: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to parse sway tree JSON: {e}"),
+        })?;
 
     let mut windows = Vec::new();
     sway_find_windows(&tree, &mut windows);
@@ -566,18 +610,20 @@ fn list_windows_gnome() -> Result<String, ToolError> {
             js,
         ])
         .output()
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to run gdbus: {e}") })?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to run gdbus: {e}"),
+        })?;
 
     if !output.status.success() {
-        return Err(ToolError::ExecutionFailed { message: format!(
-            "gdbus failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ) });
+        return Err(ToolError::ExecutionFailed {
+            message: format!("gdbus failed: {}", String::from_utf8_lossy(&output.stderr)),
+        });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let result = parse_gdbus_tuple_string(&stdout)
-        .ok_or_else(|| ToolError::ExecutionFailed { message: "Failed to parse gdbus output".to_string() })?;
+    let result = parse_gdbus_tuple_string(&stdout).ok_or_else(|| ToolError::ExecutionFailed {
+        message: "Failed to parse gdbus output".to_string(),
+    })?;
 
     let mut windows = Vec::new();
     for line in result.lines() {
@@ -594,13 +640,14 @@ fn try_qdbus_eval(js: &str) -> Result<String, ToolError> {
     let output = std::process::Command::new("qdbus")
         .args(["org.kde.plasmashell", "/PlasmaShell", "evaluateScript", js])
         .output()
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to run qdbus: {e}") })?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to run qdbus: {e}"),
+        })?;
 
     if !output.status.success() {
-        return Err(ToolError::ExecutionFailed { message: format!(
-            "qdbus failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ) });
+        return Err(ToolError::ExecutionFailed {
+            message: format!("qdbus failed: {}", String::from_utf8_lossy(&output.stderr)),
+        });
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -621,17 +668,21 @@ fn try_gdbus_kwin_eval(js: &str) -> Result<String, ToolError> {
             js,
         ])
         .output()
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to run gdbus: {e}") })?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to run gdbus: {e}"),
+        })?;
 
     if !output.status.success() {
-        return Err(ToolError::ExecutionFailed { message: format!(
-            "gdbus failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ) });
+        return Err(ToolError::ExecutionFailed {
+            message: format!("gdbus failed: {}", String::from_utf8_lossy(&output.stderr)),
+        });
     }
 
-    parse_gdbus_tuple_string(&String::from_utf8_lossy(&output.stdout))
-        .ok_or_else(|| ToolError::ExecutionFailed { message: "Failed to parse gdbus output".to_string() })
+    parse_gdbus_tuple_string(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
+        ToolError::ExecutionFailed {
+            message: "Failed to parse gdbus output".to_string(),
+        }
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -652,13 +703,17 @@ fn focus_window_hyprland(title: &str) -> Result<String, ToolError> {
     let output = std::process::Command::new("hyprctl")
         .args(["dispatch", "focuswindow", &format!("title:{}", title)])
         .output()
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to run hyprctl: {e}") })?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to run hyprctl: {e}"),
+        })?;
 
     if !output.status.success() {
-        return Err(ToolError::ExecutionFailed { message: format!(
-            "hyprctl focus failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ) });
+        return Err(ToolError::ExecutionFailed {
+            message: format!(
+                "hyprctl focus failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        });
     }
 
     Ok(format!("Focused window matching: {}", title))
@@ -670,13 +725,17 @@ fn focus_window_sway(title: &str) -> Result<String, ToolError> {
     let output = std::process::Command::new("swaymsg")
         .arg(&criteria)
         .output()
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to run swaymsg: {e}") })?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to run swaymsg: {e}"),
+        })?;
 
     if !output.status.success() {
-        return Err(ToolError::ExecutionFailed { message: format!(
-            "swaymsg focus failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ) });
+        return Err(ToolError::ExecutionFailed {
+            message: format!(
+                "swaymsg focus failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        });
     }
 
     Ok(format!("Focused window matching: {}", title))
@@ -703,24 +762,28 @@ fn focus_window_gnome(title: &str) -> Result<String, ToolError> {
             &js,
         ])
         .output()
-        .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to run gdbus: {e}") })?;
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to run gdbus: {e}"),
+        })?;
 
     if !output.status.success() {
-        return Err(ToolError::ExecutionFailed { message: format!(
-            "gdbus focus failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ) });
+        return Err(ToolError::ExecutionFailed {
+            message: format!(
+                "gdbus focus failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let result = parse_gdbus_tuple_string(&stdout)
-        .ok_or_else(|| ToolError::ExecutionFailed { message: "Failed to parse gdbus output".to_string() })?;
+    let result = parse_gdbus_tuple_string(&stdout).ok_or_else(|| ToolError::ExecutionFailed {
+        message: "Failed to parse gdbus output".to_string(),
+    })?;
 
     if result == "not found" || result.is_empty() {
-        return Err(ToolError::ExecutionFailed { message: format!(
-            "Window not found: {}",
-            title
-        ) });
+        return Err(ToolError::ExecutionFailed {
+            message: format!("Window not found: {}", title),
+        });
     }
 
     Ok(format!("Focused window matching: {}", title))
@@ -750,7 +813,7 @@ pub fn list_windows_wayland() -> Result<String, ToolError> {
         "sway" => list_windows_sway(),
         "gnome" => list_windows_gnome(),
         "kde" => list_windows_kde(),
-        _ => Err(ToolError::ExecutionFailed { message: 
+        _ => Err(ToolError::ExecutionFailed { message:
             "Window listing not supported on this Wayland compositor. Supported: Hyprland, Sway, GNOME, KDE.".to_string(),
          }),
     }
@@ -758,7 +821,9 @@ pub fn list_windows_wayland() -> Result<String, ToolError> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn list_windows_wayland() -> Result<String, ToolError> {
-    Err(ToolError::ExecutionFailed { message: "Wayland not available on this platform".to_string() })
+    Err(ToolError::ExecutionFailed {
+        message: "Wayland not available on this platform".to_string(),
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -769,7 +834,7 @@ pub fn focus_window_wayland(title: &str) -> Result<String, ToolError> {
         "sway" => focus_window_sway(title),
         "gnome" => focus_window_gnome(title),
         "kde" => focus_window_kde(title),
-        _ => Err(ToolError::ExecutionFailed { message: 
+        _ => Err(ToolError::ExecutionFailed { message:
             "Window focusing not supported on this Wayland compositor. Supported: Hyprland, Sway, GNOME, KDE.".to_string(),
          }),
     }
@@ -777,5 +842,7 @@ pub fn focus_window_wayland(title: &str) -> Result<String, ToolError> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn focus_window_wayland(_title: &str) -> Result<String, ToolError> {
-    Err(ToolError::ExecutionFailed { message: "Wayland not available on this platform".to_string() })
+    Err(ToolError::ExecutionFailed {
+        message: "Wayland not available on this platform".to_string(),
+    })
 }

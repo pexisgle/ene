@@ -1,6 +1,6 @@
 mod registry;
 
-use ene_tool_proto::{read_ipc_request, write_ipc_response, IpcRequest, IpcResponse};
+use ene_tool_proto::{IpcRequest, IpcResponse, read_ipc_request, write_ipc_response};
 use registry::HostRegistry;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,10 +21,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[host] Listening on {}", socket_path.display());
 
     let mut registry = HostRegistry::new();
-    registry.add_provider(Box::new(ene_tools_utility::provider::UtilityToolProvider::new()));
+    registry.add_provider(Box::new(
+        ene_tools_utility::provider::UtilityToolProvider::new(),
+    ));
     registry.add_provider(Box::new(ene_tools_web::provider::WebToolProvider));
     registry.add_provider(Box::new(ene_tools_app::provider::AppToolProvider));
-    registry.add_provider(Box::new(ene_tools_browser::provider::BrowserToolProvider::new()));
+    registry.add_provider(Box::new(
+        ene_tools_browser::provider::BrowserToolProvider::new(),
+    ));
     registry.add_provider(Box::new(ene_tools_fs::provider::FsToolProvider));
     let registry = Arc::new(registry);
 
@@ -83,13 +87,12 @@ async fn dispatch(registry: &HostRegistry, req: &IpcRequest) -> IpcResponse {
             let tools = registry.list_tools();
             IpcResponse::Tools { tools }
         }
-        IpcRequest::CallTool { name, arguments } => match registry.call_tool(&name, &arguments).await
-        {
-            Ok(result) => IpcResponse::CallResult {
-                result: Ok(result),
-            },
-            Err(e) => IpcResponse::CallResult { result: Err(e) },
-        },
+        IpcRequest::CallTool { name, arguments } => {
+            match registry.call_tool(&name, &arguments).await {
+                Ok(result) => IpcResponse::CallResult { result: Ok(result) },
+                Err(e) => IpcResponse::CallResult { result: Err(e) },
+            }
+        }
         IpcRequest::SetSessionId { session_id } => {
             registry.set_session_id(&session_id);
             IpcResponse::Ack

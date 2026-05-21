@@ -20,7 +20,13 @@ pub fn tool_definition() -> ToolDefinition {
             "required": ["query"]
         }),
         category: Some(ToolCategory::WebSearch),
-        keywords: vec!["search".to_string(), "web".to_string(), "google".to_string(), "internet".to_string(), "lookup".to_string()],
+        keywords: vec![
+            "search".to_string(),
+            "web".to_string(),
+            "google".to_string(),
+            "internet".to_string(),
+            "lookup".to_string(),
+        ],
     }
 }
 

@@ -1,6 +1,6 @@
+use super::ToolCategory;
 use super::definition::ToolDefinition;
 use super::utility::undo_manager::UndoManager;
-use super::ToolCategory;
 use crate::sandbox::SandboxConfig;
 use std::path::Path;
 
@@ -54,7 +54,9 @@ pub async fn execute(
 ) -> Result<String, String> {
     match action {
         "read" => {
-            let file_path = args["filePath"].as_str().ok_or("filePath is required for read")?;
+            let file_path = args["filePath"]
+                .as_str()
+                .ok_or("filePath is required for read")?;
             let offset = args["offset"].as_u64().map(|v| v as usize);
             let limit = args["limit"].as_u64().map(|v| v as usize);
             super::read::read(Path::new(file_path), offset, limit, sandbox)
@@ -62,16 +64,32 @@ pub async fn execute(
                 .map_err(|e| e.to_string())
         }
         "write" => {
-            let file_path = args["filePath"].as_str().ok_or("filePath is required for write")?;
-            let content = args["content"].as_str().ok_or("content is required for write")?;
-            super::write::write(Path::new(file_path), content, sandbox, undo_manager, session_id)
-                .await
-                .map_err(|e| e.to_string())
+            let file_path = args["filePath"]
+                .as_str()
+                .ok_or("filePath is required for write")?;
+            let content = args["content"]
+                .as_str()
+                .ok_or("content is required for write")?;
+            super::write::write(
+                Path::new(file_path),
+                content,
+                sandbox,
+                undo_manager,
+                session_id,
+            )
+            .await
+            .map_err(|e| e.to_string())
         }
         "edit" => {
-            let file_path = args["filePath"].as_str().ok_or("filePath is required for edit")?;
-            let old_string = args["oldString"].as_str().ok_or("oldString is required for edit")?;
-            let new_string = args["newString"].as_str().ok_or("newString is required for edit")?;
+            let file_path = args["filePath"]
+                .as_str()
+                .ok_or("filePath is required for edit")?;
+            let old_string = args["oldString"]
+                .as_str()
+                .ok_or("oldString is required for edit")?;
+            let new_string = args["newString"]
+                .as_str()
+                .ok_or("newString is required for edit")?;
             let replace_all = args["replaceAll"].as_bool().unwrap_or(false);
             super::edit::edit(
                 Path::new(file_path),
@@ -88,19 +106,29 @@ pub async fn execute(
         "delete" => {
             let path = args["path"].as_str().ok_or("path is required for delete")?;
             let recursive = args["recursive"].as_bool().unwrap_or(false);
-            super::delete::delete(Path::new(path), recursive, sandbox, undo_manager, session_id)
-                .await
-                .map_err(|e| e.to_string())
+            super::delete::delete(
+                Path::new(path),
+                recursive,
+                sandbox,
+                undo_manager,
+                session_id,
+            )
+            .await
+            .map_err(|e| e.to_string())
         }
         "glob" => {
-            let pattern = args["pattern"].as_str().ok_or("pattern is required for glob")?;
+            let pattern = args["pattern"]
+                .as_str()
+                .ok_or("pattern is required for glob")?;
             let path = args["path"].as_str();
             super::search::glob_search(pattern, path, sandbox)
                 .await
                 .map_err(|e| e.to_string())
         }
         "grep" => {
-            let pattern = args["pattern"].as_str().ok_or("pattern is required for grep")?;
+            let pattern = args["pattern"]
+                .as_str()
+                .ok_or("pattern is required for grep")?;
             let path = args["path"].as_str();
             let include = args["include"].as_str();
             super::search::grep_search(pattern, path, include, sandbox)
@@ -108,7 +136,9 @@ pub async fn execute(
                 .map_err(|e| e.to_string())
         }
         "patch" => {
-            let patch_text = args["patchText"].as_str().ok_or("patchText is required for patch")?;
+            let patch_text = args["patchText"]
+                .as_str()
+                .ok_or("patchText is required for patch")?;
             super::patch::apply_patch(patch_text, sandbox, undo_manager, session_id)
                 .await
                 .map_err(|e| e.to_string())

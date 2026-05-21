@@ -311,8 +311,7 @@ fn start_next_ai_request(
             embed_rx,
         )) {
             Ok(Ok(Ok(embedding))) => {
-                session_ptr
-                    .set_pending_embedding(embedding.clone());
+                session_ptr.set_pending_embedding(embedding.clone());
                 session_ptr.set_last_input_embedding(embedding);
             }
             Ok(Ok(Err(e))) => {
@@ -343,7 +342,8 @@ fn poll_ai_worker(
             match result {
                 Ok(split_result) => {
                     eprintln!("\x1b[33m[Session] {} \x1b[0m", split_result.reason);
-                    eprintln!("\x1b[33m[Session] Conversation summarized and saved: {}\x1b[0m",
+                    eprintln!(
+                        "\x1b[33m[Session] Conversation summarized and saved: {}\x1b[0m",
                         truncate(&split_result.summary, 80)
                     );
                     if !split_result.key_facts.is_empty() {

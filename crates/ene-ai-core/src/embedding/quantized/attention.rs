@@ -5,7 +5,7 @@ use candle_nn::ops;
 
 use crate::error::AiCoreError;
 
-use super::rotary::{repeat_kv, RotaryEmbedding};
+use super::rotary::{RotaryEmbedding, repeat_kv};
 
 pub struct AttentionBlock {
     pub q_proj: candle_nn::Linear,

@@ -58,7 +58,10 @@ pub async fn write_ipc_request<W: AsyncWriteExt + Unpin>(
         message: format!("Failed to serialize IpcRequest: {e}"),
     })?;
     let len = json.len() as u32;
-    writer.write_all(&len.to_le_bytes()).await.map_err(ToolError::from)?;
+    writer
+        .write_all(&len.to_le_bytes())
+        .await
+        .map_err(ToolError::from)?;
     writer.write_all(&json).await.map_err(ToolError::from)?;
     writer.flush().await.map_err(ToolError::from)?;
     Ok(())
@@ -97,7 +100,10 @@ pub async fn write_ipc_response<W: AsyncWriteExt + Unpin>(
         message: format!("Failed to serialize IpcResponse: {e}"),
     })?;
     let len = json.len() as u32;
-    writer.write_all(&len.to_le_bytes()).await.map_err(ToolError::from)?;
+    writer
+        .write_all(&len.to_le_bytes())
+        .await
+        .map_err(ToolError::from)?;
     writer.write_all(&json).await.map_err(ToolError::from)?;
     writer.flush().await.map_err(ToolError::from)?;
     Ok(())

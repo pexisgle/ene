@@ -3,8 +3,8 @@ use std::io::{Read, Seek};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use candle_core::quantized::gguf_file;
 use candle_core::Device;
+use candle_core::quantized::gguf_file;
 
 use crate::error::AiCoreError;
 

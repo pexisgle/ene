@@ -1,5 +1,5 @@
-use ene_tool_proto::{ToolDefinition, ToolError, ToolProvider};
 use async_trait::async_trait;
+use ene_tool_proto::{ToolDefinition, ToolError, ToolProvider};
 
 pub struct WebToolProvider;
 
@@ -33,19 +33,17 @@ impl ToolProvider for WebToolProvider {
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         match name {
             "webfetch" => {
-                let args: WebFetchArgs = serde_json::from_str(arguments).map_err(|e| {
-                    ToolError::InvalidArguments {
+                let args: WebFetchArgs =
+                    serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
                         message: format!("Invalid arguments for webfetch: {e}"),
-                    }
-                })?;
+                    })?;
                 crate::webfetch::webfetch(&args.url, args.format.as_deref(), args.timeout).await
             }
             "websearch" => {
-                let args: WebSearchArgs = serde_json::from_str(arguments).map_err(|e| {
-                    ToolError::InvalidArguments {
+                let args: WebSearchArgs =
+                    serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
                         message: format!("Invalid arguments for websearch: {e}"),
-                    }
-                })?;
+                    })?;
                 crate::websearch::websearch(&args.query, args.backend.as_deref(), args.limit).await
             }
             _ => Err(ToolError::NotFound {

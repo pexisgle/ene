@@ -81,11 +81,21 @@ impl AntialiasingMode {
 }
 
 pub fn normalize_mask_render_downsample(value: u32) -> u32 {
-    cycle_choice(&MASK_RENDER_DOWNSAMPLE_CHOICES, value, 0, DEFAULT_MASK_RENDER_DOWNSAMPLE)
+    cycle_choice(
+        &MASK_RENDER_DOWNSAMPLE_CHOICES,
+        value,
+        0,
+        DEFAULT_MASK_RENDER_DOWNSAMPLE,
+    )
 }
 
 pub fn cycle_mask_render_downsample(current: u32, step: isize) -> u32 {
-    cycle_choice(&MASK_RENDER_DOWNSAMPLE_CHOICES, current, step, DEFAULT_MASK_RENDER_DOWNSAMPLE)
+    cycle_choice(
+        &MASK_RENDER_DOWNSAMPLE_CHOICES,
+        current,
+        step,
+        DEFAULT_MASK_RENDER_DOWNSAMPLE,
+    )
 }
 
 pub fn normalize_target_fps(value: u32) -> u32 {
@@ -97,19 +107,24 @@ pub fn cycle_target_fps(current: u32, step: isize) -> u32 {
 }
 
 pub fn cycle_shadow_quality(current: ShadowQuality, step: isize) -> ShadowQuality {
-    cycle_choice(&SHADOW_QUALITY_CHOICES, current, step, DEFAULT_SHADOW_QUALITY)
+    cycle_choice(
+        &SHADOW_QUALITY_CHOICES,
+        current,
+        step,
+        DEFAULT_SHADOW_QUALITY,
+    )
 }
 
 pub fn cycle_antialiasing_mode(current: AntialiasingMode, step: isize) -> AntialiasingMode {
-    cycle_choice(&ANTIALIASING_MODE_CHOICES, current, step, DEFAULT_ANTIALIASING_MODE)
+    cycle_choice(
+        &ANTIALIASING_MODE_CHOICES,
+        current,
+        step,
+        DEFAULT_ANTIALIASING_MODE,
+    )
 }
 
-fn cycle_choice<T: Copy + PartialEq>(
-    choices: &[T],
-    current: T,
-    step: isize,
-    _default: T,
-) -> T {
+fn cycle_choice<T: Copy + PartialEq>(choices: &[T], current: T, step: isize, _default: T) -> T {
     let index = choices
         .iter()
         .position(|candidate| *candidate == current)
@@ -395,7 +410,10 @@ impl AppSettings {
 
     fn apply_to(&self, s: &mut CharacterSettings) {
         if self.version > CONFIG_VERSION {
-            eprintln!("[Config] Config version {} is newer than supported version {}; loading with defaults", self.version, CONFIG_VERSION);
+            eprintln!(
+                "[Config] Config version {} is newer than supported version {}; loading with defaults",
+                self.version, CONFIG_VERSION
+            );
         }
         if !self.character.selected_character_name.is_empty() {
             if let Some(idx) = s
@@ -445,10 +463,15 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
             continue;
         }
         let folder = path.file_name().unwrap().to_string_lossy().to_string();
-        let card_path = path.join("character.json")
+        let card_path = path
+            .join("character.json")
             .exists()
             .then(|| path.join("character.json"))
-            .or_else(|| path.join("charactor.json").exists().then(|| path.join("charactor.json")))
+            .or_else(|| {
+                path.join("charactor.json")
+                    .exists()
+                    .then(|| path.join("charactor.json"))
+            })
             .unwrap_or_else(|| path.join("character.json"));
         if !card_path.exists() {
             continue;

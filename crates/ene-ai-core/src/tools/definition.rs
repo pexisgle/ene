@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use super::ToolCategory;
+use async_trait::async_trait;
 
 /// ツール定義 — OpenAI API の `tools` パラメータに渡す形式
 #[derive(Debug, Clone)]
@@ -19,8 +19,14 @@ impl ToolDefinition {
         } else {
             format!(" Keywords: {}", self.keywords.join(", "))
         };
-        let category = self.category.map(|c| format!(" Category: {}", c.label())).unwrap_or_default();
-        format!("{}: {}{}{}", self.name, self.description, category, keywords)
+        let category = self
+            .category
+            .map(|c| format!(" Category: {}", c.label()))
+            .unwrap_or_default();
+        format!(
+            "{}: {}{}{}",
+            self.name, self.description, category, keywords
+        )
     }
 }
 
@@ -38,7 +44,11 @@ pub trait ToolRegistry: Send + Sync {
     fn list_tools(&self) -> Vec<ToolDefinition>;
 
     /// クエリに関連するツールのみを返す（デフォルトでは全ツール）
-    fn list_relevant_tools(&self, _query_embedding: Option<&[f32]>, _limit: usize) -> Vec<ToolDefinition> {
+    fn list_relevant_tools(
+        &self,
+        _query_embedding: Option<&[f32]>,
+        _limit: usize,
+    ) -> Vec<ToolDefinition> {
         self.list_tools()
     }
 

@@ -2,14 +2,13 @@ use crate::error::AiCoreError;
 use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
-use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use std::path::Path;
 use std::sync::Mutex;
 
 mod models;
 use models::{
-    EmbeddingBlob, NewConversationLog, NewConversationSummary, NewKeyFact,
-    NewToolEmbedding,
+    EmbeddingBlob, NewConversationLog, NewConversationSummary, NewKeyFact, NewToolEmbedding,
 };
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
@@ -88,9 +87,9 @@ impl MemoryStore {
     }
 
     pub fn open(path: &Path, embedding_dim: usize) -> Result<Self, AiCoreError> {
-        let path_str = path.to_str().ok_or_else(|| {
-            AiCoreError::MemoryStoreConnectionError("Invalid path".to_string())
-        })?;
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| AiCoreError::MemoryStoreConnectionError("Invalid path".to_string()))?;
         Self::init(
             SqliteConnection::establish(path_str)
                 .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?,
@@ -259,8 +258,7 @@ impl MemoryStore {
         let mut conn = self.conn.lock().unwrap();
         conn.transaction(|conn| {
             diesel::delete(
-                conversation_keyfacts::table
-                    .filter(conversation_keyfacts::summary_id.eq(id)),
+                conversation_keyfacts::table.filter(conversation_keyfacts::summary_id.eq(id)),
             )
             .execute(conn)?;
 
@@ -338,7 +336,8 @@ impl MemoryStore {
     pub fn count_keyfacts(&self, card_name: &str) -> Result<i64, AiCoreError> {
         let mut conn = self.conn.lock().unwrap();
 
-        let query = "SELECT COUNT(DISTINCT key) as count FROM conversation_keyfacts WHERE card_name = ?";
+        let query =
+            "SELECT COUNT(DISTINCT key) as count FROM conversation_keyfacts WHERE card_name = ?";
         let result: CountResult = diesel::sql_query(query)
             .bind::<diesel::sql_types::Text, _>(card_name)
             .get_result(&mut *conn)?;
@@ -429,9 +428,7 @@ impl MemoryStore {
         Ok(())
     }
 
-    pub fn list_tool_embeddings(
-        &self,
-    ) -> Result<Vec<(String, String, Vec<f32>)>, AiCoreError> {
+    pub fn list_tool_embeddings(&self) -> Result<Vec<(String, String, Vec<f32>)>, AiCoreError> {
         use crate::schema::tool_embeddings::dsl;
 
         let mut conn = self.conn.lock().unwrap();

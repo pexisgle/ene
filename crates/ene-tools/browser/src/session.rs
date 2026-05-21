@@ -1,5 +1,5 @@
-use ene_tool_proto::ToolError;
 use dashmap::DashMap;
+use ene_tool_proto::ToolError;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
@@ -35,8 +35,8 @@ impl BrowserSessionStore {
 
         let user_data_dir =
             std::env::temp_dir().join(format!("ene-browser-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&user_data_dir).map_err(|e| {
-            ToolError::ExecutionFailed { message: format!("Failed to create user data dir: {e}") }
+        std::fs::create_dir_all(&user_data_dir).map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to create user data dir: {e}"),
         })?;
 
         let config = chromiumoxide::browser::BrowserConfig::builder()
@@ -44,13 +44,15 @@ impl BrowserSessionStore {
             .user_data_dir(&user_data_dir)
             .no_sandbox()
             .build()
-            .map_err(|e| {
-                ToolError::ExecutionFailed { message: format!("Failed to build browser config: {e}") }
+            .map_err(|e| ToolError::ExecutionFailed {
+                message: format!("Failed to build browser config: {e}"),
             })?;
 
         let (browser, mut handler) = chromiumoxide::browser::Browser::launch(config)
             .await
-            .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to launch browser: {e}") })?;
+            .map_err(|e| ToolError::ExecutionFailed {
+                message: format!("Failed to launch browser: {e}"),
+            })?;
 
         let handler_task = tokio::spawn(async move {
             while let Some(h) = handler.next().await {
@@ -60,10 +62,13 @@ impl BrowserSessionStore {
             }
         });
 
-        let page = browser
-            .new_page("about:blank")
-            .await
-            .map_err(|e| ToolError::ExecutionFailed { message: format!("Failed to create page: {e}") })?;
+        let page =
+            browser
+                .new_page("about:blank")
+                .await
+                .map_err(|e| ToolError::ExecutionFailed {
+                    message: format!("Failed to create page: {e}"),
+                })?;
 
         let session = BrowserSession {
             browser,

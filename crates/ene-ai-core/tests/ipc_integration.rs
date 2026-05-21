@@ -1,7 +1,7 @@
 use ene_ai_core::ToolRegistry;
 use ene_tool_proto::{
-    read_ipc_request, write_ipc_response, IpcRequest, IpcResponse, SandboxConfigData,
-    ToolCategory, ToolDefinition,
+    IpcRequest, IpcResponse, SandboxConfigData, ToolCategory, ToolDefinition, read_ipc_request,
+    write_ipc_response,
 };
 use std::time::Duration;
 
@@ -47,19 +47,17 @@ async fn test_ipc_list_tools_and_call_tool() {
         write_ipc_response(
             &mut stream,
             &IpcResponse::Tools {
-                tools: vec![
-                    ToolDefinition {
-                        name: "get_current_time".to_string(),
-                        description: "Get the current date and time.".to_string(),
-                        parameters: serde_json::json!({
-                            "type": "object",
-                            "properties": {},
-                            "required": []
-                        }),
-                        category: Some(ToolCategory::Utility),
-                        keywords: vec!["time".to_string()],
-                    },
-                ],
+                tools: vec![ToolDefinition {
+                    name: "get_current_time".to_string(),
+                    description: "Get the current date and time.".to_string(),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    }),
+                    category: Some(ToolCategory::Utility),
+                    keywords: vec!["time".to_string()],
+                }],
             },
         )
         .await
@@ -245,21 +243,39 @@ async fn test_ipc_with_real_host() {
         .call_tool("get_system_info", "{}")
         .await
         .expect("call_tool get_system_info failed");
-    assert!(result.contains("OS:"), "Result should contain OS info: {}", result);
+    assert!(
+        result.contains("OS:"),
+        "Result should contain OS info: {}",
+        result
+    );
     println!("Real host get_system_info result: {}", result);
 
     let result = registry
-        .call_tool("question", r#"{"questions": ["What is your name?", "What is your favorite color?"]}"#)
+        .call_tool(
+            "question",
+            r#"{"questions": ["What is your name?", "What is your favorite color?"]}"#,
+        )
         .await
         .expect("call_tool question failed");
-    assert!(result.contains("What is your name?"), "Result should contain question: {}", result);
+    assert!(
+        result.contains("What is your name?"),
+        "Result should contain question: {}",
+        result
+    );
     println!("Real host question result: {}", result);
 
     let result = registry
-        .call_tool("todo", r#"{"todos": [{"content": "Test task", "status": "pending", "priority": "high"}]}"#)
+        .call_tool(
+            "todo",
+            r#"{"todos": [{"content": "Test task", "status": "pending", "priority": "high"}]}"#,
+        )
         .await
         .expect("call_tool todo failed");
-    assert!(result.contains("Test task"), "Result should contain todo: {}", result);
+    assert!(
+        result.contains("Test task"),
+        "Result should contain todo: {}",
+        result
+    );
     println!("Real host todo result: {}", result);
 
     let _ = child.kill().await;

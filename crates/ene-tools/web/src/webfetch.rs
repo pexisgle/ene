@@ -23,7 +23,13 @@ pub fn tool_definition() -> ToolDefinition {
             "required": ["url"]
         }),
         category: Some(ToolCategory::Browser),
-        keywords: vec!["fetch".to_string(), "url".to_string(), "web".to_string(), "download".to_string(), "html".to_string()],
+        keywords: vec![
+            "fetch".to_string(),
+            "url".to_string(),
+            "web".to_string(),
+            "download".to_string(),
+            "html".to_string(),
+        ],
     }
 }
 
@@ -87,9 +93,12 @@ pub async fn webfetch(
         }
     }
 
-    let bytes = response.bytes().await.map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Failed to read response body: {e}"),
-    })?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to read response body: {e}"),
+        })?;
 
     if bytes.len() > MAX_RESPONSE_SIZE {
         return Err(ToolError::ExecutionFailed {

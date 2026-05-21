@@ -455,5 +455,3 @@ fn build_screenshot_message(b64_data: String) -> Option<ChatCompletionRequestMes
         .ok()?;
     Some(user_msg.into())
 }
-
-

@@ -54,10 +54,8 @@ pub async fn search_duckduckgo(query: &str, limit: usize) -> Result<String, Tool
 }
 
 pub async fn search_tavily(query: &str, _limit: usize) -> Result<String, ToolError> {
-    let api_key = std::env::var("TAVILY_API_KEY").map_err(|_| {
-        ToolError::ExecutionFailed {
-            message: "TAVILY_API_KEY environment variable is not set".to_string(),
-        }
+    let api_key = std::env::var("TAVILY_API_KEY").map_err(|_| ToolError::ExecutionFailed {
+        message: "TAVILY_API_KEY environment variable is not set".to_string(),
     })?;
 
     let client = reqwest::Client::builder()
@@ -80,12 +78,13 @@ pub async fn search_tavily(query: &str, _limit: usize) -> Result<String, ToolErr
             message: format!("Request failed: {e}"),
         })?;
 
-    let json: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Parse failed: {e}"),
-        })?;
+    let json: serde_json::Value =
+        response
+            .json()
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                message: format!("Parse failed: {e}"),
+            })?;
 
     let results = json["results"]
         .as_array()
@@ -120,10 +119,8 @@ pub async fn search_tavily(query: &str, _limit: usize) -> Result<String, ToolErr
 }
 
 pub async fn search_brave(query: &str, _limit: usize) -> Result<String, ToolError> {
-    let api_key = std::env::var("BRAVE_API_KEY").map_err(|_| {
-        ToolError::ExecutionFailed {
-            message: "BRAVE_API_KEY environment variable is not set".to_string(),
-        }
+    let api_key = std::env::var("BRAVE_API_KEY").map_err(|_| ToolError::ExecutionFailed {
+        message: "BRAVE_API_KEY environment variable is not set".to_string(),
     })?;
 
     let client = reqwest::Client::builder()
@@ -143,12 +140,13 @@ pub async fn search_brave(query: &str, _limit: usize) -> Result<String, ToolErro
             message: format!("Request failed: {e}"),
         })?;
 
-    let json: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Parse failed: {e}"),
-        })?;
+    let json: serde_json::Value =
+        response
+            .json()
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                message: format!("Parse failed: {e}"),
+            })?;
 
     let results = json["web"]["results"]
         .as_array()

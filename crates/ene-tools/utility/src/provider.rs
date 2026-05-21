@@ -1,6 +1,6 @@
 use crate::todo;
-use ene_tool_proto::{ToolDefinition, ToolError, ToolProvider};
 use async_trait::async_trait;
+use ene_tool_proto::{ToolDefinition, ToolError, ToolProvider};
 use std::sync::{Arc, Mutex};
 
 pub struct UtilityToolProvider {
@@ -47,7 +47,11 @@ impl ToolProvider for UtilityToolProvider {
                     "required": []
                 }),
                 category: Some(ene_tool_proto::ToolCategory::Utility),
-                keywords: vec!["system".to_string(), "os".to_string(), "platform".to_string()],
+                keywords: vec![
+                    "system".to_string(),
+                    "os".to_string(),
+                    "platform".to_string(),
+                ],
             },
         ]
     }
@@ -55,19 +59,17 @@ impl ToolProvider for UtilityToolProvider {
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         match name {
             "question" => {
-                let args: QuestionArgs = serde_json::from_str(arguments).map_err(|e| {
-                    ToolError::InvalidArguments {
+                let args: QuestionArgs =
+                    serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
                         message: format!("Invalid arguments for question: {e}"),
-                    }
-                })?;
+                    })?;
                 crate::question::question(args.questions)
             }
             "todo" => {
-                let args: TodoArgs = serde_json::from_str(arguments).map_err(|e| {
-                    ToolError::InvalidArguments {
+                let args: TodoArgs =
+                    serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
                         message: format!("Invalid arguments for todo: {e}"),
-                    }
-                })?;
+                    })?;
                 Ok(crate::todo::update_todos(
                     &self.todo_store,
                     &self.current_session_id(),

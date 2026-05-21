@@ -1,12 +1,13 @@
 use ene_ai_core::{
-    config::AiSettings, mcp_client::McpToolRegistry,
-    tool_factory::ToolRegistryBuilder, tools::{CompositeToolRegistry, ToolRegistry},
+    config::AiSettings,
+    mcp_client::McpToolRegistry,
+    tool_factory::ToolRegistryBuilder,
+    tools::{CompositeToolRegistry, ToolRegistry},
 };
 use std::sync::Arc;
 
 pub async fn build(settings: &AiSettings) -> Arc<dyn ToolRegistry> {
-    let mut builder = ToolRegistryBuilder::new()
-        .with_builtin();
+    let mut builder = ToolRegistryBuilder::new().with_builtin();
 
     if settings.sandbox.enabled {
         builder = builder.with_sandbox(settings.sandbox.to_sandbox_config());
@@ -41,9 +42,8 @@ pub async fn build(settings: &AiSettings) -> Arc<dyn ToolRegistry> {
         }
     }
 
-    let mut registries: Vec<Box<dyn ToolRegistry>> = vec![
-        Box::new(ene_ai_core::BuiltinToolRegistry::new()),
-    ];
+    let mut registries: Vec<Box<dyn ToolRegistry>> =
+        vec![Box::new(ene_ai_core::BuiltinToolRegistry::new())];
     if settings.sandbox.enabled {
         registries.push(Box::new(ene_ai_core::tools::EneToolRegistry::new(
             settings.sandbox.to_sandbox_config(),
