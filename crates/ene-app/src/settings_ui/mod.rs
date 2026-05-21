@@ -504,30 +504,7 @@ fn render_character_page(
             apply_action(action, settings, animation_control, ai_request_writer);
         }
 
-        if cfg!(target_os = "linux") {
-            if let Some(action) = render_toggle_row(
-                ui,
-                "Debug Overlay",
-                SettingsValueKind::DebugOverlay,
-                settings,
-                animation_control,
-                SettingsButtonAction::ToggleDebugOverlay,
-            ) {
-                apply_action(action, settings, animation_control, ai_request_writer);
-            }
-
-            if let Some(action) = render_cycle_row(
-                ui,
-                "Mask Downsample",
-                SettingsValueKind::MaskRenderDownsample,
-                settings,
-                animation_control,
-                SettingsButtonAction::MaskDownsampleDown,
-                SettingsButtonAction::MaskDownsampleUp,
-            ) {
-                apply_action(action, settings, animation_control, ai_request_writer);
-            }
-        }
+        render_linux_only_settings(ui, settings, animation_control, ai_request_writer);
 
         if let Some(action) = render_numeric_row(
             ui,
@@ -608,6 +585,46 @@ fn render_character_page(
             }
         });
     });
+}
+
+#[cfg(target_os = "linux")]
+fn render_linux_only_settings(
+    ui: &mut egui::Ui,
+    settings: &mut CharacterSettings,
+    animation_control: &mut CharacterAnimationControl,
+    ai_request_writer: &mut MessageWriter<AiRequestEvent>,
+) {
+    if let Some(action) = render_toggle_row(
+        ui,
+        "Debug Overlay",
+        SettingsValueKind::DebugOverlay,
+        settings,
+        animation_control,
+        SettingsButtonAction::ToggleDebugOverlay,
+    ) {
+        apply_action(action, settings, animation_control, ai_request_writer);
+    }
+
+    if let Some(action) = render_cycle_row(
+        ui,
+        "Mask Downsample",
+        SettingsValueKind::MaskRenderDownsample,
+        settings,
+        animation_control,
+        SettingsButtonAction::MaskDownsampleDown,
+        SettingsButtonAction::MaskDownsampleUp,
+    ) {
+        apply_action(action, settings, animation_control, ai_request_writer);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn render_linux_only_settings(
+    _ui: &mut egui::Ui,
+    _settings: &mut CharacterSettings,
+    _animation_control: &mut CharacterAnimationControl,
+    _ai_request_writer: &mut MessageWriter<AiRequestEvent>,
+) {
 }
 
 fn render_graphics_page(
