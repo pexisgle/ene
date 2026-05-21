@@ -219,6 +219,17 @@ impl AiSettings {
     }
 
     pub fn resolve_api_key(&self) -> String {
+        if !self.api_key.trim().is_empty() {
+            return self.api_key.clone();
+        }
+        #[cfg(debug_assertions)]
+        {
+            if let Ok(token) = std::env::var("API_TOKEN") {
+                if !token.trim().is_empty() {
+                    return token;
+                }
+            }
+        }
         self.api_key.clone()
     }
 

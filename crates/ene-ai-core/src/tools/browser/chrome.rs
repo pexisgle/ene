@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+const PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
+
 pub fn find_chrome_executable() -> Option<PathBuf> {
     for env_var in &[
         "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH",
@@ -24,7 +26,7 @@ pub fn find_chrome_executable() -> Option<PathBuf> {
     ];
 
     if let Ok(path_env) = std::env::var("PATH") {
-        for dir in path_env.split(if cfg!(windows) { ';' } else { ':' }) {
+        for dir in path_env.split(PATH_SEPARATOR) {
             for candidate in candidates {
                 let path = std::path::Path::new(dir).join(candidate);
                 if path.is_file() {

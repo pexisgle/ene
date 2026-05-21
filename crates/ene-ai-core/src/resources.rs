@@ -1,5 +1,8 @@
+#[cfg(not(debug_assertions))]
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(not(debug_assertions))]
+use std::path::Path;
+use std::path::PathBuf;
 
 /// Initializes the app's data directory. On first launch, copies default assets
 /// from the distribution location into the OS-standard data directory.
@@ -13,43 +16,52 @@ use std::path::{Path, PathBuf};
 pub fn ensure_resource_dirs() -> PathBuf {
     let assets_dir = crate::paths::assets_dir();
 
-    if !assets_dir.exists() {
-        let source = find_source_dir();
-        if let Some(src) = source {
-            eprintln!(
-                "[Resources] Deploying default assets to {}",
-                assets_dir.display()
-            );
-            if let Err(e) = fs::create_dir_all(&assets_dir) {
-                eprintln!("[Resources] Failed to create assets dir: {e}");
-                return assets_dir;
-            }
-            // Copy assets/* (not the assets folder itself) into the destination.
-            let Ok(entries) = fs::read_dir(&src) else {
-                return assets_dir;
-            };
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let dst = assets_dir.join(&name);
-                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    if let Err(e) = copy_dir_all(&entry.path(), &dst) {
-                        eprintln!("[Resources] Failed to copy {:?}: {e}", name);
-                    }
-                } else {
-                    if let Err(e) = fs::copy(&entry.path(), &dst) {
-                        eprintln!("[Resources] Failed to copy {:?}: {e}", name);
-                    }
-                }
-            }
-        } else {
-            eprintln!("[Resources] Default assets not found; running without defaults.");
-            let _ = fs::create_dir_all(&assets_dir);
-        }
+    #[cfg(debug_assertions)]
+    {
+        eprintln!("[Resources] Dev build: using source assets at {}", assets_dir.display());
+        assets_dir
     }
 
-    assets_dir
+    #[cfg(not(debug_assertions))]
+    {
+        if !assets_dir.exists() {
+            let source = find_source_dir();
+            if let Some(src) = source {
+                eprintln!(
+                    "[Resources] Deploying default assets to {}",
+                    assets_dir.display()
+                );
+                if let Err(e) = fs::create_dir_all(&assets_dir) {
+                    eprintln!("[Resources] Failed to create assets dir: {e}");
+                    return assets_dir;
+                }
+                let Ok(entries) = fs::read_dir(&src) else {
+                    return assets_dir;
+                };
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let dst = assets_dir.join(&name);
+                    if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        if let Err(e) = copy_dir_all(&entry.path(), &dst) {
+                            eprintln!("[Resources] Failed to copy {:?}: {e}", name);
+                        }
+                    } else {
+                        if let Err(e) = fs::copy(&entry.path(), &dst) {
+                            eprintln!("[Resources] Failed to copy {:?}: {e}", name);
+                        }
+                    }
+                }
+            } else {
+                eprintln!("[Resources] Default assets not found; running without defaults.");
+                let _ = fs::create_dir_all(&assets_dir);
+            }
+        }
+
+        assets_dir
+    }
 }
 
+#[cfg(not(debug_assertions))]
 fn find_source_dir() -> Option<PathBuf> {
     let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
 
@@ -78,6 +90,7 @@ fn find_source_dir() -> Option<PathBuf> {
     None
 }
 
+#[cfg(not(debug_assertions))]
 fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), String> {
     fs::create_dir_all(dst).map_err(|e| format!("Failed to create {}: {e}", dst.display()))?;
     for entry in fs::read_dir(src).map_err(|e| format!("Failed to read {}: {e}", src.display()))? {

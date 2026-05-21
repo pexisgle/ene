@@ -273,9 +273,11 @@ pub async fn run_ai_with_tools(
 
                 yield AiStreamEvent::ToolCallStart { name: name.clone(), arguments: args.clone() };
 
-                let result = match registry.call_tool(&name, &args).await {
-                    Ok(res) => res,
-                    Err(e) => format!("Error executing tool: {}", e),
+                let tool_timeout = std::time::Duration::from_secs(30);
+                let result = match tokio::time::timeout(tool_timeout, registry.call_tool(&name, &args)).await {
+                    Ok(Ok(res)) => res,
+                    Ok(Err(e)) => format!("Error executing tool: {}", e),
+                    Err(_) => format!("Tool '{}' timed out after {} seconds (the operation may not be supported on this environment)", name, tool_timeout.as_secs()),
                 };
 
                 yield AiStreamEvent::ToolCallResult { name, result: result.clone() };

@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 const APP_ID: &str = "dev.pexisgle.Ene";
 
+pub const IS_DEV_BUILD: bool = cfg!(debug_assertions);
+
 pub fn app_data_dir() -> PathBuf {
     dirs::data_dir()
         .map(|p| p.join(APP_ID))
@@ -9,11 +11,28 @@ pub fn app_data_dir() -> PathBuf {
 }
 
 pub fn assets_dir() -> PathBuf {
-    app_data_dir()
+    source_assets_dir().unwrap_or_else(|| app_data_dir())
+}
+
+#[cfg(debug_assertions)]
+fn source_assets_dir() -> Option<PathBuf> {
+    let current_exe = std::env::current_exe().ok()?;
+    let exe_dir = current_exe.parent()?;
+    let candidates = [
+        exe_dir.join("../../assets"),
+        exe_dir.join("../assets"),
+        PathBuf::from("assets"),
+    ];
+    candidates.into_iter().find(|c| c.is_dir())
+}
+
+#[cfg(not(debug_assertions))]
+fn source_assets_dir() -> Option<PathBuf> {
+    None
 }
 
 pub fn models_dir() -> PathBuf {
-    app_data_dir().join("models")
+    assets_dir().join("models")
 }
 
 pub fn config_file_path() -> PathBuf {
