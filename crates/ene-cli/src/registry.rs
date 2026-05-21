@@ -49,7 +49,7 @@ pub async fn build(settings: &AiSettings) -> Arc<dyn ToolRegistry> {
                 }
             }
         }
-        manager.add_registry(Box::new(mcp));
+        manager.add_registry(Arc::new(mcp));
     }
 
     manager.into_registry()

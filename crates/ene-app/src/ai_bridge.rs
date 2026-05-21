@@ -510,7 +510,7 @@ async fn build_registry(settings: &ene_ai_core::config::AiSettings) -> Arc<dyn T
                 }
             }
         }
-        manager.add_registry(Box::new(mcp));
+        manager.add_registry(Arc::new(mcp));
     }
 
     manager.into_registry()

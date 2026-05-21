@@ -1,8 +1,10 @@
 use crate::config::AiSettings;
 use crate::ipc_client::IpcToolRegistry;
+use crate::memory::store::MemoryStore;
 use crate::paths;
 use crate::tools::definition::ToolRegistry;
 use crate::tools::ToolDefinition;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -79,14 +81,21 @@ struct ToolEntry {
     registry: IpcToolRegistry,
 }
 
-/// ツールバイナリを管理し、IPC で接続するマネージャー
-///
-/// `start()` で settings に基づいてツールバイナリを発見・起動し、
-/// `into_registry()` で `Arc<dyn ToolRegistry>` に変換する。
-/// プロセスクラッシュ時は指数バックオフで自動再起動する。
 pub struct ToolHostManager {
     entries: Vec<ToolEntry>,
-    extra_registries: Vec<Box<dyn ToolRegistry>>,
+    extra_registries: Vec<Arc<dyn ToolRegistry>>,
+    tool_index: HashMap<String, usize>,
+    store: Option<Arc<MemoryStore>>,
+}
+
+fn compute_tool_version_hash(tool: &ToolDefinition) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut state = std::collections::hash_map::DefaultHasher::new();
+    tool.name.hash(&mut state);
+    tool.description.hash(&mut state);
+    tool.keywords.hash(&mut state);
+    tool.parameters.to_string().hash(&mut state);
+    format!("{:x}", state.finish())
 }
 
 #[async_trait::async_trait]
@@ -107,33 +116,41 @@ impl ToolRegistry for ToolHostManager {
         query_embedding: Option<&[f32]>,
         limit: usize,
     ) -> Vec<ToolDefinition> {
-        for entry in &self.entries {
-            let tools = entry.registry.list_relevant_tools(query_embedding, limit);
-            if !tools.is_empty() {
-                return tools;
+        let all_tools = self.list_tools();
+        let (Some(emb), Some(store)) = (query_embedding, self.store.as_ref()) else {
+            return all_tools;
+        };
+
+        let search_results = match store.search_tools(emb, limit, 0.0) {
+            Ok(results) => results,
+            Err(e) => {
+                tracing::warn!("[ToolRAG] Failed to search tools: {}", e);
+                return all_tools;
             }
-        }
-        for registry in &self.extra_registries {
-            let tools = registry.list_relevant_tools(query_embedding, limit);
-            if !tools.is_empty() {
-                return tools;
-            }
-        }
-        self.list_tools()
+        };
+
+        let all_map: HashMap<String, ToolDefinition> =
+            all_tools.into_iter().map(|t| (t.name.clone(), t)).collect();
+
+        search_results
+            .into_iter()
+            .filter_map(|(name, _similarity)| all_map.get(&name).cloned())
+            .collect()
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, String> {
-        for entry in &self.entries {
-            if entry.registry.list_tools().iter().any(|t| t.name == name) {
-                return Self::call_with_supervision(entry, name, arguments).await;
+        match self.tool_index.get(name) {
+            Some(&idx) => {
+                let num_entries = self.entries.len();
+                if idx < num_entries {
+                    Self::call_with_supervision(&self.entries[idx], name, arguments).await
+                } else {
+                    let extra_idx = idx - num_entries;
+                    self.extra_registries[extra_idx].call_tool(name, arguments).await
+                }
             }
+            None => Err(format!("Tool '{}' not found", name)),
         }
-        for registry in &self.extra_registries {
-            if registry.list_tools().iter().any(|t| t.name == name) {
-                return registry.call_tool(name, arguments).await;
-            }
-        }
-        Err(format!("Tool '{}' not found", name))
     }
 
     fn set_session_id(&self, session_id: &str) {
@@ -148,14 +165,59 @@ impl ToolRegistry for ToolHostManager {
     async fn ensure_index_built(
         &self,
         embedder: &dyn crate::embedding::EmbeddingProvider,
-        store: Option<&crate::memory::store::MemoryStore>,
+        store: Option<&MemoryStore>,
     ) -> Result<(), String> {
-        for entry in &self.entries {
-            entry.registry.ensure_index_built(embedder, store).await?;
+        let Some(store) = store.or(self.store.as_ref().map(|s| s.as_ref())) else {
+            return Ok(());
+        };
+        let Some(own_store) = &self.store else {
+            return Ok(());
+        };
+
+        let cached: HashMap<String, (String, Vec<f32>)> = match store.list_tool_embeddings() {
+            Ok(entries) => entries
+                .into_iter()
+                .map(|(name, hash, emb)| (name, (hash, emb)))
+                .collect(),
+            Err(e) => {
+                tracing::warn!("[ToolRAG] Failed to load cached embeddings: {}", e);
+                HashMap::new()
+            }
+        };
+
+        let mut indexed = 0usize;
+        let mut reused = 0usize;
+
+        for tool in self.list_tools() {
+            let current_hash = compute_tool_version_hash(&tool);
+
+            if let Some((stored_hash, _emb)) = cached.get(&tool.name) {
+                if stored_hash == &current_hash {
+                    reused += 1;
+                    continue;
+                }
+            }
+
+            let text = tool.embedding_text();
+            match embedder.embed(&text).await {
+                Ok(embedding) => {
+                    if let Err(e) = own_store.upsert_tool_embedding(&tool.name, &current_hash, &embedding) {
+                        tracing::warn!("[ToolRAG] Failed to persist embedding for '{}': {}", tool.name, e);
+                    }
+                    indexed += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("[ToolRAG] Failed to embed tool '{}': {}", tool.name, e);
+                }
+            }
         }
-        for registry in &self.extra_registries {
-            registry.ensure_index_built(embedder, store).await?;
-        }
+
+        tracing::info!(
+            "[ToolRAG] Indexed {} tools ({} new, {} reused from DB)",
+            indexed + reused,
+            indexed,
+            reused
+        );
         Ok(())
     }
 }
@@ -164,13 +226,20 @@ impl ToolHostManager {
     pub async fn start(settings: &AiSettings) -> Result<Self, String> {
         let sandbox = settings.sandbox.to_sandbox_config_data();
         let mut entries = Vec::new();
+        let mut tool_index = HashMap::new();
 
         std::fs::create_dir_all(paths::tool_socket_dir())
             .map_err(|e| format!("Failed to create socket dir: {e}"))?;
 
         for name in &settings.tools.enabled {
             match Self::start_tool(name, &sandbox).await {
-                Ok(entry) => entries.push(entry),
+                Ok(entry) => {
+                    let idx = entries.len();
+                    for tool in entry.registry.list_tools() {
+                        tool_index.entry(tool.name).or_insert(idx);
+                    }
+                    entries.push(entry);
+                }
                 Err(e) => {
                     eprintln!("[ToolHostManager] Failed to start tool '{}': {}", name, e);
                 }
@@ -180,7 +249,25 @@ impl ToolHostManager {
         Ok(Self {
             entries,
             extra_registries: Vec::new(),
+            tool_index,
+            store: None,
         })
+    }
+
+    pub fn add_registry(&mut self, registry: Arc<dyn ToolRegistry>) {
+        let idx = self.entries.len() + self.extra_registries.len();
+        for tool in registry.list_tools() {
+            self.tool_index.entry(tool.name).or_insert(idx);
+        }
+        self.extra_registries.push(registry);
+    }
+
+    pub fn with_store(&mut self, store: Arc<MemoryStore>) {
+        self.store = Some(store);
+    }
+
+    pub fn into_registry(self) -> Arc<dyn ToolRegistry> {
+        Arc::new(self)
     }
 
     async fn start_tool(name: &str, sandbox: &ene_tool_proto::SandboxConfigData) -> Result<ToolEntry, String> {
@@ -297,13 +384,5 @@ impl ToolHostManager {
                 }
             }
         }
-    }
-
-    pub fn add_registry(&mut self, registry: Box<dyn ToolRegistry>) {
-        self.extra_registries.push(registry);
-    }
-
-    pub fn into_registry(self) -> Arc<dyn ToolRegistry> {
-        Arc::new(self)
     }
 }
