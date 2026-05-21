@@ -15,6 +15,7 @@ pub mod session;
 pub mod special_token;
 pub mod stream;
 pub mod summarizer;
+pub mod ipc_client;
 pub mod tool_factory;
 pub mod tools;
 pub mod utils;

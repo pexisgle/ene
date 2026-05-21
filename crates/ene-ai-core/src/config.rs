@@ -158,6 +158,21 @@ impl Default for AiSandboxSettings {
 }
 
 impl AiSandboxSettings {
+    /// `ene-tool-proto` 用のシリアライズ可能なサンドボックス設定に変換
+    pub fn to_sandbox_config_data(&self) -> ene_tool_proto::SandboxConfigData {
+        ene_tool_proto::SandboxConfigData {
+            enabled: self.enabled,
+            allowed_directories: self.allowed_directories.clone(),
+            writable_directories: self.writable_directories.clone(),
+            blocked_commands: self.blocked_commands.clone(),
+            max_read_bytes: self.max_read_bytes,
+            max_write_bytes: self.max_write_bytes,
+            shell_timeout_ms: self.shell_timeout_ms,
+            max_shell_output_bytes: self.max_shell_output_bytes,
+            max_shell_output_lines: self.max_shell_output_lines,
+        }
+    }
+
     pub fn to_sandbox_config(&self) -> crate::sandbox::SandboxConfig {
         let canonicalize_dirs = |dirs: &[String]| -> Vec<std::path::PathBuf> {
             dirs.iter()

@@ -11,7 +11,6 @@ pub mod read;
 pub mod search;
 pub mod shell;
 pub mod utility;
-pub mod web;
 pub mod write;
 
 pub use composite::CompositeToolRegistry;

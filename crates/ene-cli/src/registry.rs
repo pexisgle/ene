@@ -13,7 +13,7 @@ pub async fn build(settings: &AiSettings) -> Arc<dyn ToolRegistry> {
     }
 
     if settings.mcp_servers.is_empty() {
-        return builder.build();
+        return builder.build().await;
     }
 
     let mcp = McpToolRegistry::new();

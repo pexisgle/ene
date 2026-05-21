@@ -3,16 +3,26 @@ members = [
     "crates/ene-ai-core",
     "crates/ene-app",
     "crates/ene-cli",
+    "crates/ene-tool-proto",
+    "crates/ene-tools-host",
+    "crates/ene-tools/utility",
+    "crates/ene-tools/web",
+    "crates/ene-tools/app",
+    "crates/ene-tools/browser",
+    "crates/ene-tools/fs",
 ]
 resolver = "2"
 
 [workspace.dependencies]
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "io-util", "net"] }
 tokio-stream = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-trait = "0.1"
 thiserror = "2.0"
+chrono = "0.4"
+regex = "1"
+tracing = "0.1"
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]
@@ -21,7 +31,6 @@ opt-level = 1
 # Enable a large amount of optimization in the dev profile for dependencies.
 [profile.dev.package."*"]
 opt-level = 3
-
 
 [profile.release]
 codegen-units = 1

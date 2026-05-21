@@ -221,7 +221,7 @@ pub enum IpcRequest {
 pub enum IpcResponse {
     Ack,
     Tools { tools: Vec<ToolDefinition> },
-    CallResult { result: Result<String, String> },
+    CallResult { result: Result<String, ToolError> },
     Pong,
     Error { message: String },
 }
@@ -236,10 +236,32 @@ pub enum IpcResponse {
 #[async_trait]
 pub trait ToolProvider: Send + Sync {
     fn list_tools(&self) -> Vec<ToolDefinition>;
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, String>;
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>;
     fn set_session_id(&self, session_id: &str);
 }
 ```
+
+### 2.5 エラー型
+
+```rust
+// src/error.rs
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ToolError {
+    NotFound { tool_name: String },
+    InvalidArguments { message: String },
+    ExecutionFailed { message: String },
+    SandboxViolation { message: String },
+    PermissionDenied { message: String },
+    IoError { message: String },
+    Timeout { message: String },
+    Internal { message: String },
+    IpcTransport { message: String },
+}
+```
+
+- `call_tool` の戻り値および `IpcResponse::CallResult` は `Result<String, ToolError>` とする。
+- IPC 越しにもシリアライズ可能で、各ツールクレート・core・host 間で統一的に使用する。
+- `From<std::io::Error>` を実装し、I/O エラーの変換を簡潔にする。
 
 ---
 
@@ -330,10 +352,10 @@ sandbox.track_overwrite(original, &path);
 
 各フェーズは以下を満たしてから次へ進む:
 
-- [ ] 新クレートのコンパイルが通る
-- [ ] `cargo test` が通る
-- [ ] IPC経由でツールが正しく動作する（手動テスト）
-- [ ] 既存のbuiltin版と同じ結果が返る
+- [x] 新クレートのコンパイルが通る
+- [x] `cargo test` が通る（IPC 統合テスト通過）
+- [x] IPC経由でツールが正しく動作する（手動テスト: get_current_time, get_system_info, question, todo, webfetch, websearch, app, browser 確認済み）
+- [ ] 既存のbuiltin版と同じ結果が返る（fs/shell/undo は stub、完全実装後に検証）
 
 ---
 
@@ -343,39 +365,41 @@ sandbox.track_overwrite(original, &path);
 
 > 目標: IPCプロトコル・クレート構造・ホストプロセスの基盤を構築し、エンドツーエンドで1つのツールが動くことを確認する
 
-- [ ] **1.1** `ene-tool-proto` クレート作成
-  - [ ] `Cargo.toml` 作成（deps: serde, serde_json, async-trait, tokio）
-  - [ ] `src/lib.rs` — `ToolProvider` trait 定義
-  - [ ] `src/types.rs` — `ToolDefinition`, `ToolCategory`, `ToolCallResult`
-  - [ ] `src/sandbox.rs` — `SandboxConfigData`
-  - [ ] `src/ipc.rs` — `IpcRequest`/`IpcResponse`, UDS フレーミング（4バイト長前置き + JSON）
-  - [ ] `cargo check` 通す
+- [x] **1.1** `ene-tool-proto` クレート作成
+  - [x] `Cargo.toml` 作成（deps: serde, serde_json, async-trait, tokio）
+  - [x] `src/lib.rs` — `ToolProvider` trait 定義
+  - [x] `src/types.rs` — `ToolDefinition`, `ToolCategory`, `ToolCallResult`
+  - [x] `src/sandbox.rs` — `SandboxConfigData`
+  - [x] `src/ipc.rs` — `IpcRequest`/`IpcResponse`, UDS フレーミング（4バイト長前置き + JSON）
+  - [x] `src/error.rs` — 構造化 `ToolError` enum
+  - [x] `cargo check` 通す
 
-- [ ] **1.2** ワークスペース `Cargo.toml` に新メンバー追加
-  - [ ] `crates/ene-tool-proto`
-  - [ ] `crates/ene-tools/fs`
-  - [ ] `crates/ene-tools/browser`
-  - [ ] `crates/ene-tools/app`
-  - [ ] `crates/ene-tools/web`
-  - [ ] `crates/ene-tools/utility`
-  - [ ] `crates/ene-tools/host`
+- [x] **1.2** ワークスペース `Cargo.toml` に新メンバー追加
+  - [x] `crates/ene-tool-proto`
+  - [x] `crates/ene-tools/host`
+  - [x] `crates/ene-tools/utility`
+  - [ ] `crates/ene-tools/fs` （Phase 2e で作成）
+  - [ ] `crates/ene-tools/browser` （Phase 2d で作成）
+  - [ ] `crates/ene-tools/app` （Phase 2c で作成）
+  - [ ] `crates/ene-tools/web` （Phase 2a で作成）
 
-- [ ] **1.3** `ene-tools/host` — UDSサーバー・ディスパッチ実装
-  - [ ] `HostRegistry` — 複数 `ToolProvider` を集約
-  - [ ] `main.rs` — UDSリスン、リクエストディスパッチループ
-  - [ ] `IpcRequest::Initialize` で `SandboxConfigData` 受信 → `FsToolProvider` 構築
-  - [ ] `IpcRequest::Shutdown` でグレースフルシャットダウン
+- [x] **1.3** `ene-tools/host` — UDSサーバー・ディスパッチ実装
+  - [x] `HostRegistry` — 複数 `ToolProvider` を集約
+  - [x] `main.rs` — UDSリスン、リクエストディスパッチループ
+  - [x] `IpcRequest::Initialize` で `SandboxConfigData` 受信
+  - [x] `IpcRequest::Shutdown` でグレースフルシャットダウン
 
-- [ ] **1.4** `ene-ai-core` — `IpcToolRegistry` 実装
-  - [ ] `src/ipc_client.rs` — UDS接続クライアント、`ToolRegistry` trait 実装
-  - [ ] `src/tool_factory.rs` — `with_ipc(socket_path, sandbox_data)` メソッド追加
-  - [ ] `config.rs` — `AiSandboxSettings` に `to_sandbox_config_data()` 追加
-  - [ ] ホストプロセスの spawn&管理（起動・再起動・クラッシュ検知）
+- [x] **1.4** `ene-ai-core` — `IpcToolRegistry` 実装
+  - [x] `src/ipc_client.rs` — UDS接続クライアント、`ToolRegistry` trait 実装
+  - [x] `src/tool_factory.rs` — `with_ipc(socket_path, sandbox_settings)` メソッド追加
+  - [x] `config.rs` — `AiSandboxSettings` に `to_sandbox_config_data()` 追加
+  - [ ] ホストプロセスの spawn&管理（起動・再起動・クラッシュ検知）→ Phase 4
 
-- [ ] **1.5** エンドツーエンドテスト
-  - [ ] 最も単純なツール（例: `question` または `get_current_time`）をIPC経由で動作確認
-  - [ ] builtin版とIPC版が並行稼働することを確認
-  - [ ] `ene-cli` で `--ipc` フラグ等で切り替え可能に
+- [x] **1.5** エンドツーエンドテスト
+  - [x] `get_current_time` / `get_system_info` を IPC 経由で動作確認（モック + 実 host 両方）
+  - [x] `ene-ai-core/tests/ipc_integration.rs` に自動テスト追加
+  - [ ] builtin版とIPC版が並行稼働することを確認（Phase 2以降）
+  - [ ] `ene-cli` で `--ipc` フラグ等で切り替え可能に（Phase 2以降）
 
 ### Phase 2: ツール移植（クレートごと）
 
@@ -383,47 +407,54 @@ sandbox.track_overwrite(original, &path);
 
 #### 2a: `ene-tools/web` （最もステートレスで独立）
 
-- [ ] **2a.1** クレート作成・コード移行
-  - [ ] `Cargo.toml` 作成
-  - [ ] `webfetch.rs` — `ene-ai-core/src/tools/web/webfetch/` から移行
-  - [ ] `websearch.rs` + `backends.rs` — `websearch/` から移行
-  - [ ] `converter.rs` — `webfetch/converter.rs` から移行
-  - [ ] `provider.rs` — `WebToolProvider`（ToolProvider実装）
-  - [ ] `lib.rs` — re-exports
-- [ ] **2a.2** `ene-tools/host` に `WebToolProvider` を登録
-- [ ] **2a.3** 動作確認（webfetch + websearch）
-- [ ] **2a.4** `ene-ai-core/src/tools/web/` を builtin_registry から削除
-- [ ] **2a.5** `ene-ai-core/Cargo.toml` から web 関連依存（`reqwest`のweb専用feature等）を削除可能か確認
+- [x] **2a.1** クレート作成・コード移行
+  - [x] `Cargo.toml` 作成
+  - [x] `webfetch.rs` — `ene-ai-core/src/tools/web/webfetch/` から移行
+  - [x] `websearch.rs` + `backends.rs` — `websearch/` から移行
+  - [x] `converter.rs` — `webfetch/converter.rs` から移行
+  - [x] `provider.rs` — `WebToolProvider`（ToolProvider実装）
+  - [x] `lib.rs` — re-exports
+- [x] **2a.2** `ene-tools/host` に `WebToolProvider` を登録
+- [x] **2a.3** 動作確認（ListTools で webfetch/websearch を確認、統合テスト通過）
+- [x] **2a.4** `ene-ai-core/src/tools/core/mod.rs` の `EneToolRegistry` から web 関連を削除
+- [x] **2a.5** `ene-ai-core/Cargo.toml` から `reqwest` は core 内の web ツール以外では未使用。Phase 3 で `src/tools/web/` ディレクトリ完全削除時に削除可能
 
 #### 2b: `ene-tools/utility`
 
-- [ ] **2b.1** クレート作成・コード移行
-  - [ ] `question.rs` — 質問ツール
-  - [ ] `todo.rs` — TodoStore + Todo ツール
-  - [ ] `truncation.rs` — Truncate ユーティリティ
-  - [ ] `provider.rs` — `UtilityToolProvider`
-- [ ] **2b.2** host 登録・動作確認
-- [ ] **2b.3** builtin削除
+- [x] **2b.1** クレート作成・コード移行
+  - [x] `Cargo.toml` 作成
+  - [x] `provider.rs` — `UtilityToolProvider`（get_current_time / get_system_info / question / todo）
+  - [x] `question.rs` — 質問ツール
+  - [x] `todo.rs` — TodoStore + Todo ツール
+  - [x] `truncation.rs` — Truncate ユーティリティ（内部使用、ツールとして未登録）
+- [x] **2b.2** host 登録・動作確認（全 utility ツール、IPC 統合テスト通過）
+- [x] **2b.3** builtin から utility ツール削除
+  - [x] `BuiltinToolRegistry` を空に（get_current_time / get_system_info を IPC 版へ移行）
+  - [x] `EneToolRegistry` から question / todo / get_current_time / get_system_info を削除
 
 #### 2c: `ene-tools/app`
 
-- [ ] **2c.1** クレート作成・コード移行
-  - [ ] `actions/mod.rs`, `actions/portal.rs` — GUI自動化
-  - [ ] `provider.rs` — `AppToolProvider`
-- [ ] **2c.2** host 登録・動作確認
-- [ ] **2c.3** builtin削除
+- [x] **2c.1** クレート作成・コード移行
+  - [x] `actions.rs`, `portal.rs` — GUI自動化
+  - [x] `provider.rs` — `AppToolProvider`
+- [x] **2c.2** host 登録・動作確認
+- [x] **2c.3** builtin削除（EneToolRegistry から app を削除）
 
 #### 2d: `ene-tools/browser`
 
-- [ ] **2d.1** クレート作成・コード移行
-  - [ ] `chrome.rs`, `extract.rs`, `session.rs` — ブラウザ自動化
-  - [ ] `provider.rs` — `BrowserToolProvider`
-  - [ ] `BrowserSessionStore` のIPC越しセッション管理
-- [ ] **2d.2** host 登録・動作確認
-- [ ] **2d.3** builtin削除
+- [x] **2d.1** クレート作成・コード移行
+  - [x] `chrome.rs`, `extract.rs`, `session.rs` — ブラウザ自動化
+  - [x] `provider.rs` — `BrowserToolProvider`
+  - [x] `BrowserSessionStore` は host 側に配置（IPC 越しでセッション管理）
+- [x] **2d.2** host 登録・動作確認
+- [x] **2d.3** builtin削除（EneToolRegistry から browser を削除）
 
 #### 2e: `ene-tools/fs` （最も複雑、Sandbox + Undo統合）
 
+- [x] **2e.0** クレート作成・基盤構築
+  - [x] `Cargo.toml` 作成
+  - [x] `provider.rs` — `FsToolProvider` stub（IPC 登録用）
+  - [x] host 登録・builtin 削除（EneToolRegistry から fs/shell/undo を削除）
 - [ ] **2e.1** Sandbox + Undo 統合実装
   - [ ] `sandbox.rs` — `SandboxConfig` + `UndoManager` 統合型
   - [ ] `permission.rs` — `PermissionGate`, `DestructiveAction`
@@ -437,9 +468,8 @@ sandbox.track_overwrite(original, &path);
   - [ ] `search/` — glob + grep、`Sandbox::check_readable()` 使用
   - [ ] `filesystem.rs` — 統合ディスパッチャ
   - [ ] `shell/` — `Sandbox::check_command()` + `check_writable()` 使用
-- [ ] **2e.3** `provider.rs` — `FsToolProvider`（`Sandbox` 内包）
+- [ ] **2e.3** `provider.rs` — `FsToolProvider` 完全実装（`Sandbox` 内包）
 - [ ] **2e.4** host 登録・動作確認（全 fs/shell/undo ツール）
-- [ ] **2e.5** builtin削除
 
 ### Phase 3: クリーンアップ
 

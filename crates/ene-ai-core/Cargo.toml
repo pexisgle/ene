@@ -47,6 +47,7 @@ urlencoding = "2.1"
 chromiumoxide = "0.9"
 scraper = "0.27"
 htmd = "0.5"
+ene-tool-proto = { path = "../ene-tool-proto" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "screenshot", "screencast", "pipewire"] }

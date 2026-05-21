@@ -1,0 +1,22 @@
+[package]
+name = "ene-tools-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ene-tool-proto = { path = "../../ene-tool-proto" }
+enigo = "0.6"
+xcap = "0.9.4"
+active-win-pos-rs = "0.10.1"
+base64 = "0.22"
+image = "0.25"
+tokio = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+arboard = "3.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "screenshot", "screencast", "pipewire"] }
+pipewire = "0.9"

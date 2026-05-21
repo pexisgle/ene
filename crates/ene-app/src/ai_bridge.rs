@@ -468,7 +468,7 @@ fn poll_ai_worker(
 
 async fn build_registry(settings: &ene_ai_core::config::AiSettings) -> Arc<dyn ToolRegistry> {
     if settings.mcp_servers.is_empty() {
-        return ToolRegistryBuilder::new().with_builtin().build();
+        return ToolRegistryBuilder::new().with_builtin().build().await;
     }
 
     let mcp = McpToolRegistry::new();

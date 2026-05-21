@@ -366,6 +366,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ashpd"
+version = "0.13.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "340e0f6bf7f9ee78549c61454f1460a3ed97c011902ee76b58301bbc6d502a32"
+dependencies = [
+ "enumflags2",
+ "futures-channel",
+ "futures-util",
+ "getrandom 0.4.2",
+ "pipewire",
+ "serde",
+ "serde_repr",
+ "tokio",
+ "zbus",
+]
+
+[[package]]
 name = "assert_type_match"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3620,6 +3637,7 @@ version = "0.1.0"
 dependencies = [
  "active-win-pos-rs",
  "arboard",
+ "ashpd",
  "async-openai",
  "async-stream",
  "async-trait",
@@ -3633,12 +3651,14 @@ dependencies = [
  "diesel_migrations",
  "diff",
  "dirs",
+ "ene-tool-proto",
  "enigo",
  "glob",
  "hf-hub",
  "htmd",
  "image",
  "indexmap",
+ "pipewire",
  "rand 0.10.1",
  "regex",
  "reqwest 0.13.3",
@@ -3694,6 +3714,117 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-stream",
+]
+
+[[package]]
+name = "ene-tool-proto"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "ene-tools-app"
+version = "0.1.0"
+dependencies = [
+ "active-win-pos-rs",
+ "arboard",
+ "ashpd",
+ "async-trait",
+ "base64 0.22.1",
+ "ene-tool-proto",
+ "enigo",
+ "image",
+ "pipewire",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "xcap",
+]
+
+[[package]]
+name = "ene-tools-browser"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chromiumoxide",
+ "dashmap",
+ "ene-tool-proto",
+ "htmd",
+ "regex",
+ "scraper",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "uuid",
+]
+
+[[package]]
+name = "ene-tools-fs"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "dashmap",
+ "diff",
+ "ene-tool-proto",
+ "glob",
+ "regex",
+ "serde",
+ "serde_json",
+ "strsim",
+ "tokio",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
+name = "ene-tools-host"
+version = "0.1.0"
+dependencies = [
+ "ene-tool-proto",
+ "ene-tools-app",
+ "ene-tools-browser",
+ "ene-tools-fs",
+ "ene-tools-utility",
+ "ene-tools-web",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "ene-tools-utility"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "dashmap",
+ "ene-tool-proto",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "ene-tools-web"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ene-tool-proto",
+ "htmd",
+ "regex",
+ "reqwest 0.13.3",
+ "scraper",
+ "serde",
+ "serde_json",
+ "tokio",
+ "urlencoding",
 ]
 
 [[package]]
@@ -9245,6 +9376,7 @@ dependencies = [
  "signal-hook-registry",
  "socket2",
  "tokio-macros",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -11427,6 +11559,7 @@ dependencies = [
  "rustix 1.1.4",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",
