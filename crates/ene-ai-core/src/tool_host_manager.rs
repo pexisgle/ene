@@ -2,11 +2,18 @@ use crate::config::AiSettings;
 use crate::ipc_client::IpcToolRegistry;
 use crate::paths;
 use crate::tools::definition::ToolRegistry;
-use std::path::{Path, PathBuf};
+use crate::tools::ToolDefinition;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 
-/// 管理下のツールホストプロセス
+const MAX_RESTARTS: usize = 5;
+const BASE_DELAY_MS: u64 = 500;
+const MAX_DELAY_MS: u64 = 30_000;
+const CONNECT_RETRIES: u32 = 50;
+const CONNECT_DELAY_MS: u64 = 50;
+
 struct ToolProcess {
     name: String,
     child: std::process::Child,
@@ -15,10 +22,6 @@ struct ToolProcess {
     sandbox: ene_tool_proto::SandboxConfigData,
     restart_count: usize,
 }
-
-const MAX_RESTARTS: usize = 5;
-const BASE_DELAY_MS: u64 = 500;
-const MAX_DELAY_MS: u64 = 30_000;
 
 impl ToolProcess {
     fn is_alive(&mut self) -> bool {
@@ -40,6 +43,11 @@ impl ToolProcess {
         if self.socket_path.exists() {
             let _ = std::fs::remove_file(&self.socket_path);
         }
+
+        eprintln!(
+            "[ToolHostManager] Restarting tool '{}' (attempt {}/{})",
+            self.name, self.restart_count, MAX_RESTARTS
+        );
 
         let child = std::process::Command::new(&self.binary_path)
             .env("ENE_TOOL_SOCKET", &self.socket_path)
@@ -66,21 +74,29 @@ impl Drop for ToolProcess {
     }
 }
 
+struct ToolEntry {
+    process: Arc<Mutex<ToolProcess>>,
+    registry: IpcToolRegistry,
+}
+
 /// ツールバイナリを管理し、IPC で接続するマネージャー
 ///
 /// `start()` で settings に基づいてツールバイナリを発見・起動し、
 /// `into_registry()` で `Arc<dyn ToolRegistry>` に変換する。
 /// プロセスクラッシュ時は指数バックオフで自動再起動する。
 pub struct ToolHostManager {
-    processes: Vec<Arc<tokio::sync::Mutex<ToolProcess>>>,
-    registries: Vec<Box<dyn ToolRegistry>>,
+    entries: Vec<ToolEntry>,
+    extra_registries: Vec<Box<dyn ToolRegistry>>,
 }
 
 #[async_trait::async_trait]
 impl ToolRegistry for ToolHostManager {
-    fn list_tools(&self) -> Vec<crate::tools::ToolDefinition> {
+    fn list_tools(&self) -> Vec<ToolDefinition> {
         let mut tools = Vec::new();
-        for registry in &self.registries {
+        for entry in &self.entries {
+            tools.extend(entry.registry.list_tools());
+        }
+        for registry in &self.extra_registries {
             tools.extend(registry.list_tools());
         }
         tools
@@ -90,8 +106,14 @@ impl ToolRegistry for ToolHostManager {
         &self,
         query_embedding: Option<&[f32]>,
         limit: usize,
-    ) -> Vec<crate::tools::ToolDefinition> {
-        for registry in &self.registries {
+    ) -> Vec<ToolDefinition> {
+        for entry in &self.entries {
+            let tools = entry.registry.list_relevant_tools(query_embedding, limit);
+            if !tools.is_empty() {
+                return tools;
+            }
+        }
+        for registry in &self.extra_registries {
             let tools = registry.list_relevant_tools(query_embedding, limit);
             if !tools.is_empty() {
                 return tools;
@@ -101,9 +123,13 @@ impl ToolRegistry for ToolHostManager {
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, String> {
-        for registry in &self.registries {
-            let tools = registry.list_tools();
-            if tools.iter().any(|t| t.name == name) {
+        for entry in &self.entries {
+            if entry.registry.list_tools().iter().any(|t| t.name == name) {
+                return Self::call_with_supervision(entry, name, arguments).await;
+            }
+        }
+        for registry in &self.extra_registries {
+            if registry.list_tools().iter().any(|t| t.name == name) {
                 return registry.call_tool(name, arguments).await;
             }
         }
@@ -111,7 +137,10 @@ impl ToolRegistry for ToolHostManager {
     }
 
     fn set_session_id(&self, session_id: &str) {
-        for registry in &self.registries {
+        for entry in &self.entries {
+            entry.registry.set_session_id(session_id);
+        }
+        for registry in &self.extra_registries {
             registry.set_session_id(session_id);
         }
     }
@@ -121,7 +150,10 @@ impl ToolRegistry for ToolHostManager {
         embedder: &dyn crate::embedding::EmbeddingProvider,
         store: Option<&crate::memory::store::MemoryStore>,
     ) -> Result<(), String> {
-        for registry in &self.registries {
+        for entry in &self.entries {
+            entry.registry.ensure_index_built(embedder, store).await?;
+        }
+        for registry in &self.extra_registries {
             registry.ensure_index_built(embedder, store).await?;
         }
         Ok(())
@@ -131,18 +163,14 @@ impl ToolRegistry for ToolHostManager {
 impl ToolHostManager {
     pub async fn start(settings: &AiSettings) -> Result<Self, String> {
         let sandbox = settings.sandbox.to_sandbox_config_data();
-        let mut processes = Vec::new();
-        let mut registries: Vec<Box<dyn ToolRegistry>> = Vec::new();
+        let mut entries = Vec::new();
 
         std::fs::create_dir_all(paths::tool_socket_dir())
             .map_err(|e| format!("Failed to create socket dir: {e}"))?;
 
         for name in &settings.tools.enabled {
             match Self::start_tool(name, &sandbox).await {
-                Ok((process, registry)) => {
-                    processes.push(process);
-                    registries.push(registry);
-                }
+                Ok(entry) => entries.push(entry),
                 Err(e) => {
                     eprintln!("[ToolHostManager] Failed to start tool '{}': {}", name, e);
                 }
@@ -150,15 +178,12 @@ impl ToolHostManager {
         }
 
         Ok(Self {
-            processes,
-            registries,
+            entries,
+            extra_registries: Vec::new(),
         })
     }
 
-    async fn start_tool(
-        name: &str,
-        sandbox: &ene_tool_proto::SandboxConfigData,
-    ) -> Result<(Arc<tokio::sync::Mutex<ToolProcess>>, Box<dyn ToolRegistry>), String> {
+    async fn start_tool(name: &str, sandbox: &ene_tool_proto::SandboxConfigData) -> Result<ToolEntry, String> {
         let binary_path = Self::find_tool_binary(name)
             .ok_or_else(|| format!("Tool binary '{}' not found", name))?;
 
@@ -182,10 +207,48 @@ impl ToolHostManager {
             restart_count: 0,
         };
 
-        let process = Arc::new(tokio::sync::Mutex::new(process));
-        let registry = Self::connect_with_retry(&socket_path, sandbox, 50, 50).await?;
+        let process = Arc::new(Mutex::new(process));
 
-        Ok((process, registry))
+        let registry = Self::connect_with_retry(&socket_path, sandbox, CONNECT_RETRIES, CONNECT_DELAY_MS).await?;
+
+        Ok(ToolEntry { process, registry })
+    }
+
+    async fn call_with_supervision(
+        entry: &ToolEntry,
+        name: &str,
+        arguments: &str,
+    ) -> Result<String, String> {
+        let result = entry.registry.call_tool(name, arguments).await;
+
+        if result.is_ok() {
+            return result;
+        }
+
+        let mut guard = entry.process.lock().await;
+
+        if guard.is_alive() {
+            return result;
+        }
+
+        eprintln!(
+            "[ToolHostManager] Tool '{}' process is dead, attempting restart",
+            guard.name
+        );
+
+        let delay = guard.delay_for_restart();
+        tokio::time::sleep(delay).await;
+
+        guard.restart()?;
+
+        let socket_path = guard.socket_path.clone();
+        let sandbox = guard.sandbox.clone();
+
+        let new_registry = Self::connect_with_retry(&socket_path, &sandbox, CONNECT_RETRIES, CONNECT_DELAY_MS).await?;
+
+        drop(guard);
+
+        new_registry.call_tool(name, arguments).await
     }
 
     fn find_tool_binary(name: &str) -> Option<PathBuf> {
@@ -211,15 +274,15 @@ impl ToolHostManager {
     }
 
     async fn connect_with_retry(
-        socket_path: &Path,
+        socket_path: &PathBuf,
         sandbox: &ene_tool_proto::SandboxConfigData,
         max_retries: u32,
         delay_ms: u64,
-    ) -> Result<Box<dyn ToolRegistry>, String> {
+    ) -> Result<IpcToolRegistry, String> {
         let mut attempts = 0;
         loop {
             match IpcToolRegistry::new(socket_path.to_path_buf(), sandbox.clone()).await {
-                Ok(registry) => return Ok(Box::new(registry)),
+                Ok(registry) => return Ok(registry),
                 Err(e) => {
                     attempts += 1;
                     if attempts >= max_retries {
@@ -237,7 +300,7 @@ impl ToolHostManager {
     }
 
     pub fn add_registry(&mut self, registry: Box<dyn ToolRegistry>) {
-        self.registries.push(registry);
+        self.extra_registries.push(registry);
     }
 
     pub fn into_registry(self) -> Arc<dyn ToolRegistry> {

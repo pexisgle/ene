@@ -142,6 +142,10 @@ impl IpcToolRegistry {
         self.do_refresh_tools().await
     }
 
+    pub fn socket_path(&self) -> &PathBuf {
+        &self.socket_path
+    }
+
     /// 接続断時に再接続を試みる
     async fn ensure_connected(&self) -> Result<(), String> {
         {
