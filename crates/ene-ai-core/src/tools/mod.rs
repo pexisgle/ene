@@ -18,7 +18,6 @@ pub use composite::CompositeToolRegistry;
 pub use core::EneToolRegistry;
 pub use definition::{ToolCallResult, ToolDefinition, ToolRegistry};
 pub use utility::builtin::BuiltinToolRegistry;
-pub use utility::screenshot::ScreenshotToolRegistry;
 pub use utility::undo_manager::{UndoEntry, UndoManager, UndoOperation, backup_file};
 
 /// ツールカテゴリ

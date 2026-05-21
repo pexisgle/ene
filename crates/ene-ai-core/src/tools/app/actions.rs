@@ -1,10 +1,16 @@
 use crate::error::AiCoreError;
 use base64::{Engine as _, engine::general_purpose};
 use enigo::{Axis, Coordinate, Direction, Keyboard, Mouse};
-use image::DynamicImage;
+use image::{DynamicImage, imageops::FilterType};
 use std::io::Cursor;
 
+mod portal;
+
 pub async fn list_windows() -> Result<String, AiCoreError> {
+    if portal::detect_wayland() {
+        return portal::list_windows_wayland();
+    }
+
     let windows = xcap::Window::all()
         .map_err(|e| AiCoreError::AppError(format!("Failed to enumerate windows: {e}")))?;
 
@@ -20,6 +26,10 @@ pub async fn list_windows() -> Result<String, AiCoreError> {
 }
 
 pub async fn focus_window(title: &str) -> Result<String, AiCoreError> {
+    if portal::detect_wayland() {
+        return portal::focus_window_wayland(title);
+    }
+
     let windows = xcap::Window::all()
         .map_err(|e| AiCoreError::AppError(format!("Failed to enumerate windows: {e}")))?;
 
@@ -417,7 +427,7 @@ pub async fn list_monitors() -> Result<String, AiCoreError> {
     .map_err(|e| AiCoreError::AppError(format!("Task failed: {e}")))?
 }
 
-fn capture_screen_inner(scale_percent: u32) -> Result<DynamicImage, AiCoreError> {
+fn capture_screen_xcap(scale_percent: u32) -> Result<DynamicImage, AiCoreError> {
     let mut target_image = None;
 
     if let Ok(active_win) = active_win_pos_rs::get_active_window() {
@@ -454,7 +464,7 @@ fn capture_screen_inner(scale_percent: u32) -> Result<DynamicImage, AiCoreError>
     let final_image = if scale_percent > 0 && scale_percent < 100 {
         let nwidth = (image.width() as f32 * (scale_percent as f32 / 100.0)) as u32;
         let nheight = (image.height() as f32 * (scale_percent as f32 / 100.0)) as u32;
-        image.resize(nwidth.max(1), nheight.max(1), image::imageops::FilterType::Lanczos3)
+        image.resize(nwidth.max(1), nheight.max(1), FilterType::Lanczos3)
     } else {
         image
     };
@@ -462,7 +472,7 @@ fn capture_screen_inner(scale_percent: u32) -> Result<DynamicImage, AiCoreError>
     Ok(final_image)
 }
 
-fn capture_window_by_title_inner(title: &str, scale_percent: u32) -> Result<DynamicImage, AiCoreError> {
+fn capture_window_by_title_xcap(title: &str, scale_percent: u32) -> Result<DynamicImage, AiCoreError> {
     let windows = xcap::Window::all()
         .map_err(|e| AiCoreError::AppError(format!("Failed to enumerate windows: {e}")))?;
 
@@ -476,7 +486,7 @@ fn capture_window_by_title_inner(title: &str, scale_percent: u32) -> Result<Dyna
                 let final_image = if scale_percent > 0 && scale_percent < 100 {
                     let nwidth = (image.width() as f32 * (scale_percent as f32 / 100.0)) as u32;
                     let nheight = (image.height() as f32 * (scale_percent as f32 / 100.0)) as u32;
-                    image.resize(nwidth.max(1), nheight.max(1), image::imageops::FilterType::Lanczos3)
+                    image.resize(nwidth.max(1), nheight.max(1), FilterType::Lanczos3)
                 } else {
                     image
                 };
@@ -499,34 +509,44 @@ fn encode_image_to_data_uri(image: DynamicImage) -> Result<String, AiCoreError> 
 
 pub async fn screenshot(scale_percent: Option<u32>) -> Result<String, AiCoreError> {
     let scale_percent = scale_percent.unwrap_or(50);
-    tokio::task::spawn_blocking(move || {
-        let image = capture_screen_inner(scale_percent)?;
-        let data_uri = encode_image_to_data_uri(image)?;
-        let result = serde_json::json!({
-            "type": "screenshot",
-            "data": data_uri
-        });
-        Ok::<_, AiCoreError>(result.to_string())
-    })
-    .await
-    .map_err(|e| AiCoreError::AppError(format!("Task failed: {e}")))?
+
+    let image = if portal::detect_wayland() {
+        portal::capture_screen_portal(scale_percent).await
+    } else {
+        let sp = scale_percent;
+        tokio::task::spawn_blocking(move || capture_screen_xcap(sp))
+            .await
+            .map_err(|e| AiCoreError::AppError(format!("Task failed: {e}")))?
+    }?;
+
+    let data_uri = encode_image_to_data_uri(image)?;
+    let result = serde_json::json!({
+        "type": "screenshot",
+        "data": data_uri
+    });
+    Ok(result.to_string())
 }
 
 pub async fn capture_window(title: &str, scale_percent: Option<u32>) -> Result<String, AiCoreError> {
-    let title = title.to_string();
     let scale_percent = scale_percent.unwrap_or(50);
-    tokio::task::spawn_blocking(move || {
-        let image = capture_window_by_title_inner(&title, scale_percent)?;
-        let data_uri = encode_image_to_data_uri(image)?;
-        let result = serde_json::json!({
-            "type": "screenshot",
-            "data": data_uri,
-            "window": title
-        });
-        Ok::<_, AiCoreError>(result.to_string())
-    })
-    .await
-    .map_err(|e| AiCoreError::AppError(format!("Task failed: {e}")))?
+
+    let image = if portal::detect_wayland() {
+        portal::capture_window_portal(scale_percent).await
+    } else {
+        let t = title.to_string();
+        let sp = scale_percent;
+        tokio::task::spawn_blocking(move || capture_window_by_title_xcap(&t, sp))
+            .await
+            .map_err(|e| AiCoreError::AppError(format!("Task failed: {e}")))?
+    }?;
+
+    let data_uri = encode_image_to_data_uri(image)?;
+    let result = serde_json::json!({
+        "type": "screenshot",
+        "data": data_uri,
+        "window": title
+    });
+    Ok(result.to_string())
 }
 
 pub async fn clipboard_read() -> Result<String, AiCoreError> {

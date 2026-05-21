@@ -7,7 +7,7 @@ pub fn tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "app".to_string(),
         description: concat!(
-            "Performs OS-level GUI automation using enigo and xcap. ",
+            "Performs OS-level GUI automation using enigo, xcap, and xdg-desktop-portal (Wayland). ",
             "Supports window enumeration, focus, keyboard input, mouse movement/clicks/drag/scroll, ",
             "clipboard read/write, screenshots, monitor listing, and more. ",
             "Use this when you need to interact with the desktop environment or applications directly."
