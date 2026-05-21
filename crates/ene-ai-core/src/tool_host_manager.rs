@@ -4,27 +4,131 @@ use crate::paths;
 use crate::tools::definition::ToolRegistry;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// 管理下のツールホストプロセス
 struct ToolProcess {
     name: String,
     child: std::process::Child,
-    #[allow(dead_code)]
     socket_path: PathBuf,
+    binary_path: PathBuf,
+    sandbox: ene_tool_proto::SandboxConfigData,
+    restart_count: usize,
+}
+
+const MAX_RESTARTS: usize = 5;
+const BASE_DELAY_MS: u64 = 500;
+const MAX_DELAY_MS: u64 = 30_000;
+
+impl ToolProcess {
+    fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    fn restart(&mut self) -> Result<(), String> {
+        self.restart_count += 1;
+        if self.restart_count > MAX_RESTARTS {
+            return Err(format!(
+                "Tool '{}' exceeded max restarts ({})",
+                self.name, MAX_RESTARTS
+            ));
+        }
+
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+
+        if self.socket_path.exists() {
+            let _ = std::fs::remove_file(&self.socket_path);
+        }
+
+        let child = std::process::Command::new(&self.binary_path)
+            .env("ENE_TOOL_SOCKET", &self.socket_path)
+            .spawn()
+            .map_err(|e| format!("Failed to restart '{}': {}", self.binary_path.display(), e))?;
+
+        self.child = child;
+        Ok(())
+    }
+
+    fn delay_for_restart(&self) -> Duration {
+        let delay_ms = BASE_DELAY_MS * 2u64.saturating_pow(self.restart_count as u32);
+        Duration::from_millis(delay_ms.min(MAX_DELAY_MS))
+    }
+}
+
+impl Drop for ToolProcess {
+    fn drop(&mut self) {
+        eprintln!("[ToolHostManager] Stopping tool '{}'", self.name);
+        let _ = self.child.kill();
+        if self.socket_path.exists() {
+            let _ = std::fs::remove_file(&self.socket_path);
+        }
+    }
 }
 
 /// ツールバイナリを管理し、IPC で接続するマネージャー
 ///
 /// `start()` で settings に基づいてツールバイナリを発見・起動し、
 /// `into_registry()` で `Arc<dyn ToolRegistry>` に変換する。
-/// プロセスは registry がドロップされるまで存活する。
+/// プロセスクラッシュ時は指数バックオフで自動再起動する。
 pub struct ToolHostManager {
-    processes: Vec<ToolProcess>,
+    processes: Vec<Arc<tokio::sync::Mutex<ToolProcess>>>,
     registries: Vec<Box<dyn ToolRegistry>>,
 }
 
+#[async_trait::async_trait]
+impl ToolRegistry for ToolHostManager {
+    fn list_tools(&self) -> Vec<crate::tools::ToolDefinition> {
+        let mut tools = Vec::new();
+        for registry in &self.registries {
+            tools.extend(registry.list_tools());
+        }
+        tools
+    }
+
+    fn list_relevant_tools(
+        &self,
+        query_embedding: Option<&[f32]>,
+        limit: usize,
+    ) -> Vec<crate::tools::ToolDefinition> {
+        for registry in &self.registries {
+            let tools = registry.list_relevant_tools(query_embedding, limit);
+            if !tools.is_empty() {
+                return tools;
+            }
+        }
+        self.list_tools()
+    }
+
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, String> {
+        for registry in &self.registries {
+            let tools = registry.list_tools();
+            if tools.iter().any(|t| t.name == name) {
+                return registry.call_tool(name, arguments).await;
+            }
+        }
+        Err(format!("Tool '{}' not found", name))
+    }
+
+    fn set_session_id(&self, session_id: &str) {
+        for registry in &self.registries {
+            registry.set_session_id(session_id);
+        }
+    }
+
+    async fn ensure_index_built(
+        &self,
+        embedder: &dyn crate::embedding::EmbeddingProvider,
+        store: Option<&crate::memory::store::MemoryStore>,
+    ) -> Result<(), String> {
+        for registry in &self.registries {
+            registry.ensure_index_built(embedder, store).await?;
+        }
+        Ok(())
+    }
+}
+
 impl ToolHostManager {
-    /// 設定に基づいてツールホストプロセスを起動し、IPC接続を確立する
     pub async fn start(settings: &AiSettings) -> Result<Self, String> {
         let sandbox = settings.sandbox.to_sandbox_config_data();
         let mut processes = Vec::new();
@@ -40,10 +144,7 @@ impl ToolHostManager {
                     registries.push(registry);
                 }
                 Err(e) => {
-                    eprintln!(
-                        "[ToolHostManager] Failed to start tool '{}': {}",
-                        name, e
-                    );
+                    eprintln!("[ToolHostManager] Failed to start tool '{}': {}", name, e);
                 }
             }
         }
@@ -57,7 +158,7 @@ impl ToolHostManager {
     async fn start_tool(
         name: &str,
         sandbox: &ene_tool_proto::SandboxConfigData,
-    ) -> Result<(ToolProcess, Box<dyn ToolRegistry>), String> {
+    ) -> Result<(Arc<tokio::sync::Mutex<ToolProcess>>, Box<dyn ToolRegistry>), String> {
         let binary_path = Self::find_tool_binary(name)
             .ok_or_else(|| format!("Tool binary '{}' not found", name))?;
 
@@ -76,8 +177,12 @@ impl ToolHostManager {
             name: name.to_string(),
             child,
             socket_path: socket_path.clone(),
+            binary_path: binary_path.clone(),
+            sandbox: sandbox.clone(),
+            restart_count: 0,
         };
 
+        let process = Arc::new(tokio::sync::Mutex::new(process));
         let registry = Self::connect_with_retry(&socket_path, sandbox, 50, 50).await?;
 
         Ok((process, registry))
@@ -125,70 +230,17 @@ impl ToolHostManager {
                             e
                         ));
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 }
             }
         }
     }
 
-    /// MCP ツールレジストリを追加する
     pub fn add_registry(&mut self, registry: Box<dyn ToolRegistry>) {
         self.registries.push(registry);
     }
 
-    /// 管理下のプロセスとレジストリを統合して ToolRegistry を構築する
     pub fn into_registry(self) -> Arc<dyn ToolRegistry> {
-        let composite = crate::tools::CompositeToolRegistry::new(self.registries);
-        let managed = ManagedToolRegistry {
-            _processes: self.processes,
-            inner: composite,
-        };
-        Arc::new(managed)
-    }
-}
-
-/// プロセス存活を管理する ToolRegistry ラッパー
-struct ManagedToolRegistry {
-    _processes: Vec<ToolProcess>,
-    inner: crate::tools::CompositeToolRegistry,
-}
-
-impl Drop for ManagedToolRegistry {
-    fn drop(&mut self) {
-        for process in &mut self._processes {
-            eprintln!("[ToolHostManager] Stopping tool '{}'", process.name);
-            let _ = process.child.kill();
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl ToolRegistry for ManagedToolRegistry {
-    fn list_tools(&self) -> Vec<crate::tools::ToolDefinition> {
-        self.inner.list_tools()
-    }
-
-    fn list_relevant_tools(
-        &self,
-        query_embedding: Option<&[f32]>,
-        limit: usize,
-    ) -> Vec<crate::tools::ToolDefinition> {
-        self.inner.list_relevant_tools(query_embedding, limit)
-    }
-
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, String> {
-        self.inner.call_tool(name, arguments).await
-    }
-
-    fn set_session_id(&self, session_id: &str) {
-        self.inner.set_session_id(session_id);
-    }
-
-    async fn ensure_index_built(
-        &self,
-        embedder: &dyn crate::embedding::EmbeddingProvider,
-        store: Option<&crate::memory::store::MemoryStore>,
-    ) -> Result<(), String> {
-        self.inner.ensure_index_built(embedder, store).await
+        Arc::new(self)
     }
 }

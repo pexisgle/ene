@@ -7,27 +7,29 @@ use ene_tool_proto::{
 };
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 use tokio::net::UnixStream;
 use tokio::sync::Mutex as TokioMutex;
 
-/// IPC 経由で `ene-tool-host` と通信する ToolRegistry 実装
+const RECONNECT_MAX_RETRIES: u32 = 5;
+const RECONNECT_BASE_DELAY_MS: u64 = 200;
+const RECONNECT_MAX_DELAY_MS: u64 = 10_000;
+
+/// IPC 経由でツールバイナリと通信する ToolRegistry 実装
 ///
-/// `ene-ai-core` が `ToolRegistry` trait を通じてツールを呼び出す際、
-/// UDS (Unix Domain Socket) 経由で別プロセスの `ene-tool-host` に問い合わせる。
-#[allow(dead_code)]
+/// 接続が切れた場合は指数バックオフで自動再接続を試みる。
 pub struct IpcToolRegistry {
     socket_path: PathBuf,
+    sandbox: SandboxConfigData,
     stream: TokioMutex<Option<UnixStream>>,
     tools: Mutex<Vec<ToolDefinition>>,
 }
 
 impl IpcToolRegistry {
     pub async fn new(socket_path: PathBuf, sandbox: SandboxConfigData) -> Result<Self, String> {
-        let mut stream = UnixStream::connect(&socket_path)
-            .await
-            .map_err(|e| format!("Failed to connect to tool host at {socket_path:?}: {e}"))?;
+        let mut stream = Self::connect_with_retry(&socket_path, RECONNECT_MAX_RETRIES).await?;
 
-        write_ipc_request(&mut stream, &IpcRequest::Initialize { sandbox })
+        write_ipc_request(&mut stream, &IpcRequest::Initialize { sandbox: sandbox.clone() })
             .await
             .map_err(|e| format!("Failed to send Initialize: {e}"))?;
 
@@ -43,38 +45,157 @@ impl IpcToolRegistry {
 
         let registry = Self {
             socket_path,
+            sandbox,
             stream: TokioMutex::new(Some(stream)),
             tools: Mutex::new(Vec::new()),
         };
 
-        // 接続直後にツール一覧を取得してキャッシュ
-        registry.refresh_tools().await?;
+        registry.do_refresh_tools().await?;
 
         Ok(registry)
     }
 
-    /// ツール一覧を host から再取得しキャッシュを更新する
-    pub async fn refresh_tools(&self) -> Result<(), String> {
-        match self.send_request(IpcRequest::ListTools).await? {
-            IpcResponse::Tools { tools } => {
+    async fn connect_with_retry(
+        socket_path: &PathBuf,
+        max_retries: u32,
+    ) -> Result<UnixStream, String> {
+        let mut attempts = 0;
+        loop {
+            match UnixStream::connect(socket_path).await {
+                Ok(stream) => return Ok(stream),
+                Err(e) => {
+                    attempts += 1;
+                    if attempts >= max_retries {
+                        return Err(format!(
+                            "Failed to connect to tool at {} after {} attempts: {e}",
+                            socket_path.display(),
+                            attempts
+                        ));
+                    }
+                    let delay = RECONNECT_BASE_DELAY_MS * 2u64.saturating_pow(attempts.saturating_sub(1));
+                    tokio::time::sleep(Duration::from_millis(delay.min(RECONNECT_MAX_DELAY_MS))).await;
+                }
+            }
+        }
+    }
+
+    /// IpcRequest を送信し、IpcResponse を受信する。接続断時は再接続を1回試みる。
+    async fn do_request(&self, req: IpcRequest) -> Result<IpcResponse, String> {
+        let result = {
+            let mut guard = self.stream.lock().await;
+            let stream = match guard.as_mut() {
+                Some(s) => s,
+                None => return Err("Not connected to tool host".to_string()),
+            };
+
+            if let Err(e) = write_ipc_request(stream, &req).await {
+                drop(guard);
+                return Err(format!("Failed to send request: {e}"));
+            }
+
+            match read_ipc_response(stream).await {
+                Ok(Some(resp)) => Ok(resp),
+                Ok(None) => Err("Connection closed by tool host".to_string()),
+                Err(e) => Err(format!("Failed to read response: {e}")),
+            }
+        };
+
+        if result.is_err() {
+            let mut guard = self.stream.lock().await;
+            *guard = None;
+        }
+
+        result
+    }
+
+    async fn do_refresh_tools_with_stream(
+        &self,
+        stream: &mut UnixStream,
+    ) -> Result<(), String> {
+        write_ipc_request(stream, &IpcRequest::ListTools)
+            .await
+            .map_err(|e| format!("Failed to send ListTools: {e}"))?;
+
+        let resp = read_ipc_response(stream)
+            .await
+            .map_err(|e| format!("Failed to read ListTools response: {e}"))?;
+
+        match resp {
+            Some(IpcResponse::Tools { tools }) => {
                 let converted: Vec<ToolDefinition> = tools.into_iter().map(proto_to_core).collect();
-                let mut guard = self.tools.lock().map_err(|e| e.to_string())?;
-                *guard = converted;
+                let mut tools_guard = self.tools.lock().map_err(|e| e.to_string())?;
+                *tools_guard = converted;
                 Ok(())
             }
-            IpcResponse::Error { message } => Err(message),
+            Some(IpcResponse::Error { message }) => Err(message),
             _ => Err("Unexpected response for ListTools".to_string()),
         }
     }
 
-    async fn send_request(&self, req: IpcRequest) -> Result<IpcResponse, String> {
+    async fn do_refresh_tools(&self) -> Result<(), String> {
         let mut guard = self.stream.lock().await;
-        let stream = guard.as_mut().ok_or("Not connected to tool host")?;
-        write_ipc_request(stream, &req)
+        let stream = guard.as_mut().ok_or("Not connected")?;
+        self.do_refresh_tools_with_stream(stream).await
+    }
+
+    pub async fn refresh_tools(&self) -> Result<(), String> {
+        self.do_refresh_tools().await
+    }
+
+    /// 接続断時に再接続を試みる
+    async fn ensure_connected(&self) -> Result<(), String> {
+        {
+            let guard = self.stream.lock().await;
+            if guard.is_some() {
+                return Ok(());
+            }
+        }
+
+        eprintln!(
+            "[IpcToolRegistry] Connection lost, reconnecting to {}",
+            self.socket_path.display()
+        );
+
+        let mut stream = Self::connect_with_retry(&self.socket_path, RECONNECT_MAX_RETRIES).await?;
+
+        write_ipc_request(&mut stream, &IpcRequest::Initialize { sandbox: self.sandbox.clone() })
             .await
-            .map_err(|e| e.to_string())?;
-        let resp = read_ipc_response(stream).await.map_err(|e| e.to_string())?;
-        resp.ok_or("Connection closed by tool host".to_string())
+            .map_err(|e| format!("Failed to send Initialize on reconnect: {e}"))?;
+
+        let resp = read_ipc_response(&mut stream)
+            .await
+            .map_err(|e| format!("Failed to read Initialize response on reconnect: {e}"))?;
+
+        match resp {
+            Some(IpcResponse::Ack) => {}
+            Some(IpcResponse::Error { message }) => return Err(format!("Reconnect rejected: {message}")),
+            _ => return Err("Unexpected response to Initialize on reconnect".to_string()),
+        }
+
+        self.do_refresh_tools_with_stream(&mut stream).await?;
+
+        {
+            let mut guard = self.stream.lock().await;
+            *guard = Some(stream);
+        }
+
+        eprintln!(
+            "[IpcToolRegistry] Successfully reconnected to {}",
+            self.socket_path.display()
+        );
+        Ok(())
+    }
+
+    async fn send_with_reconnect(&self, req: IpcRequest) -> Result<IpcResponse, String> {
+        let result = self.do_request(req.clone()).await;
+
+        match result {
+            Ok(resp) => Ok(resp),
+            Err(_) => {
+                self.ensure_connected().await?;
+                self.do_request(req).await
+            }
+        }
     }
 }
 
@@ -91,18 +212,16 @@ impl ToolRegistry for IpcToolRegistry {
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, String> {
-        match self
-            .send_request(IpcRequest::CallTool {
-                name: name.to_string(),
-                arguments: arguments.to_string(),
-            })
-            .await
-        {
-            Ok(IpcResponse::CallResult { result }) => result.map_err(|e| e.to_string()),
-            Ok(IpcResponse::Error { message }) => Err(message),
-            Ok(_) => Err("Unexpected response for CallTool".to_string()),
-            Err(e) => Err(e),
-        }
+        self.send_with_reconnect(IpcRequest::CallTool {
+            name: name.to_string(),
+            arguments: arguments.to_string(),
+        })
+        .await
+        .and_then(|resp| match resp {
+            IpcResponse::CallResult { result } => result.map_err(|e| e.to_string()),
+            IpcResponse::Error { message } => Err(message),
+            _ => Err("Unexpected response for CallTool".to_string()),
+        })
     }
 
     fn set_session_id(&self, session_id: &str) {
@@ -111,7 +230,7 @@ impl ToolRegistry for IpcToolRegistry {
             let req = IpcRequest::SetSessionId {
                 session_id: session_id.to_string(),
             };
-            let _ = handle.block_on(self.send_request(req));
+            let _ = handle.block_on(self.send_with_reconnect(req));
         }
     }
 
@@ -120,7 +239,6 @@ impl ToolRegistry for IpcToolRegistry {
         _embedder: &dyn crate::embedding::EmbeddingProvider,
         _store: Option<&crate::memory::store::MemoryStore>,
     ) -> Result<(), String> {
-        // IPC 先の Provider は embedding を知らない。core 側の責務。
         Ok(())
     }
 }

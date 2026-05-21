@@ -30,6 +30,14 @@ pub async fn run_tool_server(
     }
 
     let listener = UnixListener::bind(&socket_path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(&socket_path, perms)?;
+    }
+
     eprintln!("[tool-server] Listening on {}", socket_path.display());
 
     let provider: Arc<dyn ToolProvider> = provider.into();
