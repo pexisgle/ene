@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use ene_tool_proto::{ToolDefinition, ToolError, ToolProvider};
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use crate::sandbox::Sandbox;
 
@@ -34,7 +33,7 @@ impl ToolProvider for FsToolProvider {
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
-        let guard = self.sandbox.read().await;
+        let guard = self.sandbox.read().unwrap();
         let default_sandbox;
         let sandbox = match guard.as_ref() {
             Some(s) => s,
@@ -94,29 +93,15 @@ impl ToolProvider for FsToolProvider {
     }
 
     fn set_session_id(&self, session_id: &str) {
-        let rt = tokio::runtime::Handle::try_current().ok();
-        if let Some(handle) = rt {
-            let sandbox = Arc::clone(&self.sandbox);
-            let id = session_id.to_string();
-            let _ = handle.block_on(async move {
-                let guard = sandbox.read().await;
-                if let Some(s) = guard.as_ref() {
-                    s.set_session_id(&id);
-                }
-            });
+        let guard = self.sandbox.read().unwrap();
+        if let Some(s) = guard.as_ref() {
+            s.set_session_id(session_id);
         }
     }
 
     fn set_sandbox(&self, data: &ene_tool_proto::SandboxConfigData) {
-        let rt = tokio::runtime::Handle::try_current().ok();
-        if let Some(handle) = rt {
-            let sandbox = Arc::clone(&self.sandbox);
-            let data = data.clone();
-            let _ = handle.block_on(async move {
-                let new_sandbox = Sandbox::new(data.into());
-                let mut guard = sandbox.write().await;
-                *guard = Some(new_sandbox);
-            });
-        }
+        let new_sandbox = Sandbox::new(data.clone().into());
+        let mut guard = self.sandbox.write().unwrap();
+        *guard = Some(new_sandbox);
     }
 }
