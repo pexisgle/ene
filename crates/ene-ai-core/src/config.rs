@@ -1,6 +1,7 @@
 use crate::error::AiCoreError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
@@ -311,4 +312,45 @@ impl AiSettings {
         }
         self.resolve_base_url()
     }
+}
+
+/// `assets/settings.json` を読み込み、`character` フィールドから `character_card_path` を解決した
+/// `AiSettings` を返す。
+pub fn load_settings() -> AiSettings {
+    let assets_dir = crate::paths::assets_dir();
+    let config_path = crate::paths::config_file_path();
+    load_settings_from(&assets_dir, &config_path)
+}
+
+/// 指定された `assets_dir` / `config_path` で設定を読み込む。
+pub fn load_settings_from(assets_dir: &Path, config_path: &Path) -> AiSettings {
+    let mut settings = AiSettings::default();
+
+    if let Ok(content) = std::fs::read_to_string(config_path) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Ok(s) = serde_json::from_value::<AiSettings>(value.clone()) {
+                settings = s;
+            }
+            if settings.character_card_path.trim().is_empty() {
+                if let Some(name) = value.get("character").and_then(|c| c.as_str()) {
+                    if !name.is_empty() {
+                        settings.character_card_path = format!(
+                            "{}/characters/{}/character.json",
+                            assets_dir.display(),
+                            name
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    if settings.character_card_path.trim().is_empty() {
+        settings.character_card_path = format!(
+            "{}/characters/Alicia/character.json",
+            assets_dir.display()
+        );
+    }
+
+    settings
 }
