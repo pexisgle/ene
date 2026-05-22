@@ -1,6 +1,5 @@
 use crate::sandbox::SandboxConfig;
 use crate::undo_manager::UndoManager;
-use ene_tool_proto::ToolDefinition;
 use ene_tool_proto::ToolError;
 use std::collections::HashMap;
 use std::path::Path;
@@ -29,32 +28,6 @@ use whitespace_normalized::whitespace_normalized_replace;
 
 /// 文字列置換関数の型エイリアス
 type ReplacerFn = fn(&str, &str, &str, bool) -> Option<String>;
-
-pub fn tool_definition() -> ToolDefinition {
-    ToolDefinition {
-        name: "edit".to_string(),
-        description: concat!(
-            "Performs exact string replacements in files. ",
-            "You must use your Read tool at least once in the conversation before editing. ",
-            "When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. ",
-            "The edit will FAIL if oldString is not found in the file. ",
-            "The edit will FAIL if oldString is found multiple times in the file. Either provide more surrounding lines in oldString to make it unique or use replaceAll to change every instance. ",
-            "Use replaceAll for replacing and renaming strings across the file."
-        ).to_string(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "filePath": { "type": "string", "description": "The absolute path to the file to modify" },
-                "oldString": { "type": "string", "description": "The text to replace" },
-                "newString": { "type": "string", "description": "The text to replace it with (must be different from oldString)" },
-                "replaceAll": { "type": "boolean", "description": "Replace all occurrences of oldString (default false)" }
-            },
-            "required": ["filePath", "oldString", "newString"]
-        }),
-        category: Some(ene_tool_proto::ToolCategory::Filesystem),
-        keywords: vec!["edit".to_string(), "replace".to_string(), "modify".to_string(), "file".to_string()],
-    }
-}
 
 static FILE_LOCKS: std::sync::OnceLock<
     std::sync::Mutex<HashMap<std::path::PathBuf, Arc<Semaphore>>>,

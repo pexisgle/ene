@@ -5,9 +5,8 @@ edition = "2024"
 
 [dependencies]
 ene-tool-proto = { path = "../../ene-tool-proto" }
+ene-tools-common = { path = "../common" }
 chromiumoxide = "0.9"
-scraper = "0.27"
-htmd = "0.5"
 base64 = "0.22"
 dashmap = "6"
 tokio = { workspace = true }

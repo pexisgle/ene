@@ -1,34 +1,7 @@
 use crate::sandbox::SandboxConfig;
 use crate::undo_manager::UndoManager;
-use ene_tool_proto::ToolDefinition;
 use ene_tool_proto::ToolError;
 use std::path::Path;
-
-pub fn tool_definition() -> ToolDefinition {
-    ToolDefinition {
-        name: "delete".to_string(),
-        description: concat!(
-            "Deletes a file or directory from the local filesystem. ",
-            "Use with caution. Set recursive=true to delete directories and their contents."
-        )
-        .to_string(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "The absolute path to the file or directory to delete" },
-                "recursive": { "type": "boolean", "description": "If true, delete directories recursively. Required for directories." }
-            },
-            "required": ["path"]
-        }),
-        category: Some(ene_tool_proto::ToolCategory::Filesystem),
-        keywords: vec![
-            "delete".to_string(),
-            "remove".to_string(),
-            "file".to_string(),
-            "directory".to_string(),
-        ],
-    }
-}
 
 pub async fn delete(
     path: &Path,

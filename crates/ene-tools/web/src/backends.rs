@@ -1,4 +1,14 @@
 use ene_tool_proto::ToolError;
+use std::sync::LazyLock;
+use regex::Regex;
+
+static RE_HTML_TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]+>").unwrap());
+static RE_DDG_BODY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"<div class="result__body"[^>]*>.*?<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?<a[^>]*class="result__snippet"[^>]*>(.*?)</a>.*?</div>"#).unwrap()
+});
+static RE_DDG_ALT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"<h[^>]*>.*?<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?</h[^>]*>.*?<p[^>]*>(.*?)</p>"#).unwrap()
+});
 
 pub struct SearchResult {
     pub title: String,
@@ -6,15 +16,7 @@ pub struct SearchResult {
     pub url: String,
 }
 
-pub async fn search_duckduckgo(query: &str, limit: usize) -> Result<String, ToolError> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        .build()
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("HTTP client error: {e}"),
-        })?;
-
+pub async fn search_duckduckgo(client: &reqwest::Client, query: &str, limit: usize) -> Result<String, ToolError> {
     let url = format!(
         "https://html.duckduckgo.com/html/?q={}",
         urlencoding::encode(query)
@@ -53,17 +55,10 @@ pub async fn search_duckduckgo(query: &str, limit: usize) -> Result<String, Tool
     Ok(output)
 }
 
-pub async fn search_tavily(query: &str, _limit: usize) -> Result<String, ToolError> {
+pub async fn search_tavily(client: &reqwest::Client, query: &str, _limit: usize) -> Result<String, ToolError> {
     let api_key = std::env::var("TAVILY_API_KEY").map_err(|_| ToolError::ExecutionFailed {
         message: "TAVILY_API_KEY environment variable is not set".to_string(),
     })?;
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("HTTP client error: {e}"),
-        })?;
 
     let response = client
         .post("https://api.tavily.com/search")
@@ -118,17 +113,10 @@ pub async fn search_tavily(query: &str, _limit: usize) -> Result<String, ToolErr
     Ok(output)
 }
 
-pub async fn search_brave(query: &str, _limit: usize) -> Result<String, ToolError> {
+pub async fn search_brave(client: &reqwest::Client, query: &str, _limit: usize) -> Result<String, ToolError> {
     let api_key = std::env::var("BRAVE_API_KEY").map_err(|_| ToolError::ExecutionFailed {
         message: "BRAVE_API_KEY environment variable is not set".to_string(),
     })?;
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("HTTP client error: {e}"),
-        })?;
 
     let response = client
         .get("https://api.search.brave.com/res/v1/web/search")
@@ -182,14 +170,8 @@ pub async fn search_brave(query: &str, _limit: usize) -> Result<String, ToolErro
 
 fn parse_duckduckgo_html(html: &str, limit: usize) -> Vec<SearchResult> {
     let mut results = Vec::new();
-    let re_result = match regex::Regex::new(
-        r#"<div class="result__body"[^>]*>.*?<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?<a[^>]*class="result__snippet"[^>]*>(.*?)</a>.*?</div>"#,
-    ) {
-        Ok(re) => re,
-        Err(_) => return results,
-    };
 
-    for cap in re_result.captures_iter(html) {
+    for cap in RE_DDG_BODY.captures_iter(html) {
         if results.len() >= limit {
             break;
         }
@@ -204,13 +186,7 @@ fn parse_duckduckgo_html(html: &str, limit: usize) -> Vec<SearchResult> {
     }
 
     if results.is_empty() {
-        let re_alt = match regex::Regex::new(
-            r#"<h[^>]*>.*?<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?</h[^>]*>.*?<p[^>]*>(.*?)</p>"#,
-        ) {
-            Ok(re) => re,
-            Err(_) => return results,
-        };
-        for cap in re_alt.captures_iter(html) {
+        for cap in RE_DDG_ALT.captures_iter(html) {
             if results.len() >= limit {
                 break;
             }
@@ -236,7 +212,6 @@ fn html_unescape(html: &str) -> String {
     result = result.replace("&quot;", "\"");
     result = result.replace("&#39;", "'");
     result = result.replace("&nbsp;", " ");
-    let re = regex::Regex::new(r"<[^>]+>").unwrap_or_else(|_| regex::Regex::new("").unwrap());
-    result = re.replace_all(&result, "").to_string();
+    result = RE_HTML_TAG.replace_all(&result, "").to_string();
     result.trim().to_string()
 }

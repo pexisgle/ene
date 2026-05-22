@@ -2,30 +2,9 @@ use crate::patch_parser;
 
 use crate::sandbox::SandboxConfig;
 use crate::undo_manager::{UndoEntry, UndoManager};
-use ene_tool_proto::ToolDefinition;
 use ene_tool_proto::ToolError;
 use patch_parser::PatchOperation;
 use std::path::Path;
-
-pub fn tool_definition() -> ToolDefinition {
-    ToolDefinition {
-        name: "patch".to_string(),
-        description: concat!(
-            "Applies a patch to multiple files at once. ",
-            "The patch text describes all changes to be made. ",
-            "Use this for complex multi-file changes or when you need to add/update/delete multiple files in one operation."
-        ).to_string(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "patchText": { "type": "string", "description": "The full patch text that describes all changes to be made. Format: *** Begin Patch\n*** Update File: path\n```\nold content\n```\n```\nnew content\n```\n*** Add File: path\n```\ncontent\n```\n*** Delete File: path\n*** End Patch" }
-            },
-            "required": ["patchText"]
-        }),
-        category: Some(ene_tool_proto::ToolCategory::Filesystem),
-        keywords: vec!["patch".to_string(), "multi-file".to_string(), "batch".to_string(), "change".to_string()],
-    }
-}
 
 pub async fn apply_patch(
     patch_text: &str,

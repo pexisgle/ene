@@ -1,38 +1,12 @@
 use crate::read_binary;
 
 use crate::sandbox::SandboxConfig;
-use ene_tool_proto::ToolDefinition;
 use ene_tool_proto::ToolError;
 use read_binary::is_binary_file;
 use std::path::Path;
 
 const MAX_LINE_LENGTH: usize = 2000;
 const MAX_LINE_SUFFIX: &str = "... (line truncated)";
-
-pub fn tool_definition() -> ToolDefinition {
-    ToolDefinition {
-        name: "read".to_string(),
-        description: concat!(
-            "Read a file or directory from the local filesystem. ",
-            "If the path does not exist, an error is returned. ",
-            "Contents are returned with each line prefixed by its line number as `<line>: <content>`. ",
-            "For directories, entries are returned one per line with a trailing `/` for subdirectories. ",
-            "Any line longer than 2000 characters is truncated. ",
-            "Call this tool in parallel when you know there are multiple files you want to read."
-        ).to_string(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "filePath": { "type": "string", "description": "The absolute path to the file or directory to read" },
-                "offset": { "type": "integer", "description": "The line number to start reading from (1-indexed)" },
-                "limit": { "type": "integer", "description": "The maximum number of lines to read (defaults to 2000)" }
-            },
-            "required": ["filePath"]
-        }),
-        category: Some(ene_tool_proto::ToolCategory::Filesystem),
-        keywords: vec!["read".to_string(), "file".to_string(), "directory".to_string(), "view".to_string()],
-    }
-}
 
 pub async fn read(
     path: &Path,
