@@ -19,10 +19,32 @@ pub fn truncate(s: &str, max_chars: usize) -> String {
     }
 }
 
-/// メモリ機能を初期化する
-pub fn init_memory(
+/// Embedding プロバイダーを初期化する（常に利用可能）
+pub fn init_embedding(
     settings: &AiSettings,
-) -> Result<(Arc<MemoryStore>, Arc<dyn EmbeddingProvider>), String> {
+) -> Result<Arc<dyn EmbeddingProvider>, String> {
+    let embed_base_url = settings
+        .resolve_embedding_base_url()
+        .map_err(|e| format!("Failed to resolve embedding base URL: {}", e))?;
+
+    let embedder = create_embedding_provider(
+        settings.embedding.provider_type,
+        &settings.embedding.model,
+        &embed_base_url,
+        &settings.resolve_api_key(),
+        settings.embedding.dimensions.unwrap_or(768),
+        Some(&settings.embedding.gguf_quantization),
+    )
+    .map_err(|e| format!("Failed to create embedding provider: {}", e))?;
+
+    Ok(Arc::from(embedder))
+}
+
+/// MemoryStore を初期化する（EmbeddingProvider が必要）
+pub fn init_memory_store(
+    settings: &AiSettings,
+    embedder: &dyn EmbeddingProvider,
+) -> Result<Arc<MemoryStore>, String> {
     let db_path = settings.resolve_memory_db_path();
 
     if let Some(parent) = db_path.parent() {
@@ -32,26 +54,21 @@ pub fn init_memory(
         }
     }
 
-    let embed_base_url = settings
-        .resolve_embedding_base_url()
-        .map_err(|e| format!("Failed to resolve embedding base URL: {}", e))?;
-
-    let embedder = create_embedding_provider(
-        settings.memory.embedding_provider_type,
-        &settings.memory.embedding_model,
-        &embed_base_url,
-        &settings.resolve_api_key(),
-        settings.memory.embedding_dimensions.unwrap_or(768),
-        Some(&settings.memory.gguf_quantization),
-    )
-    .map_err(|e| format!("Failed to create embedding provider: {}", e))?;
-
     let dims = embedder.dimensions();
 
     let store = MemoryStore::open(&db_path, dims)
         .map_err(|e| format!("Failed to open memory store: {}", e))?;
 
-    Ok((Arc::new(store), Arc::from(embedder)))
+    Ok(Arc::new(store))
+}
+
+/// メモリ機能を初期化する（EmbeddingProvider + MemoryStore）
+pub fn init_memory(
+    settings: &AiSettings,
+) -> Result<(Arc<MemoryStore>, Arc<dyn EmbeddingProvider>), String> {
+    let embedder = init_embedding(settings)?;
+    let store = init_memory_store(settings, &*embedder)?;
+    Ok((store, embedder))
 }
 
 #[cfg(test)]

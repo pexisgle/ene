@@ -52,25 +52,31 @@
         }
       }
     },
-    "provider_name": {
-      "type": "string",
-      "description": "Name of the AI provider",
-      "default": "openai-compatible"
-    },
-    "model": {
-      "type": "string",
-      "description": "Model identifier to use for chat completions",
-      "default": "gpt-4o-mini"
-    },
-    "base_url": {
-      "type": "string",
-      "description": "Base URL for the AI provider API",
-      "default": ""
-    },
-    "api_key": {
-      "type": "string",
-      "description": "API key for the AI provider",
-      "default": ""
+    "provider": {
+      "type": "object",
+      "description": "AI provider configuration",
+      "properties": {
+        "provider_name": {
+          "type": "string",
+          "description": "Name of the AI provider",
+          "default": "openai-compatible"
+        },
+        "model": {
+          "type": "string",
+          "description": "Model identifier to use for chat completions",
+          "default": "gpt-4o-mini"
+        },
+        "base_url": {
+          "type": "string",
+          "description": "Base URL for the AI provider API",
+          "default": ""
+        },
+        "api_key": {
+          "type": "string",
+          "description": "API key for the AI provider",
+          "default": ""
+        }
+      }
     },
     "user_name": {
       "type": "string",
@@ -101,37 +107,27 @@
         "$ref": "#/definitions/McpServerConfig"
       }
     },
-    "memory": {
+    "embedding": {
       "type": "object",
-      "description": "Long-term memory and embedding settings",
+      "description": "Embedding provider configuration (always enabled)",
       "properties": {
-        "enabled": {
-          "type": "boolean",
-          "description": "Whether long-term memory is enabled",
-          "default": false
-        },
-        "db_path": {
-          "type": "string",
-          "description": "Path to the SQLite memory database",
-          "default": ""
-        },
-        "embedding_provider_type": {
+        "provider_type": {
           "type": "string",
           "description": "Type of embedding provider",
           "enum": ["api", "local"],
           "default": "local"
         },
-        "embedding_model": {
+        "model": {
           "type": "string",
           "description": "Model identifier for text embeddings",
           "default": "jina-embeddings-v5-text-small"
         },
-        "embedding_base_url": {
+        "base_url": {
           "type": "string",
           "description": "Base URL for the embedding provider",
           "default": ""
         },
-        "embedding_dimensions": {
+        "dimensions": {
           "type": ["integer", "null"],
           "description": "Dimensionality of embedding vectors",
           "minimum": 1,
@@ -142,6 +138,22 @@
           "description": "GGUF quantization level for the local embedding model",
           "default": "F16",
           "examples": ["F16", "Q8_0", "Q4_K_M", "Q4_K_S", "Q5_K_M", "Q2_K", "IQ4_XS"]
+        }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "description": "Long-term memory settings",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether long-term memory is enabled",
+          "default": false
+        },
+        "db_path": {
+          "type": "string",
+          "description": "Path to the SQLite memory database",
+          "default": ""
         },
         "recall_limit": {
           "type": "integer",
