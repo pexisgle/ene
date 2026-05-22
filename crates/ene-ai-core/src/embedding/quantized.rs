@@ -18,6 +18,10 @@ pub use loader::resolve_gguf_paths;
 use loader::load_model;
 use model::EmbeddingModel;
 
+pub(crate) fn candle_err<E: std::fmt::Display>(msg: &str) -> impl FnOnce(E) -> AiCoreError + '_ {
+    move |e| AiCoreError::EmbeddingError(format!("{msg}: {e}"))
+}
+
 pub struct GgufEmbeddingProvider {
     model: Arc<Mutex<EmbeddingModel>>,
     tokenizer: Mutex<Tokenizer>,
@@ -104,7 +108,7 @@ impl EmbeddingProvider for GgufEmbeddingProvider {
             let start = Instant::now();
             let result = self.embed_internal(&owned, "Document: ");
             let elapsed = start.elapsed();
-            if let Ok(_) = &result {
+            if result.is_ok() {
                 tracing::debug!(
                     "[Embedding] GGUF({}) {} chars → {:.2}ms",
                     model,
@@ -127,7 +131,7 @@ impl EmbeddingProvider for GgufEmbeddingProvider {
             let start = Instant::now();
             let result = self.embed_internal(&owned, "Query: ");
             let elapsed = start.elapsed();
-            if let Ok(_) = &result {
+            if result.is_ok() {
                 tracing::debug!(
                     "[Embedding] GGUF({}) query {} chars → {:.2}ms",
                     model,

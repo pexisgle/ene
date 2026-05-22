@@ -14,18 +14,18 @@ impl MlpBlock {
         let gate = self
             .gate_proj
             .forward(x)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("MLP gate: {e}")))?;
+            .map_err(super::candle_err("MLP gate"))?;
         let gate =
-            ops::silu(&gate).map_err(|e| AiCoreError::EmbeddingError(format!("MLP silu: {e}")))?;
+            ops::silu(&gate).map_err(super::candle_err("MLP silu"))?;
         let up = self
             .up_proj
             .forward(x)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("MLP up: {e}")))?;
+            .map_err(super::candle_err("MLP up"))?;
         let x = gate
             .mul(&up)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("MLP mul: {e}")))?;
+            .map_err(super::candle_err("MLP mul"))?;
         self.down_proj
             .forward(&x)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("MLP down: {e}")))
+            .map_err(super::candle_err("MLP down"))
     }
 }

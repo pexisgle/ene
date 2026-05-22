@@ -27,20 +27,20 @@ async fn handle_search(query: &str, ctx: &AppContext) {
     let Some(store) = &ctx.session.memory.memory_store else {
         println!(
             "{}",
-            style::warning("[Memory] メモリが有効ではありません。")
+            style::warning("[Memory] Memory is not enabled.")
         );
         return;
     };
     let Some(embedder) = &ctx.session.memory.embedding_provider else {
         println!(
             "{}",
-            style::warning("[Memory] Embedding プロバイダーが利用できません。")
+            style::warning("[Memory] Embedding provider is not available.")
         );
         return;
     };
     println!(
         "{}",
-        style::header(format!("[Memory] クエリを検索中: {}", query))
+        style::header(format!("[Memory] Searching query: {}", query))
     );
     match embedder.embed_query(query).await {
         Ok(embedding) => {
@@ -51,13 +51,13 @@ async fn handle_search(query: &str, ctx: &AppContext) {
                     if results.is_empty() {
                         println!(
                             "{}",
-                            style::warning("[Memory] ヒットするmemoryはありませんでした。")
+                            style::warning("[Memory] No matching memories found.")
                         );
                     } else {
                         println!(
                             "{}",
                             style::success(format!(
-                                "[Memory] {} 件のmemoryがヒットしました:",
+                                "[Memory] {} memories recalled:",
                                 results.len()
                             ))
                         );
@@ -76,12 +76,12 @@ async fn handle_search(query: &str, ctx: &AppContext) {
                         }
                     }
                 }
-                Err(e) => println!("{}", style::error(format!("[Memory] 検索エラー: {}", e))),
+                Err(e) => println!("{}", style::error(format!("[Memory] Search error: {}", e))),
             }
         }
         Err(e) => println!(
             "{}",
-            style::error(format!("[Memory] Embeddingエラー: {}", e))
+            style::error(format!("[Memory] Embedding error: {}", e))
         ),
     }
 }
@@ -90,7 +90,7 @@ fn handle_list(ctx: &AppContext) {
     let Some(store) = &ctx.session.memory.memory_store else {
         println!(
             "{}",
-            style::warning("[Memory] メモリが有効ではありません。")
+            style::warning("[Memory] Memory is not enabled.")
         );
         return;
     };
@@ -98,7 +98,7 @@ fn handle_list(ctx: &AppContext) {
     match store.list_recent_summaries(card_name, 50) {
         Ok(summaries) => {
             if summaries.is_empty() {
-                println!("[Memory] 保存された会話要約はありません。");
+                println!("[Memory] No saved conversation summaries found.");
             } else {
                 println!("--- Stored Summaries ({}) ---", summaries.len());
                 for s in &summaries {

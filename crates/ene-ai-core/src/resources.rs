@@ -18,7 +18,7 @@ pub fn ensure_resource_dirs() -> PathBuf {
 
     #[cfg(debug_assertions)]
     {
-        eprintln!(
+        tracing::info!(
             "[Resources] Dev build: using source assets at {}",
             assets_dir.display()
         );
@@ -30,12 +30,12 @@ pub fn ensure_resource_dirs() -> PathBuf {
         if !assets_dir.exists() {
             let source = find_source_dir();
             if let Some(src) = source {
-                eprintln!(
+                tracing::info!(
                     "[Resources] Deploying default assets to {}",
                     assets_dir.display()
                 );
                 if let Err(e) = fs::create_dir_all(&assets_dir) {
-                    eprintln!("[Resources] Failed to create assets dir: {e}");
+                    tracing::error!("[Resources] Failed to create assets dir: {e}");
                     return assets_dir;
                 }
                 let Ok(entries) = fs::read_dir(&src) else {
@@ -46,16 +46,16 @@ pub fn ensure_resource_dirs() -> PathBuf {
                     let dst = assets_dir.join(&name);
                     if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                         if let Err(e) = copy_dir_all(&entry.path(), &dst) {
-                            eprintln!("[Resources] Failed to copy {:?}: {e}", name);
+                            tracing::error!("[Resources] Failed to copy {:?}: {e}", name);
                         }
                     } else {
                         if let Err(e) = fs::copy(&entry.path(), &dst) {
-                            eprintln!("[Resources] Failed to copy {:?}: {e}", name);
+                            tracing::error!("[Resources] Failed to copy {:?}: {e}", name);
                         }
                     }
                 }
             } else {
-                eprintln!("[Resources] Default assets not found; running without defaults.");
+                tracing::warn!("[Resources] Default assets not found; running without defaults.");
                 let _ = fs::create_dir_all(&assets_dir);
             }
         }

@@ -47,27 +47,27 @@ async fn handle_split(ctx: &mut AppContext) {
     if ctx.session.history.conversation_history.is_empty() {
         println!(
             "{}",
-            style::warning("[Session] 会話履歴がないため分割できません。")
+            style::warning("[Session] Cannot split: No conversation history.")
         );
         return;
     }
     let Some(store) = &ctx.session.memory.memory_store else {
         println!(
             "{}",
-            style::warning("[Session] メモリが有効ではありません。")
+            style::warning("[Session] Memory is not enabled.")
         );
         return;
     };
     let Some(embedder) = &ctx.session.memory.embedding_provider else {
         println!(
             "{}",
-            style::warning("[Session] Embedding プロバイダーが利用できません。")
+            style::warning("[Session] Embedding provider is not available.")
         );
         return;
     };
     println!(
         "{}",
-        style::header("[Session] 手動でセッションを分割しています...")
+        style::header("[Session] Manually splitting session...")
     );
     let reason = SplitReason::Manual;
     match execute_split(
@@ -86,7 +86,7 @@ async fn handle_split(ctx: &mut AppContext) {
             println!(
                 "{}",
                 style::warning(format!(
-                    "[Session] 要約: {}",
+                    "[Session] Summary: {}",
                     truncate(&result.summary, 120)
                 ))
             );
@@ -99,15 +99,15 @@ async fn handle_split(ctx: &mut AppContext) {
                     .join(", ");
                 println!(
                     "  {}",
-                    style::warning(format!("[Session] 重要な事実: {}", facts_str))
+                    style::warning(format!("[Session] Key Facts: {}", facts_str))
                 );
             }
             ctx.session.reset_session();
             ctx.session.memory.session_id = result.new_session_id;
-            println!("{}", style::warning("[Session] 新しい会話を開始しました。"));
+            println!("{}", style::warning("[Session] Started a new conversation."));
         }
         Err(e) => {
-            println!("{}", style::error(format!("[Session] 分割エラー: {}", e)));
+            println!("{}", style::error(format!("[Session] Split error: {}", e)));
         }
     }
 }
@@ -116,7 +116,7 @@ fn handle_summaries(ctx: &AppContext) {
     let Some(store) = &ctx.session.memory.memory_store else {
         println!(
             "{}",
-            style::warning("[Session] メモリが有効ではありません。")
+            style::warning("[Session] Memory is not enabled.")
         );
         return;
     };
@@ -124,7 +124,7 @@ fn handle_summaries(ctx: &AppContext) {
     match store.list_recent_summaries(card_name, 10) {
         Ok(summaries) => {
             if summaries.is_empty() {
-                println!("[Session] 保存された会話要約はありません。");
+                println!("[Session] No saved conversation summaries found.");
             } else {
                 println!("--- Past Conversation Summaries ({}) ---", summaries.len());
                 for s in &summaries {

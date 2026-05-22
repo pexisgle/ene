@@ -47,7 +47,7 @@ impl ToolProcess {
             let _ = std::fs::remove_file(&self.socket_path);
         }
 
-        eprintln!(
+        tracing::warn!(
             "[ToolHostManager] Restarting tool '{}' (attempt {}/{})",
             self.name, self.restart_count, MAX_RESTARTS
         );
@@ -69,7 +69,7 @@ impl ToolProcess {
 
 impl Drop for ToolProcess {
     fn drop(&mut self) {
-        eprintln!("[ToolHostManager] Stopping tool '{}'", self.name);
+        tracing::info!("[ToolHostManager] Stopping tool '{}'", self.name);
         let _ = self.child.kill();
         if self.socket_path.exists() {
             let _ = std::fs::remove_file(&self.socket_path);
@@ -112,7 +112,7 @@ impl ToolRegistry for SupervisedIpcRegistry {
             return result;
         }
 
-        eprintln!(
+        tracing::warn!(
             "[SupervisedIpcRegistry] Tool '{}' process is dead, attempting restart",
             guard.name
         );
@@ -209,7 +209,7 @@ impl ToolHostManager {
                     supervised_registries.push(supervised_entry);
                 }
                 Err(e) => {
-                    eprintln!("[ToolHostManager] Failed to start tool '{}': {}", name, e);
+                    tracing::error!("[ToolHostManager] Failed to start tool '{}': {}", name, e);
                 }
             }
         }

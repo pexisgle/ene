@@ -200,7 +200,7 @@ fn start_next_ai_request(
         match rt.0.block_on(AiRuntime::init(ai_settings)) {
             Ok(runtime) => {
                 runtime_state.runtime = Some(runtime);
-                eprintln!("\x1b[36m[Runtime] Unified AI Runtime initialized successfully.\x1b[0m");
+                info!("[Runtime] Unified AI Runtime initialized successfully.");
             }
             Err(e) => {
                 runtime_state.pending.pop_front();
@@ -250,10 +250,10 @@ fn start_next_ai_request(
                 runtime.session.set_last_input_embedding(embedding);
             }
             Ok(Ok(Err(e))) => {
-                eprintln!("[Embedding] Error: {}", e);
+                error!("[Embedding] Error: {}", e);
             }
             Ok(Err(_)) => {
-                eprintln!("[Embedding] Channel closed without value");
+                warn!("[Embedding] Channel closed without value");
             }
             Err(_) => {
                 runtime_state.embedding_in_progress = true;
@@ -277,9 +277,9 @@ fn poll_ai_worker(
             if let Some(result) = poll_split_result(&mut runtime.pending_split) {
                 match result {
                     Ok(split_result) => {
-                        eprintln!("\x1b[33m[Session] {} \x1b[0m", split_result.reason);
-                        eprintln!(
-                            "\x1b[33m[Session] Conversation summarized and saved: {}\x1b[0m",
+                        info!("[Session] {}", split_result.reason);
+                        info!(
+                            "[Session] Conversation summarized and saved: {}",
                             truncate(&split_result.summary, 80)
                         );
                         if !split_result.key_facts.is_empty() {
@@ -289,15 +289,15 @@ fn poll_ai_worker(
                                 .map(|f| format!("{}:{}", f.key, f.value))
                                 .collect::<Vec<_>>()
                                 .join(", ");
-                            eprintln!("\x1b[33m[Session] Key facts: {}\x1b[0m", facts_str);
+                            info!("[Session] Key facts: {}", facts_str);
                         }
                         runtime.session.reset_session();
                         runtime.session.memory.session_id = split_result.new_session_id;
-                        eprintln!("\x1b[33m[Session] Starting new conversation.\x1b[0m");
+                        info!("[Session] Starting new conversation.");
                     }
                     Err(e) => {
                         if !matches!(e, ene_ai_core::AiCoreError::SplitNotNeeded) {
-                            eprintln!("\x1b[31m[Session] Summary generation error: {}\x1b[0m", e);
+                            error!("[Session] Summary generation error: {}", e);
                         }
                     }
                 }
@@ -399,7 +399,7 @@ fn poll_ai_worker(
             }
             CoreAiStreamEvent::SpecialToken(_) => {}
             CoreAiStreamEvent::SessionSplit { summary, reason } => {
-                eprintln!("[Session] {}: {}", reason, summary);
+                info!("[Session] {}: {}", reason, summary);
             }
         }
     }

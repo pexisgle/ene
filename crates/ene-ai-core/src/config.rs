@@ -352,33 +352,143 @@ pub fn load_settings() -> AiSettings {
 
 /// 指定された `assets_dir` / `config_path` で設定を読み込む。
 pub fn load_settings_from(assets_dir: &Path, config_path: &Path) -> AiSettings {
-    let mut settings = AiSettings::default();
+    load_full_settings_from(assets_dir, config_path).ai
+}
 
-    if let Ok(content) = std::fs::read_to_string(config_path) {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Ok(s) = serde_json::from_value::<AiSettings>(value.clone()) {
-                settings = s;
-            }
-            if settings.character_card_path.trim().is_empty() {
-                if let Some(name) = value.get("character").and_then(|c| c.as_str()) {
-                    if !name.is_empty() {
-                        settings.character_card_path = format!(
-                            "{}/characters/{}/character.json",
-                            assets_dir.display(),
-                            name
-                        );
-                    }
-                }
-            }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ShadowQuality {
+    Low,
+    #[default]
+    Medium,
+    High,
+}
+
+impl ShadowQuality {
+    pub fn label(self) -> &'static str {
+        match self {
+            ShadowQuality::Low => "Low",
+            ShadowQuality::Medium => "Medium",
+            ShadowQuality::High => "High",
         }
     }
 
-    if settings.character_card_path.trim().is_empty() {
-        settings.character_card_path = format!(
-            "{}/characters/Alicia/character.json",
-            assets_dir.display()
-        );
+    pub fn shadow_map_size(self) -> usize {
+        match self {
+            ShadowQuality::Low => 1_024,
+            ShadowQuality::Medium => 2_048,
+            ShadowQuality::High => 4_096,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AntialiasingMode {
+    Off,
+    #[default]
+    Fxaa,
+    Smaa,
+    Taa,
+}
+
+impl AntialiasingMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            AntialiasingMode::Off => "Off",
+            AntialiasingMode::Fxaa => "FXAA",
+            AntialiasingMode::Smaa => "SMAA",
+            AntialiasingMode::Taa => "TAA",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphicsSection {
+    pub mask_render_downsample: u32,
+    pub target_fps: u32,
+    pub shadow_quality: ShadowQuality,
+    pub antialiasing_mode: AntialiasingMode,
+}
+
+impl Default for GraphicsSection {
+    fn default() -> Self {
+        Self {
+            mask_render_downsample: 8,
+            target_fps: 60,
+            shadow_quality: ShadowQuality::Medium,
+            antialiasing_mode: AntialiasingMode::Fxaa,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct AppSection {
+    pub graphics: GraphicsSection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppSettings {
+    pub version: u32,
+    pub character: String,
+    pub app: AppSection,
+    #[serde(flatten)]
+    pub ai: AiSettings,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            character: "Alicia".to_string(),
+            app: AppSection::default(),
+            ai: AiSettings::default(),
+        }
+    }
+}
+
+/// 設定ファイルを完全に読み込む
+pub fn load_full_settings() -> AppSettings {
+    let assets_dir = crate::paths::assets_dir();
+    let config_path = crate::paths::config_file_path();
+    load_full_settings_from(&assets_dir, &config_path)
+}
+
+/// 指定された `assets_dir` / `config_path` から AppSettings を完全に読み込む
+pub fn load_full_settings_from(assets_dir: &Path, config_path: &Path) -> AppSettings {
+    let mut settings = AppSettings::default();
+
+    if let Ok(content) = std::fs::read_to_string(config_path) {
+        if let Ok(s) = serde_json::from_str::<AppSettings>(&content) {
+            settings = s;
+        }
+    }
+
+    if settings.ai.character_card_path.trim().is_empty() {
+        if !settings.character.trim().is_empty() {
+            settings.ai.character_card_path = format!(
+                "{}/characters/{}/character.json",
+                assets_dir.display(),
+                settings.character
+            );
+        } else {
+            settings.ai.character_card_path = format!(
+                "{}/characters/Alicia/character.json",
+                assets_dir.display()
+            );
+        }
     }
 
     settings
 }
+
+/// 設定ファイルを型安全に保存する
+pub fn save_full_settings(settings: &AppSettings) -> Result<(), std::io::Error> {
+    let config_path = crate::paths::config_file_path();
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(settings)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(config_path, json)?;
+    Ok(())
+}
+

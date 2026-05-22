@@ -217,32 +217,10 @@ async fn handle_tooltest(arg: &str, ctx: &mut AppContext) {
 }
 
 fn save_config(ctx: &AppContext) {
-    let config_path = ene_ai_core::paths::config_file_path();
-    if let Some(parent) = config_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+    let mut full = ene_ai_core::config::load_full_settings();
+    full.ai = ctx.settings.clone();
 
-    let mut existing: serde_json::Value = std::fs::read_to_string(&config_path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-
-    if let Ok(ai_value) = serde_json::to_value(&ctx.settings) {
-        if let Some(obj) = ai_value.as_object() {
-            for (k, v) in obj {
-                existing[k] = v.clone();
-            }
-        }
-    }
-
-    if existing.get("version").is_none() {
-        existing["version"] = serde_json::json!(1);
-    }
-
-    if let Err(e) = std::fs::write(
-        &config_path,
-        serde_json::to_string_pretty(&existing).unwrap_or_default(),
-    ) {
+    if let Err(e) = ene_ai_core::config::save_full_settings(&full) {
         eprintln!("[Config] Failed to save settings: {}", e);
     }
 }

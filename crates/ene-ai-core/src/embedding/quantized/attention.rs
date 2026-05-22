@@ -27,89 +27,89 @@ impl AttentionBlock {
     pub fn forward(&self, x: &Tensor) -> Result<Tensor, AiCoreError> {
         let (b, l, _h) = x
             .dims3()
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn dims3: {e}")))?;
+            .map_err(super::candle_err("attn dims3"))?;
 
         let q = self
             .q_proj
             .forward(x)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn Q: {e}")))?
+            .map_err(super::candle_err("attn Q"))?
             .reshape((b, l, self.num_heads, self.head_dim))
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn Q reshape: {e}")))?
+            .map_err(super::candle_err("attn Q reshape"))?
             .transpose(1, 2)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn Q transpose: {e}")))?;
+            .map_err(super::candle_err("attn Q transpose"))?;
 
         let k = self
             .k_proj
             .forward(x)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn K: {e}")))?
+            .map_err(super::candle_err("attn K"))?
             .reshape((b, l, self.num_kv_heads, self.head_dim))
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn K reshape: {e}")))?
+            .map_err(super::candle_err("attn K reshape"))?
             .transpose(1, 2)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn K transpose: {e}")))?;
+            .map_err(super::candle_err("attn K transpose"))?;
 
         let v = self
             .v_proj
             .forward(x)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn V: {e}")))?
+            .map_err(super::candle_err("attn V"))?
             .reshape((b, l, self.num_kv_heads, self.head_dim))
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn V reshape: {e}")))?
+            .map_err(super::candle_err("attn V reshape"))?
             .transpose(1, 2)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn V transpose: {e}")))?;
+            .map_err(super::candle_err("attn V transpose"))?;
 
         let q_flat = q
             .flatten(0, 2)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn Q flat: {e}")))?;
+            .map_err(super::candle_err("attn Q flat"))?;
         let k_flat = k
             .flatten(0, 2)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn K flat: {e}")))?;
+            .map_err(super::candle_err("attn K flat"))?;
 
         let q_flat = ops::rms_norm(&q_flat, &self.q_norm_weight, self.q_norm_eps)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn Q norm: {e}")))?;
+            .map_err(super::candle_err("attn Q norm"))?;
         let k_flat = ops::rms_norm(&k_flat, &self.k_norm_weight, self.k_norm_eps)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn K norm: {e}")))?;
+            .map_err(super::candle_err("attn K norm"))?;
 
         let q = q_flat
             .reshape((b, self.num_heads, l, self.head_dim))
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn Q unflat: {e}")))?;
+            .map_err(super::candle_err("attn Q unflat"))?;
         let k = k_flat
             .reshape((b, self.num_kv_heads, l, self.head_dim))
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn K unflat: {e}")))?;
+            .map_err(super::candle_err("attn K unflat"))?;
 
         let (q, k) = self.rotary_emb.apply(&q, &k)?;
 
         let k = repeat_kv(&k, self.num_kv_groups)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn repeat_kv k: {e}")))?
+            .map_err(super::candle_err("attn repeat_kv k"))?
             .contiguous()
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn k contig: {e}")))?;
+            .map_err(super::candle_err("attn k contig"))?;
         let v = repeat_kv(&v, self.num_kv_groups)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn repeat_kv v: {e}")))?
+            .map_err(super::candle_err("attn repeat_kv v"))?
             .contiguous()
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn v contig: {e}")))?;
+            .map_err(super::candle_err("attn v contig"))?;
 
         let scale = 1.0 / (self.head_dim as f64).sqrt();
         let scores = q
             .matmul(
                 &k.transpose(2, 3)
-                    .map_err(|e| AiCoreError::EmbeddingError(format!("attn kT: {e}")))?,
+                    .map_err(super::candle_err("attn kT"))?,
             )
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn scores: {e}")))?
+            .map_err(super::candle_err("attn scores"))?
             .affine(scale, 0.0)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn scale: {e}")))?;
+            .map_err(super::candle_err("attn scale"))?;
 
         let probs = ops::softmax(&scores, D::Minus1)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn softmax: {e}")))?;
+            .map_err(super::candle_err("attn softmax"))?;
         let ctx = probs
             .matmul(&v)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn ctx: {e}")))?;
+            .map_err(super::candle_err("attn ctx"))?;
 
         let ctx = ctx
             .transpose(1, 2)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn transpose back: {e}")))?
+            .map_err(super::candle_err("attn transpose back"))?
             .reshape((b, l, self.num_heads * self.head_dim))
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn reshape back: {e}")))?;
+            .map_err(super::candle_err("attn reshape back"))?;
 
         self.o_proj
             .forward(&ctx)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("attn O: {e}")))
+            .map_err(super::candle_err("attn O"))
     }
 }

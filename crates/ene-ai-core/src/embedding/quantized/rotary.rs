@@ -4,7 +4,7 @@ use candle_nn::rotary_emb::rope;
 use crate::error::AiCoreError;
 
 pub fn rope_precomputed(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, AiCoreError> {
-    rope(x, cos, sin).map_err(|e| AiCoreError::EmbeddingError(format!("RoPE failed: {e}")))
+    rope(x, cos, sin).map_err(super::candle_err("RoPE failed"))
 }
 
 pub fn repeat_kv(x: &Tensor, n_rep: usize) -> Result<Tensor, AiCoreError> {
@@ -13,14 +13,14 @@ pub fn repeat_kv(x: &Tensor, n_rep: usize) -> Result<Tensor, AiCoreError> {
     }
     let (_b, _n_kv_heads, _seq_len, _head_dim) = x
         .dims4()
-        .map_err(|e| AiCoreError::EmbeddingError(format!("repeat_kv dims4 failed: {e}")))?;
+        .map_err(super::candle_err("repeat_kv dims4 failed"))?;
     let expanded = x
         .unsqueeze(2)
-        .map_err(|e| AiCoreError::EmbeddingError(format!("repeat_kv unsqueeze failed: {e}")))?
+        .map_err(super::candle_err("repeat_kv unsqueeze failed"))?
         .expand((_b, _n_kv_heads, n_rep, _seq_len, _head_dim))
-        .map_err(|e| AiCoreError::EmbeddingError(format!("repeat_kv expand failed: {e}")))?
+        .map_err(super::candle_err("repeat_kv expand failed"))?
         .reshape((_b, _n_kv_heads * n_rep, _seq_len, _head_dim))
-        .map_err(|e| AiCoreError::EmbeddingError(format!("repeat_kv reshape failed: {e}")))?;
+        .map_err(super::candle_err("repeat_kv reshape failed"))?;
     Ok(expanded)
 }
 
@@ -42,50 +42,50 @@ impl RotaryEmbedding {
             .collect();
         let inv_freq_len = inv_freq.len();
         let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), device)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE inv_freq: {e}")))?;
+            .map_err(super::candle_err("RoPE inv_freq"))?;
         let t = Tensor::arange(0u32, max_position_embeddings as u32, device)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE arange: {e}")))?
+            .map_err(super::candle_err("RoPE arange"))?
             .to_dtype(candle_core::DType::F32)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE dtype: {e}")))?
+            .map_err(super::candle_err("RoPE dtype"))?
             .reshape((max_position_embeddings, 1))
-            .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE reshape t: {e}")))?;
+            .map_err(super::candle_err("RoPE reshape t"))?;
         let freqs = t
             .matmul(&inv_freq)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE freqs: {e}")))?;
+            .map_err(super::candle_err("RoPE freqs"))?;
         let cos = freqs
             .cos()
-            .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE cos: {e}")))?;
+            .map_err(super::candle_err("RoPE cos"))?;
         let sin = freqs
             .sin()
-            .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE sin: {e}")))?;
+            .map_err(super::candle_err("RoPE sin"))?;
         Ok(Self { cos, sin })
     }
 
     pub fn apply(&self, q: &Tensor, k: &Tensor) -> Result<(Tensor, Tensor), AiCoreError> {
         let (_b, _num_heads, seq_len, _head_dim) = q
             .dims4()
-            .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE q dims: {e}")))?;
+            .map_err(super::candle_err("RoPE q dims"))?;
         let cos = self
             .cos
             .narrow(0, 0, seq_len)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE cos narrow: {e}")))?
+            .map_err(super::candle_err("RoPE cos narrow"))?
             .to_dtype(q.dtype())
-            .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE cos dtype: {e}")))?;
+            .map_err(super::candle_err("RoPE cos dtype"))?;
         let sin = self
             .sin
             .narrow(0, 0, seq_len)
-            .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE sin narrow: {e}")))?
+            .map_err(super::candle_err("RoPE sin narrow"))?
             .to_dtype(q.dtype())
-            .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE sin dtype: {e}")))?;
+            .map_err(super::candle_err("RoPE sin dtype"))?;
         let q_embed = rope_precomputed(
             &q.contiguous()
-                .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE q contig: {e}")))?,
+                .map_err(super::candle_err("RoPE q contig"))?,
             &cos,
             &sin,
         )?;
         let k_embed = rope_precomputed(
             &k.contiguous()
-                .map_err(|e| AiCoreError::EmbeddingError(format!("RoPE k contig: {e}")))?,
+                .map_err(super::candle_err("RoPE k contig"))?,
             &cos,
             &sin,
         )?;
