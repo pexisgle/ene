@@ -176,6 +176,7 @@ impl Default for AiSandboxSettings {
                 r"rm\s+-rf\s+/".to_string(),
                 r"dd\s+if=".to_string(),
                 r"mkfs".to_string(),
+                r"sudo\s+".to_string(),
                 r":\s*\{\s*\|\s*&\s*;\s*\}".to_string(),
             ],
             max_read_bytes: 50 * 1024,
@@ -189,7 +190,7 @@ impl Default for AiSandboxSettings {
 
 impl AiSandboxSettings {
     /// `ene-tool-proto` 用のシリアライズ可能なサンドボックス設定に変換
-    pub fn to_sandbox_config_data(&self) -> ene_tool_proto::SandboxConfigData {
+    pub fn to_sandbox_config_data(&self, undo_db_path: Option<String>) -> ene_tool_proto::SandboxConfigData {
         ene_tool_proto::SandboxConfigData {
             enabled: self.enabled,
             allowed_directories: self.allowed_directories.clone(),
@@ -200,34 +201,17 @@ impl AiSandboxSettings {
             shell_timeout_ms: self.shell_timeout_ms,
             max_shell_output_bytes: self.max_shell_output_bytes,
             max_shell_output_lines: self.max_shell_output_lines,
+            undo_db_path,
         }
     }
 
-    pub fn to_sandbox_config(&self) -> crate::sandbox::SandboxConfig {
-        let canonicalize_dirs = |dirs: &[String]| -> Vec<std::path::PathBuf> {
-            dirs.iter()
-                .map(|s| {
-                    let p = std::path::PathBuf::from(s);
-                    if p.exists() {
-                        std::fs::canonicalize(&p).unwrap_or(p)
-                    } else {
-                        p
-                    }
-                })
-                .collect()
-        };
+}
 
-        crate::sandbox::SandboxConfig {
-            enabled: self.enabled,
-            allowed_directories: canonicalize_dirs(&self.allowed_directories),
-            writable_directories: canonicalize_dirs(&self.writable_directories),
-            blocked_commands: self.blocked_commands.clone(),
-            max_read_bytes: self.max_read_bytes,
-            max_write_bytes: self.max_write_bytes,
-            shell_timeout_ms: self.shell_timeout_ms,
-            max_shell_output_bytes: self.max_shell_output_bytes,
-            max_shell_output_lines: self.max_shell_output_lines,
-        }
+impl AiSettings {
+    /// Undo DB のパスを解決する（memory.db と同じディレクトリ）
+    pub fn resolve_undo_db_path(&self) -> std::path::PathBuf {
+        let memory_path = self.resolve_memory_db_path();
+        memory_path.parent().unwrap_or(std::path::Path::new(".")).join("undo.db")
     }
 }
 

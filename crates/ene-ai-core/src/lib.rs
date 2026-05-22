@@ -10,7 +10,6 @@ pub mod memory;
 pub mod paths;
 pub mod prompt_builder;
 pub mod resources;
-pub mod sandbox;
 pub mod schema;
 pub mod session;
 pub mod special_token;
@@ -34,12 +33,5 @@ pub use memory::{ConversationSummary, KeyFact, MemoryStore, RecalledSummary};
 pub use session::ConversationSession;
 pub use stream::{AiStreamEvent, run_ai_with_tools};
 pub use tool_host_manager::ToolHostManager;
-pub use tools::{
-    CompositeToolRegistry, ToolCallResult, ToolCategory, ToolDefinition,
-    ToolRegistry, UndoEntry, UndoManager, UndoOperation, backup_file,
-};
+pub use tools::{CompositeToolRegistry, ToolCategory, ToolDefinition, ToolRegistry};
 pub use utils::{init_memory, truncate};
-
-pub use sandbox::permission::{
-    DestructiveAction, PermissionGate, PermissionLevel, PermissionRequest,
-};
