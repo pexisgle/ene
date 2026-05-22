@@ -68,6 +68,7 @@ struct SettingsInputState {
     ai_embedding_provider: String,
     ai_embedding_model: String,
     ai_embedding_dimensions: String,
+    ai_embedding_base_url: String,
 }
 
 #[derive(Resource, Default, Debug)]
@@ -94,6 +95,7 @@ impl Default for SettingsInputState {
             ai_embedding_provider: "local".to_string(),
             ai_embedding_model: "jina-embeddings-v5-text-small".to_string(),
             ai_embedding_dimensions: "auto".to_string(),
+            ai_embedding_base_url: String::new(),
         }
     }
 }
@@ -107,19 +109,20 @@ impl SettingsInputState {
         self.character_pos_z = format!("{:+.2}", settings.character_position.z);
         self.ai_user_name = settings.ai.user_name.clone();
         self.ai_runtime_rules = settings.ai.runtime_rules.clone();
-        self.ai_base_url = settings.ai.base_url.clone();
-        self.ai_api_key = settings.ai.api_key.clone();
+        self.ai_base_url = settings.ai.provider.base_url.clone();
+        self.ai_api_key = settings.ai.provider.api_key.clone();
         self.ai_chat_input = settings.ai_chat_input.clone();
         self.ai_memory_enabled = settings.ai.memory.enabled;
-        self.ai_embedding_provider = match settings.ai.memory.embedding_provider_type {
+        self.ai_embedding_provider = match settings.ai.embedding.provider_type {
             ene_ai_core::EmbeddingProviderType::Api => "api".to_string(),
             ene_ai_core::EmbeddingProviderType::Local => "local".to_string(),
         };
-        self.ai_embedding_model = settings.ai.memory.embedding_model.clone();
+        self.ai_embedding_model = settings.ai.embedding.model.clone();
+        self.ai_embedding_base_url = settings.ai.embedding.base_url.clone();
         self.ai_embedding_dimensions = settings
             .ai
-            .memory
-            .embedding_dimensions
+            .embedding
+            .dimensions
             .map(|d| d.to_string())
             .unwrap_or_else(|| "auto".to_string());
     }
@@ -230,10 +233,10 @@ impl SettingsValueKind {
             }
             SettingsValueKind::AiUserName => settings.ai.user_name.clone(),
             SettingsValueKind::AiRuntimeRules => settings.ai.runtime_rules.clone(),
-            SettingsValueKind::AiProviderName => settings.ai.provider_name.clone(),
-            SettingsValueKind::AiModel => settings.ai.model.clone(),
-            SettingsValueKind::AiBaseUrl => settings.ai.base_url.clone(),
-            SettingsValueKind::AiApiKey => masked_secret(&settings.ai.api_key),
+            SettingsValueKind::AiProviderName => settings.ai.provider.provider_name.clone(),
+            SettingsValueKind::AiModel => settings.ai.provider.model.clone(),
+            SettingsValueKind::AiBaseUrl => settings.ai.provider.base_url.clone(),
+            SettingsValueKind::AiApiKey => masked_secret(&settings.ai.provider.api_key),
             SettingsValueKind::AiChatInput => settings.ai_chat_input.clone(),
         }
     }
@@ -264,11 +267,11 @@ impl SettingsValueKind {
                 Ok(())
             }
             SettingsValueKind::AiBaseUrl => {
-                settings.ai.base_url = value.to_string();
+                settings.ai.provider.base_url = value.to_string();
                 Ok(())
             }
             SettingsValueKind::AiApiKey => {
-                settings.ai.api_key = value.to_string();
+                settings.ai.provider.api_key = value.to_string();
                 Ok(())
             }
             SettingsValueKind::AiChatInput => {
@@ -785,19 +788,10 @@ fn render_ai_page(
         });
 
         ui.separator();
-        ui.label("Memory Settings");
+        ui.label("Embedding Settings");
 
         ui.horizontal(|ui| {
-            let mut checked = input_state.ai_memory_enabled;
-            ui.checkbox(&mut checked, "Enable Long-term Memory");
-            if checked != input_state.ai_memory_enabled {
-                input_state.ai_memory_enabled = checked;
-                settings.ai.memory.enabled = checked;
-            }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("Embedding Provider");
+            ui.label("Provider");
             let mut current_provider = input_state.ai_embedding_provider.clone();
             egui::ComboBox::from_id_salt("embedding_provider")
                 .selected_text(&current_provider)
@@ -815,26 +809,26 @@ fn render_ai_page(
                 });
             if current_provider != input_state.ai_embedding_provider {
                 input_state.ai_embedding_provider = current_provider.clone();
-                settings.ai.memory.embedding_provider_type = match current_provider.as_str() {
+                settings.ai.embedding.provider_type = match current_provider.as_str() {
                     "local" => ene_ai_core::EmbeddingProviderType::Local,
                     _ => ene_ai_core::EmbeddingProviderType::Api,
                 };
                 match current_provider.as_str() {
                     "local" => {
-                        settings.ai.memory.embedding_model =
+                        settings.ai.embedding.model =
                             "jina-embeddings-v5-text-nano".to_string();
-                        settings.ai.memory.embedding_dimensions = None;
-                        input_state.ai_embedding_model = settings.ai.memory.embedding_model.clone();
+                        settings.ai.embedding.dimensions = None;
+                        input_state.ai_embedding_model = settings.ai.embedding.model.clone();
                         input_state.ai_embedding_dimensions = "auto".to_string();
                     }
                     _ => {
-                        settings.ai.memory.embedding_model = "text-embedding-3-small".to_string();
-                        settings.ai.memory.embedding_dimensions = Some(1536);
-                        input_state.ai_embedding_model = settings.ai.memory.embedding_model.clone();
+                        settings.ai.embedding.model = "text-embedding-3-small".to_string();
+                        settings.ai.embedding.dimensions = Some(1536);
+                        input_state.ai_embedding_model = settings.ai.embedding.model.clone();
                         input_state.ai_embedding_dimensions = settings
                             .ai
-                            .memory
-                            .embedding_dimensions
+                            .embedding
+                            .dimensions
                             .map(|d| d.to_string())
                             .unwrap_or_default();
                     }
@@ -849,7 +843,18 @@ fn render_ai_page(
                     .desired_width(f32::INFINITY),
             );
             if response.changed() {
-                settings.ai.memory.embedding_model = input_state.ai_embedding_model.clone();
+                settings.ai.embedding.model = input_state.ai_embedding_model.clone();
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Base URL");
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut input_state.ai_embedding_base_url)
+                    .desired_width(f32::INFINITY),
+            );
+            if response.changed() {
+                settings.ai.embedding.base_url = input_state.ai_embedding_base_url.clone();
             }
         });
 
@@ -864,9 +869,21 @@ fn render_ai_page(
                 );
                 if response.changed() {
                     if let Ok(dims) = input_state.ai_embedding_dimensions.parse::<usize>() {
-                        settings.ai.memory.embedding_dimensions = Some(dims);
+                        settings.ai.embedding.dimensions = Some(dims);
                     }
                 }
+            }
+        });
+
+        ui.separator();
+        ui.label("Memory Settings");
+
+        ui.horizontal(|ui| {
+            let mut checked = input_state.ai_memory_enabled;
+            ui.checkbox(&mut checked, "Enable Long-term Memory");
+            if checked != input_state.ai_memory_enabled {
+                input_state.ai_memory_enabled = checked;
+                settings.ai.memory.enabled = checked;
             }
         });
 

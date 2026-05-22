@@ -1,14 +1,31 @@
 use crate::error::AiCoreError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
-pub struct AiSettings {
+pub struct AiProviderSettings {
     pub provider_name: String,
     pub model: String,
     pub base_url: String,
     pub api_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "snake_case")]
+pub struct AiEmbeddingSettings {
+    pub provider_type: EmbeddingProviderType,
+    pub model: String,
+    pub base_url: String,
+    pub dimensions: Option<usize>,
+    pub gguf_quantization: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "snake_case")]
+pub struct AiSettings {
+    pub provider: AiProviderSettings,
     pub character_card_path: String,
     pub user_name: String,
     pub runtime_rules: String,
@@ -16,6 +33,7 @@ pub struct AiSettings {
     pub max_tool_call_rounds: usize,
     pub mcp_servers: Vec<McpServerConfig>,
 
+    pub embedding: AiEmbeddingSettings,
     pub memory: AiMemorySettings,
 
     pub sandbox: AiSandboxSettings,
@@ -45,11 +63,6 @@ impl EmbeddingProviderType {
 pub struct AiMemorySettings {
     pub enabled: bool,
     pub db_path: String,
-    pub embedding_provider_type: EmbeddingProviderType,
-    pub embedding_model: String,
-    pub embedding_base_url: String,
-    pub embedding_dimensions: Option<usize>,
-    pub gguf_quantization: String,
     pub recall_limit: usize,
     pub similarity_threshold: f32,
     pub time_decay_hours: f64,
@@ -152,16 +165,34 @@ pub enum McpTransport {
     Http { url: String },
 }
 
+impl Default for AiEmbeddingSettings {
+    fn default() -> Self {
+        Self {
+            provider_type: EmbeddingProviderType::Local,
+            model: "jina-embeddings-v5-text-small".to_string(),
+            base_url: String::new(),
+            dimensions: None,
+            gguf_quantization: "F16".to_string(),
+        }
+    }
+}
+
+impl Default for AiProviderSettings {
+    fn default() -> Self {
+        Self {
+            provider_name: "openai-compatible".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            base_url: String::new(),
+            api_key: String::new(),
+        }
+    }
+}
+
 impl Default for AiMemorySettings {
     fn default() -> Self {
         Self {
             enabled: false,
             db_path: String::new(),
-            embedding_provider_type: EmbeddingProviderType::Local,
-            embedding_model: "jina-embeddings-v5-text-small".to_string(),
-            embedding_base_url: String::new(),
-            embedding_dimensions: None,
-            gguf_quantization: "F16".to_string(),
             recall_limit: 5,
             similarity_threshold: 0.5,
             time_decay_hours: 24.0,
@@ -237,16 +268,14 @@ impl AiSettings {
 impl Default for AiSettings {
     fn default() -> Self {
         Self {
-            provider_name: "openai-compatible".to_string(),
-            model: "gpt-4o-mini".to_string(),
-            base_url: String::new(),
-            api_key: String::new(),
+            provider: AiProviderSettings::default(),
             character_card_path: String::new(),
             user_name: "User".to_string(),
             runtime_rules: "Keep responses relatively short and sweet, suitable for displaying on a screen overlay.".to_string(),
             tool_calling_enabled: true,
             max_tool_call_rounds: 10,
             mcp_servers: Vec::new(),
+            embedding: AiEmbeddingSettings::default(),
             memory: AiMemorySettings::default(),
             sandbox: AiSandboxSettings::default(),
             tools: AiToolSettings::default(),
@@ -256,17 +285,17 @@ impl Default for AiSettings {
 
 impl AiSettings {
     pub fn resolve_base_url(&self) -> Result<String, AiCoreError> {
-        if self.base_url.trim().is_empty() {
+        if self.provider.base_url.trim().is_empty() {
             return Err(AiCoreError::MissingBaseUrl {
                 env_var: String::new(),
             });
         }
-        Ok(self.base_url.clone())
+        Ok(self.provider.base_url.clone())
     }
 
     pub fn resolve_api_key(&self) -> String {
-        if !self.api_key.trim().is_empty() {
-            return self.api_key.clone();
+        if !self.provider.api_key.trim().is_empty() {
+            return self.provider.api_key.clone();
         }
         #[cfg(debug_assertions)]
         {
@@ -276,7 +305,7 @@ impl AiSettings {
                 }
             }
         }
-        self.api_key.clone()
+        self.provider.api_key.clone()
     }
 
     pub fn resolve_memory_db_path(&self) -> std::path::PathBuf {
@@ -289,8 +318,8 @@ impl AiSettings {
     }
 
     pub fn resolve_embedding_base_url(&self) -> Result<String, AiCoreError> {
-        if !self.memory.embedding_base_url.trim().is_empty() {
-            return Ok(self.memory.embedding_base_url.clone());
+        if !self.embedding.base_url.trim().is_empty() {
+            return Ok(self.embedding.base_url.clone());
         }
         self.resolve_base_url()
     }
@@ -300,7 +329,7 @@ impl AiSettings {
         if !self.memory.summarization_model.trim().is_empty() {
             self.memory.summarization_model.clone()
         } else {
-            self.model.clone()
+            self.provider.model.clone()
         }
     }
 
@@ -311,4 +340,45 @@ impl AiSettings {
         }
         self.resolve_base_url()
     }
+}
+
+/// `assets/settings.json` を読み込み、`character` フィールドから `character_card_path` を解決した
+/// `AiSettings` を返す。
+pub fn load_settings() -> AiSettings {
+    let assets_dir = crate::paths::assets_dir();
+    let config_path = crate::paths::config_file_path();
+    load_settings_from(&assets_dir, &config_path)
+}
+
+/// 指定された `assets_dir` / `config_path` で設定を読み込む。
+pub fn load_settings_from(assets_dir: &Path, config_path: &Path) -> AiSettings {
+    let mut settings = AiSettings::default();
+
+    if let Ok(content) = std::fs::read_to_string(config_path) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Ok(s) = serde_json::from_value::<AiSettings>(value.clone()) {
+                settings = s;
+            }
+            if settings.character_card_path.trim().is_empty() {
+                if let Some(name) = value.get("character").and_then(|c| c.as_str()) {
+                    if !name.is_empty() {
+                        settings.character_card_path = format!(
+                            "{}/characters/{}/character.json",
+                            assets_dir.display(),
+                            name
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    if settings.character_card_path.trim().is_empty() {
+        settings.character_card_path = format!(
+            "{}/characters/Alicia/character.json",
+            assets_dir.display()
+        );
+    }
+
+    settings
 }
