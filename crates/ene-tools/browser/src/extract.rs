@@ -102,19 +102,19 @@ fn normalize_text(text: &str) -> String {
 }
 
 pub fn truncate_text(text: &str, max_chars: usize) -> String {
-    if text.len() <= max_chars {
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
         text.to_string()
     } else {
-        let truncated = &text[..max_chars];
-        let end = truncated
+        let byte_end = text
             .char_indices()
-            .last()
+            .nth(max_chars)
             .map(|(i, _)| i)
-            .unwrap_or(max_chars);
+            .unwrap_or(text.len());
         format!(
             "{}\n\n[... truncated, total {} chars ...]",
-            &text[..end],
-            text.len()
+            &text[..byte_end],
+            char_count
         )
     }
 }
