@@ -336,6 +336,29 @@
               "default": 2000
             }
           }
+        },
+        "tools": {
+          "type": "object",
+          "description": "Tool binary selection and per-tool configuration",
+          "properties": {
+            "enabled": {
+              "type": "array",
+              "description": "List of tool names to enable (built-in: fs, web, browser, utility, app; plus any custom tools)",
+              "default": ["fs", "web", "browser", "utility", "app"],
+              "items": {
+                "type": "string"
+              }
+            },
+            "configs": {
+              "type": "object",
+              "description": "Per-tool configuration (tool_name → arbitrary JSON). Each tool defines its own expected schema.",
+              "default": {},
+              "additionalProperties": {
+                "description": "Arbitrary JSON value passed directly to the tool's set_config()",
+                "type": ["object", "string", "number", "boolean", "array", "null"]
+              }
+            }
+          }
         }
       }
     }
