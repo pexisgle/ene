@@ -224,7 +224,8 @@ impl ToolRegistry for ToolHostManager {
 
 impl ToolHostManager {
     pub async fn start(settings: &AiSettings) -> Result<Self, String> {
-        let sandbox = settings.sandbox.to_sandbox_config_data();
+        let undo_db_path = Some(settings.resolve_undo_db_path().to_string_lossy().to_string());
+        let sandbox = settings.sandbox.to_sandbox_config_data(undo_db_path);
         let mut entries = Vec::new();
         let mut tool_index = HashMap::new();
 

@@ -1,10 +1,7 @@
-use crate::tools::ToolCategory;
-use crate::tools::definition::{ToolDefinition, ToolRegistry};
+use crate::tools::definition::ToolRegistry;
+use crate::tools::ToolDefinition;
 use async_trait::async_trait;
-use ene_tool_proto::{
-    IpcRequest, IpcResponse, SandboxConfigData, ToolCategory as ProtoCategory,
-    ToolDefinition as ProtoToolDefinition, read_ipc_response, write_ipc_request,
-};
+use ene_tool_proto::{IpcRequest, IpcResponse, SandboxConfigData, read_ipc_response, write_ipc_request};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -122,9 +119,8 @@ impl IpcToolRegistry {
 
         match resp {
             Some(IpcResponse::Tools { tools }) => {
-                let converted: Vec<ToolDefinition> = tools.into_iter().map(proto_to_core).collect();
                 let mut tools_guard = self.tools.lock().map_err(|e| e.to_string())?;
-                *tools_guard = converted;
+                *tools_guard = tools;
                 Ok(())
             }
             Some(IpcResponse::Error { message }) => Err(message),
@@ -247,19 +243,3 @@ impl ToolRegistry for IpcToolRegistry {
     }
 }
 
-fn proto_to_core(proto: ProtoToolDefinition) -> ToolDefinition {
-    ToolDefinition {
-        name: proto.name,
-        description: proto.description,
-        parameters: proto.parameters,
-        category: proto.category.map(|c| match c {
-            ProtoCategory::Filesystem => ToolCategory::Filesystem,
-            ProtoCategory::Shell => ToolCategory::Shell,
-            ProtoCategory::Browser => ToolCategory::Browser,
-            ProtoCategory::App => ToolCategory::App,
-            ProtoCategory::WebSearch => ToolCategory::WebSearch,
-            ProtoCategory::Utility => ToolCategory::Utility,
-        }),
-        keywords: proto.keywords,
-    }
-}

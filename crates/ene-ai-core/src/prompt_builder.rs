@@ -32,7 +32,7 @@ fn asst_msg(content: impl Into<String>, ctx: &str) -> Result<ChatCompletionReque
 }
 
 pub fn build_tools(
-    tools: &[crate::tools::definition::ToolDefinition],
+    tools: &[crate::tools::ToolDefinition],
 ) -> Result<Vec<ChatCompletionTools>, String> {
     let mut res = Vec::new();
     for t in tools {
