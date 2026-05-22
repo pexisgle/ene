@@ -10,6 +10,7 @@ pub mod memory;
 pub mod paths;
 pub mod prompt_builder;
 pub mod resources;
+pub mod runtime;
 pub mod schema;
 pub mod session;
 pub mod special_token;
@@ -30,6 +31,7 @@ pub use embedding::{
 };
 pub use error::AiCoreError;
 pub use memory::{ConversationSummary, KeyFact, MemoryStore, RecalledSummary};
+pub use runtime::{AiRuntime, build_tool_registry};
 pub use session::ConversationSession;
 pub use stream::{AiStreamEvent, run_ai_with_tools};
 pub use tool_host_manager::ToolHostManager;
