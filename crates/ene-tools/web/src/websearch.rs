@@ -31,6 +31,7 @@ pub fn tool_definition() -> ToolDefinition {
 }
 
 pub async fn websearch(
+    client: &reqwest::Client,
     query: &str,
     backend: Option<&str>,
     limit: Option<usize>,
@@ -39,9 +40,9 @@ pub async fn websearch(
     let limit = limit.unwrap_or(5).min(10);
 
     match backend_name {
-        "duckduckgo" => backends::search_duckduckgo(query, limit).await,
-        "tavily" => backends::search_tavily(query, limit).await,
-        "brave" => backends::search_brave(query, limit).await,
+        "duckduckgo" => backends::search_duckduckgo(client, query, limit).await,
+        "tavily" => backends::search_tavily(client, query, limit).await,
+        "brave" => backends::search_brave(client, query, limit).await,
         _ => Err(ToolError::InvalidArguments {
             message: format!("Unknown backend: {backend_name}"),
         }),

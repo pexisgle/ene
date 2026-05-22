@@ -34,6 +34,7 @@ pub fn tool_definition() -> ToolDefinition {
 }
 
 pub async fn webfetch(
+    client: &reqwest::Client,
     url: &str,
     format: Option<&str>,
     timeout: Option<u64>,
@@ -49,14 +50,6 @@ pub async fn webfetch(
         .min(MAX_TIMEOUT_SECS);
     let format = format.unwrap_or("markdown");
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        .build()
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to create HTTP client: {e}"),
-        })?;
-
     let accept_header = match format {
         "text" => "text/plain;q=1.0, text/html;q=0.8, */*;q=0.1",
         "html" => "text/html;q=1.0, text/plain;q=0.8, */*;q=0.1",
@@ -65,6 +58,7 @@ pub async fn webfetch(
 
     let response = client
         .get(url)
+        .timeout(std::time::Duration::from_secs(timeout_secs))
         .header("Accept", accept_header)
         .header("Accept-Language", "en-US,en;q=0.9")
         .send()
@@ -110,7 +104,6 @@ pub async fn webfetch(
 
     match format {
         "html" => Ok(body.to_string()),
-        "text" => Ok(crate::converter::html_to_text(&body)),
-        "markdown" | _ => Ok(crate::converter::html_to_markdown(&body)),
+        "text" | "markdown" | _ => Ok(ene_tools_common::html::html_to_markdown(&body)),
     }
 }

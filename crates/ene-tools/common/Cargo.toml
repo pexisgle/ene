@@ -1,0 +1,11 @@
+[package]
+name = "ene-tools-common"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+htmd = "0.1.4"
+scraper = "0.18.0"
+regex = { workspace = true }
+serde = { workspace = true }
+ene-tool-proto = { path = "../../ene-tool-proto" }

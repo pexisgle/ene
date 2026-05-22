@@ -120,8 +120,13 @@ pub async fn grep_search(
             current_file = path;
             output.push(format!("{}:", path));
         }
-        let truncated_text = if text.len() > 2000 {
-            format!("{}...", &text[..2000])
+        let truncated_text = if text.chars().count() > 2000 {
+            let byte_end = text
+                .char_indices()
+                .nth(2000)
+                .map(|(i, _)| i)
+                .unwrap_or(text.len());
+            format!("{}...", &text[..byte_end])
         } else {
             text.clone()
         };

@@ -9,6 +9,7 @@ members = [
     "crates/ene-tools/app",
     "crates/ene-tools/browser",
     "crates/ene-tools/fs",
+    "crates/ene-tools/common",
 ]
 resolver = "2"
 

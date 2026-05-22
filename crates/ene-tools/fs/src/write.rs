@@ -1,30 +1,7 @@
 use crate::sandbox::SandboxConfig;
 use crate::undo_manager::UndoManager;
-use ene_tool_proto::ToolDefinition;
 use ene_tool_proto::ToolError;
 use std::path::Path;
-
-pub fn tool_definition() -> ToolDefinition {
-    ToolDefinition {
-        name: "write".to_string(),
-        description: concat!(
-            "Writes a file to the local filesystem. ",
-            "This tool will overwrite the existing file if there is one at the provided path. ",
-            "If this is an existing file, you MUST use the Read tool first to read the file's contents. ",
-            "ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required."
-        ).to_string(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "filePath": { "type": "string", "description": "The absolute path to the file to write (must be absolute, not relative)" },
-                "content": { "type": "string", "description": "The content to write to the file" }
-            },
-            "required": ["filePath", "content"]
-        }),
-        category: Some(ene_tool_proto::ToolCategory::Filesystem),
-        keywords: vec!["write".to_string(), "create".to_string(), "file".to_string()],
-    }
-}
 
 pub async fn write(
     path: &Path,
