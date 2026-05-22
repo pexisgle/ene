@@ -17,18 +17,19 @@ pub async fn execute(arg: &str, ctx: &mut AppContext) {
 
 fn handle_info(ctx: &AppContext) {
     println!("--- Session Info ---");
-    println!("Session ID: {}", ctx.session.session_id);
+    println!("Session ID: {}", ctx.session.memory.session_id);
     println!(
         "Started: {}",
         ctx.session
+            .memory
             .session_started_at
             .format("%Y-%m-%d %H:%M:%S UTC")
     );
     println!("Elapsed: {} min", ctx.session.session_elapsed_minutes());
-    println!("Turn count: {}", ctx.session.current_turn_count);
+    println!("Turn count: {}", ctx.session.state.current_turn_count);
     println!(
         "History messages: {}",
-        ctx.session.conversation_history.len()
+        ctx.session.history.conversation_history.len()
     );
     println!("Auto-split: {}", ctx.settings.memory.auto_session_split);
     println!(
@@ -43,21 +44,21 @@ fn handle_info(ctx: &AppContext) {
 }
 
 async fn handle_split(ctx: &mut AppContext) {
-    if ctx.session.conversation_history.is_empty() {
+    if ctx.session.history.conversation_history.is_empty() {
         println!(
             "{}",
             style::warning("[Session] 会話履歴がないため分割できません。")
         );
         return;
     }
-    let Some(store) = &ctx.session.memory_store else {
+    let Some(store) = &ctx.session.memory.memory_store else {
         println!(
             "{}",
             style::warning("[Session] メモリが有効ではありません。")
         );
         return;
     };
-    let Some(embedder) = &ctx.session.embedding_provider else {
+    let Some(embedder) = &ctx.session.memory.embedding_provider else {
         println!(
             "{}",
             style::warning("[Session] Embedding プロバイダーが利用できません。")
@@ -70,8 +71,8 @@ async fn handle_split(ctx: &mut AppContext) {
     );
     let reason = SplitReason::Manual;
     match execute_split(
-        &ctx.session.conversation_history,
-        &ctx.session.session_id,
+        &ctx.session.history.conversation_history,
+        &ctx.session.memory.session_id,
         ctx.session.card_name(),
         &ctx.settings.user_name,
         store,
@@ -102,7 +103,7 @@ async fn handle_split(ctx: &mut AppContext) {
                 );
             }
             ctx.session.reset_session();
-            ctx.session.session_id = result.new_session_id;
+            ctx.session.memory.session_id = result.new_session_id;
             println!("{}", style::warning("[Session] 新しい会話を開始しました。"));
         }
         Err(e) => {
@@ -112,7 +113,7 @@ async fn handle_split(ctx: &mut AppContext) {
 }
 
 fn handle_summaries(ctx: &AppContext) {
-    let Some(store) = &ctx.session.memory_store else {
+    let Some(store) = &ctx.session.memory.memory_store else {
         println!(
             "{}",
             style::warning("[Session] メモリが有効ではありません。")

@@ -13,7 +13,7 @@ pub async fn run(settings: &AiSettings, session: &ConversationSession, prompt_ov
 
     let mut sandbox_session = if session.character_card.is_some() {
         let mut cloned = session.clone();
-        cloned.conversation_history.clear();
+        cloned.history.conversation_history.clear();
         cloned.reset_display_buffer();
         cloned
     } else {

@@ -182,7 +182,7 @@ fn update_drag_state(
         return;
     }
 
-    settings.character_position += (cursor_world_pos - last_cursor_world_pos).extend(0.0);
+    settings.character_state.character_position += (cursor_world_pos - last_cursor_world_pos).extend(0.0);
     drag_state.last_cursor_world_pos = Some(cursor_world_pos);
 }
 

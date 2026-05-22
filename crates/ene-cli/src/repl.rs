@@ -59,7 +59,7 @@ async fn check_session_split(ctx: &mut AppContext, input: &str) {
                     );
                 }
                 ctx.session.reset_session();
-                ctx.session.session_id = result.new_session_id;
+                ctx.session.memory.session_id = result.new_session_id;
                 println!("{}\n", style::warning("[Session] 新しい会話を開始します。"));
             }
             Err(e) => {

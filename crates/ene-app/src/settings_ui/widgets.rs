@@ -13,91 +13,91 @@ pub fn apply_action(
     match action {
         SettingsButtonAction::PrevCharacter => {
             let idx =
-                cycle_index(settings.selected_character, settings.characters.len(), -1);
+                cycle_index(settings.character_state.selected_character, settings.characters.len(), -1);
             settings.select_character(idx);
         }
         SettingsButtonAction::NextCharacter => {
             let idx =
-                cycle_index(settings.selected_character, settings.characters.len(), 1);
+                cycle_index(settings.character_state.selected_character, settings.characters.len(), 1);
             settings.select_character(idx);
         }
         SettingsButtonAction::PrevMotion => {
-            settings.selected_motion = cycle_index(
-                settings.selected_motion,
+            settings.character_state.selected_motion = cycle_index(
+                settings.character_state.selected_motion,
                 settings.current_entry().motion_paths.len(),
                 -1,
             );
-            settings.needs_respawn = true;
+            settings.character_state.needs_respawn = true;
         }
         SettingsButtonAction::NextMotion => {
-            settings.selected_motion = cycle_index(
-                settings.selected_motion,
+            settings.character_state.selected_motion = cycle_index(
+                settings.character_state.selected_motion,
                 settings.current_entry().motion_paths.len(),
                 1,
             );
-            settings.needs_respawn = true;
+            settings.character_state.needs_respawn = true;
         }
         SettingsButtonAction::TogglePlay => {
             animation_control.toggle_playing();
         }
         SettingsButtonAction::ToggleDebugOverlay => {
-            settings.debug_overlay_visible = !settings.debug_overlay_visible;
+            settings.ui.debug_overlay_visible = !settings.ui.debug_overlay_visible;
         }
         SettingsButtonAction::MaskDownsampleDown => {
-            settings.mask_render_downsample =
-                cycle_mask_render_downsample(settings.mask_render_downsample, -1);
+            settings.graphics.mask_render_downsample =
+                cycle_mask_render_downsample(settings.graphics.mask_render_downsample, -1);
         }
         SettingsButtonAction::MaskDownsampleUp => {
-            settings.mask_render_downsample =
-                cycle_mask_render_downsample(settings.mask_render_downsample, 1);
+            settings.graphics.mask_render_downsample =
+                cycle_mask_render_downsample(settings.graphics.mask_render_downsample, 1);
         }
         SettingsButtonAction::TargetFpsDown => {
-            settings.target_fps = cycle_target_fps(settings.target_fps, -1);
+            settings.graphics.target_fps = cycle_target_fps(settings.graphics.target_fps, -1);
         }
         SettingsButtonAction::TargetFpsUp => {
-            settings.target_fps = cycle_target_fps(settings.target_fps, 1);
+            settings.graphics.target_fps = cycle_target_fps(settings.graphics.target_fps, 1);
         }
         SettingsButtonAction::ShadowQualityDown => {
-            settings.shadow_quality = cycle_shadow_quality(settings.shadow_quality, -1);
+            settings.graphics.shadow_quality = cycle_shadow_quality(settings.graphics.shadow_quality, -1);
         }
         SettingsButtonAction::ShadowQualityUp => {
-            settings.shadow_quality = cycle_shadow_quality(settings.shadow_quality, 1);
+            settings.graphics.shadow_quality = cycle_shadow_quality(settings.graphics.shadow_quality, 1);
         }
         SettingsButtonAction::AntialiasingModeDown => {
-            settings.antialiasing_mode = cycle_antialiasing_mode(settings.antialiasing_mode, -1);
+            settings.graphics.antialiasing_mode = cycle_antialiasing_mode(settings.graphics.antialiasing_mode, -1);
         }
         SettingsButtonAction::AntialiasingModeUp => {
-            settings.antialiasing_mode = cycle_antialiasing_mode(settings.antialiasing_mode, 1);
+            settings.graphics.antialiasing_mode = cycle_antialiasing_mode(settings.graphics.antialiasing_mode, 1);
         }
         SettingsButtonAction::LookAtStrengthDown => {
-            adjust_f32(&mut settings.look_at_strength, -0.05);
+            adjust_f32(&mut settings.character_state.look_at_strength, -0.05);
         }
         SettingsButtonAction::LookAtStrengthUp => {
-            adjust_f32(&mut settings.look_at_strength, 0.05);
+            adjust_f32(&mut settings.character_state.look_at_strength, 0.05);
         }
         SettingsButtonAction::ModelScaleDown => {
-            adjust_f32(&mut settings.model_scale, -0.05);
+            adjust_f32(&mut settings.character_state.model_scale, -0.05);
         }
         SettingsButtonAction::ModelScaleUp => {
-            adjust_f32(&mut settings.model_scale, 0.05);
+            adjust_f32(&mut settings.character_state.model_scale, 0.05);
         }
         SettingsButtonAction::CharacterPosXDown => {
-            adjust_f32(&mut settings.character_position.x, -0.05);
+            adjust_f32(&mut settings.character_state.character_position.x, -0.05);
         }
         SettingsButtonAction::CharacterPosXUp => {
-            adjust_f32(&mut settings.character_position.x, 0.05);
+            adjust_f32(&mut settings.character_state.character_position.x, 0.05);
         }
         SettingsButtonAction::CharacterPosYDown => {
-            adjust_f32(&mut settings.character_position.y, -0.05);
+            adjust_f32(&mut settings.character_state.character_position.y, -0.05);
         }
         SettingsButtonAction::CharacterPosYUp => {
-            adjust_f32(&mut settings.character_position.y, 0.05);
+            adjust_f32(&mut settings.character_state.character_position.y, 0.05);
         }
         SettingsButtonAction::CharacterPosZDown => {
-            adjust_f32(&mut settings.character_position.z, -0.05);
+            adjust_f32(&mut settings.character_state.character_position.z, -0.05);
         }
         SettingsButtonAction::CharacterPosZUp => {
-            adjust_f32(&mut settings.character_position.z, 0.05);
+            adjust_f32(&mut settings.character_state.character_position.z, 0.05);
         }
         SettingsButtonAction::SendAiChat => {
             send_ai_request(settings, ai_request_writer);
@@ -198,7 +198,7 @@ fn send_ai_request(
     settings: &mut CharacterSettings,
     ai_request_writer: &mut MessageWriter<crate::ai_bridge::AiRequestEvent>,
 ) {
-    let user_input = settings.ai_chat_input.trim();
+    let user_input = settings.ui.ai_chat_input.trim();
     if user_input.is_empty() {
         return;
     }
@@ -206,8 +206,8 @@ fn send_ai_request(
     ai_request_writer.write(crate::ai_bridge::AiRequestEvent {
         user_input: user_input.to_string(),
     });
-    settings.ai_chat_input.clear();
-    settings.ai_latest_response.clear();
+    settings.ui.ai_chat_input.clear();
+    settings.ui.ai_latest_response.clear();
 }
 
 fn cycle_mask_render_downsample(current: u32, step: isize) -> u32 {

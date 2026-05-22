@@ -76,7 +76,7 @@ impl ToolRegistry for McpToolRegistry {
         res
     }
 
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, String> {
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, crate::error::AiCoreError> {
         let client_opt = {
             let servers = self.servers.read().unwrap_or_else(|e| e.into_inner());
             let mut found = None;
@@ -89,19 +89,19 @@ impl ToolRegistry for McpToolRegistry {
             found
         };
 
-        let client = client_opt.ok_or_else(|| format!("Tool {} not found in MCP", name))?;
+        let client = client_opt.ok_or_else(|| crate::error::AiCoreError::ToolExecutionError(format!("Tool {} not found in MCP", name)))?;
 
         // Parse arguments to serde_json::Value
         let args_val: serde_json::Value =
-            serde_json::from_str(arguments).map_err(|e| e.to_string())?;
+            serde_json::from_str(arguments).map_err(|e| crate::error::AiCoreError::ToolExecutionError(e.to_string()))?;
 
         let mut params = rmcp::model::CallToolRequestParams::new(name.to_string());
         if let Some(obj) = args_val.as_object() {
             params = params.with_arguments(obj.clone());
         }
 
-        let result = client.call_tool(params).await.map_err(|e| e.to_string())?;
+        let result = client.call_tool(params).await.map_err(|e| crate::error::AiCoreError::ToolExecutionError(e.to_string()))?;
 
-        Ok(serde_json::to_string(&result.content).map_err(|e| e.to_string())?)
+        serde_json::to_string(&result.content).map_err(|e| crate::error::AiCoreError::ToolExecutionError(e.to_string()))
     }
 }

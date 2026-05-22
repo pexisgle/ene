@@ -11,7 +11,7 @@ pub async fn execute(input: &str, ctx: &mut AppContext) {
     match cmd {
         "/quit" => std::process::exit(0),
         "/clear" => {
-            ctx.session.conversation_history.clear();
+            ctx.session.history.conversation_history.clear();
             println!("Conversation history cleared.");
         }
         "/prompt" => handle_prompt(ctx),
@@ -41,7 +41,7 @@ fn handle_prompt(ctx: &AppContext) {
             println!("---------------------");
         }
 
-        if !ctx.session.conversation_history.is_empty() && !card.data.mes_example.trim().is_empty()
+        if !ctx.session.history.conversation_history.is_empty() && !card.data.mes_example.trim().is_empty()
         {
             println!("--- Example Messages ---");
             let ex = ene_ai_core::character_card::expand_cbs_macros(
@@ -62,7 +62,7 @@ fn handle_prompt(ctx: &AppContext) {
             println!("----------------------------");
         }
 
-        if let Some(store) = &ctx.session.memory_store {
+        if let Some(store) = &ctx.session.memory.memory_store {
             let card_name = card.data.get_character_name();
             if let Ok(facts) = store.get_all_keyfacts(card_name) {
                 if !facts.is_empty() {
@@ -75,10 +75,10 @@ fn handle_prompt(ctx: &AppContext) {
             }
         }
 
-        if !ctx.session.conversation_history.is_empty() {
+        if !ctx.session.history.conversation_history.is_empty() {
             println!(
                 "--- Conversation History ({} messages) ---",
-                ctx.session.conversation_history.len()
+                ctx.session.history.conversation_history.len()
             );
             println!("(Use /history to view full content)");
             println!("----------------------------------------");
@@ -163,7 +163,7 @@ fn handle_config(ctx: &AppContext) {
 
 fn handle_history(ctx: &AppContext) {
     println!("--- Conversation History ---");
-    for (role, msg) in &ctx.session.conversation_history {
+    for (role, msg) in &ctx.session.history.conversation_history {
         println!("[{:?}] {}", role, msg);
     }
     println!("----------------------------");

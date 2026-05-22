@@ -92,7 +92,7 @@ pub(super) fn spawn_wayland_mask_capture(
         return;
     }
 
-    let texture_size = mask_texture_size(window.physical_size(), settings.mask_render_downsample);
+    let texture_size = mask_texture_size(window.physical_size(), settings.graphics.mask_render_downsample);
     let image = images.add(new_wayland_mask_target_image(texture_size));
     let camera_entity = commands
         .spawn((
@@ -130,7 +130,7 @@ pub(super) fn sync_wayland_mask_capture(
     }
 
     let desired_texture_size =
-        mask_texture_size(window.physical_size(), settings.mask_render_downsample);
+        mask_texture_size(window.physical_size(), settings.graphics.mask_render_downsample);
     if state.texture_size != desired_texture_size {
         if let Some(image_handle) = &state.image_handle
             && let Some(image) = images.get_mut(image_handle)
@@ -263,7 +263,7 @@ pub(super) fn draw_visible_rect_gizmos(
         window_size.x / source_size.x as f32,
         window_size.y / source_size.y as f32,
     );
-    if !settings.debug_overlay_visible {
+    if !settings.ui.debug_overlay_visible {
         return;
     }
 

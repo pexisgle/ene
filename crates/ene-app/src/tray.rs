@@ -178,7 +178,7 @@ fn poll_tray_events(
             && button == MouseButton::Left
             && button_state == MouseButtonState::Up
         {
-            settings.settings_window_visible = true;
+            settings.ui.settings_window_visible = true;
         }
     }
 
@@ -188,7 +188,7 @@ fn poll_tray_events(
             .as_ref()
             .is_some_and(|id| id == &event.id)
         {
-            settings.settings_window_visible = true;
+            settings.ui.settings_window_visible = true;
             continue;
         }
 
