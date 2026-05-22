@@ -83,8 +83,40 @@ impl ConversationSession {
         let file_content = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read character card file: {e}"))?;
 
-        let card = serde_json::from_str::<CharacterCardV3>(&file_content)
+        let mut card = serde_json::from_str::<CharacterCardV3>(&file_content)
             .map_err(|e| format!("failed to parse character card: {e}"))?;
+
+        // Merge expressions from character_settings.json
+        if let Some(settings_path) = std::path::Path::new(path)
+            .parent()
+            .map(|p| p.join("character_settings.json"))
+            .filter(|p| p.exists())
+        {
+            if let Ok(settings_content) = std::fs::read_to_string(&settings_path) {
+                if let Ok(settings_value) =
+                    serde_json::from_str::<serde_json::Value>(&settings_content)
+                {
+                    if let Some(expr) = settings_value.get("expressions") {
+                        card.data
+                            .extensions
+                            .insert("expressions".to_string(), expr.clone());
+                    }
+                    if let Some(dm) = settings_value
+                        .get("default_motion")
+                        .and_then(|v| v.as_str())
+                    {
+                        let mut ene = serde_json::Map::new();
+                        ene.insert(
+                            "default_motion".to_string(),
+                            serde_json::Value::String(dm.to_string()),
+                        );
+                        card.data
+                            .extensions
+                            .insert("ene".to_string(), serde_json::Value::Object(ene));
+                    }
+                }
+            }
+        }
 
         self.character_card = Some(card);
         self.current_card_path = path.to_string();

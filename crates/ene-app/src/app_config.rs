@@ -308,6 +308,96 @@ impl CharacterSettings {
         self.target_fps = normalize_target_fps(self.target_fps);
     }
 
+    pub fn character_settings_path(&self) -> PathBuf {
+        self.assets_dir
+            .join("characters")
+            .join(&self.current_entry().name)
+            .join("character_settings.json")
+    }
+
+    fn motion_path_relative(&self) -> String {
+        let prefix = format!("characters/{}/", self.current_entry().name);
+        self.current_motion()
+            .strip_prefix(&prefix)
+            .unwrap_or("")
+            .to_string()
+    }
+
+    pub fn save_per_character_settings(&self) {
+        let per = CharacterPerSettings {
+            character_position: [
+                self.character_position.x,
+                self.character_position.y,
+                self.character_position.z,
+            ],
+            selected_motion_path: self.motion_path_relative(),
+            model_scale: self.model_scale,
+            look_at_strength: self.look_at_strength,
+            default_motion: self.motion_path_relative(),
+            expressions: None,
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&per) {
+            let path = self.character_settings_path();
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Err(e) = fs::write(path, json) {
+                eprintln!("[Config] Failed to save per-character settings: {e}");
+            }
+        }
+    }
+
+    pub fn load_per_character_settings(&mut self) {
+        let path = self.character_settings_path();
+        let Ok(json) = fs::read_to_string(&path) else {
+            return;
+        };
+        match serde_json::from_str::<CharacterPerSettings>(&json) {
+            Ok(per) => {
+                self.character_position = Vec3::new(
+                    per.character_position[0],
+                    per.character_position[1],
+                    per.character_position[2],
+                );
+                self.model_scale = per.model_scale;
+                self.look_at_strength = per.look_at_strength;
+                if !per.selected_motion_path.is_empty() {
+                    let abs_path = format!(
+                        "characters/{}/{}",
+                        self.current_entry().name,
+                        per.selected_motion_path
+                    );
+                    if let Some(m) = self
+                        .current_entry()
+                        .motion_paths
+                        .iter()
+                        .position(|p| p == &abs_path)
+                    {
+                        self.selected_motion = m;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "[Config] Failed to parse per-character settings {}: {e}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    pub fn select_character(&mut self, idx: usize) {
+        if idx >= self.characters.len() || idx == self.selected_character {
+            return;
+        }
+        self.save_per_character_settings();
+        self.selected_character = idx;
+        self.selected_motion = 0;
+        self.sync_card_path();
+        self.load_per_character_settings();
+        self.needs_respawn = true;
+    }
+
     pub fn save(&self) {
         let saved = AppSettings::from_character_settings(self);
         match serde_json::to_string_pretty(&saved) {
@@ -321,6 +411,7 @@ impl CharacterSettings {
                 eprintln!("[Config] Failed to serialize settings: {e}");
             }
         }
+        self.save_per_character_settings();
     }
 
     pub fn load_from_file(&mut self) {
@@ -338,40 +429,51 @@ impl CharacterSettings {
                 eprintln!("[Config] Failed to parse {}: {e}", path.display());
             }
         }
+        self.load_per_character_settings();
     }
 }
 
 const CONFIG_VERSION: u32 = 1;
 
+/// Per-character settings stored in `characters/{name}/character_settings.json`
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
+struct CharacterPerSettings {
+    character_position: [f32; 3],
+    selected_motion_path: String,
+    model_scale: f32,
+    look_at_strength: f32,
+    default_motion: String,
+    expressions: Option<serde_json::Value>,
+}
+
+impl Default for CharacterPerSettings {
+    fn default() -> Self {
+        Self {
+            character_position: [0.0, 0.0, 0.0],
+            selected_motion_path: String::new(),
+            model_scale: 1.0,
+            look_at_strength: 0.6,
+            default_motion: String::new(),
+            expressions: None,
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct AppSettings {
     version: u32,
-    character: CharacterSection,
-    graphics: GraphicsSection,
+    character: String,
+    app: AppSection,
+    #[serde(flatten)]
     ai: ene_ai_core::config::AiSettings,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
-struct CharacterSection {
-    selected_character_name: String,
-    selected_motion_path: String,
-    model_scale: f32,
-    character_position: [f32; 3],
-    look_at_strength: f32,
-}
-
-impl Default for CharacterSection {
-    fn default() -> Self {
-        Self {
-            selected_character_name: String::new(),
-            selected_motion_path: String::new(),
-            model_scale: 1.0,
-            character_position: [0.0, 0.0, 0.0],
-            look_at_strength: 0.6,
-        }
-    }
+struct AppSection {
+    graphics: GraphicsSection,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -387,22 +489,14 @@ impl AppSettings {
     fn from_character_settings(s: &CharacterSettings) -> Self {
         AppSettings {
             version: CONFIG_VERSION,
-            character: CharacterSection {
-                selected_character_name: s.current_entry().name.clone(),
-                selected_motion_path: s.current_motion().to_string(),
-                model_scale: s.model_scale,
-                character_position: [
-                    s.character_position.x,
-                    s.character_position.y,
-                    s.character_position.z,
-                ],
-                look_at_strength: s.look_at_strength,
-            },
-            graphics: GraphicsSection {
-                mask_render_downsample: s.mask_render_downsample,
-                target_fps: s.target_fps,
-                shadow_quality: s.shadow_quality,
-                antialiasing_mode: s.antialiasing_mode,
+            character: s.current_entry().name.clone(),
+            app: AppSection {
+                graphics: GraphicsSection {
+                    mask_render_downsample: s.mask_render_downsample,
+                    target_fps: s.target_fps,
+                    shadow_quality: s.shadow_quality,
+                    antialiasing_mode: s.antialiasing_mode,
+                },
             },
             ai: s.ai.clone(),
         }
@@ -415,38 +509,18 @@ impl AppSettings {
                 self.version, CONFIG_VERSION
             );
         }
-        if !self.character.selected_character_name.is_empty() {
-            if let Some(idx) = s
-                .characters
-                .iter()
-                .position(|c| c.name == self.character.selected_character_name)
-            {
+        if !self.character.is_empty() {
+            if let Some(idx) = s.characters.iter().position(|c| c.name == self.character) {
                 s.selected_character = idx;
                 let entry = &s.characters[idx];
                 s.ai.character_card_path =
                     format!("{}/{}", s.assets_dir.display(), entry.card_path);
-                if !self.character.selected_motion_path.is_empty() {
-                    if let Some(m) = entry
-                        .motion_paths
-                        .iter()
-                        .position(|p| p == &self.character.selected_motion_path)
-                    {
-                        s.selected_motion = m;
-                    }
-                }
             }
         }
-        s.model_scale = self.character.model_scale;
-        s.character_position = Vec3::new(
-            self.character.character_position[0],
-            self.character.character_position[1],
-            self.character.character_position[2],
-        );
-        s.look_at_strength = self.character.look_at_strength;
-        s.mask_render_downsample = self.graphics.mask_render_downsample;
-        s.target_fps = self.graphics.target_fps;
-        s.shadow_quality = self.graphics.shadow_quality;
-        s.antialiasing_mode = self.graphics.antialiasing_mode;
+        s.mask_render_downsample = self.app.graphics.mask_render_downsample;
+        s.target_fps = self.app.graphics.target_fps;
+        s.shadow_quality = self.app.graphics.shadow_quality;
+        s.antialiasing_mode = self.app.graphics.antialiasing_mode;
         s.ai = self.ai.clone();
     }
 }
@@ -541,13 +615,18 @@ fn read_character_json_meta(path: &Path) -> Option<(String, Option<String>)> {
     let content = fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
     let name = v.get("data")?.get("name")?.as_str()?.to_string();
-    let default_motion = v
-        .get("data")?
-        .get("extensions")?
-        .get("ene")?
-        .get("default_motion")
-        .and_then(|m| m.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
+
+    let default_motion = path
+        .parent()
+        .and_then(|p| p.join("character_settings.json").exists().then(|| p.join("character_settings.json")))
+        .and_then(|settings_path| {
+            let s = fs::read_to_string(settings_path).ok()?;
+            let sv: serde_json::Value = serde_json::from_str(&s).ok()?;
+            sv.get("default_motion")
+                .and_then(|m| m.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        });
+
     Some((name, default_motion))
 }
