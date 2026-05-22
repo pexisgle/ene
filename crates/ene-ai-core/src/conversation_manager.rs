@@ -97,7 +97,7 @@ pub async fn check_boundary(
                 }
             }
             Err(e) => {
-                eprintln!("[Session] Embedding error for boundary check: {}", e);
+                tracing::error!("[Session] Embedding error for boundary check: {}", e);
             }
         }
     }
@@ -185,7 +185,7 @@ pub async fn execute_split(
             _ => "system",
         };
         if let Err(e) = store.insert_log(session_id, card_name, role_str, content) {
-            eprintln!("[Session] Failed to save log: {}", e);
+            tracing::error!("[Session] Failed to save log: {}", e);
         }
     }
 

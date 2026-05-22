@@ -34,51 +34,7 @@ pub const ANTIALIASING_MODE_CHOICES: [AntialiasingMode; 4] = [
 ];
 pub const DEFAULT_ANTIALIASING_MODE: AntialiasingMode = AntialiasingMode::Fxaa;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ShadowQuality {
-    Low,
-    #[default]
-    Medium,
-    High,
-}
-
-impl ShadowQuality {
-    pub fn label(self) -> &'static str {
-        match self {
-            ShadowQuality::Low => "Low",
-            ShadowQuality::Medium => "Medium",
-            ShadowQuality::High => "High",
-        }
-    }
-
-    pub fn shadow_map_size(self) -> usize {
-        match self {
-            ShadowQuality::Low => 1_024,
-            ShadowQuality::Medium => 2_048,
-            ShadowQuality::High => 4_096,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AntialiasingMode {
-    Off,
-    #[default]
-    Fxaa,
-    Smaa,
-    Taa,
-}
-
-impl AntialiasingMode {
-    pub fn label(self) -> &'static str {
-        match self {
-            AntialiasingMode::Off => "Off",
-            AntialiasingMode::Fxaa => "FXAA",
-            AntialiasingMode::Smaa => "SMAA",
-            AntialiasingMode::Taa => "TAA",
-        }
-    }
-}
+pub use ene_ai_core::config::{ShadowQuality, AntialiasingMode};
 
 pub fn normalize_mask_render_downsample(value: u32) -> u32 {
     cycle_choice(
@@ -191,24 +147,7 @@ pub struct CharacterEntry {
     pub default_motion: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GraphicsSettings {
-    pub mask_render_downsample: u32,
-    pub target_fps: u32,
-    pub shadow_quality: ShadowQuality,
-    pub antialiasing_mode: AntialiasingMode,
-}
-
-impl Default for GraphicsSettings {
-    fn default() -> Self {
-        Self {
-            mask_render_downsample: DEFAULT_MASK_RENDER_DOWNSAMPLE,
-            target_fps: DEFAULT_TARGET_FPS,
-            shadow_quality: DEFAULT_SHADOW_QUALITY,
-            antialiasing_mode: DEFAULT_ANTIALIASING_MODE,
-        }
-    }
-}
+pub use ene_ai_core::config::GraphicsSection as GraphicsSettings;
 
 #[derive(Clone, Debug)]
 pub struct CharacterState {
@@ -438,57 +377,43 @@ impl CharacterSettings {
     }
 
     pub fn save(&self) {
-        let saved = AppSettings::from_character_settings(self);
-        match serde_json::to_string_pretty(&saved) {
-            Ok(json) => {
-                let path = ene_ai_core::paths::config_file_path();
-                if let Err(e) = fs::write(path, json) {
-                    eprintln!("[Config] Failed to save settings: {e}");
-                }
-            }
-            Err(e) => {
-                eprintln!("[Config] Failed to serialize settings: {e}");
-            }
+        let saved = AppSettings {
+            version: 1,
+            character: self.current_entry().name.clone(),
+            app: AppSection {
+                graphics: self.graphics.clone(),
+            },
+            ai: self.ai.ai.clone(),
+        };
+        if let Err(e) = ene_ai_core::config::save_full_settings(&saved) {
+            eprintln!("[Config] Failed to save settings: {e}");
         }
         self.save_per_character_settings();
     }
 
     pub fn load_from_file(&mut self) {
         let path = ene_ai_core::paths::config_file_path();
-        let Ok(json) = fs::read_to_string(&path) else {
-            return;
-        };
+        let full = ene_ai_core::config::load_full_settings_from(&self.assets_dir, &path);
 
-        // ai-core に委譲: AiSettings の読み取り + character_card_path 解決
-        self.ai.ai = ene_ai_core::config::load_settings_from(&self.assets_dir, &path);
+        self.ai.ai = full.ai;
 
-        // アプリ固有フィールドは raw JSON から別途パース
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
-            // キャラクター選択
-            if let Some(name) = value.get("character").and_then(|c| c.as_str()) {
-                if !name.is_empty() {
-                    if let Some(idx) = self.characters.iter().position(|c| c.name == name) {
-                        self.character_state.selected_character = idx;
-                    }
-                }
-            }
-            // グラフィック設定
-            if let Some(app_val) = value.get("app") {
-                if let Ok(app) = serde_json::from_value::<AppSection>(app_val.clone()) {
-                    self.graphics.mask_render_downsample = app.graphics.mask_render_downsample;
-                    self.graphics.target_fps = app.graphics.target_fps;
-                    self.graphics.shadow_quality = app.graphics.shadow_quality;
-                    self.graphics.antialiasing_mode = app.graphics.antialiasing_mode;
-                }
+        // キャラクター選択
+        let name = &full.character;
+        if !name.is_empty() {
+            if let Some(idx) = self.characters.iter().position(|c| c.name == *name) {
+                self.character_state.selected_character = idx;
             }
         }
+
+        // グラフィック設定
+        self.graphics = full.app.graphics;
 
         self.clamp_runtime_values();
         self.load_per_character_settings();
     }
 }
 
-const CONFIG_VERSION: u32 = 1;
+pub use ene_ai_core::config::{AppSection, AppSettings};
 
 /// Per-character settings stored in `characters/{name}/character_settings.json`
 #[derive(Debug, Serialize, Deserialize)]
@@ -513,50 +438,6 @@ impl Default for CharacterPerSettings {
             expressions: None,
         }
     }
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
-struct AppSettings {
-    version: u32,
-    character: String,
-    app: AppSection,
-    #[serde(flatten)]
-    ai: ene_ai_core::config::AiSettings,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
-struct AppSection {
-    graphics: GraphicsSection,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
-struct GraphicsSection {
-    mask_render_downsample: u32,
-    target_fps: u32,
-    shadow_quality: ShadowQuality,
-    antialiasing_mode: AntialiasingMode,
-}
-
-impl AppSettings {
-    fn from_character_settings(s: &CharacterSettings) -> Self {
-        AppSettings {
-            version: CONFIG_VERSION,
-            character: s.current_entry().name.clone(),
-            app: AppSection {
-                graphics: GraphicsSection {
-                    mask_render_downsample: s.graphics.mask_render_downsample,
-                    target_fps: s.graphics.target_fps,
-                    shadow_quality: s.graphics.shadow_quality,
-                    antialiasing_mode: s.graphics.antialiasing_mode,
-                },
-            },
-            ai: s.ai.ai.clone(),
-        }
-    }
-
 }
 
 fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {

@@ -165,7 +165,7 @@ impl IpcToolRegistry {
             }
         }
 
-        eprintln!(
+        tracing::warn!(
             "[IpcToolRegistry] Connection lost, reconnecting to {}",
             self.socket_path.display()
         );
@@ -199,7 +199,7 @@ impl IpcToolRegistry {
             *guard = Some(stream);
         }
 
-        eprintln!(
+        tracing::info!(
             "[IpcToolRegistry] Successfully reconnected to {}",
             self.socket_path.display()
         );

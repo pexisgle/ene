@@ -22,10 +22,10 @@ fn load_tensor<R: Read + Seek>(
 ) -> Result<candle_core::Tensor, AiCoreError> {
     let qtensor = ct
         .tensor(reader, name, device)
-        .map_err(|e| AiCoreError::EmbeddingError(format!("Tensor {name} not found: {e}")))?;
+        .map_err(super::candle_err(&format!("Tensor {name} not found")))?;
     qtensor
         .dequantize(device)
-        .map_err(|e| AiCoreError::EmbeddingError(format!("Failed to dequantize {name}: {e}")))
+        .map_err(super::candle_err(&format!("Failed to dequantize {name}")))
 }
 
 pub fn load_model(
@@ -33,9 +33,9 @@ pub fn load_model(
     device: &Device,
 ) -> Result<(EmbeddingModel, HashMap<String, gguf_file::Value>), AiCoreError> {
     let mut file = std::fs::File::open(gguf_path)
-        .map_err(|e| AiCoreError::EmbeddingError(format!("Cannot open GGUF: {e}")))?;
+        .map_err(super::candle_err("Cannot open GGUF"))?;
     let ct = gguf_file::Content::read(&mut file)
-        .map_err(|e| AiCoreError::EmbeddingError(format!("Failed to read GGUF: {e}")))?;
+        .map_err(super::candle_err("Failed to read GGUF"))?;
 
     let metadata = ct.metadata.clone();
 
@@ -47,34 +47,34 @@ pub fn load_model(
 
     let num_heads = md_get("qwen3.attention.head_count")?
         .to_u32()
-        .map_err(|e| AiCoreError::EmbeddingError(format!("head_count: {e}")))?
+        .map_err(super::candle_err("head_count"))?
         as usize;
     let num_kv_heads = md_get("qwen3.attention.head_count_kv")?
         .to_u32()
-        .map_err(|e| AiCoreError::EmbeddingError(format!("head_count_kv: {e}")))?
+        .map_err(super::candle_err("head_count_kv"))?
         as usize;
     let head_dim = md_get("qwen3.attention.key_length")?
         .to_u32()
-        .map_err(|e| AiCoreError::EmbeddingError(format!("key_length: {e}")))?
+        .map_err(super::candle_err("key_length"))?
         as usize;
     let num_layers = md_get("qwen3.block_count")?
         .to_u32()
-        .map_err(|e| AiCoreError::EmbeddingError(format!("block_count: {e}")))?
+        .map_err(super::candle_err("block_count"))?
         as usize;
     let hidden_size = md_get("qwen3.embedding_length")?
         .to_u32()
-        .map_err(|e| AiCoreError::EmbeddingError(format!("embedding_length: {e}")))?
+        .map_err(super::candle_err("embedding_length"))?
         as usize;
     let max_seq_len = md_get("qwen3.context_length")?
         .to_u32()
-        .map_err(|e| AiCoreError::EmbeddingError(format!("context_length: {e}")))?
+        .map_err(super::candle_err("context_length"))?
         as usize;
     let rms_norm_eps = md_get("qwen3.attention.layer_norm_rms_epsilon")?
         .to_f32()
-        .map_err(|e| AiCoreError::EmbeddingError(format!("rms_epsilon: {e}")))?;
+        .map_err(super::candle_err("rms_epsilon"))?;
     let rope_theta = md_get("qwen3.rope.freq_base")?
         .to_f32()
-        .map_err(|e| AiCoreError::EmbeddingError(format!("freq_base: {e}")))?
+        .map_err(super::candle_err("freq_base"))?
         as f64;
     let num_kv_groups = num_heads / num_kv_heads;
 
@@ -210,9 +210,7 @@ pub fn resolve_gguf_paths(
             let api = hf_hub::api::tokio::ApiBuilder::new()
                 .with_cache_dir(model_dir)
                 .build()
-                .map_err(|e| {
-                    AiCoreError::EmbeddingError(format!("Failed to create HF API: {e}"))
-                })?;
+                .map_err(super::candle_err("Failed to create HF API"))?;
 
             let repo_id = match model_name_owned.as_str() {
                 "jina-embeddings-v5-text-nano" => "jinaai/jina-embeddings-v5-text-nano-retrieval",
@@ -249,13 +247,9 @@ pub fn resolve_gguf_paths(
                 _ => unreachable!(),
             };
 
-            let gguf_path = repo.get(&gguf_filename).await.map_err(|e| {
-                AiCoreError::EmbeddingError(format!("Failed to download GGUF: {e}"))
-            })?;
+            let gguf_path = repo.get(&gguf_filename).await.map_err(super::candle_err("Failed to download GGUF"))?;
 
-            let tokenizer_path = repo.get("tokenizer.json").await.map_err(|e| {
-                AiCoreError::EmbeddingError(format!("Failed to download tokenizer: {e}"))
-            })?;
+            let tokenizer_path = repo.get("tokenizer.json").await.map_err(super::candle_err("Failed to download tokenizer"))?;
 
             tracing::info!(
                 "[Embedding] GGUF model ready: {} ({} bytes)",
