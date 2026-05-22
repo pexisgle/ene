@@ -10,13 +10,20 @@
       "antialiasing_mode": "Fxaa"
     }
   },
-  "base_url": "https://openrouter.ai/api/v1",
-  "api_key": "",
+  "provider": {
+    "provider_name": "openai-compatible",
+    "model": "google/gemma-4-31b-it",
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key": ""
+  },
   "user_name": "pexisgle",
-  "model": "google/gemma-4-31b-it",
+  "embedding": {
+    "provider_type": "local",
+    "model": "jina-embeddings-v5-text-small",
+    "gguf_quantization": "F16"
+  },
   "memory": {
     "enabled": true,
-    "topic_change_threshold": 0.4,
-    "gguf_quantization": "F16"
+    "topic_change_threshold": 0.4
   }
 }

@@ -420,15 +420,31 @@ impl CharacterSettings {
             return;
         };
 
-        match serde_json::from_str::<AppSettings>(&json) {
-            Ok(parsed) => {
-                parsed.apply_to(self);
-                self.clamp_runtime_values();
+        // ai-core に委譲: AiSettings の読み取り + character_card_path 解決
+        self.ai = ene_ai_core::config::load_settings_from(&self.assets_dir, &path);
+
+        // アプリ固有フィールドは raw JSON から別途パース
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
+            // キャラクター選択
+            if let Some(name) = value.get("character").and_then(|c| c.as_str()) {
+                if !name.is_empty() {
+                    if let Some(idx) = self.characters.iter().position(|c| c.name == name) {
+                        self.selected_character = idx;
+                    }
+                }
             }
-            Err(e) => {
-                eprintln!("[Config] Failed to parse {}: {e}", path.display());
+            // グラフィック設定
+            if let Some(app_val) = value.get("app") {
+                if let Ok(app) = serde_json::from_value::<AppSection>(app_val.clone()) {
+                    self.mask_render_downsample = app.graphics.mask_render_downsample;
+                    self.target_fps = app.graphics.target_fps;
+                    self.shadow_quality = app.graphics.shadow_quality;
+                    self.antialiasing_mode = app.graphics.antialiasing_mode;
+                }
             }
         }
+
+        self.clamp_runtime_values();
         self.load_per_character_settings();
     }
 }
@@ -502,27 +518,6 @@ impl AppSettings {
         }
     }
 
-    fn apply_to(&self, s: &mut CharacterSettings) {
-        if self.version > CONFIG_VERSION {
-            eprintln!(
-                "[Config] Config version {} is newer than supported version {}; loading with defaults",
-                self.version, CONFIG_VERSION
-            );
-        }
-        if !self.character.is_empty() {
-            if let Some(idx) = s.characters.iter().position(|c| c.name == self.character) {
-                s.selected_character = idx;
-                let entry = &s.characters[idx];
-                s.ai.character_card_path =
-                    format!("{}/{}", s.assets_dir.display(), entry.card_path);
-            }
-        }
-        s.mask_render_downsample = self.app.graphics.mask_render_downsample;
-        s.target_fps = self.app.graphics.target_fps;
-        s.shadow_quality = self.app.graphics.shadow_quality;
-        s.antialiasing_mode = self.app.graphics.antialiasing_mode;
-        s.ai = self.ai.clone();
-    }
 }
 
 fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {

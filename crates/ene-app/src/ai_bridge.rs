@@ -8,7 +8,7 @@ use tokio_stream::StreamExt;
 use crate::app_config::CharacterSettings;
 use crate::character::ResolvedExpressionMap;
 use ene_ai_core::{
-    PendingSplitTask, SplitTaskInput, init_memory,
+    PendingSplitTask, SplitTaskInput, init_embedding,
     mcp_client::McpToolRegistry,
     poll_split_result,
     session::ConversationSession,
@@ -111,16 +111,6 @@ impl Default for AiRuntimeState {
     }
 }
 
-impl AiRuntimeState {
-    fn init_memory_from_settings(
-        &mut self,
-        settings: &ene_ai_core::config::AiSettings,
-    ) -> Result<(), String> {
-        let (store, embedder) = init_memory(settings)?;
-        self.session.init_memory(store, embedder);
-        Ok(())
-    }
-}
 
 fn enqueue_ai_requests(
     mut requests: MessageReader<AiRequestEvent>,
@@ -212,17 +202,31 @@ fn start_next_ai_request(
         return;
     };
 
-    // Initialize memory if not yet initialized
-    if runtime_state.session.embedding_provider.is_none() && settings.ai.memory.enabled {
-        if let Err(e) = runtime_state.init_memory_from_settings(&settings.ai) {
-            eprintln!("[Memory] Warning: Failed to initialize memory: {}", e);
-            eprintln!("[Memory] Continuing without long-term memory.");
-        } else {
-            eprintln!("\x1b[36m[Memory] Long-term memory enabled.\x1b[0m");
-            eprintln!(
-                "\x1b[36m[Memory] DB: {}\x1b[0m",
-                settings.ai.resolve_memory_db_path().display()
-            );
+    // Initialize embedding and memory if not yet initialized
+    if runtime_state.session.embedding_provider.is_none() {
+        match init_embedding(&settings.ai) {
+            Ok(embedder) => {
+                runtime_state.session.embedding_provider = Some(embedder.clone());
+                if settings.ai.memory.enabled {
+                    match ene_ai_core::init_memory_store(&settings.ai, &*embedder) {
+                        Ok(store) => {
+                            runtime_state.session.memory_store = Some(store);
+                            eprintln!("\x1b[36m[Memory] Long-term memory enabled.\x1b[0m");
+                            eprintln!(
+                                "\x1b[36m[Memory] DB: {}\x1b[0m",
+                                settings.ai.resolve_memory_db_path().display()
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("[Memory] Warning: Failed to initialize memory: {}", e);
+                            eprintln!("[Memory] Continuing without long-term memory.");
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[Embedding] Warning: Failed to initialize embedding: {}", e);
+            }
         }
     }
 
