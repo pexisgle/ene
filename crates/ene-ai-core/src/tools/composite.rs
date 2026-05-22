@@ -4,25 +4,18 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-fn compute_tool_version_hash(tool: &ToolDefinition) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut state = std::collections::hash_map::DefaultHasher::new();
-    tool.name.hash(&mut state);
-    tool.description.hash(&mut state);
-    tool.keywords.hash(&mut state);
-    tool.parameters.to_string().hash(&mut state);
-    let hash = state.finish();
-    format!("{:x}", hash)
+pub struct CompositeToolRegistry {
+    state: std::sync::RwLock<CompositeState>,
+    store: std::sync::RwLock<Option<Arc<crate::memory::store::MemoryStore>>>,
 }
 
-pub struct CompositeToolRegistry {
-    registries: Vec<Box<dyn ToolRegistry>>,
+struct CompositeState {
+    registries: Vec<Arc<dyn ToolRegistry>>,
     tool_index: HashMap<String, usize>,
-    store: Option<Arc<crate::memory::store::MemoryStore>>,
 }
 
 impl CompositeToolRegistry {
-    pub fn new(registries: Vec<Box<dyn ToolRegistry>>) -> Self {
+    pub fn new(registries: Vec<Arc<dyn ToolRegistry>>) -> Self {
         let mut tool_index = HashMap::with_capacity(registries.len() * 4);
         for (idx, registry) in registries.iter().enumerate() {
             for tool in registry.list_tools() {
@@ -30,15 +23,34 @@ impl CompositeToolRegistry {
             }
         }
         Self {
-            registries,
-            tool_index,
-            store: None,
+            state: std::sync::RwLock::new(CompositeState {
+                registries,
+                tool_index,
+            }),
+            store: std::sync::RwLock::new(None),
         }
     }
 
-    pub fn with_store(mut self, store: Arc<crate::memory::store::MemoryStore>) -> Self {
-        self.store = Some(store);
+    pub fn with_store(self, store: Arc<crate::memory::store::MemoryStore>) -> Self {
+        {
+            let mut guard = self.store.write().unwrap_or_else(|e| e.into_inner());
+            *guard = Some(store);
+        }
         self
+    }
+
+    pub fn set_store(&self, store: Arc<crate::memory::store::MemoryStore>) {
+        let mut guard = self.store.write().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(store);
+    }
+
+    pub fn add_registry(&self, registry: Arc<dyn ToolRegistry>) {
+        let mut state_guard = self.state.write().unwrap_or_else(|e| e.into_inner());
+        let idx = state_guard.registries.len();
+        for tool in registry.list_tools() {
+            state_guard.tool_index.entry(tool.name).or_insert(idx);
+        }
+        state_guard.registries.push(registry);
     }
 
     /// ツール定義のembeddingをSQLiteに永続化する。
@@ -47,9 +59,12 @@ impl CompositeToolRegistry {
         &self,
         embedder: &dyn crate::embedding::EmbeddingProvider,
     ) -> Result<(), String> {
-        let store = match self.store.as_ref() {
-            Some(s) => s,
-            None => return Ok(()),
+        let store = {
+            let guard = self.store.read().unwrap_or_else(|e| e.into_inner());
+            match guard.as_ref() {
+                Some(s) => Arc::clone(s),
+                None => return Ok(()),
+            }
         };
 
         let cached: HashMap<String, (String, Vec<f32>)> = match store.list_tool_embeddings() {
@@ -66,9 +81,15 @@ impl CompositeToolRegistry {
         let mut indexed = 0usize;
         let mut reused = 0usize;
 
-        for registry in &self.registries {
+        // RwLockReadGuard is not Send, so clone registries under lock before async embed operations
+        let registries = {
+            let state_guard = self.state.read().unwrap_or_else(|e| e.into_inner());
+            state_guard.registries.clone()
+        };
+
+        for registry in &registries {
             for tool in registry.list_tools() {
-                let current_hash = compute_tool_version_hash(&tool);
+                let current_hash = super::compute_tool_version_hash(&tool);
 
                 if let Some((stored_hash, _emb)) = cached.get(&tool.name) {
                     if stored_hash == &current_hash {
@@ -111,8 +132,12 @@ impl CompositeToolRegistry {
 #[async_trait]
 impl ToolRegistry for CompositeToolRegistry {
     fn list_tools(&self) -> Vec<ToolDefinition> {
-        let mut tools = Vec::with_capacity(self.tool_index.len());
-        for registry in &self.registries {
+        let registries = {
+            let state_guard = self.state.read().unwrap_or_else(|e| e.into_inner());
+            state_guard.registries.clone()
+        };
+        let mut tools = Vec::new();
+        for registry in &registries {
             tools.extend(registry.list_tools());
         }
         tools
@@ -124,11 +149,19 @@ impl ToolRegistry for CompositeToolRegistry {
         limit: usize,
     ) -> Vec<ToolDefinition> {
         let all_tools = self.list_tools();
-        let (Some(emb), Some(store)) = (query_embedding, self.store.as_ref()) else {
+        let store = {
+            let guard = self.store.read().unwrap_or_else(|e| e.into_inner());
+            match guard.as_ref() {
+                Some(s) => Arc::clone(s),
+                None => return all_tools,
+            }
+        };
+
+        let (Some(emb), store_ref) = (query_embedding, store) else {
             return all_tools;
         };
 
-        let search_results = match store.search_tools(emb, limit, 0.0) {
+        let search_results = match store_ref.search_tools(emb, limit, 0.0) {
             Ok(results) => results,
             Err(e) => {
                 tracing::warn!("[ToolRAG] Failed to search tools: {}", e);
@@ -146,14 +179,22 @@ impl ToolRegistry for CompositeToolRegistry {
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, String> {
-        match self.tool_index.get(name) {
-            Some(&idx) => self.registries[idx].call_tool(name, arguments).await,
-            None => Err(format!("Tool {} not found", name)),
-        }
+        let registry = {
+            let state_guard = self.state.read().unwrap_or_else(|e| e.into_inner());
+            match state_guard.tool_index.get(name) {
+                Some(&idx) => Arc::clone(&state_guard.registries[idx]),
+                None => return Err(format!("Tool {} not found", name)),
+            }
+        };
+        registry.call_tool(name, arguments).await
     }
 
     async fn set_session_id(&self, session_id: &str) {
-        for registry in &self.registries {
+        let registries = {
+            let state_guard = self.state.read().unwrap_or_else(|e| e.into_inner());
+            state_guard.registries.clone()
+        };
+        for registry in &registries {
             registry.set_session_id(session_id).await;
         }
     }
@@ -170,7 +211,7 @@ impl ToolRegistry for CompositeToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     struct MockRegistry {
         tools: Vec<ToolDefinition>,
@@ -221,14 +262,14 @@ mod tests {
     fn composite_new_empty() {
         let composite = CompositeToolRegistry::new(vec![]);
         assert!(composite.list_tools().is_empty());
-        assert!(composite.tool_index.is_empty());
+        assert!(composite.state.read().unwrap().tool_index.is_empty());
     }
 
     #[test]
     fn composite_aggregates_single_registry() {
         let tools = vec![make_tool("alpha"), make_tool("beta")];
         let registry = MockRegistry::new(tools);
-        let composite = CompositeToolRegistry::new(vec![Box::new(registry)]);
+        let composite = CompositeToolRegistry::new(vec![Arc::new(registry)]);
         let all = composite.list_tools();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].name, "alpha");
@@ -239,7 +280,7 @@ mod tests {
     fn composite_aggregates_multiple_registries() {
         let r1 = MockRegistry::new(vec![make_tool("a"), make_tool("b")]);
         let r2 = MockRegistry::new(vec![make_tool("c")]);
-        let composite = CompositeToolRegistry::new(vec![Box::new(r1), Box::new(r2)]);
+        let composite = CompositeToolRegistry::new(vec![Arc::new(r1), Arc::new(r2)]);
         let all = composite.list_tools();
         assert_eq!(all.len(), 3);
         let names: Vec<&str> = all.iter().map(|t| t.name.as_str()).collect();
@@ -252,18 +293,18 @@ mod tests {
     fn composite_duplicate_name_first_wins() {
         let r1 = MockRegistry::new(vec![make_tool("dup")]);
         let r2 = MockRegistry::new(vec![make_tool("dup")]);
-        let composite = CompositeToolRegistry::new(vec![Box::new(r1), Box::new(r2)]);
+        let composite = CompositeToolRegistry::new(vec![Arc::new(r1), Arc::new(r2)]);
         let all = composite.list_tools();
         // Both tools appear in the list, but index maps to first
         assert_eq!(all.len(), 2);
-        assert_eq!(composite.tool_index.get("dup"), Some(&0));
+        assert_eq!(composite.state.read().unwrap().tool_index.get("dup"), Some(&0));
     }
 
     #[tokio::test]
     async fn composite_call_tool_dispatches() {
         let mock = MockRegistry::new(vec![make_tool("find")]);
         let call_log = Arc::clone(&mock.call_log);
-        let composite = CompositeToolRegistry::new(vec![Box::new(mock)]);
+        let composite = CompositeToolRegistry::new(vec![Arc::new(mock)]);
         let result = composite.call_tool("find", r#"{"pattern":"*.rs"}"#).await;
         assert_eq!(result.unwrap(), "find executed");
         let log = call_log.lock().unwrap();
@@ -275,7 +316,7 @@ mod tests {
     #[tokio::test]
     async fn composite_call_tool_not_found() {
         let mock = MockRegistry::new(vec![make_tool("exists")]);
-        let composite = CompositeToolRegistry::new(vec![Box::new(mock)]);
+        let composite = CompositeToolRegistry::new(vec![Arc::new(mock)]);
         let result = composite.call_tool("nonexistent", "").await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "Tool nonexistent not found");
@@ -287,27 +328,9 @@ mod tests {
         let mock2 = MockRegistry::new(vec![make_tool("b")]);
         let sid1 = Arc::clone(&mock1.session_id);
         let sid2 = Arc::clone(&mock2.session_id);
-        let composite = CompositeToolRegistry::new(vec![Box::new(mock1), Box::new(mock2)]);
+        let composite = CompositeToolRegistry::new(vec![Arc::new(mock1), Arc::new(mock2)]);
         composite.set_session_id("sess_main").await;
         assert_eq!(sid1.lock().unwrap().as_deref(), Some("sess_main"));
         assert_eq!(sid2.lock().unwrap().as_deref(), Some("sess_main"));
-    }
-
-    #[test]
-    fn compute_tool_version_hash_deterministic() {
-        let t1 = make_tool("test");
-        let h1 = compute_tool_version_hash(&t1);
-        let h2 = compute_tool_version_hash(&t1);
-        assert_eq!(h1, h2);
-    }
-
-    #[test]
-    fn compute_tool_version_hash_differs_on_change() {
-        let t1 = make_tool("test");
-        let mut t2 = make_tool("test");
-        t2.description = "different".into();
-        let h1 = compute_tool_version_hash(&t1);
-        let h2 = compute_tool_version_hash(&t2);
-        assert_ne!(h1, h2);
     }
 }
