@@ -213,11 +213,11 @@ impl Sandbox {
     }
 
     pub fn session_id(&self) -> String {
-        self.session_id.read().unwrap().clone()
+        self.session_id.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn set_session_id(&self, id: &str) {
-        *self.session_id.write().unwrap() = id.to_string();
+        *self.session_id.write().unwrap_or_else(|e| e.into_inner()) = id.to_string();
     }
 
     /// 読み取りパス検証

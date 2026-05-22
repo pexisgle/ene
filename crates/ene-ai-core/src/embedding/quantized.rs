@@ -66,7 +66,7 @@ impl GgufEmbeddingProvider {
 
     fn embed_internal(&self, text: &str, prefix: &str) -> Result<Vec<f32>, AiCoreError> {
         let prefixed = format!("{prefix}{text}");
-        let tokenizer = self.tokenizer.lock().unwrap();
+        let tokenizer = self.tokenizer.lock().unwrap_or_else(|e| e.into_inner());
         let encoding = tokenizer
             .encode(prefixed.as_str(), true)
             .map_err(|e| AiCoreError::EmbeddingError(format!("Tokenization failed: {e}")))?;
@@ -83,7 +83,7 @@ impl GgufEmbeddingProvider {
         )
         .map_err(|e| AiCoreError::EmbeddingError(format!("Failed to create input tensor: {e}")))?;
 
-        let model = self.model.lock().unwrap();
+        let model = self.model.lock().unwrap_or_else(|e| e.into_inner());
         model.forward(&input_tensor)
     }
 }
