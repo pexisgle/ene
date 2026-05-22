@@ -339,25 +339,10 @@
         },
         "tools": {
           "type": "object",
-          "description": "Tool binary selection and per-tool configuration",
-          "properties": {
-            "enabled": {
-              "type": "array",
-              "description": "List of tool names to enable (built-in: fs, web, browser, utility, app; plus any custom tools)",
-              "default": ["fs", "web", "browser", "utility", "app"],
-              "items": {
-                "type": "string"
-              }
-            },
-            "configs": {
-              "type": "object",
-              "description": "Per-tool configuration (tool_name → arbitrary JSON). Each tool defines its own expected schema.",
-              "default": {},
-              "additionalProperties": {
-                "description": "Arbitrary JSON value passed directly to the tool's set_config()",
-                "type": ["object", "string", "number", "boolean", "array", "null"]
-              }
-            }
+          "description": "Per-tool enable/disable and configuration (tool_name → { enable: bool, ...custom fields })",
+          "default": {},
+          "additionalProperties": {
+            "$ref": "#/definitions/ToolEntry"
           }
         }
       }
@@ -431,6 +416,20 @@
           "additionalProperties": false
         }
       ]
+    },
+    "ToolEntry": {
+      "type": "object",
+      "description": "Enable/disable flag and tool-specific configuration",
+      "required": ["enable"],
+      "properties": {
+        "enable": {
+          "type": "boolean",
+          "description": "Whether this tool is enabled"
+        }
+      },
+      "additionalProperties": {
+        "description": "Tool-specific configuration passed to set_config()"
+      }
     }
   }
 }

@@ -233,10 +233,14 @@ impl ToolHostManager {
         std::fs::create_dir_all(paths::tool_socket_dir())
             .map_err(|e| format!("Failed to create socket dir: {e}"))?;
 
-        let configs = &settings.tools.configs;
-
-        for name in &settings.tools.enabled {
-            let tool_config = configs.get(name.as_str()).cloned();
+        for (name, entry) in &settings.tools.tools {
+            if !entry.enable {
+                continue;
+            }
+            let tool_config = match &entry.config {
+                serde_json::Value::Object(m) if m.is_empty() => None,
+                _ => Some(entry.config.clone()),
+            };
             match Self::start_tool(name, &sandbox, tool_config).await {
                 Ok(entry) => {
                     let idx = entries.len();

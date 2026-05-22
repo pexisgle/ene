@@ -13,8 +13,7 @@ pub async fn build(settings: &AiSettings) -> Arc<dyn ToolRegistry> {
             eprintln!("[ToolHostManager] Warning: {}", e);
             ToolHostManager::start(&AiSettings {
                 tools: ene_ai_core::config::AiToolSettings {
-                    enabled: Vec::new(),
-                    ..Default::default()
+                    tools: std::collections::HashMap::new(),
                 },
                 ..settings.clone()
             })

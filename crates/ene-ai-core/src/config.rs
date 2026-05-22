@@ -97,35 +97,45 @@ pub struct AiSandboxSettings {
     pub max_shell_output_lines: usize,
 }
 
-/// ツール設定 — 起動するツールバイナリとカスタムツール
+/// ツールごとのエントリ — enable フラグ + ツール固有設定
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, rename_all = "snake_case")]
-pub struct AiToolSettings {
-    /// 有効にするビルトインツール名のリスト
-    /// ビルトインツール: "fs", "web", "browser", "utility", "app"
-    /// 空の場合は何も起動しない
-    pub enabled: Vec<String>,
+pub struct ToolEntry {
+    /// 有効/無効
+    pub enable: bool,
+    /// ツール固有の設定 (enable 以外の全フィールド)
+    #[serde(flatten)]
+    pub config: serde_json::Value,
+}
 
-    /// ツールごとの固有設定 (tool_name → arbitrary JSON)
+/// ツール設定 — ツール名 → ToolEntry のマップ
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AiToolSettings {
+    /// ツールごとのエントリ
     ///
-    /// 各設定値はツールプロセス起動時に Initialize で渡される。
-    /// 機密情報は直接記述せず、`{ "$env": "VAR_NAME" }` 形式で
-    /// 環境変数を参照することを推奨。
-    pub configs: HashMap<String, serde_json::Value>,
+    /// 例:
+    /// ```json
+    /// { "fs": { "enable": true },
+    ///   "web": { "enable": true, "search_backends": { "tavily": { "api_key": "..." } } }
+    /// }
+    /// ```
+    /// enable=true のツールだけが起動され、余分なフィールドはそのツールの設定として渡される。
+    pub tools: HashMap<String, ToolEntry>,
 }
 
 impl Default for AiToolSettings {
     fn default() -> Self {
-        Self {
-            enabled: vec![
-                "fs".to_string(),
-                "web".to_string(),
-                "browser".to_string(),
-                "utility".to_string(),
-                "app".to_string(),
-            ],
-            configs: HashMap::new(),
+        let mut tools = HashMap::new();
+        for name in ["fs", "web", "browser", "utility", "app"] {
+            tools.insert(
+                name.to_string(),
+                ToolEntry {
+                    enable: true,
+                    config: serde_json::Value::Object(Default::default()),
+                },
+            );
         }
+        Self { tools }
     }
 }
 
