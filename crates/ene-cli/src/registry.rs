@@ -14,6 +14,7 @@ pub async fn build(settings: &AiSettings) -> Arc<dyn ToolRegistry> {
             ToolHostManager::start(&AiSettings {
                 tools: ene_ai_core::config::AiToolSettings {
                     enabled: Vec::new(),
+                    ..Default::default()
                 },
                 ..settings.clone()
             })

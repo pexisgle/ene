@@ -22,6 +22,7 @@ struct ToolProcess {
     socket_path: PathBuf,
     binary_path: PathBuf,
     sandbox: ene_tool_proto::SandboxConfigData,
+    tool_config: Option<serde_json::Value>,
     restart_count: usize,
 }
 
@@ -232,8 +233,11 @@ impl ToolHostManager {
         std::fs::create_dir_all(paths::tool_socket_dir())
             .map_err(|e| format!("Failed to create socket dir: {e}"))?;
 
+        let configs = &settings.tools.configs;
+
         for name in &settings.tools.enabled {
-            match Self::start_tool(name, &sandbox).await {
+            let tool_config = configs.get(name.as_str()).cloned();
+            match Self::start_tool(name, &sandbox, tool_config).await {
                 Ok(entry) => {
                     let idx = entries.len();
                     for tool in entry.registry.list_tools() {
@@ -271,7 +275,11 @@ impl ToolHostManager {
         Arc::new(self)
     }
 
-    async fn start_tool(name: &str, sandbox: &ene_tool_proto::SandboxConfigData) -> Result<ToolEntry, String> {
+    async fn start_tool(
+        name: &str,
+        sandbox: &ene_tool_proto::SandboxConfigData,
+        tool_config: Option<serde_json::Value>,
+    ) -> Result<ToolEntry, String> {
         let binary_path = Self::find_tool_binary(name)
             .ok_or_else(|| format!("Tool binary '{}' not found", name))?;
 
@@ -292,12 +300,20 @@ impl ToolHostManager {
             socket_path: socket_path.clone(),
             binary_path: binary_path.clone(),
             sandbox: sandbox.clone(),
+            tool_config: tool_config.clone(),
             restart_count: 0,
         };
 
         let process = Arc::new(Mutex::new(process));
 
-        let registry = Self::connect_with_retry(&socket_path, sandbox, CONNECT_RETRIES, CONNECT_DELAY_MS).await?;
+        let registry = Self::connect_with_retry(
+            &socket_path,
+            sandbox,
+            tool_config,
+            CONNECT_RETRIES,
+            CONNECT_DELAY_MS,
+        )
+        .await?;
 
         Ok(ToolEntry { process, registry })
     }
@@ -331,8 +347,16 @@ impl ToolHostManager {
 
         let socket_path = guard.socket_path.clone();
         let sandbox = guard.sandbox.clone();
+        let tool_config = guard.tool_config.clone();
 
-        let new_registry = Self::connect_with_retry(&socket_path, &sandbox, CONNECT_RETRIES, CONNECT_DELAY_MS).await?;
+        let new_registry = Self::connect_with_retry(
+            &socket_path,
+            &sandbox,
+            tool_config,
+            CONNECT_RETRIES,
+            CONNECT_DELAY_MS,
+        )
+        .await?;
 
         drop(guard);
 
@@ -364,12 +388,19 @@ impl ToolHostManager {
     async fn connect_with_retry(
         socket_path: &PathBuf,
         sandbox: &ene_tool_proto::SandboxConfigData,
+        tool_config: Option<serde_json::Value>,
         max_retries: u32,
         delay_ms: u64,
     ) -> Result<IpcToolRegistry, String> {
         let mut attempts = 0;
         loop {
-            match IpcToolRegistry::new(socket_path.to_path_buf(), sandbox.clone()).await {
+            match IpcToolRegistry::new(
+                socket_path.to_path_buf(),
+                sandbox.clone(),
+                tool_config.clone(),
+            )
+            .await
+            {
                 Ok(registry) => return Ok(registry),
                 Err(e) => {
                     attempts += 1;

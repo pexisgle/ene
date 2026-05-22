@@ -91,8 +91,11 @@ pub async fn run_tool_server(
 
 async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse {
     match req {
-        IpcRequest::Initialize { sandbox } => {
+        IpcRequest::Initialize { sandbox, tool_config } => {
             provider.set_sandbox(sandbox);
+            if let Some(config) = tool_config {
+                provider.set_config(config);
+            }
             IpcResponse::Ack
         }
         IpcRequest::ListTools => {
