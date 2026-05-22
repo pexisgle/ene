@@ -14,6 +14,7 @@ pub struct SandboxConfig {
     pub shell_timeout_ms: u64,
     pub max_shell_output_bytes: usize,
     pub max_shell_output_lines: usize,
+    pub undo_db_path: Option<PathBuf>,
 }
 
 impl Default for SandboxConfig {
@@ -40,6 +41,7 @@ impl Default for SandboxConfig {
             shell_timeout_ms: 120_000,         // 2 minutes
             max_shell_output_bytes: 50 * 1024, // 50KB
             max_shell_output_lines: 2000,
+            undo_db_path: None,
         }
     }
 }
@@ -168,6 +170,7 @@ impl From<ene_tool_proto::SandboxConfigData> for SandboxConfig {
             shell_timeout_ms: data.shell_timeout_ms,
             max_shell_output_bytes: data.max_shell_output_bytes,
             max_shell_output_lines: data.max_shell_output_lines,
+            undo_db_path: data.undo_db_path.map(PathBuf::from),
         }
     }
 }
@@ -185,9 +188,18 @@ pub struct Sandbox {
 
 impl Sandbox {
     pub fn new(config: SandboxConfig) -> Self {
+        let undo = crate::undo_manager::UndoManager::new();
+        if let Some(ref path) = config.undo_db_path {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = undo.set_db_path(path) {
+                eprintln!("[Sandbox] Failed to open undo DB: {e}");
+            }
+        }
         Self {
             config,
-            undo: crate::undo_manager::UndoManager::new(),
+            undo,
             session_id: std::sync::RwLock::new(String::new()),
         }
     }
