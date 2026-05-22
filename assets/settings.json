@@ -1,19 +1,22 @@
 {
   "$schema": "./settings.schema.json",
   "version": 1,
-  "character": {
-    "selected_character_name": "Alicia",
-    "character_position": [-1.261557, 0.21307433, 0.0]
-  },
-  "ai": {
-    "base_url": "https://openrouter.ai/api/v1",
-    "api_key": "",
-    "user_name": "pexisgle",
-    "model": "google/gemma-4-31b-it",
-    "memory": {
-      "enabled": true,
-      "topic_change_threshold": 0.4,
-      "gguf_quantization": "F16"
+  "character": "Alicia",
+  "app": {
+    "graphics": {
+      "mask_render_downsample": 8,
+      "target_fps": 60,
+      "shadow_quality": "Medium",
+      "antialiasing_mode": "Fxaa"
     }
+  },
+  "base_url": "https://openrouter.ai/api/v1",
+  "api_key": "",
+  "user_name": "pexisgle",
+  "model": "google/gemma-4-31b-it",
+  "memory": {
+    "enabled": true,
+    "topic_change_threshold": 0.4,
+    "gguf_quantization": "F16"
   }
 }

@@ -12,18 +12,14 @@ pub fn apply_action(
 ) {
     match action {
         SettingsButtonAction::PrevCharacter => {
-            settings.selected_character =
+            let idx =
                 cycle_index(settings.selected_character, settings.characters.len(), -1);
-            settings.selected_motion = 0;
-            settings.sync_card_path();
-            settings.needs_respawn = true;
+            settings.select_character(idx);
         }
         SettingsButtonAction::NextCharacter => {
-            settings.selected_character =
+            let idx =
                 cycle_index(settings.selected_character, settings.characters.len(), 1);
-            settings.selected_motion = 0;
-            settings.sync_card_path();
-            settings.needs_respawn = true;
+            settings.select_character(idx);
         }
         SettingsButtonAction::PrevMotion => {
             settings.selected_motion = cycle_index(

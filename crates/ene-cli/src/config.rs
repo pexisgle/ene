@@ -9,17 +9,12 @@ pub fn init() -> (AiSettings, ConversationSession) {
 
     if let Ok(json_str) = std::fs::read_to_string(&config_path) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) {
-            if let Some(ai_section) = v.get("ai") {
-                if let Ok(ai) = serde_json::from_value::<AiSettings>(ai_section.clone()) {
-                    settings = ai;
-                }
+            if let Ok(ai) = serde_json::from_value::<AiSettings>(v.clone()) {
+                settings = ai;
             }
-            if let Some(card) = v
-                .get("character")
-                .and_then(|c| c.get("selected_character_card_path"))
-                .and_then(|x| x.as_str())
-            {
-                settings.character_card_path = format!("{}/{}", assets_dir.display(), card);
+            if let Some(name) = v.get("character").and_then(|c| c.as_str()) {
+                settings.character_card_path =
+                    format!("{}/characters/{}/character.json", assets_dir.display(), name);
             }
         }
     }

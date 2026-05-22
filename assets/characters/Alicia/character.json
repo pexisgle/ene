@@ -19,53 +19,7 @@
     ],
     "creator": "Ene",
     "character_version": "1.0",
-    "extensions": {
-      "ene": {
-        "default_motion": "motions/VRMA_01.vrma"
-      },
-      "expressions": [
-        {
-          "name": "neutral",
-          "description": "Default resting expression",
-          "vrm": {
-            "neutral": 1.0
-          }
-        },
-        {
-          "name": "happy",
-          "vrm": {
-            "happy": 1.0,
-            "aa": 0.3
-          }
-        },
-        {
-          "name": "sad",
-          "vrm": {
-            "sad": 1.0
-          }
-        },
-        {
-          "name": "angry",
-          "vrm": {
-            "angry": 1.0,
-            "ee": 0.2
-          }
-        },
-        {
-          "name": "relaxed",
-          "vrm": {
-            "relaxed": 1.0
-          }
-        },
-        {
-          "name": "surprised",
-          "vrm": {
-            "surprised": 1.0,
-            "oh": 0.3
-          }
-        }
-      ]
-    },
+    "extensions": {},
     "nickname": "",
     "assets": [
       {
