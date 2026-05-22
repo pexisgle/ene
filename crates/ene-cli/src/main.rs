@@ -2,7 +2,6 @@ mod cli;
 mod commands;
 mod config;
 mod context;
-mod registry;
 mod repl;
 mod stream;
 mod style;
@@ -14,20 +13,16 @@ use cli::Args;
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    let (settings, session) = config::init();
+    let runtime = config::init().await;
 
     if let Some(prompt) = args.tooltest {
-        tooltest::run(&settings, &session, &prompt).await;
+        tooltest::run(&runtime.settings, &runtime.session, &prompt).await;
     } else {
         println!("Ene Interactive CLI");
         println!("Type '/help' for a list of commands.");
 
-        let registry = registry::build(&settings).await;
         let mut ctx = context::AppContext {
-            settings,
-            session,
-            registry,
-            pending_split: None,
+            runtime,
         };
         repl::run(&mut ctx).await;
     }
