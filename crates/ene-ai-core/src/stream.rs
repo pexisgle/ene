@@ -64,7 +64,7 @@ pub async fn run_ai_with_tools(
     };
 
     let client = build_openai_client(&base_url, &api_key);
-    let model = settings.model.clone();
+    let model = settings.provider.model.clone();
 
     let memory_enabled = settings.memory.enabled;
     let mem_store = if memory_enabled {

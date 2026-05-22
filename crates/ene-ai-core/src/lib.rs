@@ -34,4 +34,4 @@ pub use session::ConversationSession;
 pub use stream::{AiStreamEvent, run_ai_with_tools};
 pub use tool_host_manager::ToolHostManager;
 pub use tools::{CompositeToolRegistry, ToolCategory, ToolDefinition, ToolRegistry};
-pub use utils::{init_memory, truncate};
+pub use utils::{init_embedding, init_memory, init_memory_store, truncate};

@@ -137,18 +137,18 @@ fn handle_card(arg: &str, ctx: &mut AppContext) {
 
 fn handle_config(ctx: &AppContext) {
     println!("--- Current Config ---");
-    println!("Provider: {}", ctx.settings.provider_name);
-    println!("Model: {}", ctx.settings.model);
-    println!("Base URL: {}", ctx.settings.base_url);
+    println!("Provider: {}", ctx.settings.provider.provider_name);
+    println!("Model: {}", ctx.settings.provider.model);
+    println!("Base URL: {}", ctx.settings.provider.base_url);
     println!("Card Path: {}", ctx.settings.character_card_path);
     println!("Tool Calling: {}", ctx.settings.tool_calling_enabled);
     println!("Memory Enabled: {}", ctx.settings.memory.enabled);
+    println!("Embedding Model: {}", ctx.settings.embedding.model);
     if ctx.settings.memory.enabled {
         println!(
             "Memory DB: {}",
             ctx.settings.resolve_memory_db_path().display()
         );
-        println!("Embedding Model: {}", ctx.settings.memory.embedding_model);
         println!(
             "Summary Recall Limit: {}",
             ctx.settings.memory.summary_recall_limit
