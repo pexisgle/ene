@@ -264,7 +264,7 @@ pub async fn run_ai_with_tools(
         };
         messages.push(asst_msg);
 
-        registry.set_session_id(&session_id_for_tools);
+        registry.set_session_id(&session_id_for_tools).await;
 
         for tool_call_enum in tool_calls {
             if let ToolCalls::Function(call) = tool_call_enum {

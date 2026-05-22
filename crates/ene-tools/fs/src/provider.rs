@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 use crate::sandbox::Sandbox;
 
 pub struct FsToolProvider {
-    sandbox: Arc<RwLock<Option<Sandbox>>>,
+    sandbox: Arc<RwLock<Option<Arc<Sandbox>>>>,
 }
 
 impl FsToolProvider {
@@ -33,14 +33,9 @@ impl ToolProvider for FsToolProvider {
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
-        let guard = self.sandbox.read().unwrap();
-        let default_sandbox;
-        let sandbox = match guard.as_ref() {
-            Some(s) => s,
-            None => {
-                default_sandbox = Sandbox::new(Default::default());
-                &default_sandbox
-            }
+        let sandbox = {
+            let guard = self.sandbox.read().unwrap();
+            guard.clone().unwrap_or_else(|| Arc::new(Sandbox::new(Default::default())))
         };
         let session_id = sandbox.session_id();
 
@@ -100,7 +95,7 @@ impl ToolProvider for FsToolProvider {
     }
 
     fn set_sandbox(&self, data: &ene_tool_proto::SandboxConfigData) {
-        let new_sandbox = Sandbox::new(data.clone().into());
+        let new_sandbox = Arc::new(Sandbox::new(data.clone().into()));
         let mut guard = self.sandbox.write().unwrap();
         *guard = Some(new_sandbox);
     }

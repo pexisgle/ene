@@ -244,14 +244,11 @@ impl ToolRegistry for IpcToolRegistry {
         })
     }
 
-    fn set_session_id(&self, session_id: &str) {
-        let rt = tokio::runtime::Handle::try_current().ok();
-        if let Some(handle) = rt {
-            let req = IpcRequest::SetSessionId {
-                session_id: session_id.to_string(),
-            };
-            let _ = handle.block_on(self.send_with_reconnect(req));
-        }
+    async fn set_session_id(&self, session_id: &str) {
+        let req = IpcRequest::SetSessionId {
+            session_id: session_id.to_string(),
+        };
+        let _ = self.send_with_reconnect(req).await;
     }
 
     async fn ensure_index_built(
