@@ -52,7 +52,7 @@ impl McpToolRegistry {
             });
         }
 
-        let mut servers = self.servers.write().unwrap();
+        let mut servers = self.servers.write().unwrap_or_else(|e| e.into_inner());
         servers.push(McpServerConnection {
             name: name.to_string(),
             client: Arc::new(client.peer().clone()),
@@ -69,7 +69,7 @@ impl McpToolRegistry {
 impl ToolRegistry for McpToolRegistry {
     fn list_tools(&self) -> Vec<ToolDefinition> {
         let mut res = Vec::new();
-        let servers = self.servers.read().unwrap();
+        let servers = self.servers.read().unwrap_or_else(|e| e.into_inner());
         for s in servers.iter() {
             res.extend(s.tools.clone());
         }
@@ -78,7 +78,7 @@ impl ToolRegistry for McpToolRegistry {
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, String> {
         let client_opt = {
-            let servers = self.servers.read().unwrap();
+            let servers = self.servers.read().unwrap_or_else(|e| e.into_inner());
             let mut found = None;
             for s in servers.iter() {
                 if s.tools.iter().any(|t| t.name == name) {

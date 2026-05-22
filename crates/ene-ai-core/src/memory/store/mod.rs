@@ -4,7 +4,6 @@ use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use std::path::Path;
-use std::sync::Mutex;
 
 mod models;
 use models::{
@@ -54,22 +53,13 @@ pub struct RecalledSummary {
     pub similarity: f32,
 }
 
+type SqlitePool = diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<SqliteConnection>>;
+
 /// SQLite ベースの長期記憶ストア
 pub struct MemoryStore {
-    conn: Mutex<SqliteConnection>,
+    pool: SqlitePool,
     pub embedding_dim: usize,
 }
-
-// SAFETY: MemoryStore is Send + Sync because:
-// - The SqliteConnection is wrapped in a Mutex, ensuring only one thread can access
-//   the connection at any given time.
-// - SqliteConnection does not implement Send/Sync by default because raw SQLite
-//   connections are not thread-safe. However, by serializing all access through
-//   the Mutex, we guarantee the same safety property that Send/Sync require:
-//   no concurrent mutable access from multiple threads.
-// - The embedding_dim field is Copy and inherently thread-safe.
-unsafe impl Send for MemoryStore {}
-unsafe impl Sync for MemoryStore {}
 
 fn parse_dt(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
@@ -78,10 +68,13 @@ fn parse_dt(s: &str) -> DateTime<Utc> {
 }
 
 impl MemoryStore {
-    fn init(mut conn: SqliteConnection, embedding_dim: usize) -> Result<Self, AiCoreError> {
+    fn init(pool: SqlitePool, embedding_dim: usize) -> Result<Self, AiCoreError> {
+        let mut conn = pool
+            .get()
+            .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?;
         init_sqlite_vec(&mut conn)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            pool,
             embedding_dim,
         })
     }
@@ -90,19 +83,20 @@ impl MemoryStore {
         let path_str = path
             .to_str()
             .ok_or_else(|| AiCoreError::MemoryStoreConnectionError("Invalid path".to_string()))?;
-        Self::init(
-            SqliteConnection::establish(path_str)
-                .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?,
-            embedding_dim,
-        )
+        let manager = diesel::r2d2::ConnectionManager::<SqliteConnection>::new(path_str);
+        let pool = diesel::r2d2::Pool::builder()
+            .build(manager)
+            .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?;
+        Self::init(pool, embedding_dim)
     }
 
     pub fn open_in_memory(embedding_dim: usize) -> Result<Self, AiCoreError> {
-        Self::init(
-            SqliteConnection::establish(":memory:")
-                .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?,
-            embedding_dim,
-        )
+        let manager = diesel::r2d2::ConnectionManager::<SqliteConnection>::new(":memory:");
+        let pool = diesel::r2d2::Pool::builder()
+            .max_size(1)
+            .build(manager)
+            .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?;
+        Self::init(pool, embedding_dim)
     }
 
     // ── Conversation Summaries ────────────────────────────────────────────────
@@ -119,7 +113,9 @@ impl MemoryStore {
         let now = Utc::now().to_rfc3339();
         let ended_str = ended_at.to_rfc3339();
 
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.pool
+            .get()
+            .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?;
 
         conn.transaction(|conn| {
             let new_summary = NewConversationSummary {
@@ -174,7 +170,9 @@ impl MemoryStore {
         similarity_threshold: f32,
     ) -> Result<Vec<RecalledSummary>, AiCoreError> {
         let query_blob = EmbeddingBlob(query_embedding.to_vec());
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.pool
+            .get()
+            .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?;
 
         let query = "SELECT id, session_id, card_name, summary, embedding, created_at, ended_at,
                             1.0 - vec_distance_cosine(embedding, ?) AS similarity
@@ -218,7 +216,9 @@ impl MemoryStore {
     ) -> Result<Vec<ConversationSummary>, AiCoreError> {
         use crate::schema::conversation_summaries::dsl;
 
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.pool
+            .get()
+            .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?;
         let rows = dsl::conversation_summaries
             .filter(dsl::card_name.eq(card_name))
             .order(dsl::created_at.desc())
@@ -244,7 +244,9 @@ impl MemoryStore {
     pub fn count_summaries(&self, card_name: &str) -> Result<i64, AiCoreError> {
         use crate::schema::conversation_summaries::dsl;
 
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.pool
+            .get()
+            .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?;
         let count = dsl::conversation_summaries
             .filter(dsl::card_name.eq(card_name))
             .count()
@@ -255,7 +257,9 @@ impl MemoryStore {
     pub fn delete_summary(&self, id: i64) -> Result<usize, AiCoreError> {
         use crate::schema::{conversation_keyfacts, conversation_summaries};
 
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.pool
+            .get()
+            .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?;
         conn.transaction(|conn| {
             diesel::delete(
                 conversation_keyfacts::table.filter(conversation_keyfacts::summary_id.eq(id)),
@@ -274,7 +278,9 @@ impl MemoryStore {
     // ── Key Facts ─────────────────────────────────────────────────────────────
 
     pub fn get_all_keyfacts(&self, card_name: &str) -> Result<Vec<KeyFact>, AiCoreError> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.pool
+            .get()
+            .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?;
 
         let query = "SELECT key, value FROM (
             SELECT key, value, ROW_NUMBER() OVER (PARTITION BY key ORDER BY created_at DESC) as rn
@@ -303,7 +309,9 @@ impl MemoryStore {
         value: &str,
     ) -> Result<(), AiCoreError> {
         let now = Utc::now().to_rfc3339();
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.pool
+            .get()
+            .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?;
 
         let new_fact = NewKeyFact {
             card_name,
@@ -323,7 +331,9 @@ impl MemoryStore {
     pub fn delete_keyfact(&self, card_name: &str, key: &str) -> Result<usize, AiCoreError> {
         use crate::schema::conversation_keyfacts::dsl;
 
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.pool
+            .get()
+            .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?;
         let count = diesel::delete(
             dsl::conversation_keyfacts
                 .filter(dsl::card_name.eq(card_name))
@@ -334,7 +344,9 @@ impl MemoryStore {
     }
 
     pub fn count_keyfacts(&self, card_name: &str) -> Result<i64, AiCoreError> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.pool
+            .get()
+            .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?;
 
         let query =
             "SELECT COUNT(DISTINCT key) as count FROM conversation_keyfacts WHERE card_name = ?";
@@ -355,7 +367,9 @@ impl MemoryStore {
         content: &str,
     ) -> Result<i64, AiCoreError> {
         let now = Utc::now().to_rfc3339();
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.pool
+            .get()
+            .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?;
 
         let new_log = NewConversationLog {
             session_id,
@@ -383,7 +397,9 @@ impl MemoryStore {
     ) -> Result<Vec<(String, String, String)>, AiCoreError> {
         use crate::schema::conversation_logs::dsl;
 
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.pool
+            .get()
+            .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?;
         let rows = dsl::conversation_logs
             .filter(dsl::session_id.eq(session_id))
             .order(dsl::created_at.asc())
@@ -405,7 +421,9 @@ impl MemoryStore {
         embedding: &[f32],
     ) -> Result<(), AiCoreError> {
         let now = Utc::now().to_rfc3339();
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.pool
+            .get()
+            .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?;
 
         let new_embedding = NewToolEmbedding {
             tool_name,
@@ -431,7 +449,9 @@ impl MemoryStore {
     pub fn list_tool_embeddings(&self) -> Result<Vec<(String, String, Vec<f32>)>, AiCoreError> {
         use crate::schema::tool_embeddings::dsl;
 
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.pool
+            .get()
+            .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?;
         let rows = dsl::tool_embeddings
             .select(models::ToolEmbeddingRow::as_select())
             .load(&mut *conn)?;
@@ -445,7 +465,9 @@ impl MemoryStore {
     pub fn delete_tool_embedding(&self, tool_name: &str) -> Result<usize, AiCoreError> {
         use crate::schema::tool_embeddings::dsl;
 
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.pool
+            .get()
+            .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?;
         let count = diesel::delete(dsl::tool_embeddings.filter(dsl::tool_name.eq(tool_name)))
             .execute(&mut *conn)?;
         Ok(count)
@@ -459,7 +481,9 @@ impl MemoryStore {
     ) -> Result<Vec<(String, f32)>, AiCoreError> {
         let query_blob = EmbeddingBlob(query_embedding.to_vec());
 
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.pool
+            .get()
+            .map_err(|e| AiCoreError::MemoryStoreConnectionError(e.to_string()))?;
         let query = "SELECT tool_name,
                             1.0 - vec_distance_cosine(embedding, ?) AS similarity
                      FROM tool_embeddings
@@ -578,7 +602,7 @@ mod tests {
             },
         ];
         let now = Utc::now().to_rfc3339();
-        let mut conn = store.conn.lock().unwrap();
+        let mut conn = store.pool.get().unwrap();
         for f in &facts {
             let new_fact = NewKeyFact {
                 card_name: "char",
@@ -618,7 +642,7 @@ mod tests {
             .unwrap();
 
         let now = Utc::now().to_rfc3339();
-        let mut conn = store.conn.lock().unwrap();
+        let mut conn = store.pool.get().unwrap();
         let new_fact = NewKeyFact {
             card_name: "char",
             summary_id: Some(summary_id),
@@ -646,7 +670,7 @@ mod tests {
             .unwrap();
 
         let now = Utc::now().to_rfc3339();
-        let mut conn = store.conn.lock().unwrap();
+        let mut conn = store.pool.get().unwrap();
         for (k, v) in &[("job", "engineer"), ("hobby", "guitar")] {
             let new_fact = NewKeyFact {
                 card_name: "char",

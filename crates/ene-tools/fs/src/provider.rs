@@ -34,7 +34,7 @@ impl ToolProvider for FsToolProvider {
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         let sandbox = {
-            let guard = self.sandbox.read().unwrap();
+            let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
             guard.clone().unwrap_or_else(|| Arc::new(Sandbox::new(Default::default())))
         };
         let session_id = sandbox.session_id();
@@ -88,7 +88,7 @@ impl ToolProvider for FsToolProvider {
     }
 
     fn set_session_id(&self, session_id: &str) {
-        let guard = self.sandbox.read().unwrap();
+        let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = guard.as_ref() {
             s.set_session_id(session_id);
         }
@@ -96,7 +96,7 @@ impl ToolProvider for FsToolProvider {
 
     fn set_sandbox(&self, data: &ene_tool_proto::SandboxConfigData) {
         let new_sandbox = Arc::new(Sandbox::new(data.clone().into()));
-        let mut guard = self.sandbox.write().unwrap();
+        let mut guard = self.sandbox.write().unwrap_or_else(|e| e.into_inner());
         *guard = Some(new_sandbox);
     }
 }
