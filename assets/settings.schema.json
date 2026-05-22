@@ -141,7 +141,15 @@
           "type": "string",
           "description": "GGUF quantization level for the local embedding model",
           "default": "F16",
-          "examples": ["F16", "Q8_0", "Q4_K_M", "Q4_K_S", "Q5_K_M", "Q2_K", "IQ4_XS"]
+          "examples": [
+            "F16",
+            "Q8_0",
+            "Q4_K_M",
+            "Q4_K_S",
+            "Q5_K_M",
+            "Q2_K",
+            "IQ4_XS"
+          ]
         },
         "recall_limit": {
           "type": "integer",
@@ -242,7 +250,12 @@
         "blocked_commands": {
           "type": "array",
           "description": "List of regex patterns for shell commands that are blocked",
-          "default": ["rm\\s+-rf\\s+/", "dd\\s+if=", "mkfs", ":\\s*\\{\\s*\\|\\s*&\\s*;\\s*\\}"],
+          "default": [
+            "rm\\s+-rf\\s+/",
+            "dd\\s+if=",
+            "mkfs",
+            ":\\s*\\{\\s*\\|\\s*&\\s*;\\s*\\}"
+          ],
           "items": { "type": "string" }
         },
         "max_read_bytes": {
@@ -292,8 +305,14 @@
       "description": "Configuration for a single MCP server",
       "required": ["name", "enabled", "transport"],
       "properties": {
-        "name": { "type": "string", "description": "Display name of the MCP server" },
-        "enabled": { "type": "boolean", "description": "Whether this MCP server is enabled" },
+        "name": {
+          "type": "string",
+          "description": "Display name of the MCP server"
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether this MCP server is enabled"
+        },
         "transport": { "$ref": "#/definitions/McpTransport" }
       }
     },
@@ -309,8 +328,16 @@
               "type": "object",
               "required": ["command", "args"],
               "properties": {
-                "command": { "type": "string", "description": "Executable command to run" },
-                "args": { "type": "array", "description": "Arguments passed to the command", "items": { "type": "string" }, "default": [] }
+                "command": {
+                  "type": "string",
+                  "description": "Executable command to run"
+                },
+                "args": {
+                  "type": "array",
+                  "description": "Arguments passed to the command",
+                  "items": { "type": "string" },
+                  "default": []
+                }
               }
             }
           },
@@ -325,7 +352,11 @@
               "type": "object",
               "required": ["url"],
               "properties": {
-                "url": { "type": "string", "format": "uri", "description": "HTTP endpoint URL for the MCP server" }
+                "url": {
+                  "type": "string",
+                  "format": "uri",
+                  "description": "HTTP endpoint URL for the MCP server"
+                }
               }
             }
           },
@@ -338,9 +369,14 @@
       "description": "Enable/disable flag and tool-specific configuration",
       "required": ["enable"],
       "properties": {
-        "enable": { "type": "boolean", "description": "Whether this tool is enabled" }
+        "enable": {
+          "type": "boolean",
+          "description": "Whether this tool is enabled"
+        }
       },
-      "additionalProperties": { "description": "Tool-specific configuration passed to set_config()" }
+      "additionalProperties": {
+        "description": "Tool-specific configuration passed to set_config()"
+      }
     }
   }
 }

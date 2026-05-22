@@ -114,8 +114,9 @@ pub async fn read(
         );
         for (i, line) in sliced.iter().enumerate() {
             let line_num = start + i + 1;
-            let truncated = if line.len() > MAX_LINE_LENGTH {
-                format!("{}{}", &line[..MAX_LINE_LENGTH], MAX_LINE_SUFFIX)
+            let truncated = if line.chars().count() > MAX_LINE_LENGTH {
+                let s: String = line.chars().take(MAX_LINE_LENGTH).collect();
+                format!("{}{}", s, MAX_LINE_SUFFIX)
             } else {
                 line.to_string()
             };
@@ -153,8 +154,9 @@ pub async fn read(
     );
     for (i, line) in sliced.iter().enumerate() {
         let line_num = start + i + 1;
-        let truncated = if line.len() > MAX_LINE_LENGTH {
-            format!("{}{}", &line[..MAX_LINE_LENGTH], MAX_LINE_SUFFIX)
+        let truncated = if line.chars().count() > MAX_LINE_LENGTH {
+            let s: String = line.chars().take(MAX_LINE_LENGTH).collect();
+            format!("{}{}", s, MAX_LINE_SUFFIX)
         } else {
             line.to_string()
         };
