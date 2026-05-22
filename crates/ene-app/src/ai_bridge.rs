@@ -156,7 +156,7 @@ fn launch_ai_request(
     let runtime = runtime_state.runtime.as_mut().unwrap();
     runtime.session.add_user_message(&user_input);
 
-    let ai_settings = settings.ai.clone();
+    let ai_settings = settings.ai.ai.clone();
     let session_clone = runtime.session.clone();
     let registry_clone = runtime.registry.clone();
 
@@ -196,7 +196,7 @@ fn start_next_ai_request(
 
     // Initialize unified runtime if not yet initialized
     if runtime_state.runtime.is_none() {
-        let ai_settings = settings.ai.clone();
+        let ai_settings = settings.ai.ai.clone();
         match rt.0.block_on(AiRuntime::init(ai_settings)) {
             Ok(runtime) => {
                 runtime_state.runtime = Some(runtime);
@@ -213,26 +213,26 @@ fn start_next_ai_request(
     let runtime = runtime_state.runtime.as_mut().unwrap();
 
     // Character card loading if card path changed
-    if runtime.session.current_card_path != settings.ai.character_card_path {
-        match runtime.session.load_card(&settings.ai.character_card_path) {
+    if runtime.session.current_card_path != settings.ai.ai.character_card_path {
+        match runtime.session.load_card(&settings.ai.ai.character_card_path) {
             Ok(resolved) => {
                 expression_map.map = resolved.into_iter().map(|e| (e.name, e.vrm)).collect();
             }
             Err(e) => {
                 runtime_state.pending.pop_front();
-                stream_writer.write(AiStreamEvent::Error(e));
+                stream_writer.write(AiStreamEvent::Error(e.to_string()));
                 return;
             }
         }
     }
 
     // Unify Session splitting boundary check
-    runtime.check_and_perform_split(&user_input, &settings.ai.user_name);
+    runtime.check_and_perform_split(&user_input, &settings.ai.ai.user_name);
 
     // Embed asynchronously without blocking the game loop.
     // If the embedding takes longer than 50ms, we defer to the next frame
     // via the embedding_in_progress flag and process_embedding system.
-    let embedder = runtime.session.embedding_provider.clone();
+    let embedder = runtime.session.memory.embedding_provider.clone();
     if let Some(embedder) = embedder {
         let user_input_clone = user_input.clone();
         let (embed_tx, embed_rx) = tokio::sync::oneshot::channel();
@@ -272,7 +272,7 @@ fn poll_ai_worker(
     mut stream_writer: MessageWriter<AiStreamEvent>,
     settings: Res<CharacterSettings>,
 ) {
-    if settings.ai.memory.enabled && settings.ai.memory.auto_session_split {
+    if settings.ai.ai.memory.enabled && settings.ai.ai.memory.auto_session_split {
         if let Some(runtime) = runtime_state.runtime.as_mut() {
             if let Some(result) = poll_split_result(&mut runtime.pending_split) {
                 match result {
@@ -292,7 +292,7 @@ fn poll_ai_worker(
                             eprintln!("\x1b[33m[Session] Key facts: {}\x1b[0m", facts_str);
                         }
                         runtime.session.reset_session();
-                        runtime.session.session_id = split_result.new_session_id;
+                        runtime.session.memory.session_id = split_result.new_session_id;
                         eprintln!("\x1b[33m[Session] Starting new conversation.\x1b[0m");
                     }
                     Err(e) => {

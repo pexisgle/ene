@@ -31,13 +31,13 @@ impl ToolProcess {
         matches!(self.child.try_wait(), Ok(None))
     }
 
-    fn restart(&mut self) -> Result<(), String> {
+    fn restart(&mut self) -> Result<(), crate::error::AiCoreError> {
         self.restart_count += 1;
         if self.restart_count > MAX_RESTARTS {
-            return Err(format!(
+            return Err(crate::error::AiCoreError::ToolExecutionError(format!(
                 "Tool '{}' exceeded max restarts ({})",
                 self.name, MAX_RESTARTS
-            ));
+            )));
         }
 
         let _ = self.child.kill();
@@ -55,7 +55,7 @@ impl ToolProcess {
         let child = std::process::Command::new(&self.binary_path)
             .env("ENE_TOOL_SOCKET", &self.socket_path)
             .spawn()
-            .map_err(|e| format!("Failed to restart '{}': {}", self.binary_path.display(), e))?;
+            .map_err(|e| crate::error::AiCoreError::ToolExecutionError(format!("Failed to restart '{}': {}", self.binary_path.display(), e)))?;
 
         self.child = child;
         Ok(())
@@ -98,7 +98,7 @@ impl ToolRegistry for SupervisedIpcRegistry {
         reg.list_relevant_tools(query_embedding, limit)
     }
 
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, String> {
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, crate::error::AiCoreError> {
         let reg = self.registry.read().unwrap_or_else(|e| e.into_inner()).clone();
         let result = reg.call_tool(name, arguments).await;
 
@@ -170,7 +170,7 @@ impl ToolRegistry for ToolHostManager {
         self.composite.list_relevant_tools(query_embedding, limit)
     }
 
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, String> {
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, crate::error::AiCoreError> {
         self.composite.call_tool(name, arguments).await
     }
 
@@ -182,19 +182,19 @@ impl ToolRegistry for ToolHostManager {
         &self,
         embedder: &dyn crate::embedding::EmbeddingProvider,
         store: Option<&MemoryStore>,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::error::AiCoreError> {
         self.composite.ensure_index_built(embedder, store).await
     }
 }
 
 impl ToolHostManager {
-    pub async fn start(settings: &AiSettings) -> Result<Self, String> {
+    pub async fn start(settings: &AiSettings) -> Result<Self, crate::error::AiCoreError> {
         let undo_db_path = Some(settings.resolve_undo_db_path().to_string_lossy().to_string());
         let sandbox = settings.sandbox.to_sandbox_config_data(undo_db_path);
         let mut supervised_registries = Vec::new();
 
         std::fs::create_dir_all(paths::tool_socket_dir())
-            .map_err(|e| format!("Failed to create socket dir: {e}"))?;
+            .map_err(|e| crate::error::AiCoreError::ToolExecutionError(format!("Failed to create socket dir: {e}")))?;
 
         for (name, entry) in &settings.tools.tools {
             if !entry.enable {
@@ -235,9 +235,9 @@ impl ToolHostManager {
         name: &str,
         sandbox: &ene_tool_proto::SandboxConfigData,
         tool_config: Option<serde_json::Value>,
-    ) -> Result<Arc<dyn ToolRegistry>, String> {
+    ) -> Result<Arc<dyn ToolRegistry>, crate::error::AiCoreError> {
         let binary_path = Self::find_tool_binary(name)
-            .ok_or_else(|| format!("Tool binary '{}' not found", name))?;
+            .ok_or_else(|| crate::error::AiCoreError::ToolExecutionError(format!("Tool binary '{}' not found", name)))?;
 
         let socket_path = paths::tool_socket_dir().join(format!("ene-tool-{}.sock", name));
 
@@ -248,7 +248,7 @@ impl ToolHostManager {
         let child = std::process::Command::new(&binary_path)
             .env("ENE_TOOL_SOCKET", &socket_path)
             .spawn()
-            .map_err(|e| format!("Failed to spawn '{}': {}", binary_path.display(), e))?;
+            .map_err(|e| crate::error::AiCoreError::ToolExecutionError(format!("Failed to spawn '{}': {}", binary_path.display(), e)))?;
 
         let process = ToolProcess {
             name: name.to_string(),
@@ -305,7 +305,7 @@ impl ToolHostManager {
         tool_config: Option<serde_json::Value>,
         max_retries: u32,
         delay_ms: u64,
-    ) -> Result<IpcToolRegistry, String> {
+    ) -> Result<IpcToolRegistry, crate::error::AiCoreError> {
         let mut attempts = 0;
         loop {
             match IpcToolRegistry::new(
@@ -319,12 +319,12 @@ impl ToolHostManager {
                 Err(e) => {
                     attempts += 1;
                     if attempts >= max_retries {
-                        return Err(format!(
+                        return Err(crate::error::AiCoreError::ToolExecutionError(format!(
                             "Failed to connect to tool at {} after {} attempts: {}",
                             socket_path.display(),
                             attempts,
                             e
-                        ));
+                        )));
                     }
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 }

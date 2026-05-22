@@ -6,6 +6,7 @@ use crate::tools::ToolRegistry;
 use crate::tool_host_manager::ToolHostManager;
 use crate::mcp_client::McpToolRegistry;
 use crate::{PendingSplitTask, SplitTaskInput, spawn_split_task};
+use crate::error::AiCoreError;
 use std::sync::Arc;
 
 pub struct AiRuntime {
@@ -16,17 +17,19 @@ pub struct AiRuntime {
 }
 
 impl AiRuntime {
-    pub async fn init(settings: AiSettings) -> Result<Self, String> {
+    pub async fn init(settings: AiSettings) -> Result<Self, AiCoreError> {
         let mut session = ConversationSession::new();
 
         // 1. Initialize embedding
-        let embedder = init_embedding(&settings)?;
-        session.embedding_provider = Some(embedder.clone());
+        let embedder = init_embedding(&settings)
+            .map_err(|e| AiCoreError::EmbeddingError(e))?;
+        session.memory.embedding_provider = Some(embedder.clone());
 
         // 2. Initialize memory store if enabled
         if settings.memory.enabled {
-            let store = init_memory_store(&settings, &*embedder)?;
-            session.memory_store = Some(store);
+            let store = init_memory_store(&settings, &*embedder)
+                .map_err(|e| AiCoreError::MemoryStoreConnectionError(e))?;
+            session.memory.memory_store = Some(store);
         }
 
         // 3. Load default character card
@@ -49,11 +52,11 @@ impl AiRuntime {
         if !self.settings.memory.enabled || !self.settings.memory.auto_session_split {
             return;
         }
-        let store = match &self.session.memory_store {
+        let store = match &self.session.memory.memory_store {
             Some(s) => s,
             None => return,
         };
-        let embedder = match &self.session.embedding_provider {
+        let embedder = match &self.session.memory.embedding_provider {
             Some(e) => e,
             None => return,
         };
@@ -61,13 +64,13 @@ impl AiRuntime {
             spawn_split_task(
                 &mut self.pending_split,
                 SplitTaskInput {
-                    last_input_embedding: self.session.last_input_embedding.clone(),
-                    last_message_time: self.session.last_message_time,
-                    current_turn_count: self.session.current_turn_count,
+                    last_input_embedding: self.session.state.last_input_embedding.clone(),
+                    last_message_time: self.session.state.last_message_time,
+                    current_turn_count: self.session.state.current_turn_count,
                     user_input: user_input.to_string(),
                     settings: self.settings.clone(),
-                    history: self.session.conversation_history.clone(),
-                    session_id: self.session.session_id.clone(),
+                    history: self.session.history.conversation_history.clone(),
+                    session_id: self.session.memory.session_id.clone(),
                     card_name: self.session.card_name().to_string(),
                     user_name: user_name.to_string(),
                     store: store.clone(),
@@ -77,17 +80,18 @@ impl AiRuntime {
         }
     }
 
-    pub async fn embed_input(&mut self, input: &str) -> Result<Vec<f32>, String> {
+    pub async fn embed_input(&mut self, input: &str) -> Result<Vec<f32>, AiCoreError> {
         let embedder = self
             .session
+            .memory
             .embedding_provider
             .clone()
-            .ok_or_else(|| "No embedding provider initialized".to_string())?;
+            .ok_or_else(|| AiCoreError::EmbeddingError("No embedding provider initialized".to_string()))?;
 
         let embedding = embedder
             .embed_query(input)
             .await
-            .map_err(|e| format!("Failed to embed: {}", e))?;
+            .map_err(|e| AiCoreError::EmbeddingError(format!("Failed to embed: {}", e)))?;
 
         self.session.set_pending_embedding(embedding.clone());
         self.session.set_last_input_embedding(embedding.clone());
@@ -95,7 +99,7 @@ impl AiRuntime {
     }
 }
 
-pub async fn build_tool_registry(settings: &AiSettings) -> Result<Arc<dyn ToolRegistry>, String> {
+pub async fn build_tool_registry(settings: &AiSettings) -> Result<Arc<dyn ToolRegistry>, AiCoreError> {
     let mut manager = match ToolHostManager::start(settings).await {
         Ok(m) => m,
         Err(e) => {
@@ -107,7 +111,7 @@ pub async fn build_tool_registry(settings: &AiSettings) -> Result<Arc<dyn ToolRe
                 ..settings.clone()
             })
             .await
-            .map_err(|e2| format!("Fatal: Failed to start fallback ToolHostManager: {}", e2))?
+            .map_err(|e2| AiCoreError::ConfigError(format!("Fatal: Failed to start fallback ToolHostManager: {}", e2)))?
         }
     };
 

@@ -22,7 +22,7 @@ pub trait ToolRegistry: Send + Sync {
         &self,
         name: &str,
         arguments: &str, // JSON string from LLM
-    ) -> Result<String, String>;
+    ) -> Result<String, crate::error::AiCoreError>;
 
     /// 現在のセッションIDを設定（Undo等で使用）
     async fn set_session_id(&self, _session_id: &str) {}
@@ -32,7 +32,7 @@ pub trait ToolRegistry: Send + Sync {
         &self,
         _embedder: &dyn crate::embedding::EmbeddingProvider,
         _store: Option<&crate::memory::store::MemoryStore>,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::error::AiCoreError> {
         Ok(())
     }
 }

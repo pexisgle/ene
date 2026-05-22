@@ -78,14 +78,14 @@ fn apply_graphics_settings(
     camera_query: Query<Entity, With<MainViewCamera>>,
     mut commands: Commands,
 ) {
-    shadow_map.size = settings.shadow_quality.shadow_map_size();
+    shadow_map.size = settings.graphics.shadow_quality.shadow_map_size();
 
     let Ok(camera_entity) = camera_query.single() else {
         return;
     };
 
     let mut camera = commands.entity(camera_entity);
-    match settings.antialiasing_mode {
+    match settings.graphics.antialiasing_mode {
         AntialiasingMode::Off => {
             camera.remove::<Fxaa>();
             camera.remove::<Smaa>();
@@ -114,12 +114,12 @@ fn apply_graphics_settings(
 }
 
 fn pace_frame_rate(settings: Res<CharacterSettings>, mut pacing: ResMut<FramePacingState>) {
-    if settings.target_fps == 0 {
+    if settings.graphics.target_fps == 0 {
         pacing.last_frame_end = Some(Instant::now());
         return;
     }
 
-    let target_frame_duration = Duration::from_secs_f64(1.0 / f64::from(settings.target_fps));
+    let target_frame_duration = Duration::from_secs_f64(1.0 / f64::from(settings.graphics.target_fps));
     let now = Instant::now();
 
     let Some(last_frame_end) = pacing.last_frame_end else {

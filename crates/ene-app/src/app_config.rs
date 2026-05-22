@@ -191,25 +191,69 @@ pub struct CharacterEntry {
     pub default_motion: Option<String>,
 }
 
-#[derive(Resource, Debug)]
-pub struct CharacterSettings {
-    pub assets_dir: PathBuf,
-    pub characters: Vec<CharacterEntry>,
-    pub selected_character: usize,
-    pub selected_motion: usize,
-    pub settings_window_visible: bool,
-    pub debug_overlay_visible: bool,
-    pub needs_respawn: bool,
-    pub model_scale: f32,
-    pub character_position: Vec3,
-    pub look_at_strength: f32,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphicsSettings {
     pub mask_render_downsample: u32,
     pub target_fps: u32,
     pub shadow_quality: ShadowQuality,
     pub antialiasing_mode: AntialiasingMode,
-    pub ai: ene_ai_core::config::AiSettings,
+}
+
+impl Default for GraphicsSettings {
+    fn default() -> Self {
+        Self {
+            mask_render_downsample: DEFAULT_MASK_RENDER_DOWNSAMPLE,
+            target_fps: DEFAULT_TARGET_FPS,
+            shadow_quality: DEFAULT_SHADOW_QUALITY,
+            antialiasing_mode: DEFAULT_ANTIALIASING_MODE,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CharacterState {
+    pub selected_character: usize,
+    pub selected_motion: usize,
+    pub needs_respawn: bool,
+    pub model_scale: f32,
+    pub character_position: Vec3,
+    pub look_at_strength: f32,
+}
+
+impl Default for CharacterState {
+    fn default() -> Self {
+        Self {
+            selected_character: 0,
+            selected_motion: 0,
+            needs_respawn: true,
+            model_scale: 1.0,
+            character_position: Vec3::ZERO,
+            look_at_strength: 0.60,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct UiState {
+    pub settings_window_visible: bool,
+    pub debug_overlay_visible: bool,
     pub ai_chat_input: String,
     pub ai_latest_response: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AiConfig {
+    pub ai: ene_ai_core::config::AiSettings,
+}
+
+#[derive(Resource, Debug)]
+pub struct CharacterSettings {
+    pub assets_dir: PathBuf,
+    pub characters: Vec<CharacterEntry>,
+    pub graphics: GraphicsSettings,
+    pub character_state: CharacterState,
+    pub ui: UiState,
+    pub ai: AiConfig,
 }
 
 impl CharacterSettings {
@@ -250,31 +294,26 @@ impl CharacterSettings {
         let mut settings = Self {
             assets_dir: assets_dir.to_path_buf(),
             characters,
-            selected_character,
-            selected_motion,
-            settings_window_visible: false,
-            debug_overlay_visible: false,
-            needs_respawn: true,
-            model_scale: 1.0,
-            character_position: Vec3::ZERO,
-            look_at_strength: 0.60,
-            mask_render_downsample: DEFAULT_MASK_RENDER_DOWNSAMPLE,
-            target_fps: DEFAULT_TARGET_FPS,
-            shadow_quality: DEFAULT_SHADOW_QUALITY,
-            antialiasing_mode: DEFAULT_ANTIALIASING_MODE,
-            ai: ene_ai_core::config::AiSettings {
-                character_card_path: format!("{}/{}", assets_dir.display(), selected_card_path),
+            graphics: GraphicsSettings::default(),
+            character_state: CharacterState {
+                selected_character,
+                selected_motion,
                 ..Default::default()
             },
-            ai_chat_input: String::new(),
-            ai_latest_response: String::new(),
+            ui: UiState::default(),
+            ai: AiConfig {
+                ai: ene_ai_core::config::AiSettings {
+                    character_card_path: format!("{}/{}", assets_dir.display(), selected_card_path),
+                    ..Default::default()
+                },
+            },
         };
         settings.load_from_file();
         settings
     }
 
     pub fn current_entry(&self) -> &CharacterEntry {
-        &self.characters[self.selected_character]
+        &self.characters[self.character_state.selected_character]
     }
 
     pub fn current_character(&self) -> &str {
@@ -282,7 +321,7 @@ impl CharacterSettings {
     }
 
     pub fn current_motion(&self) -> &str {
-        &self.current_entry().motion_paths[self.selected_motion]
+        &self.current_entry().motion_paths[self.character_state.selected_motion]
     }
 
     pub fn current_character_card(&self) -> &str {
@@ -295,17 +334,17 @@ impl CharacterSettings {
             self.assets_dir.display(),
             self.current_character_card()
         );
-        self.ai.character_card_path = path;
+        self.ai.ai.character_card_path = path;
     }
 
     pub fn clamp_runtime_values(&mut self) {
-        self.model_scale = self.model_scale.clamp(0.25, 4.0);
-        self.character_position.x = self.character_position.x.clamp(-3.0, 3.0);
-        self.character_position.y = self.character_position.y.clamp(-2.0, 3.0);
-        self.character_position.z = self.character_position.z.clamp(-4.0, 3.0);
-        self.look_at_strength = self.look_at_strength.clamp(0.0, 1.0);
-        self.mask_render_downsample = normalize_mask_render_downsample(self.mask_render_downsample);
-        self.target_fps = normalize_target_fps(self.target_fps);
+        self.character_state.model_scale = self.character_state.model_scale.clamp(0.25, 4.0);
+        self.character_state.character_position.x = self.character_state.character_position.x.clamp(-3.0, 3.0);
+        self.character_state.character_position.y = self.character_state.character_position.y.clamp(-2.0, 3.0);
+        self.character_state.character_position.z = self.character_state.character_position.z.clamp(-4.0, 3.0);
+        self.character_state.look_at_strength = self.character_state.look_at_strength.clamp(0.0, 1.0);
+        self.graphics.mask_render_downsample = normalize_mask_render_downsample(self.graphics.mask_render_downsample);
+        self.graphics.target_fps = normalize_target_fps(self.graphics.target_fps);
     }
 
     pub fn character_settings_path(&self) -> PathBuf {
@@ -326,13 +365,13 @@ impl CharacterSettings {
     pub fn save_per_character_settings(&self) {
         let per = CharacterPerSettings {
             character_position: [
-                self.character_position.x,
-                self.character_position.y,
-                self.character_position.z,
+                self.character_state.character_position.x,
+                self.character_state.character_position.y,
+                self.character_state.character_position.z,
             ],
             selected_motion_path: self.motion_path_relative(),
-            model_scale: self.model_scale,
-            look_at_strength: self.look_at_strength,
+            model_scale: self.character_state.model_scale,
+            look_at_strength: self.character_state.look_at_strength,
             default_motion: self.motion_path_relative(),
             expressions: None,
         };
@@ -354,13 +393,13 @@ impl CharacterSettings {
         };
         match serde_json::from_str::<CharacterPerSettings>(&json) {
             Ok(per) => {
-                self.character_position = Vec3::new(
+                self.character_state.character_position = Vec3::new(
                     per.character_position[0],
                     per.character_position[1],
                     per.character_position[2],
                 );
-                self.model_scale = per.model_scale;
-                self.look_at_strength = per.look_at_strength;
+                self.character_state.model_scale = per.model_scale;
+                self.character_state.look_at_strength = per.look_at_strength;
                 if !per.selected_motion_path.is_empty() {
                     let abs_path = format!(
                         "characters/{}/{}",
@@ -373,7 +412,7 @@ impl CharacterSettings {
                         .iter()
                         .position(|p| p == &abs_path)
                     {
-                        self.selected_motion = m;
+                        self.character_state.selected_motion = m;
                     }
                 }
             }
@@ -387,15 +426,15 @@ impl CharacterSettings {
     }
 
     pub fn select_character(&mut self, idx: usize) {
-        if idx >= self.characters.len() || idx == self.selected_character {
+        if idx >= self.characters.len() || idx == self.character_state.selected_character {
             return;
         }
         self.save_per_character_settings();
-        self.selected_character = idx;
-        self.selected_motion = 0;
+        self.character_state.selected_character = idx;
+        self.character_state.selected_motion = 0;
         self.sync_card_path();
         self.load_per_character_settings();
-        self.needs_respawn = true;
+        self.character_state.needs_respawn = true;
     }
 
     pub fn save(&self) {
@@ -421,7 +460,7 @@ impl CharacterSettings {
         };
 
         // ai-core に委譲: AiSettings の読み取り + character_card_path 解決
-        self.ai = ene_ai_core::config::load_settings_from(&self.assets_dir, &path);
+        self.ai.ai = ene_ai_core::config::load_settings_from(&self.assets_dir, &path);
 
         // アプリ固有フィールドは raw JSON から別途パース
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
@@ -429,17 +468,17 @@ impl CharacterSettings {
             if let Some(name) = value.get("character").and_then(|c| c.as_str()) {
                 if !name.is_empty() {
                     if let Some(idx) = self.characters.iter().position(|c| c.name == name) {
-                        self.selected_character = idx;
+                        self.character_state.selected_character = idx;
                     }
                 }
             }
             // グラフィック設定
             if let Some(app_val) = value.get("app") {
                 if let Ok(app) = serde_json::from_value::<AppSection>(app_val.clone()) {
-                    self.mask_render_downsample = app.graphics.mask_render_downsample;
-                    self.target_fps = app.graphics.target_fps;
-                    self.shadow_quality = app.graphics.shadow_quality;
-                    self.antialiasing_mode = app.graphics.antialiasing_mode;
+                    self.graphics.mask_render_downsample = app.graphics.mask_render_downsample;
+                    self.graphics.target_fps = app.graphics.target_fps;
+                    self.graphics.shadow_quality = app.graphics.shadow_quality;
+                    self.graphics.antialiasing_mode = app.graphics.antialiasing_mode;
                 }
             }
         }
@@ -508,13 +547,13 @@ impl AppSettings {
             character: s.current_entry().name.clone(),
             app: AppSection {
                 graphics: GraphicsSection {
-                    mask_render_downsample: s.mask_render_downsample,
-                    target_fps: s.target_fps,
-                    shadow_quality: s.shadow_quality,
-                    antialiasing_mode: s.antialiasing_mode,
+                    mask_render_downsample: s.graphics.mask_render_downsample,
+                    target_fps: s.graphics.target_fps,
+                    shadow_quality: s.graphics.shadow_quality,
+                    antialiasing_mode: s.graphics.antialiasing_mode,
                 },
             },
-            ai: s.ai.clone(),
+            ai: s.ai.ai.clone(),
         }
     }
 

@@ -24,14 +24,14 @@ async fn handle_search(query: &str, ctx: &AppContext) {
         );
         return;
     }
-    let Some(store) = &ctx.session.memory_store else {
+    let Some(store) = &ctx.session.memory.memory_store else {
         println!(
             "{}",
             style::warning("[Memory] メモリが有効ではありません。")
         );
         return;
     };
-    let Some(embedder) = &ctx.session.embedding_provider else {
+    let Some(embedder) = &ctx.session.memory.embedding_provider else {
         println!(
             "{}",
             style::warning("[Memory] Embedding プロバイダーが利用できません。")
@@ -87,7 +87,7 @@ async fn handle_search(query: &str, ctx: &AppContext) {
 }
 
 fn handle_list(ctx: &AppContext) {
-    let Some(store) = &ctx.session.memory_store else {
+    let Some(store) = &ctx.session.memory.memory_store else {
         println!(
             "{}",
             style::warning("[Memory] メモリが有効ではありません。")

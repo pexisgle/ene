@@ -231,16 +231,17 @@ impl ToolRegistry for IpcToolRegistry {
         }
     }
 
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, String> {
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, crate::error::AiCoreError> {
         self.send_with_reconnect(IpcRequest::CallTool {
             name: name.to_string(),
             arguments: arguments.to_string(),
         })
         .await
+        .map_err(crate::error::AiCoreError::ToolExecutionError)
         .and_then(|resp| match resp {
-            IpcResponse::CallResult { result } => result.map_err(|e| e.to_string()),
-            IpcResponse::Error { message } => Err(message),
-            _ => Err("Unexpected response for CallTool".to_string()),
+            IpcResponse::CallResult { result } => result.map_err(|e| crate::error::AiCoreError::ToolExecutionError(e.to_string())),
+            IpcResponse::Error { message } => Err(crate::error::AiCoreError::ToolExecutionError(message)),
+            _ => Err(crate::error::AiCoreError::ToolExecutionError("Unexpected response for CallTool".to_string())),
         })
     }
 
@@ -255,7 +256,7 @@ impl ToolRegistry for IpcToolRegistry {
         &self,
         _embedder: &dyn crate::embedding::EmbeddingProvider,
         _store: Option<&crate::memory::store::MemoryStore>,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::error::AiCoreError> {
         Ok(())
     }
 }

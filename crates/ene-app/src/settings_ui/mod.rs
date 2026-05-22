@@ -102,24 +102,25 @@ impl Default for SettingsInputState {
 
 impl SettingsInputState {
     fn sync_from_settings(&mut self, settings: &CharacterSettings) {
-        self.look_at_strength = format!("{:.2}", settings.look_at_strength);
-        self.model_scale = format!("{:.2}", settings.model_scale);
-        self.character_pos_x = format!("{:+.2}", settings.character_position.x);
-        self.character_pos_y = format!("{:+.2}", settings.character_position.y);
-        self.character_pos_z = format!("{:+.2}", settings.character_position.z);
-        self.ai_user_name = settings.ai.user_name.clone();
-        self.ai_runtime_rules = settings.ai.runtime_rules.clone();
-        self.ai_base_url = settings.ai.provider.base_url.clone();
-        self.ai_api_key = settings.ai.provider.api_key.clone();
-        self.ai_chat_input = settings.ai_chat_input.clone();
-        self.ai_memory_enabled = settings.ai.memory.enabled;
-        self.ai_embedding_provider = match settings.ai.embedding.provider_type {
+        self.look_at_strength = format!("{:.2}", settings.character_state.look_at_strength);
+        self.model_scale = format!("{:.2}", settings.character_state.model_scale);
+        self.character_pos_x = format!("{:+.2}", settings.character_state.character_position.x);
+        self.character_pos_y = format!("{:+.2}", settings.character_state.character_position.y);
+        self.character_pos_z = format!("{:+.2}", settings.character_state.character_position.z);
+        self.ai_user_name = settings.ai.ai.user_name.clone();
+        self.ai_runtime_rules = settings.ai.ai.runtime_rules.clone();
+        self.ai_base_url = settings.ai.ai.provider.base_url.clone();
+        self.ai_api_key = settings.ai.ai.provider.api_key.clone();
+        self.ai_chat_input = settings.ui.ai_chat_input.clone();
+        self.ai_memory_enabled = settings.ai.ai.memory.enabled;
+        self.ai_embedding_provider = match settings.ai.ai.embedding.provider_type {
             ene_ai_core::EmbeddingProviderType::Api => "api".to_string(),
             ene_ai_core::EmbeddingProviderType::Local => "local".to_string(),
         };
-        self.ai_embedding_model = settings.ai.embedding.model.clone();
-        self.ai_embedding_base_url = settings.ai.embedding.base_url.clone();
+        self.ai_embedding_model = settings.ai.ai.embedding.model.clone();
+        self.ai_embedding_base_url = settings.ai.ai.embedding.base_url.clone();
         self.ai_embedding_dimensions = settings
+            .ai
             .ai
             .embedding
             .dimensions
@@ -190,13 +191,13 @@ impl SettingsValueKind {
         match self {
             SettingsValueKind::Character => format!(
                 "[{}/{}] {}",
-                settings.selected_character + 1,
+                settings.character_state.selected_character + 1,
                 settings.characters.len(),
                 settings.current_entry().name
             ),
             SettingsValueKind::Motion => format!(
                 "[{}/{}] {}",
-                settings.selected_motion + 1,
+                settings.character_state.selected_motion + 1,
                 settings.current_entry().motion_paths.len(),
                 compact_asset_name(settings.current_motion())
             ),
@@ -208,74 +209,74 @@ impl SettingsValueKind {
                 }
             }
             SettingsValueKind::DebugOverlay => {
-                if settings.debug_overlay_visible {
+                if settings.ui.debug_overlay_visible {
                     "Visible".to_string()
                 } else {
                     "Hidden".to_string()
                 }
             }
             SettingsValueKind::MaskRenderDownsample => {
-                format!("{}x", settings.mask_render_downsample)
+                format!("{}x", settings.graphics.mask_render_downsample)
             }
-            SettingsValueKind::TargetFps => target_fps_label(settings.target_fps),
-            SettingsValueKind::ShadowQuality => settings.shadow_quality.label().to_string(),
-            SettingsValueKind::AntialiasingMode => settings.antialiasing_mode.label().to_string(),
-            SettingsValueKind::LookAtStrength => format!("{:.2}", settings.look_at_strength),
-            SettingsValueKind::ModelScale => format!("{:.2}", settings.model_scale),
+            SettingsValueKind::TargetFps => target_fps_label(settings.graphics.target_fps),
+            SettingsValueKind::ShadowQuality => settings.graphics.shadow_quality.label().to_string(),
+            SettingsValueKind::AntialiasingMode => settings.graphics.antialiasing_mode.label().to_string(),
+            SettingsValueKind::LookAtStrength => format!("{:.2}", settings.character_state.look_at_strength),
+            SettingsValueKind::ModelScale => format!("{:.2}", settings.character_state.model_scale),
             SettingsValueKind::CharacterPositionX => {
-                format!("{:+.2}", settings.character_position.x)
+                format!("{:+.2}", settings.character_state.character_position.x)
             }
             SettingsValueKind::CharacterPositionY => {
-                format!("{:+.2}", settings.character_position.y)
+                format!("{:+.2}", settings.character_state.character_position.y)
             }
             SettingsValueKind::CharacterPositionZ => {
-                format!("{:+.2}", settings.character_position.z)
+                format!("{:+.2}", settings.character_state.character_position.z)
             }
-            SettingsValueKind::AiUserName => settings.ai.user_name.clone(),
-            SettingsValueKind::AiRuntimeRules => settings.ai.runtime_rules.clone(),
-            SettingsValueKind::AiProviderName => settings.ai.provider.provider_name.clone(),
-            SettingsValueKind::AiModel => settings.ai.provider.model.clone(),
-            SettingsValueKind::AiBaseUrl => settings.ai.provider.base_url.clone(),
-            SettingsValueKind::AiApiKey => masked_secret(&settings.ai.provider.api_key),
-            SettingsValueKind::AiChatInput => settings.ai_chat_input.clone(),
+            SettingsValueKind::AiUserName => settings.ai.ai.user_name.clone(),
+            SettingsValueKind::AiRuntimeRules => settings.ai.ai.runtime_rules.clone(),
+            SettingsValueKind::AiProviderName => settings.ai.ai.provider.provider_name.clone(),
+            SettingsValueKind::AiModel => settings.ai.ai.provider.model.clone(),
+            SettingsValueKind::AiBaseUrl => settings.ai.ai.provider.base_url.clone(),
+            SettingsValueKind::AiApiKey => masked_secret(&settings.ai.ai.provider.api_key),
+            SettingsValueKind::AiChatInput => settings.ui.ai_chat_input.clone(),
         }
     }
 
     fn apply_input(self, value: &str, settings: &mut CharacterSettings) -> Result<(), ()> {
         match self {
             SettingsValueKind::LookAtStrength => {
-                parse_and_assign(value, |parsed| settings.look_at_strength = parsed)
+                parse_and_assign(value, |parsed| settings.character_state.look_at_strength = parsed)
             }
             SettingsValueKind::ModelScale => {
-                parse_and_assign(value, |parsed| settings.model_scale = parsed)
+                parse_and_assign(value, |parsed| settings.character_state.model_scale = parsed)
             }
             SettingsValueKind::CharacterPositionX => {
-                parse_and_assign(value, |parsed| settings.character_position.x = parsed)
+                parse_and_assign(value, |parsed| settings.character_state.character_position.x = parsed)
             }
             SettingsValueKind::CharacterPositionY => {
-                parse_and_assign(value, |parsed| settings.character_position.y = parsed)
+                parse_and_assign(value, |parsed| settings.character_state.character_position.y = parsed)
             }
             SettingsValueKind::CharacterPositionZ => {
-                parse_and_assign(value, |parsed| settings.character_position.z = parsed)
+                parse_and_assign(value, |parsed| settings.character_state.character_position.z = parsed)
             }
             SettingsValueKind::AiUserName => {
-                settings.ai.user_name = value.to_string();
+                settings.ai.ai.user_name = value.to_string();
                 Ok(())
             }
             SettingsValueKind::AiRuntimeRules => {
-                settings.ai.runtime_rules = value.to_string();
+                settings.ai.ai.runtime_rules = value.to_string();
                 Ok(())
             }
             SettingsValueKind::AiBaseUrl => {
-                settings.ai.provider.base_url = value.to_string();
+                settings.ai.ai.provider.base_url = value.to_string();
                 Ok(())
             }
             SettingsValueKind::AiApiKey => {
-                settings.ai.provider.api_key = value.to_string();
+                settings.ai.ai.provider.api_key = value.to_string();
                 Ok(())
             }
             SettingsValueKind::AiChatInput => {
-                settings.ai_chat_input = value.to_string();
+                settings.ui.ai_chat_input = value.to_string();
                 Ok(())
             }
             SettingsValueKind::Character
@@ -305,8 +306,8 @@ fn toggle_settings_visibility_shortcut(
     mut input_state: ResMut<SettingsInputState>,
 ) {
     if keys.just_pressed(KeyCode::F1) {
-        settings.settings_window_visible = !settings.settings_window_visible;
-        if settings.settings_window_visible {
+        settings.ui.settings_window_visible = !settings.ui.settings_window_visible;
+        if settings.ui.settings_window_visible {
             input_state.sync_from_settings(&settings);
         } else {
             settings.save();
@@ -323,12 +324,12 @@ fn handle_settings_keyboard_controls(
     _window_entities: Res<SettingsWindowEntities>,
     input_state: Res<SettingsInputState>,
 ) {
-    if !settings.settings_window_visible {
+    if !settings.ui.settings_window_visible {
         return;
     }
 
     if keys.just_pressed(KeyCode::Escape) {
-        settings.settings_window_visible = false;
+        settings.ui.settings_window_visible = false;
         settings.save();
         return;
     }
@@ -370,7 +371,7 @@ fn render_settings_window(
     mut emotion_queue: ResMut<EmotionQueue>,
     time: Res<Time>,
 ) {
-    if !settings.settings_window_visible {
+    if !settings.ui.settings_window_visible {
         return;
     }
 
@@ -388,7 +389,7 @@ fn render_settings_window(
                 ui.heading("Ene Settings");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("X").clicked() {
-                        settings.settings_window_visible = false;
+                        settings.ui.settings_window_visible = false;
                         settings.save();
                     }
                 });
@@ -517,7 +518,7 @@ fn render_character_page(
             settings,
             SettingsButtonAction::LookAtStrengthDown,
             SettingsButtonAction::LookAtStrengthUp,
-            |s| format!("{:.2}", s.look_at_strength),
+            |s| format!("{:.2}", s.character_state.look_at_strength),
         ) {
             apply_action(action, settings, animation_control, ai_request_writer);
         }
@@ -530,7 +531,7 @@ fn render_character_page(
             settings,
             SettingsButtonAction::ModelScaleDown,
             SettingsButtonAction::ModelScaleUp,
-            |s| format!("{:.2}", s.model_scale),
+            |s| format!("{:.2}", s.character_state.model_scale),
         ) {
             apply_action(action, settings, animation_control, ai_request_writer);
         }
@@ -543,7 +544,7 @@ fn render_character_page(
             settings,
             SettingsButtonAction::CharacterPosXDown,
             SettingsButtonAction::CharacterPosXUp,
-            |s| format!("{:+.2}", s.character_position.x),
+            |s| format!("{:+.2}", s.character_state.character_position.x),
         ) {
             apply_action(action, settings, animation_control, ai_request_writer);
         }
@@ -556,7 +557,7 @@ fn render_character_page(
             settings,
             SettingsButtonAction::CharacterPosYDown,
             SettingsButtonAction::CharacterPosYUp,
-            |s| format!("{:+.2}", s.character_position.y),
+            |s| format!("{:+.2}", s.character_state.character_position.y),
         ) {
             apply_action(action, settings, animation_control, ai_request_writer);
         }
@@ -569,7 +570,7 @@ fn render_character_page(
             settings,
             SettingsButtonAction::CharacterPosZDown,
             SettingsButtonAction::CharacterPosZUp,
-            |s| format!("{:+.2}", s.character_position.z),
+            |s| format!("{:+.2}", s.character_state.character_position.z),
         ) {
             apply_action(action, settings, animation_control, ai_request_writer);
         }
@@ -809,23 +810,24 @@ fn render_ai_page(
                 });
             if current_provider != input_state.ai_embedding_provider {
                 input_state.ai_embedding_provider = current_provider.clone();
-                settings.ai.embedding.provider_type = match current_provider.as_str() {
+                settings.ai.ai.embedding.provider_type = match current_provider.as_str() {
                     "local" => ene_ai_core::EmbeddingProviderType::Local,
                     _ => ene_ai_core::EmbeddingProviderType::Api,
                 };
                 match current_provider.as_str() {
                     "local" => {
-                        settings.ai.embedding.model =
+                        settings.ai.ai.embedding.model =
                             "jina-embeddings-v5-text-nano".to_string();
-                        settings.ai.embedding.dimensions = None;
-                        input_state.ai_embedding_model = settings.ai.embedding.model.clone();
+                        settings.ai.ai.embedding.dimensions = None;
+                        input_state.ai_embedding_model = settings.ai.ai.embedding.model.clone();
                         input_state.ai_embedding_dimensions = "auto".to_string();
                     }
                     _ => {
-                        settings.ai.embedding.model = "text-embedding-3-small".to_string();
-                        settings.ai.embedding.dimensions = Some(1536);
-                        input_state.ai_embedding_model = settings.ai.embedding.model.clone();
+                        settings.ai.ai.embedding.model = "text-embedding-3-small".to_string();
+                        settings.ai.ai.embedding.dimensions = Some(1536);
+                        input_state.ai_embedding_model = settings.ai.ai.embedding.model.clone();
                         input_state.ai_embedding_dimensions = settings
+                            .ai
                             .ai
                             .embedding
                             .dimensions
@@ -843,7 +845,7 @@ fn render_ai_page(
                     .desired_width(f32::INFINITY),
             );
             if response.changed() {
-                settings.ai.embedding.model = input_state.ai_embedding_model.clone();
+                settings.ai.ai.embedding.model = input_state.ai_embedding_model.clone();
             }
         });
 
@@ -854,7 +856,7 @@ fn render_ai_page(
                     .desired_width(f32::INFINITY),
             );
             if response.changed() {
-                settings.ai.embedding.base_url = input_state.ai_embedding_base_url.clone();
+                settings.ai.ai.embedding.base_url = input_state.ai_embedding_base_url.clone();
             }
         });
 
@@ -869,7 +871,7 @@ fn render_ai_page(
                 );
                 if response.changed() {
                     if let Ok(dims) = input_state.ai_embedding_dimensions.parse::<usize>() {
-                        settings.ai.embedding.dimensions = Some(dims);
+                        settings.ai.ai.embedding.dimensions = Some(dims);
                     }
                 }
             }
@@ -883,7 +885,7 @@ fn render_ai_page(
             ui.checkbox(&mut checked, "Enable Long-term Memory");
             if checked != input_state.ai_memory_enabled {
                 input_state.ai_memory_enabled = checked;
-                settings.ai.memory.enabled = checked;
+                settings.ai.ai.memory.enabled = checked;
             }
         });
 
@@ -893,10 +895,10 @@ fn render_ai_page(
             .max_height(180.0)
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                if settings.ai_latest_response.is_empty() {
+                if settings.ui.ai_latest_response.is_empty() {
                     ui.weak("(empty)");
                 } else {
-                    ui.label(&settings.ai_latest_response);
+                    ui.label(&settings.ui.ai_latest_response);
                 }
             });
     });
@@ -909,7 +911,7 @@ fn apply_settings_window_visibility(
     mut input_state: ResMut<SettingsInputState>,
     mut windows: Query<&mut Window>,
 ) {
-    if settings.settings_window_visible {
+    if settings.ui.settings_window_visible {
         if window_entities.window.is_none() {
             let window = commands
                 .spawn((Window {
@@ -966,15 +968,15 @@ fn apply_ai_stream_events(
     for event in stream_events.read() {
         match event {
             AiStreamEvent::TextDelta(delta) => {
-                settings.ai_latest_response.push_str(delta);
+                settings.ui.ai_latest_response.push_str(delta);
             }
             AiStreamEvent::Finished => {}
             AiStreamEvent::Error(error) => {
-                if !settings.ai_latest_response.is_empty() {
-                    settings.ai_latest_response.push('\n');
+                if !settings.ui.ai_latest_response.is_empty() {
+                    settings.ui.ai_latest_response.push('\n');
                 }
-                settings.ai_latest_response.push_str("[error] ");
-                settings.ai_latest_response.push_str(error);
+                settings.ui.ai_latest_response.push_str("[error] ");
+                settings.ui.ai_latest_response.push_str(error);
             }
             AiStreamEvent::SpecialToken(_) => {}
             AiStreamEvent::ToolCallStart { .. } => {}

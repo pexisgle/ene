@@ -208,7 +208,7 @@ fn apply_character_selection(
     existing_vrmas: Query<Entity, With<MotionVrma>>,
     look_targets: Query<(), With<CursorLookTarget>>,
 ) {
-    if !settings.needs_respawn {
+    if !settings.character_state.needs_respawn {
         return;
     }
     settings.clamp_runtime_values();
@@ -234,7 +234,7 @@ fn apply_character_selection(
         current_character.active_motion_path = Some(motion_path);
         animation_apply_state.vrma = None;
         animation_apply_state.clip_started = false;
-        settings.needs_respawn = false;
+        settings.character_state.needs_respawn = false;
         return;
     }
 
@@ -262,9 +262,9 @@ fn apply_character_selection(
             CharacterRoot,
             VrmHandle(vrm_handle),
             LookAt::Target(look_target_entity),
-            body_tracking_for_strength(settings.look_at_strength),
-            Transform::from_translation(settings.character_position)
-                .with_scale(Vec3::splat(settings.model_scale)),
+            body_tracking_for_strength(settings.character_state.look_at_strength),
+            Transform::from_translation(settings.character_state.character_position)
+                .with_scale(Vec3::splat(settings.character_state.model_scale)),
             Visibility::Hidden,
         ))
         .with_children(move |cmd| {
@@ -283,7 +283,7 @@ fn apply_character_selection(
     current_character.root = Some(root);
     current_character.vrm_path = Some(vrm_path);
     current_character.active_motion_path = Some(motion_path);
-    settings.needs_respawn = false;
+    settings.character_state.needs_respawn = false;
 }
 
 /// Records when the primary VRMA has loaded so playback can start once.
@@ -305,14 +305,14 @@ fn apply_runtime_character_settings(
     mut roots: Query<&mut Transform, With<CharacterRoot>>,
     mut body_trackings: Query<&mut BodyTracking, With<CharacterRoot>>,
 ) {
-    let scale = Vec3::splat(settings.model_scale);
-    let translation = settings.character_position;
+    let scale = Vec3::splat(settings.character_state.model_scale);
+    let translation = settings.character_state.character_position;
     for mut tf in &mut roots {
         tf.scale = scale;
         tf.translation = translation;
     }
 
-    let tuned = body_tracking_for_strength(settings.look_at_strength);
+    let tuned = body_tracking_for_strength(settings.character_state.look_at_strength);
     for mut body_tracking in &mut body_trackings {
         *body_tracking = tuned.clone();
     }
@@ -324,7 +324,7 @@ fn handle_animation_hotkeys(
     settings: Res<CharacterSettings>,
     mut animation_control: ResMut<CharacterAnimationControl>,
 ) {
-    if settings.settings_window_visible {
+    if settings.ui.settings_window_visible {
         return;
     }
 
@@ -459,7 +459,7 @@ fn update_cursor_look_target(
     let cursor_position = cursor_position_for_window(window);
     let desired_target = cursor_world_target(cursor_position, camera, camera_gtf, head_pos)
         .map(|world_target| {
-            let strength = settings.look_at_strength.clamp(0.0, 1.0);
+            let strength = settings.character_state.look_at_strength.clamp(0.0, 1.0);
             neutral_target.lerp(world_target, strength)
         })
         .unwrap_or(neutral_target);

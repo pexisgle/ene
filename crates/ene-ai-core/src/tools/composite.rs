@@ -3,6 +3,7 @@ use super::ToolDefinition;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
+use crate::error::AiCoreError;
 
 pub struct CompositeToolRegistry {
     state: std::sync::RwLock<CompositeState>,
@@ -58,7 +59,7 @@ impl CompositeToolRegistry {
     pub async fn ensure_tool_embeddings(
         &self,
         embedder: &dyn crate::embedding::EmbeddingProvider,
-    ) -> Result<(), String> {
+    ) -> Result<(), AiCoreError> {
         let store = {
             let guard = self.store.read().unwrap_or_else(|e| e.into_inner());
             match guard.as_ref() {
@@ -178,12 +179,12 @@ impl ToolRegistry for CompositeToolRegistry {
             .collect()
     }
 
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, String> {
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, AiCoreError> {
         let registry = {
             let state_guard = self.state.read().unwrap_or_else(|e| e.into_inner());
             match state_guard.tool_index.get(name) {
                 Some(&idx) => Arc::clone(&state_guard.registries[idx]),
-                None => return Err(format!("Tool {} not found", name)),
+                None => return Err(AiCoreError::ToolExecutionError(format!("Tool {} not found", name))),
             }
         };
         registry.call_tool(name, arguments).await
@@ -203,7 +204,7 @@ impl ToolRegistry for CompositeToolRegistry {
         &self,
         embedder: &dyn crate::embedding::EmbeddingProvider,
         _store: Option<&crate::memory::store::MemoryStore>,
-    ) -> Result<(), String> {
+    ) -> Result<(), AiCoreError> {
         self.ensure_tool_embeddings(embedder).await
     }
 }
@@ -235,7 +236,7 @@ mod tests {
             self.tools.clone()
         }
 
-        async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, String> {
+        async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, AiCoreError> {
             self.call_log
                 .lock()
                 .unwrap()
@@ -319,7 +320,7 @@ mod tests {
         let composite = CompositeToolRegistry::new(vec![Arc::new(mock)]);
         let result = composite.call_tool("nonexistent", "").await;
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Tool nonexistent not found");
+        assert!(matches!(result.unwrap_err(), AiCoreError::ToolExecutionError(_)));
     }
 
     #[tokio::test]
