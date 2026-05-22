@@ -1,6 +1,5 @@
 use bevy::prelude::*;
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::mpsc::{self, UnboundedReceiver, error::TryRecvError};
 use tokio_stream::StreamExt;
@@ -8,14 +7,9 @@ use tokio_stream::StreamExt;
 use crate::app_config::CharacterSettings;
 use crate::character::ResolvedExpressionMap;
 use ene_ai_core::{
-    PendingSplitTask, SplitTaskInput, init_embedding,
-    mcp_client::McpToolRegistry,
+    AiRuntime,
     poll_split_result,
-    session::ConversationSession,
-    spawn_split_task,
     stream::{AiStreamEvent as CoreAiStreamEvent, run_ai_with_tools},
-    tool_host_manager::ToolHostManager,
-    tools::ToolRegistry,
     truncate,
 };
 
@@ -92,8 +86,7 @@ impl FromWorld for AiTokioRuntime {
 pub struct AiRuntimeState {
     pub processing: bool,
     pub pending: VecDeque<String>,
-    pub session: ConversationSession,
-    pub pending_split: Option<PendingSplitTask>,
+    pub runtime: Option<AiRuntime>,
     pub embedding_in_progress: bool,
     worker_rx: Mutex<Option<UnboundedReceiver<CoreAiStreamEvent>>>,
 }
@@ -103,14 +96,12 @@ impl Default for AiRuntimeState {
         Self {
             processing: false,
             pending: VecDeque::new(),
-            session: ConversationSession::new(),
-            pending_split: None,
+            runtime: None,
             embedding_in_progress: false,
             worker_rx: Mutex::new(None),
         }
     }
 }
-
 
 fn enqueue_ai_requests(
     mut requests: MessageReader<AiRequestEvent>,
@@ -162,14 +153,15 @@ fn launch_ai_request(
     }
 
     runtime_state.pending.pop_front();
-    runtime_state.session.add_user_message(&user_input);
+    let runtime = runtime_state.runtime.as_mut().unwrap();
+    runtime.session.add_user_message(&user_input);
 
     let ai_settings = settings.ai.clone();
-    let session_clone = runtime_state.session.clone();
+    let session_clone = runtime.session.clone();
+    let registry_clone = runtime.registry.clone();
 
     rt.0.spawn(async move {
-        let registry = build_registry(&ai_settings).await;
-        match run_ai_with_tools(&ai_settings, &session_clone, &user_input, registry).await {
+        match run_ai_with_tools(&ai_settings, &session_clone, &user_input, registry_clone).await {
             Ok(stream) => {
                 tokio::pin!(stream);
                 while let Some(event) = stream.next().await {
@@ -202,40 +194,27 @@ fn start_next_ai_request(
         return;
     };
 
-    // Initialize embedding and memory if not yet initialized
-    if runtime_state.session.embedding_provider.is_none() {
-        match init_embedding(&settings.ai) {
-            Ok(embedder) => {
-                runtime_state.session.embedding_provider = Some(embedder.clone());
-                if settings.ai.memory.enabled {
-                    match ene_ai_core::init_memory_store(&settings.ai, &*embedder) {
-                        Ok(store) => {
-                            runtime_state.session.memory_store = Some(store);
-                            eprintln!("\x1b[36m[Memory] Long-term memory enabled.\x1b[0m");
-                            eprintln!(
-                                "\x1b[36m[Memory] DB: {}\x1b[0m",
-                                settings.ai.resolve_memory_db_path().display()
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!("[Memory] Warning: Failed to initialize memory: {}", e);
-                            eprintln!("[Memory] Continuing without long-term memory.");
-                        }
-                    }
-                }
+    // Initialize unified runtime if not yet initialized
+    if runtime_state.runtime.is_none() {
+        let ai_settings = settings.ai.clone();
+        match rt.0.block_on(AiRuntime::init(ai_settings)) {
+            Ok(runtime) => {
+                runtime_state.runtime = Some(runtime);
+                eprintln!("\x1b[36m[Runtime] Unified AI Runtime initialized successfully.\x1b[0m");
             }
             Err(e) => {
-                eprintln!("[Embedding] Warning: Failed to initialize embedding: {}", e);
+                runtime_state.pending.pop_front();
+                stream_writer.write(AiStreamEvent::Error(format!("Failed to initialize AI runtime: {}", e)));
+                return;
             }
         }
     }
 
-    // Character card loading
-    if runtime_state.session.current_card_path != settings.ai.character_card_path {
-        match runtime_state
-            .session
-            .load_card(&settings.ai.character_card_path)
-        {
+    let runtime = runtime_state.runtime.as_mut().unwrap();
+
+    // Character card loading if card path changed
+    if runtime.session.current_card_path != settings.ai.character_card_path {
+        match runtime.session.load_card(&settings.ai.character_card_path) {
             Ok(resolved) => {
                 expression_map.map = resolved.into_iter().map(|e| (e.name, e.vrm)).collect();
             }
@@ -247,63 +226,15 @@ fn start_next_ai_request(
         }
     }
 
-    if settings.ai.memory.enabled && settings.ai.memory.auto_session_split {
-        let split_params = {
-            let session = &runtime_state.session;
-            session
-                .memory_store
-                .as_ref()
-                .zip(session.embedding_provider.as_ref())
-                .map(|(store, embedder)| {
-                    (
-                        session.last_input_embedding.clone(),
-                        session.last_message_time,
-                        session.current_turn_count,
-                        session.conversation_history.clone(),
-                        session.session_id.clone(),
-                        session.card_name().to_string(),
-                        store.clone(),
-                        embedder.clone(),
-                    )
-                })
-        };
-        if let Some((
-            last_input_embedding,
-            last_message_time,
-            current_turn_count,
-            history,
-            session_id,
-            card_name,
-            store,
-            embedder,
-        )) = split_params
-        {
-            spawn_split_task(
-                &mut runtime_state.pending_split,
-                SplitTaskInput {
-                    last_input_embedding,
-                    last_message_time,
-                    current_turn_count,
-                    user_input: user_input.clone(),
-                    settings: settings.ai.clone(),
-                    history,
-                    session_id,
-                    card_name,
-                    user_name: settings.ai.user_name.clone(),
-                    store,
-                    embedder,
-                },
-            );
-        }
-    }
+    // Unify Session splitting boundary check
+    runtime.check_and_perform_split(&user_input, &settings.ai.user_name);
 
     // Embed asynchronously without blocking the game loop.
     // If the embedding takes longer than 50ms, we defer to the next frame
     // via the embedding_in_progress flag and process_embedding system.
-    if let Some(embedder) = runtime_state.session.embedding_provider.clone() {
+    let embedder = runtime.session.embedding_provider.clone();
+    if let Some(embedder) = embedder {
         let user_input_clone = user_input.clone();
-        let session_ptr = &mut runtime_state.session;
-
         let (embed_tx, embed_rx) = tokio::sync::oneshot::channel();
         rt.0.spawn(async move {
             let result = embedder.embed_query(&user_input_clone).await;
@@ -315,8 +246,8 @@ fn start_next_ai_request(
             embed_rx,
         )) {
             Ok(Ok(Ok(embedding))) => {
-                session_ptr.set_pending_embedding(embedding.clone());
-                session_ptr.set_last_input_embedding(embedding);
+                runtime.session.set_pending_embedding(embedding.clone());
+                runtime.session.set_last_input_embedding(embedding);
             }
             Ok(Ok(Err(e))) => {
                 eprintln!("[Embedding] Error: {}", e);
@@ -331,7 +262,7 @@ fn start_next_ai_request(
         }
     }
 
-    runtime_state.session.record_user_input();
+    runtime.session.record_user_input();
 
     launch_ai_request(&mut runtime_state, &settings, &rt, &mut stream_writer);
 }
@@ -342,30 +273,32 @@ fn poll_ai_worker(
     settings: Res<CharacterSettings>,
 ) {
     if settings.ai.memory.enabled && settings.ai.memory.auto_session_split {
-        if let Some(result) = poll_split_result(&mut runtime_state.pending_split) {
-            match result {
-                Ok(split_result) => {
-                    eprintln!("\x1b[33m[Session] {} \x1b[0m", split_result.reason);
-                    eprintln!(
-                        "\x1b[33m[Session] Conversation summarized and saved: {}\x1b[0m",
-                        truncate(&split_result.summary, 80)
-                    );
-                    if !split_result.key_facts.is_empty() {
-                        let facts_str = split_result
-                            .key_facts
-                            .iter()
-                            .map(|f| format!("{}:{}", f.key, f.value))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        eprintln!("\x1b[33m[Session] Key facts: {}\x1b[0m", facts_str);
+        if let Some(runtime) = runtime_state.runtime.as_mut() {
+            if let Some(result) = poll_split_result(&mut runtime.pending_split) {
+                match result {
+                    Ok(split_result) => {
+                        eprintln!("\x1b[33m[Session] {} \x1b[0m", split_result.reason);
+                        eprintln!(
+                            "\x1b[33m[Session] Conversation summarized and saved: {}\x1b[0m",
+                            truncate(&split_result.summary, 80)
+                        );
+                        if !split_result.key_facts.is_empty() {
+                            let facts_str = split_result
+                                .key_facts
+                                .iter()
+                                .map(|f| format!("{}:{}", f.key, f.value))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            eprintln!("\x1b[33m[Session] Key facts: {}\x1b[0m", facts_str);
+                        }
+                        runtime.session.reset_session();
+                        runtime.session.session_id = split_result.new_session_id;
+                        eprintln!("\x1b[33m[Session] Starting new conversation.\x1b[0m");
                     }
-                    runtime_state.session.reset_session();
-                    runtime_state.session.session_id = split_result.new_session_id;
-                    eprintln!("\x1b[33m[Session] Starting new conversation.\x1b[0m");
-                }
-                Err(e) => {
-                    if !matches!(e, ene_ai_core::AiCoreError::SplitNotNeeded) {
-                        eprintln!("\x1b[31m[Session] Summary generation error: {}\x1b[0m", e);
+                    Err(e) => {
+                        if !matches!(e, ene_ai_core::AiCoreError::SplitNotNeeded) {
+                            eprintln!("\x1b[31m[Session] Summary generation error: {}\x1b[0m", e);
+                        }
                     }
                 }
             }
@@ -403,7 +336,8 @@ fn poll_ai_worker(
     for event in drained_events {
         match event {
             CoreAiStreamEvent::TextDelta(delta) => {
-                let (text_deltas, special_tokens) = runtime_state.session.process_delta(&delta);
+                let runtime = runtime_state.runtime.as_mut().unwrap();
+                let (text_deltas, special_tokens) = runtime.session.process_delta(&delta);
 
                 for text_delta in text_deltas {
                     stream_writer.write(AiStreamEvent::TextDelta(text_delta));
@@ -419,7 +353,8 @@ fn poll_ai_worker(
                 stream_writer.write(AiStreamEvent::ToolCallResult { name, result });
             }
             CoreAiStreamEvent::Finished => {
-                if let Some(tail) = runtime_state.session.finalize_response() {
+                let runtime = runtime_state.runtime.as_mut().unwrap();
+                if let Some(tail) = runtime.session.finalize_response() {
                     stream_writer.write(AiStreamEvent::TextDelta(tail));
                 }
 
@@ -468,54 +403,4 @@ fn poll_ai_worker(
             }
         }
     }
-}
-
-async fn build_registry(settings: &ene_ai_core::config::AiSettings) -> Arc<dyn ToolRegistry> {
-    let mut manager = match ToolHostManager::start(settings).await {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("[ToolHostManager] Warning: {}", e);
-            ToolHostManager::start(&ene_ai_core::config::AiSettings {
-                tools: ene_ai_core::config::AiToolSettings {
-                    tools: std::collections::HashMap::new(),
-                },
-                ..settings.clone()
-            })
-            .await
-            .unwrap_or_else(|e2| {
-                eprintln!("[ToolHostManager] Fatal: {}", e2);
-                panic!("Failed to start tool host manager");
-            })
-        }
-    };
-
-    if !settings.mcp_servers.is_empty() {
-        let mcp = McpToolRegistry::new();
-        for server in &settings.mcp_servers {
-            if !server.enabled {
-                continue;
-            }
-
-            match &server.transport {
-                ene_ai_core::config::McpTransport::Stdio { command, args } => {
-                    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                    if let Err(err) = mcp.connect_stdio(&server.name, command, &args_ref).await {
-                        eprintln!(
-                            "Warning: MCP server '{}' failed to connect: {}",
-                            server.name, err
-                        );
-                    }
-                }
-                ene_ai_core::config::McpTransport::Http { url } => {
-                    eprintln!(
-                        "Warning: MCP HTTP transport not supported yet for '{}': {}",
-                        server.name, url
-                    );
-                }
-            }
-        }
-        manager.add_registry(Arc::new(mcp));
-    }
-
-    manager.into_registry()
 }

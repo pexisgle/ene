@@ -1,4 +1,4 @@
-use crate::{registry, stream};
+use crate::stream;
 use ene_ai_core::{config::AiSettings, run_ai_with_tools, session::ConversationSession};
 
 pub async fn run(settings: &AiSettings, session: &ConversationSession, prompt_override: &str) {
@@ -29,7 +29,13 @@ pub async fn run(settings: &AiSettings, session: &ConversationSession, prompt_ov
         fresh
     };
 
-    let registry = registry::build(&sandbox_settings).await;
+    let registry = match ene_ai_core::build_tool_registry(&sandbox_settings).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[Error] Failed to build tool registry: {}", e);
+            return;
+        }
+    };
     println!("Tool test: tool_calling_enabled = true");
     println!("Tool test: tools = {}", registry.list_tools().len());
 
