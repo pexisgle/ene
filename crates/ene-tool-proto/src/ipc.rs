@@ -7,7 +7,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// IPC リクエスト — core → host
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum IpcRequest {
-    Initialize { sandbox: SandboxConfigData },
+    Initialize {
+        sandbox: SandboxConfigData,
+        tool_config: Option<serde_json::Value>,
+    },
     ListTools,
     CallTool { name: String, arguments: String },
     SetSessionId { session_id: String },
@@ -146,7 +149,10 @@ mod tests {
             max_shell_output_lines: 0,
             undo_db_path: None,
         };
-        let req = IpcRequest::Initialize { sandbox: sandbox.clone() };
+        let req = IpcRequest::Initialize {
+            sandbox: sandbox.clone(),
+            tool_config: None,
+        };
         let got = send_recv_request(&req).await;
         assert_eq!(got, req);
     }

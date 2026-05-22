@@ -34,4 +34,12 @@ pub trait ToolProvider: Send + Sync {
 
     /// サンドボックス設定を受信（FSツール等で使用。デフォルトは無操作）
     fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
+
+    /// ツール固有の設定を受信（Initialize 時に1回だけ呼ばれる）
+    fn set_config(&self, _config: &serde_json::Value) {}
+
+    /// 受け付ける設定の JSON Schema を返す
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        None
+    }
 }

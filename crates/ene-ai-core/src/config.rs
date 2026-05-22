@@ -1,5 +1,6 @@
 use crate::error::AiCoreError;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
@@ -104,6 +105,13 @@ pub struct AiToolSettings {
     /// ビルトインツール: "fs", "web", "browser", "utility", "app"
     /// 空の場合は何も起動しない
     pub enabled: Vec<String>,
+
+    /// ツールごとの固有設定 (tool_name → arbitrary JSON)
+    ///
+    /// 各設定値はツールプロセス起動時に Initialize で渡される。
+    /// 機密情報は直接記述せず、`{ "$env": "VAR_NAME" }` 形式で
+    /// 環境変数を参照することを推奨。
+    pub configs: HashMap<String, serde_json::Value>,
 }
 
 impl Default for AiToolSettings {
@@ -116,6 +124,7 @@ impl Default for AiToolSettings {
                 "utility".to_string(),
                 "app".to_string(),
             ],
+            configs: HashMap::new(),
         }
     }
 }

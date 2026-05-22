@@ -1,7 +1,9 @@
 use crate::tools::definition::ToolRegistry;
 use crate::tools::ToolDefinition;
 use async_trait::async_trait;
-use ene_tool_proto::{IpcRequest, IpcResponse, SandboxConfigData, read_ipc_response, write_ipc_request};
+use ene_tool_proto::{
+    read_ipc_response, write_ipc_request, IpcRequest, IpcResponse, SandboxConfigData,
+};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -18,17 +20,28 @@ const RECONNECT_MAX_DELAY_MS: u64 = 10_000;
 pub struct IpcToolRegistry {
     socket_path: PathBuf,
     sandbox: SandboxConfigData,
+    tool_config: Option<serde_json::Value>,
     stream: TokioMutex<Option<UnixStream>>,
     tools: Mutex<Vec<ToolDefinition>>,
 }
 
 impl IpcToolRegistry {
-    pub async fn new(socket_path: PathBuf, sandbox: SandboxConfigData) -> Result<Self, String> {
+    pub async fn new(
+        socket_path: PathBuf,
+        sandbox: SandboxConfigData,
+        tool_config: Option<serde_json::Value>,
+    ) -> Result<Self, String> {
         let mut stream = Self::connect_with_retry(&socket_path, RECONNECT_MAX_RETRIES).await?;
 
-        write_ipc_request(&mut stream, &IpcRequest::Initialize { sandbox: sandbox.clone() })
-            .await
-            .map_err(|e| format!("Failed to send Initialize: {e}"))?;
+        write_ipc_request(
+            &mut stream,
+            &IpcRequest::Initialize {
+                sandbox: sandbox.clone(),
+                tool_config: tool_config.clone(),
+            },
+        )
+        .await
+        .map_err(|e| format!("Failed to send Initialize: {e}"))?;
 
         let resp = read_ipc_response(&mut stream)
             .await
@@ -43,6 +56,7 @@ impl IpcToolRegistry {
         let registry = Self {
             socket_path,
             sandbox,
+            tool_config,
             stream: TokioMutex::new(Some(stream)),
             tools: Mutex::new(Vec::new()),
         };
@@ -158,9 +172,15 @@ impl IpcToolRegistry {
 
         let mut stream = Self::connect_with_retry(&self.socket_path, RECONNECT_MAX_RETRIES).await?;
 
-        write_ipc_request(&mut stream, &IpcRequest::Initialize { sandbox: self.sandbox.clone() })
-            .await
-            .map_err(|e| format!("Failed to send Initialize on reconnect: {e}"))?;
+        write_ipc_request(
+            &mut stream,
+            &IpcRequest::Initialize {
+                sandbox: self.sandbox.clone(),
+                tool_config: self.tool_config.clone(),
+            },
+        )
+        .await
+        .map_err(|e| format!("Failed to send Initialize on reconnect: {e}"))?;
 
         let resp = read_ipc_response(&mut stream)
             .await
