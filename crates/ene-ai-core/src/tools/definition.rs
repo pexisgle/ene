@@ -25,7 +25,7 @@ pub trait ToolRegistry: Send + Sync {
     ) -> Result<String, String>;
 
     /// 現在のセッションIDを設定（Undo等で使用）
-    fn set_session_id(&self, _session_id: &str) {}
+    async fn set_session_id(&self, _session_id: &str) {}
 
     /// RAGインデックスが必要な場合に構築する（デフォルトでは何もしない）
     async fn ensure_index_built(

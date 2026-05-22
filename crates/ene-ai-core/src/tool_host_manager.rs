@@ -154,12 +154,12 @@ impl ToolRegistry for ToolHostManager {
         }
     }
 
-    fn set_session_id(&self, session_id: &str) {
+    async fn set_session_id(&self, session_id: &str) {
         for entry in &self.entries {
-            entry.registry.set_session_id(session_id);
+            entry.registry.set_session_id(session_id).await;
         }
         for registry in &self.extra_registries {
-            registry.set_session_id(session_id);
+            registry.set_session_id(session_id).await;
         }
     }
 

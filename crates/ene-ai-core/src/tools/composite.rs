@@ -152,9 +152,9 @@ impl ToolRegistry for CompositeToolRegistry {
         }
     }
 
-    fn set_session_id(&self, session_id: &str) {
+    async fn set_session_id(&self, session_id: &str) {
         for registry in &self.registries {
-            registry.set_session_id(session_id);
+            registry.set_session_id(session_id).await;
         }
     }
 
@@ -202,7 +202,7 @@ mod tests {
             Ok(format!("{name} executed"))
         }
 
-        fn set_session_id(&self, session_id: &str) {
+        async fn set_session_id(&self, session_id: &str) {
             *self.session_id.lock().unwrap() = Some(session_id.to_string());
         }
     }
@@ -281,14 +281,14 @@ mod tests {
         assert_eq!(result.unwrap_err(), "Tool nonexistent not found");
     }
 
-    #[test]
-    fn composite_set_session_id_propagates() {
+    #[tokio::test]
+    async fn composite_set_session_id_propagates() {
         let mock1 = MockRegistry::new(vec![make_tool("a")]);
         let mock2 = MockRegistry::new(vec![make_tool("b")]);
         let sid1 = Arc::clone(&mock1.session_id);
         let sid2 = Arc::clone(&mock2.session_id);
         let composite = CompositeToolRegistry::new(vec![Box::new(mock1), Box::new(mock2)]);
-        composite.set_session_id("sess_main");
+        composite.set_session_id("sess_main").await;
         assert_eq!(sid1.lock().unwrap().as_deref(), Some("sess_main"));
         assert_eq!(sid2.lock().unwrap().as_deref(), Some("sess_main"));
     }
