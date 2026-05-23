@@ -6,12 +6,12 @@ Ene は、ローカルでキャラクター（VRM / VRMA）を扱い、AIを使�
 - **ワークスペース構成**: このリポジトリは複数クレートを含む Cargo ワークスペースです。
 - **主なクレート**:
 - `ene-ai-core`: AI ロジック、プロンプト構築、ストリーミングなどのコア機能。
-- `ene-app`: デスクトップ GUI アプリ（Bevy ベース）。
+- `ene-desktop`: デスクトップ GUI アプリ（Bevy ベース）。
 - `ene-cli`: CLI クライアント（ヘッドレスやスクリプト用途）。
 
 ## リポジトリ構造（抜粋）
 - `crates/ene-ai-core/` — AI コアライブラリ
-- `crates/ene-app/` — GUI アプリケーション
+- `apps/ene-desktop/` — GUI アプリケーション
 - `crates/ene-cli/` — コマンドラインインターフェース
 - `assets/` — サンプルキャラクターやアセット（`characters/`、`vrm/`、`vrma/` 等）
 
@@ -36,7 +36,7 @@ cargo build --workspace --release
 GUI アプリを実行するには:
 
 ```bash
-cargo run -p ene-app --release
+cargo run -p ene-desktop --release
 ```
 
 CLI を実行するには（オプションは `--help` で確認してください）:

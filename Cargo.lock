@@ -3656,29 +3656,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ene-app"
-version = "0.1.0"
-dependencies = [
- "arboard",
- "bevy",
- "bevy_egui",
- "bevy_vrm1",
- "ene-ai-core",
- "ene-config",
- "gtk",
- "log",
- "png",
- "raw-window-handle",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tray-icon",
- "wayland-client",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "ene-cli"
 version = "0.1.0"
 dependencies = [
@@ -3706,6 +3683,29 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "ene-desktop"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "bevy",
+ "bevy_egui",
+ "bevy_vrm1",
+ "ene-ai-core",
+ "ene-config",
+ "gtk",
+ "log",
+ "png",
+ "raw-window-handle",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tray-icon",
+ "wayland-client",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
