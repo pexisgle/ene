@@ -1,8 +1,7 @@
-#[cfg(target_os = "linux")]
 use ene_tool_proto::ToolError;
-
+use image::DynamicImage;
 #[cfg(target_os = "linux")]
-use image::{DynamicImage, imageops::FilterType};
+use image::imageops::FilterType;
 
 #[cfg(target_os = "linux")]
 pub fn detect_wayland() -> bool {

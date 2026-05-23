@@ -7,7 +7,7 @@ use ene_tool_proto::{
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
-use tokio::net::UnixStream;
+use ene_tool_proto::transport::IpcStream;
 use tokio::sync::Mutex as TokioMutex;
 
 const RECONNECT_MAX_RETRIES: u32 = 5;
@@ -21,7 +21,7 @@ pub struct IpcToolRegistry {
     socket_path: PathBuf,
     sandbox: SandboxConfigData,
     tool_config: Option<serde_json::Value>,
-    stream: TokioMutex<Option<UnixStream>>,
+    stream: TokioMutex<Option<IpcStream>>,
     tools: Mutex<Vec<ToolDefinition>>,
 }
 
@@ -69,10 +69,10 @@ impl IpcToolRegistry {
     async fn connect_with_retry(
         socket_path: &PathBuf,
         max_retries: u32,
-    ) -> Result<UnixStream, String> {
+    ) -> Result<IpcStream, String> {
         let mut attempts = 0;
         loop {
-            match UnixStream::connect(socket_path).await {
+            match IpcStream::connect(socket_path).await {
                 Ok(stream) => return Ok(stream),
                 Err(e) => {
                     attempts += 1;
@@ -121,7 +121,7 @@ impl IpcToolRegistry {
         result
     }
 
-    async fn do_refresh_tools_with_stream(&self, stream: &mut UnixStream) -> Result<(), String> {
+    async fn do_refresh_tools_with_stream(&self, stream: &mut IpcStream) -> Result<(), String> {
         write_ipc_request(stream, &IpcRequest::ListTools)
             .await
             .map_err(|e| format!("Failed to send ListTools: {e}"))?;
