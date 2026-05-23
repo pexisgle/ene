@@ -14,7 +14,7 @@ use crate::app_config::{
 use crate::character::{CharacterAnimationControl, EmotionQueue};
 use bevy::camera::RenderTarget;
 use bevy::prelude::*;
-use bevy::window::{WindowLevel, WindowRef, WindowResolution};
+use bevy::window::{WindowRef, WindowResolution};
 use bevy_egui::{EguiContext, EguiMultipassSchedule, PrimaryEguiContext, egui};
 use widgets::apply_action;
 
@@ -34,6 +34,7 @@ impl Plugin for SettingsUiPlugin {
                     handle_settings_keyboard_controls,
                     apply_ai_stream_events,
                     apply_settings_window_visibility,
+                    handle_settings_window_close,
                 )
                     .chain(),
             )
@@ -379,8 +380,6 @@ fn render_settings_window(
     mut animation_control: ResMut<CharacterAnimationControl>,
     mut ai_request_writer: MessageWriter<AiRequestEvent>,
     mut input_state: ResMut<SettingsInputState>,
-    window_entities: Res<SettingsWindowEntities>,
-    mut windows: Query<&mut Window>,
     mut emotion_queue: ResMut<EmotionQueue>,
     time: Res<Time>,
 ) {
@@ -397,30 +396,6 @@ fn render_settings_window(
     apply_egui_visuals(ctx);
 
     egui::CentralPanel::default().show(ctx, |ui| {
-        let header_response = ui
-            .horizontal(|ui| {
-                ui.heading("Ene Settings");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("X").clicked() {
-                        settings.ui.settings_window_visible = false;
-                        settings.save();
-                    }
-                });
-            })
-            .response;
-
-        let should_start_drag = header_response.hovered()
-            && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
-        if should_start_drag {
-            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-            if let Some(window_entity) = window_entities.window
-                && let Ok(mut window) = windows.get_mut(window_entity)
-            {
-                window.start_drag_move();
-            }
-        }
-
-        ui.separator();
 
         ui.horizontal(|ui| {
             for page in [
@@ -492,8 +467,6 @@ fn apply_settings_window_visibility(
                         SETTINGS_WINDOW_WIDTH,
                         SETTINGS_WINDOW_HEIGHT,
                     ),
-                    decorations: false,
-                    window_level: WindowLevel::AlwaysOnTop,
                     ime_enabled: true,
                     ..default()
                 },))
@@ -585,5 +558,18 @@ fn masked_secret(value: &str) -> String {
         "(empty)".to_string()
     } else {
         "********".to_string()
+    }
+}
+
+fn handle_settings_window_close(
+    mut events: MessageReader<bevy::window::WindowCloseRequested>,
+    window_entities: Res<SettingsWindowEntities>,
+    mut settings: ResMut<CharacterSettings>,
+) {
+    for event in events.read() {
+        if Some(event.window) == window_entities.window {
+            settings.ui.settings_window_visible = false;
+            settings.save();
+        }
     }
 }
