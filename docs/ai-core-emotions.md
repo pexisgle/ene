@@ -47,5 +47,5 @@ CLI: "[Emotion: name]" をマゼンタ表示
 
 | アプリ | 処理 |
 |--------|------|
-| ene-app（GUI） | `AiStreamEvent::SpecialToken` → `EmotionQueue` → `process_emotion_queue`（4秒ホールド→フェードアウト） → `SetExpressions` トリガー → VRM blendshape 反映 |
+| ene-desktop（GUI） | `AiStreamEvent::SpecialToken` → `EmotionQueue` → `process_emotion_queue`（4秒ホールド→フェードアウト） → `SetExpressions` トリガー → VRM blendshape 反映 |
 | ene-cli（CLI） | `TextDelta` 内のトークンを `process_delta()` で解析、`[Emotion: name]` としてマゼンタ表示（SpecialToken イベントはサイレント消費） |

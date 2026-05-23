@@ -1,6 +1,6 @@
 # アプリケーション起動フロー
 
-## GUI（ene-app）
+## GUI（ene-desktop）
 
 Bevy ECS ベースのデスクトップアプリ。VRM キャラクターを常時最前面表示する。
 

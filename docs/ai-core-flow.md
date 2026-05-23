@@ -15,4 +15,4 @@
 | 9 | [ai-core-tools-providers.md](ai-core-tools-providers.md) | ツールプロバイダ一覧（引数・アクション詳細） |
 | 10 | [ai-core-sandbox.md](ai-core-sandbox.md) | サンドボックスセキュリティ、パス制限、Undo |
 | 11 | [ai-core-emotions.md](ai-core-emotions.md) | 感情表現トークン、表情適用フロー |
-| 12 | [ai-core-startup.md](ai-core-startup.md) | GUI（ene-app）/ CLI（ene-cli）起動フロー |
+| 12 | [ai-core-startup.md](ai-core-startup.md) | GUI（ene-desktop）/ CLI（ene-cli）起動フロー |
