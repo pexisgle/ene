@@ -1,5 +1,5 @@
 use crate::error::AiCoreError;
-use ene_config::AiSettings;
+use ene_config::EneSettings;
 use ene_session::{
     ConversationSession, PendingSplitTask, SplitTaskInput, init_embedding, init_memory_store,
     spawn_split_task,
@@ -8,14 +8,14 @@ use ene_tool_host::{McpToolRegistry, ToolHostManager, ToolRegistry};
 use std::sync::Arc;
 
 pub struct AiRuntime {
-    pub settings: AiSettings,
+    pub settings: EneSettings,
     pub session: ConversationSession,
     pub registry: Arc<dyn ToolRegistry>,
     pub pending_split: Option<PendingSplitTask>,
 }
 
 impl AiRuntime {
-    pub async fn init(settings: AiSettings) -> Result<Self, AiCoreError> {
+    pub async fn init(settings: EneSettings) -> Result<Self, AiCoreError> {
         let mut session = ConversationSession::new();
 
         // 1. Initialize embedding
@@ -100,14 +100,14 @@ impl AiRuntime {
 }
 
 pub async fn build_tool_registry(
-    settings: &AiSettings,
+    settings: &EneSettings,
 ) -> Result<Arc<dyn ToolRegistry>, AiCoreError> {
     let mut manager = match ToolHostManager::start(settings).await {
         Ok(m) => m,
         Err(e) => {
             eprintln!("[ToolHostManager] Warning: {}", e);
-            ToolHostManager::start(&AiSettings {
-                tools: ene_config::AiToolSettings {
+            ToolHostManager::start(&EneSettings {
+                tools: ene_config::ToolSettings {
                     tools: std::collections::HashMap::new(),
                 },
                 ..settings.clone()

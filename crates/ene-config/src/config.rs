@@ -5,7 +5,7 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
-pub struct AiProviderSettings {
+pub struct ProviderSettings {
     pub provider_name: String,
     pub model: String,
     pub base_url: String,
@@ -14,7 +14,7 @@ pub struct AiProviderSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
-pub struct AiEmbeddingSettings {
+pub struct EmbeddingSettings {
     pub provider_type: EmbeddingProviderType,
     pub model: String,
     pub base_url: String,
@@ -24,8 +24,8 @@ pub struct AiEmbeddingSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
-pub struct AiSettings {
-    pub provider: AiProviderSettings,
+pub struct EneSettings {
+    pub provider: ProviderSettings,
     pub character_card_path: String,
     pub user_name: String,
     pub runtime_rules: String,
@@ -33,12 +33,12 @@ pub struct AiSettings {
     pub max_tool_call_rounds: usize,
     pub mcp_servers: Vec<McpServerConfig>,
 
-    pub embedding: AiEmbeddingSettings,
-    pub memory: AiMemorySettings,
+    pub embedding: EmbeddingSettings,
+    pub memory: MemorySettings,
 
-    pub sandbox: AiSandboxSettings,
+    pub sandbox: SandboxSettings,
 
-    pub tools: AiToolSettings,
+    pub tools: ToolSettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -60,7 +60,7 @@ impl EmbeddingProviderType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
-pub struct AiMemorySettings {
+pub struct MemorySettings {
     pub enabled: bool,
     pub db_path: String,
     pub recall_limit: usize,
@@ -98,7 +98,7 @@ pub struct AiMemorySettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
-pub struct AiSandboxSettings {
+pub struct SandboxSettings {
     pub enabled: bool,
     pub allowed_directories: Vec<String>,
     pub writable_directories: Vec<String>,
@@ -123,7 +123,7 @@ pub struct ToolEntry {
 /// ツール設定 — ツール名 → ToolEntry のマップ
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct AiToolSettings {
+pub struct ToolSettings {
     /// ツールごとのエントリ
     ///
     /// 例:
@@ -136,7 +136,7 @@ pub struct AiToolSettings {
     pub tools: HashMap<String, ToolEntry>,
 }
 
-impl Default for AiToolSettings {
+impl Default for ToolSettings {
     fn default() -> Self {
         let mut tools = HashMap::new();
         for name in ["fs", "web", "browser", "utility", "app"] {
@@ -165,7 +165,7 @@ pub enum McpTransport {
     Http { url: String },
 }
 
-impl Default for AiEmbeddingSettings {
+impl Default for EmbeddingSettings {
     fn default() -> Self {
         Self {
             provider_type: EmbeddingProviderType::Local,
@@ -177,7 +177,7 @@ impl Default for AiEmbeddingSettings {
     }
 }
 
-impl Default for AiProviderSettings {
+impl Default for ProviderSettings {
     fn default() -> Self {
         Self {
             provider_name: "openai-compatible".to_string(),
@@ -188,7 +188,7 @@ impl Default for AiProviderSettings {
     }
 }
 
-impl Default for AiMemorySettings {
+impl Default for MemorySettings {
     fn default() -> Self {
         Self {
             enabled: false,
@@ -216,7 +216,7 @@ impl Default for AiMemorySettings {
     }
 }
 
-impl Default for AiSandboxSettings {
+impl Default for SandboxSettings {
     fn default() -> Self {
         Self {
             enabled: true,
@@ -238,7 +238,7 @@ impl Default for AiSandboxSettings {
     }
 }
 
-impl AiSandboxSettings {
+impl SandboxSettings {
     /// `ene-tool-proto` 用のシリアライズ可能なサンドボックス設定に変換
     pub fn to_sandbox_config_data(
         &self,
@@ -259,7 +259,7 @@ impl AiSandboxSettings {
     }
 }
 
-impl AiSettings {
+impl EneSettings {
     /// Undo DB のパスを解決する（memory.db と同じディレクトリ）
     pub fn resolve_undo_db_path(&self) -> std::path::PathBuf {
         let memory_path = self.resolve_memory_db_path();
@@ -270,25 +270,25 @@ impl AiSettings {
     }
 }
 
-impl Default for AiSettings {
+impl Default for EneSettings {
     fn default() -> Self {
         Self {
-            provider: AiProviderSettings::default(),
+            provider: ProviderSettings::default(),
             character_card_path: String::new(),
             user_name: "User".to_string(),
             runtime_rules: "Keep responses relatively short and sweet, suitable for displaying on a screen overlay.".to_string(),
             tool_calling_enabled: true,
             max_tool_call_rounds: 10,
             mcp_servers: Vec::new(),
-            embedding: AiEmbeddingSettings::default(),
-            memory: AiMemorySettings::default(),
-            sandbox: AiSandboxSettings::default(),
-            tools: AiToolSettings::default(),
+            embedding: EmbeddingSettings::default(),
+            memory: MemorySettings::default(),
+            sandbox: SandboxSettings::default(),
+            tools: ToolSettings::default(),
         }
     }
 }
 
-impl AiSettings {
+impl EneSettings {
     pub fn resolve_base_url(&self) -> Result<String, ConfigError> {
         if self.provider.base_url.trim().is_empty() {
             return Err(ConfigError::MissingBaseUrl {
@@ -348,15 +348,15 @@ impl AiSettings {
 }
 
 /// `assets/settings.json` を読み込み、`character` フィールドから `character_card_path` を解決した
-/// `AiSettings` を返す。
-pub fn load_settings() -> AiSettings {
+/// `EneSettings` を返す。
+pub fn load_settings() -> EneSettings {
     let assets_dir = crate::paths::assets_dir();
     let config_path = crate::paths::config_file_path();
     load_settings_from(&assets_dir, &config_path)
 }
 
 /// 指定された `assets_dir` / `config_path` で設定を読み込む。
-pub fn load_settings_from(assets_dir: &Path, config_path: &Path) -> AiSettings {
+pub fn load_settings_from(assets_dir: &Path, config_path: &Path) -> EneSettings {
     load_full_settings_from(assets_dir, config_path).ai
 }
 
@@ -436,7 +436,7 @@ pub struct AppSettings {
     pub character: String,
     pub app: AppSection,
     #[serde(flatten)]
-    pub ai: AiSettings,
+    pub ai: EneSettings,
 }
 
 impl Default for AppSettings {
@@ -445,7 +445,7 @@ impl Default for AppSettings {
             version: 1,
             character: "Alicia".to_string(),
             app: AppSection::default(),
-            ai: AiSettings::default(),
+            ai: EneSettings::default(),
         }
     }
 }

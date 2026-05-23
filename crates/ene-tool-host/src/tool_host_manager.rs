@@ -3,7 +3,7 @@ use crate::tools::CompositeToolRegistry;
 use crate::tools::ToolDefinition;
 use crate::tools::definition::ToolRegistry;
 use ene_config as paths;
-use ene_config::AiSettings;
+use ene_config::EneSettings;
 use ene_memory::MemoryStore;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -216,7 +216,7 @@ impl ToolRegistry for ToolHostManager {
 }
 
 impl ToolHostManager {
-    pub async fn start(settings: &AiSettings) -> Result<Self, crate::error::ToolError> {
+    pub async fn start(settings: &EneSettings) -> Result<Self, crate::error::ToolError> {
         let undo_db_path = Some(
             settings
                 .resolve_undo_db_path()

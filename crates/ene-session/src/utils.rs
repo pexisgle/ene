@@ -1,4 +1,4 @@
-use ene_config::AiSettings;
+use ene_config::EneSettings;
 use ene_embedding::{EmbeddingProvider, create_embedding_provider};
 
 use ene_memory::MemoryStore;
@@ -19,7 +19,7 @@ pub fn truncate(s: &str, max_chars: usize) -> String {
 }
 
 /// Embedding プロバイダーを初期化する（常に利用可能）
-pub fn init_embedding(settings: &AiSettings) -> Result<Arc<dyn EmbeddingProvider>, String> {
+pub fn init_embedding(settings: &EneSettings) -> Result<Arc<dyn EmbeddingProvider>, String> {
     let embed_base_url = settings
         .resolve_embedding_base_url()
         .map_err(|e| format!("Failed to resolve embedding base URL: {}", e))?;
@@ -39,7 +39,7 @@ pub fn init_embedding(settings: &AiSettings) -> Result<Arc<dyn EmbeddingProvider
 
 /// MemoryStore を初期化する（EmbeddingProvider が必要）
 pub fn init_memory_store(
-    settings: &AiSettings,
+    settings: &EneSettings,
     embedder: &dyn EmbeddingProvider,
 ) -> Result<Arc<MemoryStore>, String> {
     let db_path = settings.resolve_memory_db_path();
@@ -61,7 +61,7 @@ pub fn init_memory_store(
 
 /// メモリ機能を初期化する（EmbeddingProvider + MemoryStore）
 pub fn init_memory(
-    settings: &AiSettings,
+    settings: &EneSettings,
 ) -> Result<(Arc<MemoryStore>, Arc<dyn EmbeddingProvider>), String> {
     let embedder = init_embedding(settings)?;
     let store = init_memory_store(settings, &*embedder)?;
