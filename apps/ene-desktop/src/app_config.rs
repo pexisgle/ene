@@ -182,7 +182,7 @@ pub struct UiState {
 
 #[derive(Clone, Debug, Default)]
 pub struct AiConfig {
-    pub ai: ene_config::AiSettings,
+    pub ai: ene_config::EneSettings,
 }
 
 #[derive(Resource, Debug)]
@@ -241,7 +241,7 @@ impl CharacterSettings {
             },
             ui: UiState::default(),
             ai: AiConfig {
-                ai: ene_config::AiSettings {
+                ai: ene_config::EneSettings {
                     character_card_path: format!("{}/{}", assets_dir.display(), selected_card_path),
                     ..Default::default()
                 },

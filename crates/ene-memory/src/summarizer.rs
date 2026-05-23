@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::MemoryError;
 use crate::store::KeyFact;
-use ene_config::AiSettings;
+use ene_config::EneSettings;
 use ene_embedding::client::build_openai_client;
 
 /// LLM が返す構造化された会話要約
@@ -26,7 +26,7 @@ pub struct ConversationSummaryResult {
 
 /// 会話履歴から要約を生成する
 pub async fn summarize_conversation(
-    settings: &AiSettings,
+    settings: &EneSettings,
     history: &[(Role, String)],
     character_name: &str,
     user_name: &str,

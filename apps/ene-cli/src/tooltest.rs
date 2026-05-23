@@ -1,8 +1,8 @@
 use crate::stream;
 use ene_ai_core::{ConversationSession, run_ai_with_tools};
-use ene_config::AiSettings;
+use ene_config::EneSettings;
 
-pub async fn run(settings: &AiSettings, session: &ConversationSession, prompt_override: &str) {
+pub async fn run(settings: &EneSettings, session: &ConversationSession, prompt_override: &str) {
     let prompt = if prompt_override.trim().is_empty() {
         "Use the get_current_time tool and reply with the time only.".to_string()
     } else {

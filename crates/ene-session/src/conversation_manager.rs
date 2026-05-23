@@ -1,7 +1,7 @@
 use crate::error::SessionError;
 use async_openai::types::chat::Role;
 use chrono::{DateTime, Utc};
-use ene_config::AiSettings;
+use ene_config::EneSettings;
 use ene_embedding::{EmbeddingProvider, cosine_similarity};
 use ene_memory as summarizer;
 use ene_memory::{KeyFact, MemoryStore};
@@ -55,7 +55,7 @@ pub struct SplitTaskInput {
     pub last_message_time: Option<DateTime<Utc>>,
     pub current_turn_count: usize,
     pub user_input: String,
-    pub settings: AiSettings,
+    pub settings: EneSettings,
     pub history: Vec<(Role, String)>,
     pub session_id: String,
     pub card_name: String,
@@ -68,7 +68,7 @@ pub async fn check_boundary(
     last_input_embedding: Option<&Vec<f32>>,
     last_message_time: Option<DateTime<Utc>>,
     current_turn_count: usize,
-    settings: &AiSettings,
+    settings: &EneSettings,
     user_input: &str,
     embedder: &dyn EmbeddingProvider,
 ) -> SessionBoundary {
@@ -173,7 +173,7 @@ pub async fn execute_split(
     user_name: &str,
     store: &Arc<MemoryStore>,
     embedder: &Arc<dyn EmbeddingProvider>,
-    settings: &AiSettings,
+    settings: &EneSettings,
     reason: SplitReason,
 ) -> Result<SplitResult, SessionError> {
     let ended_at = Utc::now();

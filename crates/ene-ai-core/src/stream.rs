@@ -11,7 +11,7 @@ use async_openai::types::chat::{
     FunctionCall, FunctionCallStream, ImageUrlArgs,
 };
 use async_stream::stream;
-use ene_config::AiSettings;
+use ene_config::EneSettings;
 use ene_memory::RecalledSummary;
 use ene_session::ConversationSession;
 use std::sync::Arc;
@@ -100,7 +100,7 @@ pub async fn select_relevant_tools(
 
 pub async fn fetch_memory_context(
     session: &ConversationSession,
-    settings: &AiSettings,
+    settings: &EneSettings,
 ) -> (Vec<RecalledSummary>, Vec<ene_memory::KeyFact>) {
     let memory_enabled = settings.memory.enabled;
     let mem_store = if memory_enabled {
@@ -140,7 +140,7 @@ pub async fn fetch_memory_context(
 
 pub fn build_chat_messages_list(
     session: &ConversationSession,
-    settings: &AiSettings,
+    settings: &EneSettings,
     user_input: &str,
     recalled_summaries: &[RecalledSummary],
     key_facts: &[ene_memory::KeyFact],
@@ -244,7 +244,7 @@ pub async fn perform_tool_executions(
 }
 
 pub async fn run_ai_with_tools(
-    settings: &AiSettings,
+    settings: &EneSettings,
     session: &ConversationSession,
     user_input: &str,
     registry: std::sync::Arc<dyn ene_tool_host::ToolRegistry>,
