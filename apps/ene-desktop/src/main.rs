@@ -6,7 +6,7 @@ mod resources;
 mod scene;
 mod settings_ui;
 mod tray;
-mod window_drag;
+mod character_drag;
 
 use bevy::asset::AssetPlugin;
 use bevy::light::DirectionalLightShadowMap;
@@ -20,9 +20,14 @@ use character::CharacterPlugin;
 use scene::ScenePlugin;
 use settings_ui::SettingsUiPlugin;
 use tray::TrayPlugin;
-use window_drag::WindowDragPlugin;
+use character_drag::CharacterDragPlugin;
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    if let Err(err) = gtk::init() {
+        panic!("Failed to initialize GTK: {}", err);
+    }
+
     let assets_dir = resources::ensure_resource_dirs();
     let (default_vrm, _default_vrma) = app_config::read_cli_paths();
     let settings = CharacterSettings::discover(&assets_dir, default_vrm);
@@ -46,7 +51,7 @@ fn main() {
             CharacterPlugin,
             TrayPlugin,
             SettingsUiPlugin,
-            WindowDragPlugin,
+            CharacterDragPlugin,
         ))
         .run();
 }
