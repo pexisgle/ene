@@ -1,0 +1,11 @@
+[package]
+name = "ene-test-two-window"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = "0.18.1"
+tray-icon = "0.24.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
