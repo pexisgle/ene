@@ -165,7 +165,7 @@ pub async fn summarize_conversation(
             json_schema: ResponseFormatJsonSchema {
                 description: Some("Conversation summary result".to_string()),
                 name: "ConversationSummaryResult".to_string(),
-                schema: Some(schema),
+                schema: schema,
                 strict: Some(true),
             },
         })

@@ -7,7 +7,7 @@ edition = "2024"
 crate-type = ["lib"]
 
 [dependencies]
-async-openai = { version = "0.38.2", features = ["chat-completion", "embedding"] }
+async-openai = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
@@ -15,5 +15,5 @@ hf-hub = { version = "0.5.0", default-features = false, features = ["rustls-tls"
 candle-core = "0.10"
 candle-nn = "0.10"
 tokenizers = "0.23"
-tracing = "0.1"
+tracing = { workspace = true }
 ene-config = { path = "../ene-config" }

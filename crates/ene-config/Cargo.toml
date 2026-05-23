@@ -10,9 +10,9 @@ crate-type = ["lib"]
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-chrono = "0.4"
+chrono = { workspace = true }
 dirs = "6"
-indexmap = "2"
-rand = "0.10.1"
-tracing = "0.1"
+indexmap = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true }
 ene-tool-proto = { path = "../ene-tool-proto" }
