@@ -19,5 +19,5 @@ sqlite-vec = "0.1"
 uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-ene-config = { path = "../ene-config" }
-ene-embedding = { path = "../ene-embedding" }
+ene-config = { workspace = true }
+ene-embedding = { workspace = true }

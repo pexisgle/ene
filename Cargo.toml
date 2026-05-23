@@ -5,16 +5,9 @@ members = [
     "crates/ene-embedding",
     "crates/ene-memory",
     "crates/ene-session",
-    "crates/ene-tool-host",
-    "crates/ene-app",
-    "crates/ene-cli",
-    "crates/ene-tool-proto",
-    "crates/ene-tools/utility",
-    "crates/ene-tools/web",
-    "crates/ene-tools/app",
-    "crates/ene-tools/browser",
-    "crates/ene-tools/fs",
-    "crates/ene-tools/common",
+    "crates/ene-tool-*",
+    "crates/ene-tools/*",
+    "apps/*",
 ]
 resolver = "2"
 
@@ -32,6 +25,17 @@ uuid = { version = "1", features = ["v4"] }
 indexmap = "2"
 rand = "0.10.1"
 async-openai = { version = "0.40.2", features = ["chat-completion", "embedding"] }
+
+# --- 内部ライブラリ ---
+ene-config = { path = "crates/ene-config" }
+ene-ai-core = { path = "crates/ene-ai-core" }
+ene-embedding = { path = "crates/ene-embedding" }
+ene-memory = { path = "crates/ene-memory" }
+ene-session = { path = "crates/ene-session" }
+ene-tool-host = { path = "crates/ene-tool-host" }
+ene-tool-proto = { path = "crates/ene-tool-proto" }
+ene-tools-common = { path = "crates/ene-tools/common" }
+ene-tools-utility = { path = "crates/ene-tools/utility" }
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]

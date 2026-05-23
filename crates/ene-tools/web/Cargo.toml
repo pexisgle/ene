@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ene-tool-proto = { path = "../../ene-tool-proto" }
+ene-tool-proto = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query"] }
 serde = { workspace = true }
-ene-tools-common = { path = "../common" }
+ene-tools-common = { workspace = true }
 regex = { workspace = true }
 urlencoding = "2.1"
 serde_json = { workspace = true }

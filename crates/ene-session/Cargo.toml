@@ -15,6 +15,6 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-ene-config = { path = "../ene-config" }
-ene-embedding = { path = "../ene-embedding" }
-ene-memory = { path = "../ene-memory" }
+ene-config = { workspace = true }
+ene-embedding = { workspace = true }
+ene-memory = { workspace = true }

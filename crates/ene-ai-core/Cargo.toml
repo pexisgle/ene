@@ -20,8 +20,8 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 regex = { workspace = true }
 tracing = { workspace = true }
-ene-config = { path = "../ene-config" }
-ene-embedding = { path = "../ene-embedding" }
-ene-memory = { path = "../ene-memory" }
-ene-session = { path = "../ene-session" }
-ene-tool-host = { path = "../ene-tool-host" }
+ene-config = { workspace = true }
+ene-embedding = { workspace = true }
+ene-memory = { workspace = true }
+ene-session = { workspace = true }
+ene-tool-host = { workspace = true }

@@ -15,4 +15,4 @@ dirs = "6"
 indexmap = { workspace = true }
 rand = { workspace = true }
 tracing = { workspace = true }
-ene-tool-proto = { path = "../ene-tool-proto" }
+ene-tool-proto = { workspace = true }

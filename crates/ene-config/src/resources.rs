@@ -74,14 +74,12 @@ fn find_source_dir() -> Option<PathBuf> {
         // Dev: binary in target/debug/, assets at workspace root
         exe_dir.join("../../assets"),
         exe_dir.join("../../resources/assets"),
-        exe_dir.join("../../crates/ene-app/resources/assets"),
         // Dev: binary in target/<profile>/, assets at workspace root
         exe_dir.join("../assets"),
         exe_dir.join("../resources/assets"),
         // CWD-relative fallbacks
         PathBuf::from("assets"),
         PathBuf::from("resources/assets"),
-        PathBuf::from("crates/ene-app/resources/assets"),
     ];
 
     for c in &candidates {
