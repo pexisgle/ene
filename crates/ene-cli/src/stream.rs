@@ -1,5 +1,5 @@
 use crate::style;
-use ene_ai_core::{session::ConversationSession, stream::AiStreamEvent, truncate};
+use ene_ai_core::{ConversationSession, stream::AiStreamEvent, truncate};
 use std::io::{self, Write};
 use tokio_stream::StreamExt;
 
@@ -20,7 +20,7 @@ where
                 }
                 for token in special_tokens {
                     if let Some(emotion) =
-                        ene_ai_core::special_token::extract_emotion_from_token(&token)
+                        ene_ai_core::extract_emotion_from_token(&token)
                     {
                         print!("{}", style::emotion(format!("[Emotion: {}]", emotion)));
                     } else {

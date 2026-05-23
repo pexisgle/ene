@@ -1,39 +1,24 @@
-pub mod character_card;
 pub mod client;
-pub mod config;
-pub mod conversation_manager;
-pub mod embedding;
 pub mod error;
-pub mod ipc_client;
-pub mod mcp_client;
-pub mod memory;
-pub mod paths;
 pub mod prompt_builder;
-pub mod resources;
 pub mod runtime;
-pub mod schema;
-pub mod session;
-pub mod special_token;
 pub mod stream;
-pub mod summarizer;
-pub mod tool_host_manager;
-pub mod tools;
-pub mod utils;
 
-pub use config::{AiSettings, EmbeddingProviderType};
-pub use conversation_manager::{
-    PendingSplitTask, SessionBoundary, SplitReason, SplitResult, SplitTaskInput, check_boundary,
-    execute_split, generate_session_id, poll_split_result, spawn_split_task,
-};
-pub use embedding::{
-    ApiEmbeddingProvider, EmbeddingProvider, GgufEmbeddingProvider, cosine_similarity,
-    create_embedding_provider,
-};
 pub use error::AiCoreError;
-pub use memory::{ConversationSummary, KeyFact, MemoryStore, RecalledSummary};
+pub use ene_memory::{ConversationSummary, KeyFact, MemoryStore, RecalledSummary};
+pub use ene_session::{
+    ConversationSession, PendingSplitTask, SessionBoundary, SplitReason, SplitResult,
+    SplitTaskInput, check_boundary, execute_split, generate_session_id, poll_split_result,
+    spawn_split_task, SessionError, init_embedding, init_memory, init_memory_store, truncate,
+    extract_emotion_from_token, split_text_and_special_tokens,
+};
+pub use ene_tool_host::{
+    CompositeToolRegistry, IpcToolRegistry, McpToolRegistry, ToolCategory, ToolDefinition,
+    ToolHostManager, ToolRegistry, ToolError,
+};
 pub use runtime::{AiRuntime, build_tool_registry};
-pub use session::ConversationSession;
 pub use stream::{AiStreamEvent, run_ai_with_tools};
-pub use tool_host_manager::ToolHostManager;
-pub use tools::{CompositeToolRegistry, ToolCategory, ToolDefinition, ToolRegistry};
-pub use utils::{init_embedding, init_memory, init_memory_store, truncate};
+
+
+
+

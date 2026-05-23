@@ -121,8 +121,8 @@ impl SettingsInputState {
         self.ai_chat_input = settings.ui.ai_chat_input.clone();
         self.ai_memory_enabled = settings.ai.ai.memory.enabled;
         self.ai_embedding_provider = match settings.ai.ai.embedding.provider_type {
-            ene_ai_core::EmbeddingProviderType::Api => "api".to_string(),
-            ene_ai_core::EmbeddingProviderType::Local => "local".to_string(),
+            ene_config::EmbeddingProviderType::Api => "api".to_string(),
+            ene_config::EmbeddingProviderType::Local => "local".to_string(),
         };
         self.ai_embedding_model = settings.ai.ai.embedding.model.clone();
         self.ai_embedding_base_url = settings.ai.ai.embedding.base_url.clone();

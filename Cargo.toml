@@ -1,6 +1,11 @@
 [workspace]
 members = [
     "crates/ene-ai-core",
+    "crates/ene-config",
+    "crates/ene-embedding",
+    "crates/ene-memory",
+    "crates/ene-session",
+    "crates/ene-tool-host",
     "crates/ene-app",
     "crates/ene-cli",
     "crates/ene-tool-proto",

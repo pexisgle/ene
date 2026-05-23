@@ -1,11 +1,6 @@
-use crate::config::AiSettings;
-use crate::utils::init_embedding;
-use crate::utils::init_memory_store;
-use crate::session::ConversationSession;
-use crate::tools::ToolRegistry;
-use crate::tool_host_manager::ToolHostManager;
-use crate::mcp_client::McpToolRegistry;
-use crate::{PendingSplitTask, SplitTaskInput, spawn_split_task};
+use ene_config::AiSettings;
+use ene_session::{ConversationSession, PendingSplitTask, SplitTaskInput, spawn_split_task, init_embedding, init_memory_store};
+use ene_tool_host::{ToolRegistry, ToolHostManager, McpToolRegistry};
 use crate::error::AiCoreError;
 use std::sync::Arc;
 
@@ -28,7 +23,7 @@ impl AiRuntime {
         // 2. Initialize memory store if enabled
         if settings.memory.enabled {
             let store = init_memory_store(&settings, &*embedder)
-                .map_err(|e| AiCoreError::MemoryStoreConnectionError(e))?;
+                .map_err(|e| AiCoreError::Memory(ene_memory::MemoryError::MemoryStoreConnectionError(e)))?;
             session.memory.memory_store = Some(store);
         }
 
@@ -105,7 +100,7 @@ pub async fn build_tool_registry(settings: &AiSettings) -> Result<Arc<dyn ToolRe
         Err(e) => {
             eprintln!("[ToolHostManager] Warning: {}", e);
             ToolHostManager::start(&AiSettings {
-                tools: crate::config::AiToolSettings {
+                tools: ene_config::AiToolSettings {
                     tools: std::collections::HashMap::new(),
                 },
                 ..settings.clone()
@@ -122,7 +117,7 @@ pub async fn build_tool_registry(settings: &AiSettings) -> Result<Arc<dyn ToolRe
                 continue;
             }
             match &server.transport {
-                crate::config::McpTransport::Stdio { command, args } => {
+                ene_config::McpTransport::Stdio { command, args } => {
                     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
                     if let Err(err) = mcp.connect_stdio(&server.name, command, &args_ref).await {
                         eprintln!(
@@ -131,7 +126,7 @@ pub async fn build_tool_registry(settings: &AiSettings) -> Result<Arc<dyn ToolRe
                         );
                     }
                 }
-                crate::config::McpTransport::Http { url } => {
+                ene_config::McpTransport::Http { url } => {
                     eprintln!(
                         "Warning: MCP HTTP transport not supported yet for '{}': {}",
                         server.name, url

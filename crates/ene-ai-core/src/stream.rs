@@ -1,9 +1,9 @@
 use crate::client::build_openai_client;
-use crate::config::AiSettings;
+use ene_config::AiSettings;
 use std::sync::Arc;
-use crate::memory::store::RecalledSummary;
+use ene_memory::RecalledSummary;
 use crate::prompt_builder::build_messages;
-use crate::session::ConversationSession;
+use ene_session::ConversationSession;
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall as ToolCall, ChatCompletionMessageToolCallChunk as ToolCallChunk,
     ChatCompletionMessageToolCalls as ToolCalls,
@@ -52,15 +52,15 @@ pub enum AiStreamEvent {
 }
 
 pub async fn select_relevant_tools(
-    registry: &dyn crate::tools::ToolRegistry,
-    embedding_provider: &Option<Arc<dyn crate::embedding::EmbeddingProvider>>,
+    registry: &dyn ene_tool_host::ToolRegistry,
+    embedding_provider: &Option<Arc<dyn ene_embedding::EmbeddingProvider>>,
     user_input: &str,
     tool_calling_enabled: bool,
     tool_rag_enabled: bool,
     tool_rag_limit: usize,
     tool_rag_always_include: &[String],
-    mem_store: Option<&crate::memory::store::MemoryStore>,
-) -> Vec<crate::tools::ToolDefinition> {
+    mem_store: Option<&ene_memory::MemoryStore>,
+) -> Vec<ene_tool_host::ToolDefinition> {
     if tool_rag_enabled && tool_calling_enabled {
         if let Some(embedder) = embedding_provider.as_ref() {
             if let Err(e) = registry.ensure_index_built(embedder.as_ref(), mem_store).await {
@@ -96,7 +96,7 @@ pub async fn select_relevant_tools(
 pub async fn fetch_memory_context(
     session: &ConversationSession,
     settings: &AiSettings,
-) -> (Vec<RecalledSummary>, Vec<crate::memory::store::KeyFact>) {
+) -> (Vec<RecalledSummary>, Vec<ene_memory::KeyFact>) {
     let memory_enabled = settings.memory.enabled;
     let mem_store = if memory_enabled {
         session.memory.memory_store.clone()
@@ -137,7 +137,7 @@ pub fn build_chat_messages_list(
     settings: &AiSettings,
     user_input: &str,
     recalled_summaries: &[RecalledSummary],
-    key_facts: &[crate::memory::store::KeyFact],
+    key_facts: &[ene_memory::KeyFact],
 ) -> Result<Vec<ChatCompletionRequestMessage>, crate::error::AiCoreError> {
     let Some(card) = session.character_card.as_ref() else {
         return Err(crate::error::AiCoreError::NoCharacterCard);
@@ -160,7 +160,7 @@ pub fn build_chat_messages_list(
 }
 
 pub async fn perform_tool_executions(
-    registry: &dyn crate::tools::ToolRegistry,
+    registry: &dyn ene_tool_host::ToolRegistry,
     session_id: &str,
     tool_calls: Vec<ToolCalls>,
     assistant_content: &str,
@@ -227,7 +227,7 @@ pub async fn run_ai_with_tools(
     settings: &AiSettings,
     session: &ConversationSession,
     user_input: &str,
-    registry: std::sync::Arc<dyn crate::tools::ToolRegistry>,
+    registry: std::sync::Arc<dyn ene_tool_host::ToolRegistry>,
 ) -> Result<impl Stream<Item = AiStreamEvent> + 'static, crate::error::AiCoreError> {
     let base_url = settings.resolve_base_url()?;
     let api_key = settings.resolve_api_key();
@@ -416,7 +416,7 @@ pub async fn run_ai_with_tools(
 
 async fn search_summaries(
     memory_enabled: bool,
-    mem_store: &Option<std::sync::Arc<crate::memory::store::MemoryStore>>,
+    mem_store: &Option<std::sync::Arc<ene_memory::MemoryStore>>,
     card_name: &str,
     pending_embedding: &Option<Vec<f32>>,
     summary_recall_limit: usize,

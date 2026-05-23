@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 ene-ai-core = { path = "../ene-ai-core" }
+ene-config = { path = "../ene-config" }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 serde_json = { workspace = true }

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 ene-ai-core = { path = "../ene-ai-core" }
+ene-config = { path = "../ene-config" }
 bevy = "0.18.1"
 bevy_egui = "0.39.1"
 bevy_vrm1 = "0.7.1"

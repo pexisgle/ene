@@ -34,7 +34,7 @@ pub const ANTIALIASING_MODE_CHOICES: [AntialiasingMode; 4] = [
 ];
 pub const DEFAULT_ANTIALIASING_MODE: AntialiasingMode = AntialiasingMode::Fxaa;
 
-pub use ene_ai_core::config::{ShadowQuality, AntialiasingMode};
+pub use ene_config::{ShadowQuality, AntialiasingMode};
 
 pub fn normalize_mask_render_downsample(value: u32) -> u32 {
     cycle_choice(
@@ -147,7 +147,7 @@ pub struct CharacterEntry {
     pub default_motion: Option<String>,
 }
 
-pub use ene_ai_core::config::GraphicsSection as GraphicsSettings;
+pub use ene_config::GraphicsSection as GraphicsSettings;
 
 #[derive(Clone, Debug)]
 pub struct CharacterState {
@@ -182,7 +182,7 @@ pub struct UiState {
 
 #[derive(Clone, Debug, Default)]
 pub struct AiConfig {
-    pub ai: ene_ai_core::config::AiSettings,
+    pub ai: ene_config::AiSettings,
 }
 
 #[derive(Resource, Debug)]
@@ -241,7 +241,7 @@ impl CharacterSettings {
             },
             ui: UiState::default(),
             ai: AiConfig {
-                ai: ene_ai_core::config::AiSettings {
+                ai: ene_config::AiSettings {
                     character_card_path: format!("{}/{}", assets_dir.display(), selected_card_path),
                     ..Default::default()
                 },
@@ -385,15 +385,15 @@ impl CharacterSettings {
             },
             ai: self.ai.ai.clone(),
         };
-        if let Err(e) = ene_ai_core::config::save_full_settings(&saved) {
+        if let Err(e) = ene_config::save_full_settings(&saved) {
             eprintln!("[Config] Failed to save settings: {e}");
         }
         self.save_per_character_settings();
     }
 
     pub fn load_from_file(&mut self) {
-        let path = ene_ai_core::paths::config_file_path();
-        let full = ene_ai_core::config::load_full_settings_from(&self.assets_dir, &path);
+        let path = ene_config::config_file_path();
+        let full = ene_config::load_full_settings_from(&self.assets_dir, &path);
 
         self.ai.ai = full.ai;
 
@@ -413,7 +413,7 @@ impl CharacterSettings {
     }
 }
 
-pub use ene_ai_core::config::{AppSection, AppSettings};
+pub use ene_config::{AppSection, AppSettings};
 
 /// Per-character settings stored in `characters/{name}/character_settings.json`
 #[derive(Debug, Serialize, Deserialize)]

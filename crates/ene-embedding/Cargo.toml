@@ -1,0 +1,19 @@
+[package]
+name = "ene-embedding"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+async-openai = { version = "0.38.2", features = ["chat-completion", "embedding"] }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+hf-hub = { version = "0.5.0", default-features = false, features = ["rustls-tls", "tokio"] }
+candle-core = "0.10"
+candle-nn = "0.10"
+tokenizers = "0.23"
+tracing = "0.1"
+ene-config = { path = "../ene-config" }
