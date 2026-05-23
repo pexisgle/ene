@@ -43,9 +43,7 @@ impl ToolProcess {
         let _ = self.child.kill();
         let _ = self.child.wait();
 
-        if self.socket_path.exists() {
-            let _ = std::fs::remove_file(&self.socket_path);
-        }
+        ene_tool_proto::transport::cleanup_path(&self.socket_path);
 
         tracing::warn!(
             "[ToolHostManager] Restarting tool '{}' (attempt {}/{})",
@@ -79,9 +77,7 @@ impl Drop for ToolProcess {
     fn drop(&mut self) {
         tracing::info!("[ToolHostManager] Stopping tool '{}'", self.name);
         let _ = self.child.kill();
-        if self.socket_path.exists() {
-            let _ = std::fs::remove_file(&self.socket_path);
-        }
+        ene_tool_proto::transport::cleanup_path(&self.socket_path);
     }
 }
 
@@ -278,11 +274,20 @@ impl ToolHostManager {
             crate::error::ToolError::ToolExecutionError(format!("Tool binary '{}' not found", name))
         })?;
 
-        let socket_path = paths::tool_socket_dir().join(format!("ene-tool-{}.sock", name));
-
-        if socket_path.exists() {
-            let _ = std::fs::remove_file(&socket_path);
-        }
+        let socket_path: PathBuf = {
+            #[cfg(unix)]
+            {
+                let p = paths::tool_socket_dir().join(format!("ene-tool-{}.sock", name));
+                if p.exists() {
+                    let _ = std::fs::remove_file(&p);
+                }
+                p
+            }
+            #[cfg(windows)]
+            {
+                PathBuf::from(format!(r"\\.\pipe\ene-tool-{}", name))
+            }
+        };
 
         let child = std::process::Command::new(&binary_path)
             .env("ENE_TOOL_SOCKET", &socket_path)

@@ -3,6 +3,7 @@ pub mod ipc;
 pub mod registry;
 pub mod sandbox;
 pub mod server;
+pub mod transport;
 pub mod types;
 
 pub use error::ToolError;

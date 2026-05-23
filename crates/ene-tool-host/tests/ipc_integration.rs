@@ -1,24 +1,36 @@
 use ene_tool_host::ToolRegistry;
+use ene_tool_proto::transport::IpcListener;
 use ene_tool_proto::{
     IpcRequest, IpcResponse, SandboxConfigData, ToolCategory, ToolDefinition, read_ipc_request,
     write_ipc_response,
 };
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// IPC プロトコルのエンドツーエンドテスト
 ///
-/// モック UDS サーバーを立て、IpcToolRegistry から接続・ListTools・CallTool
+/// モック IPC サーバーを立て、IpcToolRegistry から接続・ListTools・CallTool
 /// までの一連の流れを検証する。
 #[tokio::test]
 async fn test_ipc_list_tools_and_call_tool() {
-    let socket_path = "/tmp/ene-test-e2e.sock";
-    let _ = std::fs::remove_file(socket_path);
+    let socket_path: PathBuf = {
+        #[cfg(unix)]
+        {
+            let p = PathBuf::from("/tmp/ene-test-e2e.sock");
+            ene_tool_proto::transport::cleanup_path(&p);
+            p
+        }
+        #[cfg(windows)]
+        {
+            PathBuf::from(r"\\.\pipe\ene-test-e2e")
+        }
+    };
 
-    let listener = tokio::net::UnixListener::bind(socket_path).unwrap();
+    let mut listener = IpcListener::bind(&socket_path).unwrap();
 
     // モックサーバータスク
     let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut stream = listener.accept().await.unwrap();
 
         // 1. Initialize
         let req = read_ipc_request(&mut stream)
@@ -99,7 +111,7 @@ async fn test_ipc_list_tools_and_call_tool() {
         undo_db_path: None,
     };
 
-    let registry = ene_tool_host::IpcToolRegistry::new(socket_path.into(), sandbox, None)
+    let registry = ene_tool_host::IpcToolRegistry::new(socket_path, sandbox, None)
         .await
         .expect("Failed to create IpcToolRegistry");
 
@@ -120,18 +132,24 @@ async fn test_ipc_list_tools_and_call_tool() {
         .await
         .expect("Server timed out")
         .expect("Server panicked");
-
-    // クリーンアップ
-    let _ = std::fs::remove_file(socket_path);
 }
 
 /// 実際の ene-tool-host バイナリを起動してエンドツーエンドテスト
 #[tokio::test]
 async fn test_ipc_with_real_host() {
-    let socket_path = "/tmp/ene-test-real-host.sock";
-    let _ = std::fs::remove_file(socket_path);
+    let socket_path: PathBuf = {
+        #[cfg(unix)]
+        {
+            let p = PathBuf::from("/tmp/ene-test-real-host.sock");
+            ene_tool_proto::transport::cleanup_path(&p);
+            p
+        }
+        #[cfg(windows)]
+        {
+            PathBuf::from(r"\\.\pipe\ene-test-real-host")
+        }
+    };
 
-    // ene-tool-host を起動（cargo run ではなくビルド済みバイナリを探す）
     let bin_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -144,13 +162,12 @@ async fn test_ipc_with_real_host() {
     let mut host = if bin_path.exists() {
         tokio::process::Command::new(&bin_path)
     } else {
-        // フォールバック: cargo run
         let mut cmd = tokio::process::Command::new("cargo");
         cmd.args(["run", "--bin", "ene-tool-host", "--"]);
         cmd
     };
 
-    host.env("ENE_TOOL_HOST_SOCKET", socket_path)
+    host.env("ENE_TOOL_SOCKET", &socket_path)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
@@ -172,7 +189,7 @@ async fn test_ipc_with_real_host() {
         undo_db_path: None,
     };
 
-    let registry = ene_tool_host::IpcToolRegistry::new(socket_path.into(), sandbox, None)
+    let registry = ene_tool_host::IpcToolRegistry::new(socket_path, sandbox, None)
         .await
         .expect("Failed to connect to real tool host");
 
@@ -281,5 +298,4 @@ async fn test_ipc_with_real_host() {
     println!("Real host todo result: {}", result);
 
     let _ = child.kill().await;
-    let _ = std::fs::remove_file(socket_path);
 }

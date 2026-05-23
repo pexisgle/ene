@@ -1,12 +1,12 @@
+use crate::transport::{IpcListener, cleanup_path};
 use crate::{IpcRequest, IpcResponse, ToolProvider, read_ipc_request, write_ipc_response};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::net::UnixListener;
 
 /// ツールプロバイダをIPCサーバーとして起動する
 ///
-/// 環境変数 `ENE_TOOL_SOCKET` からソケットパスを読み取り、
-/// Unix Domain Socket でリクエストを待ち受ける。
+/// 環境変数 `ENE_TOOL_SOCKET` からパスを読み取り、
+/// IPC でリクエストを待ち受ける。
 /// `Shutdown` リクエストを受信すると終了する。
 ///
 /// # 使用例
@@ -21,15 +21,21 @@ use tokio::net::UnixListener;
 pub async fn run_tool_server(
     provider: Box<dyn ToolProvider>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let socket_path =
-        std::env::var("ENE_TOOL_SOCKET").unwrap_or_else(|_| "/tmp/ene-tool.sock".to_string());
+    let socket_path = std::env::var("ENE_TOOL_SOCKET").unwrap_or_else(|_| {
+        #[cfg(unix)]
+        {
+            "/tmp/ene-tool.sock".to_string()
+        }
+        #[cfg(windows)]
+        {
+            r"\\.\pipe\ene-tool".to_string()
+        }
+    });
     let socket_path = PathBuf::from(&socket_path);
 
-    if socket_path.exists() {
-        std::fs::remove_file(&socket_path)?;
-    }
+    cleanup_path(&socket_path);
 
-    let listener = UnixListener::bind(&socket_path)?;
+    let mut listener = IpcListener::bind(&socket_path)?;
 
     #[cfg(unix)]
     {
@@ -46,7 +52,7 @@ pub async fn run_tool_server(
     loop {
         tokio::select! {
             result = listener.accept() => {
-                let (mut stream, _) = result?;
+                let mut stream = result?;
                 let provider = Arc::clone(&provider);
                 let shutdown = Arc::clone(&shutdown);
                 tokio::spawn(async move {
@@ -84,7 +90,7 @@ pub async fn run_tool_server(
         }
     }
 
-    let _ = std::fs::remove_file(&socket_path);
+    cleanup_path(&socket_path);
     eprintln!("[tool-server] Shutting down");
     Ok(())
 }
