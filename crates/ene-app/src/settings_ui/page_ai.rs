@@ -143,8 +143,8 @@ pub fn render_ai_page(
             if current_provider != input_state.ai_embedding_provider {
                 input_state.ai_embedding_provider = current_provider.clone();
                 settings.ai.ai.embedding.provider_type = match current_provider.as_str() {
-                    "local" => ene_ai_core::EmbeddingProviderType::Local,
-                    _ => ene_ai_core::EmbeddingProviderType::Api,
+                    "local" => ene_config::EmbeddingProviderType::Local,
+                    _ => ene_config::EmbeddingProviderType::Api,
                 };
                 match current_provider.as_str() {
                     "local" => {

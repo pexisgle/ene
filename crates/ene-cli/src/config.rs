@@ -2,9 +2,9 @@ use crate::style;
 use ene_ai_core::AiRuntime;
 
 pub async fn init() -> AiRuntime {
-    let _assets_dir = ene_ai_core::resources::ensure_resource_dirs();
+    let _assets_dir = ene_config::ensure_resource_dirs();
 
-    let settings = ene_ai_core::config::load_settings();
+    let settings = ene_config::load_settings();
 
     match AiRuntime::init(settings).await {
         Ok(runtime) => {
@@ -30,7 +30,7 @@ pub async fn init() -> AiRuntime {
                 ))
             );
             // Fallback: create an empty session and registry
-            let empty_settings = ene_ai_core::config::load_settings();
+            let empty_settings = ene_config::load_settings();
             AiRuntime::init(empty_settings)
                 .await
                 .expect("Failed to initialize fallback runtime")

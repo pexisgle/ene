@@ -1,6 +1,5 @@
-use super::character_card::{CharacterCardV3, expand_cbs_macros, resolve_expressions};
-use crate::memory::recall::format_summaries_for_prompt;
-use crate::memory::store::{KeyFact, RecalledSummary};
+use ene_config::character_card::{CharacterCardV3, expand_cbs_macros, resolve_expressions};
+use ene_memory::{KeyFact, RecalledSummary, format_summaries_for_prompt};
 use async_openai::types::chat::{
     ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
     ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
@@ -32,7 +31,7 @@ fn asst_msg(content: impl Into<String>, ctx: &str) -> Result<ChatCompletionReque
 }
 
 pub fn build_tools(
-    tools: &[crate::tools::ToolDefinition],
+    tools: &[ene_tool_host::ToolDefinition],
 ) -> Result<Vec<ChatCompletionTools>, String> {
     let mut res = Vec::new();
     for t in tools {

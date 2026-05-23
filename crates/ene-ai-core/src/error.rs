@@ -18,12 +18,18 @@ pub enum AiCoreError {
     ToolExecutionError(String),
     #[error("Configuration error: {0}")]
     ConfigError(String),
-    #[error("Memory store error: {0}")]
-    MemoryStoreError(#[from] diesel::result::Error),
-    #[error("Memory store connection error: {0}")]
-    MemoryStoreConnectionError(String),
+    #[error(transparent)]
+    Config(#[from] ene_config::ConfigError),
+    #[error(transparent)]
+    Memory(#[from] ene_memory::MemoryError),
+    #[error(transparent)]
+    Session(#[from] ene_session::SessionError),
+    #[error(transparent)]
+    Tool(#[from] ene_tool_host::ToolError),
     #[error("Embedding error: {0}")]
     EmbeddingError(String),
+    #[error(transparent)]
+    Embedding(#[from] ene_embedding::error::EmbeddingError),
     #[error("Sandbox violation: {0}")]
     SandboxViolation(String),
     #[error("Permission denied: {0}")]

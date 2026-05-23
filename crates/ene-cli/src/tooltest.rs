@@ -1,5 +1,6 @@
 use crate::stream;
-use ene_ai_core::{config::AiSettings, run_ai_with_tools, session::ConversationSession};
+use ene_config::AiSettings;
+use ene_ai_core::{run_ai_with_tools, ConversationSession};
 
 pub async fn run(settings: &AiSettings, session: &ConversationSession, prompt_override: &str) {
     let prompt = if prompt_override.trim().is_empty() {
@@ -18,7 +19,7 @@ pub async fn run(settings: &AiSettings, session: &ConversationSession, prompt_ov
         cloned
     } else {
         let mut fresh = ConversationSession::new();
-        let assets_dir = ene_ai_core::paths::assets_dir();
+        let assets_dir = ene_config::assets_dir();
         let card_path = format!("{}/characters/Alicia/character.json", assets_dir.display());
         if let Err(_err) = fresh.load_card(&sandbox_settings.character_card_path) {
             if let Err(err2) = fresh.load_card(&card_path) {

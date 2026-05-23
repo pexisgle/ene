@@ -63,7 +63,7 @@ async fn check_session_split(ctx: &mut AppContext, input: &str) {
                 println!("{}\n", style::warning("[Session] 新しい会話を開始します。"));
             }
             Err(e) => {
-                if !matches!(e, ene_ai_core::AiCoreError::SplitNotNeeded) {
+                if !matches!(e, ene_ai_core::SessionError::SplitNotNeeded) {
                     eprintln!(
                         "{}",
                         style::error(format!("[Session] 要約生成エラー: {}", e))

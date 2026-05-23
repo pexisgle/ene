@@ -44,7 +44,7 @@ fn handle_prompt(ctx: &AppContext) {
         if !ctx.session.history.conversation_history.is_empty() && !card.data.mes_example.trim().is_empty()
         {
             println!("--- Example Messages ---");
-            let ex = ene_ai_core::character_card::expand_cbs_macros(
+            let ex = ene_config::expand_cbs_macros(
                 &card.data.mes_example,
                 card.data.get_character_name(),
                 &ctx.settings.user_name,
@@ -85,7 +85,7 @@ fn handle_prompt(ctx: &AppContext) {
         }
 
         if let Some(phi) = ene_ai_core::prompt_builder::build_expression_phi(card) {
-            let phi_expanded = ene_ai_core::character_card::expand_cbs_macros(
+            let phi_expanded = ene_config::expand_cbs_macros(
                 &phi,
                 card.data.get_character_name(),
                 &ctx.settings.user_name,
@@ -217,10 +217,10 @@ async fn handle_tooltest(arg: &str, ctx: &mut AppContext) {
 }
 
 fn save_config(ctx: &AppContext) {
-    let mut full = ene_ai_core::config::load_full_settings();
+    let mut full = ene_config::load_full_settings();
     full.ai = ctx.settings.clone();
 
-    if let Err(e) = ene_ai_core::config::save_full_settings(&full) {
+    if let Err(e) = ene_config::save_full_settings(&full) {
         eprintln!("[Config] Failed to save settings: {}", e);
     }
 }

@@ -1,0 +1,23 @@
+[package]
+name = "ene-tool-host"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+async-openai = { version = "0.38.2", features = ["chat-completion", "embedding"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = "0.1"
+dashmap = "6"
+rmcp = { version = "1.5", features = ["client", "transport-child-process", "transport-streamable-http-client"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+ene-config = { path = "../ene-config" }
+ene-embedding = { path = "../ene-embedding" }
+ene-memory = { path = "../ene-memory" }
+ene-tool-proto = { path = "../ene-tool-proto" }

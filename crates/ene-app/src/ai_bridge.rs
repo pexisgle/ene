@@ -296,7 +296,7 @@ fn poll_ai_worker(
                         info!("[Session] Starting new conversation.");
                     }
                     Err(e) => {
-                        if !matches!(e, ene_ai_core::AiCoreError::SplitNotNeeded) {
+                        if !matches!(e, ene_ai_core::SessionError::SplitNotNeeded) {
                             error!("[Session] Summary generation error: {}", e);
                         }
                     }

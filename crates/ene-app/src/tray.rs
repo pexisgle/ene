@@ -203,7 +203,7 @@ fn poll_tray_events(
 }
 
 fn build_tray_icon() -> Option<Icon> {
-    let path = ene_ai_core::paths::assets_dir().join("icon.png");
+    let path = ene_config::assets_dir().join("icon.png");
     let file = match File::open(&path) {
         Ok(file) => file,
         Err(err) => {
