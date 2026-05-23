@@ -1,13 +1,11 @@
 use bevy::app::AppExit;
 use bevy::prelude::*;
-#[cfg(target_os = "linux")]
-use std::thread;
 use std::{fs::File, io::BufReader};
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(target_os = "windows"))]
 use tray_icon::TrayIcon;
 use tray_icon::{
-    Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
-    menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
+    Icon, MouseButton, TrayIconBuilder, TrayIconEvent,
+    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
 };
 
 use crate::app_config::CharacterSettings;
@@ -16,188 +14,118 @@ pub struct TrayPlugin;
 
 const SETTINGS_MENU_ID: &str = "ene.settings";
 const QUIT_MENU_ID: &str = "ene.quit";
-const TRAY_ICON_ID: &str = "ene.tray";
 
 impl Plugin for TrayPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_non_send_resource(TrayState::default())
-            .add_systems(Startup, setup_tray_icon)
-            .add_systems(Update, poll_tray_events);
+        setup_tray_icon(app);
+
+        app.add_systems(Update, poll_tray_events);
+
+        #[cfg(target_os = "linux")]
+        app.add_systems(Update, tick_gtk_events);
     }
 }
 
-#[derive(Default)]
-struct TrayState {
-    #[cfg(not(target_os = "linux"))]
-    tray: Option<TrayIcon>,
-    settings_item_id: Option<MenuId>,
-    quit_item_id: Option<MenuId>,
+#[cfg(not(target_os = "windows"))]
+struct TrayApp {
+    _tray_icon: TrayIcon,
+}
+
+fn build_tray_menu() -> Menu {
+    let menu = Menu::new();
+    let settings_item = MenuItem::with_id(SETTINGS_MENU_ID, "Settings", true, None);
+    let quit_item = MenuItem::with_id(QUIT_MENU_ID, "Quit", true, None);
+    let _ = menu.append_items(&[
+        &settings_item,
+        &PredefinedMenuItem::separator(),
+        &quit_item,
+    ]);
+    menu
+}
+
+fn build_tray_icon_and_menu() -> TrayIcon {
+    let menu = build_tray_menu();
+    let icon = build_tray_icon().unwrap_or_else(|| {
+        // Fallback to a dummy blue icon if loading PNG fails
+        let (width, height) = (32, 32);
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        for _ in 0..(width * height) {
+            rgba.extend_from_slice(&[0, 128, 255, 255]);
+        }
+        Icon::from_rgba(rgba, width, height).unwrap()
+    });
+
+    TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_tooltip("Ene")
+        .with_icon(icon)
+        .build()
+        .unwrap()
+}
+
+/// Windows needs its own message pump thread; the Bevy `App` is not needed here.
+#[cfg(target_os = "windows")]
+fn setup_tray_icon(_app: &mut App) {
+    std::thread::spawn(move || {
+        let _tray_icon = build_tray_icon_and_menu();
+
+        unsafe {
+            let mut msg: windows_sys::Win32::UI::WindowsAndMessaging::MSG = std::mem::zeroed();
+            while windows_sys::Win32::UI::WindowsAndMessaging::GetMessageW(
+                &mut msg,
+                std::ptr::null_mut(),
+                0,
+                0,
+            ) > 0
+            {
+                windows_sys::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
+                windows_sys::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
+            }
+        }
+
+        std::mem::forget(_tray_icon);
+    });
+}
+
+/// Non-Windows platforms store the tray icon as a non-send resource so the
+/// event loop can keep it alive.
+#[cfg(not(target_os = "windows"))]
+fn setup_tray_icon(app: &mut App) {
+    app.insert_non_send_resource(TrayApp {
+        _tray_icon: build_tray_icon_and_menu(),
+    });
 }
 
 #[cfg(target_os = "linux")]
-fn ensure_gtk_initialized() -> bool {
-    if gtk::is_initialized_main_thread() {
-        return true;
-    }
-
-    match gtk::init() {
-        Ok(()) => true,
-        Err(err) => {
-            error!("Failed to initialize GTK for tray icon: {err}");
-            false
-        }
-    }
-}
-
-fn setup_tray_icon(mut tray_state: NonSendMut<TrayState>) {
-    let tray_state = &mut *tray_state;
-
-    if tray_state
-        .settings_item_id
-        .as_ref()
-        .is_some_and(|id| id == SETTINGS_MENU_ID)
-    {
-        return;
-    }
-
-    tray_state.settings_item_id = Some(MenuId::new(SETTINGS_MENU_ID));
-    tray_state.quit_item_id = Some(MenuId::new(QUIT_MENU_ID));
-
-    #[cfg(target_os = "linux")]
-    {
-        if thread::Builder::new()
-            .name("ene-tray-gtk".to_string())
-            .spawn(|| {
-                if !ensure_gtk_initialized() {
-                    return;
-                }
-
-                let Some(icon) = build_tray_icon() else {
-                    error!("Failed to build tray icon image");
-                    return;
-                };
-
-                let menu = Menu::new();
-                let settings_item = MenuItem::with_id(SETTINGS_MENU_ID, "Settings", true, None);
-                let quit_item = MenuItem::with_id(QUIT_MENU_ID, "Quit", true, None);
-
-                if menu
-                    .append_items(&[&settings_item, &PredefinedMenuItem::separator(), &quit_item])
-                    .is_err()
-                {
-                    error!("Failed to build tray menu");
-                    return;
-                }
-
-                let tray = match TrayIconBuilder::new()
-                    .with_id(TRAY_ICON_ID)
-                    .with_icon(icon)
-                    .with_tooltip("Ene")
-                    .with_title("Ene")
-                    .with_menu(Box::new(menu))
-                    .with_menu_on_left_click(false)
-                    .build()
-                {
-                    Ok(tray) => tray,
-                    Err(err) => {
-                        error!("Failed to create tray icon: {err}");
-                        return;
-                    }
-                };
-
-                // Keep tray alive while the GTK loop dispatches StatusNotifier events.
-                let _tray = tray;
-                gtk::main();
-            })
-            .is_err()
-        {
-            error!("Failed to spawn GTK tray thread");
-        }
-        return;
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        if tray_state.tray.is_some() {
-            return;
-        }
-
-        let Some(icon) = build_tray_icon() else {
-            error!("Failed to build tray icon image");
-            return;
-        };
-
-        let menu = Menu::new();
-        let settings_item = MenuItem::with_id(SETTINGS_MENU_ID, "Settings", true, None);
-        let quit_item = MenuItem::with_id(QUIT_MENU_ID, "Quit", true, None);
-        let settings_item_id = settings_item.id().clone();
-        let quit_item_id = quit_item.id().clone();
-
-        if menu
-            .append_items(&[&settings_item, &PredefinedMenuItem::separator(), &quit_item])
-            .is_err()
-        {
-            error!("Failed to build tray menu");
-            return;
-        }
-
-        match TrayIconBuilder::new()
-            .with_id(TRAY_ICON_ID)
-            .with_icon(icon)
-            .with_tooltip("Ene")
-            .with_title("Ene")
-            .with_menu(Box::new(menu))
-            .with_menu_on_left_click(false)
-            .build()
-        {
-            Ok(tray) => {
-                tray_state.tray = Some(tray);
-                tray_state.settings_item_id = Some(settings_item_id);
-                tray_state.quit_item_id = Some(quit_item_id);
-            }
-            Err(err) => {
-                error!("Failed to create tray icon: {err}");
-            }
-        }
+fn tick_gtk_events(_tray: NonSend<TrayApp>) {
+    while gtk::events_pending() {
+        gtk::main_iteration_do(false);
     }
 }
 
 fn poll_tray_events(
     mut settings: ResMut<CharacterSettings>,
     mut app_exit: MessageWriter<AppExit>,
-    tray_state: NonSend<TrayState>,
 ) {
-    let tray_state = &*tray_state;
-
     while let Ok(event) = TrayIconEvent::receiver().try_recv() {
         if let TrayIconEvent::Click {
-            button,
-            button_state,
+            button: MouseButton::Left,
             ..
         } = event
-            && button == MouseButton::Left
-            && button_state == MouseButtonState::Up
         {
             settings.ui.settings_window_visible = true;
         }
     }
 
     while let Ok(event) = MenuEvent::receiver().try_recv() {
-        if tray_state
-            .settings_item_id
-            .as_ref()
-            .is_some_and(|id| id == &event.id)
-        {
-            settings.ui.settings_window_visible = true;
-            continue;
-        }
-
-        if tray_state
-            .quit_item_id
-            .as_ref()
-            .is_some_and(|id| id == &event.id)
-        {
-            app_exit.write(AppExit::Success);
+        match event.id.as_ref() {
+            SETTINGS_MENU_ID => {
+                settings.ui.settings_window_visible = true;
+            }
+            QUIT_MENU_ID => {
+                app_exit.write(AppExit::Success);
+            }
+            _ => {}
         }
     }
 }
