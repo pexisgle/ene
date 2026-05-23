@@ -47,64 +47,55 @@ fn main() {
     app.run();
 }
 
+fn build_tray_icon() -> tray_icon::TrayIcon {
+    let tray_menu = Menu::new();
+    let open_config_item = MenuItem::with_id("open_config", "Settings", true, None);
+    let quit_item = MenuItem::with_id("quit", "Quit", true, None);
+    let _ = tray_menu.append_items(&[
+        &open_config_item,
+        &PredefinedMenuItem::separator(),
+        &quit_item,
+    ]);
+
+    TrayIconBuilder::new()
+        .with_menu(Box::new(tray_menu))
+        .with_tooltip("Bevy Multi-Window App")
+        .with_icon(load_dummy_icon())
+        .build()
+        .unwrap()
+}
+
+/// Windows needs its own message pump thread; the Bevy `App` is not needed here.
+#[cfg(target_os = "windows")]
 fn setup_tray_icon(_app: &mut App) {
-    #[cfg(target_os = "windows")]
-    {
-        std::thread::spawn(move || {
-            let tray_menu = Menu::new();
-            let open_config_item = MenuItem::with_id("open_config", "Settings", true, None);
-            let quit_item = MenuItem::with_id("quit", "Quit", true, None);
+    std::thread::spawn(move || {
+        let _tray_icon = build_tray_icon();
 
-            let _ = tray_menu.append_items(&[
-                &open_config_item,
-                &PredefinedMenuItem::separator(),
-                &quit_item,
-            ]);
-
-            let tray_icon = TrayIconBuilder::new()
-                .with_menu(Box::new(tray_menu))
-                .with_tooltip("Bevy Multi-Window App")
-                .with_icon(load_dummy_icon())
-                .build()
-                .unwrap();
-
-            unsafe {
-                let mut msg: windows_sys::Win32::UI::WindowsAndMessaging::MSG = std::mem::zeroed();
-                while windows_sys::Win32::UI::WindowsAndMessaging::GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0)
-                    > 0
-                {
-                    windows_sys::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
-                    windows_sys::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
-                }
+        unsafe {
+            let mut msg: windows_sys::Win32::UI::WindowsAndMessaging::MSG = std::mem::zeroed();
+            while windows_sys::Win32::UI::WindowsAndMessaging::GetMessageW(
+                &mut msg,
+                std::ptr::null_mut(),
+                0,
+                0,
+            ) > 0
+            {
+                windows_sys::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
+                windows_sys::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
             }
+        }
 
-            std::mem::forget(tray_icon);
-        });
-    }
+        std::mem::forget(_tray_icon);
+    });
+}
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        let tray_menu = Menu::new();
-        let open_config_item = MenuItem::with_id("open_config", "Settings", true, None);
-        let quit_item = MenuItem::with_id("quit", "Quit", true, None);
-
-        let _ = tray_menu.append_items(&[
-            &open_config_item,
-            &PredefinedMenuItem::separator(),
-            &quit_item,
-        ]);
-
-        let tray_icon = TrayIconBuilder::new()
-            .with_menu(Box::new(tray_menu))
-            .with_tooltip("Bevy Multi-Window App")
-            .with_icon(load_dummy_icon())
-            .build()
-            .unwrap();
-
-        app.insert_non_send_resource(TrayApp {
-            _tray_icon: tray_icon,
-        });
-    }
+/// Non-Windows platforms store the tray icon as a non-send resource so the
+/// event loop can keep it alive.
+#[cfg(not(target_os = "windows"))]
+fn setup_tray_icon(app: &mut App) {
+    app.insert_non_send_resource(TrayApp {
+        _tray_icon: build_tray_icon(),
+    });
 }
 
 fn setup_main_scene(mut commands: Commands) {
