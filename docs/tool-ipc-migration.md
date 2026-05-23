@@ -6,7 +6,7 @@
 
 **目的:**
 - コンパイル時間の短縮（ツール変更時の再コンパイル範囲を限定）
-- バイナリサイズの削減（`ene-app` が重い依存を引き込まない）
+- バイナリサイズの削減（`ene-desktop` が重い依存を引き込まない）
 - 開発・変更の容易さ（各ツールクレートが独立）
 - サンドボックス・Undo の統合安全モデルの実現
 - ユーザーツール追加機能（`app_data_dir()/tools/` にバイナリを配置）
@@ -70,8 +70,8 @@ crates/
 │       ├── paths.rs                 # builtin_tools_dir(), user_tools_dir(), tool_socket_dir()
 │       ├── ...                     # その他残す（embedding, memory, session, stream, etc.）
 │
-├── ene-app/
-└── ene-cli/
+├── apps/ene-desktop/
+└── apps/ene-cli/
 ```
 
 **ユーザー追加ツールの配置先:**
@@ -293,7 +293,7 @@ impl ToolHostManager {
 ### バイナリ発見順序
 
 1. **ビルトインツール**: `builtin_tools_dir()` — 実行ファイルと同じディレクトリの `tools/` サブディレクトリ
-   - 例: `/usr/bin/ene-app` → `/usr/bin/tools/ene-tools-fs`
+   - 例: `/usr/bin/ene-desktop` → `/usr/bin/tools/ene-tools-fs`
 2. **ユーザーツール**: `user_tools_dir()` — `app_data_dir()/tools/`
    - 例: `~/.local/share/dev.pexisgle.Ene/tools/my-custom-tool`
 3. `settings.json` の `tools.enabled` に指定された名前にマッチする `ene-tools-{name}` バイナリのみを起動
@@ -349,7 +349,7 @@ async fn main() {
 - [x] `ene-ai-core/src/tool_host_manager.rs` 追加（ToolHostManager）
 - [x] `ene-ai-core/src/paths.rs` に `builtin_tools_dir()`, `user_tools_dir()`, `tool_socket_dir()` 追加
 - [x] `ene-ai-core/src/config.rs` に `AiToolSettings` 追加（enabled フィールド）
-- [x] `ene-cli`/`ene-app` を `ToolHostManager` 使用に更新
+- [x] `ene-cli`/`ene-desktop` を `ToolHostManager` 使用に更新
 
 ### Phase 4: 最適化・安定化
 

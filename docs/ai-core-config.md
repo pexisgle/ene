@@ -3,7 +3,7 @@
 全設定は 1 つの JSON ファイルに集約され、`settings.schema.json` でスキーマが定義されている。
 `ene-ai-core::paths::config_file_path()` → `assets/settings.json` から読み込む。
 
-CLI（`ene-cli`）と GUI（`ene-app`）でファイル構造は異なるため、各々の読み込み方法も異なる。
+CLI（`ene-cli`）と GUI（`ene-desktop`）でファイル構造は異なるため、各々の読み込み方法も異なる。
 
 ---
 
@@ -118,7 +118,7 @@ pub struct McpServerConfig {
 
 ## 2. AppSettings（GUIラッパー）
 
-`ene-app` では `AiSettings` を内包する `AppSettings` 構造体でファイルを読み書きする。
+`ene-desktop` では `AiSettings` を内包する `AppSettings` 構造体でファイルを読み書きする。
 
 ```rust
 struct AppSettings {
@@ -183,9 +183,9 @@ struct AppSettings {
 5. カードが未設定ならデフォルト `characters/Alicia/character.json`
 6. `memory.enabled` が true なら `init_memory()` でメモリ初期化
 
-### 4.2 GUI（ene-app）
+### 4.2 GUI（ene-desktop）
 
-`ene-app/src/app_config.rs`:
+`apps/ene-desktop/src/app_config.rs`:
 
 1. `CharacterSettings::discover()` で `assets/characters/` 以下の全キャラクターをスキャン
 2. デフォルト設定で初期化後、`load_from_file()` を呼ぶ
