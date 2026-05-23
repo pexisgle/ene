@@ -7,15 +7,15 @@ edition = "2024"
 crate-type = ["lib"]
 
 [dependencies]
-async-openai = { version = "0.38.2", features = ["chat-completion", "embedding"] }
+async-openai = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
-tracing = "0.1"
+tracing = { workspace = true }
 dashmap = "6"
-rmcp = { version = "1.5", features = ["client", "transport-child-process", "transport-streamable-http-client"] }
+rmcp = { version = "1.7", features = ["client", "transport-child-process", "transport-streamable-http-client"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 ene-config = { path = "../ene-config" }
 ene-embedding = { path = "../ene-embedding" }

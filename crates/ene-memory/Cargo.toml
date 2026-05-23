@@ -7,17 +7,17 @@ edition = "2024"
 crate-type = ["lib"]
 
 [dependencies]
-async-openai = { version = "0.38.2", features = ["chat-completion", "embedding"] }
+async-openai = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-chrono = { version = "0.4", features = ["serde"] }
-diesel = { version = "2.2", features = ["sqlite", "chrono", "r2d2"] }
-diesel_migrations = { version = "2.2", features = ["sqlite"] }
+chrono = { workspace = true }
+diesel = { version = "2.3", features = ["sqlite", "chrono", "r2d2"] }
+diesel_migrations = { version = "2.3", features = ["sqlite"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 sqlite-vec = "0.1"
-uuid = { version = "1", features = ["v4"] }
+uuid = { workspace = true }
 thiserror = { workspace = true }
-tracing = "0.1"
+tracing = { workspace = true }
 ene-config = { path = "../ene-config" }
 ene-embedding = { path = "../ene-embedding" }

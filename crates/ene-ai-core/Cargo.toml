@@ -7,19 +7,19 @@ edition = "2024"
 crate-type = ["lib"]
 
 [dependencies]
-async-openai = { version = "0.38.2", features = ["chat-completion", "embedding"] }
+async-openai = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-rand = "0.10.1"
-indexmap = "2"
-async-stream = "0.3.5"
+rand = { workspace = true }
+indexmap = { workspace = true }
+async-stream = "0.3"
 async-trait = { workspace = true }
 thiserror = { workspace = true }
-chrono = "0.4"
-regex = "1"
-tracing = "0.1"
+chrono = { workspace = true }
+regex = { workspace = true }
+tracing = { workspace = true }
 ene-config = { path = "../ene-config" }
 ene-embedding = { path = "../ene-embedding" }
 ene-memory = { path = "../ene-memory" }
