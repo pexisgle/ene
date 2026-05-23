@@ -16,4 +16,4 @@ candle-core = "0.10"
 candle-nn = "0.10"
 tokenizers = "0.23"
 tracing = { workspace = true }
-ene-config = { path = "../ene-config" }
+ene-config = { workspace = true }

@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ene-tool-proto = { path = "../../ene-tool-proto" }
-ene-tools-common = { path = "../common" }
+ene-tool-proto = { workspace = true }
+ene-tools-common = { workspace = true }
 chromiumoxide = "0.9"
 base64 = "0.22"
 dashmap = "6"

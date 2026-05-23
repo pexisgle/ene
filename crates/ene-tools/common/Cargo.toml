@@ -8,4 +8,4 @@ htmd = "0.5"
 scraper = "0.27"
 regex = { workspace = true }
 serde = { workspace = true }
-ene-tool-proto = { path = "../../ene-tool-proto" }
+ene-tool-proto = { workspace = true }

@@ -8,9 +8,9 @@ name = "ene-tools-fs"
 path = "src/main.rs"
 
 [dependencies]
-ene-tool-proto = { path = "../../ene-tool-proto" }
-ene-tools-utility = { path = "../utility" }
-ene-tools-common = { path = "../common" }
+ene-tool-proto = { workspace = true }
+ene-tools-utility = { workspace = true }
+ene-tools-common = { workspace = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "fs", "process", "time", "net"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

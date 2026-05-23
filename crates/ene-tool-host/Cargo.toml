@@ -17,7 +17,7 @@ tracing = { workspace = true }
 dashmap = "6"
 rmcp = { version = "1.7", features = ["client", "transport-child-process", "transport-streamable-http-client"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
-ene-config = { path = "../ene-config" }
-ene-embedding = { path = "../ene-embedding" }
-ene-memory = { path = "../ene-memory" }
-ene-tool-proto = { path = "../ene-tool-proto" }
+ene-config = { workspace = true }
+ene-embedding = { workspace = true }
+ene-memory = { workspace = true }
+ene-tool-proto = { workspace = true }
