@@ -1,8 +1,8 @@
 use chrono::Utc;
 use dashmap::DashMap;
+use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
-use flate2::Compression;
 use rusqlite::Connection;
 use std::collections::VecDeque;
 use std::io::{Read, Write};

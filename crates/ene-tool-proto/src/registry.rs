@@ -164,10 +164,7 @@ mod tests {
         let reg = HostRegistry::new();
         let err = reg.call_tool("nonexistent", "arg").await.unwrap_err();
         assert!(matches!(err, ToolError::NotFound { .. }));
-        assert_eq!(
-            format!("{err}"),
-            "Tool not found: nonexistent"
-        );
+        assert_eq!(format!("{err}"), "Tool not found: nonexistent");
     }
 
     #[test]

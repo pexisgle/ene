@@ -1,7 +1,10 @@
-use ene_config::AiSettings;
-use ene_session::{ConversationSession, PendingSplitTask, SplitTaskInput, spawn_split_task, init_embedding, init_memory_store};
-use ene_tool_host::{ToolRegistry, ToolHostManager, McpToolRegistry};
 use crate::error::AiCoreError;
+use ene_config::AiSettings;
+use ene_session::{
+    ConversationSession, PendingSplitTask, SplitTaskInput, init_embedding, init_memory_store,
+    spawn_split_task,
+};
+use ene_tool_host::{McpToolRegistry, ToolHostManager, ToolRegistry};
 use std::sync::Arc;
 
 pub struct AiRuntime {
@@ -16,14 +19,14 @@ impl AiRuntime {
         let mut session = ConversationSession::new();
 
         // 1. Initialize embedding
-        let embedder = init_embedding(&settings)
-            .map_err(|e| AiCoreError::EmbeddingError(e))?;
+        let embedder = init_embedding(&settings).map_err(|e| AiCoreError::EmbeddingError(e))?;
         session.memory.embedding_provider = Some(embedder.clone());
 
         // 2. Initialize memory store if enabled
         if settings.memory.enabled {
-            let store = init_memory_store(&settings, &*embedder)
-                .map_err(|e| AiCoreError::Memory(ene_memory::MemoryError::MemoryStoreConnectionError(e)))?;
+            let store = init_memory_store(&settings, &*embedder).map_err(|e| {
+                AiCoreError::Memory(ene_memory::MemoryError::MemoryStoreConnectionError(e))
+            })?;
             session.memory.memory_store = Some(store);
         }
 
@@ -81,7 +84,9 @@ impl AiRuntime {
             .memory
             .embedding_provider
             .clone()
-            .ok_or_else(|| AiCoreError::EmbeddingError("No embedding provider initialized".to_string()))?;
+            .ok_or_else(|| {
+                AiCoreError::EmbeddingError("No embedding provider initialized".to_string())
+            })?;
 
         let embedding = embedder
             .embed_query(input)
@@ -94,7 +99,9 @@ impl AiRuntime {
     }
 }
 
-pub async fn build_tool_registry(settings: &AiSettings) -> Result<Arc<dyn ToolRegistry>, AiCoreError> {
+pub async fn build_tool_registry(
+    settings: &AiSettings,
+) -> Result<Arc<dyn ToolRegistry>, AiCoreError> {
     let mut manager = match ToolHostManager::start(settings).await {
         Ok(m) => m,
         Err(e) => {
@@ -106,7 +113,12 @@ pub async fn build_tool_registry(settings: &AiSettings) -> Result<Arc<dyn ToolRe
                 ..settings.clone()
             })
             .await
-            .map_err(|e2| AiCoreError::ConfigError(format!("Fatal: Failed to start fallback ToolHostManager: {}", e2)))?
+            .map_err(|e2| {
+                AiCoreError::ConfigError(format!(
+                    "Fatal: Failed to start fallback ToolHostManager: {}",
+                    e2
+                ))
+            })?
         }
     };
 

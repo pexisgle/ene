@@ -113,7 +113,8 @@ impl MemoryStore {
         let now = Utc::now().to_rfc3339();
         let ended_str = ended_at.to_rfc3339();
 
-        let mut conn = self.pool
+        let mut conn = self
+            .pool
             .get()
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
 
@@ -170,7 +171,8 @@ impl MemoryStore {
         similarity_threshold: f32,
     ) -> Result<Vec<RecalledSummary>, MemoryError> {
         let query_blob = EmbeddingBlob(query_embedding.to_vec());
-        let mut conn = self.pool
+        let mut conn = self
+            .pool
             .get()
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
 
@@ -216,7 +218,8 @@ impl MemoryStore {
     ) -> Result<Vec<ConversationSummary>, MemoryError> {
         use crate::schema::conversation_summaries::dsl;
 
-        let mut conn = self.pool
+        let mut conn = self
+            .pool
             .get()
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
         let rows = dsl::conversation_summaries
@@ -244,7 +247,8 @@ impl MemoryStore {
     pub fn count_summaries(&self, card_name: &str) -> Result<i64, MemoryError> {
         use crate::schema::conversation_summaries::dsl;
 
-        let mut conn = self.pool
+        let mut conn = self
+            .pool
             .get()
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
         let count = dsl::conversation_summaries
@@ -257,7 +261,8 @@ impl MemoryStore {
     pub fn delete_summary(&self, id: i64) -> Result<usize, MemoryError> {
         use crate::schema::{conversation_keyfacts, conversation_summaries};
 
-        let mut conn = self.pool
+        let mut conn = self
+            .pool
             .get()
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
         conn.transaction(|conn| {
@@ -278,7 +283,8 @@ impl MemoryStore {
     // ── Key Facts ─────────────────────────────────────────────────────────────
 
     pub fn get_all_keyfacts(&self, card_name: &str) -> Result<Vec<KeyFact>, MemoryError> {
-        let mut conn = self.pool
+        let mut conn = self
+            .pool
             .get()
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
 
@@ -309,7 +315,8 @@ impl MemoryStore {
         value: &str,
     ) -> Result<(), MemoryError> {
         let now = Utc::now().to_rfc3339();
-        let mut conn = self.pool
+        let mut conn = self
+            .pool
             .get()
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
 
@@ -331,7 +338,8 @@ impl MemoryStore {
     pub fn delete_keyfact(&self, card_name: &str, key: &str) -> Result<usize, MemoryError> {
         use crate::schema::conversation_keyfacts::dsl;
 
-        let mut conn = self.pool
+        let mut conn = self
+            .pool
             .get()
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
         let count = diesel::delete(
@@ -344,7 +352,8 @@ impl MemoryStore {
     }
 
     pub fn count_keyfacts(&self, card_name: &str) -> Result<i64, MemoryError> {
-        let mut conn = self.pool
+        let mut conn = self
+            .pool
             .get()
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
 
@@ -367,7 +376,8 @@ impl MemoryStore {
         content: &str,
     ) -> Result<i64, MemoryError> {
         let now = Utc::now().to_rfc3339();
-        let mut conn = self.pool
+        let mut conn = self
+            .pool
             .get()
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
 
@@ -397,7 +407,8 @@ impl MemoryStore {
     ) -> Result<Vec<(String, String, String)>, MemoryError> {
         use crate::schema::conversation_logs::dsl;
 
-        let mut conn = self.pool
+        let mut conn = self
+            .pool
             .get()
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
         let rows = dsl::conversation_logs
@@ -421,7 +432,8 @@ impl MemoryStore {
         embedding: &[f32],
     ) -> Result<(), MemoryError> {
         let now = Utc::now().to_rfc3339();
-        let mut conn = self.pool
+        let mut conn = self
+            .pool
             .get()
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
 
@@ -449,7 +461,8 @@ impl MemoryStore {
     pub fn list_tool_embeddings(&self) -> Result<Vec<(String, String, Vec<f32>)>, MemoryError> {
         use crate::schema::tool_embeddings::dsl;
 
-        let mut conn = self.pool
+        let mut conn = self
+            .pool
             .get()
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
         let rows = dsl::tool_embeddings
@@ -465,7 +478,8 @@ impl MemoryStore {
     pub fn delete_tool_embedding(&self, tool_name: &str) -> Result<usize, MemoryError> {
         use crate::schema::tool_embeddings::dsl;
 
-        let mut conn = self.pool
+        let mut conn = self
+            .pool
             .get()
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
         let count = diesel::delete(dsl::tool_embeddings.filter(dsl::tool_name.eq(tool_name)))
@@ -481,7 +495,8 @@ impl MemoryStore {
     ) -> Result<Vec<(String, f32)>, MemoryError> {
         let query_blob = EmbeddingBlob(query_embedding.to_vec());
 
-        let mut conn = self.pool
+        let mut conn = self
+            .pool
             .get()
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
         let query = "SELECT tool_name,

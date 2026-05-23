@@ -56,7 +56,9 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
             .embeddings()
             .create(request)
             .await
-            .map_err(|e| EmbeddingError::EmbeddingError(format!("Embedding API call failed: {e}")))?;
+            .map_err(|e| {
+                EmbeddingError::EmbeddingError(format!("Embedding API call failed: {e}"))
+            })?;
         let elapsed = start.elapsed();
 
         tracing::debug!(
@@ -66,10 +68,9 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
             elapsed.as_secs_f64() * 1000.0,
         );
 
-        let embedding =
-            response.data.into_iter().next().ok_or_else(|| {
-                EmbeddingError::EmbeddingError("Empty embedding response".to_string())
-            })?;
+        let embedding = response.data.into_iter().next().ok_or_else(|| {
+            EmbeddingError::EmbeddingError("Empty embedding response".to_string())
+        })?;
 
         Ok(embedding.embedding)
     }

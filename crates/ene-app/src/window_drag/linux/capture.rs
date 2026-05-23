@@ -92,7 +92,10 @@ pub(super) fn spawn_wayland_mask_capture(
         return;
     }
 
-    let texture_size = mask_texture_size(window.physical_size(), settings.graphics.mask_render_downsample);
+    let texture_size = mask_texture_size(
+        window.physical_size(),
+        settings.graphics.mask_render_downsample,
+    );
     let image = images.add(new_wayland_mask_target_image(texture_size));
     let camera_entity = commands
         .spawn((
@@ -129,8 +132,10 @@ pub(super) fn sync_wayland_mask_capture(
         return;
     }
 
-    let desired_texture_size =
-        mask_texture_size(window.physical_size(), settings.graphics.mask_render_downsample);
+    let desired_texture_size = mask_texture_size(
+        window.physical_size(),
+        settings.graphics.mask_render_downsample,
+    );
     if state.texture_size != desired_texture_size {
         if let Some(image_handle) = &state.image_handle
             && let Some(image) = images.get_mut(image_handle)

@@ -31,9 +31,7 @@ impl EmbeddingModel {
         let h = ops::rms_norm(&h, &self.norm_weight, self.norm_eps)
             .map_err(super::candle_err("model final norm"))?;
 
-        let hidden = h
-            .mean(1)
-            .map_err(super::candle_err("model mean pool"))?;
+        let hidden = h.mean(1).map_err(super::candle_err("model mean pool"))?;
         let hidden = hidden
             .squeeze(0)
             .map_err(super::candle_err("model squeeze"))?;

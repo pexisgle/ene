@@ -1,13 +1,14 @@
 use ene_tool_proto::ToolError;
-use std::sync::LazyLock;
 use regex::Regex;
+use std::sync::LazyLock;
 
 static RE_HTML_TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]+>").unwrap());
 static RE_DDG_BODY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"<div class="result__body"[^>]*>.*?<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?<a[^>]*class="result__snippet"[^>]*>(.*?)</a>.*?</div>"#).unwrap()
 });
 static RE_DDG_ALT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"<h[^>]*>.*?<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?</h[^>]*>.*?<p[^>]*>(.*?)</p>"#).unwrap()
+    Regex::new(r#"<h[^>]*>.*?<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?</h[^>]*>.*?<p[^>]*>(.*?)</p>"#)
+        .unwrap()
 });
 
 pub struct SearchResult {
@@ -16,7 +17,11 @@ pub struct SearchResult {
     pub url: String,
 }
 
-pub async fn search_duckduckgo(client: &reqwest::Client, query: &str, limit: usize) -> Result<String, ToolError> {
+pub async fn search_duckduckgo(
+    client: &reqwest::Client,
+    query: &str,
+    limit: usize,
+) -> Result<String, ToolError> {
     let url = format!(
         "https://html.duckduckgo.com/html/?q={}",
         urlencoding::encode(query)
@@ -55,7 +60,11 @@ pub async fn search_duckduckgo(client: &reqwest::Client, query: &str, limit: usi
     Ok(output)
 }
 
-pub async fn search_tavily(client: &reqwest::Client, query: &str, _limit: usize) -> Result<String, ToolError> {
+pub async fn search_tavily(
+    client: &reqwest::Client,
+    query: &str,
+    _limit: usize,
+) -> Result<String, ToolError> {
     let api_key = std::env::var("TAVILY_API_KEY").map_err(|_| ToolError::ExecutionFailed {
         message: "TAVILY_API_KEY environment variable is not set".to_string(),
     })?;
@@ -113,7 +122,11 @@ pub async fn search_tavily(client: &reqwest::Client, query: &str, _limit: usize)
     Ok(output)
 }
 
-pub async fn search_brave(client: &reqwest::Client, query: &str, _limit: usize) -> Result<String, ToolError> {
+pub async fn search_brave(
+    client: &reqwest::Client,
+    query: &str,
+    _limit: usize,
+) -> Result<String, ToolError> {
     let api_key = std::env::var("BRAVE_API_KEY").map_err(|_| ToolError::ExecutionFailed {
         message: "BRAVE_API_KEY environment variable is not set".to_string(),
     })?;

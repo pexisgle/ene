@@ -1,12 +1,9 @@
-use bevy::prelude::*;
-use bevy_egui::egui;
+use super::{SettingsButtonAction, SettingsInputState, SettingsValueKind, widgets::apply_action};
+use crate::ai_bridge::AiRequestEvent;
 use crate::app_config::CharacterSettings;
 use crate::character::CharacterAnimationControl;
-use crate::ai_bridge::AiRequestEvent;
-use super::{
-    SettingsButtonAction, SettingsInputState, SettingsValueKind,
-    widgets::apply_action,
-};
+use bevy::prelude::*;
+use bevy_egui::egui;
 
 pub fn render_ai_page(
     ui: &mut egui::Ui,
@@ -148,8 +145,7 @@ pub fn render_ai_page(
                 };
                 match current_provider.as_str() {
                     "local" => {
-                        settings.ai.ai.embedding.model =
-                            "jina-embeddings-v5-text-nano".to_string();
+                        settings.ai.ai.embedding.model = "jina-embeddings-v5-text-nano".to_string();
                         settings.ai.ai.embedding.dimensions = None;
                         input_state.ai_embedding_model = settings.ai.ai.embedding.model.clone();
                         input_state.ai_embedding_dimensions = "auto".to_string();

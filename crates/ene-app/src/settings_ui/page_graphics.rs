@@ -1,12 +1,12 @@
-use bevy::prelude::*;
-use bevy_egui::egui;
-use crate::app_config::CharacterSettings;
-use crate::character::CharacterAnimationControl;
-use crate::ai_bridge::AiRequestEvent;
 use super::{
     SettingsButtonAction, SettingsValueKind,
-    widgets::{render_cycle_row, apply_action},
+    widgets::{apply_action, render_cycle_row},
 };
+use crate::ai_bridge::AiRequestEvent;
+use crate::app_config::CharacterSettings;
+use crate::character::CharacterAnimationControl;
+use bevy::prelude::*;
+use bevy_egui::egui;
 
 pub fn render_graphics_page(
     ui: &mut egui::Ui,

@@ -12,8 +12,13 @@ pub enum IpcRequest {
         tool_config: Option<serde_json::Value>,
     },
     ListTools,
-    CallTool { name: String, arguments: String },
-    SetSessionId { session_id: String },
+    CallTool {
+        name: String,
+        arguments: String,
+    },
+    SetSessionId {
+        session_id: String,
+    },
     Ping,
     Shutdown,
 }
@@ -117,18 +122,14 @@ mod tests {
     use super::*;
     use crate::{SandboxConfigData, ToolCategory};
 
-    async fn send_recv_request(
-        req: &IpcRequest,
-    ) -> IpcRequest {
+    async fn send_recv_request(req: &IpcRequest) -> IpcRequest {
         let (mut a, mut b) = tokio::io::duplex(4096);
         write_ipc_request(&mut a, req).await.unwrap();
         drop(a);
         read_ipc_request(&mut b).await.unwrap().unwrap()
     }
 
-    async fn send_recv_response(
-        resp: &IpcResponse,
-    ) -> IpcResponse {
+    async fn send_recv_response(resp: &IpcResponse) -> IpcResponse {
         let (mut a, mut b) = tokio::io::duplex(4096);
         write_ipc_response(&mut a, resp).await.unwrap();
         drop(a);

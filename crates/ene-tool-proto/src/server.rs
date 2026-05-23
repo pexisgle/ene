@@ -21,8 +21,8 @@ use tokio::net::UnixListener;
 pub async fn run_tool_server(
     provider: Box<dyn ToolProvider>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let socket_path = std::env::var("ENE_TOOL_SOCKET")
-        .unwrap_or_else(|_| "/tmp/ene-tool.sock".to_string());
+    let socket_path =
+        std::env::var("ENE_TOOL_SOCKET").unwrap_or_else(|_| "/tmp/ene-tool.sock".to_string());
     let socket_path = PathBuf::from(&socket_path);
 
     if socket_path.exists() {
@@ -91,23 +91,22 @@ pub async fn run_tool_server(
 
 async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse {
     match req {
-        IpcRequest::Initialize { sandbox, tool_config } => {
+        IpcRequest::Initialize {
+            sandbox,
+            tool_config,
+        } => {
             provider.set_sandbox(sandbox);
             if let Some(config) = tool_config {
                 provider.set_config(config);
             }
             IpcResponse::Ack
         }
-        IpcRequest::ListTools => {
-            IpcResponse::Tools {
-                tools: provider.list_tools(),
-            }
-        }
+        IpcRequest::ListTools => IpcResponse::Tools {
+            tools: provider.list_tools(),
+        },
         IpcRequest::CallTool { name, arguments } => match provider.call_tool(name, arguments).await
         {
-            Ok(result) => IpcResponse::CallResult {
-                result: Ok(result),
-            },
+            Ok(result) => IpcResponse::CallResult { result: Ok(result) },
             Err(e) => IpcResponse::CallResult { result: Err(e) },
         },
         IpcRequest::SetSessionId { session_id } => {

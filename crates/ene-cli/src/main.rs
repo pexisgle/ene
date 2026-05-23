@@ -21,9 +21,7 @@ async fn main() {
         println!("Ene Interactive CLI");
         println!("Type '/help' for a list of commands.");
 
-        let mut ctx = context::AppContext {
-            runtime,
-        };
+        let mut ctx = context::AppContext { runtime };
         repl::run(&mut ctx).await;
     }
 }

@@ -52,19 +52,14 @@ impl RotaryEmbedding {
         let freqs = t
             .matmul(&inv_freq)
             .map_err(super::candle_err("RoPE freqs"))?;
-        let cos = freqs
-            .cos()
-            .map_err(super::candle_err("RoPE cos"))?;
-        let sin = freqs
-            .sin()
-            .map_err(super::candle_err("RoPE sin"))?;
+        let cos = freqs.cos().map_err(super::candle_err("RoPE cos"))?;
+        let sin = freqs.sin().map_err(super::candle_err("RoPE sin"))?;
         Ok(Self { cos, sin })
     }
 
     pub fn apply(&self, q: &Tensor, k: &Tensor) -> Result<(Tensor, Tensor), EmbeddingError> {
-        let (_b, _num_heads, seq_len, _head_dim) = q
-            .dims4()
-            .map_err(super::candle_err("RoPE q dims"))?;
+        let (_b, _num_heads, seq_len, _head_dim) =
+            q.dims4().map_err(super::candle_err("RoPE q dims"))?;
         let cos = self
             .cos
             .narrow(0, 0, seq_len)
@@ -78,14 +73,12 @@ impl RotaryEmbedding {
             .to_dtype(q.dtype())
             .map_err(super::candle_err("RoPE sin dtype"))?;
         let q_embed = rope_precomputed(
-            &q.contiguous()
-                .map_err(super::candle_err("RoPE q contig"))?,
+            &q.contiguous().map_err(super::candle_err("RoPE q contig"))?,
             &cos,
             &sin,
         )?;
         let k_embed = rope_precomputed(
-            &k.contiguous()
-                .map_err(super::candle_err("RoPE k contig"))?,
+            &k.contiguous().map_err(super::candle_err("RoPE k contig"))?,
             &cos,
             &sin,
         )?;

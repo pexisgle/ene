@@ -1,10 +1,10 @@
-use ene_config::character_card::{CharacterCardV3, expand_cbs_macros, resolve_expressions};
-use ene_memory::{KeyFact, RecalledSummary, format_summaries_for_prompt};
 use async_openai::types::chat::{
     ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
     ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
     ChatCompletionTool, ChatCompletionTools, FunctionObject, Role,
 };
+use ene_config::character_card::{CharacterCardV3, expand_cbs_macros, resolve_expressions};
+use ene_memory::{KeyFact, RecalledSummary, format_summaries_for_prompt};
 
 fn sys_msg(content: impl Into<String>, ctx: &str) -> Result<ChatCompletionRequestMessage, String> {
     ChatCompletionRequestSystemMessageArgs::default()

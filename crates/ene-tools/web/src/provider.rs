@@ -50,14 +50,26 @@ impl ToolProvider for WebToolProvider {
                     serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
                         message: format!("Invalid arguments for webfetch: {e}"),
                     })?;
-                crate::webfetch::webfetch(&self.client, &args.url, args.format.as_deref(), args.timeout).await
+                crate::webfetch::webfetch(
+                    &self.client,
+                    &args.url,
+                    args.format.as_deref(),
+                    args.timeout,
+                )
+                .await
             }
             "websearch" => {
                 let args: WebSearchArgs =
                     serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
                         message: format!("Invalid arguments for websearch: {e}"),
                     })?;
-                crate::websearch::websearch(&self.client, &args.query, args.backend.as_deref(), args.limit).await
+                crate::websearch::websearch(
+                    &self.client,
+                    &args.query,
+                    args.backend.as_deref(),
+                    args.limit,
+                )
+                .await
             }
             _ => Err(ToolError::NotFound {
                 tool_name: name.to_string(),

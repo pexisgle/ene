@@ -240,7 +240,10 @@ impl Default for AiSandboxSettings {
 
 impl AiSandboxSettings {
     /// `ene-tool-proto` 用のシリアライズ可能なサンドボックス設定に変換
-    pub fn to_sandbox_config_data(&self, undo_db_path: Option<String>) -> ene_tool_proto::SandboxConfigData {
+    pub fn to_sandbox_config_data(
+        &self,
+        undo_db_path: Option<String>,
+    ) -> ene_tool_proto::SandboxConfigData {
         ene_tool_proto::SandboxConfigData {
             enabled: self.enabled,
             allowed_directories: self.allowed_directories.clone(),
@@ -254,14 +257,16 @@ impl AiSandboxSettings {
             undo_db_path,
         }
     }
-
 }
 
 impl AiSettings {
     /// Undo DB のパスを解決する（memory.db と同じディレクトリ）
     pub fn resolve_undo_db_path(&self) -> std::path::PathBuf {
         let memory_path = self.resolve_memory_db_path();
-        memory_path.parent().unwrap_or(std::path::Path::new(".")).join("undo.db")
+        memory_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("undo.db")
     }
 }
 
@@ -470,10 +475,8 @@ pub fn load_full_settings_from(assets_dir: &Path, config_path: &Path) -> AppSett
                 settings.character
             );
         } else {
-            settings.ai.character_card_path = format!(
-                "{}/characters/Alicia/character.json",
-                assets_dir.display()
-            );
+            settings.ai.character_card_path =
+                format!("{}/characters/Alicia/character.json", assets_dir.display());
         }
     }
 

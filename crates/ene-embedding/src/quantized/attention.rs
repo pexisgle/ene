@@ -25,9 +25,7 @@ pub struct AttentionBlock {
 
 impl AttentionBlock {
     pub fn forward(&self, x: &Tensor) -> Result<Tensor, EmbeddingError> {
-        let (b, l, _h) = x
-            .dims3()
-            .map_err(super::candle_err("attn dims3"))?;
+        let (b, l, _h) = x.dims3().map_err(super::candle_err("attn dims3"))?;
 
         let q = self
             .q_proj
@@ -56,12 +54,8 @@ impl AttentionBlock {
             .transpose(1, 2)
             .map_err(super::candle_err("attn V transpose"))?;
 
-        let q_flat = q
-            .flatten(0, 2)
-            .map_err(super::candle_err("attn Q flat"))?;
-        let k_flat = k
-            .flatten(0, 2)
-            .map_err(super::candle_err("attn K flat"))?;
+        let q_flat = q.flatten(0, 2).map_err(super::candle_err("attn Q flat"))?;
+        let k_flat = k.flatten(0, 2).map_err(super::candle_err("attn K flat"))?;
 
         let q_flat = ops::rms_norm(&q_flat, &self.q_norm_weight, self.q_norm_eps)
             .map_err(super::candle_err("attn Q norm"))?;
@@ -88,19 +82,13 @@ impl AttentionBlock {
 
         let scale = 1.0 / (self.head_dim as f64).sqrt();
         let scores = q
-            .matmul(
-                &k.transpose(2, 3)
-                    .map_err(super::candle_err("attn kT"))?,
-            )
+            .matmul(&k.transpose(2, 3).map_err(super::candle_err("attn kT"))?)
             .map_err(super::candle_err("attn scores"))?
             .affine(scale, 0.0)
             .map_err(super::candle_err("attn scale"))?;
 
-        let probs = ops::softmax(&scores, D::Minus1)
-            .map_err(super::candle_err("attn softmax"))?;
-        let ctx = probs
-            .matmul(&v)
-            .map_err(super::candle_err("attn ctx"))?;
+        let probs = ops::softmax(&scores, D::Minus1).map_err(super::candle_err("attn softmax"))?;
+        let ctx = probs.matmul(&v).map_err(super::candle_err("attn ctx"))?;
 
         let ctx = ctx
             .transpose(1, 2)
