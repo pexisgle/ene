@@ -32,10 +32,9 @@ pub fn load_model(
     gguf_path: &str,
     device: &Device,
 ) -> Result<(EmbeddingModel, HashMap<String, gguf_file::Value>), EmbeddingError> {
-    let mut file = std::fs::File::open(gguf_path)
-        .map_err(super::candle_err("Cannot open GGUF"))?;
-    let ct = gguf_file::Content::read(&mut file)
-        .map_err(super::candle_err("Failed to read GGUF"))?;
+    let mut file = std::fs::File::open(gguf_path).map_err(super::candle_err("Cannot open GGUF"))?;
+    let ct =
+        gguf_file::Content::read(&mut file).map_err(super::candle_err("Failed to read GGUF"))?;
 
     let metadata = ct.metadata.clone();
 
@@ -47,35 +46,28 @@ pub fn load_model(
 
     let num_heads = md_get("qwen3.attention.head_count")?
         .to_u32()
-        .map_err(super::candle_err("head_count"))?
-        as usize;
+        .map_err(super::candle_err("head_count"))? as usize;
     let num_kv_heads = md_get("qwen3.attention.head_count_kv")?
         .to_u32()
-        .map_err(super::candle_err("head_count_kv"))?
-        as usize;
+        .map_err(super::candle_err("head_count_kv"))? as usize;
     let head_dim = md_get("qwen3.attention.key_length")?
         .to_u32()
-        .map_err(super::candle_err("key_length"))?
-        as usize;
+        .map_err(super::candle_err("key_length"))? as usize;
     let num_layers = md_get("qwen3.block_count")?
         .to_u32()
-        .map_err(super::candle_err("block_count"))?
-        as usize;
+        .map_err(super::candle_err("block_count"))? as usize;
     let hidden_size = md_get("qwen3.embedding_length")?
         .to_u32()
-        .map_err(super::candle_err("embedding_length"))?
-        as usize;
+        .map_err(super::candle_err("embedding_length"))? as usize;
     let max_seq_len = md_get("qwen3.context_length")?
         .to_u32()
-        .map_err(super::candle_err("context_length"))?
-        as usize;
+        .map_err(super::candle_err("context_length"))? as usize;
     let rms_norm_eps = md_get("qwen3.attention.layer_norm_rms_epsilon")?
         .to_f32()
         .map_err(super::candle_err("rms_epsilon"))?;
     let rope_theta = md_get("qwen3.rope.freq_base")?
         .to_f32()
-        .map_err(super::candle_err("freq_base"))?
-        as f64;
+        .map_err(super::candle_err("freq_base"))? as f64;
     let num_kv_groups = num_heads / num_kv_heads;
 
     tracing::info!(
@@ -247,9 +239,15 @@ pub fn resolve_gguf_paths(
                 _ => unreachable!(),
             };
 
-            let gguf_path = repo.get(&gguf_filename).await.map_err(super::candle_err("Failed to download GGUF"))?;
+            let gguf_path = repo
+                .get(&gguf_filename)
+                .await
+                .map_err(super::candle_err("Failed to download GGUF"))?;
 
-            let tokenizer_path = repo.get("tokenizer.json").await.map_err(super::candle_err("Failed to download tokenizer"))?;
+            let tokenizer_path = repo
+                .get("tokenizer.json")
+                .await
+                .map_err(super::candle_err("Failed to download tokenizer"))?;
 
             tracing::info!(
                 "[Embedding] GGUF model ready: {} ({} bytes)",

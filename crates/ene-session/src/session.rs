@@ -1,10 +1,10 @@
-use ene_config::character_card::{CharacterCardV3, ResolvedExpression, resolve_expressions};
 use crate::conversation_manager::generate_session_id;
-use ene_embedding::EmbeddingProvider;
-use ene_memory::MemoryStore;
 use crate::special_token::split_text_and_special_tokens;
 use async_openai::types::chat::Role;
 use chrono::{DateTime, Utc};
+use ene_config::character_card::{CharacterCardV3, ResolvedExpression, resolve_expressions};
+use ene_embedding::EmbeddingProvider;
+use ene_memory::MemoryStore;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -58,7 +58,10 @@ pub struct ConversationSession {
 impl std::fmt::Debug for ConversationSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConversationSession")
-            .field("conversation_history_len", &self.history.conversation_history.len())
+            .field(
+                "conversation_history_len",
+                &self.history.conversation_history.len(),
+            )
             .field("max_history_turns", &self.history.max_history_turns)
             .field("current_card_path", &self.current_card_path)
             .field("memory_enabled", &self.memory.memory_store.is_some())
@@ -107,15 +110,18 @@ impl ConversationSession {
         self.memory.embedding_provider = Some(embedder);
     }
 
-    pub fn load_card(&mut self, path: &str) -> Result<Vec<ResolvedExpression>, crate::error::SessionError> {
+    pub fn load_card(
+        &mut self,
+        path: &str,
+    ) -> Result<Vec<ResolvedExpression>, crate::error::SessionError> {
         if self.current_card_path == path && self.character_card.is_some() {
             if let Some(card) = &self.character_card {
                 return Ok(resolve_expressions(card));
             }
         }
 
-        let file_content = std::fs::read_to_string(path)
-            .map_err(crate::error::SessionError::CardReadError)?;
+        let file_content =
+            std::fs::read_to_string(path).map_err(crate::error::SessionError::CardReadError)?;
 
         let mut card = serde_json::from_str::<CharacterCardV3>(&file_content)
             .map_err(crate::error::SessionError::JsonError)?;
@@ -160,13 +166,15 @@ impl ConversationSession {
     }
 
     pub fn add_user_message(&mut self, input: &str) {
-        self.history.conversation_history
+        self.history
+            .conversation_history
             .push((Role::User, input.to_string()));
         self.history.trim_history();
     }
 
     pub fn add_assistant_message(&mut self, text: &str) {
-        self.history.conversation_history
+        self.history
+            .conversation_history
             .push((Role::Assistant, text.to_string()));
         self.history.trim_history();
     }

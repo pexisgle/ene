@@ -7,8 +7,7 @@ use tokio_stream::StreamExt;
 use crate::app_config::CharacterSettings;
 use crate::character::ResolvedExpressionMap;
 use ene_ai_core::{
-    AiRuntime,
-    poll_split_result,
+    AiRuntime, poll_split_result,
     stream::{AiStreamEvent as CoreAiStreamEvent, run_ai_with_tools},
     truncate,
 };
@@ -204,7 +203,10 @@ fn start_next_ai_request(
             }
             Err(e) => {
                 runtime_state.pending.pop_front();
-                stream_writer.write(AiStreamEvent::Error(format!("Failed to initialize AI runtime: {}", e)));
+                stream_writer.write(AiStreamEvent::Error(format!(
+                    "Failed to initialize AI runtime: {}",
+                    e
+                )));
                 return;
             }
         }
@@ -214,7 +216,10 @@ fn start_next_ai_request(
 
     // Character card loading if card path changed
     if runtime.session.current_card_path != settings.ai.ai.character_card_path {
-        match runtime.session.load_card(&settings.ai.ai.character_card_path) {
+        match runtime
+            .session
+            .load_card(&settings.ai.ai.character_card_path)
+        {
             Ok(resolved) => {
                 expression_map.map = resolved.into_iter().map(|e| (e.name, e.vrm)).collect();
             }

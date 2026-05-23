@@ -25,10 +25,7 @@ async fn handle_search(query: &str, ctx: &AppContext) {
         return;
     }
     let Some(store) = &ctx.session.memory.memory_store else {
-        println!(
-            "{}",
-            style::warning("[Memory] Memory is not enabled.")
-        );
+        println!("{}", style::warning("[Memory] Memory is not enabled."));
         return;
     };
     let Some(embedder) = &ctx.session.memory.embedding_provider else {
@@ -49,10 +46,7 @@ async fn handle_search(query: &str, ctx: &AppContext) {
             match store.search_summaries(&embedding, card_name, 10, threshold) {
                 Ok(results) => {
                     if results.is_empty() {
-                        println!(
-                            "{}",
-                            style::warning("[Memory] No matching memories found.")
-                        );
+                        println!("{}", style::warning("[Memory] No matching memories found."));
                     } else {
                         println!(
                             "{}",
@@ -88,10 +82,7 @@ async fn handle_search(query: &str, ctx: &AppContext) {
 
 fn handle_list(ctx: &AppContext) {
     let Some(store) = &ctx.session.memory.memory_store else {
-        println!(
-            "{}",
-            style::warning("[Memory] Memory is not enabled.")
-        );
+        println!("{}", style::warning("[Memory] Memory is not enabled."));
         return;
     };
     let card_name = ctx.session.card_name();

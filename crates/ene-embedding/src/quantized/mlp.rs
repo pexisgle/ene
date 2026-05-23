@@ -15,15 +15,12 @@ impl MlpBlock {
             .gate_proj
             .forward(x)
             .map_err(super::candle_err("MLP gate"))?;
-        let gate =
-            ops::silu(&gate).map_err(super::candle_err("MLP silu"))?;
+        let gate = ops::silu(&gate).map_err(super::candle_err("MLP silu"))?;
         let up = self
             .up_proj
             .forward(x)
             .map_err(super::candle_err("MLP up"))?;
-        let x = gate
-            .mul(&up)
-            .map_err(super::candle_err("MLP mul"))?;
+        let x = gate.mul(&up).map_err(super::candle_err("MLP mul"))?;
         self.down_proj
             .forward(&x)
             .map_err(super::candle_err("MLP down"))

@@ -8,10 +8,10 @@ use async_openai::types::chat::{
 };
 use serde::{Deserialize, Serialize};
 
-use ene_embedding::client::build_openai_client;
-use ene_config::AiSettings;
 use crate::error::MemoryError;
 use crate::store::KeyFact;
+use ene_config::AiSettings;
+use ene_embedding::client::build_openai_client;
 
 /// LLM が返す構造化された会話要約
 #[derive(Debug, Clone, Serialize, Deserialize)]

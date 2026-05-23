@@ -1,8 +1,8 @@
-use crate::tools::definition::ToolRegistry;
 use crate::tools::ToolDefinition;
+use crate::tools::definition::ToolRegistry;
 use async_trait::async_trait;
 use ene_tool_proto::{
-    read_ipc_response, write_ipc_request, IpcRequest, IpcResponse, SandboxConfigData,
+    IpcRequest, IpcResponse, SandboxConfigData, read_ipc_response, write_ipc_request,
 };
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -83,8 +83,10 @@ impl IpcToolRegistry {
                             attempts
                         ));
                     }
-                    let delay = RECONNECT_BASE_DELAY_MS * 2u64.saturating_pow(attempts.saturating_sub(1));
-                    tokio::time::sleep(Duration::from_millis(delay.min(RECONNECT_MAX_DELAY_MS))).await;
+                    let delay =
+                        RECONNECT_BASE_DELAY_MS * 2u64.saturating_pow(attempts.saturating_sub(1));
+                    tokio::time::sleep(Duration::from_millis(delay.min(RECONNECT_MAX_DELAY_MS)))
+                        .await;
                 }
             }
         }
@@ -119,10 +121,7 @@ impl IpcToolRegistry {
         result
     }
 
-    async fn do_refresh_tools_with_stream(
-        &self,
-        stream: &mut UnixStream,
-    ) -> Result<(), String> {
+    async fn do_refresh_tools_with_stream(&self, stream: &mut UnixStream) -> Result<(), String> {
         write_ipc_request(stream, &IpcRequest::ListTools)
             .await
             .map_err(|e| format!("Failed to send ListTools: {e}"))?;
@@ -188,7 +187,9 @@ impl IpcToolRegistry {
 
         match resp {
             Some(IpcResponse::Ack) => {}
-            Some(IpcResponse::Error { message }) => return Err(format!("Reconnect rejected: {message}")),
+            Some(IpcResponse::Error { message }) => {
+                return Err(format!("Reconnect rejected: {message}"));
+            }
             _ => return Err("Unexpected response to Initialize on reconnect".to_string()),
         }
 
@@ -231,7 +232,11 @@ impl ToolRegistry for IpcToolRegistry {
         }
     }
 
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, crate::error::ToolError> {
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: &str,
+    ) -> Result<String, crate::error::ToolError> {
         self.send_with_reconnect(IpcRequest::CallTool {
             name: name.to_string(),
             arguments: arguments.to_string(),
@@ -239,9 +244,15 @@ impl ToolRegistry for IpcToolRegistry {
         .await
         .map_err(crate::error::ToolError::ToolExecutionError)
         .and_then(|resp| match resp {
-            IpcResponse::CallResult { result } => result.map_err(|e| crate::error::ToolError::ToolExecutionError(e.to_string())),
-            IpcResponse::Error { message } => Err(crate::error::ToolError::ToolExecutionError(message)),
-            _ => Err(crate::error::ToolError::ToolExecutionError("Unexpected response for CallTool".to_string())),
+            IpcResponse::CallResult { result } => {
+                result.map_err(|e| crate::error::ToolError::ToolExecutionError(e.to_string()))
+            }
+            IpcResponse::Error { message } => {
+                Err(crate::error::ToolError::ToolExecutionError(message))
+            }
+            _ => Err(crate::error::ToolError::ToolExecutionError(
+                "Unexpected response for CallTool".to_string(),
+            )),
         })
     }
 
@@ -260,4 +271,3 @@ impl ToolRegistry for IpcToolRegistry {
         Ok(())
     }
 }
-

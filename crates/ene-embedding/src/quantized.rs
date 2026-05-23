@@ -43,14 +43,17 @@ impl GgufEmbeddingProvider {
 
         let (model, _metadata) = load_model(gguf_path, &device)?;
 
-        let mut tokenizer = Tokenizer::from_file(tokenizer_path)
-            .map_err(|e| EmbeddingError::EmbeddingError(format!("Failed to load tokenizer: {e}")))?;
+        let mut tokenizer = Tokenizer::from_file(tokenizer_path).map_err(|e| {
+            EmbeddingError::EmbeddingError(format!("Failed to load tokenizer: {e}"))
+        })?;
         tokenizer
             .with_truncation(Some(tokenizers::TruncationParams {
                 max_length,
                 ..Default::default()
             }))
-            .map_err(|e| EmbeddingError::EmbeddingError(format!("Failed to set truncation: {e}")))?;
+            .map_err(|e| {
+                EmbeddingError::EmbeddingError(format!("Failed to set truncation: {e}"))
+            })?;
 
         let dims = model.hidden_size;
 
@@ -85,7 +88,9 @@ impl GgufEmbeddingProvider {
             (1, input_ids.len()),
             &Device::Cpu,
         )
-        .map_err(|e| EmbeddingError::EmbeddingError(format!("Failed to create input tensor: {e}")))?;
+        .map_err(|e| {
+            EmbeddingError::EmbeddingError(format!("Failed to create input tensor: {e}"))
+        })?;
 
         let model = self.model.lock().unwrap_or_else(|e| e.into_inner());
         model.forward(&input_tensor)

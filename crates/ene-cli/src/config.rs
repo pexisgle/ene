@@ -8,7 +8,10 @@ pub async fn init() -> AiRuntime {
 
     match AiRuntime::init(settings).await {
         Ok(runtime) => {
-            println!("{}", style::header("[Runtime] Unified AI Runtime initialized successfully."));
+            println!(
+                "{}",
+                style::header("[Runtime] Unified AI Runtime initialized successfully.")
+            );
             if runtime.settings.memory.enabled {
                 println!("{}", style::header("[Memory] Long-term memory enabled."));
                 println!(

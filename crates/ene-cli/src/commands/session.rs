@@ -52,10 +52,7 @@ async fn handle_split(ctx: &mut AppContext) {
         return;
     }
     let Some(store) = &ctx.session.memory.memory_store else {
-        println!(
-            "{}",
-            style::warning("[Session] Memory is not enabled.")
-        );
+        println!("{}", style::warning("[Session] Memory is not enabled."));
         return;
     };
     let Some(embedder) = &ctx.session.memory.embedding_provider else {
@@ -104,7 +101,10 @@ async fn handle_split(ctx: &mut AppContext) {
             }
             ctx.session.reset_session();
             ctx.session.memory.session_id = result.new_session_id;
-            println!("{}", style::warning("[Session] Started a new conversation."));
+            println!(
+                "{}",
+                style::warning("[Session] Started a new conversation.")
+            );
         }
         Err(e) => {
             println!("{}", style::error(format!("[Session] Split error: {}", e)));
@@ -114,10 +114,7 @@ async fn handle_split(ctx: &mut AppContext) {
 
 fn handle_summaries(ctx: &AppContext) {
     let Some(store) = &ctx.session.memory.memory_store else {
-        println!(
-            "{}",
-            style::warning("[Session] Memory is not enabled.")
-        );
+        println!("{}", style::warning("[Session] Memory is not enabled."));
         return;
     };
     let card_name = ctx.session.card_name();

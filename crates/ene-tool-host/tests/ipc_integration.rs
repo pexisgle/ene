@@ -99,10 +99,9 @@ async fn test_ipc_list_tools_and_call_tool() {
         undo_db_path: None,
     };
 
-    let registry =
-        ene_tool_host::IpcToolRegistry::new(socket_path.into(), sandbox, None)
-            .await
-            .expect("Failed to create IpcToolRegistry");
+    let registry = ene_tool_host::IpcToolRegistry::new(socket_path.into(), sandbox, None)
+        .await
+        .expect("Failed to create IpcToolRegistry");
 
     // list_tools の検証
     let tools = registry.list_tools();
@@ -173,10 +172,9 @@ async fn test_ipc_with_real_host() {
         undo_db_path: None,
     };
 
-    let registry =
-        ene_tool_host::IpcToolRegistry::new(socket_path.into(), sandbox, None)
-            .await
-            .expect("Failed to connect to real tool host");
+    let registry = ene_tool_host::IpcToolRegistry::new(socket_path.into(), sandbox, None)
+        .await
+        .expect("Failed to connect to real tool host");
 
     let tools = registry.list_tools();
     let names: Vec<_> = tools.iter().map(|t| t.name.as_str()).collect();

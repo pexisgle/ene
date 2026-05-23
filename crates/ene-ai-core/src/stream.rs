@@ -1,9 +1,5 @@
 use crate::client::build_openai_client;
-use ene_config::AiSettings;
-use std::sync::Arc;
-use ene_memory::RecalledSummary;
 use crate::prompt_builder::build_messages;
-use ene_session::ConversationSession;
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall as ToolCall, ChatCompletionMessageToolCallChunk as ToolCallChunk,
     ChatCompletionMessageToolCalls as ToolCalls,
@@ -15,6 +11,10 @@ use async_openai::types::chat::{
     FunctionCall, FunctionCallStream, ImageUrlArgs,
 };
 use async_stream::stream;
+use ene_config::AiSettings;
+use ene_memory::RecalledSummary;
+use ene_session::ConversationSession;
+use std::sync::Arc;
 use tokio_stream::Stream;
 
 #[derive(Debug)]
@@ -63,7 +63,10 @@ pub async fn select_relevant_tools(
 ) -> Vec<ene_tool_host::ToolDefinition> {
     if tool_rag_enabled && tool_calling_enabled {
         if let Some(embedder) = embedding_provider.as_ref() {
-            if let Err(e) = registry.ensure_index_built(embedder.as_ref(), mem_store).await {
+            if let Err(e) = registry
+                .ensure_index_built(embedder.as_ref(), mem_store)
+                .await
+            {
                 tracing::warn!("[ToolRAG] Failed to build index: {}", e);
             }
             let query_embedding = match embedder.embed_query(user_input).await {
@@ -73,10 +76,12 @@ pub async fn select_relevant_tools(
                     None
                 }
             };
-            let mut relevant = registry.list_relevant_tools(query_embedding.as_deref(), tool_rag_limit);
+            let mut relevant =
+                registry.list_relevant_tools(query_embedding.as_deref(), tool_rag_limit);
             // 常に含めるツールが漏れていれば追加
             let all_tools = registry.list_tools();
-            let all_map: std::collections::HashMap<String, _> = all_tools.into_iter().map(|t| (t.name.clone(), t)).collect();
+            let all_map: std::collections::HashMap<String, _> =
+                all_tools.into_iter().map(|t| (t.name.clone(), t)).collect();
             for name in tool_rag_always_include {
                 if !relevant.iter().any(|t| &t.name == name) {
                     if let Some(tool) = all_map.get(name) {
@@ -115,7 +120,8 @@ pub async fn fetch_memory_context(
         &pending_embedding,
         summary_recall_limit,
         similarity_threshold,
-    ).await;
+    )
+    .await;
 
     let key_facts = if settings.memory.enabled {
         if let Some(store) = &session.memory.memory_store {
@@ -174,9 +180,12 @@ pub async fn perform_tool_executions(
         asst_msg_builder.content(assistant_content);
     }
 
-    let asst_msg = asst_msg_builder
-        .build()
-        .map_err(|e| crate::error::AiCoreError::ToolExecutionError(format!("Failed to build assistant message: {}", e)))?;
+    let asst_msg = asst_msg_builder.build().map_err(|e| {
+        crate::error::AiCoreError::ToolExecutionError(format!(
+            "Failed to build assistant message: {}",
+            e
+        ))
+    })?;
     round_messages.push(asst_msg.into());
 
     registry.set_session_id(session_id).await;
@@ -192,10 +201,16 @@ pub async fn perform_tool_executions(
             });
 
             let tool_timeout = std::time::Duration::from_secs(30);
-            let result = match tokio::time::timeout(tool_timeout, registry.call_tool(&name, &args)).await {
+            let result = match tokio::time::timeout(tool_timeout, registry.call_tool(&name, &args))
+                .await
+            {
                 Ok(Ok(res)) => res,
                 Ok(Err(e)) => format!("Error executing tool: {}", e),
-                Err(_) => format!("Tool '{}' timed out after {} seconds (the operation may not be supported on this environment)", name, tool_timeout.as_secs()),
+                Err(_) => format!(
+                    "Tool '{}' timed out after {} seconds (the operation may not be supported on this environment)",
+                    name,
+                    tool_timeout.as_secs()
+                ),
             };
 
             let _ = tx.send(AiStreamEvent::ToolCallResult {
@@ -209,7 +224,12 @@ pub async fn perform_tool_executions(
                 .tool_call_id(call.id.clone())
                 .content(final_tool_text)
                 .build()
-                .map_err(|e| crate::error::AiCoreError::ToolExecutionError(format!("Failed to build tool message: {}", e)))?;
+                .map_err(|e| {
+                    crate::error::AiCoreError::ToolExecutionError(format!(
+                        "Failed to build tool message: {}",
+                        e
+                    ))
+                })?;
             round_messages.push(tool_msg.into());
 
             if let Some(b64_data) = screenshot_data {
@@ -246,7 +266,8 @@ pub async fn run_ai_with_tools(
             let session_id = session.memory.session_id.clone();
             let input_text = user_input.to_string();
             tokio::spawn(async move {
-                if let Err(e) = store_clone.insert_log(&session_id, &card_name, "user", &input_text) {
+                if let Err(e) = store_clone.insert_log(&session_id, &card_name, "user", &input_text)
+                {
                     tracing::error!("[Memory] Failed to save user log: {}", e);
                 }
             });
@@ -254,7 +275,13 @@ pub async fn run_ai_with_tools(
     }
 
     // 3. Build initial OpenAI chat messages list
-    let mut messages = build_chat_messages_list(session, settings, user_input, &recalled_summaries, &key_facts)?;
+    let mut messages = build_chat_messages_list(
+        session,
+        settings,
+        user_input,
+        &recalled_summaries,
+        &key_facts,
+    )?;
 
     let memory_enabled = settings.memory.enabled;
     let mem_store = if memory_enabled {

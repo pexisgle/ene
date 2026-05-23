@@ -35,20 +35,24 @@ impl ToolProvider for FsToolProvider {
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         let sandbox = {
             let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
-            guard.clone().unwrap_or_else(|| Arc::new(Sandbox::new(Default::default())))
+            guard
+                .clone()
+                .unwrap_or_else(|| Arc::new(Sandbox::new(Default::default())))
         };
         let session_id = sandbox.session_id();
 
         match name {
             "filesystem" => {
-                let args: serde_json::Value = serde_json::from_str(arguments).map_err(|e| {
-                    ToolError::InvalidArguments {
+                let args: serde_json::Value =
+                    serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
                         message: format!("Failed to parse filesystem arguments: {e}"),
-                    }
-                })?;
-                let action = args["action"].as_str().ok_or_else(|| ToolError::InvalidArguments {
-                    message: "Missing 'action' field in filesystem arguments".to_string(),
-                })?;
+                    })?;
+                let action =
+                    args["action"]
+                        .as_str()
+                        .ok_or_else(|| ToolError::InvalidArguments {
+                            message: "Missing 'action' field in filesystem arguments".to_string(),
+                        })?;
                 crate::filesystem::execute(
                     action,
                     &args,
@@ -60,25 +64,21 @@ impl ToolProvider for FsToolProvider {
                 .map_err(|e| ToolError::ExecutionFailed { message: e })
             }
             "shell" => {
-                let args: serde_json::Value = serde_json::from_str(arguments).map_err(|e| {
-                    ToolError::InvalidArguments {
+                let args: serde_json::Value =
+                    serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
                         message: format!("Failed to parse shell arguments: {e}"),
-                    }
-                })?;
-                let command = args["command"].as_str().ok_or_else(|| ToolError::InvalidArguments {
-                    message: "Missing 'command' field".to_string(),
-                })?;
+                    })?;
+                let command =
+                    args["command"]
+                        .as_str()
+                        .ok_or_else(|| ToolError::InvalidArguments {
+                            message: "Missing 'command' field".to_string(),
+                        })?;
                 let description = args["description"].as_str().unwrap_or("");
                 let timeout = args["timeout"].as_u64();
                 let workdir = args["workdir"].as_str();
-                crate::shell::shell_exec(
-                    command,
-                    description,
-                    timeout,
-                    workdir,
-                    sandbox.config(),
-                )
-                .await
+                crate::shell::shell_exec(command, description, timeout, workdir, sandbox.config())
+                    .await
             }
             "undo" => crate::undo_tool::undo(sandbox.undo_manager(), &session_id).await,
             _ => Err(ToolError::NotFound {

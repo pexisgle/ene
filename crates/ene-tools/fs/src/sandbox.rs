@@ -213,7 +213,10 @@ impl Sandbox {
     }
 
     pub fn session_id(&self) -> String {
-        self.session_id.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.session_id
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn set_session_id(&self, id: &str) {
@@ -263,19 +266,21 @@ impl Sandbox {
 
     /// パッチ適用を記録（複数ファイル操作を1つのUndoエントリに）
     pub fn track_patch(&self, operations: Vec<crate::undo_manager::UndoOperation>) {
-        self.undo
-            .push(&self.session_id(), crate::undo_manager::UndoEntry::new("patch", operations));
+        self.undo.push(
+            &self.session_id(),
+            crate::undo_manager::UndoEntry::new("patch", operations),
+        );
     }
 
     /// 直前の操作を取り消し
     pub async fn undo_last(&self) -> Result<String, ToolError> {
-        let logs = self
-            .undo
-            .undo(&self.session_id())
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Undo failed: {e}"),
-            })?;
+        let logs =
+            self.undo
+                .undo(&self.session_id())
+                .await
+                .map_err(|e| ToolError::ExecutionFailed {
+                    message: format!("Undo failed: {e}"),
+                })?;
         Ok(logs.join("\n"))
     }
 }

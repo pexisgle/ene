@@ -1,10 +1,10 @@
-use ene_config::AiSettings;
-use ene_embedding::{EmbeddingProvider, cosine_similarity};
 use crate::error::SessionError;
-use ene_memory::{KeyFact, MemoryStore};
-use ene_memory as summarizer;
 use async_openai::types::chat::Role;
 use chrono::{DateTime, Utc};
+use ene_config::AiSettings;
+use ene_embedding::{EmbeddingProvider, cosine_similarity};
+use ene_memory as summarizer;
+use ene_memory::{KeyFact, MemoryStore};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 

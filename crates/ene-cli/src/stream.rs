@@ -19,9 +19,7 @@ where
                     let _ = io::stdout().flush();
                 }
                 for token in special_tokens {
-                    if let Some(emotion) =
-                        ene_ai_core::extract_emotion_from_token(&token)
-                    {
+                    if let Some(emotion) = ene_ai_core::extract_emotion_from_token(&token) {
                         print!("{}", style::emotion(format!("[Emotion: {}]", emotion)));
                     } else {
                         print!("{}", style::warning(token));

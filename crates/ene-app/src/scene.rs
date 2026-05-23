@@ -119,7 +119,8 @@ fn pace_frame_rate(settings: Res<CharacterSettings>, mut pacing: ResMut<FramePac
         return;
     }
 
-    let target_frame_duration = Duration::from_secs_f64(1.0 / f64::from(settings.graphics.target_fps));
+    let target_frame_duration =
+        Duration::from_secs_f64(1.0 / f64::from(settings.graphics.target_fps));
     let now = Instant::now();
 
     let Some(last_frame_end) = pacing.last_frame_end else {

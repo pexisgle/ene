@@ -1,9 +1,9 @@
-use super::definition::ToolRegistry;
 use super::ToolDefinition;
+use super::definition::ToolRegistry;
+use crate::error::ToolError;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::error::ToolError;
 
 pub struct CompositeToolRegistry {
     state: std::sync::RwLock<CompositeState>,
@@ -184,7 +184,12 @@ impl ToolRegistry for CompositeToolRegistry {
             let state_guard = self.state.read().unwrap_or_else(|e| e.into_inner());
             match state_guard.tool_index.get(name) {
                 Some(&idx) => Arc::clone(&state_guard.registries[idx]),
-                None => return Err(ToolError::ToolExecutionError(format!("Tool {} not found", name))),
+                None => {
+                    return Err(ToolError::ToolExecutionError(format!(
+                        "Tool {} not found",
+                        name
+                    )));
+                }
             }
         };
         registry.call_tool(name, arguments).await
@@ -298,7 +303,10 @@ mod tests {
         let all = composite.list_tools();
         // Both tools appear in the list, but index maps to first
         assert_eq!(all.len(), 2);
-        assert_eq!(composite.state.read().unwrap().tool_index.get("dup"), Some(&0));
+        assert_eq!(
+            composite.state.read().unwrap().tool_index.get("dup"),
+            Some(&0)
+        );
     }
 
     #[tokio::test]
@@ -320,7 +328,10 @@ mod tests {
         let composite = CompositeToolRegistry::new(vec![Arc::new(mock)]);
         let result = composite.call_tool("nonexistent", "").await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::ToolExecutionError(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::ToolExecutionError(_)
+        ));
     }
 
     #[tokio::test]

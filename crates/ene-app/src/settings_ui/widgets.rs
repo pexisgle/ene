@@ -12,13 +12,19 @@ pub fn apply_action(
 ) {
     match action {
         SettingsButtonAction::PrevCharacter => {
-            let idx =
-                cycle_index(settings.character_state.selected_character, settings.characters.len(), -1);
+            let idx = cycle_index(
+                settings.character_state.selected_character,
+                settings.characters.len(),
+                -1,
+            );
             settings.select_character(idx);
         }
         SettingsButtonAction::NextCharacter => {
-            let idx =
-                cycle_index(settings.character_state.selected_character, settings.characters.len(), 1);
+            let idx = cycle_index(
+                settings.character_state.selected_character,
+                settings.characters.len(),
+                1,
+            );
             settings.select_character(idx);
         }
         SettingsButtonAction::PrevMotion => {
@@ -58,16 +64,20 @@ pub fn apply_action(
             settings.graphics.target_fps = cycle_target_fps(settings.graphics.target_fps, 1);
         }
         SettingsButtonAction::ShadowQualityDown => {
-            settings.graphics.shadow_quality = cycle_shadow_quality(settings.graphics.shadow_quality, -1);
+            settings.graphics.shadow_quality =
+                cycle_shadow_quality(settings.graphics.shadow_quality, -1);
         }
         SettingsButtonAction::ShadowQualityUp => {
-            settings.graphics.shadow_quality = cycle_shadow_quality(settings.graphics.shadow_quality, 1);
+            settings.graphics.shadow_quality =
+                cycle_shadow_quality(settings.graphics.shadow_quality, 1);
         }
         SettingsButtonAction::AntialiasingModeDown => {
-            settings.graphics.antialiasing_mode = cycle_antialiasing_mode(settings.graphics.antialiasing_mode, -1);
+            settings.graphics.antialiasing_mode =
+                cycle_antialiasing_mode(settings.graphics.antialiasing_mode, -1);
         }
         SettingsButtonAction::AntialiasingModeUp => {
-            settings.graphics.antialiasing_mode = cycle_antialiasing_mode(settings.graphics.antialiasing_mode, 1);
+            settings.graphics.antialiasing_mode =
+                cycle_antialiasing_mode(settings.graphics.antialiasing_mode, 1);
         }
         SettingsButtonAction::LookAtStrengthDown => {
             adjust_f32(&mut settings.character_state.look_at_strength, -0.05);

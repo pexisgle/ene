@@ -41,7 +41,8 @@ fn handle_prompt(ctx: &AppContext) {
             println!("---------------------");
         }
 
-        if !ctx.session.history.conversation_history.is_empty() && !card.data.mes_example.trim().is_empty()
+        if !ctx.session.history.conversation_history.is_empty()
+            && !card.data.mes_example.trim().is_empty()
         {
             println!("--- Example Messages ---");
             let ex = ene_config::expand_cbs_macros(

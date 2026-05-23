@@ -34,7 +34,7 @@ pub const ANTIALIASING_MODE_CHOICES: [AntialiasingMode; 4] = [
 ];
 pub const DEFAULT_ANTIALIASING_MODE: AntialiasingMode = AntialiasingMode::Fxaa;
 
-pub use ene_config::{ShadowQuality, AntialiasingMode};
+pub use ene_config::{AntialiasingMode, ShadowQuality};
 
 pub fn normalize_mask_render_downsample(value: u32) -> u32 {
     cycle_choice(
@@ -278,11 +278,16 @@ impl CharacterSettings {
 
     pub fn clamp_runtime_values(&mut self) {
         self.character_state.model_scale = self.character_state.model_scale.clamp(0.25, 4.0);
-        self.character_state.character_position.x = self.character_state.character_position.x.clamp(-3.0, 3.0);
-        self.character_state.character_position.y = self.character_state.character_position.y.clamp(-2.0, 3.0);
-        self.character_state.character_position.z = self.character_state.character_position.z.clamp(-4.0, 3.0);
-        self.character_state.look_at_strength = self.character_state.look_at_strength.clamp(0.0, 1.0);
-        self.graphics.mask_render_downsample = normalize_mask_render_downsample(self.graphics.mask_render_downsample);
+        self.character_state.character_position.x =
+            self.character_state.character_position.x.clamp(-3.0, 3.0);
+        self.character_state.character_position.y =
+            self.character_state.character_position.y.clamp(-2.0, 3.0);
+        self.character_state.character_position.z =
+            self.character_state.character_position.z.clamp(-4.0, 3.0);
+        self.character_state.look_at_strength =
+            self.character_state.look_at_strength.clamp(0.0, 1.0);
+        self.graphics.mask_render_downsample =
+            normalize_mask_render_downsample(self.graphics.mask_render_downsample);
         self.graphics.target_fps = normalize_target_fps(self.graphics.target_fps);
     }
 
@@ -533,7 +538,11 @@ fn read_character_json_meta(path: &Path) -> Option<(String, Option<String>)> {
 
     let default_motion = path
         .parent()
-        .and_then(|p| p.join("character_settings.json").exists().then(|| p.join("character_settings.json")))
+        .and_then(|p| {
+            p.join("character_settings.json")
+                .exists()
+                .then(|| p.join("character_settings.json"))
+        })
         .and_then(|settings_path| {
             let s = fs::read_to_string(settings_path).ok()?;
             let sv: serde_json::Value = serde_json::from_str(&s).ok()?;

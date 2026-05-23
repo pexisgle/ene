@@ -1,11 +1,11 @@
-mod widgets;
+mod page_ai;
 mod page_character;
 mod page_graphics;
-mod page_ai;
+mod widgets;
 
+use page_ai::render_ai_page;
 use page_character::render_character_page;
 use page_graphics::render_graphics_page;
-use page_ai::render_ai_page;
 
 use crate::ai_bridge::{AiRequestEvent, AiStreamEvent};
 use crate::app_config::{
@@ -226,9 +226,15 @@ impl SettingsValueKind {
                 format!("{}x", settings.graphics.mask_render_downsample)
             }
             SettingsValueKind::TargetFps => target_fps_label(settings.graphics.target_fps),
-            SettingsValueKind::ShadowQuality => settings.graphics.shadow_quality.label().to_string(),
-            SettingsValueKind::AntialiasingMode => settings.graphics.antialiasing_mode.label().to_string(),
-            SettingsValueKind::LookAtStrength => format!("{:.2}", settings.character_state.look_at_strength),
+            SettingsValueKind::ShadowQuality => {
+                settings.graphics.shadow_quality.label().to_string()
+            }
+            SettingsValueKind::AntialiasingMode => {
+                settings.graphics.antialiasing_mode.label().to_string()
+            }
+            SettingsValueKind::LookAtStrength => {
+                format!("{:.2}", settings.character_state.look_at_strength)
+            }
             SettingsValueKind::ModelScale => format!("{:.2}", settings.character_state.model_scale),
             SettingsValueKind::CharacterPositionX => {
                 format!("{:+.2}", settings.character_state.character_position.x)
@@ -251,21 +257,21 @@ impl SettingsValueKind {
 
     fn apply_input(self, value: &str, settings: &mut CharacterSettings) -> Result<(), ()> {
         match self {
-            SettingsValueKind::LookAtStrength => {
-                parse_and_assign(value, |parsed| settings.character_state.look_at_strength = parsed)
-            }
-            SettingsValueKind::ModelScale => {
-                parse_and_assign(value, |parsed| settings.character_state.model_scale = parsed)
-            }
-            SettingsValueKind::CharacterPositionX => {
-                parse_and_assign(value, |parsed| settings.character_state.character_position.x = parsed)
-            }
-            SettingsValueKind::CharacterPositionY => {
-                parse_and_assign(value, |parsed| settings.character_state.character_position.y = parsed)
-            }
-            SettingsValueKind::CharacterPositionZ => {
-                parse_and_assign(value, |parsed| settings.character_state.character_position.z = parsed)
-            }
+            SettingsValueKind::LookAtStrength => parse_and_assign(value, |parsed| {
+                settings.character_state.look_at_strength = parsed
+            }),
+            SettingsValueKind::ModelScale => parse_and_assign(value, |parsed| {
+                settings.character_state.model_scale = parsed
+            }),
+            SettingsValueKind::CharacterPositionX => parse_and_assign(value, |parsed| {
+                settings.character_state.character_position.x = parsed
+            }),
+            SettingsValueKind::CharacterPositionY => parse_and_assign(value, |parsed| {
+                settings.character_state.character_position.y = parsed
+            }),
+            SettingsValueKind::CharacterPositionZ => parse_and_assign(value, |parsed| {
+                settings.character_state.character_position.z = parsed
+            }),
             SettingsValueKind::AiUserName => {
                 settings.ai.ai.user_name = value.to_string();
                 Ok(())
@@ -469,8 +475,6 @@ fn render_settings_window(
         ui.small("F1: Open/Close  |  Esc: Hide  |  A/D,W/S: Char/Motion");
     });
 }
-
-
 
 fn apply_settings_window_visibility(
     settings: Res<CharacterSettings>,

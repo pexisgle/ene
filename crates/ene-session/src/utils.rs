@@ -19,9 +19,7 @@ pub fn truncate(s: &str, max_chars: usize) -> String {
 }
 
 /// Embedding プロバイダーを初期化する（常に利用可能）
-pub fn init_embedding(
-    settings: &AiSettings,
-) -> Result<Arc<dyn EmbeddingProvider>, String> {
+pub fn init_embedding(settings: &AiSettings) -> Result<Arc<dyn EmbeddingProvider>, String> {
     let embed_base_url = settings
         .resolve_embedding_base_url()
         .map_err(|e| format!("Failed to resolve embedding base URL: {}", e))?;

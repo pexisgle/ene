@@ -1,10 +1,10 @@
-use ene_config::AiSettings;
 use crate::ipc_client::IpcToolRegistry;
-use ene_memory::MemoryStore;
-use ene_config as paths;
-use crate::tools::definition::ToolRegistry;
 use crate::tools::CompositeToolRegistry;
 use crate::tools::ToolDefinition;
+use crate::tools::definition::ToolRegistry;
+use ene_config as paths;
+use ene_config::AiSettings;
+use ene_memory::MemoryStore;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,13 +49,21 @@ impl ToolProcess {
 
         tracing::warn!(
             "[ToolHostManager] Restarting tool '{}' (attempt {}/{})",
-            self.name, self.restart_count, MAX_RESTARTS
+            self.name,
+            self.restart_count,
+            MAX_RESTARTS
         );
 
         let child = std::process::Command::new(&self.binary_path)
             .env("ENE_TOOL_SOCKET", &self.socket_path)
             .spawn()
-            .map_err(|e| crate::error::ToolError::ToolExecutionError(format!("Failed to restart '{}': {}", self.binary_path.display(), e)))?;
+            .map_err(|e| {
+                crate::error::ToolError::ToolExecutionError(format!(
+                    "Failed to restart '{}': {}",
+                    self.binary_path.display(),
+                    e
+                ))
+            })?;
 
         self.child = child;
         Ok(())
@@ -85,7 +93,11 @@ struct SupervisedIpcRegistry {
 #[async_trait::async_trait]
 impl ToolRegistry for SupervisedIpcRegistry {
     fn list_tools(&self) -> Vec<ToolDefinition> {
-        let reg = self.registry.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let reg = self
+            .registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         reg.list_tools()
     }
 
@@ -94,12 +106,24 @@ impl ToolRegistry for SupervisedIpcRegistry {
         query_embedding: Option<&[f32]>,
         limit: usize,
     ) -> Vec<ToolDefinition> {
-        let reg = self.registry.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let reg = self
+            .registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         reg.list_relevant_tools(query_embedding, limit)
     }
 
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, crate::error::ToolError> {
-        let reg = self.registry.read().unwrap_or_else(|e| e.into_inner()).clone();
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: &str,
+    ) -> Result<String, crate::error::ToolError> {
+        let reg = self
+            .registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let result = reg.call_tool(name, arguments).await;
 
         if result.is_ok() {
@@ -147,7 +171,11 @@ impl ToolRegistry for SupervisedIpcRegistry {
     }
 
     async fn set_session_id(&self, session_id: &str) {
-        let reg = self.registry.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let reg = self
+            .registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         reg.set_session_id(session_id).await;
     }
 }
@@ -170,7 +198,11 @@ impl ToolRegistry for ToolHostManager {
         self.composite.list_relevant_tools(query_embedding, limit)
     }
 
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, crate::error::ToolError> {
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: &str,
+    ) -> Result<String, crate::error::ToolError> {
         self.composite.call_tool(name, arguments).await
     }
 
@@ -189,12 +221,18 @@ impl ToolRegistry for ToolHostManager {
 
 impl ToolHostManager {
     pub async fn start(settings: &AiSettings) -> Result<Self, crate::error::ToolError> {
-        let undo_db_path = Some(settings.resolve_undo_db_path().to_string_lossy().to_string());
+        let undo_db_path = Some(
+            settings
+                .resolve_undo_db_path()
+                .to_string_lossy()
+                .to_string(),
+        );
         let sandbox = settings.sandbox.to_sandbox_config_data(undo_db_path);
         let mut supervised_registries = Vec::new();
 
-        std::fs::create_dir_all(paths::tool_socket_dir())
-            .map_err(|e| crate::error::ToolError::ToolExecutionError(format!("Failed to create socket dir: {e}")))?;
+        std::fs::create_dir_all(paths::tool_socket_dir()).map_err(|e| {
+            crate::error::ToolError::ToolExecutionError(format!("Failed to create socket dir: {e}"))
+        })?;
 
         for (name, entry) in &settings.tools.tools {
             if !entry.enable {
@@ -236,8 +274,9 @@ impl ToolHostManager {
         sandbox: &ene_tool_proto::SandboxConfigData,
         tool_config: Option<serde_json::Value>,
     ) -> Result<Arc<dyn ToolRegistry>, crate::error::ToolError> {
-        let binary_path = Self::find_tool_binary(name)
-            .ok_or_else(|| crate::error::ToolError::ToolExecutionError(format!("Tool binary '{}' not found", name)))?;
+        let binary_path = Self::find_tool_binary(name).ok_or_else(|| {
+            crate::error::ToolError::ToolExecutionError(format!("Tool binary '{}' not found", name))
+        })?;
 
         let socket_path = paths::tool_socket_dir().join(format!("ene-tool-{}.sock", name));
 
@@ -248,7 +287,13 @@ impl ToolHostManager {
         let child = std::process::Command::new(&binary_path)
             .env("ENE_TOOL_SOCKET", &socket_path)
             .spawn()
-            .map_err(|e| crate::error::ToolError::ToolExecutionError(format!("Failed to spawn '{}': {}", binary_path.display(), e)))?;
+            .map_err(|e| {
+                crate::error::ToolError::ToolExecutionError(format!(
+                    "Failed to spawn '{}': {}",
+                    binary_path.display(),
+                    e
+                ))
+            })?;
 
         let process = ToolProcess {
             name: name.to_string(),
