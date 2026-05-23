@@ -18,9 +18,9 @@ mod linux;
 #[cfg(target_os = "windows")]
 mod windows;
 
-pub struct WindowDragPlugin;
+pub struct CharacterDragPlugin;
 
-impl Plugin for WindowDragPlugin {
+impl Plugin for CharacterDragPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CharacterDragState>();
         #[cfg(not(target_os = "windows"))]
