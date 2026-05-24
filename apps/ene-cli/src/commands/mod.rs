@@ -2,6 +2,7 @@ mod memory;
 mod session;
 
 use crate::{context::AppContext, style};
+use ene_ai_core::{MemoryConfig, SessionConfig, EmbeddingConfig};
 
 pub async fn execute(input: &str, ctx: &mut AppContext) {
     let parts: Vec<&str> = input.splitn(2, ' ').collect();
@@ -45,7 +46,7 @@ fn handle_prompt(ctx: &AppContext) {
             && !card.data.mes_example.trim().is_empty()
         {
             println!("--- Example Messages ---");
-            let ex = ene_config::expand_cbs_macros(
+            let ex = ene_ai_core::expand_cbs_macros(
                 &card.data.mes_example,
                 card.data.get_character_name(),
                 &ctx.settings.user_name,
@@ -54,11 +55,13 @@ fn handle_prompt(ctx: &AppContext) {
             println!("----------------------------------------------------");
         }
 
-        if ctx.settings.memory.enabled {
+        let mem_config = ctx.settings.get_section::<MemoryConfig>("memory").unwrap_or_default();
+        let session_config = ctx.settings.get_section::<SessionConfig>("session").unwrap_or_default();
+        if mem_config.enabled {
             println!("--- Recalled Summaries ---");
             println!(
                 "Up to {} past conversation summaries will be injected dynamically based on embedding similarity.",
-                ctx.settings.memory.summary_recall_limit
+                session_config.summary_recall_limit
             );
             println!("----------------------------");
         }
@@ -86,7 +89,7 @@ fn handle_prompt(ctx: &AppContext) {
         }
 
         if let Some(phi) = ene_ai_core::prompt_builder::build_expression_phi(card) {
-            let phi_expanded = ene_config::expand_cbs_macros(
+            let phi_expanded = ene_ai_core::expand_cbs_macros(
                 &phi,
                 card.data.get_character_name(),
                 &ctx.settings.user_name,
@@ -98,7 +101,8 @@ fn handle_prompt(ctx: &AppContext) {
             }
         }
 
-        if ctx.settings.tool_calling_enabled {
+        let tool_settings = ctx.settings.get_section::<ene_tool_host::ToolSettings>("tools").unwrap_or_default();
+        if tool_settings.tool_calling_enabled {
             let tools = ctx.registry.list_tools();
             if !tools.is_empty() {
                 println!("--- Tool Definitions ({} tools) ---", tools.len());
@@ -128,7 +132,7 @@ fn handle_card(arg: &str, ctx: &mut AppContext) {
                     "Card loaded successfully. Found {} expressions.",
                     exprs.len()
                 );
-                ctx.settings.character_card_path = arg.to_string();
+                ctx.settings.character = arg.to_string();
                 save_config(ctx);
             }
             Err(e) => eprintln!("Failed to load card: {}", e),
@@ -137,26 +141,32 @@ fn handle_card(arg: &str, ctx: &mut AppContext) {
 }
 
 fn handle_config(ctx: &AppContext) {
+    let mem_config = ctx.settings.get_section::<MemoryConfig>("memory").unwrap_or_default();
+    let embed_config = ctx.settings.get_section::<EmbeddingConfig>("embedding").unwrap_or_default();
+    let session_config = ctx.settings.get_section::<SessionConfig>("session").unwrap_or_default();
+    let provider_config = ctx.settings.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
+
     println!("--- Current Config ---");
-    println!("Provider: {}", ctx.settings.provider.provider_name);
-    println!("Model: {}", ctx.settings.provider.model);
-    println!("Base URL: {}", ctx.settings.provider.base_url);
-    println!("Card Path: {}", ctx.settings.character_card_path);
-    println!("Tool Calling: {}", ctx.settings.tool_calling_enabled);
-    println!("Memory Enabled: {}", ctx.settings.memory.enabled);
-    println!("Embedding Model: {}", ctx.settings.embedding.model);
-    if ctx.settings.memory.enabled {
+    println!("Provider: {}", provider_config.provider_name);
+    println!("Model: {}", provider_config.model);
+    println!("Base URL: {}", provider_config.base_url);
+    println!("Card Path: {}", ctx.settings.character);
+    let tool_settings = ctx.settings.get_section::<ene_tool_host::ToolSettings>("tools").unwrap_or_default();
+    println!("Tool Calling: {}", tool_settings.tool_calling_enabled);
+    println!("Memory Enabled: {}", mem_config.enabled);
+    println!("Embedding Model: {}", embed_config.model);
+    if mem_config.enabled {
         println!(
             "Memory DB: {}",
-            ctx.settings.resolve_memory_db_path().display()
+            mem_config.resolve_memory_db_path().display()
         );
         println!(
             "Summary Recall Limit: {}",
-            ctx.settings.memory.summary_recall_limit
+            session_config.summary_recall_limit
         );
         println!(
             "Similarity Threshold: {}",
-            ctx.settings.memory.similarity_threshold
+            mem_config.similarity_threshold
         );
     }
     println!("----------------------");
@@ -218,8 +228,7 @@ async fn handle_tooltest(arg: &str, ctx: &mut AppContext) {
 }
 
 fn save_config(ctx: &AppContext) {
-    let mut full = ene_config::load_full_settings();
-    full.ai = ctx.settings.clone();
+    let full = ctx.settings.clone();
 
     if let Err(e) = ene_config::save_full_settings(&full) {
         eprintln!("[Config] Failed to save settings: {}", e);

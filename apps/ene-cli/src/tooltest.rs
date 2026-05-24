@@ -10,7 +10,9 @@ pub async fn run(settings: &EneSettings, session: &ConversationSession, prompt_o
     };
 
     let mut sandbox_settings = settings.clone();
-    sandbox_settings.tool_calling_enabled = true;
+    let mut tool_settings = sandbox_settings.get_section::<ene_tool_host::ToolSettings>("tools").unwrap_or_default();
+    tool_settings.tool_calling_enabled = true;
+    let _ = sandbox_settings.set_section("tools", &tool_settings);
 
     let mut sandbox_session = if session.character_card.is_some() {
         let mut cloned = session.clone();
@@ -21,7 +23,7 @@ pub async fn run(settings: &EneSettings, session: &ConversationSession, prompt_o
         let mut fresh = ConversationSession::new();
         let assets_dir = ene_config::assets_dir();
         let card_path = format!("{}/characters/Alicia/character.json", assets_dir.display());
-        if let Err(_err) = fresh.load_card(&sandbox_settings.character_card_path) {
+        if let Err(_err) = fresh.load_card(&sandbox_settings.character) {
             if let Err(err2) = fresh.load_card(&card_path) {
                 println!("Warning: Failed to load default card: {}", err2);
                 return;

@@ -1,5 +1,5 @@
 use crate::{commands, context::AppContext, stream, style};
-use ene_ai_core::{poll_split_result, run_ai_with_tools, truncate};
+use ene_ai_core::{poll_split_result, run_ai_with_tools, truncate, MemoryConfig, SessionConfig};
 
 pub async fn run(ctx: &mut AppContext) {
     loop {
@@ -26,9 +26,10 @@ pub async fn run(ctx: &mut AppContext) {
         process_ai_response(ctx, &input).await;
     }
 }
-
 async fn check_session_split(ctx: &mut AppContext, input: &str) {
-    if !ctx.settings.memory.enabled || !ctx.settings.memory.auto_session_split {
+    let mem_config = ctx.settings.get_section::<MemoryConfig>("memory").unwrap_or_default();
+    let session_config = ctx.settings.get_section::<SessionConfig>("session").unwrap_or_default();
+    if !mem_config.enabled || !session_config.auto_session_split {
         return;
     }
 
