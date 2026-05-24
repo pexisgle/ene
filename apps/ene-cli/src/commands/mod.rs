@@ -20,9 +20,8 @@ pub async fn execute(input: &str, ctx: &mut AppContext) {
         "/config" => handle_config(ctx),
         "/history" => handle_history(ctx),
         "/help" => handle_help(),
-        "/tools" => handle_tools(ctx),
         "/undo" => handle_undo(ctx).await,
-        "/tooltest" => handle_tooltest(arg, ctx).await,
+        "/tool" => handle_tool(arg, ctx).await,
         "/memory" => memory::execute(arg, ctx).await,
         "/session" => session::execute(arg, ctx).await,
         _ => eprintln!("Unknown command: {}", cmd),
@@ -182,29 +181,23 @@ fn handle_history(ctx: &AppContext) {
 
 fn handle_help() {
     println!("Commands:");
-    println!("  /card <path>     - Load a new character card");
-    println!("  /clear           - Clear conversation history");
-    println!("  /history         - View conversation history");
-    println!("  /config          - View current AI settings");
-    println!("  /tools           - List available tools");
-    println!("  /tooltest [prompt] - Run a one-shot tool test");
-    println!("  /undo            - Undo the most recent agent operation");
+    println!("  /card <path>         - Load a new character card");
+    println!("  /clear               - Clear conversation history");
+    println!("  /history             - View conversation history");
+    println!("  /config              - View current AI settings");
+    println!("  /tool list           - List available tools");
+    println!("  /tool help <name>    - Show tool parameters (JSON Schema)");
+    println!("  /tool call <name> <json> - Call a tool directly");
+    println!("  /undo                - Undo the most recent agent operation");
     println!("  /memory search <query> - Search memories by query and show hit results");
     println!("  /memory list           - List all stored summaries and keyfacts");
-    println!("  /session info    - Show current session info");
-    println!("  /session split   - Manually split session");
-    println!("  /session summaries - Show past conversation summaries");
+    println!("  /session info        - Show current session info");
+    println!("  /session split       - Manually split session");
+    println!("  /session summaries   - Show past conversation summaries");
     println!(
-        "  /prompt          - View the complete prompt sent to the AI (system, tools, memory, etc.)"
+        "  /prompt             - View the complete prompt sent to the AI (system, tools, memory, etc.)"
     );
-    println!("  /quit            - Exit the CLI");
-}
-
-fn handle_tools(ctx: &AppContext) {
-    println!("{}", style::header("Available Tools:"));
-    for tool in ctx.registry.list_tools() {
-        println!("- {}: {}", tool.name, tool.description);
-    }
+    println!("  /quit                - Exit the CLI");
 }
 
 async fn handle_undo(ctx: &mut AppContext) {
@@ -214,17 +207,40 @@ async fn handle_undo(ctx: &mut AppContext) {
     }
 }
 
-async fn handle_tooltest(arg: &str, ctx: &mut AppContext) {
-    let prompt = if arg.trim().is_empty() {
-        "Use the get_current_time tool and reply with the time only.".to_string()
-    } else {
-        arg.trim().to_string()
-    };
-    println!(
-        "{}",
-        style::header(format!("[ToolTest] Running: {}", prompt))
-    );
-    crate::tooltest::run(&ctx.settings, &ctx.session, &prompt).await;
+async fn handle_tool(arg: &str, ctx: &mut AppContext) {
+    let subparts: Vec<&str> = arg.splitn(3, ' ').collect();
+    match subparts.first().copied() {
+        Some("list") => {
+            println!("{}", style::header("Available Tools:"));
+            for tool in ctx.registry.list_tools() {
+                println!("- {}: {}", tool.name, tool.description);
+            }
+        }
+        Some("help") if subparts.len() >= 2 => {
+            let name = subparts[1];
+            let tools = ctx.registry.list_tools();
+            if let Some(tool) = tools.iter().find(|t| t.name == name) {
+                println!("{}", style::header(format!("Tool: {}", tool.name)));
+                println!("Description: {}", tool.description);
+                println!("Parameters:");
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&tool.parameters).unwrap_or_default()
+                );
+            } else {
+                eprintln!("{}", style::error(format!("Tool '{}' not found", name)));
+            }
+        }
+        Some("call") if subparts.len() >= 3 => {
+            let name = subparts[1];
+            let arguments = subparts[2];
+            match ctx.registry.call_tool(name, arguments).await {
+                Ok(result) => println!("{}", style::success(result)),
+                Err(e) => eprintln!("{}", style::error(e.to_string())),
+            }
+        }
+        _ => println!("Usage: /tool list | /tool help <name> | /tool call <name> <json>"),
+    }
 }
 
 fn save_config(ctx: &AppContext) {
