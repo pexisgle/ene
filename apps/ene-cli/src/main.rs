@@ -5,8 +5,6 @@ mod context;
 mod repl;
 mod stream;
 mod style;
-mod tooltest;
-
 use clap::Parser;
 use cli::Args;
 
@@ -53,13 +51,9 @@ async fn main() {
 
     let runtime = config::init().await;
 
-    if let Some(prompt) = args.tooltest {
-        tooltest::run(&runtime.settings, &runtime.session, &prompt).await;
-    } else {
-        println!("ene Interactive CLI");
-        println!("Type '/help' for a list of commands.");
+    println!("ene Interactive CLI");
+    println!("Type '/help' for a list of commands.");
 
-        let mut ctx = context::AppContext { runtime };
-        repl::run(&mut ctx).await;
-    }
+    let mut ctx = context::AppContext { runtime };
+    repl::run(&mut ctx).await;
 }
