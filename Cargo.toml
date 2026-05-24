@@ -38,6 +38,7 @@ async-openai = { version = "0.40.2", features = [
 figment = { version = "0.10", features = ["json", "env"] }
 schemars = { version = "0.8", features = ["preserve_order"] }
 ctor = "0.2"
+keyring = "3.2.1"
 
 # --- 内部ライブラリ ---
 ene-config = { path = "crates/ene-config" }

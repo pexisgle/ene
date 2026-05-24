@@ -3674,6 +3674,7 @@ dependencies = [
  "ene-tool-host",
  "ene-tool-proto",
  "indexmap 2.14.0",
+ "keyring",
  "rand 0.10.1",
  "regex",
  "serde",
@@ -3696,6 +3697,7 @@ dependencies = [
  "ene-memory",
  "ene-tool-host",
  "futures-core",
+ "keyring",
  "serde_json",
  "tokio",
  "tokio-stream",
@@ -3729,6 +3731,7 @@ dependencies = [
  "ene-ai-core",
  "ene-config",
  "gtk",
+ "keyring",
  "log",
  "png",
  "raw-window-handle",
@@ -5800,6 +5803,16 @@ dependencies = [
  "bitflags 2.11.1",
  "serde",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "keyring"
+version = "3.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c"
+dependencies = [
+ "log",
+ "zeroize",
 ]
 
 [[package]]
