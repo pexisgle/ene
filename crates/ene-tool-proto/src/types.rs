@@ -143,4 +143,5 @@ mod tests {
         let deser: ToolCallResult = serde_json::from_str(&json).unwrap();
         assert_eq!(result, deser);
     }
+
 }

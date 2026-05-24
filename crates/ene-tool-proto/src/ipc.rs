@@ -13,6 +13,7 @@ pub enum IpcRequest {
         tool_config: Option<serde_json::Value>,
     },
     ListTools,
+    GetConfigSchema,
     CallTool {
         name: String,
         arguments: String,
@@ -37,6 +38,7 @@ pub enum IpcRequest {
 pub enum IpcResponse {
     Ack,
     Tools { tools: Vec<ToolDefinition> },
+    ConfigSchema { schema: Option<serde_json::Value> },
     CallResult { result: Result<String, ToolError> },
     Pong,
     Error { message: String },
