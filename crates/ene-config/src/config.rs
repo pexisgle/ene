@@ -164,6 +164,12 @@ pub fn load_full_settings_from(assets_dir: &Path, config_path: &Path) -> EneSett
         let _ = std::fs::write(&schema_path, schema_json);
     }
 
+    // キャラクター固有設定のスキーマ自動書き出し生成
+    let char_schema_path = crate::paths::character_schema_file_path();
+    if let Ok(char_schema_json) = crate::character_settings::generate_character_schema_json() {
+        let _ = std::fs::write(&char_schema_path, char_schema_json);
+    }
+
     if settings.character.trim().is_empty() {
         settings.character = format!("{}/characters/Alicia/character.json", assets_dir.display());
     } else if !settings.character.contains('/') && !settings.character.contains('\\') {

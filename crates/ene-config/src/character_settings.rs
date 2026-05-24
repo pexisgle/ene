@@ -9,3 +9,11 @@ crate::define_config!(
         pub expressions: Option<serde_json::Value> = None,
     }
 );
+
+/// CharacterPerSettings の JSON Schema の JSON 表現を生成します
+pub fn generate_character_schema_json() -> Result<String, serde_json::Error> {
+    let schema_gen = schemars::r#gen::SchemaSettings::draft07().into_generator();
+    let root_schema = schema_gen.into_root_schema_for::<CharacterPerSettings>();
+    serde_json::to_string_pretty(&root_schema)
+}
+
