@@ -1,4 +1,5 @@
 {
+  "$schema": "../../character_settings.schema.json",
   "character_position": [-1.261557, 0.21307433, 0.0],
   "selected_motion_path": "motions/VRMA_01.vrma",
   "model_scale": 1.0,
