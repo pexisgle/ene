@@ -64,13 +64,26 @@ where
                         action, target, description
                     ))
                 );
-                println!(
-                    "{}",
-                    style::warning(format!(
-                        "To approve, use: approve_permission {}",
-                        request_id
-                    ))
-                );
+
+                let choices = vec!["1回のみ許可 (Allow Once)", "このセッションで常に許可 (Allow Session)", "拒否 (Deny)"];
+                let selection = dialoguer::Select::new()
+                    .with_prompt("操作の権限を選択してください")
+                    .items(&choices)
+                    .default(0)
+                    .interact()
+                    .unwrap_or(2);
+
+                let decision = match selection {
+                    0 => ene_ai_core::stream::PermissionDecision::AllowOnce,
+                    1 => ene_ai_core::stream::PermissionDecision::AllowSession,
+                    _ => ene_ai_core::stream::PermissionDecision::Deny,
+                };
+
+                if let Err(e) = ene_ai_core::stream::submit_permission_decision(&request_id, decision) {
+                    eprintln!("\n[Error] Failed to submit permission decision: {}", e);
+                } else {
+                    println!("\n{}", style::success("承認の入力を送信しました。処理を再開します..."));
+                }
             }
             AiStreamEvent::TaskProgress {
                 task_id,
