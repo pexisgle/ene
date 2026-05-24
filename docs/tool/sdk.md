@@ -121,7 +121,7 @@ cp target/release/my-cool-tool ~/.local/share/dev.pexisgle.Ene/tools/
 ## アーキテクチャ概要
 
 ```
-LLM ◄──→ ene-ai-core ◄── IPC (UDS) ──→ あなたのツールバイナリ
+LLM ◄──→ ene-core ◄── IPC (UDS) ──→ あなたのツールバイナリ
 ```
 
 各ツールバイナリは独立したプロセスとして動作し、Unix Domain Socket 経由で JSON をやり取りします。

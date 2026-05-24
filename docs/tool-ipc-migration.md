@@ -9,7 +9,7 @@ crates/
 ├── ene-tool-proto/      # IPC プロトコル / ToolProvider trait / server helper
 ├── ene-tool-host/       # ToolHostManager / IpcToolRegistry / MCP
 ├── ene-tools/*          # 各ツールバイナリ（fs/web/app/browser/utility）
-├── ene-ai-core/         # ストリーム・プロンプト・セッション/記憶
+├── ene-core/            # ストリーム・プロンプト・セッション/記憶
 apps/
 ├── ene-desktop/
 └── ene-cli/
