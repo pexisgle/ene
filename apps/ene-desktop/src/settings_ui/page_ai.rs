@@ -82,6 +82,23 @@ pub fn render_ai_page(
         });
 
         ui.horizontal(|ui| {
+            ui.label("API Key Source");
+            let mut provider_config = settings.ai.ai.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
+            let mut current_source = provider_config.api_key_source.clone();
+            egui::ComboBox::from_id_salt("api_key_source")
+                .selected_text(&current_source)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut current_source, "inline".to_string(), "Inline (settings.json 平文)");
+                    ui.selectable_value(&mut current_source, "env".to_string(), "Environment (環境変数)");
+                    ui.selectable_value(&mut current_source, "keyring".to_string(), "Keyring (OS セキュアストア)");
+                });
+            if current_source != provider_config.api_key_source {
+                provider_config.api_key_source = current_source;
+                let _ = settings.ai.ai.set_section("provider", &provider_config);
+            }
+        });
+
+        ui.horizontal(|ui| {
             ui.label("API Key");
             let response = ui.add(
                 egui::TextEdit::singleline(&mut input_state.ai_api_key)
