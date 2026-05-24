@@ -6,14 +6,34 @@ use ene_session::{
 use ene_tool_host::{McpToolRegistry, ToolHostManager, ToolRegistry};
 use std::sync::Arc;
 
+/// Ene Core runtime state.
+///
+/// This struct acts as the primary runtime container for an active Ene session,
+/// including its active user configuration, conversation history, the underlying tool registries,
+/// and any pending session splitting tasks.
 pub struct AiRuntime {
+    /// The active workspace configurations.
     pub settings: EneSettings,
+    /// The session holding the conversation history, character details, and memory connection.
     pub session: ConversationSession,
+    /// The registry containing active tools (IPC tool host processes, MCP servers, etc.).
     pub registry: Arc<dyn ToolRegistry>,
+    /// Any active background task evaluating session boundaries for auto-splitting.
     pub pending_split: Option<PendingSplitTask>,
 }
 
 impl AiRuntime {
+    /// Initializes a new Ene Core runtime with the provided workspace settings.
+    ///
+    /// This will automatically boot up:
+    /// - The requested embedding provider (local Candle or remote OpenAI-compatible API).
+    /// - The vector database memory store (if enabled in settings).
+    /// - The default character card defined in the settings.
+    /// - The tool manager, starting external IPC tool providers and connecting stdio/HTTP MCP servers.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AiCoreError` if embedding initialization, database connection, or tool manager start fails.
     pub async fn init(settings: EneSettings) -> Result<Self, AiCoreError> {
         let mut session = ConversationSession::new();
 
@@ -34,7 +54,7 @@ impl AiRuntime {
 
         // 3. Load default character card
         if let Err(e) = session.load_card(&settings.character) {
-            eprintln!("Warning: Failed to load default card: {}", e);
+            tracing::warn!("Failed to load default character card: {}", e);
         }
 
         // 4. Build tool registry
@@ -48,18 +68,21 @@ impl AiRuntime {
         })
     }
 
+    /// Evaluates if the current conversation session has reached a semantic boundary.
+    /// If so, spawns a background tokio thread to execute an auto session-split,
+    /// generating a compiled memory summary and key facts.
     pub fn check_and_perform_split(&mut self, user_input: &str, user_name: &str) {
         let session_config = match self.settings.get_section::<ene_session::SessionConfig>("session") {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("Warning: Failed to load session config: {}", e);
+                tracing::warn!("Failed to load session config for split checking: {}", e);
                 return;
             }
         };
         let mem_config = match self.settings.get_section::<ene_memory::MemoryConfig>("memory") {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("Warning: Failed to load memory config: {}", e);
+                tracing::warn!("Failed to load memory config for split checking: {}", e);
                 return;
             }
         };
@@ -98,6 +121,13 @@ impl AiRuntime {
         }
     }
 
+    /// Computes and caches the embedding vector for a given user query string.
+    /// This is typically called prior to storing or searching within the semantic memory store.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AiCoreError` if the underlying embedding provider is not initialized
+    /// or if the connection/computation fails.
     pub async fn embed_input(&mut self, input: &str) -> Result<Vec<f32>, AiCoreError> {
         let embedder = self
             .session
@@ -119,13 +149,21 @@ impl AiRuntime {
     }
 }
 
+/// Builds the active composite tool registry based on workspace config settings.
+///
+/// This starts up local tool subprocesses managed by `ToolHostManager` and initiates
+/// connections to external MCP servers (via stdio transports).
+///
+/// # Errors
+///
+/// Returns `AiCoreError` if initialization fails completely.
 pub async fn build_tool_registry(
     settings: &EneSettings,
 ) -> Result<Arc<dyn ToolRegistry>, AiCoreError> {
     let mut manager = match ToolHostManager::start(settings).await {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("[ToolHostManager] Warning: {}", e);
+            tracing::warn!("[ToolHostManager] Failed to start tool host, falling back to empty tools: {}", e);
             let mut fallback_settings = settings.clone();
             let fallback_tools = ene_tool_host::ToolSettings {
                 tools: std::collections::HashMap::new(),
@@ -154,15 +192,15 @@ pub async fn build_tool_registry(
                 ene_tool_host::McpTransport::Stdio { command, args } => {
                     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
                     if let Err(err) = mcp.connect_stdio(&server.name, command, &args_ref).await {
-                        eprintln!(
-                            "Warning: MCP server '{}' failed to connect: {}",
+                        tracing::warn!(
+                            "MCP server '{}' failed to connect: {}",
                             server.name, err
                         );
                     }
                 }
                 ene_tool_host::McpTransport::Http { url } => {
-                    eprintln!(
-                        "Warning: MCP HTTP transport not supported yet for '{}': {}",
+                    tracing::warn!(
+                        "MCP HTTP transport not supported yet for '{}' (URL: {})",
                         server.name, url
                     );
                 }
