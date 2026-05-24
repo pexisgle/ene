@@ -25,3 +25,4 @@ ene-embedding = { workspace = true }
 ene-memory = { workspace = true }
 ene-session = { workspace = true }
 ene-tool-host = { workspace = true }
+ene-tool-proto = { workspace = true }

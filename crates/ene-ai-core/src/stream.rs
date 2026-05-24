@@ -102,7 +102,10 @@ pub async fn fetch_memory_context(
     session: &ConversationSession,
     settings: &EneSettings,
 ) -> (Vec<RecalledSummary>, Vec<ene_memory::KeyFact>) {
-    let memory_enabled = settings.memory.enabled;
+    let mem_config = settings.get_section::<ene_memory::MemoryConfig>("memory").unwrap_or_default();
+    let session_config = settings.get_section::<ene_session::SessionConfig>("session").unwrap_or_default();
+
+    let memory_enabled = mem_config.enabled;
     let mem_store = if memory_enabled {
         session.memory.memory_store.clone()
     } else {
@@ -110,8 +113,8 @@ pub async fn fetch_memory_context(
     };
     let card_name = session.card_name().to_string();
     let pending_embedding = session.memory.pending_embedding.clone();
-    let summary_recall_limit = settings.memory.summary_recall_limit;
-    let similarity_threshold = settings.memory.similarity_threshold;
+    let summary_recall_limit = session_config.summary_recall_limit;
+    let similarity_threshold = mem_config.similarity_threshold;
 
     let recalled_summaries = search_summaries(
         memory_enabled,
@@ -123,7 +126,7 @@ pub async fn fetch_memory_context(
     )
     .await;
 
-    let key_facts = if settings.memory.enabled {
+    let key_facts = if mem_config.enabled {
         if let Some(store) = &session.memory.memory_store {
             store
                 .get_all_keyfacts(session.card_name())
@@ -249,17 +252,20 @@ pub async fn run_ai_with_tools(
     user_input: &str,
     registry: std::sync::Arc<dyn ene_tool_host::ToolRegistry>,
 ) -> Result<impl Stream<Item = AiStreamEvent> + 'static, crate::error::AiCoreError> {
-    let base_url = settings.resolve_base_url()?;
-    let api_key = settings.resolve_api_key();
+    let provider = settings.get_section::<crate::ProviderSettings>("provider").unwrap_or_default();
+    let base_url = provider.resolve_base_url()?;
+    let api_key = provider.resolve_api_key();
 
     let client = build_openai_client(&base_url, &api_key);
-    let model = settings.provider.model.clone();
+    let model = provider.model;
+
+    let mem_config = settings.get_section::<ene_memory::MemoryConfig>("memory").unwrap_or_default();
 
     // 1. Fetch memory context (summaries and keyfacts)
     let (recalled_summaries, key_facts) = fetch_memory_context(session, settings).await;
 
     // 2. Insert user log if memory is enabled
-    if settings.memory.enabled {
+    if mem_config.enabled {
         if let Some(store) = &session.memory.memory_store {
             let store_clone = store.clone();
             let card_name = session.card_name().to_string();
@@ -283,7 +289,7 @@ pub async fn run_ai_with_tools(
         &key_facts,
     )?;
 
-    let memory_enabled = settings.memory.enabled;
+    let memory_enabled = mem_config.enabled;
     let mem_store = if memory_enabled {
         session.memory.memory_store.clone()
     } else {
@@ -292,12 +298,13 @@ pub async fn run_ai_with_tools(
     let card_name = session.card_name().to_string();
     let session_id = session.memory.session_id.clone();
     let user_input = user_input.to_string();
-    let tool_calling_enabled = settings.tool_calling_enabled;
-    let max_rounds = settings.max_tool_call_rounds;
+    let tool_settings = settings.get_section::<ene_tool_host::ToolSettings>("tools").unwrap_or_default();
+    let tool_calling_enabled = tool_settings.tool_calling_enabled;
+    let max_rounds = tool_settings.max_tool_call_rounds;
     let session_id_for_tools = session.memory.session_id.clone();
-    let tool_rag_enabled = settings.memory.tool_rag_enabled;
-    let tool_rag_limit = settings.memory.tool_rag_limit;
-    let tool_rag_always_include = settings.memory.tool_rag_always_include.clone();
+    let tool_rag_enabled = mem_config.tool_rag_enabled;
+    let tool_rag_limit = mem_config.tool_rag_limit;
+    let tool_rag_always_include = mem_config.tool_rag_always_include.clone();
     let embedding_provider = session.memory.embedding_provider.clone();
 
     Ok(stream! {
