@@ -6,15 +6,15 @@ use async_openai::types::chat::{
     ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
     CreateChatCompletionRequestArgs, ResponseFormat, ResponseFormatJsonSchema, Role,
 };
-use serde::{Deserialize, Serialize};
+use ene_config::serde::{Deserialize, Serialize};
 
 use crate::error::MemoryError;
 use crate::store::KeyFact;
-use ene_config::EneSettings;
 use ene_embedding::client::build_openai_client;
 
 /// LLM が返す構造化された会話要約
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(crate = "ene_config::serde")]
 pub struct ConversationSummaryResult {
     /// 自然言語の会話要約
     pub summary: String,
@@ -24,9 +24,10 @@ pub struct ConversationSummaryResult {
     pub key_facts: Vec<KeyFact>,
 }
 
-/// 会話履歴から要約を生成する
 pub async fn summarize_conversation(
-    settings: &EneSettings,
+    model: &str,
+    base_url: &str,
+    api_key: &str,
     history: &[(Role, String)],
     character_name: &str,
     user_name: &str,
@@ -40,9 +41,11 @@ pub async fn summarize_conversation(
         });
     }
 
-    let base_url = settings.resolve_summarization_base_url()?;
-    let api_key = settings.resolve_api_key();
-    let model = settings.resolve_summarization_model();
+    if base_url.trim().is_empty() {
+        return Err(MemoryError::MissingBaseUrl {
+            env_var: String::new(),
+        });
+    }
 
     let client = build_openai_client(&base_url, &api_key);
 

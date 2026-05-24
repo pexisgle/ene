@@ -12,8 +12,8 @@ pub enum SessionError {
     SplitNotNeeded,
     #[error("Task channel closed")]
     ChannelClosed,
-    #[error(transparent)]
-    Config(#[from] ene_config::ConfigError),
+    #[error("Configuration error: {0}")]
+    Config(String),
     #[error(transparent)]
     Embedding(#[from] ene_embedding::error::EmbeddingError),
     #[error(transparent)]

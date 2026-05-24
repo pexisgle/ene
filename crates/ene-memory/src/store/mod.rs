@@ -1,5 +1,6 @@
 use crate::error::MemoryError;
 use chrono::{DateTime, Utc};
+use ene_config::serde;
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
@@ -29,6 +30,7 @@ pub fn init_sqlite_vec(conn: &mut SqliteConnection) -> Result<(), MemoryError> {
 
 /// キーバリュー型の事実
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(crate = "ene_config::serde")]
 pub struct KeyFact {
     pub key: String,
     pub value: String,
@@ -36,6 +38,7 @@ pub struct KeyFact {
 
 /// 会話要約エントリ
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(crate = "ene_config::serde")]
 pub struct ConversationSummary {
     pub id: i64,
     pub session_id: String,

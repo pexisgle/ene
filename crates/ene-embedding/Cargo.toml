@@ -11,7 +11,10 @@ async-openai = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
-hf-hub = { version = "0.5.0", default-features = false, features = ["rustls-tls", "tokio"] }
+hf-hub = { version = "0.5.0", default-features = false, features = [
+    "rustls-tls",
+    "tokio",
+] }
 candle-core = "0.10"
 candle-nn = "0.10"
 tokenizers = "0.23"

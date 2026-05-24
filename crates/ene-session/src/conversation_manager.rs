@@ -1,7 +1,6 @@
 use crate::error::SessionError;
 use async_openai::types::chat::Role;
 use chrono::{DateTime, Utc};
-use ene_config::EneSettings;
 use ene_embedding::{EmbeddingProvider, cosine_similarity};
 use ene_memory as summarizer;
 use ene_memory::{KeyFact, MemoryStore};
@@ -55,7 +54,10 @@ pub struct SplitTaskInput {
     pub last_message_time: Option<DateTime<Utc>>,
     pub current_turn_count: usize,
     pub user_input: String,
-    pub settings: EneSettings,
+    pub session_config: crate::SessionConfig,
+    pub summarization_model: String,
+    pub summarization_base_url: String,
+    pub api_key: String,
     pub history: Vec<(Role, String)>,
     pub session_id: String,
     pub card_name: String,
@@ -68,31 +70,31 @@ pub async fn check_boundary(
     last_input_embedding: Option<&Vec<f32>>,
     last_message_time: Option<DateTime<Utc>>,
     current_turn_count: usize,
-    settings: &EneSettings,
+    settings: &crate::SessionConfig,
     user_input: &str,
     embedder: &dyn EmbeddingProvider,
 ) -> SessionBoundary {
-    if !settings.memory.auto_session_split {
+    if !settings.auto_session_split {
         return SessionBoundary::Continue;
     }
 
     if let Some(last_time) = last_message_time {
         let elapsed = Utc::now() - last_time;
         let elapsed_minutes = elapsed.num_minutes().max(0) as u64;
-        if elapsed_minutes >= settings.memory.session_timeout_minutes
-            && current_turn_count >= settings.memory.min_turns_before_split
+        if elapsed_minutes >= settings.session_timeout_minutes
+            && current_turn_count >= settings.min_turns_before_split
         {
             return SessionBoundary::Split(SplitReason::Timeout { elapsed_minutes });
         }
     }
 
     if let Some(prev_embedding) = last_input_embedding
-        && current_turn_count >= settings.memory.min_turns_before_split
+        && current_turn_count >= settings.min_turns_before_split
     {
         match embedder.embed_query(user_input).await {
             Ok(current_embedding) => {
                 let similarity = cosine_similarity(prev_embedding, &current_embedding);
-                if similarity < settings.memory.topic_change_threshold {
+                if similarity < settings.topic_change_threshold {
                     return SessionBoundary::Split(SplitReason::TopicChange { similarity });
                 }
             }
@@ -173,7 +175,9 @@ pub async fn execute_split(
     user_name: &str,
     store: &Arc<MemoryStore>,
     embedder: &Arc<dyn EmbeddingProvider>,
-    settings: &EneSettings,
+    model: &str,
+    base_url: &str,
+    api_key: &str,
     reason: SplitReason,
 ) -> Result<SplitResult, SessionError> {
     let ended_at = Utc::now();
@@ -192,7 +196,9 @@ pub async fn execute_split(
     let existing_facts = store.get_all_keyfacts(card_name).unwrap_or_default();
 
     let summary_result = summarizer::summarize_conversation(
-        settings,
+        model,
+        base_url,
+        api_key,
         history,
         card_name,
         user_name,
@@ -234,7 +240,10 @@ pub fn spawn_split_task(pending_split: &mut Option<PendingSplitTask>, input: Spl
             last_message_time,
             current_turn_count,
             user_input,
-            settings,
+            session_config,
+            summarization_model,
+            summarization_base_url,
+            api_key,
             history,
             session_id,
             card_name,
@@ -247,7 +256,7 @@ pub fn spawn_split_task(pending_split: &mut Option<PendingSplitTask>, input: Spl
             last_input_embedding.as_ref(),
             last_message_time,
             current_turn_count,
-            &settings,
+            &session_config,
             &user_input,
             embedder.as_ref(),
         )
@@ -262,7 +271,9 @@ pub fn spawn_split_task(pending_split: &mut Option<PendingSplitTask>, input: Spl
                     &user_name,
                     &store,
                     &embedder,
-                    &settings,
+                    &summarization_model,
+                    &summarization_base_url,
+                    &api_key,
                     reason,
                 )
                 .await

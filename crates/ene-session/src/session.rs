@@ -2,7 +2,7 @@ use crate::conversation_manager::generate_session_id;
 use crate::special_token::split_text_and_special_tokens;
 use async_openai::types::chat::Role;
 use chrono::{DateTime, Utc};
-use ene_config::character_card::{CharacterCardV3, ResolvedExpression, resolve_expressions};
+use ene_config::{CharacterCardV3, ResolvedExpression, resolve_expressions};
 use ene_embedding::EmbeddingProvider;
 use ene_memory::MemoryStore;
 use std::sync::Arc;
@@ -127,32 +127,27 @@ impl ConversationSession {
             .map_err(crate::error::SessionError::JsonError)?;
 
         // Merge expressions from character_settings.json
-        if let Some(settings_path) = std::path::Path::new(path)
-            .parent()
-            .map(|p| p.join("character_settings.json"))
-            .filter(|p| p.exists())
-        {
-            if let Ok(settings_content) = std::fs::read_to_string(&settings_path) {
-                if let Ok(settings_value) =
-                    serde_json::from_str::<serde_json::Value>(&settings_content)
-                {
-                    if let Some(expr) = settings_value.get("expressions") {
-                        card.data
-                            .extensions
-                            .insert("expressions".to_string(), expr.clone());
-                    }
-                    if let Some(dm) = settings_value
-                        .get("default_motion")
-                        .and_then(|v| v.as_str())
-                    {
-                        let mut ene = serde_json::Map::new();
-                        ene.insert(
-                            "default_motion".to_string(),
-                            serde_json::Value::String(dm.to_string()),
-                        );
-                        card.data
-                            .extensions
-                            .insert("ene".to_string(), serde_json::Value::Object(ene));
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            let folder = parent.file_name().unwrap_or_default().to_string_lossy();
+            let settings_path = ene_config::character_settings_path(&folder);
+            if settings_path.exists() {
+                if let Ok(settings_content) = std::fs::read_to_string(&settings_path) {
+                    if let Ok(per) = serde_json::from_str::<ene_config::CharacterPerSettings>(&settings_content) {
+                        if let Some(expr) = per.expressions {
+                            card.data
+                                .extensions
+                                .insert("expressions".to_string(), expr);
+                        }
+                        if !per.default_motion.is_empty() {
+                            let mut ene = serde_json::Map::new();
+                            ene.insert(
+                                "default_motion".to_string(),
+                                serde_json::Value::String(per.default_motion),
+                            );
+                            card.data
+                                .extensions
+                                .insert("ene".to_string(), serde_json::Value::Object(ene));
+                        }
                     }
                 }
             }

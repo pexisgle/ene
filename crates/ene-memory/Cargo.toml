@@ -9,7 +9,6 @@ crate-type = ["lib"]
 [dependencies]
 async-openai = { workspace = true }
 tokio = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 diesel = { version = "2.3", features = ["sqlite", "chrono", "r2d2"] }
@@ -19,5 +18,5 @@ sqlite-vec = "0.1"
 uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-ene-config = { workspace = true }
 ene-embedding = { workspace = true }
+ene-config = { workspace = true }
