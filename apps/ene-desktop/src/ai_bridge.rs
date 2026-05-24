@@ -9,7 +9,7 @@ use crate::character::ResolvedExpressionMap;
 use ene_ai_core::{
     AiRuntime, poll_split_result,
     stream::{AiStreamEvent as CoreAiStreamEvent, run_ai_with_tools},
-    truncate,
+    truncate, MemoryConfig, SessionConfig,
 };
 
 pub struct AiPlugin;
@@ -215,10 +215,10 @@ fn start_next_ai_request(
     let runtime = runtime_state.runtime.as_mut().unwrap();
 
     // Character card loading if card path changed
-    if runtime.session.current_card_path != settings.ai.ai.character_card_path {
+    if runtime.session.current_card_path != settings.ai.ai.character {
         match runtime
             .session
-            .load_card(&settings.ai.ai.character_card_path)
+            .load_card(&settings.ai.ai.character)
         {
             Ok(resolved) => {
                 expression_map.map = resolved.into_iter().map(|e| (e.name, e.vrm)).collect();
@@ -277,7 +277,9 @@ fn poll_ai_worker(
     mut stream_writer: MessageWriter<AiStreamEvent>,
     settings: Res<CharacterSettings>,
 ) {
-    if settings.ai.ai.memory.enabled && settings.ai.ai.memory.auto_session_split {
+    let mem_config = settings.ai.ai.get_section::<MemoryConfig>("memory").unwrap_or_default();
+    let session_config = settings.ai.ai.get_section::<SessionConfig>("session").unwrap_or_default();
+    if mem_config.enabled && session_config.auto_session_split {
         if let Some(runtime) = runtime_state.runtime.as_mut() {
             if let Some(result) = poll_split_result(&mut runtime.pending_split) {
                 match result {

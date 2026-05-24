@@ -1,5 +1,6 @@
 use super::{SettingsButtonAction, SettingsInputState, SettingsValueKind, widgets::apply_action};
 use crate::ai_bridge::AiRequestEvent;
+use ene_ai_core::{EmbeddingConfig, MemoryConfig};
 use crate::app_config::CharacterSettings;
 use crate::character::CharacterAnimationControl;
 use bevy::prelude::*;
@@ -12,6 +13,9 @@ pub fn render_ai_page(
     ai_request_writer: &mut MessageWriter<AiRequestEvent>,
     input_state: &mut SettingsInputState,
 ) {
+    let mut embed_config = settings.ai.ai.get_section::<EmbeddingConfig>("embedding").unwrap_or_default();
+    let mut mem_config = settings.ai.ai.get_section::<MemoryConfig>("memory").unwrap_or_default();
+
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
             ui.label("Character Card");
@@ -139,30 +143,28 @@ pub fn render_ai_page(
                 });
             if current_provider != input_state.ai_embedding_provider {
                 input_state.ai_embedding_provider = current_provider.clone();
-                settings.ai.ai.embedding.provider_type = match current_provider.as_str() {
-                    "local" => ene_config::EmbeddingProviderType::Local,
-                    _ => ene_config::EmbeddingProviderType::Api,
+                embed_config.provider_type = match current_provider.as_str() {
+                    "local" => ene_ai_core::EmbeddingProviderType::Local,
+                    _ => ene_ai_core::EmbeddingProviderType::Api,
                 };
                 match current_provider.as_str() {
                     "local" => {
-                        settings.ai.ai.embedding.model = "jina-embeddings-v5-text-nano".to_string();
-                        settings.ai.ai.embedding.dimensions = None;
-                        input_state.ai_embedding_model = settings.ai.ai.embedding.model.clone();
+                        embed_config.model = "jina-embeddings-v5-text-nano".to_string();
+                        embed_config.dimensions = None;
+                        input_state.ai_embedding_model = embed_config.model.clone();
                         input_state.ai_embedding_dimensions = "auto".to_string();
                     }
                     _ => {
-                        settings.ai.ai.embedding.model = "text-embedding-3-small".to_string();
-                        settings.ai.ai.embedding.dimensions = Some(1536);
-                        input_state.ai_embedding_model = settings.ai.ai.embedding.model.clone();
-                        input_state.ai_embedding_dimensions = settings
-                            .ai
-                            .ai
-                            .embedding
+                        embed_config.model = "text-embedding-3-small".to_string();
+                        embed_config.dimensions = Some(1536);
+                        input_state.ai_embedding_model = embed_config.model.clone();
+                        input_state.ai_embedding_dimensions = embed_config
                             .dimensions
                             .map(|d| d.to_string())
                             .unwrap_or_default();
                     }
                 }
+                settings.ai.ai.extra.insert("embedding".to_string(), serde_json::to_value(&embed_config).unwrap());
             }
         });
 
@@ -173,7 +175,8 @@ pub fn render_ai_page(
                     .desired_width(f32::INFINITY),
             );
             if response.changed() {
-                settings.ai.ai.embedding.model = input_state.ai_embedding_model.clone();
+                embed_config.model = input_state.ai_embedding_model.clone();
+                settings.ai.ai.extra.insert("embedding".to_string(), serde_json::to_value(&embed_config).unwrap());
             }
         });
 
@@ -184,7 +187,8 @@ pub fn render_ai_page(
                     .desired_width(f32::INFINITY),
             );
             if response.changed() {
-                settings.ai.ai.embedding.base_url = input_state.ai_embedding_base_url.clone();
+                embed_config.base_url = input_state.ai_embedding_base_url.clone();
+                settings.ai.ai.extra.insert("embedding".to_string(), serde_json::to_value(&embed_config).unwrap());
             }
         });
 
@@ -199,7 +203,8 @@ pub fn render_ai_page(
                 );
                 if response.changed() {
                     if let Ok(dims) = input_state.ai_embedding_dimensions.parse::<usize>() {
-                        settings.ai.ai.embedding.dimensions = Some(dims);
+                        embed_config.dimensions = Some(dims);
+                        settings.ai.ai.extra.insert("embedding".to_string(), serde_json::to_value(&embed_config).unwrap());
                     }
                 }
             }
@@ -213,7 +218,8 @@ pub fn render_ai_page(
             ui.checkbox(&mut checked, "Enable Long-term Memory");
             if checked != input_state.ai_memory_enabled {
                 input_state.ai_memory_enabled = checked;
-                settings.ai.ai.memory.enabled = checked;
+                mem_config.enabled = checked;
+                settings.ai.ai.extra.insert("memory".to_string(), serde_json::to_value(&mem_config).unwrap());
             }
         });
 
