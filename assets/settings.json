@@ -25,5 +25,25 @@
   "memory": {
     "enabled": true,
     "topic_change_threshold": 0.4
+  },
+  "tools": {
+    "tools": {
+      "app": {
+        "enable": true
+      },
+      "browser": {
+        "enable": true
+      },
+      "fs": {
+        "enable": true
+      },
+      "utility": {
+        "enable": true
+      },
+      "web": {
+        "enable": true,
+        "tavily_api_key": ""
+      }
+    }
   }
 }

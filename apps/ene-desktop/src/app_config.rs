@@ -38,7 +38,7 @@ ene_config::define_config!(
     }
 );
 
-#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, ene_config::schemars::JsonSchema)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct DesktopSection {
     pub graphics: GraphicsSection,
@@ -208,7 +208,7 @@ impl Default for CharacterState {
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PendingPermission {
     pub request_id: String,
     pub action: String,
