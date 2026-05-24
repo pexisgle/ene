@@ -15,12 +15,6 @@ pub struct AiRuntime {
 
 impl AiRuntime {
     pub async fn init(settings: EneSettings) -> Result<Self, AiCoreError> {
-        // 各機能クレートの設定スキーマを動的に登録
-        ene_config::register_schema::<ene_embedding::EmbeddingConfig>("embedding");
-        ene_config::register_schema::<ene_memory::MemoryConfig>("memory");
-        ene_config::register_schema::<ene_session::SessionConfig>("session");
-        ene_config::register_schema::<ene_tool_proto::SandboxConfigData>("sandbox");
-
         let mut session = ConversationSession::new();
 
         // 1. Initialize embedding
