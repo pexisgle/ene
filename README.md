@@ -5,14 +5,14 @@ Ene は、ローカルでキャラクター（VRM / VRMA）を扱い、AIを使�
 ## 概要
 - **ワークスペース構成**: このリポジトリは複数クレートを含む Cargo ワークスペースです。
 - **主なクレート**:
-- `ene-ai-core`: AI ロジック、プロンプト構築、ストリーミングなどのコア機能。
+- `ene-core`: LLM対話、セッション管理、長期記憶、ツール実行基盤を統合したコアライブラリ。
 - `ene-desktop`: デスクトップ GUI アプリ（Bevy ベース）。
 - `ene-cli`: CLI クライアント（ヘッドレスやスクリプト用途）。
 
 ## リポジトリ構造（抜粋）
-- `crates/ene-ai-core/` — AI コアライブラリ
+- `crates/ene-core/` — コアライブラリ
 - `apps/ene-desktop/` — GUI アプリケーション
-- `crates/ene-cli/` — コマンドラインインターフェース
+- `apps/ene-cli/` — コマンドラインインターフェース
 - `assets/` — サンプルキャラクターやアセット（`characters/`、`vrm/`、`vrma/` 等）
 
 ## 前提条件
@@ -54,7 +54,7 @@ cargo test --workspace
 ```
 
 ## 開発メモ
-- `crates/ene-ai-core` は `async-openai` 等を使い非同期でモデルと通信します。
+- `crates/ene-core` は `async-openai` 等を使い非同期でモデルと通信します。
 - GUI は `bevy` と `bevy_vrm1`、`bevy_egui` 等を利用しています。
 
 ## 資産（assets）
@@ -92,7 +92,7 @@ OpenCode のアーキテクチャを参考に、AI キャラクターがユー�
 
 ### アーキテクチャの拡張方針
 
-これらの強力な機能を実現するため、コアライブラリ (`ene-ai-core`) に以下の基盤を追加します。
+これらの強力な機能を実現するため、コアライブラリ (`ene-core`) に以下の基盤を追加します。
 
 - **高度なサンドボックスとパーミッション管理** (`sandbox.rs`)
   - 許可ディレクトリ (`allowed_directories`) と禁止コマンド (`blocked_commands`) の設定

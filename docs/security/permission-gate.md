@@ -44,7 +44,7 @@
 ## 実装ステップ（具体）
 1. `ene-tool-proto::ToolError` に `PermissionRequired` を追加
 2. fs/shell/app/browser の実装で `sandbox.check_permission(...)` を呼び出し、拒否時は `PermissionRequired` を返す
-3. `ene-ai-core::run_ai_with_tools` で `PermissionRequired` を検出し `AiStreamEvent::PermissionRequired` を送出
+3. `ene-core::run_ai_with_tools` で `PermissionRequired` を検出し `AiStreamEvent::PermissionRequired` を送出
 4. CLI: `Allow Once/Session/Deny` を対話で選択
 5. GUI: モーダルで承認・拒否・スコープを提示
 6. 承認済みの場合のみ、同一 tool_call を再実行
