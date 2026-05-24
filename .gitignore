@@ -12,3 +12,6 @@ assets/models/
 memory:
 
 .env
+
+# Generated settings schemas
+assets/settings.schema.json
