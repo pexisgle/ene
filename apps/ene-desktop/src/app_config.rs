@@ -208,12 +208,21 @@ impl Default for CharacterState {
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PendingPermission {
+    pub request_id: String,
+    pub action: String,
+    pub target: String,
+    pub description: String,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct UiState {
     pub settings_window_visible: bool,
     pub debug_overlay_visible: bool,
     pub ai_chat_input: String,
     pub ai_latest_response: String,
+    pub pending_permission: Option<PendingPermission>,
 }
 
 #[derive(Clone, Debug, Default)]
