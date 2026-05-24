@@ -5,7 +5,7 @@
 | # | ファイル | 内容 |
 |---|---------|------|
 | 1 | [ai-core-overview.md](ai-core-overview.md) | プロジェクト概要、クレート構成、依存関係 |
-| 2 | [ai-core-config.md](ai-core-config.md) | 設定システム（AiSettings、Memory、Sandbox、Tools、MCP） |
+| 2 | [ai-core-config.md](ai-core-config.md) | 設定システム（EneSettings、各セクション、MCP） |
 | 3 | [ai-core-session.md](ai-core-session.md) | ConversationSession、CharacterCardV3、CBS式展開 |
 | 4 | [ai-core-stream.md](ai-core-stream.md) | run_ai_with_tools、AiStreamEvent、ツールループ |
 | 5 | [ai-core-prompt.md](ai-core-prompt.md) | プロンプト構築、メッセージ順序、表現プロトコル |

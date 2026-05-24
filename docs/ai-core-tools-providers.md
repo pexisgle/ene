@@ -24,8 +24,8 @@ Web 検索・フェッチ。ステートレス。
 
 | ツール | 引数 | 説明 |
 |--------|------|------|
-| `webfetch` | `url`, `format`（text/markdown/html）, `timeout` | URL コンテンツ取得、5MB制限、HTML→Markdown変換 |
-| `websearch` | `query`, `backend`（duckduckgo/tavily/brave）, `limit` | Web 検索、結果タイトル＋スニペット＋URL |
+| `webfetch` | `url`, `format`（text/markdown/html）, `timeout` | URL 取得（5MB制限）。`text`/`markdown` は HTML→Markdown 変換、`html` は生HTML。timeout は秒（最大120） |
+| `websearch` | `query`, `backend`（duckduckgo/tavily/brave）, `limit` | Web 検索。limit はデフォルト5（最大10） |
 
 ## ene-tools-utility（UtilityToolProvider）
 
@@ -50,13 +50,13 @@ OS レベル GUI 自動化（enigo, xcap, xdg-desktop-portal）。ステート�
 | `list_monitors` | なし | モニター一覧 |
 | `type_text` | `text` | キーボード入力 |
 | `press_key` | `key` | 単一キー押下 |
-| `key_combo` | `combo_str`（例: ctrl+shift+s） | キーコンビネーション |
+| `key_combo` | `combo_str`（例: ctrl+shift+s） | キーコンビネーション ※引数キーは `combo_str`（schema では `key_combo` 表記） |
 | `mouse_move` | `x`, `y`, `relative` | マウス移動 |
 | `mouse_click` | `button`, `count` | マウスクリック（ダブルクリック対応） |
 | `mouse_drag` | `x`, `y`, `x2`, `y2`, `button` | マウスドラッグ |
 | `mouse_scroll` | `amount`, `direction` | スクロール |
-| `screenshot` | `scale_percent` | スクリーンショット（base64） |
-| `capture_window` | `window_title`, `scale_percent` | 特定ウィンドウのキャプチャ |
+| `screenshot` | `scale_percent` | スクリーンショット（base64、未指定は 50） |
+| `capture_window` | `window_title`, `scale_percent` | 特定ウィンドウのキャプチャ（未指定は 50） |
 | `clipboard_read` | なし | クリップボード読み取り |
 | `clipboard_write` | `text` | クリップボード書き込み |
 

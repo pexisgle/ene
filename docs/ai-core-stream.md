@@ -22,7 +22,7 @@ pub enum AiStreamEvent {
 
 ```rust
 pub async fn run_ai_with_tools(
-    settings: &AiSettings,
+    settings: &EneSettings,
     session: &ConversationSession,
     user_input: &str,
     registry: Arc<dyn ToolRegistry>,
@@ -65,8 +65,8 @@ pub async fn run_ai_with_tools(
    ```
 
 5. **事後処理**
-   - `finalize_response()` でアシスタントメッセージ確定
-   - `add_assistant_message()` で履歴登録
+   - `AiStreamEvent::Finished` を送出
+   - **履歴確定は呼び出し側で実行**（CLI では `session.finalize_response()`）
 
 ## ツール呼び出しの蓄積と確定
 
@@ -77,7 +77,7 @@ fn accumulate_tool_calls(chunks: &mut Vec<ToolCallChunk>, delta: &[ToolCallChunk
 fn finalize_tool_calls(chunks: Vec<ToolCallChunk>) -> Vec<ToolCalls>
 ```
 
-各チャンクの `tool_call_index` で同一呼び出しを識別し、`function.arguments` を連結する。
+各チャンクの `index` で同一呼び出しを識別し、`function.arguments` を連結する。
 
 ## スクリーンショット結果処理
 

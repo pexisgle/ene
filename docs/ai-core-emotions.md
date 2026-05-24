@@ -20,7 +20,7 @@ run_ai_with_tools → TextDelta(String)
   ↓
 session.process_delta(chunk) で分割
   ├── テキスト → 表示
-  └── <|emo:name|> → SpecialToken(String) イベント
+  └── <|emo:name|> → 感情トークンとして処理
        ↓
 GUI: EmotionQueue → VRM SetExpressions で表情適用
 CLI: "[Emotion: name]" をマゼンタ表示
@@ -47,5 +47,7 @@ CLI: "[Emotion: name]" をマゼンタ表示
 
 | アプリ | 処理 |
 |--------|------|
-| ene-desktop（GUI） | `AiStreamEvent::SpecialToken` → `EmotionQueue` → `process_emotion_queue`（4秒ホールド→フェードアウト） → `SetExpressions` トリガー → VRM blendshape 反映 |
-| ene-cli（CLI） | `TextDelta` 内のトークンを `process_delta()` で解析、`[Emotion: name]` としてマゼンタ表示（SpecialToken イベントはサイレント消費） |
+| ene-desktop（GUI） | `TextDelta` を `process_delta()` で解析 → `EmotionQueue` → `process_emotion_queue`（4秒ホールド→フェードアウト） → `SetExpressions` で反映 |
+| ene-cli（CLI） | `TextDelta` 内のトークンを `process_delta()` で解析、`[Emotion: name]` としてマゼンタ表示 |
+
+※ `AiStreamEvent::SpecialToken` は現在の実装では使用されない。
