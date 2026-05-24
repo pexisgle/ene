@@ -23,7 +23,7 @@ build_messages(
 | 2 | **例メッセージ** | カード `mes_example` | 初回ターンのみ |
 | 3 | **想起された要約** | `format_summaries_for_prompt()` | メモリ有効時 |
 | 4 | **重要事実** | `[Known facts about {user_name}]` | メモリ有効時 |
-| 5 | **会話履歴** | `session.conversation_history` | 常に |
+| 5 | **会話履歴** | `session.history.conversation_history` | 常に |
 | 6 | **表現プロトコル** | `build_expression_phi()` | 常に |
 | 7 | **現在のユーザー入力** | `user_input` + runtime_context | 常に |
 
@@ -48,7 +48,7 @@ Description:
 
 ## build_expression_phi
 
-キャラクターカードの `post_history_instructions` と、解���された表情定義から Emotion Expression Protocol ブロックを生成する。
+キャラクターカードの `post_history_instructions` と、解決された表情定義から Emotion Expression Protocol ブロックを生成する。
 
 利用可能な `<|emo:name|>` トークンの一覧を提示し、LLM に感情表現の使用を指示する。`card.data.extensions["expressions"]` から `ExpressionDefinition` をパースし、デフォルト表情（neutral/happy/sad/angry/relaxed/surprised）とマージする。無効（`disabled: true`）の表情は除外される。
 

@@ -1,13 +1,14 @@
 # IPC ツールシステム
 
-各ツール種別は独立したバイナリプロセスとして動作し、`ene-ai-core` とは Unix Domain Socket 経由の IPC で通信する。
+各ツール種別は独立したバイナリプロセスとして動作し、core とは IPC で通信する。
+Unix では UDS、Windows では Named Pipe を使用する。
 
 ## アーキテクチャ
 
 ```
 ToolHostManager (バイナリ発見・起動・監視)
-  ├── ToolEntry × N (IPC)
-  │   └── IpcToolRegistry (UDS 通信・再接続)
+  ├── SupervisedIpcRegistry × N (IPC + 再起動)
+  │   └── IpcToolRegistry (再接続)
   │       └── ene-tool-proto protocol
   ├── extra_registries × N (MCP など)
   │   └── McpToolRegistry
@@ -16,20 +17,17 @@ ToolHostManager (バイナリ発見・起動・監視)
 
 ## ToolHostManager
 
-`tool_host_manager.rs` で実装。全ツールプロセスを統括する。
+`ene-tool-host` クレートで実装。全ツールプロセスを統括する。
 
 ```rust
 pub struct ToolHostManager {
-    entries: Vec<ToolEntry>,
-    extra_registries: Vec<Arc<dyn ToolRegistry>>,
-    tool_index: HashMap<String, usize>,
-    store: Option<Arc<MemoryStore>>,
+    composite: Arc<CompositeToolRegistry>,
 }
 ```
 
 | メソッド | 説明 |
 |----------|------|
-| `start(settings)` | ソケットディレクトリ作成、有効ツールバイナリを `start_tool()` で起動 |
+| `start(settings)` | ソケットディレクトリ作成、有効ツールバイナリを起動 |
 | `add_registry(registry)` | MCP 等の追加レジストリを登録 |
 | `with_store(store)` | MemoryStore をアタッチ（Tool RAG 用） |
 | `into_registry()` | `Arc<dyn ToolRegistry>` に変換 |
@@ -37,14 +35,14 @@ pub struct ToolHostManager {
 ToolRegistry trait 実装:
 - `list_tools()`: IPC ツール + extra_registries をマージ
 - `list_relevant_tools()`: ツール埋め込みテーブルからコサイン類似度検索
-- `call_tool()`: 該当エントリにディスパッチ。失敗時は `call_with_supervision()` でプロセス再起動＋リトライ
+- `call_tool()`: 該当エントリにディスパッチ。ツールプロセスが死亡していれば再起動＋再接続を実行
 - `ensure_index_built()`: ツール定義のバージョンハッシュを比較し、変更があったものだけを再埋め込み
 
 ### バイナリ発見
 
 `find_tool_binary(name)` が以下のパスを探索する:
-1. `<exe_dir>/tools/`（ビルドイン）
-2. `app_data_dir()/tools/`（ユーザープラグイン）
+1. `builtin_tools_dir()`（デバッグ時は exe_dir、リリース時は exe_dir/tools）
+2. `user_tools_dir()`（`app_data_dir()/tools/`）
 
 ### クラッシュ耐性
 
@@ -61,14 +59,15 @@ ToolRegistry trait 実装:
 pub struct IpcToolRegistry {
     socket_path: PathBuf,
     sandbox: SandboxConfigData,
-    stream: TokioMutex<Option<UnixStream>>,
+    tool_config: Option<serde_json::Value>,
+    stream: TokioMutex<Option<IpcStream>>,
     tools: Mutex<Vec<ToolDefinition>>,
 }
 ```
 
 | メソッド | 説明 |
 |----------|------|
-| `new(socket_path, sandbox)` | 接続 → Initialize → Ack → ListTools の順で初期化 |
+| `new(socket_path, sandbox, tool_config)` | 接続 → Initialize → Ack → ListTools の順で初期化 |
 | `ensure_connected()` | 未接続時は再接続＋再初期化 |
 | `send_with_reconnect(req)` | リクエスト送信、失敗時は再接続＋リトライ |
 

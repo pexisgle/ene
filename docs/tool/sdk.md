@@ -99,12 +99,19 @@ cp target/release/my-cool-tool ~/.local/share/dev.pexisgle.Ene/tools/
 
 ### 5. Ene に認識させる
 
-`settings.json` の `tools.enabled` にツール名を追加:
+`settings.json` の `tools.tools` にツール名を追加:
 
 ```json
 {
   "tools": {
-    "enabled": ["fs", "web", "utility", "app", "browser", "my-cool-tool"]
+    "tools": {
+      "fs": { "enable": true },
+      "web": { "enable": true },
+      "utility": { "enable": true },
+      "app": { "enable": true },
+      "browser": { "enable": true },
+      "my-cool-tool": { "enable": true }
+    }
   }
 }
 ```
@@ -134,7 +141,7 @@ pub trait ToolProvider: Send + Sync {
 
 | メソッド | 必須 | 説明 |
 |----------|------|------|
-| `list_tools()` | はい | 提供するツール定義の一覧を返す。起動時に一度だけ呼ばれる |
+| `list_tools()` | はい | 提供するツール定義の一覧を返す（起動時/再接続時） |
 | `call_tool()` | はい | ツールを実行する。`name` でツールを判別し、`arguments` (JSON) をパースして処理する |
 | `set_session_id()` | はい | セッションIDを受け取る。Undo 等のステート管理に使う |
 | `set_sandbox()` | いいえ | サンドボックス設定を受け取る。ファイル操作系ツールでのみ使用 |
@@ -279,7 +286,7 @@ run_tool_server(Box::new(registry)).await.unwrap();
 | `<exe_dir>/tools/` | ビルドインツール（Ene本体に同梱） | `/usr/bin/tools/ene-tools-fs` |
 | `~/.local/share/dev.pexisgle.Ene/tools/` | ユーザー追加ツール | `~/.local/share/dev.pexisgle.Ene/tools/my-cool-tool` |
 
-設定の `tools.enabled` にバイナリ名（拡張子なし）を追加すると、`ToolHostManager` が起動時に自動的に発見・起動します。
+設定の `tools.tools` にバイナリ名（拡張子なし）を追加すると、`ToolHostManager` が起動時に自動的に発見・起動します。
 
 ## ヒント
 

@@ -23,7 +23,7 @@ main()
             CharacterPlugin,    # キャラクター生成・表情・アニメーション
             TrayPlugin,         # システムトレイ
             SettingsUiPlugin,   # egui 設定ウィンドウ
-            WindowDragPlugin,   # キャラクタークリック＆ドラッグ
+            CharacterDragPlugin,# キャラクタークリック＆ドラッグ
         ))
         .run()
 ```
@@ -43,11 +43,10 @@ Bevy システムチェーン:
 
 | 項目 | 値 |
 |------|-----|
-| サイズ | 560x980 |
-| スタイル | 非サイズ変更、非装飾、透明背景 |
+| サイズ | 560x980（Windows） |
+| スタイル | Windows: Windowed / macOS・Linux: BorderlessFullscreen |
 | Z-order | 常時最前面（AlwaysOnTop） |
 | 透明度 | CompositeAlphaMode（OS依存） |
-| クリックスルー | Windows: WM_NCHITTEST / Wayland: 入力領域マスク / X11: skip_taskbar |
 
 ### 表情適用フロー
 
@@ -69,10 +68,8 @@ main()
   ├── clap: Args 解析（--tooltest フラグ）
   ├── config::init()
   │   ├── ensure_resource_dirs()
-  │   ├── settings.json 読み込み
-  │   ├── ConversationSession 作成
-  │   ├── キャラクターカード読み込み
-  │   └── メモリ有効時: init_memory()
+  │   ├── settings.json 読み込み（ene_config::load_settings）
+  │   └── AiRuntime::init(settings) で session / registry を初期化
   ├── --tooltest 指定時 → tooltest::run() で終了
   └── 通常モード:
       ├── registry::build(settings) → ToolHostManager 起動＋MCP接続
@@ -96,12 +93,15 @@ main()
 | `/undo` | Undo 実行 |
 | `/tooltest [prompt]` | ワンショットツールテスト |
 | `/memory search <query>` | 記憶検索 |
+| `/memory list` | 保存済み要約/キーファクト一覧 |
 | `/session split` | 手動セッション分割 |
+| `/session info` | セッション情報 |
+| `/session summaries` | 過去要約一覧 |
 | `/help` | ヘルプ表示 |
 
 3. 通常入力時:
    - `poll_split_result` で分割完了確認
-   - `spawn_split_task` で境界チェック起動
+   - `check_and_perform_split` で境界チェック起動
    - ユーザー入力を埋め込み
    - `run_ai_with_tools` 実行
    - `process_stream` でイベント処理・表示

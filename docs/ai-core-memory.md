@@ -1,116 +1,100 @@
 # 長期記憶システム
 
-SQLite + sqlite-vec（ベクトル拡張）+ Diesel ORM による埋め込みベースの長期記憶。
+SQLite + sqlite-vec + Diesel による埋め込みベースの長期記憶。  
+初期化は `AiRuntime::init()` 内で実施される。
 
-## 初期化
-
-`init_memory()` が設定に基づいて MemoryStore と EmbeddingProvider を生成する。
-
-```rust
-pub fn init_memory(
-    settings: &AiSettings
-) -> Result<(Arc<MemoryStore>, Arc<dyn EmbeddingProvider>), String>
-```
-
-1. DB パス解決（明示指定 or `{card_dir}/memory.db`）
-2. 親ディレクトリ作成
-3. EmbeddingProvider 作成（`create_embedding_provider()`、Api/Local を選択）
-4. MemoryStore::open(db_path, dimensions) でテーブル作成・マイグレーション
+## 初期化フロー（概念）
+1. `embedding` セクションから埋め込みプロバイダを作成
+2. `memory.enabled == true` の場合、`MemoryStore::open()` を実行
+3. sqlite-vec 拡張登録とマイグレーションを適用
 
 ## MemoryStore
 
 ```rust
 pub struct MemoryStore {
-    conn: Mutex<SqliteConnection>,
-    embedding_dim: usize,
+    pool: r2d2::Pool<SqliteConnection>,
+    pub embedding_dim: usize,
 }
 ```
 
-`Send + Sync`（`unsafe impl`）、Mutex で全アクセスを直列化。
+`r2d2` プールを使用し、各操作でコネクションを取得する。
 
 ### テーブル構造
-
 ```sql
 conversation_summaries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id INTEGER PRIMARY KEY,
     session_id TEXT,
     card_name TEXT,
     summary TEXT,
-    embedding BLOB,       -- f32 ベクトルのバイナリ（リトルエンディアン）
-    ended_at TEXT,
-    created_at DATETIME
+    embedding BLOB,
+    created_at TEXT, -- RFC3339
+    ended_at TEXT    -- RFC3339
 )
 
 conversation_keyfacts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id INTEGER PRIMARY KEY,
     card_name TEXT,
     summary_id INTEGER REFERENCES conversation_summaries(id),
     key TEXT,
     value TEXT,
-    created_at DATETIME
+    created_at TEXT
 )
 
 conversation_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id INTEGER PRIMARY KEY,
     session_id TEXT,
     card_name TEXT,
     role TEXT,
     content TEXT,
-    created_at DATETIME
+    created_at TEXT
 )
 
 tool_embeddings (
     tool_name TEXT PRIMARY KEY,
     version_hash TEXT,
     embedding BLOB,
-    created_at DATETIME
+    created_at TEXT
 )
 ```
 
 ### 要約操作
-
 | メソッド | 説明 |
-|----------|------|
-| `insert_summary(session_id, card_name, summary, key_facts, embedding, ended_at)` | 要約 + キーファクトをトランザクションで挿入（空valueのキーファクトは削除扱い） |
-| `search_summaries(query_embedding, card_name, limit, threshold)` | `vec_distance_cosine` でコサイン類似度検索 |
+|---|---|
+| `insert_summary(session_id, card_name, summary, key_facts, embedding, ended_at)` | 要約 + キーファクトをトランザクションで挿入（空 value は削除扱い） |
+| `search_summaries(query_embedding, card_name, limit, threshold)` | `vec_distance_cosine` で類似度検索 |
 | `list_recent_summaries(card_name, limit)` | `created_at DESC` で一覧 |
 
 ### キーファクト操作
-
 | メソッド | 説明 |
-|----------|------|
-| `get_all_keyfacts(card_name)` | `ROW_NUMBER() PARTITION BY key ORDER BY created_at DESC` で各キーの最新値を取得 |
+|---|---|
+| `get_all_keyfacts(card_name)` | `ROW_NUMBER() PARTITION BY key ORDER BY created_at DESC` で最新のみ取得 |
 | `upsert_keyfact(card_name, key, value)` | 新規行挿入（クエリ時に最新が採用される） |
-| `delete_keyfact(card_name, key)` | 該当行全削除 |
+| `delete_keyfact(card_name, key)` | 該当キーを全削除 |
 
 ### ツール埋め込み操作
-
 | メソッド | 説明 |
-|----------|------|
+|---|---|
 | `upsert_tool_embedding(tool_name, version_hash, embedding)` | UPSERT |
 | `search_tools(query_embedding, limit, threshold)` | Tool RAG 用コサイン類似度検索 |
 
 ## EmbeddingProvider
 
 ```rust
+#[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
-    fn embed(&self, text: &str) -> Result<Vec<f32>, AiCoreError>;
-    fn embed_query(&self, text: &str) -> Result<Vec<f32>, AiCoreError>;
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError>;
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbeddingError>;
     fn dimensions(&self) -> usize;
-    fn model_name(&self) -> String;
+    fn model_name(&self) -> &str;
 }
 ```
 
-2 実装:
-
-| 実装 | 説明 |
-|------|------|
-| `ApiEmbeddingProvider` | OpenAI 互換 API 経由の埋め込み |
-| `GgufEmbeddingProvider` | Candle フレームワークによる GGUF 量子化モデルのローカル推論 |
+実装:
+- `ApiEmbeddingProvider`（OpenAI 互換 API）
+- `GgufEmbeddingProvider`（Candle によるローカル推論）
 
 ## 要約（Summarizer）
-
-`summarize_conversation()` が LLM を呼び出して会話要約を生成する。
+`summarize_conversation()` が LLM を呼び出して要約を生成する。
 
 ```rust
 pub struct ConversationSummaryResult {
@@ -120,13 +104,8 @@ pub struct ConversationSummaryResult {
 }
 ```
 
-- JSON Schema で構造化された応答を LLM から取得
-- 既存のキーファクトを入力として渡し、update/delete/keep の判断を LLM に委ねる
-- パース失敗時はフォールバック（JSON 抽出→生テキスト）
-
 ## 要約フォーマット（プロンプト注入用）
-
-`format_summaries_for_prompt()` が検索結果を以下の形式に整形する:
+`format_summaries_for_prompt()` が検索結果を次の形式に整形する:
 
 ```
 [Past Conversation Summaries — relevant previous conversations]

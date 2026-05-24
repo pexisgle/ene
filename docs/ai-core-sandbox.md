@@ -1,11 +1,11 @@
 # セキュリティサンドボックス
 
-Sandbox 設定は `AiSandboxSettings` で管理され、IPC 経由で `ene-tools-fs` に配信される。
+Sandbox 設定は `SandboxConfigData`（`ene-tool-proto`）で管理され、IPC 経由で `ene-tools-fs` に配信される。
 
 ## 設定→IPC 伝達
 
-1. `AiSandboxSettings` は `to_sandbox_config_data()` で `SandboxConfigData` に変換
-2. `IpcRequest::Initialize { sandbox }` としてツールバイナリに送信
+1. `SandboxConfigData` を作成（`settings.json` の `sandbox` セクション）
+2. `IpcRequest::Initialize { sandbox, tool_config }` としてツールバイナリに送信
 3. ツール側の `Sandbox` 型が受信、全ファイル操作に適用
 
 ## SandboxConfig（ene-tools-fs 内）
@@ -21,22 +21,22 @@ struct SandboxConfig {
     shell_timeout_ms: u64,                 // 120秒
     max_shell_output_bytes: usize,         // 50KB
     max_shell_output_lines: usize,         // 2000行
+    undo_db_path: Option<PathBuf>,
 }
 ```
 
 ## チェックフロー
 
 ```
-コマンド実行リクエスト
+ファイル/シェル操作リクエスト
   ↓
 Sandbox 有効?
   ├── No → 直接実行
   └── Yes
-       ├── パス正規化（canonicalize）
-       ├── allowed_directories 内？ → No → 拒否
-       ├── 書き込み操作？ → writable_directories 内？ → No → 拒否
-       ├── ブロックコマンドパターン一致？ → Yes → 拒否
-       └── リソース制限内？ → No → 拒否
+       ├── パス正規化（read/write のみ）
+       ├── allowed_directories / writable_directories 内？ → No → 拒否
+       ├── シェルの場合: blocked_commands に一致？ → Yes → 拒否
+       └── read/write/shell 実行時にサイズ・出力制限を適用
 ```
 
 ## ブロックコマンドパターン
