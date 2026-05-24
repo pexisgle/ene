@@ -57,7 +57,7 @@ fn build_tray_icon_and_menu() -> TrayIcon {
 
     TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip("Ene")
+        .with_tooltip("ene")
         .with_icon(icon)
         .build()
         .unwrap()

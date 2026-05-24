@@ -47,7 +47,7 @@ pub struct DesktopSection {
 pub const DEFAULT_CHARACTER_NAME: &str = "Alicia";
 pub const DEFAULT_VRM_PATH: &str = "characters/Alicia/AliciaSolid.vrm";
 pub const DEFAULT_VRMA_PATH: &str = "characters/Alicia/motions/VRMA_01.vrma";
-pub const APP_ID: &str = "dev.pexisgle.Ene";
+pub const APP_ID: &str = "dev.pexisgle.ene";
 pub const WINDOW_WIDTH: u32 = 560;
 pub const WINDOW_HEIGHT: u32 = 980;
 pub const SETTINGS_WINDOW_WIDTH: u32 = 460;
@@ -149,7 +149,7 @@ pub fn read_cli_paths() -> (String, String) {
 pub fn window_plugin() -> WindowPlugin {
     WindowPlugin {
         primary_window: Some(Window {
-            title: "Ene".to_string(),
+            title: "ene".to_string(),
             name: Some(APP_ID.to_string()),
             resolution: WindowResolution::new(WINDOW_WIDTH, WINDOW_HEIGHT),
             resizable: false,

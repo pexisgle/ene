@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
-const APP_ID: &str = "dev.pexisgle.Ene";
+const APP_ID: &str = "dev.pexisgle.ene";
 
 pub const IS_DEV_BUILD: bool = cfg!(debug_assertions);
 
 pub fn app_data_dir() -> PathBuf {
-    directories::ProjectDirs::from("dev", "pexisgle", "Ene")
+    directories::ProjectDirs::from("dev", "pexisgle", "ene")
         .map(|proj_dirs| proj_dirs.data_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from(APP_ID))
 }

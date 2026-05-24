@@ -576,7 +576,7 @@ fn apply_settings_window_visibility(
         if window_entities.window.is_none() {
             let window = commands
                 .spawn((Window {
-                    title: "Ene Settings".to_string(),
+                    title: "ene Settings".to_string(),
                     resolution: WindowResolution::new(
                         SETTINGS_WINDOW_WIDTH,
                         SETTINGS_WINDOW_HEIGHT,

@@ -1,10 +1,10 @@
-//! # Ene Core (`ene-core`)
+//! # ene Core (`ene-core`)
 //!
-//! Ene Core is the unified Rust-based library powering the Ene application ecosystem.
+//! ene Core is the unified Rust-based library powering the ene application ecosystem.
 //! It serves as a modular, high-performance facade encapsulating LLM integration,
 //! conversational memory, auto session-splitting, and active tool hosts (via both local IPC and MCP).
 //!
-//! By using `ene-core`, third-party developers can embed the entire Ene system in their own applications
+//! By using `ene-core`, third-party developers can embed the entire ene system in their own applications
 //! (CUI, GUI, or server backends) without duplicate boilerplate.
 //!
 //! ## Architecture Overview

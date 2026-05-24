@@ -83,7 +83,7 @@ async fn main() {
 }
 ```
 
-ビルドしたバイナリを `~/.local/share/dev.pexisgle.Ene/tools/` に配置し、  
+ビルドしたバイナリを `~/.local/share/dev.pexisgle.ene/tools/` に配置し、  
 `tools.tools` にエントリを追加すれば自動起動される。
 
 ## 6. ステータス
