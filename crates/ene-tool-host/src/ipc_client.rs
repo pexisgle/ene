@@ -151,8 +151,15 @@ impl IpcToolRegistry {
         self.do_refresh_tools().await
     }
 
-    pub fn socket_path(&self) -> &PathBuf {
+    pub     fn socket_path(&self) -> &PathBuf {
         &self.socket_path
+    }
+
+    pub async fn get_config_schema(&self) -> Option<serde_json::Value> {
+        match self.send_with_reconnect(IpcRequest::GetConfigSchema).await {
+            Ok(IpcResponse::ConfigSchema { schema }) => schema,
+            _ => None,
+        }
     }
 
     /// 接続断時に再接続を試みる
@@ -265,6 +272,10 @@ impl ToolRegistry for IpcToolRegistry {
                 "Unexpected response for CallTool".to_string(),
             )),
         })
+    }
+
+    async fn config_schema(&self) -> Option<serde_json::Value> {
+        self.get_config_schema().await
     }
 
     async fn set_session_id(&self, session_id: &str) {

@@ -205,6 +205,19 @@ impl ToolRegistry for CompositeToolRegistry {
         }
     }
 
+    async fn config_schema(&self) -> Option<serde_json::Value> {
+        let registries = {
+            let state_guard = self.state.read().unwrap_or_else(|e| e.into_inner());
+            state_guard.registries.clone()
+        };
+        for registry in &registries {
+            if let Some(schema) = registry.config_schema().await {
+                return Some(schema);
+            }
+        }
+        None
+    }
+
     async fn approve_permission(&self, request_id: &str) {
         let registries = {
             let state_guard = self.state.read().unwrap_or_else(|e| e.into_inner());

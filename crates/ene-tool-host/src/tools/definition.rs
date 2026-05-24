@@ -33,6 +33,11 @@ pub trait ToolRegistry: Send + Sync {
     /// セッション全体のパーミッション許可パターンの追加
     async fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
 
+    /// ツールのconfigスキーマを返す
+    async fn config_schema(&self) -> Option<serde_json::Value> {
+        None
+    }
+
     /// RAGインデックスが必要な場合に構築する（デフォルトでは何もしない）
     async fn ensure_index_built(
         &self,

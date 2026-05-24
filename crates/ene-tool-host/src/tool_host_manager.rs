@@ -3,7 +3,7 @@ use crate::tools::CompositeToolRegistry;
 use crate::tools::ToolDefinition;
 use crate::tools::definition::ToolRegistry;
 use ene_config as paths;
-use ene_config::EneSettings;
+use ene_config::{register_runtime_schema, EneSettings};
 use ene_memory::MemoryStore;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -166,6 +166,15 @@ impl ToolRegistry for SupervisedIpcRegistry {
         new_reg_arc.call_tool(name, arguments).await
     }
 
+    async fn config_schema(&self) -> Option<serde_json::Value> {
+        let reg = self
+            .registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        reg.config_schema().await
+    }
+
     async fn set_session_id(&self, session_id: &str) {
         let reg = self
             .registry
@@ -218,6 +227,10 @@ impl ToolRegistry for ToolHostManager {
         arguments: &str,
     ) -> Result<String, crate::error::ToolError> {
         self.composite.call_tool(name, arguments).await
+    }
+
+    async fn config_schema(&self) -> Option<serde_json::Value> {
+        self.composite.config_schema().await
     }
 
     async fn set_session_id(&self, session_id: &str) {
@@ -275,12 +288,23 @@ impl ToolHostManager {
             };
             match Self::start_tool(name, &sandbox, tool_config).await {
                 Ok(supervised_entry) => {
+                    // Collect config schema and register it in the runtime registry
+                    if let Some(schema) = supervised_entry.config_schema().await {
+                        let schema_key = format!("{}_config", name);
+                        register_runtime_schema(&schema_key, schema, Some("tool_entry".to_string()));
+                    }
                     supervised_registries.push(supervised_entry);
                 }
                 Err(e) => {
                     tracing::error!("[ToolHostManager] Failed to start tool '{}': {}", name, e);
                 }
             }
+        }
+
+        // Regenerate schema file to include runtime tool schemas
+        if let Ok(schema_json) = ene_config::generate_schema_json() {
+            let schema_path = paths::assets_dir().join("settings.schema.json");
+            let _ = std::fs::write(&schema_path, schema_json);
         }
 
         let composite = Arc::new(CompositeToolRegistry::new(supervised_registries));
