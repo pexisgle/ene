@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ene-ai-core = { workspace = true }
+ene-core = { workspace = true }
 ene-config = { workspace = true }
 ene-memory = { workspace = true }
 ene-tool-host = { workspace = true }

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ene-ai-core = { workspace = true }
+ene-core = { workspace = true }
 ene-config = { workspace = true }
 bevy = "0.18.1"
 bevy_egui = "0.39.1"

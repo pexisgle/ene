@@ -1,5 +1,5 @@
 use crate::stream;
-use ene_ai_core::{ConversationSession, run_ai_with_tools};
+use ene_core::{ConversationSession, run_ai_with_tools};
 use ene_config::EneSettings;
 
 pub async fn run(settings: &EneSettings, session: &ConversationSession, prompt_override: &str) {
@@ -32,7 +32,7 @@ pub async fn run(settings: &EneSettings, session: &ConversationSession, prompt_o
         fresh
     };
 
-    let registry = match ene_ai_core::build_tool_registry(&sandbox_settings).await {
+    let registry = match ene_core::build_tool_registry(&sandbox_settings).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("[Error] Failed to build tool registry: {}", e);

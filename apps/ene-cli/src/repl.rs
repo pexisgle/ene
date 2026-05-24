@@ -1,5 +1,5 @@
 use crate::{commands, context::AppContext, stream, style};
-use ene_ai_core::{poll_split_result, run_ai_with_tools, truncate, MemoryConfig, SessionConfig};
+use ene_core::{poll_split_result, run_ai_with_tools, truncate, MemoryConfig, SessionConfig};
 
 pub async fn run(ctx: &mut AppContext) {
     loop {
@@ -64,7 +64,7 @@ async fn check_session_split(ctx: &mut AppContext, input: &str) {
                 println!("{}\n", style::warning("[Session] 新しい会話を開始します。"));
             }
             Err(e) => {
-                if !matches!(e, ene_ai_core::SessionError::SplitNotNeeded) {
+                if !matches!(e, ene_core::SessionError::SplitNotNeeded) {
                     eprintln!(
                         "{}",
                         style::error(format!("[Session] 要約生成エラー: {}", e))

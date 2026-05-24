@@ -3660,40 +3660,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 
 [[package]]
-name = "ene-ai-core"
-version = "0.1.0"
-dependencies = [
- "async-openai",
- "async-stream",
- "async-trait",
- "chrono",
- "ene-config",
- "ene-embedding",
- "ene-memory",
- "ene-session",
- "ene-tool-host",
- "ene-tool-proto",
- "indexmap 2.14.0",
- "keyring",
- "rand 0.10.1",
- "regex",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tracing",
-]
-
-[[package]]
 name = "ene-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
  "console",
  "dialoguer",
- "ene-ai-core",
  "ene-config",
+ "ene-core",
  "ene-memory",
  "ene-tool-host",
  "futures-core",
@@ -3721,6 +3695,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-core"
+version = "0.1.0"
+dependencies = [
+ "async-openai",
+ "async-stream",
+ "async-trait",
+ "chrono",
+ "ene-config",
+ "ene-embedding",
+ "ene-memory",
+ "ene-session",
+ "ene-tool-host",
+ "ene-tool-proto",
+ "indexmap 2.14.0",
+ "keyring",
+ "rand 0.10.1",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
 name = "ene-desktop"
 version = "0.1.0"
 dependencies = [
@@ -3728,8 +3728,8 @@ dependencies = [
  "bevy",
  "bevy_egui",
  "bevy_vrm1",
- "ene-ai-core",
  "ene-config",
+ "ene-core",
  "gtk",
  "keyring",
  "log",

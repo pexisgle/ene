@@ -1,5 +1,5 @@
 use crate::{context::AppContext, style};
-use ene_ai_core::{SplitReason, execute_split, truncate, SessionConfig};
+use ene_core::{SplitReason, execute_split, truncate, SessionConfig};
 
 pub async fn execute(arg: &str, ctx: &mut AppContext) {
     let parts: Vec<&str> = arg.splitn(2, ' ').collect();
@@ -77,7 +77,7 @@ async fn handle_split(ctx: &mut AppContext) {
         embedder,
         &ctx.settings.get_section::<ene_memory::MemoryConfig>("memory").unwrap_or_default().resolve_summarization_model(),
         &ctx.settings.get_section::<ene_memory::MemoryConfig>("memory").unwrap_or_default().resolve_summarization_base_url().unwrap_or_default(),
-        &ctx.settings.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default().resolve_api_key(),
+        &ctx.settings.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default().resolve_api_key(),
         reason,
      )
      .await

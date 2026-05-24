@@ -1,5 +1,5 @@
 use crate::style;
-use ene_ai_core::{ConversationSession, stream::AiStreamEvent, truncate};
+use ene_core::{ConversationSession, stream::AiStreamEvent, truncate};
 use std::io::{self, Write};
 use tokio_stream::StreamExt;
 
@@ -19,7 +19,7 @@ where
                     let _ = io::stdout().flush();
                 }
                 for token in special_tokens {
-                    if let Some(emotion) = ene_ai_core::extract_emotion_from_token(&token) {
+                    if let Some(emotion) = ene_core::extract_emotion_from_token(&token) {
                         print!("{}", style::emotion(format!("[Emotion: {}]", emotion)));
                     } else {
                         print!("{}", style::warning(token));
@@ -74,12 +74,12 @@ where
                     .unwrap_or(2);
 
                 let decision = match selection {
-                    0 => ene_ai_core::stream::PermissionDecision::AllowOnce,
-                    1 => ene_ai_core::stream::PermissionDecision::AllowSession,
-                    _ => ene_ai_core::stream::PermissionDecision::Deny,
+                    0 => ene_core::stream::PermissionDecision::AllowOnce,
+                    1 => ene_core::stream::PermissionDecision::AllowSession,
+                    _ => ene_core::stream::PermissionDecision::Deny,
                 };
 
-                if let Err(e) = ene_ai_core::stream::submit_permission_decision(&request_id, decision) {
+                if let Err(e) = ene_core::stream::submit_permission_decision(&request_id, decision) {
                     eprintln!("\n[Error] Failed to submit permission decision: {}", e);
                 } else {
                     println!("\n{}", style::success("承認の入力を送信しました。処理を再開します..."));
