@@ -1,9 +1,9 @@
 # 設定システム
 
-Ene の設定は `assets/settings.json` に集約され、`settings.schema.json` が自動生成される。  
+ene の設定は `assets/settings.json` に集約され、`settings.schema.json` が自動生成される。  
 読み込みは `ene_config::load_full_settings()`（もしくは `load_settings()`）で行う。
 
-## 1. 基本構造（EneSettings）
+## 1. 基本構造（`EneSettings`）
 
 `EneSettings` は最小限の共通フィールドと、拡張セクションを持つ。
 

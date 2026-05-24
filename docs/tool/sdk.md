@@ -1,6 +1,6 @@
 # サードパーティツール開発ガイド
 
-`ene-tool-proto` は Ene のツールシステム用軽量SDKです。このクレートを使うと、誰でも簡単に Ene 用のカスタムツールバイナリを作成できます。
+`ene-tool-proto` は ene のツールシステム用軽量SDKです。このクレートを使うと、誰でも簡単に ene 用のカスタムツールバイナリを作成できます。
 
 ## クイックスタート
 
@@ -93,11 +93,11 @@ cargo build --release
 バイナリを配置:
 
 ```bash
-mkdir -p ~/.local/share/dev.pexisgle.Ene/tools
-cp target/release/my-cool-tool ~/.local/share/dev.pexisgle.Ene/tools/
+mkdir -p ~/.local/share/dev.pexisgle.ene/tools
+cp target/release/my-cool-tool ~/.local/share/dev.pexisgle.ene/tools/
 ```
 
-### 5. Ene に認識させる
+### 5. ene に認識させる
 
 `settings.json` の `tools.tools` にツール名を追加:
 
@@ -116,7 +116,7 @@ cp target/release/my-cool-tool ~/.local/share/dev.pexisgle.Ene/tools/
 }
 ```
 
-これで完了です。次回 Ene 起動時に自動的に `my-cool-tool` プロセスが起動し、LLM がツールを使えるようになります。
+これで完了です。次回 ene 起動時に自動的に `my-cool-tool` プロセスが起動し、LLM がツールを使えるようになります。
 
 ## アーキテクチャ概要
 
@@ -283,8 +283,8 @@ run_tool_server(Box::new(registry)).await.unwrap();
 
 | ディレクトリ | 用途 | 例 |
 |-------------|------|-----|
-| `<exe_dir>/tools/` | ビルドインツール（Ene本体に同梱） | `/usr/bin/tools/ene-tools-fs` |
-| `~/.local/share/dev.pexisgle.Ene/tools/` | ユーザー追加ツール | `~/.local/share/dev.pexisgle.Ene/tools/my-cool-tool` |
+| `<exe_dir>/tools/` | ビルドインツール（ene本体に同梱） | `/usr/bin/tools/ene-tools-fs` |
+| `~/.local/share/dev.pexisgle.ene/tools/` | ユーザー追加ツール | `~/.local/share/dev.pexisgle.ene/tools/my-cool-tool` |
 
 設定の `tools.tools` にバイナリ名（拡張子なし）を追加すると、`ToolHostManager` が起動時に自動的に発見・起動します。
 

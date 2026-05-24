@@ -6,9 +6,9 @@ use ene_session::{
 use ene_tool_host::{McpToolRegistry, ToolHostManager, ToolRegistry};
 use std::sync::Arc;
 
-/// Ene Core runtime state.
+/// ene Core runtime state.
 ///
-/// This struct acts as the primary runtime container for an active Ene session,
+/// This struct acts as the primary runtime container for an active ene session,
 /// including its active user configuration, conversation history, the underlying tool registries,
 /// and any pending session splitting tasks.
 pub struct AiRuntime {
@@ -23,7 +23,7 @@ pub struct AiRuntime {
 }
 
 impl AiRuntime {
-    /// Initializes a new Ene Core runtime with the provided workspace settings.
+    /// Initializes a new ene Core runtime with the provided workspace settings.
     ///
     /// This will automatically boot up:
     /// - The requested embedding provider (local Candle or remote OpenAI-compatible API).

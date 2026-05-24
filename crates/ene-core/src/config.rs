@@ -11,7 +11,7 @@ ene_config::define_config!(
         pub api_key: String = default_string(),
         pub api_key_source: String = "inline".to_string(),
         pub api_key_env: String = "OPENAI_API_KEY".to_string(),
-        pub api_key_keyring_service: String = "dev.pexisgle.Ene".to_string(),
+        pub api_key_keyring_service: String = "dev.pexisgle.ene".to_string(),
         pub api_key_keyring_account: String = "default".to_string(),
     }
 );
@@ -52,7 +52,7 @@ impl ProviderSettings {
             }
             "keyring" => {
                 let service = if self.api_key_keyring_service.trim().is_empty() {
-                    "dev.pexisgle.Ene"
+                    "dev.pexisgle.ene"
                 } else {
                     self.api_key_keyring_service.trim()
                 };
