@@ -8,6 +8,42 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+ene_config::define_label_enum!(
+    pub enum ShadowQuality {
+        Low => "Low" => 1_024,
+        #[default]
+        Medium => "Medium" => 2_048,
+        High => "High" => 4_096,
+    }
+    [shadow_map_size: usize]
+);
+
+ene_config::define_label_enum!(
+    pub enum AntialiasingMode {
+        Off => "Off",
+        #[default]
+        Fxaa => "FXAA",
+        Smaa => "SMAA",
+        Taa => "TAA",
+    }
+);
+
+ene_config::define_config!(
+    "graphics",
+    pub struct GraphicsSection {
+        pub mask_render_downsample: u32 = 8,
+        pub target_fps: u32 = 60,
+        pub shadow_quality: ShadowQuality = ShadowQuality::Medium,
+        pub antialiasing_mode: AntialiasingMode = AntialiasingMode::Fxaa,
+    }
+);
+
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize, ene_config::schemars::JsonSchema)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct DesktopSection {
+    pub graphics: GraphicsSection,
+}
+
 pub const DEFAULT_CHARACTER_NAME: &str = "Alicia";
 pub const DEFAULT_VRM_PATH: &str = "characters/Alicia/AliciaSolid.vrm";
 pub const DEFAULT_VRMA_PATH: &str = "characters/Alicia/motions/VRMA_01.vrma";
@@ -34,7 +70,7 @@ pub const ANTIALIASING_MODE_CHOICES: [AntialiasingMode; 4] = [
 ];
 pub const DEFAULT_ANTIALIASING_MODE: AntialiasingMode = AntialiasingMode::Fxaa;
 
-pub use ene_config::{AntialiasingMode, ShadowQuality};
+
 
 pub fn normalize_mask_render_downsample(value: u32) -> u32 {
     cycle_choice(
@@ -147,7 +183,7 @@ pub struct CharacterEntry {
     pub default_motion: Option<String>,
 }
 
-pub use ene_config::GraphicsSection as GraphicsSettings;
+pub use GraphicsSection as GraphicsSettings;
 
 #[derive(Clone, Debug)]
 pub struct CharacterState {
@@ -242,7 +278,7 @@ impl CharacterSettings {
             ui: UiState::default(),
             ai: AiConfig {
                 ai: ene_config::EneSettings {
-                    character_card_path: format!("{}/{}", assets_dir.display(), selected_card_path),
+                    character: format!("{}/{}", assets_dir.display(), selected_card_path),
                     ..Default::default()
                 },
             },
@@ -273,7 +309,7 @@ impl CharacterSettings {
             self.assets_dir.display(),
             self.current_character_card()
         );
-        self.ai.ai.character_card_path = path;
+        self.ai.ai.character = path;
     }
 
     pub fn clamp_runtime_values(&mut self) {
@@ -292,10 +328,7 @@ impl CharacterSettings {
     }
 
     pub fn character_settings_path(&self) -> PathBuf {
-        self.assets_dir
-            .join("characters")
-            .join(&self.current_entry().name)
-            .join("character_settings.json")
+        ene_config::character_settings_path(&self.current_entry().name)
     }
 
     fn motion_path_relative(&self) -> String {
@@ -382,14 +415,14 @@ impl CharacterSettings {
     }
 
     pub fn save(&self) {
-        let saved = AppSettings {
-            version: 1,
-            character: self.current_entry().name.clone(),
-            app: AppSection {
-                graphics: self.graphics.clone(),
-            },
-            ai: self.ai.ai.clone(),
+        let mut saved = self.ai.ai.clone();
+        saved.version = 1;
+        let desktop = DesktopSection {
+            graphics: self.graphics.clone(),
         };
+        if let Err(e) = saved.set_section("desktop", &desktop) {
+            eprintln!("[Config] Failed to set desktop section: {e}");
+        }
         if let Err(e) = ene_config::save_full_settings(&saved) {
             eprintln!("[Config] Failed to save settings: {e}");
         }
@@ -400,50 +433,34 @@ impl CharacterSettings {
         let path = ene_config::config_file_path();
         let full = ene_config::load_full_settings_from(&self.assets_dir, &path);
 
-        self.ai.ai = full.ai;
+        self.ai.ai = full.clone();
 
         // キャラクター選択
-        let name = &full.character;
-        if !name.is_empty() {
-            if let Some(idx) = self.characters.iter().position(|c| c.name == *name) {
-                self.character_state.selected_character = idx;
+        let card_path = &full.character;
+        if !card_path.is_empty() {
+            let path = Path::new(card_path);
+            if let Some(parent) = path.parent() {
+                if let Some(name_os) = parent.file_name() {
+                    let name = name_os.to_string_lossy();
+                    if let Some(idx) = self.characters.iter().position(|c| c.name == name) {
+                        self.character_state.selected_character = idx;
+                    }
+                }
             }
         }
 
         // グラフィック設定
-        self.graphics = full.app.graphics;
+        let desktop_cfg = full.get_section::<DesktopSection>("desktop").unwrap_or_default();
+        self.graphics = desktop_cfg.graphics;
 
         self.clamp_runtime_values();
         self.load_per_character_settings();
     }
 }
 
-pub use ene_config::{AppSection, AppSettings};
 
-/// Per-character settings stored in `characters/{name}/character_settings.json`
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(default)]
-struct CharacterPerSettings {
-    character_position: [f32; 3],
-    selected_motion_path: String,
-    model_scale: f32,
-    look_at_strength: f32,
-    default_motion: String,
-    expressions: Option<serde_json::Value>,
-}
 
-impl Default for CharacterPerSettings {
-    fn default() -> Self {
-        Self {
-            character_position: [0.0, 0.0, 0.0],
-            selected_motion_path: String::new(),
-            model_scale: 1.0,
-            look_at_strength: 0.6,
-            default_motion: String::new(),
-            expressions: None,
-        }
-    }
-}
+pub use ene_config::CharacterPerSettings;
 
 fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
     let mut out = Vec::new();
@@ -536,21 +553,19 @@ fn read_character_json_meta(path: &Path) -> Option<(String, Option<String>)> {
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
     let name = v.get("data")?.get("name")?.as_str()?.to_string();
 
-    let default_motion = path
-        .parent()
-        .and_then(|p| {
-            p.join("character_settings.json")
-                .exists()
-                .then(|| p.join("character_settings.json"))
-        })
-        .and_then(|settings_path| {
+    let default_motion = (|| {
+        let parent = path.parent()?;
+        let folder = parent.file_name()?.to_string_lossy();
+        let settings_path = ene_config::character_settings_path(&folder);
+        if settings_path.exists() {
             let s = fs::read_to_string(settings_path).ok()?;
-            let sv: serde_json::Value = serde_json::from_str(&s).ok()?;
-            sv.get("default_motion")
-                .and_then(|m| m.as_str())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-        });
+            let per: CharacterPerSettings = serde_json::from_str(&s).ok()?;
+            if !per.default_motion.is_empty() {
+                return Some(per.default_motion);
+            }
+        }
+        None
+    })();
 
     Some((name, default_motion))
 }

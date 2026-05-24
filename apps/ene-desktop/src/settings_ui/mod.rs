@@ -8,8 +8,10 @@ use page_character::render_character_page;
 use page_graphics::render_graphics_page;
 
 use crate::ai_bridge::{AiRequestEvent, AiStreamEvent};
+use ene_ai_core::{EmbeddingConfig, MemoryConfig};
 use crate::app_config::{
     CharacterSettings, SETTINGS_WINDOW_HEIGHT, SETTINGS_WINDOW_WIDTH, target_fps_label,
+    AntialiasingMode, ShadowQuality,
 };
 use crate::character::{CharacterAnimationControl, EmotionQueue};
 use bevy::camera::RenderTarget;
@@ -117,20 +119,21 @@ impl SettingsInputState {
         self.character_pos_z = format!("{:+.2}", settings.character_state.character_position.z);
         self.ai_user_name = settings.ai.ai.user_name.clone();
         self.ai_runtime_rules = settings.ai.ai.runtime_rules.clone();
-        self.ai_base_url = settings.ai.ai.provider.base_url.clone();
-        self.ai_api_key = settings.ai.ai.provider.api_key.clone();
+        let provider_config = settings.ai.ai.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
+        self.ai_base_url = provider_config.base_url.clone();
+        self.ai_api_key = provider_config.api_key.clone();
         self.ai_chat_input = settings.ui.ai_chat_input.clone();
-        self.ai_memory_enabled = settings.ai.ai.memory.enabled;
-        self.ai_embedding_provider = match settings.ai.ai.embedding.provider_type {
-            ene_config::EmbeddingProviderType::Api => "api".to_string(),
-            ene_config::EmbeddingProviderType::Local => "local".to_string(),
+        let mem_config = settings.ai.ai.get_section::<MemoryConfig>("memory").unwrap_or_default();
+        let embed_config = settings.ai.ai.get_section::<EmbeddingConfig>("embedding").unwrap_or_default();
+
+        self.ai_memory_enabled = mem_config.enabled;
+        self.ai_embedding_provider = match embed_config.provider_type {
+            ene_ai_core::EmbeddingProviderType::Api => "api".to_string(),
+            ene_ai_core::EmbeddingProviderType::Local => "local".to_string(),
         };
-        self.ai_embedding_model = settings.ai.ai.embedding.model.clone();
-        self.ai_embedding_base_url = settings.ai.ai.embedding.base_url.clone();
-        self.ai_embedding_dimensions = settings
-            .ai
-            .ai
-            .embedding
+        self.ai_embedding_model = embed_config.model.clone();
+        self.ai_embedding_base_url = embed_config.base_url.clone();
+        self.ai_embedding_dimensions = embed_config
             .dimensions
             .map(|d| d.to_string())
             .unwrap_or_else(|| "auto".to_string());
@@ -228,10 +231,19 @@ impl SettingsValueKind {
             }
             SettingsValueKind::TargetFps => target_fps_label(settings.graphics.target_fps),
             SettingsValueKind::ShadowQuality => {
-                settings.graphics.shadow_quality.label().to_string()
+                match settings.graphics.shadow_quality {
+                    ShadowQuality::Low => "Low",
+                    ShadowQuality::Medium => "Medium",
+                    ShadowQuality::High => "High",
+                }.to_string()
             }
             SettingsValueKind::AntialiasingMode => {
-                settings.graphics.antialiasing_mode.label().to_string()
+                match settings.graphics.antialiasing_mode {
+                    AntialiasingMode::Off => "Off",
+                    AntialiasingMode::Fxaa => "Fxaa",
+                    AntialiasingMode::Smaa => "Smaa",
+                    AntialiasingMode::Taa => "Taa",
+                }.to_string()
             }
             SettingsValueKind::LookAtStrength => {
                 format!("{:.2}", settings.character_state.look_at_strength)
@@ -248,10 +260,22 @@ impl SettingsValueKind {
             }
             SettingsValueKind::AiUserName => settings.ai.ai.user_name.clone(),
             SettingsValueKind::AiRuntimeRules => settings.ai.ai.runtime_rules.clone(),
-            SettingsValueKind::AiProviderName => settings.ai.ai.provider.provider_name.clone(),
-            SettingsValueKind::AiModel => settings.ai.ai.provider.model.clone(),
-            SettingsValueKind::AiBaseUrl => settings.ai.ai.provider.base_url.clone(),
-            SettingsValueKind::AiApiKey => masked_secret(&settings.ai.ai.provider.api_key),
+            SettingsValueKind::AiProviderName => {
+                let provider_config = settings.ai.ai.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
+                provider_config.provider_name.clone()
+            }
+            SettingsValueKind::AiModel => {
+                let provider_config = settings.ai.ai.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
+                provider_config.model.clone()
+            }
+            SettingsValueKind::AiBaseUrl => {
+                let provider_config = settings.ai.ai.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
+                provider_config.base_url.clone()
+            }
+            SettingsValueKind::AiApiKey => {
+                let provider_config = settings.ai.ai.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
+                masked_secret(&provider_config.api_key)
+            }
             SettingsValueKind::AiChatInput => settings.ui.ai_chat_input.clone(),
         }
     }
@@ -282,11 +306,15 @@ impl SettingsValueKind {
                 Ok(())
             }
             SettingsValueKind::AiBaseUrl => {
-                settings.ai.ai.provider.base_url = value.to_string();
+                let mut provider_config = settings.ai.ai.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
+                provider_config.base_url = value.to_string();
+                let _ = settings.ai.ai.set_section("provider", &provider_config);
                 Ok(())
             }
             SettingsValueKind::AiApiKey => {
-                settings.ai.ai.provider.api_key = value.to_string();
+                let mut provider_config = settings.ai.ai.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
+                provider_config.api_key = value.to_string();
+                let _ = settings.ai.ai.set_section("provider", &provider_config);
                 Ok(())
             }
             SettingsValueKind::AiChatInput => {
