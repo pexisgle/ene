@@ -205,6 +205,26 @@ impl ToolRegistry for CompositeToolRegistry {
         }
     }
 
+    async fn approve_permission(&self, request_id: &str) {
+        let registries = {
+            let state_guard = self.state.read().unwrap_or_else(|e| e.into_inner());
+            state_guard.registries.clone()
+        };
+        for registry in &registries {
+            registry.approve_permission(request_id).await;
+        }
+    }
+
+    async fn allow_pattern(&self, action: &str, target_pattern: &str) {
+        let registries = {
+            let state_guard = self.state.read().unwrap_or_else(|e| e.into_inner());
+            state_guard.registries.clone()
+        };
+        for registry in &registries {
+            registry.allow_pattern(action, target_pattern).await;
+        }
+    }
+
     async fn ensure_index_built(
         &self,
         embedder: &dyn ene_embedding::EmbeddingProvider,

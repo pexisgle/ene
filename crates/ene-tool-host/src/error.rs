@@ -8,6 +8,13 @@ pub enum ToolError {
     SandboxViolation(String),
     #[error("Permission denied: {0}")]
     PermissionDenied(String),
+    #[error("Permission required: {action} on {target} ({description})")]
+    PermissionRequired {
+        request_id: String,
+        action: String,
+        target: String,
+        description: String,
+    },
     #[error("File not found: {0}")]
     FileNotFound(String),
     #[error("File too large: {0} bytes (max: {1} bytes)")]

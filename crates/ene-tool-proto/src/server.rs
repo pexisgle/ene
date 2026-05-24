@@ -119,6 +119,14 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
             provider.set_session_id(session_id);
             IpcResponse::Ack
         }
+        IpcRequest::ApprovePermission { request_id } => {
+            provider.approve_permission(request_id);
+            IpcResponse::Ack
+        }
+        IpcRequest::AllowPattern { action, target_pattern } => {
+            provider.allow_pattern(action, target_pattern);
+            IpcResponse::Ack
+        }
         IpcRequest::Ping => IpcResponse::Pong,
         IpcRequest::Shutdown => IpcResponse::Ack,
     }

@@ -20,6 +20,13 @@ pub enum IpcRequest {
     SetSessionId {
         session_id: String,
     },
+    ApprovePermission {
+        request_id: String,
+    },
+    AllowPattern {
+        action: String,
+        target_pattern: String,
+    },
     Ping,
     Shutdown,
 }

@@ -1,7 +1,6 @@
-use crate::sandbox::SandboxConfig;
+use crate::sandbox::Sandbox;
 use crate::undo_manager::UndoManager;
-use ene_tool_proto::ToolCategory;
-use ene_tool_proto::ToolDefinition;
+use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
 use std::path::Path;
 
 pub fn tool_definition() -> ToolDefinition {
@@ -48,101 +47,142 @@ pub fn tool_definition() -> ToolDefinition {
 pub async fn execute(
     action: &str,
     args: &serde_json::Value,
-    sandbox: &SandboxConfig,
+    sandbox: &Sandbox,
     undo_manager: &UndoManager,
     session_id: &str,
-) -> Result<String, String> {
+) -> Result<String, ToolError> {
     match action {
         "read" => {
             let file_path = args["filePath"]
                 .as_str()
-                .ok_or("filePath is required for read")?;
+                .ok_or_else(|| ToolError::InvalidArguments {
+                    message: "filePath is required for read".to_string(),
+                })?;
             let offset = args["offset"].as_u64().map(|v| v as usize);
             let limit = args["limit"].as_u64().map(|v| v as usize);
-            super::read::read(Path::new(file_path), offset, limit, sandbox)
-                .await
-                .map_err(|e| e.to_string())
+            super::read::read(Path::new(file_path), offset, limit, sandbox.config()).await
         }
         "write" => {
             let file_path = args["filePath"]
                 .as_str()
-                .ok_or("filePath is required for write")?;
+                .ok_or_else(|| ToolError::InvalidArguments {
+                    message: "filePath is required for write".to_string(),
+                })?;
             let content = args["content"]
                 .as_str()
-                .ok_or("content is required for write")?;
+                .ok_or_else(|| ToolError::InvalidArguments {
+                    message: "content is required for write".to_string(),
+                })?;
+
+            sandbox.check_permission(
+                crate::permission::DestructiveAction::FileOverwrite,
+                file_path,
+                "Writing/Overwriting file",
+            )?;
+
             super::write::write(
                 Path::new(file_path),
                 content,
-                sandbox,
+                sandbox.config(),
                 undo_manager,
                 session_id,
             )
             .await
-            .map_err(|e| e.to_string())
         }
         "edit" => {
             let file_path = args["filePath"]
                 .as_str()
-                .ok_or("filePath is required for edit")?;
+                .ok_or_else(|| ToolError::InvalidArguments {
+                    message: "filePath is required for edit".to_string(),
+                })?;
             let old_string = args["oldString"]
                 .as_str()
-                .ok_or("oldString is required for edit")?;
+                .ok_or_else(|| ToolError::InvalidArguments {
+                    message: "oldString is required for edit".to_string(),
+                })?;
             let new_string = args["newString"]
                 .as_str()
-                .ok_or("newString is required for edit")?;
+                .ok_or_else(|| ToolError::InvalidArguments {
+                    message: "newString is required for edit".to_string(),
+                })?;
             let replace_all = args["replaceAll"].as_bool().unwrap_or(false);
+
+            sandbox.check_permission(
+                crate::permission::DestructiveAction::FileOverwrite,
+                file_path,
+                "Editing file content",
+            )?;
+
             super::edit::edit(
                 Path::new(file_path),
                 old_string,
                 new_string,
                 replace_all,
-                sandbox,
+                sandbox.config(),
                 undo_manager,
                 session_id,
             )
             .await
-            .map_err(|e| e.to_string())
         }
         "delete" => {
-            let path = args["path"].as_str().ok_or("path is required for delete")?;
+            let path = args["path"]
+                .as_str()
+                .ok_or_else(|| ToolError::InvalidArguments {
+                    message: "path is required for delete".to_string(),
+                })?;
             let recursive = args["recursive"].as_bool().unwrap_or(false);
+
+            sandbox.check_permission(
+                crate::permission::DestructiveAction::FileDelete,
+                path,
+                "Deleting file or directory",
+            )?;
+
             super::delete::delete(
                 Path::new(path),
                 recursive,
-                sandbox,
+                sandbox.config(),
                 undo_manager,
                 session_id,
             )
             .await
-            .map_err(|e| e.to_string())
         }
         "glob" => {
             let pattern = args["pattern"]
                 .as_str()
-                .ok_or("pattern is required for glob")?;
+                .ok_or_else(|| ToolError::InvalidArguments {
+                    message: "pattern is required for glob".to_string(),
+                })?;
             let path = args["path"].as_str();
-            super::search::glob_search(pattern, path, sandbox)
-                .await
-                .map_err(|e| e.to_string())
+            super::search::glob_search(pattern, path, sandbox.config()).await
         }
         "grep" => {
             let pattern = args["pattern"]
                 .as_str()
-                .ok_or("pattern is required for grep")?;
+                .ok_or_else(|| ToolError::InvalidArguments {
+                    message: "pattern is required for grep".to_string(),
+                })?;
             let path = args["path"].as_str();
             let include = args["include"].as_str();
-            super::search::grep_search(pattern, path, include, sandbox)
-                .await
-                .map_err(|e| e.to_string())
+            super::search::grep_search(pattern, path, include, sandbox.config()).await
         }
         "patch" => {
             let patch_text = args["patchText"]
                 .as_str()
-                .ok_or("patchText is required for patch")?;
-            super::patch::apply_patch(patch_text, sandbox, undo_manager, session_id)
-                .await
-                .map_err(|e| e.to_string())
+                .ok_or_else(|| ToolError::InvalidArguments {
+                    message: "patchText is required for patch".to_string(),
+                })?;
+
+            sandbox.check_permission(
+                crate::permission::DestructiveAction::FileOverwrite,
+                "multiple files (patch)",
+                "Applying patch to files",
+            )?;
+
+            super::patch::apply_patch(patch_text, sandbox.config(), undo_manager, session_id).await
         }
-        _ => Err(format!("Unknown filesystem action: {}", action)),
+        _ => Err(ToolError::NotFound {
+            tool_name: format!("filesystem action: {}", action),
+        }),
     }
 }

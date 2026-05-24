@@ -27,6 +27,12 @@ pub trait ToolRegistry: Send + Sync {
     /// 現在のセッションIDを設定（Undo等で使用）
     async fn set_session_id(&self, _session_id: &str) {}
 
+    /// 破壊的操作の承認（リクエストID）
+    async fn approve_permission(&self, _request_id: &str) {}
+
+    /// セッション全体のパーミッション許可パターンの追加
+    async fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
+
     /// RAGインデックスが必要な場合に構築する（デフォルトでは何もしない）
     async fn ensure_index_built(
         &self,

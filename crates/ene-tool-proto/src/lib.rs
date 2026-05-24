@@ -36,6 +36,12 @@ pub trait ToolProvider: Send + Sync {
     /// サンドボックス設定を受信（FSツール等で使用。デフォルトは無操作）
     fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
 
+    /// 破壊的操作の承認（リクエストID）
+    fn approve_permission(&self, _request_id: &str) {}
+
+    /// セッション全体のパーミッション許可パターンの追加
+    fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
+
     /// ツール固有の設定を受信（Initialize 時に1回だけ呼ばれる）
     fn set_config(&self, _config: &serde_json::Value) {}
 

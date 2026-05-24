@@ -17,6 +17,36 @@ use ene_session::ConversationSession;
 use std::sync::Arc;
 use tokio_stream::Stream;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionDecision {
+    AllowOnce,
+    AllowSession,
+    Deny,
+}
+
+static PENDING_DECISIONS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<PermissionDecision>>>> = std::sync::OnceLock::new();
+
+pub fn register_permission_request(request_id: String, tx: tokio::sync::oneshot::Sender<PermissionDecision>) {
+    let map = PENDING_DECISIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(mut guard) = map.lock() {
+        guard.insert(request_id, tx);
+    }
+}
+
+pub fn submit_permission_decision(request_id: &str, decision: PermissionDecision) -> Result<(), &'static str> {
+    let map = PENDING_DECISIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(mut guard) = map.lock() {
+        if let Some(tx) = guard.remove(request_id) {
+            let _ = tx.send(decision);
+            Ok(())
+        } else {
+            Err("Request ID not found or already processed")
+        }
+    } else {
+        Err("Failed to lock global decision map")
+    }
+}
+
 #[derive(Debug)]
 pub enum AiStreamEvent {
     TextDelta(String),
@@ -203,25 +233,59 @@ pub async fn perform_tool_executions(
                 arguments: args.clone(),
             });
 
-            let tool_timeout = std::time::Duration::from_secs(30);
-            let result = match tokio::time::timeout(tool_timeout, registry.call_tool(&name, &args))
+            let tool_timeout = std::time::Duration::from_secs(60);
+            let mut result = match tokio::time::timeout(tool_timeout, registry.call_tool(&name, &args))
                 .await
             {
-                Ok(Ok(res)) => res,
-                Ok(Err(e)) => format!("Error executing tool: {}", e),
-                Err(_) => format!(
-                    "Tool '{}' timed out after {} seconds (the operation may not be supported on this environment)",
+                Ok(Ok(res)) => Ok(res),
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err(ene_tool_host::error::ToolError::Other(format!(
+                    "Tool '{}' timed out after {} seconds",
                     name,
                     tool_timeout.as_secs()
-                ),
+                ))),
+            };
+
+            if let Err(ene_tool_host::error::ToolError::PermissionRequired { request_id, action, target, description }) = &result {
+                let _ = tx.send(AiStreamEvent::PermissionRequired {
+                    request_id: request_id.clone(),
+                    action: action.clone(),
+                    target: target.clone(),
+                    description: description.clone(),
+                });
+
+                let (tx_decision, rx_decision) = tokio::sync::oneshot::channel::<PermissionDecision>();
+                register_permission_request(request_id.clone(), tx_decision);
+
+                match rx_decision.await {
+                    Ok(PermissionDecision::AllowOnce) => {
+                        registry.approve_permission(request_id).await;
+                        result = registry.call_tool(&name, &args).await;
+                    }
+                    Ok(PermissionDecision::AllowSession) => {
+                        registry.allow_pattern(action, target).await;
+                        registry.approve_permission(request_id).await;
+                        result = registry.call_tool(&name, &args).await;
+                    }
+                    _ => {
+                        result = Err(ene_tool_host::error::ToolError::PermissionDenied(
+                            "Permission denied by user".to_string()
+                        ));
+                    }
+                }
+            }
+
+            let result_str = match result {
+                Ok(res) => res,
+                Err(e) => format!("Error executing tool: {}", e),
             };
 
             let _ = tx.send(AiStreamEvent::ToolCallResult {
                 name: name.clone(),
-                result: result.clone(),
+                result: result_str.clone(),
             });
 
-            let (final_tool_text, screenshot_data) = extract_screenshot(&result);
+            let (final_tool_text, screenshot_data) = extract_screenshot(&result_str);
 
             let tool_msg = ToolMsgArgs::default()
                 .tool_call_id(call.id.clone())

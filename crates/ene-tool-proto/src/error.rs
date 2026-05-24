@@ -16,6 +16,12 @@ pub enum ToolError {
     Timeout { message: String },
     Internal { message: String },
     IpcTransport { message: String },
+    PermissionRequired {
+        request_id: String,
+        action: String,
+        target: String,
+        description: String,
+    },
 }
 
 impl std::fmt::Display for ToolError {
@@ -30,6 +36,13 @@ impl std::fmt::Display for ToolError {
             ToolError::Timeout { message } => write!(f, "Timeout: {message}"),
             ToolError::Internal { message } => write!(f, "Internal error: {message}"),
             ToolError::IpcTransport { message } => write!(f, "IPC transport error: {message}"),
+            ToolError::PermissionRequired { request_id, action, target, description } => {
+                write!(
+                    f,
+                    "Permission required [id: {}]: {} on {} ({})",
+                    request_id, action, target, description
+                )
+            }
         }
     }
 }
