@@ -15,8 +15,9 @@ pub use character_card::{
 pub use config::{
     EneSettings,
     load_full_settings, load_full_settings_from, load_settings, load_settings_from,
-    save_full_settings, generate_schema_json, register_schema, get_global_section,
-    update_global_settings, get_global_settings,
+    save_full_settings, generate_schema_json, register_schema, register_schema_with_parent,
+    register_runtime_schema,
+    get_global_section, update_global_settings, get_global_settings,
 };
 pub use character_settings::{CharacterPerSettings, generate_character_schema_json};
 pub use error::ConfigError;
@@ -34,8 +35,50 @@ pub use ctor::ctor;
 /// 機能クレートがボイラープレートなしで Config 構造体を簡潔に定義・自動登録するための宣言的マクロ。
 /// 各フィールドには `= デフォルト値` の形式でインラインのデフォルト値を指定でき、
 /// 自動的に `Default` トレイトの実装も生成されます。
+///
+/// `parent = "ParentDefinitionName"` を指定すると、スキーマ生成時に親の定義/property にネストされます。
 #[macro_export]
 macro_rules! define_config {
+    (
+        $key:expr,
+        parent = $parent:expr,
+        $(#[$meta:meta])*
+        pub struct $name:ident {
+            $(
+                $(#[$field_meta:meta])*
+                pub $field:ident : $type:ty = $default:expr
+            ),* $(,)?
+        }
+    ) => {
+        #[derive(Debug, Clone, $crate::serde::Serialize, $crate::serde::Deserialize, $crate::schemars::JsonSchema)]
+        #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+        #[schemars(crate = "::ene_config::schemars")]
+        $(#[$meta])*
+        pub struct $name {
+            $(
+                $(#[$field_meta])*
+                pub $field : $type,
+            )*
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self {
+                    $(
+                        $field : $default,
+                    )*
+                }
+            }
+        }
+
+        const _: () = {
+            #[$crate::ctor]
+            fn register() {
+                $crate::register_schema_with_parent::<$name>($key, $parent);
+            }
+        };
+    };
+
     (
         $key:expr,
         $(#[$meta:meta])*

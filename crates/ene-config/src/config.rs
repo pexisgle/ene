@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use schemars::schema::Schema;
 use schemars::JsonSchema;
 use std::collections::HashMap;
 use std::path::Path;
@@ -41,15 +41,91 @@ pub fn get_global_section<T: serde::de::DeserializeOwned + Default>(key: &str) -
     T::default()
 }
 
-static SCHEMA_REGISTRY: std::sync::OnceLock<std::sync::Mutex<HashMap<String, schemars::schema::RootSchema>>> = std::sync::OnceLock::new();
+pub struct SchemaEntry {
+    pub schema: schemars::schema::RootSchema,
+    pub parent: Option<String>,
+}
+
+static SCHEMA_REGISTRY: std::sync::OnceLock<std::sync::Mutex<HashMap<String, SchemaEntry>>> = std::sync::OnceLock::new();
+
+/// 実行時にツールから収集したスキーマを保管するレジストリ
+static RUNTIME_SCHEMA_REGISTRY: std::sync::OnceLock<std::sync::Mutex<HashMap<String, SchemaEntry>>> =
+    std::sync::OnceLock::new();
 
 /// 各クレートが自身の Config スキーマを登録するためのグローバルな静的ヘルパー
 pub fn register_schema<T: JsonSchema>(key: &str) {
+    register_schema_inner::<T>(key, None);
+}
+
+/// 実行時にツールから収集したスキーマを登録する
+pub fn register_runtime_schema(
+    key: &str,
+    schema: serde_json::Value,
+    parent: Option<String>,
+) {
+    use schemars::schema::RootSchema;
+    let root_schema: RootSchema = serde_json::from_value(schema).unwrap_or_else(|e| {
+        tracing::error!("Failed to parse runtime schema for '{}': {}", key, e);
+        RootSchema::default()
+    });
+    let registry = RUNTIME_SCHEMA_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(mut reg) = registry.lock() {
+        reg.insert(
+            key.to_string(),
+            SchemaEntry {
+                schema: root_schema,
+                parent,
+            },
+        );
+    }
+}
+
+/// 親スキーマの definition/property にネストして登録する
+pub fn register_schema_with_parent<T: JsonSchema>(key: &str, parent: &str) {
+    register_schema_inner::<T>(key, Some(parent.to_string()));
+}
+
+fn register_schema_inner<T: JsonSchema>(key: &str, parent: Option<String>) {
     let schema_gen = schemars::r#gen::SchemaSettings::draft07().into_generator();
     let schema = schema_gen.into_root_schema_for::<T>();
     let registry = SCHEMA_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     if let Ok(mut reg) = registry.lock() {
-        reg.insert(key.to_string(), schema);
+        reg.insert(key.to_string(), SchemaEntry { schema, parent });
+    }
+}
+
+fn merge_child_into_parent(
+    root_schema: &mut schemars::schema::RootSchema,
+    parent_key: &str,
+    child_schema: &schemars::schema::RootSchema,
+) {
+    let child_props = match child_schema.schema.object {
+        Some(ref ov) => ov.properties.clone(),
+        None => return,
+    };
+    if child_props.is_empty() {
+        return;
+    }
+
+    // Try definitions first (e.g. "ToolEntry")
+    if let Some(def) = root_schema.definitions.get_mut(parent_key) {
+        if let Schema::Object(schema_obj) = def {
+            if let Some(ov) = schema_obj.object.as_mut() {
+                ov.properties.extend(child_props);
+                return;
+            }
+        }
+    }
+
+    // Fall back to root-level property
+    if let Some(ov) = root_schema.schema.object.as_mut() {
+        if let Some(parent) = ov.properties.get_mut(parent_key) {
+            if let Schema::Object(parent_obj) = parent {
+                if let Some(parent_ov) = parent_obj.object.as_mut() {
+                    parent_ov.properties.extend(child_props);
+                }
+            }
+        }
     }
 }
 
@@ -100,6 +176,32 @@ impl EneSettings {
 }
 
 
+fn apply_registry_to_schema(
+    root_schema: &mut schemars::schema::RootSchema,
+    registry: &HashMap<String, SchemaEntry>,
+) {
+    // 第一パス: 親を持たないエントリを挿入し、すべての定義を収集
+    for (key, entry) in registry.iter() {
+        if entry.parent.is_none() {
+            if let Some(object) = &mut root_schema.schema.object {
+                object.properties.insert(
+                    key.clone(),
+                    schemars::schema::Schema::Object(entry.schema.schema.clone()),
+                );
+            }
+        }
+        for (def_name, def_schema) in &entry.schema.definitions {
+            root_schema.definitions.insert(def_name.clone(), def_schema.clone());
+        }
+    }
+    // 第二パス: 親を持つエントリをマージ
+    for (_, entry) in registry.iter() {
+        if let Some(parent_key) = &entry.parent {
+            merge_child_into_parent(root_schema, parent_key, &entry.schema);
+        }
+    }
+}
+
 /// JSON Schema の JSON 表現を生成します
 pub fn generate_schema_json() -> Result<String, serde_json::Error> {
     let schema_gen = schemars::r#gen::SchemaSettings::draft07().into_generator();
@@ -107,19 +209,13 @@ pub fn generate_schema_json() -> Result<String, serde_json::Error> {
     
     if let Some(registry) = SCHEMA_REGISTRY.get() {
         if let Ok(reg) = registry.lock() {
-            for (key, sub_root) in reg.iter() {
-                let schema_obj = &mut root_schema.schema;
-                if let Some(object) = &mut schema_obj.object {
-                    object.properties.insert(
-                        key.clone(),
-                        schemars::schema::Schema::Object(sub_root.schema.clone())
-                    );
-                    
-                    for (def_name, def_schema) in &sub_root.definitions {
-                        root_schema.definitions.insert(def_name.clone(), def_schema.clone());
-                    }
-                }
-            }
+            apply_registry_to_schema(&mut root_schema, &reg);
+        }
+    }
+
+    if let Some(registry) = RUNTIME_SCHEMA_REGISTRY.get() {
+        if let Ok(reg) = registry.lock() {
+            apply_registry_to_schema(&mut root_schema, &reg);
         }
     }
     
@@ -200,6 +296,7 @@ pub fn save_full_settings(settings: &EneSettings) -> Result<(), std::io::Error> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use schemars::schema::Schema;
 
     crate::define_config!(
         "dummy_test_config",
@@ -209,15 +306,51 @@ mod tests {
         }
     );
 
+    crate::define_config!(
+        "child_config",
+        parent = "ParentDef",
+        pub struct ChildTestConfig {
+            pub child_field: String = "child".to_string(),
+        }
+    );
+
     #[test]
     fn test_define_config_self_registration() {
-        // ctor will run before tests, so the schema should be in the registry.
         let schema_json = generate_schema_json().unwrap();
         assert!(schema_json.contains("dummy_test_config"), "Schema should automatically include dummy_test_config");
         assert!(schema_json.contains("test_value"), "Schema should automatically include dummy_test_config field test_value");
     }
 
+    #[test]
+    fn test_parent_merge() {
+        // Test that merge_child_into_parent merges properties into a definition
+        let child_schema = {
+            let g = schemars::r#gen::SchemaSettings::draft07().into_generator();
+            g.into_root_schema_for::<ChildTestConfig>()
+        };
 
+        let mut parent_schema = {
+            let g = schemars::r#gen::SchemaSettings::draft07().into_generator();
+            let mut schema = g.into_root_schema_for::<DummyTestConfig>();
+            // Add a dummy ParentDef definition to test against
+            let def_schema = Schema::Object(schemars::schema::SchemaObject {
+                object: Some(Box::new(schemars::schema::ObjectValidation::default())),
+                ..Default::default()
+            });
+            schema.definitions.insert("ParentDef".to_string(), def_schema);
+            schema
+        };
+
+        merge_child_into_parent(&mut parent_schema, "ParentDef", &child_schema);
+
+        let parent_def = parent_schema.definitions.get("ParentDef").unwrap();
+        let child_props = match parent_def {
+            Schema::Object(obj) => obj.object.as_ref().map(|o| &o.properties),
+            _ => None,
+        };
+        assert!(child_props.is_some(), "ParentDef should have properties");
+        assert!(child_props.unwrap().contains_key("child_field"), "ParentDef should contain child_field");
+    }
 
     #[test]
     fn test_global_settings_accessor() {
