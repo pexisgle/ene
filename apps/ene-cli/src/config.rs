@@ -1,5 +1,5 @@
 use crate::style;
-use ene_ai_core::AiRuntime;
+use ene_ai_core::{AiRuntime, MemoryConfig};
 
 pub async fn init() -> AiRuntime {
     let _assets_dir = ene_config::ensure_resource_dirs();
@@ -12,13 +12,14 @@ pub async fn init() -> AiRuntime {
                 "{}",
                 style::header("[Runtime] Unified AI Runtime initialized successfully.")
             );
-            if runtime.settings.memory.enabled {
+            let mem_config = runtime.settings.get_section::<MemoryConfig>("memory").unwrap_or_default();
+            if mem_config.enabled {
                 println!("{}", style::header("[Memory] Long-term memory enabled."));
                 println!(
                     "{}",
                     style::header(format!(
                         "[Memory] DB: {}",
-                        runtime.settings.resolve_memory_db_path().display()
+                        mem_config.resolve_memory_db_path().display()
                     ))
                 );
             }

@@ -1,5 +1,5 @@
 use crate::{context::AppContext, style};
-use ene_ai_core::{SplitReason, execute_split, truncate};
+use ene_ai_core::{SplitReason, execute_split, truncate, SessionConfig};
 
 pub async fn execute(arg: &str, ctx: &mut AppContext) {
     let parts: Vec<&str> = arg.splitn(2, ' ').collect();
@@ -31,14 +31,15 @@ fn handle_info(ctx: &AppContext) {
         "History messages: {}",
         ctx.session.history.conversation_history.len()
     );
-    println!("Auto-split: {}", ctx.settings.memory.auto_session_split);
+    let session_config = ctx.settings.get_section::<SessionConfig>("session").unwrap_or_default();
+    println!("Auto-split: {}", session_config.auto_session_split);
     println!(
         "Timeout: {} min",
-        ctx.settings.memory.session_timeout_minutes
+        session_config.session_timeout_minutes
     );
     println!(
         "Topic threshold: {}",
-        ctx.settings.memory.topic_change_threshold
+        session_config.topic_change_threshold
     );
     println!("--------------------");
 }
@@ -74,10 +75,12 @@ async fn handle_split(ctx: &mut AppContext) {
         &ctx.settings.user_name,
         store,
         embedder,
-        &ctx.settings,
+        &ctx.settings.get_section::<ene_memory::MemoryConfig>("memory").unwrap_or_default().resolve_summarization_model(),
+        &ctx.settings.get_section::<ene_memory::MemoryConfig>("memory").unwrap_or_default().resolve_summarization_base_url().unwrap_or_default(),
+        &ctx.settings.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default().resolve_api_key(),
         reason,
-    )
-    .await
+     )
+     .await
     {
         Ok(result) => {
             println!(

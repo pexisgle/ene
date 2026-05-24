@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 ene-ai-core = { workspace = true }
 ene-config = { workspace = true }
+ene-memory = { workspace = true }
+ene-tool-host = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 serde_json = { workspace = true }
