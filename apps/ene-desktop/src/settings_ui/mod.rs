@@ -313,7 +313,25 @@ impl SettingsValueKind {
             }
             SettingsValueKind::AiApiKey => {
                 let mut provider_config = settings.ai.ai.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
-                provider_config.api_key = value.to_string();
+                if provider_config.api_key_source == "keyring" {
+                    let service = &provider_config.api_key_keyring_service;
+                    let account = &provider_config.api_key_keyring_account;
+                    match keyring::Entry::new(service, account) {
+                        Ok(entry) => {
+                            if let Err(e) = entry.set_password(value) {
+                                error!("[Security] Failed to write API key to keyring: {}", e);
+                            } else {
+                                info!("[Security] API key stored in keyring.");
+                                provider_config.api_key = String::new();
+                            }
+                        }
+                        Err(e) => {
+                            error!("[Security] Failed to initialize keyring: {}", e);
+                        }
+                    }
+                } else {
+                    provider_config.api_key = value.to_string();
+                }
                 let _ = settings.ai.ai.set_section("provider", &provider_config);
                 Ok(())
             }
@@ -477,6 +495,74 @@ fn render_settings_window(
         ui.separator();
         ui.small("F1: Open/Close  |  Esc: Hide  |  A/D,W/S: Char/Motion");
     });
+
+    if let Some(req) = settings.ui.pending_permission.clone() {
+        let mut open = true;
+        egui::Window::new("⚠️ 承認の要求 / Permission Required")
+            .open(&mut open)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(8.0);
+                    ui.heading("破壊的操作の許可を求めています");
+                    ui.add_space(8.0);
+                });
+
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.strong("アクション: ");
+                        ui.label(&req.action);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.strong("対象: ");
+                        ui.label(&req.target);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.strong("詳細: ");
+                        ui.label(&req.description);
+                    });
+                });
+
+                ui.add_space(12.0);
+
+                ui.horizontal(|ui| {
+                    ui.columns(3, |columns| {
+                        if columns[0].button("1回のみ許可\n(Allow Once)").clicked() {
+                            let _ = ene_ai_core::stream::submit_permission_decision(
+                                &req.request_id,
+                                ene_ai_core::stream::PermissionDecision::AllowOnce,
+                            );
+                            settings.ui.pending_permission = None;
+                        }
+                        if columns[1].button("セッションで許可\n(Allow Session)").clicked() {
+                            let _ = ene_ai_core::stream::submit_permission_decision(
+                                &req.request_id,
+                                ene_ai_core::stream::PermissionDecision::AllowSession,
+                            );
+                            settings.ui.pending_permission = None;
+                        }
+                        if columns[2].button("拒否\n(Deny)").clicked() {
+                            let _ = ene_ai_core::stream::submit_permission_decision(
+                                &req.request_id,
+                                ene_ai_core::stream::PermissionDecision::Deny,
+                            );
+                            settings.ui.pending_permission = None;
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+            });
+
+        if !open {
+            let _ = ene_ai_core::stream::submit_permission_decision(
+                &req.request_id,
+                ene_ai_core::stream::PermissionDecision::Deny,
+            );
+            settings.ui.pending_permission = None;
+        }
+    }
 }
 
 fn apply_settings_window_visibility(
@@ -554,7 +640,20 @@ fn apply_ai_stream_events(
             AiStreamEvent::SpecialToken(_) => {}
             AiStreamEvent::ToolCallStart { .. } => {}
             AiStreamEvent::ToolCallResult { .. } => {}
-            AiStreamEvent::PermissionRequired { .. } => {}
+            AiStreamEvent::PermissionRequired {
+                request_id,
+                action,
+                target,
+                description,
+            } => {
+                settings.ui.pending_permission = Some(crate::app_config::PendingPermission {
+                    request_id: request_id.clone(),
+                    action: action.clone(),
+                    target: target.clone(),
+                    description: description.clone(),
+                });
+                settings.ui.settings_window_visible = true;
+            }
             AiStreamEvent::TaskProgress { .. } => {}
         }
     }
