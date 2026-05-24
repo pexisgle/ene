@@ -107,6 +107,9 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
             }
             IpcResponse::Ack
         }
+        IpcRequest::GetConfigSchema => IpcResponse::ConfigSchema {
+            schema: provider.config_schema(),
+        },
         IpcRequest::ListTools => IpcResponse::Tools {
             tools: provider.list_tools(),
         },
