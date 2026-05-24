@@ -1,3 +1,4 @@
+pub mod config;
 pub mod error;
 pub mod recall;
 pub mod schema;
@@ -10,3 +11,4 @@ pub use recall::format_summaries_for_prompt;
 pub use store::{ConversationSummary, KeyFact, MemoryStore, RecalledSummary};
 pub use summarizer::{ConversationSummaryResult, summarize_conversation};
 pub use utils::truncate;
+pub use config::MemoryConfig;

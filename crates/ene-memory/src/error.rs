@@ -12,8 +12,8 @@ pub enum MemoryError {
     PromptBuildError(String),
     #[error("API request failed: {0}")]
     ApiRequestError(String),
-    #[error(transparent)]
-    Config(#[from] ene_config::ConfigError),
+    #[error("Configuration error: {0}")]
+    Config(String),
     #[error(transparent)]
     Embedding(#[from] ene_embedding::error::EmbeddingError),
     #[error("Other error: {0}")]

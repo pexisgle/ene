@@ -1,6 +1,9 @@
 pub mod client;
+pub mod config;
 pub mod error;
 mod quantized;
+
+pub use config::{EmbeddingConfig, EmbeddingProviderType};
 
 use async_openai::types::embeddings::CreateEmbeddingRequestArgs;
 use async_trait::async_trait;
@@ -105,17 +108,18 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 }
 
 pub fn create_embedding_provider(
-    provider_type: ene_config::EmbeddingProviderType,
+    provider_type: crate::EmbeddingProviderType,
     model: &str,
     base_url: &str,
     api_key: &str,
     dimensions: usize,
     quantization: Option<&str>,
+    model_dir: std::path::PathBuf,
 ) -> Result<Box<dyn EmbeddingProvider>, EmbeddingError> {
     match provider_type {
-        ene_config::EmbeddingProviderType::Local => {
+        crate::EmbeddingProviderType::Local => {
             let quant = quantization.unwrap_or("F16");
-            let (gguf_path, tokenizer_path) = resolve_gguf_paths(model, quant)?;
+            let (gguf_path, tokenizer_path) = resolve_gguf_paths(model, quant, model_dir)?;
             let max_length = 8192;
             let provider = GgufEmbeddingProvider::load(
                 model,
@@ -126,7 +130,7 @@ pub fn create_embedding_provider(
             )?;
             Ok(Box::new(provider))
         }
-        ene_config::EmbeddingProviderType::Api => {
+        crate::EmbeddingProviderType::Api => {
             let provider = ApiEmbeddingProvider::new(base_url, api_key, model, dimensions);
             Ok(Box::new(provider))
         }

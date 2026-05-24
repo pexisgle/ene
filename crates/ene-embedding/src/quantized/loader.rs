@@ -191,9 +191,8 @@ pub fn load_model(
 pub fn resolve_gguf_paths(
     model_name: &str,
     quantization: &str,
+    model_dir: PathBuf,
 ) -> Result<(PathBuf, PathBuf), EmbeddingError> {
-    let model_dir = ene_config::models_dir();
-
     let model_name_owned = model_name.to_string();
     let quant_owned = quantization.to_string();
 
