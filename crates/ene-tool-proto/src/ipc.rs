@@ -1,11 +1,12 @@
 use crate::error::ToolError;
 use crate::sandbox::SandboxConfigData;
 use crate::types::ToolDefinition;
-use serde::{Deserialize, Serialize};
+use ene_config::serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// IPC リクエスト — core → host
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(crate = "ene_config::serde")]
 pub enum IpcRequest {
     Initialize {
         sandbox: SandboxConfigData,
@@ -25,6 +26,7 @@ pub enum IpcRequest {
 
 /// IPC レスポンス — host → core
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(crate = "ene_config::serde")]
 pub enum IpcResponse {
     Ack,
     Tools { tools: Vec<ToolDefinition> },

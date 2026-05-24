@@ -1,7 +1,8 @@
-use serde::{Deserialize, Serialize};
+use ene_config::serde::{Deserialize, Serialize};
 
 /// ツールカテゴリ — 分類・RAG絞り込みに使用
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(crate = "ene_config::serde")]
 pub enum ToolCategory {
     Filesystem,
     Shell,
@@ -26,6 +27,7 @@ impl ToolCategory {
 
 /// ツール定義 — OpenAI API の `tools` パラメータに渡す形式
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(crate = "ene_config::serde")]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
@@ -55,6 +57,7 @@ impl ToolDefinition {
 
 /// ツール実行結果（LLMに返す形式）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(crate = "ene_config::serde")]
 pub struct ToolCallResult {
     pub tool_call_id: String,
     pub content: String,

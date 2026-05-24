@@ -1,22 +1,29 @@
-use serde::{Deserialize, Serialize};
-
-/// SandboxConfig のシリアライズ可能データ型（POD）
-///
-/// バリデーションロジックは含まず、ene-tools/fs::Sandbox で構築・検証する。
-/// core → host 間のIPC通信で使用される。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SandboxConfigData {
-    pub enabled: bool,
-    pub allowed_directories: Vec<String>,
-    pub writable_directories: Vec<String>,
-    pub blocked_commands: Vec<String>,
-    pub max_read_bytes: usize,
-    pub max_write_bytes: usize,
-    pub shell_timeout_ms: u64,
-    pub max_shell_output_bytes: usize,
-    pub max_shell_output_lines: usize,
-    pub undo_db_path: Option<String>,
-}
+// SandboxConfig のシリアライズ可能データ型（POD）
+//
+// バリデーションロジックは含まず、ene-tools/fs::Sandbox で構築・検証する。
+// core → host 間のIPC通信で使用される。
+ene_config::define_config!(
+    "sandbox",
+    #[derive(PartialEq, Eq)]
+    pub struct SandboxConfigData {
+        pub enabled: bool = true,
+        pub allowed_directories: Vec<String> = vec![".".to_string()],
+        pub writable_directories: Vec<String> = vec![".".to_string()],
+        pub blocked_commands: Vec<String> = vec![
+            r"rm\s+-rf\s+/".to_string(),
+            r"dd\s+if=".to_string(),
+            r"mkfs".to_string(),
+            r"sudo\s+".to_string(),
+            r":\s*\{\s*\|\s*&\s*;\s*\}".to_string(),
+        ],
+        pub max_read_bytes: usize = 50 * 1024,
+        pub max_write_bytes: usize = 1024 * 1024,
+        pub shell_timeout_ms: u64 = 120_000,
+        pub max_shell_output_bytes: usize = 50 * 1024,
+        pub max_shell_output_lines: usize = 2000,
+        pub undo_db_path: Option<String> = None,
+    }
+);
 
 #[cfg(test)]
 mod tests {

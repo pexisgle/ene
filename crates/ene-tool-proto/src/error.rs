@@ -1,10 +1,11 @@
-use serde::{Deserialize, Serialize};
+use ene_config::serde::{Deserialize, Serialize};
 
 /// 構造化されたツールエラー型
 ///
 /// IPC越しにもシリアライズ可能で、各ツールクレート・core・host間で
 /// 統一的に使用される。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(crate = "ene_config::serde")]
 pub enum ToolError {
     NotFound { tool_name: String },
     InvalidArguments { message: String },
