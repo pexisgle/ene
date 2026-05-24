@@ -6,7 +6,7 @@ use tokio_stream::StreamExt;
 
 use crate::app_config::CharacterSettings;
 use crate::character::ResolvedExpressionMap;
-use ene_ai_core::{
+use ene_core::{
     AiRuntime, poll_split_result,
     stream::{AiStreamEvent as CoreAiStreamEvent, run_ai_with_tools},
     truncate, MemoryConfig, SessionConfig,
@@ -303,7 +303,7 @@ fn poll_ai_worker(
                         info!("[Session] Starting new conversation.");
                     }
                     Err(e) => {
-                        if !matches!(e, ene_ai_core::SessionError::SplitNotNeeded) {
+                        if !matches!(e, ene_core::SessionError::SplitNotNeeded) {
                             error!("[Session] Summary generation error: {}", e);
                         }
                     }

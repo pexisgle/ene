@@ -1,11 +1,11 @@
 use crate::style;
-use ene_ai_core::{AiRuntime, MemoryConfig};
+use ene_core::{AiRuntime, MemoryConfig};
 
 pub async fn init() -> AiRuntime {
     let _assets_dir = ene_config::ensure_resource_dirs();
 
     let mut settings = ene_config::load_settings();
-    let provider = settings.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
+    let provider = settings.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default();
 
     if !provider.api_key.trim().is_empty() && provider.api_key_source != "keyring" {
         println!("{}", style::warning("\n[Security Warning] settings.json に API キーが平文で保存されています。"));

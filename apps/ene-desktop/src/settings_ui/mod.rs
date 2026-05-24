@@ -8,7 +8,7 @@ use page_character::render_character_page;
 use page_graphics::render_graphics_page;
 
 use crate::ai_bridge::{AiRequestEvent, AiStreamEvent};
-use ene_ai_core::{EmbeddingConfig, MemoryConfig};
+use ene_core::{EmbeddingConfig, MemoryConfig};
 use crate::app_config::{
     CharacterSettings, SETTINGS_WINDOW_HEIGHT, SETTINGS_WINDOW_WIDTH, target_fps_label,
     AntialiasingMode, ShadowQuality,
@@ -119,7 +119,7 @@ impl SettingsInputState {
         self.character_pos_z = format!("{:+.2}", settings.character_state.character_position.z);
         self.ai_user_name = settings.ai.ai.user_name.clone();
         self.ai_runtime_rules = settings.ai.ai.runtime_rules.clone();
-        let provider_config = settings.ai.ai.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
+        let provider_config = settings.ai.ai.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default();
         self.ai_base_url = provider_config.base_url.clone();
         self.ai_api_key = provider_config.api_key.clone();
         self.ai_chat_input = settings.ui.ai_chat_input.clone();
@@ -128,8 +128,8 @@ impl SettingsInputState {
 
         self.ai_memory_enabled = mem_config.enabled;
         self.ai_embedding_provider = match embed_config.provider_type {
-            ene_ai_core::EmbeddingProviderType::Api => "api".to_string(),
-            ene_ai_core::EmbeddingProviderType::Local => "local".to_string(),
+            ene_core::EmbeddingProviderType::Api => "api".to_string(),
+            ene_core::EmbeddingProviderType::Local => "local".to_string(),
         };
         self.ai_embedding_model = embed_config.model.clone();
         self.ai_embedding_base_url = embed_config.base_url.clone();
@@ -261,19 +261,19 @@ impl SettingsValueKind {
             SettingsValueKind::AiUserName => settings.ai.ai.user_name.clone(),
             SettingsValueKind::AiRuntimeRules => settings.ai.ai.runtime_rules.clone(),
             SettingsValueKind::AiProviderName => {
-                let provider_config = settings.ai.ai.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
+                let provider_config = settings.ai.ai.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default();
                 provider_config.provider_name.clone()
             }
             SettingsValueKind::AiModel => {
-                let provider_config = settings.ai.ai.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
+                let provider_config = settings.ai.ai.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default();
                 provider_config.model.clone()
             }
             SettingsValueKind::AiBaseUrl => {
-                let provider_config = settings.ai.ai.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
+                let provider_config = settings.ai.ai.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default();
                 provider_config.base_url.clone()
             }
             SettingsValueKind::AiApiKey => {
-                let provider_config = settings.ai.ai.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
+                let provider_config = settings.ai.ai.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default();
                 masked_secret(&provider_config.api_key)
             }
             SettingsValueKind::AiChatInput => settings.ui.ai_chat_input.clone(),
@@ -306,13 +306,13 @@ impl SettingsValueKind {
                 Ok(())
             }
             SettingsValueKind::AiBaseUrl => {
-                let mut provider_config = settings.ai.ai.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
+                let mut provider_config = settings.ai.ai.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default();
                 provider_config.base_url = value.to_string();
                 let _ = settings.ai.ai.set_section("provider", &provider_config);
                 Ok(())
             }
             SettingsValueKind::AiApiKey => {
-                let mut provider_config = settings.ai.ai.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
+                let mut provider_config = settings.ai.ai.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default();
                 if provider_config.api_key_source == "keyring" {
                     let service = &provider_config.api_key_keyring_service;
                     let account = &provider_config.api_key_keyring_account;
@@ -530,23 +530,23 @@ fn render_settings_window(
                 ui.horizontal(|ui| {
                     ui.columns(3, |columns| {
                         if columns[0].button("1回のみ許可\n(Allow Once)").clicked() {
-                            let _ = ene_ai_core::stream::submit_permission_decision(
+                            let _ = ene_core::stream::submit_permission_decision(
                                 &req.request_id,
-                                ene_ai_core::stream::PermissionDecision::AllowOnce,
+                                ene_core::stream::PermissionDecision::AllowOnce,
                             );
                             settings.ui.pending_permission = None;
                         }
                         if columns[1].button("セッションで許可\n(Allow Session)").clicked() {
-                            let _ = ene_ai_core::stream::submit_permission_decision(
+                            let _ = ene_core::stream::submit_permission_decision(
                                 &req.request_id,
-                                ene_ai_core::stream::PermissionDecision::AllowSession,
+                                ene_core::stream::PermissionDecision::AllowSession,
                             );
                             settings.ui.pending_permission = None;
                         }
                         if columns[2].button("拒否\n(Deny)").clicked() {
-                            let _ = ene_ai_core::stream::submit_permission_decision(
+                            let _ = ene_core::stream::submit_permission_decision(
                                 &req.request_id,
-                                ene_ai_core::stream::PermissionDecision::Deny,
+                                ene_core::stream::PermissionDecision::Deny,
                             );
                             settings.ui.pending_permission = None;
                         }
@@ -556,9 +556,9 @@ fn render_settings_window(
             });
 
         if !open {
-            let _ = ene_ai_core::stream::submit_permission_decision(
+            let _ = ene_core::stream::submit_permission_decision(
                 &req.request_id,
-                ene_ai_core::stream::PermissionDecision::Deny,
+                ene_core::stream::PermissionDecision::Deny,
             );
             settings.ui.pending_permission = None;
         }

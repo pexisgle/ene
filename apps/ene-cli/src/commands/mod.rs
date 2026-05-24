@@ -2,7 +2,7 @@ mod memory;
 mod session;
 
 use crate::{context::AppContext, style};
-use ene_ai_core::{MemoryConfig, SessionConfig, EmbeddingConfig};
+use ene_core::{MemoryConfig, SessionConfig, EmbeddingConfig};
 
 pub async fn execute(input: &str, ctx: &mut AppContext) {
     let parts: Vec<&str> = input.splitn(2, ' ').collect();
@@ -31,7 +31,7 @@ pub async fn execute(input: &str, ctx: &mut AppContext) {
 
 fn handle_prompt(ctx: &AppContext) {
     if let Some(card) = &ctx.session.character_card {
-        let sys = ene_ai_core::prompt_builder::build_system_prompt(
+        let sys = ene_core::prompt_builder::build_system_prompt(
             card,
             &ctx.settings.runtime_rules,
             &ctx.settings.user_name,
@@ -46,7 +46,7 @@ fn handle_prompt(ctx: &AppContext) {
             && !card.data.mes_example.trim().is_empty()
         {
             println!("--- Example Messages ---");
-            let ex = ene_ai_core::expand_cbs_macros(
+            let ex = ene_core::expand_cbs_macros(
                 &card.data.mes_example,
                 card.data.get_character_name(),
                 &ctx.settings.user_name,
@@ -88,8 +88,8 @@ fn handle_prompt(ctx: &AppContext) {
             println!("----------------------------------------");
         }
 
-        if let Some(phi) = ene_ai_core::prompt_builder::build_expression_phi(card) {
-            let phi_expanded = ene_ai_core::expand_cbs_macros(
+        if let Some(phi) = ene_core::prompt_builder::build_expression_phi(card) {
+            let phi_expanded = ene_core::expand_cbs_macros(
                 &phi,
                 card.data.get_character_name(),
                 &ctx.settings.user_name,
@@ -144,7 +144,7 @@ fn handle_config(ctx: &AppContext) {
     let mem_config = ctx.settings.get_section::<MemoryConfig>("memory").unwrap_or_default();
     let embed_config = ctx.settings.get_section::<EmbeddingConfig>("embedding").unwrap_or_default();
     let session_config = ctx.settings.get_section::<SessionConfig>("session").unwrap_or_default();
-    let provider_config = ctx.settings.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
+    let provider_config = ctx.settings.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default();
 
     println!("--- Current Config ---");
     println!("Provider: {}", provider_config.provider_name);

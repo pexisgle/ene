@@ -1,4 +1,4 @@
-use ene_ai_core::AiRuntime;
+use ene_core::AiRuntime;
 use std::ops::{Deref, DerefMut};
 
 pub struct AppContext {

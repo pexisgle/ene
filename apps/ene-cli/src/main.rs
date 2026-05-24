@@ -17,7 +17,7 @@ async fn main() {
     if let Some(api_key) = args.set_api_key {
         let _ = ene_config::ensure_resource_dirs();
         let mut settings = ene_config::load_settings();
-        let provider = settings.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
+        let provider = settings.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default();
         let service = &provider.api_key_keyring_service;
         let account = &provider.api_key_keyring_account;
 

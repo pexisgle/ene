@@ -1,5 +1,5 @@
 use crate::{context::AppContext, style};
-use ene_ai_core::truncate;
+use ene_core::truncate;
 
 pub async fn execute(arg: &str, ctx: &mut AppContext) {
     let parts: Vec<&str> = arg.splitn(2, ' ').collect();

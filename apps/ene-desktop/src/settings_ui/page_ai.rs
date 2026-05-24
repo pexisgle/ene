@@ -1,6 +1,6 @@
 use super::{SettingsButtonAction, SettingsInputState, SettingsValueKind, widgets::apply_action};
 use crate::ai_bridge::AiRequestEvent;
-use ene_ai_core::{EmbeddingConfig, MemoryConfig};
+use ene_core::{EmbeddingConfig, MemoryConfig};
 use crate::app_config::CharacterSettings;
 use crate::character::CharacterAnimationControl;
 use bevy::prelude::*;
@@ -83,7 +83,7 @@ pub fn render_ai_page(
 
         ui.horizontal(|ui| {
             ui.label("API Key Source");
-            let mut provider_config = settings.ai.ai.get_section::<ene_ai_core::ProviderSettings>("provider").unwrap_or_default();
+            let mut provider_config = settings.ai.ai.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default();
             let mut current_source = provider_config.api_key_source.clone();
             egui::ComboBox::from_id_salt("api_key_source")
                 .selected_text(&current_source)
@@ -161,8 +161,8 @@ pub fn render_ai_page(
             if current_provider != input_state.ai_embedding_provider {
                 input_state.ai_embedding_provider = current_provider.clone();
                 embed_config.provider_type = match current_provider.as_str() {
-                    "local" => ene_ai_core::EmbeddingProviderType::Local,
-                    _ => ene_ai_core::EmbeddingProviderType::Api,
+                    "local" => ene_core::EmbeddingProviderType::Local,
+                    _ => ene_core::EmbeddingProviderType::Api,
                 };
                 match current_provider.as_str() {
                     "local" => {

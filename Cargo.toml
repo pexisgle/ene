@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "crates/ene-ai-core",
+    "crates/ene-core",
     "crates/ene-config",
     "crates/ene-embedding",
     "crates/ene-memory",
@@ -42,7 +42,7 @@ keyring = "3.2.1"
 
 # --- 内部ライブラリ ---
 ene-config = { path = "crates/ene-config" }
-ene-ai-core = { path = "crates/ene-ai-core" }
+ene-core = { path = "crates/ene-core" }
 ene-embedding = { path = "crates/ene-embedding" }
 ene-memory = { path = "crates/ene-memory" }
 ene-session = { path = "crates/ene-session" }
