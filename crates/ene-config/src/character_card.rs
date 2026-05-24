@@ -1,14 +1,29 @@
-use serde::{Deserialize, Serialize};
+use serde::{Serialize, Deserialize};
+use schemars::JsonSchema;
 use std::collections::HashMap;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(crate = "crate::serde")]
+#[schemars(crate = "crate::schemars")]
 pub struct CharacterCardV3 {
     pub spec: String,
     pub spec_version: String,
     pub data: CharacterCardData,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+impl Default for CharacterCardV3 {
+    fn default() -> Self {
+        Self {
+            spec: "chara_card_v3".to_string(),
+            spec_version: "3.0".to_string(),
+            data: CharacterCardData::default(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default, JsonSchema)]
+#[serde(crate = "crate::serde")]
+#[schemars(crate = "crate::schemars")]
 pub struct CharacterCardData {
     pub name: String,
     pub description: String,
@@ -24,22 +39,33 @@ pub struct CharacterCardData {
     pub alternate_greetings: Vec<String>,
     pub personality: String,
     pub scenario: String,
+    
+    // Changes from CCv2
     #[serde(default)]
     pub creator_notes: String,
     #[serde(default)]
+    pub character_book: Option<Lorebook>,
+
+    // New fields in CCv3
+    #[serde(default)]
+    pub assets: Vec<CharacterAsset>,
+    #[serde(default)]
     pub nickname: String,
+    #[serde(default)]
+    pub creator_notes_multilingual: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub source: Option<Vec<String>>,
     #[serde(default)]
     pub group_only_greetings: Vec<String>,
     #[serde(default)]
     pub creation_date: Option<u64>,
     #[serde(default)]
     pub modification_date: Option<u64>,
-    #[serde(default)]
-    pub assets: Vec<CharacterAsset>,
-    // Omitting Lorebook fields for now, adding base struct later if needed
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(crate = "crate::serde")]
+#[schemars(crate = "crate::schemars")]
 pub struct CharacterAsset {
     #[serde(rename = "type")]
     pub asset_type: String,
@@ -48,15 +74,60 @@ pub struct CharacterAsset {
     pub ext: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Default, JsonSchema)]
+#[serde(crate = "crate::serde")]
+#[schemars(crate = "crate::schemars")]
+pub struct Lorebook {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub scan_depth: Option<u32>,
+    #[serde(default)]
+    pub token_budget: Option<u32>,
+    #[serde(default)]
+    pub recursive_scanning: Option<bool>,
+    #[serde(default)]
+    pub extensions: HashMap<String, serde_json::Value>,
+    pub entries: Vec<LorebookEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(crate = "crate::serde")]
+#[schemars(crate = "crate::schemars")]
+pub struct LorebookEntry {
+    pub keys: Vec<String>,
+    pub content: String,
+    #[serde(default)]
+    pub extensions: HashMap<String, serde_json::Value>,
+    pub enabled: bool,
+    pub insertion_order: i32,
+    #[serde(default)]
+    pub case_sensitive: Option<bool>,
+    pub use_regex: bool,
+    #[serde(default)]
+    pub constant: Option<bool>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub priority: Option<i32>,
+    #[serde(default)]
+    pub id: Option<serde_json::Value>,
+    #[serde(default)]
+    pub comment: Option<String>,
+    #[serde(default)]
+    pub selective: Option<bool>,
+    #[serde(default)]
+    pub secondary_keys: Option<Vec<String>>,
+    #[serde(default)]
+    pub position: Option<String>,
+}
+
 /// A single expression override in `extensions.expressions`.
-///
-/// JSON shape:
-/// ```json
-/// { "name": "happy", "description": "Joyful", "vrm": {"happy": 1.0, "aa": 0.3} }
-/// { "name": "think", "description": "Deep in thought", "vrm": {"neutral": 0.5} }
-/// { "name": "relaxed", "disabled": true }
-/// ```
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
+#[serde(crate = "crate::serde")]
+#[schemars(crate = "crate::schemars")]
 pub struct ExpressionDefinition {
     pub name: String,
     #[serde(default)]
@@ -79,7 +150,7 @@ pub struct ResolvedExpression {
     pub vrm: HashMap<String, f32>,
 }
 
-/// Built-in default expressions.  Used when the card has no `extensions.expressions`,
+/// Built-in default expressions. Used when the card has no `extensions.expressions`,
 /// and as the base that card overrides are merged on top of.
 fn default_expressions() -> Vec<ResolvedExpression> {
     [
@@ -104,11 +175,6 @@ fn default_expressions() -> Vec<ResolvedExpression> {
 }
 
 /// Merges the built-in defaults with card-level overrides from `extensions.expressions`.
-///
-/// Rules:
-/// - Entries with `disabled: true` remove the expression from the set.
-/// - Entries with a matching name override `description` (if non-empty) and `vrm` (if non-empty).
-/// - Entries with a name not in the defaults are added as new expressions.
 pub fn resolve_expressions(card: &CharacterCardV3) -> Vec<ResolvedExpression> {
     let overrides = card.data.get_expression_overrides();
     let mut map: indexmap::IndexMap<String, ResolvedExpression> = default_expressions()
@@ -122,18 +188,14 @@ pub fn resolve_expressions(card: &CharacterCardV3) -> Vec<ResolvedExpression> {
             continue;
         }
         if let Some(existing) = map.get_mut(&ovr.name) {
-            // Override description if provided
             if !ovr.description.is_empty() {
                 existing.description = ovr.description.clone();
             }
-            // Override VRM weights if provided
             if !ovr.vrm.is_empty() {
                 existing.vrm = ovr.vrm.clone();
             }
         } else {
-            // New expression not in defaults
             let vrm = if ovr.vrm.is_empty() {
-                // If no VRM specified, default to same-name expression at 1.0
                 [(ovr.name.clone(), 1.0f32)].into_iter().collect()
             } else {
                 ovr.vrm.clone()
@@ -161,7 +223,6 @@ impl CharacterCardData {
         }
     }
 
-    /// Returns raw expression overrides from `extensions.expressions`.
     fn get_expression_overrides(&self) -> Vec<ExpressionDefinition> {
         let Some(value) = self.extensions.get("expressions") else {
             return Vec::new();
@@ -173,18 +234,12 @@ impl CharacterCardData {
 pub fn expand_cbs_macros(text: &str, char_name: &str, user_name: &str) -> String {
     let mut result = text.to_string();
 
-    // {{char}} -> nickname or name
     result = result.replace("{{char}}", char_name);
     result = result.replace("<char>", char_name);
     result = result.replace("<bot>", char_name);
 
-    // {{user}} -> user name
     result = result.replace("{{user}}", user_name);
 
-    // Simple regex-less replacement for custom macros.
-    // For a robust implementation, we would use regex.
-
-    // {{random:...}} or {{pick:...}}
     fn expand_template_macro(result: &mut String, prefix: &str, handler: impl Fn(&str) -> String) {
         while let Some(start) = result.find(prefix) {
             if let Some(end_rel) = result[start..].find("}}") {
