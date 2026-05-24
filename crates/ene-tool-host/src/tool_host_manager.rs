@@ -215,22 +215,31 @@ impl ToolRegistry for ToolHostManager {
     }
 }
 
+fn resolve_undo_db_path(settings: &EneSettings) -> std::path::PathBuf {
+    let memory_config = settings.get_section::<ene_memory::MemoryConfig>("memory").unwrap_or_default();
+    let memory_path = memory_config.resolve_memory_db_path();
+    memory_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("undo.db")
+}
+
 impl ToolHostManager {
     pub async fn start(settings: &EneSettings) -> Result<Self, crate::error::ToolError> {
-        let undo_db_path = Some(
-            settings
-                .resolve_undo_db_path()
+        let mut sandbox = settings.get_section::<ene_tool_proto::SandboxConfigData>("sandbox").unwrap_or_default();
+        sandbox.undo_db_path = Some(
+            resolve_undo_db_path(settings)
                 .to_string_lossy()
                 .to_string(),
         );
-        let sandbox = settings.sandbox.to_sandbox_config_data(undo_db_path);
         let mut supervised_registries = Vec::new();
 
         std::fs::create_dir_all(paths::tool_socket_dir()).map_err(|e| {
             crate::error::ToolError::ToolExecutionError(format!("Failed to create socket dir: {e}"))
         })?;
 
-        for (name, entry) in &settings.tools.tools {
+        let tool_settings = settings.get_section::<crate::config::ToolSettings>("tools").unwrap_or_default();
+        for (name, entry) in &tool_settings.tools {
             if !entry.enable {
                 continue;
             }

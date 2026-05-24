@@ -3,6 +3,7 @@ pub mod ipc_client;
 pub mod mcp_client;
 pub mod tool_host_manager;
 pub mod tools;
+pub mod config;
 
 pub use error::ToolError;
 pub use ipc_client::IpcToolRegistry;
@@ -11,3 +12,4 @@ pub use tool_host_manager::ToolHostManager;
 pub use tools::{
     CompositeToolRegistry, ToolCategory, ToolDefinition, ToolRegistry, compute_tool_version_hash,
 };
+pub use config::{ToolSettings, ToolEntry, McpServerConfig, McpTransport};
