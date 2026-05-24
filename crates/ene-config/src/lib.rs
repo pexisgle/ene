@@ -18,11 +18,11 @@ pub use config::{
     save_full_settings, generate_schema_json, register_schema, get_global_section,
     update_global_settings, get_global_settings,
 };
-pub use character_settings::CharacterPerSettings;
+pub use character_settings::{CharacterPerSettings, generate_character_schema_json};
 pub use error::ConfigError;
 pub use paths::{
     IS_DEV_BUILD, app_data_dir, assets_dir, builtin_tools_dir, config_file_path, models_dir,
-    schema_file_path, tool_socket_dir, user_tools_dir, character_settings_path,
+    schema_file_path, character_schema_file_path, tool_socket_dir, user_tools_dir, character_settings_path,
 };
 pub use resources::ensure_resource_dirs;
 

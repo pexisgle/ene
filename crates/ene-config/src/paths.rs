@@ -38,6 +38,10 @@ pub fn schema_file_path() -> PathBuf {
     assets_dir().join("settings.schema.json")
 }
 
+pub fn character_schema_file_path() -> PathBuf {
+    assets_dir().join("character_settings.schema.json")
+}
+
 /// ビルトインツールバイナリのディレクトリ
 /// 実行ファイルと同じディレクトリ（デバッグ時）またはその `tools/` サブディレクトリ（リリース時）
 pub fn builtin_tools_dir() -> PathBuf {

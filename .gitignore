@@ -10,8 +10,9 @@ assets/models/
 # Runtime database files
 **/memory.db
 memory:
-
+**/undo.db**
 .env
 
 # Generated settings schemas
 assets/settings.schema.json
+assets/character_settings.schema.json
