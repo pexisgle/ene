@@ -5,30 +5,25 @@ const APP_ID: &str = "dev.pexisgle.Ene";
 pub const IS_DEV_BUILD: bool = cfg!(debug_assertions);
 
 pub fn app_data_dir() -> PathBuf {
-    dirs::data_dir()
-        .map(|p| p.join(APP_ID))
+    directories::ProjectDirs::from("dev", "pexisgle", "Ene")
+        .map(|proj_dirs| proj_dirs.data_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from(APP_ID))
 }
 
 pub fn assets_dir() -> PathBuf {
-    source_assets_dir().unwrap_or_else(|| app_data_dir())
-}
-
-#[cfg(debug_assertions)]
-fn source_assets_dir() -> Option<PathBuf> {
-    let current_exe = std::env::current_exe().ok()?;
-    let exe_dir = current_exe.parent()?;
-    let candidates = [
-        exe_dir.join("../../assets"),
-        exe_dir.join("../assets"),
-        PathBuf::from("assets"),
-    ];
-    candidates.into_iter().find(|c| c.is_dir())
-}
-
-#[cfg(not(debug_assertions))]
-fn source_assets_dir() -> Option<PathBuf> {
-    None
+    if cfg!(debug_assertions) {
+        if let Some(exe_dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())) {
+            let candidates = [
+                exe_dir.join("../../assets"),
+                exe_dir.join("../assets"),
+                PathBuf::from("assets"),
+            ];
+            if let Some(path) = candidates.into_iter().find(|c| c.is_dir()) {
+                return path;
+            }
+        }
+    }
+    app_data_dir()
 }
 
 pub fn models_dir() -> PathBuf {
@@ -44,12 +39,17 @@ pub fn schema_file_path() -> PathBuf {
 }
 
 /// ビルトインツールバイナリのディレクトリ
-/// 実行ファイルと同じディレクトリの `tools/` サブディレクトリ
+/// 実行ファイルと同じディレクトリ（デバッグ時）またはその `tools/` サブディレクトリ（リリース時）
 pub fn builtin_tools_dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|p| p.join("tools")))
-        .unwrap_or_else(|| PathBuf::from("tools"))
+    if let Some(exe_dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|p| p.to_path_buf())) {
+        if cfg!(debug_assertions) {
+            exe_dir
+        } else {
+            exe_dir.join("tools")
+        }
+    } else {
+        PathBuf::from("tools")
+    }
 }
 
 /// ユーザー追加ツールのディレクトリ
@@ -61,4 +61,13 @@ pub fn user_tools_dir() -> PathBuf {
 /// ツール用一時ソケットディレクトリ
 pub fn tool_socket_dir() -> PathBuf {
     std::env::temp_dir().join(format!("{}.tools", APP_ID))
+}
+
+/// キャラクター固有の設定ファイルのパスを取得します。
+/// assets_dir/characters/{name}/character_settings.json
+pub fn character_settings_path(character_name: &str) -> PathBuf {
+    assets_dir()
+        .join("characters")
+        .join(character_name)
+        .join("character_settings.json")
 }

@@ -11,8 +11,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
-dirs = "6"
+directories = "6"
 indexmap = { workspace = true }
 rand = { workspace = true }
 tracing = { workspace = true }
-ene-tool-proto = { workspace = true }
+figment = { workspace = true }
+schemars = { workspace = true }
+ctor = { workspace = true }
