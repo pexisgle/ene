@@ -174,6 +174,24 @@ impl ToolRegistry for SupervisedIpcRegistry {
             .clone();
         reg.set_session_id(session_id).await;
     }
+
+    async fn approve_permission(&self, request_id: &str) {
+        let reg = self
+            .registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        reg.approve_permission(request_id).await;
+    }
+
+    async fn allow_pattern(&self, action: &str, target_pattern: &str) {
+        let reg = self
+            .registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        reg.allow_pattern(action, target_pattern).await;
+    }
 }
 
 pub struct ToolHostManager {
@@ -204,6 +222,14 @@ impl ToolRegistry for ToolHostManager {
 
     async fn set_session_id(&self, session_id: &str) {
         self.composite.set_session_id(session_id).await;
+    }
+
+    async fn approve_permission(&self, request_id: &str) {
+        self.composite.approve_permission(request_id).await;
+    }
+
+    async fn allow_pattern(&self, action: &str, target_pattern: &str) {
+        self.composite.allow_pattern(action, target_pattern).await;
     }
 
     async fn ensure_index_built(

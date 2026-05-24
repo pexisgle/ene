@@ -56,12 +56,11 @@ impl ToolProvider for FsToolProvider {
                 crate::filesystem::execute(
                     action,
                     &args,
-                    sandbox.config(),
+                    &sandbox,
                     sandbox.undo_manager(),
                     &session_id,
                 )
                 .await
-                .map_err(|e| ToolError::ExecutionFailed { message: e })
             }
             "shell" => {
                 let args: serde_json::Value =
@@ -77,6 +76,13 @@ impl ToolProvider for FsToolProvider {
                 let description = args["description"].as_str().unwrap_or("");
                 let timeout = args["timeout"].as_u64();
                 let workdir = args["workdir"].as_str();
+
+                sandbox.check_permission(
+                    crate::permission::DestructiveAction::ShellCommand,
+                    command,
+                    description,
+                )?;
+
                 crate::shell::shell_exec(command, description, timeout, workdir, sandbox.config())
                     .await
             }
@@ -98,5 +104,19 @@ impl ToolProvider for FsToolProvider {
         let new_sandbox = Arc::new(Sandbox::new(data.clone().into()));
         let mut guard = self.sandbox.write().unwrap_or_else(|e| e.into_inner());
         *guard = Some(new_sandbox);
+    }
+
+    fn approve_permission(&self, request_id: &str) {
+        let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = guard.as_ref() {
+            s.approve_request(request_id);
+        }
+    }
+
+    fn allow_pattern(&self, action: &str, target_pattern: &str) {
+        let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = guard.as_ref() {
+            s.allow_pattern(action, target_pattern);
+        }
     }
 }

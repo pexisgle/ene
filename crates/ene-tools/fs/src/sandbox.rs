@@ -135,12 +135,18 @@ impl SandboxConfig {
         let gate = PermissionGate::default_with_sandbox(self);
         match gate.check_destructive(action, target, description) {
             Ok(()) => Ok(()),
-            Err(req) => Err(ToolError::PermissionDenied {
-                message: format!(
-                    "{:?} on {} requires approval: {}",
-                    action, req.description, target
-                ),
-            }),
+            Err(req) => {
+                let action_str = match req.level {
+                    crate::permission::PermissionLevel::RequiresApproval { action, .. } => action,
+                    _ => format!("{:?}", action),
+                };
+                Err(ToolError::PermissionRequired {
+                    request_id: req.id.to_string(),
+                    action: action_str,
+                    target: target.to_string(),
+                    description: req.description,
+                })
+            }
         }
     }
 }
@@ -184,6 +190,8 @@ pub struct Sandbox {
     config: SandboxConfig,
     undo: crate::undo_manager::UndoManager,
     session_id: std::sync::RwLock<String>,
+    approved_requests: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
+    allowed_patterns: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<(String, String)>>>,
 }
 
 impl Sandbox {
@@ -201,6 +209,8 @@ impl Sandbox {
             config,
             undo,
             session_id: std::sync::RwLock::new(String::new()),
+            approved_requests: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
+            allowed_patterns: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
         }
     }
 
@@ -221,6 +231,54 @@ impl Sandbox {
 
     pub fn set_session_id(&self, id: &str) {
         *self.session_id.write().unwrap_or_else(|e| e.into_inner()) = id.to_string();
+    }
+
+    /// 承認済みリクエストIDを追加
+    pub fn approve_request(&self, request_id: &str) {
+        if let Ok(mut guard) = self.approved_requests.write() {
+            guard.insert(request_id.to_string());
+        }
+    }
+
+    /// アクションとターゲットパターンの組み合わせを追加
+    pub fn allow_pattern(&self, action: &str, target_pattern: &str) {
+        if let Ok(mut guard) = self.allowed_patterns.write() {
+            guard.insert((action.to_string(), target_pattern.to_string()));
+        }
+    }
+
+    /// 破壊的操作のパーミッションチェック
+    pub fn check_permission(
+        &self,
+        action: DestructiveAction,
+        target: &str,
+        description: &str,
+    ) -> Result<(), ToolError> {
+        let action_str = format!("{:?}", action);
+        
+        // 1. Session-level allow pattern check
+        if let Ok(guard) = self.allowed_patterns.read() {
+            for (allowed_action, allowed_target) in guard.iter() {
+                if allowed_action == &action_str && target.contains(allowed_target) {
+                    return Ok(());
+                }
+            }
+        }
+
+        // 2. Base permission config check
+        match self.config.check_permission(action, target, description) {
+            Ok(()) => Ok(()),
+            Err(ToolError::PermissionRequired { request_id, action: act, target: tgt, description: desc }) => {
+                // Check if this specific request_id has been approved (Allow Once)
+                if let Ok(guard) = self.approved_requests.read() {
+                    if guard.contains(&request_id) {
+                        return Ok(());
+                    }
+                }
+                Err(ToolError::PermissionRequired { request_id, action: act, target: tgt, description: desc })
+            }
+            Err(other) => Err(other),
+        }
     }
 
     /// 読み取りパス検証

@@ -245,7 +245,18 @@ impl ToolRegistry for IpcToolRegistry {
         .map_err(crate::error::ToolError::ToolExecutionError)
         .and_then(|resp| match resp {
             IpcResponse::CallResult { result } => {
-                result.map_err(|e| crate::error::ToolError::ToolExecutionError(e.to_string()))
+                result.map_err(|e| match e {
+                    ene_tool_proto::ToolError::PermissionRequired { request_id, action, target, description } => {
+                        crate::error::ToolError::PermissionRequired { request_id, action, target, description }
+                    }
+                    ene_tool_proto::ToolError::PermissionDenied { message } => {
+                        crate::error::ToolError::PermissionDenied(message)
+                    }
+                    ene_tool_proto::ToolError::SandboxViolation { message } => {
+                        crate::error::ToolError::SandboxViolation(message)
+                    }
+                    other => crate::error::ToolError::ToolExecutionError(other.to_string()),
+                })
             }
             IpcResponse::Error { message } => {
                 Err(crate::error::ToolError::ToolExecutionError(message))
@@ -259,6 +270,21 @@ impl ToolRegistry for IpcToolRegistry {
     async fn set_session_id(&self, session_id: &str) {
         let req = IpcRequest::SetSessionId {
             session_id: session_id.to_string(),
+        };
+        let _ = self.send_with_reconnect(req).await;
+    }
+
+    async fn approve_permission(&self, request_id: &str) {
+        let req = IpcRequest::ApprovePermission {
+            request_id: request_id.to_string(),
+        };
+        let _ = self.send_with_reconnect(req).await;
+    }
+
+    async fn allow_pattern(&self, action: &str, target_pattern: &str) {
+        let req = IpcRequest::AllowPattern {
+            action: action.to_string(),
+            target_pattern: target_pattern.to_string(),
         };
         let _ = self.send_with_reconnect(req).await;
     }
