@@ -6,5 +6,5 @@ edition = "2024"
 [dependencies]
 serde_json = { workspace = true }
 async-trait = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net"] }
 ene-config = { workspace = true }
