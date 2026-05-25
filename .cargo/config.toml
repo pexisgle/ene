@@ -3,6 +3,8 @@ linker = "clang"
 rustflags = [
     "-Zshare-generics=y",
     "-C", "link-arg=-fuse-ld=mold",
+    "-C", "link-arg=-Wl,--gc-sections",
+    "-C", "link-arg=-Wl,--icf=all",
 ]
 
 [unstable]
