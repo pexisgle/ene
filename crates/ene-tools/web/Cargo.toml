@@ -2,10 +2,7 @@
 name = "ene-tools-web"
 version = "0.1.0"
 edition = "2024"
-
-[lib]
-crate-type = ["lib"]
-name = "ene_tools_web"
+description = "Web tools: URL fetching with HTML-to-Markdown conversion and multi-backend web search"
 
 [dependencies]
 ene-tool-proto = { workspace = true }

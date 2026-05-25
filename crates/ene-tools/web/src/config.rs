@@ -1,7 +1,3 @@
-pub mod provider;
-pub mod webfetch;
-pub mod websearch;
-
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

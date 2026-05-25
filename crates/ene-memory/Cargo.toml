@@ -2,6 +2,7 @@
 name = "ene-memory"
 version = "0.1.0"
 edition = "2024"
+description = "SQLite-vec powered episodic memory store with vector similarity search, key facts, and LLM-driven summarization"
 
 [lib]
 crate-type = ["lib"]

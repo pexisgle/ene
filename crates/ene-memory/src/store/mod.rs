@@ -28,7 +28,7 @@ pub fn init_sqlite_vec(conn: &mut SqliteConnection) -> Result<(), MemoryError> {
     Ok(())
 }
 
-/// キーバリュー型の事実
+/// A key-value fact about the user.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(crate = "ene_config::serde")]
 pub struct KeyFact {
@@ -36,7 +36,7 @@ pub struct KeyFact {
     pub value: String,
 }
 
-/// 会話要約エントリ
+/// A stored conversation summary entry with its embedding vector.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(crate = "ene_config::serde")]
 pub struct ConversationSummary {
@@ -49,7 +49,7 @@ pub struct ConversationSummary {
     pub ended_at: DateTime<Utc>,
 }
 
-/// ベクトル検索で呼び出された要約（スコア付き）
+/// A recalled summary with its cosine similarity score.
 #[derive(Debug, Clone)]
 pub struct RecalledSummary {
     pub entry: ConversationSummary,
@@ -58,7 +58,11 @@ pub struct RecalledSummary {
 
 type SqlitePool = diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<SqliteConnection>>;
 
-/// SQLite ベースの長期記憶ストア
+/// SQLite-backed long-term memory store with vector similarity search.
+///
+/// Uses `r2d2` connection pooling and `sqlite-vec` for cosine-similarity queries.
+/// Manages four tables: `conversation_summaries`, `conversation_keyfacts`,
+/// `conversation_logs`, and `tool_embeddings`.
 pub struct MemoryStore {
     pool: SqlitePool,
     pub embedding_dim: usize,
@@ -82,6 +86,10 @@ impl MemoryStore {
         })
     }
 
+    /// Opens a persistent memory store at the given file path.
+    ///
+    /// Creates the database file if it doesn't exist. Runs embedded Diesel migrations
+    /// and registers the `sqlite-vec` extension automatically.
     pub fn open(path: &Path, embedding_dim: usize) -> Result<Self, MemoryError> {
         let path_str = path
             .to_str()
@@ -93,6 +101,9 @@ impl MemoryStore {
         Self::init(pool, embedding_dim)
     }
 
+    /// Opens an in-memory memory store (useful for testing).
+    ///
+    /// Uses `":memory:"` as the database path with a pool limited to one connection.
     pub fn open_in_memory(embedding_dim: usize) -> Result<Self, MemoryError> {
         let manager = diesel::r2d2::ConnectionManager::<SqliteConnection>::new(":memory:");
         let pool = diesel::r2d2::Pool::builder()
@@ -104,6 +115,10 @@ impl MemoryStore {
 
     // ── Conversation Summaries ────────────────────────────────────────────────
 
+    /// Inserts a conversation summary and associated key facts in a single transaction.
+    ///
+    /// Facts with an empty `value` field are treated as deletions for that key.
+    /// Returns the new summary's auto-increment ID.
     pub fn insert_summary(
         &self,
         session_id: &str,
@@ -166,6 +181,10 @@ impl MemoryStore {
         })
     }
 
+    /// Searches summaries by cosine similarity to the query embedding.
+    ///
+    /// Uses `vec_distance_cosine` for fast approximate matching.
+    /// Results are filtered by `card_name` and `similarity_threshold`.
     pub fn search_summaries(
         &self,
         query_embedding: &[f32],

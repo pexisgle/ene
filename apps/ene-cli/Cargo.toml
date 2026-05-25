@@ -2,6 +2,7 @@
 name = "ene-cli"
 version = "0.1.0"
 edition = "2024"
+description = "Interactive CLI REPL for chatting with AI characters, testing tools, and managing memory/sessions"
 
 [dependencies]
 ene-core = { workspace = true }

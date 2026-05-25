@@ -2,6 +2,7 @@
 name = "ene-tool-proto"
 version = "0.1.0"
 edition = "2024"
+description = "IPC protocol definitions, ToolProvider trait, sandbox configuration, and tool server runtime"
 
 [dependencies]
 serde_json = { workspace = true }

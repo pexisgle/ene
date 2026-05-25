@@ -48,7 +48,6 @@ ene-session = { path = "crates/ene-session" }
 ene-tool-host = { path = "crates/ene-tool-host" }
 ene-tool-proto = { path = "crates/ene-tool-proto" }
 ene-tools-common = { path = "crates/ene-tools/common" }
-ene-tools-utility = { path = "crates/ene-tools/utility" }
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]

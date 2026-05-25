@@ -2,6 +2,7 @@
 name = "ene-core"
 version = "0.1.0"
 edition = "2024"
+description = "Unified runtime facade integrating LLM streaming, tool orchestration, long-term memory, and session management"
 
 [lib]
 crate-type = ["lib"]

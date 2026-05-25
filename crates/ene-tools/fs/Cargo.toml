@@ -2,6 +2,7 @@
 name = "ene-tools-fs"
 version = "0.1.0"
 edition = "2024"
+description = "Filesystem tools: read, write, edit, glob, grep, patch, shell execution, and undo with sandbox security"
 
 [[bin]]
 name = "ene-tools-fs"
@@ -9,7 +10,6 @@ path = "src/main.rs"
 
 [dependencies]
 ene-tool-proto = { workspace = true }
-ene-tools-utility = { workspace = true }
 ene-tools-common = { workspace = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "fs", "process", "time"] }
 serde = { workspace = true }

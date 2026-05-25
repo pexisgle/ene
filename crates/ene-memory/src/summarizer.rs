@@ -1,6 +1,7 @@
-//! LLM を使った会話要約生成モジュール
+//! LLM-driven conversation summarizer.
 //!
-//! セッション分割時に呼び出され、会話履歴を構造化された要約に変換する。
+//! Called during session splits to convert raw conversation history into structured summaries
+//! with natural-language descriptions, extracted topics, and user-relevant key facts.
 
 use async_openai::types::chat::{
     ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,

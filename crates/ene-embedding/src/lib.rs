@@ -1,3 +1,43 @@
+//! # ene-embedding
+//!
+//! Vector embedding providers for the ene AI character platform.
+//!
+//! ## Providers
+//!
+//! - [`ApiEmbeddingProvider`] — OpenAI-compatible remote API embedding (e.g., OpenRouter, any OpenAI-compatible endpoint)
+//! - [`GgufEmbeddingProvider`] — Local GPU-free inference via Candle with GGUF-quantized models (e.g., jina-embeddings-v5-text-small)
+//!
+//! ## Quick Start
+//!
+//! ```rust,no_run
+//! use ene_embedding::{create_embedding_provider, EmbeddingConfig, EmbeddingProviderType};
+//! use ene_embedding::EmbeddingProvider;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let config = EmbeddingConfig {
+//!     provider_type: EmbeddingProviderType::Local,
+//!     model: "jina-embeddings-v5-text-small".into(),
+//!     ..Default::default()
+//! };
+//!
+//! let provider = create_embedding_provider(
+//!     config.provider_type, &config.model, "", "", 0, None,
+//!     std::path::PathBuf::from("./models"),
+//! )?;
+//!
+//! let embedding = tokio::runtime::Runtime::new()?
+//!     .block_on(provider.embed_query("Hello, world!"))?;
+//! println!("Dimensions: {}", embedding.len());
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Utility Functions
+//!
+//! - [`cosine_similarity`] — Compute cosine similarity between two embedding vectors
+//! - [`create_embedding_provider`] — Factory function dispatching on [`EmbeddingProviderType`]
+#![warn(missing_docs)]
+
 pub mod client;
 pub mod config;
 pub mod error;
@@ -14,6 +54,18 @@ use crate::error::EmbeddingError;
 
 pub use quantized::{GgufEmbeddingProvider, resolve_gguf_paths};
 
+/// Trait for generating vector embeddings from text.
+///
+/// Implementors provide a unified interface for both local and remote embedding backends.
+/// Implementations include [`ApiEmbeddingProvider`] for OpenAI-compatible APIs and
+/// [`GgufEmbeddingProvider`] for local GPU-free inference.
+///
+/// # Required Methods
+///
+/// - [`embed`](EmbeddingProvider::embed) — Generate an embedding for any text (used for indexing)
+/// - [`embed_query`](EmbeddingProvider::embed_query) — Generate an embedding optimized for query/search text
+/// - [`dimensions`](EmbeddingProvider::dimensions) — Dimensionality of the embedding vectors
+/// - [`model_name`](EmbeddingProvider::model_name) — Human-readable model identifier
 #[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError>;
@@ -22,6 +74,10 @@ pub trait EmbeddingProvider: Send + Sync {
     fn model_name(&self) -> &str;
 }
 
+/// OpenAI-compatible API embedding provider.
+///
+/// Sends text to a remote embedding endpoint (OpenAI, OpenRouter, or any compatible server).
+/// Empty input returns a zero vector of `dims` elements.
 pub struct ApiEmbeddingProvider {
     client: async_openai::Client<async_openai::config::OpenAIConfig>,
     model: String,
@@ -29,6 +85,12 @@ pub struct ApiEmbeddingProvider {
 }
 
 impl ApiEmbeddingProvider {
+    /// Creates a new API-based embedding provider.
+    ///
+    /// * `base_url` — Base URL for the embedding API endpoint
+    /// * `api_key` — API key (may be empty for local endpoints)
+    /// * `model` — Model name (e.g., `"text-embedding-3-small"`)
+    /// * `dims` — Expected embedding dimensions
     pub fn new(base_url: &str, api_key: &str, model: &str, dims: usize) -> Self {
         Self {
             client: build_openai_client(base_url, api_key),
@@ -91,6 +153,10 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
     }
 }
 
+/// Computes the cosine similarity between two embedding vectors.
+///
+/// Returns a value in `[-1.0, 1.0]`. Returns `0.0` if the vectors have different lengths,
+/// are empty, or either has zero norm.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
@@ -107,6 +173,13 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
 }
 
+/// Factory function that creates the appropriate [`EmbeddingProvider`] based on the
+/// [`EmbeddingProviderType`] configuration.
+///
+/// * `Local` — Loads a GGUF-quantized model via [`GgufEmbeddingProvider`]
+/// * `Api` — Creates an [`ApiEmbeddingProvider`] for OpenAI-compatible endpoints
+///
+/// Returns a boxed trait object suitable for dynamic dispatch.
 pub fn create_embedding_provider(
     provider_type: crate::EmbeddingProviderType,
     model: &str,

@@ -1,5 +1,6 @@
 pub struct Truncate;
 
+/// Result of a truncation operation, indicating whether content was actually cut.
 #[derive(Debug, Clone)]
 pub struct TruncateResult {
     pub content: String,
@@ -7,7 +8,8 @@ pub struct TruncateResult {
 }
 
 impl Truncate {
-    /// UTF-8 安全な文字数ベースでの切り詰め
+    /// Truncates text to a maximum number of Unicode characters.
+    /// Appends a `[... truncated, total N chars ...]` notice when cut.
     pub fn chars(text: &str, max_chars: usize) -> String {
         let char_count = text.chars().count();
         if char_count <= max_chars {

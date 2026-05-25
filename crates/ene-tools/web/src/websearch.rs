@@ -1,4 +1,4 @@
-use crate::WebSearchConfig;
+use crate::config::WebSearchConfig;
 use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
 use websearch::providers::{ArxivProvider, BraveProvider, DuckDuckGoProvider, ExaProvider, TavilyProvider};
 use websearch::{web_search, SearchOptions, SearchProvider};

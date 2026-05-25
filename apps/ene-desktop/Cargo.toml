@@ -2,6 +2,7 @@
 name = "ene-desktop"
 version = "0.1.0"
 edition = "2024"
+description = "Bevy-based desktop GUI application with VRM character rendering, always-on-top overlay, and system tray"
 
 [dependencies]
 ene-core = { workspace = true }
