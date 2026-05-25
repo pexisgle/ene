@@ -9,7 +9,7 @@ name = "ene_tools_web"
 
 [dependencies]
 ene-tool-proto = { workspace = true }
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query", "cookies"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query"] }
 serde = { workspace = true }
 schemars = { workspace = true }
 ene-tools-common = { workspace = true }
