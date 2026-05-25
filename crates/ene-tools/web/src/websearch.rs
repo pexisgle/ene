@@ -1,14 +1,14 @@
 use crate::WebSearchConfig;
 use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
-use websearch::providers::{DuckDuckGoProvider, GoogleProvider, TavilyProvider};
+use websearch::providers::{ArxivProvider, BraveProvider, DuckDuckGoProvider, ExaProvider, TavilyProvider};
 use websearch::{web_search, SearchOptions, SearchProvider};
 
 fn resolve_api_key(config: Option<&WebSearchConfig>, key: &str, env_var: &str) -> Result<String, ToolError> {
     if let Some(cfg) = config {
         match key {
             "tavily" if !cfg.tavily_api_key.is_empty() => return Ok(cfg.tavily_api_key.clone()),
-            "google_key" if !cfg.google_api_key.is_empty() => return Ok(cfg.google_api_key.clone()),
-            "google_cx" if !cfg.google_cse_cx.is_empty() => return Ok(cfg.google_cse_cx.clone()),
+            "brave" if !cfg.brave_api_key.is_empty() => return Ok(cfg.brave_api_key.clone()),
+            "exa" if !cfg.exa_api_key.is_empty() => return Ok(cfg.exa_api_key.clone()),
             _ => {}
         }
     }
@@ -22,7 +22,7 @@ pub fn tool_definition() -> ToolDefinition {
         name: "websearch".to_string(),
         description: concat!(
             "Searches the web for latest information and technical references. ",
-            "Supports multiple search backends (DuckDuckGo, Tavily, Google). ",
+            "Supports multiple search backends (ArXiv, DuckDuckGo, Tavily). ",
             "Returns summarized search results with titles, snippets, and URLs."
         )
         .to_string(),
@@ -30,7 +30,7 @@ pub fn tool_definition() -> ToolDefinition {
             "type": "object",
             "properties": {
                 "query": { "type": "string", "description": "The search query" },
-                "backend": { "type": "string", "enum": ["duckduckgo", "tavily", "google"], "description": "Search backend to use. Defaults to duckduckgo." },
+                "backend": { "type": "string", "enum": ["arxiv", "brave", "duckduckgo", "exa", "tavily"], "description": "Search backend to use. Defaults to duckduckgo." },
                 "limit": { "type": "integer", "description": "Maximum number of results (default 5, max 10)" }
             },
             "required": ["query"]
@@ -56,6 +56,7 @@ pub async fn websearch(
     let limit = limit.unwrap_or(5).min(10);
 
     let provider: Box<dyn SearchProvider> = match backend_name {
+        "arxiv" => Box::new(ArxivProvider::new()),
         "duckduckgo" => Box::new(DuckDuckGoProvider::new()),
         "tavily" => {
             let api_key = resolve_api_key(config, "tavily", "TAVILY_API_KEY")?;
@@ -65,12 +66,19 @@ pub async fn websearch(
                 }
             })?)
         }
-        "google" => {
-            let api_key = resolve_api_key(config, "google_key", "GOOGLE_API_KEY")?;
-            let cx = resolve_api_key(config, "google_cx", "GOOGLE_CSE_CX")?;
-            Box::new(GoogleProvider::new(&api_key, &cx).map_err(|e| {
+        "brave" => {
+            let api_key = resolve_api_key(config, "brave", "BRAVE_API_KEY")?;
+            Box::new(BraveProvider::new(&api_key).map_err(|e| {
                 ToolError::ExecutionFailed {
-                    message: format!("Google provider init failed: {e}"),
+                    message: format!("Brave provider init failed: {e}"),
+                }
+            })?)
+        }
+        "exa" => {
+            let api_key = resolve_api_key(config, "exa", "EXA_API_KEY")?;
+            Box::new(ExaProvider::new(&api_key).map_err(|e| {
+                ToolError::ExecutionFailed {
+                    message: format!("Exa provider init failed: {e}"),
                 }
             })?)
         }
@@ -97,9 +105,11 @@ pub async fn websearch(
     }
 
     let provider_label = match backend_name {
+        "arxiv" => "ArXiv",
         "duckduckgo" => "DuckDuckGo",
         "tavily" => "Tavily",
-        "google" => "Google",
+        "brave" => "Brave",
+        "exa" => "Exa",
         _ => backend_name,
     };
 
