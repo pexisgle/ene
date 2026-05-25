@@ -22,6 +22,7 @@ pub(crate) fn candle_err<E: std::fmt::Display>(msg: &str) -> impl FnOnce(E) -> E
     move |e| EmbeddingError::EmbeddingError(format!("{msg}: {e}"))
 }
 
+/// A local GPU-free embedding provider using GGUF-quantized models via Candle.
 pub struct GgufEmbeddingProvider {
     model: Arc<Mutex<EmbeddingModel>>,
     tokenizer: Mutex<Tokenizer>,
@@ -30,6 +31,13 @@ pub struct GgufEmbeddingProvider {
 }
 
 impl GgufEmbeddingProvider {
+    /// Loads a GGUF embedding model from disk.
+    ///
+    /// * `model_name` — Human-readable model identifier
+    /// * `gguf_path` — Path to the GGUF weights file
+    /// * `tokenizer_path` — Path to the tokenizer JSON file
+    /// * `max_length` — Maximum token sequence length
+    /// * `quantization` — Quantization label (e.g. `"F16"`)
     pub fn load(
         model_name: &str,
         gguf_path: &str,

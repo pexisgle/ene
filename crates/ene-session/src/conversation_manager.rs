@@ -7,16 +7,29 @@ use ene_memory::{KeyFact, MemoryStore};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
+/// Represents whether a session should continue or split.
 #[derive(Debug)]
 pub enum SessionBoundary {
+    /// The session should continue without splitting.
     Continue,
+    /// The session should be split for the given reason.
     Split(SplitReason),
 }
 
+/// Reasons for a session split.
 #[derive(Debug, Clone)]
 pub enum SplitReason {
-    Timeout { elapsed_minutes: u64 },
-    TopicChange { similarity: f32 },
+    /// Split due to inactivity timeout.
+    Timeout {
+        /// Minutes elapsed since the last message.
+        elapsed_minutes: u64,
+    },
+    /// Split due to topic change detection.
+    TopicChange {
+        /// Cosine similarity between consecutive user message embeddings.
+        similarity: f32,
+    },
+    /// Split requested manually by the user.
     Manual,
 }
 
@@ -36,36 +49,58 @@ impl std::fmt::Display for SplitReason {
     }
 }
 
+/// The result of a session split operation.
 #[derive(Debug, Clone)]
 pub struct SplitResult {
+    /// The reason the split was triggered.
     pub reason: SplitReason,
+    /// The generated conversation summary.
     pub summary: String,
+    /// Extracted key facts from the conversation.
     pub key_facts: Vec<KeyFact>,
+    /// The ID of the new session.
     pub new_session_id: String,
 }
 
+/// Handle to a pending split task running in the background.
 pub struct PendingSplitTask {
+    /// Oneshot receiver for the split result.
     pub rx: oneshot::Receiver<Result<SplitResult, SessionError>>,
 }
 
-/// セッション分割タスクの入力パラメータ
+/// Input parameters for a split task.
 pub struct SplitTaskInput {
+    /// The embedding of the previous user input.
     pub last_input_embedding: Option<Vec<f32>>,
+    /// Timestamp of the last message.
     pub last_message_time: Option<DateTime<Utc>>,
+    /// Current conversation turn count.
     pub current_turn_count: usize,
+    /// The current user input.
     pub user_input: String,
+    /// Session configuration.
     pub session_config: crate::SessionConfig,
+    /// Model used for summarization.
     pub summarization_model: String,
+    /// Base URL for summarization API.
     pub summarization_base_url: String,
+    /// API key for the provider.
     pub api_key: String,
+    /// Conversation history.
     pub history: Vec<(Role, String)>,
+    /// Current session ID.
     pub session_id: String,
+    /// Character card name.
     pub card_name: String,
+    /// User's name.
     pub user_name: String,
+    /// Memory store for persistence.
     pub store: Arc<MemoryStore>,
+    /// Embedding provider for vector operations.
     pub embedder: Arc<dyn EmbeddingProvider>,
 }
 
+/// Checks whether the current session should be split based on timeout or topic change.
 pub async fn check_boundary(
     last_input_embedding: Option<&Vec<f32>>,
     last_message_time: Option<DateTime<Utc>>,
@@ -168,6 +203,7 @@ pub async fn embed_session_messages(
     Ok(max_pooled)
 }
 
+/// Executes a session split: summarizes conversation, saves to memory, and generates a new session ID.
 pub async fn execute_split(
     history: &[(Role, String)],
     session_id: &str,
@@ -227,6 +263,7 @@ pub async fn execute_split(
     })
 }
 
+/// Spawns an async task that checks the session boundary and executes a split if needed.
 pub fn spawn_split_task(pending_split: &mut Option<PendingSplitTask>, input: SplitTaskInput) {
     if pending_split.is_some() {
         return;
@@ -287,6 +324,7 @@ pub fn spawn_split_task(pending_split: &mut Option<PendingSplitTask>, input: Spl
     *pending_split = Some(PendingSplitTask { rx });
 }
 
+/// Polls for the result of a pending split task without blocking.
 pub fn poll_split_result(
     pending_split: &mut Option<PendingSplitTask>,
 ) -> Option<Result<SplitResult, SessionError>> {
@@ -302,6 +340,7 @@ pub fn poll_split_result(
     }
 }
 
+/// Generates a unique session identifier.
 pub fn generate_session_id() -> String {
     format!("session_{}", uuid::Uuid::new_v4())
 }

@@ -188,6 +188,9 @@ pub fn load_model(
     Ok((model, metadata))
 }
 
+/// Resolves GGUF weight and tokenizer file paths for a given model.
+///
+/// Downloads the model from HuggingFace Hub if not already cached in `model_dir`.
 pub fn resolve_gguf_paths(
     model_name: &str,
     quantization: &str,

@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// A tool registry that aggregates multiple sub-registries and supports RAG-based tool selection.
 pub struct CompositeToolRegistry {
     state: std::sync::RwLock<CompositeState>,
     store: std::sync::RwLock<Option<Arc<ene_memory::MemoryStore>>>,
@@ -16,6 +17,7 @@ struct CompositeState {
 }
 
 impl CompositeToolRegistry {
+    /// Creates a new composite tool registry from the given sub-registries.
     pub fn new(registries: Vec<Arc<dyn ToolRegistry>>) -> Self {
         let mut tool_index = HashMap::with_capacity(registries.len() * 4);
         for (idx, registry) in registries.iter().enumerate() {
@@ -32,6 +34,7 @@ impl CompositeToolRegistry {
         }
     }
 
+    /// Builder method to attach a memory store for tool RAG.
     pub fn with_store(self, store: Arc<ene_memory::MemoryStore>) -> Self {
         {
             let mut guard = self.store.write().unwrap_or_else(|e| e.into_inner());
@@ -40,11 +43,13 @@ impl CompositeToolRegistry {
         self
     }
 
+    /// Sets the memory store for tool RAG.
     pub fn set_store(&self, store: Arc<ene_memory::MemoryStore>) {
         let mut guard = self.store.write().unwrap_or_else(|e| e.into_inner());
         *guard = Some(store);
     }
 
+    /// Adds a sub-registry to the composite.
     pub fn add_registry(&self, registry: Arc<dyn ToolRegistry>) {
         let mut state_guard = self.state.write().unwrap_or_else(|e| e.into_inner());
         let idx = state_guard.registries.len();

@@ -24,17 +24,30 @@
 //! ```
 #![warn(missing_docs)]
 
+/// Memory configuration types.
 pub mod config;
+/// Memory-related error types.
 pub mod error;
+/// Summary recall and prompt formatting utilities.
 pub mod recall;
+/// Diesel-generated database schema.
 pub mod schema;
+/// Core memory store (SQLite + sqlite-vec).
 pub mod store;
+/// LLM-driven conversation summarization.
 pub mod summarizer;
+/// Internal utilities (truncation, etc.).
 pub mod utils;
 
+/// Memory error type.
 pub use error::MemoryError;
+/// Formats recalled summaries for prompt injection.
 pub use recall::format_summaries_for_prompt;
+/// Core memory types.
 pub use store::{ConversationSummary, KeyFact, MemoryStore, RecalledSummary};
+/// LLM summarization result type and entry-point.
 pub use summarizer::{ConversationSummaryResult, summarize_conversation};
+/// Truncation utility re-exported from `ene-tools-common`.
 pub use utils::truncate;
+/// Memory feature toggle configuration.
 pub use config::MemoryConfig;

@@ -7,19 +7,60 @@ use ene_config::serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(crate = "ene_config::serde")]
 pub enum ToolError {
-    NotFound { tool_name: String },
-    InvalidArguments { message: String },
-    ExecutionFailed { message: String },
-    SandboxViolation { message: String },
-    PermissionDenied { message: String },
-    IoError { message: String },
-    Timeout { message: String },
-    Internal { message: String },
-    IpcTransport { message: String },
+    /// The requested tool was not found.
+    NotFound {
+        /// Name of the tool that was not found.
+        tool_name: String,
+    },
+    /// Invalid arguments were passed to a tool call.
+    InvalidArguments {
+        /// Description of what was invalid.
+        message: String,
+    },
+    /// Tool execution failed.
+    ExecutionFailed {
+        /// Error details.
+        message: String,
+    },
+    /// A sandbox policy was violated.
+    SandboxViolation {
+        /// Description of the violation.
+        message: String,
+    },
+    /// Permission was denied for a destructive operation.
+    PermissionDenied {
+        /// Explanation of why permission was denied.
+        message: String,
+    },
+    /// An I/O error occurred.
+    IoError {
+        /// I/O error details.
+        message: String,
+    },
+    /// The tool call timed out.
+    Timeout {
+        /// Timeout details.
+        message: String,
+    },
+    /// An internal error occurred.
+    Internal {
+        /// Internal error details.
+        message: String,
+    },
+    /// An IPC transport error occurred.
+    IpcTransport {
+        /// Transport error details.
+        message: String,
+    },
+    /// User permission is required to proceed.
     PermissionRequired {
+        /// Unique request identifier.
         request_id: String,
+        /// The action being requested (e.g. "filesystem_write").
         action: String,
+        /// The target of the action (e.g. file path).
         target: String,
+        /// Human-readable description of what is being requested.
         description: String,
     },
 }

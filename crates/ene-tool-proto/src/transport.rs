@@ -9,10 +9,13 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 /// On Unix: wraps `UnixStream`
 /// On Windows: wraps `NamedPipeServer` (server-end) or `NamedPipeClient` (client-end)
 pub enum IpcStream {
+    /// Unix domain socket stream (Unix only).
     #[cfg(unix)]
     Unix(tokio::net::UnixStream),
+    /// Named pipe server end (Windows only).
     #[cfg(windows)]
     Server(tokio::net::windows::named_pipe::NamedPipeServer),
+    /// Named pipe client end (Windows only).
     #[cfg(windows)]
     Client(tokio::net::windows::named_pipe::NamedPipeClient),
 }
@@ -95,11 +98,15 @@ impl AsyncWrite for IpcStream {
 /// On Unix: wraps `UnixListener` (shared via `&self` accept)
 /// On Windows: wraps `NamedPipeServer` (one instance at a time, recreated after accept)
 pub enum IpcListener {
+    /// Unix domain socket listener (Unix only).
     #[cfg(unix)]
     Unix(tokio::net::UnixListener),
+    /// Named pipe listener (Windows only).
     #[cfg(windows)]
     Pipe {
+        /// The current pipe server instance.
         current: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
+        /// Name of the pipe.
         pipe_name: String,
     },
 }

@@ -38,11 +38,15 @@
 //! - [`create_embedding_provider`] — Factory function dispatching on [`EmbeddingProviderType`]
 #![warn(missing_docs)]
 
+/// OpenAI HTTP client construction.
 pub mod client;
+/// Embedding configuration types.
 pub mod config;
+/// Embedding-related error types.
 pub mod error;
 mod quantized;
 
+/// Embedding configuration and provider-type enum.
 pub use config::{EmbeddingConfig, EmbeddingProviderType};
 
 use async_openai::types::embeddings::CreateEmbeddingRequestArgs;
@@ -52,6 +56,7 @@ use std::time::Instant;
 use crate::client::build_openai_client;
 use crate::error::EmbeddingError;
 
+/// Local GGUF-quantized embedding provider and path resolution.
 pub use quantized::{GgufEmbeddingProvider, resolve_gguf_paths};
 
 /// Trait for generating vector embeddings from text.
@@ -68,9 +73,13 @@ pub use quantized::{GgufEmbeddingProvider, resolve_gguf_paths};
 /// - [`model_name`](EmbeddingProvider::model_name) — Human-readable model identifier
 #[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
+    /// Generate an embedding vector for the given text (used for indexing / storage).
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError>;
+    /// Generate an embedding vector optimised for query / search.
     async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbeddingError>;
+    /// The dimensionality of the embedding vectors produced by this provider.
     fn dimensions(&self) -> usize;
+    /// A human-readable name identifying the embedding model.
     fn model_name(&self) -> &str;
 }
 

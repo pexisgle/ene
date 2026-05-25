@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod delete;
 mod edit;
 mod filesystem;

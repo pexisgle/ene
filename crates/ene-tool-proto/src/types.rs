@@ -4,15 +4,22 @@ use ene_config::serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(crate = "ene_config::serde")]
 pub enum ToolCategory {
+    /// File-system tools (read, write, edit, shell, undo).
     Filesystem,
+    /// Shell execution tools.
     Shell,
+    /// Browser automation tools.
     Browser,
+    /// GUI automation tools.
     App,
+    /// Web search tools.
     WebSearch,
+    /// Utility tools (question, todo, time, system info).
     Utility,
 }
 
 impl ToolCategory {
+    /// Returns the category label used for RAG embedding.
     pub fn label(&self) -> &'static str {
         match self {
             ToolCategory::Filesystem => "filesystem_tools",
@@ -29,10 +36,15 @@ impl ToolCategory {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(crate = "ene_config::serde")]
 pub struct ToolDefinition {
+    /// Unique tool name.
     pub name: String,
+    /// Human-readable description of what this tool does.
     pub description: String,
-    pub parameters: serde_json::Value, // JSON Schema
+    /// JSON Schema describing the tool's parameters.
+    pub parameters: serde_json::Value,
+    /// Optional category for RAG filtering.
     pub category: Option<ToolCategory>,
+    /// Keywords for RAG-based tool retrieval.
     pub keywords: Vec<String>,
 }
 
@@ -59,7 +71,9 @@ impl ToolDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(crate = "ene_config::serde")]
 pub struct ToolCallResult {
+    /// Identifier matching the original tool call.
     pub tool_call_id: String,
+    /// The tool's output content.
     pub content: String,
 }
 

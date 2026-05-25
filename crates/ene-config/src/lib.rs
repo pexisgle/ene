@@ -24,10 +24,17 @@
 #![warn(missing_docs)]
 extern crate self as ene_config;
 
+/// V3-format character card models with CBS macro expansion.
 pub mod character_card;
+/// Settings loading, schema generation, and the global settings registry.
+pub mod config;
+/// Configuration-related error types.
 pub mod error;
+/// Platform-aware directory and file path resolution.
 pub mod paths;
+/// First-launch asset deployment and resource directory initialization.
 pub mod resources;
+/// Per-character settings (position, motion, expressions).
 pub mod character_settings;
 
 pub use character_card::{
@@ -203,6 +210,7 @@ macro_rules! define_label_enum {
         }
 
         impl $name {
+            /// Returns the display label for this variant.
             pub fn label(&self) -> &'static str {
                 match self {
                     $(
@@ -211,6 +219,7 @@ macro_rules! define_label_enum {
                 }
             }
 
+            /// Returns extra data associated with this variant.
             pub fn $method(&self) -> $val_type {
                 match self {
                     $(
@@ -242,6 +251,7 @@ macro_rules! define_label_enum {
         }
 
         impl $name {
+            /// Returns the display label for this variant.
             pub fn label(&self) -> &'static str {
                 match self {
                     $(

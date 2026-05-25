@@ -12,6 +12,7 @@ pub struct HostRegistry {
 }
 
 impl HostRegistry {
+    /// Creates an empty registry.
     pub fn new() -> Self {
         Self {
             providers: Vec::new(),
@@ -19,6 +20,7 @@ impl HostRegistry {
         }
     }
 
+    /// Register a tool provider. First-wins on name conflicts.
     pub fn add_provider(&mut self, provider: Box<dyn ToolProvider>) {
         let idx = self.providers.len();
         for tool in provider.list_tools() {
@@ -27,6 +29,7 @@ impl HostRegistry {
         self.providers.push(provider);
     }
 
+    /// Returns all tool definitions from all registered providers.
     pub fn list_tools(&self) -> Vec<ToolDefinition> {
         let mut tools = Vec::with_capacity(self.tool_index.len());
         for provider in &self.providers {
@@ -35,6 +38,7 @@ impl HostRegistry {
         tools
     }
 
+    /// Call a tool by name, dispatching to the provider that registered it.
     pub async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         match self.tool_index.get(name) {
             Some(&idx) => self.providers[idx].call_tool(name, arguments).await,
@@ -44,12 +48,14 @@ impl HostRegistry {
         }
     }
 
+    /// Broadcasts the session ID to all registered providers.
     pub fn set_session_id(&self, session_id: &str) {
         for provider in &self.providers {
             provider.set_session_id(session_id);
         }
     }
 
+    /// Broadcasts sandbox configuration to all registered providers.
     pub fn set_sandbox(&self, sandbox: &SandboxConfigData) {
         for provider in &self.providers {
             provider.set_sandbox(sandbox);

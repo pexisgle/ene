@@ -8,6 +8,11 @@ use crate::error::ConfigError;
 
 
 
+/// Global singleton holding the active [`EneSettings`].
+///
+/// Set once at startup by [`load_full_settings`] and updated by
+/// [`update_global_settings`]. Accessed by [`get_global_settings`]
+/// and [`get_global_section`].
 pub static GLOBAL_SETTINGS: std::sync::OnceLock<std::sync::RwLock<EneSettings>> = std::sync::OnceLock::new();
 
 /// グローバルな EneSettings を更新します。
@@ -41,8 +46,11 @@ pub fn get_global_section<T: serde::de::DeserializeOwned + Default>(key: &str) -
     T::default()
 }
 
+/// A registered config schema entry.
 pub struct SchemaEntry {
+    /// The JSON Schema definition for this config section.
     pub schema: schemars::schema::RootSchema,
+    /// Optional parent key under which this schema should be nested at merge time.
     pub parent: Option<String>,
 }
 
@@ -131,14 +139,20 @@ fn merge_child_into_parent(
 
 crate::define_config!(
     "ene_settings",
+    /// Top-level application settings for ene.
     pub struct EneSettings {
+        /// Schema version number.
         pub version: u32 = 1,
+        /// Character card name or path.
         pub character: String = String::new(),
+        /// Display name shown to the user.
         pub user_name: String = "User".to_string(),
+        /// Behavioural rules injected into every system prompt.
         pub runtime_rules: String = "Keep responses relatively short and sweet, suitable for displaying on a screen overlay.".to_string(),
 
         #[serde(flatten)]
         #[schemars(skip)]
+        /// Catch-all for provider, tool, and other sub-settings.
         pub extra: HashMap<String, serde_json::Value> = HashMap::new(),
     }
 );
@@ -147,8 +161,9 @@ crate::define_config!(
 
 impl EneSettings {
 
-    /// 汎用的なセクションのデシリアライズヘルパー。
-    /// 指定されたキーが存在すればそれをパースし、存在しなければ Default::default() を返します。
+    /// Deserialise a sub-section from the `extra` map by key.
+    ///
+    /// Returns `Ok(T::default())` when the key is absent.
     pub fn get_section<T>(&self, key: &str) -> Result<T, ConfigError>
     where
         T: serde::de::DeserializeOwned + Default,
@@ -162,7 +177,7 @@ impl EneSettings {
         }
     }
 
-    /// 汎用的なセクションのシリアライズ・保存ヘルパー。
+    /// Serialise and insert a sub-section into the `extra` map by key.
     pub fn set_section<T>(&mut self, key: &str, section: &T) -> Result<(), ConfigError>
     where
         T: serde::Serialize,

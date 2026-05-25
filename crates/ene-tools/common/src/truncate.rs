@@ -1,9 +1,15 @@
+/// Smart content truncation helpers.
+///
+/// Provides three strategies: truncation by Unicode character count, by line count,
+/// and by tail (keeping the last N lines).
 pub struct Truncate;
 
 /// Result of a truncation operation, indicating whether content was actually cut.
 #[derive(Debug, Clone)]
 pub struct TruncateResult {
+    /// The truncated (or original) text content.
     pub content: String,
+    /// Whether the content was actually truncated.
     pub truncated: bool,
 }
 

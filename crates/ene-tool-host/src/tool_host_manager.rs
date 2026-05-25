@@ -13,7 +13,9 @@ use tokio::sync::Mutex;
 const MAX_RESTARTS: usize = 5;
 const BASE_DELAY_MS: u64 = 500;
 const MAX_DELAY_MS: u64 = 30_000;
+/// Maximum number of connection retries when connecting to a tool binary.
 pub const CONNECT_RETRIES: u32 = 50;
+/// Delay in milliseconds between connection retry attempts.
 pub const CONNECT_DELAY_MS: u64 = 50;
 
 struct ToolProcess {
@@ -426,6 +428,7 @@ impl ToolHostManager {
         None
     }
 
+    /// Attempts to connect to a tool binary with retry logic.
     pub async fn connect_with_retry(
         socket_path: &PathBuf,
         sandbox: &ene_tool_proto::SandboxConfigData,
