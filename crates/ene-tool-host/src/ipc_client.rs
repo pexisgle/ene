@@ -26,6 +26,7 @@ pub struct IpcToolRegistry {
 }
 
 impl IpcToolRegistry {
+    /// Creates a new IPC tool registry client, connecting to the tool binary at the given socket path.
     pub async fn new(
         socket_path: PathBuf,
         sandbox: SandboxConfigData,
@@ -147,14 +148,17 @@ impl IpcToolRegistry {
         self.do_refresh_tools_with_stream(stream).await
     }
 
+    /// Refreshes the cached tool definitions from the tool binary.
     pub async fn refresh_tools(&self) -> Result<(), String> {
         self.do_refresh_tools().await
     }
 
-    pub     fn socket_path(&self) -> &PathBuf {
+    /// Returns the socket path this client is connected to.
+    pub fn socket_path(&self) -> &PathBuf {
         &self.socket_path
     }
 
+    /// Retrieves the configuration JSON schema from the tool binary.
     pub async fn get_config_schema(&self) -> Option<serde_json::Value> {
         match self.send_with_reconnect(IpcRequest::GetConfigSchema).await {
             Ok(IpcResponse::ConfigSchema { schema }) => schema,

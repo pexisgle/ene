@@ -1,5 +1,7 @@
+#![allow(missing_docs)]
 // @generated automatically by Diesel CLI.
 
+// Key-value facts extracted from conversations, linked to summaries.
 diesel::table! {
     conversation_keyfacts (id) {
         id -> BigInt,
@@ -11,6 +13,7 @@ diesel::table! {
     }
 }
 
+// Raw conversation logs, ordered by creation time within a session.
 diesel::table! {
     conversation_logs (id) {
         id -> BigInt,
@@ -22,6 +25,7 @@ diesel::table! {
     }
 }
 
+// Summarized conversation entries with vector embeddings for similarity search.
 diesel::table! {
     conversation_summaries (id) {
         id -> BigInt,
@@ -34,6 +38,7 @@ diesel::table! {
     }
 }
 
+// Tool descriptions with versioned embeddings for tool RAG retrieval.
 diesel::table! {
     tool_embeddings (tool_name) {
         tool_name -> Text,

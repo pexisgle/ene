@@ -1,5 +1,6 @@
 ene_config::define_config!(
     "session",
+    /// Configuration for session auto-splitting behaviour.
     pub struct SessionConfig {
         /// セッション自動分割を有効にするか
         pub auto_session_split: bool = true,

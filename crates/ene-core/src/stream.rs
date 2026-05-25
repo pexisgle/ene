@@ -17,15 +17,21 @@ use ene_session::ConversationSession;
 use std::sync::Arc;
 use tokio_stream::Stream;
 
+/// Represents a user's permission decision for a destructive operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionDecision {
+    /// Allow the operation this one time.
     AllowOnce,
+    /// Allow the operation for the rest of the session.
     AllowSession,
+    /// Deny the operation.
     Deny,
 }
 
 static PENDING_DECISIONS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<PermissionDecision>>>> = std::sync::OnceLock::new();
 
+/// Registers a pending permission request that will be resolved when the user
+/// makes a decision.
 pub fn register_permission_request(request_id: String, tx: tokio::sync::oneshot::Sender<PermissionDecision>) {
     let map = PENDING_DECISIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     if let Ok(mut guard) = map.lock() {
@@ -33,6 +39,7 @@ pub fn register_permission_request(request_id: String, tx: tokio::sync::oneshot:
     }
 }
 
+/// Submits a user's permission decision for a pending request.
 pub fn submit_permission_decision(request_id: &str, decision: PermissionDecision) -> Result<(), &'static str> {
     let map = PENDING_DECISIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     if let Ok(mut guard) = map.lock() {
@@ -47,40 +54,64 @@ pub fn submit_permission_decision(request_id: &str, decision: PermissionDecision
     }
 }
 
+/// Events emitted during an AI streaming completion session.
 #[derive(Debug)]
 pub enum AiStreamEvent {
+    /// A chunk of generated text.
     TextDelta(String),
+    /// A special token like `<|emo:happy|>`.
     SpecialToken(String),
+    /// A tool call has been initiated.
     ToolCallStart {
+        /// The name of the tool being called.
         name: String,
+        /// The arguments passed to the tool.
         arguments: String,
     },
+    /// A tool call has completed with its result.
     ToolCallResult {
+        /// The name of the tool that was called.
         name: String,
+        /// The result returned by the tool.
         result: String,
     },
-    /// パーミッション要求（Phase 2: UI 連携）
+    /// A destructive operation requires user permission.
     PermissionRequired {
+        /// Unique identifier for the permission request.
         request_id: String,
+        /// The action requesting permission.
         action: String,
+        /// The target of the action (e.g. file path).
         target: String,
+        /// Human-readable description of the action.
         description: String,
     },
-    /// タスク進捗（Phase 2: バックグラウンド実行）
+    /// Progress update for a background task.
     TaskProgress {
+        /// Unique identifier for the task.
         task_id: String,
+        /// Current step number.
         step: usize,
+        /// Total number of steps.
         total_steps: usize,
+        /// Description of the current step.
         description: String,
     },
+    /// The session has been split with a new summary.
     SessionSplit {
+        /// The generated conversation summary.
         summary: String,
+        /// The reason the session was split.
         reason: String,
     },
+    /// The AI stream has completed.
     Finished,
+    /// An error occurred during streaming.
     Error(String),
 }
 
+/// Selects relevant tools using embedding-based RAG if enabled, otherwise
+/// returns all tools.
 pub async fn select_relevant_tools(
     registry: &dyn ene_tool_host::ToolRegistry,
     embedding_provider: &Option<Arc<dyn ene_embedding::EmbeddingProvider>>,
@@ -128,6 +159,8 @@ pub async fn select_relevant_tools(
     }
 }
 
+/// Fetches recalled summaries and key facts from the memory store for the
+/// current session context.
 pub async fn fetch_memory_context(
     session: &ConversationSession,
     settings: &EneSettings,
@@ -171,6 +204,7 @@ pub async fn fetch_memory_context(
     (recalled_summaries, key_facts)
 }
 
+/// Builds the full list of chat completion request messages for the AI stream.
 pub fn build_chat_messages_list(
     session: &ConversationSession,
     settings: &EneSettings,
@@ -198,6 +232,7 @@ pub fn build_chat_messages_list(
     .map_err(|e| crate::error::AiCoreError::PromptBuildError(e))
 }
 
+/// Executes a batch of tool calls and sends result events through the channel.
 pub async fn perform_tool_executions(
     registry: &dyn ene_tool_host::ToolRegistry,
     session_id: &str,
@@ -310,6 +345,8 @@ pub async fn perform_tool_executions(
     Ok(round_messages)
 }
 
+/// Runs the full AI streaming completion loop with tool calling, memory
+/// retrieval, and session management.
 pub async fn run_ai_with_tools(
     settings: &EneSettings,
     session: &ConversationSession,

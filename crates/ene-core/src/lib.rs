@@ -71,27 +71,41 @@
 //! ```
 #![warn(missing_docs)]
 
+/// OpenAI client builder and API interaction.
 pub mod client;
+/// Configuration types for the AI provider.
 pub mod config;
+/// Core error types.
 pub mod error;
+/// System prompt and message assembly helpers.
 pub mod prompt_builder;
+/// Runtime initialization and lifecycle management.
 pub mod runtime;
+/// AI streaming engine and tool-call loop.
 pub mod stream;
 
+/// OpenAI-compatible provider settings.
 pub use config::ProviderSettings;
 
+/// Memory types (re-exported from `ene-memory`).
 pub use ene_memory::{ConversationSummary, KeyFact, MemoryStore, RecalledSummary, MemoryConfig};
+/// Session types and utilities (re-exported from `ene-session`).
 pub use ene_session::{
     ConversationSession, PendingSplitTask, SessionBoundary, SessionError, SplitReason, SplitResult,
     SplitTaskInput, check_boundary, execute_split, extract_emotion_from_token, generate_session_id,
     poll_split_result, spawn_split_task, split_text_and_special_tokens, truncate,
     expand_cbs_macros, SessionConfig,
 };
+/// Embedding types (re-exported from `ene-embedding`).
 pub use ene_embedding::{EmbeddingProviderType, EmbeddingConfig};
+/// Tool host types (re-exported from `ene-tool-host`).
 pub use ene_tool_host::{
     CompositeToolRegistry, IpcToolRegistry, McpToolRegistry, ToolCategory, ToolDefinition,
     ToolError, ToolHostManager, ToolRegistry,
 };
+/// Core AI error type.
 pub use error::AiCoreError;
+/// Runtime and tool-registry builder.
 pub use runtime::{AiRuntime, build_tool_registry};
+/// Streaming event type and entry-point.
 pub use stream::{AiStreamEvent, run_ai_with_tools};

@@ -25,23 +25,36 @@
 //! Also re-exports character card types ([`CharacterCardV3`], [`expand_cbs_macros`], etc.) from `ene_config`.
 #![warn(missing_docs)]
 
+/// Session configuration types.
 pub mod config;
+/// Session split lifecycle (boundary check, async split, polling).
 pub mod conversation_manager;
+/// Session error types.
 pub mod error;
+/// Core session holder.
 pub mod session;
+/// Emotion-token (`<|emo:name|>`) parsing.
 pub mod special_token;
+/// Internal utilities.
 pub mod utils;
 
+/// Split lifecycle types and entry-points.
 pub use conversation_manager::{
     PendingSplitTask, SessionBoundary, SplitReason, SplitResult, SplitTaskInput, check_boundary,
     execute_split, generate_session_id, poll_split_result, spawn_split_task,
 };
+/// Session error type.
 pub use error::SessionError;
+/// Central session holder.
 pub use session::ConversationSession;
+/// Emotion-token parsing utilities.
 pub use special_token::{extract_emotion_from_token, split_text_and_special_tokens};
+/// Truncation utility re-exported from `ene-tools-common`.
 pub use utils::truncate;
+/// Character-card types re-exported from `ene-config`.
 pub use ene_config::{
     CharacterAsset, CharacterCardData, CharacterCardV3, ExpressionDefinition, ResolvedExpression,
     expand_cbs_macros, resolve_expressions,
 };
+/// Session auto-split configuration.
 pub use config::SessionConfig;

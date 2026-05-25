@@ -1,9 +1,12 @@
+#![allow(missing_docs)]
+
 fn default_string() -> String {
     String::new()
 }
 
 ene_config::define_config!(
     "memory",
+    /// Configuration for the memory (SQLite-vec) subsystem.
     pub struct MemoryConfig {
         pub enabled: bool = false,
         pub db_path: String = default_string(),
@@ -33,6 +36,7 @@ ene_config::define_config!(
 );
 
 impl MemoryConfig {
+    /// Resolves the effective database path, defaulting to a file next to the character card.
     pub fn resolve_memory_db_path(&self) -> std::path::PathBuf {
         if !self.db_path.trim().is_empty() {
             return std::path::PathBuf::from(&self.db_path);
@@ -43,6 +47,7 @@ impl MemoryConfig {
         dir.join("memory.db")
     }
 
+    /// Resolves the effective summarisation model, falling back to the chat model.
     pub fn resolve_summarization_model(&self) -> String {
         if !self.summarization_model.trim().is_empty() {
             return self.summarization_model.clone();
@@ -59,6 +64,7 @@ impl MemoryConfig {
         "gpt-4o-mini".to_string()
     }
 
+    /// Resolves the effective summarisation base URL, falling back to the provider settings.
     pub fn resolve_summarization_base_url(&self) -> Result<String, ene_config::ConfigError> {
         if !self.summarization_base_url.trim().is_empty() {
             return Ok(self.summarization_base_url.clone());

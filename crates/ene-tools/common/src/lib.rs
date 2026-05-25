@@ -21,5 +21,7 @@
 //! retrieval precision for your specific use case.
 #![warn(missing_docs)]
 
+/// HTML-to-Markdown conversion and content extraction.
 pub mod html;
+/// Smart content truncation (by chars, lines, and tail).
 pub mod truncate;

@@ -30,6 +30,7 @@ fn asst_msg(content: impl Into<String>, ctx: &str) -> Result<ChatCompletionReque
         .map(|m| m.into())
 }
 
+/// Converts tool definitions into OpenAI `ChatCompletionTools` format.
 pub fn build_tools(
     tools: &[ene_tool_host::ToolDefinition],
 ) -> Result<Vec<ChatCompletionTools>, String> {
@@ -48,6 +49,8 @@ pub fn build_tools(
     Ok(res)
 }
 
+/// Builds the system prompt from a character card, including runtime rules,
+/// personality, scenario, and description.
 pub fn build_system_prompt(card: &CharacterCardV3, runtime_rules: &str, user_name: &str) -> String {
     let char_name = card.data.get_character_name();
 
@@ -77,6 +80,7 @@ pub fn build_system_prompt(card: &CharacterCardV3, runtime_rules: &str, user_nam
     expand_cbs_macros(&combined, char_name, user_name)
 }
 
+/// Builds the expression protocol instructions (PHI) for emotion token emission.
 pub fn build_expression_phi(card: &CharacterCardV3) -> Option<String> {
     let resolved = resolve_expressions(card);
 
@@ -114,6 +118,9 @@ pub fn build_expression_phi(card: &CharacterCardV3) -> Option<String> {
     }
 }
 
+/// Assembles the full message list for an AI completion request, including system
+/// prompt, example messages, memory recalls, key facts, history, expression PHI,
+/// and the final user input.
 pub fn build_messages(
     card: &CharacterCardV3,
     user_input: &str,

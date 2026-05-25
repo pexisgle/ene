@@ -6,23 +6,30 @@ use rmcp::transport::child_process::{ConfigureCommandExt, TokioChildProcess};
 use std::sync::{Arc, RwLock};
 use tokio::process::Command;
 
+/// Represents a connection to an MCP server.
 pub struct McpServerConnection {
+    /// The server name.
     pub name: String,
+    /// The MCP client peer.
     pub client: Arc<rmcp::Peer<rmcp::RoleClient>>,
+    /// Tools provided by this server.
     pub tools: Vec<ToolDefinition>,
 }
 
+/// Registry for MCP server connections and their tools.
 pub struct McpToolRegistry {
     servers: Arc<RwLock<Vec<McpServerConnection>>>,
 }
 
 impl McpToolRegistry {
+    /// Creates a new empty MCP tool registry.
     pub fn new() -> Self {
         Self {
             servers: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
+    /// Connects to an MCP server via stdio transport.
     pub async fn connect_stdio(
         &self,
         name: &str,

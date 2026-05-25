@@ -7,9 +7,12 @@ use ene_embedding::EmbeddingProvider;
 use ene_memory::MemoryStore;
 use std::sync::Arc;
 
+/// Manages the conversation history with automatic trimming.
 #[derive(Clone, Debug)]
 pub struct ConversationHistory {
+    /// List of (role, content) pairs.
     pub conversation_history: Vec<(Role, String)>,
+    /// Maximum number of turns to retain.
     pub max_history_turns: usize,
 }
 
@@ -23,25 +26,38 @@ impl ConversationHistory {
     }
 }
 
+/// Holds the current display buffer and partial token carry-over.
 #[derive(Clone, Debug, Default)]
 pub struct DisplayState {
+    /// Accumulated display text for the current response.
     pub display_buffer: String,
+    /// Partial token text carried from a previous chunk.
     pub token_carry: String,
 }
 
+/// Context for the memory subsystem within a session.
 #[derive(Clone)]
 pub struct MemoryContext {
+    /// Optional memory store.
     pub memory_store: Option<Arc<MemoryStore>>,
+    /// Optional embedding provider.
     pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    /// The current session ID.
     pub session_id: String,
+    /// Timestamp when the session started.
     pub session_started_at: chrono::DateTime<chrono::Utc>,
+    /// Embedding of the pending user input.
     pub pending_embedding: Option<Vec<f32>>,
 }
 
+/// Tracks session metadata like embedding and timing.
 #[derive(Clone, Debug, Default)]
 pub struct SessionState {
+    /// The embedding of the last user input.
     pub last_input_embedding: Option<Vec<f32>>,
+    /// Timestamp of the last received message.
     pub last_message_time: Option<DateTime<Utc>>,
+    /// The current conversation turn count.
     pub current_turn_count: usize,
 }
 
@@ -49,11 +65,17 @@ pub struct SessionState {
 /// and the loaded character card. Shared between the streaming engine and the CLI/GUI frontends.
 #[derive(Clone)]
 pub struct ConversationSession {
+    /// Conversation history state.
     pub history: ConversationHistory,
+    /// Display buffer state.
     pub display: DisplayState,
+    /// Memory context state.
     pub memory: MemoryContext,
+    /// Session metadata state.
     pub state: SessionState,
+    /// The loaded character card.
     pub character_card: Option<CharacterCardV3>,
+    /// The filesystem path to the current character card.
     pub current_card_path: String,
 }
 

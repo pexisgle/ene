@@ -8,27 +8,44 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(crate = "ene_config::serde")]
 pub enum IpcRequest {
+    /// Initialise the tool with sandbox and config data.
     Initialize {
+        /// Sandbox configuration to apply.
         sandbox: SandboxConfigData,
+        /// Tool-specific configuration JSON.
         tool_config: Option<serde_json::Value>,
     },
+    /// List all available tool definitions.
     ListTools,
+    /// Request the tool's config JSON Schema.
     GetConfigSchema,
+    /// Execute a tool by name with JSON arguments.
     CallTool {
+        /// Tool name to call.
         name: String,
+        /// JSON-encoded arguments.
         arguments: String,
     },
+    /// Set the current session ID.
     SetSessionId {
+        /// Session identifier.
         session_id: String,
     },
+    /// Approve a pending permission request.
     ApprovePermission {
+        /// ID of the request to approve.
         request_id: String,
     },
+    /// Register a session-wide permission allow pattern.
     AllowPattern {
+        /// Action pattern (e.g. "filesystem_write").
         action: String,
+        /// Target glob pattern.
         target_pattern: String,
     },
+    /// Health-check ping.
     Ping,
+    /// Graceful shutdown.
     Shutdown,
 }
 
@@ -36,12 +53,30 @@ pub enum IpcRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(crate = "ene_config::serde")]
 pub enum IpcResponse {
+    /// Acknowledgment (for Initialize, SetSessionId, etc.).
     Ack,
-    Tools { tools: Vec<ToolDefinition> },
-    ConfigSchema { schema: Option<serde_json::Value> },
-    CallResult { result: Result<String, ToolError> },
+    /// List of tool definitions.
+    Tools {
+        /// The tool definitions.
+        tools: Vec<ToolDefinition>,
+    },
+    /// The tool's config JSON Schema.
+    ConfigSchema {
+        /// The schema, or None if not provided.
+        schema: Option<serde_json::Value>,
+    },
+    /// Result of a tool call.
+    CallResult {
+        /// The result, or an error.
+        result: Result<String, ToolError>,
+    },
+    /// Pong response to Ping.
     Pong,
-    Error { message: String },
+    /// Error response.
+    Error {
+        /// Error description.
+        message: String,
+    },
 }
 
 /// 4バイト長前置き + JSON でIpcRequestを読み込む

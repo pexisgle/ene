@@ -1,3 +1,5 @@
+/// Splits streaming text into normal text deltas and special tokens (like `<|emo:happy|>`).
+/// Handles partial tokens that span across chunks via a carry buffer.
 pub fn split_text_and_special_tokens(
     carry: &mut String,
     chunk: &str,
@@ -61,6 +63,8 @@ pub fn split_text_and_special_tokens(
     (text_deltas, special_tokens)
 }
 
+/// Extracts the emotion name from an emotion token like `<|emo:happy|>`,
+/// returning `None` if the token is not a valid emotion token.
 pub fn extract_emotion_from_token(token: &str) -> Option<String> {
     let upper = token.to_ascii_uppercase();
     if !upper.starts_with("<|EMO:") || !upper.ends_with("|>") {

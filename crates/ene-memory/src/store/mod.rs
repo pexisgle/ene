@@ -13,6 +13,7 @@ use models::{
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
+/// Registers the sqlite-vec extension and runs pending Diesel migrations.
 pub fn init_sqlite_vec(conn: &mut SqliteConnection) -> Result<(), MemoryError> {
     use rusqlite::ffi::sqlite3_auto_extension;
     use sqlite_vec::sqlite3_vec_init;
@@ -32,7 +33,9 @@ pub fn init_sqlite_vec(conn: &mut SqliteConnection) -> Result<(), MemoryError> {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(crate = "ene_config::serde")]
 pub struct KeyFact {
+    /// The key identifier for this fact.
     pub key: String,
+    /// The value associated with the key.
     pub value: String,
 }
 
@@ -40,19 +43,28 @@ pub struct KeyFact {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(crate = "ene_config::serde")]
 pub struct ConversationSummary {
+    /// Primary key.
     pub id: i64,
+    /// Session identifier this summary belongs to.
     pub session_id: String,
+    /// Character card name.
     pub card_name: String,
+    /// The summary text.
     pub summary: String,
+    /// Vector embedding of the summary.
     pub embedding: Vec<f32>,
+    /// Creation timestamp.
     pub created_at: DateTime<Utc>,
+    /// Timestamp when the session ended.
     pub ended_at: DateTime<Utc>,
 }
 
 /// A recalled summary with its cosine similarity score.
 #[derive(Debug, Clone)]
 pub struct RecalledSummary {
+    /// The recalled conversation summary entry.
     pub entry: ConversationSummary,
+    /// Cosine similarity score.
     pub similarity: f32,
 }
 
@@ -65,6 +77,7 @@ type SqlitePool = diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<SqliteConne
 /// `conversation_logs`, and `tool_embeddings`.
 pub struct MemoryStore {
     pool: SqlitePool,
+    /// Dimensionality of the embedding vectors.
     pub embedding_dim: usize,
 }
 
@@ -233,6 +246,7 @@ impl MemoryStore {
             .collect()
     }
 
+    /// Lists the most recent conversation summaries for a card.
     pub fn list_recent_summaries(
         &self,
         card_name: &str,
@@ -266,6 +280,7 @@ impl MemoryStore {
             .collect()
     }
 
+    /// Counts the number of summaries for a card.
     pub fn count_summaries(&self, card_name: &str) -> Result<i64, MemoryError> {
         use crate::schema::conversation_summaries::dsl;
 
@@ -280,6 +295,7 @@ impl MemoryStore {
         Ok(count)
     }
 
+    /// Deletes a summary and its associated keyfacts.
     pub fn delete_summary(&self, id: i64) -> Result<usize, MemoryError> {
         use crate::schema::{conversation_keyfacts, conversation_summaries};
 
@@ -304,6 +320,7 @@ impl MemoryStore {
 
     // ── Key Facts ─────────────────────────────────────────────────────────────
 
+    /// Returns all unique keyfacts for a card, with the latest value per key.
     pub fn get_all_keyfacts(&self, card_name: &str) -> Result<Vec<KeyFact>, MemoryError> {
         let mut conn = self
             .pool
@@ -330,6 +347,7 @@ impl MemoryStore {
             .collect())
     }
 
+    /// Inserts or updates a keyfact for a card.
     pub fn upsert_keyfact(
         &self,
         card_name: &str,
@@ -357,6 +375,7 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// Deletes all entries for a specific keyfact key.
     pub fn delete_keyfact(&self, card_name: &str, key: &str) -> Result<usize, MemoryError> {
         use crate::schema::conversation_keyfacts::dsl;
 
@@ -373,6 +392,7 @@ impl MemoryStore {
         Ok(count)
     }
 
+    /// Counts the number of distinct keyfacts for a card.
     pub fn count_keyfacts(&self, card_name: &str) -> Result<i64, MemoryError> {
         let mut conn = self
             .pool
@@ -390,6 +410,7 @@ impl MemoryStore {
 
     // ── Conversation Logs ─────────────────────────────────────────────────────
 
+    /// Inserts a conversation log entry.
     pub fn insert_log(
         &self,
         session_id: &str,
@@ -423,6 +444,7 @@ impl MemoryStore {
         Ok(id)
     }
 
+    /// Returns all conversation logs for a session.
     pub fn get_logs_by_session(
         &self,
         session_id: &str,
@@ -447,6 +469,7 @@ impl MemoryStore {
 
     // ── Tool Embeddings ─────────────────────────────────────────────────────
 
+    /// Inserts or updates a tool embedding in the database.
     pub fn upsert_tool_embedding(
         &self,
         tool_name: &str,
@@ -480,6 +503,7 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// Lists all stored tool embeddings.
     pub fn list_tool_embeddings(&self) -> Result<Vec<(String, String, Vec<f32>)>, MemoryError> {
         use crate::schema::tool_embeddings::dsl;
 
@@ -497,6 +521,7 @@ impl MemoryStore {
             .collect())
     }
 
+    /// Deletes a tool embedding from the database.
     pub fn delete_tool_embedding(&self, tool_name: &str) -> Result<usize, MemoryError> {
         use crate::schema::tool_embeddings::dsl;
 
@@ -509,6 +534,7 @@ impl MemoryStore {
         Ok(count)
     }
 
+    /// Searches tool embeddings by cosine similarity to the query.
     pub fn search_tools(
         &self,
         query_embedding: &[f32],

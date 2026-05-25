@@ -53,22 +53,35 @@
 //! ```
 #![warn(missing_docs)]
 
+/// Tool error types.
 pub mod error;
+/// IPC wire protocol (request / response).
 pub mod ipc;
+/// Composite registry for multiple tool providers.
 pub mod registry;
+/// Sandbox configuration types.
 pub mod sandbox;
+/// Server helper for running a tool provider.
 pub mod server;
+/// UDS / Named Pipe transport layer.
 pub mod transport;
+/// Shared types (ToolDefinition, ToolCategory, etc.).
 pub mod types;
 
+/// Tool error type.
 pub use error::ToolError;
+/// IPC message types and serialisation helpers.
 pub use ipc::{
     IpcRequest, IpcResponse, read_ipc_request, read_ipc_response, write_ipc_request,
     write_ipc_response,
 };
+/// Composite registry that aggregates multiple ToolProvider instances.
 pub use registry::HostRegistry;
+/// Sandbox configuration data sent from the host.
 pub use sandbox::SandboxConfigData;
+/// Starts an IPC server for a ToolProvider.
 pub use server::run_tool_server;
+/// Shared tool types.
 pub use types::{ToolCallResult, ToolCategory, ToolDefinition};
 
 use async_trait::async_trait;

@@ -1,14 +1,19 @@
-// SandboxConfig のシリアライズ可能データ型（POD）
-//
-// バリデーションロジックは含まず、ene-tools/fs::Sandbox で構築・検証する。
-// core → host 間のIPC通信で使用される。
 ene_config::define_config!(
     "sandbox",
     #[derive(PartialEq, Eq)]
+    /// Serializable sandbox configuration data (POD).
+    ///
+    /// Contains no validation logic — the `ene-tools-fs::Sandbox` type builds
+    /// and validates the actual sandbox. This struct is used in IPC between
+    /// core and tool binaries.
     pub struct SandboxConfigData {
+        /// Whether the sandbox is enabled.
         pub enabled: bool = true,
+        /// Directories allowed for read access.
         pub allowed_directories: Vec<String> = vec![".".to_string()],
+        /// Directories allowed for write access.
         pub writable_directories: Vec<String> = vec![".".to_string()],
+        /// Regex patterns for blocked shell commands.
         pub blocked_commands: Vec<String> = vec![
             r"rm\s+-rf\s+/".to_string(),
             r"dd\s+if=".to_string(),
@@ -16,11 +21,17 @@ ene_config::define_config!(
             r"sudo\s+".to_string(),
             r":\s*\{\s*\|\s*&\s*;\s*\}".to_string(),
         ],
+        /// Maximum bytes per read operation.
         pub max_read_bytes: usize = 50 * 1024,
+        /// Maximum bytes per write operation.
         pub max_write_bytes: usize = 1024 * 1024,
+        /// Shell command timeout in milliseconds.
         pub shell_timeout_ms: u64 = 120_000,
+        /// Maximum bytes in shell output.
         pub max_shell_output_bytes: usize = 50 * 1024,
+        /// Maximum lines in shell output.
         pub max_shell_output_lines: usize = 2000,
+        /// Optional path to the undo database.
         pub undo_db_path: Option<String> = None,
     }
 );

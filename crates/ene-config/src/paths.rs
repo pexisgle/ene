@@ -2,14 +2,20 @@ use std::path::PathBuf;
 
 const APP_ID: &str = "dev.pexisgle.ene";
 
+/// `true` when the binary was compiled in debug mode.
 pub const IS_DEV_BUILD: bool = cfg!(debug_assertions);
 
+/// Returns the OS-standard application data directory for ene.
 pub fn app_data_dir() -> PathBuf {
     directories::ProjectDirs::from("dev", "pexisgle", "ene")
         .map(|proj_dirs| proj_dirs.data_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from(APP_ID))
 }
 
+/// Returns the assets directory.
+///
+/// In debug builds the source-tree `assets/` is used; in release builds
+/// the app data directory is returned.
 pub fn assets_dir() -> PathBuf {
     if cfg!(debug_assertions) {
         if let Some(exe_dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())) {
@@ -26,18 +32,22 @@ pub fn assets_dir() -> PathBuf {
     app_data_dir()
 }
 
+/// Returns the models directory (`assets/models`).
 pub fn models_dir() -> PathBuf {
     assets_dir().join("models")
 }
 
+/// Returns the path to `settings.json`.
 pub fn config_file_path() -> PathBuf {
     assets_dir().join("settings.json")
 }
 
+/// Returns the path to `settings.schema.json`.
 pub fn schema_file_path() -> PathBuf {
     assets_dir().join("settings.schema.json")
 }
 
+/// Returns the path to `character_settings.schema.json`.
 pub fn character_schema_file_path() -> PathBuf {
     assets_dir().join("character_settings.schema.json")
 }

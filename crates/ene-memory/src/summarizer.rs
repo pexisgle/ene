@@ -25,6 +25,9 @@ pub struct ConversationSummaryResult {
     pub key_facts: Vec<KeyFact>,
 }
 
+/// Summarizes a conversation history using an LLM, returning a structured summary
+/// with topics and key facts. The prompt includes existing keyfacts for comparison,
+/// allowing updates, deletions, and retentions via the key_facts output.
 pub async fn summarize_conversation(
     model: &str,
     base_url: &str,

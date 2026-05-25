@@ -5,9 +5,14 @@ use std::collections::HashMap;
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
+/// A V3-format character card following the
+/// [Character Card Spec](https://github.com/CharAI-China/character-card-spec).
 pub struct CharacterCardV3 {
+    /// Spec identifier (e.g. `"chara_card_v3"`).
     pub spec: String,
+    /// Spec version (e.g. `"3.0"`).
     pub spec_version: String,
+    /// The card's data payload.
     pub data: CharacterCardData,
 }
 
@@ -24,41 +29,60 @@ impl Default for CharacterCardV3 {
 #[derive(Debug, Serialize, Deserialize, Clone, Default, JsonSchema)]
 #[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
+/// The core data payload of a V3 character card.
 pub struct CharacterCardData {
+    /// The character's primary name.
     pub name: String,
+    /// A short description of the character.
     pub description: String,
+    /// Tags / categories for discovery.
     pub tags: Vec<String>,
+    /// Who created this card.
     pub creator: String,
+    /// Version string for this character definition.
     pub character_version: String,
+    /// Example dialogue shown to the LLM on the first turn.
     pub mes_example: String,
+    /// Extension key-value store (expressions, ene metadata, etc.).
     #[serde(default)]
     pub extensions: HashMap<String, serde_json::Value>,
+    /// The character's system prompt.
     pub system_prompt: String,
+    /// Instructions appended after the conversation history (PHI).
     pub post_history_instructions: String,
+    /// The character's opening message.
     pub first_mes: String,
+    /// Alternate greeting messages that can replace `first_mes`.
     pub alternate_greetings: Vec<String>,
+    /// Personality traits description.
     pub personality: String,
+    /// Scenario / setting description.
     pub scenario: String,
-    
-    // Changes from CCv2
+    /// Notes from the card creator (CCv2+).
     #[serde(default)]
     pub creator_notes: String,
+    /// Optional lorebook for world-building context.
     #[serde(default)]
     pub character_book: Option<Lorebook>,
-
-    // New fields in CCv3
+    /// References to external assets (VRM, VRMA, etc.).
     #[serde(default)]
     pub assets: Vec<CharacterAsset>,
+    /// An alternative display name (preferred over `name` when non-empty).
     #[serde(default)]
     pub nickname: String,
+    /// Multilingual creator notes.
     #[serde(default)]
     pub creator_notes_multilingual: Option<HashMap<String, String>>,
+    /// Attribution sources for the card.
     #[serde(default)]
     pub source: Option<Vec<String>>,
+    /// Alternative greetings shown only in group chats.
     #[serde(default)]
     pub group_only_greetings: Vec<String>,
+    /// Unix timestamp of when the card was created.
     #[serde(default)]
     pub creation_date: Option<u64>,
+    /// Unix timestamp of the last modification.
     #[serde(default)]
     pub modification_date: Option<u64>,
 }
@@ -66,60 +90,89 @@ pub struct CharacterCardData {
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
+/// A reference to an external asset (VRM model, VRMA animation, etc.).
 pub struct CharacterAsset {
+    /// The type of asset (e.g. `"vrm"`, `"vrma"`, `"png"`).
     #[serde(rename = "type")]
     pub asset_type: String,
+    /// URI pointing to the asset file.
     pub uri: String,
+    /// Human-readable name for the asset.
     pub name: String,
+    /// File extension (e.g. `"vrm"`, `"vrma"`).
     pub ext: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default, JsonSchema)]
 #[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
+/// A lorebook (world-info) attached to a character card.
 pub struct Lorebook {
+    /// Optional name for this lorebook.
     #[serde(default)]
     pub name: Option<String>,
+    /// Optional description of the lorebook's purpose.
     #[serde(default)]
     pub description: Option<String>,
+    /// How many messages back to scan for trigger keys.
     #[serde(default)]
     pub scan_depth: Option<u32>,
+    /// Maximum number of tokens the lorebook entries may consume.
     #[serde(default)]
     pub token_budget: Option<u32>,
+    /// Whether scanning should recurse into previously matched entries.
     #[serde(default)]
     pub recursive_scanning: Option<bool>,
+    /// Extension data for the lorebook.
     #[serde(default)]
     pub extensions: HashMap<String, serde_json::Value>,
+    /// The list of lorebook entries.
     pub entries: Vec<LorebookEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
+/// A single entry inside a lorebook.
 pub struct LorebookEntry {
+    /// Trigger key-words / phrases that activate this entry.
     pub keys: Vec<String>,
+    /// The content injected when this entry is activated.
     pub content: String,
+    /// Extension data for this entry.
     #[serde(default)]
     pub extensions: HashMap<String, serde_json::Value>,
+    /// Whether this entry is enabled.
     pub enabled: bool,
+    /// Positional ordering among entries (lower = earlier).
     pub insertion_order: i32,
+    /// Whether key matching is case-sensitive.
     #[serde(default)]
     pub case_sensitive: Option<bool>,
+    /// Whether the keys should be treated as regular expressions.
     pub use_regex: bool,
+    /// If true, this entry is always injected regardless of key matching.
     #[serde(default)]
     pub constant: Option<bool>,
+    /// Optional display name for the entry.
     #[serde(default)]
     pub name: Option<String>,
+    /// Priority override for ordering.
     #[serde(default)]
     pub priority: Option<i32>,
+    /// Unique identifier (type varies by implementation).
     #[serde(default)]
     pub id: Option<serde_json::Value>,
+    /// Free-form comment about this entry.
     #[serde(default)]
     pub comment: Option<String>,
+    /// Whether secondary keys are used for matching.
     #[serde(default)]
     pub selective: Option<bool>,
+    /// Secondary key-words that must also match.
     #[serde(default)]
     pub secondary_keys: Option<Vec<String>>,
+    /// Where the content is inserted (`"before_char"` or `"after_char"`).
     #[serde(default)]
     pub position: Option<String>,
 }
@@ -129,7 +182,9 @@ pub struct LorebookEntry {
 #[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
 pub struct ExpressionDefinition {
+    /// The expression name (e.g. `"happy"`, `"sad"`).
     pub name: String,
+    /// A human-readable description of what this expression conveys.
     #[serde(default)]
     pub description: String,
     /// VRM blend-shape weights to set when this expression fires.
@@ -144,7 +199,9 @@ pub struct ExpressionDefinition {
 /// A fully resolved expression ready for use at runtime.
 #[derive(Debug, Clone)]
 pub struct ResolvedExpression {
+    /// The expression name (e.g. `"happy"`, `"sad"`).
     pub name: String,
+    /// A human-readable description of what this expression conveys.
     pub description: String,
     /// VRM blend-shape weights: expression_name → weight.
     pub vrm: HashMap<String, f32>,
@@ -215,6 +272,9 @@ pub fn resolve_expressions(card: &CharacterCardV3) -> Vec<ResolvedExpression> {
 }
 
 impl CharacterCardData {
+    /// Returns the display name for this character.
+    ///
+    /// Prefers `nickname` over `name` when `nickname` is non-empty.
     pub fn get_character_name(&self) -> &str {
         if self.nickname.is_empty() {
             &self.name
@@ -231,6 +291,15 @@ impl CharacterCardData {
     }
 }
 
+/// Expands CBS (Character Book Spec) template macros in `text`.
+///
+/// Supported macros:
+/// - `{{char}}`, `<char>`, `<bot>` → `char_name`
+/// - `{{user}}` → `user_name`
+/// - `{{random:a,b,c}}`, `{{pick:a,b,c}}` → random selection
+/// - `{{roll:d20}}` → random dice roll (1..N)
+/// - `{{//...}}`, `{{comment:...}}` → removed
+/// - `{{reverse:text}}` → reversed string
 pub fn expand_cbs_macros(text: &str, char_name: &str, user_name: &str) -> String {
     let mut result = text.to_string();
 
