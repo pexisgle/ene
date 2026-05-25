@@ -2,6 +2,7 @@
 name = "ene-tools-browser"
 version = "0.1.0"
 edition = "2024"
+description = "Chromium browser automation via Chrome DevTools Protocol: navigation, interaction, content extraction"
 
 [dependencies]
 ene-tool-proto = { workspace = true }

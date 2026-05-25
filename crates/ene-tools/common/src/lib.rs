@@ -1,20 +1,25 @@
 //! # ene-tools-common
 //!
-//! ツールクレート群の共通ユーティリティ。
+//! Shared utilities used by all tool provider crates.
 //!
-//! ## 将来的なツール設計・統一方針について
+//! ## Modules
 //!
-//! 現在、`ene-tools` は以下の方式が混在しています：
-//! 1. メガツール方式（fs, browser, app）: 単一のバイナリ/プロセスで複数のアクションを実行。
-//! 2. 個別ツール方式（web, utility）: 機能ごとに個別のバイナリ/プロセスを配置。
+//! - [`html`] — HTML-to-Markdown conversion and content extraction ((scraper-based)
+//! - [`truncate`] — Smart content truncation helpers (by chars, lines, and tail)
 //!
-//! **【将来的な統一方針】**
-//! ツール選択における AI の RAG（Retrieval-Augmented Generation）判定の精度向上と、
-//! プロセス起動オーバーヘッドの削減のバランスを取るため、将来的には「メガツール方式」または「個別ツール方式」の
-//! いずれか一方に統一することを推奨します。
-//! 具体的な移行候補としては、すべてのツールを「個別ツール」として細分化し、セマンティック判定の精度を高める方向、
-//! もしくはIPC通信レイヤーのオーバーヘッド最小化のため、すべてを一つの「統合エージェントツール」にまとめる方向が考えられます。
-//! 新しいツールを追加、または既存ツールを再設計する際は、この統一基準に従ってください。
+//! ## Tool Design Philosophy
+//!
+//! Currently the `ene-tools` family uses two architectural patterns:
+//!
+//! 1. **Mega-tool approach** (fs, app, browser): A single binary per domain with multiple actions
+//!    dispatched internally. Minimizes process overhead and IPC round-trips.
+//! 2. **Individual-tool approach** (web, utility): Multiple smaller tools, each with a focused responsibility.
+//!    Improves semantic matching precision in Tool RAG.
+//!
+//! A future unification to a single approach is possible but not yet decided.
+//! When designing new tools, consider the trade-offs between startup overhead and
+//! retrieval precision for your specific use case.
+#![warn(missing_docs)]
 
 pub mod html;
 pub mod truncate;

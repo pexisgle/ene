@@ -2,6 +2,7 @@
 name = "ene-session"
 version = "0.1.0"
 edition = "2024"
+description = "Conversation history, character card loading, emotion token parsing, and automatic session splitting"
 
 [lib]
 crate-type = ["lib"]

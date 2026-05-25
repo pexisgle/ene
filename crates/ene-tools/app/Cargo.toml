@@ -2,6 +2,7 @@
 name = "ene-tools-app"
 version = "0.1.0"
 edition = "2024"
+description = "OS-level GUI automation: window management, keyboard/mouse control, screenshots, clipboard"
 
 [dependencies]
 ene-tool-proto = { workspace = true }

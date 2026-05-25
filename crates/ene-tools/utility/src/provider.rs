@@ -3,6 +3,10 @@ use async_trait::async_trait;
 use ene_tool_proto::{ToolDefinition, ToolError, ToolProvider};
 use std::sync::{Arc, Mutex};
 
+/// Built-in utility tool provider.
+///
+/// Exposes four tools: `question`, `todo`, `get_current_time`, and `get_system_info`.
+/// The `todo` store is session-scoped via a `DashMap`.
 pub struct UtilityToolProvider {
     todo_store: Arc<todo::TodoStore>,
     session_id: Arc<Mutex<String>>,

@@ -1,3 +1,58 @@
+//! # ene-tool-proto
+//!
+//! IPC protocol definitions and shared types for the ene tool system.
+//!
+//! This crate defines the contract between the core runtime and standalone tool binaries:
+//!
+//! - [`ToolProvider`] trait — Interface each tool implements
+//! - [`IpcRequest`] / [`IpcResponse`] — Wire protocol messages (length-prefixed JSON over UDS/Named Pipe)
+//! - [`ToolDefinition`] — Schema describing a tool (name, parameters, category, keywords)
+//! - [`SandboxConfigData`] — Sandbox configuration shared across tool processes
+//! - [`run_tool_server`] — Helper to start an IPC server for a [`ToolProvider`]
+//!
+//! ## Creating a Custom Tool
+//!
+//! ```rust,no_run
+//! use async_trait::async_trait;
+//! use ene_tool_proto::{ToolProvider, ToolDefinition, ToolError, run_tool_server};
+//!
+//! struct MyTool;
+//!
+//! #[async_trait]
+//! impl ToolProvider for MyTool {
+//!     fn list_tools(&self) -> Vec<ToolDefinition> {
+//!         vec![ToolDefinition {
+//!             name: "hello".into(),
+//!             description: "Greets the user".into(),
+//!             parameters: serde_json::json!({
+//!                 "type": "object",
+//!                 "properties": {
+//!                     "name": {"type": "string", "description": "Name to greet"}
+//!                 },
+//!                 "required": ["name"]
+//!             }),
+//!             category: None,
+//!             keywords: vec![],
+//!         }]
+//!     }
+//!
+//!     async fn call_tool(&self, name: &str, args: &str) -> Result<String, ToolError> {
+//!         let v: serde_json::Value = serde_json::from_str(args)
+//!             .map_err(|e| ToolError::InvalidArguments { message: e.to_string() })?;
+//!         Ok(format!("Hello, {}!", v["name"].as_str().unwrap_or("world")))
+//!     }
+//!
+//!     fn set_session_id(&self, _sid: &str) {}
+//! }
+//!
+//! // In main.rs of your tool binary:
+//! // #[tokio::main]
+//! // async fn main() {
+//! //     run_tool_server(Box::new(MyTool)).await.unwrap();
+//! // }
+//! ```
+#![warn(missing_docs)]
+
 pub mod error;
 pub mod ipc;
 pub mod registry;
@@ -18,34 +73,34 @@ pub use types::{ToolCallResult, ToolCategory, ToolDefinition};
 
 use async_trait::async_trait;
 
-/// ツールプロバイダ trait — 各ツールクレートが実装する
+/// Tool provider trait — implemented by each tool crate.
 ///
-/// IPC分離後、host側の各Providerがこのtraitを実装し、
-/// core側のIpcToolRegistryがIPC経由で呼び出す。
+/// After IPC separation, each provider on the host side implements this trait.
+/// The host-side `IpcToolRegistry` calls through IPC to the tool binary.
 #[async_trait]
 pub trait ToolProvider: Send + Sync {
-    /// 提供するツール一覧を返す
+    /// Returns the list of tools this provider exposes.
     fn list_tools(&self) -> Vec<ToolDefinition>;
 
-    /// ツールを実行する
+    /// Executes a tool by name with the given JSON arguments.
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>;
 
-    /// 現在のセッションIDを設定（Undo等で使用）
+    /// Sets the current session ID (used for undo tracking, session-scoped state, etc.).
     fn set_session_id(&self, session_id: &str);
 
-    /// サンドボックス設定を受信（FSツール等で使用。デフォルトは無操作）
+    /// Receives sandbox configuration (used by filesystem tools; default is no-op).
     fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
 
-    /// 破壊的操作の承認（リクエストID）
+    /// Approves a pending destructive-operation permission request by ID.
     fn approve_permission(&self, _request_id: &str) {}
 
-    /// セッション全体のパーミッション許可パターンの追加
+    /// Adds a session-wide permission allow pattern (action + target glob).
     fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
 
-    /// ツール固有の設定を受信（Initialize 時に1回だけ呼ばれる）
+    /// Receives tool-specific configuration (called once during Initialize).
     fn set_config(&self, _config: &serde_json::Value) {}
 
-    /// 受け付ける設定の JSON Schema を返す
+    /// Returns the JSON Schema for the configuration this tool accepts.
     fn config_schema(&self) -> Option<serde_json::Value> {
         None
     }

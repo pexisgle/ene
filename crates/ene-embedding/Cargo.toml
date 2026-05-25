@@ -2,6 +2,7 @@
 name = "ene-embedding"
 version = "0.1.0"
 edition = "2024"
+description = "Vector embedding providers — supports OpenAI-compatible API and local Candle/GGUF inference"
 
 [lib]
 crate-type = ["lib"]

@@ -45,6 +45,8 @@ pub struct SessionState {
     pub current_turn_count: usize,
 }
 
+/// Central session container holding conversation history, display state, memory context,
+/// and the loaded character card. Shared between the streaming engine and the CLI/GUI frontends.
 #[derive(Clone)]
 pub struct ConversationSession {
     pub history: ConversationHistory,
@@ -78,6 +80,7 @@ impl Default for ConversationSession {
 }
 
 impl ConversationSession {
+    /// Creates a new empty session with a fresh session ID and zero turn count.
     pub fn new() -> Self {
         Self {
             history: ConversationHistory {
@@ -105,11 +108,14 @@ impl ConversationSession {
         }
     }
 
+    /// Attaches a memory store and embedding provider for long-term memory.
     pub fn init_memory(&mut self, store: Arc<MemoryStore>, embedder: Arc<dyn EmbeddingProvider>) {
         self.memory.memory_store = Some(store);
         self.memory.embedding_provider = Some(embedder);
     }
 
+    /// Loads a character card from `path`, merges `character_settings.json` expressions,
+    /// and clears the conversation history.
     pub fn load_card(
         &mut self,
         path: &str,
@@ -160,6 +166,7 @@ impl ConversationSession {
         Ok(resolve_expressions(self.character_card.as_ref().unwrap()))
     }
 
+    /// Appends a user message and trims history if it exceeds `max_history_turns * 2`.
     pub fn add_user_message(&mut self, input: &str) {
         self.history
             .conversation_history
@@ -167,6 +174,7 @@ impl ConversationSession {
         self.history.trim_history();
     }
 
+    /// Appends an assistant message and trims history if it exceeds `max_history_turns * 2`.
     pub fn add_assistant_message(&mut self, text: &str) {
         self.history
             .conversation_history
@@ -174,6 +182,10 @@ impl ConversationSession {
         self.history.trim_history();
     }
 
+    /// Processes a streaming text chunk, splitting it into text deltas and special tokens
+    /// (e.g., `<|emo:happy|>`). Appends text to the display buffer.
+    ///
+    /// Returns `(text_deltas, special_tokens)`.
     pub fn process_delta(&mut self, chunk: &str) -> (Vec<String>, Vec<String>) {
         let (text_deltas, special_tokens) =
             split_text_and_special_tokens(&mut self.display.token_carry, chunk);
@@ -183,6 +195,8 @@ impl ConversationSession {
         (text_deltas, special_tokens)
     }
 
+    /// Finalizes the current response: flushes any remaining token carry, commits the
+    /// display buffer as an assistant message, and returns any lingering token fragment.
     pub fn finalize_response(&mut self) -> Option<String> {
         let mut tail = None;
         if !self.display.token_carry.is_empty() {
@@ -197,11 +211,13 @@ impl ConversationSession {
         tail
     }
 
+    /// Resets the display buffer (used when a response is interrupted or discarded).
     pub fn reset_display_buffer(&mut self) {
         self.display.display_buffer.clear();
         self.display.token_carry.clear();
     }
 
+    /// Resets all session state (history, display, turn count) and returns a new session ID.
     pub fn reset_session(&mut self) -> String {
         let new_id = generate_session_id();
         self.history.conversation_history.clear();
@@ -216,24 +232,29 @@ impl ConversationSession {
         new_id
     }
 
+    /// Stores an embedding for the current pending user input (used for memory search).
     pub fn set_pending_embedding(&mut self, embedding: Vec<f32>) {
         self.memory.pending_embedding = Some(embedding);
     }
 
+    /// Stores the embedding of the most recent user input (used for topic boundary detection).
     pub fn set_last_input_embedding(&mut self, embedding: Vec<f32>) {
         self.state.last_input_embedding = Some(embedding);
     }
 
+    /// Tracks timing and turn count after a user sends a message.
     pub fn record_user_input(&mut self) {
         self.state.current_turn_count += 1;
         self.state.last_message_time = Some(Utc::now());
     }
 
+    /// Tracks timing and turn count after the assistant sends a response.
     pub fn record_assistant_response(&mut self) {
         self.state.current_turn_count += 1;
         self.state.last_message_time = Some(Utc::now());
     }
 
+    /// Returns the current character name, or `"default"` if no card is loaded.
     pub fn card_name(&self) -> &str {
         self.character_card
             .as_ref()
@@ -241,6 +262,7 @@ impl ConversationSession {
             .unwrap_or("default")
     }
 
+    /// Returns the number of minutes elapsed since the session started.
     pub fn session_elapsed_minutes(&self) -> i64 {
         (Utc::now() - self.memory.session_started_at).num_minutes()
     }

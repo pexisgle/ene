@@ -2,6 +2,7 @@
 name = "ene-tool-host"
 version = "0.1.0"
 edition = "2024"
+description = "Tool process lifecycle manager — spawns, supervises, and auto-restarts tool binaries with exponential backoff"
 
 [lib]
 crate-type = ["lib"]

@@ -2,6 +2,7 @@
 name = "ene-tools-utility"
 version = "0.1.0"
 edition = "2024"
+description = "Built-in utility tools: user questioning, todo list management, system time/info"
 
 [dependencies]
 ene-tool-proto = { workspace = true }

@@ -2,13 +2,16 @@ use async_trait::async_trait;
 
 use super::ToolDefinition;
 
-/// ツールレジストリ — 組み込みツールやMCPツールの統一インターフェース
+/// Unified tool registry interface — abstracts over both built-in IPC tools and MCP tools.
+///
+/// Implemented by [`IpcToolRegistry`], [`McpToolRegistry`], and [`CompositeToolRegistry`].
 #[async_trait]
 pub trait ToolRegistry: Send + Sync {
-    /// 利用可能なツール一覧を返す
+    /// Returns the list of all available tools.
     fn list_tools(&self) -> Vec<ToolDefinition>;
 
-    /// クエリに関連するツールのみを返す（デフォルトでは全ツール）
+    /// Returns only the tools relevant to the given query (defaults to all tools).
+    /// Takes an optional query embedding for cosine-similarity filtering.
     fn list_relevant_tools(
         &self,
         _query_embedding: Option<&[f32]>,
@@ -17,28 +20,29 @@ pub trait ToolRegistry: Send + Sync {
         self.list_tools()
     }
 
-    /// ツールを実行する
+    /// Executes a tool by name with the given JSON arguments from the LLM.
     async fn call_tool(
         &self,
         name: &str,
-        arguments: &str, // JSON string from LLM
+        arguments: &str,
     ) -> Result<String, crate::error::ToolError>;
 
-    /// 現在のセッションIDを設定（Undo等で使用）
+    /// Sets the current session ID (used for undo tracking, session-scoped state).
     async fn set_session_id(&self, _session_id: &str) {}
 
-    /// 破壊的操作の承認（リクエストID）
+    /// Approves a pending destructive-operation permission request by ID.
     async fn approve_permission(&self, _request_id: &str) {}
 
-    /// セッション全体のパーミッション許可パターンの追加
+    /// Adds a session-wide permission allow pattern (action + target glob).
     async fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
 
-    /// ツールのconfigスキーマを返す
+    /// Returns the JSON Schema for the tool's config section in settings.json.
     async fn config_schema(&self) -> Option<serde_json::Value> {
         None
     }
 
-    /// RAGインデックスが必要な場合に構築する（デフォルトでは何もしない）
+    /// Builds the vector embedding index for Tool RAG.
+    /// Only the [`CompositeToolRegistry`] implementation does meaningful work here.
     async fn ensure_index_built(
         &self,
         _embedder: &dyn ene_embedding::EmbeddingProvider,

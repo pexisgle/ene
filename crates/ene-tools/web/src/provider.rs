@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use ene_tool_proto::{ToolDefinition, ToolError, ToolProvider};
-use crate::WebSearchConfig;
+use crate::config::WebSearchConfig;
 use std::sync::OnceLock;
 
 fn generate_web_search_schema() -> serde_json::Value {

@@ -3,7 +3,7 @@ use crate::shell_platform;
 use crate::sandbox::SandboxConfig;
 use ene_tool_proto::ToolDefinition;
 use ene_tool_proto::ToolError;
-use ene_tools_utility::truncate::Truncate;
+use ene_tools_common::truncate::Truncate;
 use std::path::Path;
 use std::time::Duration;
 

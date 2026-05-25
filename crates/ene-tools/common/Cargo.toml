@@ -2,6 +2,7 @@
 name = "ene-tools-common"
 version = "0.1.0"
 edition = "2021"
+description = "Shared utilities for tool crates — HTML-to-Markdown conversion and content truncation"
 
 [dependencies]
 htmd = "0.5"

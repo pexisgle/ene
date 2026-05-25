@@ -1,9 +1,14 @@
 use scraper::{ElementRef, Html, Node};
 
+/// Converts raw HTML to Markdown text.
 pub fn html_to_markdown(html: &str) -> String {
     htmd::convert(html).unwrap_or_default()
 }
 
+/// Extracts a specific region from HTML and returns it as HTML.
+///
+/// * `extract` — Target selector: `"body"`, `"main"`, or `"full"`
+/// * `trim` — If true, removes non-semantic HTML noise (scripts, styles, etc.)
 pub fn extract_html(html: &str, extract: &str, trim: bool) -> String {
     let document = Html::parse_document(html);
     let target = select_target_element(&document, extract);
@@ -15,6 +20,9 @@ pub fn extract_html(html: &str, extract: &str, trim: bool) -> String {
     }
 }
 
+/// Extracts and converts a specific region of HTML to Markdown.
+///
+/// Applies `extract_html` first, then converts the result to Markdown.
 pub fn extract_markdown(html: &str, extract: &str, trim: bool) -> String {
     let html_input = if trim || extract != "full" {
         extract_html(html, extract, trim)

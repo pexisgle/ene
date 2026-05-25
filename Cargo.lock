@@ -3934,7 +3934,6 @@ dependencies = [
  "dashmap",
  "ene-tool-proto",
  "ene-tools-common",
- "ene-tools-utility",
  "flate2",
  "glob",
  "regex",

@@ -203,6 +203,14 @@ impl ToolRegistry for SupervisedIpcRegistry {
     }
 }
 
+/// Orchestrates the lifecycle of all tool processes.
+///
+/// Reads the `tools` section from settings, discovers and spawns tool binaries,
+/// wraps each in a [`SupervisedIpcRegistry`] with crash detection and auto-restart,
+/// and aggregates them into a [`CompositeToolRegistry`].
+///
+/// Also supports adding external registries (e.g., [`McpToolRegistry`]) and attaching
+/// a [`MemoryStore`] for Tool RAG embeddings.
 pub struct ToolHostManager {
     composite: Arc<CompositeToolRegistry>,
 }
@@ -264,6 +272,12 @@ fn resolve_undo_db_path(settings: &EneSettings) -> std::path::PathBuf {
 }
 
 impl ToolHostManager {
+    /// Starts all enabled tool binaries from the settings configuration.
+    ///
+    /// Creates the socket directory, iterates over enabled tools in `settings.tools`,
+    /// spawns each binary as a child process, and connects to it over IPC.
+    /// Also registers each tool's config schema in the global runtime registry
+    /// and regenerates `settings.schema.json`.
     pub async fn start(settings: &EneSettings) -> Result<Self, crate::error::ToolError> {
         let mut sandbox = settings.get_section::<ene_tool_proto::SandboxConfigData>("sandbox").unwrap_or_default();
         sandbox.undo_db_path = Some(
@@ -312,14 +326,18 @@ impl ToolHostManager {
         Ok(Self { composite })
     }
 
+    /// Adds an external registry (e.g., an [`McpToolRegistry`]) to the composite.
     pub fn add_registry(&mut self, registry: Arc<dyn ToolRegistry>) {
         self.composite.add_registry(registry);
     }
 
+    /// Attaches a memory store for Tool RAG embedding indexing.
     pub fn with_store(&mut self, store: Arc<MemoryStore>) {
         self.composite.set_store(store);
     }
 
+    /// Consumes the manager and returns an `Arc<dyn ToolRegistry>` suitable for use
+    /// in the streaming engine.
     pub fn into_registry(self) -> Arc<dyn ToolRegistry> {
         Arc::new(self)
     }
