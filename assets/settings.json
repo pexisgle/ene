@@ -42,7 +42,9 @@
       },
       "web": {
         "enable": true,
-        "tavily_api_key": ""
+        "tavily_api_key": "",
+        "brave_api_key": "",
+        "exa_api_key": ""
       }
     }
   }

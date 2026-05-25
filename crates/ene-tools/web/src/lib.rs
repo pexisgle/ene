@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 #[serde(default, rename_all = "snake_case")]
 pub struct WebSearchConfig {
     pub tavily_api_key: String,
-    pub google_api_key: String,
-    pub google_cse_cx: String,
+    pub brave_api_key: String,
+    pub exa_api_key: String,
 }
 
 #[cfg(test)]
@@ -24,16 +24,5 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(cfg.tavily_api_key, "test-key");
-        assert_eq!(cfg.google_api_key, "");
-        assert_eq!(cfg.google_cse_cx, "");
-
-        let cfg: WebSearchConfig = serde_json::from_value(serde_json::json!({
-            "google_api_key": "g-key",
-            "google_cse_cx": "cx-val"
-        }))
-        .unwrap();
-        assert_eq!(cfg.tavily_api_key, "");
-        assert_eq!(cfg.google_api_key, "g-key");
-        assert_eq!(cfg.google_cse_cx, "cx-val");
     }
 }
