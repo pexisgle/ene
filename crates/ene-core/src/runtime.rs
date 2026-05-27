@@ -1,8 +1,10 @@
 use crate::error::EneCoreError;
+use crate::stream::{EneStreamEvent, run_ene_with_tools};
 use ene_config::EneSettings;
 use ene_session::{ConversationSession, PendingSplitTask, SplitTaskInput, spawn_split_task};
-use ene_tool_host::{McpToolRegistry, ToolHostManager, ToolRegistry};
+use ene_tool_host::{CompositeToolRegistry, McpToolRegistry, ToolHostManager, ToolRegistry};
 use std::sync::Arc;
+use tokio_stream::Stream;
 
 /// ene Core runtime state.
 ///
@@ -21,52 +23,71 @@ pub struct EneRuntime {
 }
 
 impl EneRuntime {
-    /// Initializes a new ene Core runtime with the provided workspace settings.
+    /// Creates a new ene Core runtime with empty defaults.
     ///
-    /// This will automatically boot up:
-    /// - The requested embedding provider (local Candle or remote OpenAI-compatible API).
-    /// - The vector database memory store (if enabled in settings).
-    /// - The default character card defined in the settings.
-    /// - The tool manager, starting external IPC tool providers and connecting stdio/HTTP MCP servers.
+    /// Call [`load_settings`](Self::load_settings) or [`apply_settings`](Self::apply_settings)
+    /// afterwards to initialize the embedding provider, memory store, character card,
+    /// and tool registry.
+    pub async fn init() -> Result<Self, EneCoreError> {
+        Ok(Self {
+            settings: EneSettings::default(),
+            session: ConversationSession::new(),
+            registry: Arc::new(CompositeToolRegistry::new(vec![])),
+            pending_split: None,
+        })
+    }
+
+    /// Loads the full workspace settings from disk and initializes all subsystems
+    /// (embedding provider, memory store, character card, tool registry).
     ///
     /// # Errors
     ///
-    /// Returns `EneCoreError` if embedding initialization, database connection, or tool manager start fails.
-    pub async fn init(settings: EneSettings) -> Result<Self, EneCoreError> {
-        let mut session = ConversationSession::new();
+    /// Returns `EneCoreError` if embedding initialization, database connection,
+    /// or tool manager start fails.
+    pub async fn load_settings(&mut self) -> Result<(), EneCoreError> {
+        let settings = ene_config::load_full_settings();
+        self.apply_settings(settings).await?;
+        Ok(())
+    }
+
+    /// Applies externally constructed settings and initializes all subsystems
+    /// (embedding provider, memory store, character card, tool registry).
+    ///
+    /// # Errors
+    ///
+    /// Returns `EneCoreError` if embedding initialization, database connection,
+    /// or tool manager start fails.
+    pub async fn apply_settings(&mut self, settings: EneSettings) -> Result<(), EneCoreError> {
+        self.settings = settings;
 
         // 1. Initialize embedding
-        let embedder = init_embedding(&settings).map_err(|e| EneCoreError::EmbeddingError(e))?;
-        session.memory.embedding_provider = Some(embedder.clone());
+        let embedder = init_embedding(&self.settings).map_err(|e| EneCoreError::EmbeddingError(e))?;
+        self.session.memory.embedding_provider = Some(embedder.clone());
 
         // 2. Initialize memory store if enabled
-        let mem_config = settings
+        let mem_config = self
+            .settings
             .get_section::<ene_memory::MemoryConfig>("memory")
             .map_err(|e| {
                 EneCoreError::ConfigError(format!("Failed to load memory config: {}", e))
             })?;
 
         if mem_config.enabled {
-            let store = init_memory_store(&settings, &*embedder).map_err(|e| {
+            let store = init_memory_store(&self.settings, &*embedder).map_err(|e| {
                 EneCoreError::Memory(ene_memory::MemoryError::MemoryStoreConnectionError(e))
             })?;
-            session.memory.memory_store = Some(store);
+            self.session.memory.memory_store = Some(store);
         }
 
         // 3. Load default character card
-        if let Err(e) = session.load_card(&settings.character) {
+        if let Err(e) = self.session.load_card(&self.settings.character) {
             tracing::warn!("Failed to load default character card: {}", e);
         }
 
         // 4. Build tool registry
-        let registry = build_tool_registry(&settings).await?;
+        self.registry = build_tool_registry(&self.settings).await?;
 
-        Ok(Self {
-            settings,
-            session,
-            registry,
-            pending_split: None,
-        })
+        Ok(())
     }
 
     /// Evaluates if the current conversation session has reached a semantic boundary.
@@ -166,6 +187,29 @@ impl EneRuntime {
         self.session.set_pending_embedding(embedding.clone());
         self.session.set_last_input_embedding(embedding.clone());
         Ok(embedding)
+    }
+
+    /// Runs a full AI streaming completion for the given user input.
+    ///
+    /// This method handles:
+    /// - Session boundary detection and auto-splitting.
+    /// - Embedding the user input for semantic memory search.
+    /// - Recording the user turn and adding the message to history.
+    /// - Streaming the AI response with tool calling support.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EneCoreError` if embedding, LLM initialization, or stream setup fails.
+    pub async fn run(
+        &mut self,
+        user_input: &str,
+    ) -> Result<impl Stream<Item = EneStreamEvent> + 'static, EneCoreError> {
+        self.check_and_perform_split(user_input, &self.settings.user_name.clone());
+        self.embed_input(user_input).await?;
+        self.session.record_user_input();
+        self.session.add_user_message(user_input);
+
+        run_ene_with_tools(&self.settings, &self.session, user_input, self.registry.clone()).await
     }
 }
 

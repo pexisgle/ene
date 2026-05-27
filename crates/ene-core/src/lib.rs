@@ -22,31 +22,23 @@
 //! Here is a minimal example initializing the `EneRuntime` and launching an AI streaming completion loop:
 //!
 //! ```rust,no_run
-//! use ene_core::{EneRuntime, run_ene_with_tools, EneStreamEvent};
-//! use ene_config::load_full_settings;
+//! use ene_core::{EneRuntime, EneStreamEvent};
 //! use tokio_stream::StreamExt;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     // 1. Load workspace settings
-//!     let settings = load_full_settings()?;
+//!     // 1. Create the runtime
+//!     let mut runtime = EneRuntime::init().await?;
 //!
-//!     // 2. Initialize the core runtime
-//!     let mut runtime = EneRuntime::init(settings).await?;
+//!     // 2. Load workspace settings and initialize subsystems
+//!     runtime.load_settings().await?;
 //!
-//!     // 3. Prepare user input
+//!     // 3. Run the AI agent stream with tool support
 //!     let user_input = "Hello, what tools can you use?";
-//!     let _ = runtime.embed_input(user_input).await?;
+//!     let stream = runtime.run(user_input).await?;
+//!     tokio::pin!(stream);
 //!
-//!     // 4. Run the AI agent stream with active sandboxed tools
-//!     let mut stream = run_ene_with_tools(
-//!         &runtime.settings,
-//!         &runtime.session,
-//!         user_input,
-//!         runtime.registry.clone(),
-//!     ).await?;
-//!
-//!     // 5. Consume events dynamically (e.g., streaming text, tool executions)
+//!     // 4. Consume events dynamically (e.g., streaming text, tool executions)
 //!     while let Some(event) = stream.next().await {
 //!         match event {
 //!             EneStreamEvent::TextDelta(delta) => print!("{}", delta),
@@ -108,4 +100,7 @@ pub use error::EneCoreError;
 /// Runtime and tool-registry builder.
 pub use runtime::{EneRuntime, build_tool_registry};
 /// Streaming event type and entry-point.
-pub use stream::{EneStreamEvent, run_ene_with_tools};
+pub use stream::{
+    EneStreamEvent, PermissionDecision, register_permission_request, run_ene_with_tools,
+    submit_permission_decision,
+};
