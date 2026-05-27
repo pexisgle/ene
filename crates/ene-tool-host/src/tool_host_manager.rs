@@ -339,7 +339,9 @@ impl ToolHostManager {
     /// Combines [`start`](Self::start) (IPC tool spawn), MCP server connection,
     /// and registry aggregation into a single call. Includes automatic fallback
     /// to an empty tool set if the primary startup fails.
-    pub async fn start_full(settings: &EneSettings) -> Result<Arc<dyn ToolRegistry>, crate::error::ToolError> {
+    pub async fn start_full(
+        settings: &EneSettings,
+    ) -> Result<Arc<dyn ToolRegistry>, crate::error::ToolError> {
         let mut manager = match Self::start(settings).await {
             Ok(m) => m,
             Err(e) => {
@@ -374,8 +376,7 @@ impl ToolHostManager {
                 match &server.transport {
                     crate::config::McpTransport::Stdio { command, args } => {
                         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                        if let Err(err) =
-                            mcp.connect_stdio(&server.name, command, &args_ref).await
+                        if let Err(err) = mcp.connect_stdio(&server.name, command, &args_ref).await
                         {
                             tracing::warn!(
                                 "MCP server '{}' failed to connect: {}",
