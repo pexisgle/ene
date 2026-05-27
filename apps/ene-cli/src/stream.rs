@@ -1,18 +1,18 @@
 use crate::style;
-use ene_core::{ConversationSession, stream::AiStreamEvent, truncate};
+use ene_core::{ConversationSession, stream::EneStreamEvent, truncate};
 use std::io::{self, Write};
 use tokio_stream::StreamExt;
 
 pub async fn process_stream<S>(stream: S, session: &mut ConversationSession)
 where
-    S: futures_core::Stream<Item = AiStreamEvent>,
+    S: futures_core::Stream<Item = EneStreamEvent>,
 {
     session.reset_display_buffer();
     tokio::pin!(stream);
 
     while let Some(event) = stream.next().await {
         match event {
-            AiStreamEvent::TextDelta(delta) => {
+            EneStreamEvent::TextDelta(delta) => {
                 let (text_deltas, special_tokens) = session.process_delta(&delta);
                 for t in text_deltas {
                     print!("{}", t);
@@ -27,23 +27,23 @@ where
                     let _ = io::stdout().flush();
                 }
             }
-            AiStreamEvent::ToolCallStart { name, arguments } => {
+            EneStreamEvent::ToolCallStart { name, arguments } => {
                 println!(
                     "\n{}",
                     style::header(format!("[Tool Calling: {}({})]", name, arguments))
                 );
             }
-            AiStreamEvent::ToolCallResult { name: _, result } => {
+            EneStreamEvent::ToolCallResult { name: _, result } => {
                 println!("{}\n", style::success(format!("[Tool Result: {}]", result)));
             }
-            AiStreamEvent::SessionSplit { summary, reason } => {
+            EneStreamEvent::SessionSplit { summary, reason } => {
                 println!("\n{}", style::warning(format!("[Session] {} ", reason)));
                 println!(
                     "{}",
                     style::warning(format!("[Session] Summary: {}", truncate(&summary, 80)))
                 );
             }
-            AiStreamEvent::Finished => {
+            EneStreamEvent::Finished => {
                 if let Some(tail) = session.finalize_response() {
                     print!("{}", tail);
                     let _ = io::stdout().flush();
@@ -51,7 +51,7 @@ where
                 session.record_assistant_response();
                 println!();
             }
-            AiStreamEvent::PermissionRequired {
+            EneStreamEvent::PermissionRequired {
                 request_id,
                 action,
                 target,
@@ -85,7 +85,7 @@ where
                     println!("\n{}", style::success("承認の入力を送信しました。処理を再開します..."));
                 }
             }
-            AiStreamEvent::TaskProgress {
+            EneStreamEvent::TaskProgress {
                 task_id,
                 step,
                 total_steps,
@@ -99,10 +99,10 @@ where
                     ))
                 );
             }
-            AiStreamEvent::Error(err) => {
+            EneStreamEvent::Error(err) => {
                 eprintln!("\n[Error] {}", err);
             }
-            AiStreamEvent::SpecialToken(_) => {}
+            EneStreamEvent::SpecialToken(_) => {}
         }
     }
 }

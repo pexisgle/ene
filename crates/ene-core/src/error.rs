@@ -2,7 +2,7 @@ use thiserror::Error;
 
 /// Error types for the ene AI core subsystem.
 #[derive(Error, Debug)]
-pub enum AiCoreError {
+pub enum EneCoreError {
     /// Missing base URL for API calls.
     #[error("Missing base url: set {env_var} or configure AI Base URL")]
     MissingBaseUrl {

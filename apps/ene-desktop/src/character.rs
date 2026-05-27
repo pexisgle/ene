@@ -1,4 +1,4 @@
-use crate::ai_bridge::AiStreamEvent;
+use crate::ai_bridge::EneStreamEvent;
 use crate::app_config::CharacterSettings;
 use crate::platform::cursor_position_for_window;
 use crate::scene::MainViewCamera;
@@ -54,12 +54,12 @@ pub struct EmotionCommand {
 }
 
 fn enqueue_ai_special_tokens(
-    mut stream_events: MessageReader<AiStreamEvent>,
+    mut stream_events: MessageReader<EneStreamEvent>,
     mut emotion_queue: ResMut<EmotionQueue>,
     time: Res<Time>,
 ) {
     for event in stream_events.read() {
-        let AiStreamEvent::SpecialToken(token) = event else {
+        let EneStreamEvent::SpecialToken(token) = event else {
             continue;
         };
 

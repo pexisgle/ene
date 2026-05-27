@@ -8,7 +8,7 @@ pub fn apply_action(
     action: SettingsButtonAction,
     settings: &mut CharacterSettings,
     animation_control: &mut CharacterAnimationControl,
-    ai_request_writer: &mut MessageWriter<crate::ai_bridge::AiRequestEvent>,
+    ai_request_writer: &mut MessageWriter<crate::ai_bridge::EneRequestEvent>,
 ) {
     match action {
         SettingsButtonAction::PrevCharacter => {
@@ -206,14 +206,14 @@ fn adjust_f32(value: &mut f32, delta: f32) {
 
 fn send_ai_request(
     settings: &mut CharacterSettings,
-    ai_request_writer: &mut MessageWriter<crate::ai_bridge::AiRequestEvent>,
+    ai_request_writer: &mut MessageWriter<crate::ai_bridge::EneRequestEvent>,
 ) {
     let user_input = settings.ui.ai_chat_input.trim();
     if user_input.is_empty() {
         return;
     }
 
-    ai_request_writer.write(crate::ai_bridge::AiRequestEvent {
+    ai_request_writer.write(crate::ai_bridge::EneRequestEvent {
         user_input: user_input.to_string(),
     });
     settings.ui.ai_chat_input.clear();

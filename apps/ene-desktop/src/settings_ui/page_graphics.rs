@@ -2,7 +2,7 @@ use super::{
     SettingsButtonAction, SettingsValueKind,
     widgets::{apply_action, render_cycle_row},
 };
-use crate::ai_bridge::AiRequestEvent;
+use crate::ai_bridge::EneRequestEvent;
 use crate::app_config::CharacterSettings;
 use crate::character::CharacterAnimationControl;
 use bevy::prelude::*;
@@ -12,7 +12,7 @@ pub fn render_graphics_page(
     ui: &mut egui::Ui,
     settings: &mut CharacterSettings,
     animation_control: &mut CharacterAnimationControl,
-    ai_request_writer: &mut MessageWriter<AiRequestEvent>,
+    ai_request_writer: &mut MessageWriter<EneRequestEvent>,
 ) {
     ui.vertical(|ui| {
         if let Some(action) = render_cycle_row(

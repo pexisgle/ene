@@ -56,7 +56,7 @@ pub fn submit_permission_decision(request_id: &str, decision: PermissionDecision
 
 /// Events emitted during an AI streaming completion session.
 #[derive(Debug)]
-pub enum AiStreamEvent {
+pub enum EneStreamEvent {
     /// A chunk of generated text.
     TextDelta(String),
     /// A special token like `<|emo:happy|>`.
@@ -139,7 +139,7 @@ pub async fn select_relevant_tools(
             };
             let mut relevant =
                 registry.list_relevant_tools(query_embedding.as_deref(), tool_rag_limit);
-            // 常に含めるツールが漏れていれば追加
+            // Add back any tools that must always be included if they were missed
             let all_tools = registry.list_tools();
             let all_map: std::collections::HashMap<String, _> =
                 all_tools.into_iter().map(|t| (t.name.clone(), t)).collect();
@@ -211,9 +211,9 @@ pub fn build_chat_messages_list(
     user_input: &str,
     recalled_summaries: &[RecalledSummary],
     key_facts: &[ene_memory::KeyFact],
-) -> Result<Vec<ChatCompletionRequestMessage>, crate::error::AiCoreError> {
+) -> Result<Vec<ChatCompletionRequestMessage>, crate::error::EneCoreError> {
     let Some(card) = session.character_card.as_ref() else {
-        return Err(crate::error::AiCoreError::NoCharacterCard);
+        return Err(crate::error::EneCoreError::NoCharacterCard);
     };
     let history = session.history.conversation_history.clone();
     let runtime_rules = settings.runtime_rules.clone();
@@ -229,7 +229,7 @@ pub fn build_chat_messages_list(
         recalled_summaries,
         key_facts,
     )
-    .map_err(|e| crate::error::AiCoreError::PromptBuildError(e))
+    .map_err(|e| crate::error::EneCoreError::PromptBuildError(e))
 }
 
 /// Executes a batch of tool calls and sends result events through the channel.
@@ -238,8 +238,8 @@ pub async fn perform_tool_executions(
     session_id: &str,
     tool_calls: Vec<ToolCalls>,
     assistant_content: &str,
-    tx: tokio::sync::mpsc::UnboundedSender<AiStreamEvent>,
-) -> Result<Vec<ChatCompletionRequestMessage>, crate::error::AiCoreError> {
+    tx: tokio::sync::mpsc::UnboundedSender<EneStreamEvent>,
+) -> Result<Vec<ChatCompletionRequestMessage>, crate::error::EneCoreError> {
     let mut round_messages = Vec::new();
 
     let mut asst_msg_builder = AssistantMsgArgs::default();
@@ -249,7 +249,7 @@ pub async fn perform_tool_executions(
     }
 
     let asst_msg = asst_msg_builder.build().map_err(|e| {
-        crate::error::AiCoreError::ToolExecutionError(format!(
+        crate::error::EneCoreError::ToolExecutionError(format!(
             "Failed to build assistant message: {}",
             e
         ))
@@ -263,7 +263,7 @@ pub async fn perform_tool_executions(
             let name = call.function.name.clone();
             let args = call.function.arguments.clone();
 
-            let _ = tx.send(AiStreamEvent::ToolCallStart {
+            let _ = tx.send(EneStreamEvent::ToolCallStart {
                 name: name.clone(),
                 arguments: args.clone(),
             });
@@ -282,7 +282,7 @@ pub async fn perform_tool_executions(
             };
 
             if let Err(ene_tool_host::error::ToolError::PermissionRequired { request_id, action, target, description }) = &result {
-                let _ = tx.send(AiStreamEvent::PermissionRequired {
+                let _ = tx.send(EneStreamEvent::PermissionRequired {
                     request_id: request_id.clone(),
                     action: action.clone(),
                     target: target.clone(),
@@ -315,7 +315,7 @@ pub async fn perform_tool_executions(
                 Err(e) => format!("Error executing tool: {}", e),
             };
 
-            let _ = tx.send(AiStreamEvent::ToolCallResult {
+            let _ = tx.send(EneStreamEvent::ToolCallResult {
                 name: name.clone(),
                 result: result_str.clone(),
             });
@@ -327,7 +327,7 @@ pub async fn perform_tool_executions(
                 .content(final_tool_text)
                 .build()
                 .map_err(|e| {
-                    crate::error::AiCoreError::ToolExecutionError(format!(
+                    crate::error::EneCoreError::ToolExecutionError(format!(
                         "Failed to build tool message: {}",
                         e
                     ))
@@ -347,12 +347,12 @@ pub async fn perform_tool_executions(
 
 /// Runs the full AI streaming completion loop with tool calling, memory
 /// retrieval, and session management.
-pub async fn run_ai_with_tools(
+pub async fn run_ene_with_tools(
     settings: &EneSettings,
     session: &ConversationSession,
     user_input: &str,
     registry: std::sync::Arc<dyn ene_tool_host::ToolRegistry>,
-) -> Result<impl Stream<Item = AiStreamEvent> + 'static, crate::error::AiCoreError> {
+) -> Result<impl Stream<Item = EneStreamEvent> + 'static, crate::error::EneCoreError> {
     let provider = settings.get_section::<crate::ProviderSettings>("provider").unwrap_or_default();
     let base_url = provider.resolve_base_url()?;
     let api_key = provider.resolve_api_key();
@@ -426,7 +426,7 @@ pub async fn run_ai_with_tools(
             match crate::prompt_builder::build_tools(&tools) {
                 Ok(t) => Some(t),
                 Err(e) => {
-                    yield AiStreamEvent::Error(e);
+                    yield EneStreamEvent::Error(e);
                     return;
                 }
             }
@@ -438,7 +438,7 @@ pub async fn run_ai_with_tools(
 
         loop {
             if round >= max_rounds {
-                yield AiStreamEvent::Error("Max tool call rounds exceeded".to_string());
+                yield EneStreamEvent::Error("Max tool call rounds exceeded".to_string());
                 return;
             }
 
@@ -451,7 +451,7 @@ pub async fn run_ai_with_tools(
             let request = match req_builder.build() {
                 Ok(req) => req,
                 Err(e) => {
-                    yield AiStreamEvent::Error(format!("failed to build request: {e}"));
+                    yield EneStreamEvent::Error(format!("failed to build request: {e}"));
                     return;
                 }
             };
@@ -459,7 +459,7 @@ pub async fn run_ai_with_tools(
             let mut stream = match client.chat().create_stream(request).await {
                 Ok(s) => s,
                 Err(e) => {
-                    yield AiStreamEvent::Error(e.to_string());
+                    yield EneStreamEvent::Error(e.to_string());
                     return;
                 }
             };
@@ -474,7 +474,7 @@ pub async fn run_ai_with_tools(
                         if let Some(choice) = chunk.choices.first() {
                             if let Some(content_delta) = &choice.delta.content {
                                 assistant_content.push_str(content_delta);
-                                yield AiStreamEvent::TextDelta(content_delta.clone());
+                                yield EneStreamEvent::TextDelta(content_delta.clone());
                             }
 
                             if let Some(tool_calls_delta) = &choice.delta.tool_calls {
@@ -483,7 +483,7 @@ pub async fn run_ai_with_tools(
                         }
                     }
                     Err(e) => {
-                        yield AiStreamEvent::Error(e.to_string());
+                        yield EneStreamEvent::Error(e.to_string());
                         return;
                     }
                 }
@@ -516,11 +516,11 @@ pub async fn run_ai_with_tools(
                 let tx_messages = match handle.await {
                     Ok(Ok(msgs)) => msgs,
                     Ok(Err(e)) => {
-                        yield AiStreamEvent::Error(e.to_string());
+                        yield EneStreamEvent::Error(e.to_string());
                         return;
                     }
                     Err(e) => {
-                        yield AiStreamEvent::Error(format!("Task panicked: {}", e));
+                        yield EneStreamEvent::Error(format!("Task panicked: {}", e));
                         return;
                     }
                 };
@@ -542,7 +542,7 @@ pub async fn run_ai_with_tools(
                     }
                 }
 
-                yield AiStreamEvent::Finished;
+                yield EneStreamEvent::Finished;
                 return;
             }
         }

@@ -1,7 +1,7 @@
 use crate::style;
-use ene_core::{AiRuntime, MemoryConfig};
+use ene_core::{EneRuntime, MemoryConfig};
 
-pub async fn init() -> AiRuntime {
+pub async fn init() -> EneRuntime {
     let _assets_dir = ene_config::ensure_resource_dirs();
 
     let mut settings = ene_config::load_settings();
@@ -47,7 +47,7 @@ pub async fn init() -> AiRuntime {
         }
     }
 
-    match AiRuntime::init(settings).await {
+    match EneRuntime::init(settings).await {
         Ok(runtime) => {
             println!(
                 "{}",
@@ -75,7 +75,7 @@ pub async fn init() -> AiRuntime {
                 ))
             );
             let empty_settings = ene_config::load_settings();
-            AiRuntime::init(empty_settings)
+            EneRuntime::init(empty_settings)
                 .await
                 .expect("Failed to initialize fallback runtime")
         }

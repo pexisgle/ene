@@ -19,10 +19,10 @@
 //!
 //! ## Quick Start Example
 //!
-//! Here is a minimal example initializing the `AiRuntime` and launching an AI streaming completion loop:
+//! Here is a minimal example initializing the `EneRuntime` and launching an AI streaming completion loop:
 //!
 //! ```rust,no_run
-//! use ene_core::{AiRuntime, run_ai_with_tools, AiStreamEvent};
+//! use ene_core::{EneRuntime, run_ene_with_tools, EneStreamEvent};
 //! use ene_config::load_full_settings;
 //! use tokio_stream::StreamExt;
 //!
@@ -32,14 +32,14 @@
 //!     let settings = load_full_settings()?;
 //!
 //!     // 2. Initialize the core runtime
-//!     let mut runtime = AiRuntime::init(settings).await?;
+//!     let mut runtime = EneRuntime::init(settings).await?;
 //!
 //!     // 3. Prepare user input
 //!     let user_input = "Hello, what tools can you use?";
 //!     let _ = runtime.embed_input(user_input).await?;
 //!
 //!     // 4. Run the AI agent stream with active sandboxed tools
-//!     let mut stream = run_ai_with_tools(
+//!     let mut stream = run_ene_with_tools(
 //!         &runtime.settings,
 //!         &runtime.session,
 //!         user_input,
@@ -49,17 +49,17 @@
 //!     // 5. Consume events dynamically (e.g., streaming text, tool executions)
 //!     while let Some(event) = stream.next().await {
 //!         match event {
-//!             AiStreamEvent::TextDelta(delta) => print!("{}", delta),
-//!             AiStreamEvent::ToolCallStart { name, arguments } => {
+//!             EneStreamEvent::TextDelta(delta) => print!("{}", delta),
+//!             EneStreamEvent::ToolCallStart { name, arguments } => {
 //!                 println!("\n[Executing tool '{}' with {}]", name, arguments);
 //!             }
-//!             AiStreamEvent::ToolCallResult { name, result } => {
+//!             EneStreamEvent::ToolCallResult { name, result } => {
 //!                 println!("[Tool '{}' returned: {}]", name, result);
 //!             }
-//!             AiStreamEvent::Finished => {
+//!             EneStreamEvent::Finished => {
 //!                 println!("\n[Stream complete]");
 //!             }
-//!             AiStreamEvent::Error(err) => {
+//!             EneStreamEvent::Error(err) => {
 //!                 eprintln!("Error in stream: {}", err);
 //!             }
 //!             _ => {}
@@ -104,8 +104,8 @@ pub use ene_tool_host::{
     ToolError, ToolHostManager, ToolRegistry,
 };
 /// Core AI error type.
-pub use error::AiCoreError;
+pub use error::EneCoreError;
 /// Runtime and tool-registry builder.
-pub use runtime::{AiRuntime, build_tool_registry};
+pub use runtime::{EneRuntime, build_tool_registry};
 /// Streaming event type and entry-point.
-pub use stream::{AiStreamEvent, run_ai_with_tools};
+pub use stream::{EneStreamEvent, run_ene_with_tools};

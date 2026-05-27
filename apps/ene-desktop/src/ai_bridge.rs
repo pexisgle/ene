@@ -7,19 +7,19 @@ use tokio_stream::StreamExt;
 use crate::app_config::CharacterSettings;
 use crate::character::ResolvedExpressionMap;
 use ene_core::{
-    AiRuntime, poll_split_result,
-    stream::{AiStreamEvent as CoreAiStreamEvent, run_ai_with_tools},
+    EneRuntime, poll_split_result,
+    stream::{EneStreamEvent as CoreEneStreamEvent, run_ene_with_tools},
     truncate, MemoryConfig, SessionConfig,
 };
 
-pub struct AiPlugin;
+pub struct EnePlugin;
 
-impl Plugin for AiPlugin {
+impl Plugin for EnePlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<AiRequestEvent>()
-            .add_message::<AiStreamEvent>()
-            .init_resource::<AiRuntimeState>()
-            .init_resource::<AiTokioRuntime>()
+        app.add_message::<EneRequestEvent>()
+            .add_message::<EneStreamEvent>()
+            .init_resource::<EneRuntimeState>()
+            .init_resource::<EneTokioRuntime>()
             .add_systems(
                 Update,
                 (
@@ -34,13 +34,13 @@ impl Plugin for AiPlugin {
 }
 
 #[derive(Message, Debug, Clone)]
-pub struct AiRequestEvent {
+pub struct EneRequestEvent {
     pub user_input: String,
 }
 
 #[derive(Message, Debug, Clone)]
 #[allow(dead_code)]
-pub enum AiStreamEvent {
+pub enum EneStreamEvent {
     TextDelta(String),
     SpecialToken(String),
     ToolCallStart {
@@ -68,9 +68,9 @@ pub enum AiStreamEvent {
 }
 
 #[derive(Resource)]
-pub struct AiTokioRuntime(pub tokio::runtime::Runtime);
+pub struct EneTokioRuntime(pub tokio::runtime::Runtime);
 
-impl FromWorld for AiTokioRuntime {
+impl FromWorld for EneTokioRuntime {
     fn from_world(_world: &mut World) -> Self {
         Self(
             tokio::runtime::Builder::new_multi_thread()
@@ -82,15 +82,15 @@ impl FromWorld for AiTokioRuntime {
 }
 
 #[derive(Resource)]
-pub struct AiRuntimeState {
+pub struct EneRuntimeState {
     pub processing: bool,
     pub pending: VecDeque<String>,
-    pub runtime: Option<AiRuntime>,
+    pub runtime: Option<EneRuntime>,
     pub embedding_in_progress: bool,
-    worker_rx: Mutex<Option<UnboundedReceiver<CoreAiStreamEvent>>>,
+    worker_rx: Mutex<Option<UnboundedReceiver<CoreEneStreamEvent>>>,
 }
 
-impl Default for AiRuntimeState {
+impl Default for EneRuntimeState {
     fn default() -> Self {
         Self {
             processing: false,
@@ -103,8 +103,8 @@ impl Default for AiRuntimeState {
 }
 
 fn enqueue_ai_requests(
-    mut requests: MessageReader<AiRequestEvent>,
-    mut runtime_state: ResMut<AiRuntimeState>,
+    mut requests: MessageReader<EneRequestEvent>,
+    mut runtime_state: ResMut<EneRuntimeState>,
 ) {
     for request in requests.read() {
         if !request.user_input.trim().is_empty() {
@@ -115,10 +115,10 @@ fn enqueue_ai_requests(
 
 /// Poll for asynchronous embedding task completion without blocking the game loop.
 fn process_embedding(
-    mut runtime_state: ResMut<AiRuntimeState>,
+    mut runtime_state: ResMut<EneRuntimeState>,
     settings: Res<CharacterSettings>,
-    rt: Res<AiTokioRuntime>,
-    mut stream_writer: MessageWriter<AiStreamEvent>,
+    rt: Res<EneTokioRuntime>,
+    mut stream_writer: MessageWriter<EneStreamEvent>,
 ) {
     if !runtime_state.embedding_in_progress {
         return;
@@ -129,10 +129,10 @@ fn process_embedding(
 }
 
 fn launch_ai_request(
-    runtime_state: &mut AiRuntimeState,
+    runtime_state: &mut EneRuntimeState,
     settings: &CharacterSettings,
-    rt: &AiTokioRuntime,
-    stream_writer: &mut MessageWriter<AiStreamEvent>,
+    rt: &EneTokioRuntime,
+    stream_writer: &mut MessageWriter<EneStreamEvent>,
 ) {
     let Some(user_input) = runtime_state.pending.front().cloned() else {
         return;
@@ -142,7 +142,7 @@ fn launch_ai_request(
     {
         let Ok(mut guard) = runtime_state.worker_rx.lock() else {
             runtime_state.pending.pop_front();
-            stream_writer.write(AiStreamEvent::Error(
+            stream_writer.write(EneStreamEvent::Error(
                 "failed to acquire AI worker receiver lock".to_string(),
             ));
             runtime_state.processing = false;
@@ -160,7 +160,7 @@ fn launch_ai_request(
     let registry_clone = runtime.registry.clone();
 
     rt.0.spawn(async move {
-        match run_ai_with_tools(&ai_settings, &session_clone, &user_input, registry_clone).await {
+        match run_ene_with_tools(&ai_settings, &session_clone, &user_input, registry_clone).await {
             Ok(stream) => {
                 tokio::pin!(stream);
                 while let Some(event) = stream.next().await {
@@ -170,7 +170,7 @@ fn launch_ai_request(
                 }
             }
             Err(err) => {
-                let _ = tx.send(CoreAiStreamEvent::Error(err.to_string()));
+                let _ = tx.send(CoreEneStreamEvent::Error(err.to_string()));
             }
         }
     });
@@ -179,10 +179,10 @@ fn launch_ai_request(
 }
 
 fn start_next_ai_request(
-    mut runtime_state: ResMut<AiRuntimeState>,
+    mut runtime_state: ResMut<EneRuntimeState>,
     settings: Res<CharacterSettings>,
-    rt: Res<AiTokioRuntime>,
-    mut stream_writer: MessageWriter<AiStreamEvent>,
+    rt: Res<EneTokioRuntime>,
+    mut stream_writer: MessageWriter<EneStreamEvent>,
     mut expression_map: ResMut<ResolvedExpressionMap>,
 ) {
     if runtime_state.processing || runtime_state.embedding_in_progress {
@@ -196,14 +196,14 @@ fn start_next_ai_request(
     // Initialize unified runtime if not yet initialized
     if runtime_state.runtime.is_none() {
         let ai_settings = settings.ai.ai.clone();
-        match rt.0.block_on(AiRuntime::init(ai_settings)) {
+        match rt.0.block_on(EneRuntime::init(ai_settings)) {
             Ok(runtime) => {
                 runtime_state.runtime = Some(runtime);
                 info!("[Runtime] Unified AI Runtime initialized successfully.");
             }
             Err(e) => {
                 runtime_state.pending.pop_front();
-                stream_writer.write(AiStreamEvent::Error(format!(
+                stream_writer.write(EneStreamEvent::Error(format!(
                     "Failed to initialize AI runtime: {}",
                     e
                 )));
@@ -225,7 +225,7 @@ fn start_next_ai_request(
             }
             Err(e) => {
                 runtime_state.pending.pop_front();
-                stream_writer.write(AiStreamEvent::Error(e.to_string()));
+                stream_writer.write(EneStreamEvent::Error(e.to_string()));
                 return;
             }
         }
@@ -273,8 +273,8 @@ fn start_next_ai_request(
 }
 
 fn poll_ai_worker(
-    mut runtime_state: ResMut<AiRuntimeState>,
-    mut stream_writer: MessageWriter<AiStreamEvent>,
+    mut runtime_state: ResMut<EneRuntimeState>,
+    mut stream_writer: MessageWriter<EneStreamEvent>,
     settings: Res<CharacterSettings>,
 ) {
     let mem_config = settings.ai.ai.get_section::<MemoryConfig>("memory").unwrap_or_default();
@@ -342,70 +342,70 @@ fn poll_ai_worker(
 
     for event in drained_events {
         match event {
-            CoreAiStreamEvent::TextDelta(delta) => {
+            CoreEneStreamEvent::TextDelta(delta) => {
                 let runtime = runtime_state.runtime.as_mut().unwrap();
                 let (text_deltas, special_tokens) = runtime.session.process_delta(&delta);
 
                 for text_delta in text_deltas {
-                    stream_writer.write(AiStreamEvent::TextDelta(text_delta));
+                    stream_writer.write(EneStreamEvent::TextDelta(text_delta));
                 }
                 for token in special_tokens {
-                    stream_writer.write(AiStreamEvent::SpecialToken(token));
+                    stream_writer.write(EneStreamEvent::SpecialToken(token));
                 }
             }
-            CoreAiStreamEvent::ToolCallStart { name, arguments } => {
-                stream_writer.write(AiStreamEvent::ToolCallStart { name, arguments });
+            CoreEneStreamEvent::ToolCallStart { name, arguments } => {
+                stream_writer.write(EneStreamEvent::ToolCallStart { name, arguments });
             }
-            CoreAiStreamEvent::ToolCallResult { name, result } => {
-                stream_writer.write(AiStreamEvent::ToolCallResult { name, result });
+            CoreEneStreamEvent::ToolCallResult { name, result } => {
+                stream_writer.write(EneStreamEvent::ToolCallResult { name, result });
             }
-            CoreAiStreamEvent::Finished => {
+            CoreEneStreamEvent::Finished => {
                 let runtime = runtime_state.runtime.as_mut().unwrap();
                 if let Some(tail) = runtime.session.finalize_response() {
-                    stream_writer.write(AiStreamEvent::TextDelta(tail));
+                    stream_writer.write(EneStreamEvent::TextDelta(tail));
                 }
 
-                stream_writer.write(AiStreamEvent::Finished);
+                stream_writer.write(EneStreamEvent::Finished);
                 runtime_state.processing = false;
                 if let Ok(mut guard) = runtime_state.worker_rx.lock() {
                     *guard = None;
                 }
             }
-            CoreAiStreamEvent::Error(error) => {
-                stream_writer.write(AiStreamEvent::Error(error));
+            CoreEneStreamEvent::Error(error) => {
+                stream_writer.write(EneStreamEvent::Error(error));
                 runtime_state.processing = false;
                 if let Ok(mut guard) = runtime_state.worker_rx.lock() {
                     *guard = None;
                 }
             }
-            CoreAiStreamEvent::PermissionRequired {
+            CoreEneStreamEvent::PermissionRequired {
                 request_id,
                 action,
                 target,
                 description,
             } => {
-                stream_writer.write(AiStreamEvent::PermissionRequired {
+                stream_writer.write(EneStreamEvent::PermissionRequired {
                     request_id,
                     action,
                     target,
                     description,
                 });
             }
-            CoreAiStreamEvent::TaskProgress {
+            CoreEneStreamEvent::TaskProgress {
                 task_id,
                 step,
                 total_steps,
                 description,
             } => {
-                stream_writer.write(AiStreamEvent::TaskProgress {
+                stream_writer.write(EneStreamEvent::TaskProgress {
                     task_id,
                     step,
                     total_steps,
                     description,
                 });
             }
-            CoreAiStreamEvent::SpecialToken(_) => {}
-            CoreAiStreamEvent::SessionSplit { summary, reason } => {
+            CoreEneStreamEvent::SpecialToken(_) => {}
+            CoreEneStreamEvent::SessionSplit { summary, reason } => {
                 info!("[Session] {}: {}", reason, summary);
             }
         }
