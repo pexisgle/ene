@@ -126,7 +126,10 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
             provider.approve_permission(request_id);
             IpcResponse::Ack
         }
-        IpcRequest::AllowPattern { action, target_pattern } => {
+        IpcRequest::AllowPattern {
+            action,
+            target_pattern,
+        } => {
             provider.allow_pattern(action, target_pattern);
             IpcResponse::Ack
         }

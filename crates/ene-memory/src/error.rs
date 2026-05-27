@@ -7,7 +7,7 @@ pub enum MemoryError {
     #[error("Missing base url: set {env_var} or configure AI Base URL")]
     MissingBaseUrl {
         /// The environment variable name for the base URL.
-        env_var: String
+        env_var: String,
     },
     /// Diesel/sqlite error from the memory store.
     #[error("Memory store error: {0}")]

@@ -3,8 +3,8 @@
 //! Demonstrates opening an in-memory store, inserting a summary with
 //! key facts, searching by embedding similarity, and retrieving facts.
 
-use ene_memory::{KeyFact, MemoryStore, RecalledSummary};
 use chrono::Utc;
+use ene_memory::{KeyFact, MemoryStore, RecalledSummary};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open an in-memory store with 4-dimensional embeddings
@@ -38,16 +38,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Search for related summaries
     let query_emb = vec![0.9_f32, 0.1, 0.0, 0.0];
-    let results: Vec<RecalledSummary> = store.search_summaries(
-        &query_emb,
-        card_name,
-        5,
-        0.5,
-    )?;
+    let results: Vec<RecalledSummary> = store.search_summaries(&query_emb, card_name, 5, 0.5)?;
 
     println!("\nFound {} related summaries:", results.len());
     for (i, rs) in results.iter().enumerate() {
-        println!("  {}. [score: {:.3}] {}", i + 1, rs.similarity, rs.entry.summary);
+        println!(
+            "  {}. [score: {:.3}] {}",
+            i + 1,
+            rs.similarity,
+            rs.entry.summary
+        );
     }
 
     // Retrieve all key facts
@@ -60,8 +60,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Upsert a fact
     store.upsert_keyfact(card_name, "favorite_color", "green")?;
     let facts = store.get_all_keyfacts(card_name)?;
-    println!("\nAfter upsert - favorite_color = {}",
-        facts.iter().find(|f| f.key == "favorite_color").map(|f| f.value.as_str()).unwrap_or("?")
+    println!(
+        "\nAfter upsert - favorite_color = {}",
+        facts
+            .iter()
+            .find(|f| f.key == "favorite_color")
+            .map(|f| f.value.as_str())
+            .unwrap_or("?")
     );
 
     // Delete a fact

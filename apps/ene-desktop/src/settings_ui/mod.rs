@@ -8,16 +8,16 @@ use page_character::render_character_page;
 use page_graphics::render_graphics_page;
 
 use crate::ai_bridge::{EneRequestEvent, EneStreamEvent};
-use ene_core::{EmbeddingConfig, MemoryConfig};
 use crate::app_config::{
-    CharacterSettings, SETTINGS_WINDOW_HEIGHT, SETTINGS_WINDOW_WIDTH, target_fps_label,
-    AntialiasingMode, ShadowQuality,
+    AntialiasingMode, CharacterSettings, SETTINGS_WINDOW_HEIGHT, SETTINGS_WINDOW_WIDTH,
+    ShadowQuality, target_fps_label,
 };
 use crate::character::{CharacterAnimationControl, EmotionQueue};
 use bevy::camera::RenderTarget;
 use bevy::prelude::*;
 use bevy::window::{WindowRef, WindowResolution};
 use bevy_egui::{EguiContext, EguiMultipassSchedule, PrimaryEguiContext, egui};
+use ene_core::{EmbeddingConfig, MemoryConfig};
 use widgets::apply_action;
 
 #[derive(bevy::ecs::schedule::ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
@@ -119,12 +119,24 @@ impl SettingsInputState {
         self.character_pos_z = format!("{:+.2}", settings.character_state.character_position.z);
         self.ai_user_name = settings.ai.ai.user_name.clone();
         self.ai_runtime_rules = settings.ai.ai.runtime_rules.clone();
-        let provider_config = settings.ai.ai.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default();
+        let provider_config = settings
+            .ai
+            .ai
+            .get_section::<ene_core::ProviderSettings>("provider")
+            .unwrap_or_default();
         self.ai_base_url = provider_config.base_url.clone();
         self.ai_api_key = provider_config.api_key.clone();
         self.ai_chat_input = settings.ui.ai_chat_input.clone();
-        let mem_config = settings.ai.ai.get_section::<MemoryConfig>("memory").unwrap_or_default();
-        let embed_config = settings.ai.ai.get_section::<EmbeddingConfig>("embedding").unwrap_or_default();
+        let mem_config = settings
+            .ai
+            .ai
+            .get_section::<MemoryConfig>("memory")
+            .unwrap_or_default();
+        let embed_config = settings
+            .ai
+            .ai
+            .get_section::<EmbeddingConfig>("embedding")
+            .unwrap_or_default();
 
         self.ai_memory_enabled = mem_config.enabled;
         self.ai_embedding_provider = match embed_config.provider_type {
@@ -230,21 +242,19 @@ impl SettingsValueKind {
                 format!("{}x", settings.graphics.mask_render_downsample)
             }
             SettingsValueKind::TargetFps => target_fps_label(settings.graphics.target_fps),
-            SettingsValueKind::ShadowQuality => {
-                match settings.graphics.shadow_quality {
-                    ShadowQuality::Low => "Low",
-                    ShadowQuality::Medium => "Medium",
-                    ShadowQuality::High => "High",
-                }.to_string()
+            SettingsValueKind::ShadowQuality => match settings.graphics.shadow_quality {
+                ShadowQuality::Low => "Low",
+                ShadowQuality::Medium => "Medium",
+                ShadowQuality::High => "High",
             }
-            SettingsValueKind::AntialiasingMode => {
-                match settings.graphics.antialiasing_mode {
-                    AntialiasingMode::Off => "Off",
-                    AntialiasingMode::Fxaa => "Fxaa",
-                    AntialiasingMode::Smaa => "Smaa",
-                    AntialiasingMode::Taa => "Taa",
-                }.to_string()
+            .to_string(),
+            SettingsValueKind::AntialiasingMode => match settings.graphics.antialiasing_mode {
+                AntialiasingMode::Off => "Off",
+                AntialiasingMode::Fxaa => "Fxaa",
+                AntialiasingMode::Smaa => "Smaa",
+                AntialiasingMode::Taa => "Taa",
             }
+            .to_string(),
             SettingsValueKind::LookAtStrength => {
                 format!("{:.2}", settings.character_state.look_at_strength)
             }
@@ -261,19 +271,35 @@ impl SettingsValueKind {
             SettingsValueKind::AiUserName => settings.ai.ai.user_name.clone(),
             SettingsValueKind::AiRuntimeRules => settings.ai.ai.runtime_rules.clone(),
             SettingsValueKind::AiProviderName => {
-                let provider_config = settings.ai.ai.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default();
+                let provider_config = settings
+                    .ai
+                    .ai
+                    .get_section::<ene_core::ProviderSettings>("provider")
+                    .unwrap_or_default();
                 provider_config.provider_name.clone()
             }
             SettingsValueKind::AiModel => {
-                let provider_config = settings.ai.ai.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default();
+                let provider_config = settings
+                    .ai
+                    .ai
+                    .get_section::<ene_core::ProviderSettings>("provider")
+                    .unwrap_or_default();
                 provider_config.model.clone()
             }
             SettingsValueKind::AiBaseUrl => {
-                let provider_config = settings.ai.ai.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default();
+                let provider_config = settings
+                    .ai
+                    .ai
+                    .get_section::<ene_core::ProviderSettings>("provider")
+                    .unwrap_or_default();
                 provider_config.base_url.clone()
             }
             SettingsValueKind::AiApiKey => {
-                let provider_config = settings.ai.ai.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default();
+                let provider_config = settings
+                    .ai
+                    .ai
+                    .get_section::<ene_core::ProviderSettings>("provider")
+                    .unwrap_or_default();
                 masked_secret(&provider_config.api_key)
             }
             SettingsValueKind::AiChatInput => settings.ui.ai_chat_input.clone(),
@@ -306,13 +332,21 @@ impl SettingsValueKind {
                 Ok(())
             }
             SettingsValueKind::AiBaseUrl => {
-                let mut provider_config = settings.ai.ai.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default();
+                let mut provider_config = settings
+                    .ai
+                    .ai
+                    .get_section::<ene_core::ProviderSettings>("provider")
+                    .unwrap_or_default();
                 provider_config.base_url = value.to_string();
                 let _ = settings.ai.ai.set_section("provider", &provider_config);
                 Ok(())
             }
             SettingsValueKind::AiApiKey => {
-                let mut provider_config = settings.ai.ai.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default();
+                let mut provider_config = settings
+                    .ai
+                    .ai
+                    .get_section::<ene_core::ProviderSettings>("provider")
+                    .unwrap_or_default();
                 if provider_config.api_key_source == "keyring" {
                     let service = &provider_config.api_key_keyring_service;
                     let account = &provider_config.api_key_keyring_account;
@@ -442,7 +476,6 @@ fn render_settings_window(
     apply_egui_visuals(ctx);
 
     egui::CentralPanel::default().show(ctx, |ui| {
-
         ui.horizontal(|ui| {
             for page in [
                 SettingsPageKind::Character,
@@ -536,7 +569,10 @@ fn render_settings_window(
                             );
                             settings.ui.pending_permission = None;
                         }
-                        if columns[1].button("セッションで許可\n(Allow Session)").clicked() {
+                        if columns[1]
+                            .button("セッションで許可\n(Allow Session)")
+                            .clicked()
+                        {
                             let _ = ene_core::stream::submit_permission_decision(
                                 &req.request_id,
                                 ene_core::stream::PermissionDecision::AllowSession,

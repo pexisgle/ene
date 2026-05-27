@@ -23,4 +23,3 @@ pub fn generate_character_schema_json() -> Result<String, serde_json::Error> {
     let root_schema = schema_gen.into_root_schema_for::<CharacterPerSettings>();
     serde_json::to_string_pretty(&root_schema)
 }
-

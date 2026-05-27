@@ -160,11 +160,11 @@ impl ConversationSession {
             let settings_path = ene_config::character_settings_path(&folder);
             if settings_path.exists() {
                 if let Ok(settings_content) = std::fs::read_to_string(&settings_path) {
-                    if let Ok(per) = serde_json::from_str::<ene_config::CharacterPerSettings>(&settings_content) {
+                    if let Ok(per) =
+                        serde_json::from_str::<ene_config::CharacterPerSettings>(&settings_content)
+                    {
                         if let Some(expr) = per.expressions {
-                            card.data
-                                .extensions
-                                .insert("expressions".to_string(), expr);
+                            card.data.extensions.insert("expressions".to_string(), expr);
                         }
                         if !per.default_motion.is_empty() {
                             let mut ene = serde_json::Map::new();

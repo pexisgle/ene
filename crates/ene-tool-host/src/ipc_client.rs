@@ -1,13 +1,13 @@
 use crate::tools::ToolDefinition;
 use crate::tools::definition::ToolRegistry;
 use async_trait::async_trait;
+use ene_tool_proto::transport::IpcStream;
 use ene_tool_proto::{
     IpcRequest, IpcResponse, SandboxConfigData, read_ipc_response, write_ipc_request,
 };
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
-use ene_tool_proto::transport::IpcStream;
 use tokio::sync::Mutex as TokioMutex;
 
 const RECONNECT_MAX_RETRIES: u32 = 5;
@@ -255,20 +255,26 @@ impl ToolRegistry for IpcToolRegistry {
         .await
         .map_err(crate::error::ToolError::ToolExecutionError)
         .and_then(|resp| match resp {
-            IpcResponse::CallResult { result } => {
-                result.map_err(|e| match e {
-                    ene_tool_proto::ToolError::PermissionRequired { request_id, action, target, description } => {
-                        crate::error::ToolError::PermissionRequired { request_id, action, target, description }
-                    }
-                    ene_tool_proto::ToolError::PermissionDenied { message } => {
-                        crate::error::ToolError::PermissionDenied(message)
-                    }
-                    ene_tool_proto::ToolError::SandboxViolation { message } => {
-                        crate::error::ToolError::SandboxViolation(message)
-                    }
-                    other => crate::error::ToolError::ToolExecutionError(other.to_string()),
-                })
-            }
+            IpcResponse::CallResult { result } => result.map_err(|e| match e {
+                ene_tool_proto::ToolError::PermissionRequired {
+                    request_id,
+                    action,
+                    target,
+                    description,
+                } => crate::error::ToolError::PermissionRequired {
+                    request_id,
+                    action,
+                    target,
+                    description,
+                },
+                ene_tool_proto::ToolError::PermissionDenied { message } => {
+                    crate::error::ToolError::PermissionDenied(message)
+                }
+                ene_tool_proto::ToolError::SandboxViolation { message } => {
+                    crate::error::ToolError::SandboxViolation(message)
+                }
+                other => crate::error::ToolError::ToolExecutionError(other.to_string()),
+            }),
             IpcResponse::Error { message } => {
                 Err(crate::error::ToolError::ToolExecutionError(message))
             }

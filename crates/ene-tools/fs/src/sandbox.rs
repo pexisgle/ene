@@ -191,7 +191,8 @@ pub struct Sandbox {
     undo: crate::undo_manager::UndoManager,
     session_id: std::sync::RwLock<String>,
     approved_requests: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
-    allowed_patterns: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<(String, String)>>>,
+    allowed_patterns:
+        std::sync::Arc<std::sync::RwLock<std::collections::HashSet<(String, String)>>>,
 }
 
 impl Sandbox {
@@ -209,8 +210,12 @@ impl Sandbox {
             config,
             undo,
             session_id: std::sync::RwLock::new(String::new()),
-            approved_requests: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
-            allowed_patterns: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
+            approved_requests: std::sync::Arc::new(std::sync::RwLock::new(
+                std::collections::HashSet::new(),
+            )),
+            allowed_patterns: std::sync::Arc::new(std::sync::RwLock::new(
+                std::collections::HashSet::new(),
+            )),
         }
     }
 
@@ -255,7 +260,7 @@ impl Sandbox {
         description: &str,
     ) -> Result<(), ToolError> {
         let action_str = format!("{:?}", action);
-        
+
         // 1. Session-level allow pattern check
         if let Ok(guard) = self.allowed_patterns.read() {
             for (allowed_action, allowed_target) in guard.iter() {
@@ -268,14 +273,24 @@ impl Sandbox {
         // 2. Base permission config check
         match self.config.check_permission(action, target, description) {
             Ok(()) => Ok(()),
-            Err(ToolError::PermissionRequired { request_id, action: act, target: tgt, description: desc }) => {
+            Err(ToolError::PermissionRequired {
+                request_id,
+                action: act,
+                target: tgt,
+                description: desc,
+            }) => {
                 // Check if this specific request_id has been approved (Allow Once)
                 if let Ok(guard) = self.approved_requests.read() {
                     if guard.contains(&request_id) {
                         return Ok(());
                     }
                 }
-                Err(ToolError::PermissionRequired { request_id, action: act, target: tgt, description: desc })
+                Err(ToolError::PermissionRequired {
+                    request_id,
+                    action: act,
+                    target: tgt,
+                    description: desc,
+                })
             }
             Err(other) => Err(other),
         }

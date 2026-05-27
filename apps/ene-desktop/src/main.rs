@@ -1,12 +1,12 @@
 mod ai_bridge;
 mod app_config;
 mod character;
+mod character_drag;
 mod platform;
 mod resources;
 mod scene;
 mod settings_ui;
 mod tray;
-mod character_drag;
 
 use bevy::asset::AssetPlugin;
 use bevy::light::DirectionalLightShadowMap;
@@ -17,10 +17,10 @@ use bevy_vrm1::prelude::*;
 use ai_bridge::EnePlugin;
 use app_config::{CharacterSettings, DEFAULT_SHADOW_QUALITY, window_plugin};
 use character::CharacterPlugin;
+use character_drag::CharacterDragPlugin;
 use scene::ScenePlugin;
 use settings_ui::SettingsUiPlugin;
 use tray::TrayPlugin;
-use character_drag::CharacterDragPlugin;
 
 fn main() {
     #[cfg(target_os = "linux")]

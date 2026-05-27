@@ -25,6 +25,8 @@
 //! cosine-similarity filtering based on the user's current query embedding.
 #![warn(missing_docs)]
 
+/// Tool and MCP configuration types.
+pub mod config;
 /// Tool host error types.
 pub mod error;
 /// IPC client with auto-reconnect for tool binaries.
@@ -35,9 +37,9 @@ pub mod mcp_client;
 pub mod tool_host_manager;
 /// Tool registry types (Composite, ToolRegistry trait, etc.).
 pub mod tools;
-/// Tool and MCP configuration types.
-pub mod config;
 
+/// Tool and MCP configuration.
+pub use config::{McpServerConfig, McpTransport, ToolEntry, ToolSettings};
 /// Tool error type.
 pub use error::ToolError;
 /// IPC client with auto-reconnect.
@@ -50,5 +52,3 @@ pub use tool_host_manager::ToolHostManager;
 pub use tools::{
     CompositeToolRegistry, ToolCategory, ToolDefinition, ToolRegistry, compute_tool_version_hash,
 };
-/// Tool and MCP configuration.
-pub use config::{ToolSettings, ToolEntry, McpServerConfig, McpTransport};

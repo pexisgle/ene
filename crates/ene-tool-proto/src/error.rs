@@ -76,7 +76,12 @@ impl std::fmt::Display for ToolError {
             ToolError::Timeout { message } => write!(f, "Timeout: {message}"),
             ToolError::Internal { message } => write!(f, "Internal error: {message}"),
             ToolError::IpcTransport { message } => write!(f, "IPC transport error: {message}"),
-            ToolError::PermissionRequired { request_id, action, target, description } => {
+            ToolError::PermissionRequired {
+                request_id,
+                action,
+                target,
+                description,
+            } => {
                 write!(
                     f,
                     "Permission required [id: {}]: {} on {} ({})",

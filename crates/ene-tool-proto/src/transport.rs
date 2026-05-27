@@ -148,7 +148,10 @@ impl IpcListener {
             IpcListener::Pipe { current, pipe_name } => {
                 use tokio::net::windows::named_pipe::ServerOptions;
                 let server = current.take().ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::NotConnected, "no available pipe server instance")
+                    io::Error::new(
+                        io::ErrorKind::NotConnected,
+                        "no available pipe server instance",
+                    )
                 })?;
                 let next = ServerOptions::new().create(pipe_name)?;
                 *current = Some(next);

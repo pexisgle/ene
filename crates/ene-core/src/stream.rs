@@ -28,20 +28,32 @@ pub enum PermissionDecision {
     Deny,
 }
 
-static PENDING_DECISIONS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<PermissionDecision>>>> = std::sync::OnceLock::new();
+static PENDING_DECISIONS: std::sync::OnceLock<
+    std::sync::Mutex<
+        std::collections::HashMap<String, tokio::sync::oneshot::Sender<PermissionDecision>>,
+    >,
+> = std::sync::OnceLock::new();
 
 /// Registers a pending permission request that will be resolved when the user
 /// makes a decision.
-pub fn register_permission_request(request_id: String, tx: tokio::sync::oneshot::Sender<PermissionDecision>) {
-    let map = PENDING_DECISIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+pub fn register_permission_request(
+    request_id: String,
+    tx: tokio::sync::oneshot::Sender<PermissionDecision>,
+) {
+    let map =
+        PENDING_DECISIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     if let Ok(mut guard) = map.lock() {
         guard.insert(request_id, tx);
     }
 }
 
 /// Submits a user's permission decision for a pending request.
-pub fn submit_permission_decision(request_id: &str, decision: PermissionDecision) -> Result<(), &'static str> {
-    let map = PENDING_DECISIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+pub fn submit_permission_decision(
+    request_id: &str,
+    decision: PermissionDecision,
+) -> Result<(), &'static str> {
+    let map =
+        PENDING_DECISIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     if let Ok(mut guard) = map.lock() {
         if let Some(tx) = guard.remove(request_id) {
             let _ = tx.send(decision);
@@ -165,8 +177,12 @@ pub async fn fetch_memory_context(
     session: &ConversationSession,
     settings: &EneSettings,
 ) -> (Vec<RecalledSummary>, Vec<ene_memory::KeyFact>) {
-    let mem_config = settings.get_section::<ene_memory::MemoryConfig>("memory").unwrap_or_default();
-    let session_config = settings.get_section::<ene_session::SessionConfig>("session").unwrap_or_default();
+    let mem_config = settings
+        .get_section::<ene_memory::MemoryConfig>("memory")
+        .unwrap_or_default();
+    let session_config = settings
+        .get_section::<ene_session::SessionConfig>("session")
+        .unwrap_or_default();
 
     let memory_enabled = mem_config.enabled;
     let mem_store = if memory_enabled {
@@ -269,19 +285,24 @@ pub async fn perform_tool_executions(
             });
 
             let tool_timeout = std::time::Duration::from_secs(60);
-            let mut result = match tokio::time::timeout(tool_timeout, registry.call_tool(&name, &args))
-                .await
-            {
-                Ok(Ok(res)) => Ok(res),
-                Ok(Err(e)) => Err(e),
-                Err(_) => Err(ene_tool_host::error::ToolError::Other(format!(
-                    "Tool '{}' timed out after {} seconds",
-                    name,
-                    tool_timeout.as_secs()
-                ))),
-            };
+            let mut result =
+                match tokio::time::timeout(tool_timeout, registry.call_tool(&name, &args)).await {
+                    Ok(Ok(res)) => Ok(res),
+                    Ok(Err(e)) => Err(e),
+                    Err(_) => Err(ene_tool_host::error::ToolError::Other(format!(
+                        "Tool '{}' timed out after {} seconds",
+                        name,
+                        tool_timeout.as_secs()
+                    ))),
+                };
 
-            if let Err(ene_tool_host::error::ToolError::PermissionRequired { request_id, action, target, description }) = &result {
+            if let Err(ene_tool_host::error::ToolError::PermissionRequired {
+                request_id,
+                action,
+                target,
+                description,
+            }) = &result
+            {
                 let _ = tx.send(EneStreamEvent::PermissionRequired {
                     request_id: request_id.clone(),
                     action: action.clone(),
@@ -289,7 +310,8 @@ pub async fn perform_tool_executions(
                     description: description.clone(),
                 });
 
-                let (tx_decision, rx_decision) = tokio::sync::oneshot::channel::<PermissionDecision>();
+                let (tx_decision, rx_decision) =
+                    tokio::sync::oneshot::channel::<PermissionDecision>();
                 register_permission_request(request_id.clone(), tx_decision);
 
                 match rx_decision.await {
@@ -304,7 +326,7 @@ pub async fn perform_tool_executions(
                     }
                     _ => {
                         result = Err(ene_tool_host::error::ToolError::PermissionDenied(
-                            "Permission denied by user".to_string()
+                            "Permission denied by user".to_string(),
                         ));
                     }
                 }
@@ -353,14 +375,18 @@ pub async fn run_ene_with_tools(
     user_input: &str,
     registry: std::sync::Arc<dyn ene_tool_host::ToolRegistry>,
 ) -> Result<impl Stream<Item = EneStreamEvent> + 'static, crate::error::EneCoreError> {
-    let provider = settings.get_section::<crate::ProviderSettings>("provider").unwrap_or_default();
+    let provider = settings
+        .get_section::<crate::ProviderSettings>("provider")
+        .unwrap_or_default();
     let base_url = provider.resolve_base_url()?;
     let api_key = provider.resolve_api_key();
 
     let client = build_openai_client(&base_url, &api_key);
     let model = provider.model;
 
-    let mem_config = settings.get_section::<ene_memory::MemoryConfig>("memory").unwrap_or_default();
+    let mem_config = settings
+        .get_section::<ene_memory::MemoryConfig>("memory")
+        .unwrap_or_default();
 
     // 1. Fetch memory context (summaries and keyfacts)
     let (recalled_summaries, key_facts) = fetch_memory_context(session, settings).await;
@@ -399,7 +425,9 @@ pub async fn run_ene_with_tools(
     let card_name = session.card_name().to_string();
     let session_id = session.memory.session_id.clone();
     let user_input = user_input.to_string();
-    let tool_settings = settings.get_section::<ene_tool_host::ToolSettings>("tools").unwrap_or_default();
+    let tool_settings = settings
+        .get_section::<ene_tool_host::ToolSettings>("tools")
+        .unwrap_or_default();
     let tool_calling_enabled = tool_settings.tool_calling_enabled;
     let max_rounds = tool_settings.max_tool_call_rounds;
     let session_id_for_tools = session.memory.session_id.clone();

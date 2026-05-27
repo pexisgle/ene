@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use serde::de::DeserializeOwned;
+use std::collections::HashMap;
 
 fn default_tools() -> HashMap<String, ToolEntry> {
     ["fs", "web", "browser", "utility", "app"]

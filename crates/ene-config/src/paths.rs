@@ -18,7 +18,10 @@ pub fn app_data_dir() -> PathBuf {
 /// the app data directory is returned.
 pub fn assets_dir() -> PathBuf {
     if cfg!(debug_assertions) {
-        if let Some(exe_dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())) {
+        if let Some(exe_dir) = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|p| p.to_path_buf()))
+        {
             let candidates = [
                 exe_dir.join("../../assets"),
                 exe_dir.join("../assets"),
@@ -55,7 +58,10 @@ pub fn character_schema_file_path() -> PathBuf {
 /// Directory for built-in tool binaries
 /// Same directory as the executable (debug) or its `tools/` subdirectory (release)
 pub fn builtin_tools_dir() -> PathBuf {
-    if let Some(exe_dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|p| p.to_path_buf())) {
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.to_path_buf()))
+    {
         if cfg!(debug_assertions) {
             exe_dir
         } else {

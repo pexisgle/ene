@@ -53,21 +53,23 @@ pub async fn execute(
 ) -> Result<String, ToolError> {
     match action {
         "read" => {
-            let file_path = args["filePath"]
-                .as_str()
-                .ok_or_else(|| ToolError::InvalidArguments {
-                    message: "filePath is required for read".to_string(),
-                })?;
+            let file_path =
+                args["filePath"]
+                    .as_str()
+                    .ok_or_else(|| ToolError::InvalidArguments {
+                        message: "filePath is required for read".to_string(),
+                    })?;
             let offset = args["offset"].as_u64().map(|v| v as usize);
             let limit = args["limit"].as_u64().map(|v| v as usize);
             super::read::read(Path::new(file_path), offset, limit, sandbox.config()).await
         }
         "write" => {
-            let file_path = args["filePath"]
-                .as_str()
-                .ok_or_else(|| ToolError::InvalidArguments {
-                    message: "filePath is required for write".to_string(),
-                })?;
+            let file_path =
+                args["filePath"]
+                    .as_str()
+                    .ok_or_else(|| ToolError::InvalidArguments {
+                        message: "filePath is required for write".to_string(),
+                    })?;
             let content = args["content"]
                 .as_str()
                 .ok_or_else(|| ToolError::InvalidArguments {
@@ -90,21 +92,24 @@ pub async fn execute(
             .await
         }
         "edit" => {
-            let file_path = args["filePath"]
-                .as_str()
-                .ok_or_else(|| ToolError::InvalidArguments {
-                    message: "filePath is required for edit".to_string(),
-                })?;
-            let old_string = args["oldString"]
-                .as_str()
-                .ok_or_else(|| ToolError::InvalidArguments {
-                    message: "oldString is required for edit".to_string(),
-                })?;
-            let new_string = args["newString"]
-                .as_str()
-                .ok_or_else(|| ToolError::InvalidArguments {
-                    message: "newString is required for edit".to_string(),
-                })?;
+            let file_path =
+                args["filePath"]
+                    .as_str()
+                    .ok_or_else(|| ToolError::InvalidArguments {
+                        message: "filePath is required for edit".to_string(),
+                    })?;
+            let old_string =
+                args["oldString"]
+                    .as_str()
+                    .ok_or_else(|| ToolError::InvalidArguments {
+                        message: "oldString is required for edit".to_string(),
+                    })?;
+            let new_string =
+                args["newString"]
+                    .as_str()
+                    .ok_or_else(|| ToolError::InvalidArguments {
+                        message: "newString is required for edit".to_string(),
+                    })?;
             let replace_all = args["replaceAll"].as_bool().unwrap_or(false);
 
             sandbox.check_permission(
@@ -167,11 +172,12 @@ pub async fn execute(
             super::search::grep_search(pattern, path, include, sandbox.config()).await
         }
         "patch" => {
-            let patch_text = args["patchText"]
-                .as_str()
-                .ok_or_else(|| ToolError::InvalidArguments {
-                    message: "patchText is required for patch".to_string(),
-                })?;
+            let patch_text =
+                args["patchText"]
+                    .as_str()
+                    .ok_or_else(|| ToolError::InvalidArguments {
+                        message: "patchText is required for patch".to_string(),
+                    })?;
 
             sandbox.check_permission(
                 crate::permission::DestructiveAction::FileOverwrite,

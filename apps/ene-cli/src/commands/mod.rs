@@ -2,7 +2,7 @@ mod memory;
 mod session;
 
 use crate::{context::AppContext, style};
-use ene_core::{MemoryConfig, SessionConfig, EmbeddingConfig};
+use ene_core::{EmbeddingConfig, MemoryConfig, SessionConfig};
 
 pub async fn execute(input: &str, ctx: &mut AppContext) {
     let parts: Vec<&str> = input.splitn(2, ' ').collect();
@@ -54,8 +54,14 @@ fn handle_prompt(ctx: &AppContext) {
             println!("----------------------------------------------------");
         }
 
-        let mem_config = ctx.settings.get_section::<MemoryConfig>("memory").unwrap_or_default();
-        let session_config = ctx.settings.get_section::<SessionConfig>("session").unwrap_or_default();
+        let mem_config = ctx
+            .settings
+            .get_section::<MemoryConfig>("memory")
+            .unwrap_or_default();
+        let session_config = ctx
+            .settings
+            .get_section::<SessionConfig>("session")
+            .unwrap_or_default();
         if mem_config.enabled {
             println!("--- Recalled Summaries ---");
             println!(
@@ -100,7 +106,10 @@ fn handle_prompt(ctx: &AppContext) {
             }
         }
 
-        let tool_settings = ctx.settings.get_section::<ene_tool_host::ToolSettings>("tools").unwrap_or_default();
+        let tool_settings = ctx
+            .settings
+            .get_section::<ene_tool_host::ToolSettings>("tools")
+            .unwrap_or_default();
         if tool_settings.tool_calling_enabled {
             let tools = ctx.registry.list_tools();
             if !tools.is_empty() {
@@ -140,17 +149,32 @@ fn handle_card(arg: &str, ctx: &mut AppContext) {
 }
 
 fn handle_config(ctx: &AppContext) {
-    let mem_config = ctx.settings.get_section::<MemoryConfig>("memory").unwrap_or_default();
-    let embed_config = ctx.settings.get_section::<EmbeddingConfig>("embedding").unwrap_or_default();
-    let session_config = ctx.settings.get_section::<SessionConfig>("session").unwrap_or_default();
-    let provider_config = ctx.settings.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default();
+    let mem_config = ctx
+        .settings
+        .get_section::<MemoryConfig>("memory")
+        .unwrap_or_default();
+    let embed_config = ctx
+        .settings
+        .get_section::<EmbeddingConfig>("embedding")
+        .unwrap_or_default();
+    let session_config = ctx
+        .settings
+        .get_section::<SessionConfig>("session")
+        .unwrap_or_default();
+    let provider_config = ctx
+        .settings
+        .get_section::<ene_core::ProviderSettings>("provider")
+        .unwrap_or_default();
 
     println!("--- Current Config ---");
     println!("Provider: {}", provider_config.provider_name);
     println!("Model: {}", provider_config.model);
     println!("Base URL: {}", provider_config.base_url);
     println!("Card Path: {}", ctx.settings.character);
-    let tool_settings = ctx.settings.get_section::<ene_tool_host::ToolSettings>("tools").unwrap_or_default();
+    let tool_settings = ctx
+        .settings
+        .get_section::<ene_tool_host::ToolSettings>("tools")
+        .unwrap_or_default();
     println!("Tool Calling: {}", tool_settings.tool_calling_enabled);
     println!("Memory Enabled: {}", mem_config.enabled);
     println!("Embedding Model: {}", embed_config.model);
@@ -163,10 +187,7 @@ fn handle_config(ctx: &AppContext) {
             "Summary Recall Limit: {}",
             session_config.summary_recall_limit
         );
-        println!(
-            "Similarity Threshold: {}",
-            mem_config.similarity_threshold
-        );
+        println!("Similarity Threshold: {}", mem_config.similarity_threshold);
     }
     println!("----------------------");
 }

@@ -70,8 +70,6 @@ pub const ANTIALIASING_MODE_CHOICES: [AntialiasingMode; 4] = [
 ];
 pub const DEFAULT_ANTIALIASING_MODE: AntialiasingMode = AntialiasingMode::Fxaa;
 
-
-
 pub fn normalize_mask_render_downsample(value: u32) -> u32 {
     cycle_choice(
         &MASK_RENDER_DOWNSAMPLE_CHOICES,
@@ -459,15 +457,15 @@ impl CharacterSettings {
         }
 
         // Graphics settings
-        let desktop_cfg = full.get_section::<DesktopSection>("desktop").unwrap_or_default();
+        let desktop_cfg = full
+            .get_section::<DesktopSection>("desktop")
+            .unwrap_or_default();
         self.graphics = desktop_cfg.graphics;
 
         self.clamp_runtime_values();
         self.load_per_character_settings();
     }
 }
-
-
 
 pub use ene_config::CharacterPerSettings;
 

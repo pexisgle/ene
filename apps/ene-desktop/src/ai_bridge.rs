@@ -7,9 +7,9 @@ use tokio_stream::StreamExt;
 use crate::app_config::CharacterSettings;
 use crate::character::ResolvedExpressionMap;
 use ene_core::{
-    EneRuntime, poll_split_result,
+    EneRuntime, MemoryConfig, SessionConfig, poll_split_result,
     stream::{EneStreamEvent as CoreEneStreamEvent, run_ene_with_tools},
-    truncate, MemoryConfig, SessionConfig,
+    truncate,
 };
 
 pub struct EnePlugin;
@@ -216,10 +216,7 @@ fn start_next_ai_request(
 
     // Character card loading if card path changed
     if runtime.session.current_card_path != settings.ai.ai.character {
-        match runtime
-            .session
-            .load_card(&settings.ai.ai.character)
-        {
+        match runtime.session.load_card(&settings.ai.ai.character) {
             Ok(resolved) => {
                 expression_map.map = resolved.into_iter().map(|e| (e.name, e.vrm)).collect();
             }
@@ -277,8 +274,16 @@ fn poll_ai_worker(
     mut stream_writer: MessageWriter<EneStreamEvent>,
     settings: Res<CharacterSettings>,
 ) {
-    let mem_config = settings.ai.ai.get_section::<MemoryConfig>("memory").unwrap_or_default();
-    let session_config = settings.ai.ai.get_section::<SessionConfig>("session").unwrap_or_default();
+    let mem_config = settings
+        .ai
+        .ai
+        .get_section::<MemoryConfig>("memory")
+        .unwrap_or_default();
+    let session_config = settings
+        .ai
+        .ai
+        .get_section::<SessionConfig>("session")
+        .unwrap_or_default();
     if mem_config.enabled && session_config.auto_session_split {
         if let Some(runtime) = runtime_state.runtime.as_mut() {
             if let Some(result) = poll_split_result(&mut runtime.pending_split) {
