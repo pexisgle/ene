@@ -54,7 +54,7 @@ pub trait ToolRegistry: Send + Sync {
     /// Builds the embedding index, embeds the query, and returns the most relevant tools.
     ///
     /// Convenience method that combines [`ensure_index_built`](Self::ensure_index_built),
-    /// [`EmbeddingProvider::embed_query`], and [`list_relevant_tools`](Self::list_relevant_tools).
+    /// [`ene_embedding::EmbeddingProvider::embed_query`], and [`list_relevant_tools`](Self::list_relevant_tools).
     async fn select_tools(
         &self,
         embedder: &dyn ene_embedding::EmbeddingProvider,
