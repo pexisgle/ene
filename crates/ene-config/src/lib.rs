@@ -13,11 +13,10 @@
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use ene_config::load_full_settings;
+//! use ene_config::load_settings;
 //!
-//! let settings = load_full_settings().expect("Failed to load settings");
+//! let settings = load_settings();
 //! println!("Using character: {}", settings.character);
-//! println!("LLM model: {}", settings.extra.get("provider").map(|v| v["model"].as_str().unwrap_or("unknown")).unwrap_or("unknown"));
 //! ```
 //!
 //! Re-exports `serde`, `schemars`, and `ctor` for use by downstream crates.
@@ -47,6 +46,7 @@ pub use config::{
     EneSettings, generate_schema_json, get_global_section, get_global_settings, load_full_settings,
     load_full_settings_from, load_settings, load_settings_from, register_runtime_schema,
     register_schema, register_schema_with_parent, save_full_settings, update_global_settings,
+    update_section,
 };
 pub use error::ConfigError;
 pub use paths::{

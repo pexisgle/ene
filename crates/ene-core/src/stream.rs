@@ -132,42 +132,36 @@ pub async fn select_relevant_tools(
     tool_rag_enabled: bool,
     tool_rag_limit: usize,
     tool_rag_always_include: &[String],
-    mem_store: Option<&ene_memory::MemoryStore>,
 ) -> Vec<ene_tool_host::ToolDefinition> {
-    if tool_rag_enabled && tool_calling_enabled {
+    if !tool_calling_enabled {
+        return vec![];
+    }
+
+    let relevant = if tool_rag_enabled {
         if let Some(embedder) = embedding_provider.as_ref() {
-            if let Err(e) = registry
-                .ensure_index_built(embedder.as_ref(), mem_store)
-                .await
-            {
-                tracing::warn!("[ToolRAG] Failed to build index: {}", e);
-            }
-            let query_embedding = match embedder.embed_query(user_input).await {
-                Ok(emb) => Some(emb),
-                Err(e) => {
-                    tracing::warn!("[ToolRAG] Failed to embed query: {}", e);
-                    None
-                }
-            };
-            let mut relevant =
-                registry.list_relevant_tools(query_embedding.as_deref(), tool_rag_limit);
-            // Add back any tools that must always be included if they were missed
-            let all_tools = registry.list_tools();
-            let all_map: std::collections::HashMap<String, _> =
-                all_tools.into_iter().map(|t| (t.name.clone(), t)).collect();
-            for name in tool_rag_always_include {
-                if !relevant.iter().any(|t| &t.name == name) {
-                    if let Some(tool) = all_map.get(name) {
-                        relevant.push(tool.clone());
-                    }
-                }
-            }
-            relevant
+            registry.select_tools(embedder.as_ref(), user_input, tool_rag_limit).await
         } else {
             registry.list_tools()
         }
     } else {
         registry.list_tools()
+    };
+
+    if !tool_rag_always_include.is_empty() {
+        let all_tools = registry.list_tools();
+        let all_map: std::collections::HashMap<String, _> =
+            all_tools.into_iter().map(|t| (t.name.clone(), t)).collect();
+        let mut result = relevant;
+        for name in tool_rag_always_include {
+            if !result.iter().any(|t| &t.name == name) {
+                if let Some(tool) = all_map.get(name) {
+                    result.push(tool.clone());
+                }
+            }
+        }
+        result
+    } else {
+        relevant
     }
 }
 
@@ -435,7 +429,6 @@ pub async fn run_ene_with_tools(
             tool_rag_enabled,
             tool_rag_limit,
             &tool_rag_always_include,
-            mem_store.as_ref().map(|s| s.as_ref()),
         )
         .await;
 

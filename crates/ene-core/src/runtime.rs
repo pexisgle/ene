@@ -45,7 +45,7 @@ impl EneRuntime {
     /// Returns `EneCoreError` if embedding initialization, database connection,
     /// or tool manager start fails.
     pub async fn load_settings(&mut self) -> Result<(), EneCoreError> {
-        let settings = ene_config::load_full_settings();
+        let settings = ene_config::load_settings();
         self.apply_settings(settings).await?;
         Ok(())
     }

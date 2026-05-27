@@ -183,6 +183,19 @@ impl EneSettings {
         self.extra.insert(key.to_string(), val);
         Ok(())
     }
+
+    /// Extracts a nested field value from the provider section in the `extra` map.
+    ///
+    /// This avoids the manual `extra["provider"]["field"]` chain duplicated across
+    /// embedding and memory config resolvers.
+    pub fn get_provider_field(&self, key: &str) -> Option<String> {
+        self.extra
+            .get("provider")
+            .and_then(|p| p.get(key))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string())
+    }
 }
 
 fn apply_registry_to_schema(
@@ -305,6 +318,18 @@ pub fn save_full_settings(settings: &EneSettings) -> Result<(), std::io::Error> 
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(config_path, json)?;
     Ok(())
+}
+
+/// Loads settings, patches a single section, and saves in one call.
+///
+/// Convenience wrapper around the load → `set_section` → save pattern.
+pub fn update_section<T: serde::Serialize + serde::de::DeserializeOwned>(
+    key: &str,
+    value: &T,
+) -> Result<(), ConfigError> {
+    let mut settings = load_settings();
+    settings.set_section(key, value)?;
+    save_full_settings(&settings).map_err(|e| ConfigError::GenericConfigError(e.to_string()))
 }
 
 #[cfg(test)]
