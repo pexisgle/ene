@@ -1,4 +1,6 @@
-use crate::conversation_manager::{generate_session_id, poll_split_result, PendingSplitTask, SplitResult, SplitTaskInput};
+use crate::conversation_manager::{
+    PendingSplitTask, SplitResult, SplitTaskInput, generate_session_id, poll_split_result,
+};
 use crate::error::SessionError;
 use crate::special_token::split_text_and_special_tokens;
 use async_openai::types::chat::Role;

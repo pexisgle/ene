@@ -61,7 +61,8 @@ impl EneRuntime {
         self.settings = settings;
 
         // 1. Initialize embedding
-        let embedder = init_embedding(&self.settings).map_err(|e| EneCoreError::EmbeddingError(e))?;
+        let embedder =
+            init_embedding(&self.settings).map_err(|e| EneCoreError::EmbeddingError(e))?;
         self.session.memory.embedding_provider = Some(embedder.clone());
 
         // 2. Initialize memory store if enabled
@@ -182,7 +183,13 @@ impl EneRuntime {
         self.session.record_user_input();
         self.session.add_user_message(user_input);
 
-        run_ene_with_tools(&self.settings, &self.session, user_input, self.registry.clone()).await
+        run_ene_with_tools(
+            &self.settings,
+            &self.session,
+            user_input,
+            self.registry.clone(),
+        )
+        .await
     }
 
     /// Polls for a completed split result and applies it to the session.

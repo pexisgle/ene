@@ -42,21 +42,17 @@ pub async fn run(ctx: &mut AppContext) {
                             println!("\n[{}]", token);
                         }
                         ene_core::EneStreamEvent::ToolCallStart { name, arguments } => {
-                            println!(
-                                "\n{}",
-                                style::header(
-                                    format!("Tool: {}", name)
-                                )
-                            );
-                            println!(
-                                "{}",
-                                style::warning(format!("Args: {}", arguments))
-                            );
+                            println!("\n{}", style::header(format!("Tool: {}", name)));
+                            println!("{}", style::warning(format!("Args: {}", arguments)));
                         }
                         ene_core::EneStreamEvent::ToolCallResult { name, result } => {
                             println!(
                                 "{}",
-                                style::success(format!("Tool {} result: {}", name, &result[..result.len().min(200)]))
+                                style::success(format!(
+                                    "Tool {} result: {}",
+                                    name,
+                                    &result[..result.len().min(200)]
+                                ))
                             );
                         }
                         ene_core::EneStreamEvent::PermissionRequired {
@@ -72,10 +68,7 @@ pub async fn run(ctx: &mut AppContext) {
                                     action, target
                                 ))
                             );
-                            println!(
-                                "   {}",
-                                style::warning(description)
-                            );
+                            println!("   {}", style::warning(description));
                             handle_permission_request(request_id);
                         }
                         ene_core::EneStreamEvent::TaskProgress {
@@ -99,20 +92,14 @@ pub async fn run(ctx: &mut AppContext) {
                             println!();
                         }
                         ene_core::EneStreamEvent::Error(err) => {
-                            eprintln!(
-                                "{}",
-                                style::error(format!("Error: {}", err))
-                            );
+                            eprintln!("{}", style::error(format!("Error: {}", err)));
                         }
                         _ => {}
                     }
                 }
             }
             Err(err) => {
-                eprintln!(
-                    "{}",
-                    style::error(format!("Stream start error: {}", err))
-                );
+                eprintln!("{}", style::error(format!("Stream start error: {}", err)));
             }
         }
     }

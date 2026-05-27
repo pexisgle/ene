@@ -279,7 +279,10 @@ fn poll_ai_worker(
     _settings: Res<CharacterSettings>,
 ) {
     if let Some(runtime) = runtime_state.runtime.as_mut() {
-        match runtime.session.apply_pending_split(&mut runtime.pending_split) {
+        match runtime
+            .session
+            .apply_pending_split(&mut runtime.pending_split)
+        {
             Some(Ok(split_result)) => {
                 info!("[Session] {}", split_result.reason);
                 info!(

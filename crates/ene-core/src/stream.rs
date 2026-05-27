@@ -139,7 +139,9 @@ pub async fn select_relevant_tools(
 
     let relevant = if tool_rag_enabled {
         if let Some(embedder) = embedding_provider.as_ref() {
-            registry.select_tools(embedder.as_ref(), user_input, tool_rag_limit).await
+            registry
+                .select_tools(embedder.as_ref(), user_input, tool_rag_limit)
+                .await
         } else {
             registry.list_tools()
         }
