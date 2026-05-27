@@ -34,7 +34,7 @@ ene_config::define_config!(
 );
 
 impl ToolEntry {
-    /// ツール固有の設定を型安全にデシリアライズして型補完をサポートします。
+    /// Deserializes tool-specific settings in a type-safe manner and supports type completion
     pub fn deserialize_config<T>(&self) -> Result<T, serde_json::Error>
     where
         T: DeserializeOwned,

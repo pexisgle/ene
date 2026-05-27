@@ -20,7 +20,7 @@
 //!
 //! ## Tool RAG
 //!
-//! When a [`MemoryStore`] is attached, tool definitions are embedded into vectors and stored
+//! When a [`ene_memory::MemoryStore`] is attached, tool definitions are embedded into vectors and stored
 //! in the `tool_embeddings` table. [`CompositeToolRegistry::list_relevant_tools`] performs
 //! cosine-similarity filtering based on the user's current query embedding.
 #![warn(missing_docs)]

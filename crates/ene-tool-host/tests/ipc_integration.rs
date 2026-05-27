@@ -7,10 +7,10 @@ use ene_tool_proto::{
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// IPC プロトコルのエンドツーエンドテスト
+/// End-to-end test of the IPC protocol
 ///
-/// モック IPC サーバーを立て、IpcToolRegistry から接続・ListTools・CallTool
-/// までの一連の流れを検証する。
+/// Sets up a mock IPC server and verifies the full flow from IpcToolRegistry
+/// connection through ListTools and CallTool
 #[tokio::test]
 async fn test_ipc_list_tools_and_call_tool() {
     let socket_path: PathBuf = {
@@ -28,7 +28,7 @@ async fn test_ipc_list_tools_and_call_tool() {
 
     let mut listener = IpcListener::bind(&socket_path).unwrap();
 
-    // モックサーバータスク
+    // Mock server task
     let server = tokio::spawn(async move {
         let mut stream = listener.accept().await.unwrap();
 
@@ -46,7 +46,7 @@ async fn test_ipc_list_tools_and_call_tool() {
             .await
             .unwrap();
 
-        // 2. ListTools (IpcToolRegistry::new 内で refresh_tools が呼ばれる)
+        // 2. ListTools (refresh_tools is called inside IpcToolRegistry::new)
         let req = read_ipc_request(&mut stream)
             .await
             .unwrap()
@@ -97,7 +97,7 @@ async fn test_ipc_list_tools_and_call_tool() {
         .unwrap();
     });
 
-    // クライアント側 — IpcToolRegistry を使って接続
+    // Client side — connects using IpcToolRegistry
     let sandbox = SandboxConfigData {
         enabled: true,
         allowed_directories: vec![".".to_string()],
@@ -115,26 +115,26 @@ async fn test_ipc_list_tools_and_call_tool() {
         .await
         .expect("Failed to create IpcToolRegistry");
 
-    // list_tools の検証
+    // Verify list_tools
     let tools = registry.list_tools();
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name, "get_current_time");
 
-    // call_tool の検証
+    // Verify call_tool
     let result = registry
         .call_tool("get_current_time", "{}")
         .await
         .expect("call_tool failed");
     assert_eq!(result, "2024-01-01 12:00:00");
 
-    // サーバーの終了を待つ
+    // Wait for server to shut down
     tokio::time::timeout(Duration::from_secs(5), server)
         .await
         .expect("Server timed out")
         .expect("Server panicked");
 }
 
-/// 実際の ene-tool-host バイナリを起動してエンドツーエンドテスト
+/// End-to-end test that launches the actual ene-tool-host binary
 #[tokio::test]
 async fn test_ipc_with_real_host() {
     let socket_path: PathBuf = {
@@ -173,7 +173,7 @@ async fn test_ipc_with_real_host() {
 
     let mut child = host.spawn().expect("Failed to start ene-tool-host");
 
-    // ホスト起動待ち
+    // Wait for host to start
     tokio::time::sleep(Duration::from_millis(800)).await;
 
     let sandbox = SandboxConfigData {

@@ -1,6 +1,6 @@
 use ene_config::serde::{Deserialize, Serialize};
 
-/// ツールカテゴリ — 分類・RAG絞り込みに使用
+/// Tool category — used for classification and RAG filtering
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(crate = "ene_config::serde")]
 pub enum ToolCategory {
@@ -32,7 +32,7 @@ impl ToolCategory {
     }
 }
 
-/// ツール定義 — OpenAI API の `tools` パラメータに渡す形式
+/// Tool definition — format passed to the OpenAI API `tools` parameter
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(crate = "ene_config::serde")]
 pub struct ToolDefinition {
@@ -49,7 +49,7 @@ pub struct ToolDefinition {
 }
 
 impl ToolDefinition {
-    /// RAG検索用のembeddingテキストを生成する
+    /// Generates embedding text for RAG search
     pub fn embedding_text(&self) -> String {
         let keywords = if self.keywords.is_empty() {
             String::new()
@@ -67,7 +67,7 @@ impl ToolDefinition {
     }
 }
 
-/// ツール実行結果（LLMに返す形式）
+/// Tool execution result (format returned to the LLM)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(crate = "ene_config::serde")]
 pub struct ToolCallResult {

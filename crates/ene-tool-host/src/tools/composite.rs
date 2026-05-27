@@ -59,8 +59,8 @@ impl CompositeToolRegistry {
         state_guard.registries.push(registry);
     }
 
-    /// ツール定義のembeddingをSQLiteに永続化する。
-    /// 既存のハッシュと比較して、変更があるもののみ再embeddingする。
+    /// Persists tool definition embeddings to SQLite
+    /// Compares against existing hashes and re-embeds only those that have changed
     pub async fn ensure_tool_embeddings(
         &self,
         embedder: &dyn ene_embedding::EmbeddingProvider,

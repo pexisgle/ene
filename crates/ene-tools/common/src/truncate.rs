@@ -34,7 +34,7 @@ impl Truncate {
         }
     }
 
-    /// テキストを max_lines / max_bytes に収める（head方向）
+    /// Fits text within max_lines / max_bytes (head direction)
     pub fn output(text: &str, max_lines: usize, max_bytes: usize) -> TruncateResult {
         let lines: Vec<&str> = text.lines().collect();
         let total_bytes = text.len();
@@ -78,7 +78,7 @@ impl Truncate {
         }
     }
 
-    /// tail方向に切り詰め
+    /// Truncation from the tail direction
     pub fn tail(text: &str, max_lines: usize, max_bytes: usize) -> TruncateResult {
         let lines: Vec<&str> = text.lines().collect();
         let total_bytes = text.len();

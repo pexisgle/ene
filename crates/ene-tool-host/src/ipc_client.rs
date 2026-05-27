@@ -14,9 +14,9 @@ const RECONNECT_MAX_RETRIES: u32 = 5;
 const RECONNECT_BASE_DELAY_MS: u64 = 200;
 const RECONNECT_MAX_DELAY_MS: u64 = 10_000;
 
-/// IPC 経由でツールバイナリと通信する ToolRegistry 実装
+/// A ToolRegistry implementation that communicates with tool binaries via IPC
 ///
-/// 接続が切れた場合は指数バックオフで自動再接続を試みる。
+/// Automatically retries connection with exponential backoff when disconnected
 pub struct IpcToolRegistry {
     socket_path: PathBuf,
     sandbox: SandboxConfigData,
@@ -93,7 +93,7 @@ impl IpcToolRegistry {
         }
     }
 
-    /// IpcRequest を送信し、IpcResponse を受信する。接続断時は再接続を1回試みる。
+    /// Sends an IpcRequest and receives an IpcResponse. Retries connection once on disconnect
     async fn do_request(&self, req: IpcRequest) -> Result<IpcResponse, String> {
         let result = {
             let mut guard = self.stream.lock().await;
@@ -166,7 +166,7 @@ impl IpcToolRegistry {
         }
     }
 
-    /// 接続断時に再接続を試みる
+    /// Attempts reconnection when disconnected
     async fn ensure_connected(&self) -> Result<(), String> {
         {
             let guard = self.stream.lock().await;

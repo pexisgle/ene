@@ -1,4 +1,4 @@
-/// 文字列を指定長さで切り捨てる（超えた場合は `...` を付与）
+/// Truncates a string to a specified length (appends `...` if exceeded)
 pub fn truncate(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         s.to_string()

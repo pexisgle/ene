@@ -2,7 +2,7 @@ use super::store::RecalledSummary;
 use crate::utils::truncate;
 use chrono::Utc;
 
-/// 過去の会話要約をプロンプトに注入するテキストブロックに整形する
+/// Formats past conversation summaries into a text block for prompt injection
 pub fn format_summaries_for_prompt(summaries: &[RecalledSummary]) -> String {
     if summaries.is_empty() {
         return String::new();

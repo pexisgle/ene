@@ -4,7 +4,7 @@ use crate::types::ToolDefinition;
 use ene_config::serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// IPC リクエスト — core → host
+/// IPC request — core → host
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(crate = "ene_config::serde")]
 pub enum IpcRequest {
@@ -49,7 +49,7 @@ pub enum IpcRequest {
     Shutdown,
 }
 
-/// IPC レスポンス — host → core
+/// IPC response — host → core
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(crate = "ene_config::serde")]
 pub enum IpcResponse {
@@ -79,9 +79,9 @@ pub enum IpcResponse {
     },
 }
 
-/// 4バイト長前置き + JSON でIpcRequestを読み込む
+/// Reads an IpcRequest as 4-byte length-prefixed JSON
 ///
-/// UnexpectedEof の場合は `Ok(None)` を返し、接続終了を表す。
+/// Returns `Ok(None)` on UnexpectedEof, indicating connection closed
 pub async fn read_ipc_request<R: AsyncReadExt + Unpin>(
     reader: &mut R,
 ) -> Result<Option<IpcRequest>, ToolError> {
@@ -103,7 +103,7 @@ pub async fn read_ipc_request<R: AsyncReadExt + Unpin>(
     Ok(Some(req))
 }
 
-/// 4バイト長前置き + JSON でIpcRequestを書き込む
+/// Writes an IpcRequest as 4-byte length-prefixed JSON
 pub async fn write_ipc_request<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     req: &IpcRequest,
@@ -121,9 +121,9 @@ pub async fn write_ipc_request<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
-/// 4バイト長前置き + JSON でIpcResponseを読み込む
+/// Reads an IpcResponse as 4-byte length-prefixed JSON
 ///
-/// UnexpectedEof の場合は `Ok(None)` を返し、接続終了を表す。
+/// Returns `Ok(None)` on UnexpectedEof, indicating connection closed
 pub async fn read_ipc_response<R: AsyncReadExt + Unpin>(
     reader: &mut R,
 ) -> Result<Option<IpcResponse>, ToolError> {
@@ -145,7 +145,7 @@ pub async fn read_ipc_response<R: AsyncReadExt + Unpin>(
     Ok(Some(resp))
 }
 
-/// 4バイト長前置き + JSON でIpcResponseを書き込む
+/// Writes an IpcResponse as 4-byte length-prefixed JSON
 pub async fn write_ipc_response<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     resp: &IpcResponse,

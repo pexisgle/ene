@@ -15,7 +15,7 @@ use crate::error::ConfigError;
 /// and [`get_global_section`].
 pub static GLOBAL_SETTINGS: std::sync::OnceLock<std::sync::RwLock<EneSettings>> = std::sync::OnceLock::new();
 
-/// グローバルな EneSettings を更新します。
+/// Updates the global EneSettings
 pub fn update_global_settings(settings: EneSettings) {
     if let Some(lock) = GLOBAL_SETTINGS.get() {
         if let Ok(mut guard) = lock.write() {
@@ -26,7 +26,7 @@ pub fn update_global_settings(settings: EneSettings) {
     }
 }
 
-/// グローバル設定全体のクローンを取得します。
+/// Gets a clone of the entire global settings
 pub fn get_global_settings() -> EneSettings {
     if let Some(lock) = GLOBAL_SETTINGS.get() {
         if let Ok(guard) = lock.read() {
@@ -36,7 +36,7 @@ pub fn get_global_settings() -> EneSettings {
     EneSettings::default()
 }
 
-/// グローバル設定から指定されたキーのサブセクションをロードします。
+/// Loads a subsection by key from the global settings
 pub fn get_global_section<T: serde::de::DeserializeOwned + Default>(key: &str) -> T {
     if let Some(lock) = GLOBAL_SETTINGS.get() {
         if let Ok(guard) = lock.read() {
@@ -56,16 +56,16 @@ pub struct SchemaEntry {
 
 static SCHEMA_REGISTRY: std::sync::OnceLock<std::sync::Mutex<HashMap<String, SchemaEntry>>> = std::sync::OnceLock::new();
 
-/// 実行時にツールから収集したスキーマを保管するレジストリ
+/// Registry holding schemas collected from tools at runtime
 static RUNTIME_SCHEMA_REGISTRY: std::sync::OnceLock<std::sync::Mutex<HashMap<String, SchemaEntry>>> =
     std::sync::OnceLock::new();
 
-/// 各クレートが自身の Config スキーマを登録するためのグローバルな静的ヘルパー
+/// Global static helper for each crate to register its own Config schema
 pub fn register_schema<T: JsonSchema>(key: &str) {
     register_schema_inner::<T>(key, None);
 }
 
-/// 実行時にツールから収集したスキーマを登録する
+/// Registers schemas collected from tools at runtime
 pub fn register_runtime_schema(
     key: &str,
     schema: serde_json::Value,
@@ -88,7 +88,7 @@ pub fn register_runtime_schema(
     }
 }
 
-/// 親スキーマの definition/property にネストして登録する
+/// Registers nested within a parent schema's definition/property
 pub fn register_schema_with_parent<T: JsonSchema>(key: &str, parent: &str) {
     register_schema_inner::<T>(key, Some(parent.to_string()));
 }
@@ -195,7 +195,7 @@ fn apply_registry_to_schema(
     root_schema: &mut schemars::schema::RootSchema,
     registry: &HashMap<String, SchemaEntry>,
 ) {
-    // 第一パス: 親を持たないエントリを挿入し、すべての定義を収集
+    // First pass: insert entries without parents and collect all definitions
     for (key, entry) in registry.iter() {
         if entry.parent.is_none() {
             if let Some(object) = &mut root_schema.schema.object {
@@ -209,7 +209,7 @@ fn apply_registry_to_schema(
             root_schema.definitions.insert(def_name.clone(), def_schema.clone());
         }
     }
-    // 第二パス: 親を持つエントリをマージ
+    // Second pass: merge entries that have parents
     for (_, entry) in registry.iter() {
         if let Some(parent_key) = &entry.parent {
             merge_child_into_parent(root_schema, parent_key, &entry.schema);
@@ -217,7 +217,7 @@ fn apply_registry_to_schema(
     }
 }
 
-/// JSON Schema の JSON 表現を生成します
+/// Generates the JSON representation of the JSON Schema
 pub fn generate_schema_json() -> Result<String, serde_json::Error> {
     let schema_gen = schemars::r#gen::SchemaSettings::draft07().into_generator();
     let mut root_schema = schema_gen.into_root_schema_for::<EneSettings>();
@@ -237,26 +237,26 @@ pub fn generate_schema_json() -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(&root_schema)
 }
 
-/// アセットディレクトリ of settings.json を読み込み、character_card_path などを解決した EneSettings を返す。
+/// Reads the asset directory and settings.json, resolves character_card_path, etc., and returns EneSettings.
 pub fn load_settings() -> EneSettings {
     let assets_dir = crate::paths::assets_dir();
     let config_path = crate::paths::config_file_path();
     load_settings_from(&assets_dir, &config_path)
 }
 
-/// 指定されたアセットディレクトリと設定ファイルパスから設定を読み込む。
+/// Loads settings from the specified asset directory and config file path
 pub fn load_settings_from(assets_dir: &Path, config_path: &Path) -> EneSettings {
     load_full_settings_from(assets_dir, config_path)
 }
 
-/// 設定ファイルを完全に読み込む。起動時に schema ファイルも自動更新する。
+/// Fully loads the config file. Also auto-updates the schema file on startup
 pub fn load_full_settings() -> EneSettings {
     let assets_dir = crate::paths::assets_dir();
     let config_path = crate::paths::config_file_path();
     load_full_settings_from(&assets_dir, &config_path)
 }
 
-/// 指定されたアセットディレクトリと設定ファイルパスから EneSettings を完全に読み込む。
+/// Fully loads EneSettings from the specified asset directory and config file path
 pub fn load_full_settings_from(assets_dir: &Path, config_path: &Path) -> EneSettings {
     use figment::{Figment, providers::{Format, Json, Env, Serialized}};
 
@@ -269,13 +269,13 @@ pub fn load_full_settings_from(assets_dir: &Path, config_path: &Path) -> EneSett
         EneSettings::default()
     });
 
-    // スキーマの自動書き出し生成
+    // Auto-generate schema write-out
     let schema_path = assets_dir.join("settings.schema.json");
     if let Ok(schema_json) = generate_schema_json() {
         let _ = std::fs::write(&schema_path, schema_json);
     }
 
-    // キャラクター固有設定のスキーマ自動書き出し生成
+    // Auto-generate schema write-out for character-specific settings
     let char_schema_path = crate::paths::character_schema_file_path();
     if let Ok(char_schema_json) = crate::character_settings::generate_character_schema_json() {
         let _ = std::fs::write(&char_schema_path, char_schema_json);
@@ -295,7 +295,7 @@ pub fn load_full_settings_from(assets_dir: &Path, config_path: &Path) -> EneSett
     settings
 }
 
-/// 設定ファイルを型安全に保存する
+/// Saves the config file in a type-safe manner
 pub fn save_full_settings(settings: &EneSettings) -> Result<(), std::io::Error> {
     update_global_settings(settings.clone());
     let config_path = crate::paths::config_file_path();

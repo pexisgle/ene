@@ -17,10 +17,10 @@ ene_config::define_config!(
         pub recency_weight: f64 = 0.3,
 
         // ── Tool RAG ─────────────────────────────────────────────────────────────
-        /// Tool RAG設定 — ユーザー入力に関連するツールのみを動的に選択してtoken消費を抑制
+        /// Tool RAG settings — dynamically select only user-input-relevant tools to reduce token consumption
         pub tool_rag_enabled: bool = true,
         pub tool_rag_limit: usize = 6,
-        /// 常に含めるツール名（RAG絞り込み後も必ず残す）
+        /// Tool names that are always included (kept even after RAG filtering)
         pub tool_rag_always_include: Vec<String> = vec![
             "question".to_string(),
             "todo".to_string(),
@@ -28,9 +28,9 @@ ene_config::define_config!(
         ],
 
         // ── Summarization Model ──────────────────────────────────────────────────
-        /// 要約生成に使うモデル（空の場合はチャット用モデルを使用）
+        /// Model used for summarization (uses the chat model if empty)
         pub summarization_model: String = default_string(),
-        /// 要約生成に使う base_url（空の場合はチャット用 base_url を使用）
+        /// Base URL used for summarization (uses the chat base URL if empty)
         pub summarization_base_url: String = default_string(),
     }
 );

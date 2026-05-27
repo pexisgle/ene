@@ -444,7 +444,7 @@ impl CharacterSettings {
 
         self.ai.ai = full.clone();
 
-        // キャラクター選択
+        // Character selection
         let card_path = &full.character;
         if !card_path.is_empty() {
             let path = Path::new(card_path);
@@ -458,7 +458,7 @@ impl CharacterSettings {
             }
         }
 
-        // グラフィック設定
+        // Graphics settings
         let desktop_cfg = full.get_section::<DesktopSection>("desktop").unwrap_or_default();
         self.graphics = desktop_cfg.graphics;
 

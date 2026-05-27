@@ -3,13 +3,13 @@ use crate::{IpcRequest, IpcResponse, ToolProvider, read_ipc_request, write_ipc_r
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// ツールプロバイダをIPCサーバーとして起動する
+/// Starts a tool provider as an IPC server
 ///
-/// 環境変数 `ENE_TOOL_SOCKET` からパスを読み取り、
-/// IPC でリクエストを待ち受ける。
-/// `Shutdown` リクエストを受信すると終了する。
+/// Reads the socket path from the `ENE_TOOL_SOCKET` environment variable
+/// and listens for requests over IPC.
+/// Shuts down upon receiving a `Shutdown` request.
 ///
-/// # 使用例
+/// # Usage Example
 ///
 /// ```ignore
 /// #[tokio::main]

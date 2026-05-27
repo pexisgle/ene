@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use uuid::Uuid;
 
-/// 1回のツール実行に対するアンドゥ情報
+/// Undo information for a single tool execution
 #[derive(Debug, Clone)]
 pub struct UndoEntry {
     pub id: Uuid,
@@ -41,19 +41,19 @@ impl UndoEntry {
     }
 }
 
-/// 具体的な元に戻し操作
+/// Concrete undo operation
 #[derive(Debug, Clone)]
 pub enum UndoOperation {
-    /// ファイルを元の内容に戻す
+    /// Restores a file to its original content
     RestoreFile {
         path: PathBuf,
         original_content: Option<Vec<u8>>,
     },
-    /// 作成されたファイルを削除
+    /// Deletes a created file
     DeleteCreatedFile { path: PathBuf },
 }
 
-/// セッション単位の Undo スタック（インメモリ + SQLite 永続化）
+/// Per-session undo stack (in-memory + SQLite persistence)
 pub struct UndoManager {
     stacks: DashMap<String, VecDeque<UndoEntry>>,
     db: Mutex<Option<Connection>>,
@@ -73,7 +73,7 @@ impl UndoManager {
         }
     }
 
-    /// DB パスを設定してテーブルを作成する
+    /// Sets the DB path and creates tables
     pub fn set_db_path(&self, path: &Path) -> Result<(), String> {
         let conn = Connection::open(path).map_err(|e| format!("Failed to open undo DB: {e}"))?;
         conn.execute_batch(
@@ -100,7 +100,7 @@ impl UndoManager {
         Ok(())
     }
 
-    /// DB から特定セッションのエントリを読み込んでインメモリスタックに復元する
+    /// Loads entries for a specific session from the DB and restores them to the in-memory stack
     fn load_session_from_db(&self, session_id: &str) -> Result<(), String> {
         let guard = self.db.lock().unwrap();
         let db = guard.as_ref().ok_or("Undo DB not initialized")?;
@@ -175,7 +175,7 @@ impl UndoManager {
         Ok(())
     }
 
-    /// ファイル復元操作を記録
+    /// Records a file restore operation
     pub fn push_restore_file(
         &self,
         session_id: &str,
@@ -192,7 +192,7 @@ impl UndoManager {
         );
     }
 
-    /// 作成ファイル削除操作を記録
+    /// Records a created-file deletion operation
     pub fn push_delete_created_file(&self, session_id: &str, tool_name: &str, path: PathBuf) {
         self.push(
             session_id,
@@ -200,7 +200,7 @@ impl UndoManager {
         );
     }
 
-    /// 操作を記録
+    /// Records an operation
     pub fn push(&self, session_id: &str, entry: UndoEntry) {
         let mut stack = self.stacks.entry(session_id.to_string()).or_default();
         stack.push_back(entry.clone());
@@ -256,7 +256,7 @@ impl UndoManager {
         Ok(())
     }
 
-    /// 最新の操作を元に戻す
+    /// Undoes the most recent operation
     pub async fn undo(&self, session_id: &str) -> Result<Vec<String>, String> {
         let has_stack = self.stacks.contains_key(session_id);
         if !has_stack && self.db.lock().unwrap().is_some() {
@@ -341,7 +341,7 @@ impl UndoManager {
         Ok(logs)
     }
 
-    /// スタックをクリア
+    /// Clears the stack
     pub fn clear(&self, session_id: &str) {
         self.stacks.remove(session_id);
 
@@ -357,7 +357,7 @@ impl UndoManager {
         }
     }
 
-    /// スタックの長さを取得
+    /// Gets the length of the stack
     pub fn len(&self, session_id: &str) -> usize {
         let has = self.stacks.contains_key(session_id);
         if !has && self.db.lock().unwrap().is_some() {
@@ -368,20 +368,20 @@ impl UndoManager {
         self.stacks.get(session_id).map(|s| s.len()).unwrap_or(0)
     }
 
-    /// 空かどうか
+    /// Whether the stack is empty
     pub fn is_empty(&self, session_id: &str) -> bool {
         self.len(session_id) == 0
     }
 }
 
-/// zlib 圧縮
+/// zlib compression
 fn compress(data: &[u8]) -> Vec<u8> {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     let _ = encoder.write_all(data);
     encoder.finish().unwrap_or_else(|_| data.to_vec())
 }
 
-/// zlib 展開
+/// zlib decompression
 fn decompress(data: &[u8]) -> Vec<u8> {
     let mut decoder = ZlibDecoder::new(data);
     let mut out = Vec::new();
@@ -392,7 +392,7 @@ fn decompress(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// 破壊的操作前にバックアップを取得
+/// Takes a backup before a destructive operation
 pub async fn backup_file(path: &Path) -> Option<Vec<u8>> {
     if path.exists() && path.is_file() {
         tokio::fs::read(path).await.ok()
