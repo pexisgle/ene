@@ -438,7 +438,7 @@ impl CharacterSettings {
 
     pub fn load_from_file(&mut self) {
         let path = ene_config::config_file_path();
-        let full = ene_config::load_full_settings_from(&self.assets_dir, &path);
+        let full = ene_config::load_settings_from(&self.assets_dir, &path);
 
         self.ai.ai = full.clone();
 

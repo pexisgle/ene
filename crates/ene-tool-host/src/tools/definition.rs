@@ -50,4 +50,27 @@ pub trait ToolRegistry: Send + Sync {
     ) -> Result<(), crate::error::ToolError> {
         Ok(())
     }
+
+    /// Builds the embedding index, embeds the query, and returns the most relevant tools.
+    ///
+    /// Convenience method that combines [`ensure_index_built`](Self::ensure_index_built),
+    /// [`EmbeddingProvider::embed_query`], and [`list_relevant_tools`](Self::list_relevant_tools).
+    async fn select_tools(
+        &self,
+        embedder: &dyn ene_embedding::EmbeddingProvider,
+        query: &str,
+        limit: usize,
+    ) -> Vec<ToolDefinition> {
+        if let Err(e) = self.ensure_index_built(embedder, None).await {
+            tracing::warn!("[ToolRAG] Failed to build index: {}", e);
+        }
+        let query_embedding = match embedder.embed_query(query).await {
+            Ok(emb) => Some(emb),
+            Err(e) => {
+                tracing::warn!("[ToolRAG] Failed to embed query: {}", e);
+                None
+            }
+        };
+        self.list_relevant_tools(query_embedding.as_deref(), limit)
+    }
 }

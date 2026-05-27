@@ -52,18 +52,9 @@ impl MemoryConfig {
         if !self.summarization_model.trim().is_empty() {
             return self.summarization_model.clone();
         }
-        let settings = ene_config::get_global_settings();
-        if let Some(model) = settings
-            .extra
-            .get("provider")
-            .and_then(|p| p.get("model"))
-            .and_then(|v| v.as_str())
-        {
-            if !model.trim().is_empty() {
-                return model.to_string();
-            }
-        }
-        "gpt-4o-mini".to_string()
+        ene_config::get_global_settings()
+            .get_provider_field("model")
+            .unwrap_or_else(|| "gpt-4o-mini".to_string())
     }
 
     /// Resolves the effective summarisation base URL, falling back to the provider settings.
@@ -71,19 +62,10 @@ impl MemoryConfig {
         if !self.summarization_base_url.trim().is_empty() {
             return Ok(self.summarization_base_url.clone());
         }
-        let settings = ene_config::get_global_settings();
-        if let Some(base_url) = settings
-            .extra
-            .get("provider")
-            .and_then(|p| p.get("base_url"))
-            .and_then(|v| v.as_str())
-        {
-            if !base_url.trim().is_empty() {
-                return Ok(base_url.to_string());
-            }
-        }
-        Err(ene_config::ConfigError::MissingBaseUrl {
-            env_var: String::new(),
-        })
+        ene_config::get_global_settings()
+            .get_provider_field("base_url")
+            .ok_or(ene_config::ConfigError::MissingBaseUrl {
+                env_var: String::new(),
+            })
     }
 }
