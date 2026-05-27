@@ -1,8 +1,8 @@
 use crate::error::EneCoreError;
 use crate::stream::{EneStreamEvent, run_ene_with_tools};
 use ene_config::EneSettings;
-use ene_session::{ConversationSession, PendingSplitTask, SplitTaskInput, spawn_split_task};
-use ene_tool_host::{CompositeToolRegistry, McpToolRegistry, ToolHostManager, ToolRegistry};
+use ene_session::{ConversationSession, PendingSplitTask, spawn_split_task};
+use ene_tool_host::{CompositeToolRegistry, ToolHostManager, ToolRegistry};
 use std::sync::Arc;
 use tokio_stream::Stream;
 
@@ -94,16 +94,6 @@ impl EneRuntime {
     /// If so, spawns a background tokio thread to execute an auto session-split,
     /// generating a compiled memory summary and key facts.
     pub fn check_and_perform_split(&mut self, user_input: &str, user_name: &str) {
-        let session_config = match self
-            .settings
-            .get_section::<ene_session::SessionConfig>("session")
-        {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("Failed to load session config for split checking: {}", e);
-                return;
-            }
-        };
         let mem_config = match self
             .settings
             .get_section::<ene_memory::MemoryConfig>("memory")
@@ -114,51 +104,34 @@ impl EneRuntime {
                 return;
             }
         };
+        let session_config = match self
+            .settings
+            .get_section::<ene_session::SessionConfig>("session")
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Failed to load session config for split checking: {}", e);
+                return;
+            }
+        };
 
         if !mem_config.enabled || !session_config.auto_session_split {
             return;
         }
-        let store = match &self.session.memory.memory_store {
-            Some(s) => s,
-            None => return,
-        };
-        let embedder = match &self.session.memory.embedding_provider {
-            Some(e) => e,
-            None => return,
-        };
+
         if self.pending_split.is_none() {
-            spawn_split_task(
-                &mut self.pending_split,
-                SplitTaskInput {
-                    last_input_embedding: self.session.state.last_input_embedding.clone(),
-                    last_message_time: self.session.state.last_message_time,
-                    current_turn_count: self.session.state.current_turn_count,
-                    user_input: user_input.to_string(),
-                    session_config,
-                    summarization_model: self
-                        .settings
-                        .get_section::<ene_memory::MemoryConfig>("memory")
-                        .unwrap_or_default()
-                        .resolve_summarization_model(),
-                    summarization_base_url: self
-                        .settings
-                        .get_section::<ene_memory::MemoryConfig>("memory")
-                        .unwrap_or_default()
-                        .resolve_summarization_base_url()
-                        .unwrap_or_default(),
-                    api_key: self
-                        .settings
-                        .get_section::<crate::config::ProviderSettings>("provider")
-                        .unwrap_or_default()
-                        .resolve_api_key(),
-                    history: self.session.history.conversation_history.clone(),
-                    session_id: self.session.memory.session_id.clone(),
-                    card_name: self.session.card_name().to_string(),
-                    user_name: user_name.to_string(),
-                    store: store.clone(),
-                    embedder: embedder.clone(),
-                },
-            );
+            let api_key = self
+                .settings
+                .get_section::<crate::config::ProviderSettings>("provider")
+                .unwrap_or_default()
+                .resolve_api_key();
+
+            if let Some(input) =
+                self.session
+                    .prepare_split_input(&self.settings, user_input, user_name, &api_key)
+            {
+                spawn_split_task(&mut self.pending_split, input);
+            }
         }
     }
 
@@ -211,12 +184,21 @@ impl EneRuntime {
 
         run_ene_with_tools(&self.settings, &self.session, user_input, self.registry.clone()).await
     }
+
+    /// Polls for a completed split result and applies it to the session.
+    ///
+    /// Delegates to [`ConversationSession::apply_pending_split`].
+    pub fn apply_pending_split(
+        &mut self,
+    ) -> Option<Result<ene_session::SplitResult, ene_session::SessionError>> {
+        self.session.apply_pending_split(&mut self.pending_split)
+    }
 }
 
 /// Builds the active composite tool registry based on workspace config settings.
 ///
-/// This starts up local tool subprocesses managed by `ToolHostManager` and initiates
-/// connections to external MCP servers (via stdio transports).
+/// Delegates to [`ToolHostManager::start_full`] which handles IPC tool spawning,
+/// MCP server connection, and fallback logic automatically.
 ///
 /// # Errors
 ///
@@ -224,59 +206,9 @@ impl EneRuntime {
 pub async fn build_tool_registry(
     settings: &EneSettings,
 ) -> Result<Arc<dyn ToolRegistry>, EneCoreError> {
-    let mut manager = match ToolHostManager::start(settings).await {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(
-                "[ToolHostManager] Failed to start tool host, falling back to empty tools: {}",
-                e
-            );
-            let mut fallback_settings = settings.clone();
-            let fallback_tools = ene_tool_host::ToolSettings {
-                tools: std::collections::HashMap::new(),
-                ..Default::default()
-            };
-            let _ = fallback_settings.set_section("tools", &fallback_tools);
-            ToolHostManager::start(&fallback_settings)
-                .await
-                .map_err(|e2| {
-                    EneCoreError::ConfigError(format!(
-                        "Fatal: Failed to start fallback ToolHostManager: {}",
-                        e2
-                    ))
-                })?
-        }
-    };
-
-    let mcp_servers = settings
-        .get_section::<Vec<ene_tool_host::McpServerConfig>>("mcp_servers")
-        .unwrap_or_default();
-    if !mcp_servers.is_empty() {
-        let mcp = McpToolRegistry::new();
-        for server in &mcp_servers {
-            if !server.enabled {
-                continue;
-            }
-            match &server.transport {
-                ene_tool_host::McpTransport::Stdio { command, args } => {
-                    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                    if let Err(err) = mcp.connect_stdio(&server.name, command, &args_ref).await {
-                        tracing::warn!("MCP server '{}' failed to connect: {}", server.name, err);
-                    }
-                }
-                ene_tool_host::McpTransport::Http { url } => {
-                    tracing::warn!(
-                        "MCP HTTP transport not supported yet for '{}' (URL: {})",
-                        server.name,
-                        url
-                    );
-                }
-            }
-        }
-        manager.add_registry(Arc::new(mcp));
-    }
-
-    Ok(manager.into_registry())
+    ToolHostManager::start_full(settings).await.map_err(|e| {
+        EneCoreError::ConfigError(format!("Fatal: Failed to start ToolHostManager: {}", e))
+    })
 }
 
 fn init_embedding(
@@ -286,23 +218,14 @@ fn init_embedding(
         .get_section::<ene_embedding::EmbeddingConfig>("embedding")
         .map_err(|e| format!("Failed to load embedding config: {}", e))?;
 
-    let embed_base_url = embed_config
-        .resolve_base_url()
-        .map_err(|e| format!("Failed to resolve embedding base URL: {}", e))?;
+    let api_key = settings
+        .get_section::<crate::config::ProviderSettings>("provider")
+        .unwrap_or_default()
+        .resolve_api_key();
 
-    let embedder = ene_embedding::create_embedding_provider(
-        embed_config.provider_type,
-        &embed_config.model,
-        &embed_base_url,
-        &settings
-            .get_section::<crate::config::ProviderSettings>("provider")
-            .unwrap_or_default()
-            .resolve_api_key(),
-        embed_config.dimensions.unwrap_or(768),
-        Some(&embed_config.gguf_quantization),
-        ene_config::models_dir(),
-    )
-    .map_err(|e| format!("Failed to create embedding provider: {}", e))?;
+    let embedder = embed_config
+        .create_provider(&api_key, ene_config::models_dir())
+        .map_err(|e| format!("Failed to create embedding provider: {}", e))?;
 
     Ok(Arc::from(embedder))
 }

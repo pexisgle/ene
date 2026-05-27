@@ -1,10 +1,11 @@
-use crate::conversation_manager::generate_session_id;
+use crate::conversation_manager::{generate_session_id, poll_split_result, PendingSplitTask, SplitResult, SplitTaskInput};
+use crate::error::SessionError;
 use crate::special_token::split_text_and_special_tokens;
 use async_openai::types::chat::Role;
 use chrono::{DateTime, Utc};
-use ene_config::{CharacterCardV3, ResolvedExpression, resolve_expressions};
+use ene_config::{CharacterCardV3, EneSettings, ResolvedExpression, resolve_expressions};
 use ene_embedding::EmbeddingProvider;
-use ene_memory::MemoryStore;
+use ene_memory::{MemoryConfig, MemoryStore};
 use std::sync::Arc;
 
 /// Manages the conversation history with automatic trimming.
@@ -287,5 +288,60 @@ impl ConversationSession {
     /// Returns the number of minutes elapsed since the session started.
     pub fn session_elapsed_minutes(&self) -> i64 {
         (Utc::now() - self.memory.session_started_at).num_minutes()
+    }
+
+    /// Polls for a completed split result and applies it to the session.
+    ///
+    /// If a split has completed, the conversation history is cleared and the
+    /// session ID is updated to the new one from the split result.
+    pub fn apply_pending_split(
+        &mut self,
+        pending_split: &mut Option<PendingSplitTask>,
+    ) -> Option<Result<SplitResult, SessionError>> {
+        let result = poll_split_result(pending_split)?;
+        if let Ok(ref split_result) = result {
+            self.reset_session();
+            self.memory.session_id = split_result.new_session_id.clone();
+        }
+        Some(result)
+    }
+
+    /// Builds a [`SplitTaskInput`] from the current session state and settings.
+    ///
+    /// Returns `None` if the memory store or embedding provider has not been initialized.
+    pub fn prepare_split_input(
+        &self,
+        settings: &EneSettings,
+        user_input: &str,
+        user_name: &str,
+        api_key: &str,
+    ) -> Option<SplitTaskInput> {
+        let store = self.memory.memory_store.clone()?;
+        let embedder = self.memory.embedding_provider.clone()?;
+        let session_config = settings
+            .get_section::<crate::SessionConfig>("session")
+            .unwrap_or_default();
+        let mem_config = settings
+            .get_section::<MemoryConfig>("memory")
+            .unwrap_or_default();
+
+        Some(SplitTaskInput {
+            last_input_embedding: self.state.last_input_embedding.clone(),
+            last_message_time: self.state.last_message_time,
+            current_turn_count: self.state.current_turn_count,
+            user_input: user_input.to_string(),
+            session_config,
+            summarization_model: mem_config.resolve_summarization_model(),
+            summarization_base_url: mem_config
+                .resolve_summarization_base_url()
+                .unwrap_or_default(),
+            api_key: api_key.to_string(),
+            history: self.history.conversation_history.clone(),
+            session_id: self.memory.session_id.clone(),
+            card_name: self.card_name().to_string(),
+            user_name: user_name.to_string(),
+            store,
+            embedder,
+        })
     }
 }

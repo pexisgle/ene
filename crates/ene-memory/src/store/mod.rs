@@ -566,6 +566,23 @@ impl MemoryStore {
             .map(|row| (row.tool_name, row.similarity))
             .collect())
     }
+
+    /// Recalls both relevant conversation summaries and key facts for a card in a single call.
+    ///
+    /// Combines [`search_summaries`](Self::search_summaries) and
+    /// [`get_all_keyfacts`](Self::get_all_keyfacts) for convenient prompt context assembly.
+    pub fn recall_context(
+        &self,
+        card_name: &str,
+        query_embedding: &[f32],
+        limit: usize,
+        similarity_threshold: f32,
+    ) -> Result<(Vec<RecalledSummary>, Vec<KeyFact>), MemoryError> {
+        let summaries =
+            self.search_summaries(query_embedding, card_name, limit, similarity_threshold)?;
+        let key_facts = self.get_all_keyfacts(card_name).unwrap_or_default();
+        Ok((summaries, key_facts))
+    }
 }
 
 #[derive(diesel::QueryableByName)]

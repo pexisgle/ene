@@ -7,7 +7,7 @@ use tokio_stream::StreamExt;
 use crate::app_config::CharacterSettings;
 use crate::character::ResolvedExpressionMap;
 use ene_core::{
-    EneRuntime, MemoryConfig, SessionConfig, poll_split_result,
+    EneRuntime,
     stream::{EneStreamEvent as CoreEneStreamEvent, run_ene_with_tools},
     truncate,
 };
@@ -276,48 +276,33 @@ fn start_next_ai_request(
 fn poll_ai_worker(
     mut runtime_state: ResMut<EneRuntimeState>,
     mut stream_writer: MessageWriter<EneStreamEvent>,
-    settings: Res<CharacterSettings>,
+    _settings: Res<CharacterSettings>,
 ) {
-    let mem_config = settings
-        .ai
-        .ai
-        .get_section::<MemoryConfig>("memory")
-        .unwrap_or_default();
-    let session_config = settings
-        .ai
-        .ai
-        .get_section::<SessionConfig>("session")
-        .unwrap_or_default();
-    if mem_config.enabled && session_config.auto_session_split {
-        if let Some(runtime) = runtime_state.runtime.as_mut() {
-            if let Some(result) = poll_split_result(&mut runtime.pending_split) {
-                match result {
-                    Ok(split_result) => {
-                        info!("[Session] {}", split_result.reason);
-                        info!(
-                            "[Session] Conversation summarized and saved: {}",
-                            truncate(&split_result.summary, 80)
-                        );
-                        if !split_result.key_facts.is_empty() {
-                            let facts_str = split_result
-                                .key_facts
-                                .iter()
-                                .map(|f| format!("{}:{}", f.key, f.value))
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            info!("[Session] Key facts: {}", facts_str);
-                        }
-                        runtime.session.reset_session();
-                        runtime.session.memory.session_id = split_result.new_session_id;
-                        info!("[Session] Starting new conversation.");
-                    }
-                    Err(e) => {
-                        if !matches!(e, ene_core::SessionError::SplitNotNeeded) {
-                            error!("[Session] Summary generation error: {}", e);
-                        }
-                    }
+    if let Some(runtime) = runtime_state.runtime.as_mut() {
+        match runtime.session.apply_pending_split(&mut runtime.pending_split) {
+            Some(Ok(split_result)) => {
+                info!("[Session] {}", split_result.reason);
+                info!(
+                    "[Session] Conversation summarized and saved: {}",
+                    truncate(&split_result.summary, 80)
+                );
+                if !split_result.key_facts.is_empty() {
+                    let facts_str = split_result
+                        .key_facts
+                        .iter()
+                        .map(|f| format!("{}:{}", f.key, f.value))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    info!("[Session] Key facts: {}", facts_str);
+                }
+                info!("[Session] Starting new conversation.");
+            }
+            Some(Err(e)) => {
+                if !matches!(e, ene_core::SessionError::SplitNotNeeded) {
+                    error!("[Session] Summary generation error: {}", e);
                 }
             }
+            None => {}
         }
     }
 
