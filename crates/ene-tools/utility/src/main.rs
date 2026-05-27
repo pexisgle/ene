@@ -1,7 +1,6 @@
 pub mod provider;
 pub mod question;
 pub mod todo;
-pub mod truncate;
 
 use ene_tool_proto::run_tool_server;
 
