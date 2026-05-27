@@ -26,7 +26,7 @@ use simple::simple_replace;
 use trimmed_boundary::trimmed_boundary_replace;
 use whitespace_normalized::whitespace_normalized_replace;
 
-/// 文字列置換関数の型エイリアス
+/// Type alias for string replacement functions
 type ReplacerFn = fn(&str, &str, &str, bool) -> Option<String>;
 
 static FILE_LOCKS: std::sync::OnceLock<
@@ -55,7 +55,7 @@ pub fn levenshtein(a: &str, b: &str) -> usize {
     strsim::levenshtein(a, b)
 }
 
-/// 類似度に基づく最良マッチを見つける
+/// Finds the best match based on similarity
 pub fn find_best_match<'a>(needle: &str, haystack: &'a str) -> Option<(usize, &'a str, f64)> {
     if needle.is_empty() {
         return None;
@@ -63,7 +63,7 @@ pub fn find_best_match<'a>(needle: &str, haystack: &'a str) -> Option<(usize, &'
     let needle_len = needle.len();
     let mut best: Option<(usize, &'a str, f64)> = None;
 
-    // スライディングウィンドウで最も類似した部分文字列を探す
+    // Searches for the most similar substring using a sliding window
     let max_window = (needle_len * 2).max(100);
     let step = needle_len.max(1);
 

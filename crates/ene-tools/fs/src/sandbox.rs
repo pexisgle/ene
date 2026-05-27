@@ -2,7 +2,7 @@ use crate::permission::{DestructiveAction, PermissionGate};
 use ene_tool_proto::ToolError;
 use std::path::{Path, PathBuf};
 
-/// サンドボックス設定 — 許可ディレクトリと制限
+/// Sandbox settings — allowed directories and restrictions
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
     pub enabled: bool,
@@ -47,19 +47,19 @@ impl Default for SandboxConfig {
 }
 
 impl SandboxConfig {
-    /// パスを正規化して許可チェック
+    /// Normalizes the path and checks permissions
     pub fn resolve_and_check(
         &self,
         path: &Path,
         require_writable: bool,
     ) -> Result<PathBuf, ToolError> {
-        // 存在しないファイルの場合、親ディレクトリをチェック
+        // For non-existent files, check the parent directory
         let check_path = if path.exists() {
             std::fs::canonicalize(path).map_err(|e| ToolError::SandboxViolation {
                 message: format!("Cannot resolve path: {e}"),
             })?
         } else {
-            // 親ディレクトリが存在するか確認
+            // Verify the parent directory exists
             let abs = if path.is_absolute() {
                 path.to_path_buf()
             } else {
@@ -110,7 +110,7 @@ impl SandboxConfig {
         })
     }
 
-    /// コマンドがブロックリストにマッチするかチェック
+    /// Checks whether a command matches the blocklist
     pub fn is_command_blocked(&self, command: &str) -> Result<(), ToolError> {
         for pattern in &self.blocked_commands {
             let re = regex::Regex::new(pattern).map_err(|e| ToolError::Internal {
@@ -125,7 +125,7 @@ impl SandboxConfig {
         Ok(())
     }
 
-    /// 破壊的操作のパーミッションをチェック
+    /// Checks permissions for destructive operations
     pub fn check_permission(
         &self,
         action: DestructiveAction,
@@ -181,11 +181,11 @@ impl From<ene_tool_proto::SandboxConfigData> for SandboxConfig {
     }
 }
 
-/// SandboxConfig + UndoManager + session_id の統合型
+/// Integrated type combining SandboxConfig + UndoManager + session_id
 ///
-/// ツール実装者は Sandbox だけを意識すればよい。
-/// アクセス制御（check_readable / check_writable / check_command）と
-/// 操作追跡（track_xxx）および Undo 実行を一つに束ねる。
+/// Tool implementers only need to be aware of Sandbox.
+/// Access control (check_readable / check_writable / check_command) and
+/// operation tracking (track_xxx) and Undo execution are bundled together
 pub struct Sandbox {
     config: SandboxConfig,
     undo: crate::undo_manager::UndoManager,
@@ -233,21 +233,21 @@ impl Sandbox {
         *self.session_id.write().unwrap_or_else(|e| e.into_inner()) = id.to_string();
     }
 
-    /// 承認済みリクエストIDを追加
+    /// Adds an approved request ID
     pub fn approve_request(&self, request_id: &str) {
         if let Ok(mut guard) = self.approved_requests.write() {
             guard.insert(request_id.to_string());
         }
     }
 
-    /// アクションとターゲットパターンの組み合わせを追加
+    /// Adds an action + target pattern combination
     pub fn allow_pattern(&self, action: &str, target_pattern: &str) {
         if let Ok(mut guard) = self.allowed_patterns.write() {
             guard.insert((action.to_string(), target_pattern.to_string()));
         }
     }
 
-    /// 破壊的操作のパーミッションチェック
+    /// Permission check for destructive operations
     pub fn check_permission(
         &self,
         action: DestructiveAction,
@@ -281,22 +281,22 @@ impl Sandbox {
         }
     }
 
-    /// 読み取りパス検証
+    /// Read path validation
     pub fn check_readable(&self, path: &Path) -> Result<PathBuf, ToolError> {
         self.config.resolve_and_check(path, false)
     }
 
-    /// 書き込みパス検証
+    /// Write path validation
     pub fn check_writable(&self, path: &Path) -> Result<PathBuf, ToolError> {
         self.config.resolve_and_check(path, true)
     }
 
-    /// コマンド検証
+    /// Command validation
     pub fn check_command(&self, cmd: &str) -> Result<(), ToolError> {
         self.config.is_command_blocked(cmd)
     }
 
-    /// 既存ファイルの上書きを記録
+    /// Records overwrite of an existing file
     pub fn track_overwrite(&self, original_content: Option<Vec<u8>>, path: &Path) {
         self.undo.push_restore_file(
             &self.session_id(),
@@ -306,13 +306,13 @@ impl Sandbox {
         );
     }
 
-    /// 新規ファイル作成を記録
+    /// Records creation of a new file
     pub fn track_creation(&self, path: &Path) {
         self.undo
             .push_delete_created_file(&self.session_id(), "filesystem", path.to_path_buf());
     }
 
-    /// ファイル削除を記録
+    /// Records file deletion
     pub fn track_deletion(&self, original_content: Option<Vec<u8>>, path: &Path) {
         self.undo.push_restore_file(
             &self.session_id(),
@@ -322,7 +322,7 @@ impl Sandbox {
         );
     }
 
-    /// パッチ適用を記録（複数ファイル操作を1つのUndoエントリに）
+    /// Records a patch application (multiple file operations in one Undo entry)
     pub fn track_patch(&self, operations: Vec<crate::undo_manager::UndoOperation>) {
         self.undo.push(
             &self.session_id(),
@@ -330,7 +330,7 @@ impl Sandbox {
         );
     }
 
-    /// 直前の操作を取り消し
+    /// Undoes the most recent operation
     pub async fn undo_last(&self) -> Result<String, ToolError> {
         let logs =
             self.undo

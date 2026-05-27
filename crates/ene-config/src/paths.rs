@@ -52,8 +52,8 @@ pub fn character_schema_file_path() -> PathBuf {
     assets_dir().join("character_settings.schema.json")
 }
 
-/// ビルトインツールバイナリのディレクトリ
-/// 実行ファイルと同じディレクトリ（デバッグ時）またはその `tools/` サブディレクトリ（リリース時）
+/// Directory for built-in tool binaries
+/// Same directory as the executable (debug) or its `tools/` subdirectory (release)
 pub fn builtin_tools_dir() -> PathBuf {
     if let Some(exe_dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|p| p.to_path_buf())) {
         if cfg!(debug_assertions) {
@@ -66,18 +66,18 @@ pub fn builtin_tools_dir() -> PathBuf {
     }
 }
 
-/// ユーザー追加ツールのディレクトリ
+/// Directory for user-added tools
 /// app_data_dir()/tools/
 pub fn user_tools_dir() -> PathBuf {
     app_data_dir().join("tools")
 }
 
-/// ツール用一時ソケットディレクトリ
+/// Temporary socket directory for tools
 pub fn tool_socket_dir() -> PathBuf {
     std::env::temp_dir().join(format!("{}.tools", APP_ID))
 }
 
-/// キャラクター固有の設定ファイルのパスを取得します。
+/// Gets the path to the character-specific settings file
 /// assets_dir/characters/{name}/character_settings.json
 pub fn character_settings_path(character_name: &str) -> PathBuf {
     assets_dir()

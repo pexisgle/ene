@@ -2,10 +2,10 @@ use crate::{SandboxConfigData, ToolDefinition, ToolError, ToolProvider};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-/// 複数の ToolProvider を集約し、ツール名でディスパッチするレジストリ
+/// Registry that aggregates multiple ToolProviders and dispatches by tool name
 ///
-/// ユーザーがカスタムツールバイナリで複数の Provider を束ねたい場合に使用できる。
-/// 個別ツールバイナリでは通常1つの Provider だけで十分。
+/// Can be used when users want to bundle multiple providers in a custom tool binary.
+/// A single provider is usually sufficient for standalone tool binaries.
 pub struct HostRegistry {
     providers: Vec<Box<dyn ToolProvider>>,
     tool_index: HashMap<String, usize>,

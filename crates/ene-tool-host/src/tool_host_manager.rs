@@ -208,10 +208,10 @@ impl ToolRegistry for SupervisedIpcRegistry {
 /// Orchestrates the lifecycle of all tool processes.
 ///
 /// Reads the `tools` section from settings, discovers and spawns tool binaries,
-/// wraps each in a [`SupervisedIpcRegistry`] with crash detection and auto-restart,
+/// wraps each in a `SupervisedIpcRegistry` with crash detection and auto-restart,
 /// and aggregates them into a [`CompositeToolRegistry`].
 ///
-/// Also supports adding external registries (e.g., [`McpToolRegistry`]) and attaching
+/// Also supports adding external registries (e.g., [`crate::McpToolRegistry`]) and attaching
 /// a [`MemoryStore`] for Tool RAG embeddings.
 pub struct ToolHostManager {
     composite: Arc<CompositeToolRegistry>,
@@ -328,7 +328,7 @@ impl ToolHostManager {
         Ok(Self { composite })
     }
 
-    /// Adds an external registry (e.g., an [`McpToolRegistry`]) to the composite.
+    /// Adds an external registry (e.g., an [`crate::McpToolRegistry`]) to the composite.
     pub fn add_registry(&mut self, registry: Arc<dyn ToolRegistry>) {
         self.composite.add_registry(registry);
     }

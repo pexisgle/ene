@@ -1,6 +1,6 @@
 use crate::sandbox::SandboxConfig;
 
-/// パーミッションレベル
+/// Permission level
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionLevel {
     Allow,
@@ -8,7 +8,7 @@ pub enum PermissionLevel {
     Deny { reason: String },
 }
 
-/// パーミッション要求
+/// Permission request
 #[derive(Debug, Clone)]
 pub struct PermissionRequest {
     pub id: uuid::Uuid,
@@ -29,7 +29,7 @@ impl PermissionRequest {
     }
 }
 
-/// 破壊的操作の種類
+/// Types of destructive operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DestructiveAction {
     FileDelete,
@@ -39,7 +39,7 @@ pub enum DestructiveAction {
     AppInteraction,
 }
 
-/// サンドボックス設定に基づくパーミッションゲート
+/// Permission gate based on sandbox configuration
 pub struct PermissionGate {
     auto_approve: bool,
 }
@@ -55,7 +55,7 @@ impl PermissionGate {
         }
     }
 
-    /// 破壊的操作をチェック
+    /// Checks destructive operations
     pub fn check_destructive(
         &self,
         action: DestructiveAction,
@@ -70,7 +70,7 @@ impl PermissionGate {
         Err(req)
     }
 
-    /// シンプルな許可チェック
+    /// Simple permission check
     pub fn check_simple(request: &PermissionRequest) -> PermissionLevel {
         match request.level {
             PermissionLevel::Allow => PermissionLevel::Allow,

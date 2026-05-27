@@ -4,7 +4,7 @@ use super::ToolDefinition;
 
 /// Unified tool registry interface — abstracts over both built-in IPC tools and MCP tools.
 ///
-/// Implemented by [`IpcToolRegistry`], [`McpToolRegistry`], and [`CompositeToolRegistry`].
+/// Implemented by [`crate::IpcToolRegistry`], [`crate::McpToolRegistry`], and [`crate::CompositeToolRegistry`].
 #[async_trait]
 pub trait ToolRegistry: Send + Sync {
     /// Returns the list of all available tools.
@@ -42,7 +42,7 @@ pub trait ToolRegistry: Send + Sync {
     }
 
     /// Builds the vector embedding index for Tool RAG.
-    /// Only the [`CompositeToolRegistry`] implementation does meaningful work here.
+    /// Only the [`crate::CompositeToolRegistry`] implementation does meaningful work here.
     async fn ensure_index_built(
         &self,
         _embedder: &dyn ene_embedding::EmbeddingProvider,

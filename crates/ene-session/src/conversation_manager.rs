@@ -142,14 +142,15 @@ pub async fn check_boundary(
     SessionBoundary::Continue
 }
 
-/// 会話履歴の全メッセージ（User + Assistant）を個別にembedし、max-pooling で統合する
+/// Embeds all conversation history messages (User + Assistant) individually and merges via max-pooling
 ///
-/// - Assistant メッセージも含める: AIが発した新しい話題・単語も捕捉し、
-///   後続の検索クエリとの意味的マッチング精度を向上させる
-/// - Max-pooling: 各次元で最も強い特徴を採用。挨拶などの情報量ゼロのメッセージに
-///   意味が希釈されない。たとえば「Python非同期」に強く反応した次元は、
-///   「こんにちは」の低い活性化値で上書きされない。
-/// - 各メッセージは個別にembed → モデルのmax_length制限に引っかからない
+/// - Includes Assistant messages: captures new topics/words introduced by the AI,
+///   improving semantic matching accuracy with subsequent search queries
+/// - Max-pooling: adopts the strongest feature per dimension. Prevents dilution
+///   by zero-information messages like greetings. For example, a dimension that
+///   strongly responded to "Python async" will not be overwritten by the low
+///   activation value of "hello."
+/// - Each message is embedded individually, avoiding model max_length limits
 pub async fn embed_session_messages(
     embedder: &dyn EmbeddingProvider,
     history: &[(Role, String)],

@@ -57,7 +57,7 @@ pub use paths::{
 };
 pub use resources::ensure_resource_dirs;
 
-// サブクレート向けに serde / schemars / ctor を公開
+// Re-export serde / schemars / ctor for sub-crates
 pub use serde;
 pub use schemars;
 pub use ctor::ctor;

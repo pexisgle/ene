@@ -1,6 +1,6 @@
 use async_openai::{Client, config::OpenAIConfig};
 
-/// OpenAI互換クライアントを構築する
+/// Builds an OpenAI-compatible client
 pub fn build_openai_client(base_url: &str, api_key: &str) -> Client<OpenAIConfig> {
     let mut config = OpenAIConfig::new().with_api_base(base_url);
     if !api_key.trim().is_empty() {

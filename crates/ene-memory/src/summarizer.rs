@@ -13,15 +13,15 @@ use crate::error::MemoryError;
 use crate::store::KeyFact;
 use ene_embedding::client::build_openai_client;
 
-/// LLM が返す構造化された会話要約
+/// Structured conversation summary returned by the LLM
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(crate = "ene_config::serde")]
 pub struct ConversationSummaryResult {
-    /// 自然言語の会話要約
+    /// Natural-language conversation summary
     pub summary: String,
-    /// 抽出されたトピックキーワード
+    /// Extracted topic keywords
     pub topics: Vec<String>,
-    /// ユーザーに関する重要な事実（キーバリュー型）
+    /// Important facts about the user (key-value format)
     pub key_facts: Vec<KeyFact>,
 }
 
@@ -196,7 +196,7 @@ pub async fn summarize_conversation(
     parse_summary_json(&content)
 }
 
-/// LLM のレスポンスから JSON を抽出してパースする
+/// Extracts and parses JSON from the LLM response
 fn parse_summary_json(raw: &str) -> Result<ConversationSummaryResult, MemoryError> {
     let cleaned = raw
         .trim()
