@@ -26,55 +26,59 @@
         devShells.default =
           with pkgs;
           mkShell {
-            buildInputs =
-              [
-                # Rust dependencies
-                (rust-bin.nightly.latest.default.override { extensions = [ "rust-src" "rustc-codegen-cranelift-preview" ]; })
-                pkg-config
-                rustPlatform.bindgenHook
-                # OpenSSL (required for native-tls)
-                openssl
-              ]
-              ++ lib.optionals (lib.strings.hasInfix "linux" system) [
-                # for Linux
-                # Faster linker
-                mold
-                clang
-                # Audio (Linux only)
-                alsa-lib
-                # Tray indicator compatibility library
-                libayatana-appindicator
-                # OS / graphics stuff
-                mesa
-                vulkan-loader
-                # For debugging around vulkan
-                vulkan-tools
-                # Other dependencies
-                libudev-zero
-                libgbm
-                libx11
-                libxcursor
-                libXi
-                libxrandr
-                libclang
-                pipewire
-                # Wayland (Linux only)
-                wayland
-                wayland-protocols
-                # GLib (for glib-sys / gtk-related crates)
-                glib
-                # Pango/Cairo for text rendering (pango-sys, cairo-sys, pango dependencies)
-                pango
-                cairo
-                gdk-pixbuf
-                # GTK3 (provides gdk-3.0, atk, etc.)
-                gtk3
-                libxkbcommon
-                # xdotool / libxdo for enigo (GUI automation)
-                xdotool
-                # Chromium for browser automation (Phase 3)
-                chromium
-              ];
+            buildInputs = [
+              # Rust dependencies
+              (rust-bin.nightly.latest.default.override {
+                extensions = [
+                  "rust-src"
+                  "rustc-codegen-cranelift-preview"
+                ];
+              })
+              pkg-config
+              rustPlatform.bindgenHook
+              # OpenSSL (required for native-tls)
+              openssl
+            ]
+            ++ lib.optionals (lib.strings.hasInfix "linux" system) [
+              # for Linux
+              # Faster linker
+              mold
+              clang
+              # Audio (Linux only)
+              alsa-lib
+              # Tray indicator compatibility library
+              libayatana-appindicator
+              # OS / graphics stuff
+              mesa
+              vulkan-loader
+              # For debugging around vulkan
+              vulkan-tools
+              # Other dependencies
+              libudev-zero
+              libgbm
+              libx11
+              libxcursor
+              libXi
+              libxrandr
+              libclang
+              pipewire
+              # Wayland (Linux only)
+              wayland
+              wayland-protocols
+              # GLib (for glib-sys / gtk-related crates)
+              glib
+              # Pango/Cairo for text rendering (pango-sys, cairo-sys, pango dependencies)
+              pango
+              cairo
+              gdk-pixbuf
+              # GTK3 (provides gdk-3.0, atk, etc.)
+              gtk3
+              libxkbcommon
+              # xdotool / libxdo for enigo (GUI automation)
+              xdotool
+              # Chromium for browser automation (Phase 3)
+              chromium
+            ];
             RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
             LD_LIBRARY_PATH = lib.makeLibraryPath [
               libayatana-appindicator
@@ -87,8 +91,8 @@
               libxkbcommon
               xdotool
             ];
-            LIBCLANG_PATH="${llvmPackages.libclang.lib}/lib";
-            # OpenSSL environment変数 (native-tls用)
+            LIBCLANG_PATH = "${llvmPackages.libclang.lib}/lib";
+            # OpenSSL environment (for native-tls)
             OPENSSL_DIR = "${pkgs.openssl.dev}";
             OPENSSL_LIB_DIR = "${pkgs.openssl.out}/lib";
             OPENSSL_INCLUDE_DIR = "${pkgs.openssl.dev}/include";
