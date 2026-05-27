@@ -1,4 +1,4 @@
-use crate::error::AiCoreError;
+use crate::error::EneCoreError;
 use ene_config::EneSettings;
 use ene_session::{
     ConversationSession, PendingSplitTask, SplitTaskInput, spawn_split_task,
@@ -11,7 +11,7 @@ use std::sync::Arc;
 /// This struct acts as the primary runtime container for an active ene session,
 /// including its active user configuration, conversation history, the underlying tool registries,
 /// and any pending session splitting tasks.
-pub struct AiRuntime {
+pub struct EneRuntime {
     /// The active workspace configurations.
     pub settings: EneSettings,
     /// The session holding the conversation history, character details, and memory connection.
@@ -22,7 +22,7 @@ pub struct AiRuntime {
     pub pending_split: Option<PendingSplitTask>,
 }
 
-impl AiRuntime {
+impl EneRuntime {
     /// Initializes a new ene Core runtime with the provided workspace settings.
     ///
     /// This will automatically boot up:
@@ -33,21 +33,21 @@ impl AiRuntime {
     ///
     /// # Errors
     ///
-    /// Returns `AiCoreError` if embedding initialization, database connection, or tool manager start fails.
-    pub async fn init(settings: EneSettings) -> Result<Self, AiCoreError> {
+    /// Returns `EneCoreError` if embedding initialization, database connection, or tool manager start fails.
+    pub async fn init(settings: EneSettings) -> Result<Self, EneCoreError> {
         let mut session = ConversationSession::new();
 
         // 1. Initialize embedding
-        let embedder = init_embedding(&settings).map_err(|e| AiCoreError::EmbeddingError(e))?;
+        let embedder = init_embedding(&settings).map_err(|e| EneCoreError::EmbeddingError(e))?;
         session.memory.embedding_provider = Some(embedder.clone());
 
         // 2. Initialize memory store if enabled
         let mem_config = settings.get_section::<ene_memory::MemoryConfig>("memory")
-            .map_err(|e| AiCoreError::ConfigError(format!("Failed to load memory config: {}", e)))?;
+            .map_err(|e| EneCoreError::ConfigError(format!("Failed to load memory config: {}", e)))?;
 
         if mem_config.enabled {
             let store = init_memory_store(&settings, &*embedder).map_err(|e| {
-                AiCoreError::Memory(ene_memory::MemoryError::MemoryStoreConnectionError(e))
+                EneCoreError::Memory(ene_memory::MemoryError::MemoryStoreConnectionError(e))
             })?;
             session.memory.memory_store = Some(store);
         }
@@ -126,22 +126,22 @@ impl AiRuntime {
     ///
     /// # Errors
     ///
-    /// Returns `AiCoreError` if the underlying embedding provider is not initialized
+    /// Returns `EneCoreError` if the underlying embedding provider is not initialized
     /// or if the connection/computation fails.
-    pub async fn embed_input(&mut self, input: &str) -> Result<Vec<f32>, AiCoreError> {
+    pub async fn embed_input(&mut self, input: &str) -> Result<Vec<f32>, EneCoreError> {
         let embedder = self
             .session
             .memory
             .embedding_provider
             .clone()
             .ok_or_else(|| {
-                AiCoreError::EmbeddingError("No embedding provider initialized".to_string())
+                EneCoreError::EmbeddingError("No embedding provider initialized".to_string())
             })?;
 
         let embedding = embedder
             .embed_query(input)
             .await
-            .map_err(|e| AiCoreError::EmbeddingError(format!("Failed to embed: {}", e)))?;
+            .map_err(|e| EneCoreError::EmbeddingError(format!("Failed to embed: {}", e)))?;
 
         self.session.set_pending_embedding(embedding.clone());
         self.session.set_last_input_embedding(embedding.clone());
@@ -156,10 +156,10 @@ impl AiRuntime {
 ///
 /// # Errors
 ///
-/// Returns `AiCoreError` if initialization fails completely.
+/// Returns `EneCoreError` if initialization fails completely.
 pub async fn build_tool_registry(
     settings: &EneSettings,
-) -> Result<Arc<dyn ToolRegistry>, AiCoreError> {
+) -> Result<Arc<dyn ToolRegistry>, EneCoreError> {
     let mut manager = match ToolHostManager::start(settings).await {
         Ok(m) => m,
         Err(e) => {
@@ -173,7 +173,7 @@ pub async fn build_tool_registry(
             ToolHostManager::start(&fallback_settings)
             .await
             .map_err(|e2| {
-                AiCoreError::ConfigError(format!(
+                EneCoreError::ConfigError(format!(
                     "Fatal: Failed to start fallback ToolHostManager: {}",
                     e2
                 ))

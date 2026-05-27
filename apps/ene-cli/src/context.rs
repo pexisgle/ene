@@ -1,12 +1,12 @@
-use ene_core::AiRuntime;
+use ene_core::EneRuntime;
 use std::ops::{Deref, DerefMut};
 
 pub struct AppContext {
-    pub runtime: AiRuntime,
+    pub runtime: EneRuntime,
 }
 
 impl Deref for AppContext {
-    type Target = AiRuntime;
+    type Target = EneRuntime;
     fn deref(&self) -> &Self::Target {
         &self.runtime
     }

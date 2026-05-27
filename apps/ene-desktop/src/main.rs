@@ -14,7 +14,7 @@ use bevy::prelude::*;
 use bevy_egui::EguiPlugin;
 use bevy_vrm1::prelude::*;
 
-use ai_bridge::AiPlugin;
+use ai_bridge::EnePlugin;
 use app_config::{CharacterSettings, DEFAULT_SHADOW_QUALITY, window_plugin};
 use character::CharacterPlugin;
 use scene::ScenePlugin;
@@ -47,7 +47,7 @@ fn main() {
             VrmPlugin,
             VrmaPlugin,
             ScenePlugin,
-            AiPlugin,
+            EnePlugin,
             CharacterPlugin,
             TrayPlugin,
             SettingsUiPlugin,

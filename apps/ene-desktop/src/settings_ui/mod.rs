@@ -7,7 +7,7 @@ use page_ai::render_ai_page;
 use page_character::render_character_page;
 use page_graphics::render_graphics_page;
 
-use crate::ai_bridge::{AiRequestEvent, AiStreamEvent};
+use crate::ai_bridge::{EneRequestEvent, EneStreamEvent};
 use ene_core::{EmbeddingConfig, MemoryConfig};
 use crate::app_config::{
     CharacterSettings, SETTINGS_WINDOW_HEIGHT, SETTINGS_WINDOW_WIDTH, target_fps_label,
@@ -380,7 +380,7 @@ fn handle_settings_keyboard_controls(
     egui_ctx: Option<Single<&mut EguiContext, Without<PrimaryEguiContext>>>,
     mut settings: ResMut<CharacterSettings>,
     mut animation_control: ResMut<CharacterAnimationControl>,
-    mut ai_request_writer: MessageWriter<AiRequestEvent>,
+    mut ai_request_writer: MessageWriter<EneRequestEvent>,
     _window_entities: Res<SettingsWindowEntities>,
     input_state: Res<SettingsInputState>,
 ) {
@@ -424,7 +424,7 @@ fn render_settings_window(
     egui_ctx: Option<Single<&mut EguiContext, Without<PrimaryEguiContext>>>,
     mut settings: ResMut<CharacterSettings>,
     mut animation_control: ResMut<CharacterAnimationControl>,
-    mut ai_request_writer: MessageWriter<AiRequestEvent>,
+    mut ai_request_writer: MessageWriter<EneRequestEvent>,
     mut input_state: ResMut<SettingsInputState>,
     mut emotion_queue: ResMut<EmotionQueue>,
     time: Res<Time>,
@@ -621,26 +621,26 @@ fn apply_settings_window_visibility(
 }
 
 fn apply_ai_stream_events(
-    mut stream_events: MessageReader<AiStreamEvent>,
+    mut stream_events: MessageReader<EneStreamEvent>,
     mut settings: ResMut<CharacterSettings>,
 ) {
     for event in stream_events.read() {
         match event {
-            AiStreamEvent::TextDelta(delta) => {
+            EneStreamEvent::TextDelta(delta) => {
                 settings.ui.ai_latest_response.push_str(delta);
             }
-            AiStreamEvent::Finished => {}
-            AiStreamEvent::Error(error) => {
+            EneStreamEvent::Finished => {}
+            EneStreamEvent::Error(error) => {
                 if !settings.ui.ai_latest_response.is_empty() {
                     settings.ui.ai_latest_response.push('\n');
                 }
                 settings.ui.ai_latest_response.push_str("[error] ");
                 settings.ui.ai_latest_response.push_str(error);
             }
-            AiStreamEvent::SpecialToken(_) => {}
-            AiStreamEvent::ToolCallStart { .. } => {}
-            AiStreamEvent::ToolCallResult { .. } => {}
-            AiStreamEvent::PermissionRequired {
+            EneStreamEvent::SpecialToken(_) => {}
+            EneStreamEvent::ToolCallStart { .. } => {}
+            EneStreamEvent::ToolCallResult { .. } => {}
+            EneStreamEvent::PermissionRequired {
                 request_id,
                 action,
                 target,
@@ -654,7 +654,7 @@ fn apply_ai_stream_events(
                 });
                 settings.ui.settings_window_visible = true;
             }
-            AiStreamEvent::TaskProgress { .. } => {}
+            EneStreamEvent::TaskProgress { .. } => {}
         }
     }
 }

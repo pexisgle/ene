@@ -1,5 +1,5 @@
 use super::{SettingsButtonAction, SettingsInputState, SettingsValueKind, widgets::apply_action};
-use crate::ai_bridge::AiRequestEvent;
+use crate::ai_bridge::EneRequestEvent;
 use ene_core::{EmbeddingConfig, MemoryConfig};
 use crate::app_config::CharacterSettings;
 use crate::character::CharacterAnimationControl;
@@ -10,7 +10,7 @@ pub fn render_ai_page(
     ui: &mut egui::Ui,
     settings: &mut CharacterSettings,
     animation_control: &mut CharacterAnimationControl,
-    ai_request_writer: &mut MessageWriter<AiRequestEvent>,
+    ai_request_writer: &mut MessageWriter<EneRequestEvent>,
     input_state: &mut SettingsInputState,
 ) {
     let mut embed_config = settings.ai.ai.get_section::<EmbeddingConfig>("embedding").unwrap_or_default();

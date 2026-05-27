@@ -2,7 +2,7 @@ use super::{
     SettingsButtonAction, SettingsInputState, SettingsValueKind,
     widgets::{apply_action, render_cycle_row, render_numeric_row, render_toggle_row},
 };
-use crate::ai_bridge::AiRequestEvent;
+use crate::ai_bridge::EneRequestEvent;
 use crate::app_config::CharacterSettings;
 use crate::character::{CharacterAnimationControl, EmotionCommand, EmotionQueue};
 use bevy::prelude::*;
@@ -12,7 +12,7 @@ pub fn render_character_page(
     ui: &mut egui::Ui,
     settings: &mut CharacterSettings,
     animation_control: &mut CharacterAnimationControl,
-    ai_request_writer: &mut MessageWriter<AiRequestEvent>,
+    ai_request_writer: &mut MessageWriter<EneRequestEvent>,
     input_state: &mut SettingsInputState,
     emotion_queue: &mut EmotionQueue,
     time: &Time,
@@ -141,7 +141,7 @@ fn render_linux_only_settings(
     ui: &mut egui::Ui,
     settings: &mut CharacterSettings,
     animation_control: &mut CharacterAnimationControl,
-    ai_request_writer: &mut MessageWriter<AiRequestEvent>,
+    ai_request_writer: &mut MessageWriter<EneRequestEvent>,
 ) {
     if let Some(action) = render_toggle_row(
         ui,
@@ -172,6 +172,6 @@ fn render_linux_only_settings(
     _ui: &mut egui::Ui,
     _settings: &mut CharacterSettings,
     _animation_control: &mut CharacterAnimationControl,
-    _ai_request_writer: &mut MessageWriter<AiRequestEvent>,
+    _ai_request_writer: &mut MessageWriter<EneRequestEvent>,
 ) {
 }

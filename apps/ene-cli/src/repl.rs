@@ -1,5 +1,5 @@
 use crate::{commands, context::AppContext, stream, style};
-use ene_core::{poll_split_result, run_ai_with_tools, truncate, MemoryConfig, SessionConfig};
+use ene_core::{poll_split_result, run_ene_with_tools, truncate, MemoryConfig, SessionConfig};
 
 pub async fn run(ctx: &mut AppContext) {
     loop {
@@ -88,7 +88,7 @@ async fn process_ai_response(ctx: &mut AppContext, input: &str) {
     ctx.session.record_user_input();
     ctx.session.add_user_message(input);
 
-    match run_ai_with_tools(&ctx.settings, &ctx.session, input, ctx.registry.clone()).await {
+    match run_ene_with_tools(&ctx.settings, &ctx.session, input, ctx.registry.clone()).await {
         Ok(stream) => {
             stream::process_stream(stream, &mut ctx.session).await;
         }
