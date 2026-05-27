@@ -12,7 +12,7 @@
 //! ```
 
 use async_trait::async_trait;
-use ene_tool_proto::{ToolProvider, ToolDefinition, ToolCategory, ToolError, run_tool_server};
+use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError, ToolProvider, run_tool_server};
 
 struct CalculatorProvider;
 
@@ -52,16 +52,22 @@ impl ToolProvider for CalculatorProvider {
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         match name {
             "calculator" => {
-                let args: serde_json::Value = serde_json::from_str(arguments)
-                    .map_err(|e| ToolError::InvalidArguments { message: e.to_string() })?;
+                let args: serde_json::Value =
+                    serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
+                        message: e.to_string(),
+                    })?;
 
                 let action = args["action"].as_str().unwrap_or("add");
-                let a = args["a"].as_f64().ok_or_else(|| ToolError::InvalidArguments {
-                    message: "Missing or invalid 'a' parameter".into(),
-                })?;
-                let b = args["b"].as_f64().ok_or_else(|| ToolError::InvalidArguments {
-                    message: "Missing or invalid 'b' parameter".into(),
-                })?;
+                let a = args["a"]
+                    .as_f64()
+                    .ok_or_else(|| ToolError::InvalidArguments {
+                        message: "Missing or invalid 'a' parameter".into(),
+                    })?;
+                let b = args["b"]
+                    .as_f64()
+                    .ok_or_else(|| ToolError::InvalidArguments {
+                        message: "Missing or invalid 'b' parameter".into(),
+                    })?;
 
                 let result = match action {
                     "add" => a + b,
@@ -75,9 +81,11 @@ impl ToolProvider for CalculatorProvider {
                         }
                         a / b
                     }
-                    _ => return Err(ToolError::InvalidArguments {
-                        message: format!("Unknown action: {}", action),
-                    }),
+                    _ => {
+                        return Err(ToolError::InvalidArguments {
+                            message: format!("Unknown action: {}", action),
+                        });
+                    }
                 };
 
                 Ok(format!("{} {} {} = {}", a, action, b, result))
@@ -94,8 +102,10 @@ impl ToolProvider for CalculatorProvider {
 #[tokio::main]
 async fn main() {
     println!("Starting calculator tool server...");
-    println!("Socket path: {}",
-        std::env::var("ENE_TOOL_SOCKET").unwrap_or_else(|_| "not set (run via ene)".into()));
+    println!(
+        "Socket path: {}",
+        std::env::var("ENE_TOOL_SOCKET").unwrap_or_else(|_| "not set (run via ene)".into())
+    );
 
     if let Err(e) = run_tool_server(Box::new(CalculatorProvider)).await {
         eprintln!("Tool server error: {}", e);

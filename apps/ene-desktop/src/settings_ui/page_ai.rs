@@ -1,10 +1,10 @@
 use super::{SettingsButtonAction, SettingsInputState, SettingsValueKind, widgets::apply_action};
 use crate::ai_bridge::EneRequestEvent;
-use ene_core::{EmbeddingConfig, MemoryConfig};
 use crate::app_config::CharacterSettings;
 use crate::character::CharacterAnimationControl;
 use bevy::prelude::*;
 use bevy_egui::egui;
+use ene_core::{EmbeddingConfig, MemoryConfig};
 
 pub fn render_ai_page(
     ui: &mut egui::Ui,
@@ -13,8 +13,16 @@ pub fn render_ai_page(
     ai_request_writer: &mut MessageWriter<EneRequestEvent>,
     input_state: &mut SettingsInputState,
 ) {
-    let mut embed_config = settings.ai.ai.get_section::<EmbeddingConfig>("embedding").unwrap_or_default();
-    let mut mem_config = settings.ai.ai.get_section::<MemoryConfig>("memory").unwrap_or_default();
+    let mut embed_config = settings
+        .ai
+        .ai
+        .get_section::<EmbeddingConfig>("embedding")
+        .unwrap_or_default();
+    let mut mem_config = settings
+        .ai
+        .ai
+        .get_section::<MemoryConfig>("memory")
+        .unwrap_or_default();
 
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
@@ -83,14 +91,30 @@ pub fn render_ai_page(
 
         ui.horizontal(|ui| {
             ui.label("API Key Source");
-            let mut provider_config = settings.ai.ai.get_section::<ene_core::ProviderSettings>("provider").unwrap_or_default();
+            let mut provider_config = settings
+                .ai
+                .ai
+                .get_section::<ene_core::ProviderSettings>("provider")
+                .unwrap_or_default();
             let mut current_source = provider_config.api_key_source.clone();
             egui::ComboBox::from_id_salt("api_key_source")
                 .selected_text(&current_source)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut current_source, "inline".to_string(), "Inline (settings.json 平文)");
-                    ui.selectable_value(&mut current_source, "env".to_string(), "Environment (環境変数)");
-                    ui.selectable_value(&mut current_source, "keyring".to_string(), "Keyring (OS セキュアストア)");
+                    ui.selectable_value(
+                        &mut current_source,
+                        "inline".to_string(),
+                        "Inline (settings.json 平文)",
+                    );
+                    ui.selectable_value(
+                        &mut current_source,
+                        "env".to_string(),
+                        "Environment (環境変数)",
+                    );
+                    ui.selectable_value(
+                        &mut current_source,
+                        "keyring".to_string(),
+                        "Keyring (OS セキュアストア)",
+                    );
                 });
             if current_source != provider_config.api_key_source {
                 provider_config.api_key_source = current_source;
@@ -181,7 +205,10 @@ pub fn render_ai_page(
                             .unwrap_or_default();
                     }
                 }
-                settings.ai.ai.extra.insert("embedding".to_string(), serde_json::to_value(&embed_config).unwrap());
+                settings.ai.ai.extra.insert(
+                    "embedding".to_string(),
+                    serde_json::to_value(&embed_config).unwrap(),
+                );
             }
         });
 
@@ -193,7 +220,10 @@ pub fn render_ai_page(
             );
             if response.changed() {
                 embed_config.model = input_state.ai_embedding_model.clone();
-                settings.ai.ai.extra.insert("embedding".to_string(), serde_json::to_value(&embed_config).unwrap());
+                settings.ai.ai.extra.insert(
+                    "embedding".to_string(),
+                    serde_json::to_value(&embed_config).unwrap(),
+                );
             }
         });
 
@@ -205,7 +235,10 @@ pub fn render_ai_page(
             );
             if response.changed() {
                 embed_config.base_url = input_state.ai_embedding_base_url.clone();
-                settings.ai.ai.extra.insert("embedding".to_string(), serde_json::to_value(&embed_config).unwrap());
+                settings.ai.ai.extra.insert(
+                    "embedding".to_string(),
+                    serde_json::to_value(&embed_config).unwrap(),
+                );
             }
         });
 
@@ -221,7 +254,10 @@ pub fn render_ai_page(
                 if response.changed() {
                     if let Ok(dims) = input_state.ai_embedding_dimensions.parse::<usize>() {
                         embed_config.dimensions = Some(dims);
-                        settings.ai.ai.extra.insert("embedding".to_string(), serde_json::to_value(&embed_config).unwrap());
+                        settings.ai.ai.extra.insert(
+                            "embedding".to_string(),
+                            serde_json::to_value(&embed_config).unwrap(),
+                        );
                     }
                 }
             }
@@ -236,7 +272,10 @@ pub fn render_ai_page(
             if checked != input_state.ai_memory_enabled {
                 input_state.ai_memory_enabled = checked;
                 mem_config.enabled = checked;
-                settings.ai.ai.extra.insert("memory".to_string(), serde_json::to_value(&mem_config).unwrap());
+                settings.ai.ai.extra.insert(
+                    "memory".to_string(),
+                    serde_json::to_value(&mem_config).unwrap(),
+                );
             }
         });
 

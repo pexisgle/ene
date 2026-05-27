@@ -1,9 +1,15 @@
 use crate::config::WebSearchConfig;
 use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
-use websearch::providers::{ArxivProvider, BraveProvider, DuckDuckGoProvider, ExaProvider, TavilyProvider};
-use websearch::{web_search, SearchOptions, SearchProvider};
+use websearch::providers::{
+    ArxivProvider, BraveProvider, DuckDuckGoProvider, ExaProvider, TavilyProvider,
+};
+use websearch::{SearchOptions, SearchProvider, web_search};
 
-fn resolve_api_key(config: Option<&WebSearchConfig>, key: &str, env_var: &str) -> Result<String, ToolError> {
+fn resolve_api_key(
+    config: Option<&WebSearchConfig>,
+    key: &str,
+    env_var: &str,
+) -> Result<String, ToolError> {
     if let Some(cfg) = config {
         match key {
             "tavily" if !cfg.tavily_api_key.is_empty() => return Ok(cfg.tavily_api_key.clone()),
@@ -60,32 +66,32 @@ pub async fn websearch(
         "duckduckgo" => Box::new(DuckDuckGoProvider::new()),
         "tavily" => {
             let api_key = resolve_api_key(config, "tavily", "TAVILY_API_KEY")?;
-            Box::new(TavilyProvider::new(&api_key).map_err(|e| {
-                ToolError::ExecutionFailed {
+            Box::new(
+                TavilyProvider::new(&api_key).map_err(|e| ToolError::ExecutionFailed {
                     message: format!("Tavily provider init failed: {e}"),
-                }
-            })?)
+                })?,
+            )
         }
         "brave" => {
             let api_key = resolve_api_key(config, "brave", "BRAVE_API_KEY")?;
-            Box::new(BraveProvider::new(&api_key).map_err(|e| {
-                ToolError::ExecutionFailed {
+            Box::new(
+                BraveProvider::new(&api_key).map_err(|e| ToolError::ExecutionFailed {
                     message: format!("Brave provider init failed: {e}"),
-                }
-            })?)
+                })?,
+            )
         }
         "exa" => {
             let api_key = resolve_api_key(config, "exa", "EXA_API_KEY")?;
-            Box::new(ExaProvider::new(&api_key).map_err(|e| {
-                ToolError::ExecutionFailed {
+            Box::new(
+                ExaProvider::new(&api_key).map_err(|e| ToolError::ExecutionFailed {
                     message: format!("Exa provider init failed: {e}"),
-                }
-            })?)
+                })?,
+            )
         }
         _ => {
             return Err(ToolError::InvalidArguments {
                 message: format!("Unknown backend: {backend_name}"),
-            })
+            });
         }
     };
 

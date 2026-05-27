@@ -35,11 +35,7 @@ fn build_tray_menu() -> Menu {
     let menu = Menu::new();
     let settings_item = MenuItem::with_id(SETTINGS_MENU_ID, "Settings", true, None);
     let quit_item = MenuItem::with_id(QUIT_MENU_ID, "Quit", true, None);
-    let _ = menu.append_items(&[
-        &settings_item,
-        &PredefinedMenuItem::separator(),
-        &quit_item,
-    ]);
+    let _ = menu.append_items(&[&settings_item, &PredefinedMenuItem::separator(), &quit_item]);
     menu
 }
 
@@ -103,10 +99,7 @@ fn tick_gtk_events(_tray: NonSend<TrayApp>) {
     }
 }
 
-fn poll_tray_events(
-    mut settings: ResMut<CharacterSettings>,
-    mut app_exit: MessageWriter<AppExit>,
-) {
+fn poll_tray_events(mut settings: ResMut<CharacterSettings>, mut app_exit: MessageWriter<AppExit>) {
     while let Ok(event) = TrayIconEvent::receiver().try_recv() {
         if let TrayIconEvent::Click {
             button: MouseButton::Left,

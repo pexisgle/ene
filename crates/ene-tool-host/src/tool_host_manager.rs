@@ -3,7 +3,7 @@ use crate::tools::CompositeToolRegistry;
 use crate::tools::ToolDefinition;
 use crate::tools::definition::ToolRegistry;
 use ene_config as paths;
-use ene_config::{register_runtime_schema, EneSettings};
+use ene_config::{EneSettings, register_runtime_schema};
 use ene_memory::MemoryStore;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -265,7 +265,9 @@ impl ToolRegistry for ToolHostManager {
 }
 
 fn resolve_undo_db_path(settings: &EneSettings) -> std::path::PathBuf {
-    let memory_config = settings.get_section::<ene_memory::MemoryConfig>("memory").unwrap_or_default();
+    let memory_config = settings
+        .get_section::<ene_memory::MemoryConfig>("memory")
+        .unwrap_or_default();
     let memory_path = memory_config.resolve_memory_db_path();
     memory_path
         .parent()
@@ -281,19 +283,19 @@ impl ToolHostManager {
     /// Also registers each tool's config schema in the global runtime registry
     /// and regenerates `settings.schema.json`.
     pub async fn start(settings: &EneSettings) -> Result<Self, crate::error::ToolError> {
-        let mut sandbox = settings.get_section::<ene_tool_proto::SandboxConfigData>("sandbox").unwrap_or_default();
-        sandbox.undo_db_path = Some(
-            resolve_undo_db_path(settings)
-                .to_string_lossy()
-                .to_string(),
-        );
+        let mut sandbox = settings
+            .get_section::<ene_tool_proto::SandboxConfigData>("sandbox")
+            .unwrap_or_default();
+        sandbox.undo_db_path = Some(resolve_undo_db_path(settings).to_string_lossy().to_string());
         let mut supervised_registries = Vec::new();
 
         std::fs::create_dir_all(paths::tool_socket_dir()).map_err(|e| {
             crate::error::ToolError::ToolExecutionError(format!("Failed to create socket dir: {e}"))
         })?;
 
-        let tool_settings = settings.get_section::<crate::config::ToolSettings>("tools").unwrap_or_default();
+        let tool_settings = settings
+            .get_section::<crate::config::ToolSettings>("tools")
+            .unwrap_or_default();
         for (name, entry) in &tool_settings.tools {
             if !entry.enable {
                 continue;
@@ -307,7 +309,11 @@ impl ToolHostManager {
                     // Collect config schema and register it in the runtime registry
                     if let Some(schema) = supervised_entry.config_schema().await {
                         let schema_key = format!("{}_config", name);
-                        register_runtime_schema(&schema_key, schema, Some("tool_entry".to_string()));
+                        register_runtime_schema(
+                            &schema_key,
+                            schema,
+                            Some("tool_entry".to_string()),
+                        );
                     }
                     supervised_registries.push(supervised_entry);
                 }

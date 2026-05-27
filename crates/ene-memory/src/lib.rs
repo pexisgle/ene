@@ -39,6 +39,8 @@ pub mod summarizer;
 /// Internal utilities (truncation, etc.).
 pub mod utils;
 
+/// Memory feature toggle configuration.
+pub use config::MemoryConfig;
 /// Memory error type.
 pub use error::MemoryError;
 /// Formats recalled summaries for prompt injection.
@@ -49,5 +51,3 @@ pub use store::{ConversationSummary, KeyFact, MemoryStore, RecalledSummary};
 pub use summarizer::{ConversationSummaryResult, summarize_conversation};
 /// Truncation utility re-exported from `ene-tools-common`.
 pub use utils::truncate;
-/// Memory feature toggle configuration.
-pub use config::MemoryConfig;

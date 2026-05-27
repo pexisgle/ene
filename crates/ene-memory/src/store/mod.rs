@@ -1,9 +1,9 @@
 use crate::error::MemoryError;
 use chrono::{DateTime, Utc};
-use ene_config::serde;
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
+use ene_config::serde;
 use std::path::Path;
 
 mod models;

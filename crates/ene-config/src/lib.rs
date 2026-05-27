@@ -26,6 +26,8 @@ extern crate self as ene_config;
 
 /// V3-format character card models with CBS macro expansion.
 pub mod character_card;
+/// Per-character settings (position, motion, expressions).
+pub mod character_settings;
 /// Settings loading, schema generation, and the global settings registry.
 pub mod config;
 /// Configuration-related error types.
@@ -34,33 +36,30 @@ pub mod error;
 pub mod paths;
 /// First-launch asset deployment and resource directory initialization.
 pub mod resources;
-/// Per-character settings (position, motion, expressions).
-pub mod character_settings;
 
 pub use character_card::{
-    CharacterCardV3, CharacterCardData, CharacterAsset, Lorebook, LorebookEntry,
-    ExpressionDefinition, ResolvedExpression, resolve_expressions, expand_cbs_macros,
+    CharacterAsset, CharacterCardData, CharacterCardV3, ExpressionDefinition, Lorebook,
+    LorebookEntry, ResolvedExpression, expand_cbs_macros, resolve_expressions,
 };
 
-pub use config::{
-    EneSettings,
-    load_full_settings, load_full_settings_from, load_settings, load_settings_from,
-    save_full_settings, generate_schema_json, register_schema, register_schema_with_parent,
-    register_runtime_schema,
-    get_global_section, update_global_settings, get_global_settings,
-};
 pub use character_settings::{CharacterPerSettings, generate_character_schema_json};
+pub use config::{
+    EneSettings, generate_schema_json, get_global_section, get_global_settings, load_full_settings,
+    load_full_settings_from, load_settings, load_settings_from, register_runtime_schema,
+    register_schema, register_schema_with_parent, save_full_settings, update_global_settings,
+};
 pub use error::ConfigError;
 pub use paths::{
-    IS_DEV_BUILD, app_data_dir, assets_dir, builtin_tools_dir, config_file_path, models_dir,
-    schema_file_path, character_schema_file_path, tool_socket_dir, user_tools_dir, character_settings_path,
+    IS_DEV_BUILD, app_data_dir, assets_dir, builtin_tools_dir, character_schema_file_path,
+    character_settings_path, config_file_path, models_dir, schema_file_path, tool_socket_dir,
+    user_tools_dir,
 };
 pub use resources::ensure_resource_dirs;
 
 // Re-export serde / schemars / ctor for sub-crates
-pub use serde;
-pub use schemars;
 pub use ctor::ctor;
+pub use schemars;
+pub use serde;
 
 /// Declarative macro for defining Config structs with zero boilerplate.
 ///
@@ -262,4 +261,3 @@ macro_rules! define_label_enum {
         }
     };
 }
-

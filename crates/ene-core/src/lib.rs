@@ -87,17 +87,17 @@ pub mod stream;
 /// OpenAI-compatible provider settings.
 pub use config::ProviderSettings;
 
+/// Embedding types (re-exported from `ene-embedding`).
+pub use ene_embedding::{EmbeddingConfig, EmbeddingProviderType};
 /// Memory types (re-exported from `ene-memory`).
-pub use ene_memory::{ConversationSummary, KeyFact, MemoryStore, RecalledSummary, MemoryConfig};
+pub use ene_memory::{ConversationSummary, KeyFact, MemoryConfig, MemoryStore, RecalledSummary};
 /// Session types and utilities (re-exported from `ene-session`).
 pub use ene_session::{
-    ConversationSession, PendingSplitTask, SessionBoundary, SessionError, SplitReason, SplitResult,
-    SplitTaskInput, check_boundary, execute_split, extract_emotion_from_token, generate_session_id,
-    poll_split_result, spawn_split_task, split_text_and_special_tokens, truncate,
-    expand_cbs_macros, SessionConfig,
+    ConversationSession, PendingSplitTask, SessionBoundary, SessionConfig, SessionError,
+    SplitReason, SplitResult, SplitTaskInput, check_boundary, execute_split, expand_cbs_macros,
+    extract_emotion_from_token, generate_session_id, poll_split_result, spawn_split_task,
+    split_text_and_special_tokens, truncate,
 };
-/// Embedding types (re-exported from `ene-embedding`).
-pub use ene_embedding::{EmbeddingProviderType, EmbeddingConfig};
 /// Tool host types (re-exported from `ene-tool-host`).
 pub use ene_tool_host::{
     CompositeToolRegistry, IpcToolRegistry, McpToolRegistry, ToolCategory, ToolDefinition,

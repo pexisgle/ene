@@ -3,8 +3,8 @@ use async_openai::types::chat::{
     ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
     ChatCompletionTool, ChatCompletionTools, FunctionObject, Role,
 };
-use ene_session::{CharacterCardV3, expand_cbs_macros, resolve_expressions};
 use ene_memory::{KeyFact, RecalledSummary, format_summaries_for_prompt};
+use ene_session::{CharacterCardV3, expand_cbs_macros, resolve_expressions};
 
 fn sys_msg(content: impl Into<String>, ctx: &str) -> Result<ChatCompletionRequestMessage, String> {
     ChatCompletionRequestSystemMessageArgs::default()

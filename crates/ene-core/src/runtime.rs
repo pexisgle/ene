@@ -1,8 +1,6 @@
 use crate::error::EneCoreError;
 use ene_config::EneSettings;
-use ene_session::{
-    ConversationSession, PendingSplitTask, SplitTaskInput, spawn_split_task,
-};
+use ene_session::{ConversationSession, PendingSplitTask, SplitTaskInput, spawn_split_task};
 use ene_tool_host::{McpToolRegistry, ToolHostManager, ToolRegistry};
 use std::sync::Arc;
 
@@ -42,8 +40,11 @@ impl EneRuntime {
         session.memory.embedding_provider = Some(embedder.clone());
 
         // 2. Initialize memory store if enabled
-        let mem_config = settings.get_section::<ene_memory::MemoryConfig>("memory")
-            .map_err(|e| EneCoreError::ConfigError(format!("Failed to load memory config: {}", e)))?;
+        let mem_config = settings
+            .get_section::<ene_memory::MemoryConfig>("memory")
+            .map_err(|e| {
+                EneCoreError::ConfigError(format!("Failed to load memory config: {}", e))
+            })?;
 
         if mem_config.enabled {
             let store = init_memory_store(&settings, &*embedder).map_err(|e| {
@@ -72,14 +73,20 @@ impl EneRuntime {
     /// If so, spawns a background tokio thread to execute an auto session-split,
     /// generating a compiled memory summary and key facts.
     pub fn check_and_perform_split(&mut self, user_input: &str, user_name: &str) {
-        let session_config = match self.settings.get_section::<ene_session::SessionConfig>("session") {
+        let session_config = match self
+            .settings
+            .get_section::<ene_session::SessionConfig>("session")
+        {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("Failed to load session config for split checking: {}", e);
                 return;
             }
         };
-        let mem_config = match self.settings.get_section::<ene_memory::MemoryConfig>("memory") {
+        let mem_config = match self
+            .settings
+            .get_section::<ene_memory::MemoryConfig>("memory")
+        {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("Failed to load memory config for split checking: {}", e);
@@ -107,9 +114,22 @@ impl EneRuntime {
                     current_turn_count: self.session.state.current_turn_count,
                     user_input: user_input.to_string(),
                     session_config,
-                    summarization_model: self.settings.get_section::<ene_memory::MemoryConfig>("memory").unwrap_or_default().resolve_summarization_model(),
-                    summarization_base_url: self.settings.get_section::<ene_memory::MemoryConfig>("memory").unwrap_or_default().resolve_summarization_base_url().unwrap_or_default(),
-                    api_key: self.settings.get_section::<crate::config::ProviderSettings>("provider").unwrap_or_default().resolve_api_key(),
+                    summarization_model: self
+                        .settings
+                        .get_section::<ene_memory::MemoryConfig>("memory")
+                        .unwrap_or_default()
+                        .resolve_summarization_model(),
+                    summarization_base_url: self
+                        .settings
+                        .get_section::<ene_memory::MemoryConfig>("memory")
+                        .unwrap_or_default()
+                        .resolve_summarization_base_url()
+                        .unwrap_or_default(),
+                    api_key: self
+                        .settings
+                        .get_section::<crate::config::ProviderSettings>("provider")
+                        .unwrap_or_default()
+                        .resolve_api_key(),
                     history: self.session.history.conversation_history.clone(),
                     session_id: self.session.memory.session_id.clone(),
                     card_name: self.session.card_name().to_string(),
@@ -163,7 +183,10 @@ pub async fn build_tool_registry(
     let mut manager = match ToolHostManager::start(settings).await {
         Ok(m) => m,
         Err(e) => {
-            tracing::warn!("[ToolHostManager] Failed to start tool host, falling back to empty tools: {}", e);
+            tracing::warn!(
+                "[ToolHostManager] Failed to start tool host, falling back to empty tools: {}",
+                e
+            );
             let mut fallback_settings = settings.clone();
             let fallback_tools = ene_tool_host::ToolSettings {
                 tools: std::collections::HashMap::new(),
@@ -171,17 +194,19 @@ pub async fn build_tool_registry(
             };
             let _ = fallback_settings.set_section("tools", &fallback_tools);
             ToolHostManager::start(&fallback_settings)
-            .await
-            .map_err(|e2| {
-                EneCoreError::ConfigError(format!(
-                    "Fatal: Failed to start fallback ToolHostManager: {}",
-                    e2
-                ))
-            })?
+                .await
+                .map_err(|e2| {
+                    EneCoreError::ConfigError(format!(
+                        "Fatal: Failed to start fallback ToolHostManager: {}",
+                        e2
+                    ))
+                })?
         }
     };
 
-    let mcp_servers = settings.get_section::<Vec<ene_tool_host::McpServerConfig>>("mcp_servers").unwrap_or_default();
+    let mcp_servers = settings
+        .get_section::<Vec<ene_tool_host::McpServerConfig>>("mcp_servers")
+        .unwrap_or_default();
     if !mcp_servers.is_empty() {
         let mcp = McpToolRegistry::new();
         for server in &mcp_servers {
@@ -192,16 +217,14 @@ pub async fn build_tool_registry(
                 ene_tool_host::McpTransport::Stdio { command, args } => {
                     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
                     if let Err(err) = mcp.connect_stdio(&server.name, command, &args_ref).await {
-                        tracing::warn!(
-                            "MCP server '{}' failed to connect: {}",
-                            server.name, err
-                        );
+                        tracing::warn!("MCP server '{}' failed to connect: {}", server.name, err);
                     }
                 }
                 ene_tool_host::McpTransport::Http { url } => {
                     tracing::warn!(
                         "MCP HTTP transport not supported yet for '{}' (URL: {})",
-                        server.name, url
+                        server.name,
+                        url
                     );
                 }
             }
@@ -212,7 +235,9 @@ pub async fn build_tool_registry(
     Ok(manager.into_registry())
 }
 
-fn init_embedding(settings: &EneSettings) -> Result<Arc<dyn ene_embedding::EmbeddingProvider>, String> {
+fn init_embedding(
+    settings: &EneSettings,
+) -> Result<Arc<dyn ene_embedding::EmbeddingProvider>, String> {
     let embed_config = settings
         .get_section::<ene_embedding::EmbeddingConfig>("embedding")
         .map_err(|e| format!("Failed to load embedding config: {}", e))?;
@@ -225,7 +250,10 @@ fn init_embedding(settings: &EneSettings) -> Result<Arc<dyn ene_embedding::Embed
         embed_config.provider_type,
         &embed_config.model,
         &embed_base_url,
-        &settings.get_section::<crate::config::ProviderSettings>("provider").unwrap_or_default().resolve_api_key(),
+        &settings
+            .get_section::<crate::config::ProviderSettings>("provider")
+            .unwrap_or_default()
+            .resolve_api_key(),
         embed_config.dimensions.unwrap_or(768),
         Some(&embed_config.gguf_quantization),
         ene_config::models_dir(),
@@ -239,7 +267,10 @@ fn init_memory_store(
     settings: &EneSettings,
     embedder: &dyn ene_embedding::EmbeddingProvider,
 ) -> Result<Arc<ene_memory::MemoryStore>, String> {
-    let db_path = settings.get_section::<ene_memory::MemoryConfig>("memory").unwrap_or_default().resolve_memory_db_path();
+    let db_path = settings
+        .get_section::<ene_memory::MemoryConfig>("memory")
+        .unwrap_or_default()
+        .resolve_memory_db_path();
 
     if let Some(parent) = db_path.parent() {
         if !parent.exists() {

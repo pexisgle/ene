@@ -65,7 +65,11 @@ where
                     ))
                 );
 
-                let choices = vec!["1回のみ許可 (Allow Once)", "このセッションで常に許可 (Allow Session)", "拒否 (Deny)"];
+                let choices = vec![
+                    "1回のみ許可 (Allow Once)",
+                    "このセッションで常に許可 (Allow Session)",
+                    "拒否 (Deny)",
+                ];
                 let selection = dialoguer::Select::new()
                     .with_prompt("操作の権限を選択してください")
                     .items(&choices)
@@ -79,10 +83,14 @@ where
                     _ => ene_core::stream::PermissionDecision::Deny,
                 };
 
-                if let Err(e) = ene_core::stream::submit_permission_decision(&request_id, decision) {
+                if let Err(e) = ene_core::stream::submit_permission_decision(&request_id, decision)
+                {
                     eprintln!("\n[Error] Failed to submit permission decision: {}", e);
                 } else {
-                    println!("\n{}", style::success("承認の入力を送信しました。処理を再開します..."));
+                    println!(
+                        "\n{}",
+                        style::success("承認の入力を送信しました。処理を再開します...")
+                    );
                 }
             }
             EneStreamEvent::TaskProgress {

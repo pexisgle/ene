@@ -1,19 +1,16 @@
-use schemars::schema::Schema;
+use crate::error::ConfigError;
 use schemars::JsonSchema;
+use schemars::schema::Schema;
 use std::collections::HashMap;
 use std::path::Path;
-use crate::error::ConfigError;
-
-
-
-
 
 /// Global singleton holding the active [`EneSettings`].
 ///
 /// Set once at startup by [`load_full_settings`] and updated by
 /// [`update_global_settings`]. Accessed by [`get_global_settings`]
 /// and [`get_global_section`].
-pub static GLOBAL_SETTINGS: std::sync::OnceLock<std::sync::RwLock<EneSettings>> = std::sync::OnceLock::new();
+pub static GLOBAL_SETTINGS: std::sync::OnceLock<std::sync::RwLock<EneSettings>> =
+    std::sync::OnceLock::new();
 
 /// Updates the global EneSettings
 pub fn update_global_settings(settings: EneSettings) {
@@ -54,11 +51,13 @@ pub struct SchemaEntry {
     pub parent: Option<String>,
 }
 
-static SCHEMA_REGISTRY: std::sync::OnceLock<std::sync::Mutex<HashMap<String, SchemaEntry>>> = std::sync::OnceLock::new();
+static SCHEMA_REGISTRY: std::sync::OnceLock<std::sync::Mutex<HashMap<String, SchemaEntry>>> =
+    std::sync::OnceLock::new();
 
 /// Registry holding schemas collected from tools at runtime
-static RUNTIME_SCHEMA_REGISTRY: std::sync::OnceLock<std::sync::Mutex<HashMap<String, SchemaEntry>>> =
-    std::sync::OnceLock::new();
+static RUNTIME_SCHEMA_REGISTRY: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<String, SchemaEntry>>,
+> = std::sync::OnceLock::new();
 
 /// Global static helper for each crate to register its own Config schema
 pub fn register_schema<T: JsonSchema>(key: &str) {
@@ -66,11 +65,7 @@ pub fn register_schema<T: JsonSchema>(key: &str) {
 }
 
 /// Registers schemas collected from tools at runtime
-pub fn register_runtime_schema(
-    key: &str,
-    schema: serde_json::Value,
-    parent: Option<String>,
-) {
+pub fn register_runtime_schema(key: &str, schema: serde_json::Value, parent: Option<String>) {
     use schemars::schema::RootSchema;
     let root_schema: RootSchema = serde_json::from_value(schema).unwrap_or_else(|e| {
         tracing::error!("Failed to parse runtime schema for '{}': {}", key, e);
@@ -157,10 +152,7 @@ crate::define_config!(
     }
 );
 
-
-
 impl EneSettings {
-
     /// Deserialise a sub-section from the `extra` map by key.
     ///
     /// Returns `Ok(T::default())` when the key is absent.
@@ -170,7 +162,10 @@ impl EneSettings {
     {
         if let Some(val) = self.extra.get(key) {
             serde_json::from_value(val.clone()).map_err(|e| {
-                ConfigError::GenericConfigError(format!("Failed to deserialize section '{}': {}", key, e))
+                ConfigError::GenericConfigError(format!(
+                    "Failed to deserialize section '{}': {}",
+                    key, e
+                ))
             })
         } else {
             Ok(T::default())
@@ -190,7 +185,6 @@ impl EneSettings {
     }
 }
 
-
 fn apply_registry_to_schema(
     root_schema: &mut schemars::schema::RootSchema,
     registry: &HashMap<String, SchemaEntry>,
@@ -206,7 +200,9 @@ fn apply_registry_to_schema(
             }
         }
         for (def_name, def_schema) in &entry.schema.definitions {
-            root_schema.definitions.insert(def_name.clone(), def_schema.clone());
+            root_schema
+                .definitions
+                .insert(def_name.clone(), def_schema.clone());
         }
     }
     // Second pass: merge entries that have parents
@@ -221,7 +217,7 @@ fn apply_registry_to_schema(
 pub fn generate_schema_json() -> Result<String, serde_json::Error> {
     let schema_gen = schemars::r#gen::SchemaSettings::draft07().into_generator();
     let mut root_schema = schema_gen.into_root_schema_for::<EneSettings>();
-    
+
     if let Some(registry) = SCHEMA_REGISTRY.get() {
         if let Ok(reg) = registry.lock() {
             apply_registry_to_schema(&mut root_schema, &reg);
@@ -233,7 +229,7 @@ pub fn generate_schema_json() -> Result<String, serde_json::Error> {
             apply_registry_to_schema(&mut root_schema, &reg);
         }
     }
-    
+
     serde_json::to_string_pretty(&root_schema)
 }
 
@@ -258,7 +254,10 @@ pub fn load_full_settings() -> EneSettings {
 
 /// Fully loads EneSettings from the specified asset directory and config file path
 pub fn load_full_settings_from(assets_dir: &Path, config_path: &Path) -> EneSettings {
-    use figment::{Figment, providers::{Format, Json, Env, Serialized}};
+    use figment::{
+        Figment,
+        providers::{Env, Format, Json, Serialized},
+    };
 
     let figment = Figment::from(Serialized::defaults(EneSettings::default()))
         .merge(Json::file(config_path))
@@ -332,8 +331,14 @@ mod tests {
     #[test]
     fn test_define_config_self_registration() {
         let schema_json = generate_schema_json().unwrap();
-        assert!(schema_json.contains("dummy_test_config"), "Schema should automatically include dummy_test_config");
-        assert!(schema_json.contains("test_value"), "Schema should automatically include dummy_test_config field test_value");
+        assert!(
+            schema_json.contains("dummy_test_config"),
+            "Schema should automatically include dummy_test_config"
+        );
+        assert!(
+            schema_json.contains("test_value"),
+            "Schema should automatically include dummy_test_config field test_value"
+        );
     }
 
     #[test]
@@ -352,7 +357,9 @@ mod tests {
                 object: Some(Box::new(schemars::schema::ObjectValidation::default())),
                 ..Default::default()
             });
-            schema.definitions.insert("ParentDef".to_string(), def_schema);
+            schema
+                .definitions
+                .insert("ParentDef".to_string(), def_schema);
             schema
         };
 
@@ -364,7 +371,10 @@ mod tests {
             _ => None,
         };
         assert!(child_props.is_some(), "ParentDef should have properties");
-        assert!(child_props.unwrap().contains_key("child_field"), "ParentDef should contain child_field");
+        assert!(
+            child_props.unwrap().contains_key("child_field"),
+            "ParentDef should contain child_field"
+        );
     }
 
     #[test]
@@ -375,7 +385,7 @@ mod tests {
             serde_json::json!({
                 "test_value": "custom_val",
                 "test_number": 999
-            })
+            }),
         );
         update_global_settings(raw_settings);
 

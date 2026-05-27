@@ -37,7 +37,9 @@ impl EmbeddingConfig {
             return Ok(self.base_url.clone());
         }
         let settings = ene_config::get_global_settings();
-        if let Some(base_url) = settings.extra.get("provider")
+        if let Some(base_url) = settings
+            .extra
+            .get("provider")
             .and_then(|p| p.get("base_url"))
             .and_then(|v| v.as_str())
         {
