@@ -334,6 +334,71 @@ impl ToolHostManager {
         Ok(Self { composite })
     }
 
+    /// Starts all tool binaries and MCP servers and returns the unified registry.
+    ///
+    /// Combines [`start`](Self::start) (IPC tool spawn), MCP server connection,
+    /// and registry aggregation into a single call. Includes automatic fallback
+    /// to an empty tool set if the primary startup fails.
+    pub async fn start_full(settings: &EneSettings) -> Result<Arc<dyn ToolRegistry>, crate::error::ToolError> {
+        let mut manager = match Self::start(settings).await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(
+                    "[ToolHostManager] Failed to start tool host, falling back to empty tools: {}",
+                    e
+                );
+                let mut fallback_settings = settings.clone();
+                let fallback_tools = crate::config::ToolSettings {
+                    tools: std::collections::HashMap::new(),
+                    ..Default::default()
+                };
+                let _ = fallback_settings.set_section("tools", &fallback_tools);
+                Self::start(&fallback_settings).await.map_err(|e2| {
+                    crate::error::ToolError::ToolExecutionError(format!(
+                        "Fatal: Failed to start fallback ToolHostManager: {}",
+                        e2
+                    ))
+                })?
+            }
+        };
+
+        let mcp_servers = settings
+            .get_section::<Vec<crate::config::McpServerConfig>>("mcp_servers")
+            .unwrap_or_default();
+        if !mcp_servers.is_empty() {
+            let mcp = crate::McpToolRegistry::new();
+            for server in &mcp_servers {
+                if !server.enabled {
+                    continue;
+                }
+                match &server.transport {
+                    crate::config::McpTransport::Stdio { command, args } => {
+                        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                        if let Err(err) =
+                            mcp.connect_stdio(&server.name, command, &args_ref).await
+                        {
+                            tracing::warn!(
+                                "MCP server '{}' failed to connect: {}",
+                                server.name,
+                                err
+                            );
+                        }
+                    }
+                    crate::config::McpTransport::Http { url } => {
+                        tracing::warn!(
+                            "MCP HTTP transport not supported yet for '{}' (URL: {})",
+                            server.name,
+                            url
+                        );
+                    }
+                }
+            }
+            manager.add_registry(Arc::new(mcp));
+        }
+
+        Ok(manager.into_registry())
+    }
+
     /// Adds an external registry (e.g., an [`crate::McpToolRegistry`]) to the composite.
     pub fn add_registry(&mut self, registry: Arc<dyn ToolRegistry>) {
         self.composite.add_registry(registry);

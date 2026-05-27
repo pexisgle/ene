@@ -184,40 +184,29 @@ pub async fn fetch_memory_context(
         .get_section::<ene_session::SessionConfig>("session")
         .unwrap_or_default();
 
-    let memory_enabled = mem_config.enabled;
-    let mem_store = if memory_enabled {
-        session.memory.memory_store.clone()
-    } else {
-        None
-    };
-    let card_name = session.card_name().to_string();
-    let pending_embedding = session.memory.pending_embedding.clone();
-    let summary_recall_limit = session_config.summary_recall_limit;
-    let similarity_threshold = mem_config.similarity_threshold;
+    if !mem_config.enabled {
+        return (vec![], vec![]);
+    }
 
-    let recalled_summaries = search_summaries(
-        memory_enabled,
-        &mem_store,
-        &card_name,
-        &pending_embedding,
-        summary_recall_limit,
-        similarity_threshold,
-    )
-    .await;
-
-    let key_facts = if mem_config.enabled {
-        if let Some(store) = &session.memory.memory_store {
-            store
-                .get_all_keyfacts(session.card_name())
-                .unwrap_or_default()
-        } else {
-            vec![]
-        }
-    } else {
-        vec![]
+    let Some(store) = &session.memory.memory_store else {
+        return (vec![], vec![]);
     };
 
-    (recalled_summaries, key_facts)
+    let Some(pending_embedding) = &session.memory.pending_embedding else {
+        return (vec![], vec![]);
+    };
+
+    store
+        .recall_context(
+            session.card_name(),
+            pending_embedding,
+            session_config.summary_recall_limit,
+            mem_config.similarity_threshold,
+        )
+        .unwrap_or_else(|e| {
+            tracing::error!("[Memory] Context recall error: {}", e);
+            (vec![], vec![])
+        })
 }
 
 /// Builds the full list of chat completion request messages for the AI stream.
@@ -575,48 +564,6 @@ pub async fn run_ene_with_tools(
             }
         }
     })
-}
-
-async fn search_summaries(
-    memory_enabled: bool,
-    mem_store: &Option<std::sync::Arc<ene_memory::MemoryStore>>,
-    card_name: &str,
-    pending_embedding: &Option<Vec<f32>>,
-    summary_recall_limit: usize,
-    similarity_threshold: f32,
-) -> Vec<RecalledSummary> {
-    if !memory_enabled || summary_recall_limit == 0 {
-        return vec![];
-    }
-
-    let Some(store) = mem_store else {
-        return vec![];
-    };
-
-    let query_vec = match pending_embedding {
-        Some(v) => v.clone(),
-        None => {
-            tracing::warn!("[Memory] No embedding available for summary search");
-            return vec![];
-        }
-    };
-
-    if query_vec.is_empty() {
-        return vec![];
-    }
-
-    match store.search_summaries(
-        &query_vec,
-        card_name,
-        summary_recall_limit,
-        similarity_threshold,
-    ) {
-        Ok(summaries) => summaries,
-        Err(e) => {
-            tracing::error!("[Memory] Summary search error: {}", e);
-            vec![]
-        }
-    }
 }
 
 fn accumulate_tool_calls(

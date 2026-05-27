@@ -1,5 +1,5 @@
 use crate::{commands, context::AppContext, style};
-use ene_core::{MemoryConfig, SessionConfig, poll_split_result, truncate};
+use ene_core::truncate;
 use tokio_stream::StreamExt;
 
 pub async fn run(ctx: &mut AppContext) {
@@ -119,57 +119,42 @@ pub async fn run(ctx: &mut AppContext) {
 }
 
 async fn check_session_split(ctx: &mut AppContext) {
-    let mem_config = ctx
-        .settings
-        .get_section::<MemoryConfig>("memory")
-        .unwrap_or_default();
-    let session_config = ctx
-        .settings
-        .get_section::<SessionConfig>("session")
-        .unwrap_or_default();
-    if !mem_config.enabled || !session_config.auto_session_split {
-        return;
-    }
-
-    if let Some(result) = poll_split_result(&mut ctx.pending_split) {
-        match result {
-            Ok(result) => {
-                println!(
-                    "\n{}",
-                    style::warning(format!("[Session] {} ", result.reason))
-                );
+    match ctx.runtime.apply_pending_split() {
+        Some(Ok(result)) => {
+            println!(
+                "\n{}",
+                style::warning(format!("[Session] {} ", result.reason))
+            );
+            println!(
+                "{}",
+                style::warning(format!(
+                    "[Session] 会話を要約して保存しました: {}",
+                    truncate(&result.summary, 80)
+                ))
+            );
+            if !result.key_facts.is_empty() {
+                let facts_str = result
+                    .key_facts
+                    .iter()
+                    .map(|f| format!("{}:{}", f.key, f.value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 println!(
                     "{}",
-                    style::warning(format!(
-                        "[Session] 会話を要約して保存しました: {}",
-                        truncate(&result.summary, 80)
-                    ))
+                    style::warning(format!("[Session] 重要な事実: {}", facts_str))
                 );
-                if !result.key_facts.is_empty() {
-                    let facts_str = result
-                        .key_facts
-                        .iter()
-                        .map(|f| format!("{}:{}", f.key, f.value))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    println!(
-                        "{}",
-                        style::warning(format!("[Session] 重要な事実: {}", facts_str))
-                    );
-                }
-                ctx.session.reset_session();
-                ctx.session.memory.session_id = result.new_session_id;
-                println!("{}\n", style::warning("[Session] 新しい会話を開始します。"));
             }
-            Err(e) => {
-                if !matches!(e, ene_core::SessionError::SplitNotNeeded) {
-                    eprintln!(
-                        "{}",
-                        style::error(format!("[Session] 要約生成エラー: {}", e))
-                    );
-                }
+            println!("{}\n", style::warning("[Session] 新しい会話を開始します。"));
+        }
+        Some(Err(e)) => {
+            if !matches!(e, ene_core::SessionError::SplitNotNeeded) {
+                eprintln!(
+                    "{}",
+                    style::error(format!("[Session] 要約生成エラー: {}", e))
+                );
             }
         }
+        None => {}
     }
 }
 

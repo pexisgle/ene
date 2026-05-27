@@ -51,4 +51,31 @@ impl EmbeddingConfig {
             env_var: String::new(),
         })
     }
+
+    /// Creates an [`EmbeddingProvider`](crate::EmbeddingProvider) from this configuration.
+    ///
+    /// Resolves the base URL automatically and delegates to
+    /// [`create_embedding_provider`](crate::create_embedding_provider) with all fields
+    /// pre-extracted from the config.
+    pub fn create_provider(
+        &self,
+        api_key: &str,
+        model_dir: std::path::PathBuf,
+    ) -> Result<Box<dyn crate::EmbeddingProvider>, crate::error::EmbeddingError> {
+        let base_url = self.resolve_base_url().map_err(|e| {
+            crate::error::EmbeddingError::EmbeddingError(format!(
+                "Failed to resolve embedding base URL: {}",
+                e
+            ))
+        })?;
+        crate::create_embedding_provider(
+            self.provider_type,
+            &self.model,
+            &base_url,
+            api_key,
+            self.dimensions.unwrap_or(768),
+            Some(&self.gguf_quantization),
+            model_dir,
+        )
+    }
 }
