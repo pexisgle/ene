@@ -1,5 +1,6 @@
-use crate::{commands, context::AppContext, stream, style};
-use ene_core::{MemoryConfig, SessionConfig, poll_split_result, run_ene_with_tools, truncate};
+use crate::{commands, context::AppContext, style};
+use ene_core::{MemoryConfig, SessionConfig, poll_split_result, truncate};
+use tokio_stream::StreamExt;
 
 pub async fn run(ctx: &mut AppContext) {
     loop {
@@ -21,12 +22,103 @@ pub async fn run(ctx: &mut AppContext) {
             continue;
         }
 
-        check_session_split(ctx, &input).await;
-        embed_input(ctx, &input).await;
-        process_ai_response(ctx, &input).await;
+        check_session_split(ctx).await;
+        match ctx.runtime.run(&input).await {
+            Ok(stream) => {
+                tokio::pin!(stream);
+                while let Some(event) = stream.next().await {
+                    match event {
+                        ene_core::EneStreamEvent::TextDelta(delta) => {
+                            let (text_deltas, special_tokens) =
+                                ctx.runtime.session.process_delta(&delta);
+                            for td in text_deltas {
+                                print!("{}", td);
+                            }
+                            for token in special_tokens {
+                                println!("\n[{}]", token);
+                            }
+                        }
+                        ene_core::EneStreamEvent::SpecialToken(token) => {
+                            println!("\n[{}]", token);
+                        }
+                        ene_core::EneStreamEvent::ToolCallStart { name, arguments } => {
+                            println!(
+                                "\n{}",
+                                style::header(
+                                    format!("Tool: {}", name)
+                                )
+                            );
+                            println!(
+                                "{}",
+                                style::warning(format!("Args: {}", arguments))
+                            );
+                        }
+                        ene_core::EneStreamEvent::ToolCallResult { name, result } => {
+                            println!(
+                                "{}",
+                                style::success(format!("Tool {} result: {}", name, &result[..result.len().min(200)]))
+                            );
+                        }
+                        ene_core::EneStreamEvent::PermissionRequired {
+                            request_id,
+                            action,
+                            target,
+                            description,
+                        } => {
+                            println!(
+                                "\n{}",
+                                style::warning(format!(
+                                    "Permission required: {} ({})",
+                                    action, target
+                                ))
+                            );
+                            println!(
+                                "   {}",
+                                style::warning(description)
+                            );
+                            handle_permission_request(request_id);
+                        }
+                        ene_core::EneStreamEvent::TaskProgress {
+                            task_id: _,
+                            step,
+                            total_steps,
+                            description,
+                        } => {
+                            println!(
+                                "{}",
+                                style::warning(format!(
+                                    "[Progress: {}/{}] {}",
+                                    step, total_steps, description
+                                ))
+                            );
+                        }
+                        ene_core::EneStreamEvent::Finished => {
+                            if let Some(tail) = ctx.runtime.session.finalize_response() {
+                                print!("{}", tail);
+                            }
+                            println!();
+                        }
+                        ene_core::EneStreamEvent::Error(err) => {
+                            eprintln!(
+                                "{}",
+                                style::error(format!("Error: {}", err))
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "{}",
+                    style::error(format!("Stream start error: {}", err))
+                );
+            }
+        }
     }
 }
-async fn check_session_split(ctx: &mut AppContext, input: &str) {
+
+async fn check_session_split(ctx: &mut AppContext) {
     let mem_config = ctx
         .settings
         .get_section::<MemoryConfig>("memory")
@@ -79,27 +171,42 @@ async fn check_session_split(ctx: &mut AppContext, input: &str) {
             }
         }
     }
-
-    let user_name = ctx.settings.user_name.clone();
-    ctx.runtime.check_and_perform_split(input, &user_name);
 }
 
-async fn embed_input(ctx: &mut AppContext, input: &str) {
-    if let Err(e) = ctx.runtime.embed_input(input).await {
-        eprintln!("[Embedding] Error: {}", e);
-    }
-}
+fn handle_permission_request(request_id: String) {
+    loop {
+        let choice = dialoguer::Select::new()
+            .with_prompt("許可しますか？")
+            .items(&["1度だけ許可", "セッション中許可", "拒否"])
+            .default(0)
+            .interact();
 
-async fn process_ai_response(ctx: &mut AppContext, input: &str) {
-    ctx.session.record_user_input();
-    ctx.session.add_user_message(input);
-
-    match run_ene_with_tools(&ctx.settings, &ctx.session, input, ctx.registry.clone()).await {
-        Ok(stream) => {
-            stream::process_stream(stream, &mut ctx.session).await;
-        }
-        Err(err) => {
-            println!("[Error] Failed to start stream: {}", err);
+        match choice {
+            Ok(0) => {
+                ene_core::submit_permission_decision(
+                    &request_id,
+                    ene_core::PermissionDecision::AllowOnce,
+                )
+                .ok();
+                break;
+            }
+            Ok(1) => {
+                ene_core::submit_permission_decision(
+                    &request_id,
+                    ene_core::PermissionDecision::AllowSession,
+                )
+                .ok();
+                break;
+            }
+            Ok(2) => {
+                ene_core::submit_permission_decision(
+                    &request_id,
+                    ene_core::PermissionDecision::Deny,
+                )
+                .ok();
+                break;
+            }
+            _ => continue,
         }
     }
 }

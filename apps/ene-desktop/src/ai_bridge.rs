@@ -196,7 +196,11 @@ fn start_next_ai_request(
     // Initialize unified runtime if not yet initialized
     if runtime_state.runtime.is_none() {
         let ai_settings = settings.ai.ai.clone();
-        match rt.0.block_on(EneRuntime::init(ai_settings)) {
+        match rt.0.block_on(async {
+            let mut runtime = EneRuntime::init().await?;
+            runtime.apply_settings(ai_settings).await?;
+            Ok::<_, ene_core::EneCoreError>(runtime)
+        }) {
             Ok(runtime) => {
                 runtime_state.runtime = Some(runtime);
                 info!("[Runtime] Unified AI Runtime initialized successfully.");

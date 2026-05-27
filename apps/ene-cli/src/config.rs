@@ -86,8 +86,22 @@ pub async fn init() -> EneRuntime {
         }
     }
 
-    match EneRuntime::init(settings).await {
-        Ok(runtime) => {
+    match EneRuntime::init().await {
+        Ok(mut runtime) => {
+            if let Err(e) = runtime.apply_settings(settings).await {
+                eprintln!(
+                    "{}",
+                    style::warning(format!(
+                        "[Runtime] Warning: Failed to initialize AI runtime: {}",
+                        e
+                    ))
+                );
+                let empty_settings = ene_config::load_settings();
+                runtime
+                    .apply_settings(empty_settings)
+                    .await
+                    .expect("Failed to initialize fallback runtime");
+            }
             println!(
                 "{}",
                 style::header("[Runtime] Unified AI Runtime initialized successfully.")
@@ -117,9 +131,14 @@ pub async fn init() -> EneRuntime {
                 ))
             );
             let empty_settings = ene_config::load_settings();
-            EneRuntime::init(empty_settings)
+            let mut runtime = EneRuntime::init()
                 .await
-                .expect("Failed to initialize fallback runtime")
+                .expect("Failed to initialize fallback runtime");
+            runtime
+                .apply_settings(empty_settings)
+                .await
+                .expect("Failed to apply fallback settings");
+            runtime
         }
     }
 }
