@@ -5,6 +5,7 @@ use diesel::sqlite::SqliteConnection;
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use ene_config::serde;
 use std::path::Path;
+use std::sync::Arc;
 
 mod models;
 use models::{
@@ -442,6 +443,29 @@ impl MemoryStore {
         .get_result(&mut *conn)?;
 
         Ok(id)
+    }
+
+    /// Spawns a fire-and-forget task that inserts a conversation log entry.
+    ///
+    /// Errors are logged at the `error` tracing level. Takes an `Arc<Self>`
+    /// so the store outlives the spawned task.
+    pub fn spawn_insert_log(
+        store: &Arc<Self>,
+        session_id: &str,
+        card_name: &str,
+        role: &str,
+        content: &str,
+    ) {
+        let store = store.clone();
+        let session_id = session_id.to_string();
+        let card_name = card_name.to_string();
+        let role = role.to_string();
+        let content = content.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = store.insert_log(&session_id, &card_name, &role, &content) {
+                tracing::error!("[Memory] Failed to save {} log: {}", role, e);
+            }
+        });
     }
 
     /// Returns all conversation logs for a session.

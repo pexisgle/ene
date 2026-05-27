@@ -377,16 +377,15 @@ pub async fn run_ene_with_tools(
     // 2. Insert user log if memory is enabled
     if mem_config.enabled {
         if let Some(store) = &session.memory.memory_store {
-            let store_clone = store.clone();
+            let session_id_log = session.memory.session_id.clone();
             let card_name = session.card_name().to_string();
-            let session_id = session.memory.session_id.clone();
-            let input_text = user_input.to_string();
-            tokio::spawn(async move {
-                if let Err(e) = store_clone.insert_log(&session_id, &card_name, "user", &input_text)
-                {
-                    tracing::error!("[Memory] Failed to save user log: {}", e);
-                }
-            });
+            ene_memory::MemoryStore::spawn_insert_log(
+                store,
+                &session_id_log,
+                &card_name,
+                "user",
+                user_input,
+            );
         }
     }
 
@@ -540,15 +539,14 @@ pub async fn run_ene_with_tools(
                 continue;
             } else {
                 if !assistant_content.is_empty() {
-                    if let Some(store) = mem_store.clone() {
-                        let card_name = card_name.clone();
-                        let session_id = session_id.clone();
-                        let content = assistant_content.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = store.insert_log(&session_id, &card_name, "assistant", &content) {
-                                tracing::error!("[Memory] Failed to save assistant log: {}", e);
-                            }
-                        });
+                    if let Some(store) = &mem_store {
+                        ene_memory::MemoryStore::spawn_insert_log(
+                            store,
+                            &session_id,
+                            &card_name,
+                            "assistant",
+                            &assistant_content,
+                        );
                     }
                 }
 
