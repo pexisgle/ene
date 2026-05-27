@@ -3,7 +3,7 @@
 //! Demonstrates opening an in-memory store, inserting a summary with
 //! key facts, searching by embedding similarity, and retrieving facts.
 
-use ene_memory::{ConversationSummary, KeyFact, MemoryStore, RecalledSummary};
+use ene_memory::{KeyFact, MemoryStore, RecalledSummary};
 use chrono::Utc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
