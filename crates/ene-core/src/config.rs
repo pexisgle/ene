@@ -4,8 +4,8 @@ fn default_string() -> String {
 
 ene_config::define_config!(
     "provider",
-    /// AI provider connection settings.
-    pub struct ProviderSettings {
+    /// AI provider connection config.
+    pub struct ProviderConfig {
         /// Provider name (e.g. `"openai-compatible"`).
         pub provider_name: String = "openai-compatible".to_string(),
         /// Model name (e.g. `"gpt-4o-mini"`).
@@ -25,7 +25,7 @@ ene_config::define_config!(
     }
 );
 
-impl ProviderSettings {
+impl ProviderConfig {
     /// Resolves the effective base URL, falling back to defaults.
     pub fn resolve_base_url(&self) -> Result<String, ene_config::ConfigError> {
         if !self.base_url.trim().is_empty() {

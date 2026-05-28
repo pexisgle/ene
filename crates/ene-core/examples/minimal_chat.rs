@@ -11,7 +11,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     let mut runtime = EneRuntime::init().await?;
-    runtime.load_settings().await?;
+    runtime.config().load().await?;
+    runtime.character().load()?;
 
     let user_input = "Hello! What's your name?";
     let stream = runtime.run(user_input).await?;

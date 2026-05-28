@@ -11,7 +11,7 @@ use async_openai::types::chat::{
     FunctionCall, FunctionCallStream, ImageUrlArgs,
 };
 use async_stream::stream;
-use ene_config::EneSettings;
+use ene_config::EneConfig;
 use ene_memory::RecalledSummary;
 use ene_session::ConversationSession;
 use std::sync::Arc;
@@ -171,12 +171,12 @@ pub async fn select_relevant_tools(
 /// current session context.
 pub async fn fetch_memory_context(
     session: &ConversationSession,
-    settings: &EneSettings,
+    config: &EneConfig,
 ) -> (Vec<RecalledSummary>, Vec<ene_memory::KeyFact>) {
-    let mem_config = settings
+    let mem_config = config
         .get_section::<ene_memory::MemoryConfig>("memory")
         .unwrap_or_default();
-    let session_config = settings
+    let session_config = config
         .get_section::<ene_session::SessionConfig>("session")
         .unwrap_or_default();
 
@@ -208,7 +208,7 @@ pub async fn fetch_memory_context(
 /// Builds the full list of chat completion request messages for the AI stream.
 pub fn build_chat_messages_list(
     session: &ConversationSession,
-    settings: &EneSettings,
+    config: &EneConfig,
     user_input: &str,
     recalled_summaries: &[RecalledSummary],
     key_facts: &[ene_memory::KeyFact],
@@ -217,8 +217,8 @@ pub fn build_chat_messages_list(
         return Err(crate::error::EneCoreError::NoCharacterCard);
     };
     let history = session.history.conversation_history.clone();
-    let runtime_rules = settings.runtime_rules.clone();
-    let user_name = settings.user_name.clone();
+    let runtime_rules = config.runtime_rules.clone();
+    let user_name = config.user_name.clone();
 
     build_messages(
         card,
@@ -355,13 +355,13 @@ pub async fn perform_tool_executions(
 /// Runs the full AI streaming completion loop with tool calling, memory
 /// retrieval, and session management.
 pub async fn run_ene_with_tools(
-    settings: &EneSettings,
+    config: &EneConfig,
     session: &ConversationSession,
     user_input: &str,
     registry: std::sync::Arc<dyn ene_tool_host::ToolRegistry>,
 ) -> Result<impl Stream<Item = EneStreamEvent> + 'static, crate::error::EneCoreError> {
-    let provider = settings
-        .get_section::<crate::ProviderSettings>("provider")
+    let provider = config
+        .get_section::<crate::ProviderConfig>("provider")
         .unwrap_or_default();
     let base_url = provider.resolve_base_url()?;
     let api_key = provider.resolve_api_key();
@@ -369,12 +369,12 @@ pub async fn run_ene_with_tools(
     let client = build_openai_client(&base_url, &api_key);
     let model = provider.model;
 
-    let mem_config = settings
+    let mem_config = config
         .get_section::<ene_memory::MemoryConfig>("memory")
         .unwrap_or_default();
 
     // 1. Fetch memory context (summaries and keyfacts)
-    let (recalled_summaries, key_facts) = fetch_memory_context(session, settings).await;
+    let (recalled_summaries, key_facts) = fetch_memory_context(session, config).await;
 
     // 2. Insert user log if memory is enabled
     if mem_config.enabled {
@@ -394,7 +394,7 @@ pub async fn run_ene_with_tools(
     // 3. Build initial OpenAI chat messages list
     let mut messages = build_chat_messages_list(
         session,
-        settings,
+        config,
         user_input,
         &recalled_summaries,
         &key_facts,
@@ -409,11 +409,11 @@ pub async fn run_ene_with_tools(
     let card_name = session.card_name().to_string();
     let session_id = session.memory.session_id.clone();
     let user_input = user_input.to_string();
-    let tool_settings = settings
-        .get_section::<ene_tool_host::ToolSettings>("tools")
+    let tool_config = config
+        .get_section::<ene_tool_host::ToolConfig>("tools")
         .unwrap_or_default();
-    let tool_calling_enabled = tool_settings.tool_calling_enabled;
-    let max_rounds = tool_settings.max_tool_call_rounds;
+    let tool_calling_enabled = tool_config.tool_calling_enabled;
+    let max_rounds = tool_config.max_tool_call_rounds;
     let session_id_for_tools = session.memory.session_id.clone();
     let tool_rag_enabled = mem_config.tool_rag_enabled;
     let tool_rag_limit = mem_config.tool_rag_limit;
