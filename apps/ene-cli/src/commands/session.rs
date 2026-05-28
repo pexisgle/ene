@@ -31,10 +31,7 @@ fn handle_info(snapshot: &ene_core::EneStateSnapshot) {
     );
     println!("Elapsed: {} min", "? (not tracked locally)");
     println!("Turn count: {}", snapshot.current_turn_count);
-    println!(
-        "History messages: {}",
-        snapshot.history.len()
-    );
+    println!("History messages: {}", snapshot.history.len());
     let session_config = snapshot
         .config
         .get_section::<SessionConfig>()
@@ -47,7 +44,10 @@ fn handle_info(snapshot: &ene_core::EneStateSnapshot) {
 
 async fn handle_split(_ctx: &AppContext, snapshot: &ene_core::EneStateSnapshot) {
     if snapshot.history.is_empty() {
-        println!("{}", style::warning("[Session] Cannot split: No conversation history."));
+        println!(
+            "{}",
+            style::warning("[Session] Cannot split: No conversation history.")
+        );
         return;
     }
     if snapshot.memory_store.is_none() {
@@ -55,14 +55,26 @@ async fn handle_split(_ctx: &AppContext, snapshot: &ene_core::EneStateSnapshot) 
         return;
     }
     if snapshot.embedding_provider.is_none() {
-        println!("{}", style::warning("[Session] Embedding provider is not available."));
+        println!(
+            "{}",
+            style::warning("[Session] Embedding provider is not available.")
+        );
         return;
     }
 
-    println!("{}", style::header("[Session] Manually splitting session..."));
+    println!(
+        "{}",
+        style::header("[Session] Manually splitting session...")
+    );
     match _ctx.handle.manual_split().await {
         Ok(result) => {
-            println!("{}", style::warning(format!("[Session] Summary: {}", truncate(&result.summary, 120))));
+            println!(
+                "{}",
+                style::warning(format!(
+                    "[Session] Summary: {}",
+                    truncate(&result.summary, 120)
+                ))
+            );
             if !result.key_facts.is_empty() {
                 let facts_str = result
                     .key_facts
@@ -70,7 +82,10 @@ async fn handle_split(_ctx: &AppContext, snapshot: &ene_core::EneStateSnapshot) 
                     .map(|f| format!("{}:{}", f.key, f.value))
                     .collect::<Vec<_>>()
                     .join(", ");
-                println!("  {}", style::warning(format!("[Session] Key Facts: {}", facts_str)));
+                println!(
+                    "  {}",
+                    style::warning(format!("[Session] Key Facts: {}", facts_str))
+                );
             }
             println!("{}", style::warning("[Session] Session split completed."));
         }

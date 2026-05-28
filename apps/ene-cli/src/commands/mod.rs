@@ -219,7 +219,9 @@ fn handle_help() {
     println!("  /session info        - Show current session info");
     println!("  /session split       - Manually split session");
     println!("  /session summaries   - Show past conversation summaries");
-    println!("  /prompt             - View the complete prompt sent to the AI (system, tools, memory, etc.)");
+    println!(
+        "  /prompt             - View the complete prompt sent to the AI (system, tools, memory, etc.)"
+    );
     println!("  /quit                - Exit the CLI");
 }
 

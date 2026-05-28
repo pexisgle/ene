@@ -27,9 +27,7 @@ pub async fn init() -> Result<EneHandle, EneCoreError> {
     );
 
     // Log long-term memory status if enabled
-    let mem_config = config
-        .get_section::<MemoryConfig>()
-        .unwrap_or_default();
+    let mem_config = config.get_section::<MemoryConfig>().unwrap_or_default();
     if mem_config.enabled {
         println!("{}", style::header("[Memory] Long-term memory enabled."));
         println!(
