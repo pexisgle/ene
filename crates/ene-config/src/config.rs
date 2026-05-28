@@ -39,7 +39,6 @@ pub trait HasConfigKey {
     const KEY: &'static str;
 }
 
-
 /// Loads a subsection from the global config using the type's associated key.
 pub fn get_global_section<T>() -> T
 where
@@ -62,7 +61,6 @@ pub fn get_global_section_by_key<T: serde::de::DeserializeOwned + Default>(key: 
     }
     T::default()
 }
-
 
 /// A registered config schema entry.
 pub struct SchemaEntry {
@@ -222,7 +220,6 @@ impl EneConfig {
         self.extra.insert(key.to_string(), val);
         Ok(())
     }
-
 
     /// Extracts a nested field value from the provider section in the `extra` map.
     ///
@@ -394,7 +391,6 @@ where
     config.set_section_by_key(key, value)?;
     save_full_config(&config).map_err(|e| ConfigError::GenericConfigError(e.to_string()))
 }
-
 
 #[cfg(test)]
 mod tests {

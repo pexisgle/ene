@@ -160,7 +160,40 @@ fn launch_ai_request(
     let registry_clone = runtime.registry.clone();
 
     rt.0.spawn(async move {
-        match run_ene_with_tools(&ai_settings, &session_clone, &user_input, registry_clone).await {
+        let provider_config = match ai_settings.get_section::<ene_core::ProviderConfig>() {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.send(CoreEneStreamEvent::Error(format!(
+                    "Failed to load provider config: {}",
+                    e
+                )));
+                return;
+            }
+        };
+        let active_provider = match ene_core::LlmProviderRegistry::create_provider(
+            &provider_config.provider_name,
+            &ai_settings,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = tx.send(CoreEneStreamEvent::Error(format!(
+                    "Failed to create provider: {}",
+                    e
+                )));
+                return;
+            }
+        };
+        let provider_arc = std::sync::Arc::from(active_provider);
+
+        match run_ene_with_tools(
+            &ai_settings,
+            &session_clone,
+            &user_input,
+            registry_clone,
+            provider_arc,
+        )
+        .await
+        {
             Ok(stream) => {
                 tokio::pin!(stream);
                 while let Some(event) = stream.next().await {

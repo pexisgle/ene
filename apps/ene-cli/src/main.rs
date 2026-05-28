@@ -1,3 +1,9 @@
+//! # ene-cli
+//!
+//! Interactive CLI REPL for the ene AI character platform.
+//! Supports /slash commands, tool execution, and conversation management.
+#![warn(missing_docs)]
+
 mod cli;
 mod commands;
 mod config;
@@ -10,48 +16,18 @@ use cli::Args;
 
 #[tokio::main]
 async fn main() {
-    let args = Args::parse();
+    let _args = Args::parse();
 
-    if let Some(api_key) = args.set_api_key {
-        let _ = ene_config::ensure_resource_dirs();
-        let mut config = ene_config::load_config();
-        let provider = config
-            .get_section::<ene_core::ProviderConfig>()
-            .unwrap_or_default();
-        let service = &provider.api_key_keyring_service;
-        let account = &provider.api_key_keyring_account;
-
-        match keyring::Entry::new(service, account) {
-            Ok(entry) => match entry.set_password(&api_key) {
-                Ok(_) => {
-                    println!("API キーを Keyring に正常に保存しました。");
-                    let mut new_provider = provider.clone();
-                    new_provider.api_key = String::new();
-                    new_provider.api_key_source = "keyring".to_string();
-                    let _ = config.set_section(&new_provider);
-                    if let Err(e) = ene_config::save_full_config(&config) {
-                        eprintln!("設定ファイルの保存に失敗しました: {}", e);
-                        std::process::exit(1);
-                    } else {
-                        println!(
-                            "settings.json を更新し、api_key_source を 'keyring' に設定しました。"
-                        );
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Keyring への保存に失敗しました: {}", e);
-                    std::process::exit(1);
-                }
-            },
-            Err(e) => {
-                eprintln!("Keyring の初期化に失敗しました: {}", e);
-                std::process::exit(1);
-            }
+    let runtime = match config::init().await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!(
+                "{}",
+                style::error(format!("Fatal: Failed to initialize runtime: {}", e))
+            );
+            std::process::exit(1);
         }
-        return;
-    }
-
-    let runtime = config::init().await;
+    };
 
     println!("ene Interactive CLI");
     println!("Type '/help' for a list of commands.");

@@ -1,13 +1,14 @@
+use crate::Role;
 use crate::conversation_manager::{
     PendingSplitTask, SplitResult, SplitTaskInput, generate_session_id, poll_split_result,
 };
 use crate::error::SessionError;
 use crate::special_token::split_text_and_special_tokens;
-use async_openai::types::chat::Role;
 use chrono::{DateTime, Utc};
 use ene_config::{CharacterCardV3, EneConfig, ResolvedExpression, resolve_expressions};
-use ene_embedding::EmbeddingProvider;
-use ene_memory::{MemoryConfig, MemoryStore};
+use ene_provider::EmbeddingProvider;
+
+use ene_memory::MemoryStore;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -163,19 +164,21 @@ impl ConversationSession {
             let folder = parent.file_name().unwrap_or_default().to_string_lossy();
             let settings_path = ene_config::character_settings_path(&folder);
             if let Ok(settings_content) = std::fs::read_to_string(&settings_path) {
-                let per = serde_json::from_str::<HashMap<String, serde_json::Value>>(
-                    &settings_content,
-                )
-                .ok()
-                .and_then(|map| {
-                    map.get("character_settings")
-                        .cloned()
-                        .and_then(|v| serde_json::from_value::<ene_config::CharacterPerConfig>(v).ok())
-                })
-                // Fallback: flat CharacterPerConfig
-                .or_else(|| {
-                    serde_json::from_str::<ene_config::CharacterPerConfig>(&settings_content).ok()
-                });
+                let per =
+                    serde_json::from_str::<HashMap<String, serde_json::Value>>(&settings_content)
+                        .ok()
+                        .and_then(|map| {
+                            map.get("character_settings").cloned().and_then(|v| {
+                                serde_json::from_value::<ene_config::CharacterPerConfig>(v).ok()
+                            })
+                        })
+                        // Fallback: flat CharacterPerConfig
+                        .or_else(|| {
+                            serde_json::from_str::<ene_config::CharacterPerConfig>(
+                                &settings_content,
+                            )
+                            .ok()
+                        });
 
                 if let Some(per) = per {
                     if let Some(expr) = per.expressions {
@@ -327,15 +330,12 @@ impl ConversationSession {
         config: &EneConfig,
         user_input: &str,
         user_name: &str,
-        api_key: &str,
+        provider: Arc<dyn ene_provider::LlmProvider>,
     ) -> Option<SplitTaskInput> {
         let store = self.memory.memory_store.clone()?;
         let embedder = self.memory.embedding_provider.clone()?;
         let session_config = config
             .get_section::<crate::SessionConfig>()
-            .unwrap_or_default();
-        let mem_config = config
-            .get_section::<MemoryConfig>()
             .unwrap_or_default();
 
         Some(SplitTaskInput {
@@ -344,11 +344,7 @@ impl ConversationSession {
             current_turn_count: self.state.current_turn_count,
             user_input: user_input.to_string(),
             session_config,
-            summarization_model: mem_config.resolve_summarization_model(),
-            summarization_base_url: mem_config
-                .resolve_summarization_base_url()
-                .unwrap_or_default(),
-            api_key: api_key.to_string(),
+            provider,
             history: self.history.conversation_history.clone(),
             session_id: self.memory.session_id.clone(),
             card_name: self.card_name().to_string(),

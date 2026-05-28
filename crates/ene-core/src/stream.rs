@@ -1,18 +1,8 @@
-use crate::client::build_openai_client;
 use crate::prompt_builder::build_messages;
-use async_openai::types::chat::{
-    ChatCompletionMessageToolCall as ToolCall, ChatCompletionMessageToolCallChunk as ToolCallChunk,
-    ChatCompletionMessageToolCalls as ToolCalls,
-    ChatCompletionRequestAssistantMessageArgs as AssistantMsgArgs, ChatCompletionRequestMessage,
-    ChatCompletionRequestMessageContentPartImageArgs as ImagePartArgs,
-    ChatCompletionRequestMessageContentPartTextArgs as TextPartArgs,
-    ChatCompletionRequestToolMessageArgs as ToolMsgArgs,
-    ChatCompletionRequestUserMessageArgs as UserMsgArgs, CreateChatCompletionRequestArgs,
-    FunctionCall, FunctionCallStream, ImageUrlArgs,
-};
 use async_stream::stream;
 use ene_config::EneConfig;
 use ene_memory::RecalledSummary;
+use ene_provider::{LlmMessage, LlmToolCall, LlmToolCallChunk, UserMessagePart};
 use ene_session::ConversationSession;
 use std::sync::Arc;
 use tokio_stream::Stream;
@@ -126,7 +116,8 @@ pub enum EneStreamEvent {
 /// returns all tools.
 pub async fn select_relevant_tools(
     registry: &dyn ene_tool_host::ToolRegistry,
-    embedding_provider: &Option<Arc<dyn ene_embedding::EmbeddingProvider>>,
+    embedding_provider: &Option<Arc<dyn ene_provider::EmbeddingProvider>>,
+
     user_input: &str,
     tool_calling_enabled: bool,
     tool_rag_enabled: bool,
@@ -212,7 +203,7 @@ pub fn build_chat_messages_list(
     user_input: &str,
     recalled_summaries: &[RecalledSummary],
     key_facts: &[ene_memory::KeyFact],
-) -> Result<Vec<ChatCompletionRequestMessage>, crate::error::EneCoreError> {
+) -> Result<Vec<LlmMessage>, crate::error::EneCoreError> {
     let Some(card) = session.character_card.as_ref() else {
         return Err(crate::error::EneCoreError::NoCharacterCard);
     };
@@ -237,115 +228,107 @@ pub fn build_chat_messages_list(
 pub async fn perform_tool_executions(
     registry: &dyn ene_tool_host::ToolRegistry,
     session_id: &str,
-    tool_calls: Vec<ToolCalls>,
+    tool_calls: Vec<LlmToolCall>,
     assistant_content: &str,
     tx: tokio::sync::mpsc::UnboundedSender<EneStreamEvent>,
-) -> Result<Vec<ChatCompletionRequestMessage>, crate::error::EneCoreError> {
+) -> Result<Vec<LlmMessage>, crate::error::EneCoreError> {
     let mut round_messages = Vec::new();
 
-    let mut asst_msg_builder = AssistantMsgArgs::default();
-    asst_msg_builder.tool_calls(tool_calls.clone());
-    if !assistant_content.is_empty() {
-        asst_msg_builder.content(assistant_content);
-    }
-
-    let asst_msg = asst_msg_builder.build().map_err(|e| {
-        crate::error::EneCoreError::ToolExecutionError(format!(
-            "Failed to build assistant message: {}",
-            e
-        ))
-    })?;
-    round_messages.push(asst_msg.into());
+    round_messages.push(LlmMessage::Assistant {
+        content: if assistant_content.is_empty() {
+            None
+        } else {
+            Some(assistant_content.to_string())
+        },
+        tool_calls: Some(tool_calls.clone()),
+    });
 
     registry.set_session_id(session_id).await;
 
-    for tool_call_enum in tool_calls {
-        if let ToolCalls::Function(call) = tool_call_enum {
-            let name = call.function.name.clone();
-            let args = call.function.arguments.clone();
+    for call in tool_calls {
+        let name = call.name.clone();
+        let args = call.arguments.clone();
 
-            let _ = tx.send(EneStreamEvent::ToolCallStart {
-                name: name.clone(),
-                arguments: args.clone(),
-            });
+        let _ = tx.send(EneStreamEvent::ToolCallStart {
+            name: name.clone(),
+            arguments: args.clone(),
+        });
 
-            let tool_timeout = std::time::Duration::from_secs(60);
-            let mut result =
-                match tokio::time::timeout(tool_timeout, registry.call_tool(&name, &args)).await {
-                    Ok(Ok(res)) => Ok(res),
-                    Ok(Err(e)) => Err(e),
-                    Err(_) => Err(ene_tool_host::error::ToolError::Other(format!(
-                        "Tool '{}' timed out after {} seconds",
-                        name,
-                        tool_timeout.as_secs()
-                    ))),
-                };
-
-            if let Err(ene_tool_host::error::ToolError::PermissionRequired {
-                request_id,
-                action,
-                target,
-                description,
-            }) = &result
-            {
-                let _ = tx.send(EneStreamEvent::PermissionRequired {
-                    request_id: request_id.clone(),
-                    action: action.clone(),
-                    target: target.clone(),
-                    description: description.clone(),
-                });
-
-                let (tx_decision, rx_decision) =
-                    tokio::sync::oneshot::channel::<PermissionDecision>();
-                register_permission_request(request_id.clone(), tx_decision);
-
-                match rx_decision.await {
-                    Ok(PermissionDecision::AllowOnce) => {
-                        registry.approve_permission(request_id).await;
-                        result = registry.call_tool(&name, &args).await;
-                    }
-                    Ok(PermissionDecision::AllowSession) => {
-                        registry.allow_pattern(action, target).await;
-                        registry.approve_permission(request_id).await;
-                        result = registry.call_tool(&name, &args).await;
-                    }
-                    _ => {
-                        result = Err(ene_tool_host::error::ToolError::PermissionDenied(
-                            "Permission denied by user".to_string(),
-                        ));
-                    }
-                }
-            }
-
-            let result_str = match result {
-                Ok(res) => res,
-                Err(e) => format!("Error executing tool: {}", e),
+        let tool_timeout = std::time::Duration::from_secs(60);
+        let mut result =
+            match tokio::time::timeout(tool_timeout, registry.call_tool(&name, &args)).await {
+                Ok(Ok(res)) => Ok(res),
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err(ene_tool_host::error::ToolError::Other(format!(
+                    "Tool '{}' timed out after {} seconds",
+                    name,
+                    tool_timeout.as_secs()
+                ))),
             };
 
-            let _ = tx.send(EneStreamEvent::ToolCallResult {
-                name: name.clone(),
-                result: result_str.clone(),
+        if let Err(ene_tool_host::error::ToolError::PermissionRequired {
+            request_id,
+            action,
+            target,
+            description,
+        }) = &result
+        {
+            let _ = tx.send(EneStreamEvent::PermissionRequired {
+                request_id: request_id.clone(),
+                action: action.clone(),
+                target: target.clone(),
+                description: description.clone(),
             });
 
-            let (final_tool_text, screenshot_data) = extract_screenshot(&result_str);
+            let (tx_decision, rx_decision) = tokio::sync::oneshot::channel::<PermissionDecision>();
+            register_permission_request(request_id.clone(), tx_decision);
 
-            let tool_msg = ToolMsgArgs::default()
-                .tool_call_id(call.id.clone())
-                .content(final_tool_text)
-                .build()
-                .map_err(|e| {
-                    crate::error::EneCoreError::ToolExecutionError(format!(
-                        "Failed to build tool message: {}",
-                        e
-                    ))
-                })?;
-            round_messages.push(tool_msg.into());
-
-            if let Some(b64_data) = screenshot_data {
-                if let Some(user_msg) = build_screenshot_message(b64_data) {
-                    round_messages.push(user_msg);
+            match rx_decision.await {
+                Ok(PermissionDecision::AllowOnce) => {
+                    registry.approve_permission(request_id).await;
+                    result = registry.call_tool(&name, &args).await;
+                }
+                Ok(PermissionDecision::AllowSession) => {
+                    registry.allow_pattern(action, target).await;
+                    registry.approve_permission(request_id).await;
+                    result = registry.call_tool(&name, &args).await;
+                }
+                _ => {
+                    result = Err(ene_tool_host::error::ToolError::PermissionDenied(
+                        "Permission denied by user".to_string(),
+                    ));
                 }
             }
+        }
+
+        let result_str = match result {
+            Ok(res) => res,
+            Err(e) => format!("Error executing tool: {}", e),
+        };
+
+        let _ = tx.send(EneStreamEvent::ToolCallResult {
+            name: name.clone(),
+            result: result_str.clone(),
+        });
+
+        let (final_tool_text, screenshot_data) = extract_screenshot(&result_str);
+
+        round_messages.push(LlmMessage::Tool {
+            tool_call_id: call.id.clone(),
+            content: final_tool_text,
+        });
+
+        if let Some(b64_data) = screenshot_data {
+            round_messages.push(LlmMessage::User {
+                parts: vec![
+                    UserMessagePart::Text {
+                        text: "Here is the screenshot.".to_string(),
+                    },
+                    UserMessagePart::Image {
+                        base64_image_data: b64_data,
+                    },
+                ],
+            });
         }
     }
 
@@ -359,16 +342,8 @@ pub async fn run_ene_with_tools(
     session: &ConversationSession,
     user_input: &str,
     registry: std::sync::Arc<dyn ene_tool_host::ToolRegistry>,
+    provider: std::sync::Arc<dyn ene_provider::LlmProvider>,
 ) -> Result<impl Stream<Item = EneStreamEvent> + 'static, crate::error::EneCoreError> {
-    let provider = config
-        .get_section::<crate::ProviderConfig>()
-        .unwrap_or_default();
-    let base_url = provider.resolve_base_url()?;
-    let api_key = provider.resolve_api_key();
-
-    let client = build_openai_client(&base_url, &api_key);
-    let model = provider.model;
-
     let mem_config = config
         .get_section::<ene_memory::MemoryConfig>()
         .unwrap_or_default();
@@ -391,14 +366,9 @@ pub async fn run_ene_with_tools(
         }
     }
 
-    // 3. Build initial OpenAI chat messages list
-    let mut messages = build_chat_messages_list(
-        session,
-        config,
-        user_input,
-        &recalled_summaries,
-        &key_facts,
-    )?;
+    // 3. Build initial messages list
+    let mut messages =
+        build_chat_messages_list(session, config, user_input, &recalled_summaries, &key_facts)?;
 
     let memory_enabled = mem_config.enabled;
     let mem_store = if memory_enabled {
@@ -433,18 +403,6 @@ pub async fn run_ene_with_tools(
         )
         .await;
 
-        let oa_tools = if tool_calling_enabled && !tools.is_empty() {
-            match crate::prompt_builder::build_tools(&tools) {
-                Ok(t) => Some(t),
-                Err(e) => {
-                    yield EneStreamEvent::Error(e);
-                    return;
-                }
-            }
-        } else {
-            None
-        };
-
         let mut round = 0;
 
         loop {
@@ -453,21 +411,7 @@ pub async fn run_ene_with_tools(
                 return;
             }
 
-            let mut req_builder = CreateChatCompletionRequestArgs::default();
-            req_builder.model(model.clone()).messages(messages.clone());
-            if let Some(t) = &oa_tools {
-                req_builder.tools(t.clone());
-            }
-
-            let request = match req_builder.build() {
-                Ok(req) => req,
-                Err(e) => {
-                    yield EneStreamEvent::Error(format!("failed to build request: {e}"));
-                    return;
-                }
-            };
-
-            let mut stream = match client.chat().create_stream(request).await {
+            let mut stream = match provider.create_chat_stream(&messages, &tools).await {
                 Ok(s) => s,
                 Err(e) => {
                     yield EneStreamEvent::Error(e.to_string());
@@ -475,22 +419,20 @@ pub async fn run_ene_with_tools(
                 }
             };
 
-            let mut current_tool_calls: Vec<ToolCallChunk> = Vec::new();
+            let mut current_tool_calls: Vec<LlmToolCallChunk> = Vec::new();
             let mut assistant_content = String::new();
 
             use tokio_stream::StreamExt;
             while let Some(chunk_res) = stream.next().await {
                 match chunk_res {
                     Ok(chunk) => {
-                        if let Some(choice) = chunk.choices.first() {
-                            if let Some(content_delta) = &choice.delta.content {
-                                assistant_content.push_str(content_delta);
-                                yield EneStreamEvent::TextDelta(content_delta.clone());
-                            }
+                        if let Some(content_delta) = &chunk.text_delta {
+                            assistant_content.push_str(content_delta);
+                            yield EneStreamEvent::TextDelta(content_delta.clone());
+                        }
 
-                            if let Some(tool_calls_delta) = &choice.delta.tool_calls {
-                                accumulate_tool_calls(&mut current_tool_calls, tool_calls_delta);
-                            }
+                        if let Some(tool_calls_delta) = &chunk.tool_calls_delta {
+                            accumulate_tool_calls(&mut current_tool_calls, tool_calls_delta);
                         }
                     }
                     Err(e) => {
@@ -560,19 +502,19 @@ pub async fn run_ene_with_tools(
 }
 
 fn accumulate_tool_calls(
-    current_tool_calls: &mut Vec<ToolCallChunk>,
-    tool_calls_delta: &[ToolCallChunk],
+    current_tool_calls: &mut Vec<LlmToolCallChunk>,
+    tool_calls_delta: &[LlmToolCallChunk],
 ) {
     for tc_delta in tool_calls_delta {
-        let idx = tc_delta.index as usize;
+        let idx = tc_delta.index;
         if idx >= current_tool_calls.len() {
             current_tool_calls.resize(
                 idx + 1,
-                ToolCallChunk {
+                LlmToolCallChunk {
                     index: tc_delta.index,
                     id: None,
-                    r#type: None,
-                    function: None,
+                    name: None,
+                    arguments: None,
                 },
             );
         }
@@ -580,41 +522,23 @@ fn accumulate_tool_calls(
         if let Some(id) = &tc_delta.id {
             target.id = Some(id.clone());
         }
-        if let Some(ty) = &tc_delta.r#type {
-            target.r#type = Some(ty.clone());
+        if let Some(name) = &tc_delta.name {
+            target.name = Some(target.name.clone().unwrap_or_default() + name);
         }
-        if let Some(func_delta) = &tc_delta.function {
-            if target.function.is_none() {
-                target.function = Some(FunctionCallStream {
-                    name: None,
-                    arguments: None,
-                });
-            }
-            if let Some(target_func) = &mut target.function {
-                if let Some(name) = &func_delta.name {
-                    target_func.name = Some(target_func.name.clone().unwrap_or_default() + name);
-                }
-                if let Some(args) = &func_delta.arguments {
-                    target_func.arguments =
-                        Some(target_func.arguments.clone().unwrap_or_default() + args);
-                }
-            }
+        if let Some(args) = &tc_delta.arguments {
+            target.arguments = Some(target.arguments.clone().unwrap_or_default() + args);
         }
     }
 }
 
-fn finalize_tool_calls(current_tool_calls: Vec<ToolCallChunk>) -> Vec<ToolCalls> {
+fn finalize_tool_calls(current_tool_calls: Vec<LlmToolCallChunk>) -> Vec<LlmToolCall> {
     let mut tool_calls = Vec::new();
     for tc in current_tool_calls {
-        if let Some(func) = tc.function {
-            tool_calls.push(ToolCalls::Function(ToolCall {
-                id: tc.id.unwrap_or_default(),
-                function: FunctionCall {
-                    name: func.name.unwrap_or_default(),
-                    arguments: func.arguments.unwrap_or_default(),
-                },
-            }));
-        }
+        tool_calls.push(LlmToolCall {
+            id: tc.id.unwrap_or_default(),
+            name: tc.name.unwrap_or_default(),
+            arguments: tc.arguments.unwrap_or_default(),
+        });
     }
     tool_calls
 }
@@ -631,18 +555,4 @@ fn extract_screenshot(result: &str) -> (String, Option<String>) {
         }
     }
     (result.to_string(), None)
-}
-
-fn build_screenshot_message(b64_data: String) -> Option<ChatCompletionRequestMessage> {
-    let img_url = ImageUrlArgs::default().url(b64_data).build().ok()?;
-    let text_part = TextPartArgs::default()
-        .text("Here is the screenshot.")
-        .build()
-        .ok()?;
-    let img_part = ImagePartArgs::default().image_url(img_url).build().ok()?;
-    let user_msg = UserMsgArgs::default()
-        .content(vec![text_part.into(), img_part.into()])
-        .build()
-        .ok()?;
-    Some(user_msg.into())
 }

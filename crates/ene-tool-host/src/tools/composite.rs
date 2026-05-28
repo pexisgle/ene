@@ -63,7 +63,7 @@ impl CompositeToolRegistry {
     /// Compares against existing hashes and re-embeds only those that have changed
     pub async fn ensure_tool_embeddings(
         &self,
-        embedder: &dyn ene_embedding::EmbeddingProvider,
+        embedder: &dyn ene_provider::EmbeddingProvider,
     ) -> Result<(), ToolError> {
         let store = {
             let guard = self.store.read().unwrap_or_else(|e| e.into_inner());
@@ -245,7 +245,7 @@ impl ToolRegistry for CompositeToolRegistry {
 
     async fn ensure_index_built(
         &self,
-        embedder: &dyn ene_embedding::EmbeddingProvider,
+        embedder: &dyn ene_provider::EmbeddingProvider,
         _store: Option<&ene_memory::MemoryStore>,
     ) -> Result<(), ToolError> {
         self.ensure_tool_embeddings(embedder).await

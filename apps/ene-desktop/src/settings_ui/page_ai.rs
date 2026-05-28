@@ -4,7 +4,7 @@ use crate::app_config::CharacterSettings;
 use crate::character::CharacterAnimationControl;
 use bevy::prelude::*;
 use bevy_egui::egui;
-use ene_core::{EmbeddingConfig, MemoryConfig};
+use ene_core::MemoryConfig;
 
 pub fn render_ai_page(
     ui: &mut egui::Ui,
@@ -13,11 +13,12 @@ pub fn render_ai_page(
     ai_request_writer: &mut MessageWriter<EneRequestEvent>,
     input_state: &mut SettingsInputState,
 ) {
-    let mut embed_config = settings
+    let mut provider_config = settings
         .ai
         .ai
-        .get_section::<EmbeddingConfig>()
+        .get_section::<ene_core::ProviderConfig>()
         .unwrap_or_default();
+    let mut local_emb = ene_core::ProviderConfig::local_embedding(&settings.ai.ai);
     let mut mem_config = settings
         .ai
         .ai
@@ -110,11 +111,6 @@ pub fn render_ai_page(
                         "env".to_string(),
                         "Environment (環境変数)",
                     );
-                    ui.selectable_value(
-                        &mut current_source,
-                        "keyring".to_string(),
-                        "Keyring (OS セキュアストア)",
-                    );
                 });
             if current_source != provider_config.api_key_source {
                 provider_config.api_key_source = current_source;
@@ -184,28 +180,28 @@ pub fn render_ai_page(
                 });
             if current_provider != input_state.ai_embedding_provider {
                 input_state.ai_embedding_provider = current_provider.clone();
-                embed_config.provider_type = match current_provider.as_str() {
-                    "local" => ene_core::EmbeddingProviderType::Local,
-                    _ => ene_core::EmbeddingProviderType::Api,
-                };
+                provider_config.embedding_backend = current_provider.clone();
                 match current_provider.as_str() {
                     "local" => {
-                        embed_config.model = "jina-embeddings-v5-text-nano".to_string();
-                        embed_config.dimensions = None;
-                        input_state.ai_embedding_model = embed_config.model.clone();
+                        local_emb.model = "jina-embeddings-v5-text-nano".to_string();
+                        input_state.ai_embedding_model = local_emb.model.clone();
                         input_state.ai_embedding_dimensions = "auto".to_string();
                     }
                     _ => {
-                        embed_config.model = "text-embedding-3-small".to_string();
-                        embed_config.dimensions = Some(1536);
-                        input_state.ai_embedding_model = embed_config.model.clone();
-                        input_state.ai_embedding_dimensions = embed_config
-                            .dimensions
-                            .map(|d| d.to_string())
-                            .unwrap_or_default();
+                        provider_config.cloud_embedding_model =
+                            "text-embedding-3-small".to_string();
+                        provider_config.cloud_embedding_dimensions = 1536;
+                        input_state.ai_embedding_model =
+                            provider_config.cloud_embedding_model.clone();
+                        input_state.ai_embedding_dimensions =
+                            provider_config.cloud_embedding_dimensions.to_string();
                     }
                 }
-                let _ = settings.ai.ai.set_section(&embed_config);
+                let _ = settings.ai.ai.set_section(&provider_config);
+                let _ = settings
+                    .ai
+                    .ai
+                    .set_section_by_key("provider.local_embedding", &local_emb);
             }
         });
 
@@ -216,8 +212,16 @@ pub fn render_ai_page(
                     .desired_width(f32::INFINITY),
             );
             if response.changed() {
-                embed_config.model = input_state.ai_embedding_model.clone();
-                let _ = settings.ai.ai.set_section(&embed_config);
+                if input_state.ai_embedding_provider == "local" {
+                    local_emb.model = input_state.ai_embedding_model.clone();
+                    let _ = settings
+                        .ai
+                        .ai
+                        .set_section_by_key("provider.local_embedding", &local_emb);
+                } else {
+                    provider_config.cloud_embedding_model = input_state.ai_embedding_model.clone();
+                    let _ = settings.ai.ai.set_section(&provider_config);
+                }
             }
         });
 
@@ -228,8 +232,7 @@ pub fn render_ai_page(
                     .desired_width(f32::INFINITY),
             );
             if response.changed() {
-                embed_config.base_url = input_state.ai_embedding_base_url.clone();
-                let _ = settings.ai.ai.set_section(&embed_config);
+                // base_url removed from new config design; no-op
             }
         });
 
@@ -244,8 +247,8 @@ pub fn render_ai_page(
                 );
                 if response.changed() {
                     if let Ok(dims) = input_state.ai_embedding_dimensions.parse::<usize>() {
-                        embed_config.dimensions = Some(dims);
-                        let _ = settings.ai.ai.set_section(&embed_config);
+                        provider_config.cloud_embedding_dimensions = dims;
+                        let _ = settings.ai.ai.set_section(&provider_config);
                     }
                 }
             }

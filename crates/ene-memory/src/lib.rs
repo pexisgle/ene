@@ -17,7 +17,7 @@
 //! use ene_memory::MemoryStore;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let store = MemoryStore::open(":memory:", 768)?;
+//! let store = MemoryStore::open(std::path::Path::new(":memory:"), 768)?;
 //! // Use store.search_summaries(), store.insert_summary(), etc.
 //! # Ok(())
 //! # }

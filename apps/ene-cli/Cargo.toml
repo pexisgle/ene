@@ -6,7 +6,6 @@ description = "Interactive CLI REPL for chatting with AI characters, testing too
 
 [dependencies]
 ene-core = { workspace = true }
-ene-config = { workspace = true }
 ene-memory = { workspace = true }
 ene-tool-host = { workspace = true }
 tokio = { workspace = true }
@@ -16,4 +15,3 @@ dialoguer = "0.12"
 console = "0.16.3"
 clap = { version = "4", features = ["derive"] }
 futures-core = "0.3"
-keyring = { workspace = true }

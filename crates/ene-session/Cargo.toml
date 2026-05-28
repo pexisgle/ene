@@ -8,7 +8,8 @@ description = "Conversation history, character card loading, emotion token parsi
 crate-type = ["lib"]
 
 [dependencies]
-async-openai = { workspace = true }
+ene-provider = { workspace = true }
+serde = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
@@ -17,6 +18,6 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 rand = { workspace = true }
 indexmap = { workspace = true }
-ene-embedding = { workspace = true }
+
 ene-memory = { workspace = true }
 ene-config = { workspace = true }

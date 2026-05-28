@@ -66,8 +66,6 @@
 //! ```
 #![warn(missing_docs)]
 
-/// OpenAI client builder and API interaction.
-pub mod client;
 /// Configuration types for the AI provider.
 pub mod config;
 /// Core error types.
@@ -82,8 +80,17 @@ pub mod stream;
 /// OpenAI-compatible provider config.
 pub use config::ProviderConfig;
 
-/// Embedding types (re-exported from `ene-embedding`).
-pub use ene_embedding::{EmbeddingConfig, EmbeddingProviderType};
+/// Provider types (re-exported from `ene-provider`).
+pub use ene_provider::{
+    LlmMessage, LlmProvider, LlmProviderFactory, LlmProviderRegistry, LlmResponseChunk,
+    LlmToolCall, LlmToolCallChunk, UserMessagePart,
+};
+
+/// Embedding provider trait (re-exported from `ene-provider`).
+pub use ene_provider::EmbeddingProvider;
+/// Local embedding config (re-exported from `ene-provider`).
+pub use ene_provider::LocalEmbeddingConfig;
+
 /// Memory types (re-exported from `ene-memory`).
 pub use ene_memory::{ConversationSummary, KeyFact, MemoryConfig, MemoryStore, RecalledSummary};
 /// Session types and utilities (re-exported from `ene-session`).
@@ -100,6 +107,9 @@ pub use ene_tool_host::{
 };
 /// Core AI error type.
 pub use error::EneCoreError;
+
+/// Resource directory initialization (re-exported from `ene-config`).
+pub use ene_config::ensure_resource_dirs;
 /// Runtime and tool-registry builder.
 pub use runtime::{CharacterHandle, ConfigHandle, EneRuntime, build_tool_registry};
 /// Streaming event type and entry-point.

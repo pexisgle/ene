@@ -60,6 +60,30 @@ async fn handle_split(ctx: &mut AppContext) {
         );
         return;
     };
+    let provider_config = match ctx.config.get_section::<ene_core::ProviderConfig>() {
+        Ok(c) => c,
+        Err(e) => {
+            println!(
+                "{}",
+                style::error(format!("[Session] Failed to load provider config: {}", e))
+            );
+            return;
+        }
+    };
+    let active_provider = match ene_core::LlmProviderRegistry::create_provider(
+        &provider_config.provider_name,
+        &ctx.config,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            println!(
+                "{}",
+                style::error(format!("[Session] Failed to create provider: {}", e))
+            );
+            return;
+        }
+    };
+
     println!(
         "{}",
         style::header("[Session] Manually splitting session...")
@@ -72,19 +96,7 @@ async fn handle_split(ctx: &mut AppContext) {
         &ctx.config.user_name,
         store,
         embedder,
-        &ctx.config
-            .get_section::<ene_memory::MemoryConfig>()
-            .unwrap_or_default()
-            .resolve_summarization_model(),
-        &ctx.config
-            .get_section::<ene_memory::MemoryConfig>()
-            .unwrap_or_default()
-            .resolve_summarization_base_url()
-            .unwrap_or_default(),
-        &ctx.config
-            .get_section::<ene_core::ProviderConfig>()
-            .unwrap_or_default()
-            .resolve_api_key(),
+        active_provider.as_ref(),
         reason,
     )
     .await

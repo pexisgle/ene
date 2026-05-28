@@ -24,9 +24,6 @@ pub enum EneCoreError {
     /// Failed to parse JSON.
     #[error("Failed to parse JSON: {0}")]
     JsonError(#[from] serde_json::Error),
-    /// OpenAI API error.
-    #[error("OpenAI API error: {0}")]
-    OpenAiError(#[from] async_openai::error::OpenAIError),
     /// A tool execution failed.
     #[error("Tool execution failed: {0}")]
     ToolExecutionError(String),
@@ -48,9 +45,6 @@ pub enum EneCoreError {
     /// Embedding error.
     #[error("Embedding error: {0}")]
     EmbeddingError(String),
-    /// Embedding error.
-    #[error(transparent)]
-    Embedding(#[from] ene_embedding::error::EmbeddingError),
     /// Sandbox policy violation.
     #[error("Sandbox violation: {0}")]
     SandboxViolation(String),

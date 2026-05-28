@@ -45,7 +45,7 @@ pub trait ToolRegistry: Send + Sync {
     /// Only the [`crate::CompositeToolRegistry`] implementation does meaningful work here.
     async fn ensure_index_built(
         &self,
-        _embedder: &dyn ene_embedding::EmbeddingProvider,
+        _embedder: &dyn ene_provider::EmbeddingProvider,
         _store: Option<&ene_memory::MemoryStore>,
     ) -> Result<(), crate::error::ToolError> {
         Ok(())
@@ -54,10 +54,10 @@ pub trait ToolRegistry: Send + Sync {
     /// Builds the embedding index, embeds the query, and returns the most relevant tools.
     ///
     /// Convenience method that combines [`ensure_index_built`](Self::ensure_index_built),
-    /// [`ene_embedding::EmbeddingProvider::embed_query`], and [`list_relevant_tools`](Self::list_relevant_tools).
+    /// [`ene_provider::EmbeddingProvider::embed_query`], and [`list_relevant_tools`](Self::list_relevant_tools).
     async fn select_tools(
         &self,
-        embedder: &dyn ene_embedding::EmbeddingProvider,
+        embedder: &dyn ene_provider::EmbeddingProvider,
         query: &str,
         limit: usize,
     ) -> Vec<ToolDefinition> {

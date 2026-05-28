@@ -55,8 +55,9 @@ pub enum ToolError {
     #[error(transparent)]
     Config(#[from] ene_config::ConfigError),
     /// Embedding error.
-    #[error(transparent)]
-    Embedding(#[from] ene_embedding::error::EmbeddingError),
+    #[error("Embedding error: {0}")]
+    Embedding(String),
+
     /// Memory store error.
     #[error(transparent)]
     Memory(#[from] ene_memory::MemoryError),

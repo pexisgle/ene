@@ -22,12 +22,9 @@ pub enum SessionError {
     #[error("Configuration error: {0}")]
     Config(String),
     /// Embedding error.
-    #[error(transparent)]
-    Embedding(#[from] ene_embedding::error::EmbeddingError),
+    #[error("Embedding error: {0}")]
+    Embedding(String),
     /// Memory store error.
     #[error(transparent)]
     Memory(#[from] ene_memory::MemoryError),
-    /// OpenAI API error.
-    #[error("OpenAI API error: {0}")]
-    OpenAiError(#[from] async_openai::error::OpenAIError),
 }
