@@ -1,3 +1,8 @@
+//! # ene-tools-web
+//!
+//! IPC tool binary providing web fetch and search capabilities.
+#![warn(missing_docs)]
+
 mod config;
 mod provider;
 mod webfetch;

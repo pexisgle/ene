@@ -1,3 +1,9 @@
+//! # ene-tools-browser
+//!
+//! IPC tool binary providing browser automation capabilities:
+//! Chrome DevTools Protocol integration for web scraping and interaction.
+#![warn(missing_docs)]
+
 mod chrome;
 mod extract;
 mod provider;

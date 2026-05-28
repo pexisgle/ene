@@ -1,4 +1,9 @@
+//! # ene-tools-fs
+//!
+//! IPC tool binary providing filesystem operations:
+//! read, write, edit, search, glob, patch, shell execution, and undo management.
 #![allow(dead_code)]
+#![warn(missing_docs)]
 
 mod delete;
 mod edit;

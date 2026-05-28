@@ -13,6 +13,7 @@ pub struct UtilityToolProvider {
 }
 
 impl UtilityToolProvider {
+    /// Creates a new `UtilityToolProvider` with an empty todo store.
     pub fn new() -> Self {
         Self {
             todo_store: Arc::new(todo::TodoStore::new()),

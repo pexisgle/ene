@@ -1,3 +1,10 @@
+//! # ene-desktop
+//!
+//! Desktop GUI application for the ene AI character platform.
+//! Built with Bevy, featuring a VRM character overlay, egui settings window,
+//! character drag interaction, and system tray integration.
+#![warn(missing_docs)]
+
 mod ai_bridge;
 mod app_config;
 mod character;
