@@ -43,10 +43,10 @@ pub use character_card::{
 
 pub use character_config::{CharacterPerConfig, generate_character_schema_json};
 pub use config::{
-    EneConfig, generate_schema_json, get_global_section, get_global_config, load_full_config,
-    load_full_config_from, load_config, load_config_from, register_runtime_schema,
-    register_schema, register_schema_with_parent, resolve_character_path, save_full_config,
-    update_global_config, update_section, HasConfigKey,
+    EneConfig, HasConfigKey, generate_schema_json, get_global_config, get_global_section,
+    load_config, load_config_from, load_full_config, load_full_config_from,
+    register_runtime_schema, register_schema, register_schema_with_parent, resolve_character_path,
+    save_full_config, update_global_config, update_section,
 };
 pub use error::ConfigError;
 pub use paths::{

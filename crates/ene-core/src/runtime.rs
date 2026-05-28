@@ -35,10 +35,13 @@ impl ConfigHandle<'_> {
     /// Loads config from the default config path and initializes all subsystems
     /// (embedding, memory, tool registry) except the character card.
     ///
+    /// Also ensures resource directories exist on first run.
+    ///
     /// # Errors
     ///
     /// Returns `EneCoreError` if embedding, memory store, or tool manager init fails.
     pub async fn load(&mut self) -> Result<(), EneCoreError> {
+        ene_config::ensure_resource_dirs();
         let config = ene_config::load_config();
         self.apply(config).await?;
         Ok(())
@@ -193,7 +196,10 @@ impl CharacterHandle<'_> {
     /// Returns `EneCoreError` if the card file cannot be read or parsed.
     pub fn load(&mut self) -> Result<(), EneCoreError> {
         let path = self.runtime.config.character.clone();
-        self.runtime.session.load_card(&path).map_err(EneCoreError::Session)?;
+        self.runtime
+            .session
+            .load_card(&path)
+            .map_err(EneCoreError::Session)?;
 
         // Load per-character config (section-based with flat fallback) into cache
         let folder = std::path::Path::new(&path)
@@ -210,9 +216,7 @@ impl CharacterHandle<'_> {
                 sections = map;
             } else {
                 // Fallback: flat CharacterPerConfig → wrap as "character_settings" section
-                if let Ok(per) = serde_json::from_str::<ene_config::CharacterPerConfig>(
-                    &content,
-                ) {
+                if let Ok(per) = serde_json::from_str::<ene_config::CharacterPerConfig>(&content) {
                     if let Ok(val) = serde_json::to_value(&per) {
                         sections.insert("character_settings".to_string(), val);
                     }
@@ -220,8 +224,7 @@ impl CharacterHandle<'_> {
             }
         }
 
-        self.runtime.per_character_config_path =
-            Some(settings_path.to_string_lossy().to_string());
+        self.runtime.per_character_config_path = Some(settings_path.to_string_lossy().to_string());
         self.runtime.per_character_sections = Some(sections);
 
         Ok(())
@@ -269,9 +272,13 @@ impl CharacterHandle<'_> {
     where
         T: serde::de::DeserializeOwned + Default,
     {
-        let sections = self.runtime.per_character_sections.as_ref().ok_or_else(|| {
-            EneCoreError::ConfigError("No per-character config loaded".to_string())
-        })?;
+        let sections = self
+            .runtime
+            .per_character_sections
+            .as_ref()
+            .ok_or_else(|| {
+                EneCoreError::ConfigError("No per-character config loaded".to_string())
+            })?;
         match sections.get(key) {
             Some(val) => serde_json::from_value(val.clone()).map_err(|e| {
                 EneCoreError::ConfigError(format!(
@@ -312,9 +319,13 @@ impl CharacterHandle<'_> {
     where
         T: serde::Serialize,
     {
-        let sections = self.runtime.per_character_sections.as_mut().ok_or_else(|| {
-            EneCoreError::ConfigError("No per-character config loaded".to_string())
-        })?;
+        let sections = self
+            .runtime
+            .per_character_sections
+            .as_mut()
+            .ok_or_else(|| {
+                EneCoreError::ConfigError("No per-character config loaded".to_string())
+            })?;
         let val = serde_json::to_value(section).map_err(|e| {
             EneCoreError::ConfigError(format!(
                 "Failed to serialize character section '{}': {}",
@@ -344,10 +355,7 @@ impl CharacterHandle<'_> {
                     let _ = std::fs::create_dir_all(parent);
                 }
                 std::fs::write(settings_path, json).map_err(|e| {
-                    EneCoreError::ConfigError(format!(
-                        "Failed to save character config: {}",
-                        e
-                    ))
+                    EneCoreError::ConfigError(format!("Failed to save character config: {}", e))
                 })?;
             }
         }
@@ -362,6 +370,9 @@ impl EneRuntime {
     /// Call [`config`](Self::config)`.load()` then [`character`](Self::character)`.load()`
     /// to initialize.
     pub async fn init() -> Result<Self, EneCoreError> {
+        // Register built-in OpenAI provider factory
+        ene_provider::LlmProviderRegistry::register(Arc::new(ene_provider::OpenAiProviderFactory));
+
         Ok(Self {
             config: EneConfig::default(),
             session: ConversationSession::new(),
@@ -387,21 +398,15 @@ impl EneRuntime {
     /// Evaluates if the current conversation session has reached a semantic boundary.
     /// If so, spawns a background tokio thread to execute an auto session-split,
     /// generating a compiled memory summary and key facts.
-    pub fn check_and_perform_split(&mut self, user_input: &str, user_name: &str) {
-        let mem_config = match self
-            .config
-            .get_section::<ene_memory::MemoryConfig>()
-        {
+    pub fn check_and_perform_split(&mut self, user_input: &str, _user_name: &str) {
+        let mem_config = match self.config.get_section::<ene_memory::MemoryConfig>() {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("Failed to load memory config for split checking: {}", e);
                 return;
             }
         };
-        let session_config = match self
-            .config
-            .get_section::<ene_session::SessionConfig>()
-        {
+        let session_config = match self.config.get_section::<ene_session::SessionConfig>() {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("Failed to load session config for split checking: {}", e);
@@ -414,16 +419,30 @@ impl EneRuntime {
         }
 
         if self.pending_split.is_none() {
-            let api_key = self
-                .config
-                .get_section::<crate::config::ProviderConfig>()
-                .unwrap_or_default()
-                .resolve_api_key();
+            let provider_config = match self.config.get_section::<ene_provider::ProviderConfig>() {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("Failed to load provider config for split checking: {}", e);
+                    return;
+                }
+            };
+            let provider = match ene_provider::LlmProviderRegistry::create_provider(
+                &provider_config.provider_name,
+                &self.config,
+            ) {
+                Ok(p) => Arc::from(p),
+                Err(e) => {
+                    tracing::warn!("Failed to create provider for split checking: {}", e);
+                    return;
+                }
+            };
 
-            if let Some(input) =
-                self.session
-                    .prepare_split_input(&self.config, user_input, user_name, &api_key)
-            {
+            if let Some(input) = self.session.prepare_split_input(
+                &self.config,
+                user_input,
+                &self.config.user_name.clone(),
+                provider,
+            ) {
                 spawn_split_task(&mut self.pending_split, input);
             }
         }
@@ -476,11 +495,23 @@ impl EneRuntime {
         self.session.record_user_input();
         self.session.add_user_message(user_input);
 
+        let provider_config = self
+            .config
+            .get_section::<ene_provider::ProviderConfig>()
+            .map_err(|e| EneCoreError::ConfigError(e.to_string()))?;
+        let active_provider = ene_provider::LlmProviderRegistry::create_provider(
+            &provider_config.provider_name,
+            &self.config,
+        )
+        .map_err(|e| EneCoreError::ConfigError(e))?;
+        let provider_arc = Arc::from(active_provider);
+
         run_ene_with_tools(
             &self.config,
             &self.session,
             user_input,
             self.registry.clone(),
+            provider_arc,
         )
         .await
     }
@@ -511,28 +542,45 @@ pub async fn build_tool_registry(
     })
 }
 
-fn init_embedding(
-    config: &EneConfig,
-) -> Result<Arc<dyn ene_embedding::EmbeddingProvider>, String> {
-    let embed_config = config
-        .get_section::<ene_embedding::EmbeddingConfig>()
-        .map_err(|e| format!("Failed to load embedding config: {}", e))?;
+fn init_embedding(config: &EneConfig) -> Result<Arc<dyn ene_provider::EmbeddingProvider>, String> {
+    let provider_config = config
+        .get_section::<ene_provider::ProviderConfig>()
+        .map_err(|e| format!("Failed to load provider config: {}", e))?;
 
-    let api_key = config
-        .get_section::<crate::config::ProviderConfig>()
-        .unwrap_or_default()
-        .resolve_api_key();
-
-    let embedder = embed_config
-        .create_provider(&api_key, ene_config::models_dir())
-        .map_err(|e| format!("Failed to create embedding provider: {}", e))?;
-
-    Ok(Arc::from(embedder))
+    match provider_config.embedding_backend.as_str() {
+        "local" => {
+            let local_cfg = ene_provider::ProviderConfig::local_embedding(config);
+            let model_dir = ene_config::models_dir();
+            let provider = ene_embedding::create_local_provider(
+                &local_cfg.model,
+                &local_cfg.quantization,
+                model_dir,
+            )
+            .map_err(|e| format!("Failed to create local embedding provider: {}", e))?;
+            Ok(Arc::from(provider))
+        }
+        // "cloud" or any unrecognised value → cloud via the LLM provider's embedding API
+        _ => {
+            let base_url = provider_config
+                .resolve_base_url()
+                .map_err(|e| format!("Failed to resolve base URL for cloud embedding: {}", e))?;
+            let api_key = provider_config.resolve_api_key();
+            let llm: Arc<dyn ene_provider::LlmProvider> =
+                Arc::new(ene_provider::OpenAiProvider::new(
+                    &base_url,
+                    &api_key,
+                    &provider_config.model,
+                    &provider_config.cloud_embedding_model,
+                    provider_config.cloud_embedding_dimensions,
+                ));
+            Ok(Arc::new(ene_provider::CloudEmbeddingProvider::new(llm)))
+        }
+    }
 }
 
 fn init_memory_store(
     config: &EneConfig,
-    embedder: &dyn ene_embedding::EmbeddingProvider,
+    embedder: &dyn ene_provider::EmbeddingProvider,
 ) -> Result<Arc<ene_memory::MemoryStore>, String> {
     let db_path = config
         .get_section::<ene_memory::MemoryConfig>()

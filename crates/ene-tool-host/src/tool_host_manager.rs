@@ -257,7 +257,7 @@ impl ToolRegistry for ToolHostManager {
 
     async fn ensure_index_built(
         &self,
-        embedder: &dyn ene_embedding::EmbeddingProvider,
+        embedder: &dyn ene_provider::EmbeddingProvider,
         store: Option<&MemoryStore>,
     ) -> Result<(), crate::error::ToolError> {
         self.composite.ensure_index_built(embedder, store).await

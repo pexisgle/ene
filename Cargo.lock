@@ -3716,12 +3716,10 @@ dependencies = [
  "clap",
  "console",
  "dialoguer",
- "ene-config",
  "ene-core",
  "ene-memory",
  "ene-tool-host",
  "futures-core",
- "keyring",
  "serde_json",
  "tokio",
  "tokio-stream",
@@ -3748,18 +3746,17 @@ dependencies = [
 name = "ene-core"
 version = "0.1.0"
 dependencies = [
- "async-openai",
  "async-stream",
  "async-trait",
  "chrono",
  "ene-config",
  "ene-embedding",
  "ene-memory",
+ "ene-provider",
  "ene-session",
  "ene-tool-host",
  "ene-tool-proto",
  "indexmap 2.14.0",
- "keyring",
  "rand 0.10.1",
  "regex",
  "serde",
@@ -3782,7 +3779,6 @@ dependencies = [
  "ene-config",
  "ene-core",
  "gtk",
- "keyring",
  "log",
  "png",
  "raw-window-handle",
@@ -3799,11 +3795,11 @@ dependencies = [
 name = "ene-embedding"
 version = "0.1.0"
 dependencies = [
- "async-openai",
  "async-trait",
  "candle-core",
  "candle-nn",
  "ene-config",
+ "ene-provider",
  "hf-hub",
  "thiserror 2.0.18",
  "tokenizers 0.23.1",
@@ -3815,12 +3811,11 @@ dependencies = [
 name = "ene-memory"
 version = "0.1.0"
 dependencies = [
- "async-openai",
  "chrono",
  "diesel",
  "diesel_migrations",
  "ene-config",
- "ene-embedding",
+ "ene-provider",
  "rusqlite",
  "serde_json",
  "sqlite-vec",
@@ -3831,16 +3826,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "ene-session"
+name = "ene-provider"
 version = "0.1.0"
 dependencies = [
  "async-openai",
+ "async-trait",
+ "ene-config",
+ "ene-tool-proto",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
+name = "ene-session"
+version = "0.1.0"
+dependencies = [
  "chrono",
  "ene-config",
- "ene-embedding",
  "ene-memory",
+ "ene-provider",
  "indexmap 2.14.0",
  "rand 0.10.1",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -3856,8 +3866,8 @@ dependencies = [
  "async-trait",
  "dashmap",
  "ene-config",
- "ene-embedding",
  "ene-memory",
+ "ene-provider",
  "ene-tool-proto",
  "rmcp",
  "serde",
@@ -5969,16 +5979,6 @@ dependencies = [
  "bitflags 2.11.1",
  "serde",
  "unicode-segmentation",
-]
-
-[[package]]
-name = "keyring"
-version = "3.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c"
-dependencies = [
- "log",
- "zeroize",
 ]
 
 [[package]]

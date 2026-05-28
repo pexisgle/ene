@@ -312,7 +312,7 @@ impl ToolRegistry for IpcToolRegistry {
 
     async fn ensure_index_built(
         &self,
-        _embedder: &dyn ene_embedding::EmbeddingProvider,
+        _embedder: &dyn ene_provider::EmbeddingProvider,
         _store: Option<&ene_memory::MemoryStore>,
     ) -> Result<(), crate::error::ToolError> {
         Ok(())

@@ -53,8 +53,7 @@ apps/
 
 ## Testing
 - `cargo test --workspace` for all tests.
-- CLI has `--tooltest` flag for one-shot tool testing.
-- REPL `/tooltest [prompt]` for interactive tool testing.
+- REPL `/tool call [tool_name]` for interactive tool testing.
 
 ## Docs
 - Full documentation in `docs/`. Key files:

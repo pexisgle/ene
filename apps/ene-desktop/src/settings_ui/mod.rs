@@ -17,7 +17,8 @@ use bevy::camera::RenderTarget;
 use bevy::prelude::*;
 use bevy::window::{WindowRef, WindowResolution};
 use bevy_egui::{EguiContext, EguiMultipassSchedule, PrimaryEguiContext, egui};
-use ene_core::{EmbeddingConfig, MemoryConfig};
+use ene_core::MemoryConfig;
+
 use widgets::apply_action;
 
 #[derive(bevy::ecs::schedule::ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
@@ -132,23 +133,18 @@ impl SettingsInputState {
             .ai
             .get_section::<MemoryConfig>()
             .unwrap_or_default();
-        let embed_config = settings
-            .ai
-            .ai
-            .get_section::<EmbeddingConfig>()
-            .unwrap_or_default();
 
         self.ai_memory_enabled = mem_config.enabled;
-        self.ai_embedding_provider = match embed_config.provider_type {
-            ene_core::EmbeddingProviderType::Api => "api".to_string(),
-            ene_core::EmbeddingProviderType::Local => "local".to_string(),
-        };
-        self.ai_embedding_model = embed_config.model.clone();
-        self.ai_embedding_base_url = embed_config.base_url.clone();
-        self.ai_embedding_dimensions = embed_config
-            .dimensions
-            .map(|d| d.to_string())
-            .unwrap_or_else(|| "auto".to_string());
+        let provider_config2 = settings
+            .ai
+            .ai
+            .get_section::<ene_core::ProviderConfig>()
+            .unwrap_or_default();
+        self.ai_embedding_provider = provider_config2.embedding_backend.clone();
+        let local_emb = ene_core::ProviderConfig::local_embedding(&settings.ai.ai);
+        self.ai_embedding_model = local_emb.model.clone();
+        self.ai_embedding_base_url = String::new();
+        self.ai_embedding_dimensions = provider_config2.cloud_embedding_dimensions.to_string();
     }
 }
 
@@ -347,25 +343,7 @@ impl SettingsValueKind {
                     .ai
                     .get_section::<ene_core::ProviderConfig>()
                     .unwrap_or_default();
-                if provider_config.api_key_source == "keyring" {
-                    let service = &provider_config.api_key_keyring_service;
-                    let account = &provider_config.api_key_keyring_account;
-                    match keyring::Entry::new(service, account) {
-                        Ok(entry) => {
-                            if let Err(e) = entry.set_password(value) {
-                                error!("[Security] Failed to write API key to keyring: {}", e);
-                            } else {
-                                info!("[Security] API key stored in keyring.");
-                                provider_config.api_key = String::new();
-                            }
-                        }
-                        Err(e) => {
-                            error!("[Security] Failed to initialize keyring: {}", e);
-                        }
-                    }
-                } else {
-                    provider_config.api_key = value.to_string();
-                }
+                provider_config.api_key = value.to_string();
                 let _ = settings.ai.ai.set_section(&provider_config);
                 Ok(())
             }

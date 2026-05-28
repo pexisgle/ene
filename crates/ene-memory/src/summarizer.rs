@@ -3,15 +3,9 @@
 //! Called during session splits to convert raw conversation history into structured summaries
 //! with natural-language descriptions, extracted topics, and user-relevant key facts.
 
-use async_openai::types::chat::{
-    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-    CreateChatCompletionRequestArgs, ResponseFormat, ResponseFormatJsonSchema, Role,
-};
-use ene_config::serde::{Deserialize, Serialize};
-
 use crate::error::MemoryError;
 use crate::store::KeyFact;
-use ene_embedding::client::build_openai_client;
+use ene_config::serde::{Deserialize, Serialize};
 
 /// Structured conversation summary returned by the LLM
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,10 +23,8 @@ pub struct ConversationSummaryResult {
 /// with topics and key facts. The prompt includes existing keyfacts for comparison,
 /// allowing updates, deletions, and retentions via the key_facts output.
 pub async fn summarize_conversation(
-    model: &str,
-    base_url: &str,
-    api_key: &str,
-    history: &[(Role, String)],
+    provider: &dyn ene_provider::LlmProvider,
+    history: &[ene_provider::LlmMessage],
     character_name: &str,
     user_name: &str,
     existing_facts: &[KeyFact],
@@ -45,22 +37,27 @@ pub async fn summarize_conversation(
         });
     }
 
-    if base_url.trim().is_empty() {
-        return Err(MemoryError::MissingBaseUrl {
-            env_var: String::new(),
-        });
-    }
-
-    let client = build_openai_client(&base_url, &api_key);
-
     let mut conversation_text = String::new();
-    for (role, content) in history {
-        let label = match role {
-            Role::User => user_name,
-            Role::Assistant => character_name,
-            _ => "System",
-        };
-        conversation_text.push_str(&format!("{}: {}\n", label, content));
+    for message in history {
+        match message {
+            ene_provider::LlmMessage::User { parts } => {
+                let mut text = String::new();
+                for part in parts {
+                    if let ene_provider::UserMessagePart::Text { text: t } = part {
+                        text.push_str(t);
+                    }
+                }
+                conversation_text.push_str(&format!("{}: {}\n", user_name, text));
+            }
+            ene_provider::LlmMessage::Assistant { content, .. } => {
+                let text = content.as_deref().unwrap_or("");
+                conversation_text.push_str(&format!("{}: {}\n", character_name, text));
+            }
+            ene_provider::LlmMessage::System { content } => {
+                conversation_text.push_str(&format!("System: {}\n", content));
+            }
+            _ => {}
+        }
     }
 
     let existing_facts_str = if existing_facts.is_empty() {
@@ -132,16 +129,6 @@ pub async fn summarize_conversation(
         existing_facts_str, conversation_text
     );
 
-    let sys_msg = ChatCompletionRequestSystemMessageArgs::default()
-        .content(system_prompt)
-        .build()
-        .map_err(|e| MemoryError::PromptBuildError(format!("system message: {e}")))?;
-
-    let user_msg = ChatCompletionRequestUserMessageArgs::default()
-        .content(user_prompt)
-        .build()
-        .map_err(|e| MemoryError::PromptBuildError(format!("user message: {e}")))?;
-
     let schema = serde_json::json!({
         "type": "object",
         "properties": {
@@ -165,33 +152,19 @@ pub async fn summarize_conversation(
         "additionalProperties": false
     });
 
-    let request = CreateChatCompletionRequestArgs::default()
-        .model(model)
-        .messages(vec![sys_msg.into(), user_msg.into()])
-        .response_format(ResponseFormat::JsonSchema {
-            json_schema: ResponseFormatJsonSchema {
-                description: Some("Conversation summary result".to_string()),
-                name: "ConversationSummaryResult".to_string(),
-                schema: schema,
-                strict: Some(true),
-            },
-        })
-        .build()
-        .map_err(|e| MemoryError::PromptBuildError(format!("request: {e}")))?;
+    let messages = vec![
+        ene_provider::LlmMessage::System {
+            content: system_prompt,
+        },
+        ene_provider::LlmMessage::User {
+            parts: vec![ene_provider::UserMessagePart::Text { text: user_prompt }],
+        },
+    ];
 
-    let response = client
-        .chat()
-        .create(request)
+    let content = provider
+        .chat_completion(&messages, Some(schema))
         .await
         .map_err(|e| MemoryError::ApiRequestError(format!("summarization: {e}")))?;
-
-    let content = response
-        .choices
-        .first()
-        .and_then(|c| c.message.content.as_deref())
-        .unwrap_or("")
-        .trim()
-        .to_string();
 
     parse_summary_json(&content)
 }

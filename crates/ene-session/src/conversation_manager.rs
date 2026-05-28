@@ -1,11 +1,27 @@
+use crate::Role;
 use crate::error::SessionError;
-use async_openai::types::chat::Role;
 use chrono::{DateTime, Utc};
-use ene_embedding::{EmbeddingProvider, cosine_similarity};
 use ene_memory as summarizer;
 use ene_memory::{KeyFact, MemoryStore};
+use ene_provider::EmbeddingProvider;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+
+/// Compute cosine similarity between two vectors.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
+}
+
+// ... rest of file unchanged ...
 
 /// Represents whether a session should continue or split.
 #[derive(Debug)]
@@ -80,12 +96,8 @@ pub struct SplitTaskInput {
     pub user_input: String,
     /// Session configuration.
     pub session_config: crate::SessionConfig,
-    /// Model used for summarization.
-    pub summarization_model: String,
-    /// Base URL for summarization API.
-    pub summarization_base_url: String,
-    /// API key for the provider.
-    pub api_key: String,
+    /// The provider used for summarization.
+    pub provider: Arc<dyn ene_provider::LlmProvider>,
     /// Conversation history.
     pub history: Vec<(Role, String)>,
     /// Current session ID.
@@ -212,9 +224,7 @@ pub async fn execute_split(
     user_name: &str,
     store: &Arc<MemoryStore>,
     embedder: &Arc<dyn EmbeddingProvider>,
-    model: &str,
-    base_url: &str,
-    api_key: &str,
+    provider: &dyn ene_provider::LlmProvider,
     reason: SplitReason,
 ) -> Result<SplitResult, SessionError> {
     let ended_at = Utc::now();
@@ -232,11 +242,27 @@ pub async fn execute_split(
 
     let existing_facts = store.get_all_keyfacts(card_name).unwrap_or_default();
 
+    let provider_messages: Vec<ene_provider::LlmMessage> = history
+        .iter()
+        .map(|(role, content)| match role {
+            Role::User => ene_provider::LlmMessage::User {
+                parts: vec![ene_provider::UserMessagePart::Text {
+                    text: content.clone(),
+                }],
+            },
+            Role::Assistant => ene_provider::LlmMessage::Assistant {
+                content: Some(content.clone()),
+                tool_calls: None,
+            },
+            Role::System => ene_provider::LlmMessage::System {
+                content: content.clone(),
+            },
+        })
+        .collect();
+
     let summary_result = summarizer::summarize_conversation(
-        model,
-        base_url,
-        api_key,
-        history,
+        provider,
+        &provider_messages,
         card_name,
         user_name,
         &existing_facts,
@@ -279,9 +305,7 @@ pub fn spawn_split_task(pending_split: &mut Option<PendingSplitTask>, input: Spl
             current_turn_count,
             user_input,
             session_config,
-            summarization_model,
-            summarization_base_url,
-            api_key,
+            provider,
             history,
             session_id,
             card_name,
@@ -309,9 +333,7 @@ pub fn spawn_split_task(pending_split: &mut Option<PendingSplitTask>, input: Spl
                     &user_name,
                     &store,
                     &embedder,
-                    &summarization_model,
-                    &summarization_base_url,
-                    &api_key,
+                    provider.as_ref(),
                     reason,
                 )
                 .await

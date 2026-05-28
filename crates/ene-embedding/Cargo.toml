@@ -2,13 +2,13 @@
 name = "ene-embedding"
 version = "0.1.0"
 edition = "2024"
-description = "Vector embedding providers — supports OpenAI-compatible API and local Candle/GGUF inference"
+description = "Vector embedding providers — supports local Candle/GGUF inference"
 
 [lib]
 crate-type = ["lib"]
 
 [dependencies]
-async-openai = { workspace = true }
+ene-provider = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
@@ -21,3 +21,4 @@ candle-nn = "0.10"
 tokenizers = "0.23"
 tracing = { workspace = true }
 ene-config = { workspace = true }
+

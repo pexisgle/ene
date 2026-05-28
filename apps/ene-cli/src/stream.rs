@@ -3,7 +3,8 @@ use ene_core::{ConversationSession, stream::EneStreamEvent, truncate};
 use std::io::{self, Write};
 use tokio_stream::StreamExt;
 
-#[allow(dead_code)]
+/// Processes an AI event stream, formatting and printing events in real-time,
+/// and updating the conversation session history.
 pub async fn process_stream<S>(stream: S, session: &mut ConversationSession)
 where
     S: futures_core::Stream<Item = EneStreamEvent>,

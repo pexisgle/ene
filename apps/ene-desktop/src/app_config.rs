@@ -392,9 +392,7 @@ impl CharacterSettings {
                     .cloned()
                     .and_then(|v| serde_json::from_value::<CharacterPerConfig>(v).ok())
             })
-            .or_else(|| {
-                serde_json::from_str::<CharacterPerConfig>(&json).ok()
-            });
+            .or_else(|| serde_json::from_str::<CharacterPerConfig>(&json).ok());
 
         match per {
             Some(per) => {
@@ -478,9 +476,7 @@ impl CharacterSettings {
         }
 
         // Graphics settings
-        let desktop_cfg = full
-            .get_section::<DesktopSection>()
-            .unwrap_or_default();
+        let desktop_cfg = full.get_section::<DesktopSection>().unwrap_or_default();
         self.graphics = desktop_cfg.graphics;
 
         self.clamp_runtime_values();

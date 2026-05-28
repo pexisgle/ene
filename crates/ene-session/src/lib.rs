@@ -52,6 +52,17 @@ pub use ene_config::{
 };
 /// Session error type.
 pub use error::SessionError;
+/// Represents the role of a message author in conversation history.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum Role {
+    /// System instruction or context.
+    System,
+    /// Human user prompt.
+    User,
+    /// AI assistant response.
+    Assistant,
+}
+
 /// Central session holder.
 pub use session::ConversationSession;
 /// Emotion-token parsing utilities.

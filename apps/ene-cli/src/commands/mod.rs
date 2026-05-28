@@ -2,7 +2,7 @@ mod memory;
 mod session;
 
 use crate::{context::AppContext, style};
-use ene_core::{EmbeddingConfig, MemoryConfig, SessionConfig};
+use ene_core::{MemoryConfig, SessionConfig};
 
 pub async fn execute(input: &str, ctx: &mut AppContext) {
     let parts: Vec<&str> = input.splitn(2, ' ').collect();
@@ -54,10 +54,7 @@ fn handle_prompt(ctx: &AppContext) {
             println!("----------------------------------------------------");
         }
 
-        let mem_config = ctx
-            .config
-            .get_section::<MemoryConfig>()
-            .unwrap_or_default();
+        let mem_config = ctx.config.get_section::<MemoryConfig>().unwrap_or_default();
         let session_config = ctx
             .config
             .get_section::<SessionConfig>()
@@ -153,14 +150,8 @@ fn handle_card(arg: &str, ctx: &mut AppContext) {
 }
 
 fn handle_config(ctx: &AppContext) {
-    let mem_config = ctx
-        .config
-        .get_section::<MemoryConfig>()
-        .unwrap_or_default();
-    let embed_config = ctx
-        .config
-        .get_section::<EmbeddingConfig>()
-        .unwrap_or_default();
+    let mem_config = ctx.config.get_section::<MemoryConfig>().unwrap_or_default();
+
     let session_config = ctx
         .config
         .get_section::<SessionConfig>()
@@ -181,7 +172,23 @@ fn handle_config(ctx: &AppContext) {
         .unwrap_or_default();
     println!("Tool Calling: {}", tool_config.tool_calling_enabled);
     println!("Memory Enabled: {}", mem_config.enabled);
-    println!("Embedding Model: {}", embed_config.model);
+    println!("Embedding Backend: {}", provider_config.embedding_backend);
+    match provider_config.embedding_backend.as_str() {
+        "local" => {
+            let local_emb = ene_core::ProviderConfig::local_embedding(&ctx.config);
+            println!("Local Embedding Model: {}", local_emb.model);
+        }
+        _ => {
+            println!(
+                "Cloud Embedding Model: {}",
+                provider_config.cloud_embedding_model
+            );
+            println!(
+                "Cloud Embedding Dims: {}",
+                provider_config.cloud_embedding_dimensions
+            );
+        }
+    }
     if mem_config.enabled {
         println!(
             "Memory DB: {}",

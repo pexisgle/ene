@@ -25,8 +25,9 @@ pub enum MemoryError {
     #[error("Configuration error: {0}")]
     Config(String),
     /// Embedding error.
-    #[error(transparent)]
-    Embedding(#[from] ene_embedding::error::EmbeddingError),
+    #[error("Embedding error: {0}")]
+    Embedding(String),
+
     /// Catch-all error variant.
     #[error("Other error: {0}")]
     Other(String),

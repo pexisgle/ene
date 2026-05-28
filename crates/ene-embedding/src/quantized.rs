@@ -8,6 +8,7 @@ mod rotary;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use async_trait::async_trait;
 use candle_core::{Device, Tensor};
 use tokenizers::Tokenizer;
 
@@ -105,12 +106,9 @@ impl GgufEmbeddingProvider {
     }
 }
 
-use super::EmbeddingProvider;
-use async_trait::async_trait;
-
 #[async_trait]
-impl EmbeddingProvider for GgufEmbeddingProvider {
-    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
+impl ene_provider::EmbeddingProvider for GgufEmbeddingProvider {
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
         if text.trim().is_empty() {
             return Ok(vec![0.0; self.dims]);
         }
@@ -119,7 +117,9 @@ impl EmbeddingProvider for GgufEmbeddingProvider {
 
         tokio::task::block_in_place(|| {
             let start = Instant::now();
-            let result = self.embed_internal(&owned, "Document: ");
+            let result = self
+                .embed_internal(&owned, "Document: ")
+                .map_err(|e| e.to_string());
             let elapsed = start.elapsed();
             if result.is_ok() {
                 tracing::debug!(
@@ -133,7 +133,7 @@ impl EmbeddingProvider for GgufEmbeddingProvider {
         })
     }
 
-    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, String> {
         if text.trim().is_empty() {
             return Ok(vec![0.0; self.dims]);
         }
@@ -142,7 +142,9 @@ impl EmbeddingProvider for GgufEmbeddingProvider {
 
         tokio::task::block_in_place(|| {
             let start = Instant::now();
-            let result = self.embed_internal(&owned, "Query: ");
+            let result = self
+                .embed_internal(&owned, "Query: ")
+                .map_err(|e| e.to_string());
             let elapsed = start.elapsed();
             if result.is_ok() {
                 tracing::debug!(

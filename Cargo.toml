@@ -5,6 +5,7 @@ members = [
     "crates/ene-embedding",
     "crates/ene-memory",
     "crates/ene-session",
+    "crates/ene-provider",
     "crates/ene-tool-*",
     "crates/ene-tools/*",
     "apps/*",
@@ -38,7 +39,6 @@ async-openai = { version = "0.40.2", features = [
 figment = { version = "0.10", features = ["json", "env"] }
 schemars = { version = "0.8", features = ["preserve_order"] }
 ctor = "0.2"
-keyring = "3.2.1"
 
 # --- Internal libraries ---
 ene-config = { path = "crates/ene-config" }
@@ -46,6 +46,7 @@ ene-core = { path = "crates/ene-core" }
 ene-embedding = { path = "crates/ene-embedding" }
 ene-memory = { path = "crates/ene-memory" }
 ene-session = { path = "crates/ene-session" }
+ene-provider = { path = "crates/ene-provider" }
 ene-tool-host = { path = "crates/ene-tool-host" }
 ene-tool-proto = { path = "crates/ene-tool-proto" }
 ene-tools-common = { path = "crates/ene-tools/common" }

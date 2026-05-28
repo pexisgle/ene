@@ -1,0 +1,20 @@
+[package]
+name = "ene-provider"
+version = "0.1.0"
+edition = "2024"
+description = "Pluggable LLM Provider trait and built-in implementations for the ene platform"
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+async-openai = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+ene-config = { workspace = true }
+ene-tool-proto = { workspace = true }
+

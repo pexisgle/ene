@@ -8,8 +8,6 @@ Interactive REPL for chatting with AI characters, testing tools, and managing me
 cargo run -p ene-cli
 # With tool test mode:
 cargo run -p ene-cli -- --tooltest
-# Set API key (stores in OS keyring):
-cargo run -p ene-cli -- --set-api-key
 ```
 
 ## REPL Commands
