@@ -1,0 +1,10 @@
+[package]
+name = "ene-common"
+version = "0.1.0"
+edition = "2024"
+description = "Shared utilities, error types, and ID newtypes for the ene workspace"
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
