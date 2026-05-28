@@ -2,37 +2,47 @@ use dashmap::DashMap;
 use ene_tool_proto::{ToolCategory, ToolDefinition};
 use serde::{Deserialize, Serialize};
 
+/// A single todo item with content, status, and priority.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodoItem {
+    /// Brief description of the task.
     pub content: String,
+    /// Current status: `pending`, `in_progress`, `completed`, or `cancelled`.
     pub status: String,
+    /// Priority level: `high`, `medium`, or `low`.
     pub priority: String,
 }
 
+/// Session-scoped todo list store backed by a `DashMap`.
 #[derive(Default)]
 pub struct TodoStore {
     lists: DashMap<String, Vec<TodoItem>>,
 }
 
 impl TodoStore {
+    /// Creates a new empty `TodoStore`.
     pub fn new() -> Self {
         Self {
             lists: DashMap::new(),
         }
     }
 
+    /// Replaces the todo list for the given session.
     pub fn update(&self, session_id: &str, todos: Vec<TodoItem>) {
         self.lists.insert(session_id.to_string(), todos);
     }
 
+    /// Returns the todo list for the given session, if any.
     pub fn get(&self, session_id: &str) -> Option<Vec<TodoItem>> {
         self.lists.get(session_id).map(|v| v.clone())
     }
 
+    /// Removes the todo list for the given session.
     pub fn clear(&self, session_id: &str) {
         self.lists.remove(session_id);
     }
 
+    /// Formats the todo list for a session into a human-readable string.
     pub fn format_list(&self, session_id: &str) -> String {
         match self.get(session_id) {
             Some(items) => {
@@ -62,6 +72,7 @@ impl TodoStore {
     }
 }
 
+/// Returns the `ToolDefinition` for the todo tool.
 pub fn tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "todo".to_string(),
@@ -93,6 +104,7 @@ pub fn tool_definition() -> ToolDefinition {
     }
 }
 
+/// Updates the todo list for a session and returns a formatted summary.
 pub fn update_todos(store: &TodoStore, session_id: &str, todos: Vec<TodoItem>) -> String {
     let pending = todos.iter().filter(|x| x.status != "completed").count();
     store.update(session_id, todos.clone());

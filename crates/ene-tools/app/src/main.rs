@@ -1,3 +1,9 @@
+//! # ene-tools-app
+//!
+//! IPC tool binary providing desktop application control:
+//! window management, input simulation, and portal overlay.
+#![warn(missing_docs)]
+
 mod actions;
 mod portal;
 mod provider;

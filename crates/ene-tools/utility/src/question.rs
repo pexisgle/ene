@@ -1,5 +1,6 @@
 use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
 
+/// Returns the `ToolDefinition` for the question tool.
 pub fn tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "question".to_string(),
@@ -23,6 +24,7 @@ pub fn tool_definition() -> ToolDefinition {
     }
 }
 
+/// Asks the user clarifying questions and returns a formatted prompt.
 pub fn question(questions: Vec<String>) -> Result<String, ToolError> {
     if questions.is_empty() {
         return Err(ToolError::InvalidArguments {
