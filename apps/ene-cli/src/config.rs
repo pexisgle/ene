@@ -4,9 +4,9 @@ use ene_core::{EneRuntime, MemoryConfig};
 pub async fn init() -> EneRuntime {
     let _assets_dir = ene_config::ensure_resource_dirs();
 
-    let mut settings = ene_config::load_settings();
-    let provider = settings
-        .get_section::<ene_core::ProviderSettings>("provider")
+    let mut config = ene_config::load_config();
+    let provider = config
+        .get_section::<ene_core::ProviderConfig>("provider")
         .unwrap_or_default();
 
     if !provider.api_key.trim().is_empty() && provider.api_key_source != "keyring" {
@@ -47,8 +47,8 @@ pub async fn init() -> EneRuntime {
                             let mut new_provider = provider.clone();
                             new_provider.api_key = String::new(); // clear plain text
                             new_provider.api_key_source = "keyring".to_string();
-                            let _ = settings.set_section("provider", &new_provider);
-                            if let Err(e) = ene_config::save_full_settings(&settings) {
+                            let _ = config.set_section("provider", &new_provider);
+                            if let Err(e) = ene_config::save_full_config(&config) {
                                 eprintln!(
                                     "{}",
                                     style::warning(format!(
@@ -88,7 +88,7 @@ pub async fn init() -> EneRuntime {
 
     match EneRuntime::init().await {
         Ok(mut runtime) => {
-            if let Err(e) = runtime.apply_settings(settings).await {
+            if let Err(e) = runtime.config().apply(config).await {
                 eprintln!(
                     "{}",
                     style::warning(format!(
@@ -96,18 +96,28 @@ pub async fn init() -> EneRuntime {
                         e
                     ))
                 );
-                let empty_settings = ene_config::load_settings();
+                let empty_config = ene_config::load_config();
                 runtime
-                    .apply_settings(empty_settings)
+                    .config()
+                    .apply(empty_config)
                     .await
                     .expect("Failed to initialize fallback runtime");
+            }
+            if let Err(e) = runtime.character().load() {
+                eprintln!(
+                    "{}",
+                    style::warning(format!(
+                        "[Runtime] Warning: Failed to load character: {}",
+                        e
+                    ))
+                );
             }
             println!(
                 "{}",
                 style::header("[Runtime] Unified AI Runtime initialized successfully.")
             );
             let mem_config = runtime
-                .settings
+                .config
                 .get_section::<MemoryConfig>("memory")
                 .unwrap_or_default();
             if mem_config.enabled {
@@ -130,14 +140,25 @@ pub async fn init() -> EneRuntime {
                     e
                 ))
             );
-            let empty_settings = ene_config::load_settings();
+
+            let empty_config = ene_config::load_config();
             let mut runtime = EneRuntime::init()
                 .await
                 .expect("Failed to initialize fallback runtime");
             runtime
-                .apply_settings(empty_settings)
+                .config()
+                .apply(empty_config)
                 .await
-                .expect("Failed to apply fallback settings");
+                .expect("Failed to apply fallback config");
+            if let Err(e) = runtime.character().load() {
+                eprintln!(
+                    "{}",
+                    style::warning(format!(
+                        "[Runtime] Warning: Failed to load character: {}",
+                        e
+                    ))
+                );
+            }
             runtime
         }
     }

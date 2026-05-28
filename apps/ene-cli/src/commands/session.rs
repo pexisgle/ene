@@ -32,7 +32,7 @@ fn handle_info(ctx: &AppContext) {
         ctx.session.history.conversation_history.len()
     );
     let session_config = ctx
-        .settings
+        .config
         .get_section::<SessionConfig>("session")
         .unwrap_or_default();
     println!("Auto-split: {}", session_config.auto_session_split);
@@ -69,20 +69,20 @@ async fn handle_split(ctx: &mut AppContext) {
         &ctx.session.history.conversation_history,
         &ctx.session.memory.session_id,
         ctx.session.card_name(),
-        &ctx.settings.user_name,
+        &ctx.config.user_name,
         store,
         embedder,
-        &ctx.settings
+        &ctx.config
             .get_section::<ene_memory::MemoryConfig>("memory")
             .unwrap_or_default()
             .resolve_summarization_model(),
-        &ctx.settings
+        &ctx.config
             .get_section::<ene_memory::MemoryConfig>("memory")
             .unwrap_or_default()
             .resolve_summarization_base_url()
             .unwrap_or_default(),
-        &ctx.settings
-            .get_section::<ene_core::ProviderSettings>("provider")
+        &ctx.config
+            .get_section::<ene_core::ProviderConfig>("provider")
             .unwrap_or_default()
             .resolve_api_key(),
         reason,

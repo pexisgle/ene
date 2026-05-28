@@ -94,7 +94,7 @@ pub fn render_ai_page(
             let mut provider_config = settings
                 .ai
                 .ai
-                .get_section::<ene_core::ProviderSettings>("provider")
+                .get_section::<ene_core::ProviderConfig>("provider")
                 .unwrap_or_default();
             let mut current_source = provider_config.api_key_source.clone();
             egui::ComboBox::from_id_salt("api_key_source")
