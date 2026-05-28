@@ -22,3 +22,4 @@ tracing = { workspace = true }
 
 ene-common = { workspace = true }
 ene-config = { workspace = true }
+ctor = { workspace = true }

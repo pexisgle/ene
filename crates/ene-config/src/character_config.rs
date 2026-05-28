@@ -19,7 +19,7 @@ crate::define_config!(
 
 /// Generates the JSON representation of the CharacterPerConfig JSON Schema
 pub fn generate_character_schema_json() -> Result<String, serde_json::Error> {
-    let schema_gen = schemars::r#gen::SchemaSettings::draft07().into_generator();
+    let schema_gen = schemars::SchemaGenerator::default();
     let root_schema = schema_gen.into_root_schema_for::<CharacterPerConfig>();
     serde_json::to_string_pretty(&root_schema)
 }

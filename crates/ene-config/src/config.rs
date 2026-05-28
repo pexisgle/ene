@@ -1,6 +1,5 @@
 use crate::error::ConfigError;
 use schemars::JsonSchema;
-use schemars::schema::Schema;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -65,7 +64,7 @@ pub fn get_global_section_by_key<T: serde::de::DeserializeOwned + Default>(key: 
 /// A registered config schema entry.
 pub struct SchemaEntry {
     /// The JSON Schema definition for this config section.
-    pub schema: schemars::schema::RootSchema,
+    pub schema: schemars::Schema,
     /// Optional parent key under which this schema should be nested at merge time.
     pub parent: Option<String>,
 }
@@ -85,10 +84,9 @@ pub fn register_schema<T: JsonSchema>(key: &str) {
 
 /// Registers schemas collected from tools at runtime
 pub fn register_runtime_schema(key: &str, schema: serde_json::Value, parent: Option<String>) {
-    use schemars::schema::RootSchema;
-    let root_schema: RootSchema = serde_json::from_value(schema).unwrap_or_else(|e| {
+    let root_schema: schemars::Schema = serde_json::from_value(schema).unwrap_or_else(|e| {
         tracing::error!("Failed to parse runtime schema for '{}': {}", key, e);
-        RootSchema::default()
+        schemars::Schema::default()
     });
     let registry = RUNTIME_SCHEMA_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     if let Ok(mut reg) = registry.lock() {
@@ -108,7 +106,7 @@ pub fn register_schema_with_parent<T: JsonSchema>(key: &str, parent: &str) {
 }
 
 fn register_schema_inner<T: JsonSchema>(key: &str, parent: Option<String>) {
-    let schema_gen = schemars::r#gen::SchemaSettings::draft07().into_generator();
+    let schema_gen = schemars::SchemaGenerator::default();
     let schema = schema_gen.into_root_schema_for::<T>();
     let registry = SCHEMA_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     if let Ok(mut reg) = registry.lock() {
@@ -117,34 +115,43 @@ fn register_schema_inner<T: JsonSchema>(key: &str, parent: Option<String>) {
 }
 
 fn merge_child_into_parent(
-    root_schema: &mut schemars::schema::RootSchema,
+    root_schema: &mut schemars::Schema,
     parent_key: &str,
-    child_schema: &schemars::schema::RootSchema,
+    child_schema: &schemars::Schema,
 ) {
-    let child_props = match child_schema.schema.object {
-        Some(ref ov) => ov.properties.clone(),
-        None => return,
+    let child_props = child_schema
+        .get("properties")
+        .and_then(|v| v.as_object())
+        .cloned();
+    let child_props = match child_props {
+        Some(p) if !p.is_empty() => p,
+        _ => return,
     };
-    if child_props.is_empty() {
-        return;
-    }
 
-    // Try definitions first (e.g. "ToolEntry")
-    if let Some(def) = root_schema.definitions.get_mut(parent_key) {
-        if let Schema::Object(schema_obj) = def {
-            if let Some(ov) = schema_obj.object.as_mut() {
-                ov.properties.extend(child_props);
+    // Try $defs first (e.g. "ToolEntry")
+    if let Some(defs) = root_schema.get_mut("$defs").and_then(|v| v.as_object_mut()) {
+        if let Some(def) = defs.get_mut(parent_key) {
+            if let Some(def_props) = def.get_mut("properties").and_then(|v| v.as_object_mut()) {
+                for (k, v) in &child_props {
+                    def_props.insert(k.clone(), v.clone());
+                }
                 return;
             }
         }
     }
 
     // Fall back to root-level property
-    if let Some(ov) = root_schema.schema.object.as_mut() {
-        if let Some(parent) = ov.properties.get_mut(parent_key) {
-            if let Schema::Object(parent_obj) = parent {
-                if let Some(parent_ov) = parent_obj.object.as_mut() {
-                    parent_ov.properties.extend(child_props);
+    if let Some(root_obj) = root_schema.as_object_mut() {
+        if let Some(parent_val) = root_obj
+            .get_mut("properties")
+            .and_then(|v| v.get_mut(parent_key))
+        {
+            if let Some(parent_props) = parent_val
+                .get_mut("properties")
+                .and_then(|v| v.as_object_mut())
+            {
+                for (k, v) in child_props {
+                    parent_props.insert(k, v);
                 }
             }
         }
@@ -236,23 +243,32 @@ impl EneConfig {
 }
 
 fn apply_registry_to_schema(
-    root_schema: &mut schemars::schema::RootSchema,
+    root_schema: &mut schemars::Schema,
     registry: &HashMap<String, SchemaEntry>,
 ) {
     // First pass: insert entries without parents and collect all definitions
     for (key, entry) in registry.iter() {
         if entry.parent.is_none() {
-            if let Some(object) = &mut root_schema.schema.object {
-                object.properties.insert(
-                    key.clone(),
-                    schemars::schema::Schema::Object(entry.schema.schema.clone()),
-                );
+            if let Some(root_obj) = root_schema.as_object_mut() {
+                let props = root_obj
+                    .entry("properties".to_string())
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(props_obj) = props.as_object_mut() {
+                    props_obj.insert(key.clone(), entry.schema.clone().into());
+                }
             }
         }
-        for (def_name, def_schema) in &entry.schema.definitions {
-            root_schema
-                .definitions
-                .insert(def_name.clone(), def_schema.clone());
+        // Copy $defs from child schema into root schema
+        if let Some(child_defs) = entry.schema.get("$defs").and_then(|v| v.as_object()) {
+            let root_defs = root_schema
+                .ensure_object()
+                .entry("$defs".to_string())
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(root_defs_obj) = root_defs.as_object_mut() {
+                for (def_name, def_schema) in child_defs {
+                    root_defs_obj.insert(def_name.clone(), def_schema.clone());
+                }
+            }
         }
     }
     // Second pass: merge entries that have parents
@@ -265,7 +281,7 @@ fn apply_registry_to_schema(
 
 /// Generates the JSON representation of the JSON Schema
 pub fn generate_schema_json() -> Result<String, serde_json::Error> {
-    let schema_gen = schemars::r#gen::SchemaSettings::draft07().into_generator();
+    let schema_gen = schemars::SchemaGenerator::default();
     let mut root_schema = schema_gen.into_root_schema_for::<EneConfig>();
 
     if let Some(registry) = SCHEMA_REGISTRY.get() {
@@ -395,7 +411,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use schemars::schema::Schema;
 
     crate::define_config!(
         "dummy_test_config",
@@ -430,31 +445,35 @@ mod tests {
     fn test_parent_merge() {
         // Test that merge_child_into_parent merges properties into a definition
         let child_schema = {
-            let g = schemars::r#gen::SchemaSettings::draft07().into_generator();
+            let g = schemars::SchemaGenerator::default();
             g.into_root_schema_for::<ChildTestConfig>()
         };
 
         let mut parent_schema = {
-            let g = schemars::r#gen::SchemaSettings::draft07().into_generator();
+            let g = schemars::SchemaGenerator::default();
             let mut schema = g.into_root_schema_for::<DummyTestConfig>();
             // Add a dummy ParentDef definition to test against
-            let def_schema = Schema::Object(schemars::schema::SchemaObject {
-                object: Some(Box::new(schemars::schema::ObjectValidation::default())),
-                ..Default::default()
+            let def_schema = schemars::json_schema!({
+                "type": "object",
+                "properties": {}
             });
-            schema
-                .definitions
-                .insert("ParentDef".to_string(), def_schema);
+            let defs = schema
+                .ensure_object()
+                .entry("$defs".to_string())
+                .or_insert_with(|| serde_json::json!({}));
+            defs.as_object_mut()
+                .unwrap()
+                .insert("ParentDef".to_string(), def_schema.into());
             schema
         };
 
         merge_child_into_parent(&mut parent_schema, "ParentDef", &child_schema);
 
-        let parent_def = parent_schema.definitions.get("ParentDef").unwrap();
-        let child_props = match parent_def {
-            Schema::Object(obj) => obj.object.as_ref().map(|o| &o.properties),
-            _ => None,
-        };
+        let parent_def = parent_schema
+            .get("$defs")
+            .and_then(|v| v.get("ParentDef"))
+            .unwrap();
+        let child_props = parent_def.get("properties").and_then(|v| v.as_object());
         assert!(child_props.is_some(), "ParentDef should have properties");
         assert!(
             child_props.unwrap().contains_key("child_field"),

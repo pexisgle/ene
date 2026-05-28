@@ -7,6 +7,7 @@ description = "Bevy-based desktop GUI application with VRM character rendering, 
 [dependencies]
 ene-core = { workspace = true }
 ene-config = { workspace = true }
+ctor = { workspace = true }
 bevy = "0.18.1"
 bevy_egui = "0.39.1"
 bevy_vrm1 = "0.7.1"
