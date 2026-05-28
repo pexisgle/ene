@@ -31,14 +31,17 @@
 //!     let mut runtime = EneRuntime::init().await?;
 //!
 //!     // 2. Load workspace settings and initialize subsystems
-//!     runtime.load_settings().await?;
+//!     runtime.config().load().await?;
 //!
-//!     // 3. Run the AI agent stream with tool support
+//!     // 3. Load the character card (default from config)
+//!     runtime.character().load()?;
+//!
+//!     // 4. Run the AI agent stream with tool support
 //!     let user_input = "Hello, what tools can you use?";
 //!     let stream = runtime.run(user_input).await?;
 //!     tokio::pin!(stream);
 //!
-//!     // 4. Consume events dynamically (e.g., streaming text, tool executions)
+//!     // 5. Consume events dynamically (e.g., streaming text, tool executions)
 //!     while let Some(event) = stream.next().await {
 //!         match event {
 //!             EneStreamEvent::TextDelta(delta) => print!("{}", delta),
@@ -76,8 +79,8 @@ pub mod runtime;
 /// AI streaming engine and tool-call loop.
 pub mod stream;
 
-/// OpenAI-compatible provider settings.
-pub use config::ProviderSettings;
+/// OpenAI-compatible provider config.
+pub use config::ProviderConfig;
 
 /// Embedding types (re-exported from `ene-embedding`).
 pub use ene_embedding::{EmbeddingConfig, EmbeddingProviderType};
@@ -98,7 +101,7 @@ pub use ene_tool_host::{
 /// Core AI error type.
 pub use error::EneCoreError;
 /// Runtime and tool-registry builder.
-pub use runtime::{EneRuntime, build_tool_registry};
+pub use runtime::{CharacterHandle, ConfigHandle, EneRuntime, build_tool_registry};
 /// Streaming event type and entry-point.
 pub use stream::{
     EneStreamEvent, PermissionDecision, register_permission_request, run_ene_with_tools,
