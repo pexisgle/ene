@@ -1,5 +1,8 @@
 use crate::transport::{IpcListener, cleanup_path};
-use crate::{IpcRequest, IpcResponse, IPC_PROTOCOL_VERSION, ToolProvider, read_ipc_request, write_ipc_response};
+use crate::{
+    IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, ToolProvider, read_ipc_request,
+    write_ipc_response,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 
