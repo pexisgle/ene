@@ -8,14 +8,14 @@ description = "Chromium browser automation via Chrome DevTools Protocol: navigat
 ene-tool-proto = { workspace = true }
 ene-tools-common = { workspace = true }
 chromiumoxide = "0.9"
-base64 = "0.22"
-dashmap = "6"
+base64 = { workspace = true }
+dashmap = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 async-trait = { workspace = true }
-uuid = { version = "1", features = ["v4"] }
+uuid = { workspace = true }
 regex = { workspace = true }
 
 [[bin]]
