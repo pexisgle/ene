@@ -21,6 +21,19 @@ pub enum PermissionDecision {
     Deny,
 }
 
+/// Configuration for tool RAG (retrieval-augmented generation) filtering.
+#[derive(Debug, Clone)]
+pub struct ToolRagConfig {
+    /// Whether tool calling is enabled at all.
+    pub tool_calling_enabled: bool,
+    /// Whether RAG-based tool filtering is enabled.
+    pub tool_rag_enabled: bool,
+    /// Maximum number of tools to return via RAG.
+    pub tool_rag_limit: usize,
+    /// Tool names that should always be included regardless of RAG.
+    pub tool_rag_always_include: Vec<String>,
+}
+
 /// Runs the full AI streaming completion loop with tool calling, memory
 /// retrieval, and session management. Sends events through the broadcast channel.
 pub(crate) async fn run_stream(
@@ -97,10 +110,12 @@ pub(crate) async fn run_stream(
         registry.as_ref(),
         &embedding_provider,
         &user_input,
-        tool_calling_enabled,
-        tool_rag_enabled,
-        tool_rag_limit,
-        &tool_rag_always_include,
+        &ToolRagConfig {
+            tool_calling_enabled,
+            tool_rag_enabled,
+            tool_rag_limit,
+            tool_rag_always_include,
+        },
     )
     .await;
 
@@ -223,19 +238,16 @@ pub async fn select_relevant_tools(
     registry: &dyn ene_tool_host::ToolRegistry,
     embedding_provider: &Option<Arc<dyn ene_provider::EmbeddingProvider>>,
     user_input: &str,
-    tool_calling_enabled: bool,
-    tool_rag_enabled: bool,
-    tool_rag_limit: usize,
-    tool_rag_always_include: &[String],
+    rag_config: &ToolRagConfig,
 ) -> Vec<ene_tool_host::ToolDefinition> {
-    if !tool_calling_enabled {
+    if !rag_config.tool_calling_enabled {
         return vec![];
     }
 
-    let relevant = if tool_rag_enabled {
+    let relevant = if rag_config.tool_rag_enabled {
         if let Some(embedder) = embedding_provider.as_ref() {
             registry
-                .select_tools(embedder.as_ref(), user_input, tool_rag_limit)
+                .select_tools(embedder.as_ref(), user_input, rag_config.tool_rag_limit)
                 .await
         } else {
             registry.list_tools()
@@ -244,12 +256,12 @@ pub async fn select_relevant_tools(
         registry.list_tools()
     };
 
-    if !tool_rag_always_include.is_empty() {
+    if !rag_config.tool_rag_always_include.is_empty() {
         let all_tools = registry.list_tools();
         let all_map: std::collections::HashMap<String, _> =
             all_tools.into_iter().map(|t| (t.name.clone(), t)).collect();
         let mut result = relevant;
-        for name in tool_rag_always_include {
+        for name in &rag_config.tool_rag_always_include {
             if !result.iter().any(|t| &t.name == name) {
                 if let Some(tool) = all_map.get(name) {
                     result.push(tool.clone());
