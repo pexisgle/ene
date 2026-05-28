@@ -6,6 +6,7 @@ description = "Interactive CLI REPL for chatting with AI characters, testing too
 
 [dependencies]
 ene-core = { workspace = true }
+ene-config = { workspace = true }
 ene-memory = { workspace = true }
 ene-tool-host = { workspace = true }
 tokio = { workspace = true }

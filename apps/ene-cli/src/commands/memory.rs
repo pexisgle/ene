@@ -1,13 +1,18 @@
 use crate::{context::AppContext, style};
 use ene_core::truncate;
 
-pub async fn execute(arg: &str, ctx: &mut AppContext) {
+pub async fn execute(arg: &str, ctx: &AppContext) {
     let parts: Vec<&str> = arg.splitn(2, ' ').collect();
     let subcmd = parts.first().copied().unwrap_or("");
 
+    let Ok(snapshot) = ctx.handle.get_snapshot().await else {
+        eprintln!("Failed to get actor state");
+        return;
+    };
+
     match subcmd {
-        "search" => handle_search(parts.get(1).copied().unwrap_or(""), ctx).await,
-        "list" => handle_list(ctx),
+        "search" => handle_search(parts.get(1).copied().unwrap_or(""), &snapshot).await,
+        "list" => handle_list(&snapshot),
         _ => {
             println!("Usage: /memory <search|list>");
             println!("  search <query> - Search memories by similarity");
@@ -16,45 +21,30 @@ pub async fn execute(arg: &str, ctx: &mut AppContext) {
     }
 }
 
-async fn handle_search(query: &str, ctx: &AppContext) {
+async fn handle_search(query: &str, snapshot: &ene_core::EneStateSnapshot) {
     if query.is_empty() {
-        println!(
-            "{}",
-            style::warning("[Memory] Usage: /memory search <query>")
-        );
+        println!("{}", style::warning("[Memory] Usage: /memory search <query>"));
         return;
     }
-    let Some(store) = &ctx.session.memory.memory_store else {
+    let Some(store) = &snapshot.memory_store else {
         println!("{}", style::warning("[Memory] Memory is not enabled."));
         return;
     };
-    let Some(embedder) = &ctx.session.memory.embedding_provider else {
-        println!(
-            "{}",
-            style::warning("[Memory] Embedding provider is not available.")
-        );
+    let Some(embedder) = &snapshot.embedding_provider else {
+        println!("{}", style::warning("[Memory] Embedding provider is not available."));
         return;
     };
-    println!(
-        "{}",
-        style::header(format!("[Memory] Searching query: {}", query))
-    );
+    println!("{}", style::header(format!("[Memory] Searching query: {}", query)));
     match embedder.embed_query(query).await {
         Ok(embedding) => {
-            let card_name = ctx.session.card_name();
+            let card_name = &snapshot.card_name;
             let threshold = 0.0f32;
             match store.search_summaries(&embedding, card_name, 10, threshold) {
                 Ok(results) => {
                     if results.is_empty() {
                         println!("{}", style::warning("[Memory] No matching memories found."));
                     } else {
-                        println!(
-                            "{}",
-                            style::success(format!(
-                                "[Memory] {} memories recalled:",
-                                results.len()
-                            ))
-                        );
+                        println!("{}", style::success(format!("[Memory] {} memories recalled:", results.len())));
                         for (i, recalled) in results.iter().enumerate() {
                             println!(
                                 "\n--- Memory #{} (similarity: {:.4}) ---",
@@ -62,10 +52,7 @@ async fn handle_search(query: &str, ctx: &AppContext) {
                                 recalled.similarity
                             );
                             println!("  Session ID: {}", recalled.entry.session_id);
-                            println!(
-                                "  Date: {}",
-                                recalled.entry.ended_at.format("%Y-%m-%d %H:%M")
-                            );
+                            println!("  Date: {}", recalled.entry.ended_at.format("%Y-%m-%d %H:%M"));
                             println!("  Summary: {}", recalled.entry.summary);
                         }
                     }
@@ -73,19 +60,16 @@ async fn handle_search(query: &str, ctx: &AppContext) {
                 Err(e) => println!("{}", style::error(format!("[Memory] Search error: {}", e))),
             }
         }
-        Err(e) => println!(
-            "{}",
-            style::error(format!("[Memory] Embedding error: {}", e))
-        ),
+        Err(e) => println!("{}", style::error(format!("[Memory] Embedding error: {}", e))),
     }
 }
 
-fn handle_list(ctx: &AppContext) {
-    let Some(store) = &ctx.session.memory.memory_store else {
+fn handle_list(snapshot: &ene_core::EneStateSnapshot) {
+    let Some(store) = &snapshot.memory_store else {
         println!("{}", style::warning("[Memory] Memory is not enabled."));
         return;
     };
-    let card_name = ctx.session.card_name();
+    let card_name = &snapshot.card_name;
     match store.list_recent_summaries(card_name, 50) {
         Ok(summaries) => {
             if summaries.is_empty() {

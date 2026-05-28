@@ -1,11 +1,14 @@
+use crate::actor::EneEvent;
 use crate::prompt_builder::build_messages;
-use async_stream::stream;
 use ene_config::EneConfig;
 use ene_memory::RecalledSummary;
 use ene_provider::{LlmMessage, LlmToolCall, LlmToolCallChunk, UserMessagePart};
 use ene_session::ConversationSession;
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio_stream::Stream;
+use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 
 /// Represents a user's permission decision for a destructive operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,98 +21,200 @@ pub enum PermissionDecision {
     Deny,
 }
 
-static PENDING_DECISIONS: std::sync::OnceLock<
-    std::sync::Mutex<
-        std::collections::HashMap<String, tokio::sync::oneshot::Sender<PermissionDecision>>,
-    >,
-> = std::sync::OnceLock::new();
+/// Runs the full AI streaming completion loop with tool calling, memory
+/// retrieval, and session management. Sends events through the broadcast channel.
+pub(crate) async fn run_stream(
+    config: &EneConfig,
+    session: &ConversationSession,
+    user_input: &str,
+    registry: Arc<dyn ene_tool_host::ToolRegistry>,
+    provider: Arc<dyn ene_provider::LlmProvider>,
+    event_tx: broadcast::Sender<EneEvent>,
+    cancel_token: CancellationToken,
+    pending_permissions: Arc<Mutex<HashMap<String, oneshot::Sender<PermissionDecision>>>>,
+) -> ConversationSession {
+    let mut session = session.clone();
+    session.reset_display_buffer();
 
-/// Registers a pending permission request that will be resolved when the user
-/// makes a decision.
-pub fn register_permission_request(
-    request_id: String,
-    tx: tokio::sync::oneshot::Sender<PermissionDecision>,
-) {
-    let map =
-        PENDING_DECISIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    if let Ok(mut guard) = map.lock() {
-        guard.insert(request_id, tx);
-    }
-}
+    let mem_config = config
+        .get_section::<ene_memory::MemoryConfig>()
+        .unwrap_or_default();
 
-/// Submits a user's permission decision for a pending request.
-pub fn submit_permission_decision(
-    request_id: &str,
-    decision: PermissionDecision,
-) -> Result<(), &'static str> {
-    let map =
-        PENDING_DECISIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    if let Ok(mut guard) = map.lock() {
-        if let Some(tx) = guard.remove(request_id) {
-            let _ = tx.send(decision);
-            Ok(())
-        } else {
-            Err("Request ID not found or already processed")
+    // 1. Fetch memory context
+    let (recalled_summaries, key_facts) = fetch_memory_context(&session, config).await;
+
+    // 2. Insert user log if memory enabled
+    if mem_config.enabled {
+        if let Some(store) = &session.memory.memory_store {
+            let session_id_log = session.memory.session_id.clone();
+            let card_name = session.card_name().to_string();
+            ene_memory::MemoryStore::spawn_insert_log(
+                store,
+                &session_id_log,
+                &card_name,
+                "user",
+                user_input,
+            );
         }
-    } else {
-        Err("Failed to lock global decision map")
     }
-}
 
-/// Events emitted during an AI streaming completion session.
-#[derive(Debug)]
-pub enum EneStreamEvent {
-    /// A chunk of generated text.
-    TextDelta(String),
-    /// A special token like `<|emo:happy|>`.
-    SpecialToken(String),
-    /// A tool call has been initiated.
-    ToolCallStart {
-        /// The name of the tool being called.
-        name: String,
-        /// The arguments passed to the tool.
-        arguments: String,
-    },
-    /// A tool call has completed with its result.
-    ToolCallResult {
-        /// The name of the tool that was called.
-        name: String,
-        /// The result returned by the tool.
-        result: String,
-    },
-    /// A destructive operation requires user permission.
-    PermissionRequired {
-        /// Unique identifier for the permission request.
-        request_id: String,
-        /// The action requesting permission.
-        action: String,
-        /// The target of the action (e.g. file path).
-        target: String,
-        /// Human-readable description of the action.
-        description: String,
-    },
-    /// Progress update for a background task.
-    TaskProgress {
-        /// Unique identifier for the task.
-        task_id: String,
-        /// Current step number.
-        step: usize,
-        /// Total number of steps.
-        total_steps: usize,
-        /// Description of the current step.
-        description: String,
-    },
-    /// The session has been split with a new summary.
-    SessionSplit {
-        /// The generated conversation summary.
-        summary: String,
-        /// The reason the session was split.
-        reason: String,
-    },
-    /// The AI stream has completed.
-    Finished,
-    /// An error occurred during streaming.
-    Error(String),
+    // 3. Build initial messages
+    let mut messages = match build_chat_messages_list(
+        &session, config, user_input, &recalled_summaries, &key_facts,
+    ) {
+        Ok(msgs) => msgs,
+        Err(e) => {
+            let _ = event_tx.send(EneEvent::Error {
+                message: e.to_string(),
+            });
+            let _ = event_tx.send(EneEvent::Finished);
+            return session;
+        }
+    };
+
+    let memory_enabled = mem_config.enabled;
+    let mem_store = if memory_enabled {
+        session.memory.memory_store.clone()
+    } else {
+        None
+    };
+    let card_name = session.card_name().to_string();
+    let session_id = session.memory.session_id.clone();
+    let user_input = user_input.to_string();
+    let tool_config = config
+        .get_section::<ene_tool_host::ToolConfig>()
+        .unwrap_or_default();
+    let tool_calling_enabled = tool_config.tool_calling_enabled;
+    let max_rounds = tool_config.max_tool_call_rounds;
+    let session_id_for_tools = session.memory.session_id.clone();
+    let tool_rag_enabled = mem_config.tool_rag_enabled;
+    let tool_rag_limit = mem_config.tool_rag_limit;
+    let tool_rag_always_include = mem_config.tool_rag_always_include.clone();
+    let embedding_provider = session.memory.embedding_provider.clone();
+
+    // 4. Select relevant tools
+    let tools = select_relevant_tools(
+        registry.as_ref(),
+        &embedding_provider,
+        &user_input,
+        tool_calling_enabled,
+        tool_rag_enabled,
+        tool_rag_limit,
+        &tool_rag_always_include,
+    )
+    .await;
+
+    let mut round = 0usize;
+
+    loop {
+        if cancel_token.is_cancelled() {
+            return session;
+        }
+
+        if round >= max_rounds as usize {
+            let _ = event_tx.send(EneEvent::Error {
+                message: "Max tool call rounds exceeded".to_string(),
+            });
+            let _ = event_tx.send(EneEvent::Finished);
+            return session;
+        }
+
+        let mut stream = match provider.create_chat_stream(&messages, &tools).await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = event_tx.send(EneEvent::Error {
+                    message: e.to_string(),
+                });
+                let _ = event_tx.send(EneEvent::Finished);
+                return session;
+            }
+        };
+
+        let mut current_tool_calls: Vec<LlmToolCallChunk> = Vec::new();
+        let mut assistant_content = String::new();
+
+        while let Some(chunk_res) = stream.next().await {
+            if cancel_token.is_cancelled() {
+                let _ = event_tx.send(EneEvent::Finished);
+                return session;
+            }
+
+            match chunk_res {
+                Ok(chunk) => {
+                    if let Some(content_delta) = &chunk.text_delta {
+                        assistant_content.push_str(content_delta);
+                        let (text_deltas, special_tokens) =
+                            session.process_delta(content_delta);
+                        for text in text_deltas {
+                            let _ = event_tx.send(EneEvent::TextDelta { delta: text });
+                        }
+                        for token in special_tokens {
+                            let _ =
+                                event_tx.send(EneEvent::SpecialToken { token });
+                        }
+                    }
+
+                    if let Some(tool_calls_delta) = &chunk.tool_calls_delta {
+                        accumulate_tool_calls(&mut current_tool_calls, tool_calls_delta);
+                    }
+                }
+                Err(e) => {
+                    let _ = event_tx.send(EneEvent::Error {
+                        message: e.to_string(),
+                    });
+                    let _ = event_tx.send(EneEvent::Finished);
+                    return session;
+                }
+            }
+        }
+
+        if current_tool_calls.is_empty() {
+            // No tool calls - stream is done
+            if !assistant_content.is_empty() {
+                if let Some(store) = &mem_store {
+                    ene_memory::MemoryStore::spawn_insert_log(
+                        store,
+                        &session_id,
+                        &card_name,
+                        "assistant",
+                        &assistant_content,
+                    );
+                }
+            }
+
+            session.finalize_response();
+            session.record_assistant_response();
+            let _ = event_tx.send(EneEvent::Finished);
+            return session;
+        }
+
+        // Tool calls needed
+        let tool_calls = finalize_tool_calls(current_tool_calls);
+
+        let tx_messages = perform_tool_executions(
+            registry.as_ref(),
+            &session_id_for_tools,
+            tool_calls,
+            &assistant_content,
+            &event_tx,
+            &pending_permissions,
+        )
+        .await;
+
+        match tx_messages {
+            Ok(msgs) => {
+                messages.extend(msgs);
+                round += 1;
+            }
+            Err(e) => {
+                let _ = event_tx.send(EneEvent::Error {
+                    message: e.to_string(),
+                });
+                let _ = event_tx.send(EneEvent::Finished);
+                return session;
+            }
+        }
+    }
 }
 
 /// Selects relevant tools using embedding-based RAG if enabled, otherwise
@@ -117,7 +222,6 @@ pub enum EneStreamEvent {
 pub async fn select_relevant_tools(
     registry: &dyn ene_tool_host::ToolRegistry,
     embedding_provider: &Option<Arc<dyn ene_provider::EmbeddingProvider>>,
-
     user_input: &str,
     tool_calling_enabled: bool,
     tool_rag_enabled: bool,
@@ -224,13 +328,14 @@ pub fn build_chat_messages_list(
     .map_err(|e| crate::error::EneCoreError::PromptBuildError(e))
 }
 
-/// Executes a batch of tool calls and sends result events through the channel.
-pub async fn perform_tool_executions(
+/// Executes a batch of tool calls and sends result events through the broadcast channel.
+async fn perform_tool_executions(
     registry: &dyn ene_tool_host::ToolRegistry,
     session_id: &str,
     tool_calls: Vec<LlmToolCall>,
     assistant_content: &str,
-    tx: tokio::sync::mpsc::UnboundedSender<EneStreamEvent>,
+    event_tx: &broadcast::Sender<EneEvent>,
+    pending_permissions: &Arc<Mutex<HashMap<String, oneshot::Sender<PermissionDecision>>>>,
 ) -> Result<Vec<LlmMessage>, crate::error::EneCoreError> {
     let mut round_messages = Vec::new();
 
@@ -249,7 +354,7 @@ pub async fn perform_tool_executions(
         let name = call.name.clone();
         let args = call.arguments.clone();
 
-        let _ = tx.send(EneStreamEvent::ToolCallStart {
+        let _ = event_tx.send(EneEvent::ToolCallStart {
             name: name.clone(),
             arguments: args.clone(),
         });
@@ -273,17 +378,20 @@ pub async fn perform_tool_executions(
             description,
         }) = &result
         {
-            let _ = tx.send(EneStreamEvent::PermissionRequired {
+            let _ = event_tx.send(EneEvent::PermissionRequired {
                 request_id: request_id.clone(),
                 action: action.clone(),
                 target: target.clone(),
                 description: description.clone(),
             });
 
-            let (tx_decision, rx_decision) = tokio::sync::oneshot::channel::<PermissionDecision>();
-            register_permission_request(request_id.clone(), tx_decision);
+            let (decide_tx, decide_rx) = oneshot::channel::<PermissionDecision>();
+            {
+                let mut guard = pending_permissions.lock().await;
+                guard.insert(request_id.clone(), decide_tx);
+            }
 
-            match rx_decision.await {
+            match decide_rx.await {
                 Ok(PermissionDecision::AllowOnce) => {
                     registry.approve_permission(request_id).await;
                     result = registry.call_tool(&name, &args).await;
@@ -306,7 +414,7 @@ pub async fn perform_tool_executions(
             Err(e) => format!("Error executing tool: {}", e),
         };
 
-        let _ = tx.send(EneStreamEvent::ToolCallResult {
+        let _ = event_tx.send(EneEvent::ToolCallResult {
             name: name.clone(),
             result: result_str.clone(),
         });
@@ -333,172 +441,6 @@ pub async fn perform_tool_executions(
     }
 
     Ok(round_messages)
-}
-
-/// Runs the full AI streaming completion loop with tool calling, memory
-/// retrieval, and session management.
-pub async fn run_ene_with_tools(
-    config: &EneConfig,
-    session: &ConversationSession,
-    user_input: &str,
-    registry: std::sync::Arc<dyn ene_tool_host::ToolRegistry>,
-    provider: std::sync::Arc<dyn ene_provider::LlmProvider>,
-) -> Result<impl Stream<Item = EneStreamEvent> + 'static, crate::error::EneCoreError> {
-    let mem_config = config
-        .get_section::<ene_memory::MemoryConfig>()
-        .unwrap_or_default();
-
-    // 1. Fetch memory context (summaries and keyfacts)
-    let (recalled_summaries, key_facts) = fetch_memory_context(session, config).await;
-
-    // 2. Insert user log if memory is enabled
-    if mem_config.enabled {
-        if let Some(store) = &session.memory.memory_store {
-            let session_id_log = session.memory.session_id.clone();
-            let card_name = session.card_name().to_string();
-            ene_memory::MemoryStore::spawn_insert_log(
-                store,
-                &session_id_log,
-                &card_name,
-                "user",
-                user_input,
-            );
-        }
-    }
-
-    // 3. Build initial messages list
-    let mut messages =
-        build_chat_messages_list(session, config, user_input, &recalled_summaries, &key_facts)?;
-
-    let memory_enabled = mem_config.enabled;
-    let mem_store = if memory_enabled {
-        session.memory.memory_store.clone()
-    } else {
-        None
-    };
-    let card_name = session.card_name().to_string();
-    let session_id = session.memory.session_id.clone();
-    let user_input = user_input.to_string();
-    let tool_config = config
-        .get_section::<ene_tool_host::ToolConfig>()
-        .unwrap_or_default();
-    let tool_calling_enabled = tool_config.tool_calling_enabled;
-    let max_rounds = tool_config.max_tool_call_rounds;
-    let session_id_for_tools = session.memory.session_id.clone();
-    let tool_rag_enabled = mem_config.tool_rag_enabled;
-    let tool_rag_limit = mem_config.tool_rag_limit;
-    let tool_rag_always_include = mem_config.tool_rag_always_include.clone();
-    let embedding_provider = session.memory.embedding_provider.clone();
-
-    Ok(stream! {
-        // 4. Select relevant tools (Tool RAG)
-        let tools = select_relevant_tools(
-            registry.as_ref(),
-            &embedding_provider,
-            &user_input,
-            tool_calling_enabled,
-            tool_rag_enabled,
-            tool_rag_limit,
-            &tool_rag_always_include,
-        )
-        .await;
-
-        let mut round = 0;
-
-        loop {
-            if round >= max_rounds {
-                yield EneStreamEvent::Error("Max tool call rounds exceeded".to_string());
-                return;
-            }
-
-            let mut stream = match provider.create_chat_stream(&messages, &tools).await {
-                Ok(s) => s,
-                Err(e) => {
-                    yield EneStreamEvent::Error(e.to_string());
-                    return;
-                }
-            };
-
-            let mut current_tool_calls: Vec<LlmToolCallChunk> = Vec::new();
-            let mut assistant_content = String::new();
-
-            use tokio_stream::StreamExt;
-            while let Some(chunk_res) = stream.next().await {
-                match chunk_res {
-                    Ok(chunk) => {
-                        if let Some(content_delta) = &chunk.text_delta {
-                            assistant_content.push_str(content_delta);
-                            yield EneStreamEvent::TextDelta(content_delta.clone());
-                        }
-
-                        if let Some(tool_calls_delta) = &chunk.tool_calls_delta {
-                            accumulate_tool_calls(&mut current_tool_calls, tool_calls_delta);
-                        }
-                    }
-                    Err(e) => {
-                        yield EneStreamEvent::Error(e.to_string());
-                        return;
-                    }
-                }
-            }
-
-            if !current_tool_calls.is_empty() {
-                let tool_calls = finalize_tool_calls(current_tool_calls);
-
-                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-                let registry_clone = registry.clone();
-                let session_id_clone = session_id_for_tools.clone();
-                let tool_calls_clone = tool_calls.clone();
-                let assistant_content_clone = assistant_content.clone();
-
-                let handle = tokio::spawn(async move {
-                    perform_tool_executions(
-                        registry_clone.as_ref(),
-                        &session_id_clone,
-                        tool_calls_clone,
-                        &assistant_content_clone,
-                        tx,
-                    )
-                    .await
-                });
-
-                while let Some(event) = rx.recv().await {
-                    yield event;
-                }
-
-                let tx_messages = match handle.await {
-                    Ok(Ok(msgs)) => msgs,
-                    Ok(Err(e)) => {
-                        yield EneStreamEvent::Error(e.to_string());
-                        return;
-                    }
-                    Err(e) => {
-                        yield EneStreamEvent::Error(format!("Task panicked: {}", e));
-                        return;
-                    }
-                };
-
-                messages.extend(tx_messages);
-                round += 1;
-                continue;
-            } else {
-                if !assistant_content.is_empty() {
-                    if let Some(store) = &mem_store {
-                        ene_memory::MemoryStore::spawn_insert_log(
-                            store,
-                            &session_id,
-                            &card_name,
-                            "assistant",
-                            &assistant_content,
-                        );
-                    }
-                }
-
-                yield EneStreamEvent::Finished;
-                return;
-            }
-        }
-    })
 }
 
 fn accumulate_tool_calls(

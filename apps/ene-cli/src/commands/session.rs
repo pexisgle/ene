@@ -1,37 +1,41 @@
 use crate::{context::AppContext, style};
-use ene_core::{SessionConfig, SplitReason, execute_split, truncate};
+use ene_core::{SessionConfig, truncate};
 
-pub async fn execute(arg: &str, ctx: &mut AppContext) {
+pub async fn execute(arg: &str, ctx: &AppContext) {
     let parts: Vec<&str> = arg.splitn(2, ' ').collect();
     let subcmd = parts.first().copied().unwrap_or("");
 
+    let Ok(snapshot) = ctx.handle.get_snapshot().await else {
+        eprintln!("Failed to get actor state");
+        return;
+    };
+
     match subcmd {
-        "info" => handle_info(ctx),
-        "split" => handle_split(ctx).await,
-        "summaries" => handle_summaries(ctx),
+        "info" => handle_info(&snapshot),
+        "split" => {
+            handle_split(ctx, &snapshot).await;
+        }
+        "summaries" => handle_summaries(&snapshot),
         _ => {
             println!("Usage: /session <info|split|summaries>");
         }
     }
 }
 
-fn handle_info(ctx: &AppContext) {
+fn handle_info(snapshot: &ene_core::EneStateSnapshot) {
     println!("--- Session Info ---");
-    println!("Session ID: {}", ctx.session.memory.session_id);
+    println!("Session ID: {}", snapshot.session_id);
     println!(
         "Started: {}",
-        ctx.session
-            .memory
-            .session_started_at
-            .format("%Y-%m-%d %H:%M:%S UTC")
+        snapshot.session_started_at.format("%Y-%m-%d %H:%M:%S UTC")
     );
-    println!("Elapsed: {} min", ctx.session.session_elapsed_minutes());
-    println!("Turn count: {}", ctx.session.state.current_turn_count);
+    println!("Elapsed: {} min", "? (not tracked locally)");
+    println!("Turn count: {}", snapshot.current_turn_count);
     println!(
         "History messages: {}",
-        ctx.session.history.conversation_history.len()
+        snapshot.history.len()
     );
-    let session_config = ctx
+    let session_config = snapshot
         .config
         .get_section::<SessionConfig>()
         .unwrap_or_default();
@@ -41,74 +45,24 @@ fn handle_info(ctx: &AppContext) {
     println!("--------------------");
 }
 
-async fn handle_split(ctx: &mut AppContext) {
-    if ctx.session.history.conversation_history.is_empty() {
-        println!(
-            "{}",
-            style::warning("[Session] Cannot split: No conversation history.")
-        );
+async fn handle_split(_ctx: &AppContext, snapshot: &ene_core::EneStateSnapshot) {
+    if snapshot.history.is_empty() {
+        println!("{}", style::warning("[Session] Cannot split: No conversation history."));
         return;
     }
-    let Some(store) = &ctx.session.memory.memory_store else {
+    if snapshot.memory_store.is_none() {
         println!("{}", style::warning("[Session] Memory is not enabled."));
         return;
-    };
-    let Some(embedder) = &ctx.session.memory.embedding_provider else {
-        println!(
-            "{}",
-            style::warning("[Session] Embedding provider is not available.")
-        );
+    }
+    if snapshot.embedding_provider.is_none() {
+        println!("{}", style::warning("[Session] Embedding provider is not available."));
         return;
-    };
-    let provider_config = match ctx.config.get_section::<ene_core::ProviderConfig>() {
-        Ok(c) => c,
-        Err(e) => {
-            println!(
-                "{}",
-                style::error(format!("[Session] Failed to load provider config: {}", e))
-            );
-            return;
-        }
-    };
-    let active_provider = match ene_core::LlmProviderRegistry::create_provider(
-        &provider_config.provider_name,
-        &ctx.config,
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            println!(
-                "{}",
-                style::error(format!("[Session] Failed to create provider: {}", e))
-            );
-            return;
-        }
-    };
+    }
 
-    println!(
-        "{}",
-        style::header("[Session] Manually splitting session...")
-    );
-    let reason = SplitReason::Manual;
-    match execute_split(
-        &ctx.session.history.conversation_history,
-        &ctx.session.memory.session_id,
-        ctx.session.card_name(),
-        &ctx.config.user_name,
-        store,
-        embedder,
-        active_provider.as_ref(),
-        reason,
-    )
-    .await
-    {
+    println!("{}", style::header("[Session] Manually splitting session..."));
+    match _ctx.handle.manual_split().await {
         Ok(result) => {
-            println!(
-                "{}",
-                style::warning(format!(
-                    "[Session] Summary: {}",
-                    truncate(&result.summary, 120)
-                ))
-            );
+            println!("{}", style::warning(format!("[Session] Summary: {}", truncate(&result.summary, 120))));
             if !result.key_facts.is_empty() {
                 let facts_str = result
                     .key_facts
@@ -116,17 +70,9 @@ async fn handle_split(ctx: &mut AppContext) {
                     .map(|f| format!("{}:{}", f.key, f.value))
                     .collect::<Vec<_>>()
                     .join(", ");
-                println!(
-                    "  {}",
-                    style::warning(format!("[Session] Key Facts: {}", facts_str))
-                );
+                println!("  {}", style::warning(format!("[Session] Key Facts: {}", facts_str)));
             }
-            ctx.session.reset_session();
-            ctx.session.memory.session_id = result.new_session_id;
-            println!(
-                "{}",
-                style::warning("[Session] Started a new conversation.")
-            );
+            println!("{}", style::warning("[Session] Session split completed."));
         }
         Err(e) => {
             println!("{}", style::error(format!("[Session] Split error: {}", e)));
@@ -134,12 +80,12 @@ async fn handle_split(ctx: &mut AppContext) {
     }
 }
 
-fn handle_summaries(ctx: &AppContext) {
-    let Some(store) = &ctx.session.memory.memory_store else {
+fn handle_summaries(snapshot: &ene_core::EneStateSnapshot) {
+    let Some(store) = &snapshot.memory_store else {
         println!("{}", style::warning("[Session] Memory is not enabled."));
         return;
     };
-    let card_name = ctx.session.card_name();
+    let card_name = &snapshot.card_name;
     match store.list_recent_summaries(card_name, 10) {
         Ok(summaries) => {
             if summaries.is_empty() {
