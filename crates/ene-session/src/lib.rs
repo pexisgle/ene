@@ -54,6 +54,7 @@ pub use ene_config::{
 pub use error::SessionError;
 /// Represents the role of a message author in conversation history.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum Role {
     /// System instruction or context.
     System,

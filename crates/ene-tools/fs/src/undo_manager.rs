@@ -96,13 +96,13 @@ impl UndoManager {
                  ON undo_entries(session_id);",
         )
         .map_err(|e| format!("Failed to create undo tables: {e}"))?;
-        *self.db.lock().unwrap() = Some(conn);
+        *self.db.lock().unwrap_or_else(|e| e.into_inner()) = Some(conn);
         Ok(())
     }
 
     /// Loads entries for a specific session from the DB and restores them to the in-memory stack
     fn load_session_from_db(&self, session_id: &str) -> Result<(), String> {
-        let guard = self.db.lock().unwrap();
+        let guard = self.db.lock().unwrap_or_else(|e| e.into_inner());
         let db = guard.as_ref().ok_or("Undo DB not initialized")?;
 
         let mut stmt = db
@@ -205,9 +205,9 @@ impl UndoManager {
         let mut stack = self.stacks.entry(session_id.to_string()).or_default();
         stack.push_back(entry.clone());
 
-        if let Some(ref conn) = *self.db.lock().unwrap() {
+        if let Some(ref conn) = *self.db.lock().unwrap_or_else(|e| e.into_inner()) {
             if let Err(e) = self.persist_entry(conn, session_id, &entry) {
-                eprintln!("[UndoManager] Failed to persist undo entry: {e}");
+                tracing::error!("[UndoManager] Failed to persist undo entry: {e}");
             }
         }
     }
@@ -259,9 +259,9 @@ impl UndoManager {
     /// Undoes the most recent operation
     pub async fn undo(&self, session_id: &str) -> Result<Vec<String>, String> {
         let has_stack = self.stacks.contains_key(session_id);
-        if !has_stack && self.db.lock().unwrap().is_some() {
+        if !has_stack && self.db.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
             if let Err(e) = self.load_session_from_db(session_id) {
-                eprintln!("[UndoManager] Failed to load from DB: {e}");
+                tracing::error!("[UndoManager] Failed to load from DB: {e}");
             }
         }
 
@@ -318,18 +318,18 @@ impl UndoManager {
             }
         }
 
-        if let Some(ref conn) = *self.db.lock().unwrap() {
+        if let Some(ref conn) = *self.db.lock().unwrap_or_else(|e| e.into_inner()) {
             if let Err(e) = conn.execute(
                 "DELETE FROM undo_operations WHERE entry_id = ?1",
                 rusqlite::params![id_str],
             ) {
-                eprintln!("[UndoManager] Failed to delete undo ops from DB: {e}");
+                tracing::error!("[UndoManager] Failed to delete undo ops from DB: {e}");
             }
             if let Err(e) = conn.execute(
                 "DELETE FROM undo_entries WHERE id = ?1",
                 rusqlite::params![id_str],
             ) {
-                eprintln!("[UndoManager] Failed to delete undo entry from DB: {e}");
+                tracing::error!("[UndoManager] Failed to delete undo entry from DB: {e}");
             }
         }
 
@@ -345,7 +345,7 @@ impl UndoManager {
     pub fn clear(&self, session_id: &str) {
         self.stacks.remove(session_id);
 
-        if let Some(ref conn) = *self.db.lock().unwrap() {
+        if let Some(ref conn) = *self.db.lock().unwrap_or_else(|e| e.into_inner()) {
             let _ = conn.execute(
                 "DELETE FROM undo_operations WHERE entry_id IN (SELECT id FROM undo_entries WHERE session_id = ?1)",
                 rusqlite::params![session_id],
@@ -360,7 +360,7 @@ impl UndoManager {
     /// Gets the length of the stack
     pub fn len(&self, session_id: &str) -> usize {
         let has = self.stacks.contains_key(session_id);
-        if !has && self.db.lock().unwrap().is_some() {
+        if !has && self.db.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
             if let Ok(()) = self.load_session_from_db(session_id) {
                 // fall through to check again
             }

@@ -35,7 +35,7 @@ static FILE_LOCKS: std::sync::OnceLock<
 
 fn get_lock(path: &Path) -> Arc<Semaphore> {
     let locks = FILE_LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    let mut locks = locks.lock().unwrap();
+    let mut locks = locks.lock().unwrap_or_else(|e| e.into_inner());
     locks
         .entry(path.to_path_buf())
         .or_insert_with(|| Arc::new(Semaphore::new(1)))
