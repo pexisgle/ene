@@ -1,7 +1,7 @@
 use ene_tool_host::ToolRegistry;
 use ene_tool_proto::transport::IpcListener;
 use ene_tool_proto::{
-    IpcRequest, IpcResponse, IPC_PROTOCOL_VERSION, SandboxConfigData, ToolCategory, ToolDefinition,
+    IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, SandboxConfigData, ToolCategory, ToolDefinition,
     read_ipc_request, write_ipc_response,
 };
 use std::path::PathBuf;
@@ -38,7 +38,12 @@ async fn test_ipc_list_tools_and_call_tool() {
             .unwrap()
             .expect("Expected Handshake request");
         assert!(
-            matches!(req, IpcRequest::Handshake { version: IPC_PROTOCOL_VERSION }),
+            matches!(
+                req,
+                IpcRequest::Handshake {
+                    version: IPC_PROTOCOL_VERSION
+                }
+            ),
             "Expected Handshake, got {:?}",
             req
         );

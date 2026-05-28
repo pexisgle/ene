@@ -4,7 +4,7 @@ use crate::tools::definition::ToolRegistry;
 use async_trait::async_trait;
 use ene_tool_proto::transport::IpcStream;
 use ene_tool_proto::{
-    IpcRequest, IpcResponse, IPC_PROTOCOL_VERSION, SandboxConfigData, read_ipc_response,
+    IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, SandboxConfigData, read_ipc_response,
     write_ipc_request,
 };
 use std::path::PathBuf;
@@ -53,7 +53,11 @@ impl IpcToolRegistry {
         match resp {
             Some(IpcResponse::HandshakeAck { .. }) => {}
             Some(IpcResponse::Error { message }) => return Err(ToolError::IpcClient(message)),
-            _ => return Err(ToolError::IpcClient("Unexpected response to Handshake".to_string())),
+            _ => {
+                return Err(ToolError::IpcClient(
+                    "Unexpected response to Handshake".to_string(),
+                ));
+            }
         }
 
         write_ipc_request(
@@ -66,14 +70,18 @@ impl IpcToolRegistry {
         .await
         .map_err(|e| ToolError::IpcClient(format!("Failed to send Initialize: {e}")))?;
 
-        let resp = read_ipc_response(&mut stream)
-            .await
-            .map_err(|e| ToolError::IpcClient(format!("Failed to read Initialize response: {e}")))?;
+        let resp = read_ipc_response(&mut stream).await.map_err(|e| {
+            ToolError::IpcClient(format!("Failed to read Initialize response: {e}"))
+        })?;
 
         match resp {
             Some(IpcResponse::Ack) => {}
             Some(IpcResponse::Error { message }) => return Err(ToolError::IpcClient(message)),
-            _ => return Err(ToolError::IpcClient("Unexpected response to Initialize".to_string())),
+            _ => {
+                return Err(ToolError::IpcClient(
+                    "Unexpected response to Initialize".to_string(),
+                ));
+            }
         }
 
         let registry = Self {
@@ -121,7 +129,11 @@ impl IpcToolRegistry {
             let mut guard = self.stream.lock().await;
             let stream = match guard.as_mut() {
                 Some(s) => s,
-                None => return Err(ToolError::IpcClient("Not connected to tool host".to_string())),
+                None => {
+                    return Err(ToolError::IpcClient(
+                        "Not connected to tool host".to_string(),
+                    ));
+                }
             };
 
             if let Err(e) = write_ipc_request(stream, &req).await {
@@ -131,8 +143,12 @@ impl IpcToolRegistry {
 
             match read_ipc_response(stream).await {
                 Ok(Some(resp)) => Ok(resp),
-                Ok(None) => Err(ToolError::IpcClient("Connection closed by tool host".to_string())),
-                Err(e) => Err(ToolError::IpcClient(format!("Failed to read response: {e}"))),
+                Ok(None) => Err(ToolError::IpcClient(
+                    "Connection closed by tool host".to_string(),
+                )),
+                Err(e) => Err(ToolError::IpcClient(format!(
+                    "Failed to read response: {e}"
+                ))),
             }
         };
 
@@ -155,22 +171,25 @@ impl IpcToolRegistry {
 
         match resp {
             Some(IpcResponse::Tools { tools }) => {
-                let mut tools_guard = self.tools.lock().map_err(|e| {
-                    ToolError::IpcClient(format!("Tools lock poisoned: {e}"))
-                })?;
+                let mut tools_guard = self
+                    .tools
+                    .lock()
+                    .map_err(|e| ToolError::IpcClient(format!("Tools lock poisoned: {e}")))?;
                 *tools_guard = tools;
                 Ok(())
             }
             Some(IpcResponse::Error { message }) => Err(ToolError::IpcClient(message)),
-            _ => Err(ToolError::IpcClient("Unexpected response for ListTools".to_string())),
+            _ => Err(ToolError::IpcClient(
+                "Unexpected response for ListTools".to_string(),
+            )),
         }
     }
 
     async fn do_refresh_tools(&self) -> Result<(), ToolError> {
         let mut guard = self.stream.lock().await;
-        let stream = guard.as_mut().ok_or_else(|| {
-            ToolError::IpcClient("Not connected".to_string())
-        })?;
+        let stream = guard
+            .as_mut()
+            .ok_or_else(|| ToolError::IpcClient("Not connected".to_string()))?;
         self.do_refresh_tools_with_stream(stream).await
     }
 
@@ -218,16 +237,24 @@ impl IpcToolRegistry {
         .await
         .map_err(|e| ToolError::IpcClient(format!("Failed to send Handshake on reconnect: {e}")))?;
 
-        let resp = read_ipc_response(&mut stream)
-            .await
-            .map_err(|e| ToolError::IpcClient(format!("Failed to read Handshake response on reconnect: {e}")))?;
+        let resp = read_ipc_response(&mut stream).await.map_err(|e| {
+            ToolError::IpcClient(format!(
+                "Failed to read Handshake response on reconnect: {e}"
+            ))
+        })?;
 
         match resp {
             Some(IpcResponse::HandshakeAck { .. }) => {}
             Some(IpcResponse::Error { message }) => {
-                return Err(ToolError::IpcClient(format!("Reconnect handshake rejected: {message}")));
+                return Err(ToolError::IpcClient(format!(
+                    "Reconnect handshake rejected: {message}"
+                )));
             }
-            _ => return Err(ToolError::IpcClient("Unexpected response to Handshake on reconnect".to_string())),
+            _ => {
+                return Err(ToolError::IpcClient(
+                    "Unexpected response to Handshake on reconnect".to_string(),
+                ));
+            }
         }
 
         write_ipc_request(
@@ -238,18 +265,28 @@ impl IpcToolRegistry {
             },
         )
         .await
-        .map_err(|e| ToolError::IpcClient(format!("Failed to send Initialize on reconnect: {e}")))?;
+        .map_err(|e| {
+            ToolError::IpcClient(format!("Failed to send Initialize on reconnect: {e}"))
+        })?;
 
-        let resp = read_ipc_response(&mut stream)
-            .await
-            .map_err(|e| ToolError::IpcClient(format!("Failed to read Initialize response on reconnect: {e}")))?;
+        let resp = read_ipc_response(&mut stream).await.map_err(|e| {
+            ToolError::IpcClient(format!(
+                "Failed to read Initialize response on reconnect: {e}"
+            ))
+        })?;
 
         match resp {
             Some(IpcResponse::Ack) => {}
             Some(IpcResponse::Error { message }) => {
-                return Err(ToolError::IpcClient(format!("Reconnect rejected: {message}")));
+                return Err(ToolError::IpcClient(format!(
+                    "Reconnect rejected: {message}"
+                )));
             }
-            _ => return Err(ToolError::IpcClient("Unexpected response to Initialize on reconnect".to_string())),
+            _ => {
+                return Err(ToolError::IpcClient(
+                    "Unexpected response to Initialize on reconnect".to_string(),
+                ));
+            }
         }
 
         self.do_refresh_tools_with_stream(&mut stream).await?;
