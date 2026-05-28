@@ -36,8 +36,8 @@ impl EmbeddingConfig {
         if !self.base_url.trim().is_empty() {
             return Ok(self.base_url.clone());
         }
-        let settings = ene_config::get_global_settings();
-        if let Some(base_url) = settings.get_provider_field("base_url") {
+        let config = ene_config::get_global_config();
+        if let Some(base_url) = config.get_provider_field("base_url") {
             return Ok(base_url);
         }
         Err(ene_config::ConfigError::MissingBaseUrl {

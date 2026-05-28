@@ -3,7 +3,7 @@ use crate::tools::CompositeToolRegistry;
 use crate::tools::ToolDefinition;
 use crate::tools::definition::ToolRegistry;
 use ene_config as paths;
-use ene_config::{EneSettings, register_runtime_schema};
+use ene_config::{EneConfig, register_runtime_schema};
 use ene_memory::MemoryStore;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -264,8 +264,8 @@ impl ToolRegistry for ToolHostManager {
     }
 }
 
-fn resolve_undo_db_path(settings: &EneSettings) -> std::path::PathBuf {
-    let memory_config = settings
+fn resolve_undo_db_path(config: &EneConfig) -> std::path::PathBuf {
+    let memory_config = config
         .get_section::<ene_memory::MemoryConfig>("memory")
         .unwrap_or_default();
     let memory_path = memory_config.resolve_memory_db_path();
@@ -282,21 +282,21 @@ impl ToolHostManager {
     /// spawns each binary as a child process, and connects to it over IPC.
     /// Also registers each tool's config schema in the global runtime registry
     /// and regenerates `settings.schema.json`.
-    pub async fn start(settings: &EneSettings) -> Result<Self, crate::error::ToolError> {
-        let mut sandbox = settings
+    pub async fn start(config: &EneConfig) -> Result<Self, crate::error::ToolError> {
+        let mut sandbox = config
             .get_section::<ene_tool_proto::SandboxConfigData>("sandbox")
             .unwrap_or_default();
-        sandbox.undo_db_path = Some(resolve_undo_db_path(settings).to_string_lossy().to_string());
+        sandbox.undo_db_path = Some(resolve_undo_db_path(config).to_string_lossy().to_string());
         let mut supervised_registries = Vec::new();
 
         std::fs::create_dir_all(paths::tool_socket_dir()).map_err(|e| {
             crate::error::ToolError::ToolExecutionError(format!("Failed to create socket dir: {e}"))
         })?;
 
-        let tool_settings = settings
-            .get_section::<crate::config::ToolSettings>("tools")
+        let tool_config = config
+            .get_section::<crate::config::ToolConfig>("tools")
             .unwrap_or_default();
-        for (name, entry) in &tool_settings.tools {
+        for (name, entry) in &tool_config.tools {
             if !entry.enable {
                 continue;
             }
@@ -340,22 +340,22 @@ impl ToolHostManager {
     /// and registry aggregation into a single call. Includes automatic fallback
     /// to an empty tool set if the primary startup fails.
     pub async fn start_full(
-        settings: &EneSettings,
+        config: &EneConfig,
     ) -> Result<Arc<dyn ToolRegistry>, crate::error::ToolError> {
-        let mut manager = match Self::start(settings).await {
+        let mut manager = match Self::start(config).await {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!(
                     "[ToolHostManager] Failed to start tool host, falling back to empty tools: {}",
                     e
                 );
-                let mut fallback_settings = settings.clone();
-                let fallback_tools = crate::config::ToolSettings {
+                let mut fallback_config = config.clone();
+                let fallback_tools = crate::config::ToolConfig {
                     tools: std::collections::HashMap::new(),
                     ..Default::default()
                 };
-                let _ = fallback_settings.set_section("tools", &fallback_tools);
-                Self::start(&fallback_settings).await.map_err(|e2| {
+                let _ = fallback_config.set_section("tools", &fallback_tools);
+                Self::start(&fallback_config).await.map_err(|e2| {
                     crate::error::ToolError::ToolExecutionError(format!(
                         "Fatal: Failed to start fallback ToolHostManager: {}",
                         e2
@@ -364,7 +364,7 @@ impl ToolHostManager {
             }
         };
 
-        let mcp_servers = settings
+        let mcp_servers = config
             .get_section::<Vec<crate::config::McpServerConfig>>("mcp_servers")
             .unwrap_or_default();
         if !mcp_servers.is_empty() {
