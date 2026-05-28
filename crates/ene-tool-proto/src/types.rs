@@ -2,7 +2,7 @@ use ene_config::serde::{Deserialize, Serialize};
 
 /// Tool category — used for classification and RAG filtering
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(crate = "ene_config::serde")]
+#[serde(crate = "ene_config::serde", rename_all = "snake_case")]
 pub enum ToolCategory {
     /// File-system tools (read, write, edit, shell, undo).
     Filesystem,

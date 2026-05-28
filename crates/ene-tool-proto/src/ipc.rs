@@ -4,10 +4,21 @@ use crate::types::ToolDefinition;
 use ene_config::serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+/// Maximum allowed IPC message size in bytes (64 MB).
+const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+
+/// Current IPC protocol version.
+pub const IPC_PROTOCOL_VERSION: u32 = 1;
+
 /// IPC request — core → host
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(crate = "ene_config::serde")]
 pub enum IpcRequest {
+    /// Handshake to negotiate protocol version.
+    Handshake {
+        /// Client's supported protocol version.
+        version: u32,
+    },
     /// Initialise the tool with sandbox and config data.
     Initialize {
         /// Sandbox configuration to apply.
@@ -53,6 +64,11 @@ pub enum IpcRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(crate = "ene_config::serde")]
 pub enum IpcResponse {
+    /// Handshake acknowledgment with negotiated version.
+    HandshakeAck {
+        /// Agreed protocol version.
+        version: u32,
+    },
     /// Acknowledgment (for Initialize, SetSessionId, etc.).
     Ack,
     /// List of tool definitions.
@@ -95,6 +111,11 @@ pub async fn read_ipc_request<R: AsyncReadExt + Unpin>(
     if len == 0 {
         return Ok(None);
     }
+    if len > MAX_MESSAGE_SIZE {
+        return Err(ToolError::IpcTransport {
+            message: format!("Request size {} exceeds maximum {}", len, MAX_MESSAGE_SIZE),
+        });
+    }
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf).await.map_err(ToolError::from)?;
     let req = serde_json::from_slice(&buf).map_err(|e| ToolError::InvalidArguments {
@@ -136,6 +157,11 @@ pub async fn read_ipc_response<R: AsyncReadExt + Unpin>(
     let len = u32::from_le_bytes(len_buf) as usize;
     if len == 0 {
         return Ok(None);
+    }
+    if len > MAX_MESSAGE_SIZE {
+        return Err(ToolError::IpcTransport {
+            message: format!("Response size {} exceeds maximum {}", len, MAX_MESSAGE_SIZE),
+        });
     }
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf).await.map_err(ToolError::from)?;

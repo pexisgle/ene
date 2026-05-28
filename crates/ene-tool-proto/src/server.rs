@@ -1,5 +1,5 @@
 use crate::transport::{IpcListener, cleanup_path};
-use crate::{IpcRequest, IpcResponse, ToolProvider, read_ipc_request, write_ipc_response};
+use crate::{IpcRequest, IpcResponse, IPC_PROTOCOL_VERSION, ToolProvider, read_ipc_request, write_ipc_response};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -44,7 +44,7 @@ pub async fn run_tool_server(
         std::fs::set_permissions(&socket_path, perms)?;
     }
 
-    eprintln!("[tool-server] Listening on {}", socket_path.display());
+    tracing::info!("[tool-server] Listening on {}", socket_path.display());
 
     let provider: Arc<dyn ToolProvider> = provider.into();
     let shutdown = Arc::new(tokio::sync::Notify::new());
@@ -63,7 +63,7 @@ pub async fn run_tool_server(
                                 let is_shutdown = matches!(req, IpcRequest::Shutdown);
                                 let resp = dispatch(provider.as_ref(), &req).await;
                                 if let Err(e) = write_ipc_response(&mut stream, &resp).await {
-                                    eprintln!("[tool-server] Failed to write response: {e}");
+                                    tracing::error!("[tool-server] Failed to write response: {e}");
                                     break;
                                 }
                                 if is_shutdown {
@@ -72,7 +72,7 @@ pub async fn run_tool_server(
                                 }
                             }
                             Err(e) => {
-                                eprintln!("[tool-server] IPC read error: {e}");
+                                tracing::error!("[tool-server] IPC read error: {e}");
                                 let _ = write_ipc_response(
                                     &mut stream,
                                     &IpcResponse::Error { message: e.to_string() },
@@ -91,12 +91,16 @@ pub async fn run_tool_server(
     }
 
     cleanup_path(&socket_path);
-    eprintln!("[tool-server] Shutting down");
+    tracing::info!("[tool-server] Shutting down");
     Ok(())
 }
 
 async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse {
     match req {
+        IpcRequest::Handshake { version } => {
+            let agreed = (*version).min(IPC_PROTOCOL_VERSION);
+            IpcResponse::HandshakeAck { version: agreed }
+        }
         IpcRequest::Initialize {
             sandbox,
             tool_config,

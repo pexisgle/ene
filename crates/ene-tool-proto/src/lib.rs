@@ -72,8 +72,8 @@ pub mod types;
 pub use error::ToolError;
 /// IPC message types and serialisation helpers.
 pub use ipc::{
-    IpcRequest, IpcResponse, read_ipc_request, read_ipc_response, write_ipc_request,
-    write_ipc_response,
+    IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, read_ipc_request, read_ipc_response,
+    write_ipc_request, write_ipc_response,
 };
 /// Composite registry that aggregates multiple ToolProvider instances.
 pub use registry::HostRegistry;
