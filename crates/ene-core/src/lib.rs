@@ -54,5 +54,7 @@ pub use error::EneCoreError;
 pub use ene_config::ensure_resource_dirs;
 /// Permission decision type.
 pub use stream::PermissionDecision;
+/// Tool RAG configuration.
+pub use stream::ToolRagConfig;
 /// Prompt builder utilities.
 pub use prompt_builder::{build_system_prompt, build_messages, build_expression_phi};
