@@ -7,5 +7,6 @@ description = "IPC protocol definitions, ToolProvider trait, sandbox configurati
 [dependencies]
 serde_json = { workspace = true }
 async-trait = { workspace = true }
+tracing = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net"] }
 ene-config = { workspace = true }
