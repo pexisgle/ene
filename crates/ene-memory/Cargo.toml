@@ -14,10 +14,11 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 diesel = { version = "2.3", features = ["sqlite", "chrono", "r2d2"] }
 diesel_migrations = { version = "2.3", features = ["sqlite"] }
-rusqlite = { version = "0.39.0", features = ["bundled"] }
+rusqlite = { workspace = true }
 sqlite-vec = "0.1"
 uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+ene-common = { workspace = true }
 ene-config = { workspace = true }
