@@ -5,6 +5,7 @@ use bevy::window::CompositeAlphaMode;
 use bevy::window::PresentMode;
 use bevy::window::{WindowLevel, WindowMode, WindowPlugin, WindowResolution};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -225,7 +226,7 @@ pub struct UiState {
 
 #[derive(Clone, Debug, Default)]
 pub struct AiConfig {
-    pub ai: ene_config::EneSettings,
+    pub ai: ene_config::EneConfig,
 }
 
 #[derive(Resource, Debug)]
@@ -284,7 +285,7 @@ impl CharacterSettings {
             },
             ui: UiState::default(),
             ai: AiConfig {
-                ai: ene_config::EneSettings {
+                ai: ene_config::EneConfig {
                     character: format!("{}/{}", assets_dir.display(), selected_card_path),
                     ..Default::default()
                 },
@@ -347,7 +348,7 @@ impl CharacterSettings {
     }
 
     pub fn save_per_character_settings(&self) {
-        let per = CharacterPerSettings {
+        let per = CharacterPerConfig {
             character_position: [
                 self.character_state.character_position.x,
                 self.character_state.character_position.y,
@@ -359,7 +360,11 @@ impl CharacterSettings {
             default_motion: self.motion_path_relative(),
             expressions: None,
         };
-        if let Ok(json) = serde_json::to_string_pretty(&per) {
+        let mut sections = serde_json::Map::new();
+        if let Ok(val) = serde_json::to_value(&per) {
+            sections.insert("character_settings".to_string(), val);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(&sections) {
             let path = self.character_settings_path();
             if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
@@ -375,8 +380,20 @@ impl CharacterSettings {
         let Ok(json) = fs::read_to_string(&path) else {
             return;
         };
-        match serde_json::from_str::<CharacterPerSettings>(&json) {
-            Ok(per) => {
+
+        let per = serde_json::from_str::<HashMap<String, serde_json::Value>>(&json)
+            .ok()
+            .and_then(|map| {
+                map.get("character_settings")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value::<CharacterPerConfig>(v).ok())
+            })
+            .or_else(|| {
+                serde_json::from_str::<CharacterPerConfig>(&json).ok()
+            });
+
+        match per {
+            Some(per) => {
                 self.character_state.character_position = Vec3::new(
                     per.character_position[0],
                     per.character_position[1],
@@ -400,9 +417,9 @@ impl CharacterSettings {
                     }
                 }
             }
-            Err(e) => {
+            None => {
                 eprintln!(
-                    "[Config] Failed to parse per-character settings {}: {e}",
+                    "[Config] Failed to parse per-character settings {}",
                     path.display()
                 );
             }
@@ -430,15 +447,15 @@ impl CharacterSettings {
         if let Err(e) = saved.set_section("desktop", &desktop) {
             eprintln!("[Config] Failed to set desktop section: {e}");
         }
-        if let Err(e) = ene_config::save_full_settings(&saved) {
-            eprintln!("[Config] Failed to save settings: {e}");
+        if let Err(e) = ene_config::save_full_config(&saved) {
+            eprintln!("[Config] Failed to save config: {e}");
         }
         self.save_per_character_settings();
     }
 
     pub fn load_from_file(&mut self) {
         let path = ene_config::config_file_path();
-        let full = ene_config::load_settings_from(&self.assets_dir, &path);
+        let full = ene_config::load_config_from(&self.assets_dir, &path);
 
         self.ai.ai = full.clone();
 
@@ -467,7 +484,7 @@ impl CharacterSettings {
     }
 }
 
-pub use ene_config::CharacterPerSettings;
+pub use ene_config::CharacterPerConfig;
 
 fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
     let mut out = Vec::new();
@@ -566,7 +583,7 @@ fn read_character_json_meta(path: &Path) -> Option<(String, Option<String>)> {
         let settings_path = ene_config::character_settings_path(&folder);
         if settings_path.exists() {
             let s = fs::read_to_string(settings_path).ok()?;
-            let per: CharacterPerSettings = serde_json::from_str(&s).ok()?;
+            let per: CharacterPerConfig = serde_json::from_str(&s).ok()?;
             if !per.default_motion.is_empty() {
                 return Some(per.default_motion);
             }

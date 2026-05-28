@@ -198,7 +198,7 @@ fn start_next_ai_request(
         let ai_settings = settings.ai.ai.clone();
         match rt.0.block_on(async {
             let mut runtime = EneRuntime::init().await?;
-            runtime.apply_settings(ai_settings).await?;
+            runtime.config().apply(ai_settings).await?;
             Ok::<_, ene_core::EneCoreError>(runtime)
         }) {
             Ok(runtime) => {

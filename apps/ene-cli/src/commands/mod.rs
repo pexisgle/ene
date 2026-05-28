@@ -32,8 +32,8 @@ fn handle_prompt(ctx: &AppContext) {
     if let Some(card) = &ctx.session.character_card {
         let sys = ene_core::prompt_builder::build_system_prompt(
             card,
-            &ctx.settings.runtime_rules,
-            &ctx.settings.user_name,
+            &ctx.config.runtime_rules,
+            &ctx.config.user_name,
         );
         if !sys.trim().is_empty() {
             println!("--- System Prompt ---");
@@ -48,18 +48,18 @@ fn handle_prompt(ctx: &AppContext) {
             let ex = ene_core::expand_cbs_macros(
                 &card.data.mes_example,
                 card.data.get_character_name(),
-                &ctx.settings.user_name,
+                &ctx.config.user_name,
             );
             println!("{}", ex);
             println!("----------------------------------------------------");
         }
 
         let mem_config = ctx
-            .settings
+            .config
             .get_section::<MemoryConfig>("memory")
             .unwrap_or_default();
         let session_config = ctx
-            .settings
+            .config
             .get_section::<SessionConfig>("session")
             .unwrap_or_default();
         if mem_config.enabled {
@@ -75,7 +75,7 @@ fn handle_prompt(ctx: &AppContext) {
             let card_name = card.data.get_character_name();
             if let Ok(facts) = store.get_all_keyfacts(card_name) {
                 if !facts.is_empty() {
-                    println!("--- Known Facts about {} ---", ctx.settings.user_name);
+                    println!("--- Known Facts about {} ---", ctx.config.user_name);
                     for f in facts {
                         println!("• {}: {}", f.key, f.value);
                     }
@@ -97,7 +97,7 @@ fn handle_prompt(ctx: &AppContext) {
             let phi_expanded = ene_core::expand_cbs_macros(
                 &phi,
                 card.data.get_character_name(),
-                &ctx.settings.user_name,
+                &ctx.config.user_name,
             );
             if !phi_expanded.trim().is_empty() {
                 println!("--- Expression Protocol (ACT tokens) ---");
@@ -106,11 +106,11 @@ fn handle_prompt(ctx: &AppContext) {
             }
         }
 
-        let tool_settings = ctx
-            .settings
-            .get_section::<ene_tool_host::ToolSettings>("tools")
+        let tool_config = ctx
+            .config
+            .get_section::<ene_tool_host::ToolConfig>("tools")
             .unwrap_or_default();
-        if tool_settings.tool_calling_enabled {
+        if tool_config.tool_calling_enabled {
             let tools = ctx.registry.list_tools();
             if !tools.is_empty() {
                 println!("--- Tool Definitions ({} tools) ---", tools.len());
@@ -134,14 +134,18 @@ fn handle_card(arg: &str, ctx: &mut AppContext) {
     if arg.is_empty() {
         println!("Usage: /card <path>");
     } else {
-        match ctx.session.load_card(arg) {
-            Ok(exprs) => {
-                println!(
-                    "Card loaded successfully. Found {} expressions.",
-                    exprs.len()
-                );
-                ctx.settings.character = arg.to_string();
-                save_config(ctx);
+        ctx.character().set(arg);
+        match ctx.character().load() {
+            Ok(()) => {
+                if let Some(card) = ctx.character().card() {
+                    println!(
+                        "Card loaded successfully. Character: {}",
+                        card.data.get_character_name()
+                    );
+                }
+                if let Err(e) = ctx.character().save() {
+                    eprintln!("[Config] Failed to save settings: {}", e);
+                }
             }
             Err(e) => eprintln!("Failed to load card: {}", e),
         }
@@ -150,32 +154,32 @@ fn handle_card(arg: &str, ctx: &mut AppContext) {
 
 fn handle_config(ctx: &AppContext) {
     let mem_config = ctx
-        .settings
+        .config
         .get_section::<MemoryConfig>("memory")
         .unwrap_or_default();
     let embed_config = ctx
-        .settings
+        .config
         .get_section::<EmbeddingConfig>("embedding")
         .unwrap_or_default();
     let session_config = ctx
-        .settings
+        .config
         .get_section::<SessionConfig>("session")
         .unwrap_or_default();
     let provider_config = ctx
-        .settings
-        .get_section::<ene_core::ProviderSettings>("provider")
+        .config
+        .get_section::<ene_core::ProviderConfig>("provider")
         .unwrap_or_default();
 
     println!("--- Current Config ---");
     println!("Provider: {}", provider_config.provider_name);
     println!("Model: {}", provider_config.model);
     println!("Base URL: {}", provider_config.base_url);
-    println!("Card Path: {}", ctx.settings.character);
-    let tool_settings = ctx
-        .settings
-        .get_section::<ene_tool_host::ToolSettings>("tools")
+    println!("Card Path: {}", ctx.config.character);
+    let tool_config = ctx
+        .config
+        .get_section::<ene_tool_host::ToolConfig>("tools")
         .unwrap_or_default();
-    println!("Tool Calling: {}", tool_settings.tool_calling_enabled);
+    println!("Tool Calling: {}", tool_config.tool_calling_enabled);
     println!("Memory Enabled: {}", mem_config.enabled);
     println!("Embedding Model: {}", embed_config.model);
     if mem_config.enabled {
@@ -261,13 +265,5 @@ async fn handle_tool(arg: &str, ctx: &mut AppContext) {
             }
         }
         _ => println!("Usage: /tool list | /tool help <name> | /tool call <name> <json>"),
-    }
-}
-
-fn save_config(ctx: &AppContext) {
-    let full = ctx.settings.clone();
-
-    if let Err(e) = ene_config::save_full_settings(&full) {
-        eprintln!("[Config] Failed to save settings: {}", e);
     }
 }

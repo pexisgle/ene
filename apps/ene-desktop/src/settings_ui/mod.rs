@@ -122,7 +122,7 @@ impl SettingsInputState {
         let provider_config = settings
             .ai
             .ai
-            .get_section::<ene_core::ProviderSettings>("provider")
+            .get_section::<ene_core::ProviderConfig>("provider")
             .unwrap_or_default();
         self.ai_base_url = provider_config.base_url.clone();
         self.ai_api_key = provider_config.api_key.clone();
@@ -274,7 +274,7 @@ impl SettingsValueKind {
                 let provider_config = settings
                     .ai
                     .ai
-                    .get_section::<ene_core::ProviderSettings>("provider")
+                    .get_section::<ene_core::ProviderConfig>("provider")
                     .unwrap_or_default();
                 provider_config.provider_name.clone()
             }
@@ -282,7 +282,7 @@ impl SettingsValueKind {
                 let provider_config = settings
                     .ai
                     .ai
-                    .get_section::<ene_core::ProviderSettings>("provider")
+                    .get_section::<ene_core::ProviderConfig>("provider")
                     .unwrap_or_default();
                 provider_config.model.clone()
             }
@@ -290,7 +290,7 @@ impl SettingsValueKind {
                 let provider_config = settings
                     .ai
                     .ai
-                    .get_section::<ene_core::ProviderSettings>("provider")
+                    .get_section::<ene_core::ProviderConfig>("provider")
                     .unwrap_or_default();
                 provider_config.base_url.clone()
             }
@@ -298,7 +298,7 @@ impl SettingsValueKind {
                 let provider_config = settings
                     .ai
                     .ai
-                    .get_section::<ene_core::ProviderSettings>("provider")
+                    .get_section::<ene_core::ProviderConfig>("provider")
                     .unwrap_or_default();
                 masked_secret(&provider_config.api_key)
             }
@@ -335,7 +335,7 @@ impl SettingsValueKind {
                 let mut provider_config = settings
                     .ai
                     .ai
-                    .get_section::<ene_core::ProviderSettings>("provider")
+                    .get_section::<ene_core::ProviderConfig>("provider")
                     .unwrap_or_default();
                 provider_config.base_url = value.to_string();
                 let _ = settings.ai.ai.set_section("provider", &provider_config);
@@ -345,7 +345,7 @@ impl SettingsValueKind {
                 let mut provider_config = settings
                     .ai
                     .ai
-                    .get_section::<ene_core::ProviderSettings>("provider")
+                    .get_section::<ene_core::ProviderConfig>("provider")
                     .unwrap_or_default();
                 if provider_config.api_key_source == "keyring" {
                     let service = &provider_config.api_key_keyring_service;
