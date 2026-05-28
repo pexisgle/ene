@@ -3,8 +3,8 @@
 //! Initializes the actor, loads settings, and runs a single-turn
 //! streaming conversation with tool support.
 
-use ene_core::{EneHandle, EneEvent, EneCommand, PermissionDecision};
 use ene_config;
+use ene_core::{EneCommand, EneEvent, EneHandle, PermissionDecision};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -14,16 +14,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = ene_config::load_config();
     handle.reconfigure(config).await?;
-    handle.load_character("characters/Alicia/character.json").await?;
+    handle
+        .load_character("characters/Alicia/character.json")
+        .await?;
 
     handle.run("Hello! What's your name?");
 
     let mut rx = handle.clone();
-    while let Ok(event) = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        rx.recv(),
-    )
-    .await
+    while let Ok(event) = tokio::time::timeout(std::time::Duration::from_secs(60), rx.recv()).await
     {
         match event {
             Ok(EneEvent::TextDelta { delta }) => print!("{}", delta),
@@ -38,8 +36,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             Ok(EneEvent::Error { message }) => eprintln!("\nError: {}", message),
-            Ok(EneEvent::PermissionRequired { request_id, action, target, description }) => {
-                println!("\n[Permission Required] {} on {} ({})", action, target, description);
+            Ok(EneEvent::PermissionRequired {
+                request_id,
+                action,
+                target,
+                description,
+            }) => {
+                println!(
+                    "\n[Permission Required] {} on {} ({})",
+                    action, target, description
+                );
                 handle.send(EneCommand::PermissionDecision {
                     request_id,
                     decision: PermissionDecision::AllowOnce,

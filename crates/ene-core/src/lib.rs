@@ -5,10 +5,10 @@
 //! message-passing architecture.
 #![warn(missing_docs)]
 
-/// Configuration types for the AI provider.
-pub mod config;
 /// Actor-based runtime with message-passing architecture.
 pub mod actor;
+/// Configuration types for the AI provider.
+pub mod config;
 /// Core error types.
 pub mod error;
 /// System prompt and message assembly helpers.
@@ -20,7 +20,7 @@ pub mod stream;
 pub use config::ProviderConfig;
 
 /// Actor handle, commands, events, status, and state snapshot.
-pub use actor::{EneHandle, EneCommand, EneEvent, EneStatus, EneStateSnapshot};
+pub use actor::{EneCommand, EneEvent, EneHandle, EneStateSnapshot, EneStatus};
 
 /// Provider types (re-exported from `ene-provider`).
 pub use ene_provider::{
@@ -52,9 +52,9 @@ pub use error::EneCoreError;
 
 /// Resource directory initialization (re-exported from `ene-config`).
 pub use ene_config::ensure_resource_dirs;
+/// Prompt builder utilities.
+pub use prompt_builder::{build_expression_phi, build_messages, build_system_prompt};
 /// Permission decision type.
 pub use stream::PermissionDecision;
 /// Tool RAG configuration.
 pub use stream::ToolRagConfig;
-/// Prompt builder utilities.
-pub use prompt_builder::{build_system_prompt, build_messages, build_expression_phi};
