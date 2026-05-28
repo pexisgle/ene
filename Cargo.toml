@@ -38,13 +38,13 @@ async-openai = { version = "0.40.2", features = [
     "embedding",
 ] }
 figment = { version = "0.10", features = ["json", "env"] }
-schemars = { version = "0.8", features = ["preserve_order"] }
-ctor = "0.2"
+schemars = { version = "1.2", features = ["preserve_order"] }
+ctor = "1.0"
 
 # --- Workspace dependencies (shared across crates) ---
 dashmap = "6"
 base64 = "0.22"
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 # --- Internal libraries ---
 ene-common = { path = "crates/ene-common" }
