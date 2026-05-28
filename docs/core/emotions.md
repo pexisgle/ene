@@ -14,17 +14,21 @@ Implemented in `special_token.rs`:
 ## Data Flow
 
 ```
-run_ai_with_tools → TextDelta(String)
+LLM stream → raw text chunks
   ↓
-Consumer (ai_bridge / CLI) receives
-  ↓
-session.process_delta(chunk) splits
-  ├── Text → display
-  └── <|emo:name|> → emotion token processing
+ene-core stream task: session.process_delta(chunk)
+  ├── Text → EneEvent::TextDelta { delta }
+  └── <|emo:name|> → EneEvent::SpecialToken { token }
        ↓
-GUI: EmotionQueue → SetExpressions (VRM blendshapes)
-CLI: "[Emotion: name]" in magenta text
+Consumer receives separate events:
+  ├── CLI: TextDelta → print directly
+  │       SpecialToken → extract_emotion_from_token → "[Emotion: name]"
+  └── Desktop: TextDelta → EneStreamEvent::TextDelta
+              SpecialToken → extract_emotion_from_token → EneStreamEvent::SpecialToken
+                → EmotionQueue → SetExpressions (VRM blendshapes)
 ```
+
+**Important:** Emotion extraction from `TextDelta` happens inside `ene-core`'s stream task, not in the consumer. Consumers receive pre-parsed `SpecialToken` events. There is no need to call `extract_emotion_from_token` on `TextDelta`.
 
 ## Emotion Expression Protocol
 
@@ -47,5 +51,5 @@ Merged with `post_history_instructions` before injection.
 
 | Application | Handling |
 |-------------|----------|
-| ene-desktop (GUI) | `TextDelta` → `process_delta()` → `EmotionQueue` → `process_emotion_queue` (4s hold, then fade-out) → `SetExpressions` |
-| ene-cli (CLI) | `TextDelta` → `process_delta()` → `[Emotion: name]` in magenta |
+| ene-desktop (GUI) | `SpecialToken` → `extract_emotion_from_token` → `EneStreamEvent::SpecialToken` → `EmotionQueue` → 4s hold → fade-out → `SetExpressions` |
+| ene-cli (CLI) | `SpecialToken` → `extract_emotion_from_token` → `[Emotion: name]` in magenta |

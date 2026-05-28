@@ -12,10 +12,10 @@ ene is a local AI character platform implemented as a Rust workspace. It provide
 
 | Document | Topic |
 |----------|-------|
-| [Streaming Engine](core/streaming.md) | `run_ai_with_tools()`, `AiStreamEvent`, tool calling loop |
+| [Streaming Engine](core/streaming.md) | Actor-based architecture, `EneHandle`, `EneEvent`, tool calling loop |
 | [Prompt Construction](core/prompt.md) | Message assembly order, system prompt, emotion protocol, function calling |
 | [Session Management](core/session.md) | `ConversationSession`, `CharacterCardV3`, CBS macro expansion |
-| [Session Splitting](core/session-split.md) | Timeout, topic change detection, async split lifecycle, max-pooling |
+| [Session Splitting](core/session-split.md) | Timeout, topic change detection, manual split, async lifecycle |
 | [Emotion Tokens](core/emotions.md) | `<\|emo:name\|>` parsing, VRM blendshape mapping |
 
 ## Memory
@@ -43,7 +43,7 @@ ene is a local AI character platform implemented as a Rust workspace. It provide
 | Crate | Type | Description |
 |-------|------|-------------|
 | `ene-config` | Library | Configuration, schemas, character cards, macros |
-| `ene-core` | Library | Streaming engine, tool orchestration, unified runtime |
+| `ene-core` | Library | Actor-based runtime, LLM streaming, tool orchestration, memory integration |
 | `ene-embedding` | Library | Embedding providers (API + local GGUF) |
 | `ene-memory` | Library | SQLite-vec memory store |
 | `ene-session` | Library | Conversation history, session splitting |

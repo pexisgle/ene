@@ -1,7 +1,7 @@
 # アーキテクチャ概要
 
 ene は `ene-core` を中心としたモジュラーな Rust ワークスペースであり、
-LLM 統合、ツール呼び出し、長期記憶、セッション管理を結合します。
+LLM 統合、ツール呼び出し、長期記憶、セッション管理を**チャネルベースのメッセージパッシングによるアクターパターン**で結合します。
 
 ## クレート依存関係グラフ
 
@@ -16,8 +16,7 @@ ene-cli ──┼── ene-core ──── ene-tool-host ──── ene-too
         ├── ene-embedding (ベクトル埋め込み)
         ├── ene-memory    (長期記憶ストア)
         ├── ene-session   (会話履歴, 自動分割)
-        ├── ene-tool-host (ツールプロセス管理, MCP)
-        └── ene-tool-proto (プロトコル型, ToolProvider トレイト)
+        └── ene-tool-host (ツールプロセス管理, MCP)
 ```
 
 ## レイヤー説明
@@ -26,7 +25,7 @@ ene-cli ──┼── ene-core ──── ene-tool-host ──── ene-too
 - **`ene-config`** — `figment` ベースの JSON 設定。`define_config!` と `define_label_enum!` マクロを提供し、宣言的な設定構造体定義を可能にします。プラットフォーム対応のパス解決と自動 `settings.schema.json` 生成を管理します。
 
 ### コアランタイムレイヤー
-- **`ene-core`** — 統一ランタイムファサード。すべてのサブシステムを `AiRuntime::init()` の背後にカプセル化します。`run_ai_with_tools()` でツールオーケストレーション付きのストリーミング LLM 補完を提供します。
+- **`ene-core`** — 統一ランタイムファサード。**アクターベースアーキテクチャ**とチャネルベースのメッセージパッシングを使用します。`EneHandle` が公開 API であり、バックグラウンドの `EneActor` タスクを生成します。コンシューマーは `EneCommand`（mpsc）で通信し、`EneEvent`（broadcast）でイベントを受信します。アクターセッション、設定、ツールレジストリを所有し、ストリーミング、ツールオーケストレーション、権限管理、セッション分割を内部で管理します。
 
 ### AI サブシステム
 - **`ene-embedding`** — ベクトル埋め込み生成。`ApiEmbeddingProvider` (OpenAI 互換) と `GgufEmbeddingProvider` (candle/GGUF、ローカル、GPU 不要) の 2 つのバックエンド。
@@ -49,14 +48,45 @@ ene-cli ──┼── ene-core ──── ene-tool-host ──── ene-too
 - **`ene-cli`** — 対話型ターミナル REPL。`/` コマンドでセッションとメモリを管理。
 - **`ene-desktop`** — Bevy ベース GUI。VRM キャラクターレンダリング、常時最前面の透明オーバーレイ、システムトレイ、egui 設定 UI。
 
-## データフロー (簡略)
+## データフロー
 
 ```
-ユーザー入力 → AiRuntime → 記憶検索 → build_messages()
-    → LLM API (ストリーム) → AiStreamEvent パイプライン
-        → TextDelta → 表示
-        → ToolCall → IPC→ツールバイナリ → ToolCallResult → LLM API (ループ)
-        → Finished
-
-セッション境界チェック → summarize_conversation() → MemoryStore.insert_summary()
+ユーザー入力
+  ↓
+コンシューマーが EneCommand::Run { input } を送信
+  ↓
+EneActor がコマンドを受信
+  ↓
+記憶検索 → build_messages()
+  ↓
+ストリームタスク生成 → LLM API (ストリーム)
+  ↓
+EneEvent パイプライン (broadcast チャンネル):
+  → TextDelta → 表示
+  → SpecialToken → 感情処理
+  → ToolCallStart → ツール実行 → ToolCallResult → LLM API (ループ)
+  → PermissionRequired → ユーザー承認 → PermissionDecision
+  → Finished
+  ↓
+ストリームタスクが更新されたセッションを oneshot で送信
+  ↓
+アクターがセッションを更新、StatusChanged { Idle } を送出
 ```
+
+## アーキテクチャ
+
+アクターパターンによりスレッド安全性と関心の分離を実現:
+
+| コンポーネント | 役割 |
+|-------------|------|
+| `EneHandle` | スレッドセーフな公開 API。mpsc でコマンド送信、broadcast でイベント受信。 |
+| `EneActor` | バックグラウンドタスク。全変更可能状態 (セッション、設定、レジストリ) を所有。 |
+| `EneCommand` | コンシューマー → アクターメッセージ (Run, Cancel, Reconfigure, LoadCharacter など) |
+| `EneEvent` | アクター → コンシューマーイベント (TextDelta, ToolCall*, PermissionRequired, Finished など) |
+| `stream::run_stream` | Run コマンドごとに生成される内部ストリーミングエンジン。更新されたセッションを oneshot で返す。 |
+
+利点:
+- **グローバル状態なし** — 全状態はアクターが所有
+- **スレッドセーフ** — チャネルベース通信、ホットパスでのミューテックス競合なし
+- **Bevy 対応** — `try_recv()` でノンブロッキング ECS ポーリング、`subscribe()` で複数コンシューマー対応
+- **ライフサイクル管理** — 全ハンドルがドロップされるとアクターが終了

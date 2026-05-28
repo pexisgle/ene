@@ -1,71 +1,171 @@
 # ストリーミングエンジン
 
-`ene-core` の `run_ai_with_tools()` は、ツール呼び出しループを備えたストリーミング LLM 対話を実行します。
+ene は **アクターベースのメッセージパッシングアーキテクチャ** を使用して、ツール呼び出しループ付きのストリーミング LLM 対話を実行します。
 
-## `AiStreamEvent`
+## アーキテクチャ
 
-ストリーミングパイプラインが生成する主要なイベント型:
+```
+コンシューマー (CLI/デスクトップ)
+    ↓ EneCommand::Run { input }
+EneHandle (mpsc チャンネル)
+    ↓
+EneActor (バックグラウンド tokio タスク)
+    ├── 所有: セッション, 設定, ツールレジストリ, 権限
+    ├── 生成: ストリームタスク (run_stream)
+    │     ↓ EneEvent (broadcast チャンネル)
+    └── コンシューマーがイベントを受信
+```
+
+## EneHandle
+
+コンシューマー向けの公開 API。スレッドセーフでクローン可能。
 
 ```rust
-pub enum AiStreamEvent {
-    TextDelta(String),                                    // テキスト断片
-    SpecialToken(String),                                 // 例: <|emo:happy|>
-    ToolCallStart { name: String, arguments: String },    // ツール呼び出し開始
-    ToolCallResult { name: String, result: String },      // ツール実行結果
-    PermissionRequired { request_id, action, target, description }, // Phase 2
-    TaskProgress { task_id, step, total_steps, description },       // Phase 2
-    SessionSplit { summary: String, reason: String },               // Phase 2
-    Finished,                                             // 応答完了
-    Error(String),                                        // エラー詳細
+pub struct EneHandle {
+    cmd_tx: Arc<mpsc::UnboundedSender<EneCommand>>,
+    event_tx: broadcast::Sender<EneEvent>,
+    event_rx: broadcast::Receiver<EneEvent>,
 }
 ```
 
-## `run_ai_with_tools()` フロー
+### 主要メソッド
+
+| メソッド | 説明 |
+|---------|------|
+| `new()` | アクターをバックグラウンドタスクとして生成 |
+| `run(input)` | `EneCommand::Run` を送信 (ファイア＆フォーゲット) |
+| `cancel()` | `EneCommand::Cancel` を送信 |
+| `subscribe()` | イベント用の新規 broadcast 受信機を取得 |
+| `try_recv()` | ノンブロッキングポーリング (Bevy ECS 向け) |
+| `recv()` | 非同期受信 (tokio タスク向け) |
+| `get_snapshot()` | oneshot 経由で読み取り専用状態をリクエスト |
+| `load_character(path)` | oneshot 経由でキャラクターカードを読み込み |
+| `reconfigure(config)` | oneshot 経由で新しい設定を適用 |
+| `manual_split()` | oneshot 経由でセッション分割をトリガー |
+
+### ライフサイクル
+
+- `EneHandle::new()` がアクターを生成しハンドルを返す
+- クローンは新しい broadcast 受信機を作成（`run()` 前にクローンすればイベントロストなし）
+- `Drop`: `Arc::strong_count == 1` のときのみ `Shutdown` を送信（最後のハンドル）
+- アクターは `cmd_rx` が `None` を返すと終了（全送信者がドロップされたとき）
+
+## EneCommand
+
+コンシューマーからアクターに送信されるコマンド:
 
 ```rust
-pub async fn run_ai_with_tools(
-    settings: &EneSettings,
-    session: &ConversationSession,
-    user_input: &str,
-    registry: Arc<dyn ToolRegistry>,
-) -> Result<impl Stream<Item = AiStreamEvent>, AiCoreError>
+pub enum EneCommand {
+    Run { input: String },
+    Cancel,
+    Shutdown,
+    Reconfigure { config: EneConfig, reply: oneshot::Sender<Result<(), EneCoreError>> },
+    LoadCharacter { path: String, reply: oneshot::Sender<Result<(), EneCoreError>> },
+    PermissionDecision { request_id: String, decision: PermissionDecision },
+    GetSnapshot { reply: oneshot::Sender<EneStateSnapshot> },
+    ManualSplit { reply: oneshot::Sender<Result<SplitResult, EneCoreError>> },
+}
 ```
 
-### ステップ詳細
+## EneEvent
 
-1. **準備** — `base_url`/`api_key` 解決、カード読み込み確認、ユーザー入力を `conversation_logs` に保存 (非同期、メモリ有効時)
+アクターから全コンシューマーに broadcast チャンネルで送出されるイベント:
 
-2. **記憶検索**
-   - `get_all_keyfacts()` → 既存ユーザーファクト
-   - Tool RAG 有効時: ユーザー入力を埋め込み → `store.search_tools()` → 関連ツール
-   - `search_summaries()` → 呼び出された過去の会話要約
+```rust
+pub enum EneEvent {
+    TextDelta { delta: String },
+    SpecialToken { token: String },
+    ToolCallStart { name: String, arguments: String },
+    ToolCallResult { name: String, result: String },
+    PermissionRequired { request_id: String, action: String, target: String, description: String },
+    TaskProgress { task_id: String, step: usize, total_steps: usize, description: String },
+    SessionSplit { summary: String, reason: String },
+    Finished,
+    Error { message: String },
+    StatusChanged { status: EneStatus },
+}
+```
 
-3. **メッセージ構築**
-   - `build_messages()` → 完全なメッセージ配列 (システムプロンプト、例、要約、履歴、プロトコル、ユーザー入力)
-   - `build_tools()` → `ToolDefinition` リスト → OpenAI 関数呼び出し形式
+**注意:** `TextDelta` はプレーンテキストのみを含みます。特殊トークン（`<|emo:name|>` など）は `ene-core` 内のストリームタスクで事前にパースされ、別々の `SpecialToken` イベントとして送出されます。
 
-4. **メインループ** (最大 `max_tool_call_rounds` 回)
+## 内部ストリームフロー (`run_stream`)
 
-   ```
-   POST chat/completions (ストリーム)
-       ↓
-   TextDelta イベント送出
-       ↓
-   ToolCallChunk 蓄積
-       ↓
-   ストリーム終了後、tool_calls が存在すれば:
-     ├── ToolCallStart イベント
-     ├── registry.call_tool(name, args) (30秒タイムアウト)
-     ├── スクリーンショット結果 → 画像メッセージ変換
-     ├── ToolCallResult イベント
-     └── ループ継続
-   存在しなければ:
-     └── アシスタントログ保存、Finished イベント
-   ```
+アクターは各 `Run` コマンドに対してストリームタスクを生成:
 
-5. **事後処理**
-   - `AiStreamEvent::Finished` 送出
-   - 履歴確定は呼び出し側の責任 (`session.finalize_response()`)
+```
+Run { input }
+  ↓
+1. ペンディング分割を適用 (ある場合)
+2. 分割条件をチェック → 分割タスクを生成 (必要な場合)
+3. 入力を埋め込み → pending_embedding
+4. セッションにユーザー入力を記録
+5. LLM プロバイダを作成
+6. ストリームタスクを生成
+  ↓
+ストリームタスク (run_stream):
+  ├── 記憶コンテキストを取得 (要約 + キーファクト)
+  ├── メッセージを構築 (システムプロンプト, 履歴, 記憶, プロトコル)
+  ├── 関連ツールを選択 (Tool RAG)
+  ├── メインループ (最大 max_tool_call_rounds 回):
+  │     ├── LLM ストリーミング → TextDelta / SpecialToken イベント
+  │     ├── tool_calls がある場合:
+  │     │     ├── ToolCallStart イベント
+  │     │     ├── ツール実行 (必要な場合権限チェック付き)
+  │     │     ├── ToolCallResult イベント
+  │     │     └── ループ継続
+  │     └── tool_calls がない場合:
+  │           ├── アシスタントログを保存
+  │           └── Finished イベント
+  └── 更新されたセッションを oneshot でアクターに送信
+```
+
+## 権限処理
+
+破壊的なツール操作にはユーザー承認が必要:
+
+```
+ツール実行 → PermissionRequired { request_id, action, target, description }
+  ↓
+アクターが PermissionRequired イベントをコンシューマーに送信
+  ↓
+コンシューマーが権限ダイアログを表示
+  ↓
+コンシューマーが EneCommand::PermissionDecision { request_id, decision } を送信
+  ↓
+アクターが pending_permissions マップを介して待機中のストリームタスクに決定をルーティング
+  ↓
+ストリームタスクがツール実行を再開または拒否
+```
+
+権限はアクターとストリームタスク間の `Arc<Mutex<HashMap<String, oneshot::Sender<PermissionDecision>>>>` を介して解決されます。
+
+## セッション更新
+
+ストリームタスクが完了すると、更新された `ConversationSession` を onesot チャンネルでアクターに送信します。アクターはこの完了をポーリング:
+
+- **ストリーミング中:** `tokio::select!` と 100ms スリープで `stream_session_rx` をチェック
+- **アイドル時:** `cmd_rx.recv()` でブロック（タイマーポーリングなし）
+- 完了時: アクターが `self.session` を更新し `StatusChanged { status: Idle }` を送出
+
+## キャンセル
+
+`EneCommand::Cancel` は以下をトリガー:
+1. `cancel_token.cancel()` — LLM ストリーミングループ内でチェック
+2. `stream_handle.abort()` — tokio タスクをキル
+3. セッション状態をアイドルにリセット
+
+キャンセルトークンは `while let Some(chunk) = stream.next().await` の内側でチェックされ、即座に応答します。
+
+## エラーハンドリング
+
+| エラーソース | 処理 |
+|-------------|------|
+| LLM API エラー | `EneEvent::Error` + `Finished`、ストリームが返す |
+| ツールタイムアウト (60秒) | ツールエラーメッセージを LLM に送信 |
+| 権限拒否 | ツールエラーを LLM に送信 |
+| 最大ラウンド超過 | `EneEvent::Error` + `Finished` |
+| 埋め込みエラー | `EneEvent::Error` + `Finished` |
+| Broadcast Lagged | コンシューマーが警告をログし、残りのイベントを継続読み込み |
 
 ## ツール呼び出しの蓄積
 
@@ -73,7 +173,7 @@ pub async fn run_ai_with_tools(
 
 ```rust
 fn accumulate_tool_calls(chunks: &mut Vec<ToolCallChunk>, delta: &[ToolCallChunk])
-fn finalize_tool_calls(chunks: Vec<ToolCallChunk>) -> Vec<ToolCalls>
+fn finalize_tool_calls(chunks: Vec<ToolCallChunk>) -> Vec<ToolCall>
 ```
 
 各チャンクは `index` フィールドで識別されます。`function.arguments` 文字列はチャンク間で連結されます。

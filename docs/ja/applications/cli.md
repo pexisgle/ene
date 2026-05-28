@@ -8,9 +8,20 @@ AI キャラクターとの対話、ツールテスト、メモリ/セッショ�
 cargo run -p ene-cli
 # ツールテストモード:
 cargo run -p ene-cli -- --tooltest
-# API キー設定 (OS キーリングに保存):
-cargo run -p ene-cli -- --set-api-key
 ```
+
+## アーキテクチャ
+
+```
+main.rs → clap 引数解析
+  → config::init() → 設定読み込み, EneHandle::new()
+  → AppContext { handle: EneHandle }
+  → repl::run() → dialoguer 入力ループ
+      → process_stream() → EneEvent バリアント処理
+      → commands::execute() → / プレフィックスコマンド処理
+```
+
+CLI は起動時に `EneHandle`（アクター）を作成。ユーザー入力は `handle.run()` で送信し、イベントは `handle.subscribe()` で受信。
 
 ## REPL コマンド
 
@@ -29,7 +40,7 @@ cargo run -p ene-cli -- --set-api-key
 
 | コマンド | 動作 |
 |---------|------|
-| `/card <path>` | 別のキャラクターカードを読み込み |
+| `/card <path>` | 別のキャラクターカードを読み込み (非同期) |
 
 ### 設定とツール
 
@@ -51,7 +62,7 @@ cargo run -p ene-cli -- --set-api-key
 
 | コマンド | 動作 |
 |---------|------|
-| `/session split` | 手動でセッション分割を実行 |
+| `/session split` | 手動でセッション分割を実行 (アクターの ManualSplit コマンド経由) |
 | `/session info` | セッション診断情報を表示 |
 | `/session summaries` | 過去のセッション要約を一覧 |
 
@@ -71,13 +82,3 @@ cargo run -p ene-cli -- --set-api-key
 | `[Tool Result: ...]` | 緑 |
 | `[Session split]` | 黄色 |
 | エラー | 赤太字 |
-
-## アーキテクチャ
-
-```
-main.rs → clap 引数解析
-  → config::init() → 設定読み込み, AiRuntime::init()
-  → repl::run() → dialoguer 入力ループ
-      → process_stream() → AiStreamEvent バリアント処理
-      → commands::execute() → / プレフィックスコマンド処理
-```

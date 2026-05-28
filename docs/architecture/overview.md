@@ -1,6 +1,6 @@
 # Architecture Overview
 
-ene is a modular Rust workspace centered around the `ene-core` library, which ties together LLM integration, tool invocation, long-term memory, and session management.
+ene is a modular Rust workspace centered around the `ene-core` library, which ties together LLM integration, tool invocation, long-term memory, and session management through an **actor-based message-passing architecture**.
 
 ## Crate Dependency Graph
 
@@ -15,8 +15,7 @@ ene-cli ──┼── ene-core ──── ene-tool-host ──── ene-too
         ├── ene-embedding (vector embeddings)
         ├── ene-memory    (long-term memory store)
         ├── ene-session   (conversation history, auto-split)
-        ├── ene-tool-host (tool process management, MCP)
-        └── ene-tool-proto (protocol types, ToolProvider trait)
+        └── ene-tool-host (tool process management, MCP)
 ```
 
 ## Layer Descriptions
@@ -25,7 +24,7 @@ ene-cli ──┼── ene-core ──── ene-tool-host ──── ene-too
 - **`ene-config`** — JSON-based settings with `figment`. Provides `define_config!` and `define_label_enum!` macros for declarative config structs. Manages platform-aware path resolution and automatic `settings.schema.json` generation.
 
 ### Core Runtime Layer
-- **`ene-core`** — The unified runtime facade. Wraps all subsystems behind a single `AiRuntime::init()` call. Provides `run_ai_with_tools()` for streaming LLM completions with tool orchestration.
+- **`ene-core`** — The unified runtime facade. Uses an **actor-based architecture** with channel-based message passing. `EneHandle` is the public API that spawns a background `EneActor` task. Consumers communicate via `EneCommand` (mpsc) and receive events via `EneEvent` (broadcast). The actor owns the session, config, and tool registry, and manages streaming, tool orchestration, permissions, and session splitting internally.
 
 ### AI Subsystems
 - **`ene-embedding`** — Vector embedding generation. Two backends: `ApiEmbeddingProvider` (OpenAI-compatible) and `GgufEmbeddingProvider` (candle/GGUF, local, GPU-free).
@@ -48,14 +47,45 @@ ene-cli ──┼── ene-core ──── ene-tool-host ──── ene-too
 - **`ene-cli`** — Interactive terminal REPL with `/` commands for session and memory management.
 - **`ene-desktop`** — Bevy-based GUI with VRM character rendering, always-on-top transparent overlay, system tray, and egui settings UI.
 
-## Data Flow (Simplified)
+## Data Flow
 
 ```
-User Input → AiRuntime → Memory Search → build_messages()
-    → LLM API (stream) → AiStreamEvent pipeline
-        → TextDelta → Display
-        → ToolCall → IPC to tool binary → ToolCallResult → LLM API (loop)
-        → Finished
-
-Session Boundary Check → summarize_conversation() → MemoryStore.insert_summary()
+User Input
+  ↓
+Consumer sends EneCommand::Run { input }
+  ↓
+EneActor receives command
+  ↓
+Memory Search → build_messages()
+  ↓
+Spawn stream task → LLM API (stream)
+  ↓
+EneEvent pipeline (broadcast channel):
+  → TextDelta → Display
+  → SpecialToken → Emotion processing
+  → ToolCallStart → Tool execution → ToolCallResult → LLM API (loop)
+  → PermissionRequired → User approval → PermissionDecision
+  → Finished
+  ↓
+Stream task sends updated session back via oneshot
+  ↓
+Actor updates session, emits StatusChanged { Idle }
 ```
+
+## Actor Architecture
+
+The actor pattern ensures thread safety and clean separation of concerns:
+
+| Component | Role |
+|-----------|------|
+| `EneHandle` | Thread-safe public API. Sends commands via mpsc, receives events via broadcast. |
+| `EneActor` | Background task. Owns all mutable state (session, config, registry). |
+| `EneCommand` | Consumer → Actor messages (Run, Cancel, Reconfigure, LoadCharacter, etc.) |
+| `EneEvent` | Actor → Consumer events (TextDelta, ToolCall*, PermissionRequired, Finished, etc.) |
+| `stream::run_stream` | Internal streaming engine spawned per Run command. Returns updated session via oneshot. |
+
+Benefits:
+- **No global state** — all state is owned by the actor
+- **Thread-safe** — channel-based communication, no mutex contention on hot paths
+- **Bevy-friendly** — `try_recv()` for non-blocking ECS polling, `subscribe()` for multiple consumers
+- **Lifecycle-managed** — actor exits when all handles are dropped

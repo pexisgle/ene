@@ -1,13 +1,17 @@
 # 長期記憶
 
-SQLite + sqlite-vec + Diesel による、ベクトル類似度検索と LLM 駆動要約を備えたエピソディック記憶。
+SQLite + sqlite-vec + Diesel ベースのエピソディック記憶。ベクトル類似度検索と LLM 駆動の要約を提供。
 
 ## 初期化
 
-`AiRuntime::init()` 内で実行:
+`EneActor` が `reconfigure()` 中に記憶を初期化:
+
 1. `embedding` 設定から埋め込みプロバイダを作成
-2. `memory.enabled == true` の場合、`MemoryStore::open()` を呼び出し
-3. sqlite-vec 拡張の登録とマイグレーションを実行
+2. `memory.enabled == true` なら `MemoryStore::open()` を呼び出し
+3. sqlite-vec 拡張を登録しマイグレーションを実行
+4. ストアと埋め込みを `session.memory` にアタッチ
+
+記憶は `EneStateSnapshot` 経由でも CLI コマンド (`/memory search`, `/session summaries`) で利用可能。
 
 ## MemoryStore
 
@@ -18,7 +22,7 @@ pub struct MemoryStore {
 }
 ```
 
-`r2d2` コネクションプーリングを使用。各操作でプールからコネクションを取得します。
+`r2d2` 接続プーリングを使用。各操作はプールから接続を取得。
 
 ### データベーステーブル
 
@@ -28,7 +32,7 @@ conversation_summaries (
     session_id TEXT,
     card_name TEXT,
     summary TEXT,
-    embedding BLOB,     -- f32 ベクトル (バイナリ)
+    embedding BLOB,     -- f32 ベクトルとしてバイナリ
     created_at TEXT,    -- RFC3339
     ended_at TEXT       -- RFC3339
 )
@@ -46,7 +50,7 @@ conversation_logs (
     id INTEGER PRIMARY KEY,
     session_id TEXT,
     card_name TEXT,
-    role TEXT,          -- "user" or "assistant"
+    role TEXT,          -- "user" または "assistant"
     content TEXT,
     created_at TEXT
 )
@@ -64,10 +68,10 @@ tool_embeddings (
 | メソッド | 説明 |
 |---------|------|
 | `open(path, dims)` | 永続ストアを開き、マイグレーションを実行 |
-| `open_in_memory(dims)` | テスト用インメモリストア |
-| `insert_summary(id, card, summary, facts, emb, ended)` | 要約 + キーファクトをトランザクションで挿入。空 `value` はファクト削除扱い |
+| `open_in_memory(dims)` | テスト用のインメモリストア |
+| `insert_summary(id, card, summary, facts, emb, ended)` | 要約 + キーファクトをトランザクションで挿入。空の `value` はファクトを削除。 |
 | `search_summaries(query_emb, card, limit, threshold)` | `vec_distance_cosine` によるコサイン類似度検索 |
-| `list_recent_summaries(card, limit)` | `created_at DESC` で最新取得 |
+| `list_recent_summaries(card, limit)` | `created_at DESC` で最新順 |
 | `delete_summary(id)` | カスケード削除 (関連キーファクトも削除) |
 | `count_summaries(card)` | キャラクターの要約数をカウント |
 
@@ -75,10 +79,10 @@ tool_embeddings (
 
 | メソッド | 説明 |
 |---------|------|
-| `get_all_keyfacts(card)` | キーごとに最新の値を取得 (`ROW_NUMBER() PARTITION BY key ORDER BY created_at DESC`) |
-| `upsert_keyfact(card, key, value)` | 新しい行を挿入 (クエリ時に最新が採用) |
+| `get_all_keyfacts(card)` | キーごとの最新値 (`ROW_NUMBER() PARTITION BY key ORDER BY created_at DESC`) |
+| `upsert_keyfact(card, key, value)` | 新しい行を挿入 (クエリ時に最新が選択) |
 | `delete_keyfact(card, key)` | キーの全行を削除 |
-| `count_keyfacts(card)` | 個別キー数をカウント |
+| `count_keyfacts(card)` | ユニークキー数をカウント |
 
 ### 会話ログ
 
@@ -91,10 +95,10 @@ tool_embeddings (
 
 | メソッド | 説明 |
 |---------|------|
-| `upsert_tool_embedding(name, hash, emb)` | UPSERT ツール埋め込み |
-| `list_tool_embeddings()` | 全 (name, hash, vector) を一覧 |
-| `delete_tool_embedding(name)` | ツール埋め込みを削除 |
-| `search_tools(query_emb, limit, threshold)` | Tool RAG 用コサイン類似度ツール検索 |
+| `upsert_tool_embedding(name, hash, emb)` | ツール埋め込みを UPSERT |
+| `list_tool_embeddings()` | 全 (名前, ハッシュ, ベクトル) を列挙 |
+| `delete_tool_embedding(name)` | ツールの埋め込みを削除 |
+| `search_tools(query_emb, limit, threshold)` | Tool RAG 用のコサイン類似度ツール検索 |
 
 ## EmbeddingProvider
 
@@ -124,11 +128,11 @@ pub struct ConversationSummaryResult {
 }
 ```
 
-専用の要約モデルは `memory.summarization_model` と `memory.summarization_base_url` で設定できます (空の場合はメイン LLM にフォールバック)。
+専用の要約モデルは `memory.summarization_model` と `memory.summarization_base_url` で設定可能 (空の場合はメイン LLM にフォールバック)。
 
 ## プロンプト注入形式
 
-`format_summaries_for_prompt()` が呼び出された要約をプロンプト用に整形:
+`format_summaries_for_prompt()` が呼び出された要約をプロンプト用にレンダリング:
 
 ```
 [Past Conversation Summaries — relevant previous conversations]

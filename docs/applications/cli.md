@@ -2,41 +2,54 @@
 
 Interactive REPL for chatting with AI characters, testing tools, and managing memory/sessions.
 
-## Launch
+## Startup
 
 ```bash
 cargo run -p ene-cli
-# With tool test mode:
+# Tool test mode:
 cargo run -p ene-cli -- --tooltest
 ```
 
+## Architecture
+
+```
+main.rs → clap args
+  → config::init() → settings load, EneHandle::new()
+  → AppContext { handle: EneHandle }
+  → repl::run() → dialoguer input loop
+      → process_stream() → EneEvent dispatch
+      → commands::execute() → / command dispatch
+```
+
+The CLI creates an `EneHandle` (actor) on startup. User input is sent via `handle.run()`, and events are received via `handle.subscribe()`.
+
 ## REPL Commands
 
-Commands are prefixed with `/`:
+Commands are entered with `/` prefix:
 
 ### Session Commands
 
 | Command | Action |
 |---------|--------|
-| `/quit` | Exit the REPL |
+| `/quit` | Exit REPL |
 | `/clear` | Clear conversation history |
-| `/history` | Show full conversation history |
-| `/prompt` | Display the current system prompt |
+| `/history` | Show conversation history |
+| `/prompt` | Show current system prompt |
 
 ### Character Commands
 
 | Command | Action |
 |---------|--------|
-| `/card <path>` | Load a different character card |
+| `/card <path>` | Load a different character card (async) |
 
 ### Config & Tools
 
 | Command | Action |
 |---------|--------|
 | `/config` | Show current settings |
-| `/tools` | List all enabled tools |
-| `/undo` | Undo the last file operation |
-| `/tooltest [prompt]` | Run a one-shot tool test |
+| `/tools` | List enabled tools |
+| `/undo` | Undo last file operation |
+| `/tooltest [prompt]` | One-shot tool test |
 
 ### Memory Commands
 
@@ -49,9 +62,9 @@ Commands are prefixed with `/`:
 
 | Command | Action |
 |---------|--------|
-| `/session split` | Manually trigger a session split |
-| `/session info` | Show session diagnostics |
-| `/session summaries` | List past session summaries |
+| `/session split` | Manually split session (via actor ManualSplit command) |
+| `/session info` | Session diagnostics |
+| `/session summaries` | Past session summaries |
 
 ### Help
 
@@ -61,21 +74,11 @@ Commands are prefixed with `/`:
 
 ## Stream Display
 
-| Event | Styling |
-|-------|---------|
-| Normal text | Default stdout |
+| Event | Style |
+|-------|-------|
+| Plain text | Default stdout |
 | `[Emotion: happy]` | Magenta |
 | `[Tool Calling: name(args)]` | Cyan |
 | `[Tool Result: ...]` | Green |
 | `[Session split]` | Yellow |
-| Errors | Red bold |
-
-## Architecture
-
-```
-main.rs → clap arg parse
-  → config::init() → load settings, AiRuntime::init()
-  → repl::run() → dialoguer input loop
-      → process_stream() → handle AiStreamEvent variants
-      → commands::execute() → handle /-prefixed commands
-```
+| Error | Red bold |

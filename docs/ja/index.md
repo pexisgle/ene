@@ -14,10 +14,10 @@ LLM 駆動の会話、アニメーションする VRM キャラクター、ツ�
 
 | ドキュメント | トピック |
 |-------------|---------|
-| [ストリーミングエンジン](core/streaming.md) | `run_ai_with_tools()`, `AiStreamEvent`, ツール呼び出しループ |
+| [ストリーミングエンジン](core/streaming.md) | アクターベースアーキテクチャ, `EneHandle`, `EneEvent`, ツール呼び出しループ |
 | [プロンプト構築](core/prompt.md) | メッセージ構築順序, システムプロンプト, 感情プロトコル, 関数呼び出し |
 | [セッション管理](core/session.md) | `ConversationSession`, `CharacterCardV3`, CBS 式展開 |
-| [セッション分割](core/session-split.md) | タイムアウト, 話題変化検出, 非同期分割ライフサイクル, Max-pooling |
+| [セッション分割](core/session-split.md) | タイムアウト, 話題変化検出, 手動分割, 非同期ライフサイクル |
 | [感情トークン](core/emotions.md) | `<\|emo:name\|>` 解析, VRM ブレンドシェイプマッピング |
 
 ## 記憶
@@ -45,7 +45,7 @@ LLM 駆動の会話、アニメーションする VRM キャラクター、ツ�
 | クレート | 種別 | 説明 |
 |---------|------|------|
 | `ene-config` | Library | 設定管理, スキーマ生成, キャラクターカード, マクロ |
-| `ene-core` | Library | ストリーミングエンジン, ツール統合, 統一ランタイム |
+| `ene-core` | Library | アクターベースランタイム, LLM ストリーミング, ツール統合, 記憶統合 |
 | `ene-embedding` | Library | 埋め込みプロバイダ (API + ローカル GGUF) |
 | `ene-memory` | Library | SQLite-vec 記憶ストア |
 | `ene-session` | Library | 会話履歴, セッション分割 |

@@ -28,36 +28,64 @@ cargo run -p ene-desktop -- /path/to/character.vrm /path/to/animation.vrma
 | プラグイン | ソース | 役割 |
 |-----------|--------|------|
 | `ScenePlugin` | `scene.rs` | カメラ、照明、環境、フレーム制限 |
-| `AiPlugin` | `ai_bridge.rs` | Bevy ECS と Tokio 間の非同期 AI ストリーミングブリッジ |
+| `EnePlugin` | `ai_bridge.rs` | アクターベース AI ストリーミングブリッジ (EneHandle + Bevy イベント) |
 | `CharacterPlugin` | `character.rs` | キャラクター生成、表情ブレンド、アニメーション、ヘッドトラッキング |
 | `TrayPlugin` | `tray.rs` | システムトレイアイコンとメニュー (Linux/Windows) |
 | `SettingsUiPlugin` | `settings_ui/` | egui ベース設定パネル (AI, キャラクター, グラフィック) |
 | `CharacterDragPlugin` | `character_drag/` | クリック＆ドラッグウィンドウ移動、透明ヒットテスト |
 
-## AI ブリッジ (`AiPlugin`)
+## AI ブリッジ (`EnePlugin`)
 
-Bevy の同期 ECS ワールドと非同期 `ene-core` ストリーミングエンジンを接続:
+Bevy の同期 ECS ワールドと非同期アクターベースの `ene-core` を接続:
 
 ```
 Bevy ECS (同期)
-  → Tokio ランタイム (非同期)
-    → run_ai_with_tools()
-      → AiStreamEvent パイプライン
-        → Bevy イベントとして ECS に戻す
+  → EneHandle::run() (mpsc 経由ファイア＆フォーゲット)
+    → EneActor (バックグラウンド tokio タスク)
+      → EneEvent (broadcast チャンネル)
+        → poll_ene_events → EneStreamEvent (Bevy メッセージ)
+          → UI / キャラクターシステム
 ```
 
-システムチェーン:
-1. `enqueue_ai_requests` — Bevy UI メッセージ → 内部キュー
-2. `process_embedding` — 前フレームからの遅延埋め込み処理
-3. `start_next_ai_request` — メモリ初期化 (遅延) → カードロード → 分割タスク → 埋め込み → AI 起動
-4. `poll_ai_worker` — ストリームイベントポーリング、表示/サウンド/ツールシステムにディスパッチ
+### リソース
+
+```rust
+#[derive(Resource)]
+pub struct EneResource {
+    pub handle: EneHandle,    // アクターハンドル
+    pub processing: bool,     // AI がストリーミング中かどうか
+}
+```
+
+### システムチェーン
+
+1. `enqueue_ai_requests` — `EneRequestEvent` を受信 → `handle.run()` を呼び出し
+2. `poll_ene_events` — `handle.try_recv()` をループ → `EneStreamEvent` にディスパッチ
+
+**重要な設計:** `handle.try_recv()` を直接使用（`handle.clone()` しない）。毎フレーム `clone()` で broadcast 受信機を再生成すると、新しい受信機は購読時以降のイベントのみ受信するため、イベントがロストする。
+
+### イベント
+
+```rust
+pub enum EneStreamEvent {
+    TextDelta(String),
+    SpecialToken(String),
+    ToolCallStart { name: String, arguments: String },
+    ToolCallResult { name: String, result: String },
+    PermissionRequired { request_id, action, target, description },
+    TaskProgress { task_id, step, total_steps, description },
+    Finished,
+    Error(String),
+}
+```
 
 ## VRM キャラクターパイプライン
 
 ### 表情システム
 
 ```
-AiStreamEvent::SpecialToken
+EneEvent::SpecialToken
+  → poll_ene_events → EneStreamEvent::SpecialToken
   → EmotionQueue (エンキュー)
   → process_emotion_queue (4秒ホールド → フェードアウト)
   → SetExpressions トリガー
