@@ -332,10 +332,10 @@ impl ConversationSession {
         let store = self.memory.memory_store.clone()?;
         let embedder = self.memory.embedding_provider.clone()?;
         let session_config = config
-            .get_section::<crate::SessionConfig>("session")
+            .get_section::<crate::SessionConfig>()
             .unwrap_or_default();
         let mem_config = config
-            .get_section::<MemoryConfig>("memory")
+            .get_section::<MemoryConfig>()
             .unwrap_or_default();
 
         Some(SplitTaskInput {

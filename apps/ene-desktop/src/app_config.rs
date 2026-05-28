@@ -45,6 +45,10 @@ pub struct DesktopSection {
     pub graphics: GraphicsSection,
 }
 
+impl ene_config::HasConfigKey for DesktopSection {
+    const KEY: &'static str = "desktop";
+}
+
 pub const DEFAULT_CHARACTER_NAME: &str = "Alicia";
 pub const DEFAULT_VRM_PATH: &str = "characters/Alicia/AliciaSolid.vrm";
 pub const DEFAULT_VRMA_PATH: &str = "characters/Alicia/motions/VRMA_01.vrma";
@@ -444,7 +448,7 @@ impl CharacterSettings {
         let desktop = DesktopSection {
             graphics: self.graphics.clone(),
         };
-        if let Err(e) = saved.set_section("desktop", &desktop) {
+        if let Err(e) = saved.set_section(&desktop) {
             eprintln!("[Config] Failed to set desktop section: {e}");
         }
         if let Err(e) = ene_config::save_full_config(&saved) {
@@ -475,7 +479,7 @@ impl CharacterSettings {
 
         // Graphics settings
         let desktop_cfg = full
-            .get_section::<DesktopSection>("desktop")
+            .get_section::<DesktopSection>()
             .unwrap_or_default();
         self.graphics = desktop_cfg.graphics;
 

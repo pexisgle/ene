@@ -69,7 +69,7 @@ impl ConfigHandle<'_> {
         let mem_config = self
             .runtime
             .config
-            .get_section::<ene_memory::MemoryConfig>("memory")
+            .get_section::<ene_memory::MemoryConfig>()
             .map_err(|e| {
                 EneCoreError::ConfigError(format!("Failed to load memory config: {}", e))
             })?;
@@ -91,29 +91,55 @@ impl ConfigHandle<'_> {
         &self.runtime.config
     }
 
+    /// Deserializes a sub-section from the config using the type's associated key.
+    ///
+    /// Returns `Ok(T::default())` when the key is absent.
+    pub fn get_section<T>(&self) -> Result<T, EneCoreError>
+    where
+        T: serde::de::DeserializeOwned + Default + ene_config::HasConfigKey,
+    {
+        self.runtime
+            .config
+            .get_section::<T>()
+            .map_err(EneCoreError::Config)
+    }
+
     /// Deserializes a sub-section from the config by key.
     ///
     /// Returns `Ok(T::default())` when the key is absent.
-    pub fn get_section<T>(&self, key: &str) -> Result<T, EneCoreError>
+    pub fn get_section_by_key<T>(&self, key: &str) -> Result<T, EneCoreError>
     where
         T: serde::de::DeserializeOwned + Default,
     {
         self.runtime
             .config
-            .get_section::<T>(key)
+            .get_section_by_key::<T>(key)
+            .map_err(EneCoreError::Config)
+    }
+
+    /// Serializes and inserts a sub-section into the config using the type's associated key.
+    ///
+    /// The change is held in memory. Call [`save`](Self::save) to persist.
+    pub fn set_section<T>(&mut self, section: &T) -> Result<(), EneCoreError>
+    where
+        T: serde::Serialize + ene_config::HasConfigKey,
+    {
+        self.runtime
+            .config
+            .set_section(section)
             .map_err(EneCoreError::Config)
     }
 
     /// Serializes and inserts a sub-section into the config by key.
     ///
     /// The change is held in memory. Call [`save`](Self::save) to persist.
-    pub fn set_section<T>(&mut self, key: &str, section: &T) -> Result<(), EneCoreError>
+    pub fn set_section_by_key<T>(&mut self, key: &str, section: &T) -> Result<(), EneCoreError>
     where
         T: serde::Serialize,
     {
         self.runtime
             .config
-            .set_section(key, section)
+            .set_section_by_key(key, section)
             .map_err(EneCoreError::Config)
     }
 
@@ -216,7 +242,7 @@ impl CharacterHandle<'_> {
         &self.runtime.session.current_card_path
     }
 
-    /// Deserializes a named section from the loaded per-character config.
+    /// Deserializes a named section from the loaded per-character config using the type's associated key.
     ///
     /// Returns `Ok(T::default())` when the key is absent.
     ///
@@ -224,7 +250,22 @@ impl CharacterHandle<'_> {
     ///
     /// Returns `EneCoreError` if no per-character config are loaded or
     /// if deserialization fails.
-    pub fn get_section<T>(&self, key: &str) -> Result<T, EneCoreError>
+    pub fn get_section<T>(&self) -> Result<T, EneCoreError>
+    where
+        T: serde::de::DeserializeOwned + Default + ene_config::HasConfigKey,
+    {
+        self.get_section_by_key(T::KEY)
+    }
+
+    /// Deserializes a named section from the loaded per-character config by key.
+    ///
+    /// Returns `Ok(T::default())` when the key is absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EneCoreError` if no per-character config are loaded or
+    /// if deserialization fails.
+    pub fn get_section_by_key<T>(&self, key: &str) -> Result<T, EneCoreError>
     where
         T: serde::de::DeserializeOwned + Default,
     {
@@ -243,7 +284,7 @@ impl CharacterHandle<'_> {
     }
 
     /// Serializes and inserts a named section into the per-character config
-    /// cache.
+    /// cache using the type's associated key.
     ///
     /// The change is held in memory. Call [`save`](Self::save) to persist.
     ///
@@ -251,7 +292,23 @@ impl CharacterHandle<'_> {
     ///
     /// Returns `EneCoreError` if no per-character config are loaded or
     /// if serialization fails.
-    pub fn set_section<T>(&mut self, key: &str, section: &T) -> Result<(), EneCoreError>
+    pub fn set_section<T>(&mut self, section: &T) -> Result<(), EneCoreError>
+    where
+        T: serde::Serialize + ene_config::HasConfigKey,
+    {
+        self.set_section_by_key(T::KEY, section)
+    }
+
+    /// Serializes and inserts a named section into the per-character config
+    /// cache by key.
+    ///
+    /// The change is held in memory. Call [`save`](Self::save) to persist.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EneCoreError` if no per-character config are loaded or
+    /// if serialization fails.
+    pub fn set_section_by_key<T>(&mut self, key: &str, section: &T) -> Result<(), EneCoreError>
     where
         T: serde::Serialize,
     {
@@ -333,7 +390,7 @@ impl EneRuntime {
     pub fn check_and_perform_split(&mut self, user_input: &str, user_name: &str) {
         let mem_config = match self
             .config
-            .get_section::<ene_memory::MemoryConfig>("memory")
+            .get_section::<ene_memory::MemoryConfig>()
         {
             Ok(c) => c,
             Err(e) => {
@@ -343,7 +400,7 @@ impl EneRuntime {
         };
         let session_config = match self
             .config
-            .get_section::<ene_session::SessionConfig>("session")
+            .get_section::<ene_session::SessionConfig>()
         {
             Ok(c) => c,
             Err(e) => {
@@ -359,7 +416,7 @@ impl EneRuntime {
         if self.pending_split.is_none() {
             let api_key = self
                 .config
-                .get_section::<crate::config::ProviderConfig>("provider")
+                .get_section::<crate::config::ProviderConfig>()
                 .unwrap_or_default()
                 .resolve_api_key();
 
@@ -458,11 +515,11 @@ fn init_embedding(
     config: &EneConfig,
 ) -> Result<Arc<dyn ene_embedding::EmbeddingProvider>, String> {
     let embed_config = config
-        .get_section::<ene_embedding::EmbeddingConfig>("embedding")
+        .get_section::<ene_embedding::EmbeddingConfig>()
         .map_err(|e| format!("Failed to load embedding config: {}", e))?;
 
     let api_key = config
-        .get_section::<crate::config::ProviderConfig>("provider")
+        .get_section::<crate::config::ProviderConfig>()
         .unwrap_or_default()
         .resolve_api_key();
 
@@ -478,7 +535,7 @@ fn init_memory_store(
     embedder: &dyn ene_embedding::EmbeddingProvider,
 ) -> Result<Arc<ene_memory::MemoryStore>, String> {
     let db_path = config
-        .get_section::<ene_memory::MemoryConfig>("memory")
+        .get_section::<ene_memory::MemoryConfig>()
         .unwrap_or_default()
         .resolve_memory_db_path();
 

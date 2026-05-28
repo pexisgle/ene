@@ -6,7 +6,7 @@ pub async fn init() -> EneRuntime {
 
     let mut config = ene_config::load_config();
     let provider = config
-        .get_section::<ene_core::ProviderConfig>("provider")
+        .get_section::<ene_core::ProviderConfig>()
         .unwrap_or_default();
 
     if !provider.api_key.trim().is_empty() && provider.api_key_source != "keyring" {
@@ -47,7 +47,7 @@ pub async fn init() -> EneRuntime {
                             let mut new_provider = provider.clone();
                             new_provider.api_key = String::new(); // clear plain text
                             new_provider.api_key_source = "keyring".to_string();
-                            let _ = config.set_section("provider", &new_provider);
+                            let _ = config.set_section(&new_provider);
                             if let Err(e) = ene_config::save_full_config(&config) {
                                 eprintln!(
                                     "{}",
@@ -118,7 +118,7 @@ pub async fn init() -> EneRuntime {
             );
             let mem_config = runtime
                 .config
-                .get_section::<MemoryConfig>("memory")
+                .get_section::<MemoryConfig>()
                 .unwrap_or_default();
             if mem_config.enabled {
                 println!("{}", style::header("[Memory] Long-term memory enabled."));
