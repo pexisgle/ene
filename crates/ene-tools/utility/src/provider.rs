@@ -22,7 +22,10 @@ impl UtilityToolProvider {
     }
 
     fn current_session_id(&self) -> String {
-        self.session_id.lock().unwrap().clone()
+        self.session_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 

@@ -16,6 +16,7 @@ use tokio_stream::{Stream, StreamExt};
 
 /// Unified chat message formats for LLM providers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "role")]
 pub enum LlmMessage {
     /// System instruction message.
     System {
@@ -197,7 +198,7 @@ fn default_string() -> String {
 }
 
 /// Configuration for the local GGUF embedding backend.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, ene_config::serde::Serialize, ene_config::serde::Deserialize)]
 pub struct LocalEmbeddingConfig {
     /// Local GGUF embedding model name (e.g. `"jina-embeddings-v5-text-small"`).
     #[serde(default = "LocalEmbeddingConfig::default_model")]
