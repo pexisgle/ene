@@ -75,7 +75,7 @@ pub use serde;
 ///
 /// define_config!(
 ///     "provider",
-///     pub struct ProviderSettings {
+///     pub struct ProviderConfig {
 ///         pub model: String = "gpt-4o-mini".into(),
 ///         pub base_url: String = String::new(),
 ///         pub api_key: String = String::new(),
@@ -121,7 +121,7 @@ macro_rules! define_config {
         }
 
         const _: () = {
-            #[$crate::ctor]
+            #[ctor::ctor(unsafe)]
             fn register() {
                 $crate::register_schema_with_parent::<$name>($key, $parent);
             }
@@ -164,7 +164,7 @@ macro_rules! define_config {
         }
 
         const _: () = {
-            #[$crate::ctor]
+            #[ctor::ctor(unsafe)]
             fn register() {
                 $crate::register_schema::<$name>($key);
             }

@@ -21,3 +21,4 @@ ene-config = { workspace = true }
 ene-provider = { workspace = true }
 ene-memory = { workspace = true }
 ene-tool-proto = { workspace = true }
+ctor = { workspace = true }
