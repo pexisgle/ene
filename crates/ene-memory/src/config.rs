@@ -41,8 +41,8 @@ impl MemoryConfig {
         if !self.db_path.trim().is_empty() {
             return std::path::PathBuf::from(&self.db_path);
         }
-        let settings = ene_config::get_global_settings();
-        let card_path = std::path::Path::new(&settings.character);
+        let config = ene_config::get_global_config();
+        let card_path = std::path::Path::new(&config.character);
         let dir = card_path.parent().unwrap_or(std::path::Path::new("."));
         dir.join("memory.db")
     }
@@ -52,7 +52,7 @@ impl MemoryConfig {
         if !self.summarization_model.trim().is_empty() {
             return self.summarization_model.clone();
         }
-        ene_config::get_global_settings()
+        ene_config::get_global_config()
             .get_provider_field("model")
             .unwrap_or_else(|| "gpt-4o-mini".to_string())
     }
@@ -62,7 +62,7 @@ impl MemoryConfig {
         if !self.summarization_base_url.trim().is_empty() {
             return Ok(self.summarization_base_url.clone());
         }
-        ene_config::get_global_settings()
+        ene_config::get_global_config()
             .get_provider_field("base_url")
             .ok_or(ene_config::ConfigError::MissingBaseUrl {
                 env_var: String::new(),

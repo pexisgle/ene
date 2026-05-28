@@ -10,8 +10,8 @@ fn default_tools() -> HashMap<String, ToolEntry> {
 
 ene_config::define_config!(
     "tools",
-    /// Global tool subsystem settings.
-    pub struct ToolSettings {
+    /// Global tool subsystem config.
+    pub struct ToolConfig {
         /// Whether tool calling is enabled globally.
         pub tool_calling_enabled: bool = true,
         /// Maximum number of sequential tool calls per turn.

@@ -5,9 +5,10 @@ use crate::error::SessionError;
 use crate::special_token::split_text_and_special_tokens;
 use async_openai::types::chat::Role;
 use chrono::{DateTime, Utc};
-use ene_config::{CharacterCardV3, EneSettings, ResolvedExpression, resolve_expressions};
+use ene_config::{CharacterCardV3, EneConfig, ResolvedExpression, resolve_expressions};
 use ene_embedding::EmbeddingProvider;
 use ene_memory::{MemoryConfig, MemoryStore};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Manages the conversation history with automatic trimming.
@@ -157,28 +158,38 @@ impl ConversationSession {
         let mut card = serde_json::from_str::<CharacterCardV3>(&file_content)
             .map_err(crate::error::SessionError::JsonError)?;
 
-        // Merge expressions from character_settings.json
+        // Merge expressions from character_settings.json (section-based with fallback)
         if let Some(parent) = std::path::Path::new(path).parent() {
             let folder = parent.file_name().unwrap_or_default().to_string_lossy();
             let settings_path = ene_config::character_settings_path(&folder);
-            if settings_path.exists() {
-                if let Ok(settings_content) = std::fs::read_to_string(&settings_path) {
-                    if let Ok(per) =
-                        serde_json::from_str::<ene_config::CharacterPerSettings>(&settings_content)
-                    {
-                        if let Some(expr) = per.expressions {
-                            card.data.extensions.insert("expressions".to_string(), expr);
-                        }
-                        if !per.default_motion.is_empty() {
-                            let mut ene = serde_json::Map::new();
-                            ene.insert(
-                                "default_motion".to_string(),
-                                serde_json::Value::String(per.default_motion),
-                            );
-                            card.data
-                                .extensions
-                                .insert("ene".to_string(), serde_json::Value::Object(ene));
-                        }
+            if let Ok(settings_content) = std::fs::read_to_string(&settings_path) {
+                let per = serde_json::from_str::<HashMap<String, serde_json::Value>>(
+                    &settings_content,
+                )
+                .ok()
+                .and_then(|map| {
+                    map.get("character_settings")
+                        .cloned()
+                        .and_then(|v| serde_json::from_value::<ene_config::CharacterPerConfig>(v).ok())
+                })
+                // Fallback: flat CharacterPerConfig
+                .or_else(|| {
+                    serde_json::from_str::<ene_config::CharacterPerConfig>(&settings_content).ok()
+                });
+
+                if let Some(per) = per {
+                    if let Some(expr) = per.expressions {
+                        card.data.extensions.insert("expressions".to_string(), expr);
+                    }
+                    if !per.default_motion.is_empty() {
+                        let mut ene = serde_json::Map::new();
+                        ene.insert(
+                            "default_motion".to_string(),
+                            serde_json::Value::String(per.default_motion),
+                        );
+                        card.data
+                            .extensions
+                            .insert("ene".to_string(), serde_json::Value::Object(ene));
                     }
                 }
             }
@@ -313,17 +324,17 @@ impl ConversationSession {
     /// Returns `None` if the memory store or embedding provider has not been initialized.
     pub fn prepare_split_input(
         &self,
-        settings: &EneSettings,
+        config: &EneConfig,
         user_input: &str,
         user_name: &str,
         api_key: &str,
     ) -> Option<SplitTaskInput> {
         let store = self.memory.memory_store.clone()?;
         let embedder = self.memory.embedding_provider.clone()?;
-        let session_config = settings
+        let session_config = config
             .get_section::<crate::SessionConfig>("session")
             .unwrap_or_default();
-        let mem_config = settings
+        let mem_config = config
             .get_section::<MemoryConfig>("memory")
             .unwrap_or_default();
 

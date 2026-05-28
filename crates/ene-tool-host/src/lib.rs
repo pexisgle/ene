@@ -39,7 +39,7 @@ pub mod tool_host_manager;
 pub mod tools;
 
 /// Tool and MCP configuration.
-pub use config::{McpServerConfig, McpTransport, ToolEntry, ToolSettings};
+pub use config::{McpServerConfig, McpTransport, ToolEntry, ToolConfig};
 /// Tool error type.
 pub use error::ToolError;
 /// IPC client with auto-reconnect.
