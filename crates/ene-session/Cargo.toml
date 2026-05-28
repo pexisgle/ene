@@ -19,5 +19,6 @@ tracing = { workspace = true }
 rand = { workspace = true }
 indexmap = { workspace = true }
 
+ene-common = { workspace = true }
 ene-memory = { workspace = true }
 ene-config = { workspace = true }
