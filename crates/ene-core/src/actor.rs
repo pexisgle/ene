@@ -1,16 +1,14 @@
 use crate::error::EneCoreError;
 use crate::stream::{self, PermissionDecision};
+use chrono::{DateTime, Utc};
 use ene_config::EneConfig;
 use ene_provider::LlmProviderRegistry;
-use ene_session::{ConversationSession, SessionError, SplitResult, poll_split_result};
-use ene_tool_host::{
-    CompositeToolRegistry, ToolHostManager, ToolRegistry,
-};
 use ene_session::PendingSplitTask;
+use ene_session::{ConversationSession, SessionError, SplitResult, poll_split_result};
+use ene_tool_host::{CompositeToolRegistry, ToolHostManager, ToolRegistry};
 use std::collections::HashMap;
 use std::sync::Arc;
-use chrono::{DateTime, Utc};
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 /// Commands sent to the actor from consumers (UI/CLI).
@@ -169,7 +167,7 @@ pub enum EneStatus {
     Error,
 }
 
-/// Thread-safe handle to the [`EneActor`].
+/// Thread-safe handle to the actor.
 ///
 /// Spawns the actor on construction. When the last clone is dropped the
 /// underlying `mpsc` channel closes, and the actor exits naturally.
@@ -202,7 +200,11 @@ impl EneHandle {
         let actor = EneActor::new(cmd_rx, event_tx.clone());
         tokio::spawn(actor.run());
 
-        Self { cmd_tx, event_tx, event_rx }
+        Self {
+            cmd_tx,
+            event_tx,
+            event_rx,
+        }
     }
 
     /// Obtain a fresh broadcast receiver that sees events from this point
@@ -248,10 +250,7 @@ impl EneHandle {
     }
 
     /// Send a `LoadCharacter` command and wait for the result.
-    pub async fn load_character(
-        &self,
-        path: impl Into<String>,
-    ) -> Result<(), EneCoreError> {
+    pub async fn load_character(&self, path: impl Into<String>) -> Result<(), EneCoreError> {
         let (tx, rx) = oneshot::channel();
         self.send(EneCommand::LoadCharacter {
             path: path.into(),
@@ -377,17 +376,17 @@ impl EneActor {
                 self.session = updated_session;
                 self.stream_handle = None;
                 self.stream_session_rx = None;
-                let _ = self
-                    .event_tx
-                    .send(EneEvent::StatusChanged { status: EneStatus::Idle });
+                let _ = self.event_tx.send(EneEvent::StatusChanged {
+                    status: EneStatus::Idle,
+                });
             }
             Err(oneshot::error::TryRecvError::Empty) => {}
             Err(oneshot::error::TryRecvError::Closed) => {
                 self.stream_handle = None;
                 self.stream_session_rx = None;
-                let _ = self
-                    .event_tx
-                    .send(EneEvent::StatusChanged { status: EneStatus::Idle });
+                let _ = self.event_tx.send(EneEvent::StatusChanged {
+                    status: EneStatus::Idle,
+                });
             }
         }
     }
@@ -399,9 +398,9 @@ impl EneActor {
                     handle.abort();
                 }
                 self.cancel_token = CancellationToken::new();
-                let _ = self
-                    .event_tx
-                    .send(EneEvent::StatusChanged { status: EneStatus::Running });
+                let _ = self.event_tx.send(EneEvent::StatusChanged {
+                    status: EneStatus::Running,
+                });
                 self.start_stream(input).await;
                 true
             }
@@ -412,9 +411,9 @@ impl EneActor {
                 }
                 self.stream_session_rx = None;
                 self.cancel_token = CancellationToken::new();
-                let _ = self
-                    .event_tx
-                    .send(EneEvent::StatusChanged { status: EneStatus::Idle });
+                let _ = self.event_tx.send(EneEvent::StatusChanged {
+                    status: EneStatus::Idle,
+                });
                 true
             }
             EneCommand::Shutdown => false,
@@ -470,9 +469,9 @@ impl EneActor {
 
         // 3. Embed the input
         if let Err(e) = self.embed_input(&user_input).await {
-            let _ = self
-                .event_tx
-                .send(EneEvent::Error { message: e.to_string() });
+            let _ = self.event_tx.send(EneEvent::Error {
+                message: e.to_string(),
+            });
             let _ = self.event_tx.send(EneEvent::Finished);
             return;
         }
@@ -527,12 +526,9 @@ impl EneActor {
             .config
             .get_section::<ene_provider::ProviderConfig>()
             .map_err(|e| EneCoreError::ConfigError(e.to_string()))?;
-        LlmProviderRegistry::create_provider(
-            &provider_config.provider_name,
-            &self.config,
-        )
-        .map(Arc::from)
-        .map_err(|e| EneCoreError::ConfigError(e))
+        LlmProviderRegistry::create_provider(&provider_config.provider_name, &self.config)
+            .map(Arc::from)
+            .map_err(|e| EneCoreError::ConfigError(e))
     }
 
     // ── Split management ──
@@ -595,17 +591,11 @@ impl EneActor {
     }
 
     fn check_and_perform_split(&mut self, user_input: &str) {
-        let mem_config = match self
-            .config
-            .get_section::<ene_memory::MemoryConfig>()
-        {
+        let mem_config = match self.config.get_section::<ene_memory::MemoryConfig>() {
             Ok(c) => c,
             Err(_) => return,
         };
-        let session_config = match self
-            .config
-            .get_section::<ene_session::SessionConfig>()
-        {
+        let session_config = match self.config.get_section::<ene_session::SessionConfig>() {
             Ok(c) => c,
             Err(_) => return,
         };
@@ -615,10 +605,7 @@ impl EneActor {
         }
 
         if self.pending_split.is_none() {
-            let provider_config = match self
-                .config
-                .get_section::<ene_provider::ProviderConfig>()
-            {
+            let provider_config = match self.config.get_section::<ene_provider::ProviderConfig>() {
                 Ok(c) => c,
                 Err(_) => return,
             };
@@ -668,8 +655,7 @@ impl EneActor {
     async fn reconfigure(&mut self, config: EneConfig) -> Result<(), EneCoreError> {
         self.config = config;
 
-        let embedder =
-            init_embedding(&self.config).map_err(EneCoreError::EmbeddingError)?;
+        let embedder = init_embedding(&self.config).map_err(EneCoreError::EmbeddingError)?;
         self.session.memory.embedding_provider = Some(embedder.clone());
 
         let mem_config = self
@@ -702,22 +688,13 @@ impl EneActor {
 // ── Factory / init helpers (moved from runtime.rs) ──
 
 /// Builds the active composite tool registry based on workspace config.
-async fn build_tool_registry(
-    config: &EneConfig,
-) -> Result<Arc<dyn ToolRegistry>, EneCoreError> {
-    ToolHostManager::start_full(config)
-        .await
-        .map_err(|e| {
-            EneCoreError::ConfigError(format!(
-                "Fatal: Failed to start ToolHostManager: {}",
-                e
-            ))
-        })
+async fn build_tool_registry(config: &EneConfig) -> Result<Arc<dyn ToolRegistry>, EneCoreError> {
+    ToolHostManager::start_full(config).await.map_err(|e| {
+        EneCoreError::ConfigError(format!("Fatal: Failed to start ToolHostManager: {}", e))
+    })
 }
 
-fn init_embedding(
-    config: &EneConfig,
-) -> Result<Arc<dyn ene_provider::EmbeddingProvider>, String> {
+fn init_embedding(config: &EneConfig) -> Result<Arc<dyn ene_provider::EmbeddingProvider>, String> {
     let provider_config = config
         .get_section::<ene_provider::ProviderConfig>()
         .map_err(|e| format!("Failed to load provider config: {}", e))?;

@@ -6,7 +6,7 @@ use ene_provider::{LlmMessage, LlmToolCall, LlmToolCallChunk, UserMessagePart};
 use ene_session::ConversationSession;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{Mutex, broadcast, oneshot};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
@@ -73,7 +73,11 @@ pub(crate) async fn run_stream(
 
     // 3. Build initial messages
     let mut messages = match build_chat_messages_list(
-        &session, config, user_input, &recalled_summaries, &key_facts,
+        &session,
+        config,
+        user_input,
+        &recalled_summaries,
+        &key_facts,
     ) {
         Ok(msgs) => msgs,
         Err(e) => {
@@ -158,14 +162,12 @@ pub(crate) async fn run_stream(
                 Ok(chunk) => {
                     if let Some(content_delta) = &chunk.text_delta {
                         assistant_content.push_str(content_delta);
-                        let (text_deltas, special_tokens) =
-                            session.process_delta(content_delta);
+                        let (text_deltas, special_tokens) = session.process_delta(content_delta);
                         for text in text_deltas {
                             let _ = event_tx.send(EneEvent::TextDelta { delta: text });
                         }
                         for token in special_tokens {
-                            let _ =
-                                event_tx.send(EneEvent::SpecialToken { token });
+                            let _ = event_tx.send(EneEvent::SpecialToken { token });
                         }
                     }
 
