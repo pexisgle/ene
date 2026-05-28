@@ -174,10 +174,10 @@ pub async fn fetch_memory_context(
     config: &EneConfig,
 ) -> (Vec<RecalledSummary>, Vec<ene_memory::KeyFact>) {
     let mem_config = config
-        .get_section::<ene_memory::MemoryConfig>("memory")
+        .get_section::<ene_memory::MemoryConfig>()
         .unwrap_or_default();
     let session_config = config
-        .get_section::<ene_session::SessionConfig>("session")
+        .get_section::<ene_session::SessionConfig>()
         .unwrap_or_default();
 
     if !mem_config.enabled {
@@ -361,7 +361,7 @@ pub async fn run_ene_with_tools(
     registry: std::sync::Arc<dyn ene_tool_host::ToolRegistry>,
 ) -> Result<impl Stream<Item = EneStreamEvent> + 'static, crate::error::EneCoreError> {
     let provider = config
-        .get_section::<crate::ProviderConfig>("provider")
+        .get_section::<crate::ProviderConfig>()
         .unwrap_or_default();
     let base_url = provider.resolve_base_url()?;
     let api_key = provider.resolve_api_key();
@@ -370,7 +370,7 @@ pub async fn run_ene_with_tools(
     let model = provider.model;
 
     let mem_config = config
-        .get_section::<ene_memory::MemoryConfig>("memory")
+        .get_section::<ene_memory::MemoryConfig>()
         .unwrap_or_default();
 
     // 1. Fetch memory context (summaries and keyfacts)
@@ -410,7 +410,7 @@ pub async fn run_ene_with_tools(
     let session_id = session.memory.session_id.clone();
     let user_input = user_input.to_string();
     let tool_config = config
-        .get_section::<ene_tool_host::ToolConfig>("tools")
+        .get_section::<ene_tool_host::ToolConfig>()
         .unwrap_or_default();
     let tool_calling_enabled = tool_config.tool_calling_enabled;
     let max_rounds = tool_config.max_tool_call_rounds;

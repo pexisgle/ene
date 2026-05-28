@@ -33,15 +33,36 @@ pub fn get_global_config() -> EneConfig {
     EneConfig::default()
 }
 
-/// Loads a subsection by key from the global config
-pub fn get_global_section<T: serde::de::DeserializeOwned + Default>(key: &str) -> T {
+/// Trait for config structs that possess a unique config key.
+pub trait HasConfigKey {
+    /// The string key of this configuration section under the root config's `extra` map.
+    const KEY: &'static str;
+}
+
+
+/// Loads a subsection from the global config using the type's associated key.
+pub fn get_global_section<T>() -> T
+where
+    T: serde::de::DeserializeOwned + Default + HasConfigKey,
+{
     if let Some(lock) = GLOBAL_CONFIG.get() {
         if let Ok(guard) = lock.read() {
-            return guard.get_section::<T>(key).unwrap_or_default();
+            return guard.get_section::<T>().unwrap_or_default();
         }
     }
     T::default()
 }
+
+/// Loads a subsection by key from the global config.
+pub fn get_global_section_by_key<T: serde::de::DeserializeOwned + Default>(key: &str) -> T {
+    if let Some(lock) = GLOBAL_CONFIG.get() {
+        if let Ok(guard) = lock.read() {
+            return guard.get_section_by_key::<T>(key).unwrap_or_default();
+        }
+    }
+    T::default()
+}
+
 
 /// A registered config schema entry.
 pub struct SchemaEntry {
@@ -153,10 +174,20 @@ crate::define_config!(
 );
 
 impl EneConfig {
+    /// Deserialise a sub-section from the `extra` map using the type's associated key.
+    ///
+    /// Returns `Ok(T::default())` when the key is absent.
+    pub fn get_section<T>(&self) -> Result<T, ConfigError>
+    where
+        T: serde::de::DeserializeOwned + Default + HasConfigKey,
+    {
+        self.get_section_by_key(T::KEY)
+    }
+
     /// Deserialise a sub-section from the `extra` map by key.
     ///
     /// Returns `Ok(T::default())` when the key is absent.
-    pub fn get_section<T>(&self, key: &str) -> Result<T, ConfigError>
+    pub fn get_section_by_key<T>(&self, key: &str) -> Result<T, ConfigError>
     where
         T: serde::de::DeserializeOwned + Default,
     {
@@ -172,8 +203,16 @@ impl EneConfig {
         }
     }
 
+    /// Serialise and insert a sub-section into the `extra` map using the type's associated key.
+    pub fn set_section<T>(&mut self, section: &T) -> Result<(), ConfigError>
+    where
+        T: serde::Serialize + HasConfigKey,
+    {
+        self.set_section_by_key(T::KEY, section)
+    }
+
     /// Serialise and insert a sub-section into the `extra` map by key.
-    pub fn set_section<T>(&mut self, key: &str, section: &T) -> Result<(), ConfigError>
+    pub fn set_section_by_key<T>(&mut self, key: &str, section: &T) -> Result<(), ConfigError>
     where
         T: serde::Serialize,
     {
@@ -183,6 +222,7 @@ impl EneConfig {
         self.extra.insert(key.to_string(), val);
         Ok(())
     }
+
 
     /// Extracts a nested field value from the provider section in the `extra` map.
     ///
@@ -336,14 +376,25 @@ pub fn save_full_config(config: &EneConfig) -> Result<(), std::io::Error> {
 /// Loads settings, patches a single section, and saves in one call.
 ///
 /// Convenience wrapper around the load → `set_section` → save pattern.
-pub fn update_section<T: serde::Serialize + serde::de::DeserializeOwned>(
-    key: &str,
-    value: &T,
-) -> Result<(), ConfigError> {
+pub fn update_section<T>(value: &T) -> Result<(), ConfigError>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + HasConfigKey,
+{
     let mut config = load_config();
-    config.set_section(key, value)?;
+    config.set_section(value)?;
     save_full_config(&config).map_err(|e| ConfigError::GenericConfigError(e.to_string()))
 }
+
+/// Loads settings, patches a single section by key, and saves in one call.
+pub fn update_section_by_key<T>(key: &str, value: &T) -> Result<(), ConfigError>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let mut config = load_config();
+    config.set_section_by_key(key, value)?;
+    save_full_config(&config).map_err(|e| ConfigError::GenericConfigError(e.to_string()))
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -427,7 +478,7 @@ mod tests {
         );
         update_global_config(raw_config);
 
-        let config = get_global_section::<DummyTestConfig>("dummy_test_config");
+        let config = get_global_section::<DummyTestConfig>();
         assert_eq!(config.test_value, "custom_val");
         assert_eq!(config.test_number, 999);
     }

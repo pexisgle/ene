@@ -33,7 +33,7 @@ fn handle_info(ctx: &AppContext) {
     );
     let session_config = ctx
         .config
-        .get_section::<SessionConfig>("session")
+        .get_section::<SessionConfig>()
         .unwrap_or_default();
     println!("Auto-split: {}", session_config.auto_session_split);
     println!("Timeout: {} min", session_config.session_timeout_minutes);
@@ -73,16 +73,16 @@ async fn handle_split(ctx: &mut AppContext) {
         store,
         embedder,
         &ctx.config
-            .get_section::<ene_memory::MemoryConfig>("memory")
+            .get_section::<ene_memory::MemoryConfig>()
             .unwrap_or_default()
             .resolve_summarization_model(),
         &ctx.config
-            .get_section::<ene_memory::MemoryConfig>("memory")
+            .get_section::<ene_memory::MemoryConfig>()
             .unwrap_or_default()
             .resolve_summarization_base_url()
             .unwrap_or_default(),
         &ctx.config
-            .get_section::<ene_core::ProviderConfig>("provider")
+            .get_section::<ene_core::ProviderConfig>()
             .unwrap_or_default()
             .resolve_api_key(),
         reason,

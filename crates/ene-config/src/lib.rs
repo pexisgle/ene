@@ -46,7 +46,7 @@ pub use config::{
     EneConfig, generate_schema_json, get_global_section, get_global_config, load_full_config,
     load_full_config_from, load_config, load_config_from, register_runtime_schema,
     register_schema, register_schema_with_parent, resolve_character_path, save_full_config,
-    update_global_config, update_section,
+    update_global_config, update_section, HasConfigKey,
 };
 pub use error::ConfigError;
 pub use paths::{
@@ -116,6 +116,10 @@ macro_rules! define_config {
             }
         }
 
+        impl $crate::HasConfigKey for $name {
+            const KEY: &'static str = $key;
+        }
+
         const _: () = {
             #[$crate::ctor]
             fn register() {
@@ -153,6 +157,10 @@ macro_rules! define_config {
                     )*
                 }
             }
+        }
+
+        impl $crate::HasConfigKey for $name {
+            const KEY: &'static str = $key;
         }
 
         const _: () = {

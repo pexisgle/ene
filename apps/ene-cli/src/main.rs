@@ -16,7 +16,7 @@ async fn main() {
         let _ = ene_config::ensure_resource_dirs();
         let mut config = ene_config::load_config();
         let provider = config
-            .get_section::<ene_core::ProviderConfig>("provider")
+            .get_section::<ene_core::ProviderConfig>()
             .unwrap_or_default();
         let service = &provider.api_key_keyring_service;
         let account = &provider.api_key_keyring_account;
@@ -28,7 +28,7 @@ async fn main() {
                     let mut new_provider = provider.clone();
                     new_provider.api_key = String::new();
                     new_provider.api_key_source = "keyring".to_string();
-                    let _ = config.set_section("provider", &new_provider);
+                    let _ = config.set_section(&new_provider);
                     if let Err(e) = ene_config::save_full_config(&config) {
                         eprintln!("設定ファイルの保存に失敗しました: {}", e);
                         std::process::exit(1);

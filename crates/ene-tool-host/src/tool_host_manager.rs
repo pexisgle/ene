@@ -266,7 +266,7 @@ impl ToolRegistry for ToolHostManager {
 
 fn resolve_undo_db_path(config: &EneConfig) -> std::path::PathBuf {
     let memory_config = config
-        .get_section::<ene_memory::MemoryConfig>("memory")
+        .get_section::<ene_memory::MemoryConfig>()
         .unwrap_or_default();
     let memory_path = memory_config.resolve_memory_db_path();
     memory_path
@@ -284,7 +284,7 @@ impl ToolHostManager {
     /// and regenerates `settings.schema.json`.
     pub async fn start(config: &EneConfig) -> Result<Self, crate::error::ToolError> {
         let mut sandbox = config
-            .get_section::<ene_tool_proto::SandboxConfigData>("sandbox")
+            .get_section::<ene_tool_proto::SandboxConfigData>()
             .unwrap_or_default();
         sandbox.undo_db_path = Some(resolve_undo_db_path(config).to_string_lossy().to_string());
         let mut supervised_registries = Vec::new();
@@ -294,7 +294,7 @@ impl ToolHostManager {
         })?;
 
         let tool_config = config
-            .get_section::<crate::config::ToolConfig>("tools")
+            .get_section::<crate::config::ToolConfig>()
             .unwrap_or_default();
         for (name, entry) in &tool_config.tools {
             if !entry.enable {
@@ -354,7 +354,7 @@ impl ToolHostManager {
                     tools: std::collections::HashMap::new(),
                     ..Default::default()
                 };
-                let _ = fallback_config.set_section("tools", &fallback_tools);
+                let _ = fallback_config.set_section(&fallback_tools);
                 Self::start(&fallback_config).await.map_err(|e2| {
                     crate::error::ToolError::ToolExecutionError(format!(
                         "Fatal: Failed to start fallback ToolHostManager: {}",
@@ -365,7 +365,7 @@ impl ToolHostManager {
         };
 
         let mcp_servers = config
-            .get_section::<Vec<crate::config::McpServerConfig>>("mcp_servers")
+            .get_section_by_key::<Vec<crate::config::McpServerConfig>>("mcp_servers")
             .unwrap_or_default();
         if !mcp_servers.is_empty() {
             let mcp = crate::McpToolRegistry::new();

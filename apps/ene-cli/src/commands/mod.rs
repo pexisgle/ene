@@ -56,11 +56,11 @@ fn handle_prompt(ctx: &AppContext) {
 
         let mem_config = ctx
             .config
-            .get_section::<MemoryConfig>("memory")
+            .get_section::<MemoryConfig>()
             .unwrap_or_default();
         let session_config = ctx
             .config
-            .get_section::<SessionConfig>("session")
+            .get_section::<SessionConfig>()
             .unwrap_or_default();
         if mem_config.enabled {
             println!("--- Recalled Summaries ---");
@@ -108,7 +108,7 @@ fn handle_prompt(ctx: &AppContext) {
 
         let tool_config = ctx
             .config
-            .get_section::<ene_tool_host::ToolConfig>("tools")
+            .get_section::<ene_tool_host::ToolConfig>()
             .unwrap_or_default();
         if tool_config.tool_calling_enabled {
             let tools = ctx.registry.list_tools();
@@ -155,19 +155,19 @@ fn handle_card(arg: &str, ctx: &mut AppContext) {
 fn handle_config(ctx: &AppContext) {
     let mem_config = ctx
         .config
-        .get_section::<MemoryConfig>("memory")
+        .get_section::<MemoryConfig>()
         .unwrap_or_default();
     let embed_config = ctx
         .config
-        .get_section::<EmbeddingConfig>("embedding")
+        .get_section::<EmbeddingConfig>()
         .unwrap_or_default();
     let session_config = ctx
         .config
-        .get_section::<SessionConfig>("session")
+        .get_section::<SessionConfig>()
         .unwrap_or_default();
     let provider_config = ctx
         .config
-        .get_section::<ene_core::ProviderConfig>("provider")
+        .get_section::<ene_core::ProviderConfig>()
         .unwrap_or_default();
 
     println!("--- Current Config ---");
@@ -177,7 +177,7 @@ fn handle_config(ctx: &AppContext) {
     println!("Card Path: {}", ctx.config.character);
     let tool_config = ctx
         .config
-        .get_section::<ene_tool_host::ToolConfig>("tools")
+        .get_section::<ene_tool_host::ToolConfig>()
         .unwrap_or_default();
     println!("Tool Calling: {}", tool_config.tool_calling_enabled);
     println!("Memory Enabled: {}", mem_config.enabled);

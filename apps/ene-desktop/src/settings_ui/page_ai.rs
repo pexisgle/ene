@@ -16,12 +16,12 @@ pub fn render_ai_page(
     let mut embed_config = settings
         .ai
         .ai
-        .get_section::<EmbeddingConfig>("embedding")
+        .get_section::<EmbeddingConfig>()
         .unwrap_or_default();
     let mut mem_config = settings
         .ai
         .ai
-        .get_section::<MemoryConfig>("memory")
+        .get_section::<MemoryConfig>()
         .unwrap_or_default();
 
     ui.vertical(|ui| {
@@ -94,7 +94,7 @@ pub fn render_ai_page(
             let mut provider_config = settings
                 .ai
                 .ai
-                .get_section::<ene_core::ProviderConfig>("provider")
+                .get_section::<ene_core::ProviderConfig>()
                 .unwrap_or_default();
             let mut current_source = provider_config.api_key_source.clone();
             egui::ComboBox::from_id_salt("api_key_source")
@@ -118,7 +118,7 @@ pub fn render_ai_page(
                 });
             if current_source != provider_config.api_key_source {
                 provider_config.api_key_source = current_source;
-                let _ = settings.ai.ai.set_section("provider", &provider_config);
+                let _ = settings.ai.ai.set_section(&provider_config);
             }
         });
 
@@ -205,10 +205,7 @@ pub fn render_ai_page(
                             .unwrap_or_default();
                     }
                 }
-                settings.ai.ai.extra.insert(
-                    "embedding".to_string(),
-                    serde_json::to_value(&embed_config).unwrap(),
-                );
+                let _ = settings.ai.ai.set_section(&embed_config);
             }
         });
 
@@ -220,10 +217,7 @@ pub fn render_ai_page(
             );
             if response.changed() {
                 embed_config.model = input_state.ai_embedding_model.clone();
-                settings.ai.ai.extra.insert(
-                    "embedding".to_string(),
-                    serde_json::to_value(&embed_config).unwrap(),
-                );
+                let _ = settings.ai.ai.set_section(&embed_config);
             }
         });
 
@@ -235,10 +229,7 @@ pub fn render_ai_page(
             );
             if response.changed() {
                 embed_config.base_url = input_state.ai_embedding_base_url.clone();
-                settings.ai.ai.extra.insert(
-                    "embedding".to_string(),
-                    serde_json::to_value(&embed_config).unwrap(),
-                );
+                let _ = settings.ai.ai.set_section(&embed_config);
             }
         });
 
@@ -254,10 +245,7 @@ pub fn render_ai_page(
                 if response.changed() {
                     if let Ok(dims) = input_state.ai_embedding_dimensions.parse::<usize>() {
                         embed_config.dimensions = Some(dims);
-                        settings.ai.ai.extra.insert(
-                            "embedding".to_string(),
-                            serde_json::to_value(&embed_config).unwrap(),
-                        );
+                        let _ = settings.ai.ai.set_section(&embed_config);
                     }
                 }
             }
@@ -272,10 +260,7 @@ pub fn render_ai_page(
             if checked != input_state.ai_memory_enabled {
                 input_state.ai_memory_enabled = checked;
                 mem_config.enabled = checked;
-                settings.ai.ai.extra.insert(
-                    "memory".to_string(),
-                    serde_json::to_value(&mem_config).unwrap(),
-                );
+                let _ = settings.ai.ai.set_section(&mem_config);
             }
         });
 
