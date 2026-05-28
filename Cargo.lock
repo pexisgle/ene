@@ -3705,6 +3705,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-common"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ene-config"
 version = "0.1.0"
 dependencies = [
@@ -3789,6 +3798,7 @@ dependencies = [
  "chrono",
  "diesel",
  "diesel_migrations",
+ "ene-common",
  "ene-config",
  "ene-provider",
  "rusqlite",
@@ -3820,6 +3830,7 @@ name = "ene-session"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "ene-common",
  "ene-config",
  "ene-memory",
  "ene-provider",
@@ -3860,6 +3871,7 @@ dependencies = [
  "ene-config",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3928,6 +3940,7 @@ dependencies = [
  "serde_json",
  "strsim",
  "tokio",
+ "tracing",
  "uuid",
  "walkdir",
 ]

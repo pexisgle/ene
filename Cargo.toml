@@ -41,7 +41,13 @@ figment = { version = "0.10", features = ["json", "env"] }
 schemars = { version = "0.8", features = ["preserve_order"] }
 ctor = "0.2"
 
+# --- Workspace dependencies (shared across crates) ---
+dashmap = "6"
+base64 = "0.22"
+rusqlite = { version = "0.39", features = ["bundled"] }
+
 # --- Internal libraries ---
+ene-common = { path = "crates/ene-common" }
 ene-config = { path = "crates/ene-config" }
 ene-core = { path = "crates/ene-core" }
 ene-embedding = { path = "crates/ene-embedding" }
