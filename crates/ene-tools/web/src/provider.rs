@@ -4,8 +4,7 @@ use ene_tool_proto::{ToolDefinition, ToolError, ToolProvider};
 use std::sync::OnceLock;
 
 fn generate_web_search_schema() -> serde_json::Value {
-    use schemars::r#gen::SchemaSettings;
-    let g = SchemaSettings::draft07().into_generator();
+    let g = schemars::SchemaGenerator::default();
     let schema = g.into_root_schema_for::<WebSearchConfig>();
     serde_json::to_value(schema).expect("WebSearchConfig schema should always serialize")
 }
