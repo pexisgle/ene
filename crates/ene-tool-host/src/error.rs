@@ -48,6 +48,9 @@ pub enum ToolError {
     /// A web search error occurred.
     #[error("Web search error: {0}")]
     WebSearchError(String),
+    /// IPC client connection or transport error.
+    #[error("IPC client error: {0}")]
+    IpcClient(String),
     /// OpenAI API error.
     #[error("OpenAI API error: {0}")]
     OpenAiError(#[from] async_openai::error::OpenAIError),
