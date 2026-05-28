@@ -1,9 +1,3 @@
-//! # ene-cli
-//!
-//! Interactive CLI REPL for the ene AI character platform.
-//! Supports /slash commands, tool execution, and conversation management.
-#![warn(missing_docs)]
-
 mod cli;
 mod commands;
 mod config;
@@ -18,8 +12,8 @@ use cli::Args;
 async fn main() {
     let _args = Args::parse();
 
-    let runtime = match config::init().await {
-        Ok(r) => r,
+    let handle = match config::init().await {
+        Ok(h) => h,
         Err(e) => {
             eprintln!(
                 "{}",
@@ -32,6 +26,6 @@ async fn main() {
     println!("ene Interactive CLI");
     println!("Type '/help' for a list of commands.");
 
-    let mut ctx = context::AppContext { runtime };
+    let mut ctx = context::AppContext::new(handle);
     repl::run(&mut ctx).await;
 }

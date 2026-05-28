@@ -1,23 +1,33 @@
 use crate::style;
-use ene_core::{EneCoreError, EneRuntime, MemoryConfig};
+use ene_core::{EneCoreError, EneHandle, MemoryConfig};
 
-/// Initializes the core AI runtime, loading configuration and the active character card.
-pub async fn init() -> Result<EneRuntime, EneCoreError> {
+/// Initializes the actor, loading configuration and the active character card.
+pub async fn init() -> Result<EneHandle, EneCoreError> {
     println!("{}", style::header("[Runtime] Initializing AI runtime..."));
 
-    let mut runtime = EneRuntime::init().await?;
+    let handle = EneHandle::new();
 
-    runtime.config().load().await?;
-    runtime.character().load()?;
+    let config = ene_config::load_config();
+    let character_path = config.character.clone();
+    handle.reconfigure(config.clone()).await?;
+
+    if let Err(e) = handle.load_character(&character_path).await {
+        eprintln!(
+            "{}",
+            style::error(format!(
+                "[Runtime] Warning: Failed to load character card: {}",
+                e
+            ))
+        );
+    }
 
     println!(
         "{}",
         style::success("[Runtime] AI runtime initialized successfully.")
     );
 
-    // Log long-term memory status if enabled in the loaded configuration
-    let mem_config = runtime
-        .config
+    // Log long-term memory status if enabled
+    let mem_config = config
         .get_section::<MemoryConfig>()
         .unwrap_or_default();
     if mem_config.enabled {
@@ -31,5 +41,5 @@ pub async fn init() -> Result<EneRuntime, EneCoreError> {
         );
     }
 
-    Ok(runtime)
+    Ok(handle)
 }

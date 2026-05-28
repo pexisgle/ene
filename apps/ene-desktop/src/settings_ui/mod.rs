@@ -7,7 +7,7 @@ use page_ai::render_ai_page;
 use page_character::render_character_page;
 use page_graphics::render_graphics_page;
 
-use crate::ai_bridge::{EneRequestEvent, EneStreamEvent};
+use crate::ai_bridge::{EneRequestEvent, EneResource, EneStreamEvent};
 use crate::app_config::{
     AntialiasingMode, CharacterSettings, SETTINGS_WINDOW_HEIGHT, SETTINGS_WINDOW_WIDTH,
     ShadowQuality, target_fps_label,
@@ -17,7 +17,7 @@ use bevy::camera::RenderTarget;
 use bevy::prelude::*;
 use bevy::window::{WindowRef, WindowResolution};
 use bevy_egui::{EguiContext, EguiMultipassSchedule, PrimaryEguiContext, egui};
-use ene_core::MemoryConfig;
+use ene_core::{EneCommand, MemoryConfig, PermissionDecision};
 
 use widgets::apply_action;
 
@@ -440,6 +440,7 @@ fn render_settings_window(
     mut input_state: ResMut<SettingsInputState>,
     mut emotion_queue: ResMut<EmotionQueue>,
     time: Res<Time>,
+    ene: Res<EneResource>,
 ) {
     if !settings.ui.settings_window_visible {
         return;
@@ -541,27 +542,27 @@ fn render_settings_window(
                 ui.horizontal(|ui| {
                     ui.columns(3, |columns| {
                         if columns[0].button("1回のみ許可\n(Allow Once)").clicked() {
-                            let _ = ene_core::stream::submit_permission_decision(
-                                &req.request_id,
-                                ene_core::stream::PermissionDecision::AllowOnce,
-                            );
+                            ene.handle.send(EneCommand::PermissionDecision {
+                                request_id: req.request_id.clone(),
+                                decision: PermissionDecision::AllowOnce,
+                            });
                             settings.ui.pending_permission = None;
                         }
                         if columns[1]
                             .button("セッションで許可\n(Allow Session)")
                             .clicked()
                         {
-                            let _ = ene_core::stream::submit_permission_decision(
-                                &req.request_id,
-                                ene_core::stream::PermissionDecision::AllowSession,
-                            );
+                            ene.handle.send(EneCommand::PermissionDecision {
+                                request_id: req.request_id.clone(),
+                                decision: PermissionDecision::AllowSession,
+                            });
                             settings.ui.pending_permission = None;
                         }
                         if columns[2].button("拒否\n(Deny)").clicked() {
-                            let _ = ene_core::stream::submit_permission_decision(
-                                &req.request_id,
-                                ene_core::stream::PermissionDecision::Deny,
-                            );
+                            ene.handle.send(EneCommand::PermissionDecision {
+                                request_id: req.request_id.clone(),
+                                decision: PermissionDecision::Deny,
+                            });
                             settings.ui.pending_permission = None;
                         }
                     });
@@ -570,10 +571,10 @@ fn render_settings_window(
             });
 
         if !open {
-            let _ = ene_core::stream::submit_permission_decision(
-                &req.request_id,
-                ene_core::stream::PermissionDecision::Deny,
-            );
+            ene.handle.send(EneCommand::PermissionDecision {
+                request_id: req.request_id.clone(),
+                decision: PermissionDecision::Deny,
+            });
             settings.ui.pending_permission = None;
         }
     }

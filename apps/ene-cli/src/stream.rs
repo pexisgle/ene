@@ -1,64 +1,56 @@
 use crate::style;
-use ene_core::{ConversationSession, stream::EneStreamEvent, truncate};
+use ene_core::{
+    EneHandle, EneEvent, EneCommand, PermissionDecision, extract_emotion_from_token, truncate,
+};
 use std::io::{self, Write};
-use tokio_stream::StreamExt;
+use tokio::sync::broadcast;
 
-/// Processes an AI event stream, formatting and printing events in real-time,
-/// and updating the conversation session history.
-pub async fn process_stream<S>(stream: S, session: &mut ConversationSession)
-where
-    S: futures_core::Stream<Item = EneStreamEvent>,
-{
-    session.reset_display_buffer();
-    tokio::pin!(stream);
-
-    while let Some(event) = stream.next().await {
-        match event {
-            EneStreamEvent::TextDelta(delta) => {
-                let (text_deltas, special_tokens) = session.process_delta(&delta);
-                for t in text_deltas {
-                    print!("{}", t);
-                    let _ = io::stdout().flush();
-                }
-                for token in special_tokens {
-                    if let Some(emotion) = ene_core::extract_emotion_from_token(&token) {
-                        print!("{}", style::emotion(format!("[Emotion: {}]", emotion)));
-                    } else {
-                        print!("{}", style::warning(token));
-                    }
-                    let _ = io::stdout().flush();
-                }
+/// Processes AI events from the actor in real-time, printing them to stdout.
+/// Returns when the stream finishes or an error occurs.
+pub async fn process_stream(rx: &mut broadcast::Receiver<EneEvent>, handle: &EneHandle) {
+    loop {
+        match rx.recv().await {
+            Ok(EneEvent::TextDelta { delta }) => {
+                print!("{}", delta);
+                let _ = io::stdout().flush();
             }
-            EneStreamEvent::ToolCallStart { name, arguments } => {
+            Ok(EneEvent::SpecialToken { token }) => {
+                if let Some(emotion) = extract_emotion_from_token(&token) {
+                    print!("{}", style::emotion(format!("[Emotion: {}]", emotion)));
+                } else {
+                    print!("{}", style::warning(token));
+                }
+                let _ = io::stdout().flush();
+            }
+            Ok(EneEvent::ToolCallStart { name, arguments }) => {
                 println!(
                     "\n{}",
                     style::header(format!("[Tool Calling: {}({})]", name, arguments))
                 );
             }
-            EneStreamEvent::ToolCallResult { name: _, result } => {
+            Ok(EneEvent::ToolCallResult { name: _, result }) => {
                 println!("{}\n", style::success(format!("[Tool Result: {}]", result)));
             }
-            EneStreamEvent::SessionSplit { summary, reason } => {
+            Ok(EneEvent::SessionSplit { summary, reason }) => {
                 println!("\n{}", style::warning(format!("[Session] {} ", reason)));
                 println!(
                     "{}",
-                    style::warning(format!("[Session] Summary: {}", truncate(&summary, 80)))
+                    style::warning(format!(
+                        "[Session] Summary: {}",
+                        truncate(&summary, 80)
+                    ))
                 );
             }
-            EneStreamEvent::Finished => {
-                if let Some(tail) = session.finalize_response() {
-                    print!("{}", tail);
-                    let _ = io::stdout().flush();
-                }
-                session.record_assistant_response();
+            Ok(EneEvent::Finished) => {
                 println!();
+                break;
             }
-            EneStreamEvent::PermissionRequired {
+            Ok(EneEvent::PermissionRequired {
                 request_id,
                 action,
                 target,
                 description,
-            } => {
+            }) => {
                 println!(
                     "\n{}",
                     style::warning(format!(
@@ -80,27 +72,26 @@ where
                     .unwrap_or(2);
 
                 let decision = match selection {
-                    0 => ene_core::stream::PermissionDecision::AllowOnce,
-                    1 => ene_core::stream::PermissionDecision::AllowSession,
-                    _ => ene_core::stream::PermissionDecision::Deny,
+                    0 => PermissionDecision::AllowOnce,
+                    1 => PermissionDecision::AllowSession,
+                    _ => PermissionDecision::Deny,
                 };
 
-                if let Err(e) = ene_core::stream::submit_permission_decision(&request_id, decision)
-                {
-                    eprintln!("\n[Error] Failed to submit permission decision: {}", e);
-                } else {
-                    println!(
-                        "\n{}",
-                        style::success("承認の入力を送信しました。処理を再開します...")
-                    );
-                }
+                handle.send(EneCommand::PermissionDecision {
+                    request_id,
+                    decision,
+                });
+                println!(
+                    "\n{}",
+                    style::success("承認の入力を送信しました。処理を再開します...")
+                );
             }
-            EneStreamEvent::TaskProgress {
+            Ok(EneEvent::TaskProgress {
                 task_id,
                 step,
                 total_steps,
                 description,
-            } => {
+            }) => {
                 println!(
                     "\n{}",
                     style::header(format!(
@@ -109,10 +100,14 @@ where
                     ))
                 );
             }
-            EneStreamEvent::Error(err) => {
-                eprintln!("\n[Error] {}", err);
+            Ok(EneEvent::Error { message }) => {
+                eprintln!("\n[Error] {}", message);
             }
-            EneStreamEvent::SpecialToken(_) => {}
+            Ok(EneEvent::StatusChanged { .. }) => {}
+            Err(e) => {
+                eprintln!("\n[Warning] Event receive error: {:?}", e);
+                break;
+            }
         }
     }
 }

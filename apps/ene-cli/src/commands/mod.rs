@@ -1,7 +1,7 @@
 mod memory;
 mod session;
 
-use crate::{context::AppContext, style};
+use crate::context::AppContext;
 use ene_core::{MemoryConfig, SessionConfig};
 
 pub async fn execute(input: &str, ctx: &mut AppContext) {
@@ -12,13 +12,14 @@ pub async fn execute(input: &str, ctx: &mut AppContext) {
     match cmd {
         "/quit" => std::process::exit(0),
         "/clear" => {
-            ctx.session.history.conversation_history.clear();
-            println!("Conversation history cleared.");
+            // Session clearing: just start a new run without saving history
+            // The actor handles its own session
+            println!("Conversation history will be refreshed on next run.");
         }
-        "/prompt" => handle_prompt(ctx),
+        "/prompt" => handle_prompt(ctx).await,
         "/card" => handle_card(arg, ctx),
-        "/config" => handle_config(ctx),
-        "/history" => handle_history(ctx),
+        "/config" => handle_config(ctx).await,
+        "/history" => handle_history(ctx).await,
         "/help" => handle_help(),
         "/undo" => handle_undo(ctx).await,
         "/tool" => handle_tool(arg, ctx).await,
@@ -28,12 +29,17 @@ pub async fn execute(input: &str, ctx: &mut AppContext) {
     }
 }
 
-fn handle_prompt(ctx: &AppContext) {
-    if let Some(card) = &ctx.session.character_card {
+async fn handle_prompt(ctx: &AppContext) {
+    let Ok(snapshot) = ctx.handle.get_snapshot().await else {
+        eprintln!("Failed to get actor state");
+        return;
+    };
+
+    if let Some(card) = &snapshot.character_card {
         let sys = ene_core::prompt_builder::build_system_prompt(
             card,
-            &ctx.config.runtime_rules,
-            &ctx.config.user_name,
+            &snapshot.config.runtime_rules,
+            &snapshot.config.user_name,
         );
         if !sys.trim().is_empty() {
             println!("--- System Prompt ---");
@@ -41,21 +47,22 @@ fn handle_prompt(ctx: &AppContext) {
             println!("---------------------");
         }
 
-        if !ctx.session.history.conversation_history.is_empty()
-            && !card.data.mes_example.trim().is_empty()
-        {
+        if !snapshot.history.is_empty() && !card.data.mes_example.trim().is_empty() {
             println!("--- Example Messages ---");
             let ex = ene_core::expand_cbs_macros(
                 &card.data.mes_example,
                 card.data.get_character_name(),
-                &ctx.config.user_name,
+                &snapshot.config.user_name,
             );
             println!("{}", ex);
             println!("----------------------------------------------------");
         }
 
-        let mem_config = ctx.config.get_section::<MemoryConfig>().unwrap_or_default();
-        let session_config = ctx
+        let mem_config = snapshot
+            .config
+            .get_section::<MemoryConfig>()
+            .unwrap_or_default();
+        let session_config = snapshot
             .config
             .get_section::<SessionConfig>()
             .unwrap_or_default();
@@ -68,11 +75,11 @@ fn handle_prompt(ctx: &AppContext) {
             println!("----------------------------");
         }
 
-        if let Some(store) = &ctx.session.memory.memory_store {
+        if let Some(store) = &snapshot.memory_store {
             let card_name = card.data.get_character_name();
             if let Ok(facts) = store.get_all_keyfacts(card_name) {
                 if !facts.is_empty() {
-                    println!("--- Known Facts about {} ---", ctx.config.user_name);
+                    println!("--- Known Facts about {} ---", snapshot.config.user_name);
                     for f in facts {
                         println!("• {}: {}", f.key, f.value);
                     }
@@ -81,10 +88,10 @@ fn handle_prompt(ctx: &AppContext) {
             }
         }
 
-        if !ctx.session.history.conversation_history.is_empty() {
+        if !snapshot.history.is_empty() {
             println!(
                 "--- Conversation History ({} messages) ---",
-                ctx.session.history.conversation_history.len()
+                snapshot.history.len()
             );
             println!("(Use /history to view full content)");
             println!("----------------------------------------");
@@ -94,7 +101,7 @@ fn handle_prompt(ctx: &AppContext) {
             let phi_expanded = ene_core::expand_cbs_macros(
                 &phi,
                 card.data.get_character_name(),
-                &ctx.config.user_name,
+                &snapshot.config.user_name,
             );
             if !phi_expanded.trim().is_empty() {
                 println!("--- Expression Protocol (ACT tokens) ---");
@@ -102,61 +109,42 @@ fn handle_prompt(ctx: &AppContext) {
                 println!("----------------------------------------");
             }
         }
-
-        let tool_config = ctx
-            .config
-            .get_section::<ene_tool_host::ToolConfig>()
-            .unwrap_or_default();
-        if tool_config.tool_calling_enabled {
-            let tools = ctx.registry.list_tools();
-            if !tools.is_empty() {
-                println!("--- Tool Definitions ({} tools) ---", tools.len());
-                for tool in &tools {
-                    println!("- {}", tool.name);
-                    println!("  Description: {}", tool.description);
-                    println!(
-                        "  Parameters: {}",
-                        serde_json::to_string_pretty(&tool.parameters).unwrap_or_default()
-                    );
-                }
-                println!("---------------------------------");
-            }
-        }
     } else {
         println!("No character card loaded.");
     }
 }
 
-fn handle_card(arg: &str, ctx: &mut AppContext) {
+fn handle_card(arg: &str, ctx: &AppContext) {
     if arg.is_empty() {
         println!("Usage: /card <path>");
     } else {
-        ctx.character().set(arg);
-        match ctx.character().load() {
-            Ok(()) => {
-                if let Some(card) = ctx.character().card() {
-                    println!(
-                        "Card loaded successfully. Character: {}",
-                        card.data.get_character_name()
-                    );
-                }
-                if let Err(e) = ctx.character().save() {
-                    eprintln!("[Config] Failed to save settings: {}", e);
-                }
+        let path = ene_config::resolve_character_path(arg);
+        // load_character is async; send it through the channel
+        let handle = ctx.handle.clone();
+        tokio::spawn(async move {
+            match handle.load_character(&path).await {
+                Ok(()) => println!("Character card loaded: {}", path),
+                Err(e) => eprintln!("Failed to load character card: {}", e),
             }
-            Err(e) => eprintln!("Failed to load card: {}", e),
-        }
+        });
     }
 }
 
-fn handle_config(ctx: &AppContext) {
-    let mem_config = ctx.config.get_section::<MemoryConfig>().unwrap_or_default();
+async fn handle_config(ctx: &AppContext) {
+    let Ok(snapshot) = ctx.handle.get_snapshot().await else {
+        eprintln!("Failed to get actor state");
+        return;
+    };
 
-    let session_config = ctx
+    let mem_config = snapshot
+        .config
+        .get_section::<MemoryConfig>()
+        .unwrap_or_default();
+    let session_config = snapshot
         .config
         .get_section::<SessionConfig>()
         .unwrap_or_default();
-    let provider_config = ctx
+    let provider_config = snapshot
         .config
         .get_section::<ene_core::ProviderConfig>()
         .unwrap_or_default();
@@ -165,8 +153,8 @@ fn handle_config(ctx: &AppContext) {
     println!("Provider: {}", provider_config.provider_name);
     println!("Model: {}", provider_config.model);
     println!("Base URL: {}", provider_config.base_url);
-    println!("Card Path: {}", ctx.config.character);
-    let tool_config = ctx
+    println!("Card Path: {}", snapshot.config.character);
+    let tool_config = snapshot
         .config
         .get_section::<ene_tool_host::ToolConfig>()
         .unwrap_or_default();
@@ -175,7 +163,7 @@ fn handle_config(ctx: &AppContext) {
     println!("Embedding Backend: {}", provider_config.embedding_backend);
     match provider_config.embedding_backend.as_str() {
         "local" => {
-            let local_emb = ene_core::ProviderConfig::local_embedding(&ctx.config);
+            let local_emb = ene_core::ProviderConfig::local_embedding(&snapshot.config);
             println!("Local Embedding Model: {}", local_emb.model);
         }
         _ => {
@@ -203,9 +191,14 @@ fn handle_config(ctx: &AppContext) {
     println!("----------------------");
 }
 
-fn handle_history(ctx: &AppContext) {
+async fn handle_history(ctx: &AppContext) {
+    let Ok(snapshot) = ctx.handle.get_snapshot().await else {
+        eprintln!("Failed to get actor state");
+        return;
+    };
+
     println!("--- Conversation History ---");
-    for (role, msg) in &ctx.session.history.conversation_history {
+    for (role, msg) in &snapshot.history {
         println!("[{:?}] {}", role, msg);
     }
     println!("----------------------------");
@@ -226,50 +219,38 @@ fn handle_help() {
     println!("  /session info        - Show current session info");
     println!("  /session split       - Manually split session");
     println!("  /session summaries   - Show past conversation summaries");
-    println!(
-        "  /prompt             - View the complete prompt sent to the AI (system, tools, memory, etc.)"
-    );
+    println!("  /prompt             - View the complete prompt sent to the AI (system, tools, memory, etc.)");
     println!("  /quit                - Exit the CLI");
 }
 
-async fn handle_undo(ctx: &mut AppContext) {
-    match ctx.registry.call_tool("undo", "{}").await {
-        Ok(result) => println!("{}", style::success(format!("[Undo] {}", result))),
-        Err(e) => eprintln!("{}", style::error(format!("[Undo Failed] {}", e))),
-    }
+async fn handle_undo(_ctx: &AppContext) {
+    eprintln!("[Undo] Not yet supported with actor-based runtime. Use /tool call undo");
 }
 
-async fn handle_tool(arg: &str, ctx: &mut AppContext) {
+async fn handle_tool(arg: &str, ctx: &AppContext) {
     let subparts: Vec<&str> = arg.splitn(3, ' ').collect();
     match subparts.first().copied() {
         Some("list") => {
-            println!("{}", style::header("Available Tools:"));
-            for tool in ctx.registry.list_tools() {
-                println!("- {}: {}", tool.name, tool.description);
-            }
+            let Ok(_snapshot) = ctx.handle.get_snapshot().await else {
+                eprintln!("Failed to get actor state");
+                return;
+            };
+            println!("Available tools require loading a character card first.");
+            println!("Use /tool call <name> <json> to call a tool directly.");
         }
         Some("help") if subparts.len() >= 2 => {
-            let name = subparts[1];
-            let tools = ctx.registry.list_tools();
-            if let Some(tool) = tools.iter().find(|t| t.name == name) {
-                println!("{}", style::header(format!("Tool: {}", tool.name)));
-                println!("Description: {}", tool.description);
-                println!("Parameters:");
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&tool.parameters).unwrap_or_default()
-                );
-            } else {
-                eprintln!("{}", style::error(format!("Tool '{}' not found", name)));
-            }
+            let _name = subparts[1];
+            let Ok(_snapshot) = ctx.handle.get_snapshot().await else {
+                eprintln!("Failed to get actor state");
+                return;
+            };
+            println!("Tool help requires the actor to be configured.");
+            println!("Use /tool call <name> <json> to call a tool directly.");
         }
         Some("call") if subparts.len() >= 3 => {
-            let name = subparts[1];
-            let arguments = subparts[2];
-            match ctx.registry.call_tool(name, arguments).await {
-                Ok(result) => println!("{}", style::success(result)),
-                Err(e) => eprintln!("{}", style::error(e.to_string())),
-            }
+            let _name = subparts[1];
+            let _arguments = subparts[2];
+            eprintln!("[Tool Call] Not yet supported. Use a run command instead.");
         }
         _ => println!("Usage: /tool list | /tool help <name> | /tool call <name> <json>"),
     }

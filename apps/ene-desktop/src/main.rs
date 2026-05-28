@@ -18,6 +18,7 @@ mod tray;
 use bevy::asset::AssetPlugin;
 use bevy::light::DirectionalLightShadowMap;
 use bevy::prelude::*;
+use bevy::winit::WinitSettings;
 use bevy_egui::EguiPlugin;
 use bevy_vrm1::prelude::*;
 
@@ -45,6 +46,7 @@ fn main() {
             size: DEFAULT_SHADOW_QUALITY.shadow_map_size(),
         })
         .insert_resource(ClearColor(Color::NONE))
+        .insert_resource(WinitSettings::desktop_app())
         .add_plugins((
             DefaultPlugins.set(window_plugin()).set(AssetPlugin {
                 file_path: assets_dir.to_string_lossy().into(),
