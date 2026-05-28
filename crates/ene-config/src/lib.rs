@@ -25,9 +25,9 @@ extern crate self as ene_config;
 
 /// V3-format character card models with CBS macro expansion.
 pub mod character_card;
-/// Per-character settings (position, motion, expressions).
-pub mod character_settings;
-/// Settings loading, schema generation, and the global settings registry.
+/// Per-character configuration (position, motion, expressions).
+pub mod character_config;
+/// Configuration loading, schema generation, and the global config registry.
 pub mod config;
 /// Configuration-related error types.
 pub mod error;
@@ -41,12 +41,12 @@ pub use character_card::{
     LorebookEntry, ResolvedExpression, expand_cbs_macros, resolve_expressions,
 };
 
-pub use character_settings::{CharacterPerSettings, generate_character_schema_json};
+pub use character_config::{CharacterPerConfig, generate_character_schema_json};
 pub use config::{
-    EneSettings, generate_schema_json, get_global_section, get_global_settings, load_full_settings,
-    load_full_settings_from, load_settings, load_settings_from, register_runtime_schema,
-    register_schema, register_schema_with_parent, save_full_settings, update_global_settings,
-    update_section,
+    EneConfig, generate_schema_json, get_global_section, get_global_config, load_full_config,
+    load_full_config_from, load_config, load_config_from, register_runtime_schema,
+    register_schema, register_schema_with_parent, resolve_character_path, save_full_config,
+    update_global_config, update_section,
 };
 pub use error::ConfigError;
 pub use paths::{

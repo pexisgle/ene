@@ -4,38 +4,38 @@ use schemars::schema::Schema;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Global singleton holding the active [`EneSettings`].
+/// Global singleton holding the active [`EneConfig`].
 ///
-/// Set once at startup by [`load_full_settings`] and updated by
-/// [`update_global_settings`]. Accessed by [`get_global_settings`]
+/// Set once at startup by [`load_full_config`] and updated by
+/// [`update_global_config`]. Accessed by [`get_global_config`]
 /// and [`get_global_section`].
-pub static GLOBAL_SETTINGS: std::sync::OnceLock<std::sync::RwLock<EneSettings>> =
+pub static GLOBAL_CONFIG: std::sync::OnceLock<std::sync::RwLock<EneConfig>> =
     std::sync::OnceLock::new();
 
-/// Updates the global EneSettings
-pub fn update_global_settings(settings: EneSettings) {
-    if let Some(lock) = GLOBAL_SETTINGS.get() {
+/// Updates the global EneConfig
+pub fn update_global_config(config: EneConfig) {
+    if let Some(lock) = GLOBAL_CONFIG.get() {
         if let Ok(mut guard) = lock.write() {
-            *guard = settings;
+            *guard = config;
         }
     } else {
-        let _ = GLOBAL_SETTINGS.set(std::sync::RwLock::new(settings));
+        let _ = GLOBAL_CONFIG.set(std::sync::RwLock::new(config));
     }
 }
 
-/// Gets a clone of the entire global settings
-pub fn get_global_settings() -> EneSettings {
-    if let Some(lock) = GLOBAL_SETTINGS.get() {
+/// Gets a clone of the entire global config
+pub fn get_global_config() -> EneConfig {
+    if let Some(lock) = GLOBAL_CONFIG.get() {
         if let Ok(guard) = lock.read() {
             return guard.clone();
         }
     }
-    EneSettings::default()
+    EneConfig::default()
 }
 
-/// Loads a subsection by key from the global settings
+/// Loads a subsection by key from the global config
 pub fn get_global_section<T: serde::de::DeserializeOwned + Default>(key: &str) -> T {
-    if let Some(lock) = GLOBAL_SETTINGS.get() {
+    if let Some(lock) = GLOBAL_CONFIG.get() {
         if let Ok(guard) = lock.read() {
             return guard.get_section::<T>(key).unwrap_or_default();
         }
@@ -133,9 +133,9 @@ fn merge_child_into_parent(
 }
 
 crate::define_config!(
-    "ene_settings",
-    /// Top-level application settings for ene.
-    pub struct EneSettings {
+    "ene_config",
+    /// Top-level application configuration for ene.
+    pub struct EneConfig {
         /// Schema version number.
         pub version: u32 = 1,
         /// Character card name or path.
@@ -147,12 +147,12 @@ crate::define_config!(
 
         #[serde(flatten)]
         #[schemars(skip)]
-        /// Catch-all for provider, tool, and other sub-settings.
+        /// Catch-all for provider, tool, and other sub-configurations.
         pub extra: HashMap<String, serde_json::Value> = HashMap::new(),
     }
 );
 
-impl EneSettings {
+impl EneConfig {
     /// Deserialise a sub-section from the `extra` map by key.
     ///
     /// Returns `Ok(T::default())` when the key is absent.
@@ -229,7 +229,7 @@ fn apply_registry_to_schema(
 /// Generates the JSON representation of the JSON Schema
 pub fn generate_schema_json() -> Result<String, serde_json::Error> {
     let schema_gen = schemars::r#gen::SchemaSettings::draft07().into_generator();
-    let mut root_schema = schema_gen.into_root_schema_for::<EneSettings>();
+    let mut root_schema = schema_gen.into_root_schema_for::<EneConfig>();
 
     if let Some(registry) = SCHEMA_REGISTRY.get() {
         if let Ok(reg) = registry.lock() {
@@ -246,39 +246,60 @@ pub fn generate_schema_json() -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(&root_schema)
 }
 
-/// Reads the asset directory and settings.json, resolves character_card_path, etc., and returns EneSettings.
-pub fn load_settings() -> EneSettings {
+/// Resolves a character name to a full card path.
+///
+/// If `name` is empty, defaults to the built-in `Alicia` character.
+/// If `name` is a bare name (no path separators), resolves to
+/// `{assets}/characters/{name}/character.json`.
+/// Otherwise, the name is treated as a literal path.
+pub fn resolve_character_path(name: &str) -> String {
     let assets_dir = crate::paths::assets_dir();
-    let config_path = crate::paths::config_file_path();
-    load_settings_from(&assets_dir, &config_path)
+    if name.trim().is_empty() {
+        format!("{}/characters/Alicia/character.json", assets_dir.display())
+    } else if !name.contains('/') && !name.contains('\\') {
+        format!(
+            "{}/characters/{}/character.json",
+            assets_dir.display(),
+            name
+        )
+    } else {
+        name.to_string()
+    }
 }
 
-/// Loads settings from the specified asset directory and config file path
-pub fn load_settings_from(assets_dir: &Path, config_path: &Path) -> EneSettings {
-    load_full_settings_from(assets_dir, config_path)
+/// Reads the asset directory and settings.json, resolves character_card_path, etc., and returns EneConfig.
+pub fn load_config() -> EneConfig {
+    let assets_dir = crate::paths::assets_dir();
+    let config_path = crate::paths::config_file_path();
+    load_config_from(&assets_dir, &config_path)
+}
+
+/// Loads config from the specified asset directory and config file path
+pub fn load_config_from(assets_dir: &Path, config_path: &Path) -> EneConfig {
+    load_full_config_from(assets_dir, config_path)
 }
 
 /// Fully loads the config file. Also auto-updates the schema file on startup
-pub fn load_full_settings() -> EneSettings {
+pub fn load_full_config() -> EneConfig {
     let assets_dir = crate::paths::assets_dir();
     let config_path = crate::paths::config_file_path();
-    load_full_settings_from(&assets_dir, &config_path)
+    load_full_config_from(&assets_dir, &config_path)
 }
 
-/// Fully loads EneSettings from the specified asset directory and config file path
-pub fn load_full_settings_from(assets_dir: &Path, config_path: &Path) -> EneSettings {
+/// Fully loads EneConfig from the specified asset directory and config file path
+pub fn load_full_config_from(assets_dir: &Path, config_path: &Path) -> EneConfig {
     use figment::{
         Figment,
         providers::{Env, Format, Json, Serialized},
     };
 
-    let figment = Figment::from(Serialized::defaults(EneSettings::default()))
+    let figment = Figment::from(Serialized::defaults(EneConfig::default()))
         .merge(Json::file(config_path))
         .merge(Env::prefixed("ENE_").split("__"));
 
-    let mut settings: EneSettings = figment.extract().unwrap_or_else(|e| {
+    let mut config: EneConfig = figment.extract().unwrap_or_else(|e| {
         tracing::error!("Failed to load configuration: {e}, using default");
-        EneSettings::default()
+        EneConfig::default()
     });
 
     // Auto-generate schema write-out
@@ -289,32 +310,24 @@ pub fn load_full_settings_from(assets_dir: &Path, config_path: &Path) -> EneSett
 
     // Auto-generate schema write-out for character-specific settings
     let char_schema_path = crate::paths::character_schema_file_path();
-    if let Ok(char_schema_json) = crate::character_settings::generate_character_schema_json() {
+    if let Ok(char_schema_json) = crate::character_config::generate_character_schema_json() {
         let _ = std::fs::write(&char_schema_path, char_schema_json);
     }
 
-    if settings.character.trim().is_empty() {
-        settings.character = format!("{}/characters/Alicia/character.json", assets_dir.display());
-    } else if !settings.character.contains('/') && !settings.character.contains('\\') {
-        settings.character = format!(
-            "{}/characters/{}/character.json",
-            assets_dir.display(),
-            settings.character
-        );
-    }
+    config.character = resolve_character_path(&config.character);
 
-    update_global_settings(settings.clone());
-    settings
+    update_global_config(config.clone());
+    config
 }
 
 /// Saves the config file in a type-safe manner
-pub fn save_full_settings(settings: &EneSettings) -> Result<(), std::io::Error> {
-    update_global_settings(settings.clone());
+pub fn save_full_config(config: &EneConfig) -> Result<(), std::io::Error> {
+    update_global_config(config.clone());
     let config_path = crate::paths::config_file_path();
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_string_pretty(settings)
+    let json = serde_json::to_string_pretty(config)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(config_path, json)?;
     Ok(())
@@ -327,9 +340,9 @@ pub fn update_section<T: serde::Serialize + serde::de::DeserializeOwned>(
     key: &str,
     value: &T,
 ) -> Result<(), ConfigError> {
-    let mut settings = load_settings();
-    settings.set_section(key, value)?;
-    save_full_settings(&settings).map_err(|e| ConfigError::GenericConfigError(e.to_string()))
+    let mut config = load_config();
+    config.set_section(key, value)?;
+    save_full_config(&config).map_err(|e| ConfigError::GenericConfigError(e.to_string()))
 }
 
 #[cfg(test)]
@@ -403,16 +416,16 @@ mod tests {
     }
 
     #[test]
-    fn test_global_settings_accessor() {
-        let mut raw_settings = EneSettings::default();
-        raw_settings.extra.insert(
+    fn test_global_config_accessor() {
+        let mut raw_config = EneConfig::default();
+        raw_config.extra.insert(
             "dummy_test_config".to_string(),
             serde_json::json!({
                 "test_value": "custom_val",
                 "test_number": 999
             }),
         );
-        update_global_settings(raw_settings);
+        update_global_config(raw_config);
 
         let config = get_global_section::<DummyTestConfig>("dummy_test_config");
         assert_eq!(config.test_value, "custom_val");
