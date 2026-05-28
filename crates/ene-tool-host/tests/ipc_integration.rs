@@ -1,8 +1,8 @@
 use ene_tool_host::ToolRegistry;
 use ene_tool_proto::transport::IpcListener;
 use ene_tool_proto::{
-    IpcRequest, IpcResponse, SandboxConfigData, ToolCategory, ToolDefinition, read_ipc_request,
-    write_ipc_response,
+    IpcRequest, IpcResponse, IPC_PROTOCOL_VERSION, SandboxConfigData, ToolCategory, ToolDefinition,
+    read_ipc_request, write_ipc_response,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -10,7 +10,7 @@ use std::time::Duration;
 /// End-to-end test of the IPC protocol
 ///
 /// Sets up a mock IPC server and verifies the full flow from IpcToolRegistry
-/// connection through ListTools and CallTool
+/// connection through Handshake, ListTools, and CallTool
 #[tokio::test]
 async fn test_ipc_list_tools_and_call_tool() {
     let socket_path: PathBuf = {
@@ -32,7 +32,26 @@ async fn test_ipc_list_tools_and_call_tool() {
     let server = tokio::spawn(async move {
         let mut stream = listener.accept().await.unwrap();
 
-        // 1. Initialize
+        // 1. Handshake
+        let req = read_ipc_request(&mut stream)
+            .await
+            .unwrap()
+            .expect("Expected Handshake request");
+        assert!(
+            matches!(req, IpcRequest::Handshake { version: IPC_PROTOCOL_VERSION }),
+            "Expected Handshake, got {:?}",
+            req
+        );
+        write_ipc_response(
+            &mut stream,
+            &IpcResponse::HandshakeAck {
+                version: IPC_PROTOCOL_VERSION,
+            },
+        )
+        .await
+        .unwrap();
+
+        // 2. Initialize
         let req = read_ipc_request(&mut stream)
             .await
             .unwrap()
@@ -46,7 +65,7 @@ async fn test_ipc_list_tools_and_call_tool() {
             .await
             .unwrap();
 
-        // 2. ListTools (refresh_tools is called inside IpcToolRegistry::new)
+        // 3. ListTools (refresh_tools is called inside IpcToolRegistry::new)
         let req = read_ipc_request(&mut stream)
             .await
             .unwrap()
