@@ -25,27 +25,47 @@ pub enum SplitReason {
    - 有効な埋め込みを持つユーザー入力が最低 2 回必要
    - かつ `current_turn_count >= min_turns_before_split`
 
-## 非同期ライフサイクル
+## ライフサイクル
+
+### 自動分割 (ストリーミング中)
 
 ```
-ユーザー入力受信
-    ↓
+ユーザーが入力を送信
+  ↓
+アクター: check_and_perform_split(user_input)
+  ↓
+check_boundary() → Continue | Split(SplitReason)
+  ↓ (Split)
 spawn_split_task() → バックグラウンド Tokio タスク
+  ↓
+  execute_split()
     ↓
-                    check_boundary()
-                        ↓
-                    Continue | Split
-                        ↓ (Split)
-                    execute_split()
-                        ↓
-                    oneshot チャンネルで SplitResult を送信
-    ↓
-poll_split_result() → ノンブロッキング確認
-    ↓ (完了時)
-session.reset_session()
+  oneshot チャンネルで SplitResult を送信
+  ↓
+アクター: 次の Run で apply_pending_split()
+  ↓
+session.reset_session() + 新しい session_id
 ```
 
 同時に実行される分割タスクは 1 つのみです。既に pending のタスクがある場合、`spawn_split_task()` の追加呼び出しは無視されます。
+
+### 手動分割 (/session split コマンド経由)
+
+```
+ユーザー: /session split
+  ↓
+CLI が EneCommand::ManualSplit { reply } を送信
+  ↓
+アクター: handle_manual_split()
+  ├── バリデーション: 空でない履歴、メモリ有効、埋め込みプロバイダ利用可能
+  ├── LLM プロバイダを作成
+  ├── execute_split() を SplitReason::Manual で呼び出し
+  ├── EneEvent::SessionSplit を送出
+  ├── 新しい session_id でセッションをリセット
+  └── oneshot で SplitResult を返す
+  ↓
+CLI が要約 + キーファクトを表示
+```
 
 ## `execute_split()` の手順
 

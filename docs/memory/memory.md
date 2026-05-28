@@ -4,10 +4,14 @@ SQLite + sqlite-vec + Diesel powered episodic memory with vector similarity sear
 
 ## Initialization
 
-Performed during `AiRuntime::init()`:
+The `EneActor` initializes memory during `reconfigure()`:
+
 1. Create embedding provider from `embedding` config
 2. If `memory.enabled == true`, call `MemoryStore::open()`
 3. Register sqlite-vec extension and run migrations
+4. Attach store and embedder to `session.memory`
+
+Memory is also available in snapshots (`EneStateSnapshot`) for CLI commands like `/memory search` and `/session summaries`.
 
 ## MemoryStore
 

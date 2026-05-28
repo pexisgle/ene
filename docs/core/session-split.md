@@ -25,27 +25,47 @@ pub enum SplitReason {
    - Requires at least 2 user inputs with valid embeddings
    - AND `current_turn_count >= min_turns_before_split`
 
-## Async Lifecycle
+## Lifecycle
+
+### Automatic Split (during streaming)
 
 ```
-User input received
-    ↓
+User sends input
+  ↓
+Actor: check_and_perform_split(user_input)
+  ↓
+check_boundary() → Continue | Split(SplitReason)
+  ↓ (Split)
 spawn_split_task() → background Tokio task
+  ↓
+  execute_split()
     ↓
-                    check_boundary()
-                        ↓
-                    Continue | Split
-                        ↓ (Split)
-                    execute_split()
-                        ↓
-                    Send SplitResult via oneshot channel
-    ↓
-poll_split_result() → non-blocking check
-    ↓ (if complete)
-session.reset_session()
+  Send SplitResult via oneshot channel
+  ↓
+Actor: apply_pending_split() on next Run
+  ↓
+session.reset_session() + new session_id
 ```
 
 Only one split task runs at a time — calling `spawn_split_task()` when one is already pending is ignored.
+
+### Manual Split (via /session split command)
+
+```
+User: /session split
+  ↓
+CLI sends EneCommand::ManualSplit { reply }
+  ↓
+Actor: handle_manual_split()
+  ├── Validates: non-empty history, memory enabled, embedder available
+  ├── Creates LLM provider
+  ├── Calls execute_split() with SplitReason::Manual
+  ├── Emits EneEvent::SessionSplit
+  ├── Resets session with new session_id
+  └── Returns SplitResult via oneshot
+  ↓
+CLI displays summary + key facts
+```
 
 ## `execute_split()` Steps
 

@@ -19,7 +19,7 @@ main()
             VrmPlugin,          # VRM モデル読み込み
             VrmaPlugin,         # VRMA アニメーション
             ScenePlugin,        # カメラ、ライト、フレーム制限
-            AiPlugin,           # AI ストリーミング統合
+            EnePlugin,          # EneHandle アクターによる AI ストリーミング
             CharacterPlugin,    # 表情、アニメーション、ヘッドトラッキング
             TrayPlugin,         # システムトレイ
             SettingsUiPlugin,   # egui 設定パネル
@@ -28,15 +28,25 @@ main()
         .run()
 ```
 
-### AI 統合 (`AiPlugin`)
+### AI 統合 (`EnePlugin`)
+
+アクターは Bevy `Resource` として初期化:
+
+```rust
+#[derive(Resource)]
+pub struct EneResource {
+    pub handle: EneHandle,    // アクターハンドル — コマンド送信、イベント受信
+    pub processing: bool,     // AI ストリームがアクティブかどうか
+}
+```
 
 Bevy システムチェーン:
-1. `enqueue_ai_requests` — Bevy メッセージ → 内部キュー
-2. `process_embedding` — バックグラウンド埋め込み計算
-3. `start_next_ai_request` — 遅延メモリ初期化 → カードロード → 分割タスク生成 → 埋め込み → `run_ai_with_tools`
-4. `poll_ai_worker` — ストリームイベント消費 → 表示/サウンド/ツール処理
+1. `enqueue_ai_requests` — Bevy の `EneRequestEvent` メッセージ → `handle.run()` (ファイア＆フォーゲット)
+2. `poll_ene_events` — `handle.try_recv()` をループ → `EneStreamEvent` メッセージにディスパッチ
 
-メモリ初期化は最初の AI リクエストまで遅延されます。
+イベントフロー: `EneEvent` (broadcast) → `poll_ene_events` → `EneStreamEvent` (Bevy メッセージ) → UI/キャラクターシステム
+
+**重要:** `poll_ene_events` は `ene.handle.try_recv()` を直接使用（`clone()` しない）。毎フレーム `clone()` で broadcast 受信機を再生成すると、新しい受信機は購読時以降のイベントのみ受信するため、イベントがロストする。
 
 ### ウィンドウプロパティ
 
@@ -50,7 +60,8 @@ Bevy システムチェーン:
 ### 表情適用
 
 ```
-AiStreamEvent::SpecialToken → EmotionQueue → 4秒ホールド + フェードアウト
+EneEvent::SpecialToken → poll_ene_events → EneStreamEvent::SpecialToken
+  → EmotionQueue → 4秒ホールド + フェードアウト
     → SetExpressions → VRM ブレンドシェイプ更新
 ```
 
@@ -68,10 +79,10 @@ main()
   ├── config::init()
   │   ├── ensure_resource_dirs()
   │   ├── settings.json 読み込み
-  │   └── AiRuntime::init(settings) → セッション + ツールホスト
+  │   └── EneHandle::new() → アクターを生成
   ├── --tooltest → tooltest::run() → 終了
   └── 通常モード:
-      ├── ツールレジストリ構築 (ToolHostManager.start + MCP 接続)
+      ├── AppContext { handle: EneHandle }
       └── repl::run(ctx) → 対話ループ
 ```
 
@@ -79,13 +90,25 @@ main()
 
 1. `dialoguer::Input` でプロンプト表示
 2. `/` コマンドは `commands::execute()` で処理
+3. 通常入力: `handle.run()` + `process_stream()` でイベント表示
+
+**イベントサブスクリプションパターン:**
+```rust
+let mut rx = ctx.handle.subscribe();  // コマンド送信前に受信機を取得
+ctx.handle.run(&input);               // Run コマンドを送信
+stream::process_stream(&mut rx, &ctx.handle).await;  // イベントを処理
+```
+
+これにより `run()` 呼び出しと最初の `recv()` の間のイベントロストを防ぐ。
+
+### REPL コマンド
 
 | コマンド | 動作 |
 |---------|------|
-| `/quit` | 終了 |
+| `/quit` | REPL を終了 |
 | `/clear` | 履歴クリア |
 | `/prompt` | システムプロンプト表示 |
-| `/card <path>` | キャラクターカード変更 |
+| `/card <path>` | キャラクターカード変更 (非同期) |
 | `/config` | 設定表示 |
 | `/tools` | 有効なツール一覧 |
 | `/history` | 会話履歴表示 |
@@ -93,7 +116,7 @@ main()
 | `/tooltest [prompt]` | ワンショットツールテスト |
 | `/memory search <q>` | 記憶検索 |
 | `/memory list` | 保存済み要約/ファクト一覧 |
-| `/session split` | 手動セッション分割 |
+| `/session split` | 手動セッション分割 (ManualSplit コマンド経由) |
 | `/session info` | セッション診断 |
 | `/session summaries` | 過去の要約一覧 |
 | `/help` | ヘルプ |
@@ -102,7 +125,7 @@ main()
 
 | イベント | 出力スタイル |
 |---------|-------------|
-| `TextDelta` | stdout (flush) |
+| テキスト | デフォルト stdout |
 | `SpecialToken(emo)` | `[Emotion: name]` マゼンタ |
 | `ToolCallStart` | `[Tool Calling: name(args)]` シアン |
 | `ToolCallResult` | `[Tool Result: ...]` 緑 |

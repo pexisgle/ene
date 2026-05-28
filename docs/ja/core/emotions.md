@@ -14,17 +14,21 @@ LLM は `<|emo:name|>` 形式の特殊トークンを生成して、キャラク
 ## データフロー
 
 ```
-run_ai_with_tools → TextDelta(String)
+LLM ストリーム → 生テキストチャンク
   ↓
-コンシューマー (ai_bridge / CLI) が受信
-  ↓
-session.process_delta(chunk) で分割
-  ├── テキスト → 表示
-  └── <|emo:name|> → 感情トークン処理
+ene-core ストリームタスク: session.process_delta(chunk)
+  ├── テキスト → EneEvent::TextDelta { delta }
+  └── <|emo:name|> → EneEvent::SpecialToken { token }
        ↓
-GUI: EmotionQueue → SetExpressions (VRM ブレンドシェイプ)
-CLI: "[Emotion: name]" マゼンタ表示
+コンシューマーが個別のイベントを受信:
+  ├── CLI: TextDelta → 直接表示
+  │       SpecialToken → extract_emotion_from_token → "[Emotion: name]"
+  └── デスクトップ: TextDelta → EneStreamEvent::TextDelta
+              SpecialToken → extract_emotion_from_token → EneStreamEvent::SpecialToken
+                → EmotionQueue → SetExpressions (VRM ブレンドシェイプ)
 ```
+
+**重要:** `TextDelta` からの感情抽出は `ene-core` のストリームタスク内で行われ、コンシューマー内ではありません。コンシューマーは事前にパースされた `SpecialToken` イベントを受信します。`TextDelta` に対して `extract_emotion_from_token` を呼び出す必要はありません。
 
 ## 感情表現プロトコル
 
@@ -47,5 +51,5 @@ CLI: "[Emotion: name]" マゼンタ表示
 
 | アプリケーション | 処理 |
 |----------------|------|
-| ene-desktop (GUI) | `TextDelta` → `process_delta()` → `EmotionQueue` → `process_emotion_queue` (4秒ホールド → フェードアウト) → `SetExpressions` |
-| ene-cli (CLI) | `TextDelta` → `process_delta()` → `[Emotion: name]` マゼンタ表示 |
+| ene-desktop (GUI) | `SpecialToken` → `extract_emotion_from_token` → `EneStreamEvent::SpecialToken` → `EmotionQueue` → 4秒ホールド → フェードアウト → `SetExpressions` |
+| ene-cli (CLI) | `SpecialToken` → `extract_emotion_from_token` → `[Emotion: name]` マゼンタ表示 |
