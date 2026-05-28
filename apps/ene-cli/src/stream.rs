@@ -1,6 +1,6 @@
 use crate::style;
 use ene_core::{
-    EneHandle, EneEvent, EneCommand, PermissionDecision, extract_emotion_from_token, truncate,
+    EneCommand, EneEvent, EneHandle, PermissionDecision, extract_emotion_from_token, truncate,
 };
 use std::io::{self, Write};
 use tokio::sync::broadcast;
@@ -35,10 +35,7 @@ pub async fn process_stream(rx: &mut broadcast::Receiver<EneEvent>, handle: &Ene
                 println!("\n{}", style::warning(format!("[Session] {} ", reason)));
                 println!(
                     "{}",
-                    style::warning(format!(
-                        "[Session] Summary: {}",
-                        truncate(&summary, 80)
-                    ))
+                    style::warning(format!("[Session] Summary: {}", truncate(&summary, 80)))
                 );
             }
             Ok(EneEvent::Finished) => {

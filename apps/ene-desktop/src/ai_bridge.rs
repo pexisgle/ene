@@ -1,7 +1,5 @@
 use bevy::prelude::*;
-use ene_core::{
-    EneHandle, EneEvent, EneStatus,
-};
+use ene_core::{EneEvent, EneHandle, EneStatus};
 
 pub struct EnePlugin;
 
@@ -10,14 +8,7 @@ impl Plugin for EnePlugin {
         app.add_message::<EneRequestEvent>()
             .add_message::<EneStreamEvent>()
             .init_resource::<EneResource>()
-            .add_systems(
-                Update,
-                (
-                    enqueue_ai_requests,
-                    poll_ene_events,
-                )
-                    .chain(),
-            );
+            .add_systems(Update, (enqueue_ai_requests, poll_ene_events).chain());
     }
 }
 
@@ -33,8 +24,14 @@ pub struct EneRequestEvent {
 pub enum EneStreamEvent {
     TextDelta(String),
     SpecialToken(String),
-    ToolCallStart { name: String, arguments: String },
-    ToolCallResult { name: String, result: String },
+    ToolCallStart {
+        name: String,
+        arguments: String,
+    },
+    ToolCallResult {
+        name: String,
+        result: String,
+    },
     PermissionRequired {
         request_id: String,
         action: String,
@@ -66,10 +63,7 @@ impl Default for EneResource {
     }
 }
 
-fn enqueue_ai_requests(
-    mut requests: MessageReader<EneRequestEvent>,
-    mut ene: ResMut<EneResource>,
-) {
+fn enqueue_ai_requests(mut requests: MessageReader<EneRequestEvent>, mut ene: ResMut<EneResource>) {
     for request in requests.read() {
         if !request.user_input.trim().is_empty() {
             ene.handle.run(&request.user_input);
@@ -78,10 +72,7 @@ fn enqueue_ai_requests(
     }
 }
 
-fn poll_ene_events(
-    mut ene: ResMut<EneResource>,
-    mut stream_writer: MessageWriter<EneStreamEvent>,
-) {
+fn poll_ene_events(mut ene: ResMut<EneResource>, mut stream_writer: MessageWriter<EneStreamEvent>) {
     loop {
         match ene.handle.try_recv() {
             Ok(EneEvent::TextDelta { delta }) => {

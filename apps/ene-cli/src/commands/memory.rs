@@ -23,7 +23,10 @@ pub async fn execute(arg: &str, ctx: &AppContext) {
 
 async fn handle_search(query: &str, snapshot: &ene_core::EneStateSnapshot) {
     if query.is_empty() {
-        println!("{}", style::warning("[Memory] Usage: /memory search <query>"));
+        println!(
+            "{}",
+            style::warning("[Memory] Usage: /memory search <query>")
+        );
         return;
     }
     let Some(store) = &snapshot.memory_store else {
@@ -31,10 +34,16 @@ async fn handle_search(query: &str, snapshot: &ene_core::EneStateSnapshot) {
         return;
     };
     let Some(embedder) = &snapshot.embedding_provider else {
-        println!("{}", style::warning("[Memory] Embedding provider is not available."));
+        println!(
+            "{}",
+            style::warning("[Memory] Embedding provider is not available.")
+        );
         return;
     };
-    println!("{}", style::header(format!("[Memory] Searching query: {}", query)));
+    println!(
+        "{}",
+        style::header(format!("[Memory] Searching query: {}", query))
+    );
     match embedder.embed_query(query).await {
         Ok(embedding) => {
             let card_name = &snapshot.card_name;
@@ -44,7 +53,13 @@ async fn handle_search(query: &str, snapshot: &ene_core::EneStateSnapshot) {
                     if results.is_empty() {
                         println!("{}", style::warning("[Memory] No matching memories found."));
                     } else {
-                        println!("{}", style::success(format!("[Memory] {} memories recalled:", results.len())));
+                        println!(
+                            "{}",
+                            style::success(format!(
+                                "[Memory] {} memories recalled:",
+                                results.len()
+                            ))
+                        );
                         for (i, recalled) in results.iter().enumerate() {
                             println!(
                                 "\n--- Memory #{} (similarity: {:.4}) ---",
@@ -52,7 +67,10 @@ async fn handle_search(query: &str, snapshot: &ene_core::EneStateSnapshot) {
                                 recalled.similarity
                             );
                             println!("  Session ID: {}", recalled.entry.session_id);
-                            println!("  Date: {}", recalled.entry.ended_at.format("%Y-%m-%d %H:%M"));
+                            println!(
+                                "  Date: {}",
+                                recalled.entry.ended_at.format("%Y-%m-%d %H:%M")
+                            );
                             println!("  Summary: {}", recalled.entry.summary);
                         }
                     }
@@ -60,7 +78,10 @@ async fn handle_search(query: &str, snapshot: &ene_core::EneStateSnapshot) {
                 Err(e) => println!("{}", style::error(format!("[Memory] Search error: {}", e))),
             }
         }
-        Err(e) => println!("{}", style::error(format!("[Memory] Embedding error: {}", e))),
+        Err(e) => println!(
+            "{}",
+            style::error(format!("[Memory] Embedding error: {}", e))
+        ),
     }
 }
 
