@@ -38,6 +38,7 @@
               rustPlatform.bindgenHook
               # OpenSSL (required for native-tls)
               openssl
+              diesel-cli
             ]
             ++ lib.optionals (lib.strings.hasInfix "linux" system) [
               # for Linux

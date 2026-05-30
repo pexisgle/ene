@@ -44,7 +44,6 @@ ctor = "1.0"
 # --- Workspace dependencies (shared across crates) ---
 dashmap = "6"
 base64 = "0.22"
-rusqlite = { version = "0.37", features = ["bundled"] }
 
 # --- Internal libraries ---
 ene-common = { path = "crates/ene-common" }

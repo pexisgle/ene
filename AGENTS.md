@@ -79,7 +79,11 @@ apps/
 - Resource dirs created on first run via `ensure_resource_dirs()`.
 
 ## Memory System
-- **Storage**: SQLite + sqlite-vec + Diesel. Connection pooled via `r2d2`.
+- **Storage & Database Rules**: SQLite + sqlite-vec + Diesel. Connection pooled via `r2d2`.
+  - **Always** use `diesel` for all database management and SQL query/execution operations (such as the SQLite long-term memory store and the tool undo manager).
+  - Do **NOT** introduce or use `rusqlite` in any crate in the workspace.
+  - For SQLite extension registration (like `sqlite-vec` auto extension), use `libsqlite3-sys` directly (e.g. `libsqlite3_sys::sqlite3_auto_extension`) instead of calling the FFI via `rusqlite`.
+  - To package statically with SQLite, bundle it using `libsqlite3-sys` with the `bundled` feature.
 - **Tables**: `conversation_summaries` (embedding f32 blob), `conversation_keyfacts` (upsert), `conversation_logs`, `tool_embeddings`.
 - **Search**: Cosine similarity via `vec_distance_cosine`. Results weighted by `similarity_weight` + `recency_weight` with time decay.
 - **Embedding providers**: `ApiEmbeddingProvider` (OpenAI-compatible), `GgufEmbeddingProvider` (candle/GGUF, local, GPU-free).
@@ -94,6 +98,23 @@ apps/
   - `/memory search [query]` — Search long-term memory
   - `/session info` — Current session details
   - `/session split` — Manual session split
+
+## Documentation & Re-exports (rustdoc)
+To maintain code discoverability and avoid developer confusion regarding where structs/traits are declared, follow these guidelines for re-exports:
+
+- **Use `#[doc(no_inline)]` when re-exporting major items from other crates in the workspace:**
+  - *Why*: By default, modern `rustdoc` automatically inlines re-exports from external crates, displaying them under the local crate's `Structs`, `Enums`, or `Traits` list. This misleads developers into thinking the item is declared in the local crate.
+  - *Action*: Apply `#[doc(no_inline)]` to the `pub use` statement. This places the item under a distinct "Re-exports" section with an explicit hyperlink pointing back to the original crate (e.g., `pub use ene_session::CharacterCardV3;`).
+  - *Example*:
+    ```rust
+    /// Character card type (re-exported from `ene-session`).
+    #[doc(no_inline)]
+    pub use ene_session::CharacterCardV3;
+    ```
+
+- **Do NOT use `#[doc(no_inline)]` (allow inlining) when:**
+  - **Internal Private Modules**: Re-exporting an item from a private module (`mod foo; pub use foo::Bar;`) within the *same* crate. Inlining is necessary here to expose the item as part of the crate's root public API without showing the internal module structure.
+  - **Minor helper/aliasing**: The re-exported item is a minor utility or type alias that is logically a first-class citizen of the current module, and its underlying origin is a pure implementation detail.
 
 ## Docs
 - Full documentation in `docs/` (also Japanese translations in `docs/ja/`). Key files:
