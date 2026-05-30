@@ -149,9 +149,10 @@ impl ToolRegistry for CompositeToolRegistry {
         tools
     }
 
-    fn list_relevant_tools(
+    async fn select_tools(
         &self,
-        query_embedding: Option<&[f32]>,
+        embedder: &dyn ene_provider::EmbeddingProvider,
+        query: &str,
         limit: usize,
     ) -> Vec<ToolDefinition> {
         let all_tools = self.list_tools();
@@ -163,11 +164,19 @@ impl ToolRegistry for CompositeToolRegistry {
             }
         };
 
-        let (Some(emb), store_ref) = (query_embedding, store) else {
-            return all_tools;
+        if let Err(e) = self.ensure_tool_embeddings(embedder).await {
+            tracing::warn!("[ToolRAG] Failed to build index: {}", e);
+        }
+
+        let query_embedding = match embedder.embed_query(query).await {
+            Ok(emb) => emb,
+            Err(e) => {
+                tracing::warn!("[ToolRAG] Failed to embed query: {}", e);
+                return all_tools;
+            }
         };
 
-        let search_results = match store_ref.search_tools(emb, limit, 0.0) {
+        let search_results = match store.search_tools(&query_embedding, limit, 0.0) {
             Ok(results) => results,
             Err(e) => {
                 tracing::warn!("[ToolRAG] Failed to search tools: {}", e);

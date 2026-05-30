@@ -14,9 +14,9 @@ const MAX_RESTARTS: usize = 5;
 const BASE_DELAY_MS: u64 = 500;
 const MAX_DELAY_MS: u64 = 30_000;
 /// Maximum number of connection retries when connecting to a tool binary.
-pub const CONNECT_RETRIES: u32 = 50;
+pub(crate) const CONNECT_RETRIES: u32 = 50;
 /// Delay in milliseconds between connection retry attempts.
-pub const CONNECT_DELAY_MS: u64 = 50;
+pub(crate) const CONNECT_DELAY_MS: u64 = 50;
 
 struct ToolProcess {
     name: String,
@@ -99,9 +99,10 @@ impl ToolRegistry for SupervisedIpcRegistry {
         reg.list_tools()
     }
 
-    fn list_relevant_tools(
+    async fn select_tools(
         &self,
-        query_embedding: Option<&[f32]>,
+        embedder: &dyn ene_provider::EmbeddingProvider,
+        query: &str,
         limit: usize,
     ) -> Vec<ToolDefinition> {
         let reg = self
@@ -109,7 +110,7 @@ impl ToolRegistry for SupervisedIpcRegistry {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        reg.list_relevant_tools(query_embedding, limit)
+        reg.select_tools(embedder, query, limit).await
     }
 
     async fn call_tool(
@@ -223,12 +224,13 @@ impl ToolRegistry for ToolHostManager {
         self.composite.list_tools()
     }
 
-    fn list_relevant_tools(
+    async fn select_tools(
         &self,
-        query_embedding: Option<&[f32]>,
+        embedder: &dyn ene_provider::EmbeddingProvider,
+        query: &str,
         limit: usize,
     ) -> Vec<ToolDefinition> {
-        self.composite.list_relevant_tools(query_embedding, limit)
+        self.composite.select_tools(embedder, query, limit).await
     }
 
     async fn call_tool(
@@ -501,7 +503,7 @@ impl ToolHostManager {
     }
 
     /// Attempts to connect to a tool binary with retry logic.
-    pub async fn connect_with_retry(
+    pub(crate) async fn connect_with_retry(
         socket_path: &PathBuf,
         sandbox: &ene_tool_proto::SandboxConfigData,
         tool_config: Option<serde_json::Value>,

@@ -16,6 +16,8 @@ ene_config::define_config!(
         pub tool_calling_enabled: bool = true,
         /// Maximum number of sequential tool calls per turn.
         pub max_tool_call_rounds: usize = 10,
+        /// Tool call execution timeout in milliseconds.
+        pub tool_call_timeout_ms: u64 = 60_000,
         /// Per-tool enable/disable map with optional extra config.
         pub tools: HashMap<String, ToolEntry> = default_tools(),
     }
