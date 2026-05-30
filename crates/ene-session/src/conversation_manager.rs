@@ -1,6 +1,7 @@
 use crate::Role;
 use crate::error::SessionError;
 use chrono::{DateTime, Utc};
+use ene_common::SessionId;
 use ene_memory as summarizer;
 use ene_memory::{KeyFact, MemoryStore};
 use ene_provider::EmbeddingProvider;
@@ -75,13 +76,13 @@ pub struct SplitResult {
     /// Extracted key facts from the conversation.
     pub key_facts: Vec<KeyFact>,
     /// The ID of the new session.
-    pub new_session_id: String,
+    pub new_session_id: SessionId,
 }
 
 /// Handle to a pending split task running in the background.
 pub struct PendingSplitTask {
     /// Oneshot receiver for the split result.
-    pub rx: oneshot::Receiver<Result<SplitResult, SessionError>>,
+    pub(crate) rx: oneshot::Receiver<Result<SplitResult, SessionError>>,
 }
 
 /// Input parameters for a split task.
@@ -101,9 +102,9 @@ pub struct SplitTaskInput {
     /// Conversation history.
     pub history: Vec<(Role, String)>,
     /// Current session ID.
-    pub session_id: String,
+    pub session_id: SessionId,
     /// Character card name.
-    pub card_name: String,
+    pub card_name: ene_common::CardName,
     /// User's name.
     pub user_name: String,
     /// Memory store for persistence.
@@ -328,8 +329,8 @@ pub fn spawn_split_task(pending_split: &mut Option<PendingSplitTask>, input: Spl
             SessionBoundary::Split(reason) => {
                 execute_split(
                     &history,
-                    &session_id,
-                    &card_name,
+                    session_id.as_str(),
+                    card_name.as_str(),
                     &user_name,
                     &store,
                     &embedder,
@@ -364,6 +365,6 @@ pub fn poll_split_result(
 }
 
 /// Generates a unique session identifier.
-pub fn generate_session_id() -> String {
-    format!("session_{}", uuid::Uuid::new_v4())
+pub fn generate_session_id() -> SessionId {
+    SessionId::from(format!("session_{}", uuid::Uuid::new_v4()))
 }

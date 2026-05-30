@@ -5,6 +5,7 @@ use crate::conversation_manager::{
 use crate::error::SessionError;
 use crate::special_token::split_text_and_special_tokens;
 use chrono::{DateTime, Utc};
+use ene_common::SessionId;
 use ene_config::{CharacterCardV3, EneConfig, ResolvedExpression, resolve_expressions};
 use ene_provider::EmbeddingProvider;
 
@@ -48,7 +49,7 @@ pub struct MemoryContext {
     /// Optional embedding provider.
     pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     /// The current session ID.
-    pub session_id: String,
+    pub session_id: SessionId,
     /// Timestamp when the session started.
     pub session_started_at: chrono::DateTime<chrono::Utc>,
     /// Embedding of the pending user input.
@@ -71,17 +72,17 @@ pub struct SessionState {
 #[derive(Clone)]
 pub struct ConversationSession {
     /// Conversation history state.
-    pub history: ConversationHistory,
+    pub(crate) history: ConversationHistory,
     /// Display buffer state.
     pub display: DisplayState,
     /// Memory context state.
     pub memory: MemoryContext,
     /// Session metadata state.
-    pub state: SessionState,
+    pub(crate) state: SessionState,
     /// The loaded character card.
     pub character_card: Option<CharacterCardV3>,
     /// The filesystem path to the current character card.
-    pub current_card_path: String,
+    current_card_path: String,
 }
 
 impl std::fmt::Debug for ConversationSession {
@@ -261,7 +262,7 @@ impl ConversationSession {
     }
 
     /// Resets all session state (history, display, turn count) and returns a new session ID.
-    pub fn reset_session(&mut self) -> String {
+    pub fn reset_session(&mut self) -> SessionId {
         let new_id = generate_session_id();
         self.history.conversation_history.clear();
         self.display.display_buffer.clear();
@@ -303,6 +304,31 @@ impl ConversationSession {
             .as_ref()
             .map(|c| c.data.get_character_name())
             .unwrap_or("default")
+    }
+
+    /// Returns a reference to the conversation history entries.
+    pub fn history(&self) -> &[(Role, String)] {
+        &self.history.conversation_history
+    }
+
+    /// Returns the current session ID.
+    pub fn session_id(&self) -> &SessionId {
+        &self.memory.session_id
+    }
+
+    /// Returns when the session started (UTC).
+    pub fn session_started_at(&self) -> DateTime<Utc> {
+        self.memory.session_started_at
+    }
+
+    /// Returns the current conversation turn count.
+    pub fn current_turn_count(&self) -> usize {
+        self.state.current_turn_count
+    }
+
+    /// Returns the timestamp of the last received message, if any.
+    pub fn last_message_time(&self) -> Option<DateTime<Utc>> {
+        self.state.last_message_time
     }
 
     /// Returns the number of minutes elapsed since the session started.
@@ -351,7 +377,7 @@ impl ConversationSession {
             provider,
             history: self.history.conversation_history.clone(),
             session_id: self.memory.session_id.clone(),
-            card_name: self.card_name().to_string(),
+            card_name: ene_common::CardName::from(self.card_name()),
             user_name: user_name.to_string(),
             store,
             embedder,
