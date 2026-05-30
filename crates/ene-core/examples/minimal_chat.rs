@@ -4,7 +4,7 @@
 //! streaming conversation with tool support.
 
 use ene_config;
-use ene_core::{EneCommand, EneEvent, EneHandle, PermissionDecision};
+use ene_core::{EneEvent, EneHandle, PermissionDecision};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -18,9 +18,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .load_character("characters/Alicia/character.json")
         .await?;
 
-    handle.run("Hello! What's your name?");
+    let _ = handle.run("Hello! What's your name?");
 
-    let mut rx = handle.clone();
+    let mut rx = handle.subscribe();
     while let Ok(event) = tokio::time::timeout(std::time::Duration::from_secs(60), rx.recv()).await
     {
         match event {
@@ -31,11 +31,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(EneEvent::ToolCallResult { name, result }) => {
                 println!("[{} -> {}]", name, &result[..result.len().min(200)]);
             }
-            Ok(EneEvent::Finished) => {
+            Ok(EneEvent::Done) => {
                 println!("\n[Done]");
                 break;
             }
-            Ok(EneEvent::Error { message }) => eprintln!("\nError: {}", message),
+            Ok(EneEvent::Failed { message }) => {
+                eprintln!("\nError: {}", message);
+                break;
+            }
             Ok(EneEvent::PermissionRequired {
                 request_id,
                 action,
@@ -46,10 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "\n[Permission Required] {} on {} ({})",
                     action, target, description
                 );
-                handle.send(EneCommand::PermissionDecision {
-                    request_id,
-                    decision: PermissionDecision::AllowOnce,
-                });
+                let _ = handle.decide_permission(request_id, PermissionDecision::AllowOnce);
             }
             _ => {}
         }

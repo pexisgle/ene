@@ -8,6 +8,7 @@ description = "Unified runtime facade integrating LLM streaming, tool orchestrat
 crate-type = ["lib"]
 
 [dependencies]
+ene-common = { workspace = true }
 ene-provider = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
