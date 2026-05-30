@@ -1,5 +1,5 @@
 use crate::tools::ToolDefinition;
-use crate::tools::definition::ToolRegistry;
+use crate::tools::registry::ToolRegistry;
 use async_trait::async_trait;
 use rmcp::serve_client;
 use rmcp::transport::child_process::{ConfigureCommandExt, TokioChildProcess};

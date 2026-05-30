@@ -6,15 +6,19 @@
 
 ```
 build_messages(
+    ctx: &MessageBuildContext<'_>,
+) -> Result<Vec<ChatCompletionRequestMessage>>
+
+MessageBuildContext {
     card: &CharacterCardV3,
     user_input: &str,
-    history: &[(Role, String)],
-    runtime_context: &str,
+    history: &[ConversationEntry],
+    runtime_context: Option<&str>,
     runtime_rules: &str,
     user_name: &str,
     recalled_summaries: &[RecalledSummary],
     key_facts: &[KeyFact],
-) -> Vec<ChatCompletionRequestMessage>
+}
 ```
 
 | # | Content | Source | Condition |

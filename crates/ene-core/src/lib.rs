@@ -6,17 +6,17 @@
 #![warn(missing_docs)]
 
 /// Actor-based runtime with message-passing architecture.
-pub mod actor;
+pub mod handle;
 /// Core error types.
 pub mod error;
 /// System prompt and message assembly helpers.
-pub mod prompt_builder;
-/// AI streaming engine and tool-call loop.
-pub mod stream;
+pub mod message_builder;
+/// Permission types and streaming engine internals.
+pub mod permission;
 
 // ── Actor types ──
 /// Actor handle, events, status, and state snapshot.
-pub use actor::{
+pub use handle::{
     ActorDeadError, ConversationEntry, EneEvent, EneEventReceiver, EneHandle, EneStateSnapshot,
     EneStatus, MemoryQueryHandle,
 };
@@ -60,11 +60,11 @@ pub use ene_tool_host::ToolRegistry;
 pub use error::EneCoreError;
 
 // ── Stream types ──
-/// Permission decision type (re-exported from `ene-core::stream`).
-pub use stream::PermissionDecision;
+/// Permission decision type (re-exported from `ene-core::permission`).
+pub use permission::PermissionDecision;
 
 // ── Prompt builder ──
 /// Message build context struct.
-pub use prompt_builder::MessageBuildContext;
+pub use message_builder::MessageBuildContext;
 /// Build messages for LLM completion request.
-pub use prompt_builder::build_messages;
+pub use message_builder::build_messages;

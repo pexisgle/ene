@@ -1,10 +1,10 @@
 /// Composite tool registry that aggregates multiple registries.
 pub mod composite;
 /// Tool registry trait and type definitions.
-pub mod definition;
+pub mod registry;
 
 pub use composite::CompositeToolRegistry;
-pub use definition::ToolRegistry;
+pub use registry::ToolRegistry;
 pub use ene_tool_proto::{ToolCategory, ToolDefinition};
 
 /// Computes a hash of the tool definition used for cache invalidation of tool embeddings.

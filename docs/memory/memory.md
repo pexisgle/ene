@@ -113,7 +113,7 @@ pub trait EmbeddingProvider: Send + Sync {
 ```
 
 Implementations:
-- `ApiEmbeddingProvider` — OpenAI-compatible API
+- `CloudEmbeddingProvider` — OpenAI-compatible API
 - `GgufEmbeddingProvider` — Local GGUF inference via Candle (GPU-free)
 
 ## Summarization

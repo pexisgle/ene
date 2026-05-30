@@ -1,5 +1,5 @@
 use crate::Role;
-use crate::conversation_manager::{
+use crate::session_split::{
     PendingSplitTask, SplitResult, SplitTaskInput, generate_session_id, poll_split_result,
 };
 use crate::error::SessionError;
@@ -170,12 +170,12 @@ impl ConversationSession {
                         .ok()
                         .and_then(|map| {
                             map.get("character_settings").cloned().and_then(|v| {
-                                serde_json::from_value::<ene_config::CharacterPerConfig>(v).ok()
+                                serde_json::from_value::<ene_config::CharacterConfig>(v).ok()
                             })
                         })
-                        // Fallback: flat CharacterPerConfig
-                        .or_else(|| {
-                            serde_json::from_str::<ene_config::CharacterPerConfig>(
+                    // Fallback: flat CharacterConfig
+                    .or_else(|| {
+                        serde_json::from_str::<ene_config::CharacterConfig>(
                                 &settings_content,
                             )
                             .ok()

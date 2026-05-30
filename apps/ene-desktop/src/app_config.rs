@@ -353,7 +353,7 @@ impl CharacterSettings {
     }
 
     pub fn save_per_character_settings(&self) {
-        let per = CharacterPerConfig {
+        let per = CharacterConfig {
             character_position: [
                 self.character_state.character_position.x,
                 self.character_state.character_position.y,
@@ -389,11 +389,11 @@ impl CharacterSettings {
         let per = serde_json::from_str::<HashMap<String, serde_json::Value>>(&json)
             .ok()
             .and_then(|map| {
-                map.get("character_settings")
+                map.get("character_config")
                     .cloned()
-                    .and_then(|v| serde_json::from_value::<CharacterPerConfig>(v).ok())
+                    .and_then(|v| serde_json::from_value::<CharacterConfig>(v).ok())
             })
-            .or_else(|| serde_json::from_str::<CharacterPerConfig>(&json).ok());
+            .or_else(|| serde_json::from_str::<CharacterConfig>(&json).ok());
 
         match per {
             Some(per) => {
@@ -485,7 +485,7 @@ impl CharacterSettings {
     }
 }
 
-pub use ene_config::CharacterPerConfig;
+pub use ene_config::CharacterConfig;
 
 fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
     let mut out = Vec::new();
@@ -584,7 +584,7 @@ fn read_character_json_meta(path: &Path) -> Option<(String, Option<String>)> {
         let settings_path = ene_config::character_settings_path(&folder);
         if settings_path.exists() {
             let s = fs::read_to_string(settings_path).ok()?;
-            let per: CharacterPerConfig = serde_json::from_str(&s).ok()?;
+            let per: CharacterConfig = serde_json::from_str(&s).ok()?;
             if !per.default_motion.is_empty() {
                 return Some(per.default_motion);
             }

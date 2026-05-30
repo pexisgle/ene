@@ -1,7 +1,7 @@
-use crate::ipc_client::IpcToolRegistry;
+use crate::ipc_registry::IpcToolRegistry;
 use crate::tools::CompositeToolRegistry;
 use crate::tools::ToolDefinition;
-use crate::tools::definition::ToolRegistry;
+use crate::tools::registry::ToolRegistry;
 use ene_config as paths;
 use ene_config::{EneConfig, register_runtime_schema};
 use ene_memory::MemoryStore;
@@ -367,7 +367,7 @@ impl ToolHostManager {
         };
 
         let mcp_servers = config
-            .get_section_by_key::<Vec<crate::config::McpServerConfig>>("mcp_servers")
+            .get_section_by_key::<Vec<crate::mcp_config::McpServerConfig>>("mcp_servers")
             .unwrap_or_default();
         if !mcp_servers.is_empty() {
             let mcp = crate::McpToolRegistry::new();
@@ -376,7 +376,7 @@ impl ToolHostManager {
                     continue;
                 }
                 match &server.transport {
-                    crate::config::McpTransport::Stdio { command, args } => {
+                    crate::mcp_config::McpTransport::Stdio { command, args } => {
                         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
                         if let Err(err) = mcp.connect_stdio(&server.name, command, &args_ref).await
                         {
@@ -387,7 +387,7 @@ impl ToolHostManager {
                             );
                         }
                     }
-                    crate::config::McpTransport::Http { url } => {
+                    crate::mcp_config::McpTransport::Http { url } => {
                         tracing::warn!(
                             "MCP HTTP transport not supported yet for '{}' (URL: {})",
                             server.name,

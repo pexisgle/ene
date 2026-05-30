@@ -36,7 +36,7 @@ async fn handle_prompt(ctx: &AppContext) {
     };
 
     if let Some(card) = &snapshot.character_card {
-        let sys = ene_core::prompt_builder::build_system_prompt(
+        let sys = ene_core::message_builder::build_system_prompt(
             card,
             &snapshot.config.runtime_rules,
             &snapshot.config.user_name,
@@ -97,7 +97,7 @@ async fn handle_prompt(ctx: &AppContext) {
             println!("----------------------------------------");
         }
 
-        if let Some(phi) = ene_core::prompt_builder::build_expression_phi(card) {
+        if let Some(phi) = ene_core::message_builder::build_expression_phi(card) {
             let phi_expanded = ene_config::expand_cbs_macros(
                 &phi,
                 card.data.get_character_name(),

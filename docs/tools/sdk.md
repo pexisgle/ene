@@ -119,6 +119,12 @@ pub trait ToolProvider: Send + Sync {
     /// Receives sandbox configuration (for filesystem tools).
     fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
 
+    /// Approves a pending destructive-operation permission request by ID.
+    fn approve_permission(&self, _request_id: &str) {}
+
+    /// Adds a session-wide permission allow pattern (action + target glob).
+    fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
+
     /// Receives tool-specific config from settings.json.
     fn set_config(&self, _config: &serde_json::Value) {}
 
@@ -152,15 +158,24 @@ pub struct ToolDefinition {
 
 ## ToolError
 
+The `ToolError` type in `ene-tool-proto` (used by tool binaries):
+
 ```rust
 pub enum ToolError {
     NotFound { tool_name: String },
     InvalidArguments { message: String },
     ExecutionFailed { message: String },
+    SandboxViolation { message: String },
+    PermissionDenied { message: String },
+    IoError { message: String },
+    Timeout { message: String },
+    Internal { message: String },
+    IpcTransport { message: String },
     PermissionRequired { request_id: String, action: String, target: String, description: String },
-    // ...
 }
 ```
+
+**Note:** `ene-tool-host` has its own separate `ToolError` type with additional domain-specific variants (`FileNotFound`, `FileTooLarge`, `CommandBlocked`, `ShellTimeout`, `BrowserError`, `AppError`, `IpcClient`, etc.). The host-side error is mapped to the proto-side error at the IPC boundary.
 
 ## IPC Lifecycle
 

@@ -21,31 +21,35 @@
 //! ## Tool RAG
 //!
 //! When a [`ene_memory::MemoryStore`] is attached, tool definitions are embedded into vectors and stored
-//! in the `tool_embeddings` table. [`CompositeToolRegistry::list_relevant_tools`] performs
+//! in the `tool_embeddings` table. [`CompositeToolRegistry::select_tools`] performs
 //! cosine-similarity filtering based on the user's current query embedding.
 #![warn(missing_docs)]
 
 /// Tool and MCP configuration types.
 pub mod config;
+/// MCP server configuration types.
+pub mod mcp_config;
 /// Tool host error types.
 pub mod error;
 /// IPC client with auto-reconnect for tool binaries.
-pub mod ipc_client;
+pub mod ipc_registry;
 /// MCP client for external server connections.
-pub mod mcp_client;
+pub mod mcp_registry;
 /// Tool process lifecycle manager.
 pub mod tool_host_manager;
 /// Tool registry types (Composite, ToolRegistry trait, etc.).
 pub mod tools;
 
-/// Tool and MCP configuration.
-pub use config::{McpServerConfig, McpTransport, ToolConfig, ToolEntry};
+/// Tool configuration types.
+pub use config::{ToolConfig, ToolEntry};
+/// MCP server configuration types.
+pub use mcp_config::{McpServerConfig, McpTransport};
 /// Tool error type.
 pub use error::ToolError;
 /// IPC client with auto-reconnect.
-pub use ipc_client::IpcToolRegistry;
+pub use ipc_registry::IpcToolRegistry;
 /// MCP client for external servers.
-pub use mcp_client::McpToolRegistry;
+pub use mcp_registry::McpToolRegistry;
 /// Tool process lifecycle manager.
 pub use tool_host_manager::ToolHostManager;
 /// Registry types and the ToolRegistry trait.

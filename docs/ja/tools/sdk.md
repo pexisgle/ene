@@ -119,6 +119,12 @@ pub trait ToolProvider: Send + Sync {
     /// サンドボックス設定を受信 (ファイルシステムツール用)
     fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
 
+    /// ペンディング中の破壊的操作の権限リクエストを承認
+    fn approve_permission(&self, _request_id: &str) {}
+
+    /// セッション全体の権限許可パターンを追加 (アクション + ターゲットグロブ)
+    fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
+
     /// settings.json からツール固有設定を受信
     fn set_config(&self, _config: &serde_json::Value) {}
 
@@ -152,15 +158,24 @@ pub struct ToolDefinition {
 
 ## ToolError
 
+`ene-tool-proto` の `ToolError` 型 (ツールバイナリが使用):
+
 ```rust
 pub enum ToolError {
     NotFound { tool_name: String },
     InvalidArguments { message: String },
     ExecutionFailed { message: String },
+    SandboxViolation { message: String },
+    PermissionDenied { message: String },
+    IoError { message: String },
+    Timeout { message: String },
+    Internal { message: String },
+    IpcTransport { message: String },
     PermissionRequired { request_id: String, action: String, target: String, description: String },
-    // ...
 }
 ```
+
+**注意:** `ene-tool-host` は独自の `ToolError` 型を持ち、ドメイン固有のバリアント (`FileNotFound`, `FileTooLarge`, `CommandBlocked`, `ShellTimeout`, `BrowserError`, `AppError`, `IpcClient` など) が追加されています。ホスト側のエラーは IPC 境界でプロトコル側のエラーにマッピングされます。
 
 ## IPC ライフサイクル
 

@@ -92,6 +92,7 @@ pub struct EneSettings {
 | `recall_limit` | 1クエリあたりの最大呼び出し要約数 |
 | `similarity_threshold` | 呼び出しの最小コサイン類似度 |
 | `tool_rag_enabled` | 埋め込みベースのツールフィルタリングを有効化 |
+| `tool_rag_limit` | RAG フィルタリングで返される最大ツール数 |
 | `tool_rag_always_include` | 類似度に関わらず常に含めるツール |
 
 ### `session` — セッション管理
@@ -141,6 +142,7 @@ pub struct EneSettings {
   "tools": {
     "tool_calling_enabled": true,
     "max_tool_call_rounds": 10,
+    "tool_call_timeout_ms": 60000,
     "tools": {
       "fs": { "enable": true },
       "web": { "enable": true },
@@ -156,6 +158,7 @@ pub struct EneSettings {
 |-----------|------|
 | `tool_calling_enabled` | 全ツールの関数呼び出しを有効化 |
 | `max_tool_call_rounds` | ユーザーターンあたりの最大ツール呼び出し反復数 |
+| `tool_call_timeout_ms` | 個別ツール呼び出しのタイムアウト (ミリ秒、デフォルト: 60000) |
 | `tools.<name>.enable` | 特定のツールを有効/無効化 |
 | `tools.<name>.config` | ツール固有の追加設定 |
 

@@ -1,5 +1,5 @@
 use crate::error::EneCoreError;
-use crate::stream::{self, PermissionDecision};
+use crate::permission::{self, PermissionDecision};
 use chrono::{DateTime, Utc};
 use ene_common::{CardName, RequestId, SessionId};
 use ene_config::EneConfig;
@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 /// Commands sent to the actor from consumers (UI/CLI).
 ///
-/// Fire-and-forget variants are sent via [`EneHandle::send`].
+/// Fire-and-forget variants are sent via internal channels.
 /// Oneshot variants carry a reply channel for result confirmation.
 pub enum EneCommand {
     /// Start an AI completion for the given user prompt.
@@ -638,7 +638,7 @@ impl EneActor {
         self.stream_session_rx = Some(session_rx);
 
         let handle = tokio::spawn(async move {
-            let updated_session = stream::run_stream(stream::StreamContext {
+            let updated_session = permission::run_stream(permission::StreamContext {
                 config,
                 session,
                 user_input,

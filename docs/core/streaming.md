@@ -24,7 +24,6 @@ The public API for consumers. Thread-safe, cloneable.
 pub struct EneHandle {
     cmd_tx: Arc<mpsc::UnboundedSender<EneCommand>>,
     event_tx: broadcast::Sender<EneEvent>,
-    event_rx: broadcast::Receiver<EneEvent>,
 }
 ```
 
@@ -61,7 +60,7 @@ pub enum EneCommand {
     Shutdown,
     Reconfigure { config: EneConfig, reply: oneshot::Sender<Result<(), EneCoreError>> },
     LoadCharacter { path: String, reply: oneshot::Sender<Result<(), EneCoreError>> },
-    PermissionDecision { request_id: String, decision: PermissionDecision },
+    PermissionDecision { request_id: RequestId, decision: PermissionDecision },
     GetSnapshot { reply: oneshot::Sender<EneStateSnapshot> },
     ManualSplit { reply: oneshot::Sender<Result<SplitResult, EneCoreError>> },
 }
@@ -77,11 +76,11 @@ pub enum EneEvent {
     SpecialToken { token: String },
     ToolCallStart { name: String, arguments: String },
     ToolCallResult { name: String, result: String },
-    PermissionRequired { request_id: String, action: String, target: String, description: String },
-    TaskProgress { task_id: String, step: usize, total_steps: usize, description: String },
-    SessionSplit { summary: String, reason: String },
-    Finished,
-    Error { message: String },
+    PermissionRequired { request_id: RequestId, action: String, target: String, description: String },
+    TaskProgress { task_id: String, step: usize, total_steps: Option<usize>, description: String },
+    SessionSplit { summary: String, reason: SplitReason },
+    Done,
+    Failed { message: String },
     StatusChanged { status: EneStatus },
 }
 ```
@@ -115,7 +114,7 @@ stream task (run_stream):
   │     │     └── Continue loop
   │     └── If no tool_calls:
   │           ├── Save assistant log
-  │           └── Finished event
+  │           └── Done event
   └── Send updated session back to actor via oneshot
 ```
 
@@ -160,11 +159,11 @@ The cancel token is checked inside `while let Some(chunk) = stream.next().await`
 
 | Error Source | Handling |
 |-------------|----------|
-| LLM API error | `EneEvent::Error` + `Finished`, stream returns |
+| LLM API error | `EneEvent::Failed` + `Done`, stream returns |
 | Tool timeout (60s) | Tool error message sent back to LLM |
 | Permission denied | Tool error sent back to LLM |
-| Max rounds exceeded | `EneEvent::Error` + `Finished` |
-| Embedding error | `EneEvent::Error` + `Finished` |
+| Max rounds exceeded | `EneEvent::Failed` + `Done` |
+| Embedding error | `EneEvent::Failed` + `Done` |
 | Broadcast Lagged | Consumer logs warning, continues reading |
 
 ## Tool Call Accumulation

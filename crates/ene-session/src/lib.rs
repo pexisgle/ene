@@ -28,7 +28,7 @@
 /// Session configuration types.
 pub mod config;
 /// Session split lifecycle (boundary check, async split, polling).
-pub mod conversation_manager;
+pub mod session_split;
 /// Session error types.
 pub mod error;
 /// Core session holder.
@@ -37,11 +37,13 @@ pub mod session;
 pub mod special_token;
 /// Internal utilities.
 pub mod utils;
+/// Role enum for conversation history.
+pub mod role;
 
 /// Session auto-split configuration.
 pub use config::SessionConfig;
 /// Split lifecycle types and entry-points.
-pub use conversation_manager::{
+pub use session_split::{
     PendingSplitTask, SessionBoundary, SplitReason, SplitResult, SplitTaskInput, check_boundary,
     execute_split, generate_session_id, poll_split_result, spawn_split_task,
 };
@@ -52,18 +54,8 @@ pub use ene_config::{
 };
 /// Session error type.
 pub use error::SessionError;
-/// Represents the role of a message author in conversation history.
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Role {
-    /// System instruction or context.
-    System,
-    /// Human user prompt.
-    User,
-    /// AI assistant response.
-    Assistant,
-}
-
+/// Role enum for conversation history.
+pub use role::Role;
 /// Central session holder.
 pub use session::ConversationSession;
 /// Emotion-token parsing utilities.

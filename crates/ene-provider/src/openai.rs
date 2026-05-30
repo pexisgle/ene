@@ -1,0 +1,391 @@
+use async_openai::{Client, config::OpenAIConfig};
+use async_trait::async_trait;
+use std::pin::Pin;
+use tokio_stream::{Stream, StreamExt};
+
+use crate::config::ProviderConfig;
+use crate::message::{
+    LlmMessage, LlmResponseChunk, LlmToolCallChunk, UserMessagePart,
+};
+use crate::traits::{EmbeddingProvider, LlmProvider, LlmProviderFactory};
+
+/// Builds an OpenAI-compatible client with the given base URL and API key.
+pub(crate) fn build_openai_client(base_url: &str, api_key: &str) -> Client<OpenAIConfig> {
+    let mut config = OpenAIConfig::default().with_api_key(api_key);
+    if !base_url.trim().is_empty() {
+        config = config.with_api_base(base_url);
+    }
+    Client::with_config(config)
+}
+
+use async_openai::types::chat::{
+    ChatCompletionMessageToolCall, ChatCompletionRequestAssistantMessageArgs,
+    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
+    ChatCompletionRequestToolMessageArgs, ChatCompletionRequestUserMessageArgs, FunctionCall,
+};
+
+fn convert_message(msg: &LlmMessage) -> Result<ChatCompletionRequestMessage, String> {
+    match msg {
+        LlmMessage::System { content } => {
+            let m = ChatCompletionRequestSystemMessageArgs::default()
+                .content(content.clone())
+                .build()
+                .map_err(|e| e.to_string())?;
+            Ok(m.into())
+        }
+        LlmMessage::User { parts } => {
+            use async_openai::types::chat::{
+                ChatCompletionRequestMessageContentPartImageArgs,
+                ChatCompletionRequestMessageContentPartTextArgs, ImageUrlArgs,
+            };
+
+            if parts.len() == 1 {
+                if let UserMessagePart::Text { text } = &parts[0] {
+                    let m = ChatCompletionRequestUserMessageArgs::default()
+                        .content(text.clone())
+                        .build()
+                        .map_err(|e| e.to_string())?;
+                    return Ok(m.into());
+                }
+            }
+
+            let mut oa_parts = Vec::new();
+            for part in parts {
+                match part {
+                    UserMessagePart::Text { text } => {
+                        let p = ChatCompletionRequestMessageContentPartTextArgs::default()
+                            .text(text.clone())
+                            .build()
+                            .map_err(|e| e.to_string())?;
+                        oa_parts.push(p.into());
+                    }
+                    UserMessagePart::Image { base64_image_data } => {
+                        let img_url = ImageUrlArgs::default()
+                            .url(base64_image_data.clone())
+                            .build()
+                            .map_err(|e| e.to_string())?;
+                        let p = ChatCompletionRequestMessageContentPartImageArgs::default()
+                            .image_url(img_url)
+                            .build()
+                            .map_err(|e| e.to_string())?;
+                        oa_parts.push(p.into());
+                    }
+                }
+            }
+
+            let m = ChatCompletionRequestUserMessageArgs::default()
+                .content(oa_parts)
+                .build()
+                .map_err(|e| e.to_string())?;
+            Ok(m.into())
+        }
+        LlmMessage::Assistant {
+            content,
+            tool_calls,
+        } => {
+            let mut builder = ChatCompletionRequestAssistantMessageArgs::default();
+            if let Some(c) = content {
+                builder.content(c.clone());
+            }
+            if let Some(calls) = tool_calls {
+                let mut oa_calls = Vec::new();
+                for call in calls {
+                    oa_calls.push(
+                        async_openai::types::chat::ChatCompletionMessageToolCalls::Function(
+                            ChatCompletionMessageToolCall {
+                                id: call.id.clone(),
+                                function: FunctionCall {
+                                    name: call.name.clone(),
+                                    arguments: call.arguments.clone(),
+                                },
+                            },
+                        ),
+                    );
+                }
+                builder.tool_calls(oa_calls);
+            }
+            let m = builder.build().map_err(|e| e.to_string())?;
+            Ok(m.into())
+        }
+        LlmMessage::Tool {
+            tool_call_id,
+            content,
+        } => {
+            let m = ChatCompletionRequestToolMessageArgs::default()
+                .tool_call_id(tool_call_id.clone())
+                .content(content.clone())
+                .build()
+                .map_err(|e| e.to_string())?;
+            Ok(m.into())
+        }
+    }
+}
+
+fn convert_tools(
+    tools: &[ene_tool_proto::ToolDefinition],
+) -> Vec<async_openai::types::chat::ChatCompletionTools> {
+    let mut res = Vec::new();
+    for t in tools {
+        let func = async_openai::types::chat::FunctionObject {
+            name: t.name.clone(),
+            description: Some(t.description.clone()),
+            parameters: Some(t.parameters.clone()),
+            strict: None,
+        };
+        res.push(async_openai::types::chat::ChatCompletionTools::Function(
+            async_openai::types::chat::ChatCompletionTool { function: func },
+        ));
+    }
+    res
+}
+
+/// Built-in OpenAI-Compatible Provider.
+pub struct OpenAiProvider {
+    client: Client<OpenAIConfig>,
+    model: String,
+}
+
+impl OpenAiProvider {
+    /// Creates a new OpenAI provider with the given base URL, API key, and model.
+    pub fn new(
+        base_url: &str,
+        api_key: &str,
+        model: &str,
+        _embedding_model: &str,
+        _embedding_dimensions: usize,
+    ) -> Self {
+        Self {
+            client: build_openai_client(base_url, api_key),
+            model: model.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for OpenAiProvider {
+    fn name(&self) -> &str {
+        "openai-compatible"
+    }
+
+    async fn create_chat_stream(
+        &self,
+        messages: &[LlmMessage],
+        tools: &[ene_tool_proto::ToolDefinition],
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, String>> + Send>>, String> {
+        let oa_messages: Vec<ChatCompletionRequestMessage> = messages
+            .iter()
+            .map(convert_message)
+            .collect::<Result<_, _>>()?;
+
+        let oa_tools = if !tools.is_empty() {
+            Some(convert_tools(tools))
+        } else {
+            None
+        };
+
+        let mut req_builder =
+            async_openai::types::chat::CreateChatCompletionRequestArgs::default();
+        req_builder.model(self.model.clone()).messages(oa_messages);
+        if let Some(t) = oa_tools {
+            req_builder.tools(t);
+        }
+
+        let request = req_builder.build().map_err(|e| e.to_string())?;
+        let stream = self
+            .client
+            .chat()
+            .create_stream(request)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mapped_stream = stream.map(|chunk_res| match chunk_res {
+            Ok(chunk) => {
+                let mut text_delta = None;
+                let mut tool_calls_delta = None;
+
+                if let Some(choice) = chunk.choices.first() {
+                    if let Some(content) = &choice.delta.content {
+                        text_delta = Some(content.clone());
+                    }
+
+                    if let Some(tc_deltas) = &choice.delta.tool_calls {
+                        let mut tc_list = Vec::new();
+                        for tc in tc_deltas {
+                            let mut name = None;
+                            let mut arguments = None;
+                            if let Some(func) = &tc.function {
+                                if let Some(n) = &func.name {
+                                    name = Some(n.clone());
+                                }
+                                if let Some(a) = &func.arguments {
+                                    arguments = Some(a.clone());
+                                }
+                            }
+                            tc_list.push(LlmToolCallChunk {
+                                index: tc.index as usize,
+                                id: tc.id.clone(),
+                                name,
+                                arguments,
+                            });
+                        }
+                        tool_calls_delta = Some(tc_list);
+                    }
+                }
+
+                Ok(LlmResponseChunk {
+                    text_delta,
+                    tool_calls_delta,
+                })
+            }
+            Err(e) => Err(e.to_string()),
+        });
+
+        Ok(Box::pin(mapped_stream)
+            as Pin<
+                Box<dyn Stream<Item = Result<LlmResponseChunk, String>> + Send>,
+            >)
+    }
+
+    async fn chat_completion(
+        &self,
+        messages: &[LlmMessage],
+        json_schema: Option<serde_json::Value>,
+    ) -> Result<String, String> {
+        let oa_messages: Vec<ChatCompletionRequestMessage> = messages
+            .iter()
+            .map(convert_message)
+            .collect::<Result<_, _>>()?;
+
+        let mut req_builder =
+            async_openai::types::chat::CreateChatCompletionRequestArgs::default();
+        req_builder.model(self.model.clone()).messages(oa_messages);
+
+        if let Some(schema) = json_schema {
+            req_builder.response_format(async_openai::types::chat::ResponseFormat::JsonSchema {
+                json_schema: async_openai::types::chat::ResponseFormatJsonSchema {
+                    description: Some("Structured output".to_string()),
+                    name: "StructuredOutput".to_string(),
+                    schema,
+                    strict: Some(true),
+                },
+            });
+        }
+
+        let request = req_builder.build().map_err(|e| e.to_string())?;
+        let response = self
+            .client
+            .chat()
+            .create(request)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let content = response
+            .choices
+            .first()
+            .and_then(|c| c.message.content.as_deref())
+            .unwrap_or("")
+            .to_string();
+
+        Ok(content)
+    }
+}
+
+/// Factory for the default OpenAI provider.
+pub struct OpenAiProviderFactory;
+
+impl LlmProviderFactory for OpenAiProviderFactory {
+    fn provider_name(&self) -> &str {
+        "openai-compatible"
+    }
+
+    fn create_provider(
+        &self,
+        config: &ene_config::EneConfig,
+    ) -> Result<Box<dyn LlmProvider>, String> {
+        let provider_config = config
+            .get_section::<ProviderConfig>()
+            .map_err(|e| format!("Failed to parse provider config: {}", e))?;
+
+        let base_url = provider_config
+            .resolve_base_url()
+            .map_err(|e| format!("Failed to resolve base URL: {}", e))?;
+
+        let api_key = provider_config.resolve_api_key();
+
+        Ok(Box::new(OpenAiProvider::new(
+            &base_url,
+            &api_key,
+            &provider_config.model,
+            &provider_config.cloud_embedding_model,
+            provider_config.cloud_embedding_dimensions,
+        )))
+    }
+}
+
+/// Cloud embedding provider.
+pub struct CloudEmbeddingProvider {
+    client: Client<OpenAIConfig>,
+    embedding_model: String,
+    embedding_dimensions: usize,
+    query_prefix: Option<String>,
+}
+
+impl CloudEmbeddingProvider {
+    /// Creates a new `CloudEmbeddingProvider`.
+    pub fn new(
+        base_url: &str,
+        api_key: &str,
+        embedding_model: &str,
+        embedding_dimensions: usize,
+        query_prefix: Option<String>,
+    ) -> Self {
+        Self {
+            client: build_openai_client(base_url, api_key),
+            embedding_model: embedding_model.to_string(),
+            embedding_dimensions,
+            query_prefix,
+        }
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for CloudEmbeddingProvider {
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
+        use async_openai::types::embeddings::CreateEmbeddingRequestArgs;
+        let request = CreateEmbeddingRequestArgs::default()
+            .model(&self.embedding_model)
+            .input(text)
+            .build()
+            .map_err(|e| e.to_string())?;
+
+        let response = self
+            .client
+            .embeddings()
+            .create(request)
+            .await
+            .map_err(|e| e.to_string())?;
+        let embedding = response
+            .data
+            .into_iter()
+            .next()
+            .ok_or_else(|| "Empty embedding response".to_string())?;
+        Ok(embedding.embedding)
+    }
+
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, String> {
+        if let Some(prefix) = &self.query_prefix {
+            let prefixed = format!("{}{}", prefix, text);
+            self.embed(&prefixed).await
+        } else {
+            self.embed(text).await
+        }
+    }
+
+    fn dimensions(&self) -> usize {
+        self.embedding_dimensions
+    }
+
+    fn model_name(&self) -> &str {
+        &self.embedding_model
+    }
+}

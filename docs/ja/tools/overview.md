@@ -18,24 +18,30 @@ ToolHostManager (バイナリ発見、起動、監視)
 
 ```rust
 pub enum IpcRequest {
+    Handshake { version: u32 },
     Initialize { sandbox: SandboxConfigData, tool_config: Option<Value> },
     ListTools,
+    GetConfigSchema,
     CallTool { name: String, arguments: String },
     SetSessionId { session_id: String },
+    ApprovePermission { request_id: String },
+    AllowPattern { action: String, target_pattern: String },
     Ping,
     Shutdown,
 }
 
 pub enum IpcResponse {
+    HandshakeAck { version: u32 },
     Ack,
     Tools { tools: Vec<ToolDefinition> },
+    ConfigSchema { schema: Option<Value> },
     CallResult { result: Result<String, ToolError> },
     Pong,
     Error { message: String },
 }
 ```
 
-ワイヤ形式: 4 バイトビッグエンディアン長さプレフィックス + JSON ペイロード。
+ワイヤ形式: 4 バイトリトルエンディアン長さプレフィックス + JSON ペイロード。
 
 ## ToolHostManager
 
@@ -43,7 +49,7 @@ pub enum IpcResponse {
 
 | メソッド | 説明 |
 |---------|------|
-| `start(settings)` | ソケットディレクトリ作成、有効なツールバイナリを起動 |
+| `start_full(config)` | ソケットディレクトリ作成、EneConfig ベースで有効なツールバイナリを起動 |
 | `add_registry(registry)` | 外部レジストリを登録 (例: MCP) |
 | `with_store(store)` | Tool RAG 用に MemoryStore をアタッチ |
 | `into_registry()` | `Arc<dyn ToolRegistry>` に変換 |
@@ -67,11 +73,13 @@ pub enum IpcResponse {
 #[async_trait]
 pub trait ToolRegistry: Send + Sync {
     fn list_tools(&self) -> Vec<ToolDefinition>;
-    fn list_relevant_tools(&self, query_emb: Option<&[f32]>, limit: usize) -> Vec<ToolDefinition>;
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>;
     async fn set_session_id(&self, session_id: &str) {}
+    async fn approve_permission(&self, request_id: &str) {}
+    async fn allow_pattern(&self, action: &str, target_pattern: &str) {}
     async fn config_schema(&self) -> Option<serde_json::Value> { None }
     async fn ensure_index_built(&self, embedder: &dyn EmbeddingProvider, store: Option<&MemoryStore>) -> Result<(), ToolError> { Ok(()) }
+    async fn select_tools(&self, embedder: &dyn EmbeddingProvider, query: &str, limit: usize) -> Vec<ToolDefinition> { self.list_tools() }
 }
 ```
 
@@ -81,7 +89,7 @@ pub trait ToolRegistry: Send + Sync {
 
 - **先勝ち** — 重複ツール名は最初の登録が優先
 - **Tool RAG** — `ensure_tool_embeddings()` がバージョンハッシュを計算し、変更があったツールのみ `store.upsert_tool_embedding()` で再埋め込み
-- **`list_relevant_tools()`** — 保存されたツール埋め込みのコサイン類似度フィルタリング、`tool_rag_always_include` のツールは常に含める
+- **`select_tools()`** — 保存されたツール埋め込みのコサイン類似度フィルタリング、`tool_rag_always_include` のツールは常に含める
 
 ## MCP サポート
 
