@@ -1,10 +1,13 @@
 use crate::error::EneCoreError;
 use crate::stream::{self, PermissionDecision};
 use chrono::{DateTime, Utc};
+use ene_common::{CardName, RequestId, SessionId};
 use ene_config::EneConfig;
 use ene_provider::LlmProviderRegistry;
 use ene_session::PendingSplitTask;
-use ene_session::{ConversationSession, SessionError, SplitResult, poll_split_result};
+use ene_session::{
+    ConversationSession, SessionError, SplitReason, SplitResult, poll_split_result,
+};
 use ene_tool_host::{CompositeToolRegistry, ToolHostManager, ToolRegistry};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,7 +46,7 @@ pub enum EneCommand {
     /// Submit a permission decision for a pending destructive operation.
     PermissionDecision {
         /// The `request_id` from a prior `PermissionRequired` event.
-        request_id: String,
+        request_id: RequestId,
         /// The user's decision.
         decision: PermissionDecision,
     },
@@ -63,7 +66,7 @@ pub enum EneCommand {
 /// Events emitted from the actor to all consumers via broadcast channel.
 ///
 /// Consumers (CLI, Bevy systems, logging) receive these through
-/// [`EneHandle::try_recv`] or [`EneHandle::recv`].
+/// [`EneHandle::subscribe`] which returns an [`EneEventReceiver`].
 #[derive(Debug, Clone)]
 pub enum EneEvent {
     /// A chunk of generated text from the LLM.
@@ -93,7 +96,7 @@ pub enum EneEvent {
     /// A destructive operation requires user approval before execution.
     PermissionRequired {
         /// Unique identifier for this permission request.
-        request_id: String,
+        request_id: RequestId,
         /// The category of operation (e.g. "write", "delete").
         action: String,
         /// The target resource path.
@@ -107,8 +110,8 @@ pub enum EneEvent {
         task_id: String,
         /// Current step number.
         step: usize,
-        /// Total number of steps.
-        total_steps: usize,
+        /// Total number of steps (`None` if unknown).
+        total_steps: Option<usize>,
         /// Description of the current step.
         description: String,
     },
@@ -117,12 +120,13 @@ pub enum EneEvent {
         /// Generated summary of the conversation segment.
         summary: String,
         /// Why the split was triggered.
-        reason: String,
+        reason: SplitReason,
     },
-    /// The AI stream has completed normally.
-    Finished,
-    /// A non-fatal error occurred during streaming.
-    Error {
+    /// The AI stream has completed normally. This is always the final event
+    /// for a given run — consumers should break their event loop on this.
+    Done,
+    /// The AI stream terminated due to an error.
+    Failed {
         /// Human-readable error description.
         message: String,
     },
@@ -133,23 +137,102 @@ pub enum EneEvent {
     },
 }
 
+/// A read-only handle for querying the memory subsystem.
+///
+/// Wraps the memory store and embedding provider, exposing only
+/// the operations needed by downstream consumers (CLI commands, etc.).
+#[derive(Clone)]
+pub struct MemoryQueryHandle {
+    store: Option<Arc<ene_memory::MemoryStore>>,
+    embedder: Option<Arc<dyn ene_provider::EmbeddingProvider>>,
+}
+
+impl std::fmt::Debug for MemoryQueryHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryQueryHandle")
+            .field("enabled", &self.is_enabled())
+            .finish()
+    }
+}
+
+impl MemoryQueryHandle {
+    /// Whether memory is enabled and both store and embedder are available.
+    pub fn is_enabled(&self) -> bool {
+        self.store.is_some() && self.embedder.is_some()
+    }
+
+    /// Embed a text query for similarity search.
+    pub async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EneCoreError> {
+        let embedder = self
+            .embedder
+            .as_ref()
+            .ok_or_else(|| EneCoreError::EmbeddingError("Embedding provider not available".into()))?;
+        embedder
+            .embed_query(text)
+            .await
+            .map_err(|e| EneCoreError::EmbeddingError(format!("Embedding failed: {}", e)))
+    }
+
+    /// Search conversation summaries by embedding similarity.
+    pub fn search_summaries(
+        &self,
+        query_embedding: &[f32],
+        card_name: &str,
+        limit: usize,
+        threshold: f32,
+    ) -> Result<Vec<ene_memory::RecalledSummary>, EneCoreError> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| EneCoreError::EmbeddingError("Memory store not available".into()))?;
+        store
+            .search_summaries(query_embedding, card_name, limit, threshold)
+            .map_err(EneCoreError::Memory)
+    }
+
+    /// List recent conversation summaries for a character card.
+    pub fn list_recent_summaries(
+        &self,
+        card_name: &str,
+        limit: usize,
+    ) -> Result<Vec<ene_memory::ConversationSummary>, EneCoreError> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| EneCoreError::EmbeddingError("Memory store not available".into()))?;
+        store
+            .list_recent_summaries(card_name, limit)
+            .map_err(EneCoreError::Memory)
+    }
+
+    /// List all known key facts for a character card.
+    pub fn get_all_keyfacts(
+        &self,
+        card_name: &str,
+    ) -> Result<Vec<ene_memory::KeyFact>, EneCoreError> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| EneCoreError::EmbeddingError("Memory store not available".into()))?;
+        store.get_all_keyfacts(card_name).map_err(EneCoreError::Memory)
+    }
+}
+
 /// A snapshot of the current actor state for read-only queries.
 #[derive(Clone)]
 pub struct EneStateSnapshot {
     /// The loaded character card, if any.
     pub character_card: Option<ene_session::CharacterCardV3>,
     /// Conversation history.
-    pub history: Vec<(ene_session::Role, String)>,
+    pub history: Vec<ConversationEntry>,
     /// A copy of the current configuration.
     pub config: EneConfig,
     /// Current session ID.
-    pub session_id: String,
+    pub session_id: SessionId,
     /// Character card name.
-    pub card_name: String,
-    /// Memory store, if enabled.
-    pub memory_store: Option<Arc<ene_memory::MemoryStore>>,
-    /// Embedding provider, if initialized.
-    pub embedding_provider: Option<Arc<dyn ene_provider::EmbeddingProvider>>,
+    pub card_name: CardName,
+    /// Memory query handle (enabled only if memory is configured).
+    pub memory: MemoryQueryHandle,
     /// Current conversation turn count.
     pub current_turn_count: u32,
     /// When the session started (UTC).
@@ -167,6 +250,44 @@ pub enum EneStatus {
     Error,
 }
 
+/// Error returned when a command is sent to an actor that is no longer running.
+#[derive(Debug, thiserror::Error)]
+#[error("Actor is no longer running")]
+pub struct ActorDeadError;
+
+/// A single entry in the conversation history.
+#[derive(Debug, Clone)]
+pub struct ConversationEntry {
+    /// Who produced this message.
+    pub role: ene_session::Role,
+    /// The message content.
+    pub content: String,
+}
+
+/// Event receiver handle obtained from [`EneHandle::subscribe`].
+///
+/// Wraps the broadcast receiver and provides a ergonomic interface for
+/// consuming events from the actor.
+pub struct EneEventReceiver(broadcast::Receiver<EneEvent>);
+
+impl std::fmt::Debug for EneEventReceiver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EneEventReceiver").finish()
+    }
+}
+
+impl EneEventReceiver {
+    /// Non-blocking poll of the event stream.
+    pub fn try_recv(&mut self) -> Result<EneEvent, broadcast::error::TryRecvError> {
+        self.0.try_recv()
+    }
+
+    /// Async receive, waiting for the next event.
+    pub async fn recv(&mut self) -> Result<EneEvent, broadcast::error::RecvError> {
+        self.0.recv().await
+    }
+}
+
 /// Thread-safe handle to the actor.
 ///
 /// Spawns the actor on construction. When the last clone is dropped the
@@ -174,7 +295,12 @@ pub enum EneStatus {
 pub struct EneHandle {
     cmd_tx: Arc<mpsc::UnboundedSender<EneCommand>>,
     event_tx: broadcast::Sender<EneEvent>,
-    event_rx: broadcast::Receiver<EneEvent>,
+}
+
+impl std::fmt::Debug for EneHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EneHandle").finish()
+    }
 }
 
 impl Clone for EneHandle {
@@ -182,7 +308,6 @@ impl Clone for EneHandle {
         Self {
             cmd_tx: Arc::clone(&self.cmd_tx),
             event_tx: self.event_tx.clone(),
-            event_rx: self.event_tx.subscribe(),
         }
     }
 }
@@ -195,51 +320,53 @@ impl EneHandle {
     pub fn new() -> Self {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let cmd_tx = Arc::new(cmd_tx);
-        let (event_tx, event_rx) = broadcast::channel(1024);
+        let (event_tx, _event_rx) = broadcast::channel(1024);
 
         let actor = EneActor::new(cmd_rx, event_tx.clone());
         tokio::spawn(actor.run());
 
-        Self {
-            cmd_tx,
-            event_tx,
-            event_rx,
-        }
+        Self { cmd_tx, event_tx }
     }
 
-    /// Obtain a fresh broadcast receiver that sees events from this point
-    /// forward. Prefer this over `clone()` when you only need to consume
-    /// events and want to avoid the lifetime implications of cloning the
-    /// entire handle.
-    pub fn subscribe(&self) -> broadcast::Receiver<EneEvent> {
-        self.event_tx.subscribe()
+    /// Subscribe to the event stream. Returns a receiver that will see
+    /// events from this point forward.
+    pub fn subscribe(&self) -> EneEventReceiver {
+        EneEventReceiver(self.event_tx.subscribe())
     }
 
-    /// Send a command (fire-and-forget).
-    pub fn send(&self, cmd: EneCommand) {
+    pub(crate) fn send(&self, cmd: EneCommand) {
         let _ = self.cmd_tx.send(cmd);
     }
 
-    /// Convenience: send a `Run` command.
-    pub fn run(&self, input: impl Into<String>) {
-        self.send(EneCommand::Run {
-            input: input.into(),
-        });
+    /// Send a `Run` command. Returns an error if the actor is no longer running.
+    pub fn run(&self, input: impl Into<String>) -> Result<(), ActorDeadError> {
+        self.cmd_tx
+            .send(EneCommand::Run {
+                input: input.into(),
+            })
+            .map_err(|_| ActorDeadError)
     }
 
-    /// Convenience: send a `Cancel` command.
-    pub fn cancel(&self) {
-        self.send(EneCommand::Cancel);
+    /// Send a `Cancel` command. Returns an error if the actor is no longer running.
+    pub fn cancel(&self) -> Result<(), ActorDeadError> {
+        self.cmd_tx
+            .send(EneCommand::Cancel)
+            .map_err(|_| ActorDeadError)
     }
 
-    /// Non-blocking poll of the event stream (for Bevy ECS systems).
-    pub fn try_recv(&mut self) -> Result<EneEvent, broadcast::error::TryRecvError> {
-        self.event_rx.try_recv()
-    }
-
-    /// Async receive (for tokio tasks).
-    pub async fn recv(&mut self) -> Result<EneEvent, broadcast::error::RecvError> {
-        self.event_rx.recv().await
+    /// Send a permission decision for a pending destructive operation.
+    /// Returns an error if the actor is no longer running.
+    pub fn decide_permission(
+        &self,
+        request_id: impl Into<RequestId>,
+        decision: PermissionDecision,
+    ) -> Result<(), ActorDeadError> {
+        self.cmd_tx
+            .send(EneCommand::PermissionDecision {
+                request_id: request_id.into(),
+                decision,
+            })
+            .map_err(|_| ActorDeadError)
     }
 
     /// Send a `Reconfigure` command and wait for the result.
@@ -283,9 +410,6 @@ impl Default for EneHandle {
 
 impl Drop for EneHandle {
     fn drop(&mut self) {
-        // Only the last handle sends Shutdown so the actor can clean up.
-        // When all Arc<Sender> clones are dropped the mpsc channel closes
-        // automatically, but an explicit Shutdown is faster.
         if Arc::strong_count(&self.cmd_tx) == 1 {
             let _ = self.cmd_tx.send(EneCommand::Shutdown);
         }
@@ -303,7 +427,7 @@ struct EneActor {
     cancel_token: CancellationToken,
     stream_handle: Option<tokio::task::JoinHandle<()>>,
     stream_session_rx: Option<oneshot::Receiver<ConversationSession>>,
-    pending_permissions: Arc<Mutex<HashMap<String, oneshot::Sender<PermissionDecision>>>>,
+    pending_permissions: Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
     pending_split: Option<PendingSplitTask>,
 }
 
@@ -443,16 +567,27 @@ impl EneActor {
                 true
             }
             EneCommand::GetSnapshot { reply } => {
+                let history: Vec<ConversationEntry> = self
+                    .session
+                    .history()
+                    .iter()
+                    .map(|(role, content)| ConversationEntry {
+                        role: *role,
+                        content: content.clone(),
+                    })
+                    .collect();
                 let snapshot = EneStateSnapshot {
                     character_card: self.session.character_card.clone(),
-                    history: self.session.history.conversation_history.clone(),
+                    history,
                     config: self.config.clone(),
                     session_id: self.session.memory.session_id.clone(),
-                    card_name: self.session.card_name().to_string(),
-                    memory_store: self.session.memory.memory_store.clone(),
-                    embedding_provider: self.session.memory.embedding_provider.clone(),
-                    current_turn_count: self.session.state.current_turn_count as u32,
-                    session_started_at: self.session.memory.session_started_at,
+                    card_name: CardName::from(self.session.card_name()),
+                    memory: MemoryQueryHandle {
+                        store: self.session.memory.memory_store.clone(),
+                        embedder: self.session.memory.embedding_provider.clone(),
+                    },
+                    current_turn_count: self.session.current_turn_count() as u32,
+                    session_started_at: self.session.session_started_at(),
                 };
                 let _ = reply.send(snapshot);
                 true
@@ -469,10 +604,9 @@ impl EneActor {
 
         // 3. Embed the input
         if let Err(e) = self.embed_input(&user_input).await {
-            let _ = self.event_tx.send(EneEvent::Error {
+            let _ = self.event_tx.send(EneEvent::Failed {
                 message: e.to_string(),
             });
-            let _ = self.event_tx.send(EneEvent::Finished);
             return;
         }
 
@@ -484,10 +618,9 @@ impl EneActor {
         let provider = match self.create_provider() {
             Ok(p) => p,
             Err(e) => {
-                let _ = self.event_tx.send(EneEvent::Error {
+                let _ = self.event_tx.send(EneEvent::Failed {
                     message: e.to_string(),
                 });
-                let _ = self.event_tx.send(EneEvent::Finished);
                 return;
             }
         };
@@ -505,16 +638,16 @@ impl EneActor {
         self.stream_session_rx = Some(session_rx);
 
         let handle = tokio::spawn(async move {
-            let updated_session = stream::run_stream(
-                &config,
-                &session,
-                &user_input,
+            let updated_session = stream::run_stream(stream::StreamContext {
+                config,
+                session,
+                user_input,
                 registry,
                 provider,
                 event_tx,
                 cancel_token,
                 pending_permissions,
-            )
+            })
             .await;
             let _ = session_tx.send(updated_session);
         });
@@ -524,17 +657,16 @@ impl EneActor {
     fn create_provider(&self) -> Result<Arc<dyn ene_provider::LlmProvider>, EneCoreError> {
         let provider_config = self
             .config
-            .get_section::<ene_provider::ProviderConfig>()
-            .map_err(|e| EneCoreError::ConfigError(e.to_string()))?;
+            .get_section::<ene_provider::ProviderConfig>()?;
         LlmProviderRegistry::create_provider(&provider_config.provider_name, &self.config)
             .map(Arc::from)
-            .map_err(|e| EneCoreError::ConfigError(e))
+            .map_err(EneCoreError::Provider)
     }
 
     // ── Split management ──
 
     async fn handle_manual_split(&mut self) -> Result<SplitResult, EneCoreError> {
-        if self.session.history.conversation_history.is_empty() {
+        if self.session.history().is_empty() {
             return Err(EneCoreError::Session(SessionError::SplitNotNeeded));
         }
         let Some(store) = &self.session.memory.memory_store else {
@@ -547,8 +679,8 @@ impl EneActor {
 
         let reason = ene_session::SplitReason::Manual;
         let result = ene_session::execute_split(
-            &self.session.history.conversation_history,
-            &self.session.memory.session_id,
+            self.session.history(),
+            self.session.memory.session_id.as_str(),
             self.session.card_name(),
             &self.config.user_name,
             store,
@@ -557,12 +689,12 @@ impl EneActor {
             reason,
         )
         .await
-        .map_err(|e| EneCoreError::Session(e))?;
+        .map_err(EneCoreError::Session)?;
 
         // Emit the split event and update the actor's session state
         let _ = self.event_tx.send(EneEvent::SessionSplit {
             summary: result.summary.clone(),
-            reason: result.reason.to_string(),
+            reason: result.reason.clone(),
         });
         self.session.reset_session();
         self.session.memory.session_id = result.new_session_id.clone();
@@ -576,7 +708,7 @@ impl EneActor {
                 Ok(split) => {
                     let _ = self.event_tx.send(EneEvent::SessionSplit {
                         summary: split.summary,
-                        reason: split.reason.to_string(),
+                        reason: split.reason,
                     });
                     self.session.reset_session();
                     self.session.memory.session_id = split.new_session_id;
@@ -660,10 +792,7 @@ impl EneActor {
 
         let mem_config = self
             .config
-            .get_section::<ene_memory::MemoryConfig>()
-            .map_err(|e| {
-                EneCoreError::ConfigError(format!("Failed to load memory config: {}", e))
-            })?;
+            .get_section::<ene_memory::MemoryConfig>()?;
 
         if mem_config.enabled {
             let store = init_memory_store(&self.config, &*embedder).map_err(|e| {
@@ -689,9 +818,9 @@ impl EneActor {
 
 /// Builds the active composite tool registry based on workspace config.
 async fn build_tool_registry(config: &EneConfig) -> Result<Arc<dyn ToolRegistry>, EneCoreError> {
-    ToolHostManager::start_full(config).await.map_err(|e| {
-        EneCoreError::ConfigError(format!("Fatal: Failed to start ToolHostManager: {}", e))
-    })
+    ToolHostManager::start_full(config)
+        .await
+        .map_err(EneCoreError::Tool)
 }
 
 fn init_embedding(config: &EneConfig) -> Result<Arc<dyn ene_provider::EmbeddingProvider>, String> {
@@ -716,15 +845,14 @@ fn init_embedding(config: &EneConfig) -> Result<Arc<dyn ene_provider::EmbeddingP
                 .resolve_base_url()
                 .map_err(|e| format!("Failed to resolve base URL for cloud embedding: {}", e))?;
             let api_key = provider_config.resolve_api_key();
-            let llm: Arc<dyn ene_provider::LlmProvider> =
-                Arc::new(ene_provider::OpenAiProvider::new(
-                    &base_url,
-                    &api_key,
-                    &provider_config.model,
-                    &provider_config.cloud_embedding_model,
-                    provider_config.cloud_embedding_dimensions,
-                ));
-            Ok(Arc::new(ene_provider::CloudEmbeddingProvider::new(llm)))
+            let query_prefix = provider_config.query_prefix.clone();
+            Ok(Arc::new(ene_provider::CloudEmbeddingProvider::new(
+                &base_url,
+                &api_key,
+                &provider_config.cloud_embedding_model,
+                provider_config.cloud_embedding_dimensions,
+                query_prefix,
+            )))
         }
     }
 }

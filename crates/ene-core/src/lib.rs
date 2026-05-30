@@ -7,8 +7,6 @@
 
 /// Actor-based runtime with message-passing architecture.
 pub mod actor;
-/// Configuration types for the AI provider.
-pub mod config;
 /// Core error types.
 pub mod error;
 /// System prompt and message assembly helpers.
@@ -16,45 +14,57 @@ pub mod prompt_builder;
 /// AI streaming engine and tool-call loop.
 pub mod stream;
 
+// ── Actor types ──
+/// Actor handle, events, status, and state snapshot.
+pub use actor::{
+    ActorDeadError, ConversationEntry, EneEvent, EneEventReceiver, EneHandle, EneStateSnapshot,
+    EneStatus, MemoryQueryHandle,
+};
+
+// ── Provider types ──
 /// OpenAI-compatible provider config.
-pub use config::ProviderConfig;
+pub use ene_provider::ProviderConfig;
+/// LLM provider trait (re-exported from `ene-provider`).
+pub use ene_provider::LlmProvider;
+/// LLM message types (re-exported from `ene-provider`).
+pub use ene_provider::LlmMessage;
 
-/// Actor handle, commands, events, status, and state snapshot.
-pub use actor::{EneCommand, EneEvent, EneHandle, EneStateSnapshot, EneStatus};
+// ── Memory types ──
+/// Memory configuration (re-exported from `ene-memory`).
+pub use ene_memory::MemoryConfig;
 
-/// Provider types (re-exported from `ene-provider`).
-pub use ene_provider::{
-    LlmMessage, LlmProvider, LlmProviderFactory, LlmProviderRegistry, LlmResponseChunk,
-    LlmToolCall, LlmToolCallChunk, UserMessagePart,
-};
+// ── Session types ──
+/// Character card type (re-exported from `ene-session`).
+pub use ene_session::CharacterCardV3;
+/// Session configuration (re-exported from `ene-session`).
+pub use ene_session::SessionConfig;
+/// Session split reason (re-exported from `ene-session`).
+pub use ene_session::SplitReason;
+/// Session split result (re-exported from `ene-session`).
+pub use ene_session::SplitResult;
+/// Extract emotion name from special token (re-exported from `ene-session`).
+pub use ene_session::extract_emotion_from_token;
+/// Split text and special tokens (re-exported from `ene-session`).
+pub use ene_session::split_text_and_special_tokens;
+/// Truncate text utility (re-exported from `ene-session`).
+pub use ene_session::truncate;
 
-/// Embedding provider trait (re-exported from `ene-provider`).
-pub use ene_provider::EmbeddingProvider;
-/// Local embedding config (re-exported from `ene-provider`).
-pub use ene_provider::LocalEmbeddingConfig;
+// ── Tool types ──
+/// Tool definition type (re-exported from `ene-tool-host`).
+pub use ene_tool_host::ToolDefinition;
+/// Tool registry trait (re-exported from `ene-tool-host`).
+pub use ene_tool_host::ToolRegistry;
 
-/// Memory types (re-exported from `ene-memory`).
-pub use ene_memory::{ConversationSummary, KeyFact, MemoryConfig, MemoryStore, RecalledSummary};
-/// Session types and utilities (re-exported from `ene-session`).
-pub use ene_session::{
-    ConversationSession, PendingSplitTask, SessionBoundary, SessionConfig, SessionError,
-    SplitReason, SplitResult, SplitTaskInput, check_boundary, execute_split, expand_cbs_macros,
-    extract_emotion_from_token, generate_session_id, poll_split_result, spawn_split_task,
-    split_text_and_special_tokens, truncate,
-};
-/// Tool host types (re-exported from `ene-tool-host`).
-pub use ene_tool_host::{
-    CompositeToolRegistry, IpcToolRegistry, McpToolRegistry, ToolCategory, ToolDefinition,
-    ToolError, ToolHostManager, ToolRegistry,
-};
+// ── Core error ──
 /// Core AI error type.
 pub use error::EneCoreError;
 
-/// Resource directory initialization (re-exported from `ene-config`).
-pub use ene_config::ensure_resource_dirs;
-/// Prompt builder utilities.
-pub use prompt_builder::{build_expression_phi, build_messages, build_system_prompt};
-/// Permission decision type.
+// ── Stream types ──
+/// Permission decision type (re-exported from `ene-core::stream`).
 pub use stream::PermissionDecision;
-/// Tool RAG configuration.
-pub use stream::ToolRagConfig;
+
+// ── Prompt builder ──
+/// Message build context struct.
+pub use prompt_builder::MessageBuildContext;
+/// Build messages for LLM completion request.
+pub use prompt_builder::build_messages;

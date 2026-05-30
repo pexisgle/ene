@@ -2,6 +2,27 @@ use ene_memory::{KeyFact, RecalledSummary, format_summaries_for_prompt};
 use ene_provider::{LlmMessage, UserMessagePart};
 use ene_session::{CharacterCardV3, Role, expand_cbs_macros, resolve_expressions};
 
+/// Input parameters for [`build_messages`].
+#[derive(Debug, Clone)]
+pub struct MessageBuildContext<'a> {
+    /// The loaded character card.
+    pub card: &'a CharacterCardV3,
+    /// The user's current input text.
+    pub user_input: &'a str,
+    /// Conversation history entries.
+    pub history: &'a [crate::actor::ConversationEntry],
+    /// Optional runtime context appended to the user input (`None` is treated as empty).
+    pub runtime_context: Option<&'a str>,
+    /// Runtime rules prepended to the system prompt.
+    pub runtime_rules: &'a str,
+    /// Display name of the user.
+    pub user_name: &'a str,
+    /// Recalled memory summaries.
+    pub recalled_summaries: &'a [RecalledSummary],
+    /// Key facts about the user.
+    pub key_facts: &'a [KeyFact],
+}
+
 fn sys_msg(content: impl Into<String>) -> LlmMessage {
     LlmMessage::System {
         content: content.into(),
@@ -95,40 +116,32 @@ pub fn build_expression_phi(card: &CharacterCardV3) -> Option<String> {
 /// Assembles the full message list for an AI completion request, including system
 /// prompt, example messages, memory recalls, key facts, history, expression PHI,
 /// and the final user input.
-pub fn build_messages(
-    card: &CharacterCardV3,
-    user_input: &str,
-    history: &[(Role, String)],
-    runtime_context: &str,
-    runtime_rules: &str,
-    user_name: &str,
-    recalled_summaries: &[RecalledSummary],
-    key_facts: &[KeyFact],
-) -> Result<Vec<LlmMessage>, String> {
+pub fn build_messages(ctx: &MessageBuildContext<'_>) -> Result<Vec<LlmMessage>, crate::error::EneCoreError> {
     let mut messages: Vec<LlmMessage> = Vec::new();
-    let char_name = card.data.get_character_name();
+    let char_name = ctx.card.data.get_character_name();
 
-    let sys_prompt = build_system_prompt(card, runtime_rules, user_name);
+    let sys_prompt = build_system_prompt(ctx.card, ctx.runtime_rules, ctx.user_name);
     if !sys_prompt.trim().is_empty() {
         messages.push(sys_msg(sys_prompt));
     }
 
-    if history.is_empty() && !card.data.mes_example.trim().is_empty() {
-        let ex = expand_cbs_macros(&card.data.mes_example, char_name, user_name);
+    if ctx.history.is_empty() && !ctx.card.data.mes_example.trim().is_empty() {
+        let ex = expand_cbs_macros(&ctx.card.data.mes_example, char_name, ctx.user_name);
         messages.push(sys_msg(format!("Example Messages:\n{}", ex)));
     }
 
-    if !recalled_summaries.is_empty() {
-        let summary_block = format_summaries_for_prompt(recalled_summaries);
+    if !ctx.recalled_summaries.is_empty() {
+        let summary_block = format_summaries_for_prompt(ctx.recalled_summaries);
         if !summary_block.trim().is_empty() {
             messages.push(sys_msg(summary_block));
         }
     }
 
-    if !key_facts.is_empty() {
+    if !ctx.key_facts.is_empty() {
         let facts_block = format!(
-            "[Known facts about {user_name}]\n{}",
-            key_facts
+            "[Known facts about {}]\n{}",
+            ctx.user_name,
+            ctx.key_facts
                 .iter()
                 .map(|f| format!("• {}: {}", f.key, f.value))
                 .collect::<Vec<_>>()
@@ -137,23 +150,25 @@ pub fn build_messages(
         messages.push(sys_msg(facts_block));
     }
 
-    for (role, content) in history {
-        match role {
-            Role::User => messages.push(user_msg(content.clone())),
-            Role::Assistant => messages.push(asst_msg(content.clone())),
-            Role::System => messages.push(sys_msg(content.clone())),
+    for entry in ctx.history {
+        match entry.role {
+            Role::User => messages.push(user_msg(entry.content.clone())),
+            Role::Assistant => messages.push(asst_msg(entry.content.clone())),
+            Role::System => messages.push(sys_msg(entry.content.clone())),
         }
     }
 
-    if let Some(phi) = build_expression_phi(card) {
-        let phi_expanded = expand_cbs_macros(&phi, char_name, user_name);
+    if let Some(phi) = build_expression_phi(ctx.card) {
+        let phi_expanded = expand_cbs_macros(&phi, char_name, ctx.user_name);
         messages.push(sys_msg(phi_expanded));
     }
 
-    let mut final_input = user_input.to_string();
-    if !runtime_context.trim().is_empty() {
-        final_input.push_str("\n\n[Runtime Context]\n");
-        final_input.push_str(runtime_context);
+    let mut final_input = ctx.user_input.to_string();
+    if let Some(rc) = ctx.runtime_context {
+        if !rc.trim().is_empty() {
+            final_input.push_str("\n\n[Runtime Context]\n");
+            final_input.push_str(rc);
+        }
     }
 
     messages.push(user_msg(final_input));

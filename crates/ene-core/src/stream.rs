@@ -1,5 +1,6 @@
-use crate::actor::EneEvent;
-use crate::prompt_builder::build_messages;
+use crate::actor::{ConversationEntry, EneEvent};
+use crate::prompt_builder::{MessageBuildContext, build_messages};
+use ene_common::RequestId;
 use ene_config::EneConfig;
 use ene_memory::RecalledSummary;
 use ene_provider::{LlmMessage, LlmToolCall, LlmToolCallChunk, UserMessagePart};
@@ -23,7 +24,7 @@ pub enum PermissionDecision {
 
 /// Configuration for tool RAG (retrieval-augmented generation) filtering.
 #[derive(Debug, Clone)]
-pub struct ToolRagConfig {
+pub(crate) struct ToolRagConfig {
     /// Whether tool calling is enabled at all.
     pub tool_calling_enabled: bool,
     /// Whether RAG-based tool filtering is enabled.
@@ -34,19 +35,31 @@ pub struct ToolRagConfig {
     pub tool_rag_always_include: Vec<String>,
 }
 
+/// Configuration for a single AI streaming run.
+pub(crate) struct StreamContext {
+    pub(crate) config: EneConfig,
+    pub(crate) session: ConversationSession,
+    pub(crate) user_input: String,
+    pub(crate) registry: Arc<dyn ene_tool_host::ToolRegistry>,
+    pub(crate) provider: Arc<dyn ene_provider::LlmProvider>,
+    pub(crate) event_tx: broadcast::Sender<EneEvent>,
+    pub(crate) cancel_token: CancellationToken,
+    pub(crate) pending_permissions: Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
+}
+
 /// Runs the full AI streaming completion loop with tool calling, memory
 /// retrieval, and session management. Sends events through the broadcast channel.
-pub(crate) async fn run_stream(
-    config: &EneConfig,
-    session: &ConversationSession,
-    user_input: &str,
-    registry: Arc<dyn ene_tool_host::ToolRegistry>,
-    provider: Arc<dyn ene_provider::LlmProvider>,
-    event_tx: broadcast::Sender<EneEvent>,
-    cancel_token: CancellationToken,
-    pending_permissions: Arc<Mutex<HashMap<String, oneshot::Sender<PermissionDecision>>>>,
-) -> ConversationSession {
-    let mut session = session.clone();
+pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
+    let StreamContext {
+        config,
+        mut session,
+        user_input,
+        registry,
+        provider,
+        event_tx,
+        cancel_token,
+        pending_permissions,
+    } = ctx;
     session.reset_display_buffer();
 
     let mem_config = config
@@ -54,7 +67,7 @@ pub(crate) async fn run_stream(
         .unwrap_or_default();
 
     // 1. Fetch memory context
-    let (recalled_summaries, key_facts) = fetch_memory_context(&session, config).await;
+    let (recalled_summaries, key_facts) = fetch_memory_context(&session, &config).await;
 
     // 2. Insert user log if memory enabled
     if mem_config.enabled {
@@ -63,10 +76,10 @@ pub(crate) async fn run_stream(
             let card_name = session.card_name().to_string();
             ene_memory::MemoryStore::spawn_insert_log(
                 store,
-                &session_id_log,
+                session_id_log.as_str(),
                 &card_name,
                 "user",
-                user_input,
+                &user_input,
             );
         }
     }
@@ -74,17 +87,16 @@ pub(crate) async fn run_stream(
     // 3. Build initial messages
     let mut messages = match build_chat_messages_list(
         &session,
-        config,
-        user_input,
+        &config,
+        &user_input,
         &recalled_summaries,
         &key_facts,
     ) {
         Ok(msgs) => msgs,
         Err(e) => {
-            let _ = event_tx.send(EneEvent::Error {
+            let _ = event_tx.send(EneEvent::Failed {
                 message: e.to_string(),
             });
-            let _ = event_tx.send(EneEvent::Finished);
             return session;
         }
     };
@@ -97,7 +109,6 @@ pub(crate) async fn run_stream(
     };
     let card_name = session.card_name().to_string();
     let session_id = session.memory.session_id.clone();
-    let user_input = user_input.to_string();
     let tool_config = config
         .get_section::<ene_tool_host::ToolConfig>()
         .unwrap_or_default();
@@ -130,21 +141,19 @@ pub(crate) async fn run_stream(
             return session;
         }
 
-        if round >= max_rounds as usize {
-            let _ = event_tx.send(EneEvent::Error {
+        if round >= max_rounds {
+            let _ = event_tx.send(EneEvent::Failed {
                 message: "Max tool call rounds exceeded".to_string(),
             });
-            let _ = event_tx.send(EneEvent::Finished);
             return session;
         }
 
         let mut stream = match provider.create_chat_stream(&messages, &tools).await {
             Ok(s) => s,
             Err(e) => {
-                let _ = event_tx.send(EneEvent::Error {
+                let _ = event_tx.send(EneEvent::Failed {
                     message: e.to_string(),
                 });
-                let _ = event_tx.send(EneEvent::Finished);
                 return session;
             }
         };
@@ -154,7 +163,7 @@ pub(crate) async fn run_stream(
 
         while let Some(chunk_res) = stream.next().await {
             if cancel_token.is_cancelled() {
-                let _ = event_tx.send(EneEvent::Finished);
+                let _ = event_tx.send(EneEvent::Done);
                 return session;
             }
 
@@ -176,10 +185,9 @@ pub(crate) async fn run_stream(
                     }
                 }
                 Err(e) => {
-                    let _ = event_tx.send(EneEvent::Error {
+                    let _ = event_tx.send(EneEvent::Failed {
                         message: e.to_string(),
                     });
-                    let _ = event_tx.send(EneEvent::Finished);
                     return session;
                 }
             }
@@ -191,7 +199,7 @@ pub(crate) async fn run_stream(
                 if let Some(store) = &mem_store {
                     ene_memory::MemoryStore::spawn_insert_log(
                         store,
-                        &session_id,
+                        session_id.as_str(),
                         &card_name,
                         "assistant",
                         &assistant_content,
@@ -201,7 +209,7 @@ pub(crate) async fn run_stream(
 
             session.finalize_response();
             session.record_assistant_response();
-            let _ = event_tx.send(EneEvent::Finished);
+            let _ = event_tx.send(EneEvent::Done);
             return session;
         }
 
@@ -210,11 +218,12 @@ pub(crate) async fn run_stream(
 
         let tx_messages = perform_tool_executions(
             registry.as_ref(),
-            &session_id_for_tools,
+            session_id_for_tools.as_str(),
             tool_calls,
             &assistant_content,
             &event_tx,
             &pending_permissions,
+            tool_config.tool_call_timeout_ms,
         )
         .await;
 
@@ -224,10 +233,9 @@ pub(crate) async fn run_stream(
                 round += 1;
             }
             Err(e) => {
-                let _ = event_tx.send(EneEvent::Error {
+                let _ = event_tx.send(EneEvent::Failed {
                     message: e.to_string(),
                 });
-                let _ = event_tx.send(EneEvent::Finished);
                 return session;
             }
         }
@@ -236,7 +244,7 @@ pub(crate) async fn run_stream(
 
 /// Selects relevant tools using embedding-based RAG if enabled, otherwise
 /// returns all tools.
-pub async fn select_relevant_tools(
+pub(crate) async fn select_relevant_tools(
     registry: &dyn ene_tool_host::ToolRegistry,
     embedding_provider: &Option<Arc<dyn ene_provider::EmbeddingProvider>>,
     user_input: &str,
@@ -278,7 +286,7 @@ pub async fn select_relevant_tools(
 
 /// Fetches recalled summaries and key facts from the memory store for the
 /// current session context.
-pub async fn fetch_memory_context(
+pub(crate) async fn fetch_memory_context(
     session: &ConversationSession,
     config: &EneConfig,
 ) -> (Vec<RecalledSummary>, Vec<ene_memory::KeyFact>) {
@@ -315,7 +323,7 @@ pub async fn fetch_memory_context(
 }
 
 /// Builds the full list of chat completion request messages for the AI stream.
-pub fn build_chat_messages_list(
+pub(crate) fn build_chat_messages_list(
     session: &ConversationSession,
     config: &EneConfig,
     user_input: &str,
@@ -325,21 +333,27 @@ pub fn build_chat_messages_list(
     let Some(card) = session.character_card.as_ref() else {
         return Err(crate::error::EneCoreError::NoCharacterCard);
     };
-    let history = session.history.conversation_history.clone();
+    let history: Vec<ConversationEntry> = session
+        .history()
+        .iter()
+        .map(|(role, content)| ConversationEntry {
+            role: *role,
+            content: content.clone(),
+        })
+        .collect();
     let runtime_rules = config.runtime_rules.clone();
     let user_name = config.user_name.clone();
 
-    build_messages(
+    build_messages(&MessageBuildContext {
         card,
         user_input,
-        &history,
-        "",
-        &runtime_rules,
-        &user_name,
+        history: &history,
+        runtime_context: None,
+        runtime_rules: &runtime_rules,
+        user_name: &user_name,
         recalled_summaries,
         key_facts,
-    )
-    .map_err(|e| crate::error::EneCoreError::PromptBuildError(e))
+    })
 }
 
 /// Executes a batch of tool calls and sends result events through the broadcast channel.
@@ -349,7 +363,8 @@ async fn perform_tool_executions(
     tool_calls: Vec<LlmToolCall>,
     assistant_content: &str,
     event_tx: &broadcast::Sender<EneEvent>,
-    pending_permissions: &Arc<Mutex<HashMap<String, oneshot::Sender<PermissionDecision>>>>,
+    pending_permissions: &Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
+    timeout_ms: u64,
 ) -> Result<Vec<LlmMessage>, crate::error::EneCoreError> {
     let mut round_messages = Vec::new();
 
@@ -373,15 +388,15 @@ async fn perform_tool_executions(
             arguments: args.clone(),
         });
 
-        let tool_timeout = std::time::Duration::from_secs(60);
+        let tool_timeout = std::time::Duration::from_millis(timeout_ms);
         let mut result =
             match tokio::time::timeout(tool_timeout, registry.call_tool(&name, &args)).await {
                 Ok(Ok(res)) => Ok(res),
                 Ok(Err(e)) => Err(e),
                 Err(_) => Err(ene_tool_host::error::ToolError::Other(format!(
-                    "Tool '{}' timed out after {} seconds",
+                    "Tool '{}' timed out after {:.2} seconds",
                     name,
-                    tool_timeout.as_secs()
+                    tool_timeout.as_secs_f64()
                 ))),
             };
 
@@ -392,8 +407,9 @@ async fn perform_tool_executions(
             description,
         }) = &result
         {
+            let req_id = RequestId::from(request_id.clone());
             let _ = event_tx.send(EneEvent::PermissionRequired {
-                request_id: request_id.clone(),
+                request_id: req_id.clone(),
                 action: action.clone(),
                 target: target.clone(),
                 description: description.clone(),
@@ -402,17 +418,17 @@ async fn perform_tool_executions(
             let (decide_tx, decide_rx) = oneshot::channel::<PermissionDecision>();
             {
                 let mut guard = pending_permissions.lock().await;
-                guard.insert(request_id.clone(), decide_tx);
+                guard.insert(req_id.clone(), decide_tx);
             }
 
             match decide_rx.await {
                 Ok(PermissionDecision::AllowOnce) => {
-                    registry.approve_permission(request_id).await;
+                    registry.approve_permission(req_id.as_str()).await;
                     result = registry.call_tool(&name, &args).await;
                 }
                 Ok(PermissionDecision::AllowSession) => {
                     registry.allow_pattern(action, target).await;
-                    registry.approve_permission(request_id).await;
+                    registry.approve_permission(req_id.as_str()).await;
                     result = registry.call_tool(&name, &args).await;
                 }
                 _ => {
