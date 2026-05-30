@@ -14,8 +14,8 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 diesel = { version = "2.3", features = ["sqlite", "chrono", "r2d2"] }
 diesel_migrations = { version = "2.3", features = ["sqlite"] }
-rusqlite = { workspace = true }
 sqlite-vec = "0.1"
+libsqlite3-sys = { version = "0.35", features = ["bundled"] }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
