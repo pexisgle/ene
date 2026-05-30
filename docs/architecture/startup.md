@@ -36,6 +36,7 @@ The actor is initialized as a Bevy `Resource`:
 #[derive(Resource)]
 pub struct EneResource {
     pub handle: EneHandle,    // Actor handle — sends commands, receives events
+    pub receiver: EneEventReceiver,  // Broadcast receiver for events
     pub processing: bool,     // Whether an AI stream is active
 }
 ```

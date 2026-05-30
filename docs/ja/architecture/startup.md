@@ -36,6 +36,7 @@ main()
 #[derive(Resource)]
 pub struct EneResource {
     pub handle: EneHandle,    // アクターハンドル — コマンド送信、イベント受信
+    pub receiver: EneEventReceiver,  // ブロードキャスト受信機 — イベント受信
     pub processing: bool,     // AI ストリームがアクティブかどうか
 }
 ```

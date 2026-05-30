@@ -53,6 +53,7 @@ Bevy ECS (synchronous)
 #[derive(Resource)]
 pub struct EneResource {
     pub handle: EneHandle,    // Actor handle
+    pub receiver: EneEventReceiver,  // Broadcast receiver for events
     pub processing: bool,     // Whether AI is streaming
 }
 ```

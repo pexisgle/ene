@@ -142,6 +142,7 @@ pub struct EneSettings {
   "tools": {
     "tool_calling_enabled": true,
     "max_tool_call_rounds": 10,
+    "tool_call_timeout_ms": 60000,
     "tools": {
       "fs": { "enable": true },
       "web": { "enable": true },
@@ -157,6 +158,7 @@ pub struct EneSettings {
 |-------|-------------|
 | `tool_calling_enabled` | Enable function calling for all tools |
 | `max_tool_call_rounds` | Max tool-call iterations per user turn |
+| `tool_call_timeout_ms` | Timeout for individual tool calls in milliseconds (default: 60000) |
 | `tools.<name>.enable` | Enable/disable a specific tool |
 | `tools.<name>.config` | Optional tool-specific config (merged) |
 

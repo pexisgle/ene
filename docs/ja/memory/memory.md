@@ -113,7 +113,7 @@ pub trait EmbeddingProvider: Send + Sync {
 ```
 
 実装:
-- `ApiEmbeddingProvider` — OpenAI 互換 API
+- `CloudEmbeddingProvider` — OpenAI 互換 API
 - `GgufEmbeddingProvider` — Candle によるローカル GGUF 推論 (GPU 不要)
 
 ## 要約

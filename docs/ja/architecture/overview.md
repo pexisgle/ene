@@ -28,7 +28,7 @@ ene-cli ──┼── ene-core ──── ene-tool-host ──── ene-too
 - **`ene-core`** — 統一ランタイムファサード。**アクターベースアーキテクチャ**とチャネルベースのメッセージパッシングを使用します。`EneHandle` が公開 API であり、バックグラウンドの `EneActor` タスクを生成します。コンシューマーは `EneCommand`（mpsc）で通信し、`EneEvent`（broadcast）でイベントを受信します。アクターセッション、設定、ツールレジストリを所有し、ストリーミング、ツールオーケストレーション、権限管理、セッション分割を内部で管理します。
 
 ### AI サブシステム
-- **`ene-embedding`** — ベクトル埋め込み生成。`ApiEmbeddingProvider` (OpenAI 互換) と `GgufEmbeddingProvider` (candle/GGUF、ローカル、GPU 不要) の 2 つのバックエンド。
+- **`ene-embedding`** — ベクトル埋め込み生成。`CloudEmbeddingProvider` (OpenAI 互換 API) と `GgufEmbeddingProvider` (candle/GGUF、ローカル、GPU 不要) の 2 つのバックエンド。
 - **`ene-memory`** — SQLite + sqlite-vec エピソディック記憶。会話要約、キーファクト、ツール埋め込みをコサイン類似度ベクトル検索で保存。
 - **`ene-session`** — 会話履歴バッファ、`CharacterCardV3` 読み込み、感情トークン解析 (`<|emo:name|>`)、およびタイムアウトと話題変化に基づく自動セッション分割。
 

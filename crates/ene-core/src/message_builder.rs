@@ -10,7 +10,7 @@ pub struct MessageBuildContext<'a> {
     /// The user's current input text.
     pub user_input: &'a str,
     /// Conversation history entries.
-    pub history: &'a [crate::actor::ConversationEntry],
+    pub history: &'a [crate::handle::ConversationEntry],
     /// Optional runtime context appended to the user input (`None` is treated as empty).
     pub runtime_context: Option<&'a str>,
     /// Runtime rules prepended to the system prompt.

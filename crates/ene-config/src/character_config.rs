@@ -1,7 +1,7 @@
 crate::define_config!(
-    "character_settings",
+    "character_config",
     /// Per-character visual and motion config used by the desktop GUI.
-    pub struct CharacterPerConfig {
+    pub struct CharacterConfig {
         /// 3D position of the character model in the scene.
         pub character_position: [f32; 3] = [0.0, 0.0, 0.0],
         /// Path to the selected VRMA motion file.
@@ -17,9 +17,9 @@ crate::define_config!(
     }
 );
 
-/// Generates the JSON representation of the CharacterPerConfig JSON Schema
+/// Generates the JSON representation of the CharacterConfig JSON Schema
 pub fn generate_character_schema_json() -> Result<String, serde_json::Error> {
     let schema_gen = schemars::SchemaGenerator::default();
-    let root_schema = schema_gen.into_root_schema_for::<CharacterPerConfig>();
+    let root_schema = schema_gen.into_root_schema_for::<CharacterConfig>();
     serde_json::to_string_pretty(&root_schema)
 }

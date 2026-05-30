@@ -53,6 +53,7 @@ Bevy ECS (同期)
 #[derive(Resource)]
 pub struct EneResource {
     pub handle: EneHandle,    // アクターハンドル
+    pub receiver: EneEventReceiver,  // ブロードキャスト受信機 — イベント受信
     pub processing: bool,     // AI がストリーミング中かどうか
 }
 ```

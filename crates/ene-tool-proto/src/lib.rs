@@ -57,8 +57,8 @@
 pub mod error;
 /// IPC wire protocol (request / response).
 pub mod ipc;
-/// Composite registry for multiple tool providers.
-pub mod registry;
+/// Composite registry that aggregates multiple ToolProvider instances.
+pub mod host_registry;
 /// Sandbox configuration types.
 pub mod sandbox;
 /// Server helper for running a tool provider.
@@ -76,7 +76,7 @@ pub use ipc::{
     write_ipc_request, write_ipc_response,
 };
 /// Composite registry that aggregates multiple ToolProvider instances.
-pub use registry::HostRegistry;
+pub use host_registry::HostRegistry;
 /// Sandbox configuration data sent from the host.
 pub use sandbox::SandboxConfigData;
 /// Starts an IPC server for a ToolProvider.

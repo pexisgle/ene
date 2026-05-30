@@ -41,7 +41,7 @@ pub use character_card::{
     LorebookEntry, ResolvedExpression, expand_cbs_macros, resolve_expressions,
 };
 
-pub use character_config::{CharacterPerConfig, generate_character_schema_json};
+pub use character_config::{CharacterConfig, generate_character_schema_json};
 pub use config::{
     EneConfig, HasConfigKey, generate_schema_json, get_global_config, get_global_section,
     load_config, load_config_from, load_full_config, load_full_config_from,

@@ -1,6 +1,6 @@
 use crate::error::ToolError;
 use crate::tools::ToolDefinition;
-use crate::tools::definition::ToolRegistry;
+use crate::tools::registry::ToolRegistry;
 use async_trait::async_trait;
 use ene_tool_proto::transport::IpcStream;
 use ene_tool_proto::{

@@ -27,7 +27,7 @@ ene-cli ──┼── ene-core ──── ene-tool-host ──── ene-too
 - **`ene-core`** — The unified runtime facade. Uses an **actor-based architecture** with channel-based message passing. `EneHandle` is the public API that spawns a background `EneActor` task. Consumers communicate via `EneCommand` (mpsc) and receive events via `EneEvent` (broadcast). The actor owns the session, config, and tool registry, and manages streaming, tool orchestration, permissions, and session splitting internally.
 
 ### AI Subsystems
-- **`ene-embedding`** — Vector embedding generation. Two backends: `ApiEmbeddingProvider` (OpenAI-compatible) and `GgufEmbeddingProvider` (candle/GGUF, local, GPU-free).
+- **`ene-embedding`** — Vector embedding generation. Two backends: `CloudEmbeddingProvider` (OpenAI-compatible API) and `GgufEmbeddingProvider` (candle/GGUF, local, GPU-free).
 - **`ene-memory`** — SQLite + sqlite-vec ephemeral memory. Stores conversation summaries, key facts, and tool embeddings with cosine-similarity vector search.
 - **`ene-session`** — Conversation history buffer, `CharacterCardV3` loading, emotion token parsing (`<|emo:name|>`), and automatic session splitting based on timeouts and topic drift.
 

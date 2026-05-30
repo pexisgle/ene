@@ -24,7 +24,6 @@ EneActor (バックグラウンド tokio タスク)
 pub struct EneHandle {
     cmd_tx: Arc<mpsc::UnboundedSender<EneCommand>>,
     event_tx: broadcast::Sender<EneEvent>,
-    event_rx: broadcast::Receiver<EneEvent>,
 }
 ```
 
@@ -61,7 +60,7 @@ pub enum EneCommand {
     Shutdown,
     Reconfigure { config: EneConfig, reply: oneshot::Sender<Result<(), EneCoreError>> },
     LoadCharacter { path: String, reply: oneshot::Sender<Result<(), EneCoreError>> },
-    PermissionDecision { request_id: String, decision: PermissionDecision },
+    PermissionDecision { request_id: RequestId, decision: PermissionDecision },
     GetSnapshot { reply: oneshot::Sender<EneStateSnapshot> },
     ManualSplit { reply: oneshot::Sender<Result<SplitResult, EneCoreError>> },
 }
@@ -77,11 +76,11 @@ pub enum EneEvent {
     SpecialToken { token: String },
     ToolCallStart { name: String, arguments: String },
     ToolCallResult { name: String, result: String },
-    PermissionRequired { request_id: String, action: String, target: String, description: String },
-    TaskProgress { task_id: String, step: usize, total_steps: usize, description: String },
-    SessionSplit { summary: String, reason: String },
-    Finished,
-    Error { message: String },
+    PermissionRequired { request_id: RequestId, action: String, target: String, description: String },
+    TaskProgress { task_id: String, step: usize, total_steps: Option<usize>, description: String },
+    SessionSplit { summary: String, reason: SplitReason },
+    Done,
+    Failed { message: String },
     StatusChanged { status: EneStatus },
 }
 ```
@@ -115,7 +114,7 @@ Run { input }
   │     │     └── ループ継続
   │     └── tool_calls がない場合:
   │           ├── アシスタントログを保存
-  │           └── Finished イベント
+  │           └── Done イベント
   └── 更新されたセッションを oneshot でアクターに送信
 ```
 
@@ -141,7 +140,7 @@ Run { input }
 
 ## セッション更新
 
-ストリームタスクが完了すると、更新された `ConversationSession` を onesot チャンネルでアクターに送信します。アクターはこの完了をポーリング:
+ストリームタスクが完了すると、更新された `ConversationSession` を oneshot チャンネルでアクターに送信します。アクターはこの完了をポーリング:
 
 - **ストリーミング中:** `tokio::select!` と 100ms スリープで `stream_session_rx` をチェック
 - **アイドル時:** `cmd_rx.recv()` でブロック（タイマーポーリングなし）
@@ -160,11 +159,11 @@ Run { input }
 
 | エラーソース | 処理 |
 |-------------|------|
-| LLM API エラー | `EneEvent::Error` + `Finished`、ストリームが返す |
+| LLM API エラー | `EneEvent::Failed` + `Done`、ストリームが返す |
 | ツールタイムアウト (60秒) | ツールエラーメッセージを LLM に送信 |
 | 権限拒否 | ツールエラーを LLM に送信 |
-| 最大ラウンド超過 | `EneEvent::Error` + `Finished` |
-| 埋め込みエラー | `EneEvent::Error` + `Finished` |
+| 最大ラウンド超過 | `EneEvent::Failed` + `Done` |
+| 埋め込みエラー | `EneEvent::Failed` + `Done` |
 | Broadcast Lagged | コンシューマーが警告をログし、残りのイベントを継続読み込み |
 
 ## ツール呼び出しの蓄積

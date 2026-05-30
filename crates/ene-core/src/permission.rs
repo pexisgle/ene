@@ -1,5 +1,5 @@
-use crate::actor::{ConversationEntry, EneEvent};
-use crate::prompt_builder::{MessageBuildContext, build_messages};
+use crate::handle::{ConversationEntry, EneEvent};
+use crate::message_builder::{MessageBuildContext, build_messages};
 use ene_common::RequestId;
 use ene_config::EneConfig;
 use ene_memory::RecalledSummary;

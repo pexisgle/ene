@@ -1,5 +1,5 @@
 use super::ToolDefinition;
-use super::definition::ToolRegistry;
+use super::registry::ToolRegistry;
 use crate::error::ToolError;
 use async_trait::async_trait;
 use std::collections::HashMap;
