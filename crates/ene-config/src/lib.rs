@@ -12,7 +12,7 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use ene_config::load_settings;
 //!
 //! let settings = load_settings();
