@@ -21,6 +21,7 @@ mod search_grep;
 mod shell;
 mod shell_platform;
 mod undo_manager;
+mod schema;
 mod undo_tool;
 mod write;
 
