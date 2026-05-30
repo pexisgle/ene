@@ -16,7 +16,7 @@ const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
 /// Registers the sqlite-vec extension and runs pending Diesel migrations.
 pub fn init_sqlite_vec(conn: &mut SqliteConnection) -> Result<(), MemoryError> {
-    use rusqlite::ffi::sqlite3_auto_extension;
+    use libsqlite3_sys::sqlite3_auto_extension;
     use sqlite_vec::sqlite3_vec_init;
     // SAFETY: sqlite3_auto_extension expects a function pointer cast to a void pointer.
     // sqlite3_vec_init is a C function with the correct signature (extern "C" fn()),
@@ -216,20 +216,28 @@ impl MemoryStore {
             .get()
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
 
-        let query = "SELECT id, session_id, card_name, summary, embedding, created_at, ended_at,
-                            1.0 - vec_distance_cosine(embedding, ?) AS similarity
-                     FROM conversation_summaries
-                     WHERE card_name = ?
-                       AND (1.0 - vec_distance_cosine(embedding, ?)) >= ?
-                     ORDER BY similarity DESC
-                     LIMIT ?";
+        use crate::schema::conversation_summaries;
 
-        let results = diesel::sql_query(query)
-            .bind::<diesel::sql_types::Binary, _>(&query_blob)
-            .bind::<diesel::sql_types::Text, _>(card_name)
-            .bind::<diesel::sql_types::Binary, _>(&query_blob)
-            .bind::<diesel::sql_types::Float, _>(similarity_threshold)
-            .bind::<diesel::sql_types::BigInt, _>(limit as i64)
+        let similarity = diesel::dsl::sql::<diesel::sql_types::Double>(
+            "1.0 - vec_distance_cosine(embedding, ?)"
+        )
+        .bind::<diesel::sql_types::Binary, _>(&query_blob);
+
+        let results = conversation_summaries::table
+            .filter(conversation_summaries::card_name.eq(card_name))
+            .filter(similarity.clone().ge(similarity_threshold as f64))
+            .select((
+                conversation_summaries::id,
+                conversation_summaries::session_id,
+                conversation_summaries::card_name,
+                conversation_summaries::summary,
+                conversation_summaries::embedding,
+                conversation_summaries::created_at,
+                conversation_summaries::ended_at,
+                similarity.clone(),
+            ))
+            .order(similarity.desc())
+            .limit(limit as i64)
             .load::<SearchSummaryRow>(&mut *conn)?;
 
         results
@@ -245,7 +253,7 @@ impl MemoryStore {
                         created_at: parse_dt(&row.created_at),
                         ended_at: parse_dt(&row.ended_at),
                     },
-                    similarity: row.similarity,
+                    similarity: row.similarity as f32,
                 })
             })
             .collect()
@@ -404,13 +412,14 @@ impl MemoryStore {
             .get()
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
 
-        let query =
-            "SELECT COUNT(DISTINCT key) as count FROM conversation_keyfacts WHERE card_name = ?";
-        let result: CountResult = diesel::sql_query(query)
-            .bind::<diesel::sql_types::Text, _>(card_name)
-            .get_result(&mut *conn)?;
+        use crate::schema::conversation_keyfacts;
 
-        Ok(result.count)
+        let count = conversation_keyfacts::table
+            .filter(conversation_keyfacts::card_name.eq(card_name))
+            .select(diesel::dsl::count_distinct(conversation_keyfacts::key))
+            .get_result::<i64>(&mut *conn)?;
+
+        Ok(count)
     }
 
     // ── Conversation Logs ─────────────────────────────────────────────────────
@@ -575,23 +584,24 @@ impl MemoryStore {
             .pool
             .get()
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
-        let query = "SELECT tool_name,
-                            1.0 - vec_distance_cosine(embedding, ?) AS similarity
-                     FROM tool_embeddings
-                     WHERE (1.0 - vec_distance_cosine(embedding, ?)) >= ?
-                     ORDER BY similarity DESC
-                     LIMIT ?";
 
-        let rows = diesel::sql_query(query)
-            .bind::<diesel::sql_types::Binary, _>(&query_blob)
-            .bind::<diesel::sql_types::Binary, _>(&query_blob)
-            .bind::<diesel::sql_types::Float, _>(similarity_threshold)
-            .bind::<diesel::sql_types::BigInt, _>(limit as i64)
-            .load::<SearchToolRow>(&mut *conn)?;
+        use crate::schema::tool_embeddings;
+
+        let similarity = diesel::dsl::sql::<diesel::sql_types::Double>(
+            "1.0 - vec_distance_cosine(embedding, ?)"
+        )
+        .bind::<diesel::sql_types::Binary, _>(&query_blob);
+
+        let rows = tool_embeddings::table
+            .filter(similarity.clone().ge(similarity_threshold as f64))
+            .select((tool_embeddings::tool_name, similarity.clone()))
+            .order(similarity.desc())
+            .limit(limit as i64)
+            .load::<(String, f64)>(&mut *conn)?;
 
         Ok(rows
             .into_iter()
-            .map(|row| (row.tool_name, row.similarity))
+            .map(|(tool_name, sim)| (tool_name, sim as f32))
             .collect())
     }
 
@@ -613,24 +623,16 @@ impl MemoryStore {
     }
 }
 
-#[derive(diesel::QueryableByName)]
+#[derive(diesel::Queryable)]
 struct SearchSummaryRow {
-    #[diesel(sql_type = diesel::sql_types::BigInt)]
     id: i64,
-    #[diesel(sql_type = diesel::sql_types::Text)]
     session_id: String,
-    #[diesel(sql_type = diesel::sql_types::Text)]
     card_name: String,
-    #[diesel(sql_type = diesel::sql_types::Text)]
     summary: String,
-    #[diesel(sql_type = diesel::sql_types::Binary)]
     embedding: EmbeddingBlob,
-    #[diesel(sql_type = diesel::sql_types::Text)]
     created_at: String,
-    #[diesel(sql_type = diesel::sql_types::Text)]
     ended_at: String,
-    #[diesel(sql_type = diesel::sql_types::Float)]
-    similarity: f32,
+    similarity: f64,
 }
 
 #[derive(diesel::QueryableByName)]
@@ -639,20 +641,6 @@ struct KeyFactQueryResult {
     key: String,
     #[diesel(sql_type = diesel::sql_types::Text)]
     value: String,
-}
-
-#[derive(diesel::QueryableByName)]
-struct CountResult {
-    #[diesel(sql_type = diesel::sql_types::BigInt)]
-    count: i64,
-}
-
-#[derive(diesel::QueryableByName)]
-struct SearchToolRow {
-    #[diesel(sql_type = diesel::sql_types::Text)]
-    tool_name: String,
-    #[diesel(sql_type = diesel::sql_types::Float)]
-    similarity: f32,
 }
 
 #[cfg(test)]
