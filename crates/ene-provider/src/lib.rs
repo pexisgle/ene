@@ -111,12 +111,6 @@ pub trait LlmProvider: Send + Sync {
         messages: &[LlmMessage],
         json_schema: Option<serde_json::Value>,
     ) -> Result<String, String>;
-
-    /// Generates vector embeddings for a given text query/document.
-    async fn embed(&self, text: &str) -> Result<Vec<f32>, String>;
-
-    /// Returns the expected dimension of the embedding vectors produced by this provider.
-    fn embedding_dimensions(&self) -> usize;
 }
 
 /// Trait for generating vector embeddings from text (used by memory search).
@@ -253,6 +247,8 @@ ene_config::define_config!(
         pub cloud_embedding_model: String = "text-embedding-3-small".to_string(),
         /// Expected dimensions for cloud embedding vectors.
         pub cloud_embedding_dimensions: usize = 1536,
+        /// Optional query prefix to prepend to search queries (e.g. "Query: ").
+        pub query_prefix: Option<String> = None,
     }
 );
 
@@ -332,7 +328,7 @@ impl ProviderConfig {
 use async_openai::{Client, config::OpenAIConfig};
 
 /// Builds an OpenAI-compatible client with the given base URL and API key.
-pub fn build_openai_client(base_url: &str, api_key: &str) -> Client<OpenAIConfig> {
+pub(crate) fn build_openai_client(base_url: &str, api_key: &str) -> Client<OpenAIConfig> {
     let mut config = OpenAIConfig::default().with_api_key(api_key);
     if !base_url.trim().is_empty() {
         config = config.with_api_base(base_url);
@@ -344,8 +340,6 @@ pub fn build_openai_client(base_url: &str, api_key: &str) -> Client<OpenAIConfig
 pub struct OpenAiProvider {
     client: Client<OpenAIConfig>,
     model: String,
-    embedding_model: String,
-    embedding_dimensions: usize,
 }
 
 impl OpenAiProvider {
@@ -354,14 +348,12 @@ impl OpenAiProvider {
         base_url: &str,
         api_key: &str,
         model: &str,
-        embedding_model: &str,
-        embedding_dimensions: usize,
+        _embedding_model: &str,
+        _embedding_dimensions: usize,
     ) -> Self {
         Self {
             client: build_openai_client(base_url, api_key),
             model: model.to_string(),
-            embedding_model: embedding_model.to_string(),
-            embedding_dimensions,
         }
     }
 }
@@ -612,32 +604,6 @@ impl LlmProvider for OpenAiProvider {
 
         Ok(content)
     }
-
-    async fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
-        use async_openai::types::embeddings::CreateEmbeddingRequestArgs;
-        let request = CreateEmbeddingRequestArgs::default()
-            .model(&self.embedding_model)
-            .input(text)
-            .build()
-            .map_err(|e| e.to_string())?;
-
-        let response = self
-            .client
-            .embeddings()
-            .create(request)
-            .await
-            .map_err(|e| e.to_string())?;
-        let embedding = response
-            .data
-            .into_iter()
-            .next()
-            .ok_or_else(|| "Empty embedding response".to_string())?;
-        Ok(embedding.embedding)
-    }
-
-    fn embedding_dimensions(&self) -> usize {
-        self.embedding_dimensions
-    }
 }
 
 /// Factory for the default OpenAI provider.
@@ -672,37 +638,70 @@ impl LlmProviderFactory for OpenAiProviderFactory {
     }
 }
 
-// =========================================================================
-// Cloud Embedding Provider Bridging Wrapper
-// =========================================================================
-
-/// Embedding provider that wraps any dynamic LLM provider.
+/// Cloud embedding provider.
 pub struct CloudEmbeddingProvider {
-    provider: Arc<dyn LlmProvider>,
+    client: Client<OpenAIConfig>,
+    embedding_model: String,
+    embedding_dimensions: usize,
+    query_prefix: Option<String>,
 }
 
 impl CloudEmbeddingProvider {
-    /// Creates a new `CloudEmbeddingProvider` wrapping the given LLM provider.
-    pub fn new(provider: Arc<dyn LlmProvider>) -> Self {
-        Self { provider }
+    /// Creates a new `CloudEmbeddingProvider`.
+    pub fn new(
+        base_url: &str,
+        api_key: &str,
+        embedding_model: &str,
+        embedding_dimensions: usize,
+        query_prefix: Option<String>,
+    ) -> Self {
+        Self {
+            client: build_openai_client(base_url, api_key),
+            embedding_model: embedding_model.to_string(),
+            embedding_dimensions,
+            query_prefix,
+        }
     }
 }
 
 #[async_trait]
 impl EmbeddingProvider for CloudEmbeddingProvider {
     async fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
-        self.provider.embed(text).await
+        use async_openai::types::embeddings::CreateEmbeddingRequestArgs;
+        let request = CreateEmbeddingRequestArgs::default()
+            .model(&self.embedding_model)
+            .input(text)
+            .build()
+            .map_err(|e| e.to_string())?;
+
+        let response = self
+            .client
+            .embeddings()
+            .create(request)
+            .await
+            .map_err(|e| e.to_string())?;
+        let embedding = response
+            .data
+            .into_iter()
+            .next()
+            .ok_or_else(|| "Empty embedding response".to_string())?;
+        Ok(embedding.embedding)
     }
 
     async fn embed_query(&self, text: &str) -> Result<Vec<f32>, String> {
-        self.provider.embed(text).await
+        if let Some(prefix) = &self.query_prefix {
+            let prefixed = format!("{}{}", prefix, text);
+            self.embed(&prefixed).await
+        } else {
+            self.embed(text).await
+        }
     }
 
     fn dimensions(&self) -> usize {
-        self.provider.embedding_dimensions()
+        self.embedding_dimensions
     }
 
     fn model_name(&self) -> &str {
-        "cloud-embedding"
+        &self.embedding_model
     }
 }
