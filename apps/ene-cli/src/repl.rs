@@ -22,7 +22,7 @@ pub async fn run(ctx: &mut AppContext) {
 
         // Subscribe before sending the run command to avoid missing events
         let mut rx = ctx.handle.subscribe();
-        ctx.handle.run(&input);
+        let _ = ctx.handle.run(&input);
         stream::process_stream(&mut rx, &ctx.handle).await;
     }
 }

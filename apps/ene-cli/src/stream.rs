@@ -1,13 +1,12 @@
 use crate::style;
 use ene_core::{
-    EneCommand, EneEvent, EneHandle, PermissionDecision, extract_emotion_from_token, truncate,
+    EneEvent, EneEventReceiver, EneHandle, PermissionDecision, extract_emotion_from_token, truncate,
 };
 use std::io::{self, Write};
-use tokio::sync::broadcast;
 
 /// Processes AI events from the actor in real-time, printing them to stdout.
 /// Returns when the stream finishes or an error occurs.
-pub async fn process_stream(rx: &mut broadcast::Receiver<EneEvent>, handle: &EneHandle) {
+pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
     loop {
         match rx.recv().await {
             Ok(EneEvent::TextDelta { delta }) => {
@@ -35,10 +34,13 @@ pub async fn process_stream(rx: &mut broadcast::Receiver<EneEvent>, handle: &Ene
                 println!("\n{}", style::warning(format!("[Session] {} ", reason)));
                 println!(
                     "{}",
-                    style::warning(format!("[Session] Summary: {}", truncate(&summary, 80)))
+                    style::warning(format!(
+                        "[Session] Summary: {}",
+                        truncate(&summary, 80)
+                    ))
                 );
             }
-            Ok(EneEvent::Finished) => {
+            Ok(EneEvent::Done) => {
                 println!();
                 break;
             }
@@ -74,10 +76,7 @@ pub async fn process_stream(rx: &mut broadcast::Receiver<EneEvent>, handle: &Ene
                     _ => PermissionDecision::Deny,
                 };
 
-                handle.send(EneCommand::PermissionDecision {
-                    request_id,
-                    decision,
-                });
+                let _ = handle.decide_permission(request_id, decision);
                 println!(
                     "\n{}",
                     style::success("承認の入力を送信しました。処理を再開します...")
@@ -89,16 +88,21 @@ pub async fn process_stream(rx: &mut broadcast::Receiver<EneEvent>, handle: &Ene
                 total_steps,
                 description,
             }) => {
+                let steps_display = match total_steps {
+                    Some(total) => format!("{}/{}", step, total),
+                    None => format!("{}/?", step),
+                };
                 println!(
                     "\n{}",
                     style::header(format!(
-                        "[Task {}] Step {}/{}: {}",
-                        task_id, step, total_steps, description
+                        "[Task {}] Step {}: {}",
+                        task_id, steps_display, description
                     ))
                 );
             }
-            Ok(EneEvent::Error { message }) => {
+            Ok(EneEvent::Failed { message }) => {
                 eprintln!("\n[Error] {}", message);
+                break;
             }
             Ok(EneEvent::StatusChanged { .. }) => {}
             Err(e) => {

@@ -17,7 +17,7 @@ use bevy::camera::RenderTarget;
 use bevy::prelude::*;
 use bevy::window::{WindowRef, WindowResolution};
 use bevy_egui::{EguiContext, EguiMultipassSchedule, PrimaryEguiContext, egui};
-use ene_core::{EneCommand, MemoryConfig, PermissionDecision};
+use ene_core::{MemoryConfig, PermissionDecision};
 
 use widgets::apply_action;
 
@@ -542,27 +542,27 @@ fn render_settings_window(
                 ui.horizontal(|ui| {
                     ui.columns(3, |columns| {
                         if columns[0].button("1回のみ許可\n(Allow Once)").clicked() {
-                            ene.handle.send(EneCommand::PermissionDecision {
-                                request_id: req.request_id.clone(),
-                                decision: PermissionDecision::AllowOnce,
-                            });
+                            let _ = ene.handle.decide_permission(
+                                req.request_id.clone(),
+                                PermissionDecision::AllowOnce,
+                            );
                             settings.ui.pending_permission = None;
                         }
                         if columns[1]
                             .button("セッションで許可\n(Allow Session)")
                             .clicked()
                         {
-                            ene.handle.send(EneCommand::PermissionDecision {
-                                request_id: req.request_id.clone(),
-                                decision: PermissionDecision::AllowSession,
-                            });
+                            let _ = ene.handle.decide_permission(
+                                req.request_id.clone(),
+                                PermissionDecision::AllowSession,
+                            );
                             settings.ui.pending_permission = None;
                         }
                         if columns[2].button("拒否\n(Deny)").clicked() {
-                            ene.handle.send(EneCommand::PermissionDecision {
-                                request_id: req.request_id.clone(),
-                                decision: PermissionDecision::Deny,
-                            });
+                            let _ = ene.handle.decide_permission(
+                                req.request_id.clone(),
+                                PermissionDecision::Deny,
+                            );
                             settings.ui.pending_permission = None;
                         }
                     });
@@ -571,10 +571,10 @@ fn render_settings_window(
             });
 
         if !open {
-            ene.handle.send(EneCommand::PermissionDecision {
-                request_id: req.request_id.clone(),
-                decision: PermissionDecision::Deny,
-            });
+            let _ = ene.handle.decide_permission(
+                req.request_id.clone(),
+                PermissionDecision::Deny,
+            );
             settings.ui.pending_permission = None;
         }
     }

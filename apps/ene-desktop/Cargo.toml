@@ -5,6 +5,7 @@ edition = "2024"
 description = "Bevy-based desktop GUI application with VRM character rendering, always-on-top overlay, and system tray"
 
 [dependencies]
+ene-common = { workspace = true }
 ene-core = { workspace = true }
 ene-config = { workspace = true }
 ctor = { workspace = true }

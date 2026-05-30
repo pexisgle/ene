@@ -49,7 +49,7 @@ async fn handle_prompt(ctx: &AppContext) {
 
         if !snapshot.history.is_empty() && !card.data.mes_example.trim().is_empty() {
             println!("--- Example Messages ---");
-            let ex = ene_core::expand_cbs_macros(
+            let ex = ene_config::expand_cbs_macros(
                 &card.data.mes_example,
                 card.data.get_character_name(),
                 &snapshot.config.user_name,
@@ -75,9 +75,9 @@ async fn handle_prompt(ctx: &AppContext) {
             println!("----------------------------");
         }
 
-        if let Some(store) = &snapshot.memory_store {
+        if snapshot.memory.is_enabled() {
             let card_name = card.data.get_character_name();
-            if let Ok(facts) = store.get_all_keyfacts(card_name) {
+            if let Ok(facts) = snapshot.memory.get_all_keyfacts(card_name) {
                 if !facts.is_empty() {
                     println!("--- Known Facts about {} ---", snapshot.config.user_name);
                     for f in facts {
@@ -98,7 +98,7 @@ async fn handle_prompt(ctx: &AppContext) {
         }
 
         if let Some(phi) = ene_core::prompt_builder::build_expression_phi(card) {
-            let phi_expanded = ene_core::expand_cbs_macros(
+            let phi_expanded = ene_config::expand_cbs_macros(
                 &phi,
                 card.data.get_character_name(),
                 &snapshot.config.user_name,
@@ -198,8 +198,8 @@ async fn handle_history(ctx: &AppContext) {
     };
 
     println!("--- Conversation History ---");
-    for (role, msg) in &snapshot.history {
-        println!("[{:?}] {}", role, msg);
+    for entry in &snapshot.history {
+        println!("[{:?}] {}", entry.role, entry.content);
     }
     println!("----------------------------");
 }

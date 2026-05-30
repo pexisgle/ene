@@ -29,26 +29,19 @@ async fn handle_search(query: &str, snapshot: &ene_core::EneStateSnapshot) {
         );
         return;
     }
-    let Some(store) = &snapshot.memory_store else {
+    if !snapshot.memory.is_enabled() {
         println!("{}", style::warning("[Memory] Memory is not enabled."));
         return;
-    };
-    let Some(embedder) = &snapshot.embedding_provider else {
-        println!(
-            "{}",
-            style::warning("[Memory] Embedding provider is not available.")
-        );
-        return;
-    };
+    }
     println!(
         "{}",
         style::header(format!("[Memory] Searching query: {}", query))
     );
-    match embedder.embed_query(query).await {
+    match snapshot.memory.embed_query(query).await {
         Ok(embedding) => {
-            let card_name = &snapshot.card_name;
+            let card_name = snapshot.card_name.as_str();
             let threshold = 0.0f32;
-            match store.search_summaries(&embedding, card_name, 10, threshold) {
+            match snapshot.memory.search_summaries(&embedding, card_name, 10, threshold) {
                 Ok(results) => {
                     if results.is_empty() {
                         println!("{}", style::warning("[Memory] No matching memories found."));
@@ -86,12 +79,12 @@ async fn handle_search(query: &str, snapshot: &ene_core::EneStateSnapshot) {
 }
 
 fn handle_list(snapshot: &ene_core::EneStateSnapshot) {
-    let Some(store) = &snapshot.memory_store else {
+    if !snapshot.memory.is_enabled() {
         println!("{}", style::warning("[Memory] Memory is not enabled."));
         return;
-    };
-    let card_name = &snapshot.card_name;
-    match store.list_recent_summaries(card_name, 50) {
+    }
+    let card_name = snapshot.card_name.as_str();
+    match snapshot.memory.list_recent_summaries(card_name, 50) {
         Ok(summaries) => {
             if summaries.is_empty() {
                 println!("[Memory] No saved conversation summaries found.");
@@ -110,7 +103,7 @@ fn handle_list(snapshot: &ene_core::EneStateSnapshot) {
         }
         Err(e) => println!("[Memory] Error: {}", e),
     }
-    if let Ok(facts) = store.get_all_keyfacts(card_name) {
+    if let Ok(facts) = snapshot.memory.get_all_keyfacts(card_name) {
         if !facts.is_empty() {
             println!("\n--- Key Facts ({}) ---", facts.len());
             for f in &facts {

@@ -50,15 +50,8 @@ async fn handle_split(_ctx: &AppContext, snapshot: &ene_core::EneStateSnapshot) 
         );
         return;
     }
-    if snapshot.memory_store.is_none() {
+    if !snapshot.memory.is_enabled() {
         println!("{}", style::warning("[Session] Memory is not enabled."));
-        return;
-    }
-    if snapshot.embedding_provider.is_none() {
-        println!(
-            "{}",
-            style::warning("[Session] Embedding provider is not available.")
-        );
         return;
     }
 
@@ -96,12 +89,12 @@ async fn handle_split(_ctx: &AppContext, snapshot: &ene_core::EneStateSnapshot) 
 }
 
 fn handle_summaries(snapshot: &ene_core::EneStateSnapshot) {
-    let Some(store) = &snapshot.memory_store else {
+    if !snapshot.memory.is_enabled() {
         println!("{}", style::warning("[Session] Memory is not enabled."));
         return;
-    };
-    let card_name = &snapshot.card_name;
-    match store.list_recent_summaries(card_name, 10) {
+    }
+    let card_name = snapshot.card_name.as_str();
+    match snapshot.memory.list_recent_summaries(card_name, 10) {
         Ok(summaries) => {
             if summaries.is_empty() {
                 println!("[Session] No saved conversation summaries found.");

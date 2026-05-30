@@ -4,6 +4,7 @@ use bevy::window::CompositeAlphaMode;
 #[cfg(target_os = "windows")]
 use bevy::window::PresentMode;
 use bevy::window::{WindowLevel, WindowMode, WindowPlugin, WindowResolution};
+use ene_common::RequestId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -213,7 +214,7 @@ impl Default for CharacterState {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PendingPermission {
-    pub request_id: String,
+    pub request_id: RequestId,
     pub action: String,
     pub target: String,
     pub description: String,
