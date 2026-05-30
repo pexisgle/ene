@@ -376,11 +376,40 @@ impl EneHandle {
         rx.await.map_err(|_| EneCoreError::ChannelClosed)?
     }
 
-    /// Send a `LoadCharacter` command and wait for the result.
-    pub async fn load_character(&self, path: impl Into<String>) -> Result<(), EneCoreError> {
+    /// Load the configuration from default paths (assets/settings.json) and environment variables, and apply it.
+    ///
+    /// This is a convenience wrapper around [`ene_config::load_config`] and [`EneHandle::reconfigure`].
+    /// Returns a clone of the loaded [`EneConfig`].
+    pub async fn load_config(&self) -> Result<EneConfig, EneCoreError> {
+        let config = ene_config::load_config();
+        self.reconfigure(config.clone()).await?;
+        Ok(config)
+    }
+
+    /// Load the configuration from specified asset and configuration paths, and apply it.
+    ///
+    /// This is a convenience wrapper around [`ene_config::load_config_from`] and [`EneHandle::reconfigure`].
+    /// Returns a clone of the loaded [`EneConfig`].
+    pub async fn load_config_from(
+        &self,
+        assets_dir: &std::path::Path,
+        config_path: &std::path::Path,
+    ) -> Result<EneConfig, EneCoreError> {
+        let config = ene_config::load_config_from(assets_dir, config_path);
+        self.reconfigure(config.clone()).await?;
+        Ok(config)
+    }
+
+    /// Load a character card by its name or path.
+    ///
+    /// Bare names (e.g., "Alicia") are automatically resolved to their full path
+    /// (e.g., `assets/characters/Alicia/character.json`).
+    pub async fn load_character(&self, name: impl Into<String>) -> Result<(), EneCoreError> {
+        let name = name.into();
+        let path = ene_config::resolve_character_path(&name);
         let (tx, rx) = oneshot::channel();
         self.send(EneCommand::LoadCharacter {
-            path: path.into(),
+            path,
             reply: tx,
         });
         rx.await.map_err(|_| EneCoreError::ChannelClosed)?

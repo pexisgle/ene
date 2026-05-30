@@ -350,7 +350,7 @@ pub fn load_full_config_from(assets_dir: &Path, config_path: &Path) -> EneConfig
         .merge(Json::file(config_path))
         .merge(Env::prefixed("ENE_").split("__"));
 
-    let mut config: EneConfig = figment.extract().unwrap_or_else(|e| {
+    let config: EneConfig = figment.extract().unwrap_or_else(|e| {
         tracing::error!("Failed to load configuration: {e}, using default");
         EneConfig::default()
     });
@@ -367,7 +367,7 @@ pub fn load_full_config_from(assets_dir: &Path, config_path: &Path) -> EneConfig
         let _ = std::fs::write(&char_schema_path, char_schema_json);
     }
 
-    config.character = resolve_character_path(&config.character);
+
 
     update_global_config(config.clone());
     config

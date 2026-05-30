@@ -48,6 +48,7 @@ pub use session_split::{
     execute_split, generate_session_id, poll_split_result, spawn_split_task,
 };
 /// Character-card types re-exported from `ene-config`.
+#[doc(no_inline)]
 pub use ene_config::{
     CharacterAsset, CharacterCardData, CharacterCardV3, ExpressionDefinition, ResolvedExpression,
     expand_cbs_macros, resolve_expressions,

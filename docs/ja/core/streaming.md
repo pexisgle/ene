@@ -38,7 +38,7 @@ pub struct EneHandle {
 | `try_recv()` | ノンブロッキングポーリング (Bevy ECS 向け) |
 | `recv()` | 非同期受信 (tokio タスク向け) |
 | `get_snapshot()` | oneshot 経由で読み取り専用状態をリクエスト |
-| `load_character(path)` | oneshot 経由でキャラクターカードを読み込み |
+| `load_character(name)` | 名前またはパスからキャラクターカードを読み込み |
 | `reconfigure(config)` | oneshot 経由で新しい設定を適用 |
 | `manual_split()` | oneshot 経由でセッション分割をトリガー |
 

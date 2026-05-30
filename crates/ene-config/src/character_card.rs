@@ -6,7 +6,7 @@ use std::collections::HashMap;
 #[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
 /// A V3-format character card following the
-/// [Character Card Spec](https://github.com/CharAI-China/character-card-spec).
+/// [Character Card Spec](https://github.com/kwaroran/character-card-spec-v3).
 pub struct CharacterCardV3 {
     /// Spec identifier (e.g. `"chara_card_v3"`).
     pub spec: String,
