@@ -463,9 +463,9 @@ impl CharacterSettings {
         self.ai.ai = full.clone();
 
         // Character selection
-        let card_path = &full.character;
+        let card_path = ene_config::resolve_character_path(&full.character);
         if !card_path.is_empty() {
-            let path = Path::new(card_path);
+            let path = Path::new(&card_path);
             if let Some(parent) = path.parent() {
                 if let Some(name_os) = parent.file_name() {
                     let name = name_os.to_string_lossy();

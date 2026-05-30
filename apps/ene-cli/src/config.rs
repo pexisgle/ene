@@ -7,11 +7,9 @@ pub async fn init() -> Result<EneHandle, EneCoreError> {
 
     let handle = EneHandle::new();
 
-    let config = ene_config::load_config();
-    let character_path = config.character.clone();
-    handle.reconfigure(config.clone()).await?;
+    let config = handle.load_config().await?;
 
-    if let Err(e) = handle.load_character(&character_path).await {
+    if let Err(e) = handle.load_character(&config.character).await {
         eprintln!(
             "{}",
             style::error(format!(

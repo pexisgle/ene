@@ -116,14 +116,14 @@ async fn handle_prompt(ctx: &AppContext) {
 
 fn handle_card(arg: &str, ctx: &AppContext) {
     if arg.is_empty() {
-        println!("Usage: /card <path>");
+        println!("Usage: /card <name>");
     } else {
-        let path = ene_config::resolve_character_path(arg);
+        let name = arg.to_string();
         // load_character is async; send it through the channel
         let handle = ctx.handle.clone();
         tokio::spawn(async move {
-            match handle.load_character(&path).await {
-                Ok(()) => println!("Character card loaded: {}", path),
+            match handle.load_character(&name).await {
+                Ok(()) => println!("Character card loaded: {}", name),
                 Err(e) => eprintln!("Failed to load character card: {}", e),
             }
         });
@@ -206,7 +206,7 @@ async fn handle_history(ctx: &AppContext) {
 
 fn handle_help() {
     println!("Commands:");
-    println!("  /card <path>         - Load a new character card");
+    println!("  /card <name>         - Load a new character card by name or path");
     println!("  /clear               - Clear conversation history");
     println!("  /history             - View conversation history");
     println!("  /config              - View current AI settings");
