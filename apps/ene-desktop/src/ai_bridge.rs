@@ -1,5 +1,6 @@
 use bevy::prelude::*;
-use ene_core::{EneEvent, EneHandle, EneStatus};
+use ene_common::RequestId;
+use ene_core::{EneEvent, EneEventReceiver, EneHandle, EneStatus};
 
 pub struct EnePlugin;
 
@@ -33,7 +34,7 @@ pub enum EneStreamEvent {
         result: String,
     },
     PermissionRequired {
-        request_id: String,
+        request_id: RequestId,
         action: String,
         target: String,
         description: String,
@@ -41,7 +42,7 @@ pub enum EneStreamEvent {
     TaskProgress {
         task_id: String,
         step: usize,
-        total_steps: usize,
+        total_steps: Option<usize>,
         description: String,
     },
     Finished,
@@ -51,13 +52,17 @@ pub enum EneStreamEvent {
 #[derive(Resource)]
 pub struct EneResource {
     pub handle: EneHandle,
+    pub receiver: EneEventReceiver,
     pub processing: bool,
 }
 
 impl Default for EneResource {
     fn default() -> Self {
+        let handle = EneHandle::new();
+        let receiver = handle.subscribe();
         Self {
-            handle: EneHandle::new(),
+            handle,
+            receiver,
             processing: false,
         }
     }
@@ -66,7 +71,7 @@ impl Default for EneResource {
 fn enqueue_ai_requests(mut requests: MessageReader<EneRequestEvent>, mut ene: ResMut<EneResource>) {
     for request in requests.read() {
         if !request.user_input.trim().is_empty() {
-            ene.handle.run(&request.user_input);
+            let _ = ene.handle.run(&request.user_input);
             ene.processing = true;
         }
     }
@@ -74,7 +79,7 @@ fn enqueue_ai_requests(mut requests: MessageReader<EneRequestEvent>, mut ene: Re
 
 fn poll_ene_events(mut ene: ResMut<EneResource>, mut stream_writer: MessageWriter<EneStreamEvent>) {
     loop {
-        match ene.handle.try_recv() {
+        match ene.receiver.try_recv() {
             Ok(EneEvent::TextDelta { delta }) => {
                 stream_writer.write(EneStreamEvent::TextDelta(delta));
             }
@@ -87,11 +92,11 @@ fn poll_ene_events(mut ene: ResMut<EneResource>, mut stream_writer: MessageWrite
             Ok(EneEvent::ToolCallResult { name, result }) => {
                 stream_writer.write(EneStreamEvent::ToolCallResult { name, result });
             }
-            Ok(EneEvent::Finished) => {
+            Ok(EneEvent::Done) => {
                 ene.processing = false;
                 stream_writer.write(EneStreamEvent::Finished);
             }
-            Ok(EneEvent::Error { message }) => {
+            Ok(EneEvent::Failed { message }) => {
                 ene.processing = false;
                 stream_writer.write(EneStreamEvent::Error(message));
             }
@@ -124,7 +129,7 @@ fn poll_ene_events(mut ene: ResMut<EneResource>, mut stream_writer: MessageWrite
             Ok(EneEvent::SessionSplit { .. }) => {}
             Ok(EneEvent::StatusChanged { status }) => {
                 if status == EneStatus::Idle {
-                    // Stream completed, processing state already handled by Finished
+                    // Stream completed, processing state already handled by Done/Failed
                 }
             }
             Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
