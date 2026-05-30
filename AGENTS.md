@@ -43,8 +43,8 @@ apps/
 
 ## Architecture Notes
 - **Actor-based architecture**: `EneHandle` (public API) → mpsc `EneCommand` → `EneActor` (tokio) → broadcast `EneEvent`. `EneHandle::Drop` sends Shutdown when last handle.
-- **EneCommand**: Run, Cancel, Shutdown, Reconfigure, LoadCharacter, PermissionDecision, GetSnapshot, ManualSplit
-- **EneEvent**: TextDelta, SpecialToken, ToolCallStart, ToolCallResult, PermissionRequired, TaskProgress, SessionSplit, Finished, Error, StatusChanged
+- **EneCommand**: Run, Cancel, Shutdown, Reconfigure, LoadCharacter, PermissionDecision, GetSnapshot, ManualSplit (pub(crate), not exported)
+- **EneEvent**: TextDelta, SpecialToken, ToolCallStart, ToolCallResult, PermissionRequired, TaskProgress, SessionSplit, Done, Failed, StatusChanged
 - **Data flow**: User Input → EneCommand::Run → EneActor → Memory Search → build_messages() → LLM stream → EneEvent pipeline
 - **Tool execution**: Tools run as separate binaries via IPC (Unix Domain Sockets / Windows Named Pipes). `ene-tool-host` manages lifecycle with crash resilience (exponential backoff, max 5 restarts). Binary discovery: `builtin_tools_dir()` (debug: same dir, release: `exe_dir/tools/`), `user_tools_dir()` (`app_data_dir()/tools/`).
 - **IPC Protocol**: `IpcRequest` (Initialize, ListTools, CallTool, SetSessionId, Ping, Shutdown) ↔ `IpcResponse` (Ack, Tools, CallResult, Pong, Error). Wire format: 4-byte big-endian length prefix + JSON payload.
