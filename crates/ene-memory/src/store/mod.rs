@@ -416,7 +416,7 @@ impl MemoryStore {
 
         let count = conversation_keyfacts::table
             .filter(conversation_keyfacts::card_name.eq(card_name))
-            .select(diesel::dsl::count_distinct(conversation_keyfacts::key))
+            .select(diesel::dsl::count(conversation_keyfacts::key).aggregate_distinct())
             .get_result::<i64>(&mut *conn)?;
 
         Ok(count)
