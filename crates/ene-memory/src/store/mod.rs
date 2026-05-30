@@ -78,8 +78,7 @@ type SqlitePool = diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<SqliteConne
 /// `conversation_logs`, and `tool_embeddings`.
 pub struct MemoryStore {
     pool: SqlitePool,
-    /// Dimensionality of the embedding vectors.
-    pub embedding_dim: usize,
+    embedding_dim: usize,
 }
 
 fn parse_dt(s: &str) -> DateTime<Utc> {
@@ -98,6 +97,11 @@ impl MemoryStore {
             pool,
             embedding_dim,
         })
+    }
+
+    /// Returns the dimensionality of the embedding vectors.
+    pub fn embedding_dim(&self) -> usize {
+        self.embedding_dim
     }
 
     /// Opens a persistent memory store at the given file path.
