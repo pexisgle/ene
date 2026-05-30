@@ -38,7 +38,7 @@ pub struct EneHandle {
 | `try_recv()` | Non-blocking poll (for Bevy ECS) |
 | `recv()` | Async receive (for tokio tasks) |
 | `get_snapshot()` | Request read-only state via oneshot |
-| `load_character(path)` | Load a character card via oneshot |
+| `load_character(name)` | Load a character card by name or path |
 | `reconfigure(config)` | Apply new config via oneshot |
 | `manual_split()` | Trigger session split via oneshot |
 

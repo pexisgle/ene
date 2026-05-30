@@ -5,6 +5,7 @@ pub mod registry;
 
 pub use composite::CompositeToolRegistry;
 pub use registry::ToolRegistry;
+#[doc(no_inline)]
 pub use ene_tool_proto::{ToolCategory, ToolDefinition};
 
 /// Computes a hash of the tool definition used for cache invalidation of tool embeddings.
