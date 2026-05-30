@@ -23,5 +23,7 @@ strsim = "0.11"
 dashmap = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
-rusqlite = { workspace = true }
+diesel = { version = "2.3", features = ["sqlite", "chrono"] }
+diesel_migrations = { version = "2.3", features = ["sqlite"] }
+libsqlite3-sys = { version = "0.35", features = ["bundled"] }
 flate2 = "1"

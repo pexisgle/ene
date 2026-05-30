@@ -1,14 +1,21 @@
 use chrono::Utc;
 use dashmap::DashMap;
+use diesel::connection::SimpleConnection;
+use diesel::prelude::*;
+use diesel::sqlite::SqliteConnection;
+use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
-use rusqlite::Connection;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use uuid::Uuid;
+
+use crate::schema::{undo_entries, undo_operations};
+
+const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
 /// Undo information for a single tool execution
 #[derive(Debug, Clone)]
@@ -56,13 +63,39 @@ pub enum UndoOperation {
 /// Per-session undo stack (in-memory + SQLite persistence)
 pub struct UndoManager {
     stacks: DashMap<String, VecDeque<UndoEntry>>,
-    db: Mutex<Option<Connection>>,
+    db: Mutex<Option<SqliteConnection>>,
 }
 
 impl Default for UndoManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[derive(Debug, Clone, Queryable)]
+struct DbUndoEntry {
+    id: String,
+    tool_name: String,
+    timestamp: String,
+}
+
+#[derive(Debug, Clone, Insertable)]
+#[diesel(table_name = undo_entries)]
+struct NewUndoEntry<'a> {
+    id: &'a str,
+    session_id: &'a str,
+    tool_name: &'a str,
+    timestamp: &'a str,
+}
+
+#[derive(Debug, Clone, Insertable)]
+#[diesel(table_name = undo_operations)]
+struct NewUndoOperation<'a> {
+    entry_id: &'a str,
+    op_type: &'a str,
+    path: &'a str,
+    original_content: Option<&'a [u8]>,
+    sort_order: i32,
 }
 
 impl UndoManager {
@@ -75,98 +108,75 @@ impl UndoManager {
 
     /// Sets the DB path and creates tables
     pub fn set_db_path(&self, path: &Path) -> Result<(), String> {
-        let conn = Connection::open(path).map_err(|e| format!("Failed to open undo DB: {e}"))?;
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             CREATE TABLE IF NOT EXISTS undo_entries (
-                 id TEXT PRIMARY KEY,
-                 session_id TEXT NOT NULL,
-                 tool_name TEXT NOT NULL,
-                 timestamp TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS undo_operations (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 entry_id TEXT NOT NULL REFERENCES undo_entries(id) ON DELETE CASCADE,
-                 op_type TEXT NOT NULL,
-                 path TEXT NOT NULL,
-                 original_content BLOB,
-                 sort_order INTEGER NOT NULL
-             );
-             CREATE INDEX IF NOT EXISTS idx_undo_entries_session
-                 ON undo_entries(session_id);",
-        )
-        .map_err(|e| format!("Failed to create undo tables: {e}"))?;
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| "Invalid DB path".to_string())?;
+        let mut conn = SqliteConnection::establish(path_str)
+            .map_err(|e| format!("Failed to open undo DB: {e}"))?;
+
+        conn.batch_execute("PRAGMA journal_mode=WAL;")
+            .map_err(|e| format!("Failed to enable WAL mode: {e}"))?;
+
+        conn.run_pending_migrations(MIGRATIONS)
+            .map_err(|e| format!("Failed to run undo migrations: {e}"))?;
+
         *self.db.lock().unwrap_or_else(|e| e.into_inner()) = Some(conn);
         Ok(())
     }
 
     /// Loads entries for a specific session from the DB and restores them to the in-memory stack
     fn load_session_from_db(&self, session_id: &str) -> Result<(), String> {
-        let guard = self.db.lock().unwrap_or_else(|e| e.into_inner());
-        let db = guard.as_ref().ok_or("Undo DB not initialized")?;
+        let mut guard = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = guard.as_mut().ok_or("Undo DB not initialized")?;
 
-        let mut stmt = db
-            .prepare(
-                "SELECT id, tool_name, timestamp FROM undo_entries
-                 WHERE session_id = ?1 ORDER BY rowid",
-            )
-            .map_err(|e| format!("Failed to prepare: {e}"))?;
-
-        let entries: Vec<(String, String, String)> = stmt
-            .query_map([session_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(|e| format!("Failed to query: {e}"))?
-            .filter_map(|r| r.ok())
-            .collect();
+        let entries = undo_entries::table
+            .filter(undo_entries::session_id.eq(session_id))
+            .select((undo_entries::id, undo_entries::tool_name, undo_entries::timestamp))
+            .load::<DbUndoEntry>(conn)
+            .map_err(|e| format!("Failed to query undo entries: {e}"))?;
 
         if entries.is_empty() {
             return Ok(());
         }
 
-        let mut ops_stmt = db
-            .prepare(
-                "SELECT op_type, path, original_content, sort_order FROM undo_operations
-                 WHERE entry_id = ?1 ORDER BY sort_order",
-            )
-            .map_err(|e| format!("Failed to prepare ops: {e}"))?;
-
         let mut stack = VecDeque::new();
-        for (id_str, tool_name, ts_str) in &entries {
-            let id = Uuid::parse_str(id_str).unwrap_or_default();
-            let timestamp = ts_str.parse::<chrono::DateTime<Utc>>().unwrap_or_default();
+        for entry_row in &entries {
+            let id = Uuid::parse_str(&entry_row.id).unwrap_or_default();
+            let timestamp = entry_row
+                .timestamp
+                .parse::<chrono::DateTime<Utc>>()
+                .unwrap_or_default();
 
-            let ops: Vec<UndoOperation> = ops_stmt
-                .query_map([id_str], |row| {
-                    let op_type: String = row.get(0)?;
-                    let path_str: String = row.get(1)?;
-                    let blob: Option<Vec<u8>> = row.get(2)?;
-                    let _sort_order: i32 = row.get(3)?;
-                    let path = PathBuf::from(path_str);
-                    Ok((op_type, path, blob))
-                })
-                .map_err(|e| format!("Failed to query ops: {e}"))?
-                .filter_map(|r| r.ok())
-                .map(|(op_type, path, blob)| match op_type.as_str() {
+            let ops = undo_operations::table
+                .filter(undo_operations::entry_id.eq(&entry_row.id))
+                .order(undo_operations::sort_order.asc())
+                .select((
+                    undo_operations::op_type,
+                    undo_operations::path,
+                    undo_operations::original_content,
+                    undo_operations::sort_order,
+                ))
+                .load::<(String, String, Option<Vec<u8>>, i32)>(conn)
+                .map_err(|e| format!("Failed to query undo ops: {e}"))?
+                .into_iter()
+                .map(|(op_type, path, original_content, _sort_order)| match op_type.as_str() {
                     "RestoreFile" => {
-                        let content = blob.map(|b| decompress(&b));
+                        let content = original_content.map(|b| decompress(&b));
                         UndoOperation::RestoreFile {
-                            path,
+                            path: PathBuf::from(path),
                             original_content: content,
                         }
                     }
-                    _ => UndoOperation::DeleteCreatedFile { path },
+                    _ => UndoOperation::DeleteCreatedFile {
+                        path: PathBuf::from(path),
+                    },
                 })
                 .collect();
 
             stack.push_back(UndoEntry {
                 id,
                 timestamp,
-                tool_name: tool_name.clone(),
+                tool_name: entry_row.tool_name.clone(),
                 operations: ops,
             });
         }
@@ -204,30 +214,35 @@ impl UndoManager {
     pub fn push(&self, session_id: &str, entry: UndoEntry) {
         let mut stack = self.stacks.entry(session_id.to_string()).or_default();
         stack.push_back(entry.clone());
+        drop(stack);
 
-        if let Some(ref conn) = *self.db.lock().unwrap_or_else(|e| e.into_inner()) {
-            if let Err(e) = self.persist_entry(conn, session_id, &entry) {
+        let mut guard = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(conn) = guard.as_mut() {
+            if let Err(e) = Self::persist_entry(conn, session_id, &entry) {
                 tracing::error!("[UndoManager] Failed to persist undo entry: {e}");
             }
         }
     }
 
     fn persist_entry(
-        &self,
-        conn: &Connection,
+        conn: &mut SqliteConnection,
         session_id: &str,
         entry: &UndoEntry,
     ) -> Result<(), String> {
-        conn.execute(
-            "INSERT INTO undo_entries (id, session_id, tool_name, timestamp) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![
-                entry.id.to_string(),
-                session_id,
-                entry.tool_name,
-                entry.timestamp.to_rfc3339(),
-            ],
-        )
-        .map_err(|e| format!("Failed to insert undo entry: {e}"))?;
+        let id_str = entry.id.to_string();
+        let ts_str = entry.timestamp.to_rfc3339();
+
+        let new_entry = NewUndoEntry {
+            id: &id_str,
+            session_id,
+            tool_name: &entry.tool_name,
+            timestamp: &ts_str,
+        };
+
+        diesel::insert_into(undo_entries::table)
+            .values(&new_entry)
+            .execute(conn)
+            .map_err(|e| format!("Failed to insert undo entry: {e}"))?;
 
         for (i, op) in entry.operations.iter().enumerate() {
             match op {
@@ -236,20 +251,32 @@ impl UndoManager {
                     original_content,
                 } => {
                     let compressed = original_content.as_ref().map(|c| compress(c));
-                    conn.execute(
-                        "INSERT INTO undo_operations (entry_id, op_type, path, original_content, sort_order)
-                         VALUES (?1, 'RestoreFile', ?2, ?3, ?4)",
-                        rusqlite::params![entry.id.to_string(), path.to_string_lossy().as_ref(), compressed, i as i32],
-                    )
-                    .map_err(|e| format!("Failed to insert undo op: {e}"))?;
+                    let path_str = path.to_string_lossy();
+                    let new_op = NewUndoOperation {
+                        entry_id: &id_str,
+                        op_type: "RestoreFile",
+                        path: &path_str,
+                        original_content: compressed.as_deref(),
+                        sort_order: i as i32,
+                    };
+                    diesel::insert_into(undo_operations::table)
+                        .values(&new_op)
+                        .execute(conn)
+                        .map_err(|e| format!("Failed to insert undo op: {e}"))?;
                 }
                 UndoOperation::DeleteCreatedFile { path } => {
-                    conn.execute(
-                        "INSERT INTO undo_operations (entry_id, op_type, path, original_content, sort_order)
-                         VALUES (?1, 'DeleteCreatedFile', ?2, NULL, ?3)",
-                        rusqlite::params![entry.id.to_string(), path.to_string_lossy().as_ref(), i as i32],
-                    )
-                    .map_err(|e| format!("Failed to insert undo op: {e}"))?;
+                    let path_str = path.to_string_lossy();
+                    let new_op = NewUndoOperation {
+                        entry_id: &id_str,
+                        op_type: "DeleteCreatedFile",
+                        path: &path_str,
+                        original_content: None,
+                        sort_order: i as i32,
+                    };
+                    diesel::insert_into(undo_operations::table)
+                        .values(&new_op)
+                        .execute(conn)
+                        .map_err(|e| format!("Failed to insert undo op: {e}"))?;
                 }
             }
         }
@@ -318,23 +345,30 @@ impl UndoManager {
             }
         }
 
-        if let Some(ref conn) = *self.db.lock().unwrap_or_else(|e| e.into_inner()) {
-            if let Err(e) = conn.execute(
-                "DELETE FROM undo_operations WHERE entry_id = ?1",
-                rusqlite::params![id_str],
-            ) {
+        drop(stack);
+
+        let mut guard = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(conn) = guard.as_mut() {
+            if let Err(e) = diesel::delete(
+                undo_operations::table.filter(undo_operations::entry_id.eq(&id_str)),
+            )
+            .execute(conn)
+            {
                 tracing::error!("[UndoManager] Failed to delete undo ops from DB: {e}");
             }
-            if let Err(e) = conn.execute(
-                "DELETE FROM undo_entries WHERE id = ?1",
-                rusqlite::params![id_str],
-            ) {
+            if let Err(e) = diesel::delete(undo_entries::table.filter(undo_entries::id.eq(&id_str)))
+                .execute(conn)
+            {
                 tracing::error!("[UndoManager] Failed to delete undo entry from DB: {e}");
             }
         }
 
-        if stack.is_empty() {
-            drop(stack);
+        if self
+            .stacks
+            .get(session_id)
+            .map(|s| s.is_empty())
+            .unwrap_or(true)
+        {
             self.stacks.remove(session_id);
         }
 
@@ -345,15 +379,23 @@ impl UndoManager {
     pub fn clear(&self, session_id: &str) {
         self.stacks.remove(session_id);
 
-        if let Some(ref conn) = *self.db.lock().unwrap_or_else(|e| e.into_inner()) {
-            let _ = conn.execute(
-                "DELETE FROM undo_operations WHERE entry_id IN (SELECT id FROM undo_entries WHERE session_id = ?1)",
-                rusqlite::params![session_id],
-            );
-            let _ = conn.execute(
-                "DELETE FROM undo_entries WHERE session_id = ?1",
-                rusqlite::params![session_id],
-            );
+        let mut guard = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(conn) = guard.as_mut() {
+            let target_ids: Vec<String> = undo_entries::table
+                .filter(undo_entries::session_id.eq(session_id))
+                .select(undo_entries::id)
+                .load::<String>(conn)
+                .unwrap_or_default();
+
+            let _ = diesel::delete(
+                undo_operations::table.filter(undo_operations::entry_id.eq_any(target_ids)),
+            )
+            .execute(conn);
+
+            let _ = diesel::delete(
+                undo_entries::table.filter(undo_entries::session_id.eq(session_id)),
+            )
+            .execute(conn);
         }
     }
 
