@@ -4,7 +4,7 @@
 //! window management, input simulation, and portal overlay.
 #![warn(missing_docs)]
 
-mod actions;
+mod action;
 mod portal;
 mod provider;
 

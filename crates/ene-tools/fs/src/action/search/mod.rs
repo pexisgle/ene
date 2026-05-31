@@ -1,5 +1,5 @@
-use crate::search_glob;
-use crate::search_grep;
+mod search_glob;
+mod search_grep;
 
 use crate::sandbox::SandboxConfig;
 use ene_tool_proto::ToolError;

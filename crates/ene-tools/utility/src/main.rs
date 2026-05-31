@@ -6,10 +6,8 @@
 
 /// Tool lifecycle and provider integration.
 pub mod provider;
-/// Question-asking tool for user clarification.
-pub mod question;
-/// Todo list management tool (session-scoped).
-pub mod todo;
+/// Action modules for each tool.
+pub mod action;
 
 use ene_tool_proto::run_tool_server;
 

@@ -4,6 +4,7 @@
 //! Chrome DevTools Protocol integration for web scraping and interaction.
 #![warn(missing_docs)]
 
+mod action;
 mod chrome;
 mod extract;
 mod provider;

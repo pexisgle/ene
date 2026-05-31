@@ -1,4 +1,4 @@
-use crate::actions;
+use crate::action;
 use async_trait::async_trait;
 use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError, ToolProvider};
 use serde::Deserialize;
@@ -118,7 +118,7 @@ impl ToolProvider for AppToolProvider {
             serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
                 message: format!("Invalid arguments for app: {e}"),
             })?;
-        actions::app_exec(
+        action::app_exec(
             &args.action,
             args.window_title.as_deref(),
             args.text.as_deref(),

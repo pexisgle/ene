@@ -3,10 +3,9 @@
 //! IPC tool binary providing web fetch and search capabilities.
 #![warn(missing_docs)]
 
+mod action;
 mod config;
 mod provider;
-mod webfetch;
-mod websearch;
 
 use ene_tool_proto::run_tool_server;
 

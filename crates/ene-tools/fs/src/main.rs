@@ -5,25 +5,13 @@
 #![allow(dead_code)]
 #![warn(missing_docs)]
 
-mod delete;
-mod edit;
+mod action;
 mod filesystem;
-mod patch;
-mod patch_parser;
 mod permission;
 mod provider;
-mod read;
-mod read_binary;
 mod sandbox;
 mod schema;
-mod search;
-mod search_glob;
-mod search_grep;
-mod shell;
-mod shell_platform;
 mod undo_manager;
-mod undo_tool;
-mod write;
 
 use ene_tool_proto::run_tool_server;
 

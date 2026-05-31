@@ -1,4 +1,6 @@
-use crate::shell_platform;
+mod shell_platform;
+
+use self::shell_platform::execute_shell_command;
 
 use crate::sandbox::SandboxConfig;
 use ene_tool_proto::ToolDefinition;
@@ -54,7 +56,7 @@ pub async fn shell_exec(
     let timeout_ms = timeout.unwrap_or(sandbox.shell_timeout_ms);
     let timeout_duration = Duration::from_millis(timeout_ms);
 
-    let result = shell_platform::execute_shell_command(command, &cwd, timeout_duration).await;
+    let result = execute_shell_command(command, &cwd, timeout_duration).await;
 
     let result = match result {
         Ok(o) => o,

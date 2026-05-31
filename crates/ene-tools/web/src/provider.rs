@@ -56,8 +56,8 @@ struct WebSearchArgs {
 impl ToolProvider for WebToolProvider {
     fn list_tools(&self) -> Vec<ToolDefinition> {
         vec![
-            crate::webfetch::tool_definition(),
-            crate::websearch::tool_definition(),
+            crate::action::webfetch_definition(),
+            crate::action::websearch_definition(),
         ]
     }
 
@@ -68,7 +68,7 @@ impl ToolProvider for WebToolProvider {
                     serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
                         message: format!("Invalid arguments for webfetch: {e}"),
                     })?;
-                crate::webfetch::webfetch(
+                crate::action::webfetch(
                     &self.client,
                     &args.url,
                     args.format.as_deref(),
@@ -81,7 +81,7 @@ impl ToolProvider for WebToolProvider {
                     serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
                         message: format!("Invalid arguments for websearch: {e}"),
                     })?;
-                crate::websearch::websearch(
+                crate::action::websearch(
                     &args.query,
                     args.backend.as_deref(),
                     args.limit,
