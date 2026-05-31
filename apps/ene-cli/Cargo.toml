@@ -12,6 +12,7 @@ ene-tool-host = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 serde_json = { workspace = true }
+async-trait = { workspace = true }
 dialoguer = "0.12"
 console = "0.16.3"
 clap = { version = "4", features = ["derive"] }
