@@ -205,7 +205,7 @@ pub struct EneSettings {
 
 ## Loading Order
 
-1. `EneSettings::default()`
+1. `EneConfig::default()`
 2. `assets/settings.json`
 3. Environment variables (`ENE_` prefix, `__` separator for nesting)
 

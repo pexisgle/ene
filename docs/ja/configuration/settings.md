@@ -4,10 +4,10 @@ ene の設定は `assets/settings.json` に集約されています。`settings.
 
 読み込み: `ene_config::load_full_settings()` がデフォルト値、ファイル、環境変数を解決します。
 
-## トップレベル構造 (`EneSettings`)
+## トップレベル構造 (`EneConfig`)
 
 ```rust
-pub struct EneSettings {
+pub struct EneConfig {
     pub version: u32,           // 現在 1
     pub character: String,      // キャラクターカードのパスまたは名前
     pub user_name: String,      // デフォルト "User"
@@ -210,3 +210,4 @@ pub struct EneSettings {
 3. 環境変数 (`ENE_` プレフィックス、`__` 区切りでネスト指定)
 
 読み込み後、`settings.schema.json` と `character_settings.schema.json` が自動生成されます。
+�
