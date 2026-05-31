@@ -61,9 +61,9 @@ pub struct EneResource {
 ### System Chain
 
 1. `enqueue_ai_requests` — Receives `EneRequestEvent` → calls `handle.run()`
-2. `poll_ene_events` — Calls `handle.try_recv()` in a loop → dispatches to `EneStreamEvent`
+2. `poll_ene_events` — Calls `receiver.try_recv()` in a loop → dispatches to `EneStreamEvent`
 
-**Key design:** Uses `handle.try_recv()` directly (not `handle.clone()`) to avoid creating a new broadcast receiver every frame. Cloning would cause event loss because each new receiver only sees events from the point of subscription.
+**Key design:** Uses `receiver.try_recv()` directly (not `handle.subscribe()`) to avoid creating a new broadcast receiver every frame. Cloning would cause event loss because each new receiver only sees events from the point of subscription.
 
 ### Events
 
@@ -73,8 +73,8 @@ pub enum EneStreamEvent {
     SpecialToken(String),
     ToolCallStart { name: String, arguments: String },
     ToolCallResult { name: String, result: String },
-    PermissionRequired { request_id, action, target, description },
-    TaskProgress { task_id, step, total_steps, description },
+    PermissionRequired { request_id: RequestId, action: String, target: String, description: String },
+    TaskProgress { task_id: String, step: usize, total_steps: Option<usize>, description: String },
     Finished,
     Error(String),
 }

@@ -7,7 +7,7 @@
 ```
 build_messages(
     ctx: &MessageBuildContext<'_>,
-) -> Result<Vec<ChatCompletionRequestMessage>>
+) -> Result<Vec<LlmMessage>, EneCoreError>
 
 MessageBuildContext {
     card: &CharacterCardV3,
@@ -58,13 +58,9 @@ Generates an Emotion Expression Protocol block from the character card's `post_h
 - Merges card extensions `expressions` with defaults (neutral, happy, sad, angry, relaxed, surprised)
 - Disabled expressions (`disabled: true`) are excluded
 
-## `build_tools()`
+## Tool Passing
 
-Converts `ToolDefinition` lists into OpenAI `ChatCompletionTools` (function calling format):
-
-- `name` → function name
-- `description` → function description
-- `parameters` → JSON Schema
+Tool definitions (`Vec<ToolDefinition>`) are selected via `select_tools()` (Tool RAG) and passed directly to the LLM provider's `create_chat_stream()`. Each provider internally converts `ToolDefinition` to its API format (e.g., OpenAI `ChatCompletionTools`).
 
 ## CBS Macro Expansion
 

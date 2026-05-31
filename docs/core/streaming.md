@@ -34,13 +34,23 @@ pub struct EneHandle {
 | `new()` | Spawns the actor as a background task |
 | `run(input)` | Send `EneCommand::Run` (fire-and-forget) |
 | `cancel()` | Send `EneCommand::Cancel` |
-| `subscribe()` | Get a fresh broadcast receiver for events |
-| `try_recv()` | Non-blocking poll (for Bevy ECS) |
-| `recv()` | Async receive (for tokio tasks) |
+| `decide_permission(request_id, decision)` | Submit a permission decision for a pending destructive operation |
+| `subscribe()` | Get a fresh `EneEventReceiver` for the broadcast event stream |
 | `get_snapshot()` | Request read-only state via oneshot |
 | `load_character(name)` | Load a character card by name or path |
+| `load_config()` | Load config from default paths and apply it |
+| `load_config_from(assets_dir, config_path)` | Load config from specified paths and apply it |
 | `reconfigure(config)` | Apply new config via oneshot |
 | `manual_split()` | Trigger session split via oneshot |
+
+### EneEventReceiver
+
+Obtained via `EneHandle::subscribe()`. Wraps the broadcast receiver with ergonomic polling methods.
+
+| Method | Description |
+|--------|-------------|
+| `try_recv()` | Non-blocking poll (for Bevy ECS) |
+| `recv()` | Async receive (for tokio tasks) |
 
 ### Lifecycle
 
@@ -136,7 +146,7 @@ Actor routes decision to the waiting stream task via pending_permissions map
 Stream task resumes or denies tool execution
 ```
 
-Permissions are resolved through a shared `Arc<Mutex<HashMap<String, oneshot::Sender<PermissionDecision>>>>` between the actor and the stream task.
+Permissions are resolved through a shared `Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>` between the actor and the stream task.
 
 ## Session Updates
 
@@ -179,4 +189,4 @@ Each chunk is identified by its `index` field. `function.arguments` strings are 
 
 ## Screenshot Handling
 
-If a tool result contains `{"type":"screenshot","data":"data:image/png;base64,..."}`, the base64 data is extracted and converted into a `ChatCompletionRequestMessage::UserMessage` with an image URL for the LLM's next API call.
+If a tool result contains `{"type":"screenshot","data":"data:image/png;base64,..."}`, the base64 data is extracted and converted into an `LlmMessage::User` with an image URL for the LLM's next API call.

@@ -158,10 +158,12 @@ pub struct ToolDefinition {
 
 ## ToolError
 
-`ene-tool-proto` の `ToolError` 型 (ツールバイナリが使用):
+`ene-tool-proto` のエラー型は `EneToolProtoError` で、`ToolError` は型エイリアスです:
 
 ```rust
-pub enum ToolError {
+pub type ToolError = EneToolProtoError;
+
+pub enum EneToolProtoError {
     NotFound { tool_name: String },
     InvalidArguments { message: String },
     ExecutionFailed { message: String },

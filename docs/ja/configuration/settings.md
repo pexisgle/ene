@@ -115,6 +115,7 @@ pub struct EneConfig {
 | `session_timeout_minutes` | 分割前のアイドルタイムアウト |
 | `topic_change_threshold` | 話題変化検出のコサイン類似度しきい値 |
 | `min_turns_before_split` | 分割が発生する最小ターン数 |
+| `summary_recall_limit` | プロンプトに注入する要約の最大数 (デフォルト: 3) |
 
 ### `sandbox` — ツールセキュリティ
 
@@ -205,9 +206,9 @@ pub struct EneConfig {
 
 ## 読み込み順序
 
-1. `EneSettings::default()`
+1. `EneConfig::default()`
 2. `assets/settings.json`
 3. 環境変数 (`ENE_` プレフィックス、`__` 区切りでネスト指定)
 
 読み込み後、`settings.schema.json` と `character_settings.schema.json` が自動生成されます。
-�
+�

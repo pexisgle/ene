@@ -49,10 +49,11 @@ Wire format: 4-byte little-endian length prefix + JSON payload.
 
 | Method | Description |
 |--------|-------------|
-| `start_full(config)` | Creates socket dir, spawns enabled tool binaries based on full EneConfig |
+| `start(config)` | Creates socket dir, spawns enabled tool binaries, returns `ToolHostManager` |
+| `start_full(config)` | Calls `start()` + connects MCP servers → returns `Arc<dyn ToolRegistry>` (with fallback on failure) |
 | `add_registry(registry)` | Registers external registries (e.g., MCP) |
 | `with_store(store)` | Attaches MemoryStore for Tool RAG |
-| `into_registry()` | Converts to `Arc<dyn ToolRegistry>` |
+| `into_registry()` | Consumes manager, returns `Arc<dyn ToolRegistry>` |
 
 ### Binary Discovery
 

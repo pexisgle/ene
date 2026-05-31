@@ -6,12 +6,12 @@
 
 ```rust
 pub struct ConversationSession {
-    pub history: ConversationHistory,
+    pub(crate) history: ConversationHistory,   // crate-private
     pub display: DisplayState,
     pub memory: MemoryContext,
-    pub state: SessionState,
+    pub(crate) state: SessionState,            // crate-private
     pub character_card: Option<CharacterCardV3>,
-    pub current_card_path: String,
+    current_card_path: String,                 // private
 }
 ```
 
@@ -65,13 +65,24 @@ Defined in `ene_config` — the V3 character card format:
 | Field | Description |
 |-------|-------------|
 | `spec` / `spec_version` | Format version identifiers |
-| `data.name` / `data.nickname` | Character name |
+| `data.name` | Character name |
+| `data.nickname` | Alternate display name (preferred over `name` when non-empty) |
 | `data.description` | Character description text |
 | `data.personality` | Personality description |
 | `data.scenario` | Scenario setting |
 | `data.system_prompt` | System prompt override |
 | `data.first_mes` | First message when card is loaded |
+| `data.alternate_greetings` | Alternative greeting messages |
 | `data.mes_example` | Example conversation |
 | `data.post_history_instructions` | Post-history instructions (PHI) |
+| `data.creator_notes` | Notes from the card creator |
+| `data.tags` | Tags / categories for discovery |
+| `data.creator` | Card creator name |
+| `data.character_version` | Version string for this character |
 | `data.extensions` | Extensions (expression definitions, config) |
 | `data.assets` | Asset references (VRM models, images) |
+| `data.character_book` | Optional lorebook for world-building context |
+| `data.source` | Attribution sources |
+| `data.group_only_greetings` | Alternative greetings for group chats |
+| `data.creation_date` | Unix timestamp of creation |
+| `data.modification_date` | Unix timestamp of last modification |

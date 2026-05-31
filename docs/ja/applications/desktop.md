@@ -61,9 +61,9 @@ pub struct EneResource {
 ### システムチェーン
 
 1. `enqueue_ai_requests` — `EneRequestEvent` を受信 → `handle.run()` を呼び出し
-2. `poll_ene_events` — `handle.try_recv()` をループ → `EneStreamEvent` にディスパッチ
+2. `poll_ene_events` — `receiver.try_recv()` をループ → `EneStreamEvent` にディスパッチ
 
-**重要な設計:** `handle.try_recv()` を直接使用（`handle.clone()` しない）。毎フレーム `clone()` で broadcast 受信機を再生成すると、新しい受信機は購読時以降のイベントのみ受信するため、イベントがロストする。
+**重要な設計:** `receiver.try_recv()` を直接使用（`handle.subscribe()` しない）。毎フレーム `subscribe()` で broadcast 受信機を再生成すると、新しい受信機は購読時以降のイベントのみ受信するため、イベントがロストする。
 
 ### イベント
 
@@ -73,8 +73,8 @@ pub enum EneStreamEvent {
     SpecialToken(String),
     ToolCallStart { name: String, arguments: String },
     ToolCallResult { name: String, result: String },
-    PermissionRequired { request_id, action, target, description },
-    TaskProgress { task_id, step, total_steps, description },
+    PermissionRequired { request_id: RequestId, action: String, target: String, description: String },
+    TaskProgress { task_id: String, step: usize, total_steps: Option<usize>, description: String },
     Finished,
     Error(String),
 }

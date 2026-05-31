@@ -6,12 +6,12 @@
 
 ```rust
 pub struct ConversationSession {
-    pub history: ConversationHistory,
+    pub(crate) history: ConversationHistory,   // クレートプライベート
     pub display: DisplayState,
     pub memory: MemoryContext,
-    pub state: SessionState,
+    pub(crate) state: SessionState,            // クレートプライベート
     pub character_card: Option<CharacterCardV3>,
-    pub current_card_path: String,
+    current_card_path: String,                 // プライベート
 }
 ```
 
@@ -65,13 +65,24 @@ pub struct SessionState {
 | フィールド | 説明 |
 |-----------|------|
 | `spec` / `spec_version` | フォーマットバージョン識別子 |
-| `data.name` / `data.nickname` | キャラクター名 |
+| `data.name` | キャラクター名 |
+| `data.nickname` | 代替表示名（空でない場合 `name` より優先） |
 | `data.description` | キャラクター説明文 |
 | `data.personality` | 性格記述 |
 | `data.scenario` | シナリオ設定 |
 | `data.system_prompt` | システムプロンプト上書き |
 | `data.first_mes` | カード読み込み時の最初のメッセージ |
+| `data.alternate_greetings` | 代替グリーティングメッセージ |
 | `data.mes_example` | 会話例 |
 | `data.post_history_instructions` | 履歴後指示 (PHI) |
+| `data.creator_notes` | カード作成者のメモ |
+| `data.tags` | タグ / カテゴリ |
+| `data.creator` | カード作成者名 |
+| `data.character_version` | このキャラクターのバージョン文字列 |
 | `data.extensions` | 拡張フィールド (表情定義、設定) |
 | `data.assets` | アセット参照 (VRM モデル、画像) |
+| `data.character_book` | 世界観構築用のオプショナルなロアブック |
+| `data.source` | 帰属情報 |
+| `data.group_only_greetings` | グループチャット用の代替グリーティング |
+| `data.creation_date` | 作成日の Unix タイムスタンプ |
+| `data.modification_date` | 最終変更日の Unix タイムスタンプ |

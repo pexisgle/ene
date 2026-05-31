@@ -49,10 +49,13 @@ pub enum IpcResponse {
 
 | メソッド | 説明 |
 |---------|------|
-| `start_full(config)` | ソケットディレクトリ作成、EneConfig ベースで有効なツールバイナリを起動 |
+| メソッド | 説明 |
+|---------|------|
+| `start(config)` | ソケットディレクトリ作成、有効なツールバイナリを起動、`ToolHostManager` を返す |
+| `start_full(config)` | `start()` + MCP サーバー接続 → `Arc<dyn ToolRegistry>` を返す（失敗時はフォールバック） |
 | `add_registry(registry)` | 外部レジストリを登録 (例: MCP) |
 | `with_store(store)` | Tool RAG 用に MemoryStore をアタッチ |
-| `into_registry()` | `Arc<dyn ToolRegistry>` に変換 |
+| `into_registry()` | マネージャーを消費し `Arc<dyn ToolRegistry>` を返す |
 
 ### バイナリ発見
 
