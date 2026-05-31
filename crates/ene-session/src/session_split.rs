@@ -230,18 +230,26 @@ pub async fn execute_split(
 ) -> Result<SplitResult, EneSessionError> {
     let ended_at = Utc::now();
 
-    for (role, content) in history {
-        let role_str = match role {
-            Role::User => "user",
-            Role::Assistant => "assistant",
-            _ => "system",
-        };
-        if let Err(e) = store.insert_log(session_id, card_name, role_str, content) {
-            tracing::error!("[Session] Failed to save log: {}", e);
-        }
-    }
+    let history_clone = history.to_vec();
+    let session_id_clone = session_id.to_string();
+    let card_name_clone = card_name.to_string();
+    let store_clone = Arc::clone(store);
 
-    let existing_facts = store.get_all_keyfacts(card_name).unwrap_or_default();
+    let existing_facts = tokio::task::spawn_blocking(move || {
+        for (role, content) in &history_clone {
+            let role_str = match role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+                _ => "system",
+            };
+            if let Err(e) = store_clone.insert_log(&session_id_clone, &card_name_clone, role_str, content) {
+                tracing::error!("[Session] Failed to save log: {}", e);
+            }
+        }
+        store_clone.get_all_keyfacts(&card_name_clone).unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
 
     let provider_messages: Vec<ene_provider::LlmMessage> = history
         .iter()
@@ -272,14 +280,24 @@ pub async fn execute_split(
 
     let summary_embedding = embed_session_messages(embedder.as_ref(), history).await?;
 
-    store.insert_summary(
-        session_id,
-        card_name,
-        &summary_result.summary,
-        &summary_result.key_facts,
-        &summary_embedding,
-        ended_at,
-    )?;
+    let store_clone = Arc::clone(store);
+    let session_id_clone = session_id.to_string();
+    let card_name_clone = card_name.to_string();
+    let summary = summary_result.summary.clone();
+    let facts = summary_result.key_facts.clone();
+
+    tokio::task::spawn_blocking(move || {
+        store_clone.insert_summary(
+            &session_id_clone,
+            &card_name_clone,
+            &summary,
+            &facts,
+            &summary_embedding,
+            ended_at,
+        )
+    })
+    .await
+    .map_err(|e| EneSessionError::Memory(ene_memory::EneMemoryError::Other(e.to_string())))??;
 
     let new_session_id = generate_session_id();
 
