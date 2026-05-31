@@ -73,16 +73,21 @@ impl CompositeToolRegistry {
             }
         };
 
-        let cached: HashMap<String, (String, Vec<f32>)> = match store.list_tool_embeddings() {
-            Ok(entries) => entries
-                .into_iter()
-                .map(|(name, hash, emb)| (name, (hash, emb)))
-                .collect(),
-            Err(e) => {
-                tracing::warn!("[ToolRAG] Failed to load cached embeddings: {}", e);
-                HashMap::new()
+        let store_clone = Arc::clone(&store);
+        let cached: HashMap<String, (String, Vec<f32>)> = tokio::task::spawn_blocking(move || {
+            match store_clone.list_tool_embeddings() {
+                Ok(entries) => entries
+                    .into_iter()
+                    .map(|(name, hash, emb)| (name, (hash, emb)))
+                    .collect(),
+                Err(e) => {
+                    tracing::warn!("[ToolRAG] Failed to load cached embeddings: {}", e);
+                    HashMap::new()
+                }
             }
-        };
+        })
+        .await
+        .unwrap_or_default();
 
         let mut indexed = 0usize;
         let mut reused = 0usize;
@@ -107,15 +112,25 @@ impl CompositeToolRegistry {
                 let text = tool.embedding_text();
                 match embedder.embed(&text).await {
                     Ok(embedding) => {
-                        if let Err(e) =
-                            store.upsert_tool_embedding(&tool.name, &current_hash, &embedding)
-                        {
-                            tracing::warn!(
-                                "[ToolRAG] Failed to persist embedding for '{}': {}",
-                                tool.name,
-                                e
-                            );
-                        }
+                        let store_clone = Arc::clone(&store);
+                        let tool_name = tool.name.clone();
+                        let current_hash = current_hash.clone();
+                        let embedding_clone = embedding.clone();
+                        
+                        tokio::task::spawn_blocking(move || {
+                            if let Err(e) =
+                                store_clone.upsert_tool_embedding(&tool_name, &current_hash, &embedding_clone)
+                            {
+                                tracing::warn!(
+                                    "[ToolRAG] Failed to persist embedding for '{}': {}",
+                                    tool_name,
+                                    e
+                                );
+                            }
+                        })
+                        .await
+                        .unwrap_or_default();
+                        
                         indexed += 1;
                     }
                     Err(e) => {
@@ -176,13 +191,24 @@ impl ToolRegistry for CompositeToolRegistry {
             }
         };
 
-        let search_results = match store.search_tools(&query_embedding, limit, 0.0) {
-            Ok(results) => results,
-            Err(e) => {
-                tracing::warn!("[ToolRAG] Failed to search tools: {}", e);
-                return all_tools;
+        let store_clone = Arc::clone(&store);
+        let query_embedding_clone = query_embedding.clone();
+        
+        let search_results = tokio::task::spawn_blocking(move || {
+            match store_clone.search_tools(&query_embedding_clone, limit, 0.0) {
+                Ok(results) => results,
+                Err(e) => {
+                    tracing::warn!("[ToolRAG] Failed to search tools: {}", e);
+                    vec![]
+                }
             }
-        };
+        })
+        .await
+        .unwrap_or_default();
+        
+        if search_results.is_empty() {
+            return all_tools;
+        }
 
         let all_map: HashMap<String, ToolDefinition> =
             all_tools.into_iter().map(|t| (t.name.clone(), t)).collect();

@@ -118,7 +118,9 @@ fn process_emotion_queue(
         if now < cmd.target_time {
             break;
         }
-        let cmd = emotion_queue.commands.pop_front().unwrap();
+        let Some(cmd) = emotion_queue.commands.pop_front() else {
+            break;
+        };
 
         // Look up VRM weights from the resolved map
         let vrm_weights = if let Some(weights) = expression_map.map.get(&cmd.emotion) {
