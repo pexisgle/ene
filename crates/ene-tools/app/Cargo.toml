@@ -16,7 +16,7 @@ serde_json = { workspace = true }
 serde = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
-arboard = "3.6"
+arboard = { version = "3.6", features = ["wayland-data-control"] }
 
 [[bin]]
 name = "ene-tools-app"

@@ -1,3 +1,4 @@
+use crate::action;
 use async_trait::async_trait;
 use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError, ToolProvider};
 use serde::Deserialize;
@@ -128,131 +129,27 @@ impl ToolProvider for BrowserToolProvider {
         let page = &session_guard.page;
 
         let result = match args.action.as_str() {
-            "navigate" => {
-                let url = args.url.ok_or_else(|| ToolError::InvalidArguments {
-                    message: "URL required for navigate".to_string(),
-                })?;
-                page.goto(&url)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        message: format!("Navigation failed: {e}"),
-                    })?;
-                let current_url = page
-                    .url()
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        message: format!("Failed to get URL: {e}"),
-                    })?
-                    .unwrap_or_else(|| url.clone());
-                let title = page
-                    .evaluate("document.title")
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        message: format!("Failed to get title: {e}"),
-                    })?
-                    .into_value::<String>()
-                    .unwrap_or_default();
-                let ready_state = page
-                    .evaluate("document.readyState")
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        message: format!("Failed to get readyState: {e}"),
-                    })?
-                    .into_value::<String>()
-                    .unwrap_or_default();
-                format!(
-                    "Navigation successful\nURL: {}\nTitle: {}\nReady State: {}",
-                    current_url, title, ready_state
-                )
-            }
-            "click" => {
-                let selector = args.selector.ok_or_else(|| ToolError::InvalidArguments {
-                    message: "Selector required for click".to_string(),
-                })?;
-                page.find_element(&selector)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        message: format!("Element not found: {e}"),
-                    })?
-                    .click()
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        message: format!("Click failed: {e}"),
-                    })?;
-                format!("Clicked element: {}", selector)
-            }
-            "type" => {
-                let selector = args.selector.ok_or_else(|| ToolError::InvalidArguments {
-                    message: "Selector required for type".to_string(),
-                })?;
-                let text = args.text.ok_or_else(|| ToolError::InvalidArguments {
-                    message: "Text required for type".to_string(),
-                })?;
-                page.find_element(&selector)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        message: format!("Element not found: {e}"),
-                    })?
-                    .type_str(&text)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        message: format!("Type failed: {e}"),
-                    })?;
-                format!("Typed into element: {}", selector)
-            }
-            "wait" => {
-                let ms = args.wait_ms.unwrap_or(1000);
-                tokio::time::sleep(tokio::time::Duration::from_millis(ms)).await;
-                format!("Waited {} ms", ms)
-            }
-            "screenshot" => {
-                let params = chromiumoxide::page::ScreenshotParams::default();
-                let data =
-                    page.screenshot(params)
-                        .await
-                        .map_err(|e| ToolError::ExecutionFailed {
-                            message: format!("Screenshot failed: {e}"),
-                        })?;
-                let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
-                let data_uri = format!("data:image/png;base64,{}", b64);
-                serde_json::json!({ "type": "screenshot", "data": data_uri }).to_string()
-            }
-            "get_content" => {
-                let format = args.format.as_deref().unwrap_or("markdown");
-                let extract = args.extract.as_deref().unwrap_or("body");
-                let trim = args.trim.unwrap_or(true);
-                let html = page
-                    .content()
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        message: format!("Failed to get content: {e}"),
-                    })?;
-                let extracted = match format {
-                    "html" => crate::extract::extract_html(&html, extract, trim),
-                    _ => crate::extract::extract_markdown(&html, extract, trim),
-                };
-                crate::extract::truncate_text(&extracted, 15000)
-            }
-            "scroll" => {
-                let x = args.scroll_x.unwrap_or(0);
-                let y = args.scroll_y.unwrap_or(0);
-                let js = format!("window.scrollBy({}, {});", x, y);
-                page.evaluate(js)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        message: format!("Scroll failed: {e}"),
-                    })?;
-                format!("Scrolled by ({}, {})", x, y)
-            }
             "close" => {
                 drop(session_guard);
                 self.store.close("default");
                 "Browser session closed.".to_string()
             }
-            _ => {
-                return Err(ToolError::InvalidArguments {
-                    message: format!("Unknown browser action: {}", args.action),
-                });
+            action => {
+                let result = action::browser_exec(
+                    action,
+                    page,
+                    args.url.as_deref(),
+                    args.selector.as_deref(),
+                    args.text.as_deref(),
+                    args.wait_ms,
+                    args.scroll_x,
+                    args.scroll_y,
+                    args.format.as_deref(),
+                    args.extract.as_deref(),
+                    args.trim,
+                )
+                .await?;
+                result
             }
         };
 

@@ -27,8 +27,8 @@ impl ToolProvider for FsToolProvider {
     fn list_tools(&self) -> Vec<ToolDefinition> {
         vec![
             crate::filesystem::tool_definition(),
-            crate::shell::tool_definition(),
-            crate::undo_tool::tool_definition(),
+            crate::action::shell::tool_definition(),
+            crate::action::undo::tool_definition(),
         ]
     }
 
@@ -83,10 +83,10 @@ impl ToolProvider for FsToolProvider {
                     description,
                 )?;
 
-                crate::shell::shell_exec(command, description, timeout, workdir, sandbox.config())
+                crate::action::shell::shell_exec(command, description, timeout, workdir, sandbox.config())
                     .await
             }
-            "undo" => crate::undo_tool::undo(sandbox.undo_manager(), &session_id).await,
+            "undo" => crate::action::undo::undo(sandbox.undo_manager(), &session_id).await,
             _ => Err(ToolError::NotFound {
                 tool_name: name.to_string(),
             }),

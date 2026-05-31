@@ -1,8 +1,8 @@
-use crate::read_binary;
+mod read_binary;
 
+use self::read_binary::is_binary_file;
 use crate::sandbox::SandboxConfig;
 use ene_tool_proto::ToolError;
-use read_binary::is_binary_file;
 use std::path::Path;
 
 const MAX_LINE_LENGTH: usize = 2000;

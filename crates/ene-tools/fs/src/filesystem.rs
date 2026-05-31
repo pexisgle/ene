@@ -61,7 +61,7 @@ pub async fn execute(
                     })?;
             let offset = args["offset"].as_u64().map(|v| v as usize);
             let limit = args["limit"].as_u64().map(|v| v as usize);
-            super::read::read(Path::new(file_path), offset, limit, sandbox.config()).await
+            crate::action::read::read(Path::new(file_path), offset, limit, sandbox.config()).await
         }
         "write" => {
             let file_path =
@@ -82,7 +82,7 @@ pub async fn execute(
                 "Writing/Overwriting file",
             )?;
 
-            super::write::write(
+            crate::action::write::write(
                 Path::new(file_path),
                 content,
                 sandbox.config(),
@@ -118,7 +118,7 @@ pub async fn execute(
                 "Editing file content",
             )?;
 
-            super::edit::edit(
+            crate::action::edit::edit(
                 Path::new(file_path),
                 old_string,
                 new_string,
@@ -143,7 +143,7 @@ pub async fn execute(
                 "Deleting file or directory",
             )?;
 
-            super::delete::delete(
+            crate::action::delete::delete(
                 Path::new(path),
                 recursive,
                 sandbox.config(),
@@ -159,7 +159,7 @@ pub async fn execute(
                     message: "pattern is required for glob".to_string(),
                 })?;
             let path = args["path"].as_str();
-            super::search::glob_search(pattern, path, sandbox.config()).await
+            crate::action::search::glob_search(pattern, path, sandbox.config()).await
         }
         "grep" => {
             let pattern = args["pattern"]
@@ -169,7 +169,7 @@ pub async fn execute(
                 })?;
             let path = args["path"].as_str();
             let include = args["include"].as_str();
-            super::search::grep_search(pattern, path, include, sandbox.config()).await
+            crate::action::search::grep_search(pattern, path, include, sandbox.config()).await
         }
         "patch" => {
             let patch_text =
@@ -185,7 +185,7 @@ pub async fn execute(
                 "Applying patch to files",
             )?;
 
-            super::patch::apply_patch(patch_text, sandbox.config(), undo_manager, session_id).await
+            crate::action::patch::apply_patch(patch_text, sandbox.config(), undo_manager, session_id).await
         }
         _ => Err(ToolError::NotFound {
             tool_name: format!("filesystem action: {}", action),

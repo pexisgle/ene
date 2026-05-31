@@ -1,9 +1,9 @@
-use crate::patch_parser;
+mod patch_parser;
 
+use self::patch_parser::PatchOperation;
 use crate::sandbox::SandboxConfig;
 use crate::undo_manager::{UndoEntry, UndoManager};
 use ene_tool_proto::ToolError;
-use patch_parser::PatchOperation;
 use std::path::Path;
 
 pub async fn apply_patch(

@@ -1,4 +1,4 @@
-use super::undo_manager::UndoManager;
+use crate::undo_manager::UndoManager;
 use ene_tool_proto::ToolDefinition;
 use ene_tool_proto::ToolError;
 
