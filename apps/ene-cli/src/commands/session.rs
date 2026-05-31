@@ -1,24 +1,42 @@
+use crate::commands::CliCommand;
 use crate::{context::AppContext, style};
+use async_trait::async_trait;
 use ene_core::{SessionConfig, Truncate};
 
-pub async fn execute(arg: &str, ctx: &AppContext) {
-    let parts: Vec<&str> = arg.splitn(2, ' ').collect();
-    let subcmd = parts.first().copied().unwrap_or("");
+pub struct SessionCommand;
 
-    let Ok(snapshot) = ctx.handle.get_snapshot().await else {
-        eprintln!("Failed to get actor state");
-        return;
-    };
+#[async_trait]
+impl CliCommand for SessionCommand {
+    fn name(&self) -> &'static str {
+        "/session"
+    }
 
-    match subcmd {
-        "info" => handle_info(&snapshot),
-        "split" => {
-            handle_split(ctx, &snapshot).await;
+    fn description(&self) -> &'static str {
+        "Manage conversation sessions"
+    }
+
+    fn usage(&self) -> &'static str {
+        "/session <info|split|summaries>"
+    }
+
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), String> {
+        let parts: Vec<&str> = arg.splitn(2, ' ').collect();
+        let subcmd = parts.first().copied().unwrap_or("");
+
+        let snapshot = ctx.handle.get_snapshot().await
+            .map_err(|e| format!("Failed to get actor state: {}", e))?;
+
+        match subcmd {
+            "info" => handle_info(&snapshot),
+            "split" => {
+                handle_split(ctx, &snapshot).await;
+            }
+            "summaries" => handle_summaries(&snapshot),
+            _ => {
+                println!("{}", style::warning("Usage: /session <info|split|summaries>"));
+            }
         }
-        "summaries" => handle_summaries(&snapshot),
-        _ => {
-            println!("Usage: /session <info|split|summaries>");
-        }
+        Ok(())
     }
 }
 
@@ -42,7 +60,7 @@ fn handle_info(snapshot: &ene_core::EneStateSnapshot) {
     println!("--------------------");
 }
 
-async fn handle_split(_ctx: &AppContext, snapshot: &ene_core::EneStateSnapshot) {
+async fn handle_split(ctx: &AppContext, snapshot: &ene_core::EneStateSnapshot) {
     if snapshot.history.is_empty() {
         println!(
             "{}",
@@ -59,7 +77,7 @@ async fn handle_split(_ctx: &AppContext, snapshot: &ene_core::EneStateSnapshot) 
         "{}",
         style::header("[Session] Manually splitting session...")
     );
-    match _ctx.handle.manual_split().await {
+    match ctx.handle.manual_split().await {
         Ok(result) => {
             println!(
                 "{}",

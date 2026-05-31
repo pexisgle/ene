@@ -1,23 +1,41 @@
+use crate::commands::CliCommand;
 use crate::{context::AppContext, style};
+use async_trait::async_trait;
 use ene_core::Truncate;
 
-pub async fn execute(arg: &str, ctx: &AppContext) {
-    let parts: Vec<&str> = arg.splitn(2, ' ').collect();
-    let subcmd = parts.first().copied().unwrap_or("");
+pub struct MemoryCommand;
 
-    let Ok(snapshot) = ctx.handle.get_snapshot().await else {
-        eprintln!("Failed to get actor state");
-        return;
-    };
+#[async_trait]
+impl CliCommand for MemoryCommand {
+    fn name(&self) -> &'static str {
+        "/memory"
+    }
 
-    match subcmd {
-        "search" => handle_search(parts.get(1).copied().unwrap_or(""), &snapshot).await,
-        "list" => handle_list(&snapshot),
-        _ => {
-            println!("Usage: /memory <search|list>");
-            println!("  search <query> - Search memories by similarity");
-            println!("  list           - List all stored memories");
+    fn description(&self) -> &'static str {
+        "Search and list memories"
+    }
+
+    fn usage(&self) -> &'static str {
+        "/memory <search|list>"
+    }
+
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), String> {
+        let parts: Vec<&str> = arg.splitn(2, ' ').collect();
+        let subcmd = parts.first().copied().unwrap_or("");
+
+        let snapshot = ctx.handle.get_snapshot().await
+            .map_err(|e| format!("Failed to get actor state: {}", e))?;
+
+        match subcmd {
+            "search" => handle_search(parts.get(1).copied().unwrap_or(""), &snapshot).await,
+            "list" => handle_list(&snapshot),
+            _ => {
+                println!("{}", style::warning("Usage: /memory <search|list>"));
+                println!("  search <query> - Search memories by similarity");
+                println!("  list           - List all stored memories");
+            }
         }
+        Ok(())
     }
 }
 
