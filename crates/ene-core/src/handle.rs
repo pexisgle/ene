@@ -11,7 +11,7 @@ use ene_session::{CardName, SessionId};
 use ene_session::{
     ConversationSession, EneSessionError, SplitReason, SplitResult, poll_split_result,
 };
-use ene_tool_host::{CompositeToolRegistry, ToolHostManager, ToolRegistry};
+use ene_tool_host::{CompositeToolRegistry, ToolHostManager, ToolRegistry, ToolDefinition};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
@@ -63,6 +63,20 @@ pub enum EneCommand {
     ManualSplit {
         /// Result channel carrying the split result or an error.
         reply: oneshot::Sender<Result<SplitResult, EneCoreError>>,
+    },
+    /// List all tools in the active tool registry.
+    ListTools {
+        /// Reply channel for the tools.
+        reply: oneshot::Sender<Vec<ToolDefinition>>,
+    },
+    /// Call a tool by name with JSON-encoded arguments.
+    CallTool {
+        /// The tool name.
+        name: String,
+        /// JSON-encoded arguments.
+        arguments: String,
+        /// Reply channel.
+        reply: oneshot::Sender<Result<String, EneCoreError>>,
     },
 }
 
@@ -430,6 +444,24 @@ impl EneHandle {
         self.send(EneCommand::ManualSplit { reply: tx });
         rx.await.map_err(|_| EneCoreError::ChannelClosed)?
     }
+
+    /// List available tools from the registry.
+    pub async fn list_tools(&self) -> Result<Vec<ToolDefinition>, EneCoreError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(EneCommand::ListTools { reply: tx });
+        rx.await.map_err(|_| EneCoreError::ChannelClosed)
+    }
+
+    /// Call a tool directly by name with arguments.
+    pub async fn call_tool(&self, name: String, arguments: String) -> Result<String, EneCoreError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(EneCommand::CallTool {
+            name,
+            arguments,
+            reply: tx,
+        });
+        rx.await.map_err(|_| EneCoreError::ChannelClosed)?
+    }
 }
 
 impl Default for EneHandle {
@@ -620,6 +652,23 @@ impl EneActor {
                     session_started_at: self.session.session_started_at(),
                 };
                 let _ = reply.send(snapshot);
+                true
+            }
+            EneCommand::ListTools { reply } => {
+                let tools = self.registry.list_tools();
+                let _ = reply.send(tools);
+                true
+            }
+            EneCommand::CallTool {
+                name,
+                arguments,
+                reply,
+            } => {
+                let registry = self.registry.clone();
+                tokio::spawn(async move {
+                    let result = registry.call_tool(&name, &arguments).await.map_err(EneCoreError::from);
+                    let _ = reply.send(result);
+                });
                 true
             }
         }
