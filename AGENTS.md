@@ -65,7 +65,7 @@ apps/
 
 ## Configuration
 - Settings loaded from JSON via `figment`. Loading order: defaults → `assets/settings.json` → env vars (`ENE_` prefix). Schema auto-generated as `settings.schema.json`.
-- **Top-level `EneSettings`**: `version`, `character`, `user_name`, `runtime_rules`, `extra`
+- **Top-level `EneConfig`**: `version`, `character`, `user_name`, `runtime_rules`, `extra`
 - **Sections**:
   - `provider` — LLM: `provider_name`, `model`, `base_url`, `api_key`
   - `embedding` — Vector: `provider_type` (api/local), `model`, `base_url`, `dimensions`, `gguf_quantization`
