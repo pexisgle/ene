@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use super::ToolDefinition;
+use ene_tool_proto::ToolDefinition;
 
 /// Unified tool registry interface — abstracts over both built-in IPC tools and MCP tools.
 ///

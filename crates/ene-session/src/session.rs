@@ -1,4 +1,4 @@
-use crate::Role;
+use ene_provider::Role;
 use crate::error::EneSessionError;
 use crate::session_split::{
     PendingSplitTask, SplitResult, SplitTaskInput, generate_session_id, poll_split_result,

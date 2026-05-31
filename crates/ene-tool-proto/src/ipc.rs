@@ -1,7 +1,7 @@
 use crate::error::ToolError;
 use crate::sandbox::SandboxConfigData;
 use crate::types::ToolDefinition;
-use ene_config::serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Maximum allowed IPC message size in bytes (64 MB).
@@ -12,7 +12,6 @@ pub const IPC_PROTOCOL_VERSION: u32 = 1;
 
 /// IPC request — core → host
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(crate = "ene_config::serde")]
 pub enum IpcRequest {
     /// Handshake to negotiate protocol version.
     Handshake {
@@ -62,7 +61,6 @@ pub enum IpcRequest {
 
 /// IPC response — host → core
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(crate = "ene_config::serde")]
 pub enum IpcResponse {
     /// Handshake acknowledgment with negotiated version.
     HandshakeAck {

@@ -1,10 +1,9 @@
-use ene_config::serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 /// Structured tool error type
 ///
 /// Serializable over IPC and used uniformly across tool crates, core, and host
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(crate = "ene_config::serde")]
 pub enum EneToolProtoError {
     /// The requested tool was not found.
     NotFound {

@@ -1,4 +1,4 @@
-use crate::tools::ToolDefinition;
+use ene_tool_proto::ToolDefinition;
 use crate::tools::registry::ToolRegistry;
 use async_trait::async_trait;
 use rmcp::serve_client;

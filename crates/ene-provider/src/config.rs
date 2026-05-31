@@ -1,9 +1,11 @@
+use serde::{Deserialize, Serialize};
+
 fn default_string() -> String {
     String::new()
 }
 
 /// Configuration for the local GGUF embedding backend.
-#[derive(Debug, Clone, ene_config::serde::Serialize, ene_config::serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalEmbeddingConfig {
     /// Local GGUF embedding model name (e.g. `"jina-embeddings-v5-text-small"`).
     #[serde(default = "LocalEmbeddingConfig::default_model")]

@@ -5,11 +5,10 @@
 
 use crate::error::MemoryError;
 use crate::store::KeyFact;
-use ene_config::serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 /// Structured conversation summary returned by the LLM
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(crate = "ene_config::serde")]
 pub struct ConversationSummaryResult {
     /// Natural-language conversation summary
     pub summary: String,

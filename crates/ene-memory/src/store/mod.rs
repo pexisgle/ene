@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
-use ene_config::serde;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -31,8 +31,7 @@ pub fn init_sqlite_vec(conn: &mut SqliteConnection) -> Result<(), MemoryError> {
 }
 
 /// A key-value fact about the user.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(crate = "ene_config::serde")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyFact {
     /// The key identifier for this fact.
     pub key: String,
@@ -41,8 +40,7 @@ pub struct KeyFact {
 }
 
 /// A stored conversation summary entry with its embedding vector.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(crate = "ene_config::serde")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationSummary {
     /// Primary key.
     pub id: i64,
