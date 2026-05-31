@@ -55,10 +55,10 @@
 
 /// Tool error types.
 pub mod error;
-/// IPC wire protocol (request / response).
-pub mod ipc;
 /// Composite registry that aggregates multiple ToolProvider instances.
 pub mod host_registry;
+/// IPC wire protocol (request / response).
+pub mod ipc;
 /// Sandbox configuration types.
 pub mod sandbox;
 /// Server helper for running a tool provider.
@@ -69,14 +69,15 @@ pub mod transport;
 pub mod types;
 
 /// Tool error type.
+pub use error::EneToolProtoError;
 pub use error::ToolError;
+/// Composite registry that aggregates multiple ToolProvider instances.
+pub use host_registry::HostRegistry;
 /// IPC message types and serialisation helpers.
 pub use ipc::{
     IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, read_ipc_request, read_ipc_response,
     write_ipc_request, write_ipc_response,
 };
-/// Composite registry that aggregates multiple ToolProvider instances.
-pub use host_registry::HostRegistry;
 /// Sandbox configuration data sent from the host.
 pub use sandbox::SandboxConfigData;
 /// Starts an IPC server for a ToolProvider.

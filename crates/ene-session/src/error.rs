@@ -2,7 +2,7 @@ use thiserror::Error;
 
 /// Error types for the session subsystem.
 #[derive(Error, Debug)]
-pub enum SessionError {
+pub enum EneSessionError {
     /// No character card has been loaded.
     #[error("Character card not loaded")]
     NoCharacterCard,
@@ -26,5 +26,5 @@ pub enum SessionError {
     Embedding(String),
     /// Memory store error.
     #[error(transparent)]
-    Memory(#[from] ene_memory::MemoryError),
+    Memory(#[from] ene_memory::EneMemoryError),
 }

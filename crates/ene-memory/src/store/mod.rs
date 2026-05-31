@@ -219,7 +219,7 @@ impl MemoryStore {
         use crate::schema::conversation_summaries;
 
         let similarity = diesel::dsl::sql::<diesel::sql_types::Double>(
-            "1.0 - vec_distance_cosine(embedding, ?)"
+            "1.0 - vec_distance_cosine(embedding, ?)",
         )
         .bind::<diesel::sql_types::Binary, _>(&query_blob);
 
@@ -588,7 +588,7 @@ impl MemoryStore {
         use crate::schema::tool_embeddings;
 
         let similarity = diesel::dsl::sql::<diesel::sql_types::Double>(
-            "1.0 - vec_distance_cosine(embedding, ?)"
+            "1.0 - vec_distance_cosine(embedding, ?)",
         )
         .bind::<diesel::sql_types::Binary, _>(&query_blob);
 

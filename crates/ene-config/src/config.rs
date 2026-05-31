@@ -1,4 +1,4 @@
-use crate::error::ConfigError;
+use crate::error::EneConfigError;
 use schemars::JsonSchema;
 use std::collections::HashMap;
 use std::path::Path;
@@ -182,7 +182,7 @@ impl EneConfig {
     /// Deserialise a sub-section from the `extra` map using the type's associated key.
     ///
     /// Returns `Ok(T::default())` when the key is absent.
-    pub fn get_section<T>(&self) -> Result<T, ConfigError>
+    pub fn get_section<T>(&self) -> Result<T, EneConfigError>
     where
         T: serde::de::DeserializeOwned + Default + HasConfigKey,
     {
@@ -192,13 +192,13 @@ impl EneConfig {
     /// Deserialise a sub-section from the `extra` map by key.
     ///
     /// Returns `Ok(T::default())` when the key is absent.
-    pub fn get_section_by_key<T>(&self, key: &str) -> Result<T, ConfigError>
+    pub fn get_section_by_key<T>(&self, key: &str) -> Result<T, EneConfigError>
     where
         T: serde::de::DeserializeOwned + Default,
     {
         if let Some(val) = self.extra.get(key) {
             serde_json::from_value(val.clone()).map_err(|e| {
-                ConfigError::GenericConfigError(format!(
+                EneConfigError::GenericConfigError(format!(
                     "Failed to deserialize section '{}': {}",
                     key, e
                 ))
@@ -209,7 +209,7 @@ impl EneConfig {
     }
 
     /// Serialise and insert a sub-section into the `extra` map using the type's associated key.
-    pub fn set_section<T>(&mut self, section: &T) -> Result<(), ConfigError>
+    pub fn set_section<T>(&mut self, section: &T) -> Result<(), EneConfigError>
     where
         T: serde::Serialize + HasConfigKey,
     {
@@ -217,12 +217,15 @@ impl EneConfig {
     }
 
     /// Serialise and insert a sub-section into the `extra` map by key.
-    pub fn set_section_by_key<T>(&mut self, key: &str, section: &T) -> Result<(), ConfigError>
+    pub fn set_section_by_key<T>(&mut self, key: &str, section: &T) -> Result<(), EneConfigError>
     where
         T: serde::Serialize,
     {
         let val = serde_json::to_value(section).map_err(|e| {
-            ConfigError::GenericConfigError(format!("Failed to serialize section '{}': {}", key, e))
+            EneConfigError::GenericConfigError(format!(
+                "Failed to serialize section '{}': {}",
+                key, e
+            ))
         })?;
         self.extra.insert(key.to_string(), val);
         Ok(())
@@ -367,8 +370,6 @@ pub fn load_full_config_from(assets_dir: &Path, config_path: &Path) -> EneConfig
         let _ = std::fs::write(&char_schema_path, char_schema_json);
     }
 
-
-
     update_global_config(config.clone());
     config
 }
@@ -389,23 +390,23 @@ pub fn save_full_config(config: &EneConfig) -> Result<(), std::io::Error> {
 /// Loads settings, patches a single section, and saves in one call.
 ///
 /// Convenience wrapper around the load → `set_section` → save pattern.
-pub fn update_section<T>(value: &T) -> Result<(), ConfigError>
+pub fn update_section<T>(value: &T) -> Result<(), EneConfigError>
 where
     T: serde::Serialize + serde::de::DeserializeOwned + HasConfigKey,
 {
     let mut config = load_config();
     config.set_section(value)?;
-    save_full_config(&config).map_err(|e| ConfigError::GenericConfigError(e.to_string()))
+    save_full_config(&config).map_err(|e| EneConfigError::GenericConfigError(e.to_string()))
 }
 
 /// Loads settings, patches a single section by key, and saves in one call.
-pub fn update_section_by_key<T>(key: &str, value: &T) -> Result<(), ConfigError>
+pub fn update_section_by_key<T>(key: &str, value: &T) -> Result<(), EneConfigError>
 where
     T: serde::Serialize + serde::de::DeserializeOwned,
 {
     let mut config = load_config();
     config.set_section_by_key(key, value)?;
-    save_full_config(&config).map_err(|e| ConfigError::GenericConfigError(e.to_string()))
+    save_full_config(&config).map_err(|e| EneConfigError::GenericConfigError(e.to_string()))
 }
 
 #[cfg(test)]

@@ -27,12 +27,12 @@
 
 /// Tool and MCP configuration types.
 pub mod config;
-/// MCP server configuration types.
-pub mod mcp_config;
 /// Tool host error types.
 pub mod error;
 /// IPC client with auto-reconnect for tool binaries.
 pub mod ipc_registry;
+/// MCP server configuration types.
+pub mod mcp_config;
 /// MCP client for external server connections.
 pub mod mcp_registry;
 /// Tool process lifecycle manager.
@@ -42,12 +42,13 @@ pub mod tools;
 
 /// Tool configuration types.
 pub use config::{ToolConfig, ToolEntry};
-/// MCP server configuration types.
-pub use mcp_config::{McpServerConfig, McpTransport};
 /// Tool error type.
+pub use error::EneToolHostError;
 pub use error::ToolError;
 /// IPC client with auto-reconnect.
 pub use ipc_registry::IpcToolRegistry;
+/// MCP server configuration types.
+pub use mcp_config::{McpServerConfig, McpTransport};
 /// MCP client for external servers.
 pub use mcp_registry::McpToolRegistry;
 /// Tool process lifecycle manager.

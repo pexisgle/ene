@@ -1,5 +1,5 @@
 use crate::{context::AppContext, style};
-use ene_core::truncate;
+use ene_core::Truncate;
 
 pub async fn execute(arg: &str, ctx: &AppContext) {
     let parts: Vec<&str> = arg.splitn(2, ' ').collect();
@@ -41,7 +41,10 @@ async fn handle_search(query: &str, snapshot: &ene_core::EneStateSnapshot) {
         Ok(embedding) => {
             let card_name = snapshot.card_name.as_str();
             let threshold = 0.0f32;
-            match snapshot.memory.search_summaries(&embedding, card_name, 10, threshold) {
+            match snapshot
+                .memory
+                .search_summaries(&embedding, card_name, 10, threshold)
+            {
                 Ok(results) => {
                     if results.is_empty() {
                         println!("{}", style::warning("[Memory] No matching memories found."));
@@ -95,7 +98,7 @@ fn handle_list(snapshot: &ene_core::EneStateSnapshot) {
                         "  {} | {} | {}",
                         s.ended_at.format("%Y-%m-%d %H:%M"),
                         s.session_id,
-                        truncate(&s.summary, 80)
+                        Truncate::simple(&s.summary, 80)
                     );
                 }
                 println!("----------------------------------------");

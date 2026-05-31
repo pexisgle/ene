@@ -1,7 +1,4 @@
-/// Smart content truncation helpers.
-///
-/// Provides three strategies: truncation by Unicode character count, by line count,
-/// and by tail (keeping the last N lines).
+/// Helper struct for high-performance and detailed string truncation.
 pub struct Truncate;
 
 /// Result of a truncation operation, indicating whether content was actually cut.
@@ -14,9 +11,22 @@ pub struct TruncateResult {
 }
 
 impl Truncate {
-    /// Truncates text to a maximum number of Unicode characters.
-    /// Appends a `[... truncated, total N chars ...]` notice when cut.
-    pub fn chars(text: &str, max_chars: usize) -> String {
+    /// Simply truncates text to a maximum number of Unicode characters and appends `...` if exceeded.
+    pub fn simple(text: &str, max_chars: usize) -> String {
+        if text.chars().count() <= max_chars {
+            text.to_string()
+        } else {
+            let end = text
+                .char_indices()
+                .nth(max_chars)
+                .map(|(i, _)| i)
+                .unwrap_or(text.len());
+            format!("{}...", &text[..end])
+        }
+    }
+
+    /// Truncates text to a maximum number of Unicode characters and appends a detailed notice when cut.
+    pub fn detailed(text: &str, max_chars: usize) -> String {
         let char_count = text.chars().count();
         if char_count <= max_chars {
             text.to_string()
@@ -32,6 +42,11 @@ impl Truncate {
                 char_count
             )
         }
+    }
+
+    /// Alias for detailed truncation, used by tools.
+    pub fn chars(text: &str, max_chars: usize) -> String {
+        Self::detailed(text, max_chars)
     }
 
     /// Fits text within max_lines / max_bytes (head direction)
@@ -123,6 +138,29 @@ impl Truncate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_simple_no_truncation() {
+        assert_eq!(Truncate::simple("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_simple_truncation() {
+        assert_eq!(Truncate::simple("hello world", 5), "hello...");
+    }
+
+    #[test]
+    fn test_detailed_no_truncation() {
+        assert_eq!(Truncate::detailed("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_detailed_truncation() {
+        let truncated = Truncate::detailed("hello world", 5);
+        assert!(truncated.starts_with("hello"));
+        assert!(truncated.contains("truncated"));
+        assert!(truncated.contains("11 chars"));
+    }
 
     #[test]
     fn test_chars_no_truncation() {

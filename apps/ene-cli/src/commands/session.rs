@@ -1,5 +1,5 @@
 use crate::{context::AppContext, style};
-use ene_core::{SessionConfig, truncate};
+use ene_core::{SessionConfig, Truncate};
 
 pub async fn execute(arg: &str, ctx: &AppContext) {
     let parts: Vec<&str> = arg.splitn(2, ' ').collect();
@@ -65,7 +65,7 @@ async fn handle_split(_ctx: &AppContext, snapshot: &ene_core::EneStateSnapshot) 
                 "{}",
                 style::warning(format!(
                     "[Session] Summary: {}",
-                    truncate(&result.summary, 120)
+                    Truncate::simple(&result.summary, 120)
                 ))
             );
             if !result.key_facts.is_empty() {
@@ -104,7 +104,7 @@ fn handle_summaries(snapshot: &ene_core::EneStateSnapshot) {
                     println!(
                         "  {} | {}",
                         s.ended_at.format("%Y-%m-%d %H:%M"),
-                        truncate(&s.summary, 80),
+                        Truncate::simple(&s.summary, 80),
                     );
                 }
                 println!("----------------------------------------");

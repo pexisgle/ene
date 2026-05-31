@@ -4,9 +4,7 @@ use std::pin::Pin;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::config::ProviderConfig;
-use crate::message::{
-    LlmMessage, LlmResponseChunk, LlmToolCallChunk, UserMessagePart,
-};
+use crate::message::{LlmMessage, LlmResponseChunk, LlmToolCallChunk, UserMessagePart};
 use crate::traits::{EmbeddingProvider, LlmProvider, LlmProviderFactory};
 
 /// Builds an OpenAI-compatible client with the given base URL and API key.
@@ -183,8 +181,7 @@ impl LlmProvider for OpenAiProvider {
             None
         };
 
-        let mut req_builder =
-            async_openai::types::chat::CreateChatCompletionRequestArgs::default();
+        let mut req_builder = async_openai::types::chat::CreateChatCompletionRequestArgs::default();
         req_builder.model(self.model.clone()).messages(oa_messages);
         if let Some(t) = oa_tools {
             req_builder.tools(t);
@@ -256,8 +253,7 @@ impl LlmProvider for OpenAiProvider {
             .map(convert_message)
             .collect::<Result<_, _>>()?;
 
-        let mut req_builder =
-            async_openai::types::chat::CreateChatCompletionRequestArgs::default();
+        let mut req_builder = async_openai::types::chat::CreateChatCompletionRequestArgs::default();
         req_builder.model(self.model.clone()).messages(oa_messages);
 
         if let Some(schema) = json_schema {

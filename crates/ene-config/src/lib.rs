@@ -49,6 +49,7 @@ pub use config::{
     save_full_config, update_global_config, update_section,
 };
 pub use error::ConfigError;
+pub use error::EneConfigError;
 pub use paths::{
     IS_DEV_BUILD, app_data_dir, assets_dir, builtin_tools_dir, character_schema_file_path,
     character_settings_path, config_file_path, models_dir, schema_file_path, tool_socket_dir,

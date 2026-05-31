@@ -10,3 +10,4 @@ scraper = "0.27"
 regex = { workspace = true }
 serde = { workspace = true }
 ene-tool-proto = { workspace = true }
+ene-common = { workspace = true }

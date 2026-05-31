@@ -1,7 +1,7 @@
 use crate::Role;
-use crate::error::SessionError;
+use crate::error::EneSessionError;
+use crate::types::{CardName, SessionId};
 use chrono::{DateTime, Utc};
-use ene_common::SessionId;
 use ene_memory as summarizer;
 use ene_memory::{KeyFact, MemoryStore};
 use ene_provider::EmbeddingProvider;
@@ -82,7 +82,7 @@ pub struct SplitResult {
 /// Handle to a pending split task running in the background.
 pub struct PendingSplitTask {
     /// Oneshot receiver for the split result.
-    pub(crate) rx: oneshot::Receiver<Result<SplitResult, SessionError>>,
+    pub(crate) rx: oneshot::Receiver<Result<SplitResult, EneSessionError>>,
 }
 
 /// Input parameters for a split task.
@@ -104,7 +104,7 @@ pub struct SplitTaskInput {
     /// Current session ID.
     pub session_id: SessionId,
     /// Character card name.
-    pub card_name: ene_common::CardName,
+    pub card_name: CardName,
     /// User's name.
     pub user_name: String,
     /// Memory store for persistence.
@@ -167,7 +167,7 @@ pub async fn check_boundary(
 pub async fn embed_session_messages(
     embedder: &dyn EmbeddingProvider,
     history: &[(Role, String)],
-) -> Result<Vec<f32>, SessionError> {
+) -> Result<Vec<f32>, EneSessionError> {
     let dims = embedder.dimensions();
     let messages: Vec<&str> = history
         .iter()
@@ -227,7 +227,7 @@ pub async fn execute_split(
     embedder: &Arc<dyn EmbeddingProvider>,
     provider: &dyn ene_provider::LlmProvider,
     reason: SplitReason,
-) -> Result<SplitResult, SessionError> {
+) -> Result<SplitResult, EneSessionError> {
     let ended_at = Utc::now();
 
     for (role, content) in history {
@@ -339,7 +339,7 @@ pub fn spawn_split_task(pending_split: &mut Option<PendingSplitTask>, input: Spl
                 )
                 .await
             }
-            SessionBoundary::Continue => Err(SessionError::SplitNotNeeded),
+            SessionBoundary::Continue => Err(EneSessionError::SplitNotNeeded),
         };
 
         let _ = tx.send(result);
@@ -351,7 +351,7 @@ pub fn spawn_split_task(pending_split: &mut Option<PendingSplitTask>, input: Spl
 /// Polls for the result of a pending split task without blocking.
 pub fn poll_split_result(
     pending_split: &mut Option<PendingSplitTask>,
-) -> Option<Result<SplitResult, SessionError>> {
+) -> Option<Result<SplitResult, EneSessionError>> {
     let mut task = pending_split.take()?;
 
     match task.rx.try_recv() {
@@ -360,7 +360,7 @@ pub fn poll_split_result(
             *pending_split = Some(task);
             None
         }
-        Err(oneshot::error::TryRecvError::Closed) => Some(Err(SessionError::ChannelClosed)),
+        Err(oneshot::error::TryRecvError::Closed) => Some(Err(EneSessionError::ChannelClosed)),
     }
 }
 

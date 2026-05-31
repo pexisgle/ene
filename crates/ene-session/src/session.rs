@@ -1,11 +1,11 @@
 use crate::Role;
+use crate::error::EneSessionError;
 use crate::session_split::{
     PendingSplitTask, SplitResult, SplitTaskInput, generate_session_id, poll_split_result,
 };
-use crate::error::SessionError;
 use crate::special_token::split_text_and_special_tokens;
+use crate::types::{CardName, SessionId};
 use chrono::{DateTime, Utc};
-use ene_common::SessionId;
 use ene_config::{CharacterCardV3, EneConfig, ResolvedExpression, resolve_expressions};
 use ene_provider::EmbeddingProvider;
 
@@ -147,7 +147,7 @@ impl ConversationSession {
     pub fn load_card(
         &mut self,
         path: &str,
-    ) -> Result<Vec<ResolvedExpression>, crate::error::SessionError> {
+    ) -> Result<Vec<ResolvedExpression>, crate::error::EneSessionError> {
         if self.current_card_path == path && self.character_card.is_some() {
             if let Some(card) = &self.character_card {
                 return Ok(resolve_expressions(card));
@@ -155,10 +155,10 @@ impl ConversationSession {
         }
 
         let file_content =
-            std::fs::read_to_string(path).map_err(crate::error::SessionError::CardReadError)?;
+            std::fs::read_to_string(path).map_err(crate::error::EneSessionError::CardReadError)?;
 
         let mut card = serde_json::from_str::<CharacterCardV3>(&file_content)
-            .map_err(crate::error::SessionError::JsonError)?;
+            .map_err(crate::error::EneSessionError::JsonError)?;
 
         // Merge expressions from character_settings.json (section-based with fallback)
         if let Some(parent) = std::path::Path::new(path).parent() {
@@ -173,12 +173,10 @@ impl ConversationSession {
                                 serde_json::from_value::<ene_config::CharacterConfig>(v).ok()
                             })
                         })
-                    // Fallback: flat CharacterConfig
-                    .or_else(|| {
-                        serde_json::from_str::<ene_config::CharacterConfig>(
-                                &settings_content,
-                            )
-                            .ok()
+                        // Fallback: flat CharacterConfig
+                        .or_else(|| {
+                            serde_json::from_str::<ene_config::CharacterConfig>(&settings_content)
+                                .ok()
                         });
 
                 if let Some(per) = per {
@@ -343,7 +341,7 @@ impl ConversationSession {
     pub fn apply_pending_split(
         &mut self,
         pending_split: &mut Option<PendingSplitTask>,
-    ) -> Option<Result<SplitResult, SessionError>> {
+    ) -> Option<Result<SplitResult, EneSessionError>> {
         let result = poll_split_result(pending_split)?;
         if let Ok(ref split_result) = result {
             self.reset_session();
@@ -377,7 +375,7 @@ impl ConversationSession {
             provider,
             history: self.history.conversation_history.clone(),
             session_id: self.memory.session_id.clone(),
-            card_name: ene_common::CardName::from(self.card_name()),
+            card_name: CardName::from(self.card_name()),
             user_name: user_name.to_string(),
             store,
             embedder,

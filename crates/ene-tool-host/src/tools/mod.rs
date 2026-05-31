@@ -4,9 +4,9 @@ pub mod composite;
 pub mod registry;
 
 pub use composite::CompositeToolRegistry;
-pub use registry::ToolRegistry;
 #[doc(no_inline)]
 pub use ene_tool_proto::{ToolCategory, ToolDefinition};
+pub use registry::ToolRegistry;
 
 /// Computes a hash of the tool definition used for cache invalidation of tool embeddings.
 pub fn compute_tool_version_hash(tool: &ToolDefinition) -> String {

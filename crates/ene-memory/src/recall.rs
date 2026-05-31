@@ -1,6 +1,6 @@
 use super::store::RecalledSummary;
-use crate::utils::truncate;
 use chrono::Utc;
+use ene_common::truncate::Truncate;
 
 /// Formats past conversation summaries into a text block for prompt injection
 pub fn format_summaries_for_prompt(summaries: &[RecalledSummary]) -> String {
@@ -17,7 +17,7 @@ pub fn format_summaries_for_prompt(summaries: &[RecalledSummary]) -> String {
         lines.push(format!(
             "- ({}) Summary: {}",
             age,
-            truncate(&s.entry.summary, 300)
+            Truncate::simple(&s.entry.summary, 300)
         ));
     }
 

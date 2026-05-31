@@ -36,12 +36,11 @@ pub mod schema;
 pub mod store;
 /// LLM-driven conversation summarization.
 pub mod summarizer;
-/// Internal utilities (truncation, etc.).
-pub mod utils;
 
 /// Memory feature toggle configuration.
 pub use config::MemoryConfig;
 /// Memory error type.
+pub use error::EneMemoryError;
 pub use error::MemoryError;
 /// Formats recalled summaries for prompt injection.
 pub use recall::format_summaries_for_prompt;
@@ -49,5 +48,3 @@ pub use recall::format_summaries_for_prompt;
 pub use store::{ConversationSummary, KeyFact, MemoryStore, RecalledSummary};
 /// LLM summarization result type and entry-point.
 pub use summarizer::{ConversationSummaryResult, summarize_conversation};
-/// Truncation utility re-exported from `ene-tools-common`.
-pub use utils::truncate;

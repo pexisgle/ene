@@ -3,7 +3,7 @@ use thiserror::Error;
 /// Errors that can occur during configuration loading, schema generation, or
 /// card resolution.
 #[derive(Error, Debug)]
-pub enum ConfigError {
+pub enum EneConfigError {
     /// An AI provider base URL is missing and no environment variable fallback
     /// was found.
     #[error("Missing base url: set {env_var} or configure AI Base URL")]
@@ -30,3 +30,6 @@ pub enum ConfigError {
     #[error("Configuration error: {0}")]
     GenericConfigError(String),
 }
+
+/// Type alias for internal module usages.
+pub type ConfigError = EneConfigError;

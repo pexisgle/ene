@@ -5,7 +5,7 @@ use ene_config::serde::{Deserialize, Serialize};
 /// Serializable over IPC and used uniformly across tool crates, core, and host
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(crate = "ene_config::serde")]
-pub enum ToolError {
+pub enum EneToolProtoError {
     /// The requested tool was not found.
     NotFound {
         /// Name of the tool that was not found.
@@ -64,19 +64,29 @@ pub enum ToolError {
     },
 }
 
-impl std::fmt::Display for ToolError {
+impl std::fmt::Display for EneToolProtoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ToolError::NotFound { tool_name } => write!(f, "Tool not found: {tool_name}"),
-            ToolError::InvalidArguments { message } => write!(f, "Invalid arguments: {message}"),
-            ToolError::ExecutionFailed { message } => write!(f, "Execution failed: {message}"),
-            ToolError::SandboxViolation { message } => write!(f, "Sandbox violation: {message}"),
-            ToolError::PermissionDenied { message } => write!(f, "Permission denied: {message}"),
-            ToolError::IoError { message } => write!(f, "I/O error: {message}"),
-            ToolError::Timeout { message } => write!(f, "Timeout: {message}"),
-            ToolError::Internal { message } => write!(f, "Internal error: {message}"),
-            ToolError::IpcTransport { message } => write!(f, "IPC transport error: {message}"),
-            ToolError::PermissionRequired {
+            EneToolProtoError::NotFound { tool_name } => write!(f, "Tool not found: {tool_name}"),
+            EneToolProtoError::InvalidArguments { message } => {
+                write!(f, "Invalid arguments: {message}")
+            }
+            EneToolProtoError::ExecutionFailed { message } => {
+                write!(f, "Execution failed: {message}")
+            }
+            EneToolProtoError::SandboxViolation { message } => {
+                write!(f, "Sandbox violation: {message}")
+            }
+            EneToolProtoError::PermissionDenied { message } => {
+                write!(f, "Permission denied: {message}")
+            }
+            EneToolProtoError::IoError { message } => write!(f, "I/O error: {message}"),
+            EneToolProtoError::Timeout { message } => write!(f, "Timeout: {message}"),
+            EneToolProtoError::Internal { message } => write!(f, "Internal error: {message}"),
+            EneToolProtoError::IpcTransport { message } => {
+                write!(f, "IPC transport error: {message}")
+            }
+            EneToolProtoError::PermissionRequired {
                 request_id,
                 action,
                 target,
@@ -92,15 +102,18 @@ impl std::fmt::Display for ToolError {
     }
 }
 
-impl std::error::Error for ToolError {}
+impl std::error::Error for EneToolProtoError {}
 
-impl From<std::io::Error> for ToolError {
+impl From<std::io::Error> for EneToolProtoError {
     fn from(e: std::io::Error) -> Self {
-        ToolError::IoError {
+        EneToolProtoError::IoError {
             message: e.to_string(),
         }
     }
 }
+
+/// Type alias for backward compatibility and internal tool module usages.
+pub type ToolError = EneToolProtoError;
 
 #[cfg(test)]
 mod tests {

@@ -2,7 +2,7 @@ use thiserror::Error;
 
 /// Error types for the memory subsystem.
 #[derive(Error, Debug)]
-pub enum MemoryError {
+pub enum EneMemoryError {
     /// Missing base URL for API calls.
     #[error("Missing base url: set {env_var} or configure AI Base URL")]
     MissingBaseUrl {
@@ -32,3 +32,6 @@ pub enum MemoryError {
     #[error("Other error: {0}")]
     Other(String),
 }
+
+/// Type alias for internal module usages.
+pub type MemoryError = EneMemoryError;

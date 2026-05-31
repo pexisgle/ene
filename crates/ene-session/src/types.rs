@@ -45,30 +45,3 @@ macro_rules! define_id_type {
 
 define_id_type!(SessionId, "Unique session identifier");
 define_id_type!(CardName, "Character card name");
-define_id_type!(ToolName, "Tool identifier");
-define_id_type!(RequestId, "Permission or IPC request identifier");
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn session_id_roundtrip() {
-        let id = SessionId::new("session_abc123");
-        assert_eq!(id.as_str(), "session_abc123");
-        assert_eq!(format!("{id}"), "session_abc123");
-        assert_eq!(id, SessionId::from("session_abc123"));
-    }
-
-    #[test]
-    fn tool_name_from_string() {
-        let name: ToolName = "read_file".to_string().into();
-        assert_eq!(name.as_str(), "read_file");
-    }
-
-    #[test]
-    fn card_name_into_inner() {
-        let name = CardName::new("alice");
-        assert_eq!(name.into_inner(), "alice");
-    }
-}

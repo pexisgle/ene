@@ -2,7 +2,7 @@ use thiserror::Error;
 
 /// Error types for the tool host subsystem.
 #[derive(Error, Debug)]
-pub enum ToolError {
+pub enum EneToolHostError {
     /// A tool execution failed.
     #[error("Tool execution failed: {0}")]
     ToolExecutionError(String),
@@ -68,3 +68,6 @@ pub enum ToolError {
     #[error("Other error: {0}")]
     Other(String),
 }
+
+/// Type alias for internal module usages.
+pub type ToolError = EneToolHostError;

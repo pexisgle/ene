@@ -571,10 +571,9 @@ fn render_settings_window(
             });
 
         if !open {
-            let _ = ene.handle.decide_permission(
-                req.request_id.clone(),
-                PermissionDecision::Deny,
-            );
+            let _ = ene
+                .handle
+                .decide_permission(req.request_id.clone(), PermissionDecision::Deny);
             settings.ui.pending_permission = None;
         }
     }
