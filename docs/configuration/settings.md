@@ -4,10 +4,10 @@ ene settings are centralized in `assets/settings.json`. A `settings.schema.json`
 
 Loading: `ene_config::load_full_settings()` resolves defaults, file, and environment variables.
 
-## Top-Level Structure (`EneSettings`)
+## Top-Level Structure (`EneConfig`)
 
 ```rust
-pub struct EneSettings {
+pub struct EneConfig {
     pub version: u32,           // Currently 1
     pub character: String,      // Character card path or name
     pub user_name: String,      // Default "User"
@@ -115,6 +115,7 @@ pub struct EneSettings {
 | `session_timeout_minutes` | Idle timeout before split |
 | `topic_change_threshold` | Cosine similarity threshold for topic drift |
 | `min_turns_before_split` | Minimum turns before any split can occur |
+| `summary_recall_limit` | Max summaries to inject into the prompt (default: 3) |
 
 ### `sandbox` — Tool Security
 

@@ -43,11 +43,11 @@ pub struct EneResource {
 
 Bevy system chain:
 1. `enqueue_ai_requests` — Bevy `EneRequestEvent` messages → `handle.run()` (fire-and-forget)
-2. `poll_ene_events` — `handle.try_recv()` in a loop → dispatches to `EneStreamEvent` messages
+2. `poll_ene_events` — `receiver.try_recv()` in a loop → dispatches to `EneStreamEvent` messages
 
 Events flow: `EneEvent` (broadcast) → `poll_ene_events` → `EneStreamEvent` (Bevy message) → UI/character systems.
 
-**Important:** `poll_ene_events` uses `ene.handle.try_recv()` directly (not `clone()`) to avoid creating a new broadcast receiver every frame, which would cause event loss.
+**Important:** `poll_ene_events` uses `ene.receiver.try_recv()` directly (not `handle.subscribe()`) to avoid creating a new broadcast receiver every frame, which would cause event loss.
 
 ### Window Properties
 

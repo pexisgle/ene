@@ -43,11 +43,11 @@ pub struct EneResource {
 
 Bevy システムチェーン:
 1. `enqueue_ai_requests` — Bevy の `EneRequestEvent` メッセージ → `handle.run()` (ファイア＆フォーゲット)
-2. `poll_ene_events` — `handle.try_recv()` をループ → `EneStreamEvent` メッセージにディスパッチ
+2. `poll_ene_events` — `receiver.try_recv()` をループ → `EneStreamEvent` メッセージにディスパッチ
 
 イベントフロー: `EneEvent` (broadcast) → `poll_ene_events` → `EneStreamEvent` (Bevy メッセージ) → UI/キャラクターシステム
 
-**重要:** `poll_ene_events` は `ene.handle.try_recv()` を直接使用（`clone()` しない）。毎フレーム `clone()` で broadcast 受信機を再生成すると、新しい受信機は購読時以降のイベントのみ受信するため、イベントがロストする。
+**重要:** `poll_ene_events` は `ene.receiver.try_recv()` を直接使用（`handle.subscribe()` しない）。毎フレーム `subscribe()` で broadcast 受信機を再生成すると、新しい受信機は購読時以降のイベントのみ受信するため、イベントがロストする。
 
 ### ウィンドウプロパティ
 

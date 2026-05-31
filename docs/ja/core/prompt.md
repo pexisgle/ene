@@ -7,7 +7,7 @@
 ```
 build_messages(
     ctx: &MessageBuildContext<'_>,
-) -> Result<Vec<ChatCompletionRequestMessage>>
+) -> Result<Vec<LlmMessage>, EneCoreError>
 
 MessageBuildContext {
     card: &CharacterCardV3,
@@ -58,13 +58,9 @@ Description:
 - カード拡張 `expressions` をデフォルト (neutral, happy, sad, angry, relaxed, surprised) とマージ
 - 無効な表情 (`disabled: true`) は除外
 
-## `build_tools()`
+## ツール渡し
 
-`ToolDefinition` リストを OpenAI `ChatCompletionTools` (関数呼び出し形式) に変換します:
-
-- `name` → 関数名
-- `description` → 関数説明
-- `parameters` → JSON Schema
+ツール定義 (`Vec<ToolDefinition>`) は `select_tools()` (Tool RAG) で選択され、LLM プロバイダの `create_chat_stream()` に直接渡されます。各プロバイダは内部で `ToolDefinition` を API 形式（例: OpenAI `ChatCompletionTools`）に変換します。
 
 ## CBS マクロ展開
 

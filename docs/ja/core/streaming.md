@@ -34,13 +34,23 @@ pub struct EneHandle {
 | `new()` | アクターをバックグラウンドタスクとして生成 |
 | `run(input)` | `EneCommand::Run` を送信 (ファイア＆フォーゲット) |
 | `cancel()` | `EneCommand::Cancel` を送信 |
-| `subscribe()` | イベント用の新規 broadcast 受信機を取得 |
-| `try_recv()` | ノンブロッキングポーリング (Bevy ECS 向け) |
-| `recv()` | 非同期受信 (tokio タスク向け) |
+| `decide_permission(request_id, decision)` | 破壊的操作への許可決定を送信 |
+| `subscribe()` | イベント用の新規 `EneEventReceiver` を取得 |
 | `get_snapshot()` | oneshot 経由で読み取り専用状態をリクエスト |
 | `load_character(name)` | 名前またはパスからキャラクターカードを読み込み |
+| `load_config()` | デフォルトパスから設定を読み込み適用 |
+| `load_config_from(assets_dir, config_path)` | 指定パスから設定を読み込み適用 |
 | `reconfigure(config)` | oneshot 経由で新しい設定を適用 |
 | `manual_split()` | oneshot 経由でセッション分割をトリガー |
+
+### EneEventReceiver
+
+`EneHandle::subscribe()` で取得。broadcast 受信機に ergonomic なポーリングメソッドを提供。
+
+| メソッド | 説明 |
+|---------|------|
+| `try_recv()` | ノンブロッキングポーリング (Bevy ECS 向け) |
+| `recv()` | 非同期受信 (tokio タスク向け) |
 
 ### ライフサイクル
 
@@ -136,7 +146,7 @@ Run { input }
 ストリームタスクがツール実行を再開または拒否
 ```
 
-権限はアクターとストリームタスク間の `Arc<Mutex<HashMap<String, oneshot::Sender<PermissionDecision>>>>` を介して解決されます。
+権限はアクターとストリームタスク間の `Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>` を介して解決されます。
 
 ## セッション更新
 
@@ -179,4 +189,4 @@ fn finalize_tool_calls(chunks: Vec<ToolCallChunk>) -> Vec<ToolCall>
 
 ## スクリーンショット処理
 
-ツール結果が `{"type":"screenshot","data":"data:image/png;base64,..."}` 形式の場合、base64 データが抽出され、画像 URL を含む `ChatCompletionRequestMessage::UserMessage` に変換されて次の LLM API 呼び出しに送られます。
+ツール結果が `{"type":"screenshot","data":"data:image/png;base64,..."}` 形式の場合、base64 データが抽出され、画像 URL を含む `LlmMessage::User` に変換されて次の LLM API 呼び出しに送られます。

@@ -158,10 +158,12 @@ pub struct ToolDefinition {
 
 ## ToolError
 
-The `ToolError` type in `ene-tool-proto` (used by tool binaries):
+The error type in `ene-tool-proto` is `EneToolProtoError`, with `ToolError` as a type alias:
 
 ```rust
-pub enum ToolError {
+pub type ToolError = EneToolProtoError;
+
+pub enum EneToolProtoError {
     NotFound { tool_name: String },
     InvalidArguments { message: String },
     ExecutionFailed { message: String },

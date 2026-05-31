@@ -17,8 +17,8 @@ Memory is also available in snapshots (`EneStateSnapshot`) for CLI commands like
 
 ```rust
 pub struct MemoryStore {
-    pool: r2d2::Pool<SqliteConnection>,
-    pub embedding_dim: usize,
+    pool: SqlitePool,       // private; SqlitePool = diesel::r2d2::Pool<ConnectionManager<SqliteConnection>>
+    embedding_dim: usize,   // private; use embedding_dim() getter
 }
 ```
 
@@ -69,7 +69,7 @@ tool_embeddings (
 |--------|-------------|
 | `open(path, dims)` | Opens persistent store, runs migrations |
 | `open_in_memory(dims)` | In-memory store for testing |
-| `insert_summary(id, card, summary, facts, emb, ended)` | Insert summary + key facts in transaction. Empty `value` deletes the fact. |
+| `insert_summary(session_id, card, summary, facts, emb, ended)` | Insert summary + key facts in transaction. Empty `value` deletes the fact. |
 | `search_summaries(query_emb, card, limit, threshold)` | Cosine similarity search via `vec_distance_cosine` |
 | `list_recent_summaries(card, limit)` | Most recent by `created_at DESC` |
 | `delete_summary(id)` | Cascading delete (removes associated key facts) |
@@ -105,8 +105,8 @@ tool_embeddings (
 ```rust
 #[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
-    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError>;
-    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbeddingError>;
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, String>;
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, String>;
     fn dimensions(&self) -> usize;
     fn model_name(&self) -> &str;
 }

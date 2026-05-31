@@ -17,8 +17,8 @@ SQLite + sqlite-vec + Diesel ベースのエピソディック記憶。ベクト
 
 ```rust
 pub struct MemoryStore {
-    pool: r2d2::Pool<SqliteConnection>,
-    pub embedding_dim: usize,
+    pool: SqlitePool,       // プライベート; SqlitePool = diesel::r2d2::Pool<ConnectionManager<SqliteConnection>>
+    embedding_dim: usize,   // プライベート; embedding_dim() ゲッターを使用
 }
 ```
 
@@ -69,7 +69,7 @@ tool_embeddings (
 |---------|------|
 | `open(path, dims)` | 永続ストアを開き、マイグレーションを実行 |
 | `open_in_memory(dims)` | テスト用のインメモリストア |
-| `insert_summary(id, card, summary, facts, emb, ended)` | 要約 + キーファクトをトランザクションで挿入。空の `value` はファクトを削除。 |
+| `insert_summary(session_id, card, summary, facts, emb, ended)` | 要約 + キーファクトをトランザクションで挿入。空の `value` はファクトを削除。 |
 | `search_summaries(query_emb, card, limit, threshold)` | `vec_distance_cosine` によるコサイン類似度検索 |
 | `list_recent_summaries(card, limit)` | `created_at DESC` で最新順 |
 | `delete_summary(id)` | カスケード削除 (関連キーファクトも削除) |
@@ -105,8 +105,8 @@ tool_embeddings (
 ```rust
 #[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
-    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError>;
-    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbeddingError>;
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, String>;
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, String>;
     fn dimensions(&self) -> usize;
     fn model_name(&self) -> &str;
 }
