@@ -1,6 +1,6 @@
 use crate::ipc_registry::IpcToolRegistry;
 use crate::tools::CompositeToolRegistry;
-use crate::tools::ToolDefinition;
+use ene_tool_proto::ToolDefinition;
 use crate::tools::registry::ToolRegistry;
 use ene_config as paths;
 use ene_config::{EneConfig, register_runtime_schema};

@@ -1,4 +1,4 @@
-use crate::Role;
+use ene_provider::Role;
 use crate::error::EneSessionError;
 use crate::types::{CardName, SessionId};
 use chrono::{DateTime, Utc};

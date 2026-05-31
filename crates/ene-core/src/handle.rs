@@ -4,6 +4,8 @@ use crate::types::RequestId;
 use chrono::{DateTime, Utc};
 use ene_config::EneConfig;
 use ene_provider::LlmProviderRegistry;
+use ene_config::CharacterCardV3;
+use ene_provider::Role;
 use ene_session::PendingSplitTask;
 use ene_session::{CardName, SessionId};
 use ene_session::{
@@ -224,7 +226,7 @@ impl MemoryQueryHandle {
 #[derive(Clone)]
 pub struct EneStateSnapshot {
     /// The loaded character card, if any.
-    pub character_card: Option<ene_session::CharacterCardV3>,
+    pub character_card: Option<CharacterCardV3>,
     /// Conversation history.
     pub history: Vec<ConversationEntry>,
     /// A copy of the current configuration.
@@ -261,7 +263,7 @@ pub struct ActorDeadError;
 #[derive(Debug, Clone)]
 pub struct ConversationEntry {
     /// Who produced this message.
-    pub role: ene_session::Role,
+    pub role: Role,
     /// The message content.
     pub content: String,
 }

@@ -1,4 +1,4 @@
-use super::ToolDefinition;
+use ene_tool_proto::ToolDefinition;
 use super::registry::ToolRegistry;
 use crate::error::ToolError;
 use async_trait::async_trait;

@@ -10,4 +10,5 @@ async-trait = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net"] }
 ene-config = { workspace = true }
+serde = { workspace = true }
 ctor = { workspace = true }

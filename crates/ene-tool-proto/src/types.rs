@@ -1,8 +1,8 @@
-use ene_config::serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 /// Tool category — used for classification and RAG filtering
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(crate = "ene_config::serde", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum ToolCategory {
     /// File-system tools (read, write, edit, shell, undo).
     Filesystem,
@@ -34,7 +34,6 @@ impl ToolCategory {
 
 /// Tool definition — format passed to the OpenAI API `tools` parameter
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(crate = "ene_config::serde")]
 pub struct ToolDefinition {
     /// Unique tool name.
     pub name: String,
@@ -69,7 +68,6 @@ impl ToolDefinition {
 
 /// Tool execution result (format returned to the LLM)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(crate = "ene_config::serde")]
 pub struct ToolCallResult {
     /// Identifier matching the original tool call.
     pub tool_call_id: String,

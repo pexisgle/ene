@@ -1,6 +1,6 @@
+use ene_config::{CharacterCardV3, expand_cbs_macros, resolve_expressions};
 use ene_memory::{KeyFact, RecalledSummary, format_summaries_for_prompt};
-use ene_provider::{LlmMessage, UserMessagePart};
-use ene_session::{CharacterCardV3, Role, expand_cbs_macros, resolve_expressions};
+use ene_provider::{LlmMessage, Role, UserMessagePart};
 
 /// Input parameters for [`build_messages`].
 #[derive(Debug, Clone)]
