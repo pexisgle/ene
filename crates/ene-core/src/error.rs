@@ -11,16 +11,16 @@ pub enum EneCoreError {
     Provider(String),
     /// Configuration error.
     #[error(transparent)]
-    Config(#[from] ene_config::ConfigError),
+    Config(#[from] ene_config::EneConfigError),
     /// Memory store error.
     #[error(transparent)]
-    Memory(#[from] ene_memory::MemoryError),
+    Memory(#[from] ene_memory::EneMemoryError),
     /// Session error.
     #[error(transparent)]
-    Session(#[from] ene_session::SessionError),
+    Session(#[from] ene_session::EneSessionError),
     /// Tool host error.
     #[error(transparent)]
-    Tool(#[from] ene_tool_host::ToolError),
+    Tool(#[from] ene_tool_host::EneToolHostError),
     /// Embedding error.
     #[error("Embedding error: {0}")]
     EmbeddingError(String),

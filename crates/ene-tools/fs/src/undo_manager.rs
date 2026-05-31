@@ -108,9 +108,7 @@ impl UndoManager {
 
     /// Sets the DB path and creates tables
     pub fn set_db_path(&self, path: &Path) -> Result<(), String> {
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| "Invalid DB path".to_string())?;
+        let path_str = path.to_str().ok_or_else(|| "Invalid DB path".to_string())?;
         let mut conn = SqliteConnection::establish(path_str)
             .map_err(|e| format!("Failed to open undo DB: {e}"))?;
 
@@ -131,7 +129,11 @@ impl UndoManager {
 
         let entries = undo_entries::table
             .filter(undo_entries::session_id.eq(session_id))
-            .select((undo_entries::id, undo_entries::tool_name, undo_entries::timestamp))
+            .select((
+                undo_entries::id,
+                undo_entries::tool_name,
+                undo_entries::timestamp,
+            ))
             .load::<DbUndoEntry>(conn)
             .map_err(|e| format!("Failed to query undo entries: {e}"))?;
 
@@ -159,18 +161,20 @@ impl UndoManager {
                 .load::<(String, String, Option<Vec<u8>>, i32)>(conn)
                 .map_err(|e| format!("Failed to query undo ops: {e}"))?
                 .into_iter()
-                .map(|(op_type, path, original_content, _sort_order)| match op_type.as_str() {
-                    "RestoreFile" => {
-                        let content = original_content.map(|b| decompress(&b));
-                        UndoOperation::RestoreFile {
-                            path: PathBuf::from(path),
-                            original_content: content,
+                .map(
+                    |(op_type, path, original_content, _sort_order)| match op_type.as_str() {
+                        "RestoreFile" => {
+                            let content = original_content.map(|b| decompress(&b));
+                            UndoOperation::RestoreFile {
+                                path: PathBuf::from(path),
+                                original_content: content,
+                            }
                         }
-                    }
-                    _ => UndoOperation::DeleteCreatedFile {
-                        path: PathBuf::from(path),
+                        _ => UndoOperation::DeleteCreatedFile {
+                            path: PathBuf::from(path),
+                        },
                     },
-                })
+                )
                 .collect();
 
             stack.push_back(UndoEntry {
@@ -349,10 +353,9 @@ impl UndoManager {
 
         let mut guard = self.db.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(conn) = guard.as_mut() {
-            if let Err(e) = diesel::delete(
-                undo_operations::table.filter(undo_operations::entry_id.eq(&id_str)),
-            )
-            .execute(conn)
+            if let Err(e) =
+                diesel::delete(undo_operations::table.filter(undo_operations::entry_id.eq(&id_str)))
+                    .execute(conn)
             {
                 tracing::error!("[UndoManager] Failed to delete undo ops from DB: {e}");
             }
@@ -392,10 +395,9 @@ impl UndoManager {
             )
             .execute(conn);
 
-            let _ = diesel::delete(
-                undo_entries::table.filter(undo_entries::session_id.eq(session_id)),
-            )
-            .execute(conn);
+            let _ =
+                diesel::delete(undo_entries::table.filter(undo_entries::session_id.eq(session_id)))
+                    .execute(conn);
         }
     }
 

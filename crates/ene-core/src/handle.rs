@@ -1,12 +1,13 @@
 use crate::error::EneCoreError;
 use crate::permission::{self, PermissionDecision};
+use crate::types::RequestId;
 use chrono::{DateTime, Utc};
-use ene_common::{CardName, RequestId, SessionId};
 use ene_config::EneConfig;
 use ene_provider::LlmProviderRegistry;
 use ene_session::PendingSplitTask;
+use ene_session::{CardName, SessionId};
 use ene_session::{
-    ConversationSession, SessionError, SplitReason, SplitResult, poll_split_result,
+    ConversationSession, EneSessionError, SplitReason, SplitResult, poll_split_result,
 };
 use ene_tool_host::{CompositeToolRegistry, ToolHostManager, ToolRegistry};
 use std::collections::HashMap;
@@ -163,10 +164,9 @@ impl MemoryQueryHandle {
 
     /// Embed a text query for similarity search.
     pub async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EneCoreError> {
-        let embedder = self
-            .embedder
-            .as_ref()
-            .ok_or_else(|| EneCoreError::EmbeddingError("Embedding provider not available".into()))?;
+        let embedder = self.embedder.as_ref().ok_or_else(|| {
+            EneCoreError::EmbeddingError("Embedding provider not available".into())
+        })?;
         embedder
             .embed_query(text)
             .await
@@ -214,7 +214,9 @@ impl MemoryQueryHandle {
             .store
             .as_ref()
             .ok_or_else(|| EneCoreError::EmbeddingError("Memory store not available".into()))?;
-        store.get_all_keyfacts(card_name).map_err(EneCoreError::Memory)
+        store
+            .get_all_keyfacts(card_name)
+            .map_err(EneCoreError::Memory)
     }
 }
 
@@ -408,10 +410,7 @@ impl EneHandle {
         let name = name.into();
         let path = ene_config::resolve_character_path(&name);
         let (tx, rx) = oneshot::channel();
-        self.send(EneCommand::LoadCharacter {
-            path,
-            reply: tx,
-        });
+        self.send(EneCommand::LoadCharacter { path, reply: tx });
         rx.await.map_err(|_| EneCoreError::ChannelClosed)?
     }
 
@@ -684,9 +683,7 @@ impl EneActor {
     }
 
     fn create_provider(&self) -> Result<Arc<dyn ene_provider::LlmProvider>, EneCoreError> {
-        let provider_config = self
-            .config
-            .get_section::<ene_provider::ProviderConfig>()?;
+        let provider_config = self.config.get_section::<ene_provider::ProviderConfig>()?;
         LlmProviderRegistry::create_provider(&provider_config.provider_name, &self.config)
             .map(Arc::from)
             .map_err(EneCoreError::Provider)
@@ -696,13 +693,13 @@ impl EneActor {
 
     async fn handle_manual_split(&mut self) -> Result<SplitResult, EneCoreError> {
         if self.session.history().is_empty() {
-            return Err(EneCoreError::Session(SessionError::SplitNotNeeded));
+            return Err(EneCoreError::Session(EneSessionError::SplitNotNeeded));
         }
         let Some(store) = &self.session.memory.memory_store else {
-            return Err(EneCoreError::Session(SessionError::SplitNotNeeded));
+            return Err(EneCoreError::Session(EneSessionError::SplitNotNeeded));
         };
         let Some(embedder) = &self.session.memory.embedding_provider else {
-            return Err(EneCoreError::Session(SessionError::SplitNotNeeded));
+            return Err(EneCoreError::Session(EneSessionError::SplitNotNeeded));
         };
         let provider = self.create_provider()?;
 
@@ -743,7 +740,7 @@ impl EneActor {
                     self.session.memory.session_id = split.new_session_id;
                 }
                 Err(e) => {
-                    if !matches!(e, ene_session::SessionError::SplitNotNeeded) {
+                    if !matches!(e, ene_session::EneSessionError::SplitNotNeeded) {
                         tracing::error!("[Session] Summary generation error: {}", e);
                     }
                 }
@@ -819,9 +816,7 @@ impl EneActor {
         let embedder = init_embedding(&self.config).map_err(EneCoreError::EmbeddingError)?;
         self.session.memory.embedding_provider = Some(embedder.clone());
 
-        let mem_config = self
-            .config
-            .get_section::<ene_memory::MemoryConfig>()?;
+        let mem_config = self.config.get_section::<ene_memory::MemoryConfig>()?;
 
         if mem_config.enabled {
             let store = init_memory_store(&self.config, &*embedder).map_err(|e| {

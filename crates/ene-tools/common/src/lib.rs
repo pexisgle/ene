@@ -23,5 +23,9 @@
 
 /// HTML-to-Markdown conversion and content extraction.
 pub mod html;
-/// Smart content truncation (by chars, lines, and tail).
-pub mod truncate;
+
+/// Re-exports of smart truncation from ene-common.
+pub mod truncate {
+    #[doc(no_inline)]
+    pub use ene_common::truncate::{Truncate, TruncateResult};
+}

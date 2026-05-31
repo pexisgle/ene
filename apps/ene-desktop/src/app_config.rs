@@ -4,7 +4,7 @@ use bevy::window::CompositeAlphaMode;
 #[cfg(target_os = "windows")]
 use bevy::window::PresentMode;
 use bevy::window::{WindowLevel, WindowMode, WindowPlugin, WindowResolution};
-use ene_common::RequestId;
+use ene_core::RequestId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;

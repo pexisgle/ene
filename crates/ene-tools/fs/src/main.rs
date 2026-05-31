@@ -15,13 +15,13 @@ mod provider;
 mod read;
 mod read_binary;
 mod sandbox;
+mod schema;
 mod search;
 mod search_glob;
 mod search_grep;
 mod shell;
 mod shell_platform;
 mod undo_manager;
-mod schema;
 mod undo_tool;
 mod write;
 

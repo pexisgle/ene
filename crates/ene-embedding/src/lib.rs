@@ -8,9 +8,10 @@
 pub mod error;
 mod quantized;
 
-use crate::error::EmbeddingError;
 use std::path::PathBuf;
 
+/// Publicly export EneEmbeddingError.
+pub use error::EneEmbeddingError;
 /// Local GGUF-quantized embedding provider and path resolution.
 pub use quantized::{GgufEmbeddingProvider, resolve_gguf_paths};
 
@@ -23,7 +24,7 @@ pub fn create_local_provider(
     model: &str,
     quantization: &str,
     model_dir: PathBuf,
-) -> Result<Box<dyn ene_provider::EmbeddingProvider>, EmbeddingError> {
+) -> Result<Box<dyn ene_provider::EmbeddingProvider>, EneEmbeddingError> {
     let (gguf_path, tokenizer_path) = resolve_gguf_paths(model, quantization, model_dir)?;
     let max_length = 8192;
     let provider = GgufEmbeddingProvider::load(

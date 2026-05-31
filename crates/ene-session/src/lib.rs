@@ -27,39 +27,40 @@
 
 /// Session configuration types.
 pub mod config;
-/// Session split lifecycle (boundary check, async split, polling).
-pub mod session_split;
 /// Session error types.
 pub mod error;
 /// Core session holder.
 pub mod session;
+/// Session split lifecycle (boundary check, async split, polling).
+pub mod session_split;
 /// Emotion-token (`<|emo:name|>`) parsing.
 pub mod special_token;
-/// Internal utilities.
-pub mod utils;
-/// Role enum for conversation history.
-pub mod role;
+/// Type-safe identifiers for sessions and cards.
+pub mod types;
 
 /// Session auto-split configuration.
 pub use config::SessionConfig;
-/// Split lifecycle types and entry-points.
-pub use session_split::{
-    PendingSplitTask, SessionBoundary, SplitReason, SplitResult, SplitTaskInput, check_boundary,
-    execute_split, generate_session_id, poll_split_result, spawn_split_task,
-};
+/// Truncation utility.
+pub use ene_common::truncate::Truncate;
 /// Character-card types re-exported from `ene-config`.
 #[doc(no_inline)]
 pub use ene_config::{
     CharacterAsset, CharacterCardData, CharacterCardV3, ExpressionDefinition, ResolvedExpression,
     expand_cbs_macros, resolve_expressions,
 };
-/// Session error type.
-pub use error::SessionError;
 /// Role enum for conversation history.
-pub use role::Role;
+#[doc(no_inline)]
+pub use ene_provider::Role;
+/// Session error type.
+pub use error::EneSessionError;
 /// Central session holder.
 pub use session::ConversationSession;
+/// Split lifecycle types and entry-points.
+pub use session_split::{
+    PendingSplitTask, SessionBoundary, SplitReason, SplitResult, SplitTaskInput, check_boundary,
+    execute_split, generate_session_id, poll_split_result, spawn_split_task,
+};
 /// Emotion-token parsing utilities.
 pub use special_token::{extract_emotion_from_token, split_text_and_special_tokens};
-/// Truncation utility re-exported from `ene-tools-common`.
-pub use utils::truncate;
+/// Type-safe identifiers.
+pub use types::{CardName, SessionId};

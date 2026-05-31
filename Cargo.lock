@@ -3947,6 +3947,7 @@ dependencies = [
 name = "ene-tools-common"
 version = "0.1.0"
 dependencies = [
+ "ene-common",
  "ene-tool-proto",
  "htmd",
  "regex",

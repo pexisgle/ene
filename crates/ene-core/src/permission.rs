@@ -1,6 +1,6 @@
 use crate::handle::{ConversationEntry, EneEvent};
 use crate::message_builder::{MessageBuildContext, build_messages};
-use ene_common::RequestId;
+use crate::types::RequestId;
 use ene_config::EneConfig;
 use ene_memory::RecalledSummary;
 use ene_provider::{LlmMessage, LlmToolCall, LlmToolCallChunk, UserMessagePart};
@@ -44,7 +44,8 @@ pub(crate) struct StreamContext {
     pub(crate) provider: Arc<dyn ene_provider::LlmProvider>,
     pub(crate) event_tx: broadcast::Sender<EneEvent>,
     pub(crate) cancel_token: CancellationToken,
-    pub(crate) pending_permissions: Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
+    pub(crate) pending_permissions:
+        Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
 }
 
 /// Runs the full AI streaming completion loop with tool calling, memory

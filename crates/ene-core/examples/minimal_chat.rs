@@ -67,9 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── 3. Load Character Card ─────────────────────────────────────────────
     // load_character() loads the character card by name (e.g. "Alicia").
     // Bare names are automatically resolved to their full path.
-    handle
-        .load_character("Alicia")
-        .await?;
+    handle.load_character("Alicia").await?;
     println!("[Setup] Character loaded.\n");
 
     // ── 4. Subscribe to the Event Stream ──────────────────────────────────
@@ -163,7 +161,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Tool call requested by the LLM
                 EneEvent::ToolCallStart { name, arguments } => {
-                    println!("\n  [Tool↑] {} {}", name, &arguments[..arguments.len().min(80)]);
+                    println!(
+                        "\n  [Tool↑] {} {}",
+                        name,
+                        &arguments[..arguments.len().min(80)]
+                    );
                     print!("Ene: ");
                     io::stdout().flush()?;
                 }
@@ -183,7 +185,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     target,
                     description,
                 } => {
-                    println!("\n  [Permission] {} on `{}`: {}", action, target, description);
+                    println!(
+                        "\n  [Permission] {} on `{}`: {}",
+                        action, target, description
+                    );
                     print!("  Allow? [y/N]: ");
                     io::stdout().flush()?;
 
@@ -204,15 +209,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     description,
                     ..
                 } => {
-                    let total = total_steps
-                        .map(|t| format!("/{}", t))
-                        .unwrap_or_default();
+                    let total = total_steps.map(|t| format!("/{}", t)).unwrap_or_default();
                     println!("\n  [Progress {}{total}] {}", step, description);
                 }
 
                 // Session split occurred (auto or manual)
                 EneEvent::SessionSplit { summary, reason } => {
-                    println!("\n  [Session Split: {:?}] {}", reason, &summary[..summary.len().min(80)]);
+                    println!(
+                        "\n  [Session Split: {:?}] {}",
+                        reason,
+                        &summary[..summary.len().min(80)]
+                    );
                 }
 
                 // Actor status update

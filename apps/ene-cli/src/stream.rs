@@ -1,6 +1,6 @@
 use crate::style;
 use ene_core::{
-    EneEvent, EneEventReceiver, EneHandle, PermissionDecision, extract_emotion_from_token, truncate,
+    EneEvent, EneEventReceiver, EneHandle, PermissionDecision, Truncate, extract_emotion_from_token,
 };
 use std::io::{self, Write};
 
@@ -36,7 +36,7 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
                     "{}",
                     style::warning(format!(
                         "[Session] Summary: {}",
-                        truncate(&summary, 80)
+                        Truncate::simple(&summary, 80)
                     ))
                 );
             }

@@ -116,7 +116,9 @@ pub fn build_expression_phi(card: &CharacterCardV3) -> Option<String> {
 /// Assembles the full message list for an AI completion request, including system
 /// prompt, example messages, memory recalls, key facts, history, expression PHI,
 /// and the final user input.
-pub fn build_messages(ctx: &MessageBuildContext<'_>) -> Result<Vec<LlmMessage>, crate::error::EneCoreError> {
+pub fn build_messages(
+    ctx: &MessageBuildContext<'_>,
+) -> Result<Vec<LlmMessage>, crate::error::EneCoreError> {
     let mut messages: Vec<LlmMessage> = Vec::new();
     let char_name = ctx.card.data.get_character_name();
 

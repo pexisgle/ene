@@ -1,6 +1,5 @@
 use bevy::prelude::*;
-use ene_common::RequestId;
-use ene_core::{EneEvent, EneEventReceiver, EneHandle, EneStatus};
+use ene_core::{EneEvent, EneEventReceiver, EneHandle, EneStatus, RequestId};
 
 pub struct EnePlugin;
 
