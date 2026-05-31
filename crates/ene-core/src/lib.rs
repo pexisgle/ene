@@ -12,7 +12,7 @@ pub mod handle;
 /// System prompt and message assembly helpers.
 pub mod message_builder;
 /// Permission types and streaming engine internals.
-pub mod permission;
+pub mod streaming;
 /// Type-safe identifiers for runtime concepts.
 pub mod types;
 
@@ -91,8 +91,8 @@ pub use ene_tool_host::ToolRegistry;
 pub use error::EneCoreError;
 
 // ── Stream types ──
-/// Permission decision type (re-exported from `ene-core::permission`).
-pub use permission::PermissionDecision;
+/// Permission decision type (re-exported from `ene-core::streaming`).
+pub use streaming::PermissionDecision;
 
 // ── Prompt builder ──
 /// Message build context struct.

@@ -3786,6 +3786,7 @@ dependencies = [
  "bevy_vrm1",
  "ctor",
  "ene-common",
+ "ene-config",
  "ene-core",
  "gtk",
  "log",

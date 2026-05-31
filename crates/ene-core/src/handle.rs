@@ -1,5 +1,5 @@
 use crate::error::EneCoreError;
-use crate::permission::{self, PermissionDecision};
+use crate::streaming::{self, PermissionDecision};
 use crate::types::RequestId;
 use chrono::{DateTime, Utc};
 use ene_config::EneConfig;
@@ -668,7 +668,7 @@ impl EneActor {
         self.stream_session_rx = Some(session_rx);
 
         let handle = tokio::spawn(async move {
-            let updated_session = permission::run_stream(permission::StreamContext {
+            let updated_session = streaming::run_stream(streaming::StreamContext {
                 config,
                 session,
                 user_input,
