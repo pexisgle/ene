@@ -245,11 +245,13 @@ async fn test_ipc_with_real_host() {
         "Expected question in tools, got: {:?}",
         names
     );
-    assert!(
-        names.contains(&"todo"),
-        "Expected todo in tools, got: {:?}",
-        names
-    );
+    for name in &["todo_list", "todo_add", "todo_update", "todo_complete", "todo_delete"] {
+        assert!(
+            names.contains(name),
+            "Expected {name} in tools, got: {:?}",
+            names
+        );
+    }
     assert!(
         names.contains(&"app"),
         "Expected app in tools, got: {:?}",
@@ -310,17 +312,28 @@ async fn test_ipc_with_real_host() {
 
     let result = registry
         .call_tool(
-            "todo",
-            r#"{"todos": [{"content": "Test task", "status": "pending", "priority": "high"}]}"#,
+            "todo_add",
+            r#"{"content": "Test task", "priority": "high"}"#,
         )
         .await
-        .expect("call_tool todo failed");
+        .expect("call_tool todo_add failed");
     assert!(
         result.contains("Test task"),
         "Result should contain todo: {}",
         result
     );
-    println!("Real host todo result: {}", result);
+    println!("Real host todo_add result: {}", result);
+
+    let result = registry
+        .call_tool("todo_list", "{}")
+        .await
+        .expect("call_tool todo_list failed");
+    assert!(
+        result.contains("Test task"),
+        "Result should contain todo: {}",
+        result
+    );
+    println!("Real host todo_list result: {}", result);
 
     let _ = child.kill().await;
 }

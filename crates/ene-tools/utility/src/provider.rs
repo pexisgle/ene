@@ -1,35 +1,36 @@
 use crate::action;
+use crate::db::TodoDb;
 use async_trait::async_trait;
 use ene_tool_proto::{ToolDefinition, ToolError, ToolProvider};
 use ene_tools_common::ToolAction;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Built-in utility tool provider.
 ///
-/// Exposes four tools: `question`, `todo`, `get_current_time`, and `get_system_info`.
-/// Internally uses a dynamic list of actions implementing `ToolAction`.
+/// Exposes eight tools: `question`, `todo_list`, `todo_add`, `todo_update`,
+/// `todo_complete`, `todo_delete`, `get_current_time`, and `get_system_info`.
+/// The todo tools share a single [`TodoDb`] for SQLite-backed, session-scoped
+/// persistence and parent/child hierarchy.
 pub struct UtilityToolProvider {
     actions: Vec<Box<dyn ToolAction>>,
-    session_id: Arc<Mutex<String>>,
+    db: Arc<TodoDb>,
 }
 
 impl UtilityToolProvider {
     /// Creates a new `UtilityToolProvider` and registers all utility actions.
     pub fn new() -> Self {
-        let todo_store = Arc::new(action::TodoStore::new());
-        let session_id = Arc::new(Mutex::new("default".to_string()));
-
+        let db = Arc::new(TodoDb::new());
         let actions: Vec<Box<dyn ToolAction>> = vec![
             Box::new(action::AskQuestion),
-            Box::new(action::UpdateTodo::new(todo_store, session_id.clone())),
+            Box::new(action::TodoList::new(db.clone())),
+            Box::new(action::TodoAdd::new(db.clone())),
+            Box::new(action::TodoUpdate::new(db.clone())),
+            Box::new(action::TodoComplete::new(db.clone())),
+            Box::new(action::TodoDelete::new(db.clone())),
             Box::new(action::GetCurrentTime),
             Box::new(action::GetSystemInfo),
         ];
-
-        Self {
-            actions,
-            session_id,
-        }
+        Self { actions, db }
     }
 }
 
@@ -57,8 +58,15 @@ impl ToolProvider for UtilityToolProvider {
     }
 
     fn set_session_id(&self, session_id: &str) {
-        if let Ok(mut id) = self.session_id.lock() {
-            *id = session_id.to_string();
+        self.db.set_session_id(session_id);
+    }
+
+    fn set_config(&self, config: &serde_json::Value) {
+        if let Some(path) = config.get("db_path").and_then(|v| v.as_str())
+            && !path.trim().is_empty()
+            && let Err(e) = self.db.set_db_path(std::path::Path::new(path))
+        {
+            tracing::error!("[ene-tools-utility] todo db open failed: {e}");
         }
     }
 }

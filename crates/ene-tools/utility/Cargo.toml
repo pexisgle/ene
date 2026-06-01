@@ -14,6 +14,11 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 dashmap = { workspace = true }
 uuid = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+diesel = { version = "2.3", features = ["sqlite", "chrono"] }
+diesel_migrations = { version = "2.3", features = ["sqlite"] }
+libsqlite3-sys = { version = "0.35", features = ["bundled"] }
 
 [[bin]]
 name = "ene-tools-utility"
