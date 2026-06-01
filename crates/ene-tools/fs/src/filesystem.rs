@@ -185,7 +185,13 @@ pub async fn execute(
                 "Applying patch to files",
             )?;
 
-            crate::action::patch::apply_patch(patch_text, sandbox.config(), undo_manager, session_id).await
+            crate::action::patch::apply_patch(
+                patch_text,
+                sandbox.config(),
+                undo_manager,
+                session_id,
+            )
+            .await
         }
         _ => Err(ToolError::NotFound {
             tool_name: format!("filesystem action: {}", action),

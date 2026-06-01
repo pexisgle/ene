@@ -2,16 +2,16 @@ use crate::error::EneCoreError;
 use crate::streaming::{self, PermissionDecision};
 use crate::types::RequestId;
 use chrono::{DateTime, Utc};
+use ene_config::CharacterCardV3;
 use ene_config::EneConfig;
 use ene_provider::LlmProviderRegistry;
-use ene_config::CharacterCardV3;
 use ene_provider::Role;
 use ene_session::PendingSplitTask;
 use ene_session::{CardName, SessionId};
 use ene_session::{
     ConversationSession, EneSessionError, SplitReason, SplitResult, poll_split_result,
 };
-use ene_tool_host::{CompositeToolRegistry, ToolHostManager, ToolRegistry, ToolDefinition};
+use ene_tool_host::{CompositeToolRegistry, ToolDefinition, ToolHostManager, ToolRegistry};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
@@ -666,7 +666,10 @@ impl EneActor {
             } => {
                 let registry = self.registry.clone();
                 tokio::spawn(async move {
-                    let result = registry.call_tool(&name, &arguments).await.map_err(EneCoreError::from);
+                    let result = registry
+                        .call_tool(&name, &arguments)
+                        .await
+                        .map_err(EneCoreError::from);
                     let _ = reply.send(result);
                 });
                 true

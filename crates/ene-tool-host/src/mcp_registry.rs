@@ -1,6 +1,6 @@
-use ene_tool_proto::ToolDefinition;
 use crate::tools::registry::ToolRegistry;
 use async_trait::async_trait;
+use ene_tool_proto::ToolDefinition;
 use rmcp::serve_client;
 use rmcp::transport::child_process::{ConfigureCommandExt, TokioChildProcess};
 use std::sync::{Arc, RwLock};

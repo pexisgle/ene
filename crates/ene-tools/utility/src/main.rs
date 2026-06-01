@@ -4,10 +4,10 @@
 //! question prompting, todo list management, time, and system info.
 #![warn(missing_docs)]
 
-/// Tool lifecycle and provider integration.
-pub mod provider;
 /// Action modules for each tool.
 pub mod action;
+/// Tool lifecycle and provider integration.
+pub mod provider;
 
 use ene_tool_proto::run_tool_server;
 

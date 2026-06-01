@@ -23,7 +23,10 @@ impl CliCommand for MemoryCommand {
         let parts: Vec<&str> = arg.splitn(2, ' ').collect();
         let subcmd = parts.first().copied().unwrap_or("");
 
-        let snapshot = ctx.handle.get_snapshot().await
+        let snapshot = ctx
+            .handle
+            .get_snapshot()
+            .await
             .map_err(|e| format!("Failed to get actor state: {}", e))?;
 
         match subcmd {

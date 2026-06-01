@@ -83,8 +83,14 @@ impl ToolProvider for FsToolProvider {
                     description,
                 )?;
 
-                crate::action::shell::shell_exec(command, description, timeout, workdir, sandbox.config())
-                    .await
+                crate::action::shell::shell_exec(
+                    command,
+                    description,
+                    timeout,
+                    workdir,
+                    sandbox.config(),
+                )
+                .await
             }
             "undo" => crate::action::undo::undo(sandbox.undo_manager(), &session_id).await,
             _ => Err(ToolError::NotFound {

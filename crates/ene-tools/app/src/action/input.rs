@@ -69,11 +69,11 @@ pub async fn press_key(key: &str) -> Result<String, ToolError> {
         })?;
 
         if let Some(enigo_key) = parse_key(&key) {
-            enigo
-                .key(enigo_key, enigo::Direction::Click)
-                .map_err(|e| ToolError::ExecutionFailed {
+            enigo.key(enigo_key, enigo::Direction::Click).map_err(|e| {
+                ToolError::ExecutionFailed {
                     message: format!("Key press failed: {e}"),
-                })?;
+                }
+            })?;
             Ok::<_, ToolError>(format!("Pressed key: {}", key))
         } else {
             Err(ToolError::ExecutionFailed {
