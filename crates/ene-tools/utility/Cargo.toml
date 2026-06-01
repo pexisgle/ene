@@ -13,6 +13,7 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 dashmap = { workspace = true }
+uuid = { workspace = true }
 
 [[bin]]
 name = "ene-tools-utility"

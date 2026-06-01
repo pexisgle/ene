@@ -33,7 +33,7 @@
 //! }
 //! ```
 
-use ene_core::{EneEvent, EneHandle, EneStatus, PermissionDecision};
+use ene_core::{EneEvent, EneHandle, EneStatus, PermissionDecision, UserInputResponse};
 use std::io::{self, Write};
 
 #[tokio::main]
@@ -200,6 +200,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         PermissionDecision::Deny
                     };
                     let _ = handle.decide_permission(request_id, decision);
+                }
+
+                // Interactive user input request (e.g. the `question` tool)
+                EneEvent::UserInputRequired { request_id, prompt } => {
+                    println!("\n  [Question] {}", prompt.question);
+                    if !prompt.options.is_empty() {
+                        println!("  Options: {}", prompt.options.join(" | "));
+                    }
+                    print!("  Answer: ");
+                    io::stdout().flush()?;
+
+                    let mut ans = String::new();
+                    io::stdin().read_line(&mut ans)?;
+                    let trimmed = ans.trim().to_string();
+                    let response = if !trimmed.is_empty() {
+                        UserInputResponse::Answer(trimmed)
+                    } else {
+                        UserInputResponse::Cancel
+                    };
+                    let _ = handle.submit_user_input(request_id, response);
                 }
 
                 // Task progress for long running tasks

@@ -351,6 +351,9 @@ impl ToolRegistry for IpcToolRegistry {
                     target,
                     description,
                 },
+                ene_tool_proto::ToolError::UserInputRequired { request_id, prompt } => {
+                    crate::error::ToolError::UserInputRequired { request_id, prompt }
+                }
                 ene_tool_proto::ToolError::PermissionDenied { message } => {
                     crate::error::ToolError::PermissionDenied(message)
                 }

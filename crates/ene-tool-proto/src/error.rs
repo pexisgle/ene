@@ -1,5 +1,43 @@
 use serde::{Deserialize, Serialize};
 
+/// A prompt requesting interactive user input from a tool.
+///
+/// Carried inside [`EneToolProtoError::UserInputRequired`] and surfaced to the
+/// UI as a structured question. The UI may render this as a list of selectable
+/// options, a free-text input, or both (see [`Self::allow_free_text`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserInputPrompt {
+    /// Optional short label (e.g. "YesNo", "MultipleChoice") for UI categorisation.
+    #[serde(default)]
+    pub header: Option<String>,
+    /// The main question text. May contain multiple lines if the tool combines
+    /// several sub-questions into a single prompt.
+    pub question: String,
+    /// Predefined selectable options. Empty when only free-text is allowed.
+    #[serde(default)]
+    pub options: Vec<String>,
+    /// Whether the user can supply a custom answer that is not in `options`.
+    #[serde(default)]
+    pub allow_free_text: bool,
+}
+
+impl std::fmt::Display for UserInputPrompt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(header) = &self.header {
+            write!(f, "[{}] {}", header, self.question)?;
+        } else {
+            write!(f, "{}", self.question)?;
+        }
+        if !self.options.is_empty() {
+            write!(f, " (options: {})", self.options.join(", "))?;
+        }
+        if self.allow_free_text {
+            write!(f, " [free text]")?;
+        }
+        Ok(())
+    }
+}
+
 /// Structured tool error type
 ///
 /// Serializable over IPC and used uniformly across tool crates, core, and host
@@ -61,6 +99,13 @@ pub enum EneToolProtoError {
         /// Human-readable description of what is being requested.
         description: String,
     },
+    /// Interactive user input is required to proceed (e.g. an `AskQuestion` tool).
+    UserInputRequired {
+        /// Unique request identifier.
+        request_id: String,
+        /// The prompt describing the question, options, and input constraints.
+        prompt: UserInputPrompt,
+    },
 }
 
 impl std::fmt::Display for EneToolProtoError {
@@ -95,6 +140,16 @@ impl std::fmt::Display for EneToolProtoError {
                     f,
                     "Permission required [id: {}]: {} on {} ({})",
                     request_id, action, target, description
+                )
+            }
+            EneToolProtoError::UserInputRequired { request_id, prompt } => {
+                write!(
+                    f,
+                    "User input required [id: {}]: {} ({} options, free_text={})",
+                    request_id,
+                    prompt.question,
+                    prompt.options.len(),
+                    prompt.allow_free_text
                 )
             }
         }
@@ -214,5 +269,60 @@ mod tests {
         let json = serde_json::to_string(&err).unwrap();
         let deser: ToolError = serde_json::from_str(&json).unwrap();
         assert_eq!(err, deser);
+    }
+
+    #[test]
+    fn user_input_prompt_default_fields() {
+        let json = r#"{"question":"Pick one"}"#;
+        let p: UserInputPrompt = serde_json::from_str(json).unwrap();
+        assert_eq!(p.question, "Pick one");
+        assert!(p.header.is_none());
+        assert!(p.options.is_empty());
+        assert!(!p.allow_free_text);
+    }
+
+    #[test]
+    fn user_input_prompt_full() {
+        let p = UserInputPrompt {
+            header: Some("YesNo".into()),
+            question: "Proceed?".into(),
+            options: vec!["Yes".into(), "No".into()],
+            allow_free_text: true,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let de: UserInputPrompt = serde_json::from_str(&json).unwrap();
+        assert_eq!(p, de);
+    }
+
+    #[test]
+    fn tool_error_user_input_required_serde_roundtrip() {
+        let err = ToolError::UserInputRequired {
+            request_id: "req-1".into(),
+            prompt: UserInputPrompt {
+                header: Some("YesNo".into()),
+                question: "Continue?".into(),
+                options: vec!["Yes".into(), "No".into()],
+                allow_free_text: false,
+            },
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        let de: ToolError = serde_json::from_str(&json).unwrap();
+        assert_eq!(err, de);
+    }
+
+    #[test]
+    fn tool_error_user_input_required_display() {
+        let err = ToolError::UserInputRequired {
+            request_id: "abc".into(),
+            prompt: UserInputPrompt {
+                header: None,
+                question: "Q?".into(),
+                options: vec!["A".into()],
+                allow_free_text: true,
+            },
+        };
+        let s = format!("{err}");
+        assert!(s.contains("abc"));
+        assert!(s.contains("Q?"));
     }
 }

@@ -22,6 +22,17 @@ pub enum PermissionDecision {
     Deny,
 }
 
+/// Represents a user's response to an interactive tool's input request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserInputResponse {
+    /// The user picked one of the predefined options.
+    Selected(String),
+    /// The user provided a free-text answer.
+    Answer(String),
+    /// The user dismissed or cancelled the question.
+    Cancel,
+}
+
 /// Configuration for tool RAG (retrieval-augmented generation) filtering.
 #[derive(Debug, Clone)]
 pub(crate) struct ToolRagConfig {
@@ -46,6 +57,8 @@ pub(crate) struct StreamContext {
     pub(crate) cancel_token: CancellationToken,
     pub(crate) pending_permissions:
         Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
+    pub(crate) pending_user_inputs:
+        Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
 }
 
 /// Runs the full AI streaming completion loop with tool calling, memory
@@ -60,6 +73,7 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
         event_tx,
         cancel_token,
         pending_permissions,
+        pending_user_inputs,
     } = ctx;
     session.reset_display_buffer();
 
@@ -224,6 +238,7 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
             &assistant_content,
             &event_tx,
             &pending_permissions,
+            &pending_user_inputs,
             tool_config.tool_call_timeout_ms,
         )
         .await;
@@ -366,6 +381,7 @@ pub(crate) fn build_chat_messages_list(
 }
 
 /// Executes a batch of tool calls and sends result events through the broadcast channel.
+#[allow(clippy::too_many_arguments)]
 async fn perform_tool_executions(
     registry: &dyn ene_tool_host::ToolRegistry,
     session_id: &str,
@@ -373,6 +389,7 @@ async fn perform_tool_executions(
     assistant_content: &str,
     event_tx: &broadcast::Sender<EneEvent>,
     pending_permissions: &Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
+    pending_user_inputs: &Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
     timeout_ms: u64,
 ) -> Result<Vec<LlmMessage>, crate::error::EneCoreError> {
     let mut round_messages = Vec::new();
@@ -443,6 +460,38 @@ async fn perform_tool_executions(
                 _ => {
                     result = Err(ene_tool_host::error::ToolError::PermissionDenied(
                         "Permission denied by user".to_string(),
+                    ));
+                }
+            }
+        }
+
+        if let Err(ene_tool_host::error::ToolError::UserInputRequired { request_id, prompt }) =
+            &result
+        {
+            let req_id = RequestId::from(request_id.clone());
+            let _ = event_tx.send(EneEvent::UserInputRequired {
+                request_id: req_id.clone(),
+                prompt: prompt.clone(),
+            });
+
+            let (resp_tx, resp_rx) = oneshot::channel::<UserInputResponse>();
+            {
+                let mut guard = pending_user_inputs.lock().await;
+                guard.insert(req_id.clone(), resp_tx);
+            }
+
+            match resp_rx.await {
+                Ok(UserInputResponse::Selected(option)) => {
+                    let new_args = inject_user_response(&args, &option);
+                    result = registry.call_tool(&name, &new_args).await;
+                }
+                Ok(UserInputResponse::Answer(text)) => {
+                    let new_args = inject_user_response(&args, &text);
+                    result = registry.call_tool(&name, &new_args).await;
+                }
+                Ok(UserInputResponse::Cancel) | Err(_) => {
+                    result = Err(ene_tool_host::error::ToolError::ToolExecutionError(
+                        "User cancelled the question".to_string(),
                     ));
                 }
             }
@@ -536,4 +585,73 @@ fn extract_screenshot(result: &str) -> (String, Option<String>) {
         }
     }
     (result.to_string(), None)
+}
+
+/// Injects the user's response into a tool's JSON argument string under the
+/// `_user_response` key. Falls back to wrapping the original string under
+/// `_original_args` if the args are not a JSON object, so the re-invocation
+/// does not crash.
+fn inject_user_response(args_json: &str, response: &str) -> String {
+    let parsed: Option<serde_json::Value> = serde_json::from_str(args_json).ok();
+    match parsed {
+        Some(mut value) => {
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert(
+                    "_user_response".to_string(),
+                    serde_json::Value::String(response.to_string()),
+                );
+            } else {
+                let mut obj = serde_json::Map::new();
+                obj.insert(
+                    "_user_response".to_string(),
+                    serde_json::Value::String(response.to_string()),
+                );
+                obj.insert("_original_args".to_string(), value);
+                value = serde_json::Value::Object(obj);
+            }
+            serde_json::to_string(&value).unwrap_or_else(|_| args_json.to_string())
+        }
+        None => {
+            let mut obj = serde_json::Map::new();
+            obj.insert(
+                "_user_response".to_string(),
+                serde_json::Value::String(response.to_string()),
+            );
+            obj.insert(
+                "_original_args".to_string(),
+                serde_json::Value::String(args_json.to_string()),
+            );
+            serde_json::to_string(&serde_json::Value::Object(obj))
+                .unwrap_or_else(|_| args_json.to_string())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inject_into_object() {
+        let out = inject_user_response(r#"{"a":1}"#, "hi");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["_user_response"], "hi");
+    }
+
+    #[test]
+    fn inject_into_invalid_json() {
+        let out = inject_user_response("not-json", "hi");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["_user_response"], "hi");
+        assert_eq!(v["_original_args"], "not-json");
+    }
+
+    #[test]
+    fn inject_into_non_object_json() {
+        let out = inject_user_response("[1,2,3]", "hi");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["_user_response"], "hi");
+        assert_eq!(v["_original_args"], serde_json::json!([1, 2, 3]));
+    }
 }
