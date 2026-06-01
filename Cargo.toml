@@ -76,3 +76,11 @@ panic = "abort"
 inherits = "release"
 opt-level = "s"
 strip = "debuginfo"
+
+# Git hooks installed by `cargo-husky` on the first `cargo build`.
+# Hooks live under `.cargo-husky/hooks/` and are auto-installed for the
+# workspace, so every contributor gets them with no manual setup.
+# The actual dev-dep lives on a host crate (ene-core) because virtual
+# workspace manifests cannot carry `[dev-dependencies]`.
+[workspace.metadata.cargo-husky]
+run-for-all = true

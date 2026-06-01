@@ -245,7 +245,13 @@ async fn test_ipc_with_real_host() {
         "Expected question in tools, got: {:?}",
         names
     );
-    for name in &["todo_list", "todo_add", "todo_update", "todo_complete", "todo_delete"] {
+    for name in &[
+        "todo_list",
+        "todo_add",
+        "todo_update",
+        "todo_complete",
+        "todo_delete",
+    ] {
         assert!(
             names.contains(name),
             "Expected {name} in tools, got: {:?}",

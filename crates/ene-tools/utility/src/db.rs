@@ -163,8 +163,7 @@ impl TodoDb {
             .load(conn)?;
 
         let items: Vec<TodoItem> = rows.into_iter().map(TodoItem::from).collect();
-        self.cache
-            .insert(session_id.to_string(), items.clone());
+        self.cache.insert(session_id.to_string(), items.clone());
         Ok(items)
     }
 
@@ -367,14 +366,12 @@ impl TodoDb {
             all_ids.extend(children);
         }
 
-        diesel::update(
-            todo_items::table.filter(todo_items::id.eq_any(&all_ids)),
-        )
-        .set((
-            todo_items::status.eq("completed"),
-            todo_items::updated_at.eq(&now),
-        ))
-        .execute(conn)?;
+        diesel::update(todo_items::table.filter(todo_items::id.eq_any(&all_ids)))
+            .set((
+                todo_items::status.eq("completed"),
+                todo_items::updated_at.eq(&now),
+            ))
+            .execute(conn)?;
         drop(guard);
 
         self.invalidate_cache();
@@ -573,9 +570,7 @@ mod tests {
         assert_eq!(updated.parent_id, Some(p2.id));
 
         // Detach.
-        let updated = db
-            .update(c.id, None, None, None, Some(None))
-            .unwrap();
+        let updated = db.update(c.id, None, None, None, Some(None)).unwrap();
         assert!(updated.parent_id.is_none());
     }
 
