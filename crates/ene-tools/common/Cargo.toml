@@ -7,7 +7,9 @@ description = "Shared utilities for tool crates — HTML-to-Markdown conversion 
 [dependencies]
 htmd = "0.5"
 scraper = "0.27"
+ego-tree = "0.11"
 regex = { workspace = true }
 serde = { workspace = true }
+async-trait = { workspace = true }
 ene-tool-proto = { workspace = true }
 ene-common = { workspace = true }
