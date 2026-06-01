@@ -2,7 +2,6 @@
 
 ## Environment Setup
 - **Linux**: Use `direnv + flake`. Run `direnv allow` in the root. The flake provides Rust nightly, OpenSSL, mold, clang, GTK3, Wayland, Chromium, vulkan, and all native deps.
-- **Non-interactive shell**: Use `direnv exec . <command>` to run commands inside the flake environment without sourcing `.envrc` (e.g., `direnv exec . cargo build --workspace`).
 - **`.envrc`**: Runs `use flake` then loads `.env` for API tokens.
 - **`.env`**: Copy from `.env.example`, set `API_TOKEN` for OpenAI-compatible LLM access.
 - **Toolchain**: `nightly` (see `rust-toolchain.toml`).
