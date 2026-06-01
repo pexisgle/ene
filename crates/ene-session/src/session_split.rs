@@ -1,10 +1,10 @@
-use ene_provider::Role;
 use crate::error::EneSessionError;
 use crate::types::{CardName, SessionId};
 use chrono::{DateTime, Utc};
 use ene_memory as summarizer;
 use ene_memory::{KeyFact, MemoryStore};
 use ene_provider::EmbeddingProvider;
+use ene_provider::Role;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -242,11 +242,15 @@ pub async fn execute_split(
                 Role::Assistant => "assistant",
                 _ => "system",
             };
-            if let Err(e) = store_clone.insert_log(&session_id_clone, &card_name_clone, role_str, content) {
+            if let Err(e) =
+                store_clone.insert_log(&session_id_clone, &card_name_clone, role_str, content)
+            {
                 tracing::error!("[Session] Failed to save log: {}", e);
             }
         }
-        store_clone.get_all_keyfacts(&card_name_clone).unwrap_or_default()
+        store_clone
+            .get_all_keyfacts(&card_name_clone)
+            .unwrap_or_default()
     })
     .await
     .unwrap_or_default();

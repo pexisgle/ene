@@ -45,15 +45,18 @@ pub use ene_provider::ProviderConfig;
 pub use ene_memory::MemoryConfig;
 
 // ── Session types ──
-/// Character card name (re-exported from `ene-session`).
+/// Truncate text utility (re-exported from `ene-common`).
 #[doc(no_inline)]
-pub use ene_session::CardName;
+pub use ene_common::Truncate;
 /// Character card type (re-exported from `ene-config`).
 #[doc(no_inline)]
 pub use ene_config::CharacterCardV3;
 /// Role enum for conversation history (re-exported from `ene-provider`).
 #[doc(no_inline)]
 pub use ene_provider::Role;
+/// Character card name (re-exported from `ene-session`).
+#[doc(no_inline)]
+pub use ene_session::CardName;
 /// Session configuration (re-exported from `ene-session`).
 #[doc(no_inline)]
 pub use ene_session::SessionConfig;
@@ -66,9 +69,6 @@ pub use ene_session::SplitReason;
 /// Session split result (re-exported from `ene-session`).
 #[doc(no_inline)]
 pub use ene_session::SplitResult;
-/// Truncate text utility (re-exported from `ene-common`).
-#[doc(no_inline)]
-pub use ene_common::Truncate;
 /// Extract emotion name from special token (re-exported from `ene-session`).
 #[doc(no_inline)]
 pub use ene_session::extract_emotion_from_token;

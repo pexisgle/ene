@@ -20,7 +20,10 @@ impl CliCommand for ConfigCommand {
     }
 
     async fn execute(&self, _arg: &str, ctx: &mut AppContext) -> Result<(), String> {
-        let snapshot = ctx.handle.get_snapshot().await
+        let snapshot = ctx
+            .handle
+            .get_snapshot()
+            .await
             .map_err(|e| format!("Failed to get actor state: {}", e))?;
 
         let mem_config = snapshot

@@ -101,11 +101,7 @@ fn kwin_load_and_run_qdbus(js: &str) -> Result<String, ToolError> {
 
     let script_obj = format!("/Scripting/Script{}", script_id);
     let run_output = std::process::Command::new("qdbus")
-        .args([
-            "org.kde.KWin",
-            &script_obj,
-            "org.kde.kwin.Script.run",
-        ])
+        .args(["org.kde.KWin", &script_obj, "org.kde.kwin.Script.run"])
         .output()
         .map_err(|e| ToolError::ExecutionFailed {
             message: format!("Failed to run qdbus run: {e}"),
@@ -114,11 +110,7 @@ fn kwin_load_and_run_qdbus(js: &str) -> Result<String, ToolError> {
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     let _ = std::process::Command::new("qdbus")
-        .args([
-            "org.kde.KWin",
-            &script_obj,
-            "org.kde.kwin.Script.stop",
-        ])
+        .args(["org.kde.KWin", &script_obj, "org.kde.kwin.Script.stop"])
         .output();
 
     let _ = std::process::Command::new("qdbus")

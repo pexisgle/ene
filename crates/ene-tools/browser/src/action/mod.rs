@@ -43,9 +43,7 @@ pub async fn browser_exec(
         }
         "wait" => interact::wait(wait_ms.unwrap_or(1000)).await,
         "screenshot" => screenshot::screenshot(page).await,
-        "get_content" => {
-            content::get_content(page, format, extract, trim.unwrap_or(true)).await
-        }
+        "get_content" => content::get_content(page, format, extract, trim.unwrap_or(true)).await,
         "scroll" => {
             let x = scroll_x.unwrap_or(0);
             let y = scroll_y.unwrap_or(0);

@@ -23,7 +23,10 @@ impl CliCommand for SessionCommand {
         let parts: Vec<&str> = arg.splitn(2, ' ').collect();
         let subcmd = parts.first().copied().unwrap_or("");
 
-        let snapshot = ctx.handle.get_snapshot().await
+        let snapshot = ctx
+            .handle
+            .get_snapshot()
+            .await
             .map_err(|e| format!("Failed to get actor state: {}", e))?;
 
         match subcmd {
@@ -33,7 +36,10 @@ impl CliCommand for SessionCommand {
             }
             "summaries" => handle_summaries(&snapshot),
             _ => {
-                println!("{}", style::warning("Usage: /session <info|split|summaries>"));
+                println!(
+                    "{}",
+                    style::warning("Usage: /session <info|split|summaries>")
+                );
             }
         }
         Ok(())

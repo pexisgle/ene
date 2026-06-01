@@ -1,4 +1,3 @@
-use ene_provider::Role;
 use crate::error::EneSessionError;
 use crate::session_split::{
     PendingSplitTask, SplitResult, SplitTaskInput, generate_session_id, poll_split_result,
@@ -8,6 +7,7 @@ use crate::types::{CardName, SessionId};
 use chrono::{DateTime, Utc};
 use ene_config::{CharacterCardV3, EneConfig, ResolvedExpression, resolve_expressions};
 use ene_provider::EmbeddingProvider;
+use ene_provider::Role;
 
 use ene_memory::MemoryStore;
 use std::collections::HashMap;

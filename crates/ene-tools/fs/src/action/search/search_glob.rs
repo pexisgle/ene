@@ -1,5 +1,5 @@
-use crate::sandbox::SandboxConfig;
 use super::MAX_RESULTS;
+use crate::sandbox::SandboxConfig;
 use ene_tool_proto::ToolError;
 use std::path::Path;
 

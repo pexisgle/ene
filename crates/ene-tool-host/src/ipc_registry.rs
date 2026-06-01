@@ -1,7 +1,7 @@
 use crate::error::ToolError;
-use ene_tool_proto::ToolDefinition;
 use crate::tools::registry::ToolRegistry;
 use async_trait::async_trait;
+use ene_tool_proto::ToolDefinition;
 use ene_tool_proto::transport::IpcStream;
 use ene_tool_proto::{
     IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, SandboxConfigData, read_ipc_response,

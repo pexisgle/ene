@@ -22,28 +22,26 @@ impl CliCommand for ToolCommand {
     async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), String> {
         let subparts: Vec<&str> = arg.splitn(3, ' ').collect();
         match subparts.first().copied() {
-            Some("list") => {
-                match ctx.handle.list_tools().await {
-                    Ok(tools) => {
-                        if tools.is_empty() {
-                            println!("No tools registered.");
-                        } else {
-                            println!("{}", style::success("Available tools:"));
-                            for tool in tools {
-                                let desc = if tool.description.len() > 60 {
-                                    format!("{}...", &tool.description[..57])
-                                } else {
-                                    tool.description.clone()
-                                };
-                                println!("  - {}: {}", style::header(&tool.name), desc);
-                            }
+            Some("list") => match ctx.handle.list_tools().await {
+                Ok(tools) => {
+                    if tools.is_empty() {
+                        println!("No tools registered.");
+                    } else {
+                        println!("{}", style::success("Available tools:"));
+                        for tool in tools {
+                            let desc = if tool.description.len() > 60 {
+                                format!("{}...", &tool.description[..57])
+                            } else {
+                                tool.description.clone()
+                            };
+                            println!("  - {}: {}", style::header(&tool.name), desc);
                         }
                     }
-                    Err(e) => {
-                        println!("{}", style::error(&format!("Failed to list tools: {}", e)));
-                    }
                 }
-            }
+                Err(e) => {
+                    println!("{}", style::error(&format!("Failed to list tools: {}", e)));
+                }
+            },
             Some("help") => {
                 if subparts.len() >= 2 {
                     let name = subparts[1];
@@ -53,13 +51,20 @@ impl CliCommand for ToolCommand {
                                 println!("{}", style::success(&format!("Tool: {}", tool.name)));
                                 println!("Description: {}", tool.description);
                                 println!("Parameters Schema:");
-                                println!("{}", serde_json::to_string_pretty(&tool.parameters).unwrap_or_default());
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&tool.parameters)
+                                        .unwrap_or_default()
+                                );
                             } else {
                                 println!("{}", style::error(&format!("Tool not found: {}", name)));
                             }
                         }
                         Err(e) => {
-                            println!("{}", style::error(&format!("Failed to retrieve tools: {}", e)));
+                            println!(
+                                "{}",
+                                style::error(&format!("Failed to retrieve tools: {}", e))
+                            );
                         }
                     }
                 } else {
@@ -71,7 +76,11 @@ impl CliCommand for ToolCommand {
                     let name = subparts[1];
                     let arguments = subparts[2];
                     println!("Calling tool {} with arguments: {}", name, arguments);
-                    match ctx.handle.call_tool(name.to_string(), arguments.to_string()).await {
+                    match ctx
+                        .handle
+                        .call_tool(name.to_string(), arguments.to_string())
+                        .await
+                    {
                         Ok(res) => {
                             println!("{}", style::success("Tool execution result:"));
                             println!("{}", res);
@@ -83,7 +92,11 @@ impl CliCommand for ToolCommand {
                 } else if subparts.len() == 2 {
                     let name = subparts[1];
                     println!("Calling tool {} with empty arguments", name);
-                    match ctx.handle.call_tool(name.to_string(), "{}".to_string()).await {
+                    match ctx
+                        .handle
+                        .call_tool(name.to_string(), "{}".to_string())
+                        .await
+                    {
                         Ok(res) => {
                             println!("{}", style::success("Tool execution result:"));
                             println!("{}", res);
@@ -97,7 +110,12 @@ impl CliCommand for ToolCommand {
                 }
             }
             _ => {
-                println!("{}", style::warning("Usage: /tool list | /tool help <name> | /tool call <name> <json>"));
+                println!(
+                    "{}",
+                    style::warning(
+                        "Usage: /tool list | /tool help <name> | /tool call <name> <json>"
+                    )
+                );
             }
         }
         Ok(())
