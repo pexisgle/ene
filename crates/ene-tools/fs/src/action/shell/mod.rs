@@ -2,7 +2,7 @@ mod shell_platform;
 
 use self::shell_platform::execute_shell_command;
 
-use crate::sandbox::SandboxConfig;
+use crate::utils::sandbox::SandboxConfig;
 use ene_tool_proto::ToolDefinition;
 use ene_tool_proto::ToolError;
 use ene_tools_common::truncate::Truncate;
@@ -117,4 +117,58 @@ pub async fn shell_exec(
     let final_output = format!("# {}\n{}", description, output_text);
 
     Ok(final_output)
+}
+
+/// Filesystem tool action to execute shell commands.
+pub struct ShellAction {
+    sandbox:
+        std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<crate::utils::sandbox::Sandbox>>>>,
+}
+
+impl ShellAction {
+    /// Creates a new `ShellAction` with the shared sandbox reference.
+    pub fn new(
+        sandbox: std::sync::Arc<
+            std::sync::RwLock<Option<std::sync::Arc<crate::utils::sandbox::Sandbox>>>,
+        >,
+    ) -> Self {
+        Self { sandbox }
+    }
+}
+
+#[async_trait::async_trait]
+impl ene_tools_common::ToolAction for ShellAction {
+    fn definition(&self) -> ToolDefinition {
+        tool_definition()
+    }
+
+    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
+        let sandbox = {
+            let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
+            guard.clone().unwrap_or_else(|| {
+                std::sync::Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
+            })
+        };
+
+        let args: serde_json::Value =
+            serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
+                message: format!("Failed to parse shell arguments: {e}"),
+            })?;
+        let command = args["command"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidArguments {
+                message: "Missing 'command' field".to_string(),
+            })?;
+        let description = args["description"].as_str().unwrap_or("");
+        let timeout = args["timeout"].as_u64();
+        let workdir = args["workdir"].as_str();
+
+        sandbox.check_permission(
+            crate::utils::permission::DestructiveAction::ShellCommand,
+            command,
+            description,
+        )?;
+
+        shell_exec(command, description, timeout, workdir, sandbox.config()).await
+    }
 }

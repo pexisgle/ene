@@ -5,10 +5,8 @@
 #![warn(missing_docs)]
 
 mod action;
-mod chrome;
-mod extract;
 mod provider;
-mod session;
+mod utils;
 
 use ene_tool_proto::run_tool_server;
 

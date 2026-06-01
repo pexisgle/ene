@@ -1,4 +1,4 @@
-use crate::permission::{DestructiveAction, PermissionGate};
+use crate::utils::permission::{DestructiveAction, PermissionGate};
 use ene_tool_proto::ToolError;
 use std::path::{Path, PathBuf};
 
@@ -137,7 +137,9 @@ impl SandboxConfig {
             Ok(()) => Ok(()),
             Err(req) => {
                 let action_str = match req.level {
-                    crate::permission::PermissionLevel::RequiresApproval { action, .. } => action,
+                    crate::utils::permission::PermissionLevel::RequiresApproval {
+                        action, ..
+                    } => action,
                     _ => format!("{:?}", action),
                 };
                 Err(ToolError::PermissionRequired {
@@ -188,7 +190,7 @@ impl From<ene_tool_proto::SandboxConfigData> for SandboxConfig {
 /// operation tracking (track_xxx) and Undo execution are bundled together
 pub struct Sandbox {
     config: SandboxConfig,
-    undo: crate::undo_manager::UndoManager,
+    undo: crate::utils::undo_manager::UndoManager,
     session_id: std::sync::RwLock<String>,
     approved_requests: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
     allowed_patterns:
@@ -197,7 +199,7 @@ pub struct Sandbox {
 
 impl Sandbox {
     pub fn new(config: SandboxConfig) -> Self {
-        let undo = crate::undo_manager::UndoManager::new();
+        let undo = crate::utils::undo_manager::UndoManager::new();
         if let Some(ref path) = config.undo_db_path {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
@@ -223,7 +225,7 @@ impl Sandbox {
         &self.config
     }
 
-    pub fn undo_manager(&self) -> &crate::undo_manager::UndoManager {
+    pub fn undo_manager(&self) -> &crate::utils::undo_manager::UndoManager {
         &self.undo
     }
 
@@ -338,10 +340,10 @@ impl Sandbox {
     }
 
     /// Records a patch application (multiple file operations in one Undo entry)
-    pub fn track_patch(&self, operations: Vec<crate::undo_manager::UndoOperation>) {
+    pub fn track_patch(&self, operations: Vec<crate::utils::undo_manager::UndoOperation>) {
         self.undo.push(
             &self.session_id(),
-            crate::undo_manager::UndoEntry::new("patch", operations),
+            crate::utils::undo_manager::UndoEntry::new("patch", operations),
         );
     }
 

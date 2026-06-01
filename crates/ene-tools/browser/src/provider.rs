@@ -1,43 +1,10 @@
 use crate::action;
 use async_trait::async_trait;
 use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError, ToolProvider};
-use serde::Deserialize;
+use ene_tools_common::ToolAction;
+use std::collections::HashMap;
 
-pub struct BrowserToolProvider {
-    store: crate::session::BrowserSessionStore,
-}
-
-impl BrowserToolProvider {
-    pub fn new() -> Self {
-        Self {
-            store: crate::session::BrowserSessionStore::new(),
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct BrowserArgs {
-    action: String,
-    #[serde(default)]
-    url: Option<String>,
-    #[serde(default)]
-    selector: Option<String>,
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    wait_ms: Option<u64>,
-    #[serde(default)]
-    scroll_x: Option<i32>,
-    #[serde(default)]
-    scroll_y: Option<i32>,
-    #[serde(default)]
-    format: Option<String>,
-    #[serde(default)]
-    extract: Option<String>,
-    #[serde(default)]
-    trim: Option<bool>,
-}
-
+/// Returns the `ToolDefinition` for the browser tool.
 pub fn tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "browser".to_string(),
@@ -99,66 +66,107 @@ pub fn tool_definition() -> ToolDefinition {
     }
 }
 
+use std::sync::Arc;
+
+/// Dynamic ToolAction implementation for the browser tool.
+pub struct BrowserAction {
+    _store: Arc<crate::utils::session::BrowserSessionStore>,
+    sub_actions: HashMap<String, Box<dyn ToolAction>>,
+}
+
+impl BrowserAction {
+    /// Creates a new `BrowserAction` and registers all sub-actions.
+    pub fn new(store: Arc<crate::utils::session::BrowserSessionStore>) -> Self {
+        let actions: Vec<Box<dyn ToolAction>> = vec![
+            Box::new(action::NavigateSubAction::new(store.clone())),
+            Box::new(action::ClickSubAction::new(store.clone())),
+            Box::new(action::TypeSubAction::new(store.clone())),
+            Box::new(action::WaitSubAction::new(store.clone())),
+            Box::new(action::ScreenshotSubAction::new(store.clone())),
+            Box::new(action::GetContentSubAction::new(store.clone())),
+            Box::new(action::ScrollSubAction::new(store.clone())),
+            Box::new(action::CloseSubAction::new(store.clone())),
+        ];
+
+        let mut sub_actions = HashMap::new();
+        for act in actions {
+            sub_actions.insert(act.definition().name.clone(), act);
+        }
+
+        Self {
+            _store: store,
+            sub_actions,
+        }
+    }
+}
+
 #[async_trait]
-impl ToolProvider for BrowserToolProvider {
-    fn list_tools(&self) -> Vec<ToolDefinition> {
-        vec![tool_definition()]
+impl ToolAction for BrowserAction {
+    fn definition(&self) -> ToolDefinition {
+        tool_definition()
     }
 
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
-        if name != "browser" {
-            return Err(ToolError::NotFound {
-                tool_name: name.to_string(),
-            });
-        }
-        let args: BrowserArgs =
+    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
+        let args: serde_json::Value =
             serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
                 message: format!("Invalid arguments for browser: {e}"),
             })?;
+        let sub_action_name =
+            args["action"]
+                .as_str()
+                .ok_or_else(|| ToolError::InvalidArguments {
+                    message: "Missing 'action' field in browser arguments".to_string(),
+                })?;
 
-        let chrome_path =
-            crate::chrome::find_chrome_executable().ok_or_else(|| ToolError::ExecutionFailed {
-                message:
-                    "No Chrome/Chromium browser found. Please install Google Chrome or Chromium, "
-                        .to_string()
-                        + "or set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH environment variable.",
-            })?;
+        if let Some(sub_act) = self.sub_actions.get(sub_action_name) {
+            sub_act.execute(arguments).await
+        } else {
+            Err(ToolError::InvalidArguments {
+                message: format!("Unknown browser action: {sub_action_name}"),
+            })
+        }
+    }
+}
 
-        let session = self.store.get_or_create("default", chrome_path).await?;
-        let session_guard = session.lock().await;
-        let page = &session_guard.page;
+/// Browser tool provider managing Chromium automation.
+pub struct BrowserToolProvider {
+    actions: Vec<Box<dyn ToolAction>>,
+}
 
-        let result = match args.action.as_str() {
-            "close" => {
-                drop(session_guard);
-                self.store.close("default");
-                "Browser session closed.".to_string()
-            }
-            action => {
-                let result = action::browser_exec(
-                    action,
-                    page,
-                    args.url.as_deref(),
-                    args.selector.as_deref(),
-                    args.text.as_deref(),
-                    args.wait_ms,
-                    args.scroll_x,
-                    args.scroll_y,
-                    args.format.as_deref(),
-                    args.extract.as_deref(),
-                    args.trim,
-                )
-                .await?;
-                result
-            }
-        };
+impl BrowserToolProvider {
+    /// Creates a new `BrowserToolProvider` and registers the browser action.
+    pub fn new() -> Self {
+        let store = Arc::new(crate::utils::session::BrowserSessionStore::new());
+        Self {
+            actions: vec![Box::new(BrowserAction::new(store))],
+        }
+    }
+}
 
-        Ok(result)
+impl Default for BrowserToolProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl ToolProvider for BrowserToolProvider {
+    fn list_tools(&self) -> Vec<ToolDefinition> {
+        self.actions.iter().map(|a| a.definition()).collect()
     }
 
-    fn set_session_id(&self, session_id: &str) {
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
+        for action in &self.actions {
+            if action.definition().name == name {
+                return action.execute(arguments).await;
+            }
+        }
+        Err(ToolError::NotFound {
+            tool_name: name.to_string(),
+        })
+    }
+
+    fn set_session_id(&self, _session_id: &str) {
         // Browser sessions are managed by BrowserSessionStore internally
-        // session_id could be used to namespace sessions in future
-        let _ = session_id;
     }
 }

@@ -1,0 +1,41 @@
+use enigo::Key;
+
+/// Shared helper to parse key names into Enigo Key enums.
+pub fn parse_key(name: &str) -> Option<Key> {
+    match name.to_lowercase().as_str() {
+        "ctrl" | "control" => Some(Key::Control),
+        "shift" => Some(Key::Shift),
+        "alt" | "option" => Some(Key::Alt),
+        "meta" | "super" | "cmd" | "command" | "win" | "windows" => Some(Key::Meta),
+        "return" | "enter" => Some(Key::Return),
+        "escape" | "esc" => Some(Key::Escape),
+        "tab" => Some(Key::Tab),
+        "space" => Some(Key::Space),
+        "backspace" => Some(Key::Backspace),
+        "delete" | "del" => Some(Key::Delete),
+        "home" => Some(Key::Home),
+        "end" => Some(Key::End),
+        "pageup" | "page_up" => Some(Key::PageUp),
+        "pagedown" | "page_down" => Some(Key::PageDown),
+        "up" | "arrow_up" => Some(Key::UpArrow),
+        "down" | "arrow_down" => Some(Key::DownArrow),
+        "left" | "arrow_left" => Some(Key::LeftArrow),
+        "right" | "arrow_right" => Some(Key::RightArrow),
+        "insert" | "ins" => Some(Key::Insert),
+        "capslock" | "caps_lock" => Some(Key::CapsLock),
+        "f1" => Some(Key::F1),
+        "f2" => Some(Key::F2),
+        "f3" => Some(Key::F3),
+        "f4" => Some(Key::F4),
+        "f5" => Some(Key::F5),
+        "f6" => Some(Key::F6),
+        "f7" => Some(Key::F7),
+        "f8" => Some(Key::F8),
+        "f9" => Some(Key::F9),
+        "f10" => Some(Key::F10),
+        "f11" => Some(Key::F11),
+        "f12" => Some(Key::F12),
+        s if s.len() == 1 => Some(Key::Unicode(s.chars().next().unwrap())),
+        _ => None,
+    }
+}

@@ -1,37 +1,7 @@
 use ene_tool_proto::ToolError;
 use image::DynamicImage;
 
-use super::resize_image;
-
-pub async fn capture_screen_portal(scale_percent: u32) -> Result<DynamicImage, ToolError> {
-    use ashpd::desktop::screenshot::Screenshot;
-
-    let response = Screenshot::request()
-        .interactive(false)
-        .modal(false)
-        .send()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Portal screenshot request failed: {e}"),
-        })?
-        .response()
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Portal screenshot response failed: {e}"),
-        })?;
-
-    let uri = response.uri();
-    let path = uri.as_str().strip_prefix("file://").unwrap_or(uri.as_str());
-
-    let image = image::open(path).map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Failed to open screenshot file: {e}"),
-    })?;
-
-    let _ = std::fs::remove_file(path);
-
-    Ok(resize_image(image, scale_percent))
-}
-
-pub async fn capture_window_portal(scale_percent: u32) -> Result<DynamicImage, ToolError> {
+pub(super) async fn capture_window_portal(scale_percent: u32) -> Result<DynamicImage, ToolError> {
     use ashpd::desktop::screencast::{
         CursorMode, Screencast, SelectSourcesOptions, SourceType, StartCastOptions,
     };
@@ -86,7 +56,7 @@ pub async fn capture_window_portal(scale_percent: u32) -> Result<DynamicImage, T
         .map_err(|e| ToolError::ExecutionFailed {
             message: format!("PipeWire task failed: {e}"),
         })?
-        .map(|img| resize_image(img, scale_percent))
+        .map(|img| crate::utils::image::resize_image(img, scale_percent))
 }
 
 fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {

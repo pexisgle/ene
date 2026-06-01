@@ -6,12 +6,8 @@
 #![warn(missing_docs)]
 
 mod action;
-mod filesystem;
-mod permission;
 mod provider;
-mod sandbox;
-mod schema;
-mod undo_manager;
+mod utils;
 
 use ene_tool_proto::run_tool_server;
 

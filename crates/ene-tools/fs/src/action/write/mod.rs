@@ -1,5 +1,5 @@
-use crate::sandbox::SandboxConfig;
-use crate::undo_manager::UndoManager;
+use crate::utils::sandbox::SandboxConfig;
+use crate::utils::undo_manager::UndoManager;
 use ene_tool_proto::ToolError;
 use std::path::Path;
 
@@ -58,4 +58,75 @@ pub async fn write(
     undo_manager.push_restore_file(session_id, "write", resolved.clone(), original);
 
     Ok("Wrote file successfully.".to_string())
+}
+
+use ene_tool_proto::ToolDefinition;
+use ene_tools_common::ToolAction;
+use std::sync::{Arc, RwLock};
+
+/// Filesystem sub-action to write a file.
+pub struct FsWriteSubAction {
+    sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>,
+}
+
+impl FsWriteSubAction {
+    /// Creates a new `FsWriteSubAction` with the shared sandbox reference.
+    pub fn new(sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>) -> Self {
+        Self { sandbox }
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolAction for FsWriteSubAction {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "write".to_string(),
+            description: "Writes a file".to_string(),
+            parameters: serde_json::json!({}),
+            category: None,
+            keywords: vec![],
+        }
+    }
+
+    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
+        let sandbox = {
+            let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
+            guard.clone().unwrap_or_else(|| {
+                Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
+            })
+        };
+        let session_id = sandbox.session_id();
+        let undo_manager = sandbox.undo_manager();
+
+        let args: serde_json::Value =
+            serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
+                message: format!("Failed to parse write arguments: {e}"),
+            })?;
+
+        let file_path = args["filePath"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidArguments {
+                message: "filePath is required for write".to_string(),
+            })?;
+        let content = args["content"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidArguments {
+                message: "content is required for write".to_string(),
+            })?;
+
+        sandbox.check_permission(
+            crate::utils::permission::DestructiveAction::FileOverwrite,
+            file_path,
+            "Writing/Overwriting file",
+        )?;
+
+        write(
+            Path::new(file_path),
+            content,
+            sandbox.config(),
+            undo_manager,
+            &session_id,
+        )
+        .await
+    }
 }

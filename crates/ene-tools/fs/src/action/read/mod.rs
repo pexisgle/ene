@@ -1,7 +1,7 @@
 mod read_binary;
 
 use self::read_binary::is_binary_file;
-use crate::sandbox::SandboxConfig;
+use crate::utils::sandbox::SandboxConfig;
 use ene_tool_proto::ToolError;
 use std::path::Path;
 
@@ -209,4 +209,56 @@ async fn read_directory(
     }
 
     Ok(output)
+}
+
+use ene_tool_proto::ToolDefinition;
+use ene_tools_common::ToolAction;
+use std::sync::{Arc, RwLock};
+
+/// Filesystem sub-action to read file or directory.
+pub struct FsReadSubAction {
+    sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>,
+}
+
+impl FsReadSubAction {
+    /// Creates a new `FsReadSubAction` with the shared sandbox reference.
+    pub fn new(sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>) -> Self {
+        Self { sandbox }
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolAction for FsReadSubAction {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "read".to_string(),
+            description: "Reads file or directory".to_string(),
+            parameters: serde_json::json!({}),
+            category: None,
+            keywords: vec![],
+        }
+    }
+
+    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
+        let sandbox = {
+            let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
+            guard.clone().unwrap_or_else(|| {
+                Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
+            })
+        };
+
+        let args: serde_json::Value =
+            serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
+                message: format!("Failed to parse read arguments: {e}"),
+            })?;
+
+        let file_path = args["filePath"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidArguments {
+                message: "filePath is required for read".to_string(),
+            })?;
+        let offset = args["offset"].as_u64().map(|v| v as usize);
+        let limit = args["limit"].as_u64().map(|v| v as usize);
+        read(Path::new(file_path), offset, limit, sandbox.config()).await
+    }
 }

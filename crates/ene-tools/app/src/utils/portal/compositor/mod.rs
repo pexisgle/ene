@@ -7,14 +7,14 @@ use ene_tool_proto::ToolError;
 
 // ==================== Compositor trait ====================
 
-trait WlCompositor {
+pub(crate) trait WlCompositor {
     fn list_windows(&self) -> Result<String, ToolError>;
     fn focus_window(&self, title: &str) -> Result<String, ToolError>;
 }
 
 // ==================== Detection ====================
 
-fn detect() -> Option<Box<dyn WlCompositor>> {
+pub(crate) fn dispatch() -> Option<Box<dyn WlCompositor>> {
     if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
         return Some(Box::new(hyprland::Hyprland));
     }
@@ -34,42 +34,6 @@ fn detect() -> Option<Box<dyn WlCompositor>> {
         return Some(Box::new(kde::Kde));
     }
     None
-}
-
-// ==================== Public dispatchers ====================
-
-#[cfg(target_os = "linux")]
-pub fn list_windows_wayland() -> Result<String, ToolError> {
-    let compositor = detect().ok_or_else(|| ToolError::ExecutionFailed {
-        message:
-            "Window listing not supported on this Wayland compositor. Supported: Hyprland, Sway, GNOME, KDE."
-                .to_string(),
-    })?;
-    compositor.list_windows()
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn list_windows_wayland() -> Result<String, ToolError> {
-    Err(ToolError::ExecutionFailed {
-        message: "Wayland not available on this platform".to_string(),
-    })
-}
-
-#[cfg(target_os = "linux")]
-pub fn focus_window_wayland(title: &str) -> Result<String, ToolError> {
-    let compositor = detect().ok_or_else(|| ToolError::ExecutionFailed {
-        message:
-            "Window focusing not supported on this Wayland compositor. Supported: Hyprland, Sway, GNOME, KDE."
-                .to_string(),
-    })?;
-    compositor.focus_window(title)
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn focus_window_wayland(_title: &str) -> Result<String, ToolError> {
-    Err(ToolError::ExecutionFailed {
-        message: "Wayland not available on this platform".to_string(),
-    })
 }
 
 // ==================== Shared helpers (gdbus) ====================

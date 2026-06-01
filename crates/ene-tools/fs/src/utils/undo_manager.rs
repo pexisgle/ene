@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use uuid::Uuid;
 
-use crate::schema::{undo_entries, undo_operations};
+use crate::utils::schema::{undo_entries, undo_operations};
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 

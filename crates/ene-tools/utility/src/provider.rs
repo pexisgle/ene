@@ -1,71 +1,59 @@
 use crate::action;
 use async_trait::async_trait;
 use ene_tool_proto::{ToolDefinition, ToolError, ToolProvider};
+use ene_tools_common::ToolAction;
 use std::sync::{Arc, Mutex};
 
 /// Built-in utility tool provider.
 ///
 /// Exposes four tools: `question`, `todo`, `get_current_time`, and `get_system_info`.
-/// The `todo` store is session-scoped via a `DashMap`.
+/// Internally uses a dynamic list of actions implementing `ToolAction`.
 pub struct UtilityToolProvider {
-    todo_store: Arc<action::TodoStore>,
+    actions: Vec<Box<dyn ToolAction>>,
     session_id: Arc<Mutex<String>>,
 }
 
 impl UtilityToolProvider {
-    /// Creates a new `UtilityToolProvider` with an empty todo store.
+    /// Creates a new `UtilityToolProvider` and registers all utility actions.
     pub fn new() -> Self {
+        let todo_store = Arc::new(action::TodoStore::new());
+        let session_id = Arc::new(Mutex::new("default".to_string()));
+
+        let actions: Vec<Box<dyn ToolAction>> = vec![
+            Box::new(action::AskQuestion),
+            Box::new(action::UpdateTodo::new(todo_store, session_id.clone())),
+            Box::new(action::GetCurrentTime),
+            Box::new(action::GetSystemInfo),
+        ];
+
         Self {
-            todo_store: Arc::new(action::TodoStore::new()),
-            session_id: Arc::new(Mutex::new("default".to_string())),
+            actions,
+            session_id,
         }
     }
+}
 
-    fn current_session_id(&self) -> String {
-        self.session_id
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+impl Default for UtilityToolProvider {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[async_trait]
 impl ToolProvider for UtilityToolProvider {
     fn list_tools(&self) -> Vec<ToolDefinition> {
-        vec![
-            action::question_definition(),
-            action::todo_definition(),
-            action::time_definition(),
-            action::system_info_definition(),
-        ]
+        self.actions.iter().map(|a| a.definition()).collect()
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
-        match name {
-            "question" => {
-                let args: QuestionArgs =
-                    serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid arguments for question: {e}"),
-                    })?;
-                action::question(args.questions)
+        for action in &self.actions {
+            if action.definition().name == name {
+                return action.execute(arguments).await;
             }
-            "todo" => {
-                let args: TodoArgs =
-                    serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid arguments for todo: {e}"),
-                    })?;
-                Ok(action::update_todos(
-                    &self.todo_store,
-                    &self.current_session_id(),
-                    args.todos,
-                ))
-            }
-            "get_current_time" => action::get_current_time(),
-            "get_system_info" => action::get_system_info(),
-            _ => Err(ToolError::NotFound {
-                tool_name: name.to_string(),
-            }),
         }
+        Err(ToolError::NotFound {
+            tool_name: name.to_string(),
+        })
     }
 
     fn set_session_id(&self, session_id: &str) {
@@ -73,14 +61,4 @@ impl ToolProvider for UtilityToolProvider {
             *id = session_id.to_string();
         }
     }
-}
-
-#[derive(serde::Deserialize)]
-struct QuestionArgs {
-    questions: Vec<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct TodoArgs {
-    todos: Vec<action::TodoItem>,
 }

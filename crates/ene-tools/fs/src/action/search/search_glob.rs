@@ -1,5 +1,5 @@
 use super::MAX_RESULTS;
-use crate::sandbox::SandboxConfig;
+use crate::utils::sandbox::SandboxConfig;
 use ene_tool_proto::ToolError;
 use std::path::Path;
 
@@ -63,4 +63,55 @@ pub async fn glob_search(
     }
 
     Ok(output.join("\n"))
+}
+
+use ene_tool_proto::ToolDefinition;
+use ene_tools_common::ToolAction;
+use std::sync::{Arc, RwLock};
+
+/// Filesystem sub-action to execute glob search.
+pub struct FsGlobSubAction {
+    sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>,
+}
+
+impl FsGlobSubAction {
+    /// Creates a new `FsGlobSubAction` with the shared sandbox reference.
+    pub fn new(sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>) -> Self {
+        Self { sandbox }
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolAction for FsGlobSubAction {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "glob".to_string(),
+            description: "Lists files matching a pattern".to_string(),
+            parameters: serde_json::json!({}),
+            category: None,
+            keywords: vec![],
+        }
+    }
+
+    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
+        let sandbox = {
+            let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
+            guard.clone().unwrap_or_else(|| {
+                Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
+            })
+        };
+
+        let args: serde_json::Value =
+            serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
+                message: format!("Failed to parse glob arguments: {e}"),
+            })?;
+
+        let pattern = args["pattern"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidArguments {
+                message: "pattern is required for glob".to_string(),
+            })?;
+        let path = args["path"].as_str();
+        glob_search(pattern, path, sandbox.config()).await
+    }
 }
