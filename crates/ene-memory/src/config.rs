@@ -23,7 +23,11 @@ ene_config::define_config!(
         /// Tool names that are always included (kept even after RAG filtering)
         pub tool_rag_always_include: Vec<String> = vec![
             "question".to_string(),
-            "todo".to_string(),
+            "todo_list".to_string(),
+            "todo_add".to_string(),
+            "todo_update".to_string(),
+            "todo_complete".to_string(),
+            "todo_delete".to_string(),
             "get_current_time".to_string(),
         ],
 

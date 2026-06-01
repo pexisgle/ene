@@ -4,6 +4,11 @@
 //! question prompting, todo list management, time, and system info.
 #![warn(missing_docs)]
 
+/// SQLite-backed todo storage (model + cache + DB handle).
+mod db;
+/// Diesel schema mirroring the `migrations/` directory.
+mod schema;
+
 /// Action modules for each tool.
 pub mod action;
 /// Tool lifecycle and provider integration.

@@ -3994,11 +3994,16 @@ dependencies = [
  "async-trait",
  "chrono",
  "dashmap",
+ "diesel",
+ "diesel_migrations",
  "ene-tool-proto",
  "ene-tools-common",
+ "libsqlite3-sys",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
