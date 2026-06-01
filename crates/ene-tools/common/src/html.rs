@@ -2,8 +2,8 @@ use ego_tree::NodeId;
 use scraper::{ElementRef, Html, Node, Selector};
 
 const SKIP_TAGS: &[&str] = &[
-    "script", "style", "noscript", "iframe", "svg", "nav", "header", "footer", "aside",
-    "template", "code", "canvas", "audio", "video", "map", "object", "embed",
+    "script", "style", "noscript", "iframe", "svg", "nav", "header", "footer", "aside", "template",
+    "code", "canvas", "audio", "video", "map", "object", "embed",
 ];
 
 /// Converts raw HTML to Markdown text.

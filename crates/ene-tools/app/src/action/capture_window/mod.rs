@@ -77,7 +77,9 @@ impl ToolAction for CaptureWindowAction {
                 message: format!("Invalid arguments: {e}"),
             })?;
 
-        let scale_percent = args.scale_percent.unwrap_or(crate::config::DEFAULT_SCALE_PERCENT);
+        let scale_percent = args
+            .scale_percent
+            .unwrap_or(crate::config::DEFAULT_SCALE_PERCENT);
         let title = args.window_title.clone();
 
         let image = if crate::utils::portal::detect_wayland() {
