@@ -4,7 +4,6 @@
 #![warn(missing_docs)]
 
 mod action;
-mod config;
 mod provider;
 
 use ene_tool_proto::run_tool_server;

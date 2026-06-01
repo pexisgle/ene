@@ -1,4 +1,4 @@
-use crate::sandbox::SandboxConfig;
+use crate::utils::sandbox::SandboxConfig;
 
 /// Permission level
 #[derive(Debug, Clone, PartialEq, Eq)]

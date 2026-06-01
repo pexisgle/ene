@@ -1,8 +1,8 @@
 mod patch_parser;
 
 use self::patch_parser::PatchOperation;
-use crate::sandbox::SandboxConfig;
-use crate::undo_manager::{UndoEntry, UndoManager};
+use crate::utils::sandbox::SandboxConfig;
+use crate::utils::undo_manager::{UndoEntry, UndoManager};
 use ene_tool_proto::ToolError;
 use std::path::Path;
 
@@ -221,4 +221,63 @@ pub async fn apply_patch(
         "Patch applied successfully.\n{}",
         summary.join("\n")
     ))
+}
+
+use ene_tool_proto::ToolDefinition;
+use ene_tools_common::ToolAction;
+use std::sync::{Arc, RwLock};
+
+/// Filesystem sub-action to apply a multi-file patch.
+pub struct FsPatchSubAction {
+    sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>,
+}
+
+impl FsPatchSubAction {
+    /// Creates a new `FsPatchSubAction` with the shared sandbox reference.
+    pub fn new(sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>) -> Self {
+        Self { sandbox }
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolAction for FsPatchSubAction {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "patch".to_string(),
+            description: "Applies a unified multi-file patch".to_string(),
+            parameters: serde_json::json!({}),
+            category: None,
+            keywords: vec![],
+        }
+    }
+
+    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
+        let sandbox = {
+            let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
+            guard.clone().unwrap_or_else(|| {
+                Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
+            })
+        };
+        let session_id = sandbox.session_id();
+        let undo_manager = sandbox.undo_manager();
+
+        let args: serde_json::Value =
+            serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
+                message: format!("Failed to parse patch arguments: {e}"),
+            })?;
+
+        let patch_text = args["patchText"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidArguments {
+                message: "patchText is required for patch".to_string(),
+            })?;
+
+        sandbox.check_permission(
+            crate::utils::permission::DestructiveAction::FileOverwrite,
+            "multiple files (patch)",
+            "Applying patch to files",
+        )?;
+
+        apply_patch(patch_text, sandbox.config(), undo_manager, &session_id).await
+    }
 }

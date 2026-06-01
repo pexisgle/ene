@@ -1,7 +1,21 @@
-use crate::config::WebSearchConfig;
 use async_trait::async_trait;
 use ene_tool_proto::{ToolDefinition, ToolError, ToolProvider};
-use std::sync::OnceLock;
+use ene_tools_common::ToolAction;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use std::sync::{Arc, OnceLock};
+
+/// Configuration for web search providers (Tavily, Brave, Exa).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, rename_all = "snake_case")]
+pub struct WebSearchConfig {
+    /// Tavily Search API Key
+    pub tavily_api_key: String,
+    /// Brave Search API Key
+    pub brave_api_key: String,
+    /// Exa Search API Key
+    pub exa_api_key: String,
+}
 
 fn generate_web_search_schema() -> serde_json::Value {
     let g = schemars::SchemaGenerator::default();
@@ -9,12 +23,17 @@ fn generate_web_search_schema() -> serde_json::Value {
     serde_json::to_value(schema).expect("WebSearchConfig schema should always serialize")
 }
 
+/// Built-in web tool provider.
+///
+/// Exposes `webfetch` and `websearch` tools.
+/// Internally uses a dynamic list of actions implementing `ToolAction`.
 pub struct WebToolProvider {
-    client: reqwest::Client,
-    config: OnceLock<WebSearchConfig>,
+    actions: Vec<Box<dyn ToolAction>>,
+    config: Arc<OnceLock<WebSearchConfig>>,
 }
 
 impl WebToolProvider {
+    /// Creates a new `WebToolProvider` and registers web actions.
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -27,72 +46,39 @@ impl WebToolProvider {
             })
             .build()
             .unwrap_or_default();
-        Self {
-            client,
-            config: OnceLock::new(),
-        }
+
+        let config = Arc::new(OnceLock::new());
+
+        let actions: Vec<Box<dyn ToolAction>> = vec![
+            Box::new(crate::action::WebFetchAction::new(client)),
+            Box::new(crate::action::WebSearchAction::new(config.clone())),
+        ];
+
+        Self { actions, config }
     }
 }
 
-#[derive(serde::Deserialize)]
-struct WebFetchArgs {
-    url: String,
-    #[serde(default)]
-    format: Option<String>,
-    #[serde(default)]
-    timeout: Option<u64>,
-}
-
-#[derive(serde::Deserialize)]
-struct WebSearchArgs {
-    query: String,
-    #[serde(default)]
-    backend: Option<String>,
-    #[serde(default)]
-    limit: Option<usize>,
+impl Default for WebToolProvider {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait]
 impl ToolProvider for WebToolProvider {
     fn list_tools(&self) -> Vec<ToolDefinition> {
-        vec![
-            crate::action::webfetch_definition(),
-            crate::action::websearch_definition(),
-        ]
+        self.actions.iter().map(|a| a.definition()).collect()
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
-        match name {
-            "webfetch" => {
-                let args: WebFetchArgs =
-                    serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid arguments for webfetch: {e}"),
-                    })?;
-                crate::action::webfetch(
-                    &self.client,
-                    &args.url,
-                    args.format.as_deref(),
-                    args.timeout,
-                )
-                .await
+        for action in &self.actions {
+            if action.definition().name == name {
+                return action.execute(arguments).await;
             }
-            "websearch" => {
-                let args: WebSearchArgs =
-                    serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
-                        message: format!("Invalid arguments for websearch: {e}"),
-                    })?;
-                crate::action::websearch(
-                    &args.query,
-                    args.backend.as_deref(),
-                    args.limit,
-                    self.config.get(),
-                )
-                .await
-            }
-            _ => Err(ToolError::NotFound {
-                tool_name: name.to_string(),
-            }),
         }
+        Err(ToolError::NotFound {
+            tool_name: name.to_string(),
+        })
     }
 
     fn set_config(&self, config: &serde_json::Value) {

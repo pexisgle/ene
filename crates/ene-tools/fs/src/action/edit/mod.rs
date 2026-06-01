@@ -1,5 +1,5 @@
-use crate::sandbox::SandboxConfig;
-use crate::undo_manager::UndoManager;
+use crate::utils::sandbox::SandboxConfig;
+use crate::utils::undo_manager::UndoManager;
 use ene_tool_proto::ToolError;
 use std::collections::HashMap;
 use std::path::Path;
@@ -267,5 +267,84 @@ mod tests {
     #[test]
     fn test_find_best_match_empty_needle() {
         assert!(find_best_match("", "foo bar").is_none());
+    }
+}
+
+use ene_tool_proto::ToolDefinition;
+use ene_tools_common::ToolAction;
+use std::sync::RwLock;
+
+/// Filesystem sub-action to edit a file.
+pub struct FsEditSubAction {
+    sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>,
+}
+
+impl FsEditSubAction {
+    /// Creates a new `FsEditSubAction` with the shared sandbox reference.
+    pub fn new(sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>) -> Self {
+        Self { sandbox }
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolAction for FsEditSubAction {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "edit".to_string(),
+            description: "Edits a file".to_string(),
+            parameters: serde_json::json!({}),
+            category: None,
+            keywords: vec![],
+        }
+    }
+
+    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
+        let sandbox = {
+            let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
+            guard.clone().unwrap_or_else(|| {
+                Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
+            })
+        };
+        let session_id = sandbox.session_id();
+        let undo_manager = sandbox.undo_manager();
+
+        let args: serde_json::Value =
+            serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
+                message: format!("Failed to parse edit arguments: {e}"),
+            })?;
+
+        let file_path = args["filePath"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidArguments {
+                message: "filePath is required for edit".to_string(),
+            })?;
+        let old_string = args["oldString"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidArguments {
+                message: "oldString is required for edit".to_string(),
+            })?;
+        let new_string = args["newString"]
+            .as_str()
+            .ok_or_else(|| ToolError::InvalidArguments {
+                message: "newString is required for edit".to_string(),
+            })?;
+        let replace_all = args["replaceAll"].as_bool().unwrap_or(false);
+
+        sandbox.check_permission(
+            crate::utils::permission::DestructiveAction::FileOverwrite,
+            file_path,
+            "Editing file content",
+        )?;
+
+        edit(
+            Path::new(file_path),
+            old_string,
+            new_string,
+            replace_all,
+            sandbox.config(),
+            undo_manager,
+            &session_id,
+        )
+        .await
     }
 }
