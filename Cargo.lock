@@ -3766,6 +3766,7 @@ dependencies = [
  "ene-provider",
  "ene-session",
  "ene-tool-host",
+ "ene-tool-proto",
  "regex",
  "serde",
  "serde_json",
@@ -3789,6 +3790,7 @@ dependencies = [
  "ene-common",
  "ene-config",
  "ene-core",
+ "ene-tool-proto",
  "gtk",
  "log",
  "png",
@@ -3997,6 +3999,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

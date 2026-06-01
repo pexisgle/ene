@@ -93,6 +93,7 @@ pub use error::EneCoreError;
 // ── Stream types ──
 /// Permission decision type (re-exported from `ene-core::streaming`).
 pub use streaming::PermissionDecision;
+pub use streaming::UserInputResponse;
 
 // ── Prompt builder ──
 /// Message build context struct.

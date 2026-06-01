@@ -1,5 +1,5 @@
 use crate::error::EneCoreError;
-use crate::streaming::{self, PermissionDecision};
+use crate::streaming::{self, PermissionDecision, UserInputResponse};
 use crate::types::RequestId;
 use chrono::{DateTime, Utc};
 use ene_config::CharacterCardV3;
@@ -52,6 +52,13 @@ pub enum EneCommand {
         request_id: RequestId,
         /// The user's decision.
         decision: PermissionDecision,
+    },
+    /// Submit a user-input response for a pending interactive tool.
+    UserInputResponse {
+        /// The `request_id` from a prior `UserInputRequired` event.
+        request_id: RequestId,
+        /// The user's response (selected option, free-text, or cancel).
+        response: UserInputResponse,
     },
     /// Request a read-only snapshot of the current actor state (for CLI queries).
     GetSnapshot {
@@ -120,6 +127,14 @@ pub enum EneEvent {
         target: String,
         /// Human-readable description of what will be done.
         description: String,
+    },
+    /// An interactive tool needs user input (e.g. a clarifying question).
+    /// The consumer should display a UI and call [`EneHandle::submit_user_input`].
+    UserInputRequired {
+        /// Unique identifier for this input request.
+        request_id: RequestId,
+        /// The prompt describing the question, options, and free-text allowance.
+        prompt: ene_tool_proto::UserInputPrompt,
     },
     /// Progress update for a long-running background task.
     TaskProgress {
@@ -387,6 +402,21 @@ impl EneHandle {
             .map_err(|_| ActorDeadError)
     }
 
+    /// Send a user-input response for a pending interactive tool.
+    /// Returns an error if the actor is no longer running.
+    pub fn submit_user_input(
+        &self,
+        request_id: impl Into<RequestId>,
+        response: UserInputResponse,
+    ) -> Result<(), ActorDeadError> {
+        self.cmd_tx
+            .send(EneCommand::UserInputResponse {
+                request_id: request_id.into(),
+                response,
+            })
+            .map_err(|_| ActorDeadError)
+    }
+
     /// Send a `Reconfigure` command and wait for the result.
     pub async fn reconfigure(&self, config: EneConfig) -> Result<(), EneCoreError> {
         let (tx, rx) = oneshot::channel();
@@ -490,6 +520,7 @@ struct EneActor {
     stream_handle: Option<tokio::task::JoinHandle<()>>,
     stream_session_rx: Option<oneshot::Receiver<ConversationSession>>,
     pending_permissions: Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
+    pending_user_inputs: Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
     pending_split: Option<PendingSplitTask>,
 }
 
@@ -509,6 +540,7 @@ impl EneActor {
             stream_handle: None,
             stream_session_rx: None,
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
+            pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
             pending_split: None,
         }
     }
@@ -623,6 +655,16 @@ impl EneActor {
                 }
                 true
             }
+            EneCommand::UserInputResponse {
+                request_id,
+                response,
+            } => {
+                let mut guard = self.pending_user_inputs.lock().await;
+                if let Some(tx) = guard.remove(&request_id) {
+                    let _ = tx.send(response);
+                }
+                true
+            }
             EneCommand::ManualSplit { reply } => {
                 let result = self.handle_manual_split().await;
                 let _ = reply.send(result);
@@ -714,6 +756,7 @@ impl EneActor {
         let event_tx = self.event_tx.clone();
         let cancel_token = self.cancel_token.clone();
         let pending_permissions = self.pending_permissions.clone();
+        let pending_user_inputs = self.pending_user_inputs.clone();
 
         // 7. Spawn the stream task
         let (session_tx, session_rx) = oneshot::channel();
@@ -729,6 +772,7 @@ impl EneActor {
                 event_tx,
                 cancel_token,
                 pending_permissions,
+                pending_user_inputs,
             })
             .await;
             let _ = session_tx.send(updated_session);

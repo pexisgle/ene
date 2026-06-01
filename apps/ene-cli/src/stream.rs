@@ -1,6 +1,7 @@
 use crate::style;
 use ene_core::{
-    EneEvent, EneEventReceiver, EneHandle, PermissionDecision, Truncate, extract_emotion_from_token,
+    EneEvent, EneEventReceiver, EneHandle, PermissionDecision, Truncate, UserInputResponse,
+    extract_emotion_from_token,
 };
 use std::io::{self, Write};
 
@@ -80,6 +81,58 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
                 println!(
                     "\n{}",
                     style::success("承認の入力を送信しました。処理を再開します...")
+                );
+            }
+            Ok(EneEvent::UserInputRequired { request_id, prompt }) => {
+                println!(
+                    "\n{}",
+                    style::header(format!("[Question] {}", prompt.question))
+                );
+                if let Some(header) = &prompt.header {
+                    println!("{}", style::warning(format!("  (kind: {})", header)));
+                }
+
+                let response = if !prompt.options.is_empty() {
+                    println!("\n選択肢から選んでください:");
+                    let selection = dialoguer::Select::new()
+                        .with_prompt("回答を選択")
+                        .items(&prompt.options)
+                        .default(0)
+                        .interact()
+                        .unwrap_or(prompt.options.len());
+                    if selection < prompt.options.len() {
+                        Some(UserInputResponse::Selected(
+                            prompt.options[selection].clone(),
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                let response = response.or_else(|| {
+                    if prompt.allow_free_text {
+                        let text: String = dialoguer::Input::new()
+                            .with_prompt("自由入力 (空でキャンセル)")
+                            .allow_empty(true)
+                            .interact_text()
+                            .unwrap_or_default();
+                        if !text.is_empty() {
+                            Some(UserInputResponse::Answer(text))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
+
+                let decision = response.unwrap_or(UserInputResponse::Cancel);
+                let _ = handle.submit_user_input(request_id, decision);
+                println!(
+                    "\n{}",
+                    style::success("回答を送信しました。処理を再開します...")
                 );
             }
             Ok(EneEvent::TaskProgress {

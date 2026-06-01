@@ -5,6 +5,7 @@ use bevy::window::CompositeAlphaMode;
 use bevy::window::PresentMode;
 use bevy::window::{WindowLevel, WindowMode, WindowPlugin, WindowResolution};
 use ene_core::RequestId;
+use ene_tool_proto::UserInputPrompt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -220,6 +221,15 @@ pub struct PendingPermission {
     pub description: String,
 }
 
+/// A pending interactive user input request surfaced by an interactive tool
+/// (e.g. the `question` tool). The UI is responsible for collecting a
+/// response and calling `EneHandle::submit_user_input`.
+#[derive(Clone, Debug)]
+pub struct PendingUserInput {
+    pub request_id: RequestId,
+    pub prompt: UserInputPrompt,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct UiState {
     pub settings_window_visible: bool,
@@ -227,6 +237,11 @@ pub struct UiState {
     pub ai_chat_input: String,
     pub ai_latest_response: String,
     pub pending_permission: Option<PendingPermission>,
+    /// Interactive question dialog state. `Some` when the actor is paused
+    /// waiting for a user response.
+    pub pending_user_input: Option<PendingUserInput>,
+    /// Free-text input buffer for the active user input dialog.
+    pub user_input_text: String,
 }
 
 #[derive(Clone, Debug, Default)]

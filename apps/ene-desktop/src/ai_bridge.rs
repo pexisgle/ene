@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 use ene_core::{EneEvent, EneEventReceiver, EneHandle, EneStatus, RequestId};
+use ene_tool_proto::UserInputPrompt;
 
 pub struct EnePlugin;
 
@@ -37,6 +38,10 @@ pub enum EneStreamEvent {
         action: String,
         target: String,
         description: String,
+    },
+    UserInputRequired {
+        request_id: RequestId,
+        prompt: UserInputPrompt,
     },
     TaskProgress {
         task_id: String,
@@ -111,6 +116,9 @@ fn poll_ene_events(mut ene: ResMut<EneResource>, mut stream_writer: MessageWrite
                     target,
                     description,
                 });
+            }
+            Ok(EneEvent::UserInputRequired { request_id, prompt }) => {
+                stream_writer.write(EneStreamEvent::UserInputRequired { request_id, prompt });
             }
             Ok(EneEvent::TaskProgress {
                 task_id,

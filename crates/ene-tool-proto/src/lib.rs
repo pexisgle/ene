@@ -71,6 +71,8 @@ pub mod types;
 /// Tool error type.
 pub use error::EneToolProtoError;
 pub use error::ToolError;
+/// Interactive user input prompt (used inside [`ToolError::UserInputRequired`]).
+pub use error::UserInputPrompt;
 /// Composite registry that aggregates multiple ToolProvider instances.
 pub use host_registry::HostRegistry;
 /// IPC message types and serialisation helpers.

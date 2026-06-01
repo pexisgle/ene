@@ -24,6 +24,14 @@ pub enum EneToolHostError {
         /// Human-readable description.
         description: String,
     },
+    /// Interactive user input is required to proceed (e.g. an `AskQuestion` tool).
+    #[error("User input required [id: {request_id}]: {prompt}")]
+    UserInputRequired {
+        /// Unique identifier for the user input request.
+        request_id: String,
+        /// The prompt describing the question, options, and input constraints.
+        prompt: ene_tool_proto::UserInputPrompt,
+    },
     /// The requested file was not found.
     #[error("File not found: {0}")]
     FileNotFound(String),
