@@ -24,6 +24,11 @@
 /// HTML-to-Markdown conversion and content extraction.
 pub mod html;
 
+/// Unified tool action interface.
+pub mod action;
+
+pub use action::ToolAction;
+
 /// Re-exports of smart truncation from ene-common.
 pub mod truncate {
     #[doc(no_inline)]

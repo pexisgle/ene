@@ -1,4 +1,10 @@
-use scraper::{ElementRef, Html, Node};
+use ego_tree::NodeId;
+use scraper::{ElementRef, Html, Node, Selector};
+
+const SKIP_TAGS: &[&str] = &[
+    "script", "style", "noscript", "iframe", "svg", "nav", "header", "footer", "aside",
+    "template", "code", "canvas", "audio", "video", "map", "object", "embed",
+];
 
 /// Converts raw HTML to Markdown text.
 pub fn html_to_markdown(html: &str) -> String {
@@ -10,14 +16,15 @@ pub fn html_to_markdown(html: &str) -> String {
 /// * `extract` — Target selector: `"body"`, `"main"`, or `"full"`
 /// * `trim` — If true, removes non-semantic HTML noise (scripts, styles, etc.)
 pub fn extract_html(html: &str, extract: &str, trim: bool) -> String {
-    let document = Html::parse_document(html);
-    let target = select_target_element(&document, extract);
+    let mut document = Html::parse_document(html);
+    let target_id = select_target_id(&document, extract);
 
     if trim {
-        serialize_element_clean(target)
-    } else {
-        target.html()
+        strip_subtrees(&mut document.tree, target_id, SKIP_TAGS);
     }
+
+    let root = document.tree.get(target_id).unwrap();
+    ElementRef::wrap(root).unwrap().html()
 }
 
 /// Extracts and converts a specific region of HTML to Markdown.
@@ -34,71 +41,46 @@ pub fn extract_markdown(html: &str, extract: &str, trim: bool) -> String {
     normalize_text(&md)
 }
 
-fn select_target_element<'a>(document: &'a Html, extract: &str) -> ElementRef<'a> {
+fn select_target_id(html: &Html, extract: &str) -> NodeId {
     match extract {
         "main" => {
-            let sel = scraper::Selector::parse("main").unwrap();
-            document
-                .select(&sel)
-                .next()
-                .or_else(|| {
-                    let sel = scraper::Selector::parse("body").unwrap();
-                    document.select(&sel).next()
-                })
-                .unwrap_or(document.root_element())
+            let sel = Selector::parse("main").unwrap();
+            if let Some(el) = html.select(&sel).next() {
+                return el.id();
+            }
+            let sel = Selector::parse("body").unwrap();
+            if let Some(el) = html.select(&sel).next() {
+                return el.id();
+            }
+            html.root_element().id()
         }
         "body" => {
-            let sel = scraper::Selector::parse("body").unwrap();
-            document
-                .select(&sel)
-                .next()
-                .unwrap_or(document.root_element())
+            let sel = Selector::parse("body").unwrap();
+            if let Some(el) = html.select(&sel).next() {
+                return el.id();
+            }
+            html.root_element().id()
         }
-        _ => document.root_element(),
+        _ => html.root_element().id(),
     }
 }
 
-fn serialize_element_clean(element: ElementRef) -> String {
-    const SKIP_TAGS: &[&str] = &[
-        "script", "style", "noscript", "iframe", "svg", "nav", "header", "footer", "aside",
-        "template", "code", "canvas", "audio", "video", "map", "object", "embed",
-    ];
+fn strip_subtrees(tree: &mut ego_tree::Tree<Node>, root_id: NodeId, skip_tags: &[&str]) {
+    let ids: Vec<NodeId> = tree
+        .get(root_id)
+        .unwrap()
+        .descendants()
+        .filter_map(|node| match node.value() {
+            Node::Element(el) if skip_tags.contains(&el.name()) => Some(node.id()),
+            _ => None,
+        })
+        .collect();
 
-    let tag = element.value().name();
-    if SKIP_TAGS.contains(&tag) {
-        return String::new();
-    }
-
-    let mut result = String::new();
-    result.push('<');
-    result.push_str(tag);
-
-    for (name, value) in element.value().attrs.iter() {
-        result.push(' ');
-        result.push_str(&name.local);
-        result.push_str("=\"");
-        result.push_str(value);
-        result.push('"');
-    }
-    result.push('>');
-
-    for child in element.children() {
-        match child.value() {
-            Node::Text(text) => result.push_str(text),
-            Node::Element(_) => {
-                if let Some(child_el) = ElementRef::wrap(child) {
-                    result.push_str(&serialize_element_clean(child_el));
-                }
-            }
-            _ => {}
+    for id in ids {
+        if let Some(mut node) = tree.get_mut(id) {
+            node.detach();
         }
     }
-
-    result.push_str("</");
-    result.push_str(tag);
-    result.push('>');
-
-    result
 }
 
 fn normalize_text(text: &str) -> String {
