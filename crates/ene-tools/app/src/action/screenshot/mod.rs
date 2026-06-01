@@ -89,7 +89,9 @@ impl ToolAction for ScreenshotAction {
             scale_percent: None,
         });
 
-        let scale_percent = args.scale_percent.unwrap_or(crate::config::DEFAULT_SCALE_PERCENT);
+        let scale_percent = args
+            .scale_percent
+            .unwrap_or(crate::config::DEFAULT_SCALE_PERCENT);
 
         let image = if crate::utils::portal::detect_wayland() {
             portal::capture_screen_portal(scale_percent).await
