@@ -88,6 +88,14 @@ apps/
 - **Embedding providers**: `ApiEmbeddingProvider` (OpenAI-compatible), `GgufEmbeddingProvider` (candle/GGUF, local, GPU-free).
 - **Summarization**: Dedicated LLM model (`memory.summarization_model`) produces structured summary + topics + key_facts.
 
+## Git Hooks (cargo-husky)
+- Hooks are managed by [`cargo-husky`](https://github.com/rhysd/cargo-husky) and live under `.cargo-husky/hooks/` (tracked in git).
+- `cargo-husky` is registered as a workspace `dev-dependency` and auto-installs the hooks into `.git/hooks/` on the first `cargo build` — no manual setup needed for new contributors.
+- **Skip hooks** for a single command: `git commit --no-verify` or `HUSKY=0 cargo build`.
+- Current hooks:
+  - `pre-commit` — runs `cargo fmt --all` against staged `.rs` files and re-stages any changes.
+- To add a new hook, create an executable file under `.cargo-husky/hooks/<name>` and document it here.
+
 ## Testing
 - `cargo test --workspace` for all tests.
 - REPL commands for interactive testing:

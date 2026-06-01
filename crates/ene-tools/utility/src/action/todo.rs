@@ -387,7 +387,14 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    fn fresh() -> (Arc<TodoDb>, TodoList, TodoAdd, TodoUpdate, TodoComplete, TodoDelete) {
+    fn fresh() -> (
+        Arc<TodoDb>,
+        TodoList,
+        TodoAdd,
+        TodoUpdate,
+        TodoComplete,
+        TodoDelete,
+    ) {
         let db = Arc::new(TodoDb::new());
         db.set_db_path(Path::new(":memory:")).unwrap();
         db.set_session_id("sess");
