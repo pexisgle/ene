@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use enigo::Keyboard;
 use serde::Deserialize;
@@ -14,10 +16,21 @@ pub struct TypeTextAction;
 
 #[async_trait]
 impl ToolAction for TypeTextAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "type_text".to_string(),
-            description: "Simulates keyboard typing of a string.".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "app.type_text"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("app.keyboard_type"),
+            version: ToolVersion::default(),
+            display_name: "Simulates keyboard typing of a string character by character."
+                .to_string(),
+            summary: "Simulates keyboard typing of a string character by character.".to_string(),
+            description: "Simulates keyboard typing of a string character by character."
+                .to_string(),
+            category: ToolCategory::App,
+            keywords: KeywordSet::primary_only(["keyboard", "type", "input", "text"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -25,12 +38,15 @@ impl ToolAction for TypeTextAction {
                 },
                 "required": ["text"]
             }),
-            category: Some(ToolCategory::App),
-            keywords: vec![
-                "keyboard".to_string(),
-                "type".to_string(),
-                "input".to_string(),
-            ],
+            examples: vec![ToolExample {
+                description: "Type text on the keyboard".to_string(),
+                input: serde_json::json!({"text": "Hello, world!"}),
+                output: None,
+            }],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

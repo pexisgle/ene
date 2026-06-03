@@ -230,6 +230,19 @@ pub struct PendingUserInput {
     pub prompt: UserInputPrompt,
 }
 
+/// In-progress user answer for a single sub-question. The UI updates these
+/// fields as the user interacts and only the final `Multi(Vec<MultiAnswer>)`
+/// is sent to the actor on submit.
+#[derive(Clone, Debug, Default)]
+pub struct QuestionDraft {
+    /// Selected option (only used when the question declares `options`).
+    pub selected: Option<String>,
+    /// Free-text input (only used when `allow_free_text` is true).
+    pub text: String,
+    /// Whether the user marked this question as skipped.
+    pub skipped: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct UiState {
     pub settings_window_visible: bool,
@@ -240,8 +253,9 @@ pub struct UiState {
     /// Interactive question dialog state. `Some` when the actor is paused
     /// waiting for a user response.
     pub pending_user_input: Option<PendingUserInput>,
-    /// Free-text input buffer for the active user input dialog.
-    pub user_input_text: String,
+    /// Per-question draft answers, parallel to `pending_user_input.prompt.items`.
+    /// `None` while no prompt is active. Index aligns with `items[i]`.
+    pub user_input_drafts: Vec<QuestionDraft>,
 }
 
 #[derive(Clone, Debug, Default)]

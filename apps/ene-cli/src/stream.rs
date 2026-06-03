@@ -1,7 +1,7 @@
 use crate::style;
 use ene_core::{
-    EneEvent, EneEventReceiver, EneHandle, PermissionDecision, Truncate, UserInputResponse,
-    extract_emotion_from_token,
+    EneEvent, EneEventReceiver, EneHandle, MultiAnswer, PermissionDecision, Truncate,
+    UserInputResponse, extract_emotion_from_token,
 };
 use std::io::{self, Write};
 
@@ -84,51 +84,70 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
                 );
             }
             Ok(EneEvent::UserInputRequired { request_id, prompt }) => {
+                let total = prompt.items.len();
                 println!(
                     "\n{}",
-                    style::header(format!("[Question] {}", prompt.question))
+                    style::header(format!("[Question] {} 件の質問があります", total))
                 );
-                if let Some(header) = &prompt.header {
-                    println!("{}", style::warning(format!("  (kind: {})", header)));
-                }
 
-                let response = if !prompt.options.is_empty() {
-                    println!("\n選択肢から選んでください:");
-                    let selection = dialoguer::Select::new()
-                        .with_prompt("回答を選択")
-                        .items(&prompt.options)
-                        .default(0)
-                        .interact()
-                        .unwrap_or(prompt.options.len());
-                    if selection < prompt.options.len() {
-                        Some(UserInputResponse::Selected(
-                            prompt.options[selection].clone(),
-                        ))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
+                let mut answers: Vec<MultiAnswer> = Vec::with_capacity(total);
+                let mut cancelled = false;
 
-                let response = response.or_else(|| {
-                    if prompt.allow_free_text {
+                for (i, item) in prompt.items.iter().enumerate() {
+                    println!(
+                        "\n{}",
+                        style::header(format!("({}/{}) {}", i + 1, total, item.question))
+                    );
+
+                    let answer = if !item.options.is_empty() {
+                        let mut choices: Vec<String> = item.options.clone();
+                        choices.push("(skip)".to_string());
+                        choices.push("(cancel all)".to_string());
+                        let selection = dialoguer::Select::new()
+                            .with_prompt("回答を選択 (上下キーで選択, Enterで確定)")
+                            .items(&choices)
+                            .default(0)
+                            .interact()
+                            .unwrap_or(choices.len().saturating_sub(1));
+
+                        let chosen = &choices[selection];
+                        if chosen == "(cancel all)" {
+                            cancelled = true;
+                            break;
+                        } else if chosen == "(skip)" {
+                            MultiAnswer::Skip
+                        } else {
+                            MultiAnswer::Selected {
+                                option: chosen.clone(),
+                            }
+                        }
+                    } else if item.allow_free_text {
                         let text: String = dialoguer::Input::new()
-                            .with_prompt("自由入力 (空でキャンセル)")
+                            .with_prompt("自由入力 (空でskip, 'cancel'で全キャンセル)")
                             .allow_empty(true)
                             .interact_text()
                             .unwrap_or_default();
-                        if !text.is_empty() {
-                            Some(UserInputResponse::Answer(text))
+                        if text.eq_ignore_ascii_case("cancel") {
+                            cancelled = true;
+                            break;
+                        } else if text.is_empty() {
+                            MultiAnswer::Skip
                         } else {
-                            None
+                            MultiAnswer::Answer { text }
                         }
                     } else {
-                        None
-                    }
-                });
+                        // No options, no free text: record a skip and move on.
+                        MultiAnswer::Skip
+                    };
 
-                let decision = response.unwrap_or(UserInputResponse::Cancel);
+                    answers.push(answer);
+                }
+
+                let decision = if cancelled {
+                    UserInputResponse::Cancel
+                } else {
+                    UserInputResponse::Multi(answers)
+                };
                 let _ = handle.submit_user_input(request_id, decision);
                 println!(
                     "\n{}",

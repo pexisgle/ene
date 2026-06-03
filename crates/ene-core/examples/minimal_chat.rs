@@ -33,7 +33,9 @@
 //! }
 //! ```
 
-use ene_core::{EneEvent, EneHandle, EneStatus, PermissionDecision, UserInputResponse};
+use ene_core::{
+    EneEvent, EneHandle, EneStatus, MultiAnswer, PermissionDecision, UserInputResponse,
+};
 use std::io::{self, Write};
 
 #[tokio::main]
@@ -204,20 +206,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Interactive user input request (e.g. the `question` tool)
                 EneEvent::UserInputRequired { request_id, prompt } => {
-                    println!("\n  [Question] {}", prompt.question);
-                    if !prompt.options.is_empty() {
-                        println!("  Options: {}", prompt.options.join(" | "));
-                    }
-                    print!("  Answer: ");
-                    io::stdout().flush()?;
+                    let mut answers: Vec<MultiAnswer> = Vec::with_capacity(prompt.items.len());
+                    let mut cancelled = false;
+                    for (i, item) in prompt.items.iter().enumerate() {
+                        println!(
+                            "\n  [Question {}/{}] {}",
+                            i + 1,
+                            prompt.items.len(),
+                            item.question
+                        );
+                        if !item.options.is_empty() {
+                            let mut opts = item.options.clone();
+                            opts.push("(skip)".to_string());
+                            opts.push("(cancel all)".to_string());
+                            println!("  Options: {}", opts.join(" | "));
+                        } else if !item.allow_free_text {
+                            println!(
+                                "  (no input; press Enter to skip, type 'cancel' to abort all)"
+                            );
+                        }
+                        print!("  Answer: ");
+                        io::stdout().flush()?;
 
-                    let mut ans = String::new();
-                    io::stdin().read_line(&mut ans)?;
-                    let trimmed = ans.trim().to_string();
-                    let response = if !trimmed.is_empty() {
-                        UserInputResponse::Answer(trimmed)
-                    } else {
+                        let mut ans = String::new();
+                        io::stdin().read_line(&mut ans)?;
+                        let trimmed = ans.trim();
+                        if trimmed.eq_ignore_ascii_case("cancel") {
+                            cancelled = true;
+                            break;
+                        }
+                        if let Some(opt) =
+                            item.options.iter().find(|o| o.as_str() == trimmed).cloned()
+                        {
+                            answers.push(MultiAnswer::Selected { option: opt });
+                        } else if !trimmed.is_empty() && item.allow_free_text {
+                            answers.push(MultiAnswer::Answer {
+                                text: trimmed.to_string(),
+                            });
+                        } else {
+                            answers.push(MultiAnswer::Skip);
+                        }
+                    }
+
+                    let response = if cancelled {
                         UserInputResponse::Cancel
+                    } else {
+                        UserInputResponse::Multi(answers)
                     };
                     let _ = handle.submit_user_input(request_id, response);
                 }

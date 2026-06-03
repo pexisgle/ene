@@ -8,7 +8,7 @@
 //! - **Key facts**: User-specific key-value facts with upsert and latest-value retrieval
 //! - **Vector similarity search**: Cosine-similarity-based recall of semantically relevant past conversations
 //! - **LLM-driven summarization**: Automatic conversation summarization via structured LLM output
-//! - **Tool RAG**: Embedding-based tool selection (stored in `tool_embeddings` table)
+//! - **Tool RAG**: Embedding-based tool selection (stored in `tool_embedding_index` table, multi-vector per tool)
 //! - **Conversation logging**: Full conversation history in `conversation_logs` for audit and replay
 //!
 //! ## Quick Start

@@ -1,14 +1,17 @@
 use async_trait::async_trait;
 
-use ene_tool_proto::ToolDefinition;
+use ene_tool_proto::ToolSpec;
 
 /// Unified tool registry interface — abstracts over both built-in IPC tools and MCP tools.
 ///
 /// Implemented by [`crate::IpcToolRegistry`], [`crate::McpToolRegistry`], and [`crate::CompositeToolRegistry`].
+///
+/// Tool RAG indexing and selection is handled by [`ToolRag`](crate::ToolRag),
+/// not by this trait.
 #[async_trait]
 pub trait ToolRegistry: Send + Sync {
     /// Returns the list of all available tools.
-    fn list_tools(&self) -> Vec<ToolDefinition>;
+    fn list_tools(&self) -> Vec<ToolSpec>;
     /// Executes a tool by name with the given JSON arguments from the LLM.
     async fn call_tool(
         &self,
@@ -28,25 +31,5 @@ pub trait ToolRegistry: Send + Sync {
     /// Returns the JSON Schema for the tool's config section in settings.json.
     async fn config_schema(&self) -> Option<serde_json::Value> {
         None
-    }
-
-    /// Builds the vector embedding index for Tool RAG.
-    /// Only the [`crate::CompositeToolRegistry`] implementation does meaningful work here.
-    async fn ensure_index_built(
-        &self,
-        _embedder: &dyn ene_provider::EmbeddingProvider,
-        _store: Option<&ene_memory::MemoryStore>,
-    ) -> Result<(), crate::error::ToolError> {
-        Ok(())
-    }
-
-    /// Builds the embedding index, embeds the query, and returns the most relevant tools.
-    async fn select_tools(
-        &self,
-        _embedder: &dyn ene_provider::EmbeddingProvider,
-        _query: &str,
-        _limit: usize,
-    ) -> Vec<ToolDefinition> {
-        self.list_tools()
     }
 }

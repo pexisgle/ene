@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use enigo::{Key, Keyboard};
 use serde::Deserialize;
@@ -15,23 +17,47 @@ pub struct KeyComboAction;
 
 #[async_trait]
 impl ToolAction for KeyComboAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "key_combo".to_string(),
-            description: "Simulates a key combination with '+' separator.".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "app.keyboard_combo"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("app.keyboard_combo"),
+            version: ToolVersion::default(),
+            display_name:
+                "Simulates a key combination with '+' separator (e.g., 'ctrl+c', 'alt+f4')."
+                    .to_string(),
+            summary: "Simulates a key combination with '+' separator (e.g., 'ctrl+c', 'alt+f4')."
+                .to_string(),
+            description:
+                "Simulates a key combination with '+' separator (e.g., 'ctrl+c', 'alt+f4')."
+                    .to_string(),
+            category: ToolCategory::App,
+            keywords: KeywordSet::primary_only(["keyboard", "combo", "shortcut", "hotkey"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "key_combo": { "type": "string", "description": "Combo e.g., 'ctrl+c', 'alt+f4'" }
+                    "key_combo": { "type": "string", "description": "Key combination with '+' separator (e.g., 'ctrl+shift+s', 'ctrl+c')" }
                 },
                 "required": ["key_combo"]
             }),
-            category: Some(ToolCategory::App),
-            keywords: vec![
-                "keyboard".to_string(),
-                "combo".to_string(),
-                "shortcut".to_string(),
+            examples: vec![
+                ToolExample {
+                    description: "Copy (Ctrl+C)".to_string(),
+                    input: serde_json::json!({"key_combo": "ctrl+c"}),
+                    output: None,
+                },
+                ToolExample {
+                    description: "Save (Ctrl+S)".to_string(),
+                    input: serde_json::json!({"key_combo": "ctrl+s"}),
+                    output: None,
+                },
             ],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

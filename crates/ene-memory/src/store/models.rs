@@ -98,20 +98,27 @@ pub struct NewConversationLog<'a> {
 }
 
 #[derive(Debug, Clone, diesel::Queryable, diesel::Selectable)]
-#[diesel(table_name = crate::schema::tool_embeddings)]
+#[diesel(table_name = crate::schema::tool_embedding_index)]
 #[allow(dead_code)]
-pub struct ToolEmbeddingRow {
+pub struct ToolEmbeddingIndexRow {
+    pub id: i32,
     pub tool_name: String,
+    pub field: String,
+    pub field_key: String,
     pub version_hash: String,
+    pub model_name: String,
     pub embedding: EmbeddingBlob,
     pub created_at: String,
 }
 
 #[derive(diesel::Insertable)]
-#[diesel(table_name = crate::schema::tool_embeddings)]
-pub struct NewToolEmbedding<'a> {
+#[diesel(table_name = crate::schema::tool_embedding_index)]
+pub struct NewToolEmbeddingIndex<'a> {
     pub tool_name: &'a str,
+    pub field: &'a str,
+    pub field_key: &'a str,
     pub version_hash: &'a str,
+    pub model_name: &'a str,
     pub embedding: EmbeddingBlob,
     pub created_at: &'a str,
 }

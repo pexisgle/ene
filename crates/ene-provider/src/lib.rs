@@ -9,6 +9,8 @@
 
 /// Configuration types for providers and embedding.
 pub mod config;
+/// Hybrid rerank provider (primary embedder + optional LLM for HyDE / rerank).
+pub mod hybrid;
 /// Unified chat message and streaming types.
 pub mod message;
 /// Built-in OpenAI-compatible provider and cloud embedding provider.
@@ -19,7 +21,11 @@ pub mod traits;
 pub mod role;
 
 pub use config::{LocalEmbeddingConfig, ProviderConfig};
+pub use hybrid::HybridRerankProvider;
 pub use message::{LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart};
 pub use openai::{CloudEmbeddingProvider, OpenAiProvider, OpenAiProviderFactory};
 pub use role::Role;
-pub use traits::{EmbeddingProvider, LlmProvider, LlmProviderFactory, LlmProviderRegistry};
+pub use traits::{
+    EmbeddingError, EmbeddingKind, EmbeddingProvider, LlmProvider, LlmProviderFactory,
+    LlmProviderRegistry, cosine_similarity,
+};

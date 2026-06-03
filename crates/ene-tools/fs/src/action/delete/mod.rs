@@ -54,7 +54,9 @@ pub async fn delete(
     }
 }
 
-use ene_tool_proto::ToolDefinition;
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use std::sync::{Arc, RwLock};
 
@@ -72,13 +74,50 @@ impl FsDeleteSubAction {
 
 #[async_trait::async_trait]
 impl ToolAction for FsDeleteSubAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "delete".to_string(),
-            description: "Deletes a file or directory".to_string(),
-            parameters: serde_json::json!({}),
-            category: None,
-            keywords: vec![],
+    fn tool_name(&self) -> &'static str {
+        "filesystem.delete"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("filesystem.delete"),
+            version: ToolVersion::default(),
+            display_name: "Delete File".to_string(),
+            summary: "Delete a file or directory.".to_string(),
+            description: "Delete a file or directory. Directories require recursive=true."
+                .to_string(),
+            category: ToolCategory::Filesystem,
+            keywords: KeywordSet::primary_only(["delete", "remove", "rm", "unlink"]),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute path to delete"
+                    },
+                    "recursive": {
+                        "type": "boolean",
+                        "description": "Required for directories (default false)"
+                    }
+                },
+                "required": ["path"]
+            }),
+            examples: vec![
+                ToolExample {
+                    description: "Delete a single file".to_string(),
+                    input: serde_json::json!({"path": "/home/user/temp.txt"}),
+                    output: None,
+                },
+                ToolExample {
+                    description: "Recursively delete a directory".to_string(),
+                    input: serde_json::json!({"path": "/home/user/old_dir", "recursive": true}),
+                    output: None,
+                },
+            ],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

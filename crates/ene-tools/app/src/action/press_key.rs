@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use enigo::Keyboard;
 use serde::Deserialize;
@@ -14,23 +16,42 @@ pub struct PressKeyAction;
 
 #[async_trait]
 impl ToolAction for PressKeyAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "press_key".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "app.press_key"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("app.keyboard_press"),
+            version: ToolVersion::default(),
+            display_name: "Simulates pressing and releasing a single key.".to_string(),
+            summary: "Simulates pressing and releasing a single key.".to_string(),
             description: "Simulates pressing and releasing a single key.".to_string(),
+            category: ToolCategory::App,
+            keywords: KeywordSet::primary_only(["keyboard", "press", "key"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "key": { "type": "string", "description": "Key name (e.g., 'return', 'escape', 'tab', 'up', 'down')" }
+                    "key": { "type": "string", "description": "Key name (e.g., 'return', 'escape', 'tab', 'space', 'up', 'down', 'f1'-'f12')" }
                 },
                 "required": ["key"]
             }),
-            category: Some(ToolCategory::App),
-            keywords: vec![
-                "keyboard".to_string(),
-                "press".to_string(),
-                "key".to_string(),
+            examples: vec![
+                ToolExample {
+                    description: "Press Enter key".to_string(),
+                    input: serde_json::json!({"key": "return"}),
+                    output: None,
+                },
+                ToolExample {
+                    description: "Press Escape key".to_string(),
+                    input: serde_json::json!({"key": "escape"}),
+                    output: None,
+                },
             ],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

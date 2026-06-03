@@ -6,71 +6,45 @@ Provides filesystem operations, shell execution, and undo. All file operations r
 
 ## Tools
 
-### `filesystem`
+### `filesystem.read`
 
-Unified mega-tool for file operations. Action-based dispatch.
+Read file contents or directory listings.
 
-| Action | Parameters | Description |
-|--------|-----------|-------------|
-| `read` | `filePath`*, `offset?`, `limit?` | Read file with optional line range, 50KB limit |
-| `write` | `filePath`*, `content`* | Write/create file, 1MB limit, undo backup |
-| `edit` | `filePath`*, `oldString`*, `newString`*, `replaceAll?` | Text replacement with 9 matching strategies, undo support |
-| `delete` | `path`*, `recursive?` | Delete file or directory |
-| `glob` | `pattern`*, `path?` | Pattern-based file search |
-| `grep` | `pattern`*, `path?`, `include?` | Content-based regex search |
-| `patch` | `patchText`* | Apply unified diff, multi-file undo as single entry |
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `filePath` | string | Yes | Absolute path to file or directory |
+| `offset` | integer | No | Line number to start reading from (1-indexed) |
+| `limit` | integer | No | Maximum number of lines to read |
 
-**Keywords:** file, read, write, edit, delete, search, glob, grep, patch, directory, replace
-
-**Category:** Filesystem
+**Limit:** 50KB max read size.
 
 ---
 
-### `shell`
+### `filesystem.write`
 
-Executes shell commands with security enforcement.
+Write or create a file.
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `command` | string | Yes | - | Shell command to execute |
-| `description` | string | Yes | - | 5-10 word description of what the command does |
-| `timeout` | integer | No | 120000 | Timeout in milliseconds |
-| `workdir` | string | No | Current dir | Working directory |
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `filePath` | string | Yes | Absolute path to the file |
+| `content` | string | Yes | Content to write |
 
-**Security:**
-- All commands are checked against `blocked_commands` patterns
-- Output limited to `max_shell_output_bytes` (50KB) and `max_shell_output_lines` (2000)
-- 120-second timeout by default
-- Use `workdir` parameter instead of `cd &&` patterns
-
-**Keywords:** shell, command, execute, terminal, bash
-
-**Category:** Shell
+**Limit:** 1MB max write size. Creates parent directories automatically. Undo backup created.
 
 ---
 
-### `undo`
+### `filesystem.edit`
 
-Reverts the most recent file operation.
+Targeted text replacement with 9 matching strategies.
 
-| Parameter | Type |
-|-----------|------|
-| (none) | - |
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `filePath` | string | Yes | Absolute path to the file |
+| `oldString` | string | Yes | Text to replace |
+| `newString` | string | Yes | Replacement text |
+| `replaceAll` | boolean | No | Replace all occurrences (default: false) |
 
-**Behavior:**
-- Reverts write, edit, delete, and patch operations
-- Can be called multiple times to undo multiple operations
-- Shell operations cannot be undone
-- Uses a SQLite-backed undo stack with zlib compression
-
-**Keywords:** undo, revert, rollback
-
-**Category:** Utility
-
-## Edit Strategies
-
-The `edit` action in `filesystem` uses 9 matching strategies applied in order:
-
+**Matching strategies** (applied in order):
 1. `trimmed_boundary` — Trim whitespace around boundaries
 2. `simple` — Exact match
 3. `whitespace_normalized` — Collapse whitespace differences
@@ -80,6 +54,83 @@ The `edit` action in `filesystem` uses 9 matching strategies applied in order:
 7. `indentation_flexible` — Ignore indentation differences
 8. `context_aware` — Match using surrounding context
 9. `block_anchor` — Anchor matching with code block detection
+
+---
+
+### `filesystem.delete`
+
+Delete a file or directory.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | Yes | Absolute path to file or directory |
+| `recursive` | boolean | No | Delete directories recursively |
+
+---
+
+### `filesystem.glob`
+
+Pattern-based file search.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pattern` | string | Yes | Glob pattern (e.g. `**/*.rs`) |
+| `path` | string | No | Directory to search in (defaults to current) |
+
+---
+
+### `filesystem.grep`
+
+Content-based regex search.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pattern` | string | Yes | Regex pattern to search for |
+| `path` | string | No | Directory to search in |
+| `include` | string | No | File pattern filter (e.g. `*.rs`) |
+
+---
+
+### `filesystem.patch`
+
+Apply a unified diff patch.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `patchText` | string | Yes | Full unified diff text |
+
+**Behavior:** Multi-file patches are grouped as a single undo entry.
+
+---
+
+### `shell.execute`
+
+Execute shell commands with security enforcement.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `command` | string | Yes | — | Shell command to execute |
+| `description` | string | Yes | — | 5-10 word description of what the command does |
+| `timeout` | integer | No | 120000 | Timeout in milliseconds |
+| `workdir` | string | No | Current dir | Working directory |
+
+**Security:** Commands checked against `blocked_commands` patterns. Output limited to 50KB / 2000 lines.
+
+---
+
+### `utility.undo`
+
+Revert the most recent file operation.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| (none) | — | — |
+
+**Behavior:** Reverts write, edit, delete, and patch operations. Shell operations cannot be undone. Uses SQLite-backed undo stack with zlib compression.
+
+## Category
+
+All filesystem tools: `Filesystem` | Shell: `Shell` | Undo: `Utility`
 
 ## Sandbox Integration
 

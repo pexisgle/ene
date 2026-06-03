@@ -1,7 +1,7 @@
 use crate::error::ToolError;
 use crate::tools::registry::ToolRegistry;
 use async_trait::async_trait;
-use ene_tool_proto::ToolDefinition;
+use ene_tool_proto::ToolSpec;
 use ene_tool_proto::transport::IpcStream;
 use ene_tool_proto::{
     IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, SandboxConfigData, read_ipc_response,
@@ -24,7 +24,7 @@ pub struct IpcToolRegistry {
     sandbox: SandboxConfigData,
     tool_config: Option<serde_json::Value>,
     stream: TokioMutex<Option<IpcStream>>,
-    tools: Mutex<Vec<ToolDefinition>>,
+    tools: Mutex<Vec<ToolSpec>>,
 }
 
 impl IpcToolRegistry {
@@ -44,19 +44,25 @@ impl IpcToolRegistry {
             },
         )
         .await
-        .map_err(|e| ToolError::IpcClient(format!("Failed to send Handshake: {e}")))?;
+        .map_err(|e| ToolError::IpcClient {
+            message: format!("Failed to send Handshake: {e}"),
+        })?;
 
         let resp = read_ipc_response(&mut stream)
             .await
-            .map_err(|e| ToolError::IpcClient(format!("Failed to read Handshake response: {e}")))?;
+            .map_err(|e| ToolError::IpcClient {
+                message: format!("Failed to read Handshake response: {e}"),
+            })?;
 
         match resp {
             Some(IpcResponse::HandshakeAck { .. }) => {}
-            Some(IpcResponse::Error { message }) => return Err(ToolError::IpcClient(message)),
+            Some(IpcResponse::Error { message }) => {
+                return Err(ToolError::IpcClient { message: message });
+            }
             _ => {
-                return Err(ToolError::IpcClient(
-                    "Unexpected response to Handshake".to_string(),
-                ));
+                return Err(ToolError::IpcClient {
+                    message: "Unexpected response to Handshake".to_string(),
+                });
             }
         }
 
@@ -68,19 +74,25 @@ impl IpcToolRegistry {
             },
         )
         .await
-        .map_err(|e| ToolError::IpcClient(format!("Failed to send Initialize: {e}")))?;
-
-        let resp = read_ipc_response(&mut stream).await.map_err(|e| {
-            ToolError::IpcClient(format!("Failed to read Initialize response: {e}"))
+        .map_err(|e| ToolError::IpcClient {
+            message: format!("Failed to send Initialize: {e}"),
         })?;
+
+        let resp = read_ipc_response(&mut stream)
+            .await
+            .map_err(|e| ToolError::IpcClient {
+                message: format!("Failed to read Initialize response: {e}"),
+            })?;
 
         match resp {
             Some(IpcResponse::Ack) => {}
-            Some(IpcResponse::Error { message }) => return Err(ToolError::IpcClient(message)),
+            Some(IpcResponse::Error { message }) => {
+                return Err(ToolError::IpcClient { message: message });
+            }
             _ => {
-                return Err(ToolError::IpcClient(
-                    "Unexpected response to Initialize".to_string(),
-                ));
+                return Err(ToolError::IpcClient {
+                    message: "Unexpected response to Initialize".to_string(),
+                });
             }
         }
 
@@ -108,11 +120,13 @@ impl IpcToolRegistry {
                 Err(e) => {
                     attempts += 1;
                     if attempts >= max_retries {
-                        return Err(ToolError::IpcClient(format!(
-                            "Failed to connect to tool at {} after {} attempts: {e}",
-                            socket_path.display(),
-                            attempts
-                        )));
+                        return Err(ToolError::IpcClient {
+                            message: format!(
+                                "Failed to connect to tool at {} after {} attempts: {e}",
+                                socket_path.display(),
+                                attempts
+                            ),
+                        });
                     }
                     let delay =
                         RECONNECT_BASE_DELAY_MS * 2u64.saturating_pow(attempts.saturating_sub(1));
@@ -130,25 +144,27 @@ impl IpcToolRegistry {
             let stream = match guard.as_mut() {
                 Some(s) => s,
                 None => {
-                    return Err(ToolError::IpcClient(
-                        "Not connected to tool host".to_string(),
-                    ));
+                    return Err(ToolError::IpcClient {
+                        message: "Not connected to tool host".to_string(),
+                    });
                 }
             };
 
             if let Err(e) = write_ipc_request(stream, &req).await {
                 drop(guard);
-                return Err(ToolError::IpcClient(format!("Failed to send request: {e}")));
+                return Err(ToolError::IpcClient {
+                    message: format!("Failed to send request: {e}"),
+                });
             }
 
             match read_ipc_response(stream).await {
                 Ok(Some(resp)) => Ok(resp),
-                Ok(None) => Err(ToolError::IpcClient(
-                    "Connection closed by tool host".to_string(),
-                )),
-                Err(e) => Err(ToolError::IpcClient(format!(
-                    "Failed to read response: {e}"
-                ))),
+                Ok(None) => Err(ToolError::IpcClient {
+                    message: "Connection closed by tool host".to_string(),
+                }),
+                Err(e) => Err(ToolError::IpcClient {
+                    message: format!("Failed to read response: {e}"),
+                }),
             }
         };
 
@@ -163,33 +179,36 @@ impl IpcToolRegistry {
     async fn do_refresh_tools_with_stream(&self, stream: &mut IpcStream) -> Result<(), ToolError> {
         write_ipc_request(stream, &IpcRequest::ListTools)
             .await
-            .map_err(|e| ToolError::IpcClient(format!("Failed to send ListTools: {e}")))?;
+            .map_err(|e| ToolError::IpcClient {
+                message: format!("Failed to send ListTools: {e}"),
+            })?;
 
         let resp = read_ipc_response(stream)
             .await
-            .map_err(|e| ToolError::IpcClient(format!("Failed to read ListTools response: {e}")))?;
+            .map_err(|e| ToolError::IpcClient {
+                message: format!("Failed to read ListTools response: {e}"),
+            })?;
 
         match resp {
             Some(IpcResponse::Tools { tools }) => {
-                let mut tools_guard = self
-                    .tools
-                    .lock()
-                    .map_err(|e| ToolError::IpcClient(format!("Tools lock poisoned: {e}")))?;
+                let mut tools_guard = self.tools.lock().map_err(|e| ToolError::IpcClient {
+                    message: format!("Tools lock poisoned: {e}"),
+                })?;
                 *tools_guard = tools;
                 Ok(())
             }
-            Some(IpcResponse::Error { message }) => Err(ToolError::IpcClient(message)),
-            _ => Err(ToolError::IpcClient(
-                "Unexpected response for ListTools".to_string(),
-            )),
+            Some(IpcResponse::Error { message }) => Err(ToolError::IpcClient { message: message }),
+            _ => Err(ToolError::IpcClient {
+                message: "Unexpected response for ListTools".to_string(),
+            }),
         }
     }
 
     async fn do_refresh_tools(&self) -> Result<(), ToolError> {
         let mut guard = self.stream.lock().await;
-        let stream = guard
-            .as_mut()
-            .ok_or_else(|| ToolError::IpcClient("Not connected".to_string()))?;
+        let stream = guard.as_mut().ok_or_else(|| ToolError::IpcClient {
+            message: "Not connected".to_string(),
+        })?;
         self.do_refresh_tools_with_stream(stream).await
     }
 
@@ -235,25 +254,27 @@ impl IpcToolRegistry {
             },
         )
         .await
-        .map_err(|e| ToolError::IpcClient(format!("Failed to send Handshake on reconnect: {e}")))?;
-
-        let resp = read_ipc_response(&mut stream).await.map_err(|e| {
-            ToolError::IpcClient(format!(
-                "Failed to read Handshake response on reconnect: {e}"
-            ))
+        .map_err(|e| ToolError::IpcClient {
+            message: format!("Failed to send Handshake on reconnect: {e}"),
         })?;
+
+        let resp = read_ipc_response(&mut stream)
+            .await
+            .map_err(|e| ToolError::IpcClient {
+                message: format!("Failed to read Handshake response on reconnect: {e}"),
+            })?;
 
         match resp {
             Some(IpcResponse::HandshakeAck { .. }) => {}
             Some(IpcResponse::Error { message }) => {
-                return Err(ToolError::IpcClient(format!(
-                    "Reconnect handshake rejected: {message}"
-                )));
+                return Err(ToolError::IpcClient {
+                    message: format!("Reconnect handshake rejected: {message}"),
+                });
             }
             _ => {
-                return Err(ToolError::IpcClient(
-                    "Unexpected response to Handshake on reconnect".to_string(),
-                ));
+                return Err(ToolError::IpcClient {
+                    message: "Unexpected response to Handshake on reconnect".to_string(),
+                });
             }
         }
 
@@ -265,27 +286,27 @@ impl IpcToolRegistry {
             },
         )
         .await
-        .map_err(|e| {
-            ToolError::IpcClient(format!("Failed to send Initialize on reconnect: {e}"))
+        .map_err(|e| ToolError::IpcClient {
+            message: format!("Failed to send Initialize on reconnect: {e}"),
         })?;
 
-        let resp = read_ipc_response(&mut stream).await.map_err(|e| {
-            ToolError::IpcClient(format!(
-                "Failed to read Initialize response on reconnect: {e}"
-            ))
-        })?;
+        let resp = read_ipc_response(&mut stream)
+            .await
+            .map_err(|e| ToolError::IpcClient {
+                message: format!("Failed to read Initialize response on reconnect: {e}"),
+            })?;
 
         match resp {
             Some(IpcResponse::Ack) => {}
             Some(IpcResponse::Error { message }) => {
-                return Err(ToolError::IpcClient(format!(
-                    "Reconnect rejected: {message}"
-                )));
+                return Err(ToolError::IpcClient {
+                    message: format!("Reconnect rejected: {message}"),
+                });
             }
             _ => {
-                return Err(ToolError::IpcClient(
-                    "Unexpected response to Initialize on reconnect".to_string(),
-                ));
+                return Err(ToolError::IpcClient {
+                    message: "Unexpected response to Initialize on reconnect".to_string(),
+                });
             }
         }
 
@@ -318,7 +339,7 @@ impl IpcToolRegistry {
 
 #[async_trait]
 impl ToolRegistry for IpcToolRegistry {
-    fn list_tools(&self) -> Vec<ToolDefinition> {
+    fn list_tools(&self) -> Vec<ToolSpec> {
         match self.tools.lock() {
             Ok(guard) => guard.clone(),
             Err(e) => {
@@ -339,35 +360,11 @@ impl ToolRegistry for IpcToolRegistry {
         })
         .await
         .and_then(|resp| match resp {
-            IpcResponse::CallResult { result } => result.map_err(|e| match e {
-                ene_tool_proto::ToolError::PermissionRequired {
-                    request_id,
-                    action,
-                    target,
-                    description,
-                } => crate::error::ToolError::PermissionRequired {
-                    request_id,
-                    action,
-                    target,
-                    description,
-                },
-                ene_tool_proto::ToolError::UserInputRequired { request_id, prompt } => {
-                    crate::error::ToolError::UserInputRequired { request_id, prompt }
-                }
-                ene_tool_proto::ToolError::PermissionDenied { message } => {
-                    crate::error::ToolError::PermissionDenied(message)
-                }
-                ene_tool_proto::ToolError::SandboxViolation { message } => {
-                    crate::error::ToolError::SandboxViolation(message)
-                }
-                other => crate::error::ToolError::ToolExecutionError(other.to_string()),
+            IpcResponse::CallResult { result } => result,
+            IpcResponse::Error { message } => Err(crate::error::ToolError::Other { message }),
+            _ => Err(crate::error::ToolError::Other {
+                message: "Unexpected response for CallTool".to_string(),
             }),
-            IpcResponse::Error { message } => {
-                Err(crate::error::ToolError::ToolExecutionError(message))
-            }
-            _ => Err(crate::error::ToolError::ToolExecutionError(
-                "Unexpected response for CallTool".to_string(),
-            )),
         })
     }
 
@@ -395,13 +392,5 @@ impl ToolRegistry for IpcToolRegistry {
             target_pattern: target_pattern.to_string(),
         };
         let _ = self.send_with_reconnect(req).await;
-    }
-
-    async fn ensure_index_built(
-        &self,
-        _embedder: &dyn ene_provider::EmbeddingProvider,
-        _store: Option<&ene_memory::MemoryStore>,
-    ) -> Result<(), crate::error::ToolError> {
-        Ok(())
     }
 }

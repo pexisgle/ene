@@ -1,6 +1,8 @@
 use crate::provider::WebSearchConfig;
 use async_trait::async_trait;
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use serde::Deserialize;
 use std::sync::{Arc, OnceLock};
@@ -50,15 +52,19 @@ impl WebSearchAction {
 
 #[async_trait]
 impl ToolAction for WebSearchAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "websearch".to_string(),
-            description: concat!(
-                "Searches the web for latest information and technical references. ",
-                "Supports multiple search backends (ArXiv, DuckDuckGo, Tavily). ",
-                "Returns summarized search results with titles, snippets, and URLs."
-            )
-            .to_string(),
+    fn tool_name(&self) -> &'static str {
+        "web.search"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("web.search"),
+            version: ToolVersion::default(),
+            display_name: "Search the web for the latest information.".to_string(),
+            summary: "Search the web for the latest information.".to_string(),
+            description: "Searches the web using the configured backend (duckduckgo, tavily, brave, exa, or arxiv) and returns a list of relevant results with titles, URLs, and snippets.".to_string(),
+            category: ToolCategory::WebSearch,
+            keywords: KeywordSet::primary_only(["search", "web", "google", "internet", "lookup"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -68,14 +74,22 @@ impl ToolAction for WebSearchAction {
                 },
                 "required": ["query"]
             }),
-            category: Some(ToolCategory::WebSearch),
-            keywords: vec![
-                "search".to_string(),
-                "web".to_string(),
-                "google".to_string(),
-                "internet".to_string(),
-                "lookup".to_string(),
+            examples: vec![
+                ToolExample {
+                    description: "Search for latest news".to_string(),
+                    input: serde_json::json!({"query": "latest Rust programming news 2026"}),
+                    output: Some("Search results for 'latest Rust programming news 2026' (DuckDuckGo):\n\n1. Rust Blog\n   Official blog\n   URL: https://blog.rust-lang.org".to_string()),
+                },
+                ToolExample {
+                    description: "Search ArXiv with limited results".to_string(),
+                    input: serde_json::json!({"query": "machine learning", "backend": "arxiv", "limit": 3}),
+                    output: None,
+                },
             ],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

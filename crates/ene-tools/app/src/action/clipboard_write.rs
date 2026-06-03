@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use serde::Deserialize;
 
@@ -13,19 +15,35 @@ pub struct ClipboardWriteAction;
 
 #[async_trait]
 impl ToolAction for ClipboardWriteAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "clipboard_write".to_string(),
-            description: "Writes text to the clipboard.".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "app.clipboard_write"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("app.clipboard_write"),
+            version: ToolVersion::default(),
+            display_name: "Writes text to the system clipboard.".to_string(),
+            summary: "Writes text to the system clipboard.".to_string(),
+            description: "Writes text to the system clipboard.".to_string(),
+            category: ToolCategory::App,
+            keywords: KeywordSet::primary_only(["clipboard", "write", "copy"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "text": { "type": "string", "description": "Text to write" }
+                    "text": { "type": "string", "description": "Text to write to clipboard" }
                 },
                 "required": ["text"]
             }),
-            category: Some(ToolCategory::App),
-            keywords: vec!["clipboard".to_string(), "write".to_string()],
+            examples: vec![ToolExample {
+                description: "Write text to clipboard".to_string(),
+                input: serde_json::json!({"text": "Hello, world!"}),
+                output: None,
+            }],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

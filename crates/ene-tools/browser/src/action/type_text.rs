@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -24,13 +26,42 @@ impl TypeSubAction {
 
 #[async_trait]
 impl ToolAction for TypeSubAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "type".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "browser.type"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("browser.type"),
+            version: ToolVersion::default(),
+            display_name: "Types text into a form element matching the selector".to_string(),
+            summary: "Types text into a form element matching the selector".to_string(),
             description: "Types text into a form element matching the selector".to_string(),
-            parameters: serde_json::json!({}),
-            category: None,
-            keywords: vec![],
+            category: ToolCategory::Browser,
+            keywords: KeywordSet::primary_only(["type", "input", "text"]),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "selector": {
+                        "type": "string",
+                        "description": "CSS selector for the target input/textarea element"
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Text to type into the element"
+                    }
+                },
+                "required": ["selector", "text"]
+            }),
+            examples: vec![ToolExample {
+                description: "Type into a search field".to_string(),
+                input: serde_json::json!({"selector": "#search", "text": "hello world"}),
+                output: None,
+            }],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

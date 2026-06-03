@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -28,13 +30,54 @@ impl GetContentSubAction {
 
 #[async_trait]
 impl ToolAction for GetContentSubAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "get_content".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "browser.get_content"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("browser.get_content"),
+            version: ToolVersion::default(),
+            display_name: "Gets structural page content formatted as Markdown or HTML".to_string(),
+            summary: "Gets structural page content formatted as Markdown or HTML".to_string(),
             description: "Gets structural page content formatted as Markdown or HTML".to_string(),
-            parameters: serde_json::json!({}),
-            category: None,
-            keywords: vec![],
+            category: ToolCategory::Browser,
+            keywords: KeywordSet::primary_only(["content", "dom", "html", "markdown"]),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "format": {
+                        "type": "string",
+                        "enum": ["markdown", "html"],
+                        "description": "Output format (default: 'markdown'). 'markdown' preserves headings/links/lists as Markdown, 'html' returns raw HTML."
+                    },
+                    "extract": {
+                        "type": "string",
+                        "enum": ["body", "main", "full"],
+                        "description": "Extraction scope (default: 'body'). 'body' = <body> content, 'main' = <main> content (falls back to <body>), 'full' = entire document including <head>."
+                    },
+                    "trim": {
+                        "type": "boolean",
+                        "description": "Remove non-content elements (default: true). When true, removes: script, style, noscript, iframe, svg, nav, header, footer, aside, template, code, canvas, audio, video, map, object, embed."
+                    }
+                }
+            }),
+            examples: vec![
+                ToolExample {
+                    description: "Get page content as Markdown".to_string(),
+                    input: serde_json::json!({"format": "markdown"}),
+                    output: Some("# Page Title\n\nContent here...".to_string()),
+                },
+                ToolExample {
+                    description: "Get raw HTML of the main content area".to_string(),
+                    input: serde_json::json!({"format": "html", "extract": "main", "trim": false}),
+                    output: None,
+                },
+            ],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

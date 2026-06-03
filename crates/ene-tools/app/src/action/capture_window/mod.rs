@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use image::{DynamicImage, imageops::FilterType};
 use serde::Deserialize;
@@ -50,24 +52,39 @@ pub struct CaptureWindowAction;
 
 #[async_trait]
 impl ToolAction for CaptureWindowAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "capture_window".to_string(),
-            description: "Takes a screenshot of a specific window by title.".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "app.capture_window"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("app.capture_window"),
+            version: ToolVersion::default(),
+            display_name: "Takes a screenshot of a specific window by title substring match."
+                .to_string(),
+            summary: "Takes a screenshot of a specific window by title substring match."
+                .to_string(),
+            description: "Takes a screenshot of a specific window by title substring match."
+                .to_string(),
+            category: ToolCategory::App,
+            keywords: KeywordSet::primary_only(["window", "screenshot", "capture"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "window_title": { "type": "string", "description": "Window title" },
-                    "scale_percent": { "type": "integer", "description": "Resize percentage" }
+                    "window_title": { "type": "string", "description": "Substring of window title or app name to capture" },
+                    "scale_percent": { "type": "integer", "description": "Resize percentage 1-100 (default: 50)" }
                 },
                 "required": ["window_title"]
             }),
-            category: Some(ene_tool_proto::ToolCategory::App),
-            keywords: vec![
-                "window".to_string(),
-                "screenshot".to_string(),
-                "capture".to_string(),
-            ],
+            examples: vec![ToolExample {
+                description: "Capture a window screenshot".to_string(),
+                input: serde_json::json!({"window_title": "Firefox"}),
+                output: None,
+            }],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

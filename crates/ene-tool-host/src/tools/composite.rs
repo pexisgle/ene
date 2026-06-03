@@ -1,14 +1,16 @@
 use super::registry::ToolRegistry;
 use crate::error::ToolError;
 use async_trait::async_trait;
-use ene_tool_proto::ToolDefinition;
+use ene_tool_proto::ToolSpec;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// A tool registry that aggregates multiple sub-registries and supports RAG-based tool selection.
+/// A tool registry that aggregates multiple sub-registries.
+///
+/// Tool RAG indexing and selection is handled by [`ToolRag`](crate::ToolRag).
+/// This registry only handles dispatch (list, call, config).
 pub struct CompositeToolRegistry {
     state: std::sync::RwLock<CompositeState>,
-    store: std::sync::RwLock<Option<Arc<ene_memory::MemoryStore>>>,
 }
 
 struct CompositeState {
@@ -22,7 +24,7 @@ impl CompositeToolRegistry {
         let mut tool_index = HashMap::with_capacity(registries.len() * 4);
         for (idx, registry) in registries.iter().enumerate() {
             for tool in registry.list_tools() {
-                tool_index.entry(tool.name).or_insert(idx);
+                tool_index.entry(tool.name.to_string()).or_insert(idx);
             }
         }
         Self {
@@ -30,206 +32,54 @@ impl CompositeToolRegistry {
                 registries,
                 tool_index,
             }),
-            store: std::sync::RwLock::new(None),
         }
     }
 
-    /// Builder method to attach a memory store for tool RAG.
-    pub fn with_store(self, store: Arc<ene_memory::MemoryStore>) -> Self {
-        {
-            let mut guard = self.store.write().unwrap_or_else(|e| e.into_inner());
-            *guard = Some(store);
-        }
-        self
+    /// Read-locks state and calls `f` with a reference to the registries slice.
+    fn with_registries<R>(&self, f: impl FnOnce(&[Arc<dyn ToolRegistry>]) -> R) -> R {
+        let guard = self.state.read().unwrap_or_else(|e| e.into_inner());
+        f(&guard.registries)
     }
 
-    /// Sets the memory store for tool RAG.
-    pub fn set_store(&self, store: Arc<ene_memory::MemoryStore>) {
-        let mut guard = self.store.write().unwrap_or_else(|e| e.into_inner());
-        *guard = Some(store);
+    /// Write-locks state and calls `f` with a mutable reference to `CompositeState`.
+    fn with_state_mut<R>(&self, f: impl FnOnce(&mut CompositeState) -> R) -> R {
+        let mut guard = self.state.write().unwrap_or_else(|e| e.into_inner());
+        f(&mut *guard)
     }
 
     /// Adds a sub-registry to the composite.
     pub fn add_registry(&self, registry: Arc<dyn ToolRegistry>) {
-        let mut state_guard = self.state.write().unwrap_or_else(|e| e.into_inner());
-        let idx = state_guard.registries.len();
-        for tool in registry.list_tools() {
-            state_guard.tool_index.entry(tool.name).or_insert(idx);
-        }
-        state_guard.registries.push(registry);
-    }
-
-    /// Persists tool definition embeddings to SQLite
-    /// Compares against existing hashes and re-embeds only those that have changed
-    pub async fn ensure_tool_embeddings(
-        &self,
-        embedder: &dyn ene_provider::EmbeddingProvider,
-    ) -> Result<(), ToolError> {
-        let store = {
-            let guard = self.store.read().unwrap_or_else(|e| e.into_inner());
-            match guard.as_ref() {
-                Some(s) => Arc::clone(s),
-                None => return Ok(()),
-            }
-        };
-
-        let store_clone = Arc::clone(&store);
-        let cached: HashMap<String, (String, Vec<f32>)> =
-            tokio::task::spawn_blocking(move || match store_clone.list_tool_embeddings() {
-                Ok(entries) => entries
-                    .into_iter()
-                    .map(|(name, hash, emb)| (name, (hash, emb)))
-                    .collect(),
-                Err(e) => {
-                    tracing::warn!("[ToolRAG] Failed to load cached embeddings: {}", e);
-                    HashMap::new()
-                }
-            })
-            .await
-            .unwrap_or_default();
-
-        let mut indexed = 0usize;
-        let mut reused = 0usize;
-
-        // RwLockReadGuard is not Send, so clone registries under lock before async embed operations
-        let registries = {
-            let state_guard = self.state.read().unwrap_or_else(|e| e.into_inner());
-            state_guard.registries.clone()
-        };
-
-        for registry in &registries {
+        self.with_state_mut(|state| {
+            let idx = state.registries.len();
             for tool in registry.list_tools() {
-                let current_hash = super::compute_tool_version_hash(&tool);
-
-                if let Some((stored_hash, _emb)) = cached.get(&tool.name) {
-                    if stored_hash == &current_hash {
-                        reused += 1;
-                        continue;
-                    }
-                }
-
-                let text = tool.embedding_text();
-                match embedder.embed(&text).await {
-                    Ok(embedding) => {
-                        let store_clone = Arc::clone(&store);
-                        let tool_name = tool.name.clone();
-                        let current_hash = current_hash.clone();
-                        let embedding_clone = embedding.clone();
-
-                        tokio::task::spawn_blocking(move || {
-                            if let Err(e) = store_clone.upsert_tool_embedding(
-                                &tool_name,
-                                &current_hash,
-                                &embedding_clone,
-                            ) {
-                                tracing::warn!(
-                                    "[ToolRAG] Failed to persist embedding for '{}': {}",
-                                    tool_name,
-                                    e
-                                );
-                            }
-                        })
-                        .await
-                        .unwrap_or_default();
-
-                        indexed += 1;
-                    }
-                    Err(e) => {
-                        tracing::warn!("[ToolRAG] Failed to embed tool '{}': {}", tool.name, e);
-                    }
-                }
+                state.tool_index.entry(tool.name.to_string()).or_insert(idx);
             }
-        }
-
-        tracing::info!(
-            "[ToolRAG] Indexed {} tools ({} new, {} reused from DB)",
-            indexed + reused,
-            indexed,
-            reused
-        );
-        Ok(())
+            state.registries.push(registry);
+        });
     }
 }
 
 #[async_trait]
 impl ToolRegistry for CompositeToolRegistry {
-    fn list_tools(&self) -> Vec<ToolDefinition> {
-        let registries = {
-            let state_guard = self.state.read().unwrap_or_else(|e| e.into_inner());
-            state_guard.registries.clone()
-        };
+    fn list_tools(&self) -> Vec<ToolSpec> {
         let mut tools = Vec::new();
-        for registry in &registries {
-            tools.extend(registry.list_tools());
-        }
+        self.with_registries(|registries| {
+            for registry in registries {
+                tools.extend(registry.list_tools());
+            }
+        });
         tools
-    }
-
-    async fn select_tools(
-        &self,
-        embedder: &dyn ene_provider::EmbeddingProvider,
-        query: &str,
-        limit: usize,
-    ) -> Vec<ToolDefinition> {
-        let all_tools = self.list_tools();
-        let store = {
-            let guard = self.store.read().unwrap_or_else(|e| e.into_inner());
-            match guard.as_ref() {
-                Some(s) => Arc::clone(s),
-                None => return all_tools,
-            }
-        };
-
-        if let Err(e) = self.ensure_tool_embeddings(embedder).await {
-            tracing::warn!("[ToolRAG] Failed to build index: {}", e);
-        }
-
-        let query_embedding = match embedder.embed_query(query).await {
-            Ok(emb) => emb,
-            Err(e) => {
-                tracing::warn!("[ToolRAG] Failed to embed query: {}", e);
-                return all_tools;
-            }
-        };
-
-        let store_clone = Arc::clone(&store);
-        let query_embedding_clone = query_embedding.clone();
-
-        let search_results = tokio::task::spawn_blocking(move || {
-            match store_clone.search_tools(&query_embedding_clone, limit, 0.0) {
-                Ok(results) => results,
-                Err(e) => {
-                    tracing::warn!("[ToolRAG] Failed to search tools: {}", e);
-                    vec![]
-                }
-            }
-        })
-        .await
-        .unwrap_or_default();
-
-        if search_results.is_empty() {
-            return all_tools;
-        }
-
-        let all_map: HashMap<String, ToolDefinition> =
-            all_tools.into_iter().map(|t| (t.name.clone(), t)).collect();
-
-        search_results
-            .into_iter()
-            .filter_map(|(name, _similarity)| all_map.get(&name).cloned())
-            .collect()
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         let registry = {
-            let state_guard = self.state.read().unwrap_or_else(|e| e.into_inner());
-            match state_guard.tool_index.get(name) {
-                Some(&idx) => Arc::clone(&state_guard.registries[idx]),
+            let guard = self.state.read().unwrap_or_else(|e| e.into_inner());
+            match guard.tool_index.get(name) {
+                Some(&idx) => Arc::clone(&guard.registries[idx]),
                 None => {
-                    return Err(ToolError::ToolExecutionError(format!(
-                        "Tool {} not found",
-                        name
-                    )));
+                    return Err(ToolError::NotFound {
+                        tool_name: name.to_string(),
+                    });
                 }
             }
         };
@@ -237,20 +87,14 @@ impl ToolRegistry for CompositeToolRegistry {
     }
 
     async fn set_session_id(&self, session_id: &str) {
-        let registries = {
-            let state_guard = self.state.read().unwrap_or_else(|e| e.into_inner());
-            state_guard.registries.clone()
-        };
+        let registries = self.with_registries(|r| r.to_vec());
         for registry in &registries {
             registry.set_session_id(session_id).await;
         }
     }
 
     async fn config_schema(&self) -> Option<serde_json::Value> {
-        let registries = {
-            let state_guard = self.state.read().unwrap_or_else(|e| e.into_inner());
-            state_guard.registries.clone()
-        };
+        let registries = self.with_registries(|r| r.to_vec());
         for registry in &registries {
             if let Some(schema) = registry.config_schema().await {
                 return Some(schema);
@@ -260,47 +104,34 @@ impl ToolRegistry for CompositeToolRegistry {
     }
 
     async fn approve_permission(&self, request_id: &str) {
-        let registries = {
-            let state_guard = self.state.read().unwrap_or_else(|e| e.into_inner());
-            state_guard.registries.clone()
-        };
+        let registries = self.with_registries(|r| r.to_vec());
         for registry in &registries {
             registry.approve_permission(request_id).await;
         }
     }
 
     async fn allow_pattern(&self, action: &str, target_pattern: &str) {
-        let registries = {
-            let state_guard = self.state.read().unwrap_or_else(|e| e.into_inner());
-            state_guard.registries.clone()
-        };
+        let registries = self.with_registries(|r| r.to_vec());
         for registry in &registries {
             registry.allow_pattern(action, target_pattern).await;
         }
-    }
-
-    async fn ensure_index_built(
-        &self,
-        embedder: &dyn ene_provider::EmbeddingProvider,
-        _store: Option<&ene_memory::MemoryStore>,
-    ) -> Result<(), ToolError> {
-        self.ensure_tool_embeddings(embedder).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ene_tool_proto::{KeywordSet, SideEffects, ToolCategory, ToolName, ToolVersion};
     use std::sync::Mutex;
 
     struct MockRegistry {
-        tools: Vec<ToolDefinition>,
+        tools: Vec<ToolSpec>,
         call_log: Arc<Mutex<Vec<(String, String)>>>,
         session_id: Arc<Mutex<Option<String>>>,
     }
 
     impl MockRegistry {
-        fn new(tools: Vec<ToolDefinition>) -> Self {
+        fn new(tools: Vec<ToolSpec>) -> Self {
             Self {
                 tools,
                 call_log: Arc::new(Mutex::new(Vec::new())),
@@ -311,7 +142,7 @@ mod tests {
 
     #[async_trait]
     impl ToolRegistry for MockRegistry {
-        fn list_tools(&self) -> Vec<ToolDefinition> {
+        fn list_tools(&self) -> Vec<ToolSpec> {
             self.tools.clone()
         }
 
@@ -328,13 +159,21 @@ mod tests {
         }
     }
 
-    fn make_tool(name: &str) -> ToolDefinition {
-        ToolDefinition {
-            name: name.to_string(),
+    fn make_tool(name: &str) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new(name),
+            version: ToolVersion::default(),
+            display_name: format!("Tool {name}"),
+            summary: format!("Tool {name}"),
             description: format!("Tool {name}"),
+            category: ToolCategory::Utility,
+            keywords: KeywordSet::default(),
             parameters: serde_json::json!({}),
-            category: None,
-            keywords: vec![],
+            examples: Vec::new(),
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 
@@ -352,8 +191,8 @@ mod tests {
         let composite = CompositeToolRegistry::new(vec![Arc::new(registry)]);
         let all = composite.list_tools();
         assert_eq!(all.len(), 2);
-        assert_eq!(all[0].name, "alpha");
-        assert_eq!(all[1].name, "beta");
+        assert_eq!(all[0].name.as_str(), "alpha");
+        assert_eq!(all[1].name.as_str(), "beta");
     }
 
     #[test]
@@ -375,7 +214,6 @@ mod tests {
         let r2 = MockRegistry::new(vec![make_tool("dup")]);
         let composite = CompositeToolRegistry::new(vec![Arc::new(r1), Arc::new(r2)]);
         let all = composite.list_tools();
-        // Both tools appear in the list, but index maps to first
         assert_eq!(all.len(), 2);
         assert_eq!(
             composite.state.read().unwrap().tool_index.get("dup"),
@@ -402,10 +240,7 @@ mod tests {
         let composite = CompositeToolRegistry::new(vec![Arc::new(mock)]);
         let result = composite.call_tool("nonexistent", "").await;
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ToolError::ToolExecutionError(_)
-        ));
+        assert!(matches!(result.unwrap_err(), ToolError::NotFound { .. }));
     }
 
     #[tokio::test]

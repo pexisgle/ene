@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use std::sync::Arc;
 
@@ -17,13 +19,31 @@ impl ScreenshotSubAction {
 
 #[async_trait]
 impl ToolAction for ScreenshotSubAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "screenshot".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "browser.screenshot"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("browser.screenshot"),
+            version: ToolVersion::default(),
+            display_name: "Takes a screenshot of the active browser tab".to_string(),
+            summary: "Takes a screenshot of the active browser tab".to_string(),
             description: "Takes a screenshot of the active browser tab".to_string(),
-            parameters: serde_json::json!({}),
-            category: None,
-            keywords: vec![],
+            category: ToolCategory::Browser,
+            keywords: KeywordSet::primary_only(["screenshot", "capture", "image"]),
+            parameters: serde_json::json!({
+                "type": "object"
+            }),
+            examples: vec![ToolExample {
+                description: "Capture browser tab screenshot".to_string(),
+                input: serde_json::json!({}),
+                output: None,
+            }],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

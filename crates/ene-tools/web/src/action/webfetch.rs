@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use serde::Deserialize;
 
@@ -30,15 +32,19 @@ impl WebFetchAction {
 
 #[async_trait]
 impl ToolAction for WebFetchAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "webfetch".to_string(),
-            description: concat!(
-                "Fetches content from a URL. ",
-                "Returns the content in the requested format (text, markdown, or html). ",
-                "Useful for reading documentation, APIs, or web pages."
-            )
-            .to_string(),
+    fn tool_name(&self) -> &'static str {
+        "web.fetch"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("web.fetch"),
+            version: ToolVersion::default(),
+            display_name: "Fetch a URL and return its content as text or markdown.".to_string(),
+            summary: "Fetch a URL and return its content as text or markdown.".to_string(),
+            description: "Fetches content from a URL and returns it in the requested format (markdown, text, or html). Supports configurable timeout and automatically converts HTML to readable markdown.".to_string(),
+            category: ToolCategory::WebFetch,
+            keywords: KeywordSet::primary_only(["fetch", "url", "web", "download", "html"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -48,14 +54,22 @@ impl ToolAction for WebFetchAction {
                 },
                 "required": ["url"]
             }),
-            category: Some(ToolCategory::Browser),
-            keywords: vec![
-                "fetch".to_string(),
-                "url".to_string(),
-                "web".to_string(),
-                "download".to_string(),
-                "html".to_string(),
+            examples: vec![
+                ToolExample {
+                    description: "Fetch a webpage as markdown".to_string(),
+                    input: serde_json::json!({"url": "https://example.com"}),
+                    output: Some("Content of example.com converted to readable markdown".to_string()),
+                },
+                ToolExample {
+                    description: "Fetch with text format and custom timeout".to_string(),
+                    input: serde_json::json!({"url": "https://api.example.com/data", "format": "text", "timeout": 15}),
+                    output: None,
+                },
             ],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

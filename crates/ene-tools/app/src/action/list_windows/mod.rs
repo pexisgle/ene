@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 
 mod wayland;
@@ -29,17 +31,35 @@ pub struct ListWindowsAction;
 
 #[async_trait]
 impl ToolAction for ListWindowsAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "list_windows".to_string(),
-            description: "Lists all open windows with their titles and positions.".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "app.list_windows"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("app.list_windows"),
+            version: ToolVersion::default(),
+            display_name: "Lists all open windows with their titles and application names."
+                .to_string(),
+            summary: "Lists all open windows with their titles and application names.".to_string(),
+            description: "Lists all open windows with their titles and application names."
+                .to_string(),
+            category: ToolCategory::App,
+            keywords: KeywordSet::primary_only(["window", "list", "enumerate"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {},
                 "required": []
             }),
-            category: Some(ToolCategory::App),
-            keywords: vec!["window".to_string(), "list".to_string()],
+            examples: vec![ToolExample {
+                description: "List all open windows".to_string(),
+                input: serde_json::json!({}),
+                output: Some("Firefox (firefox)\nTerminal (gnome-terminal)".to_string()),
+            }],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

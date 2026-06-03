@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use std::sync::Arc;
 
@@ -17,13 +19,31 @@ impl CloseSubAction {
 
 #[async_trait]
 impl ToolAction for CloseSubAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "close".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "browser.close"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("browser.close"),
+            version: ToolVersion::default(),
+            display_name: "Closes the browser session".to_string(),
+            summary: "Closes the browser session".to_string(),
             description: "Closes the browser session".to_string(),
-            parameters: serde_json::json!({}),
-            category: None,
-            keywords: vec![],
+            category: ToolCategory::Browser,
+            keywords: KeywordSet::primary_only(["close", "session"]),
+            parameters: serde_json::json!({
+                "type": "object"
+            }),
+            examples: vec![ToolExample {
+                description: "Close the browser session".to_string(),
+                input: serde_json::json!({}),
+                output: None,
+            }],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

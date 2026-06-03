@@ -1,18 +1,33 @@
 use crate::utils::undo_manager::UndoManager;
-use ene_tool_proto::ToolDefinition;
-use ene_tool_proto::ToolError;
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 
-pub fn tool_definition() -> ToolDefinition {
-    ToolDefinition {
-        name: "undo".to_string(),
+pub fn tool_definition() -> ToolSpec {
+    ToolSpec {
+        name: ToolName::new("utility.undo"),
+        version: ToolVersion::default(),
+        display_name: "Undo".to_string(),
+        summary: "Reverts the most recent file operation.".to_string(),
         description: "Reverts the most recent file operation (write, edit, delete, patch). Can be called multiple times to undo multiple operations. Shell operations cannot be undone.".to_string(),
+        category: ToolCategory::Utility,
+        keywords: KeywordSet::primary_only(["undo", "revert", "rollback"]),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {},
             "required": []
         }),
-        category: Some(ene_tool_proto::ToolCategory::Utility),
-        keywords: vec!["undo".to_string(), "revert".to_string(), "rollback".to_string()],
+        examples: vec![
+            ToolExample {
+                description: "Undo the most recent file operation".to_string(),
+                input: serde_json::json!({}),
+                output: Some("Undo successful:\nRestored /home/user/file.txt".to_string()),
+            },
+        ],
+        caveats: Vec::new(),
+        side_effects: SideEffects::default(),
+        preconditions: Vec::new(),
+        related: Vec::new(),
     }
 }
 
@@ -45,7 +60,11 @@ impl UndoAction {
 
 #[async_trait::async_trait]
 impl ene_tools_common::ToolAction for UndoAction {
-    fn definition(&self) -> ToolDefinition {
+    fn tool_name(&self) -> &'static str {
+        "filesystem.undo"
+    }
+
+    fn definition(&self) -> ToolSpec {
         tool_definition()
     }
 

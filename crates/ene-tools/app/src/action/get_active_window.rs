@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 
 async fn run() -> Result<String, ToolError> {
@@ -29,21 +31,38 @@ pub struct GetActiveWindowAction;
 
 #[async_trait]
 impl ToolAction for GetActiveWindowAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "get_active_window".to_string(),
-            description: "Gets the title and app name of the currently focused window.".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "app.get_active_window"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("app.get_active_window"),
+            version: ToolVersion::default(),
+            display_name: "Gets the title, app name, and position of the currently focused window."
+                .to_string(),
+            summary: "Gets the title, app name, and position of the currently focused window."
+                .to_string(),
+            description: "Gets the title, app name, and position of the currently focused window."
+                .to_string(),
+            category: ToolCategory::App,
+            keywords: KeywordSet::primary_only(["window", "active", "focus", "current"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {},
                 "required": []
             }),
-            category: Some(ToolCategory::App),
-            keywords: vec![
-                "window".to_string(),
-                "active".to_string(),
-                "focus".to_string(),
-            ],
+            examples: vec![ToolExample {
+                description: "Get the active window info".to_string(),
+                input: serde_json::json!({}),
+                output: Some(
+                    "Active window: Firefox (firefox) at (0, 0) size 1920x1080".to_string(),
+                ),
+            }],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

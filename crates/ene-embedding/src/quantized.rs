@@ -80,8 +80,16 @@ impl GgufEmbeddingProvider {
         })
     }
 
-    fn embed_internal(&self, text: &str, prefix: &str) -> Result<Vec<f32>, EmbeddingError> {
-        let prefixed = format!("{prefix}{text}");
+    fn embed_internal(
+        &self,
+        text: &str,
+        kind: ene_provider::EmbeddingKind,
+    ) -> Result<Vec<f32>, EmbeddingError> {
+        let prefix = match kind {
+            ene_provider::EmbeddingKind::Query | ene_provider::EmbeddingKind::Hyde => "Query: ",
+            _ => "Document: ",
+        };
+        let prefixed = format!("{}{}", prefix, text);
         let tokenizer = self.tokenizer.lock().unwrap_or_else(|e| e.into_inner());
         let encoding = tokenizer
             .encode(prefixed.as_str(), true)
@@ -108,7 +116,11 @@ impl GgufEmbeddingProvider {
 
 #[async_trait]
 impl ene_provider::EmbeddingProvider for GgufEmbeddingProvider {
-    async fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
+    async fn embed(
+        &self,
+        text: &str,
+        kind: ene_provider::EmbeddingKind,
+    ) -> Result<Vec<f32>, ene_provider::EmbeddingError> {
         if text.trim().is_empty() {
             return Ok(vec![0.0; self.dims]);
         }
@@ -118,13 +130,14 @@ impl ene_provider::EmbeddingProvider for GgufEmbeddingProvider {
         tokio::task::block_in_place(|| {
             let start = Instant::now();
             let result = self
-                .embed_internal(&owned, "Document: ")
-                .map_err(|e| e.to_string());
+                .embed_internal(&owned, kind)
+                .map_err(ene_provider::EmbeddingError::from);
             let elapsed = start.elapsed();
             if result.is_ok() {
                 tracing::debug!(
-                    "[Embedding] GGUF({}) {} chars → {:.2}ms",
+                    "[Embedding] GGUF({}) {:?} {} chars → {:.2}ms",
                     model,
+                    kind,
                     owned.len(),
                     elapsed.as_secs_f64() * 1000.0,
                 );
@@ -133,7 +146,7 @@ impl ene_provider::EmbeddingProvider for GgufEmbeddingProvider {
         })
     }
 
-    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, String> {
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, ene_provider::EmbeddingError> {
         if text.trim().is_empty() {
             return Ok(vec![0.0; self.dims]);
         }
@@ -143,8 +156,8 @@ impl ene_provider::EmbeddingProvider for GgufEmbeddingProvider {
         tokio::task::block_in_place(|| {
             let start = Instant::now();
             let result = self
-                .embed_internal(&owned, "Query: ")
-                .map_err(|e| e.to_string());
+                .embed_internal(&owned, ene_provider::EmbeddingKind::Query)
+                .map_err(ene_provider::EmbeddingError::from);
             let elapsed = start.elapsed();
             if result.is_ok() {
                 tracing::debug!(
@@ -155,6 +168,40 @@ impl ene_provider::EmbeddingProvider for GgufEmbeddingProvider {
                 );
             }
             result
+        })
+    }
+
+    async fn embed_batch(
+        &self,
+        items: &[(&str, ene_provider::EmbeddingKind)],
+    ) -> Result<Vec<Vec<f32>>, ene_provider::EmbeddingError> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let owned: Vec<(String, ene_provider::EmbeddingKind)> =
+            items.iter().map(|(t, k)| (t.to_string(), *k)).collect();
+
+        tokio::task::block_in_place(|| {
+            let start = Instant::now();
+            let mut out = Vec::with_capacity(owned.len());
+            for (text, kind) in &owned {
+                if text.trim().is_empty() {
+                    out.push(vec![0.0; self.dims]);
+                } else {
+                    out.push(
+                        self.embed_internal(text, *kind)
+                            .map_err(ene_provider::EmbeddingError::from)?,
+                    );
+                }
+            }
+            let elapsed = start.elapsed();
+            tracing::debug!(
+                "[Embedding] GGUF({}) batch {} items → {:.2}ms",
+                self.model_name,
+                owned.len(),
+                elapsed.as_secs_f64() * 1000.0,
+            );
+            Ok(out)
         })
     }
 

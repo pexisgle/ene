@@ -1,0 +1,291 @@
+//! Attribute parsing for the `#[tool(...)]` container attribute on the
+//! `ToolSpec` derive.
+
+use darling::{FromDeriveInput, FromMeta};
+use proc_macro2::TokenStream as TokenStream2;
+use quote::quote;
+use syn::Path;
+
+/// A comma-separated list of strings, parsed from a single `FromMeta` value.
+///
+/// Usage: `keywords_primary = "read, open, cat"` parses to
+/// `vec!["read", "open", "cat"]`. Whitespace around entries is stripped.
+#[derive(Debug, Clone, Default)]
+pub struct StringList(pub Vec<String>);
+
+impl FromMeta for StringList {
+    fn from_string(value: &str) -> darling::Result<Self> {
+        Ok(StringList(
+            value
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+        ))
+    }
+}
+
+/// A semicolon-separated list of strings, parsed from a single `FromMeta` value.
+///
+/// Used for `examples = "..."` where individual example strings contain
+/// commas and pipes (e.g. JSON input) and the only safe top-level
+/// separator is `;`.
+#[derive(Debug, Clone, Default)]
+pub struct SemiList(pub Vec<String>);
+
+impl FromMeta for SemiList {
+    fn from_string(value: &str) -> darling::Result<Self> {
+        Ok(SemiList(
+            value
+                .split(';')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+        ))
+    }
+}
+
+#[derive(Debug, FromDeriveInput, Default)]
+#[darling(attributes(tool))]
+pub struct ToolSpecAttrs {
+    /// Optional namespace. When set with `name`, the final name is
+    /// `"{namespace}.{name}"`. When omitted, `name` is the full name.
+    #[darling(default)]
+    pub namespace: Option<String>,
+
+    /// Required: short action name (e.g. "read") OR full name when no
+    /// `namespace` is set.
+    pub name: String,
+
+    /// Human-friendly display name. Defaults to Title-Case of `name`.
+    #[darling(default)]
+    pub display_name: Option<String>,
+
+    /// Required: one-line summary used for embedding.
+    pub summary: String,
+
+    /// Optional full description. Defaults to `summary`.
+    #[darling(default)]
+    pub description: Option<String>,
+
+    /// Tool category. Either a bare identifier (e.g. "Filesystem") or a
+    /// fully qualified path (e.g. "::ene_tool_proto::ToolCategory::Filesystem").
+    pub category: String,
+
+    /// Side effects expression. Can be a bare variant or fully qualified.
+    #[darling(default)]
+    pub side_effects: Option<String>,
+
+    /// Primary keywords (high embedding weight). Comma-separated.
+    #[darling(default)]
+    pub keywords_primary: StringList,
+
+    /// Secondary keywords (mid embedding weight). Comma-separated.
+    #[darling(default)]
+    pub keywords_secondary: StringList,
+
+    /// Domain tags. Comma-separated.
+    #[darling(default)]
+    pub keywords_domain: StringList,
+
+    /// Negative keywords. Comma-separated.
+    #[darling(default)]
+    pub keywords_negative: StringList,
+
+    /// Free-form caveats. Comma-separated.
+    #[darling(default)]
+    pub caveats: StringList,
+
+    /// Preconditions that must hold before invocation. Comma-separated.
+    #[darling(default)]
+    pub preconditions: StringList,
+
+    /// Related tool names. Comma-separated.
+    #[darling(default)]
+    pub related: StringList,
+
+    /// Optional semantic version. Default: 1.0.0.
+    #[darling(default)]
+    pub version: Option<String>,
+
+    /// Examples, each expressed as a `ToolExample` literal. Format:
+    /// `examples = "desc1|input1|output1; desc2|input2"`.
+    ///
+    /// Examples can be provided as a semicolon-separated list, each entry
+    /// being `description|input|optional_output`. Use a leading `s:` to
+    /// treat the input as a JSON string, or `j:` to require JSON parsing.
+    /// When neither prefix is present, the input is treated as JSON and
+    /// falls back to a string value on parse failure.
+    #[darling(default)]
+    pub examples: SemiList,
+}
+
+impl ToolSpecAttrs {
+    pub fn full_name(&self) -> String {
+        match &self.namespace {
+            Some(ns) => format!("{}.{}", ns, self.name),
+            None => self.name.clone(),
+        }
+    }
+
+    pub fn tool_name_value(&self) -> darling::Result<String> {
+        Ok(self.full_name())
+    }
+
+    pub fn display_name_value(&self, _default: String) -> String {
+        self.display_name
+            .clone()
+            .unwrap_or_else(|| title_case(&self.name))
+    }
+
+    pub fn summary_value(&self) -> darling::Result<String> {
+        if self.summary.trim().is_empty() {
+            return Err(darling::Error::custom("`summary` must not be empty"));
+        }
+        Ok(self.summary.clone())
+    }
+
+    pub fn description_value(&self) -> String {
+        self.description
+            .clone()
+            .unwrap_or_else(|| self.summary.clone())
+    }
+
+    pub fn category_path(&self) -> TokenStream2 {
+        path_token(&self.category, "ene_tool_proto::ToolCategory")
+    }
+
+    pub fn side_effects_path(&self) -> TokenStream2 {
+        match &self.side_effects {
+            Some(s) => path_token(s, "ene_tool_proto::SideEffects"),
+            None => quote! { ::ene_tool_proto::SideEffects::ReadOnly },
+        }
+    }
+
+    pub fn keywords_list(&self, kind: &str) -> Vec<String> {
+        match kind {
+            "primary" => self.keywords_primary.0.clone(),
+            "secondary" => self.keywords_secondary.0.clone(),
+            "domain" => self.keywords_domain.0.clone(),
+            "negative" => self.keywords_negative.0.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn string_list(&self, kind: &str) -> Vec<String> {
+        match kind {
+            "caveats" => self.caveats.0.clone(),
+            "preconditions" => self.preconditions.0.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn related_list(&self) -> Vec<String> {
+        self.related.0.clone()
+    }
+
+    pub fn version_tokens(&self) -> TokenStream2 {
+        let v = self
+            .version
+            .as_deref()
+            .and_then(parse_version)
+            .unwrap_or((1, 0, 0));
+        let (maj, min, pat) = v;
+        quote! { ToolVersion::new(#maj, #min, #pat) }
+    }
+
+    pub fn examples_value(&self) -> TokenStream2 {
+        if self.examples.0.is_empty() {
+            return quote! { ::std::vec::Vec::new() };
+        }
+        let items = self.examples.0.iter().map(|raw: &String| {
+            let parts: Vec<&str> = raw.split('|').collect();
+            let desc = parts.first().copied().unwrap_or("");
+            let input_str = parts.get(1).copied().unwrap_or("");
+            let output_str = parts.get(2).copied();
+            let output_expr = match output_str {
+                Some(s) => quote! { ::std::option::Option::Some(#s.to_string()) },
+                None => quote! { ::std::option::Option::None },
+            };
+            quote! {
+                ::ene_tool_proto::ToolExample {
+                    description: #desc.to_string(),
+                    input: {
+                        let __s: &str = #input_str;
+                        match ::serde_json::from_str::<::serde_json::Value>(__s) {
+                            ::std::result::Result::Ok(__v) => __v,
+                            ::std::result::Result::Err(_) => ::serde_json::Value::String(__s.to_string()),
+                        }
+                    },
+                    output: #output_expr,
+                }
+            }
+        });
+        quote! { ::std::vec![ #(#items),* ] }
+    }
+
+    pub fn args_const_ident(&self, struct_ident: &syn::Ident) -> syn::Ident {
+        let n = self.full_name().to_uppercase().replace('.', "_");
+        let _ = struct_ident; // kept for symmetry; we ignore the struct name
+        syn::Ident::new(&format!("_TOOL_ARGS_{n}"), struct_ident.span())
+    }
+}
+
+fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = s.split('.');
+    let maj = parts.next()?.parse().ok()?;
+    let min = parts.next()?.parse().ok()?;
+    let pat = parts.next()?.parse().ok()?;
+    Some((maj, min, pat))
+}
+
+fn title_case(s: &str) -> String {
+    s.split(|c: char| c == '_' || c == '.')
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            let mut chars = p.chars();
+            let first = chars.next().unwrap().to_ascii_uppercase();
+            let rest: String = chars.collect();
+            format!("{first}{rest}")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn path_token(name: &str, default_module: &str) -> TokenStream2 {
+    if name.contains("::") {
+        // User provided a fully qualified path
+        if let Ok(path) = syn::parse_str::<Path>(name) {
+            return quote! { #path };
+        }
+    }
+    let mut parts = name.split_whitespace();
+    let head = parts.next().unwrap_or("ReadOnly");
+    if let Ok(ident) = syn::parse_str::<syn::Ident>(head) {
+        if ident == "ReadOnly" || ident == "Destructive" || ident == "Idempotent" {
+            // Default unit variant
+            let mod_path: syn::Path =
+                syn::parse_str(default_module).expect("default_module must be a valid path");
+            return quote! { #mod_path::#ident };
+        }
+        // Map "Filesystem" -> ToolCategory::Filesystem
+        // Map "FileSystem{...}" -> SideEffects::FileSystem{...}
+        // Fallback: parse as fully qualified into the default module
+        if name.contains('{') {
+            let mod_path: syn::Path =
+                syn::parse_str(default_module).expect("default_module must be a valid path");
+            let combined = format!("{default_module} :: {name}");
+            let stream: TokenStream2 = combined
+                .parse()
+                .unwrap_or_else(|_| quote! { #mod_path::ReadOnly });
+            return stream;
+        }
+        let mod_path: syn::Path =
+            syn::parse_str(default_module).expect("default_module must be a valid path");
+        return quote! { #mod_path::#ident };
+    }
+    // Last resort: use the input as an expression and let the compiler
+    // resolve it.
+    let stream: TokenStream2 = syn::parse_str(name).unwrap_or_else(|_| quote! { ReadOnly });
+    stream
+}

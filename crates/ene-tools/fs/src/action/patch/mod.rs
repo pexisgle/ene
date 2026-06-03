@@ -223,7 +223,9 @@ pub async fn apply_patch(
     ))
 }
 
-use ene_tool_proto::ToolDefinition;
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use std::sync::{Arc, RwLock};
 
@@ -241,13 +243,44 @@ impl FsPatchSubAction {
 
 #[async_trait::async_trait]
 impl ToolAction for FsPatchSubAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "patch".to_string(),
-            description: "Applies a unified multi-file patch".to_string(),
-            parameters: serde_json::json!({}),
-            category: None,
-            keywords: vec![],
+    fn tool_name(&self) -> &'static str {
+        "filesystem.patch"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        let description = concat!(
+            "Apply a multi-file patch in custom format. Supports Update, Add, ",
+            "and Delete file directives between *** Begin Patch / *** End Patch markers."
+        );
+        ToolSpec {
+            name: ToolName::new("filesystem.patch"),
+            version: ToolVersion::default(),
+            display_name: "Apply Patch".to_string(),
+            summary: "Apply a multi-file patch in custom format.".to_string(),
+            description: description.to_string(),
+            category: ToolCategory::Filesystem,
+            keywords: KeywordSet::primary_only(["patch", "apply", "diff", "update", "multi-file"]),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "patchText": {
+                        "type": "string",
+                        "description": "Full patch text in the custom patch format"
+                    }
+                },
+                "required": ["patchText"]
+            }),
+            examples: vec![ToolExample {
+                description: "Update a file via patch".to_string(),
+                input: serde_json::json!({"patchText": "*** Begin Patch\n*** Update File: src/main.rs\n--- old\n+++ new\n@@ -1 +1 @@\n-old code\n+new code\n*** End Patch"}),
+                output: Some(
+                    "Patch applied successfully.\nM /home/user/project/src/main.rs".to_string(),
+                ),
+            }],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

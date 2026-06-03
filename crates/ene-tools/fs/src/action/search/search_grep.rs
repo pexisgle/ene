@@ -144,7 +144,9 @@ pub async fn grep_search(
     Ok(output.join("\n"))
 }
 
-use ene_tool_proto::ToolDefinition;
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use std::sync::{Arc, RwLock};
 
@@ -162,13 +164,58 @@ impl FsGrepSubAction {
 
 #[async_trait::async_trait]
 impl ToolAction for FsGrepSubAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "grep".to_string(),
-            description: "Searches for patterns within files".to_string(),
-            parameters: serde_json::json!({}),
-            category: None,
-            keywords: vec![],
+    fn tool_name(&self) -> &'static str {
+        "filesystem.grep"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("filesystem.grep"),
+            version: ToolVersion::default(),
+            display_name: "Grep Search".to_string(),
+            summary: "Search for regex patterns within file contents.".to_string(),
+            description: "Search for regex patterns within file contents.".to_string(),
+            category: ToolCategory::Filesystem,
+            keywords: KeywordSet::primary_only([
+                "grep", "search", "regex", "find", "pattern", "content",
+            ]),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Regex pattern to search for"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Base directory or file to search in (defaults to cwd)"
+                    },
+                    "include": {
+                        "type": "string",
+                        "description": "File glob filter (e.g. '*.rs', '*.{ts,tsx}')"
+                    }
+                },
+                "required": ["pattern"]
+            }),
+            examples: vec![
+                ToolExample {
+                    description: "Search for a function definition".to_string(),
+                    input: serde_json::json!({"pattern": "fn main", "path": "/home/user/project"}),
+                    output: Some(
+                        "Found 2 matches\n/home/user/project/src/main.rs:\n  Line 1: fn main() {"
+                            .to_string(),
+                    ),
+                },
+                ToolExample {
+                    description: "Search only Rust files".to_string(),
+                    input: serde_json::json!({"pattern": "TODO", "include": "*.rs", "path": "/home/user/project"}),
+                    output: None,
+                },
+            ],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

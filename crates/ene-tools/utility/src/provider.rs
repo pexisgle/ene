@@ -1,7 +1,7 @@
 use crate::action;
 use crate::db::TodoDb;
 use async_trait::async_trait;
-use ene_tool_proto::{ToolDefinition, ToolError, ToolProvider};
+use ene_tool_proto::{ToolError, ToolProvider, ToolSpec};
 use ene_tools_common::ToolAction;
 use std::sync::Arc;
 
@@ -42,13 +42,12 @@ impl Default for UtilityToolProvider {
 
 #[async_trait]
 impl ToolProvider for UtilityToolProvider {
-    fn list_tools(&self) -> Vec<ToolDefinition> {
+    fn list_specs(&self) -> Vec<ToolSpec> {
         self.actions.iter().map(|a| a.definition()).collect()
     }
-
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         for action in &self.actions {
-            if action.definition().name == name {
+            if action.tool_name() == name {
                 return action.execute(arguments).await;
             }
         }

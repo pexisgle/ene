@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 
 async fn run() -> Result<String, ToolError> {
@@ -47,21 +49,35 @@ pub struct ListMonitorsAction;
 
 #[async_trait]
 impl ToolAction for ListMonitorsAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "list_monitors".to_string(),
-            description: "Lists all connected monitors/screens and their resolutions.".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "app.list_monitors"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("app.list_monitors"),
+            version: ToolVersion::default(),
+            display_name: "Lists all connected monitors/screens with their resolutions and positions.".to_string(),
+            summary: "Lists all connected monitors/screens with their resolutions and positions.".to_string(),
+            description: "Lists all connected monitors/screens with their resolutions and positions.".to_string(),
+            category: ToolCategory::App,
+            keywords: KeywordSet::primary_only(["monitor", "screen", "display", "resolution"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {},
                 "required": []
             }),
-            category: Some(ToolCategory::App),
-            keywords: vec![
-                "monitor".to_string(),
-                "screen".to_string(),
-                "list".to_string(),
+            examples: vec![
+                ToolExample {
+                    description: "List all monitors".to_string(),
+                    input: serde_json::json!({}),
+                    output: Some("eDP-1 (id: 0) 1920x1080 at (0,0) scale=1.0 [PRIMARY]\nHDMI-1 (id: 1) 2560x1440 at (1920,0) scale=1.0".to_string()),
+                },
             ],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

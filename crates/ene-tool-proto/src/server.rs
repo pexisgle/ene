@@ -118,7 +118,10 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
             schema: provider.config_schema(),
         },
         IpcRequest::ListTools => IpcResponse::Tools {
-            tools: provider.list_tools(),
+            tools: provider.list_specs(),
+        },
+        IpcRequest::ListActionSpecs => IpcResponse::ActionSpecs {
+            specs: provider.list_action_specs(),
         },
         IpcRequest::CallTool { name, arguments } => match provider.call_tool(name, arguments).await
         {

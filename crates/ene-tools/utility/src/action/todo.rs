@@ -1,16 +1,12 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::db::{TodoDb, TodoError, TodoItem};
-
-const KEYWORDS_BASE: &[&str] = &["todo", "task", "track", "plan", "checklist"];
-
-fn category() -> Option<ToolCategory> {
-    Some(ToolCategory::Utility)
-}
 
 fn ok_json<T: serde::Serialize>(value: &T) -> Result<String, ToolError> {
     serde_json::to_string_pretty(value).map_err(|e| ToolError::Internal {
@@ -72,24 +68,35 @@ impl TodoList {
 
 #[async_trait]
 impl ToolAction for TodoList {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "todo_list".to_string(),
-            description: concat!(
-                "Returns the current todo list for this session as a flat array. ",
-                "Each item has id, parent_id (null for top-level todos), content, ",
-                "status (pending|in_progress|completed|cancelled), priority (high|medium|low), ",
-                "and timestamps. Items are ordered as (parent_id ASC, id ASC) so children ",
-                "appear immediately after their parents. Use parent_id to reconstruct the tree."
-            )
-            .to_string(),
+    fn tool_name(&self) -> &'static str {
+        "utility.todo_list"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("utility.todo_list"),
+            version: ToolVersion::default(),
+            display_name: "List all todos in the current session.".to_string(),
+            summary: "List all todos in the current session.".to_string(),
+            description: "Returns the full todo tree for the current session, including each item's id, content, status, priority, parent relationship, and a summary of active vs total items.".to_string(),
+            category: ToolCategory::Utility,
+            keywords: KeywordSet::primary_only(["todo", "task", "track", "plan", "checklist"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {},
                 "required": []
             }),
-            category: category(),
-            keywords: KEYWORDS_BASE.iter().map(|s| s.to_string()).collect(),
+            examples: vec![
+                ToolExample {
+                    description: "List all todos".to_string(),
+                    input: serde_json::json!({}),
+                    output: Some(r#"{"summary":{"total":3,"active":2},"items":[...]}"#.to_string()),
+                },
+            ],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 
@@ -136,15 +143,24 @@ impl TodoAdd {
 
 #[async_trait]
 impl ToolAction for TodoAdd {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "todo_add".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "utility.todo_add"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("utility.todo_add"),
+            version: ToolVersion::default(),
+            display_name: "Add a new todo.".to_string(),
+            summary: "Add a new todo.".to_string(),
             description: concat!(
                 "Adds a new todo. Set `parent_id` to make this a sub-task of an existing todo; ",
                 "this lets you break a large task into smaller sub-tasks at any depth. ",
                 "New todos start with status='pending'."
             )
             .to_string(),
+            category: ToolCategory::Utility,
+            keywords: KeywordSet::primary_only(["todo", "task", "track", "plan", "checklist"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -164,8 +180,22 @@ impl ToolAction for TodoAdd {
                 },
                 "required": ["content", "priority"]
             }),
-            category: category(),
-            keywords: KEYWORDS_BASE.iter().map(|s| s.to_string()).collect(),
+            examples: vec![
+                ToolExample {
+                    description: "Add a high-priority task".to_string(),
+                    input: serde_json::json!({"content": "Buy groceries", "priority": "high"}),
+                    output: None,
+                },
+                ToolExample {
+                    description: "Add a sub-task under an existing todo".to_string(),
+                    input: serde_json::json!({"content": "Buy milk", "priority": "medium", "parent_id": 1}),
+                    output: None,
+                },
+            ],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 
@@ -225,9 +255,16 @@ impl TodoUpdate {
 
 #[async_trait]
 impl ToolAction for TodoUpdate {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "todo_update".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "utility.todo_update"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("utility.todo_update"),
+            version: ToolVersion::default(),
+            display_name: "Update an existing todo's fields.".to_string(),
+            summary: "Update an existing todo's fields.".to_string(),
             description: concat!(
                 "Updates fields of an existing todo. Any field omitted is left unchanged. ",
                 "To reparent a todo, set parent_id to a new integer id; to detach it (make it ",
@@ -235,6 +272,8 @@ impl ToolAction for TodoUpdate {
                 "(a todo cannot become a descendant of itself)."
             )
             .to_string(),
+            category: ToolCategory::Utility,
+            keywords: KeywordSet::primary_only(["todo", "task", "track", "plan", "checklist"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -260,8 +299,22 @@ impl ToolAction for TodoUpdate {
                 },
                 "required": ["id"]
             }),
-            category: category(),
-            keywords: KEYWORDS_BASE.iter().map(|s| s.to_string()).collect(),
+            examples: vec![
+                ToolExample {
+                    description: "Mark a todo as in progress".to_string(),
+                    input: serde_json::json!({"id": 1, "status": "in_progress"}),
+                    output: None,
+                },
+                ToolExample {
+                    description: "Reparent a todo to make it top-level".to_string(),
+                    input: serde_json::json!({"id": 3, "parent_id": null}),
+                    output: None,
+                },
+            ],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 
@@ -302,14 +355,23 @@ impl TodoComplete {
 
 #[async_trait]
 impl ToolAction for TodoComplete {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "todo_complete".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "utility.todo_complete"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("utility.todo_complete"),
+            version: ToolVersion::default(),
+            display_name: "Mark a todo and all its sub-tasks as completed.".to_string(),
+            summary: "Mark a todo and all its sub-tasks as completed.".to_string(),
             description: concat!(
                 "Marks a todo (and all of its descendants) as completed. ",
                 "Use this when a large task and all of its sub-tasks are finished."
             )
             .to_string(),
+            category: ToolCategory::Utility,
+            keywords: KeywordSet::primary_only(["todo", "task", "track", "plan", "checklist"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -317,8 +379,15 @@ impl ToolAction for TodoComplete {
                 },
                 "required": ["id"]
             }),
-            category: category(),
-            keywords: KEYWORDS_BASE.iter().map(|s| s.to_string()).collect(),
+            examples: vec![ToolExample {
+                description: "Complete a todo and cascade to sub-tasks".to_string(),
+                input: serde_json::json!({"id": 1}),
+                output: Some(r#"{"id":1,"status":"completed","cascaded":[2,3]}"#.to_string()),
+            }],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 
@@ -354,15 +423,24 @@ impl TodoDelete {
 
 #[async_trait]
 impl ToolAction for TodoDelete {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "todo_delete".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "utility.todo_delete"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("utility.todo_delete"),
+            version: ToolVersion::default(),
+            display_name: "Soft-delete a todo by marking it as cancelled.".to_string(),
+            summary: "Soft-delete a todo by marking it as cancelled.".to_string(),
             description: concat!(
                 "Soft-deletes a todo by setting status='cancelled'. ",
                 "The row is kept for history. Descendants are NOT cascaded — ",
                 "to cancel a whole sub-tree, delete each item individually."
             )
             .to_string(),
+            category: ToolCategory::Utility,
+            keywords: KeywordSet::primary_only(["todo", "task", "track", "plan", "checklist"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -370,8 +448,15 @@ impl ToolAction for TodoDelete {
                 },
                 "required": ["id"]
             }),
-            category: category(),
-            keywords: KEYWORDS_BASE.iter().map(|s| s.to_string()).collect(),
+            examples: vec![ToolExample {
+                description: "Soft-delete a todo by id".to_string(),
+                input: serde_json::json!({"id": 5}),
+                output: None,
+            }],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

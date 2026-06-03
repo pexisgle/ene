@@ -1,6 +1,6 @@
 # Tool System Overview
 
-Each tool type runs as an independent binary process, communicating with core over IPC (Unix Domain Sockets on Linux, Named Pipes on Windows).
+Each tool runs as an independent binary process, communicating with core over IPC (Unix Domain Sockets on Linux, Named Pipes on Windows).
 
 ## Architecture
 
@@ -11,8 +11,24 @@ ToolHostManager (binary discovery, spawning, supervision)
   │       └── ene-tool-proto protocol
   ├── extra_registries × N (MCP, etc.)
   │   └── McpToolRegistry
-  └── MemoryStore (Tool RAG)
+  └── CompositeToolRegistry
+       ├── First-wins dedup
+       ├── Tool RAG (embedding-based selection)
+       └── MemoryStore (tool_embedding_index)
 ```
+
+## Tool Naming Convention
+
+All tools use namespaced names: `<namespace>.<action>`.
+
+| Namespace | Tools | Binary |
+|-----------|-------|--------|
+| `filesystem` | `read`, `write`, `edit`, `delete`, `glob`, `grep`, `patch` | `ene-tools-fs` |
+| `shell` | `execute` | `ene-tools-fs` |
+| `app` | `clipboard_read`, `clipboard_write`, `list_windows`, `focus_window`, `get_active_window`, `list_monitors`, `capture_window`, `keyboard_type`, `keyboard_press`, `keyboard_combo`, `mouse_move`, `mouse_click`, `drag`, `mouse_scroll`, `screenshot` | `ene-tools-app` |
+| `browser` | `navigate`, `click`, `type`, `wait`, `screenshot`, `get_content`, `scroll`, `close` | `ene-tools-browser` |
+| `web` | `fetch`, `search` | `ene-tools-web` |
+| `utility` | `question`, `todo_list`, `todo_add`, `todo_update`, `todo_complete`, `todo_delete`, `get_system_info`, `get_current_time`, `undo` | `ene-tools-utility` / `ene-tools-fs` |
 
 ## IPC Protocol (`ene-tool-proto`)
 
@@ -33,7 +49,7 @@ pub enum IpcRequest {
 pub enum IpcResponse {
     HandshakeAck { version: u32 },
     Ack,
-    Tools { tools: Vec<ToolDefinition> },
+    Tools { tools: Vec<ToolSpec> },
     ConfigSchema { schema: Option<Value> },
     CallResult { result: Result<String, ToolError> },
     Pong,
@@ -68,7 +84,27 @@ Wire format: 4-byte little-endian length prefix + JSON payload.
 | ToolHostManager | Process death detection → exponential backoff restart (max 5, 500ms → 30s) |
 | IpcToolRegistry | Connection loss → exponential backoff reconnect (max 5), re-sends Initialize |
 
+## ToolProvider Trait
+
+Implemented by tool binaries. Returns `ToolSpec` (the v2 structured type):
+
+```rust
+#[async_trait]
+pub trait ToolProvider: Send + Sync {
+    fn list_specs(&self) -> Vec<ToolSpec>;
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>;
+    fn set_session_id(&self, session_id: &str);
+    fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
+    fn approve_permission(&self, _request_id: &str) {}
+    fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
+    fn set_config(&self, _config: &serde_json::Value) {}
+    fn config_schema(&self) -> Option<serde_json::Value> { None }
+}
+```
+
 ## ToolRegistry Trait
+
+Host-side interface for tool access:
 
 ```rust
 #[async_trait]
@@ -89,8 +125,8 @@ pub trait ToolRegistry: Send + Sync {
 Aggregates multiple `ToolRegistry` instances:
 
 - **First-wins** — duplicate tool names resolve to the first registration
-- **Tool RAG** — `ensure_tool_embeddings()` computes version hashes, re-embeds only changed tools via `store.upsert_tool_embedding()`
-- **`select_tools()`** — cosine-similarity filtering using stored tool embeddings, with `tool_rag_always_include` tools always present
+- **Tool RAG** — `ensure_tool_embeddings()` computes version hashes, re-embeds only changed tools via `store.upsert_tool_embedding_field()` (multi-vector: `summary`, `description`, `negative` per tool)
+- **`select_tools()`** — cosine-similarity filtering using stored tool embeddings
 
 ## MCP Support
 
@@ -105,9 +141,10 @@ Aggregates multiple `ToolRegistry` instances:
 ## Custom Tool Registration
 
 1. Implement `ToolProvider` trait from `ene-tool-proto`
-2. Call `run_tool_server()` in your binary's `main()`
-3. Place binary in `~/.local/share/dev.pexisgle.ene/tools/`
-4. Add entry to `settings.json` under `tools.tools`
+2. Use `#[derive(ToolSpec)]` on args structs for auto-generated specs
+3. Call `run_tool_server()` in your binary's `main()`
+4. Place binary in `~/.local/share/dev.pexisgle.ene/tools/`
+5. Add entry to `settings.json` under `tools.tools`
 
 ```json
 {

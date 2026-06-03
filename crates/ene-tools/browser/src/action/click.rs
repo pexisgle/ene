@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -23,13 +25,38 @@ impl ClickSubAction {
 
 #[async_trait]
 impl ToolAction for ClickSubAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "click".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "browser.click"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("browser.click"),
+            version: ToolVersion::default(),
+            display_name: "Clicks a page element matching the selector".to_string(),
+            summary: "Clicks a page element matching the selector".to_string(),
             description: "Clicks a page element matching the selector".to_string(),
-            parameters: serde_json::json!({}),
-            category: None,
-            keywords: vec![],
+            category: ToolCategory::Browser,
+            keywords: KeywordSet::primary_only(["click", "element"]),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "selector": {
+                        "type": "string",
+                        "description": "CSS selector for the element to click. Use only when navigate cannot reach the target."
+                    }
+                },
+                "required": ["selector"]
+            }),
+            examples: vec![ToolExample {
+                description: "Click a button by CSS selector".to_string(),
+                input: serde_json::json!({"selector": "#submit-button"}),
+                output: None,
+            }],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

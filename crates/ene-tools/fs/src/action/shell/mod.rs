@@ -3,21 +3,28 @@ mod shell_platform;
 use self::shell_platform::execute_shell_command;
 
 use crate::utils::sandbox::SandboxConfig;
-use ene_tool_proto::ToolDefinition;
-use ene_tool_proto::ToolError;
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::truncate::Truncate;
 use std::path::Path;
 use std::time::Duration;
 
-pub fn tool_definition() -> ToolDefinition {
-    ToolDefinition {
-        name: "shell".to_string(),
-        description: concat!(
-            "Executes a given shell command with optional timeout, ensuring proper handling and security measures. ",
-            "All commands run in the current working directory by default. Use the workdir parameter if you need to run a command in a different directory. ",
-            "AVOID using 'cd <directory> && <command>' patterns - use workdir instead. ",
-            "Clear, concise description of what this command does in 5-10 words is required."
-        ).to_string(),
+pub fn tool_definition() -> ToolSpec {
+    let description = concat!(
+        "Executes a given shell command with optional timeout, ensuring proper handling and security measures. ",
+        "All commands run in the current working directory by default. Use the workdir parameter if you need to run a command in a different directory. ",
+        "AVOID using 'cd <directory> && <command>' patterns - use workdir instead. ",
+        "Clear, concise description of what this command does in 5-10 words is required."
+    );
+    ToolSpec {
+        name: ToolName::new("shell.execute"),
+        version: ToolVersion::default(),
+        display_name: "Execute Shell Command".to_string(),
+        summary: "Executes a shell command with optional timeout and security measures.".to_string(),
+        description: description.to_string(),
+        category: ToolCategory::Shell,
+        keywords: KeywordSet::primary_only(["shell", "command", "execute", "terminal", "bash"]),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
@@ -28,8 +35,17 @@ pub fn tool_definition() -> ToolDefinition {
             },
             "required": ["command", "description"]
         }),
-        category: Some(ene_tool_proto::ToolCategory::Shell),
-        keywords: vec!["shell".to_string(), "command".to_string(), "execute".to_string(), "terminal".to_string(), "bash".to_string()],
+        examples: vec![
+            ToolExample {
+                description: "List files in a directory".to_string(),
+                input: serde_json::json!({"command": "ls -la", "description": "List files in directory", "workdir": "/tmp"}),
+                output: Some("# List files in directory\ntotal 8\ndrwxrwxr-x 2 user user 4096 Jun  1 10:00 .\ndrwxrwxr-x 3 user user 4096 Jun  1 09:59 ..".to_string()),
+            },
+        ],
+        caveats: Vec::new(),
+        side_effects: SideEffects::default(),
+        preconditions: Vec::new(),
+        related: Vec::new(),
     }
 }
 
@@ -138,7 +154,11 @@ impl ShellAction {
 
 #[async_trait::async_trait]
 impl ene_tools_common::ToolAction for ShellAction {
-    fn definition(&self) -> ToolDefinition {
+    fn tool_name(&self) -> &'static str {
+        "shell"
+    }
+
+    fn definition(&self) -> ToolSpec {
         tool_definition()
     }
 

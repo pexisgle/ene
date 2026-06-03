@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use image::{DynamicImage, imageops::FilterType};
 use serde::Deserialize;
@@ -64,23 +66,42 @@ pub struct ScreenshotAction;
 
 #[async_trait]
 impl ToolAction for ScreenshotAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "screenshot".to_string(),
-            description: "Takes a screenshot of the primary screen.".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "app.screenshot"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("app.screenshot"),
+            version: ToolVersion::default(),
+            display_name: "Takes a screenshot of the active window or primary screen.".to_string(),
+            summary: "Takes a screenshot of the active window or primary screen.".to_string(),
+            description: "Takes a screenshot of the active window or primary screen.".to_string(),
+            category: ToolCategory::App,
+            keywords: KeywordSet::primary_only(["screenshot", "screen", "capture", "image"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "scale_percent": { "type": "integer", "description": "Resize percentage (1-100)" }
+                    "scale_percent": { "type": "integer", "description": "Resize percentage 1-100 (default: 50)" }
                 },
                 "required": []
             }),
-            category: Some(ToolCategory::App),
-            keywords: vec![
-                "screenshot".to_string(),
-                "screen".to_string(),
-                "capture".to_string(),
+            examples: vec![
+                ToolExample {
+                    description: "Take a full screenshot".to_string(),
+                    input: serde_json::json!({}),
+                    output: None,
+                },
+                ToolExample {
+                    description: "Take screenshot with custom scale".to_string(),
+                    input: serde_json::json!({"scale_percent": 25}),
+                    output: None,
+                },
             ],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

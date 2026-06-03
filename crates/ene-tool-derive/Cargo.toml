@@ -1,0 +1,21 @@
+[package]
+name = "ene-tool-derive"
+version = "0.1.0"
+edition = "2024"
+description = "Proc-macro derive crate for ene-tool-proto's ToolSpec and ActionSpec"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
+darling = "0.20"
+schemars = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+ene-tool-proto = { path = "../ene-tool-proto" }
+serde = { workspace = true }
+schemars = { workspace = true }

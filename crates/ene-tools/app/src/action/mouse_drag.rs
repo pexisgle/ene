@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use enigo::{Button, Coordinate, Direction, Mouse};
 use serde::Deserialize;
@@ -74,23 +76,39 @@ pub struct MouseDragAction;
 
 #[async_trait]
 impl ToolAction for MouseDragAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "mouse_drag".to_string(),
-            description: "Drags from one coordinate to another.".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "app.drag"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("app.drag"),
+            version: ToolVersion::default(),
+            display_name: "Drags the mouse from one coordinate to another.".to_string(),
+            summary: "Drags the mouse from one coordinate to another.".to_string(),
+            description: "Drags the mouse from one coordinate to another.".to_string(),
+            category: ToolCategory::App,
+            keywords: KeywordSet::primary_only(["mouse", "drag", "drop"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "x": { "type": "integer", "description": "Start X" },
-                    "y": { "type": "integer", "description": "Start Y" },
-                    "x2": { "type": "integer", "description": "End X" },
-                    "y2": { "type": "integer", "description": "End Y" },
-                    "button": { "type": "string", "enum": ["left", "right", "middle"] }
+                    "x": { "type": "integer", "description": "Start X coordinate" },
+                    "y": { "type": "integer", "description": "Start Y coordinate" },
+                    "x2": { "type": "integer", "description": "End X coordinate" },
+                    "y2": { "type": "integer", "description": "End Y coordinate" },
+                    "button": { "type": "string", "enum": ["left", "right", "middle"], "description": "Mouse button (default: left)" }
                 },
                 "required": ["x", "y", "x2", "y2"]
             }),
-            category: Some(ToolCategory::App),
-            keywords: vec!["mouse".to_string(), "drag".to_string()],
+            examples: vec![ToolExample {
+                description: "Drag from top-left to bottom-right".to_string(),
+                input: serde_json::json!({"x": 0, "y": 0, "x2": 500, "y2": 400}),
+                output: None,
+            }],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

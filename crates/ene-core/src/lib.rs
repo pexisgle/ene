@@ -79,18 +79,21 @@ pub use ene_session::split_text_and_special_tokens;
 pub use types::RequestId;
 
 // ── Tool types ──
-/// Tool definition type (re-exported from `ene-tool-host`).
-#[doc(no_inline)]
-pub use ene_tool_host::ToolDefinition;
 /// Tool registry trait (re-exported from `ene-tool-host`).
 #[doc(no_inline)]
 pub use ene_tool_host::ToolRegistry;
+/// Tool definition type (re-exported from `ene-tool-host`).
+#[doc(no_inline)]
+/// ToolSpec type (re-exported from `ene-tool-proto`).
+#[doc(no_inline)]
+pub use ene_tool_proto::ToolSpec;
 
 // ── Core error ──
 /// Core AI error type.
 pub use error::EneCoreError;
 
 // ── Stream types ──
+pub use streaming::MultiAnswer;
 /// Permission decision type (re-exported from `ene-core::streaming`).
 pub use streaming::PermissionDecision;
 pub use streaming::UserInputResponse;

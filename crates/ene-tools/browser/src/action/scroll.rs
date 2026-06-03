@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -26,13 +28,41 @@ impl ScrollSubAction {
 
 #[async_trait]
 impl ToolAction for ScrollSubAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "scroll".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "browser.scroll"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("browser.scroll"),
+            version: ToolVersion::default(),
+            display_name: "Scrolls the page by specified pixels".to_string(),
+            summary: "Scrolls the page by specified pixels".to_string(),
             description: "Scrolls the page by specified pixels".to_string(),
-            parameters: serde_json::json!({}),
-            category: None,
-            keywords: vec![],
+            category: ToolCategory::Browser,
+            keywords: KeywordSet::primary_only(["scroll", "page"]),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "scroll_x": {
+                        "type": "integer",
+                        "description": "Horizontal scroll amount in pixels (default: 0)"
+                    },
+                    "scroll_y": {
+                        "type": "integer",
+                        "description": "Vertical scroll amount in pixels (default: 0)"
+                    }
+                }
+            }),
+            examples: vec![ToolExample {
+                description: "Scroll down 500 pixels".to_string(),
+                input: serde_json::json!({"scroll_y": 500}),
+                output: None,
+            }],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

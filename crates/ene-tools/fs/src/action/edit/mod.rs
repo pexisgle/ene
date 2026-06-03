@@ -270,7 +270,9 @@ mod tests {
     }
 }
 
-use ene_tool_proto::ToolDefinition;
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use std::sync::RwLock;
 
@@ -288,13 +290,69 @@ impl FsEditSubAction {
 
 #[async_trait::async_trait]
 impl ToolAction for FsEditSubAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "edit".to_string(),
-            description: "Edits a file".to_string(),
-            parameters: serde_json::json!({}),
-            category: None,
-            keywords: vec![],
+    fn tool_name(&self) -> &'static str {
+        "filesystem.edit"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        let description = concat!(
+            "Targeted in-place edit: find oldString and replace with newString. ",
+            "Uses a chain of matching strategies (exact, trimmed, block anchor, ",
+            "whitespace-normalized, etc.) for robust matching."
+        );
+        ToolSpec {
+            name: ToolName::new("filesystem.edit"),
+            version: ToolVersion::default(),
+            display_name: "Edit File".to_string(),
+            summary: "Targeted in-place edit: find oldString and replace with newString."
+                .to_string(),
+            description: description.to_string(),
+            category: ToolCategory::Filesystem,
+            keywords: KeywordSet::primary_only([
+                "edit",
+                "replace",
+                "modify",
+                "change",
+                "substitute",
+            ]),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "filePath": {
+                        "type": "string",
+                        "description": "Absolute path to the file to edit"
+                    },
+                    "oldString": {
+                        "type": "string",
+                        "description": "Text to find and replace"
+                    },
+                    "newString": {
+                        "type": "string",
+                        "description": "Replacement text"
+                    },
+                    "replaceAll": {
+                        "type": "boolean",
+                        "description": "Replace all occurrences (default false)"
+                    }
+                },
+                "required": ["filePath", "oldString", "newString"]
+            }),
+            examples: vec![
+                ToolExample {
+                    description: "Replace text in a file".to_string(),
+                    input: serde_json::json!({"filePath": "/home/user/file.txt", "oldString": "foo", "newString": "bar"}),
+                    output: None,
+                },
+                ToolExample {
+                    description: "Replace all occurrences of a string".to_string(),
+                    input: serde_json::json!({"filePath": "/home/user/file.txt", "oldString": "old_func", "newString": "new_func", "replaceAll": true}),
+                    output: None,
+                },
+            ],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

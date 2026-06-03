@@ -1,17 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-/// A prompt requesting interactive user input from a tool.
-///
-/// Carried inside [`EneToolProtoError::UserInputRequired`] and surfaced to the
-/// UI as a structured question. The UI may render this as a list of selectable
-/// options, a free-text input, or both (see [`Self::allow_free_text`]).
+/// A single sub-question within a [`UserInputPrompt`]. Each item carries its
+/// own set of selectable options and free-text flag, allowing heterogeneous
+/// questions (e.g. "yes/no" + "type a name") to be presented in the same
+/// dialog.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct UserInputPrompt {
-    /// Optional short label (e.g. "YesNo", "MultipleChoice") for UI categorisation.
-    #[serde(default)]
-    pub header: Option<String>,
-    /// The main question text. May contain multiple lines if the tool combines
-    /// several sub-questions into a single prompt.
+pub struct QuestionItem {
+    /// The question text shown to the user.
     pub question: String,
     /// Predefined selectable options. Empty when only free-text is allowed.
     #[serde(default)]
@@ -21,18 +16,54 @@ pub struct UserInputPrompt {
     pub allow_free_text: bool,
 }
 
+/// A single answer to one sub-question in a [`UserInputPrompt`].
+///
+/// Returned as a `Vec<MultiAnswer>` in the same order as the prompt's
+/// `items`. Use [`MultiAnswer::Skip`] when the user chose to leave the
+/// question blank.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MultiAnswer {
+    /// The user picked one of the predefined options.
+    Selected {
+        /// The exact option string the user selected.
+        option: String,
+    },
+    /// The user provided a free-text answer.
+    Answer {
+        /// The text the user typed.
+        text: String,
+    },
+    /// The user skipped or left this question blank.
+    Skip,
+}
+
+/// A prompt requesting interactive user input from a tool.
+///
+/// Carried inside [`EneToolProtoError::UserInputRequired`] and surfaced to the
+/// UI as a structured question. The prompt always contains one or more
+/// [`QuestionItem`]s; the UI is expected to render one input control per item
+/// and return a `Vec<MultiAnswer>` with one entry per item in the same order.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserInputPrompt {
+    /// The sub-questions presented to the user. Always non-empty when produced
+    /// by a tool; tools must validate `len() >= 1` before emitting the prompt.
+    pub items: Vec<QuestionItem>,
+}
+
 impl std::fmt::Display for UserInputPrompt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(header) = &self.header {
-            write!(f, "[{}] {}", header, self.question)?;
-        } else {
-            write!(f, "{}", self.question)?;
-        }
-        if !self.options.is_empty() {
-            write!(f, " (options: {})", self.options.join(", "))?;
-        }
-        if self.allow_free_text {
-            write!(f, " [free text]")?;
+        for (i, item) in self.items.iter().enumerate() {
+            if i > 0 {
+                writeln!(f)?;
+            }
+            write!(f, "{}. {}", i + 1, item.question)?;
+            if !item.options.is_empty() {
+                write!(f, " (options: {})", item.options.join(", "))?;
+            }
+            if item.allow_free_text {
+                write!(f, " [free text]")?;
+            }
         }
         Ok(())
     }
@@ -106,6 +137,67 @@ pub enum EneToolProtoError {
         /// The prompt describing the question, options, and input constraints.
         prompt: UserInputPrompt,
     },
+    /// The requested file was not found on disk.
+    FileNotFound {
+        /// Path that was not found.
+        path: String,
+    },
+    /// A file exceeded the configured size limit.
+    FileTooLarge {
+        /// Path of the offending file.
+        path: String,
+        /// Actual size in bytes.
+        size: u64,
+        /// Maximum allowed size in bytes.
+        limit: u64,
+    },
+    /// A shell command was blocked by sandbox policy.
+    CommandBlocked {
+        /// The command that was blocked.
+        command: String,
+        /// Reason for the block.
+        reason: String,
+    },
+    /// A shell command timed out.
+    ShellTimeout {
+        /// The command that was running.
+        command: String,
+        /// Timeout in milliseconds.
+        timeout_ms: u64,
+    },
+    /// Shell output exceeded the maximum size limit.
+    ShellOutputTooLarge {
+        /// Number of bytes produced.
+        size: u64,
+        /// Configured limit in bytes.
+        limit: u64,
+    },
+    /// A browser automation error occurred.
+    BrowserError {
+        /// Error details.
+        message: String,
+    },
+    /// An app/GUI automation error occurred.
+    AppError {
+        /// Error details.
+        message: String,
+    },
+    /// A web search error occurred.
+    WebSearchError {
+        /// Error details.
+        message: String,
+    },
+    /// An IPC client (host-side) error.
+    IpcClient {
+        /// Error details.
+        message: String,
+    },
+    /// Catch-all error variant for host-side failures that don't fit any
+    /// specific category.
+    Other {
+        /// Error details.
+        message: String,
+    },
 }
 
 impl std::fmt::Display for EneToolProtoError {
@@ -145,12 +237,49 @@ impl std::fmt::Display for EneToolProtoError {
             EneToolProtoError::UserInputRequired { request_id, prompt } => {
                 write!(
                     f,
-                    "User input required [id: {}]: {} ({} options, free_text={})",
+                    "User input required [id: {}]: {} item(s)",
                     request_id,
-                    prompt.question,
-                    prompt.options.len(),
-                    prompt.allow_free_text
+                    prompt.items.len(),
                 )
+            }
+            EneToolProtoError::FileNotFound { path } => {
+                write!(f, "File not found: {path}")
+            }
+            EneToolProtoError::FileTooLarge { path, size, limit } => {
+                write!(f, "File too large: {path} ({} bytes, max: {})", size, limit)
+            }
+            EneToolProtoError::CommandBlocked { command, reason } => {
+                write!(f, "Command blocked: {command} ({reason})")
+            }
+            EneToolProtoError::ShellTimeout {
+                command,
+                timeout_ms,
+            } => {
+                write!(
+                    f,
+                    "Shell execution timed out after {timeout_ms} ms: {command}"
+                )
+            }
+            EneToolProtoError::ShellOutputTooLarge { size, limit } => {
+                write!(
+                    f,
+                    "Shell output exceeded max size ({size} bytes, limit: {limit})"
+                )
+            }
+            EneToolProtoError::BrowserError { message } => {
+                write!(f, "Browser automation error: {message}")
+            }
+            EneToolProtoError::AppError { message } => {
+                write!(f, "App/GUI automation error: {message}")
+            }
+            EneToolProtoError::WebSearchError { message } => {
+                write!(f, "Web search error: {message}")
+            }
+            EneToolProtoError::IpcClient { message } => {
+                write!(f, "IPC client error: {message}")
+            }
+            EneToolProtoError::Other { message } => {
+                write!(f, "Other error: {message}")
             }
         }
     }
@@ -273,21 +402,22 @@ mod tests {
 
     #[test]
     fn user_input_prompt_default_fields() {
-        let json = r#"{"question":"Pick one"}"#;
+        let json = r#"{"items":[{"question":"Pick one"}]}"#;
         let p: UserInputPrompt = serde_json::from_str(json).unwrap();
-        assert_eq!(p.question, "Pick one");
-        assert!(p.header.is_none());
-        assert!(p.options.is_empty());
-        assert!(!p.allow_free_text);
+        assert_eq!(p.items.len(), 1);
+        assert_eq!(p.items[0].question, "Pick one");
+        assert!(p.items[0].options.is_empty());
+        assert!(!p.items[0].allow_free_text);
     }
 
     #[test]
     fn user_input_prompt_full() {
         let p = UserInputPrompt {
-            header: Some("YesNo".into()),
-            question: "Proceed?".into(),
-            options: vec!["Yes".into(), "No".into()],
-            allow_free_text: true,
+            items: vec![QuestionItem {
+                question: "Proceed?".into(),
+                options: vec!["Yes".into(), "No".into()],
+                allow_free_text: true,
+            }],
         };
         let json = serde_json::to_string(&p).unwrap();
         let de: UserInputPrompt = serde_json::from_str(&json).unwrap();
@@ -299,10 +429,11 @@ mod tests {
         let err = ToolError::UserInputRequired {
             request_id: "req-1".into(),
             prompt: UserInputPrompt {
-                header: Some("YesNo".into()),
-                question: "Continue?".into(),
-                options: vec!["Yes".into(), "No".into()],
-                allow_free_text: false,
+                items: vec![QuestionItem {
+                    question: "Continue?".into(),
+                    options: vec!["Yes".into(), "No".into()],
+                    allow_free_text: false,
+                }],
             },
         };
         let json = serde_json::to_string(&err).unwrap();
@@ -315,14 +446,38 @@ mod tests {
         let err = ToolError::UserInputRequired {
             request_id: "abc".into(),
             prompt: UserInputPrompt {
-                header: None,
-                question: "Q?".into(),
-                options: vec!["A".into()],
-                allow_free_text: true,
+                items: vec![QuestionItem {
+                    question: "Q?".into(),
+                    options: vec!["A".into()],
+                    allow_free_text: true,
+                }],
             },
         };
         let s = format!("{err}");
         assert!(s.contains("abc"));
-        assert!(s.contains("Q?"));
+        assert!(s.contains("1"));
+    }
+
+    #[test]
+    fn user_input_prompt_multi_items_display() {
+        let p = UserInputPrompt {
+            items: vec![
+                QuestionItem {
+                    question: "Pick a color".into(),
+                    options: vec!["red".into(), "blue".into()],
+                    allow_free_text: false,
+                },
+                QuestionItem {
+                    question: "Your name".into(),
+                    options: vec![],
+                    allow_free_text: true,
+                },
+            ],
+        };
+        let s = format!("{p}");
+        assert!(s.contains("1. Pick a color"));
+        assert!(s.contains("2. Your name"));
+        assert!(s.contains("red"));
+        assert!(s.contains("[free text]"));
     }
 }
