@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use enigo::{Axis, Mouse};
 use serde::Deserialize;
@@ -51,20 +53,43 @@ pub struct MouseScrollAction;
 
 #[async_trait]
 impl ToolAction for MouseScrollAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "mouse_scroll".to_string(),
-            description: "Simulates mouse scrolling.".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "app.mouse_scroll"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("app.mouse_scroll"),
+            version: ToolVersion::default(),
+            display_name: "Simulates mouse scrolling in a given direction.".to_string(),
+            summary: "Simulates mouse scrolling in a given direction.".to_string(),
+            description: "Simulates mouse scrolling in a given direction.".to_string(),
+            category: ToolCategory::App,
+            keywords: KeywordSet::primary_only(["mouse", "scroll", "wheel"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "amount": { "type": "integer", "description": "Scroll steps" },
-                    "direction": { "type": "string", "enum": ["up", "down", "left", "right"] }
+                    "amount": { "type": "integer", "description": "Number of scroll steps" },
+                    "direction": { "type": "string", "enum": ["up", "down", "left", "right"], "description": "Scroll direction (default: down)" }
                 },
                 "required": ["amount"]
             }),
-            category: Some(ToolCategory::App),
-            keywords: vec!["mouse".to_string(), "scroll".to_string()],
+            examples: vec![
+                ToolExample {
+                    description: "Scroll down 3 steps".to_string(),
+                    input: serde_json::json!({"amount": 3, "direction": "down"}),
+                    output: None,
+                },
+                ToolExample {
+                    description: "Scroll up 5 steps".to_string(),
+                    input: serde_json::json!({"amount": 5, "direction": "up"}),
+                    output: None,
+                },
+            ],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use enigo::{Coordinate, Mouse};
 use serde::Deserialize;
@@ -43,21 +45,44 @@ pub struct MouseMoveAction;
 
 #[async_trait]
 impl ToolAction for MouseMoveAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "mouse_move".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "app.mouse_move"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("app.mouse_move"),
+            version: ToolVersion::default(),
+            display_name: "Moves the mouse cursor to absolute or relative coordinates.".to_string(),
+            summary: "Moves the mouse cursor to absolute or relative coordinates.".to_string(),
             description: "Moves the mouse cursor to absolute or relative coordinates.".to_string(),
+            category: ToolCategory::App,
+            keywords: KeywordSet::primary_only(["mouse", "move", "cursor"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "x": { "type": "integer", "description": "X coordinate" },
                     "y": { "type": "integer", "description": "Y coordinate" },
-                    "relative": { "type": "boolean", "description": "Move relative to current position" }
+                    "relative": { "type": "boolean", "description": "If true, move relative to current position (default: false)" }
                 },
                 "required": ["x", "y"]
             }),
-            category: Some(ToolCategory::App),
-            keywords: vec!["mouse".to_string(), "move".to_string()],
+            examples: vec![
+                ToolExample {
+                    description: "Move mouse to absolute position".to_string(),
+                    input: serde_json::json!({"x": 100, "y": 200}),
+                    output: None,
+                },
+                ToolExample {
+                    description: "Move mouse relative by offset".to_string(),
+                    input: serde_json::json!({"x": 50, "y": 0, "relative": true}),
+                    output: None,
+                },
+            ],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

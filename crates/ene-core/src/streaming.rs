@@ -22,28 +22,19 @@ pub enum PermissionDecision {
     Deny,
 }
 
+/// Re-exported from `ene-tool-proto` so consumers of `ene-core` only need to
+/// import one crate.
+#[doc(no_inline)]
+pub use ene_tool_proto::MultiAnswer;
+
 /// Represents a user's response to an interactive tool's input request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserInputResponse {
-    /// The user picked one of the predefined options.
-    Selected(String),
-    /// The user provided a free-text answer.
-    Answer(String),
-    /// The user dismissed or cancelled the question.
+    /// One answer per sub-question in the prompt, in the same order.
+    /// For a single-question prompt this is `Multi(vec![..])`.
+    Multi(Vec<MultiAnswer>),
+    /// The user dismissed or cancelled the entire prompt.
     Cancel,
-}
-
-/// Configuration for tool RAG (retrieval-augmented generation) filtering.
-#[derive(Debug, Clone)]
-pub(crate) struct ToolRagConfig {
-    /// Whether tool calling is enabled at all.
-    pub tool_calling_enabled: bool,
-    /// Whether RAG-based tool filtering is enabled.
-    pub tool_rag_enabled: bool,
-    /// Maximum number of tools to return via RAG.
-    pub tool_rag_limit: usize,
-    /// Tool names that should always be included regardless of RAG.
-    pub tool_rag_always_include: Vec<String>,
 }
 
 /// Configuration for a single AI streaming run.
@@ -52,6 +43,7 @@ pub(crate) struct StreamContext {
     pub(crate) session: ConversationSession,
     pub(crate) user_input: String,
     pub(crate) registry: Arc<dyn ene_tool_host::ToolRegistry>,
+    pub(crate) tool_rag: Option<Arc<ene_tool_host::ToolRag>>,
     pub(crate) provider: Arc<dyn ene_provider::LlmProvider>,
     pub(crate) event_tx: broadcast::Sender<EneEvent>,
     pub(crate) cancel_token: CancellationToken,
@@ -69,6 +61,7 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
         mut session,
         user_input,
         registry,
+        tool_rag,
         provider,
         event_tx,
         cancel_token,
@@ -130,22 +123,13 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
     let tool_calling_enabled = tool_config.tool_calling_enabled;
     let max_rounds = tool_config.max_tool_call_rounds;
     let session_id_for_tools = session.memory.session_id.clone();
-    let tool_rag_enabled = mem_config.tool_rag_enabled;
-    let tool_rag_limit = mem_config.tool_rag_limit;
-    let tool_rag_always_include = mem_config.tool_rag_always_include.clone();
-    let embedding_provider = session.memory.embedding_provider.clone();
 
     // 4. Select relevant tools
     let tools = select_relevant_tools(
         registry.as_ref(),
-        &embedding_provider,
+        tool_rag.as_deref(),
         &user_input,
-        &ToolRagConfig {
-            tool_calling_enabled,
-            tool_rag_enabled,
-            tool_rag_limit,
-            tool_rag_always_include,
-        },
+        tool_calling_enabled,
     )
     .await;
 
@@ -258,46 +242,34 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
     }
 }
 
-/// Selects relevant tools using embedding-based RAG if enabled, otherwise
-/// returns all tools.
+/// Selects relevant tools using the ToolRag pipeline if available,
+/// otherwise falls back to the registry's `select_tools` or `list_tools`.
 pub(crate) async fn select_relevant_tools(
     registry: &dyn ene_tool_host::ToolRegistry,
-    embedding_provider: &Option<Arc<dyn ene_provider::EmbeddingProvider>>,
+    tool_rag: Option<&ene_tool_host::ToolRag>,
     user_input: &str,
-    rag_config: &ToolRagConfig,
-) -> Vec<ene_tool_host::ToolDefinition> {
-    if !rag_config.tool_calling_enabled {
+    tool_calling_enabled: bool,
+) -> Vec<ene_tool_proto::ToolSpec> {
+    if !tool_calling_enabled {
         return vec![];
     }
 
-    let relevant = if rag_config.tool_rag_enabled {
-        if let Some(embedder) = embedding_provider.as_ref() {
-            registry
-                .select_tools(embedder.as_ref(), user_input, rag_config.tool_rag_limit)
-                .await
-        } else {
-            registry.list_tools()
-        }
-    } else {
-        registry.list_tools()
-    };
-
-    if !rag_config.tool_rag_always_include.is_empty() {
+    // Use the new ToolRag pipeline if available.
+    if let Some(rag) = tool_rag {
+        // Get all tools from the registry.
         let all_tools = registry.list_tools();
-        let all_map: std::collections::HashMap<String, _> =
-            all_tools.into_iter().map(|t| (t.name.clone(), t)).collect();
-        let mut result = relevant;
-        for name in &rag_config.tool_rag_always_include {
-            if !result.iter().any(|t| &t.name == name) {
-                if let Some(tool) = all_map.get(name) {
-                    result.push(tool.clone());
-                }
-            }
+
+        // Ensure the index is up-to-date (no-op for already-indexed fields).
+        if let Err(e) = rag.ensure_index(&all_tools).await {
+            tracing::warn!("[ToolRag] ensure_index failed: {}", e);
         }
-        result
-    } else {
-        relevant
+
+        // Select relevant tools via the RAG pipeline.
+        return rag.select(user_input).await;
     }
+
+    // Fallback: no ToolRag, return all tools from the registry.
+    registry.list_tools()
 }
 
 /// Fetches recalled summaries and key facts from the memory store for the
@@ -419,11 +391,13 @@ async fn perform_tool_executions(
             match tokio::time::timeout(tool_timeout, registry.call_tool(&name, &args)).await {
                 Ok(Ok(res)) => Ok(res),
                 Ok(Err(e)) => Err(e),
-                Err(_) => Err(ene_tool_host::error::ToolError::Other(format!(
-                    "Tool '{}' timed out after {:.2} seconds",
-                    name,
-                    tool_timeout.as_secs_f64()
-                ))),
+                Err(_) => Err(ene_tool_host::error::ToolError::Other {
+                    message: format!(
+                        "Tool '{}' timed out after {:.2} seconds",
+                        name,
+                        tool_timeout.as_secs_f64()
+                    ),
+                }),
             };
 
         if let Err(ene_tool_host::error::ToolError::PermissionRequired {
@@ -458,9 +432,9 @@ async fn perform_tool_executions(
                     result = registry.call_tool(&name, &args).await;
                 }
                 _ => {
-                    result = Err(ene_tool_host::error::ToolError::PermissionDenied(
-                        "Permission denied by user".to_string(),
-                    ));
+                    result = Err(ene_tool_host::error::ToolError::PermissionDenied {
+                        message: "Permission denied by user".to_string(),
+                    });
                 }
             }
         }
@@ -481,18 +455,14 @@ async fn perform_tool_executions(
             }
 
             match resp_rx.await {
-                Ok(UserInputResponse::Selected(option)) => {
-                    let new_args = inject_user_response(&args, &option);
-                    result = registry.call_tool(&name, &new_args).await;
-                }
-                Ok(UserInputResponse::Answer(text)) => {
-                    let new_args = inject_user_response(&args, &text);
+                Ok(UserInputResponse::Multi(answers)) => {
+                    let new_args = inject_user_answers(&args, &answers);
                     result = registry.call_tool(&name, &new_args).await;
                 }
                 Ok(UserInputResponse::Cancel) | Err(_) => {
-                    result = Err(ene_tool_host::error::ToolError::ToolExecutionError(
-                        "User cancelled the question".to_string(),
-                    ));
+                    result = Err(ene_tool_host::error::ToolError::ExecutionFailed {
+                        message: "User cancelled the question".to_string(),
+                    });
                 }
             }
         }
@@ -587,25 +557,24 @@ fn extract_screenshot(result: &str) -> (String, Option<String>) {
     (result.to_string(), None)
 }
 
-/// Injects the user's response into a tool's JSON argument string under the
-/// `_user_response` key. Falls back to wrapping the original string under
-/// `_original_args` if the args are not a JSON object, so the re-invocation
-/// does not crash.
-fn inject_user_response(args_json: &str, response: &str) -> String {
+/// Injects the user's per-question answers into a tool's JSON argument string
+/// under the `_user_answers` key. Each entry is a [`MultiAnswer`] and is
+/// serialised in the order the user answered (i.e. the order of the prompt's
+/// `items`). Falls back to wrapping the original string under `_original_args`
+/// if the args are not a JSON object, so the re-invocation does not crash.
+fn inject_user_answers(args_json: &str, answers: &[MultiAnswer]) -> String {
+    let answers_value = match serde_json::to_value(answers) {
+        Ok(v) => v,
+        Err(_) => serde_json::Value::Array(Vec::new()),
+    };
     let parsed: Option<serde_json::Value> = serde_json::from_str(args_json).ok();
     match parsed {
         Some(mut value) => {
             if let Some(obj) = value.as_object_mut() {
-                obj.insert(
-                    "_user_response".to_string(),
-                    serde_json::Value::String(response.to_string()),
-                );
+                obj.insert("_user_answers".to_string(), answers_value);
             } else {
                 let mut obj = serde_json::Map::new();
-                obj.insert(
-                    "_user_response".to_string(),
-                    serde_json::Value::String(response.to_string()),
-                );
+                obj.insert("_user_answers".to_string(), answers_value);
                 obj.insert("_original_args".to_string(), value);
                 value = serde_json::Value::Object(obj);
             }
@@ -613,10 +582,7 @@ fn inject_user_response(args_json: &str, response: &str) -> String {
         }
         None => {
             let mut obj = serde_json::Map::new();
-            obj.insert(
-                "_user_response".to_string(),
-                serde_json::Value::String(response.to_string()),
-            );
+            obj.insert("_user_answers".to_string(), answers_value);
             obj.insert(
                 "_original_args".to_string(),
                 serde_json::Value::String(args_json.to_string()),
@@ -631,27 +597,53 @@ fn inject_user_response(args_json: &str, response: &str) -> String {
 mod tests {
     use super::*;
 
+    fn sample_answers() -> Vec<MultiAnswer> {
+        vec![
+            MultiAnswer::Selected {
+                option: "yes".into(),
+            },
+            MultiAnswer::Answer {
+                text: "alice".into(),
+            },
+            MultiAnswer::Skip,
+        ]
+    }
+
     #[test]
     fn inject_into_object() {
-        let out = inject_user_response(r#"{"a":1}"#, "hi");
+        let out = inject_user_answers(r#"{"a":1}"#, &sample_answers());
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["a"], 1);
-        assert_eq!(v["_user_response"], "hi");
+        let arr = v["_user_answers"].as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0]["kind"], "selected");
+        assert_eq!(arr[0]["option"], "yes");
+        assert_eq!(arr[1]["kind"], "answer");
+        assert_eq!(arr[1]["text"], "alice");
+        assert_eq!(arr[2]["kind"], "skip");
     }
 
     #[test]
     fn inject_into_invalid_json() {
-        let out = inject_user_response("not-json", "hi");
+        let out = inject_user_answers("not-json", &sample_answers());
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["_user_response"], "hi");
+        assert!(v["_user_answers"].is_array());
         assert_eq!(v["_original_args"], "not-json");
     }
 
     #[test]
     fn inject_into_non_object_json() {
-        let out = inject_user_response("[1,2,3]", "hi");
+        let out = inject_user_answers("[1,2,3]", &sample_answers());
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["_user_response"], "hi");
+        assert!(v["_user_answers"].is_array());
         assert_eq!(v["_original_args"], serde_json::json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn multi_answer_serde_roundtrip() {
+        let answers = sample_answers();
+        let json = serde_json::to_string(&answers).unwrap();
+        let de: Vec<MultiAnswer> = serde_json::from_str(&json).unwrap();
+        assert_eq!(de, answers);
     }
 }

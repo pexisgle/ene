@@ -6,7 +6,7 @@ Provides helper tools for user interaction and task management.
 
 ## Tools
 
-### `question`
+### `utility.question`
 
 Asks the user one or more clarifying questions.
 
@@ -16,19 +16,27 @@ Asks the user one or more clarifying questions.
 
 **Use when:** Requirements are unclear, context is missing, or user confirmation is needed.
 
-**Keywords:** question, ask, clarify, confirm
-
 **Category:** Utility
 
 ---
 
-### `todo`
+### `utility.todo_list`
 
-Manages a session-scoped task list.
+Display the current task list.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| (none) | — | — |
+
+---
+
+### `utility.todo_add`
+
+Add tasks to the session-scoped todo list.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `todos` | object[] | Yes | Complete updated todo list |
+| `todos` | object[] | Yes | Tasks to add |
 
 Each todo item:
 
@@ -38,15 +46,41 @@ Each todo item:
 | `status` | string | No | `pending`, `in_progress`, `completed`, `cancelled` |
 | `priority` | string | No | `high`, `medium`, `low` |
 
-**State:** Persistent per session via `TodoStore` (DashMap-based in-memory). The store is cleared when the tool binary restarts.
+---
 
-**Keywords:** todo, task, track, plan
+### `utility.todo_update`
 
-**Category:** Utility
+Update existing tasks.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `todos` | object[] | Yes | Updated todo items |
 
 ---
 
-### `get_current_time`
+### `utility.todo_complete`
+
+Mark tasks as completed.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `todos` | object[] | Yes | Tasks to mark complete |
+
+---
+
+### `utility.todo_delete`
+
+Remove tasks from the list.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `todos` | object[] | Yes | Tasks to remove |
+
+**State:** Persistent per session via `TodoStore` (DashMap-based in-memory). The store is cleared when the tool binary restarts.
+
+---
+
+### `utility.get_current_time`
 
 Returns the current system date and time.
 
@@ -56,13 +90,11 @@ Returns the current system date and time.
 
 **Output format:** `2026-05-26 14:30:00`
 
-**Keywords:** time, date
-
 **Category:** Utility
 
 ---
 
-### `get_system_info`
+### `utility.get_system_info`
 
 Returns basic OS and architecture information.
 
@@ -71,7 +103,5 @@ Returns basic OS and architecture information.
 | (none) | - |
 
 **Output format:** `OS: linux, Architecture: x86_64`
-
-**Keywords:** system, os, platform
 
 **Category:** Utility

@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use ene_memory as summarizer;
 use ene_memory::{KeyFact, MemoryStore};
 use ene_provider::EmbeddingProvider;
-use ene_provider::Role;
+use ene_provider::{EmbeddingKind, Role};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -186,7 +186,7 @@ pub async fn embed_session_messages(
 
     let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(messages.len());
     for content in &messages {
-        match embedder.embed(content).await {
+        match embedder.embed(content, EmbeddingKind::Summary).await {
             Ok(emb) => all_embeddings.push(emb),
             Err(e) => {
                 tracing::warn!("[Session] Failed to embed message (skipping): {}", e);

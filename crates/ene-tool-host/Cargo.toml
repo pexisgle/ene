@@ -22,3 +22,5 @@ ene-provider = { workspace = true }
 ene-memory = { workspace = true }
 ene-tool-proto = { workspace = true }
 ctor = { workspace = true }
+schemars = { workspace = true }
+blake3 = { workspace = true }

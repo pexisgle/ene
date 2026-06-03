@@ -211,7 +211,9 @@ async fn read_directory(
     Ok(output)
 }
 
-use ene_tool_proto::ToolDefinition;
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use std::sync::{Arc, RwLock};
 
@@ -229,13 +231,65 @@ impl FsReadSubAction {
 
 #[async_trait::async_trait]
 impl ToolAction for FsReadSubAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "read".to_string(),
-            description: "Reads file or directory".to_string(),
-            parameters: serde_json::json!({}),
-            category: None,
-            keywords: vec![],
+    fn tool_name(&self) -> &'static str {
+        "filesystem.read"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        let description = concat!(
+            "Read the contents of a file or list a directory. ",
+            "When editing text from Read output, preserve exact indentation (tabs/spaces) ",
+            "as it appears AFTER the line number prefix."
+        );
+        ToolSpec {
+            name: ToolName::new("filesystem.read"),
+            version: ToolVersion::default(),
+            display_name: "Read File".to_string(),
+            summary: "Read the contents of a file or list a directory.".to_string(),
+            description: description.to_string(),
+            category: ToolCategory::Filesystem,
+            keywords: KeywordSet::primary_only([
+                "read",
+                "file",
+                "open",
+                "cat",
+                "directory",
+                "list",
+            ]),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "filePath": {
+                        "type": "string",
+                        "description": "Absolute path to the file or directory"
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "1-indexed line number to start reading from"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of lines to read (default 2000)"
+                    }
+                },
+                "required": ["filePath"]
+            }),
+            examples: vec![
+                ToolExample {
+                    description: "Read a text file".to_string(),
+                    input: serde_json::json!({"filePath": "/home/user/notes.txt"}),
+                    output: Some("file content here".to_string()),
+                },
+                ToolExample {
+                    description: "Read file with line offset and limit".to_string(),
+                    input: serde_json::json!({"filePath": "/home/user/large.log", "offset": 1, "limit": 50}),
+                    output: None,
+                },
+            ],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

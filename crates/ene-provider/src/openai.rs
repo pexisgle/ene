@@ -5,7 +5,9 @@ use tokio_stream::{Stream, StreamExt};
 
 use crate::config::ProviderConfig;
 use crate::message::{LlmMessage, LlmResponseChunk, LlmToolCallChunk, UserMessagePart};
-use crate::traits::{EmbeddingProvider, LlmProvider, LlmProviderFactory};
+use crate::traits::{
+    EmbeddingError, EmbeddingKind, EmbeddingProvider, LlmProvider, LlmProviderFactory,
+};
 
 /// Builds an OpenAI-compatible client with the given base URL and API key.
 pub(crate) fn build_openai_client(base_url: &str, api_key: &str) -> Client<OpenAIConfig> {
@@ -120,12 +122,12 @@ fn convert_message(msg: &LlmMessage) -> Result<ChatCompletionRequestMessage, Str
 }
 
 fn convert_tools(
-    tools: &[ene_tool_proto::ToolDefinition],
+    tools: &[ene_tool_proto::ToolSpec],
 ) -> Vec<async_openai::types::chat::ChatCompletionTools> {
     let mut res = Vec::new();
     for t in tools {
         let func = async_openai::types::chat::FunctionObject {
-            name: t.name.clone(),
+            name: t.name.to_string(),
             description: Some(t.description.clone()),
             parameters: Some(t.parameters.clone()),
             strict: None,
@@ -168,7 +170,7 @@ impl LlmProvider for OpenAiProvider {
     async fn create_chat_stream(
         &self,
         messages: &[LlmMessage],
-        tools: &[ene_tool_proto::ToolDefinition],
+        tools: &[ene_tool_proto::ToolSpec],
     ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, String>> + Send>>, String> {
         let oa_messages: Vec<ChatCompletionRequestMessage> = messages
             .iter()
@@ -324,6 +326,7 @@ pub struct CloudEmbeddingProvider {
     embedding_model: String,
     embedding_dimensions: usize,
     query_prefix: Option<String>,
+    hyde_model: Option<String>,
 }
 
 impl CloudEmbeddingProvider {
@@ -340,41 +343,137 @@ impl CloudEmbeddingProvider {
             embedding_model: embedding_model.to_string(),
             embedding_dimensions,
             query_prefix,
+            hyde_model: None,
         }
+    }
+
+    /// Sets an optional HyDE completion model. When set, `hyde()` will call
+    /// the LLM to produce a hypothetical document instead of echoing the query.
+    pub fn with_hyde_model(mut self, model: String) -> Self {
+        self.hyde_model = Some(model);
+        self
     }
 }
 
 #[async_trait]
 impl EmbeddingProvider for CloudEmbeddingProvider {
-    async fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
+    async fn embed(&self, text: &str, kind: EmbeddingKind) -> Result<Vec<f32>, EmbeddingError> {
         use async_openai::types::embeddings::CreateEmbeddingRequestArgs;
+
+        let input = match kind {
+            EmbeddingKind::Query if self.query_prefix.is_some() => {
+                format!("{}{}", self.query_prefix.as_deref().unwrap_or(""), text)
+            }
+            _ => text.to_string(),
+        };
+
         let request = CreateEmbeddingRequestArgs::default()
             .model(&self.embedding_model)
-            .input(text)
+            .input(input)
             .build()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| EmbeddingError::Provider(e.to_string()))?;
 
         let response = self
             .client
             .embeddings()
             .create(request)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| EmbeddingError::Provider(e.to_string()))?;
         let embedding = response
             .data
             .into_iter()
             .next()
-            .ok_or_else(|| "Empty embedding response".to_string())?;
+            .ok_or_else(|| EmbeddingError::Provider("Empty embedding response".to_string()))?;
         Ok(embedding.embedding)
     }
 
-    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, String> {
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
         if let Some(prefix) = &self.query_prefix {
             let prefixed = format!("{}{}", prefix, text);
-            self.embed(&prefixed).await
+            self.embed(&prefixed, EmbeddingKind::Query).await
         } else {
-            self.embed(text).await
+            self.embed(text, EmbeddingKind::Query).await
         }
+    }
+
+    async fn embed_batch(
+        &self,
+        items: &[(&str, EmbeddingKind)],
+    ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+        use async_openai::types::embeddings::CreateEmbeddingRequestArgs;
+
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let inputs: Vec<String> = items.iter().map(|(text, _kind)| text.to_string()).collect();
+
+        let request = CreateEmbeddingRequestArgs::default()
+            .model(&self.embedding_model)
+            .input(inputs)
+            .build()
+            .map_err(|e| EmbeddingError::Provider(e.to_string()))?;
+
+        let response = self
+            .client
+            .embeddings()
+            .create(request)
+            .await
+            .map_err(|e| EmbeddingError::Provider(e.to_string()))?;
+
+        // OpenAI returns embeddings in input order.
+        let mut result: Vec<Vec<f32>> = response.data.into_iter().map(|d| d.embedding).collect();
+        result.truncate(items.len());
+        Ok(result)
+    }
+
+    async fn hyde(&self, query: &str) -> Result<String, EmbeddingError> {
+        let model = match &self.hyde_model {
+            Some(m) => m.clone(),
+            None => return Ok(query.to_string()),
+        };
+
+        let messages = vec![
+            LlmMessage::System {
+                content: "You are an assistant that writes hypothetical documents for retrieval. \
+                          Given a user query, generate a short description of what a relevant tool \
+                          or document would look like. Keep it under 200 characters."
+                    .to_string(),
+            },
+            LlmMessage::User {
+                parts: vec![UserMessagePart::Text {
+                    text: query.to_string(),
+                }],
+            },
+        ];
+
+        use async_openai::types::chat::CreateChatCompletionRequestArgs;
+
+        let openai_messages: Result<Vec<_>, _> =
+            messages.iter().map(|m| convert_message(m)).collect();
+        let openai_messages = openai_messages.map_err(|e| EmbeddingError::Provider(e))?;
+
+        let request = CreateChatCompletionRequestArgs::default()
+            .model(&model)
+            .messages(openai_messages)
+            .max_tokens(256u32)
+            .build()
+            .map_err(|e| EmbeddingError::Provider(e.to_string()))?;
+
+        let response = self
+            .client
+            .chat()
+            .create(request)
+            .await
+            .map_err(|e| EmbeddingError::Provider(e.to_string()))?;
+
+        let content = response
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|c| c.message.content)
+            .unwrap_or_default();
+        Ok(content)
     }
 
     fn dimensions(&self) -> usize {

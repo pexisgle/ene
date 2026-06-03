@@ -1,10 +1,254 @@
+//! Core tool types: `ToolName`, `ToolSpec`, `ActionSpec`, `KeywordSet`,
+//! `SideEffects`, `ToolExample`, `ToolVersion`.
+
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Tool category — used for classification and RAG filtering
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+/// A validated, namespaced tool identifier.
+///
+/// Format:
+/// - Mega-tools: `"<namespace>.<action>"` (e.g. `"filesystem.read"`)
+/// - Individual tools: `"<name>"` (e.g. `"utility.get_current_time"`)
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ToolName(pub String);
+
+impl JsonSchema for ToolName {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("ToolName")
+    }
+    fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "A namespaced tool name (e.g. 'filesystem.read' or 'get_current_time')."
+        })
+    }
+}
+
+impl ToolName {
+    /// Valid characters for a tool name: alphanumeric, `_`, `.`
+    const fn valid_char(c: u8) -> bool {
+        c.is_ascii_alphanumeric() || c == b'_' || c == b'.'
+    }
+
+    /// Returns `true` if the name is non-empty and contains only valid characters.
+    pub fn is_valid(name: &str) -> bool {
+        !name.is_empty()
+            && name.bytes().all(Self::valid_char)
+            && !name.starts_with('.')
+            && !name.ends_with('.')
+    }
+
+    /// Construct a new `ToolName` from a string.
+    ///
+    /// # Panics
+    /// Panics if the name is empty or contains invalid characters.
+    /// Accepts alphanumeric, `_`, and `.` (no leading/trailing dots).
+    pub fn new(name: impl Into<String>) -> Self {
+        let s = name.into();
+        assert!(
+            Self::is_valid(&s),
+            "Invalid ToolName: '{s}' — must be non-empty and contain only alphanumeric, '_', or '.' characters"
+        );
+        Self(s)
+    }
+
+    /// Construct a new `ToolName` from a string, returning an error on invalid input.
+    pub fn try_new(name: impl Into<String>) -> Result<Self, String> {
+        let s = name.into();
+        if Self::is_valid(&s) {
+            Ok(Self(s))
+        } else {
+            Err(format!(
+                "Invalid ToolName: '{s}' — must be non-empty and contain only alphanumeric, '_', or '.' characters"
+            ))
+        }
+    }
+
+    /// The namespace portion of the name (`"filesystem.read"` -> `"filesystem"`),
+    /// or `None` for non-namespaced tools.
+    pub fn namespace(&self) -> Option<&str> {
+        self.0.split_once('.').map(|(ns, _)| ns)
+    }
+
+    /// The action portion of the name (`"filesystem.read"` -> `"read"`).
+    pub fn action(&self) -> &str {
+        self.0.rsplit_once('.').map(|(_, a)| a).unwrap_or(&self.0)
+    }
+
+    /// Returns the inner string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ToolName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<&str> for ToolName {
+    fn from(s: &str) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<String> for ToolName {
+    fn from(s: String) -> Self {
+        Self::new(s)
+    }
+}
+
+/// Semantic version. Used to invalidate the embedding cache only on
+/// semver-meaningful changes (i.e. major version bump, or `version` field
+/// of the spec).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct ToolVersion {
+    /// Major version.
+    pub major: u32,
+    /// Minor version.
+    pub minor: u32,
+    /// Patch version.
+    pub patch: u32,
+}
+
+impl ToolVersion {
+    /// Construct a new version.
+    pub const fn new(major: u32, minor: u32, patch: u32) -> Self {
+        Self {
+            major,
+            minor,
+            patch,
+        }
+    }
+}
+
+impl Default for ToolVersion {
+    fn default() -> Self {
+        Self::new(1, 0, 0)
+    }
+}
+
+impl std::fmt::Display for ToolVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+/// Structured keyword bag, replacing the legacy flat `Vec<String>`.
+///
+/// Each tier is weighted differently during Tool RAG scoring (see
+/// `FieldWeights` in `ene-tool-host::rag`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct KeywordSet {
+    /// High-weight terms. Default weight `1.0`.
+    #[serde(default)]
+    pub primary: Vec<String>,
+    /// Mid-weight terms. Default weight `0.6`.
+    #[serde(default)]
+    pub secondary: Vec<String>,
+    /// Domain tags (language, framework, platform). Default weight `0.3`.
+    /// Useful for hard filtering by language or runtime.
+    #[serde(default)]
+    pub domain: Vec<String>,
+    /// Negative terms — when present in the query, *penalize* this tool.
+    /// Default weight `-0.5` (soft penalty).
+    #[serde(default)]
+    pub negative: Vec<String>,
+}
+
+impl KeywordSet {
+    /// Build a `KeywordSet` with only `primary` keywords.
+    pub fn primary_only(primary: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            primary: primary.into_iter().map(Into::into).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Build a `KeywordSet` with primary + secondary keywords.
+    pub fn with_secondary(
+        primary: impl IntoIterator<Item = impl Into<String>>,
+        secondary: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            primary: primary.into_iter().map(Into::into).collect(),
+            secondary: secondary.into_iter().map(Into::into).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Returns true if no keywords are present.
+    pub fn is_empty(&self) -> bool {
+        self.primary.is_empty()
+            && self.secondary.is_empty()
+            && self.domain.is_empty()
+            && self.negative.is_empty()
+    }
+}
+
+/// What kind of side effect the tool has. Used for safety analysis and
+/// for filtering tools that need sandboxing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SideEffects {
+    /// Read-only: no observable side effects.
+    ReadOnly,
+    /// File-system interaction. `mutates: true` if it writes.
+    FileSystem {
+        /// Whether the operation mutates the file system.
+        mutates: bool,
+    },
+    /// Network access. `external: true` if it goes outside the loopback.
+    Network {
+        /// Whether the network call goes to external services.
+        external: bool,
+    },
+    /// System-level access (process spawn, signals, etc.).
+    System {
+        /// Whether privileged operations are involved.
+        privileged: bool,
+    },
+    /// Browser automation.
+    Browser {
+        /// Whether the operation mutates the DOM.
+        mutates_dom: bool,
+    },
+    /// Destructive: data loss is possible and rollback is not guaranteed.
+    Destructive,
+    /// Idempotent: calling twice with the same args yields the same effect.
+    Idempotent,
+}
+
+impl Default for SideEffects {
+    fn default() -> Self {
+        Self::ReadOnly
+    }
+}
+
+/// One example of the tool in use, shown to the LLM and used for
+/// example-based RAG embedding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ToolExample {
+    /// Short description of the scenario.
+    pub description: String,
+    /// JSON-encoded input arguments.
+    pub input: serde_json::Value,
+    /// Optional sample output. When present, the example is treated as
+    /// high-confidence and is weighted higher in the RAG index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+}
+
+/// Tool category — used for classification and RAG filtering.
+///
+/// Mega-tools (`Filesystem`, `Shell`, `Browser`, `App`) carry additional
+/// per-action specs at the IPC level via `IpcResponse::ActionSpecs`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCategory {
-    /// File-system tools (read, write, edit, shell, undo).
+    /// File-system tools (read, write, edit, delete, glob, grep, patch).
     Filesystem,
     /// Shell execution tools.
     Shell,
@@ -14,12 +258,20 @@ pub enum ToolCategory {
     App,
     /// Web search tools.
     WebSearch,
+    /// Web fetch tools (URL → markdown).
+    WebFetch,
     /// Utility tools (question, todo, time, system info).
     Utility,
+    /// Long-term memory operations.
+    Memory,
+    /// Local search / RAG over user documents.
+    Search,
+    /// Meta-tools (e.g. self-introspection, tool selection).
+    Meta,
 }
 
 impl ToolCategory {
-    /// Returns the category label used for RAG embedding.
+    /// Human-readable label used in the embedding text for this category.
     pub fn label(&self) -> &'static str {
         match self {
             ToolCategory::Filesystem => "filesystem_tools",
@@ -27,47 +279,172 @@ impl ToolCategory {
             ToolCategory::Browser => "browser_tools",
             ToolCategory::App => "app_tools",
             ToolCategory::WebSearch => "websearch_tools",
+            ToolCategory::WebFetch => "webfetch_tools",
             ToolCategory::Utility => "utility_tools",
+            ToolCategory::Memory => "memory_tools",
+            ToolCategory::Search => "search_tools",
+            ToolCategory::Meta => "meta_tools",
         }
     }
 }
 
-/// Tool definition — format passed to the OpenAI API `tools` parameter
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ToolDefinition {
-    /// Unique tool name.
+/// Action = one capability within a mega-tool. Always embedded separately
+/// for Tool RAG and surfaced in `IpcResponse::ActionSpecs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ActionSpec {
+    /// Action name (e.g. "read", "write"). Namespaced via the parent
+    /// `ToolSpec::name`.
     pub name: String,
-    /// Human-readable description of what this tool does.
+    /// Short human-friendly name (e.g. "Read File").
+    pub display_name: String,
+    /// One-line summary used for embedding.
+    pub summary: String,
+    /// Full markdown description.
     pub description: String,
-    /// JSON Schema describing the tool's parameters.
-    pub parameters: serde_json::Value,
-    /// Optional category for RAG filtering.
-    pub category: Option<ToolCategory>,
-    /// Keywords for RAG-based tool retrieval.
-    pub keywords: Vec<String>,
+    /// Structured keywords.
+    pub keywords: KeywordSet,
+    /// Example invocations.
+    #[serde(default)]
+    pub examples: Vec<ToolExample>,
+    /// Caveats the LLM should be aware of.
+    #[serde(default)]
+    pub caveats: Vec<String>,
+    /// Side effects specific to this action.
+    pub side_effects: SideEffects,
+    /// Preconditions that must hold before invocation.
+    #[serde(default)]
+    pub preconditions: Vec<String>,
 }
 
-impl ToolDefinition {
-    /// Generates embedding text for RAG search
-    pub fn embedding_text(&self) -> String {
-        let keywords = if self.keywords.is_empty() {
-            String::new()
-        } else {
-            format!(" Keywords: {}", self.keywords.join(", "))
-        };
-        let category = self
-            .category
-            .map(|c| format!(" Category: {}", c.label()))
-            .unwrap_or_default();
-        format!(
-            "{}: {}{}{}",
-            self.name, self.description, category, keywords
-        )
+impl ActionSpec {
+    /// Build a minimal `ActionSpec` (used by simple non-mega tools).
+    pub fn minimal(name: impl Into<String>, summary: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            display_name: name.clone(),
+            summary: summary.into(),
+            description: String::new(),
+            keywords: KeywordSet::default(),
+            examples: Vec::new(),
+            caveats: Vec::new(),
+            side_effects: SideEffects::ReadOnly,
+            preconditions: Vec::new(),
+            name,
+        }
     }
 }
 
-/// Tool execution result (format returned to the LLM)
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// The structured, LLM-facing tool specification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ToolSpec {
+    /// Unique, validated tool name.
+    pub name: ToolName,
+    /// Semantic version.
+    pub version: ToolVersion,
+    /// Short human-friendly name (e.g. "Read File").
+    pub display_name: String,
+    /// One-line summary used for embedding.
+    pub summary: String,
+    /// Full markdown description.
+    pub description: String,
+    /// Category.
+    pub category: ToolCategory,
+    /// Structured keyword bag.
+    pub keywords: KeywordSet,
+    /// JSON Schema (auto-derived by `schemars` from the args struct).
+    pub parameters: serde_json::Value,
+    /// Example invocations.
+    #[serde(default)]
+    pub examples: Vec<ToolExample>,
+    /// Caveats the LLM should be aware of.
+    #[serde(default)]
+    pub caveats: Vec<String>,
+    /// Side effects classification.
+    pub side_effects: SideEffects,
+    /// Preconditions that must hold before invocation.
+    #[serde(default)]
+    pub preconditions: Vec<String>,
+    /// Names of related / complementary tools.
+    #[serde(default)]
+    pub related: Vec<ToolName>,
+}
+
+impl ToolSpec {
+    /// Build a text representation of this spec for RAG embedding. The
+    /// `field` parameter controls which fields are included.
+    pub fn embedding_text(&self, field: EmbeddingField) -> String {
+        match field {
+            EmbeddingField::Summary => {
+                format!("{}: {}", self.name.as_str(), self.summary)
+            }
+            EmbeddingField::Description => {
+                let mut out = format!("{}\n{}", self.name.as_str(), self.description);
+                if !self.keywords.is_empty() {
+                    out.push('\n');
+                    out.push_str(&format_keywords(&self.keywords));
+                }
+                out
+            }
+            EmbeddingField::Negative => {
+                if self.keywords.negative.is_empty() {
+                    return String::new();
+                }
+                format!(
+                    "{} NOT: {}",
+                    self.name.as_str(),
+                    self.keywords.negative.join(", ")
+                )
+            }
+        }
+    }
+}
+
+/// Which subset of a `ToolSpec`'s text content to embed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingField {
+    /// Embed only `name + summary` (highest-signal, used for fast retrieval).
+    Summary,
+    /// Embed the full description + keywords (used for ranking refinement).
+    Description,
+    /// Embed the negative-keyword phrase (used for disambiguation).
+    Negative,
+}
+
+impl EmbeddingField {
+    /// Returns the string label persisted in the index.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Summary => "summary",
+            Self::Description => "description",
+            Self::Negative => "negative",
+        }
+    }
+}
+
+fn format_keywords(k: &KeywordSet) -> String {
+    let mut parts = Vec::new();
+    if !k.primary.is_empty() {
+        parts.push(format!("Primary: {}", k.primary.join(", ")));
+    }
+    if !k.secondary.is_empty() {
+        parts.push(format!("Secondary: {}", k.secondary.join(", ")));
+    }
+    if !k.domain.is_empty() {
+        parts.push(format!("Domain: {}", k.domain.join(", ")));
+    }
+    if !k.negative.is_empty() {
+        parts.push(format!("Negative: {}", k.negative.join(", ")));
+    }
+    parts.join(" | ")
+}
+
+// =================================================================
+// Legacy types (kept for one major release with deprecation warnings)
+// =================================================================
+
+/// Tool execution result (kept for backward compatibility).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct ToolCallResult {
     /// Identifier matching the original tool call.
     pub tool_call_id: String,
@@ -80,79 +457,167 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tool_name_namespaces() {
+        let n = ToolName::new("filesystem.read");
+        assert_eq!(n.namespace(), Some("filesystem"));
+        assert_eq!(n.action(), "read");
+        assert_eq!(n.as_str(), "filesystem.read");
+    }
+
+    #[test]
+    fn tool_name_individual() {
+        let n = ToolName::new("get_current_time");
+        assert_eq!(n.namespace(), None);
+        assert_eq!(n.action(), "get_current_time");
+    }
+
+    #[test]
+    fn tool_name_serde_roundtrip() {
+        let n = ToolName::new("utility.todo_add");
+        let json = serde_json::to_string(&n).unwrap();
+        assert_eq!(json, "\"utility.todo_add\"");
+        let de: ToolName = serde_json::from_str(&json).unwrap();
+        assert_eq!(de, n);
+    }
+
+    #[test]
+    fn tool_version_display() {
+        let v = ToolVersion::new(1, 2, 3);
+        assert_eq!(v.to_string(), "1.2.3");
+    }
+
+    #[test]
+    fn keyword_set_primary_only() {
+        let k = KeywordSet::primary_only(["read", "open"]);
+        assert_eq!(k.primary, vec!["read", "open"]);
+        assert!(k.secondary.is_empty());
+        assert!(k.is_empty() == false);
+    }
+
+    #[test]
+    fn side_effects_default_is_read_only() {
+        assert_eq!(SideEffects::default(), SideEffects::ReadOnly);
+    }
+
+    #[test]
+    fn side_effects_serde_tag() {
+        let s = SideEffects::FileSystem { mutates: true };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"kind\":\"file_system\""));
+        let de: SideEffects = serde_json::from_str(&json).unwrap();
+        assert_eq!(de, s);
+    }
+
+    #[test]
     fn tool_category_label() {
         assert_eq!(ToolCategory::Filesystem.label(), "filesystem_tools");
-        assert_eq!(ToolCategory::Shell.label(), "shell_tools");
-        assert_eq!(ToolCategory::Browser.label(), "browser_tools");
-        assert_eq!(ToolCategory::App.label(), "app_tools");
-        assert_eq!(ToolCategory::WebSearch.label(), "websearch_tools");
-        assert_eq!(ToolCategory::Utility.label(), "utility_tools");
+        assert_eq!(ToolCategory::WebFetch.label(), "webfetch_tools");
+        assert_eq!(ToolCategory::Memory.label(), "memory_tools");
     }
 
     #[test]
-    fn tool_category_serde_roundtrip() {
-        for cat in &[
-            ToolCategory::Filesystem,
-            ToolCategory::Shell,
-            ToolCategory::Browser,
-            ToolCategory::App,
-            ToolCategory::WebSearch,
-            ToolCategory::Utility,
-        ] {
-            let json = serde_json::to_string(cat).unwrap();
-            let deser: ToolCategory = serde_json::from_str(&json).unwrap();
-            assert_eq!(*cat, deser);
-        }
-    }
-
-    #[test]
-    fn tool_definition_embedding_text_no_keywords() {
-        let def = ToolDefinition {
-            name: "test_tool".into(),
-            description: "A test tool".into(),
+    fn tool_spec_embedding_text_summary() {
+        let s = ToolSpec {
+            name: ToolName::new("filesystem.read"),
+            version: ToolVersion::default(),
+            display_name: "Read File".into(),
+            summary: "Read a file".into(),
+            description: "Reads a file from disk and returns its contents.".into(),
+            category: ToolCategory::Filesystem,
+            keywords: KeywordSet::default(),
             parameters: serde_json::json!({}),
-            category: Some(ToolCategory::Utility),
-            keywords: vec![],
+            examples: vec![],
+            caveats: vec![],
+            side_effects: SideEffects::ReadOnly,
+            preconditions: vec![],
+            related: vec![],
         };
-        let text = def.embedding_text();
-        assert_eq!(text, "test_tool: A test tool Category: utility_tools");
+        let t = s.embedding_text(EmbeddingField::Summary);
+        assert_eq!(t, "filesystem.read: Read a file");
     }
 
     #[test]
-    fn tool_definition_embedding_text_with_keywords() {
-        let def = ToolDefinition {
-            name: "my_tool".into(),
-            description: "My custom tool".into(),
-            parameters: serde_json::json!({"type": "object"}),
-            category: None,
-            keywords: vec!["foo".into(), "bar".into()],
+    fn tool_spec_embedding_text_negative() {
+        let s = ToolSpec {
+            name: ToolName::new("filesystem.read"),
+            version: ToolVersion::default(),
+            display_name: "Read File".into(),
+            summary: "Read a file".into(),
+            description: "".into(),
+            category: ToolCategory::Filesystem,
+            keywords: KeywordSet {
+                negative: vec!["write".into(), "delete".into()],
+                ..Default::default()
+            },
+            parameters: serde_json::json!({}),
+            examples: vec![],
+            caveats: vec![],
+            side_effects: SideEffects::ReadOnly,
+            preconditions: vec![],
+            related: vec![],
         };
-        let text = def.embedding_text();
-        assert_eq!(text, "my_tool: My custom tool Keywords: foo, bar");
+        let t = s.embedding_text(EmbeddingField::Negative);
+        assert_eq!(t, "filesystem.read NOT: write, delete");
     }
 
     #[test]
-    fn tool_definition_serde_roundtrip() {
-        let def = ToolDefinition {
-            name: "test".into(),
-            description: "desc".into(),
-            parameters: serde_json::json!({"type": "object"}),
-            category: Some(ToolCategory::Shell),
-            keywords: vec!["kw".into()],
-        };
-        let json = serde_json::to_string(&def).unwrap();
-        let deser: ToolDefinition = serde_json::from_str(&json).unwrap();
-        assert_eq!(def, deser);
+    fn action_spec_minimal() {
+        let a = ActionSpec::minimal("read", "Read a file");
+        assert_eq!(a.name, "read");
+        assert_eq!(a.summary, "Read a file");
+        assert_eq!(a.side_effects, SideEffects::ReadOnly);
     }
 
     #[test]
-    fn tool_call_result_serde_roundtrip() {
-        let result = ToolCallResult {
-            tool_call_id: "call_123".into(),
-            content: "result content".into(),
-        };
-        let json = serde_json::to_string(&result).unwrap();
-        let deser: ToolCallResult = serde_json::from_str(&json).unwrap();
-        assert_eq!(result, deser);
+    fn tool_name_validation_accepts_valid() {
+        assert!(ToolName::is_valid("filesystem.read"));
+        assert!(ToolName::is_valid("utility.get_current_time"));
+        assert!(ToolName::is_valid("a"));
+        assert!(ToolName::is_valid("a.b.c"));
+    }
+
+    #[test]
+    fn tool_name_validation_rejects_invalid() {
+        assert!(!ToolName::is_valid(""));
+        assert!(!ToolName::is_valid(".leading_dot"));
+        assert!(!ToolName::is_valid("trailing_dot."));
+        assert!(!ToolName::is_valid("has space"));
+        assert!(!ToolName::is_valid("has-dash"));
+        assert!(!ToolName::is_valid("has/slash"));
+    }
+
+    #[test]
+    fn tool_name_try_new_ok() {
+        assert!(ToolName::try_new("filesystem.read").is_ok());
+    }
+
+    #[test]
+    fn tool_name_try_new_err() {
+        assert!(ToolName::try_new("").is_err());
+        assert!(ToolName::try_new("bad name").is_err());
+    }
+
+    #[test]
+    #[should_panic]
+    fn tool_name_new_panics_on_empty() {
+        let _ = ToolName::new("");
+    }
+
+    #[test]
+    #[should_panic]
+    fn tool_name_new_panics_on_invalid() {
+        let _ = ToolName::new("has space");
+    }
+
+    #[test]
+    #[should_panic]
+    fn tool_name_from_str_panics_on_invalid() {
+        let _ = ToolName::from("bad/name");
+    }
+
+    #[test]
+    #[should_panic]
+    fn tool_name_from_string_panics_on_invalid() {
+        let _ = ToolName::from(String::from("bad/name"));
     }
 }

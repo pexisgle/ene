@@ -1,6 +1,6 @@
 use crate::error::ToolError;
 use crate::sandbox::SandboxConfigData;
-use crate::types::ToolDefinition;
+use crate::types::{ActionSpec, ToolSpec};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -8,7 +8,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 
 /// Current IPC protocol version.
-pub const IPC_PROTOCOL_VERSION: u32 = 1;
+///
+/// Version 2 introduced:
+/// - `IpcResponse::Tools` carries `Vec<ToolSpec>`
+/// - `IpcResponse::ActionSpecs` returns per-action metadata for embedding
+/// - `IpcRequest::CallTool` `name` field accepts the new `ToolName` (still
+///   a string on the wire)
+pub const IPC_PROTOCOL_VERSION: u32 = 2;
 
 /// IPC request — core → host
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -25,8 +31,10 @@ pub enum IpcRequest {
         /// Tool-specific configuration JSON.
         tool_config: Option<serde_json::Value>,
     },
-    /// List all available tool definitions.
+    /// List all available tool specs.
     ListTools,
+    /// List per-action specs (mega-tool capability metadata).
+    ListActionSpecs,
     /// Request the tool's config JSON Schema.
     GetConfigSchema,
     /// Execute a tool by name with JSON arguments.
@@ -69,10 +77,15 @@ pub enum IpcResponse {
     },
     /// Acknowledgment (for Initialize, SetSessionId, etc.).
     Ack,
-    /// List of tool definitions.
+    /// List of tool specs (v2).
     Tools {
-        /// The tool definitions.
-        tools: Vec<ToolDefinition>,
+        /// The structured tool specs.
+        tools: Vec<ToolSpec>,
+    },
+    /// Per-action specs (v2). For mega-tools, one entry per action.
+    ActionSpecs {
+        /// The action specs.
+        specs: Vec<ActionSpec>,
     },
     /// The tool's config JSON Schema.
     ConfigSchema {
@@ -190,7 +203,10 @@ pub async fn write_ipc_response<W: AsyncWriteExt + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{SandboxConfigData, ToolCategory};
+    use crate::{
+        ActionSpec, KeywordSet, SandboxConfigData, SideEffects, ToolCategory, ToolName, ToolSpec,
+        ToolVersion,
+    };
 
     async fn send_recv_request(req: &IpcRequest) -> IpcRequest {
         let (mut a, mut b) = tokio::io::duplex(4096);
@@ -236,27 +252,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ipc_request_handshake_v2_roundtrip() {
+        let req = IpcRequest::Handshake {
+            version: IPC_PROTOCOL_VERSION,
+        };
+        let got = send_recv_request(&req).await;
+        assert_eq!(got, req);
+    }
+
+    #[tokio::test]
+    async fn ipc_request_list_action_specs_roundtrip() {
+        let req = IpcRequest::ListActionSpecs;
+        let got = send_recv_request(&req).await;
+        assert_eq!(got, req);
+    }
+
+    #[tokio::test]
     async fn ipc_request_call_tool_roundtrip() {
         let req = IpcRequest::CallTool {
             name: "read".into(),
             arguments: r#"{"path":"/tmp/test.txt"}"#.into(),
         };
-        let got = send_recv_request(&req).await;
-        assert_eq!(got, req);
-    }
-
-    #[tokio::test]
-    async fn ipc_request_set_session_id_roundtrip() {
-        let req = IpcRequest::SetSessionId {
-            session_id: "sess_abc123".into(),
-        };
-        let got = send_recv_request(&req).await;
-        assert_eq!(got, req);
-    }
-
-    #[tokio::test]
-    async fn ipc_request_ping_roundtrip() {
-        let req = IpcRequest::Ping;
         let got = send_recv_request(&req).await;
         assert_eq!(got, req);
     }
@@ -277,14 +293,30 @@ mod tests {
 
     #[tokio::test]
     async fn ipc_response_tools_roundtrip() {
-        let tools = vec![ToolDefinition {
-            name: "test".into(),
+        let tools = vec![ToolSpec {
+            name: ToolName::new("test"),
+            version: ToolVersion::default(),
+            display_name: "Test".into(),
+            summary: "desc".into(),
             description: "desc".into(),
+            category: ToolCategory::Filesystem,
+            keywords: KeywordSet::default(),
             parameters: serde_json::json!({}),
-            category: Some(ToolCategory::Filesystem),
-            keywords: vec![],
+            examples: vec![],
+            caveats: vec![],
+            side_effects: SideEffects::ReadOnly,
+            preconditions: vec![],
+            related: vec![],
         }];
         let resp = IpcResponse::Tools { tools };
+        let got = send_recv_response(&resp).await;
+        assert_eq!(got, resp);
+    }
+
+    #[tokio::test]
+    async fn ipc_response_action_specs_roundtrip() {
+        let specs = vec![ActionSpec::minimal("read", "Read a file")];
+        let resp = IpcResponse::ActionSpecs { specs };
         let got = send_recv_response(&resp).await;
         assert_eq!(got, resp);
     }

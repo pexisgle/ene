@@ -55,11 +55,14 @@ conversation_logs (
     created_at TEXT
 )
 
-tool_embeddings (
-    tool_name TEXT PRIMARY KEY,
-    version_hash TEXT,
-    embedding BLOB,
-    created_at TEXT
+tool_embedding_index (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tool_name TEXT NOT NULL,
+    field TEXT NOT NULL CHECK (field IN ('summary','description','negative')),
+    version_hash TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(tool_name, field)
 )
 ```
 
@@ -91,30 +94,54 @@ tool_embeddings (
 | `insert_log(id, card, role, content)` | Record a single message |
 | `get_logs_by_session(id)` | Retrieve all messages for a session |
 
-### Tool Embeddings
+### Tool Embeddings (Multi-Vector)
+
+Each tool has up to 3 embedding rows (one per field: `summary`, `description`, `negative`). The per-field approach enables `search_tools` to aggregate relevance via max-pool across fields.
 
 | Method | Description |
 |--------|-------------|
-| `upsert_tool_embedding(name, hash, emb)` | UPSERT tool embedding |
-| `list_tool_embeddings()` | List all (name, hash, vector) |
-| `delete_tool_embedding(name)` | Remove a tool's embedding |
-| `search_tools(query_emb, limit, threshold)` | Cosine similarity tool search for Tool RAG |
+| `upsert_tool_embedding_field(name, field, hash, emb)` | UPSERT a single field embedding |
+| `list_tool_embedding_fields()` | List all `(name, field, hash, vector)` rows |
+| `delete_tool_embeddings(name)` | Remove all field rows for a tool |
+| `search_tools(query_emb, limit, threshold)` | Cosine similarity across all fields, max-pool per tool for Tool RAG |
 
 ## EmbeddingProvider
 
 ```rust
 #[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
-    async fn embed(&self, text: &str) -> Result<Vec<f32>, String>;
-    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, String>;
+    /// Embed text with a context kind (prefix / chunking strategy).
+    async fn embed(&self, text: &str, kind: EmbeddingKind)
+        -> Result<Vec<f32>, EmbeddingError>;
+    /// Embed a query (default: embed(.., Query)).
+    async fn embed_query(&self, text: &str)
+        -> Result<Vec<f32>, EmbeddingError>;
+    /// Batch embed multiple items (default: serial loop; override for performance).
+    async fn embed_batch(
+        &self, items: &[(&str, EmbeddingKind)],
+    ) -> Result<Vec<Vec<f32>>, EmbeddingError>;
+    /// Hypothetical Document Embedding — generates a synthetic document from query.
+    /// Default: echo query; LLM-backed impls use cheap completion.
+    async fn hyde(&self, query: &str) -> Result<String, EmbeddingError>;
+    /// Rerank candidates by relevance. Default: cosine similarity;
+    /// LLM-backed impls use structured output scoring.
+    async fn rerank(&self, query: &str, candidates: &[ToolSpec])
+        -> Result<Vec<f32>, EmbeddingError>;
     fn dimensions(&self) -> usize;
     fn model_name(&self) -> &str;
 }
+
+/// Kinds for embedding context-aware prefixes.
+pub enum EmbeddingKind { Summary, Description, Capability, Example, Negative, Query, Hyde }
+
+/// Errors from embedding operations.
+pub enum EmbeddingError { Provider(String), Timeout(Duration) }
 ```
 
 Implementations:
-- `CloudEmbeddingProvider` — OpenAI-compatible API
-- `GgufEmbeddingProvider` — Local GGUF inference via Candle (GPU-free)
+- `CloudEmbeddingProvider` — OpenAI-compatible API with batch embedding and optional HyDE via LLM.
+- `GgufEmbeddingProvider` — Local GGUF inference via Candle (GPU-free), serial batch.
+- `HybridRerankProvider` — Wraps a primary embedder with optional LLM for HyDE / rerank.
 
 ## Summarization
 

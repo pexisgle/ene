@@ -1,8 +1,8 @@
 use ene_tool_host::ToolRegistry;
 use ene_tool_proto::transport::IpcListener;
 use ene_tool_proto::{
-    IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, SandboxConfigData, ToolCategory, ToolDefinition,
-    read_ipc_request, write_ipc_response,
+    IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, KeywordSet, SandboxConfigData, SideEffects,
+    ToolCategory, ToolName, ToolSpec, ToolVersion, read_ipc_request, write_ipc_response,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -83,16 +83,24 @@ async fn test_ipc_list_tools_and_call_tool() {
         write_ipc_response(
             &mut stream,
             &IpcResponse::Tools {
-                tools: vec![ToolDefinition {
-                    name: "get_current_time".to_string(),
+                tools: vec![ToolSpec {
+                    name: ToolName::new("utility.get_current_time"),
+                    version: ToolVersion::default(),
+                    display_name: "Get the current date and time.".to_string(),
+                    summary: "Get the current date and time.".to_string(),
                     description: "Get the current date and time.".to_string(),
+                    category: ToolCategory::Utility,
+                    keywords: KeywordSet::primary_only(["time"]),
                     parameters: serde_json::json!({
                         "type": "object",
                         "properties": {},
                         "required": []
                     }),
-                    category: Some(ToolCategory::Utility),
-                    keywords: vec!["time".to_string()],
+                    examples: Vec::new(),
+                    caveats: Vec::new(),
+                    side_effects: SideEffects::default(),
+                    preconditions: Vec::new(),
+                    related: Vec::new(),
                 }],
             },
         )
@@ -106,7 +114,7 @@ async fn test_ipc_list_tools_and_call_tool() {
             .expect("Expected CallTool request");
         match &req {
             IpcRequest::CallTool { name, arguments } => {
-                assert_eq!(name, "get_current_time");
+                assert_eq!(name, "utility.get_current_time");
                 assert_eq!(arguments, "{}");
             }
             _ => panic!("Expected CallTool, got {:?}", req),
@@ -142,11 +150,11 @@ async fn test_ipc_list_tools_and_call_tool() {
     // Verify list_tools
     let tools = registry.list_tools();
     assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0].name, "get_current_time");
+    assert_eq!(tools[0].name.as_str(), "utility.get_current_time");
 
     // Verify call_tool
     let result = registry
-        .call_tool("get_current_time", "{}")
+        .call_tool("utility.get_current_time", "{}")
         .await
         .expect("call_tool failed");
     assert_eq!(result, "2024-01-01 12:00:00");
@@ -220,37 +228,28 @@ async fn test_ipc_with_real_host() {
 
     let tools = registry.list_tools();
     let names: Vec<_> = tools.iter().map(|t| t.name.as_str()).collect();
+    // Utility tools
     assert!(
-        names.contains(&"get_current_time"),
-        "Expected get_current_time in tools, got: {:?}",
+        names.contains(&"utility.get_current_time"),
+        "Expected utility.get_current_time in tools, got: {:?}",
         names
     );
     assert!(
-        names.contains(&"get_system_info"),
-        "Expected get_system_info in tools, got: {:?}",
+        names.contains(&"utility.get_system_info"),
+        "Expected utility.get_system_info in tools, got: {:?}",
         names
     );
     assert!(
-        names.contains(&"webfetch"),
-        "Expected webfetch in tools, got: {:?}",
-        names
-    );
-    assert!(
-        names.contains(&"websearch"),
-        "Expected websearch in tools, got: {:?}",
-        names
-    );
-    assert!(
-        names.contains(&"question"),
-        "Expected question in tools, got: {:?}",
+        names.contains(&"utility.question"),
+        "Expected utility.question in tools, got: {:?}",
         names
     );
     for name in &[
-        "todo_list",
-        "todo_add",
-        "todo_update",
-        "todo_complete",
-        "todo_delete",
+        "utility.todo_list",
+        "utility.todo_add",
+        "utility.todo_update",
+        "utility.todo_complete",
+        "utility.todo_delete",
     ] {
         assert!(
             names.contains(name),
@@ -258,82 +257,89 @@ async fn test_ipc_with_real_host() {
             names
         );
     }
+    // Web tools
     assert!(
-        names.contains(&"app"),
-        "Expected app in tools, got: {:?}",
+        names.contains(&"web.fetch"),
+        "Expected web.fetch in tools, got: {:?}",
         names
     );
     assert!(
-        names.contains(&"browser"),
-        "Expected browser in tools, got: {:?}",
+        names.contains(&"web.search"),
+        "Expected web.search in tools, got: {:?}",
+        names
+    );
+    // Filesystem tools
+    assert!(
+        names.contains(&"filesystem.read"),
+        "Expected filesystem.read in tools, got: {:?}",
         names
     );
     assert!(
-        names.contains(&"filesystem"),
-        "Expected filesystem in tools, got: {:?}",
+        names.contains(&"filesystem.write"),
+        "Expected filesystem.write in tools, got: {:?}",
         names
     );
     assert!(
-        names.contains(&"shell"),
-        "Expected shell in tools, got: {:?}",
+        names.contains(&"shell.execute"),
+        "Expected shell.execute in tools, got: {:?}",
         names
     );
     assert!(
-        names.contains(&"undo"),
-        "Expected undo in tools, got: {:?}",
+        names.contains(&"utility.undo"),
+        "Expected utility.undo in tools, got: {:?}",
         names
     );
 
     let result = registry
-        .call_tool("get_current_time", "{}")
+        .call_tool("utility.get_current_time", "{}")
         .await
-        .expect("call_tool get_current_time failed");
+        .expect("call_tool utility.get_current_time failed");
     assert!(!result.is_empty(), "Result should not be empty");
-    println!("Real host get_current_time result: {}", result);
+    println!("Real host utility.get_current_time result: {}", result);
 
     let result = registry
-        .call_tool("get_system_info", "{}")
+        .call_tool("utility.get_system_info", "{}")
         .await
-        .expect("call_tool get_system_info failed");
+        .expect("call_tool utility.get_system_info failed");
     assert!(
         result.contains("OS:"),
         "Result should contain OS info: {}",
         result
     );
-    println!("Real host get_system_info result: {}", result);
+    println!("Real host utility.get_system_info result: {}", result);
 
     let result = registry
         .call_tool(
-            "question",
+            "utility.question",
             r#"{"questions": ["What is your name?", "What is your favorite color?"]}"#,
         )
         .await
-        .expect("call_tool question failed");
+        .expect("call_tool utility.question failed");
     assert!(
         result.contains("What is your name?"),
         "Result should contain question: {}",
         result
     );
-    println!("Real host question result: {}", result);
+    println!("Real host utility.question result: {}", result);
 
     let result = registry
         .call_tool(
-            "todo_add",
+            "utility.todo_add",
             r#"{"content": "Test task", "priority": "high"}"#,
         )
         .await
-        .expect("call_tool todo_add failed");
+        .expect("call_tool utility.todo_add failed");
     assert!(
         result.contains("Test task"),
         "Result should contain todo: {}",
         result
     );
-    println!("Real host todo_add result: {}", result);
+    println!("Real host utility.todo_add result: {}", result);
 
     let result = registry
-        .call_tool("todo_list", "{}")
+        .call_tool("utility.todo_list", "{}")
         .await
-        .expect("call_tool todo_list failed");
+        .expect("call_tool utility.todo_list failed");
     assert!(
         result.contains("Test task"),
         "Result should contain todo: {}",

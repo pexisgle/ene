@@ -3,8 +3,7 @@ use crate::tools::CompositeToolRegistry;
 use crate::tools::registry::ToolRegistry;
 use ene_config as paths;
 use ene_config::{EneConfig, register_runtime_schema};
-use ene_memory::MemoryStore;
-use ene_tool_proto::ToolDefinition;
+use ene_tool_proto::ToolSpec;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,10 +35,12 @@ impl ToolProcess {
     fn restart(&mut self) -> Result<(), crate::error::ToolError> {
         self.restart_count += 1;
         if self.restart_count > MAX_RESTARTS {
-            return Err(crate::error::ToolError::ToolExecutionError(format!(
-                "Tool '{}' exceeded max restarts ({})",
-                self.name, MAX_RESTARTS
-            )));
+            return Err(crate::error::ToolError::ExecutionFailed {
+                message: format!(
+                    "Tool '{}' exceeded max restarts ({})",
+                    self.name, MAX_RESTARTS
+                ),
+            });
         }
 
         let _ = self.child.kill();
@@ -57,12 +58,8 @@ impl ToolProcess {
         let child = std::process::Command::new(&self.binary_path)
             .env("ENE_TOOL_SOCKET", &self.socket_path)
             .spawn()
-            .map_err(|e| {
-                crate::error::ToolError::ToolExecutionError(format!(
-                    "Failed to restart '{}': {}",
-                    self.binary_path.display(),
-                    e
-                ))
+            .map_err(|e| crate::error::ToolError::ExecutionFailed {
+                message: format!("Failed to restart '{}': {}", self.binary_path.display(), e),
             })?;
 
         self.child = child;
@@ -90,27 +87,13 @@ struct SupervisedIpcRegistry {
 
 #[async_trait::async_trait]
 impl ToolRegistry for SupervisedIpcRegistry {
-    fn list_tools(&self) -> Vec<ToolDefinition> {
+    fn list_tools(&self) -> Vec<ToolSpec> {
         let reg = self
             .registry
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         reg.list_tools()
-    }
-
-    async fn select_tools(
-        &self,
-        embedder: &dyn ene_provider::EmbeddingProvider,
-        query: &str,
-        limit: usize,
-    ) -> Vec<ToolDefinition> {
-        let reg = self
-            .registry
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        reg.select_tools(embedder, query, limit).await
     }
 
     async fn call_tool(
@@ -212,25 +195,16 @@ impl ToolRegistry for SupervisedIpcRegistry {
 /// wraps each in a `SupervisedIpcRegistry` with crash detection and auto-restart,
 /// and aggregates them into a [`CompositeToolRegistry`].
 ///
-/// Also supports adding external registries (e.g., [`crate::McpToolRegistry`]) and attaching
-/// a [`MemoryStore`] for Tool RAG embeddings.
+/// Also supports adding external registries (e.g., [`crate::McpToolRegistry`]).
+/// Tool RAG indexing and selection is handled by [`ToolRag`](crate::ToolRag).
 pub struct ToolHostManager {
     composite: Arc<CompositeToolRegistry>,
 }
 
 #[async_trait::async_trait]
 impl ToolRegistry for ToolHostManager {
-    fn list_tools(&self) -> Vec<ToolDefinition> {
+    fn list_tools(&self) -> Vec<ToolSpec> {
         self.composite.list_tools()
-    }
-
-    async fn select_tools(
-        &self,
-        embedder: &dyn ene_provider::EmbeddingProvider,
-        query: &str,
-        limit: usize,
-    ) -> Vec<ToolDefinition> {
-        self.composite.select_tools(embedder, query, limit).await
     }
 
     async fn call_tool(
@@ -255,14 +229,6 @@ impl ToolRegistry for ToolHostManager {
 
     async fn allow_pattern(&self, action: &str, target_pattern: &str) {
         self.composite.allow_pattern(action, target_pattern).await;
-    }
-
-    async fn ensure_index_built(
-        &self,
-        embedder: &dyn ene_provider::EmbeddingProvider,
-        store: Option<&MemoryStore>,
-    ) -> Result<(), crate::error::ToolError> {
-        self.composite.ensure_index_built(embedder, store).await
     }
 }
 
@@ -292,7 +258,9 @@ impl ToolHostManager {
         let mut supervised_registries = Vec::new();
 
         std::fs::create_dir_all(paths::tool_socket_dir()).map_err(|e| {
-            crate::error::ToolError::ToolExecutionError(format!("Failed to create socket dir: {e}"))
+            crate::error::ToolError::ExecutionFailed {
+                message: format!("Failed to create socket dir: {e}"),
+            }
         })?;
 
         let tool_config = config
@@ -358,10 +326,9 @@ impl ToolHostManager {
                 };
                 let _ = fallback_config.set_section(&fallback_tools);
                 Self::start(&fallback_config).await.map_err(|e2| {
-                    crate::error::ToolError::ToolExecutionError(format!(
-                        "Fatal: Failed to start fallback ToolHostManager: {}",
-                        e2
-                    ))
+                    crate::error::ToolError::ExecutionFailed {
+                        message: format!("Fatal: Failed to start fallback ToolHostManager: {e2}"),
+                    }
                 })?
             }
         };
@@ -407,11 +374,6 @@ impl ToolHostManager {
         self.composite.add_registry(registry);
     }
 
-    /// Attaches a memory store for Tool RAG embedding indexing.
-    pub fn with_store(&mut self, store: Arc<MemoryStore>) {
-        self.composite.set_store(store);
-    }
-
     /// Consumes the manager and returns an `Arc<dyn ToolRegistry>` suitable for use
     /// in the streaming engine.
     pub fn into_registry(self) -> Arc<dyn ToolRegistry> {
@@ -424,7 +386,9 @@ impl ToolHostManager {
         tool_config: Option<serde_json::Value>,
     ) -> Result<Arc<dyn ToolRegistry>, crate::error::ToolError> {
         let binary_path = Self::find_tool_binary(name).ok_or_else(|| {
-            crate::error::ToolError::ToolExecutionError(format!("Tool binary '{}' not found", name))
+            crate::error::ToolError::ExecutionFailed {
+                message: format!("Tool binary '{name}' not found"),
+            }
         })?;
 
         let socket_path: PathBuf = {
@@ -445,12 +409,8 @@ impl ToolHostManager {
         let child = std::process::Command::new(&binary_path)
             .env("ENE_TOOL_SOCKET", &socket_path)
             .spawn()
-            .map_err(|e| {
-                crate::error::ToolError::ToolExecutionError(format!(
-                    "Failed to spawn '{}': {}",
-                    binary_path.display(),
-                    e
-                ))
+            .map_err(|e| crate::error::ToolError::ExecutionFailed {
+                message: format!("Failed to spawn '{}': {}", binary_path.display(), e),
             })?;
 
         let process = ToolProcess {
@@ -523,12 +483,14 @@ impl ToolHostManager {
                 Err(e) => {
                     attempts += 1;
                     if attempts >= max_retries {
-                        return Err(crate::error::ToolError::ToolExecutionError(format!(
-                            "Failed to connect to tool at {} after {} attempts: {}",
-                            socket_path.display(),
-                            attempts,
-                            e
-                        )));
+                        return Err(crate::error::ToolError::ExecutionFailed {
+                            message: format!(
+                                "Failed to connect to tool at {} after {} attempts: {}",
+                                socket_path.display(),
+                                attempts,
+                                e
+                            ),
+                        });
                     }
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 }

@@ -6,7 +6,7 @@
 //!
 //! - [`ToolProvider`] trait — Interface each tool implements
 //! - [`IpcRequest`] / [`IpcResponse`] — Wire protocol messages (length-prefixed JSON over UDS/Named Pipe)
-//! - [`ToolDefinition`] — Schema describing a tool (name, parameters, category, keywords)
+//! - [`ToolSpec`] — Structured schema describing a tool (name, parameters, category, keywords, side effects, ...)
 //! - [`SandboxConfigData`] — Sandbox configuration shared across tool processes
 //! - [`run_tool_server`] — Helper to start an IPC server for a [`ToolProvider`]
 //!
@@ -14,16 +14,24 @@
 //!
 //! ```rust,no_run
 //! use async_trait::async_trait;
-//! use ene_tool_proto::{ToolProvider, ToolDefinition, ToolError, run_tool_server};
+//! use ene_tool_proto::{
+//!     KeywordSet, SideEffects, ToolCategory, ToolError, ToolName, ToolProvider, ToolSpec,
+//!     ToolVersion, run_tool_server,
+//! };
 //!
 //! struct MyTool;
 //!
 //! #[async_trait]
 //! impl ToolProvider for MyTool {
-//!     fn list_tools(&self) -> Vec<ToolDefinition> {
-//!         vec![ToolDefinition {
-//!             name: "hello".into(),
-//!             description: "Greets the user".into(),
+//!     fn list_specs(&self) -> Vec<ToolSpec> {
+//!         vec![ToolSpec {
+//!             name: ToolName::new("hello"),
+//!             version: ToolVersion::new(1, 0, 0),
+//!             display_name: "Hello".into(),
+//!             summary: "Greets the user".into(),
+//!             description: "Greets the user with a personalised message.".into(),
+//!             category: ToolCategory::Utility,
+//!             keywords: KeywordSet::primary_only(["greet", "hello", "greeting"]),
 //!             parameters: serde_json::json!({
 //!                 "type": "object",
 //!                 "properties": {
@@ -31,8 +39,11 @@
 //!                 },
 //!                 "required": ["name"]
 //!             }),
-//!             category: None,
-//!             keywords: vec![],
+//!             examples: vec![],
+//!             caveats: vec![],
+//!             side_effects: SideEffects::ReadOnly,
+//!             preconditions: vec![],
+//!             related: vec![],
 //!         }]
 //!     }
 //!
@@ -44,12 +55,6 @@
 //!
 //!     fn set_session_id(&self, _sid: &str) {}
 //! }
-//!
-//! // In main.rs of your tool binary:
-//! // #[tokio::main]
-//! // async fn main() {
-//! //     run_tool_server(Box::new(MyTool)).await.unwrap();
-//! // }
 //! ```
 #![warn(missing_docs)]
 
@@ -65,14 +70,14 @@ pub mod sandbox;
 pub mod server;
 /// UDS / Named Pipe transport layer.
 pub mod transport;
-/// Shared types (ToolDefinition, ToolCategory, etc.).
+/// Shared types (`ToolCategory`, etc.).
 pub mod types;
 
 /// Tool error type.
 pub use error::EneToolProtoError;
 pub use error::ToolError;
 /// Interactive user input prompt (used inside [`ToolError::UserInputRequired`]).
-pub use error::UserInputPrompt;
+pub use error::{MultiAnswer, QuestionItem, UserInputPrompt};
 /// Composite registry that aggregates multiple ToolProvider instances.
 pub use host_registry::HostRegistry;
 /// IPC message types and serialisation helpers.
@@ -85,7 +90,10 @@ pub use sandbox::SandboxConfigData;
 /// Starts an IPC server for a ToolProvider.
 pub use server::run_tool_server;
 /// Shared tool types.
-pub use types::{ToolCallResult, ToolCategory, ToolDefinition};
+pub use types::{
+    ActionSpec, EmbeddingField, KeywordSet, SideEffects, ToolCallResult, ToolCategory, ToolExample,
+    ToolName, ToolSpec, ToolVersion,
+};
 
 use async_trait::async_trait;
 
@@ -95,8 +103,17 @@ use async_trait::async_trait;
 /// The host-side `IpcToolRegistry` calls through IPC to the tool binary.
 #[async_trait]
 pub trait ToolProvider: Send + Sync {
-    /// Returns the list of tools this provider exposes.
-    fn list_tools(&self) -> Vec<ToolDefinition>;
+    /// Returns the list of tool specs this provider exposes.
+    ///
+    /// Mega-tools return N specs, one per action (e.g. `filesystem.read`,
+    /// `filesystem.write`, ...).
+    fn list_specs(&self) -> Vec<ToolSpec>;
+
+    /// Returns the per-action metadata (used for Tool RAG embedding).
+    /// For individual tools, this returns an empty vec.
+    fn list_action_specs(&self) -> Vec<ActionSpec> {
+        Vec::new()
+    }
 
     /// Executes a tool by name with the given JSON arguments.
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>;

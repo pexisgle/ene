@@ -12,3 +12,7 @@ tokio = { workspace = true, features = ["io-util", "net"] }
 ene-config = { workspace = true }
 serde = { workspace = true }
 ctor = { workspace = true }
+schemars = { workspace = true }
+
+[dev-dependencies]
+ene-tool-derive = { workspace = true }

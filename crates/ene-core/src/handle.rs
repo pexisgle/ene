@@ -11,7 +11,8 @@ use ene_session::{CardName, SessionId};
 use ene_session::{
     ConversationSession, EneSessionError, SplitReason, SplitResult, poll_split_result,
 };
-use ene_tool_host::{CompositeToolRegistry, ToolDefinition, ToolHostManager, ToolRegistry};
+use ene_tool_host::{CompositeToolRegistry, ToolHostManager, ToolRegistry};
+use ene_tool_proto::ToolSpec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
@@ -74,7 +75,7 @@ pub enum EneCommand {
     /// List all tools in the active tool registry.
     ListTools {
         /// Reply channel for the tools.
-        reply: oneshot::Sender<Vec<ToolDefinition>>,
+        reply: oneshot::Sender<Vec<ToolSpec>>,
     },
     /// Call a tool by name with JSON-encoded arguments.
     CallTool {
@@ -85,6 +86,8 @@ pub enum EneCommand {
         /// Reply channel.
         reply: oneshot::Sender<Result<String, EneCoreError>>,
     },
+    /// Invalidate the Tool RAG index, forcing re-embedding on next query.
+    InvalidateToolIndex,
 }
 
 /// Events emitted from the actor to all consumers via broadcast channel.
@@ -476,7 +479,7 @@ impl EneHandle {
     }
 
     /// List available tools from the registry.
-    pub async fn list_tools(&self) -> Result<Vec<ToolDefinition>, EneCoreError> {
+    pub async fn list_tools(&self) -> Result<Vec<ToolSpec>, EneCoreError> {
         let (tx, rx) = oneshot::channel();
         self.send(EneCommand::ListTools { reply: tx });
         rx.await.map_err(|_| EneCoreError::ChannelClosed)
@@ -491,6 +494,13 @@ impl EneHandle {
             reply: tx,
         });
         rx.await.map_err(|_| EneCoreError::ChannelClosed)?
+    }
+
+    /// Invalidate the Tool RAG index, forcing re-embedding on next query.
+    pub fn invalidate_tool_index(&self) -> Result<(), ActorDeadError> {
+        self.cmd_tx
+            .send(EneCommand::InvalidateToolIndex)
+            .map_err(|_| ActorDeadError)
     }
 }
 
@@ -516,6 +526,7 @@ struct EneActor {
     config: EneConfig,
     session: ConversationSession,
     registry: Arc<dyn ToolRegistry>,
+    tool_rag: Option<Arc<ene_tool_host::ToolRag>>,
     cancel_token: CancellationToken,
     stream_handle: Option<tokio::task::JoinHandle<()>>,
     stream_session_rx: Option<oneshot::Receiver<ConversationSession>>,
@@ -536,6 +547,7 @@ impl EneActor {
             config: EneConfig::default(),
             session: ConversationSession::new(),
             registry: Arc::new(CompositeToolRegistry::new(vec![])),
+            tool_rag: None,
             cancel_token: CancellationToken::new(),
             stream_handle: None,
             stream_session_rx: None,
@@ -716,6 +728,10 @@ impl EneActor {
                 });
                 true
             }
+            EneCommand::InvalidateToolIndex => {
+                self.tool_rag = None;
+                true
+            }
         }
     }
 
@@ -753,6 +769,7 @@ impl EneActor {
         let config = self.config.clone();
         let session = self.session.clone();
         let registry = self.registry.clone();
+        let tool_rag = self.tool_rag.clone();
         let event_tx = self.event_tx.clone();
         let cancel_token = self.cancel_token.clone();
         let pending_permissions = self.pending_permissions.clone();
@@ -768,6 +785,7 @@ impl EneActor {
                 session,
                 user_input,
                 registry,
+                tool_rag,
                 provider,
                 event_tx,
                 cancel_token,
@@ -925,6 +943,9 @@ impl EneActor {
 
         self.registry = build_tool_registry(&self.config).await?;
 
+        // Build the ToolRag pipeline from config.
+        self.tool_rag = init_tool_rag(&self.config, &embedder, &self.session);
+
         Ok(())
     }
 
@@ -1000,4 +1021,27 @@ fn init_memory_store(
         .map_err(|e| format!("Failed to open memory store: {}", e))?;
 
     Ok(Arc::new(store))
+}
+
+/// Builds the ToolRag pipeline from the current config, embedder, and session state.
+fn init_tool_rag(
+    config: &EneConfig,
+    embedder: &Arc<dyn ene_provider::EmbeddingProvider>,
+    session: &ConversationSession,
+) -> Option<Arc<ene_tool_host::ToolRag>> {
+    let rag_config = config
+        .get_section::<ene_tool_host::ToolRagConfig>()
+        .unwrap_or_default();
+
+    if !rag_config.enabled {
+        return None;
+    }
+
+    let store = session.memory.memory_store.clone();
+    let opts = ene_tool_host::ToolRagOptions::from(rag_config);
+    Some(Arc::new(ene_tool_host::ToolRag::new(
+        embedder.clone(),
+        store,
+        opts,
+    )))
 }

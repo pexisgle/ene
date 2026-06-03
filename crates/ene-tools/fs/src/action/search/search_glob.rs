@@ -65,7 +65,9 @@ pub async fn glob_search(
     Ok(output.join("\n"))
 }
 
-use ene_tool_proto::ToolDefinition;
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use std::sync::{Arc, RwLock};
 
@@ -83,13 +85,53 @@ impl FsGlobSubAction {
 
 #[async_trait::async_trait]
 impl ToolAction for FsGlobSubAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "glob".to_string(),
-            description: "Lists files matching a pattern".to_string(),
-            parameters: serde_json::json!({}),
-            category: None,
-            keywords: vec![],
+    fn tool_name(&self) -> &'static str {
+        "filesystem.glob"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("filesystem.glob"),
+            version: ToolVersion::default(),
+            display_name: "Glob Search".to_string(),
+            summary: "Find files and directories matching a glob pattern.".to_string(),
+            description: "Find files and directories matching a glob pattern.".to_string(),
+            category: ToolCategory::Filesystem,
+            keywords: KeywordSet::primary_only([
+                "glob", "find", "search", "files", "pattern", "match",
+            ]),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob pattern (e.g. '**/*.rs', 'src/**/*.ts')"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Base directory to search from (defaults to cwd)"
+                    }
+                },
+                "required": ["pattern"]
+            }),
+            examples: vec![
+                ToolExample {
+                    description: "Find all Rust source files".to_string(),
+                    input: serde_json::json!({"pattern": "**/*.rs", "path": "/home/user/project"}),
+                    output: Some(
+                        "/home/user/project/src/main.rs\n/home/user/project/src/lib.rs".to_string(),
+                    ),
+                },
+                ToolExample {
+                    description: "Find all JSON config files".to_string(),
+                    input: serde_json::json!({"pattern": "config/**/*.json"}),
+                    output: None,
+                },
+            ],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

@@ -6,7 +6,7 @@ Provides URL fetching and web search capabilities.
 
 ## Tools
 
-### `webfetch`
+### `web.fetch`
 
 Fetches content from a URL.
 
@@ -23,13 +23,11 @@ Fetches content from a URL.
 - HTTP URLs are automatically upgraded to HTTPS
 - Default 30-second timeout
 
-**Keywords:** fetch, url, web, download, html
-
-**Category:** Browser
+**Category:** WebFetch
 
 ---
 
-### `websearch`
+### `web.search`
 
 Searches the web using configurable backends.
 
@@ -48,8 +46,6 @@ Searches the web using configurable backends.
 | `tavily` | `TAVILY_API_KEY` |
 | `brave` | `BRAVE_API_KEY` |
 | `exa` | `EXA_API_KEY` |
-
-**Keywords:** search, web, google, internet, lookup
 
 **Category:** WebSearch
 

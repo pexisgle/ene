@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -24,13 +26,37 @@ impl WaitSubAction {
 
 #[async_trait]
 impl ToolAction for WaitSubAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "wait".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "browser.wait"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("browser.wait"),
+            version: ToolVersion::default(),
+            display_name: "Waits for a specified duration in milliseconds".to_string(),
+            summary: "Waits for a specified duration in milliseconds".to_string(),
             description: "Waits for a specified duration in milliseconds".to_string(),
-            parameters: serde_json::json!({}),
-            category: None,
-            keywords: vec![],
+            category: ToolCategory::Browser,
+            keywords: KeywordSet::primary_only(["wait", "delay", "sleep"]),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "wait_ms": {
+                        "type": "integer",
+                        "description": "Milliseconds to wait (default: 1000)"
+                    }
+                }
+            }),
+            examples: vec![ToolExample {
+                description: "Wait 2 seconds for page to load".to_string(),
+                input: serde_json::json!({"wait_ms": 2000}),
+                output: None,
+            }],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

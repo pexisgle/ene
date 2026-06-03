@@ -4,29 +4,47 @@
 
 OS-level desktop automation using enigo, xcap, arboard, and xdg-desktop-portal (Wayland).
 
-## Tool: `app`
+## Tools
 
-Single mega-tool with action-based dispatch.
+### Clipboard
 
-| Action | Parameters | Description |
-|--------|-----------|-------------|
-| `list_windows` | — | List all open windows |
-| `focus_window` | `window_title`* | Focus a window by title |
-| `get_active_window` | — | Get active window info |
-| `list_monitors` | — | List available monitors |
-| `type_text` | `text`* | Type text via keyboard |
-| `press_key` | `key`* | Press a single key |
-| `key_combo` | `combo_str`* (e.g. `ctrl+shift+s`) | Key combination |
-| `mouse_move` | `x`*, `y`*, `relative?` | Move mouse cursor |
-| `mouse_click` | `button?`, `count?` | Click (supports double-click) |
-| `mouse_drag` | `x`*, `y`*, `x2`*, `y2`*, `button?` | Drag from (x,y) to (x2,y2) |
-| `mouse_scroll` | `amount?`, `direction?` | Scroll mouse wheel |
-| `screenshot` | `scale_percent?` (default 50) | Full screen screenshot (base64) |
-| `capture_window` | `window_title`*, `scale_percent?` | Capture specific window |
-| `clipboard_read` | — | Read clipboard contents |
-| `clipboard_write` | `text`* | Write to clipboard |
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `app.clipboard_read` | — | Read clipboard contents |
+| `app.clipboard_write` | `text`* | Write to clipboard |
 
-**Keywords:** gui, automation, mouse, keyboard, clipboard, window, screenshot, screen
+### Window Management
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `app.list_windows` | — | List all open windows |
+| `app.focus_window` | `window_title`* | Focus a window by title |
+| `app.get_active_window` | — | Get active window info |
+| `app.list_monitors` | — | List available monitors |
+| `app.capture_window` | `window_title`*, `scale_percent?` | Capture specific window (base64) |
+
+### Keyboard
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `app.keyboard_type` | `text`* | Type text via keyboard |
+| `app.keyboard_press` | `key`* | Press a single key |
+| `app.keyboard_combo` | `key_combo`* (e.g. `ctrl+shift+s`) | Key combination |
+
+### Mouse
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `app.mouse_move` | `x`*, `y`*, `relative?` | Move mouse cursor |
+| `app.mouse_click` | `button?`, `count?` | Click (supports double-click) |
+| `app.drag` | `x`*, `y`*, `x2`*, `y2`*, `button?` | Drag from (x,y) to (x2,y2) |
+| `app.mouse_scroll` | `amount?`, `direction?` | Scroll mouse wheel |
+
+### Screenshot
+
+| Tool | Parameters | Description |
+|------|-----------|-------------|
+| `app.screenshot` | `scale_percent?` (default 50) | Full screen screenshot (base64) |
 
 **Category:** App
 

@@ -1,89 +1,58 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError, UserInputPrompt};
+use ene_tool_proto::{
+    KeywordSet, MultiAnswer, QuestionItem, SideEffects, ToolCategory, ToolError, ToolExample,
+    ToolName, ToolSpec, ToolVersion, UserInputPrompt,
+};
 use ene_tools_common::ToolAction;
 use serde::Deserialize;
-use serde_json::json;
 use uuid::Uuid;
-
-/// A single question that can be answered by selecting an option or by typing
-/// a free-text response.
-#[derive(Debug, Clone, Deserialize)]
-struct QuestionItem {
-    /// The question text shown to the user.
-    question: String,
-    /// Predefined selectable options. Empty when only free-text is allowed.
-    #[serde(default)]
-    options: Vec<String>,
-    /// Whether the user can supply a custom answer that is not in `options`.
-    #[serde(default)]
-    allow_free_text: bool,
-}
 
 #[derive(Debug, Clone, Deserialize)]
 struct QuestionArgs {
     /// One or more questions to present to the user.
     questions: Vec<QuestionItem>,
-    /// Set by the host on re-invocation with the user's response.
-    /// Absent on the first call.
+    /// Set by the host on re-invocation with the user's responses, one per
+    /// question in the same order as `questions`. Absent on the first call.
     #[serde(default)]
-    _user_response: Option<String>,
+    _user_answers: Option<Vec<MultiAnswer>>,
 }
 
 /// Action that asks the user clarifying questions and pauses the LLM turn
-/// until the user provides an answer through the UI.
+/// until the user provides answers through the UI.
 pub struct AskQuestion;
 
 #[async_trait]
 impl ToolAction for AskQuestion {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "question".to_string(),
-            description: concat!(
-                "Asks the user clarifying questions when you need more information to proceed. ",
-                "Each question may declare a list of `options` (rendered as selectable buttons) ",
-                "and `allow_free_text` (true to enable a custom-text input). ",
-                "The tool call blocks until the user answers; the response is then returned to you."
-            )
-            .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "questions": {
-                        "type": "array",
-                        "description": "Questions to present to the user. Multiple questions are shown together in one dialog.",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "question": {
-                                    "type": "string",
-                                    "description": "The question text."
-                                },
-                                "options": {
-                                    "type": "array",
-                                    "description": "Predefined selectable options. Omit or leave empty for free-text only.",
-                                    "items": { "type": "string" }
-                                },
-                                "allow_free_text": {
-                                    "type": "boolean",
-                                    "description": "Whether the user can type a custom answer. Defaults to false.",
-                                    "default": false
-                                }
-                            },
-                            "required": ["question"]
-                        },
-                        "minItems": 1
-                    }
+    fn tool_name(&self) -> &'static str {
+        "utility.question"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("utility.question"),
+            version: ToolVersion::default(),
+            display_name: "Ask the user a question (or multiple) and wait for a response.".to_string(),
+            summary: "Ask the user a question (or multiple) and wait for a response.".to_string(),
+            description: "Presents one or more questions to the user through the UI. Each question can have predefined options, allow free-text input, or both. The LLM turn is paused until the user responds. Supports re-invocation with collected answers.".to_string(),
+            category: ToolCategory::Utility,
+            keywords: KeywordSet::primary_only(["question", "ask", "clarify", "confirm", "input"]),
+            parameters: serde_json::json!({}),
+            examples: vec![
+                ToolExample {
+                    description: "Ask a yes/no question with options".to_string(),
+                    input: serde_json::json!({"questions": [{"question": "Do you want to proceed?", "options": ["yes", "no"]}]}),
+                    output: Some("The user answered the questions:\n1. Do you want to proceed? -> selected: yes".to_string()),
                 },
-                "required": ["questions"]
-            }),
-            category: Some(ToolCategory::Utility),
-            keywords: vec![
-                "question".to_string(),
-                "ask".to_string(),
-                "clarify".to_string(),
-                "confirm".to_string(),
-                "input".to_string(),
+                ToolExample {
+                    description: "Ask a free-text question".to_string(),
+                    input: serde_json::json!({"questions": [{"question": "What is your name?", "options": [], "allow_free_text": true}]}),
+                    output: None,
+                },
             ],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 
@@ -93,69 +62,49 @@ impl ToolAction for AskQuestion {
                 message: format!("Invalid arguments for question: {e}"),
             })?;
 
-        // Re-invocation path: the host already collected the user's response
-        // and re-injected it under `_user_response`. Format it as a result.
-        if let Some(response) = args._user_response {
-            return Ok(format_user_response(&args.questions, &response));
+        // Re-invocation path: the host already collected the user's per-question
+        // answers and re-injected them under `_user_answers`. Format as a result.
+        if let Some(answers) = args._user_answers {
+            return Ok(format_user_response(&args.questions, &answers));
         }
 
-        // First-call path: build a single prompt from all questions and emit
-        // UserInputRequired so the UI pauses the LLM turn.
+        // First-call path: emit a single UserInputRequired prompt that lists
+        // all questions; the UI will collect one answer per QuestionItem.
         if args.questions.is_empty() {
             return Err(ToolError::InvalidArguments {
                 message: "No questions provided".to_string(),
             });
         }
 
-        let prompt = build_prompt(&args.questions);
+        let prompt = UserInputPrompt {
+            items: args.questions.clone(),
+        };
         let request_id = Uuid::new_v4().to_string();
         Err(ToolError::UserInputRequired { request_id, prompt })
     }
 }
 
-/// Combines all sub-questions into a single [`UserInputPrompt`]. The header
-/// reflects whether this is a yes/no style or a multiple-choice question.
-fn build_prompt(questions: &[QuestionItem]) -> UserInputPrompt {
-    let question_text = questions
-        .iter()
-        .enumerate()
-        .map(|(i, q)| format!("{}. {}", i + 1, q.question))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let mut all_options: Vec<String> = Vec::new();
-    for q in questions {
-        all_options.extend(q.options.iter().cloned());
-    }
-    all_options.sort();
-    all_options.dedup();
-
-    let allow_free_text = questions.iter().any(|q| q.allow_free_text);
-
-    let header = if !all_options.is_empty() {
-        Some("MultipleChoice".to_string())
-    } else {
-        Some("FreeText".to_string())
-    };
-
-    UserInputPrompt {
-        header,
-        question: question_text,
-        options: all_options,
-        allow_free_text,
-    }
-}
-
-/// Formats the user's response as a human-readable string returned to the LLM.
-fn format_user_response(questions: &[QuestionItem], response: &str) -> String {
-    if questions.len() == 1 {
-        return format!("The user answered: {}", response);
-    }
+/// Formats the user's per-question answers as a human-readable string returned
+/// to the LLM. Skipped questions are recorded as `(skipped)`; the LLM can
+/// interpret that as "no answer provided".
+fn format_user_response(questions: &[QuestionItem], answers: &[MultiAnswer]) -> String {
     let mut out = String::from("The user answered the questions:\n");
     for (i, q) in questions.iter().enumerate() {
-        out.push_str(&format!("{}. {} -> {}\n", i + 1, q.question, response));
+        let rendered = answers
+            .get(i)
+            .map(format_answer)
+            .unwrap_or_else(|| "(no answer)".to_string());
+        out.push_str(&format!("{}. {} -> {}\n", i + 1, q.question, rendered));
     }
     out
+}
+
+fn format_answer(answer: &MultiAnswer) -> String {
+    match answer {
+        MultiAnswer::Selected { option } => format!("selected: {option}"),
+        MultiAnswer::Answer { text } => format!("answered: {text}"),
+        MultiAnswer::Skip => "(skipped)".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -169,18 +118,27 @@ mod tests {
         assert_eq!(a.questions.len(), 1);
         assert_eq!(a.questions[0].options, vec!["a", "b"]);
         assert!(!a.questions[0].allow_free_text);
-        assert!(a._user_response.is_none());
+        assert!(a._user_answers.is_none());
     }
 
     #[test]
-    fn args_deserialize_with_user_response() {
-        let json = r#"{"questions":[{"question":"Q?"}],"_user_response":"my answer"}"#;
+    fn args_deserialize_with_user_answers() {
+        let json = r#"{
+            "questions":[{"question":"Q1"},{"question":"Q2"}],
+            "_user_answers":[
+                {"kind":"answer","text":"hello"},
+                {"kind":"skip"}
+            ]
+        }"#;
         let a: QuestionArgs = serde_json::from_str(json).unwrap();
-        assert_eq!(a._user_response.as_deref(), Some("my answer"));
+        let answers = a._user_answers.unwrap();
+        assert_eq!(answers.len(), 2);
+        assert!(matches!(&answers[0], MultiAnswer::Answer { text } if text == "hello"));
+        assert!(matches!(&answers[1], MultiAnswer::Skip));
     }
 
     #[test]
-    fn build_prompt_collects_options_dedup() {
+    fn user_input_prompt_carries_items() {
         let qs = vec![
             QuestionItem {
                 question: "Q1".into(),
@@ -189,29 +147,14 @@ mod tests {
             },
             QuestionItem {
                 question: "Q2".into(),
-                options: vec!["b".into(), "c".into()],
+                options: vec![],
                 allow_free_text: true,
             },
         ];
-        let p = build_prompt(&qs);
-        assert_eq!(p.options, vec!["a", "b", "c"]);
-        assert!(p.allow_free_text);
-        assert_eq!(p.header.as_deref(), Some("MultipleChoice"));
-        assert!(p.question.contains("1. Q1"));
-        assert!(p.question.contains("2. Q2"));
-    }
-
-    #[test]
-    fn build_prompt_free_text_only() {
-        let qs = vec![QuestionItem {
-            question: "Type something".into(),
-            options: vec![],
-            allow_free_text: true,
-        }];
-        let p = build_prompt(&qs);
-        assert!(p.options.is_empty());
-        assert!(p.allow_free_text);
-        assert_eq!(p.header.as_deref(), Some("FreeText"));
+        let p = UserInputPrompt { items: qs.clone() };
+        assert_eq!(p.items.len(), 2);
+        assert_eq!(p.items[0].question, "Q1");
+        assert_eq!(p.items[1].options, vec![] as Vec<String>);
     }
 
     #[test]
@@ -221,12 +164,46 @@ mod tests {
             options: vec![],
             allow_free_text: true,
         }];
-        let s = format_user_response(&qs, "yes");
-        assert!(s.contains("yes"));
+        let answers = vec![MultiAnswer::Answer { text: "yes".into() }];
+        let s = format_user_response(&qs, &answers);
+        assert!(s.contains("answered: yes"));
+        assert!(s.contains("1. Q?"));
     }
 
     #[test]
-    fn format_user_response_multiple() {
+    fn format_user_response_multiple_distinct() {
+        let qs = vec![
+            QuestionItem {
+                question: "Q1".into(),
+                options: vec!["a".into(), "b".into()],
+                allow_free_text: false,
+            },
+            QuestionItem {
+                question: "Q2".into(),
+                options: vec![],
+                allow_free_text: true,
+            },
+            QuestionItem {
+                question: "Q3".into(),
+                options: vec!["x".into(), "y".into()],
+                allow_free_text: false,
+            },
+        ];
+        let answers = vec![
+            MultiAnswer::Selected { option: "a".into() },
+            MultiAnswer::Answer {
+                text: "alice".into(),
+            },
+            MultiAnswer::Skip,
+        ];
+        let s = format_user_response(&qs, &answers);
+        assert!(s.contains("1. Q1 -> selected: a"));
+        assert!(s.contains("2. Q2 -> answered: alice"));
+        assert!(s.contains("3. Q3 -> (skipped)"));
+    }
+
+    #[test]
+    fn format_user_response_missing_answers_marked() {
         let qs = vec![
             QuestionItem {
                 question: "Q1".into(),
@@ -239,9 +216,12 @@ mod tests {
                 allow_free_text: true,
             },
         ];
-        let s = format_user_response(&qs, "x");
-        assert!(s.contains("1. Q1"));
-        assert!(s.contains("2. Q2"));
-        assert!(s.contains("x"));
+        // Only one answer for two questions; the second should be marked.
+        let answers = vec![MultiAnswer::Answer {
+            text: "first".into(),
+        }];
+        let s = format_user_response(&qs, &answers);
+        assert!(s.contains("1. Q1 -> answered: first"));
+        assert!(s.contains("2. Q2 -> (no answer)"));
     }
 }

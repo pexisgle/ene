@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use serde::Deserialize;
 
@@ -39,23 +41,35 @@ pub struct FocusWindowAction;
 
 #[async_trait]
 impl ToolAction for FocusWindowAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "focus_window".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "app.focus_window"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("app.focus_window"),
+            version: ToolVersion::default(),
+            display_name: "Brings a window to the foreground by title substring match.".to_string(),
+            summary: "Brings a window to the foreground by title substring match.".to_string(),
             description: "Brings a window to the foreground by title substring match.".to_string(),
+            category: ToolCategory::App,
+            keywords: KeywordSet::primary_only(["window", "focus", "foreground", "activate"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "window_title": { "type": "string", "description": "Substring of window title to focus" }
+                    "window_title": { "type": "string", "description": "Substring of window title or app name to focus" }
                 },
                 "required": ["window_title"]
             }),
-            category: Some(ToolCategory::App),
-            keywords: vec![
-                "window".to_string(),
-                "focus".to_string(),
-                "foreground".to_string(),
-            ],
+            examples: vec![ToolExample {
+                description: "Focus a window by title".to_string(),
+                input: serde_json::json!({"window_title": "Firefox"}),
+                output: None,
+            }],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

@@ -64,3 +64,18 @@ The `Sandbox` maintains an undo stack for all file modifications:
 | `undo_last()` | Rolls back the most recent operation |
 
 Undo is backed by a SQLite database with zlib compression (`undodb_path`/`undo.db`).
+
+## Error Types
+
+Sandbox violations return `ToolError::SandboxViolation { message }` from `ene-tool-proto`. This is a unified error type shared across all tool crates — no boundary mapping is required.
+
+```rust
+pub enum ToolError {
+    SandboxViolation { message: String },
+    PermissionDenied { message: String },
+    PermissionRequired { request_id: String, action: String, target: String, description: String },
+    // ... other variants
+}
+```
+
+When a destructive operation requires user approval, the tool returns `ToolError::PermissionRequired` with a `request_id` that can be approved via `ToolProvider::approve_permission()`.

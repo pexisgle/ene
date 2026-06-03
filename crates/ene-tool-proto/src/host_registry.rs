@@ -1,8 +1,8 @@
-use crate::{SandboxConfigData, ToolDefinition, ToolError, ToolProvider};
+use crate::{SandboxConfigData, ToolError, ToolName, ToolProvider, ToolSpec};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-/// Registry that aggregates multiple ToolProviders and dispatches by tool name
+/// Registry that aggregates multiple `ToolProvider`s and dispatches by tool name.
 ///
 /// Can be used when users want to bundle multiple providers in a custom tool binary.
 /// A single provider is usually sufficient for standalone tool binaries.
@@ -23,27 +23,31 @@ impl HostRegistry {
     /// Register a tool provider. First-wins on name conflicts.
     pub fn add_provider(&mut self, provider: Box<dyn ToolProvider>) {
         let idx = self.providers.len();
-        for tool in provider.list_tools() {
-            self.tool_index.entry(tool.name).or_insert(idx);
+        for spec in provider.list_specs() {
+            self.tool_index.entry(spec.name.0).or_insert(idx);
         }
         self.providers.push(provider);
     }
 
-    /// Returns all tool definitions from all registered providers.
-    pub fn list_tools(&self) -> Vec<ToolDefinition> {
-        let mut tools = Vec::with_capacity(self.tool_index.len());
+    /// Returns all tool specs from all registered providers.
+    pub fn list_specs(&self) -> Vec<ToolSpec> {
+        let mut specs = Vec::with_capacity(self.tool_index.len());
         for provider in &self.providers {
-            tools.extend(provider.list_tools());
+            specs.extend(provider.list_specs());
         }
-        tools
+        specs
     }
 
     /// Call a tool by name, dispatching to the provider that registered it.
-    pub async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
-        match self.tool_index.get(name) {
-            Some(&idx) => self.providers[idx].call_tool(name, arguments).await,
+    pub async fn call_tool(&self, name: &ToolName, arguments: &str) -> Result<String, ToolError> {
+        match self.tool_index.get(name.as_str()) {
+            Some(&idx) => {
+                self.providers[idx]
+                    .call_tool(name.as_str(), arguments)
+                    .await
+            }
             None => Err(ToolError::NotFound {
-                tool_name: name.to_string(),
+                tool_name: name.0.clone(),
             }),
         }
     }
@@ -65,16 +69,19 @@ impl HostRegistry {
 
 #[async_trait]
 impl ToolProvider for HostRegistry {
-    fn list_tools(&self) -> Vec<ToolDefinition> {
-        self.list_tools()
+    fn list_specs(&self) -> Vec<ToolSpec> {
+        self.list_specs()
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
-        self.call_tool(name, arguments).await
+        let n = ToolName::new(name);
+        self.call_tool(&n, arguments).await
     }
 
     fn set_session_id(&self, session_id: &str) {
-        self.set_session_id(session_id);
+        for provider in &self.providers {
+            provider.set_session_id(session_id);
+        }
     }
 
     fn set_sandbox(&self, sandbox: &SandboxConfigData) {
@@ -87,7 +94,7 @@ impl ToolProvider for HostRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ToolCategory;
+    use crate::{KeywordSet, SideEffects, ToolCategory, ToolVersion};
     use std::sync::{Arc, Mutex};
 
     struct MockProvider {
@@ -104,18 +111,30 @@ mod tests {
                 sandbox: Arc::new(Mutex::new(None)),
             }
         }
+
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: ToolName::new(format!("tool_{}", self.name)),
+                version: ToolVersion::default(),
+                display_name: format!("Tool {}", self.name),
+                summary: format!("Tool from {}", self.name),
+                description: format!("Tool from {}", self.name),
+                category: ToolCategory::Utility,
+                keywords: KeywordSet::default(),
+                parameters: serde_json::json!({}),
+                examples: vec![],
+                caveats: vec![],
+                side_effects: SideEffects::ReadOnly,
+                preconditions: vec![],
+                related: vec![],
+            }
+        }
     }
 
     #[async_trait]
     impl ToolProvider for MockProvider {
-        fn list_tools(&self) -> Vec<ToolDefinition> {
-            vec![ToolDefinition {
-                name: format!("tool_{}", self.name),
-                description: format!("Tool from {}", self.name),
-                parameters: serde_json::json!({}),
-                category: Some(ToolCategory::Utility),
-                keywords: vec![],
-            }]
+        fn list_specs(&self) -> Vec<ToolSpec> {
+            vec![self.spec()]
         }
 
         async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
@@ -134,15 +153,15 @@ mod tests {
     #[test]
     fn host_registry_new_is_empty() {
         let reg = HostRegistry::new();
-        assert!(reg.list_tools().is_empty());
+        assert!(reg.list_specs().is_empty());
     }
 
     #[test]
     fn host_registry_add_provider() {
         let mut reg = HostRegistry::new();
         reg.add_provider(Box::new(MockProvider::new("alpha")));
-        assert_eq!(reg.list_tools().len(), 1);
-        assert_eq!(reg.list_tools()[0].name, "tool_alpha");
+        assert_eq!(reg.list_specs().len(), 1);
+        assert_eq!(reg.list_specs()[0].name.as_str(), "tool_alpha");
     }
 
     #[test]
@@ -150,7 +169,7 @@ mod tests {
         let mut reg = HostRegistry::new();
         reg.add_provider(Box::new(MockProvider::new("alpha")));
         reg.add_provider(Box::new(MockProvider::new("beta")));
-        let tools = reg.list_tools();
+        let tools = reg.list_specs();
         assert_eq!(tools.len(), 2);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"tool_alpha"));
@@ -161,14 +180,20 @@ mod tests {
     async fn host_registry_call_tool_found() {
         let mut reg = HostRegistry::new();
         reg.add_provider(Box::new(MockProvider::new("alpha")));
-        let result = reg.call_tool("tool_alpha", "arg1").await.unwrap();
+        let result = reg
+            .call_tool(&ToolName::new("tool_alpha"), "arg1")
+            .await
+            .unwrap();
         assert_eq!(result, "tool_alpha called with arg1");
     }
 
     #[tokio::test]
     async fn host_registry_call_tool_not_found() {
         let reg = HostRegistry::new();
-        let err = reg.call_tool("nonexistent", "arg").await.unwrap_err();
+        let err = reg
+            .call_tool(&ToolName::new("nonexistent"), "arg")
+            .await
+            .unwrap_err();
         assert!(matches!(err, ToolError::NotFound { .. }));
         assert_eq!(format!("{err}"), "Tool not found: nonexistent");
     }

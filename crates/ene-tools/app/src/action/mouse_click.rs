@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolCategory, ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use enigo::{Button, Direction, Mouse};
 use serde::Deserialize;
@@ -48,20 +50,43 @@ pub struct MouseClickAction;
 
 #[async_trait]
 impl ToolAction for MouseClickAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "mouse_click".to_string(),
-            description: "Simulates mouse click at the current position.".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "app.mouse_click"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("app.mouse_click"),
+            version: ToolVersion::default(),
+            display_name: "Simulates mouse click at the current cursor position.".to_string(),
+            summary: "Simulates mouse click at the current cursor position.".to_string(),
+            description: "Simulates mouse click at the current cursor position.".to_string(),
+            category: ToolCategory::App,
+            keywords: KeywordSet::primary_only(["mouse", "click", "button"]),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "button": { "type": "string", "enum": ["left", "right", "middle"], "description": "Mouse button to click" },
-                    "count": { "type": "integer", "description": "Click count (e.g. 1 for single, 2 for double)" }
+                    "button": { "type": "string", "enum": ["left", "right", "middle"], "description": "Mouse button to click (default: left)" },
+                    "count": { "type": "integer", "description": "Click count (default: 1, use 2 for double-click)" }
                 },
                 "required": []
             }),
-            category: Some(ToolCategory::App),
-            keywords: vec!["mouse".to_string(), "click".to_string()],
+            examples: vec![
+                ToolExample {
+                    description: "Left click at current position".to_string(),
+                    input: serde_json::json!({"button": "left"}),
+                    output: None,
+                },
+                ToolExample {
+                    description: "Right-click context menu".to_string(),
+                    input: serde_json::json!({"button": "right"}),
+                    output: None,
+                },
+            ],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

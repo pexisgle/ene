@@ -38,11 +38,18 @@ diesel::table! {
     }
 }
 
-// Tool descriptions with versioned embeddings for tool RAG retrieval.
+// Multi-vector tool embedding index. One row per (tool_name, field, field_key,
+// model_name) where `field` ∈ { 'summary', 'description', 'capability',
+// 'example', 'negative' }. Enables per-field embedding, storage, and retrieval
+// for the ToolRag pipeline.
 diesel::table! {
-    tool_embeddings (tool_name) {
+    tool_embedding_index (id) {
+        id -> Integer,
         tool_name -> Text,
+        field -> Text,
+        field_key -> Text,
         version_hash -> Text,
+        model_name -> Text,
         embedding -> Binary,
         created_at -> Text,
     }
@@ -52,7 +59,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     conversation_keyfacts,
     conversation_logs,
     conversation_summaries,
-    tool_embeddings,
+    tool_embedding_index,
 );
 
 diesel::joinable!(conversation_keyfacts -> conversation_summaries (summary_id));

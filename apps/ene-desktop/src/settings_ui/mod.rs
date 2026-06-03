@@ -9,15 +9,15 @@ use page_graphics::render_graphics_page;
 
 use crate::ai_bridge::{EneRequestEvent, EneResource, EneStreamEvent};
 use crate::app_config::{
-    AntialiasingMode, CharacterSettings, SETTINGS_WINDOW_HEIGHT, SETTINGS_WINDOW_WIDTH,
-    ShadowQuality, target_fps_label,
+    AntialiasingMode, CharacterSettings, QuestionDraft, SETTINGS_WINDOW_HEIGHT,
+    SETTINGS_WINDOW_WIDTH, ShadowQuality, target_fps_label,
 };
 use crate::character::{CharacterAnimationControl, EmotionQueue};
 use bevy::camera::RenderTarget;
 use bevy::prelude::*;
 use bevy::window::{WindowRef, WindowResolution};
 use bevy_egui::{EguiContext, EguiMultipassSchedule, PrimaryEguiContext, egui};
-use ene_core::{MemoryConfig, PermissionDecision};
+use ene_core::{MemoryConfig, MultiAnswer, PermissionDecision, UserInputResponse};
 
 use widgets::apply_action;
 
@@ -579,12 +579,20 @@ fn render_settings_window(
     }
 
     if let Some(req) = settings.ui.pending_user_input.clone() {
+        // Ensure drafts are populated for the current prompt's items.
+        if settings.ui.user_input_drafts.len() != req.prompt.items.len() {
+            settings.ui.user_input_drafts = (0..req.prompt.items.len())
+                .map(|_| QuestionDraft::default())
+                .collect();
+        }
+
         let mut open = true;
-        let header_label = req
-            .prompt
-            .header
-            .clone()
-            .unwrap_or_else(|| "Question".to_string());
+        let total = req.prompt.items.len();
+        let header_label = if total == 1 {
+            "Question".to_string()
+        } else {
+            format!("Question ({} items)", total)
+        };
         let window_title = format!("[User Input] {}", header_label);
         egui::Window::new(window_title)
             .open(&mut open)
@@ -599,96 +607,123 @@ fn render_settings_window(
                     ui.add_space(4.0);
                 });
 
-                ui.group(|ui| {
-                    egui::ScrollArea::vertical()
-                        .max_height(160.0)
-                        .show(ui, |ui| {
-                            ui.label(&req.prompt.question);
-                        });
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        let items = req.prompt.items.clone();
+                        for (idx, item) in items.iter().enumerate() {
+                            let draft = &mut settings.ui.user_input_drafts[idx];
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.strong(format!("{}.", idx + 1));
+                                    ui.label(&item.question);
+                                });
 
-                if !req.prompt.options.is_empty() {
-                    ui.add_space(8.0);
-                    ui.label("選択肢 / Options:");
-                    ui.group(|ui| {
-                        egui::ScrollArea::vertical()
-                            .max_height(160.0)
-                            .auto_shrink([false, true])
-                            .show(ui, |ui| {
-                                let options = req.prompt.options.clone();
-                                for option in options.iter() {
-                                    if ui
-                                        .add(
-                                            egui::Button::new(option.as_str())
-                                                .min_size(egui::vec2(ui.available_width(), 0.0)),
-                                        )
-                                        .clicked()
-                                    {
-                                        let _ = ene.handle.submit_user_input(
-                                            req.request_id.clone(),
-                                            ene_core::UserInputResponse::Selected(option.clone()),
-                                        );
-                                        settings.ui.pending_user_input = None;
-                                        settings.ui.user_input_text.clear();
+                                if !item.options.is_empty() {
+                                    ui.add_space(4.0);
+                                    ui.label("選択肢 / Options:");
+                                    for option in item.options.iter() {
+                                        let mut checked =
+                                            draft.selected.as_deref() == Some(option.as_str());
+                                        if ui.checkbox(&mut checked, option.as_str()).changed() {
+                                            if checked {
+                                                draft.selected = Some(option.clone());
+                                                draft.skipped = false;
+                                            } else if draft.selected.as_deref()
+                                                == Some(option.as_str())
+                                            {
+                                                draft.selected = None;
+                                            }
+                                        }
                                     }
                                 }
-                            });
-                    });
-                }
 
-                if req.prompt.allow_free_text {
-                    ui.add_space(8.0);
-                    ui.label("自由入力 / Free text:");
-                    let response = ui.add(
-                        egui::TextEdit::singleline(&mut settings.ui.user_input_text)
-                            .hint_text("回答を入力…")
-                            .desired_width(f32::INFINITY),
-                    );
-                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        let text = settings.ui.user_input_text.trim().to_string();
-                        if !text.is_empty() {
-                            let _ = ene.handle.submit_user_input(
-                                req.request_id.clone(),
-                                ene_core::UserInputResponse::Answer(text),
-                            );
-                            settings.ui.pending_user_input = None;
-                            settings.ui.user_input_text.clear();
-                        }
-                    }
-                    ui.horizontal(|ui| {
-                        if ui.button("送信 / Submit").clicked() {
-                            let text = settings.ui.user_input_text.trim().to_string();
-                            if !text.is_empty() {
-                                let _ = ene.handle.submit_user_input(
-                                    req.request_id.clone(),
-                                    ene_core::UserInputResponse::Answer(text),
-                                );
-                                settings.ui.pending_user_input = None;
-                                settings.ui.user_input_text.clear();
-                            }
+                                if item.allow_free_text {
+                                    ui.add_space(4.0);
+                                    ui.label("自由入力 / Free text:");
+                                    let response = ui.add(
+                                        egui::TextEdit::singleline(&mut draft.text)
+                                            .hint_text("回答を入力…")
+                                            .desired_width(f32::INFINITY),
+                                    );
+                                    if response.lost_focus()
+                                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                    {
+                                        if !draft.text.trim().is_empty() {
+                                            draft.skipped = false;
+                                        }
+                                    }
+                                }
+
+                                if total > 1 {
+                                    ui.horizontal(|ui| {
+                                        if ui.button("(skip)").clicked() {
+                                            draft.skipped = true;
+                                            draft.selected = None;
+                                            draft.text.clear();
+                                        }
+                                    });
+                                }
+                            });
+                            ui.add_space(6.0);
                         }
                     });
-                }
 
                 ui.add_space(8.0);
                 ui.separator();
-                if ui.button("キャンセル / Cancel").clicked() {
-                    let _ = ene.handle.submit_user_input(
-                        req.request_id.clone(),
-                        ene_core::UserInputResponse::Cancel,
-                    );
-                    settings.ui.pending_user_input = None;
-                    settings.ui.user_input_text.clear();
-                }
+                ui.horizontal(|ui| {
+                    if ui.button("送信 / Submit All").clicked() {
+                        let answers: Vec<MultiAnswer> = settings
+                            .ui
+                            .user_input_drafts
+                            .iter()
+                            .zip(req.prompt.items.iter())
+                            .map(|(draft, item)| build_answer(draft, item))
+                            .collect();
+                        let _ = ene.handle.submit_user_input(
+                            req.request_id.clone(),
+                            UserInputResponse::Multi(answers),
+                        );
+                        settings.ui.pending_user_input = None;
+                        settings.ui.user_input_drafts.clear();
+                    }
+                    if ui.button("キャンセル / Cancel").clicked() {
+                        let _ = ene
+                            .handle
+                            .submit_user_input(req.request_id.clone(), UserInputResponse::Cancel);
+                        settings.ui.pending_user_input = None;
+                        settings.ui.user_input_drafts.clear();
+                    }
+                });
             });
 
         if !open {
             let _ = ene
                 .handle
-                .submit_user_input(req.request_id, ene_core::UserInputResponse::Cancel);
+                .submit_user_input(req.request_id, UserInputResponse::Cancel);
             settings.ui.pending_user_input = None;
-            settings.ui.user_input_text.clear();
+            settings.ui.user_input_drafts.clear();
         }
+    }
+}
+
+fn build_answer(draft: &QuestionDraft, item: &ene_tool_proto::QuestionItem) -> MultiAnswer {
+    if draft.skipped {
+        return MultiAnswer::Skip;
+    }
+    if let Some(option) = &draft.selected {
+        return MultiAnswer::Selected {
+            option: option.clone(),
+        };
+    }
+    let trimmed = draft.text.trim();
+    if !trimmed.is_empty() && item.allow_free_text {
+        MultiAnswer::Answer {
+            text: trimmed.to_string(),
+        }
+    } else {
+        MultiAnswer::Skip
     }
 }
 
@@ -786,7 +821,9 @@ fn apply_ai_stream_events(
                     request_id: request_id.clone(),
                     prompt: prompt.clone(),
                 });
-                settings.ui.user_input_text.clear();
+                settings.ui.user_input_drafts = (0..prompt.items.len())
+                    .map(|_| QuestionDraft::default())
+                    .collect();
                 settings.ui.settings_window_visible = true;
             }
             EneStreamEvent::TaskProgress { .. } => {}

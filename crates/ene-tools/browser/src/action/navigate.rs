@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolDefinition, ToolError};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -23,13 +25,38 @@ impl NavigateSubAction {
 
 #[async_trait]
 impl ToolAction for NavigateSubAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "navigate".to_string(),
+    fn tool_name(&self) -> &'static str {
+        "browser.navigate"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("browser.navigate"),
+            version: ToolVersion::default(),
+            display_name: "Navigates to a URL".to_string(),
+            summary: "Navigates to a URL".to_string(),
             description: "Navigates to a URL".to_string(),
-            parameters: serde_json::json!({}),
-            category: None,
-            keywords: vec![],
+            category: ToolCategory::Browser,
+            keywords: KeywordSet::primary_only(["navigate", "url", "goto"]),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "URL to navigate to. Prefer navigate+URL over clicking links whenever possible."
+                    }
+                },
+                "required": ["url"]
+            }),
+            examples: vec![ToolExample {
+                description: "Navigate to a webpage".to_string(),
+                input: serde_json::json!({"url": "https://example.com"}),
+                output: None,
+            }],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

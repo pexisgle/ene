@@ -34,7 +34,7 @@ impl CliCommand for ToolCommand {
                             } else {
                                 tool.description.clone()
                             };
-                            println!("  - {}: {}", style::header(&tool.name), desc);
+                            println!("  - {}: {}", style::header(tool.name.as_str()), desc);
                         }
                     }
                 }
@@ -47,8 +47,11 @@ impl CliCommand for ToolCommand {
                     let name = subparts[1];
                     match ctx.handle.list_tools().await {
                         Ok(tools) => {
-                            if let Some(tool) = tools.iter().find(|t| t.name == name) {
-                                println!("{}", style::success(&format!("Tool: {}", tool.name)));
+                            if let Some(tool) = tools.iter().find(|t| t.name.as_str() == name) {
+                                println!(
+                                    "{}",
+                                    style::success(&format!("Tool: {}", tool.name.as_str()))
+                                );
                                 println!("Description: {}", tool.description);
                                 println!("Parameters Schema:");
                                 println!(

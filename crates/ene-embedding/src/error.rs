@@ -13,3 +13,9 @@ pub enum EneEmbeddingError {
 
 /// Type alias for internal module usages.
 pub type EmbeddingError = EneEmbeddingError;
+
+impl From<EneEmbeddingError> for ene_provider::EmbeddingError {
+    fn from(e: EneEmbeddingError) -> Self {
+        ene_provider::EmbeddingError::Provider(e.to_string())
+    }
+}

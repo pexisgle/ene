@@ -60,7 +60,9 @@ pub async fn write(
     Ok("Wrote file successfully.".to_string())
 }
 
-use ene_tool_proto::ToolDefinition;
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolExample, ToolName, ToolSpec, ToolVersion,
+};
 use ene_tools_common::ToolAction;
 use std::sync::{Arc, RwLock};
 
@@ -78,13 +80,43 @@ impl FsWriteSubAction {
 
 #[async_trait::async_trait]
 impl ToolAction for FsWriteSubAction {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "write".to_string(),
-            description: "Writes a file".to_string(),
-            parameters: serde_json::json!({}),
-            category: None,
-            keywords: vec![],
+    fn tool_name(&self) -> &'static str {
+        "filesystem.write"
+    }
+
+    fn definition(&self) -> ToolSpec {
+        ToolSpec {
+            name: ToolName::new("filesystem.write"),
+            version: ToolVersion::default(),
+            display_name: "Write File".to_string(),
+            summary: "Write or create a file at the given path.".to_string(),
+            description: "Write or create a file at the given path with the specified content."
+                .to_string(),
+            category: ToolCategory::Filesystem,
+            keywords: KeywordSet::primary_only(["write", "create", "save", "file"]),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "filePath": {
+                        "type": "string",
+                        "description": "Absolute path to the file to write"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Content to write to the file"
+                    }
+                },
+                "required": ["filePath", "content"]
+            }),
+            examples: vec![ToolExample {
+                description: "Create or overwrite a file".to_string(),
+                input: serde_json::json!({"filePath": "/home/user/hello.txt", "content": "Hello, world!"}),
+                output: None,
+            }],
+            caveats: Vec::new(),
+            side_effects: SideEffects::default(),
+            preconditions: Vec::new(),
+            related: Vec::new(),
         }
     }
 

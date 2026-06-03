@@ -18,4 +18,5 @@ tracing = { workspace = true }
 ene-config = { workspace = true }
 ene-tool-proto = { workspace = true }
 ctor = { workspace = true }
+thiserror = { workspace = true }
 
