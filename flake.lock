@@ -1,5 +1,56 @@
 {
   "nodes": {
+    "agent-skills": {
+      "inputs": {
+        "home-manager": "home-manager",
+        "nixpkgs": "nixpkgs"
+      },
+      "locked": {
+        "lastModified": 1780430501,
+        "narHash": "sha256-nNjp1HJGnscx1lC/bagz4FfuUIPsq2lgkd93R3JBhr8=",
+        "owner": "Kyure-A",
+        "repo": "agent-skills-nix",
+        "rev": "ba550ebf77004b8a1f865528fc9a1d7e22628501",
+        "type": "github"
+      },
+      "original": {
+        "owner": "Kyure-A",
+        "repo": "agent-skills-nix",
+        "type": "github"
+      }
+    },
+    "apollo-skills": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1780506714,
+        "narHash": "sha256-xZWRiepURNh1pzh/JwQfM+sMZ+HmWLq4WMmpMZtvn/s=",
+        "owner": "apollographql",
+        "repo": "skills",
+        "rev": "9ccf13477e116ec095ba9b606212492ffbd42926",
+        "type": "github"
+      },
+      "original": {
+        "owner": "apollographql",
+        "repo": "skills",
+        "type": "github"
+      }
+    },
+    "everything-claude-code": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1780580713,
+        "narHash": "sha256-dEwU+LNDb1VI9+pD6gHDuSVE7Lhs87oVYHMcgv0b9w0=",
+        "owner": "affaan-m",
+        "repo": "everything-claude-code",
+        "rev": "bc8e12bb80c904a5a9864797ef1fd1212aa82f3d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "affaan-m",
+        "repo": "everything-claude-code",
+        "type": "github"
+      }
+    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -15,6 +66,24 @@
       "original": {
         "owner": "numtide",
         "repo": "flake-utils",
+        "type": "github"
+      }
+    },
+    "home-manager": {
+      "inputs": {
+        "nixpkgs": ["agent-skills", "nixpkgs"]
+      },
+      "locked": {
+        "lastModified": 1780099287,
+        "narHash": "sha256-efIPwVGtIWIjWcznhaop6XN6HxnOL8800hF6CBNvlqQ=",
+        "owner": "nix-community",
+        "repo": "home-manager",
+        "rev": "7d8127d308c3fb9664f7e643eec944be74ebb37d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-community",
+        "repo": "home-manager",
         "type": "github"
       }
     },
@@ -36,6 +105,22 @@
     },
     "nixpkgs_2": {
       "locked": {
+        "lastModified": 1779560665,
+        "narHash": "sha256-tpyBcxPpcQb8ukyNF7DoCwfSY3VPsxHoYwj00Cayv5o=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "64c08a7ca051951c8eae34e3e3cb1e202fe36786",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs_3": {
+      "locked": {
         "lastModified": 1744536153,
         "narHash": "sha256-awS2zRgF4uTwrOKwwiJcByDzDOdo3Q1rPZbiHQg/N38=",
         "owner": "NixOS",
@@ -52,14 +137,19 @@
     },
     "root": {
       "inputs": {
+        "agent-skills": "agent-skills",
+        "apollo-skills": "apollo-skills",
+        "everything-claude-code": "everything-claude-code",
         "flake-utils": "flake-utils",
-        "nixpkgs": "nixpkgs",
-        "rust-overlay": "rust-overlay"
+        "nixpkgs": "nixpkgs_2",
+        "rust-overlay": "rust-overlay",
+        "rust-skills": "rust-skills",
+        "wshobson-agents": "wshobson-agents"
       }
     },
     "rust-overlay": {
       "inputs": {
-        "nixpkgs": "nixpkgs_2"
+        "nixpkgs": "nixpkgs_3"
       },
       "locked": {
         "lastModified": 1780110990,
@@ -75,6 +165,22 @@
         "type": "github"
       }
     },
+    "rust-skills": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1779665610,
+        "narHash": "sha256-OPvcLvHqWwBTolIvQU9YP8Fl/Ntsjo5OP4Y6g8Hy/Dw=",
+        "owner": "actionbook",
+        "repo": "rust-skills",
+        "rev": "fa60f7931223646fb71c4586b4a6c8545016076a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "actionbook",
+        "repo": "rust-skills",
+        "type": "github"
+      }
+    },
     "systems": {
       "locked": {
         "lastModified": 1681028828,
@@ -87,6 +193,22 @@
       "original": {
         "owner": "nix-systems",
         "repo": "default",
+        "type": "github"
+      }
+    },
+    "wshobson-agents": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1780442130,
+        "narHash": "sha256-iCG2MUyJ5l9wknWQ/SQuSG/RlA+ddUkcdU/dLGvWVIU=",
+        "owner": "wshobson",
+        "repo": "agents",
+        "rev": "767d969a73ce6608d10ac713e52be9ac7f061ab9",
+        "type": "github"
+      },
+      "original": {
+        "owner": "wshobson",
+        "repo": "agents",
         "type": "github"
       }
     }
