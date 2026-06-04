@@ -1,6 +1,6 @@
-# Utility Tools (`ene-tools-utility`)
+# Utility Tools (`ene-tool-utility`)
 
-**Binary:** `ene-tools-utility` | **Stateful:** Yes (TodoDb — SQLite-backed, session-scoped)
+**Binary:** `ene-tool-utility` | **Stateful:** Yes (TodoDb — SQLite-backed, session-scoped)
 
 Provides helper tools for user interaction and task management.
 

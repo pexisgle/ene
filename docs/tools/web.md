@@ -1,6 +1,6 @@
-# Web Tools (`ene-tools-web`)
+# Web Tools (`ene-tool-web`)
 
-**Binary:** `ene-tools-web` | **Stateful:** No
+**Binary:** `ene-tool-web` | **Stateful:** No
 
 Provides URL fetching and web search capabilities.
 

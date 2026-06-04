@@ -37,15 +37,15 @@ ene-cli ──┼── ene-core ──── ene-tool-host ──── ene-too
 - **`ene-tool-proto`** — Protocol contract. Defines `ToolProvider` trait, `ToolSpec`/`ToolError` types, `IpcRequest`/`IpcResponse` wire format (v2), `SandboxConfigData`, and the `run_tool_server()` helper.
 - **`ene-tool-derive`** — Proc-macro crate. `#[derive(ToolSpec)]` generates `ToolSpec` implementations from declarative attributes on args structs.
 - **`ene-tool-host`** — Tool lifecycle manager. Spawns tool binaries as child processes (Unix Domain Sockets / Windows Named Pipes), wraps them with crash resilience (exponential backoff, max 5 restarts), supports MCP servers, and provides Tool RAG filtering via the `ToolRag` struct (HyDE, LLM reranking, per-category limits).
-- **`ene-tools-common`** — Shared utilities consumed by tool crates (`ToolAction` trait, HTML-to-Markdown extraction).
+- **`ene-tool-common`** — Shared utilities consumed by tool crates (`ToolAction` trait, HTML-to-Markdown extraction).
 - **`ene-provider`** — LLM and embedding provider traits (`LlmProvider`, `EmbeddingProvider`), OpenAI-compatible implementation, `HybridRerankProvider` for HyDE/rerank.
 
 ### Tool Providers (IPC Subprocesses)
-- **`ene-tools-fs`** — Filesystem operations: `read`, `write`, `edit`, `delete`, `glob`, `grep`, `patch`, `shell`, `undo`. All operations respect the sandbox configuration.
-- **`ene-tools-web`** — Web access: `webfetch` (URL → text/markdown/html) and `websearch` (multiple backends).
-- **`ene-tools-utility`** — Utility tools: `question`, `todo`, `get_current_time`, `get_system_info`.
-- **`ene-tools-app`** — OS-level GUI automation: window management, keyboard/mouse input, screenshots, clipboard.
-- **`ene-tools-browser`** — Chromium automation via CDP: navigation, clicking, typing, content extraction, screenshots.
+- **`ene-tool-fs`** — Filesystem operations: `read`, `write`, `edit`, `delete`, `glob`, `grep`, `patch`, `shell`, `undo`. All operations respect the sandbox configuration.
+- **`ene-tool-web`** — Web access: `webfetch` (URL → text/markdown/html) and `websearch` (multiple backends).
+- **`ene-tool-utility`** — Utility tools: `question`, `todo`, `get_current_time`, `get_system_info`.
+- **`ene-tool-app`** — OS-level GUI automation: window management, keyboard/mouse input, screenshots, clipboard.
+- **`ene-tool-browser`** — Chromium automation via CDP: navigation, clicking, typing, content extraction, screenshots.
 
 ### Applications
 - **`ene-cli`** — Interactive terminal REPL with `/` commands for session and memory management.

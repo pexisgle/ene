@@ -1,6 +1,6 @@
-# GUI 自動化 (`ene-tools-app`)
+# GUI 自動化 (`ene-tool-app`)
 
-**バイナリ:** `ene-tools-app` | **ステートフル:** いいえ
+**バイナリ:** `ene-tool-app` | **ステートフル:** いいえ
 
 enigo, xcap, arboard, xdg-desktop-portal (Wayland) を使用した OS レベルのデスクトップ自動化。
 

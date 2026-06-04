@@ -3886,6 +3886,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-tool-app"
+version = "0.1.0"
+dependencies = [
+ "active-win-pos-rs",
+ "arboard",
+ "ashpd",
+ "async-trait",
+ "base64 0.22.1",
+ "ene-tool-common",
+ "ene-tool-proto",
+ "enigo",
+ "image",
+ "pipewire",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "xcap",
+]
+
+[[package]]
+name = "ene-tool-browser"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chromiumoxide",
+ "dashmap",
+ "ene-tool-common",
+ "ene-tool-proto",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "uuid",
+]
+
+[[package]]
+name = "ene-tool-common"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ego-tree 0.11.0",
+ "ene-common",
+ "ene-tool-proto",
+ "htmd",
+ "regex",
+ "scraper 0.27.0",
+ "serde",
+]
+
+[[package]]
 name = "ene-tool-derive"
 version = "0.1.0"
 dependencies = [
@@ -3897,6 +3950,30 @@ dependencies = [
  "serde",
  "serde_json",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "ene-tool-fs"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "dashmap",
+ "diesel",
+ "diesel_migrations",
+ "ene-tool-common",
+ "ene-tool-proto",
+ "flate2",
+ "glob",
+ "libsqlite3-sys",
+ "regex",
+ "serde",
+ "serde_json",
+ "strsim",
+ "tokio",
+ "tracing",
+ "uuid",
+ "walkdir",
 ]
 
 [[package]]
@@ -3937,60 +4014,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ene-tools-app"
-version = "0.1.0"
-dependencies = [
- "active-win-pos-rs",
- "arboard",
- "ashpd",
- "async-trait",
- "base64 0.22.1",
- "ene-tool-proto",
- "ene-tools-common",
- "enigo",
- "image",
- "pipewire",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "xcap",
-]
-
-[[package]]
-name = "ene-tools-browser"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "chromiumoxide",
- "dashmap",
- "ene-tool-proto",
- "ene-tools-common",
- "regex",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "uuid",
-]
-
-[[package]]
-name = "ene-tools-common"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "ego-tree 0.11.0",
- "ene-common",
- "ene-tool-proto",
- "htmd",
- "regex",
- "scraper 0.27.0",
- "serde",
-]
-
-[[package]]
-name = "ene-tools-fs"
+name = "ene-tool-utility"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -3998,32 +4022,8 @@ dependencies = [
  "dashmap",
  "diesel",
  "diesel_migrations",
+ "ene-tool-common",
  "ene-tool-proto",
- "ene-tools-common",
- "flate2",
- "glob",
- "libsqlite3-sys",
- "regex",
- "serde",
- "serde_json",
- "strsim",
- "tokio",
- "tracing",
- "uuid",
- "walkdir",
-]
-
-[[package]]
-name = "ene-tools-utility"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "dashmap",
- "diesel",
- "diesel_migrations",
- "ene-tool-proto",
- "ene-tools-common",
  "libsqlite3-sys",
  "serde",
  "serde_json",
@@ -4034,12 +4034,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "ene-tools-web"
+name = "ene-tool-web"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "ene-tool-common",
  "ene-tool-proto",
- "ene-tools-common",
  "reqwest 0.13.4",
  "schemars",
  "serde",

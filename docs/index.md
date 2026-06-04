@@ -53,11 +53,11 @@ ene is a local AI character platform implemented as a Rust workspace. It provide
 | `ene-tool-proto` | Library | IPC protocol, `ToolProvider` trait, `ToolSpec`, `ToolError` |
 | `ene-tool-derive` | Proc-macro | `#[derive(ToolSpec)]` for auto-generated tool specs |
 | `ene-tool-host` | Library | Tool process manager, MCP support, Tool RAG |
-| `ene-tools-common` | Library | Shared utilities (`ToolAction` trait, HTML extraction) |
-| `ene-tools-utility` | Binary | Utility tools (question, todo, time, system info) |
-| `ene-tools-fs` | Binary | Filesystem tools (read, write, edit, shell, undo) |
-| `ene-tools-web` | Binary | Web tools (fetch, search) |
-| `ene-tools-app` | Binary | GUI automation (keyboard, mouse, screenshot) |
-| `ene-tools-browser` | Binary | Browser automation (Chromium CDP) |
+| `ene-tool-common` | Library | Shared utilities (`ToolAction` trait, HTML extraction) |
+| `ene-tool-utility` | Binary | Utility tools (question, todo, time, system info) |
+| `ene-tool-fs` | Binary | Filesystem tools (read, write, edit, shell, undo) |
+| `ene-tool-web` | Binary | Web tools (fetch, search) |
+| `ene-tool-app` | Binary | GUI automation (keyboard, mouse, screenshot) |
+| `ene-tool-browser` | Binary | Browser automation (Chromium CDP) |
 | `ene-cli` | Binary | Interactive CLI REPL |
 | `ene-desktop` | Binary | Bevy-based desktop GUI |

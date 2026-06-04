@@ -1,14 +1,16 @@
 [workspace]
 members = [
-    "crates/ene-core",
+    "crates/ene-common",
     "crates/ene-config",
+    "crates/ene-core",
     "crates/ene-embedding",
     "crates/ene-memory",
-    "crates/ene-session",
     "crates/ene-provider",
-    "crates/ene-tool-*",
+    "crates/ene-session",
     "crates/ene-tool-derive",
-    "crates/ene-tools/*",
+    "crates/ene-tool-host",
+    "crates/ene-tool-proto",
+    "tools/*",
     "apps/*",
 ]
 resolver = "2"
@@ -56,7 +58,7 @@ ene-session = { path = "crates/ene-session" }
 ene-provider = { path = "crates/ene-provider" }
 ene-tool-host = { path = "crates/ene-tool-host" }
 ene-tool-proto = { path = "crates/ene-tool-proto" }
-ene-tools-common = { path = "crates/ene-tools/common" }
+ene-tool-common = { path = "tools/common" }
 ene-tool-derive = { path = "crates/ene-tool-derive" }
 blake3 = "1.5"
 

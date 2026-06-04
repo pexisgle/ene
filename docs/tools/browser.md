@@ -1,6 +1,6 @@
-# Browser Automation (`ene-tools-browser`)
+# Browser Automation (`ene-tool-browser`)
 
-**Binary:** `ene-tools-browser` | **Stateful:** Yes (BrowserSessionStore)
+**Binary:** `ene-tool-browser` | **Stateful:** Yes (BrowserSessionStore)
 
 Chromium browser automation via Chrome DevTools Protocol (CDP), powered by `chromiumoxide`.
 

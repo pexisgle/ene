@@ -1,6 +1,6 @@
-# ファイルシステムツール (`ene-tools-fs`)
+# ファイルシステムツール (`ene-tool-fs`)
 
-**バイナリ:** `ene-tools-fs` | **ステートフル:** はい (Sandbox + UndoManager)
+**バイナリ:** `ene-tool-fs` | **ステートフル:** はい (Sandbox + UndoManager)
 
 ファイルシステム操作、シェル実行、Undo を提供します。全ファイル操作はサンドボックス設定を尊重します。
 

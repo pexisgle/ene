@@ -29,13 +29,13 @@ crates/
   ene-tool-proto   — IPC protocol, ToolProvider trait, ToolSpec, ToolError, IpcRequest/IpcResponse wire format
   ene-tool-derive  — Proc-macro: #[derive(ToolSpec)] for auto-generated tool specs
   ene-tool-host    — Tool process manager, MCP support, Tool RAG (ToolRag), CompositeToolRegistry
-  ene-tools/
-    common/        — Shared tool utilities (ToolAction trait, HTML extraction)
-    fs/            — Filesystem tools (read/write/edit/delete/glob/grep/patch, shell, undo)
-    web/           — Web tools (webfetch, websearch)
-    utility/       — Utility tools (question, todo, get_current_time, get_system_info)
-    app/           — GUI automation (window mgmt, input, screenshot, clipboard)
-    browser/       — Browser automation (Chromium CDP via chromiumoxide)
+tools/
+  common/          — Shared tool utilities (ToolAction trait, HTML extraction)
+  fs/              — Filesystem tools (read/write/edit/delete/glob/grep/patch, shell, undo)
+  web/             — Web tools (webfetch, websearch)
+  utility/         — Utility tools (question, todo, get_current_time, get_system_info)
+  app/             — GUI automation (window mgmt, input, screenshot, clipboard)
+  browser/         — Browser automation (Chromium CDP via chromiumoxide)
 apps/
   ene-desktop      — Bevy GUI (VRM character, always-on-top overlay, egui settings)
   ene-cli          — tokio::main REPL with /commands

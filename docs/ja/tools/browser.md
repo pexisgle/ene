@@ -1,6 +1,6 @@
-# ブラウザ自動化 (`ene-tools-browser`)
+# ブラウザ自動化 (`ene-tool-browser`)
 
-**バイナリ:** `ene-tools-browser` | **ステートフル:** はい (BrowserSessionStore)
+**バイナリ:** `ene-tool-browser` | **ステートフル:** はい (BrowserSessionStore)
 
 Chrome DevTools Protocol (CDP) を使用した Chromium ブラウザ自動化。`chromiumoxide` を利用。
 

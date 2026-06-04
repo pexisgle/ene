@@ -1,6 +1,6 @@
-# Filesystem Tools (`ene-tools-fs`)
+# Filesystem Tools (`ene-tool-fs`)
 
-**Binary:** `ene-tools-fs` | **Stateful:** Yes (Sandbox + UndoManager)
+**Binary:** `ene-tool-fs` | **Stateful:** Yes (Sandbox + UndoManager)
 
 Provides filesystem operations, shell execution, and undo. All file operations respect sandbox configuration.
 
