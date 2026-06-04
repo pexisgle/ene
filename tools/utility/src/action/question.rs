@@ -36,7 +36,56 @@ impl ToolAction for AskQuestion {
             description: "Presents one or more questions to the user through the UI. Each question can have predefined options, allow free-text input, or both. The LLM turn is paused until the user responds. Supports re-invocation with collected answers.".to_string(),
             category: ToolCategory::Utility,
             keywords: KeywordSet::primary_only(["question", "ask", "clarify", "confirm", "input"]),
-            parameters: serde_json::json!({}),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "minItems": 1,
+                        "description": "One or more questions to present to the user. Each item renders its own input control in the UI; answers are returned in the same order.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "question": {
+                                    "type": "string",
+                                    "description": "The question text shown to the user."
+                                },
+                                "options": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "default": [],
+                                    "description": "Predefined selectable options. Empty when the question accepts free text only."
+                                },
+                                "allow_free_text": {
+                                    "type": "boolean",
+                                    "default": false,
+                                    "description": "Whether the user may type a custom answer that is not in `options`."
+                                }
+                            },
+                            "required": ["question"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "_user_answers": {
+                        "type": "array",
+                        "description": "Set by the host on re-invocation; do not populate on the first call.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["selected", "answer", "skip"]
+                                },
+                                "option": { "type": "string" },
+                                "text": { "type": "string" }
+                            },
+                            "required": ["kind"]
+                        }
+                    }
+                },
+                "required": ["questions"],
+                "additionalProperties": false
+            }),
             examples: vec![
                 ToolExample {
                     description: "Ask a yes/no question with options".to_string(),
@@ -119,6 +168,43 @@ mod tests {
         assert_eq!(a.questions[0].options, vec!["a", "b"]);
         assert!(!a.questions[0].allow_free_text);
         assert!(a._user_answers.is_none());
+    }
+
+    #[test]
+    fn args_reject_llm_hallucinated_fields() {
+        // The LLM was emitting `{ "id", "text", "type" }` style items because
+        // the spec's `parameters` was `{}`. With the real schema in place the
+        // expected field is `question`, so this should fail deserialisation.
+        let bad = r#"{"questions":[{"id":"mood","text":"How are you?","type":"free-text"}]}"#;
+        let err = serde_json::from_str::<QuestionArgs>(bad).unwrap_err();
+        assert!(
+            err.to_string().contains("question"),
+            "expected missing-field error mentioning `question`, got: {err}"
+        );
+    }
+
+    #[test]
+    fn spec_uses_real_json_schema() {
+        let def = AskQuestion.definition();
+        let props = def
+            .parameters
+            .get("properties")
+            .and_then(|p| p.get("questions"));
+        let item_props = props
+            .and_then(|q| q.get("items"))
+            .and_then(|i| i.get("properties"));
+        assert!(
+            item_props.and_then(|p| p.get("question")).is_some(),
+            "schema must declare a `question` string field on each item"
+        );
+        assert!(
+            item_props.and_then(|p| p.get("options")).is_some(),
+            "schema must declare an `options` array field on each item"
+        );
+        assert!(
+            item_props.and_then(|p| p.get("allow_free_text")).is_some(),
+            "schema must declare an `allow_free_text` boolean field on each item"
+        );
     }
 
     #[test]

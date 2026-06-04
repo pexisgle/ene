@@ -33,7 +33,9 @@ impl ToolAction for ScreenshotSubAction {
             category: ToolCategory::Browser,
             keywords: KeywordSet::primary_only(["screenshot", "capture", "image"]),
             parameters: serde_json::json!({
-                "type": "object"
+                "type": "object",
+                "properties": {},
+                "required": []
             }),
             examples: vec![ToolExample {
                 description: "Capture browser tab screenshot".to_string(),
