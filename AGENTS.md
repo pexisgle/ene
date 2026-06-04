@@ -1,144 +1,167 @@
 # AGENTS.md — ene
 
-## Environment Setup
-- **Linux**: Use `direnv + flake`. Run `direnv allow` in the root. The flake provides Rust nightly, OpenSSL, mold, clang, GTK3, Wayland, Chromium, vulkan, and all native deps.
-- **`.envrc`**: Runs `use flake` then loads `.env` for API tokens.
-- **`.env`**: Copy from `.env.example`, set `API_TOKEN` for OpenAI-compatible LLM access.
-- **Toolchain**: `nightly` (see `rust-toolchain.toml`).
+## 0. Purpose & AI Directives
 
-## Key Commands
-```bash
-cargo build --workspace          # Full build
-cargo build --workspace --release
-cargo run -p ene-desktop --release   # GUI app
-cargo run -p ene-cli --              # CLI REPL
-cargo test --workspace               # All tests
-cargo clippy --workspace             # Lint
+This file is the source of truth for **project-specific conventions** in the `ene` workspace.
+
+**For AI Agents (Crucial Behaviors):**
+* **Search First:** Always read the relevant files in `docs/` or `crates/` before proposing large architectural changes.
+* **Verify & Complete:** Before declaring a task finished, automatically run `cargo clippy --workspace` and `cargo test --workspace`. Finally, mentally verify the PR Verification Checklist (§10) and confirm all requirements are met.
+* **No Hallucinated Fixes:** If a test or build fails, read the compiler errors carefully. Do not blindly guess fixes; ask the user for context if the error is environment-specific.
+* **Follow the Recipes:** When asked to add tools, configs, or IPC messages, strictly follow the steps in **§4 Common Tasks**.
+* **Handle Hooks Gracefully:** If a git commit fails due to `cargo-husky` pre-commit hooks, read the hook output, fix the formatting or linting errors, and try committing again before resorting to `--no-verify`.
+
+## 1. Where to Look
+
+| You want to… | Go to |
+|---|---|
+| Set up a dev environment | §3 Platform Setup |
+| Add / modify a tool, config, or character | §4 Common Tasks |
+| Build, test, or lint | §5 Build / Test / Lint |
+| Understand crate layout or architecture | §6 Workspace, §7 Architecture |
+| Follow memory system rules (diesel / sqlite-vec) | §7.3 Memory System Rules |
+| Match project style or rustdoc rules | §9 Code Style & rustdoc |
+| Submit a PR / Git Workflow | §10 Git & PR Policy |
+
+## 2. AGENTS.md vs Skills vs docs/
+
+| Scope | Where it lives |
+|---|---|
+| **Project-specific conventions** | **AGENTS.md** (this file) |
+| **Language-general advice** (Rust, testing) | `.opencode/skills/` (Link to these by name, do not duplicate here) |
+| **Design & architecture tutorials** | `docs/` (English) and `docs/ja/` (Japanese) |
+| **End-user quickstart** | `README.md` |
+
+## 3. Platform Setup
+
+* **Linux (Recommended):** Uses `direnv` + Nix flake (pins nightly Rust, mold, clang, GTK3, Wayland, Chromium, etc.). Run `direnv allow` followed by `cargo build`.
+* **Windows (Community):** Requires Visual Studio Build Tools, Rust nightly, WebView2, and OpenSSL (or `rustls`). IPC uses Windows Named Pipes.
+* **macOS (Unsupported):** Do not target macOS in new code. Codebase uses `cfg(unix)` but native deps are not provisioned.
+
+## 4. Common Tasks (Recipes)
+
+### R1. Add a new tool
+1. Create: `cargo new --bin tools/<name>`
+2. Implement: `#[derive(ene_tool_derive::ToolSpec)]` on args structs.
+3. Wire up: `run_tool_server::<MyAction>()` from `ene-tool-proto` in `main`.
+4. Document: Add to a category in `docs/tools/` and `docs/ja/tools/`.
+5. Verify: `cargo run -p ene-cli` -> `/tool list`.
+
+### R2. Add a config field
+1. Edit struct in `crates/ene-config/src/config.rs` (`define_config!` macro).
+2. Run `cargo run -p ene-cli` once to auto-regenerate `assets/settings.schema.json` and `character_settings.schema.json`. *(Note: These JSON files are gitignored. Do not commit or hand-edit them).*
+3. Document in `docs/configuration/settings.md` (both English and Japanese).
+
+### R3. Add an IPC request/response
+1. Extend `IpcRequest` / `IpcResponse` in `crates/ene-tool-proto/src/ipc.rs`.
+2. Bump `PROTOCOL_VERSION` **only** if the wire format is incompatible.
+3. Handle the variant in `ene-tool-host` and all tool binaries.
+
+## 5. Build / Test / Lint
+
+* **Build:** `cargo build --workspace` (Debug) / `cargo build --workspace --release` (Release)
+* **Run:** `cargo run -p ene-cli` (CLI) / `cargo run -p ene-desktop --release` (GUI)
+* **Test:** `cargo test --workspace` (Use `#[ignore]` for tests hitting real LLM/APIs; requires `API_TOKEN` in `.env`).
+* **Lint & Format:** `cargo clippy --workspace -- -D warnings` / `cargo fmt --all`
+
+## 6. Workspace Layout
+
+* `crates/`: Core libraries (`ene-core`, `ene-memory`, `ene-tool-host`, etc.)
+* `tools/`: Standalone tool binaries (`fs`, `web`, `utility`, `app`, `browser`)
+* `apps/`: User-facing applications (`ene-cli`, `ene-desktop`)
+
+*(All crates must use `edition = "2024"`)*.
+
+## 7. Architecture
+
+### 7.1 Crate dependency graph
+
+```mermaid
+flowchart TD
+  Desktop[ene-desktop] --> Core[ene-core]
+  CLI[ene-cli] --> Core
+  Core --> Common[ene-common]
+  Core --> Provider[ene-provider]
+  Core --> Config[ene-config]
+  Core --> Embed[ene-embedding]
+  Core --> Memory[ene-memory]
+  Core --> Session[ene-session]
+  Core --> ToolHost[ene-tool-host]
+  ToolHost --> Proto[ene-tool-proto]
+  Proto --> Derive[ene-tool-derive]
+  ToolHost -.spawns.-> ToolFs[ene-tool-fs]
+  ToolHost -.spawns.-> ToolWeb[ene-tool-web]
+  ToolHost -.spawns.-> ToolUtil[ene-tool-utility]
+  ToolHost -.spawns.-> ToolApp[ene-tool-app]
+  ToolHost -.spawns.-> ToolBrowser[ene-tool-browser]
 ```
 
-## Workspace Structure
+### 7.2 Data flow (single turn)
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant H as EneHandle
+  participant A as EneActor
+  participant M as Memory
+  participant L as LLM
+  participant T as Tool
+
+  U->>H: EneCommand::Run
+  H->>A: mpsc send
+  A->>M: search(query)
+  M-->>A: recalled summaries / facts
+  A->>L: stream chat.completion
+  A-->>H: broadcast EneEvent::TextDelta
+  opt tool call
+    A->>T: IPC CallTool
+    T-->>A: CallResult
+    A->>L: continue stream
+  end
+
 ```
-crates/
-  ene-common       — Common types and utilities
-  ene-core         — Unified runtime facade, EneHandle/EneActor, streaming engine, run_ai_with_tools()
-  ene-config       — JSON settings via figment, define_config! macro
-  ene-embedding    — Vector embeddings (API + local GGUF/candle)
-  ene-memory       — SQLite-vec long-term memory store (summaries, key facts, tool embeddings)
-  ene-provider     — LLM provider abstraction
-  ene-session      — Conversation history, CharacterCardV3, auto-split
-  ene-tool-proto   — IPC protocol, ToolProvider trait, ToolSpec, ToolError, IpcRequest/IpcResponse wire format
-  ene-tool-derive  — Proc-macro: #[derive(ToolSpec)] for auto-generated tool specs
-  ene-tool-host    — Tool process manager, MCP support, Tool RAG (ToolRag), CompositeToolRegistry
-tools/
-  common/          — Shared tool utilities (ToolAction trait, HTML extraction)
-  fs/              — Filesystem tools (read/write/edit/delete/glob/grep/patch, shell, undo)
-  web/             — Web tools (webfetch, websearch)
-  utility/         — Utility tools (question, todo, get_current_time, get_system_info)
-  app/             — GUI automation (window mgmt, input, screenshot, clipboard)
-  browser/         — Browser automation (Chromium CDP via chromiumoxide)
-apps/
-  ene-desktop      — Bevy GUI (VRM character, always-on-top overlay, egui settings)
-  ene-cli          — tokio::main REPL with /commands
-```
 
-## Architecture Notes
-- **Actor-based architecture**: `EneHandle` (public API) → mpsc `EneCommand` → `EneActor` (tokio) → broadcast `EneEvent`. `EneHandle::Drop` sends Shutdown when last handle.
-- **EneCommand**: Run, Cancel, Shutdown, Reconfigure, LoadCharacter, PermissionDecision, UserInputResponse, GetSnapshot, ManualSplit, ListTools, CallTool, InvalidateToolIndex (pub(crate), not exported)
-- **EneEvent**: TextDelta, SpecialToken, ToolCallStart, ToolCallResult, PermissionRequired, UserInputRequired, TaskProgress, SessionSplit, Done, Failed, StatusChanged
-- **Data flow**: User Input → EneCommand::Run → EneActor → Memory Search → build_messages() → LLM stream → EneEvent pipeline
-- **Tool execution**: Tools run as separate binaries via IPC (Unix Domain Sockets / Windows Named Pipes). `ene-tool-host` manages lifecycle with crash resilience (exponential backoff, max 5 restarts). Binary discovery: `builtin_tools_dir()` (debug: same dir, release: `exe_dir/tools/`), `user_tools_dir()` (`app_data_dir()/tools/`).
-- **IPC Protocol**: `IpcRequest` (Handshake, Initialize, ListTools, ListActionSpecs, CallTool, SetSessionId, Ping, Shutdown) ↔ `IpcResponse` (HandshakeAck, Ack, Tools, ActionSpecs, CallResult, Pong, Error). Wire format: 4-byte little-endian length prefix + JSON payload. Max message size: 64 MB. Protocol version: 2.
-- **Tool Registry**: `ToolRegistry` trait → `CompositeToolRegistry` (first-wins dedup). Tool RAG is handled separately by `ToolRag` struct (HyDE, LLM reranking, per-category limits, multi-vector embedding). Also supports MCP via `McpToolRegistry`.
-- **Session splitting**: Automatic based on timeouts (`session_timeout_minutes`) and topic drift (cosine similarity < `topic_change_threshold`). Summaries stored in memory. Manual split via `/session split`.
-- **Emotion tokens**: `<|emo:name|>` syntax parsed from LLM output via `split_text_and_special_tokens()` and `extract_emotion_from_token()`. Desktop: 4s hold + fade out → VRM blendshape. CLI: `[Emotion: name]` in magenta.
-- **Prompt construction**: `build_messages()` assembles: system prompt → example messages (first turn) → recalled summaries → key facts → conversation history → expression protocol → current input. Supports CBS macros (`{{char}}`, `{{user}}`, `{{random:...}}`, etc.).
+### 7.3 Memory System Rules (STRICT)
 
-## Platform-Specific Gotchas
-- **Linux linker**: `.cargo/config.toml` sets `linker = "clang"` and `mold` for x86_64-unknown-linux-gnu. Also enables `--gc-sections` and `--icf=all` optimizations.
-- **Dev codegen**: Uses `cranelift` backend for faster compilation (deps still use `llvm`).
-- **GUI native deps**: GTK3, Wayland, alsa-lib, mesa, vulkan-loader, pipewire, xdotool (enigo), libayatana-appindicator. All provided by flake on Linux.
-- **Desktop window**: 560x980, always-on-top, transparent, borderless fullscreen on Linux. Wayland: layer shell for click-through.
-- **Desktop plugins**: DefaultPlugins, EguiPlugin, VrmPlugin, VrmaPlugin, ScenePlugin, EnePlugin, CharacterPlugin, TrayPlugin, SettingsUiPlugin, CharacterDragPlugin.
-- **Release profile**: `codegen-units = 1`, `lto = "fat"`, `opt-level = "z"`, `strip = true`, `panic = "abort"`.
-- **Dev profile**: `opt-level = 1` globally, `opt-level = 3` for dependencies.
-- **Sandbox**: Path normalization → directory allowlist → blocked_commands → execute with limits. Blocked: `rm -rf /`, `dd if=`, `mkfs`, `sudo`, fork bombs. SQLite-backed undo with zlib compression.
+* **Database:** SQLite + `sqlite-vec` + `diesel`. `r2d2` for connection pooling.
+* **Constraint:** **Always** use `diesel` for all SQL. **Do NOT** introduce `rusqlite`.
+* **Migrations:** Generate via `diesel migration generate <name>`. Apply via `diesel_migrations::embed_migrations!`.
 
-## Configuration
-- Settings loaded from JSON via `figment`. Loading order: defaults → `assets/settings.json` → env vars (`ENE_` prefix). Schema auto-generated as `settings.schema.json`.
-- **Top-level `EneConfig`**: `version`, `character`, `user_name`, `runtime_rules`, `extra`
-- **Sections**:
-  - `provider` — LLM: `provider_name`, `model`, `base_url`, `api_key`
-  - `embedding` — Vector: `provider_type` (api/local), `model`, `base_url`, `dimensions`, `gguf_quantization`
-  - `memory` — Long-term: `enabled`, `db_path`, `recall_limit`, `similarity_threshold`, `time_decay_hours`, `summarization_model`
-  - `session` — Split: `auto_session_split`, `session_timeout_minutes`, `topic_change_threshold`, `min_turns_before_split`
-  - `sandbox` — Security: `enabled`, `allowed_directories`, `writable_directories`, `blocked_commands`, `max_read_bytes`, `shell_timeout_ms`
-  - `tools` — Tool config: `tool_calling_enabled`, `max_tool_call_rounds`, `tools.<name>.enable/config`
-  - `mcp_servers` — MCP: stdio/http transport configs
-  - `desktop` — GUI: `graphics` (mask_render_downsample, target_fps, shadow_quality, antialiasing_mode)
-- Character cards: `CharacterCardV3` format (spec, name, description, personality, scenario, system_prompt, first_mes, mes_example, extensions, assets), loaded from CLI args or auto-discovered.
-- Resource dirs created on first run via `ensure_resource_dirs()`.
+## 8. Configuration
 
-## Memory System
-- **Storage & Database Rules**: SQLite + sqlite-vec + Diesel. Connection pooled via `r2d2`.
-  - **Always** use `diesel` for all database management and SQL query/execution operations (such as the SQLite long-term memory store and the tool undo manager).
-  - Do **NOT** introduce or use `rusqlite` in any crate in the workspace.
-  - For SQLite extension registration (like `sqlite-vec` auto extension), use `libsqlite3-sys` directly (e.g. `libsqlite3_sys::sqlite3_auto_extension`) instead of calling the FFI via `rusqlite`.
-  - To package statically with SQLite, bundle it using `libsqlite3-sys` with the `bundled` feature.
-- **Tables**: `conversation_summaries` (embedding f32 blob), `conversation_keyfacts` (upsert), `conversation_logs`, `tool_embedding_index` (multi-vector: summary/description/capability/example/negative per tool, with field_key and model_name).
-- **Search**: Cosine similarity via `vec_distance_cosine`. Results weighted by `similarity_weight` + `recency_weight` with time decay.
-- **Embedding providers**: `ApiEmbeddingProvider` (OpenAI-compatible), `GgufEmbeddingProvider` (candle/GGUF, local, GPU-free).
-- **Summarization**: Dedicated LLM model (`memory.summarization_model`) produces structured summary + topics + key_facts.
+Loaded by `figment` in order: 1. Compile-time defaults -> 2. `assets/settings.json` -> 3. `ENE_` env vars.
 
-## Git Hooks (cargo-husky)
-- Hooks are managed by [`cargo-husky`](https://github.com/rhysd/cargo-husky) and live under `.cargo-husky/hooks/` (tracked in git).
-- `cargo-husky` is registered as a workspace `dev-dependency` and auto-installs the hooks into `.git/hooks/` on the first `cargo build` — no manual setup needed for new contributors.
-- **Skip hooks** for a single command: `git commit --no-verify` or `HUSKY=0 cargo build`.
-- Current hooks:
-  - `pre-commit` — runs `cargo fmt --all` against staged `.rs` files and re-stages any changes.
-- To add a new hook, create an executable file under `.cargo-husky/hooks/<name>` and document it here.
+## 9. Code Style & rustdoc
 
-## Testing
-- `cargo test --workspace` for all tests.
-- REPL commands for interactive testing:
-  - `/tool list` — List available tools
-  - `/tool help <name>` — Show detailed help for a tool
-  - `/tool call <name> <json>` — Call a tool directly
-  - `/memory search [query]` — Search long-term memory
-  - `/session info` — Current session details
-  - `/session split` — Manual session split
+* **Async:** `tokio` only. No `async-std` or `smol`.
+* **Error Handling:** Use `thiserror` for module-level enums. No `anyhow` at the library boundary.
+* **Visibility:** Default to `pub(crate)`. Only use `pub` when external consumers need it.
+* **Comments & Docs:** Focus on writing clean, self-documenting code. **Do write** `rustdoc` comments (`///`) for public APIs and complex logic. Avoid useless inline comments (`//`) that just repeat what the code does.
+* **Re-exports:** Use `#[doc(no_inline)]` when re-exporting major items from other workspace crates so they link back to the original crate.
 
-## Documentation & Re-exports (rustdoc)
-To maintain code discoverability and avoid developer confusion regarding where structs/traits are declared, follow these guidelines for re-exports:
+## 10. Git & PR Policy
 
-- **Use `#[doc(no_inline)]` when re-exporting major items from other crates in the workspace:**
-  - *Why*: By default, modern `rustdoc` automatically inlines re-exports from external crates, displaying them under the local crate's `Structs`, `Enums`, or `Traits` list. This misleads developers into thinking the item is declared in the local crate.
-  - *Action*: Apply `#[doc(no_inline)]` to the `pub use` statement. This places the item under a distinct "Re-exports" section with an explicit hyperlink pointing back to the original crate (e.g., `pub use ene_session::CharacterCardV3;`).
-  - *Example*:
-    ```rust
-    /// Character card type (re-exported from `ene-session`).
-    #[doc(no_inline)]
-    pub use ene_session::CharacterCardV3;
-    ```
+* **Branch Naming:** `<type>/<short-kebab-case>` (e.g., `feat/sandbox-gate`, `fix/cli-race`).
+* **Commits:** Follow Conventional Commits (`feat: ...`, `fix: ...`).
+* **Documentation:** English and Japanese (`docs/` and `docs/ja/`) must be kept in lock-step within the same PR.
 
-- **Do NOT use `#[doc(no_inline)]` (allow inlining) when:**
-  - **Internal Private Modules**: Re-exporting an item from a private module (`mod foo; pub use foo::Bar;`) within the *same* crate. Inlining is necessary here to expose the item as part of the crate's root public API without showing the internal module structure.
-  - **Minor helper/aliasing**: The re-exported item is a minor utility or type alias that is logically a first-class citizen of the current module, and its underlying origin is a pure implementation detail.
+### 10.1 Pre-commit Hooks (cargo-husky)
 
-## Docs
-- Full documentation in `docs/` (also Japanese translations in `docs/ja/`). Key files:
-  - `docs/architecture/overview.md` — Crate map, dependency graph, actor architecture
-  - `docs/architecture/startup.md` — Boot sequences for desktop and CLI
-  - `docs/configuration/settings.md` — Full settings.json schema reference
-  - `docs/core/streaming.md` — Actor streaming, EneHandle/EneCommand/EneEvent lifecycle
-  - `docs/core/prompt.md` — Prompt construction, CBS macros, expression protocol
-  - `docs/core/session.md` — ConversationSession, CharacterCardV3
-  - `docs/core/session-split.md` — Split triggers, max-pooling embedding, lifecycle
-  - `docs/core/emotions.md` — Emotion token parsing, per-app display
-  - `docs/memory/memory.md` — SQLite-vec memory, summarization, embedding providers
-  - `docs/tools/overview.md` — Tool system architecture, IPC protocol, ToolAction, ToolRegistry
-  - `docs/tools/sdk.md` — Custom tool SDK guide (ToolProvider trait, IPC lifecycle)
-  - `docs/tools/sandbox.md` — Security sandbox, blocked commands, undo system
-  - `docs/tools/tool-rag.md` — Tool RAG pipeline (HyDE, reranking, multi-vector embedding)
-  - `docs/tools/derive-macro.md` — #[derive(ToolSpec)] attribute reference
-  - `docs/applications/cli.md` — CLI REPL reference (CliCommand trait, commands)
-  - `docs/applications/desktop.md` — Desktop app, Bevy plugins, VRM pipeline
+* `cargo-husky` is declared as a regular dep on `ene-core` and auto-installs hooks from `.cargo-husky/hooks/` into `.git/hooks/` on the first `cargo build`.
+* **`pre-commit`** runs `cargo fmt --all` against staged `.rs` files and re-stages the changes. Skip per-commit with `git commit --no-verify`; skip all hooks with `HUSKY=0 cargo build`.
+* To add a new hook, drop an executable file under `.cargo-husky/hooks/<name>` and document it here.
+
+### PR Verification Checklist
+
+Before submitting a PR or finishing a coding task, verify:
+
+* [ ] `cargo fmt --all` and `cargo clippy --workspace -- -D warnings` are clean.
+* [ ] `cargo test --workspace` passes.
+* [ ] Diesel migrations (`up.sql` / `down.sql`) are present and tested (if schema changed).
+* [ ] Config-field changes do not require manual schema commits (auto-regenerated, gitignored).
+* [ ] Public API or behavior changes have corresponding updates under `docs/`.
+* [ ] Both English (`docs/`) and Japanese (`docs/ja/`) docs are updated for any user-visible change.
+* [ ] Branch name and commit/PR title follow Conventional Commits (§10).
+
+## 11. Further Reading
+
+See `docs/` for deep-dives into Architecture, Memory, Tools (RAG, SDK, Sandbox), and Core (Streaming, Prompting).
