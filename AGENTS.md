@@ -140,6 +140,9 @@ Loaded by `figment` in order: 1. Compile-time defaults -> 2. `assets/settings.js
 
 ## 10. Git & PR Policy
 
+> **⚠️ Early Development Phase**
+> The project is currently in the early development stage. **AI agents do not need to create branches or pull requests at this time.** Direct commits to `main` are acceptable while the project is still in this phase. The policies below (branch naming, PR checklist, etc.) will be enforced once the project transitions to a stable release milestone.
+
 * **Branch Naming:** `<type>/<short-kebab-case>` (e.g., `feat/sandbox-gate`, `fix/cli-race`).
 * **Commits:** Follow Conventional Commits (`feat: ...`, `fix: ...`).
 * **Documentation:** English and Japanese (`docs/` and `docs/ja/`) must be kept in lock-step within the same PR.
