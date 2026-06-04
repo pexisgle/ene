@@ -1,6 +1,6 @@
-# GUI Automation (`ene-tools-app`)
+# GUI Automation (`ene-tool-app`)
 
-**Binary:** `ene-tools-app` | **Stateful:** No
+**Binary:** `ene-tool-app` | **Stateful:** No
 
 OS-level desktop automation using enigo, xcap, arboard, and xdg-desktop-portal (Wayland).
 

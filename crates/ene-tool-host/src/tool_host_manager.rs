@@ -447,9 +447,9 @@ impl ToolHostManager {
         let user_dir = paths::user_tools_dir();
 
         let candidates = [
-            builtin_dir.join(format!("ene-tools-{}{}", name, exe_suffix)),
+            builtin_dir.join(format!("ene-tool-{}{}", name, exe_suffix)),
             builtin_dir.join(format!("{}{}", name, exe_suffix)),
-            user_dir.join(format!("ene-tools-{}{}", name, exe_suffix)),
+            user_dir.join(format!("ene-tool-{}{}", name, exe_suffix)),
             user_dir.join(format!("{}{}", name, exe_suffix)),
         ];
 

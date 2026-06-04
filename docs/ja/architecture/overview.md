@@ -38,15 +38,15 @@ ene-cli ──┼── ene-core ──── ene-tool-host ──── ene-too
 - **`ene-tool-proto`** — プロトコル契約。`ToolProvider` トレイト、`ToolSpec`/`ToolError` 型、`IpcRequest`/`IpcResponse` ワイヤ形式 (v2)、`SandboxConfigData`、`run_tool_server()` ヘルパーを定義。
 - **`ene-tool-derive`** — Proc-macro クレート。`#[derive(ToolSpec)]` が引数構造体の宣言的属性から `ToolSpec` 実装を生成。
 - **`ene-tool-host`** — ツールライフサイクル管理。ツールバイナリを子プロセスとして起動 (Unix ドメインソケット / Windows 名前付きパイプ)、クラッシュ耐性 (指数バックオフ、最大 5 回再起動) でラップ、MCP サーバー対応、`ToolRag` 構造体を介した Tool RAG フィルタリング (HyDE、LLM リランキング、カテゴリ別制限) を提供。
-- **`ene-tools-common`** — ツールクレートが消費する共通ユーティリティ (`ToolAction` トレイト、HTML→Markdown 抽出)。
+- **`ene-tool-common`** — ツールクレートが消費する共通ユーティリティ (`ToolAction` トレイト、HTML→Markdown 抽出)。
 - **`ene-provider`** — LLM・埋め込みプロバイダトレイト (`LlmProvider`, `EmbeddingProvider`)、OpenAI 互換実装、HyDE/リランキング用 `HybridRerankProvider`。
 
 ### ツールプロバイダ (IPC 子プロセス)
-- **`ene-tools-fs`** — ファイルシステム操作: `read`, `write`, `edit`, `delete`, `glob`, `grep`, `patch`, `shell`, `undo`。全操作がサンドボックス設定を尊重。
-- **`ene-tools-web`** — Web アクセス: `webfetch` (URL→text/markdown/html) と `websearch` (複数バックエンド)。
-- **`ene-tools-utility`** — ユーティリティツール: `question`, `todo`, `get_current_time`, `get_system_info`。
-- **`ene-tools-app`** — OS レベルの GUI 自動化: ウィンドウ管理、キーボード/マウス入力、スクリーンショット、クリップボード。
-- **`ene-tools-browser`** — CDP 経由の Chromium 自動化: ナビゲーション、クリック、タイピング、コンテンツ抽出、スクリーンショット。
+- **`ene-tool-fs`** — ファイルシステム操作: `read`, `write`, `edit`, `delete`, `glob`, `grep`, `patch`, `shell`, `undo`。全操作がサンドボックス設定を尊重。
+- **`ene-tool-web`** — Web アクセス: `webfetch` (URL→text/markdown/html) と `websearch` (複数バックエンド)。
+- **`ene-tool-utility`** — ユーティリティツール: `question`, `todo`, `get_current_time`, `get_system_info`。
+- **`ene-tool-app`** — OS レベルの GUI 自動化: ウィンドウ管理、キーボード/マウス入力、スクリーンショット、クリップボード。
+- **`ene-tool-browser`** — CDP 経由の Chromium 自動化: ナビゲーション、クリック、タイピング、コンテンツ抽出、スクリーンショット。
 
 ### アプリケーション
 - **`ene-cli`** — 対話型ターミナル REPL。`/` コマンドでセッションとメモリを管理。

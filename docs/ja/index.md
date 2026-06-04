@@ -55,11 +55,11 @@ LLM 駆動の会話、アニメーションする VRM キャラクター、ツ�
 | `ene-tool-proto` | Library | IPC プロトコル, `ToolProvider` トレイト, `ToolSpec`, `ToolError` |
 | `ene-tool-derive` | Proc-macro | `#[derive(ToolSpec)]` によるツールスペック自動生成 |
 | `ene-tool-host` | Library | ツールプロセス管理, MCP 対応, Tool RAG |
-| `ene-tools-common` | Library | 共通ユーティリティ (`ToolAction` トレイト, HTML 抽出) |
-| `ene-tools-utility` | Binary | ユーティリティツール (question, todo, 時刻, システム情報) |
-| `ene-tools-fs` | Binary | ファイルシステムツール (read, write, edit, shell, undo) |
-| `ene-tools-web` | Binary | Web ツール (fetch, search) |
-| `ene-tools-app` | Binary | GUI 自動化 (キーボード, マウス, スクリーンショット) |
-| `ene-tools-browser` | Binary | ブラウザ自動化 (Chromium CDP) |
+| `ene-tool-common` | Library | 共通ユーティリティ (`ToolAction` トレイト, HTML 抽出) |
+| `ene-tool-utility` | Binary | ユーティリティツール (question, todo, 時刻, システム情報) |
+| `ene-tool-fs` | Binary | ファイルシステムツール (read, write, edit, shell, undo) |
+| `ene-tool-web` | Binary | Web ツール (fetch, search) |
+| `ene-tool-app` | Binary | GUI 自動化 (キーボード, マウス, スクリーンショット) |
+| `ene-tool-browser` | Binary | ブラウザ自動化 (Chromium CDP) |
 | `ene-cli` | Binary | 対話型 CLI REPL |
 | `ene-desktop` | Binary | Bevy ベースデスクトップ GUI |

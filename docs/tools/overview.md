@@ -26,12 +26,12 @@ All tools use namespaced names: `<namespace>.<action>`.
 
 | Namespace | Tools | Binary |
 |-----------|-------|--------|
-| `filesystem` | `read`, `write`, `edit`, `delete`, `glob`, `grep`, `patch` | `ene-tools-fs` |
-| `shell` | `execute` | `ene-tools-fs` |
-| `app` | `clipboard_read`, `clipboard_write`, `list_windows`, `focus_window`, `get_active_window`, `list_monitors`, `capture_window`, `type_text`, `press_key`, `key_combo`, `mouse_move`, `mouse_click`, `mouse_drag`, `mouse_scroll`, `screenshot` | `ene-tools-app` |
-| `browser` | `navigate`, `click`, `type`, `wait`, `screenshot`, `get_content`, `scroll`, `close` | `ene-tools-browser` |
-| `web` | `fetch`, `search` | `ene-tools-web` |
-| `utility` | `question`, `todo_list`, `todo_add`, `todo_update`, `todo_complete`, `todo_delete`, `get_system_info`, `get_current_time`, `undo` | `ene-tools-utility` / `ene-tools-fs` |
+| `filesystem` | `read`, `write`, `edit`, `delete`, `glob`, `grep`, `patch` | `ene-tool-fs` |
+| `shell` | `execute` | `ene-tool-fs` |
+| `app` | `clipboard_read`, `clipboard_write`, `list_windows`, `focus_window`, `get_active_window`, `list_monitors`, `capture_window`, `type_text`, `press_key`, `key_combo`, `mouse_move`, `mouse_click`, `mouse_drag`, `mouse_scroll`, `screenshot` | `ene-tool-app` |
+| `browser` | `navigate`, `click`, `type`, `wait`, `screenshot`, `get_content`, `scroll`, `close` | `ene-tool-browser` |
+| `web` | `fetch`, `search` | `ene-tool-web` |
+| `utility` | `question`, `todo_list`, `todo_add`, `todo_update`, `todo_complete`, `todo_delete`, `get_system_info`, `get_current_time`, `undo` | `ene-tool-utility` / `ene-tool-fs` |
 
 ## IPC Protocol (`ene-tool-proto`)
 
@@ -91,7 +91,7 @@ Wire format: 4-byte little-endian length prefix + JSON payload. Max message size
 
 ## ToolAction Trait
 
-`ene-tools-common` defines the `ToolAction` trait for the action module pattern used by all built-in tool binaries:
+`ene-tool-common` defines the `ToolAction` trait for the action module pattern used by all built-in tool binaries:
 
 ```rust
 #[async_trait]

@@ -3,7 +3,7 @@ ene_config::define_config!(
     #[derive(PartialEq, Eq)]
     /// Serializable sandbox configuration data (POD).
     ///
-    /// Contains no validation logic — the `ene-tools-fs::Sandbox` type builds
+    /// Contains no validation logic — the `ene-tool-fs::Sandbox` type builds
     /// and validates the actual sandbox. This struct is used in IPC between
     /// core and tool binaries.
     pub struct SandboxConfigData {

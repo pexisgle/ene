@@ -1,6 +1,6 @@
-# ユーティリティツール (`ene-tools-utility`)
+# ユーティリティツール (`ene-tool-utility`)
 
-**バイナリ:** `ene-tools-utility` | **ステートフル:** はい (TodoDb — SQLite ベース、セッション単位)
+**バイナリ:** `ene-tool-utility` | **ステートフル:** はい (TodoDb — SQLite ベース、セッション単位)
 
 ユーザーとの対話やタスク管理のためのヘルパーツールを提供します。
 

@@ -1,0 +1,29 @@
+[package]
+name = "ene-tool-fs"
+version = "0.1.0"
+edition = "2024"
+description = "Filesystem tools: read, write, edit, glob, grep, patch, shell execution, and undo with sandbox security"
+
+[[bin]]
+name = "ene-tool-fs"
+path = "src/main.rs"
+
+[dependencies]
+ene-tool-proto = { workspace = true }
+ene-tool-common = { workspace = true }
+tokio = { workspace = true, features = ["fs", "process"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+regex = { workspace = true }
+tracing = { workspace = true }
+walkdir = "2"
+glob = "0.3"
+strsim = "0.11"
+dashmap = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+diesel = { version = "2.3", features = ["sqlite", "chrono"] }
+diesel_migrations = { version = "2.3", features = ["sqlite"] }
+libsqlite3-sys = { version = "0.35", features = ["bundled"] }
+flate2 = "1"

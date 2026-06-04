@@ -1,6 +1,6 @@
-# Web ツール (`ene-tools-web`)
+# Web ツール (`ene-tool-web`)
 
-**バイナリ:** `ene-tools-web` | **ステートフル:** いいえ
+**バイナリ:** `ene-tool-web` | **ステートフル:** いいえ
 
 URL フェッチと Web 検索機能を提供します。
 
