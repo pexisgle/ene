@@ -161,6 +161,9 @@ pub trait ToolProvider: Send + Sync {
     /// Returns the list of tool specs this provider exposes.
     fn list_specs(&self) -> Vec<ToolSpec>;
 
+    /// Returns per-action metadata for mega-tools (default: empty).
+    fn list_action_specs(&self) -> Vec<ActionSpec> { vec![] }
+
     /// Executes a tool by name with the given JSON arguments.
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>;
 
@@ -314,6 +317,17 @@ pub enum EneToolProtoError {
     Internal { message: String },
     IpcTransport { message: String },
     PermissionRequired { request_id: String, action: String, target: String, description: String },
+    UserInputRequired { request_id: String, prompt: UserInputPrompt },
+    FileNotFound { path: String },
+    FileTooLarge { path: String, size: u64, limit: u64 },
+    CommandBlocked { command: String, reason: String },
+    ShellTimeout { command: String, timeout_ms: u64 },
+    ShellOutputTooLarge { size: u64, limit: u64 },
+    BrowserError { message: String },
+    AppError { message: String },
+    WebSearchError { message: String },
+    IpcClient { message: String },
+    Other { message: String },
 }
 ```
 
@@ -322,6 +336,7 @@ pub enum EneToolProtoError {
 ```
 Tool binary starts
   → listens on ENE_TOOL_SOCKET (provided by ToolHostManager as env var)
+  → receives IpcRequest::Handshake → responds HandshakeAck
   → receives IpcRequest::Initialize
   → tool initialized with sandbox + config
   → ready to handle CallTool requests

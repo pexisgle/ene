@@ -64,3 +64,23 @@ Sandbox 有効?
 | `undo_last()` | 最新の操作をロールバック |
 
 Undo は SQLite データベースに zlib 圧縮で保存されます (`undodb_path`/`undo.db`)。
+
+## エラー型
+
+サンドボックス違反は `ene-tool-proto` から `ToolError::SandboxViolation { message }` を返します。これは全ツールクレートで共有される統一エラー型 (`EneToolProtoError`) であり、境界マッピングは不要です。
+
+```rust
+pub enum ToolError {
+    SandboxViolation { message: String },
+    PermissionDenied { message: String },
+    PermissionRequired { request_id: String, action: String, target: String, description: String },
+    FileNotFound { path: String },
+    FileTooLarge { path: String, size: u64, limit: u64 },
+    CommandBlocked { command: String, reason: String },
+    ShellTimeout { command: String, timeout_ms: u64 },
+    ShellOutputTooLarge { size: u64, limit: u64 },
+    // ... 他のバリアント (全一覧は SDK ガイドを参照)
+}
+```
+
+破壊的操作にユーザー承認が必要な場合、ツールは `request_id` 付きの `ToolError::PermissionRequired` を返し、`ToolProvider::approve_permission()` で承認できます。

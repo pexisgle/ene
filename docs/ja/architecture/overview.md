@@ -8,15 +8,17 @@ LLM 統合、ツール呼び出し、長期記憶、セッション管理を**�
 ```
 ene-desktop ──┐
 ene-cli ──┼── ene-core ──── ene-tool-host ──── ene-tool-proto
-            │                    │
-            │               ene-tools/* (IPC 子プロセス)
+            │                    │                 │
+            │               ene-tools/*            ene-tool-derive
+            │          (IPC 子プロセス)       (proc-macro)
             │
       ene-core 内部依存:
         ├── ene-config    (設定, パス, スキーマ生成)
         ├── ene-embedding (ベクトル埋め込み)
         ├── ene-memory    (長期記憶ストア)
         ├── ene-session   (会話履歴, 自動分割)
-        └── ene-tool-host (ツールプロセス管理, MCP)
+        ├── ene-provider  (LLM + 埋め込みトレイト, OpenAI 実装)
+        └── ene-tool-host (ツールプロセス管理, MCP, Tool RAG)
 ```
 
 ## レイヤー説明
@@ -33,9 +35,11 @@ ene-cli ──┼── ene-core ──── ene-tool-host ──── ene-too
 - **`ene-session`** — 会話履歴バッファ、`CharacterCardV3` 読み込み、感情トークン解析 (`<|emo:name|>`)、およびタイムアウトと話題変化に基づく自動セッション分割。
 
 ### ツール基盤レイヤー
-- **`ene-tool-proto`** — プロトコル契約。`ToolProvider` トレイト、`IpcRequest`/`IpcResponse` ワイヤ形式、`SandboxConfigData`、`run_tool_server()` ヘルパーを定義。
-- **`ene-tool-host`** — ツールライフサイクル管理。ツールバイナリを子プロセスとして起動 (Unix ドメインソケット / Windows 名前付きパイプ)、クラッシュ耐性 (指数バックオフ、最大 5 回再起動) でラップ、MCP サーバー対応、埋め込み類似度による Tool RAG フィルタリングを提供。
-- **`ene-tools-common`** — ツールクレートが消費する共通ユーティリティ (HTML→Markdown、スマート切り詰め)。
+- **`ene-tool-proto`** — プロトコル契約。`ToolProvider` トレイト、`ToolSpec`/`ToolError` 型、`IpcRequest`/`IpcResponse` ワイヤ形式 (v2)、`SandboxConfigData`、`run_tool_server()` ヘルパーを定義。
+- **`ene-tool-derive`** — Proc-macro クレート。`#[derive(ToolSpec)]` が引数構造体の宣言的属性から `ToolSpec` 実装を生成。
+- **`ene-tool-host`** — ツールライフサイクル管理。ツールバイナリを子プロセスとして起動 (Unix ドメインソケット / Windows 名前付きパイプ)、クラッシュ耐性 (指数バックオフ、最大 5 回再起動) でラップ、MCP サーバー対応、`ToolRag` 構造体を介した Tool RAG フィルタリング (HyDE、LLM リランキング、カテゴリ別制限) を提供。
+- **`ene-tools-common`** — ツールクレートが消費する共通ユーティリティ (`ToolAction` トレイト、HTML→Markdown 抽出)。
+- **`ene-provider`** — LLM・埋め込みプロバイダトレイト (`LlmProvider`, `EmbeddingProvider`)、OpenAI 互換実装、HyDE/リランキング用 `HybridRerankProvider`。
 
 ### ツールプロバイダ (IPC 子プロセス)
 - **`ene-tools-fs`** — ファイルシステム操作: `read`, `write`, `edit`, `delete`, `glob`, `grep`, `patch`, `shell`, `undo`。全操作がサンドボックス設定を尊重。
@@ -66,6 +70,7 @@ EneEvent パイプライン (broadcast チャンネル):
   → SpecialToken → 感情処理
   → ToolCallStart → ツール実行 → ToolCallResult → LLM API (ループ)
   → PermissionRequired → ユーザー承認 → PermissionDecision
+  → UserInputRequired → ユーザー応答 → UserInputResponse
   → Finished
   ↓
 ストリームタスクが更新されたセッションを oneshot で送信
@@ -81,8 +86,8 @@ EneEvent パイプライン (broadcast チャンネル):
 |-------------|------|
 | `EneHandle` | スレッドセーフな公開 API。mpsc でコマンド送信、broadcast でイベント受信。 |
 | `EneActor` | バックグラウンドタスク。全変更可能状態 (セッション、設定、レジストリ) を所有。 |
-| `EneCommand` | コンシューマー → アクターメッセージ (Run, Cancel, Reconfigure, LoadCharacter など) |
-| `EneEvent` | アクター → コンシューマーイベント (TextDelta, ToolCall*, PermissionRequired, Finished など) |
+| `EneCommand` | コンシューマー → アクターメッセージ (Run, Cancel, Reconfigure, LoadCharacter, ListTools, CallTool など) |
+| `EneEvent` | アクター → コンシューマーイベント (TextDelta, ToolCall*, PermissionRequired, UserInputRequired, Finished など) |
 | `stream::run_stream` | Run コマンドごとに生成される内部ストリーミングエンジン。更新されたセッションを oneshot で返す。 |
 
 利点:

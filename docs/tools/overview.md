@@ -8,13 +8,16 @@ Each tool runs as an independent binary process, communicating with core over IP
 ToolHostManager (binary discovery, spawning, supervision)
   ├── SupervisedIpcRegistry × N (IPC + restart)
   │   └── IpcToolRegistry (reconnect)
-  │       └── ene-tool-proto protocol
+  │       └── ene-tool-proto protocol (v2)
   ├── extra_registries × N (MCP, etc.)
   │   └── McpToolRegistry
   └── CompositeToolRegistry
-       ├── First-wins dedup
-       ├── Tool RAG (embedding-based selection)
-       └── MemoryStore (tool_embedding_index)
+       └── First-wins dedup
+
+ToolRag (separate from registry)
+  ├── EmbeddingProvider (query + HyDE + rerank)
+  ├── MemoryStore (tool_embedding_index)
+  └── Weighted multi-field cosine similarity
 ```
 
 ## Tool Naming Convention
@@ -25,7 +28,7 @@ All tools use namespaced names: `<namespace>.<action>`.
 |-----------|-------|--------|
 | `filesystem` | `read`, `write`, `edit`, `delete`, `glob`, `grep`, `patch` | `ene-tools-fs` |
 | `shell` | `execute` | `ene-tools-fs` |
-| `app` | `clipboard_read`, `clipboard_write`, `list_windows`, `focus_window`, `get_active_window`, `list_monitors`, `capture_window`, `keyboard_type`, `keyboard_press`, `keyboard_combo`, `mouse_move`, `mouse_click`, `drag`, `mouse_scroll`, `screenshot` | `ene-tools-app` |
+| `app` | `clipboard_read`, `clipboard_write`, `list_windows`, `focus_window`, `get_active_window`, `list_monitors`, `capture_window`, `type_text`, `press_key`, `key_combo`, `mouse_move`, `mouse_click`, `mouse_drag`, `mouse_scroll`, `screenshot` | `ene-tools-app` |
 | `browser` | `navigate`, `click`, `type`, `wait`, `screenshot`, `get_content`, `scroll`, `close` | `ene-tools-browser` |
 | `web` | `fetch`, `search` | `ene-tools-web` |
 | `utility` | `question`, `todo_list`, `todo_add`, `todo_update`, `todo_complete`, `todo_delete`, `get_system_info`, `get_current_time`, `undo` | `ene-tools-utility` / `ene-tools-fs` |
@@ -37,6 +40,7 @@ pub enum IpcRequest {
     Handshake { version: u32 },
     Initialize { sandbox: SandboxConfigData, tool_config: Option<Value> },
     ListTools,
+    ListActionSpecs,
     GetConfigSchema,
     CallTool { name: String, arguments: String },
     SetSessionId { session_id: String },
@@ -50,6 +54,7 @@ pub enum IpcResponse {
     HandshakeAck { version: u32 },
     Ack,
     Tools { tools: Vec<ToolSpec> },
+    ActionSpecs { specs: Vec<ActionSpec> },
     ConfigSchema { schema: Option<Value> },
     CallResult { result: Result<String, ToolError> },
     Pong,
@@ -57,7 +62,7 @@ pub enum IpcResponse {
 }
 ```
 
-Wire format: 4-byte little-endian length prefix + JSON payload.
+Wire format: 4-byte little-endian length prefix + JSON payload. Max message size: 64 MB. Protocol version: 2.
 
 ## ToolHostManager
 
@@ -82,7 +87,22 @@ Wire format: 4-byte little-endian length prefix + JSON payload.
 | Layer | Behavior |
 |-------|----------|
 | ToolHostManager | Process death detection → exponential backoff restart (max 5, 500ms → 30s) |
-| IpcToolRegistry | Connection loss → exponential backoff reconnect (max 5), re-sends Initialize |
+| IpcToolRegistry | Connection loss → exponential backoff reconnect (base 200ms, max 10s, 5 retries), re-sends Handshake + Initialize |
+
+## ToolAction Trait
+
+`ene-tools-common` defines the `ToolAction` trait for the action module pattern used by all built-in tool binaries:
+
+```rust
+#[async_trait]
+pub trait ToolAction: Send + Sync {
+    fn definition(&self) -> ToolSpec;
+    fn tool_name(&self) -> &'static str;
+    async fn execute(&self, arguments: &str) -> Result<String, ToolError>;
+}
+```
+
+Each tool binary has a provider struct that owns shared state and dispatches to individual `ToolAction` implementations by `tool_name()`.
 
 ## ToolProvider Trait
 
@@ -92,6 +112,7 @@ Implemented by tool binaries. Returns `ToolSpec` (the v2 structured type):
 #[async_trait]
 pub trait ToolProvider: Send + Sync {
     fn list_specs(&self) -> Vec<ToolSpec>;
+    fn list_action_specs(&self) -> Vec<ActionSpec> { vec![] }
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>;
     fn set_session_id(&self, session_id: &str);
     fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
@@ -109,24 +130,23 @@ Host-side interface for tool access:
 ```rust
 #[async_trait]
 pub trait ToolRegistry: Send + Sync {
-    fn list_tools(&self) -> Vec<ToolDefinition>;
+    fn list_tools(&self) -> Vec<ToolSpec>;
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>;
-    async fn set_session_id(&self, session_id: &str) {}
-    async fn approve_permission(&self, request_id: &str) {}
-    async fn allow_pattern(&self, action: &str, target_pattern: &str) {}
+    async fn set_session_id(&self, _session_id: &str) {}
+    async fn approve_permission(&self, _request_id: &str) {}
+    async fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
     async fn config_schema(&self) -> Option<serde_json::Value> { None }
-    async fn ensure_index_built(&self, embedder: &dyn EmbeddingProvider, store: Option<&MemoryStore>) -> Result<(), ToolError> { Ok(()) }
-    async fn select_tools(&self, embedder: &dyn EmbeddingProvider, query: &str, limit: usize) -> Vec<ToolDefinition> { self.list_tools() }
 }
 ```
+
+Tool RAG is handled separately by the `ToolRag` struct in `ene-tool-host`, not by the registry.
 
 ## CompositeToolRegistry
 
 Aggregates multiple `ToolRegistry` instances:
 
 - **First-wins** — duplicate tool names resolve to the first registration
-- **Tool RAG** — `ensure_tool_embeddings()` computes version hashes, re-embeds only changed tools via `store.upsert_tool_embedding_field()` (multi-vector: `summary`, `description`, `negative` per tool)
-- **`select_tools()`** — cosine-similarity filtering using stored tool embeddings
+- Dispatches `call_tool`, `set_session_id`, `approve_permission`, `allow_pattern` to the correct sub-registry
 
 ## MCP Support
 

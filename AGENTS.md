@@ -26,10 +26,11 @@ crates/
   ene-memory       — SQLite-vec long-term memory store (summaries, key facts, tool embeddings)
   ene-provider     — LLM provider abstraction
   ene-session      — Conversation history, CharacterCardV3, auto-split
-  ene-tool-proto   — IPC protocol, ToolProvider trait, IpcRequest/IpcResponse wire format
-  ene-tool-host    — Tool process manager, MCP support, Tool RAG, CompositeToolRegistry
+  ene-tool-proto   — IPC protocol, ToolProvider trait, ToolSpec, ToolError, IpcRequest/IpcResponse wire format
+  ene-tool-derive  — Proc-macro: #[derive(ToolSpec)] for auto-generated tool specs
+  ene-tool-host    — Tool process manager, MCP support, Tool RAG (ToolRag), CompositeToolRegistry
   ene-tools/
-    common/        — Shared tool utilities (SandboxConfigData, etc.)
+    common/        — Shared tool utilities (ToolAction trait, HTML extraction)
     fs/            — Filesystem tools (read/write/edit/delete/glob/grep/patch, shell, undo)
     web/           — Web tools (webfetch, websearch)
     utility/       — Utility tools (question, todo, get_current_time, get_system_info)
@@ -42,12 +43,12 @@ apps/
 
 ## Architecture Notes
 - **Actor-based architecture**: `EneHandle` (public API) → mpsc `EneCommand` → `EneActor` (tokio) → broadcast `EneEvent`. `EneHandle::Drop` sends Shutdown when last handle.
-- **EneCommand**: Run, Cancel, Shutdown, Reconfigure, LoadCharacter, PermissionDecision, GetSnapshot, ManualSplit (pub(crate), not exported)
-- **EneEvent**: TextDelta, SpecialToken, ToolCallStart, ToolCallResult, PermissionRequired, TaskProgress, SessionSplit, Done, Failed, StatusChanged
+- **EneCommand**: Run, Cancel, Shutdown, Reconfigure, LoadCharacter, PermissionDecision, UserInputResponse, GetSnapshot, ManualSplit, ListTools, CallTool, InvalidateToolIndex (pub(crate), not exported)
+- **EneEvent**: TextDelta, SpecialToken, ToolCallStart, ToolCallResult, PermissionRequired, UserInputRequired, TaskProgress, SessionSplit, Done, Failed, StatusChanged
 - **Data flow**: User Input → EneCommand::Run → EneActor → Memory Search → build_messages() → LLM stream → EneEvent pipeline
 - **Tool execution**: Tools run as separate binaries via IPC (Unix Domain Sockets / Windows Named Pipes). `ene-tool-host` manages lifecycle with crash resilience (exponential backoff, max 5 restarts). Binary discovery: `builtin_tools_dir()` (debug: same dir, release: `exe_dir/tools/`), `user_tools_dir()` (`app_data_dir()/tools/`).
-- **IPC Protocol**: `IpcRequest` (Initialize, ListTools, CallTool, SetSessionId, Ping, Shutdown) ↔ `IpcResponse` (Ack, Tools, CallResult, Pong, Error). Wire format: 4-byte big-endian length prefix + JSON payload.
-- **Tool Registry**: `ToolRegistry` trait → `CompositeToolRegistry` (first-wins dedup, Tool RAG embedding, cosine-similarity filtering). Also supports MCP via `McpToolRegistry`.
+- **IPC Protocol**: `IpcRequest` (Handshake, Initialize, ListTools, ListActionSpecs, CallTool, SetSessionId, Ping, Shutdown) ↔ `IpcResponse` (HandshakeAck, Ack, Tools, ActionSpecs, CallResult, Pong, Error). Wire format: 4-byte little-endian length prefix + JSON payload. Max message size: 64 MB. Protocol version: 2.
+- **Tool Registry**: `ToolRegistry` trait → `CompositeToolRegistry` (first-wins dedup). Tool RAG is handled separately by `ToolRag` struct (HyDE, LLM reranking, per-category limits, multi-vector embedding). Also supports MCP via `McpToolRegistry`.
 - **Session splitting**: Automatic based on timeouts (`session_timeout_minutes`) and topic drift (cosine similarity < `topic_change_threshold`). Summaries stored in memory. Manual split via `/session split`.
 - **Emotion tokens**: `<|emo:name|>` syntax parsed from LLM output via `split_text_and_special_tokens()` and `extract_emotion_from_token()`. Desktop: 4s hold + fade out → VRM blendshape. CLI: `[Emotion: name]` in magenta.
 - **Prompt construction**: `build_messages()` assembles: system prompt → example messages (first turn) → recalled summaries → key facts → conversation history → expression protocol → current input. Supports CBS macros (`{{char}}`, `{{user}}`, `{{random:...}}`, etc.).
@@ -83,7 +84,7 @@ apps/
   - Do **NOT** introduce or use `rusqlite` in any crate in the workspace.
   - For SQLite extension registration (like `sqlite-vec` auto extension), use `libsqlite3-sys` directly (e.g. `libsqlite3_sys::sqlite3_auto_extension`) instead of calling the FFI via `rusqlite`.
   - To package statically with SQLite, bundle it using `libsqlite3-sys` with the `bundled` feature.
-- **Tables**: `conversation_summaries` (embedding f32 blob), `conversation_keyfacts` (upsert), `conversation_logs`, `tool_embeddings`.
+- **Tables**: `conversation_summaries` (embedding f32 blob), `conversation_keyfacts` (upsert), `conversation_logs`, `tool_embedding_index` (multi-vector: summary/description/capability/example/negative per tool, with field_key and model_name).
 - **Search**: Cosine similarity via `vec_distance_cosine`. Results weighted by `similarity_weight` + `recency_weight` with time decay.
 - **Embedding providers**: `ApiEmbeddingProvider` (OpenAI-compatible), `GgufEmbeddingProvider` (candle/GGUF, local, GPU-free).
 - **Summarization**: Dedicated LLM model (`memory.summarization_model`) produces structured summary + topics + key_facts.
@@ -99,9 +100,9 @@ apps/
 ## Testing
 - `cargo test --workspace` for all tests.
 - REPL commands for interactive testing:
-  - `/tooltest` — Tool test mode (launch with `-- --tooltest`)
-  - `/tool call [tool_name] [args]` — Call a tool directly
-  - `/tools` — List available tools
+  - `/tool list` — List available tools
+  - `/tool help <name>` — Show detailed help for a tool
+  - `/tool call <name> <json>` — Call a tool directly
   - `/memory search [query]` — Search long-term memory
   - `/session info` — Current session details
   - `/session split` — Manual session split
@@ -134,8 +135,10 @@ To maintain code discoverability and avoid developer confusion regarding where s
   - `docs/core/session-split.md` — Split triggers, max-pooling embedding, lifecycle
   - `docs/core/emotions.md` — Emotion token parsing, per-app display
   - `docs/memory/memory.md` — SQLite-vec memory, summarization, embedding providers
-  - `docs/tools/overview.md` — Tool system architecture, IPC protocol, Tool RAG
+  - `docs/tools/overview.md` — Tool system architecture, IPC protocol, ToolAction, ToolRegistry
   - `docs/tools/sdk.md` — Custom tool SDK guide (ToolProvider trait, IPC lifecycle)
   - `docs/tools/sandbox.md` — Security sandbox, blocked commands, undo system
-  - `docs/applications/cli.md` — CLI REPL reference (15 commands)
+  - `docs/tools/tool-rag.md` — Tool RAG pipeline (HyDE, reranking, multi-vector embedding)
+  - `docs/tools/derive-macro.md` — #[derive(ToolSpec)] attribute reference
+  - `docs/applications/cli.md` — CLI REPL reference (CliCommand trait, commands)
   - `docs/applications/desktop.md` — Desktop app, Bevy plugins, VRM pipeline

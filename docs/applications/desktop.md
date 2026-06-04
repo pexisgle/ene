@@ -74,6 +74,7 @@ pub enum EneStreamEvent {
     ToolCallStart { name: String, arguments: String },
     ToolCallResult { name: String, result: String },
     PermissionRequired { request_id: RequestId, action: String, target: String, description: String },
+    UserInputRequired { request_id: RequestId, prompt: UserInputPrompt },
     TaskProgress { task_id: String, step: usize, total_steps: Option<usize>, description: String },
     Finished,
     Error(String),

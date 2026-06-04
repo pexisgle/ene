@@ -76,21 +76,20 @@ EneEvent::SpecialToken → poll_ene_events → EneStreamEvent::SpecialToken
 
 ```
 main()
-  ├── clap: Args parse (--tooltest flag)
+  ├── clap: Args parse
   ├── config::init()
   │   ├── ensure_resource_dirs()
   │   ├── Load settings.json
   │   └── EneHandle::new() → spawns actor
-  ├── --tooltest → tooltest::run() → exit
   └── Normal mode:
-      ├── AppContext { handle: EneHandle }
+      ├── AppContext { handle: EneHandle, commands: Vec<Arc<dyn CliCommand>> }
       └── repl::run(ctx) → interactive loop
 ```
 
 ### REPL Loop
 
 1. Display prompt with `dialoguer::Input`
-2. `/` commands handled by `commands::execute()`
+2. `/` commands handled by `commands::execute()` via `CliCommand` trait
 3. Regular input: `handle.run()` + `process_stream()` to display events
 
 **Event subscription pattern:**
@@ -111,10 +110,11 @@ This ensures no events are lost between the `run()` call and the first `recv()`.
 | `/prompt` | Show system prompt |
 | `/card <path>` | Switch character card (async load) |
 | `/config` | Show current settings |
-| `/tools` | List enabled tools |
+| `/tool list` | List all registered tools |
+| `/tool help <name>` | Show detailed help for a tool |
+| `/tool call <name> <json>` | Call a tool directly |
 | `/history` | Show conversation history |
-| `/undo` | Undo last file operation |
-| `/tooltest [prompt]` | One-shot tool test |
+| `/undo` | Placeholder (not yet supported with actor-based runtime) |
 | `/memory search <q>` | Search memory |
 | `/memory list` | List stored summaries/facts |
 | `/session split` | Manual session split (via ManualSplit command) |

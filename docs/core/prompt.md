@@ -60,7 +60,7 @@ Generates an Emotion Expression Protocol block from the character card's `post_h
 
 ## Tool Passing
 
-Tool definitions (`Vec<ToolDefinition>`) are selected via `select_tools()` (Tool RAG) and passed directly to the LLM provider's `create_chat_stream()`. Each provider internally converts `ToolDefinition` to its API format (e.g., OpenAI `ChatCompletionTools`).
+Tool specifications (`Vec<ToolSpec>`) are selected via `select_relevant_tools()` (Tool RAG) and passed directly to the LLM provider's `create_chat_stream()`. Each provider internally converts `ToolSpec` to its API format (e.g., OpenAI `ChatCompletionTools`).
 
 ## CBS Macro Expansion
 

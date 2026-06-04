@@ -55,11 +55,16 @@ conversation_logs (
     created_at TEXT
 )
 
-tool_embeddings (
-    tool_name TEXT PRIMARY KEY,
-    version_hash TEXT,
-    embedding BLOB,
-    created_at TEXT
+tool_embedding_index (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tool_name TEXT NOT NULL,
+    field TEXT NOT NULL CHECK (field IN ('summary','description','capability','example','negative')),
+    field_key TEXT NOT NULL,        -- "" for ToolSpec, action name for ActionSpec
+    version_hash TEXT NOT NULL,
+    model_name TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(tool_name, field, field_key, model_name)
 )
 ```
 
@@ -91,30 +96,45 @@ tool_embeddings (
 | `insert_log(id, card, role, content)` | 単一メッセージを記録 |
 | `get_logs_by_session(id)` | セッションの全メッセージを取得 |
 
-### ツール埋め込み
+### ツール埋め込み (マルチベクトル)
+
+各ツールはフィールドごとに複数の埋め込み行を持ちます (`summary`, `description`, `capability`, `example`, `negative`)。フィールドごとのアプローチにより、`search_tools` はフィールド間の max-pool で関連性を集約できます。`field_key` はトップレベルの ToolSpec 埋め込みとアクションごとの ActionSpec 埋め込みを区別します。`model_name` により異なるモデルでの再埋め込みが可能です。
 
 | メソッド | 説明 |
 |---------|------|
-| `upsert_tool_embedding(name, hash, emb)` | ツール埋め込みを UPSERT |
-| `list_tool_embeddings()` | 全 (名前, ハッシュ, ベクトル) を列挙 |
-| `delete_tool_embedding(name)` | ツールの埋め込みを削除 |
-| `search_tools(query_emb, limit, threshold)` | Tool RAG 用のコサイン類似度ツール検索 |
+| `upsert_tool_embedding_field(name, field, field_key, model, hash, emb)` | 単一フィールドの埋め込みを UPSERT |
+| `list_tool_embedding_fields()` | 全 `(name, field, field_key, model, hash, vector)` 行を列挙 |
+| `delete_tool_embeddings(name)` | ツールの全フィールド行を削除 |
+| `search_tools(query_emb, limit, threshold)` | 全フィールドでコサイン類似度、ツールごとに max-pool で Tool RAG |
 
 ## EmbeddingProvider
 
 ```rust
 #[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
-    async fn embed(&self, text: &str) -> Result<Vec<f32>, String>;
-    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, String>;
+    async fn embed(&self, text: &str, kind: EmbeddingKind)
+        -> Result<Vec<f32>, EmbeddingError>;
+    async fn embed_query(&self, text: &str)
+        -> Result<Vec<f32>, EmbeddingError>;
+    async fn embed_batch(
+        &self, items: &[(&str, EmbeddingKind)],
+    ) -> Result<Vec<Vec<f32>>, EmbeddingError>;
+    async fn hyde(&self, query: &str) -> Result<String, EmbeddingError>;
+    async fn rerank(&self, query: &str, candidates: &[ToolSpec])
+        -> Result<Vec<f32>, EmbeddingError>;
     fn dimensions(&self) -> usize;
     fn model_name(&self) -> &str;
 }
+
+pub enum EmbeddingKind { Summary, Description, Capability, Example, Negative, Query, Hyde }
+
+pub enum EmbeddingError { Provider(String), Timeout(Duration) }
 ```
 
 実装:
-- `CloudEmbeddingProvider` — OpenAI 互換 API
-- `GgufEmbeddingProvider` — Candle によるローカル GGUF 推論 (GPU 不要)
+- `CloudEmbeddingProvider` — バッチ埋め込みと LLM による HyDE を備えた OpenAI 互換 API
+- `GgufEmbeddingProvider` — Candle によるローカル GGUF 推論 (GPU 不要)、シリアルバッチ
+- `HybridRerankProvider` — HyDE / リランキング用にオプションの LLM を備えたプライマリ埋め込みラッパー
 
 ## 要約
 

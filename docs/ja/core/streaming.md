@@ -35,6 +35,7 @@ pub struct EneHandle {
 | `run(input)` | `EneCommand::Run` を送信 (ファイア＆フォーゲット) |
 | `cancel()` | `EneCommand::Cancel` を送信 |
 | `decide_permission(request_id, decision)` | 破壊的操作への許可決定を送信 |
+| `submit_user_input(request_id, response)` | ユーザー対話のために一時停止するツールへのユーザー入力応答を送信 |
 | `subscribe()` | イベント用の新規 `EneEventReceiver` を取得 |
 | `get_snapshot()` | oneshot 経由で読み取り専用状態をリクエスト |
 | `load_character(name)` | 名前またはパスからキャラクターカードを読み込み |
@@ -42,6 +43,9 @@ pub struct EneHandle {
 | `load_config_from(assets_dir, config_path)` | 指定パスから設定を読み込み適用 |
 | `reconfigure(config)` | oneshot 経由で新しい設定を適用 |
 | `manual_split()` | oneshot 経由でセッション分割をトリガー |
+| `list_tools()` | oneshot 経由で登録済みツールスペック一覧を取得 |
+| `call_tool(name, arguments)` | oneshot 経由でツールを直接呼び出し |
+| `invalidate_tool_index()` | Tool RAG のキャッシュ済みツール埋め込みを無効化 |
 
 ### EneEventReceiver
 
@@ -71,8 +75,12 @@ pub enum EneCommand {
     Reconfigure { config: EneConfig, reply: oneshot::Sender<Result<(), EneCoreError>> },
     LoadCharacter { path: String, reply: oneshot::Sender<Result<(), EneCoreError>> },
     PermissionDecision { request_id: RequestId, decision: PermissionDecision },
+    UserInputResponse { request_id: RequestId, response: UserInputResponse },
     GetSnapshot { reply: oneshot::Sender<EneStateSnapshot> },
     ManualSplit { reply: oneshot::Sender<Result<SplitResult, EneCoreError>> },
+    ListTools { reply: oneshot::Sender<Vec<ToolSpec>> },
+    CallTool { name: String, arguments: String, reply: oneshot::Sender<Result<String, ToolError>> },
+    InvalidateToolIndex,
 }
 ```
 
@@ -87,6 +95,7 @@ pub enum EneEvent {
     ToolCallStart { name: String, arguments: String },
     ToolCallResult { name: String, result: String },
     PermissionRequired { request_id: RequestId, action: String, target: String, description: String },
+    UserInputRequired { request_id: RequestId, prompt: UserInputPrompt },
     TaskProgress { task_id: String, step: usize, total_steps: Option<usize>, description: String },
     SessionSplit { summary: String, reason: SplitReason },
     Done,
@@ -119,7 +128,7 @@ Run { input }
   │     ├── LLM ストリーミング → TextDelta / SpecialToken イベント
   │     ├── tool_calls がある場合:
   │     │     ├── ToolCallStart イベント
-  │     │     ├── ツール実行 (必要な場合権限チェック付き)
+  │     │     ├── ツール実行 (権限チェック / ユーザー入力の必要な場合あり)
   │     │     ├── ToolCallResult イベント
   │     │     └── ループ継続
   │     └── tool_calls がない場合:
@@ -148,6 +157,26 @@ Run { input }
 
 権限はアクターとストリームタスク間の `Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>` を介して解決されます。
 
+## ユーザー入力処理
+
+一部のツール（例: `utility.question`）は実行を一時停止し、ユーザーに対話入力を求めます:
+
+```
+ツール実行 → ToolError::UserInputRequired { request_id, prompt }
+  ↓
+ストリームタスクが EneEvent::UserInputRequired { request_id, prompt } を送出
+  ↓
+コンシューマーが対話ダイアログを表示（選択可能なオプション + フリーテキスト）
+  ↓
+コンシューマーが EneCommand::UserInputResponse { request_id, response } を送信
+  ↓
+アクターが pending_user_inputs マップを介して待機中のストリームタスクに応答をルーティング
+  ↓
+ストリームタスクが _user_answers をツール引数に注入し、ツールを再呼び出し
+```
+
+`UserInputResponse` は `Multi(Vec<MultiAnswer>)`（質問ごとに 1 つの回答）または `Cancel` です。各 `MultiAnswer` は `Selected { option }`、`Answer { text }`、または `Skip` です。
+
 ## セッション更新
 
 ストリームタスクが完了すると、更新された `ConversationSession` を oneshot チャンネルでアクターに送信します。アクターはこの完了をポーリング:
@@ -172,6 +201,7 @@ Run { input }
 | LLM API エラー | `EneEvent::Failed` + `Done`、ストリームが返す |
 | ツールタイムアウト (60秒) | ツールエラーメッセージを LLM に送信 |
 | 権限拒否 | ツールエラーを LLM に送信 |
+| ユーザー入力キャンセル | ツールエラーを LLM に送信 |
 | 最大ラウンド超過 | `EneEvent::Failed` + `Done` |
 | 埋め込みエラー | `EneEvent::Failed` + `Done` |
 | Broadcast Lagged | コンシューマーが警告をログし、残りのイベントを継続読み込み |
