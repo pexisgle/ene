@@ -38,7 +38,7 @@ impl ToolAction for KeyComboAction {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "key_combo": { "type": "string", "description": "Key combination with '+' separator (e.g., 'ctrl+shift+s', 'ctrl+c')" }
+                    "key_combo": { "type": "string", "description": "Key combination with '+' separator (e.g., 'ctrl+shift+s', 'ctrl+c'). The legacy alias `combo_str` is also accepted for backward compatibility." }
                 },
                 "required": ["key_combo"]
             }),

@@ -66,7 +66,7 @@ impl ToolAction for MouseClickAction {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "button": { "type": "string", "enum": ["left", "right", "middle"], "description": "Mouse button to click (default: left)" },
+                    "button": { "type": "string", "enum": ["left", "right", "middle", "back", "forward"], "description": "Mouse button to click (default: left)" },
                     "count": { "type": "integer", "description": "Click count (default: 1, use 2 for double-click)" }
                 },
                 "required": []
@@ -96,5 +96,34 @@ impl ToolAction for MouseClickAction {
                 message: format!("Invalid arguments: {e}"),
             })?;
         run(args.button.as_deref().unwrap_or("left"), args.count).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn button_enum_matches_implementation() {
+        // The implementation accepts left/right/middle/back/forward
+        // (see `run` body) but the LLM only sees what the schema declares.
+        // The enum must cover every value the body maps explicitly.
+        let def = MouseClickAction.definition();
+        let allowed: Vec<&str> = def
+            .parameters
+            .get("properties")
+            .and_then(|p| p.get("button"))
+            .and_then(|b| b.get("enum"))
+            .and_then(|e| e.as_array())
+            .expect("button field must declare an enum array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        for v in ["left", "right", "middle", "back", "forward"] {
+            assert!(
+                allowed.contains(&v),
+                "schema enum is missing `{v}`; LLM cannot call it"
+            );
+        }
     }
 }

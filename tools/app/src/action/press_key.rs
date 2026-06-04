@@ -22,7 +22,7 @@ impl ToolAction for PressKeyAction {
 
     fn definition(&self) -> ToolSpec {
         ToolSpec {
-            name: ToolName::new("app.keyboard_press"),
+            name: ToolName::new("app.press_key"),
             version: ToolVersion::default(),
             display_name: "Simulates pressing and releasing a single key.".to_string(),
             summary: "Simulates pressing and releasing a single key.".to_string(),
@@ -85,5 +85,19 @@ impl ToolAction for PressKeyAction {
         .map_err(|e| ToolError::ExecutionFailed {
             message: format!("Task failed: {e}"),
         })?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spec_name_matches_tool_name() {
+        // The provider dispatches via `action.tool_name()`, but the LLM
+        // receives the spec's `name` field as the callable identifier.
+        // These MUST match or every call resolves to `Tool not found`.
+        let def = PressKeyAction.definition();
+        assert_eq!(def.name.to_string(), PressKeyAction.tool_name());
     }
 }
