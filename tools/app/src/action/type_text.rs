@@ -22,7 +22,7 @@ impl ToolAction for TypeTextAction {
 
     fn definition(&self) -> ToolSpec {
         ToolSpec {
-            name: ToolName::new("app.keyboard_type"),
+            name: ToolName::new("app.type_text"),
             version: ToolVersion::default(),
             display_name: "Simulates keyboard typing of a string character by character."
                 .to_string(),
@@ -71,5 +71,19 @@ impl ToolAction for TypeTextAction {
         .map_err(|e| ToolError::ExecutionFailed {
             message: format!("Task failed: {e}"),
         })?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spec_name_matches_tool_name() {
+        // The provider dispatches via `action.tool_name()`, but the LLM
+        // receives the spec's `name` field as the callable identifier.
+        // These MUST match or every call resolves to `Tool not found`.
+        let def = TypeTextAction.definition();
+        assert_eq!(def.name.to_string(), TypeTextAction.tool_name());
     }
 }

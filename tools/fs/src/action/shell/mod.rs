@@ -33,7 +33,7 @@ pub fn tool_definition() -> ToolSpec {
                 "timeout": { "type": "integer", "description": "Optional timeout in milliseconds" },
                 "workdir": { "type": "string", "description": "The working directory to run the command in. Defaults to current directory." }
             },
-            "required": ["command", "description"]
+            "required": ["command"]
         }),
         examples: vec![
             ToolExample {
@@ -190,5 +190,35 @@ impl ene_tool_common::ToolAction for ShellAction {
         )?;
 
         shell_exec(command, description, timeout, workdir, sandbox.config()).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ene_tool_common::ToolAction;
+
+    #[test]
+    fn schema_does_not_require_description() {
+        // The implementation defaults `description` to `""` when missing
+        // (see L182), so the schema must not list it as required. Otherwise
+        // a correctly-running call without a description gets rejected at
+        // the JSON-schema validation step before reaching the body.
+        let action = ShellAction::new(std::sync::Arc::new(std::sync::RwLock::new(None)));
+        let def = action.definition();
+        let required = def
+            .parameters
+            .get("required")
+            .and_then(|r| r.as_array())
+            .expect("schema must declare a `required` array");
+        let required: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(required, vec!["command"]);
+        assert!(
+            def.parameters
+                .get("properties")
+                .and_then(|p| p.get("description"))
+                .is_some(),
+            "schema should still document the optional `description` field"
+        );
     }
 }
