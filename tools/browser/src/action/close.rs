@@ -33,7 +33,9 @@ impl ToolAction for CloseSubAction {
             category: ToolCategory::Browser,
             keywords: KeywordSet::primary_only(["close", "session"]),
             parameters: serde_json::json!({
-                "type": "object"
+                "type": "object",
+                "properties": {},
+                "required": []
             }),
             examples: vec![ToolExample {
                 description: "Close the browser session".to_string(),
