@@ -8,11 +8,30 @@
 ToolHostManager (バイナリ発見、起動、監視)
   ├── SupervisedIpcRegistry × N (IPC + 再起動)
   │   └── IpcToolRegistry (再接続)
-  │       └── ene-tool-proto プロトコル
+  │       └── ene-tool-proto プロトコル (v2)
   ├── extra_registries × N (MCP 等)
   │   └── McpToolRegistry
-  └── MemoryStore (Tool RAG)
+  └── CompositeToolRegistry
+       └── 先勝ち重複排除
+
+ToolRag (レジストリとは別)
+  ├── EmbeddingProvider (クエリ + HyDE + リランキング)
+  ├── MemoryStore (tool_embedding_index)
+  └── 重み付きマルチフィールドコサイン類似度
 ```
+
+## ツール命名規則
+
+全ツールは名前空間付き名前を使用: `<namespace>.<action>`。
+
+| 名前空間 | ツール | バイナリ |
+|---------|-------|--------|
+| `filesystem` | `read`, `write`, `edit`, `delete`, `glob`, `grep`, `patch` | `ene-tools-fs` |
+| `shell` | `execute` | `ene-tools-fs` |
+| `app` | `clipboard_read`, `clipboard_write`, `list_windows`, `focus_window`, `get_active_window`, `list_monitors`, `capture_window`, `type_text`, `press_key`, `key_combo`, `mouse_move`, `mouse_click`, `mouse_drag`, `mouse_scroll`, `screenshot` | `ene-tools-app` |
+| `browser` | `navigate`, `click`, `type`, `wait`, `screenshot`, `get_content`, `scroll`, `close` | `ene-tools-browser` |
+| `web` | `fetch`, `search` | `ene-tools-web` |
+| `utility` | `question`, `todo_list`, `todo_add`, `todo_update`, `todo_complete`, `todo_delete`, `get_system_info`, `get_current_time`, `undo` | `ene-tools-utility` / `ene-tools-fs` |
 
 ## IPC プロトコル (`ene-tool-proto`)
 
@@ -21,6 +40,7 @@ pub enum IpcRequest {
     Handshake { version: u32 },
     Initialize { sandbox: SandboxConfigData, tool_config: Option<Value> },
     ListTools,
+    ListActionSpecs,
     GetConfigSchema,
     CallTool { name: String, arguments: String },
     SetSessionId { session_id: String },
@@ -33,7 +53,8 @@ pub enum IpcRequest {
 pub enum IpcResponse {
     HandshakeAck { version: u32 },
     Ack,
-    Tools { tools: Vec<ToolDefinition> },
+    Tools { tools: Vec<ToolSpec> },
+    ActionSpecs { specs: Vec<ActionSpec> },
     ConfigSchema { schema: Option<Value> },
     CallResult { result: Result<String, ToolError> },
     Pong,
@@ -41,14 +62,12 @@ pub enum IpcResponse {
 }
 ```
 
-ワイヤ形式: 4 バイトリトルエンディアン長さプレフィックス + JSON ペイロード。
+ワイヤ形式: 4 バイトリトルエンディアン長さプレフィックス + JSON ペイロード。最大メッセージサイズ: 64 MB。プロトコルバージョン: 2。
 
 ## ToolHostManager
 
 `ene-tool-host` クレート。全ツールプロセスを統括します。
 
-| メソッド | 説明 |
-|---------|------|
 | メソッド | 説明 |
 |---------|------|
 | `start(config)` | ソケットディレクトリ作成、有効なツールバイナリを起動、`ToolHostManager` を返す |
@@ -68,31 +87,66 @@ pub enum IpcResponse {
 | レイヤー | 動作 |
 |---------|------|
 | ToolHostManager | プロセス死 → 指数バックオフ再起動 (最大 5 回、500ms → 30s) |
-| IpcToolRegistry | 接続断 → 指数バックオフ再接続 (最大 5 回)、Initialize 再送 |
+| IpcToolRegistry | 接続断 → 指数バックオフ再接続 (ベース 200ms、最大 10s、5 リトライ)、Handshake + Initialize 再送 |
+
+## ToolAction トレイト
+
+`ene-tools-common` は、全ビルトインツールバイナリで使用されるアクションモジュールパターンの `ToolAction` トレイトを定義します:
+
+```rust
+#[async_trait]
+pub trait ToolAction: Send + Sync {
+    fn definition(&self) -> ToolSpec;
+    fn tool_name(&self) -> &'static str;
+    async fn execute(&self, arguments: &str) -> Result<String, ToolError>;
+}
+```
+
+各ツールバイナリは共有状態を所有し、`tool_name()` で個別の `ToolAction` 実装にディスパッチするプロバイダ構造体を持ちます。
+
+## ToolProvider トレイト
+
+ツールバイナリ側で実装。`ToolSpec` (v2 構造化型) を返します:
+
+```rust
+#[async_trait]
+pub trait ToolProvider: Send + Sync {
+    fn list_specs(&self) -> Vec<ToolSpec>;
+    fn list_action_specs(&self) -> Vec<ActionSpec> { vec![] }
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>;
+    fn set_session_id(&self, session_id: &str);
+    fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
+    fn approve_permission(&self, _request_id: &str) {}
+    fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
+    fn set_config(&self, _config: &serde_json::Value) {}
+    fn config_schema(&self) -> Option<serde_json::Value> { None }
+}
+```
 
 ## ToolRegistry トレイト
+
+ホスト側のツールアクセスインターフェース:
 
 ```rust
 #[async_trait]
 pub trait ToolRegistry: Send + Sync {
-    fn list_tools(&self) -> Vec<ToolDefinition>;
+    fn list_tools(&self) -> Vec<ToolSpec>;
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>;
-    async fn set_session_id(&self, session_id: &str) {}
-    async fn approve_permission(&self, request_id: &str) {}
-    async fn allow_pattern(&self, action: &str, target_pattern: &str) {}
+    async fn set_session_id(&self, _session_id: &str) {}
+    async fn approve_permission(&self, _request_id: &str) {}
+    async fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
     async fn config_schema(&self) -> Option<serde_json::Value> { None }
-    async fn ensure_index_built(&self, embedder: &dyn EmbeddingProvider, store: Option<&MemoryStore>) -> Result<(), ToolError> { Ok(()) }
-    async fn select_tools(&self, embedder: &dyn EmbeddingProvider, query: &str, limit: usize) -> Vec<ToolDefinition> { self.list_tools() }
 }
 ```
+
+Tool RAG はレジストリではなく、`ene-tool-host` の `ToolRag` 構造体が個別に処理します。
 
 ## CompositeToolRegistry
 
 複数の `ToolRegistry` インスタンスを集約:
 
 - **先勝ち** — 重複ツール名は最初の登録が優先
-- **Tool RAG** — `ensure_tool_embeddings()` がバージョンハッシュを計算し、変更があったツールのみ `store.upsert_tool_embedding()` で再埋め込み
-- **`select_tools()`** — 保存されたツール埋め込みのコサイン類似度フィルタリング、`tool_rag_always_include` のツールは常に含める
+- `call_tool`, `set_session_id`, `approve_permission`, `allow_pattern` を正しいサブレジストリにディスパッチ
 
 ## MCP サポート
 
@@ -107,9 +161,10 @@ pub trait ToolRegistry: Send + Sync {
 ## カスタムツール登録
 
 1. `ene-tool-proto` の `ToolProvider` トレイトを実装
-2. バイナリの `main()` で `run_tool_server()` を呼び出し
-3. バイナリを `~/.local/share/dev.pexisgle.ene/tools/` に配置
-4. `settings.json` の `tools.tools` にエントリを追加
+2. 引数構造体に `#[derive(ToolSpec)]` を使用して仕様を自動生成
+3. バイナリの `main()` で `run_tool_server()` を呼び出し
+4. バイナリを `~/.local/share/dev.pexisgle.ene/tools/` に配置
+5. `settings.json` の `tools.tools` にエントリを追加
 
 ```json
 {

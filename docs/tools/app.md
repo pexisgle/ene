@@ -27,9 +27,9 @@ OS-level desktop automation using enigo, xcap, arboard, and xdg-desktop-portal (
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `app.keyboard_type` | `text`* | Type text via keyboard |
-| `app.keyboard_press` | `key`* | Press a single key |
-| `app.keyboard_combo` | `key_combo`* (e.g. `ctrl+shift+s`) | Key combination |
+| `app.type_text` | `text`* | Type text via keyboard |
+| `app.press_key` | `key`* | Press a single key |
+| `app.key_combo` | `key_combo`* (e.g. `ctrl+shift+s`) | Key combination |
 
 ### Mouse
 
@@ -37,7 +37,7 @@ OS-level desktop automation using enigo, xcap, arboard, and xdg-desktop-portal (
 |------|-----------|-------------|
 | `app.mouse_move` | `x`*, `y`*, `relative?` | Move mouse cursor |
 | `app.mouse_click` | `button?`, `count?` | Click (supports double-click) |
-| `app.drag` | `x`*, `y`*, `x2`*, `y2`*, `button?` | Drag from (x,y) to (x2,y2) |
+| `app.mouse_drag` | `x`*, `y`*, `x2`*, `y2`*, `button?` | Drag from (x,y) to (x2,y2) |
 | `app.mouse_scroll` | `amount?`, `direction?` | Scroll mouse wheel |
 
 ### Screenshot

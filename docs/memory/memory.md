@@ -58,11 +58,13 @@ conversation_logs (
 tool_embedding_index (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     tool_name TEXT NOT NULL,
-    field TEXT NOT NULL CHECK (field IN ('summary','description','negative')),
+    field TEXT NOT NULL CHECK (field IN ('summary','description','capability','example','negative')),
+    field_key TEXT NOT NULL,        -- "" for ToolSpec, action name for ActionSpec
     version_hash TEXT NOT NULL,
+    model_name TEXT NOT NULL,
     embedding BLOB NOT NULL,
     created_at TEXT NOT NULL,
-    UNIQUE(tool_name, field)
+    UNIQUE(tool_name, field, field_key, model_name)
 )
 ```
 
@@ -96,12 +98,12 @@ tool_embedding_index (
 
 ### Tool Embeddings (Multi-Vector)
 
-Each tool has up to 3 embedding rows (one per field: `summary`, `description`, `negative`). The per-field approach enables `search_tools` to aggregate relevance via max-pool across fields.
+Each tool has multiple embedding rows (one per field: `summary`, `description`, `capability`, `example`, `negative`). The per-field approach enables `search_tools` to aggregate relevance via max-pool across fields. The `field_key` distinguishes top-level ToolSpec embeddings from per-action ActionSpec embeddings. The `model_name` allows re-embedding with different models.
 
 | Method | Description |
 |--------|-------------|
-| `upsert_tool_embedding_field(name, field, hash, emb)` | UPSERT a single field embedding |
-| `list_tool_embedding_fields()` | List all `(name, field, hash, vector)` rows |
+| `upsert_tool_embedding_field(name, field, field_key, model, hash, emb)` | UPSERT a single field embedding |
+| `list_tool_embedding_fields()` | List all `(name, field, field_key, model, hash, vector)` rows |
 | `delete_tool_embeddings(name)` | Remove all field rows for a tool |
 | `search_tools(query_emb, limit, threshold)` | Cosine similarity across all fields, max-pool per tool for Tool RAG |
 

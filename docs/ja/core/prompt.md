@@ -60,7 +60,7 @@ Description:
 
 ## ツール渡し
 
-ツール定義 (`Vec<ToolDefinition>`) は `select_tools()` (Tool RAG) で選択され、LLM プロバイダの `create_chat_stream()` に直接渡されます。各プロバイダは内部で `ToolDefinition` を API 形式（例: OpenAI `ChatCompletionTools`）に変換します。
+ツール仕様 (`Vec<ToolSpec>`) は `select_relevant_tools()` (Tool RAG) で選択され、LLM プロバイダの `create_chat_stream()` に直接渡されます。各プロバイダは内部で `ToolSpec` を API 形式（例: OpenAI `ChatCompletionTools`）に変換します。
 
 ## CBS マクロ展開
 

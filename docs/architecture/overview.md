@@ -7,15 +7,17 @@ ene is a modular Rust workspace centered around the `ene-core` library, which ti
 ```
 ene-desktop ──┐
 ene-cli ──┼── ene-core ──── ene-tool-host ──── ene-tool-proto
-            │                    │
-            │               ene-tools/* (IPC subprocesses)
+            │                    │                 │
+            │               ene-tools/*            ene-tool-derive
+            │          (IPC subprocesses)       (proc-macro)
             │
       ene-core internal deps:
         ├── ene-config    (settings, paths, schema generation)
         ├── ene-embedding (vector embeddings)
         ├── ene-memory    (long-term memory store)
         ├── ene-session   (conversation history, auto-split)
-        └── ene-tool-host (tool process management, MCP)
+        ├── ene-provider  (LLM + embedding traits, OpenAI impl)
+        └── ene-tool-host (tool process management, MCP, Tool RAG)
 ```
 
 ## Layer Descriptions
@@ -32,9 +34,11 @@ ene-cli ──┼── ene-core ──── ene-tool-host ──── ene-too
 - **`ene-session`** — Conversation history buffer, `CharacterCardV3` loading, emotion token parsing (`<|emo:name|>`), and automatic session splitting based on timeouts and topic drift.
 
 ### Tool Infrastructure Layer
-- **`ene-tool-proto`** — Protocol contract. Defines `ToolProvider` trait, `IpcRequest`/`IpcResponse` wire format, `SandboxConfigData`, and the `run_tool_server()` helper.
-- **`ene-tool-host`** — Tool lifecycle manager. Spawns tool binaries as child processes (Unix Domain Sockets / Windows Named Pipes), wraps them with crash resilience (exponential backoff, max 5 restarts), supports MCP servers, and provides Tool RAG filtering via embedding similarity.
-- **`ene-tools-common`** — Shared utilities consumed by tool crates (HTML-to-Markdown, smart truncation).
+- **`ene-tool-proto`** — Protocol contract. Defines `ToolProvider` trait, `ToolSpec`/`ToolError` types, `IpcRequest`/`IpcResponse` wire format (v2), `SandboxConfigData`, and the `run_tool_server()` helper.
+- **`ene-tool-derive`** — Proc-macro crate. `#[derive(ToolSpec)]` generates `ToolSpec` implementations from declarative attributes on args structs.
+- **`ene-tool-host`** — Tool lifecycle manager. Spawns tool binaries as child processes (Unix Domain Sockets / Windows Named Pipes), wraps them with crash resilience (exponential backoff, max 5 restarts), supports MCP servers, and provides Tool RAG filtering via the `ToolRag` struct (HyDE, LLM reranking, per-category limits).
+- **`ene-tools-common`** — Shared utilities consumed by tool crates (`ToolAction` trait, HTML-to-Markdown extraction).
+- **`ene-provider`** — LLM and embedding provider traits (`LlmProvider`, `EmbeddingProvider`), OpenAI-compatible implementation, `HybridRerankProvider` for HyDE/rerank.
 
 ### Tool Providers (IPC Subprocesses)
 - **`ene-tools-fs`** — Filesystem operations: `read`, `write`, `edit`, `delete`, `glob`, `grep`, `patch`, `shell`, `undo`. All operations respect the sandbox configuration.
@@ -65,6 +69,7 @@ EneEvent pipeline (broadcast channel):
   → SpecialToken → Emotion processing
   → ToolCallStart → Tool execution → ToolCallResult → LLM API (loop)
   → PermissionRequired → User approval → PermissionDecision
+  → UserInputRequired → User response → UserInputResponse
   → Finished
   ↓
 Stream task sends updated session back via oneshot
@@ -80,8 +85,8 @@ The actor pattern ensures thread safety and clean separation of concerns:
 |-----------|------|
 | `EneHandle` | Thread-safe public API. Sends commands via mpsc, receives events via broadcast. |
 | `EneActor` | Background task. Owns all mutable state (session, config, registry). |
-| `EneCommand` | Consumer → Actor messages (Run, Cancel, Reconfigure, LoadCharacter, etc.) |
-| `EneEvent` | Actor → Consumer events (TextDelta, ToolCall*, PermissionRequired, Finished, etc.) |
+| `EneCommand` | Consumer → Actor messages (Run, Cancel, Reconfigure, LoadCharacter, ListTools, CallTool, etc.) |
+| `EneEvent` | Actor → Consumer events (TextDelta, ToolCall*, PermissionRequired, UserInputRequired, Finished, etc.) |
 | `stream::run_stream` | Internal streaming engine spawned per Run command. Returns updated session via oneshot. |
 
 Benefits:

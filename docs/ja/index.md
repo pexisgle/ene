@@ -33,7 +33,9 @@ LLM 駆動の会話、アニメーションする VRM キャラクター、ツ�
 - [GUI 自動化](tools/app.md) — `app` メガツール (15 アクション)
 - [ブラウザ自動化](tools/browser.md) — `browser` メガツール (8 アクション, CDP)
 - [セキュリティサンドボックス](tools/sandbox.md) — パス制限, ブロックコマンド, Undo システム
+- [Tool RAG](tools/tool-rag.md) — 埋め込みベースのツール選択, HyDE, リランキング
 - [SDK ガイド](tools/sdk.md) — `ene-tool-proto` によるサードパーティツール開発
+- [Derive Macro](tools/derive-macro.md) — `#[derive(ToolSpec)]` 属性リファレンス
 
 ## アプリケーション
 
@@ -49,9 +51,11 @@ LLM 駆動の会話、アニメーションする VRM キャラクター、ツ�
 | `ene-embedding` | Library | 埋め込みプロバイダ (API + ローカル GGUF) |
 | `ene-memory` | Library | SQLite-vec 記憶ストア |
 | `ene-session` | Library | 会話履歴, セッション分割 |
-| `ene-tool-proto` | Library | IPC プロトコル, `ToolProvider` トレイト |
-| `ene-tool-host` | Library | ツールプロセス管理, MCP 対応 |
-| `ene-tools-common` | Library | 共通ユーティリティ (HTML, 切り詰め) |
+| `ene-provider` | Library | LLM・埋め込みプロバイダトレイト, OpenAI 実装 |
+| `ene-tool-proto` | Library | IPC プロトコル, `ToolProvider` トレイト, `ToolSpec`, `ToolError` |
+| `ene-tool-derive` | Proc-macro | `#[derive(ToolSpec)]` によるツールスペック自動生成 |
+| `ene-tool-host` | Library | ツールプロセス管理, MCP 対応, Tool RAG |
+| `ene-tools-common` | Library | 共通ユーティリティ (`ToolAction` トレイト, HTML 抽出) |
 | `ene-tools-utility` | Binary | ユーティリティツール (question, todo, 時刻, システム情報) |
 | `ene-tools-fs` | Binary | ファイルシステムツール (read, write, edit, shell, undo) |
 | `ene-tools-web` | Binary | Web ツール (fetch, search) |

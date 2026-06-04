@@ -1,34 +1,52 @@
 # ユーティリティツール (`ene-tools-utility`)
 
-**バイナリ:** `ene-tools-utility` | **ステートフル:** はい (TodoStore)
+**バイナリ:** `ene-tools-utility` | **ステートフル:** はい (TodoDb — SQLite ベース、セッション単位)
 
 ユーザーとの対話やタスク管理のためのヘルパーツールを提供します。
 
 ## ツール
 
-### `question`
+### `utility.question`
 
-ユーザーに 1 つ以上の質問を投げかけます。
+ユーザーに 1 つ以上の質問を投げかけます。ツールの実行を一時停止し、対話的なユーザー入力を待ちます。
 
 | パラメータ | 型 | 必須 | 説明 |
 |-----------|------|------|------|
-| `questions` | string[] | はい | ユーザーへの質問リスト |
+| `questions` | QuestionItem[] | はい | オプション付き質問のリスト |
+
+各 `QuestionItem`:
+
+| フィールド | 型 | 必須 | 説明 |
+|-----------|------|------|------|
+| `question` | string | はい | 質問文 |
+| `options` | string[] | はい | 選択可能なオプション |
+| `allow_free_text` | boolean | いいえ | ユーザーが自由形式の回答を入力できるようにする |
+
+**動作:** 初回呼び出し時に `ToolError::UserInputRequired` を返し、ストリームが `EneEvent::UserInputRequired` を送出します。コンシューマーが対話ダイアログを表示します。ユーザーが応答すると、ホストが引数に `_user_answers` を注入してツールを再呼び出しし、フォーマットされた回答を返します。
 
 **使用場面:** 要件が不明確な場合、コンテキストが不足している場合、ユーザーの確認が必要な場合。
-
-**キーワード:** question, ask, clarify, confirm
 
 **カテゴリ:** Utility
 
 ---
 
-### `todo`
+### `utility.todo_list`
 
-セッション単位のタスクリストを管理します。
+アクティブセッションの現在のタスクリストを表示します。
+
+| パラメータ | 型 | 説明 |
+|-----------|------|------|
+| (なし) | — | — |
+
+---
+
+### `utility.todo_add`
+
+セッション単位の TODO リストにタスクを追加します。
 
 | パラメータ | 型 | 必須 | 説明 |
 |-----------|------|------|------|
-| `todos` | object[] | はい | 更新後の完全な TODO リスト |
+| `todos` | object[] | はい | 追加するタスク |
 
 各 TODO 項目:
 
@@ -37,16 +55,43 @@
 | `content` | string | はい | タスク説明 |
 | `status` | string | いいえ | `pending`, `in_progress`, `completed`, `cancelled` |
 | `priority` | string | いいえ | `high`, `medium`, `low` |
-
-**状態:** `TodoStore` (DashMap ベースのインメモリ) によるセッション単位の永続化。ツールバイナリの再起動でクリアされます。
-
-**キーワード:** todo, task, track, plan
-
-**カテゴリ:** Utility
+| `parent_id` | integer | いいえ | 階層用の親 TODO ID |
 
 ---
 
-### `get_current_time`
+### `utility.todo_update`
+
+既存のタスクを更新します。三状態の `parent_id` に対応: 未指定 = スキップ、`null` = 親から切り離し、整数 = 親を変更。
+
+| パラメータ | 型 | 必須 | 説明 |
+|-----------|------|------|------|
+| `todos` | object[] | はい | 更新後の TODO 項目 |
+
+---
+
+### `utility.todo_complete`
+
+タスクを完了としてマークします。親の完了は全子孫にカスケードします (BFS)。
+
+| パラメータ | 型 | 必須 | 説明 |
+|-----------|------|------|------|
+| `todos` | object[] | はい | 完了マークするタスク |
+
+---
+
+### `utility.todo_delete`
+
+タスクをソフトデリートします (ステータスを `cancelled` に設定)。
+
+| パラメータ | 型 | 必須 | 説明 |
+|-----------|------|------|------|
+| `todos` | object[] | はい | 削除するタスク |
+
+**状態:** `TodoDb` (SQLite、埋め込みマイグレーション、WAL モード) によるセッション単位の永続化。各セッションの TODO は `session_id` で分離されます。ツールバイナリの再起動後も生存します。サイクル検出付きの親子階層に対応。
+
+---
+
+### `utility.get_current_time`
 
 現在のシステム日時を返します。
 
@@ -56,13 +101,11 @@
 
 **出力形式:** `2026-05-26 14:30:00`
 
-**キーワード:** time, date
-
 **カテゴリ:** Utility
 
 ---
 
-### `get_system_info`
+### `utility.get_system_info`
 
 OS とアーキテクチャの基本情報を返します。
 
@@ -71,7 +114,5 @@ OS とアーキテクチャの基本情報を返します。
 | (なし) | - |
 
 **出力形式:** `OS: linux, Architecture: x86_64`
-
-**キーワード:** system, os, platform
 
 **カテゴリ:** Utility

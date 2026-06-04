@@ -76,14 +76,13 @@ EneEvent::SpecialToken → poll_ene_events → EneStreamEvent::SpecialToken
 
 ```
 main()
-  ├── clap: Args 解析 (--tooltest フラグ)
+  ├── clap: Args 解析
   ├── config::init()
   │   ├── ensure_resource_dirs()
   │   ├── settings.json 読み込み
   │   └── EneHandle::new() → アクターを生成
-  ├── --tooltest → tooltest::run() → 終了
   └── 通常モード:
-      ├── AppContext { handle: EneHandle }
+      ├── AppContext { handle: EneHandle, commands: Vec<Arc<dyn CliCommand>> }
       └── repl::run(ctx) → 対話ループ
 ```
 
@@ -111,10 +110,11 @@ stream::process_stream(&mut rx, &ctx.handle).await;  // イベントを処理
 | `/prompt` | システムプロンプト表示 |
 | `/card <path>` | キャラクターカード変更 (非同期) |
 | `/config` | 設定表示 |
-| `/tools` | 有効なツール一覧 |
+| `/tool list` | 登録済みツール一覧 |
+| `/tool help <name>` | ツールの詳細ヘルプ表示 |
+| `/tool call <name> <json>` | ツールの直接呼び出し |
 | `/history` | 会話履歴表示 |
-| `/undo` | 最後のファイル操作を取り消し |
-| `/tooltest [prompt]` | ワンショットツールテスト |
+| `/undo` | プレースホルダー (アクターベースランタイムでは未対応) |
 | `/memory search <q>` | 記憶検索 |
 | `/memory list` | 保存済み要約/ファクト一覧 |
 | `/session split` | 手動セッション分割 (ManualSplit コマンド経由) |

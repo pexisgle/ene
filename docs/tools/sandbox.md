@@ -67,14 +67,19 @@ Undo is backed by a SQLite database with zlib compression (`undodb_path`/`undo.d
 
 ## Error Types
 
-Sandbox violations return `ToolError::SandboxViolation { message }` from `ene-tool-proto`. This is a unified error type shared across all tool crates — no boundary mapping is required.
+Sandbox violations return `ToolError::SandboxViolation { message }` from `ene-tool-proto`. This is a unified error type (`EneToolProtoError`) shared across all tool crates — no boundary mapping is required.
 
 ```rust
 pub enum ToolError {
     SandboxViolation { message: String },
     PermissionDenied { message: String },
     PermissionRequired { request_id: String, action: String, target: String, description: String },
-    // ... other variants
+    FileNotFound { path: String },
+    FileTooLarge { path: String, size: u64, limit: u64 },
+    CommandBlocked { command: String, reason: String },
+    ShellTimeout { command: String, timeout_ms: u64 },
+    ShellOutputTooLarge { size: u64, limit: u64 },
+    // ... other variants (see SDK Guide for full list)
 }
 ```
 

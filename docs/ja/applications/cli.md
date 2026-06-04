@@ -6,8 +6,6 @@ AI キャラクターとの対話、ツールテスト、メモリ/セッショ�
 
 ```bash
 cargo run -p ene-cli
-# ツールテストモード:
-cargo run -p ene-cli -- --tooltest
 ```
 
 ## アーキテクチャ
@@ -15,13 +13,29 @@ cargo run -p ene-cli -- --tooltest
 ```
 main.rs → clap 引数解析
   → config::init() → 設定読み込み, EneHandle::new()
-  → AppContext { handle: EneHandle }
+  → AppContext { handle: EneHandle, commands: Vec<Arc<dyn CliCommand>> }
   → repl::run() → dialoguer 入力ループ
-      → process_stream() → EneEvent バリアント処理
-      → commands::execute() → / プレフィックスコマンド処理
+      → stream::process_stream() → EneEvent バリアント処理
+      → commands::execute() → CliCommand トレイト経由の / コマンドディスパッチ
 ```
 
 CLI は起動時に `EneHandle`（アクター）を作成。ユーザー入力は `handle.run()` で送信し、イベントは `handle.subscribe()` で受信。
+
+### CliCommand トレイト
+
+各 `/` コマンドは `CliCommand` トレイトを実装します:
+
+```rust
+#[async_trait]
+pub trait CliCommand: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn description(&self) -> &'static str;
+    fn usage(&self) -> &'static str;
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), String>;
+}
+```
+
+コマンドは `COMMANDS` スライスに登録され、名前でディスパッチされます。
 
 ## REPL コマンド
 
@@ -34,7 +48,7 @@ CLI は起動時に `EneHandle`（アクター）を作成。ユーザー入力�
 | `/quit` | REPL を終了 |
 | `/clear` | 会話履歴をクリア |
 | `/history` | 会話履歴を表示 |
-| `/prompt` | 現在のシステムプロンプトを表示 |
+| `/prompt` | 現在のシステムプロンプトを表示 (system, examples, memory, expression protocol) |
 
 ### キャラクターコマンド
 
@@ -46,16 +60,17 @@ CLI は起動時に `EneHandle`（アクター）を作成。ユーザー入力�
 
 | コマンド | 動作 |
 |---------|------|
-| `/config` | 現在の設定を表示 |
-| `/tools` | 有効な全ツールを一覧 |
-| `/undo` | 最後のファイル操作を取り消し |
-| `/tooltest [prompt]` | ワンショットツールテストを実行 |
+| `/config` | 現在の設定を表示 (provider, model, embedding, memory) |
+| `/tool list` | 登録済みの全ツールを一覧 |
+| `/tool help <name>` | ツールの詳細ヘルプを表示 |
+| `/tool call <name> <json>` | JSON 引数でツールを直接呼び出し |
+| `/undo` | プレースホルダー (アクターベースランタイムでは未対応) |
 
 ### メモリコマンド
 
 | コマンド | 動作 |
 |---------|------|
-| `/memory search <query>` | 長期記憶を検索 |
+| `/memory search <query>` | 長期記憶を検索 (埋め込み類似度) |
 | `/memory list` | 保存済み要約とキーファクトを一覧 |
 
 ### セッション分割コマンド

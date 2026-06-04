@@ -35,6 +35,7 @@ pub struct EneHandle {
 | `run(input)` | Send `EneCommand::Run` (fire-and-forget) |
 | `cancel()` | Send `EneCommand::Cancel` |
 | `decide_permission(request_id, decision)` | Submit a permission decision for a pending destructive operation |
+| `submit_user_input(request_id, response)` | Submit user input response for tools that pause for user interaction |
 | `subscribe()` | Get a fresh `EneEventReceiver` for the broadcast event stream |
 | `get_snapshot()` | Request read-only state via oneshot |
 | `load_character(name)` | Load a character card by name or path |
@@ -42,6 +43,9 @@ pub struct EneHandle {
 | `load_config_from(assets_dir, config_path)` | Load config from specified paths and apply it |
 | `reconfigure(config)` | Apply new config via oneshot |
 | `manual_split()` | Trigger session split via oneshot |
+| `list_tools()` | List all registered tool specs via oneshot |
+| `call_tool(name, arguments)` | Call a tool directly via oneshot |
+| `invalidate_tool_index()` | Invalidate cached tool embeddings for Tool RAG |
 
 ### EneEventReceiver
 
@@ -71,8 +75,12 @@ pub enum EneCommand {
     Reconfigure { config: EneConfig, reply: oneshot::Sender<Result<(), EneCoreError>> },
     LoadCharacter { path: String, reply: oneshot::Sender<Result<(), EneCoreError>> },
     PermissionDecision { request_id: RequestId, decision: PermissionDecision },
+    UserInputResponse { request_id: RequestId, response: UserInputResponse },
     GetSnapshot { reply: oneshot::Sender<EneStateSnapshot> },
     ManualSplit { reply: oneshot::Sender<Result<SplitResult, EneCoreError>> },
+    ListTools { reply: oneshot::Sender<Vec<ToolSpec>> },
+    CallTool { name: String, arguments: String, reply: oneshot::Sender<Result<String, ToolError>> },
+    InvalidateToolIndex,
 }
 ```
 
@@ -87,6 +95,7 @@ pub enum EneEvent {
     ToolCallStart { name: String, arguments: String },
     ToolCallResult { name: String, result: String },
     PermissionRequired { request_id: RequestId, action: String, target: String, description: String },
+    UserInputRequired { request_id: RequestId, prompt: UserInputPrompt },
     TaskProgress { task_id: String, step: usize, total_steps: Option<usize>, description: String },
     SessionSplit { summary: String, reason: SplitReason },
     Done,
@@ -119,7 +128,7 @@ stream task (run_stream):
   │     ├── LLM streaming → TextDelta / SpecialToken events
   │     ├── If tool_calls:
   │     │     ├── ToolCallStart event
-  │     │     ├── Execute tool (with permission check if needed)
+  │     │     ├── Execute tool (with permission check / user input if needed)
   │     │     ├── ToolCallResult event
   │     │     └── Continue loop
   │     └── If no tool_calls:
@@ -148,6 +157,26 @@ Stream task resumes or denies tool execution
 
 Permissions are resolved through a shared `Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>` between the actor and the stream task.
 
+## User Input Handling
+
+Some tools (e.g. `utility.question`) need to pause execution and ask the user for interactive input:
+
+```
+Tool execution → ToolError::UserInputRequired { request_id, prompt }
+  ↓
+Stream task emits EneEvent::UserInputRequired { request_id, prompt }
+  ↓
+Consumer displays interactive dialog (selectable options + free text)
+  ↓
+Consumer sends EneCommand::UserInputResponse { request_id, response }
+  ↓
+Actor routes response to the waiting stream task via pending_user_inputs map
+  ↓
+Stream task injects _user_answers into tool args and re-calls the tool
+```
+
+`UserInputResponse` is either `Multi(Vec<MultiAnswer>)` (one answer per question) or `Cancel`. Each `MultiAnswer` is `Selected { option }`, `Answer { text }`, or `Skip`.
+
 ## Session Updates
 
 After the stream task completes, it sends the updated `ConversationSession` back to the actor via a oneshot channel. The actor polls for this completion:
@@ -172,6 +201,7 @@ The cancel token is checked inside `while let Some(chunk) = stream.next().await`
 | LLM API error | `EneEvent::Failed` + `Done`, stream returns |
 | Tool timeout (60s) | Tool error message sent back to LLM |
 | Permission denied | Tool error sent back to LLM |
+| User input cancelled | Tool error sent back to LLM |
 | Max rounds exceeded | `EneEvent::Failed` + `Done` |
 | Embedding error | `EneEvent::Failed` + `Done` |
 | Broadcast Lagged | Consumer logs warning, continues reading |

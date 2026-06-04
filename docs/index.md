@@ -31,7 +31,9 @@ ene is a local AI character platform implemented as a Rust workspace. It provide
 - [GUI Automation](tools/app.md) — `app` mega-tool (15 actions)
 - [Browser Automation](tools/browser.md) — `browser` mega-tool (8 actions via CDP)
 - [Security Sandbox](tools/sandbox.md) — Path restrictions, blocked commands, undo system
+- [Tool RAG](tools/tool-rag.md) — Embedding-based tool selection, HyDE, reranking
 - [SDK Guide](tools/sdk.md) — Building third-party tools with `ene-tool-proto`
+- [Derive Macro](tools/derive-macro.md) — `#[derive(ToolSpec)]` attribute reference
 
 ## Applications
 
@@ -47,9 +49,11 @@ ene is a local AI character platform implemented as a Rust workspace. It provide
 | `ene-embedding` | Library | Embedding providers (API + local GGUF) |
 | `ene-memory` | Library | SQLite-vec memory store |
 | `ene-session` | Library | Conversation history, session splitting |
-| `ene-tool-proto` | Library | IPC protocol, `ToolProvider` trait |
-| `ene-tool-host` | Library | Tool process manager, MCP support |
-| `ene-tools-common` | Library | Shared utilities (HTML, truncation) |
+| `ene-provider` | Library | LLM and embedding provider traits, OpenAI implementation |
+| `ene-tool-proto` | Library | IPC protocol, `ToolProvider` trait, `ToolSpec`, `ToolError` |
+| `ene-tool-derive` | Proc-macro | `#[derive(ToolSpec)]` for auto-generated tool specs |
+| `ene-tool-host` | Library | Tool process manager, MCP support, Tool RAG |
+| `ene-tools-common` | Library | Shared utilities (`ToolAction` trait, HTML extraction) |
 | `ene-tools-utility` | Binary | Utility tools (question, todo, time, system info) |
 | `ene-tools-fs` | Binary | Filesystem tools (read, write, edit, shell, undo) |
 | `ene-tools-web` | Binary | Web tools (fetch, search) |
