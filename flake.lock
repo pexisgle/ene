@@ -22,11 +22,11 @@
     "apollo-skills": {
       "flake": false,
       "locked": {
-        "lastModified": 1780506714,
-        "narHash": "sha256-xZWRiepURNh1pzh/JwQfM+sMZ+HmWLq4WMmpMZtvn/s=",
+        "lastModified": 1780589749,
+        "narHash": "sha256-UW2HLQ8L6klCAdqmtzCyZbCjphbCvIbvPpbCEo+CDko=",
         "owner": "apollographql",
         "repo": "skills",
-        "rev": "9ccf13477e116ec095ba9b606212492ffbd42926",
+        "rev": "605089108a198e412f7f0c1926c91eb94a6d1727",
         "type": "github"
       },
       "original": {
@@ -71,7 +71,10 @@
     },
     "home-manager": {
       "inputs": {
-        "nixpkgs": ["agent-skills", "nixpkgs"]
+        "nixpkgs": [
+          "agent-skills",
+          "nixpkgs"
+        ]
       },
       "locked": {
         "lastModified": 1780099287,
@@ -105,11 +108,11 @@
     },
     "nixpkgs_2": {
       "locked": {
-        "lastModified": 1779560665,
-        "narHash": "sha256-tpyBcxPpcQb8ukyNF7DoCwfSY3VPsxHoYwj00Cayv5o=",
+        "lastModified": 1780243769,
+        "narHash": "sha256-x5UQuRsH3MqI0U9afaXSNqzTPSeZlRLvFAav2Ux1pNw=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "64c08a7ca051951c8eae34e3e3cb1e202fe36786",
+        "rev": "331800de5053fcebacf6813adb5db9c9dca22a0c",
         "type": "github"
       },
       "original": {
@@ -152,11 +155,11 @@
         "nixpkgs": "nixpkgs_3"
       },
       "locked": {
-        "lastModified": 1780110990,
-        "narHash": "sha256-6QBThUi7SuK+dgA+DCaEkQGZN4kYx6DpXmK45+MG9zI=",
+        "lastModified": 1780629589,
+        "narHash": "sha256-oHysjxZdaEqkmyDpN8G1bl3V+r9uyRD1O66bH0bq0Cs=",
         "owner": "oxalica",
         "repo": "rust-overlay",
-        "rev": "85570ef134d92a8702de6afd1f6f0209c863fa91",
+        "rev": "7a5a1c0a5cb86a28224304309b68f050835fd1f6",
         "type": "github"
       },
       "original": {
