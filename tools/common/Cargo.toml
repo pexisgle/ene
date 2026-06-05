@@ -10,6 +10,9 @@ scraper = "0.27"
 ego-tree = "0.11"
 regex = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 async-trait = { workspace = true }
+schemars = { workspace = true }
 ene-tool-proto = { workspace = true }
+ene-tool-derive = { workspace = true }
 ene-common = { workspace = true }

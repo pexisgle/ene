@@ -13,24 +13,24 @@ impl AppToolProvider {
     pub fn new() -> Self {
         let actions: Vec<Box<dyn ToolAction>> = vec![
             // Window management (5)
-            Box::new(action::ListWindowsAction),
-            Box::new(action::FocusWindowAction),
-            Box::new(action::GetActiveWindowAction),
-            Box::new(action::ListMonitorsAction),
-            Box::new(action::CaptureWindowAction),
+            Box::new(action::ListWindowsAction::default()),
+            Box::new(action::FocusWindowAction::default()),
+            Box::new(action::GetActiveWindowAction::default()),
+            Box::new(action::ListMonitorsAction::default()),
+            Box::new(action::CaptureWindowAction::default()),
             // Input simulation (5)
-            Box::new(action::TypeTextAction),
-            Box::new(action::PressKeyAction),
-            Box::new(action::KeyComboAction),
-            Box::new(action::MouseMoveAction),
-            Box::new(action::MouseClickAction),
-            Box::new(action::MouseDragAction),
-            Box::new(action::MouseScrollAction),
+            Box::new(action::TypeTextAction::default()),
+            Box::new(action::PressKeyAction::default()),
+            Box::new(action::KeyComboAction::default()),
+            Box::new(action::MouseMoveAction::default()),
+            Box::new(action::MouseClickAction::default()),
+            Box::new(action::MouseDragAction::default()),
+            Box::new(action::MouseScrollAction::default()),
             // Screen capture (1)
-            Box::new(action::ScreenshotAction),
+            Box::new(action::ScreenshotAction::default()),
             // Clipboard (2)
-            Box::new(action::ClipboardReadAction),
-            Box::new(action::ClipboardWriteAction),
+            Box::new(action::ClipboardReadAction::default()),
+            Box::new(action::ClipboardWriteAction::default()),
         ];
         Self { actions }
     }
@@ -49,7 +49,7 @@ impl ToolProvider for AppToolProvider {
     }
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         for action in &self.actions {
-            if action.tool_name() == name {
+            if action.name() == name {
                 return action.execute(arguments).await;
             }
         }

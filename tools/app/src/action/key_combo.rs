@@ -1,72 +1,24 @@
-use async_trait::async_trait;
-use ene_tool_common::ToolAction;
-use ene_tool_proto::{
-    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
-};
+use ene_tool_common::prelude::*;
 use enigo::{Key, Keyboard};
-use serde::Deserialize;
 
-#[derive(Deserialize)]
-struct KeyComboArgs {
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema, ToolAction)]
+#[tool(
+    namespace = "app",
+    name = "keyboard_combo",
+    summary = "Simulates a key combination with '+' separator (e.g., 'ctrl+c', 'alt+f4').",
+    description = "Simulates a key combination with '+' separator (e.g., 'ctrl+c', 'alt+f4').",
+    category = "App",
+    keywords_primary = "keyboard, combo, shortcut, hotkey"
+)]
+pub struct KeyComboAction {
+    /// Key combination with '+' separator (e.g., 'ctrl+shift+s', 'ctrl+c').
     #[serde(alias = "combo_str")]
     key_combo: String,
 }
 
-/// Action to execute a key combination.
-pub struct KeyComboAction;
-
-#[async_trait]
-impl ToolAction for KeyComboAction {
-    fn tool_name(&self) -> &'static str {
-        "app.keyboard_combo"
-    }
-
-    fn definition(&self) -> ToolSpec {
-        ToolSpec {
-            name: ToolName::new("app.keyboard_combo"),
-            version: ToolVersion::default(),
-            display_name:
-                "Simulates a key combination with '+' separator (e.g., 'ctrl+c', 'alt+f4')."
-                    .to_string(),
-            summary: "Simulates a key combination with '+' separator (e.g., 'ctrl+c', 'alt+f4')."
-                .to_string(),
-            description:
-                "Simulates a key combination with '+' separator (e.g., 'ctrl+c', 'alt+f4')."
-                    .to_string(),
-            category: ToolCategory::App,
-            keywords: KeywordSet::primary_only(["keyboard", "combo", "shortcut", "hotkey"]),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "key_combo": { "type": "string", "description": "Key combination with '+' separator (e.g., 'ctrl+shift+s', 'ctrl+c'). The legacy alias `combo_str` is also accepted for backward compatibility." }
-                },
-                "required": ["key_combo"]
-            }),
-            examples: vec![
-                ToolExample {
-                    description: "Copy (Ctrl+C)".to_string(),
-                    input: serde_json::json!({"key_combo": "ctrl+c"}),
-                    output: None,
-                },
-                ToolExample {
-                    description: "Save (Ctrl+S)".to_string(),
-                    input: serde_json::json!({"key_combo": "ctrl+s"}),
-                    output: None,
-                },
-            ],
-            caveats: Vec::new(),
-            side_effects: SideEffects::default(),
-            preconditions: Vec::new(),
-            related: Vec::new(),
-        }
-    }
-
-    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
-        let args: KeyComboArgs =
-            serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
-                message: format!("Invalid arguments: {e}"),
-            })?;
-        let combo = args.key_combo.clone();
+impl KeyComboAction {
+    async fn run(&self) -> Result<String, ToolError> {
+        let combo = self.key_combo.clone();
         tokio::task::spawn_blocking(move || {
             let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| {
                 ToolError::ExecutionFailed {

@@ -14,24 +14,24 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+ene-tool-common = { git = "https://github.com/pexisgle/Ene" }
 ene-tool-proto = { git = "https://github.com/pexisgle/Ene" }
 ene-tool-derive = { git = "https://github.com/pexisgle/Ene" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"
+async-trait = "0.1"
 ```
 
-### 2. Define Args Structs with `#[derive(ToolSpec)]`
+### 2. Define Actions with `#[derive(ToolAction)]`
 
-Each tool has a typed args struct. The derive macro generates a `spec() -> ToolSpec` method with auto-generated JSON Schema (via `schemars`), and a `TOOL_NAME` constant for dispatch.
+Each tool is a struct with `#[derive(ToolAction)]`. The derive macro generates the `ToolSpec`, JSON Schema, and `ToolAction` impl. You write the business logic in `async fn run(&self)`.
 
 ```rust
-use ene_tool_derive::ToolSpec;
-use schemars::JsonSchema;
-use serde::Deserialize;
+use ene_tool_common::prelude::*;
 
-#[derive(ToolSpec, JsonSchema, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "greeter",
     name = "hello",
@@ -40,38 +40,36 @@ use serde::Deserialize;
     keywords_primary = "greeting, hello",
     side_effects = "ReadOnly"
 )]
-pub struct HelloArgs {
+pub struct HelloAction {
     /// Name to greet.
-    pub name: String,
+    name: String,
+}
+
+impl HelloAction {
+    async fn run(&self) -> Result<String, ToolError> {
+        Ok(format!("Hello, {}!", self.name))
+    }
 }
 ```
-
-The derive macro generates:
-- `HelloArgs::TOOL_NAME` = `"greeter.hello"`
-- `HelloArgs::spec()` → full `ToolSpec` with auto-generated JSON Schema from `schemars`
 
 ### 3. Implement ToolProvider
 
 ```rust
-use ene_tool_proto::{ToolError, ToolProvider, ToolSpec, run_tool_server};
-use async_trait::async_trait;
+use ene_tool_proto::{ToolError, ToolProvider, ToolSpec};
 
 struct MyToolProvider;
 
 #[async_trait]
 impl ToolProvider for MyToolProvider {
     fn list_specs(&self) -> Vec<ToolSpec> {
-        vec![HelloArgs::spec()]
+        vec![HelloAction::default().definition()]
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         match name {
-            HelloArgs::TOOL_NAME => {
-                let args: HelloArgs = serde_json::from_str(arguments)
-                    .map_err(|e| ToolError::InvalidArguments {
-                        message: e.to_string(),
-                    })?;
-                Ok(format!("Hello, {}!", args.name))
+            HelloAction::TOOL_NAME => {
+                let action = HelloAction::default();
+                action.execute(arguments).await
             }
             _ => Err(ToolError::NotFound {
                 tool_name: name.to_string(),
@@ -112,37 +110,104 @@ cp target/release/my-cool-tool ~/.local/share/dev.pexisgle.ene/tools/
 }
 ```
 
-## Multiple Tools
+## Stateful Actions
 
-Expose multiple tools from a single provider by returning multiple specs:
+For actions that need injected dependencies (sandbox, database, HTTP client), use `#[tool(skip)]`:
 
 ```rust
-#[derive(ToolSpec, JsonSchema, Deserialize)]
-#[tool(namespace = "calculator", name = "add", summary = "Add two numbers.", category = "Utility")]
-pub struct AddArgs { pub a: f64, pub b: f64 }
+use ene_tool_common::prelude::*;
+use std::sync::Arc;
 
-#[derive(ToolSpec, JsonSchema, Deserialize)]
+fn default_client() -> reqwest::Client {
+    reqwest::Client::new()
+}
+
+#[derive(Clone, Deserialize, JsonSchema, ToolAction)]
+#[tool(
+    namespace = "myapi",
+    name = "fetch",
+    summary = "Fetch data from the API.",
+    category = "WebFetch"
+)]
+pub struct FetchAction {
+    /// The endpoint to call.
+    endpoint: String,
+
+    #[tool(skip)]
+    #[serde(skip, default = "default_client")]
+    client: reqwest::Client,
+}
+
+impl FetchAction {
+    pub fn new(client: reqwest::Client) -> Self {
+        Self {
+            endpoint: String::new(),
+            client,
+        }
+    }
+
+    async fn run(&self) -> Result<String, ToolError> {
+        let resp = self.client.get(&self.endpoint).send().await
+            .map_err(|e| ToolError::ExecutionFailed { message: e.to_string() })?;
+        Ok(resp.text().await.unwrap_or_default())
+    }
+}
+```
+
+The provider constructs the action with real dependencies, then `execute()` copies them in:
+
+```rust
+async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
+    match name {
+        FetchAction::TOOL_NAME => {
+            let action = FetchAction::new(self.client.clone());
+            action.execute(arguments).await
+        }
+        _ => Err(ToolError::NotFound { tool_name: name.to_string() }),
+    }
+}
+```
+
+## Multiple Tools
+
+Expose multiple tools from a single provider:
+
+```rust
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema, ToolAction)]
+#[tool(namespace = "calculator", name = "add", summary = "Add two numbers.", category = "Utility")]
+pub struct AddAction { a: f64, b: f64 }
+
+impl AddAction {
+    async fn run(&self) -> Result<String, ToolError> {
+        Ok(format!("{} + {} = {}", self.a, self.b, self.a + self.b))
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema, ToolAction)]
 #[tool(namespace = "calculator", name = "subtract", summary = "Subtract two numbers.", category = "Utility")]
-pub struct SubtractArgs { pub a: f64, pub b: f64 }
+pub struct SubtractAction { a: f64, b: f64 }
+
+impl SubtractAction {
+    async fn run(&self) -> Result<String, ToolError> {
+        Ok(format!("{} - {} = {}", self.a, self.b, self.a - self.b))
+    }
+}
 
 struct CalculatorProvider;
 
 #[async_trait]
 impl ToolProvider for CalculatorProvider {
     fn list_specs(&self) -> Vec<ToolSpec> {
-        vec![AddArgs::spec(), SubtractArgs::spec()]
+        vec![
+            AddAction::default().definition(),
+            SubtractAction::default().definition(),
+        ]
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         match name {
-            AddArgs::TOOL_NAME => {
-                let args: AddArgs = serde_json::from_str(arguments)?;
-                Ok(format!("{} + {} = {}", args.a, args.b, args.a + args.b))
-            }
-            SubtractArgs::TOOL_NAME => {
-                let args: SubtractArgs = serde_json::from_str(arguments)?;
-                Ok(format!("{} - {} = {}", args.a, args.b, args.a - args.b))
-            }
+            AddAction::TOOL_NAME => AddAction::default().execute(arguments).await,
+            SubtractAction::TOOL_NAME => SubtractAction::default().execute(arguments).await,
             _ => Err(ToolError::NotFound { tool_name: name.to_string() }),
         }
     }
@@ -150,8 +215,6 @@ impl ToolProvider for CalculatorProvider {
     fn set_session_id(&self, _session_id: &str) {}
 }
 ```
-
-Each tool is a first-class `ToolSpec` with its own typed args, auto-generated JSON Schema, and rich metadata for the Tool RAG pipeline.
 
 ## ToolProvider Trait Reference
 
@@ -209,10 +272,10 @@ pub struct ToolSpec {
 }
 ```
 
-## `#[derive(ToolSpec)]` Attributes
+## `#[tool(...)]` Attributes
 
 ```rust
-#[derive(ToolSpec, JsonSchema, Deserialize)]
+#[derive(ToolAction, JsonSchema, Deserialize)]
 #[tool(
     // Required
     namespace = "calculator",        // Namespace prefix
@@ -240,51 +303,15 @@ pub struct ToolSpec {
     // Examples (semicolon-separated, each: description|input|output)
     examples = "Add 2 and 3|{ \"a\": 2, \"b\": 3 }|2 + 3 = 5"
 )]
-pub struct AddArgs {
+pub struct AddAction {
     /// First operand.
-    pub a: f64,
+    a: f64,
     /// Second operand.
-    pub b: f64,
+    b: f64,
 }
 ```
 
 See [derive-macro.md](derive-macro.md) for the full attribute reference.
-
-## ToolName
-
-A validated, namespaced tool identifier:
-
-```rust
-ToolName::new("filesystem.read")  // namespace = "filesystem", action = "read"
-ToolName::new("get_current_time") // no namespace
-```
-
-## KeywordSet
-
-Structured keywords with weighted tiers for Tool RAG:
-
-```rust
-KeywordSet {
-    primary: vec!["read", "open", "cat"],      // weight 1.0
-    secondary: vec!["file", "filesystem"],      // weight 0.6
-    domain: vec!["linux", "posix"],             // weight 0.3
-    negative: vec!["write", "delete"],          // weight -0.5 (penalty)
-}
-```
-
-## SideEffects
-
-```rust
-pub enum SideEffects {
-    ReadOnly,                           // No side effects
-    FileSystem { mutates: bool },       // File I/O
-    Network { external: bool },         // Network access
-    System { privileged: bool },        // Process spawn, signals
-    Browser { mutates_dom: bool },      // Browser automation
-    Destructive,                        // Data loss possible
-    Idempotent,                         // Safe to retry
-}
-```
 
 ## ToolCategory
 
@@ -304,9 +331,7 @@ pub enum SideEffects {
 ## ToolError
 
 ```rust
-pub type ToolError = EneToolProtoError;
-
-pub enum EneToolProtoError {
+pub enum ToolError {
     NotFound { tool_name: String },
     InvalidArguments { message: String },
     ExecutionFailed { message: String },
@@ -344,9 +369,10 @@ Tool binary starts
 
 ## Best Practices
 
-1. **One args struct per tool** — Each tool gets its own `#[derive(ToolSpec)]` struct. This gives you typed args, auto-generated JSON Schema, and a `TOOL_NAME` constant for dispatch.
-2. **Use namespaces** — Group related tools under a namespace (e.g. `calculator.add`, `calculator.subtract`).
-3. **Write good summaries** — The summary is the primary embedding field for Tool RAG. Be clear about when and how to use the tool.
-4. **Use keywords** — Include synonyms and related terms. Primary keywords are weighted highest in RAG scoring.
-5. **Set side effects correctly** — This helps the LLM understand tool safety and helps the sandbox make correct decisions.
-6. **Handle errors gracefully** — Return `ToolError` variants with clear messages. The LLM may try to correct its usage based on error messages.
+1. **Use `#[derive(ToolAction)]`** — One derive generates the spec, schema, and dispatch. Write `async fn run(&self)` for your logic.
+2. **Use `#[tool(skip)]` for dependencies** — Sandbox, database, HTTP client, etc. are hidden from the LLM and injected by the provider.
+3. **Use namespaces** — Group related tools under a namespace (e.g. `calculator.add`, `calculator.subtract`).
+4. **Write good summaries** — The summary is the primary embedding field for Tool RAG. Be clear about when and how to use the tool.
+5. **Use keywords** — Include synonyms and related terms. Primary keywords are weighted highest in RAG scoring.
+6. **Set side effects correctly** — This helps the LLM understand tool safety and helps the sandbox make correct decisions.
+7. **Handle errors gracefully** — Return `ToolError` variants with clear messages. The LLM may try to correct its usage based on error messages.

@@ -7,6 +7,7 @@ description = "OS-level GUI automation: window management, keyboard/mouse contro
 [dependencies]
 ene-tool-proto = { workspace = true }
 ene-tool-common = { workspace = true }
+ene-tool-derive = { workspace = true }
 enigo = "0.6"
 xcap = "0.9.6"
 active-win-pos-rs = "0.11.0"
@@ -16,6 +17,7 @@ tokio = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 async-trait = { workspace = true }
+schemars = { workspace = true }
 tracing = { workspace = true }
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 

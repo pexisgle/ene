@@ -1,15 +1,12 @@
-//! Attribute parsing for the `#[tool(...)]` container attribute on the
-//! `ToolSpec` derive.
+//! Attribute parsing for the `#[tool(...)]` container attribute and the
+//! `#[arg(...)]` field-level attribute on `ToolSpec` derive input.
 
-use darling::{FromDeriveInput, FromMeta};
+use darling::{FromDeriveInput, FromField, FromMeta};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::Path;
 
 /// A comma-separated list of strings, parsed from a single `FromMeta` value.
-///
-/// Usage: `keywords_primary = "read, open, cat"` parses to
-/// `vec!["read", "open", "cat"]`. Whitespace around entries is stripped.
 #[derive(Debug, Clone, Default)]
 pub struct StringList(pub Vec<String>);
 
@@ -26,10 +23,6 @@ impl FromMeta for StringList {
 }
 
 /// A semicolon-separated list of strings, parsed from a single `FromMeta` value.
-///
-/// Used for `examples = "..."` where individual example strings contain
-/// commas and pipes (e.g. JSON input) and the only safe top-level
-/// separator is `;`.
 #[derive(Debug, Clone, Default)]
 pub struct SemiList(pub Vec<String>);
 
@@ -43,6 +36,91 @@ impl FromMeta for SemiList {
                 .collect(),
         ))
     }
+}
+
+/// A field-level `#[arg(...)]` block.
+///
+/// All members are optional. The default is "no overrides", meaning the
+/// field is included in the schema with whatever `schemars` produces
+/// from the field's Rust type plus its `///` doc comment.
+#[derive(Debug, Default, FromField)]
+#[darling(attributes(arg))]
+pub struct ArgAttrs {
+    /// When `true`, the field is hidden from the generated JSON schema.
+    /// Use this for fields that are set by the host and not by the LLM
+    /// (e.g. `_user_answers` on a re-invocation path).
+    #[darling(default)]
+    pub internal: bool,
+
+    /// Constrain this `String` (or string-typed) field to a fixed set of
+    /// values. Comma-separated: `enum_values = "left, right, middle"`.
+    #[darling(default)]
+    pub enum_values: StringList,
+
+    /// Default value to inject into the schema's `default` field, as a
+    /// JSON literal: `default = "left"`, `default = "42"`, etc.
+    #[darling(default)]
+    pub default: Option<String>,
+
+    /// Minimum (inclusive) for numeric fields.
+    #[darling(default)]
+    pub minimum: Option<i64>,
+
+    /// Maximum (inclusive) for numeric fields.
+    #[darling(default)]
+    pub maximum: Option<i64>,
+
+    /// Minimum length for string fields.
+    #[darling(default)]
+    pub min_length: Option<usize>,
+
+    /// Maximum length for string fields.
+    #[darling(default)]
+    pub max_length: Option<usize>,
+
+    /// Minimum number of array items.
+    #[darling(default)]
+    pub min_items: Option<usize>,
+
+    /// Maximum number of array items.
+    #[darling(default)]
+    pub max_items: Option<usize>,
+
+    /// Free-form description override. If unset, the `///` doc comment on
+    /// the field is used (and schemars puts it in `description`).
+    #[darling(default)]
+    pub description: Option<String>,
+
+    /// When `true`, drop the field from `properties` AND `required` in the
+    /// generated schema. Alias for `internal` kept for readability.
+    #[darling(default)]
+    pub hidden: bool,
+
+    /// When `true`, the field is a stateful field (not an arg). It is
+    /// hidden from the schema and NOT deserialized from JSON. Instead,
+    /// it is copied from `self` in the generated `execute()` method.
+    /// Use `#[serde(skip, default = "...")]` alongside this.
+    #[darling(default)]
+    pub skip: bool,
+}
+
+impl ArgAttrs {
+    pub fn is_hidden(&self) -> bool {
+        self.internal || self.hidden || self.skip
+    }
+}
+
+/// Check if a field has `#[tool(skip)]`.
+pub fn has_tool_skip(field: &syn::Field) -> bool {
+    for attr in &field.attrs {
+        if attr.path().is_ident("tool")
+            && let Ok(meta) = attr.parse_args::<syn::Ident>()
+            && meta == "skip"
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Debug, FromDeriveInput, Default)]
@@ -110,12 +188,6 @@ pub struct ToolSpecAttrs {
 
     /// Examples, each expressed as a `ToolExample` literal. Format:
     /// `examples = "desc1|input1|output1; desc2|input2"`.
-    ///
-    /// Examples can be provided as a semicolon-separated list, each entry
-    /// being `description|input|optional_output`. Use a leading `s:` to
-    /// treat the input as a JSON string, or `j:` to require JSON parsing.
-    /// When neither prefix is present, the input is treated as JSON and
-    /// falls back to a string value on parse failure.
     #[darling(default)]
     pub examples: SemiList,
 }
@@ -126,10 +198,6 @@ impl ToolSpecAttrs {
             Some(ns) => format!("{}.{}", ns, self.name),
             None => self.name.clone(),
         }
-    }
-
-    pub fn tool_name_value(&self) -> darling::Result<String> {
-        Ok(self.full_name())
     }
 
     pub fn display_name_value(&self, _default: String) -> String {
@@ -226,7 +294,7 @@ impl ToolSpecAttrs {
 
     pub fn args_const_ident(&self, struct_ident: &syn::Ident) -> syn::Ident {
         let n = self.full_name().to_uppercase().replace('.', "_");
-        let _ = struct_ident; // kept for symmetry; we ignore the struct name
+        let _ = struct_ident;
         syn::Ident::new(&format!("_TOOL_ARGS_{n}"), struct_ident.span())
     }
 }
@@ -240,7 +308,7 @@ fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
 }
 
 fn title_case(s: &str) -> String {
-    s.split(|c: char| c == '_' || c == '.')
+    s.split(['_', '.'])
         .filter(|p| !p.is_empty())
         .map(|p| {
             let mut chars = p.chars();
@@ -253,24 +321,19 @@ fn title_case(s: &str) -> String {
 }
 
 fn path_token(name: &str, default_module: &str) -> TokenStream2 {
-    if name.contains("::") {
-        // User provided a fully qualified path
-        if let Ok(path) = syn::parse_str::<Path>(name) {
-            return quote! { #path };
-        }
+    if name.contains("::")
+        && let Ok(path) = syn::parse_str::<Path>(name)
+    {
+        return quote! { #path };
     }
     let mut parts = name.split_whitespace();
     let head = parts.next().unwrap_or("ReadOnly");
     if let Ok(ident) = syn::parse_str::<syn::Ident>(head) {
         if ident == "ReadOnly" || ident == "Destructive" || ident == "Idempotent" {
-            // Default unit variant
             let mod_path: syn::Path =
                 syn::parse_str(default_module).expect("default_module must be a valid path");
             return quote! { #mod_path::#ident };
         }
-        // Map "Filesystem" -> ToolCategory::Filesystem
-        // Map "FileSystem{...}" -> SideEffects::FileSystem{...}
-        // Fallback: parse as fully qualified into the default module
         if name.contains('{') {
             let mod_path: syn::Path =
                 syn::parse_str(default_module).expect("default_module must be a valid path");
@@ -284,8 +347,6 @@ fn path_token(name: &str, default_module: &str) -> TokenStream2 {
             syn::parse_str(default_module).expect("default_module must be a valid path");
         return quote! { #mod_path::#ident };
     }
-    // Last resort: use the input as an expression and let the compiler
-    // resolve it.
     let stream: TokenStream2 = syn::parse_str(name).unwrap_or_else(|_| quote! { ReadOnly });
     stream
 }

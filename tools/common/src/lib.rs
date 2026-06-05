@@ -27,10 +27,30 @@ pub mod html;
 /// Unified tool action interface.
 pub mod action;
 
-pub use action::ToolAction;
+pub use action::{ToolAction, ToolSpecArgs};
 
 /// Re-exports of smart truncation from ene-common.
 pub mod truncate {
     #[doc(no_inline)]
     pub use ene_common::truncate::{Truncate, TruncateResult};
+}
+
+/// Common imports for tool action files.
+///
+/// Use `use ene_tool_common::prelude::*;` to bring in the most frequently
+/// needed items in a single line.
+pub mod prelude {
+    #[doc(no_inline)]
+    pub use async_trait::async_trait;
+    #[doc(no_inline)]
+    pub use ene_tool_derive::{ToolAction, ToolSpec, tool_action};
+    #[doc(no_inline)]
+    pub use ene_tool_proto::ToolError;
+    #[doc(no_inline)]
+    pub use schemars::JsonSchema;
+    #[doc(no_inline)]
+    pub use serde::Deserialize;
+
+    #[doc(no_inline)]
+    pub use crate::ToolAction as _;
 }

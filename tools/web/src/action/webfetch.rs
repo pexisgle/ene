@@ -1,96 +1,61 @@
-use async_trait::async_trait;
-use ene_tool_common::ToolAction;
-use ene_tool_proto::{
-    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
-};
-use serde::Deserialize;
+use ene_tool_common::prelude::*;
 
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_TIMEOUT_SECS: u64 = 120;
 
-#[derive(Deserialize)]
-struct WebFetchArgs {
+fn default_client() -> reqwest::Client {
+    reqwest::Client::new()
+}
+
+#[derive(Clone, Deserialize, JsonSchema, ToolAction)]
+#[tool(
+    namespace = "web",
+    name = "fetch",
+    summary = "Fetch a URL and return its content as text or markdown.",
+    description = "Fetches content from a URL and returns it in the requested format (markdown, text, or html). Supports configurable timeout and automatically converts HTML to readable markdown.",
+    category = "WebFetch",
+    keywords_primary = "fetch, url, web, download, html"
+)]
+pub struct WebFetchAction {
+    #[tool(skip)]
+    #[serde(skip, default = "default_client")]
+    client: reqwest::Client,
+    /// The URL to fetch content from (must start with http:// or https://).
     url: String,
+    /// The format to return: text, markdown, or html. Defaults to markdown.
+    #[arg(enum_values = "text, markdown, html", default = "markdown")]
     #[serde(default)]
     format: Option<String>,
+    /// Optional timeout in seconds (max 120).
+    #[arg(minimum = 1, maximum = 120, default = "30")]
     #[serde(default)]
     timeout: Option<u64>,
 }
 
-/// Action to fetch content from a URL.
-pub struct WebFetchAction {
-    client: reqwest::Client,
-}
-
 impl WebFetchAction {
-    /// Creates a new `WebFetchAction` with a given HTTP client.
     pub fn new(client: reqwest::Client) -> Self {
-        Self { client }
-    }
-}
-
-#[async_trait]
-impl ToolAction for WebFetchAction {
-    fn tool_name(&self) -> &'static str {
-        "web.fetch"
-    }
-
-    fn definition(&self) -> ToolSpec {
-        ToolSpec {
-            name: ToolName::new("web.fetch"),
-            version: ToolVersion::default(),
-            display_name: "Fetch a URL and return its content as text or markdown.".to_string(),
-            summary: "Fetch a URL and return its content as text or markdown.".to_string(),
-            description: "Fetches content from a URL and returns it in the requested format (markdown, text, or html). Supports configurable timeout and automatically converts HTML to readable markdown.".to_string(),
-            category: ToolCategory::WebFetch,
-            keywords: KeywordSet::primary_only(["fetch", "url", "web", "download", "html"]),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "url": { "type": "string", "description": "The URL to fetch content from (must start with http:// or https://)" },
-                    "format": { "type": "string", "description": "The format to return: text, markdown, or html. Defaults to markdown.", "enum": ["text", "markdown", "html"] },
-                    "timeout": { "type": "integer", "description": "Optional timeout in seconds (max 120)" }
-                },
-                "required": ["url"]
-            }),
-            examples: vec![
-                ToolExample {
-                    description: "Fetch a webpage as markdown".to_string(),
-                    input: serde_json::json!({"url": "https://example.com"}),
-                    output: Some("Content of example.com converted to readable markdown".to_string()),
-                },
-                ToolExample {
-                    description: "Fetch with text format and custom timeout".to_string(),
-                    input: serde_json::json!({"url": "https://api.example.com/data", "format": "text", "timeout": 15}),
-                    output: None,
-                },
-            ],
-            caveats: Vec::new(),
-            side_effects: SideEffects::default(),
-            preconditions: Vec::new(),
-            related: Vec::new(),
+        Self {
+            client,
+            url: String::new(),
+            format: None,
+            timeout: None,
         }
     }
 
-    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
-        let args: WebFetchArgs =
-            serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
-                message: format!("Invalid arguments for webfetch: {e}"),
-            })?;
-
-        let url = &args.url;
+    async fn run(&self) -> Result<String, ToolError> {
+        let url = &self.url;
         if !url.starts_with("http://") && !url.starts_with("https://") {
             return Err(ToolError::InvalidArguments {
                 message: "URL must start with http:// or https://".to_string(),
             });
         }
 
-        let timeout_secs = args
+        let timeout_secs = self
             .timeout
             .unwrap_or(DEFAULT_TIMEOUT_SECS)
             .min(MAX_TIMEOUT_SECS);
-        let format = args.format.as_deref().unwrap_or("markdown");
+        let format = self.format.as_deref().unwrap_or("markdown");
 
         let accept_header = match format {
             "text" => "text/plain;q=1.0, text/html;q=0.8, */*;q=0.1",

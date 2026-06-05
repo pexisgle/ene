@@ -1,53 +1,12 @@
 mod shell_platform;
 
 use self::shell_platform::execute_shell_command;
-
 use crate::utils::sandbox::SandboxConfig;
+use ene_tool_common::prelude::*;
 use ene_tool_common::truncate::Truncate;
-use ene_tool_proto::{
-    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
-};
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
-
-pub fn tool_definition() -> ToolSpec {
-    let description = concat!(
-        "Executes a given shell command with optional timeout, ensuring proper handling and security measures. ",
-        "All commands run in the current working directory by default. Use the workdir parameter if you need to run a command in a different directory. ",
-        "AVOID using 'cd <directory> && <command>' patterns - use workdir instead. ",
-        "Clear, concise description of what this command does in 5-10 words is required."
-    );
-    ToolSpec {
-        name: ToolName::new("shell.execute"),
-        version: ToolVersion::default(),
-        display_name: "Execute Shell Command".to_string(),
-        summary: "Executes a shell command with optional timeout and security measures.".to_string(),
-        description: description.to_string(),
-        category: ToolCategory::Shell,
-        keywords: KeywordSet::primary_only(["shell", "command", "execute", "terminal", "bash"]),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "command": { "type": "string", "description": "The command to execute" },
-                "description": { "type": "string", "description": "Clear, concise description of what this command does in 5-10 words" },
-                "timeout": { "type": "integer", "description": "Optional timeout in milliseconds" },
-                "workdir": { "type": "string", "description": "The working directory to run the command in. Defaults to current directory." }
-            },
-            "required": ["command"]
-        }),
-        examples: vec![
-            ToolExample {
-                description: "List files in a directory".to_string(),
-                input: serde_json::json!({"command": "ls -la", "description": "List files in directory", "workdir": "/tmp"}),
-                output: Some("# List files in directory\ntotal 8\ndrwxrwxr-x 2 user user 4096 Jun  1 10:00 .\ndrwxrwxr-x 3 user user 4096 Jun  1 09:59 ..".to_string()),
-            },
-        ],
-        caveats: Vec::new(),
-        side_effects: SideEffects::default(),
-        preconditions: Vec::new(),
-        related: Vec::new(),
-    }
-}
 
 pub async fn shell_exec(
     command: &str,
@@ -135,53 +94,59 @@ pub async fn shell_exec(
     Ok(final_output)
 }
 
-/// Filesystem tool action to execute shell commands.
+type SandboxRef = Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>;
+
+fn default_sandbox() -> SandboxRef {
+    Arc::new(RwLock::new(None))
+}
+
+#[derive(Clone, Default, Deserialize, JsonSchema, ToolAction)]
+#[tool(
+    name = "shell",
+    summary = "Executes a shell command with optional timeout and security measures.",
+    description = "Executes a given shell command with optional timeout, ensuring proper handling and security measures. All commands run in the current working directory by default. Use the workdir parameter if you need to run a command in a different directory. AVOID using 'cd <directory> && <command>' patterns - use workdir instead. Clear, concise description of what this command does in 5-10 words is required.",
+    category = "Shell",
+    keywords_primary = "shell, command, execute, terminal, bash"
+)]
 pub struct ShellAction {
-    sandbox:
-        std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<crate::utils::sandbox::Sandbox>>>>,
+    /// The command to execute.
+    command: String,
+    /// Clear, concise description of what this command does in 5-10 words.
+    #[serde(default)]
+    description: Option<String>,
+    /// Optional timeout in milliseconds.
+    #[serde(default)]
+    timeout: Option<u64>,
+    /// The working directory to run the command in. Defaults to current directory.
+    #[serde(default)]
+    workdir: Option<String>,
+
+    #[tool(skip)]
+    #[serde(skip, default = "default_sandbox")]
+    sandbox: SandboxRef,
 }
 
 impl ShellAction {
-    /// Creates a new `ShellAction` with the shared sandbox reference.
-    pub fn new(
-        sandbox: std::sync::Arc<
-            std::sync::RwLock<Option<std::sync::Arc<crate::utils::sandbox::Sandbox>>>,
-        >,
-    ) -> Self {
-        Self { sandbox }
-    }
-}
-
-#[async_trait::async_trait]
-impl ene_tool_common::ToolAction for ShellAction {
-    fn tool_name(&self) -> &'static str {
-        "shell"
+    pub fn new(sandbox: SandboxRef) -> Self {
+        Self {
+            command: String::new(),
+            description: None,
+            timeout: None,
+            workdir: None,
+            sandbox,
+        }
     }
 
-    fn definition(&self) -> ToolSpec {
-        tool_definition()
-    }
-
-    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
+    async fn run(&self) -> Result<String, ToolError> {
         let sandbox = {
             let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
             guard.clone().unwrap_or_else(|| {
-                std::sync::Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
+                Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
             })
         };
 
-        let args: serde_json::Value =
-            serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
-                message: format!("Failed to parse shell arguments: {e}"),
-            })?;
-        let command = args["command"]
-            .as_str()
-            .ok_or_else(|| ToolError::InvalidArguments {
-                message: "Missing 'command' field".to_string(),
-            })?;
-        let description = args["description"].as_str().unwrap_or("");
-        let timeout = args["timeout"].as_u64();
-        let workdir = args["workdir"].as_str();
+        let description = self.description.as_deref().unwrap_or("");
+        let command = self.command.as_str();
 
         sandbox.check_permission(
             crate::utils::permission::DestructiveAction::ShellCommand,
@@ -189,7 +154,14 @@ impl ene_tool_common::ToolAction for ShellAction {
             description,
         )?;
 
-        shell_exec(command, description, timeout, workdir, sandbox.config()).await
+        shell_exec(
+            command,
+            description,
+            self.timeout,
+            self.workdir.as_deref(),
+            sandbox.config(),
+        )
+        .await
     }
 }
 
@@ -200,11 +172,7 @@ mod tests {
 
     #[test]
     fn schema_does_not_require_description() {
-        // The implementation defaults `description` to `""` when missing
-        // (see L182), so the schema must not list it as required. Otherwise
-        // a correctly-running call without a description gets rejected at
-        // the JSON-schema validation step before reaching the body.
-        let action = ShellAction::new(std::sync::Arc::new(std::sync::RwLock::new(None)));
+        let action = ShellAction::new(Arc::new(RwLock::new(None)));
         let def = action.definition();
         let required = def
             .parameters

@@ -1,10 +1,11 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// A single sub-question within a [`UserInputPrompt`]. Each item carries its
 /// own set of selectable options and free-text flag, allowing heterogeneous
 /// questions (e.g. "yes/no" + "type a name") to be presented in the same
 /// dialog.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct QuestionItem {
     /// The question text shown to the user.
     pub question: String,
@@ -21,7 +22,7 @@ pub struct QuestionItem {
 /// Returned as a `Vec<MultiAnswer>` in the same order as the prompt's
 /// `items`. Use [`MultiAnswer::Skip`] when the user chose to leave the
 /// question blank.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MultiAnswer {
     /// The user picked one of the predefined options.

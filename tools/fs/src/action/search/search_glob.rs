@@ -1,7 +1,8 @@
 use super::MAX_RESULTS;
 use crate::utils::sandbox::SandboxConfig;
-use ene_tool_proto::ToolError;
+use ene_tool_common::prelude::*;
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 
 pub async fn glob_search(
     pattern: &str,
@@ -65,77 +66,43 @@ pub async fn glob_search(
     Ok(output.join("\n"))
 }
 
-use ene_tool_common::ToolAction;
-use ene_tool_proto::{
-    KeywordSet, SideEffects, ToolCategory, ToolExample, ToolName, ToolSpec, ToolVersion,
-};
-use std::sync::{Arc, RwLock};
+type SandboxRef = Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>;
 
-/// Filesystem sub-action to execute glob search.
-pub struct FsGlobSubAction {
-    sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>,
+fn default_sandbox() -> SandboxRef {
+    Arc::new(RwLock::new(None))
 }
 
-impl FsGlobSubAction {
-    /// Creates a new `FsGlobSubAction` with the shared sandbox reference.
-    pub fn new(sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>) -> Self {
-        Self { sandbox }
-    }
+#[derive(Clone, Deserialize, JsonSchema, ToolAction)]
+#[tool(
+    namespace = "filesystem",
+    name = "glob",
+    summary = "Find files and directories matching a glob pattern.",
+    description = "Find files and directories matching a glob pattern.",
+    category = "Filesystem",
+    keywords_primary = "glob, find, search, files, pattern, match"
+)]
+pub struct FsGlobAction {
+    /// Glob pattern (e.g. '**/*.rs', 'src/**/*.ts').
+    pattern: String,
+    /// Base directory to search from (defaults to cwd).
+    #[serde(default)]
+    path: Option<String>,
+
+    #[tool(skip)]
+    #[serde(skip, default = "default_sandbox")]
+    sandbox: SandboxRef,
 }
 
-#[async_trait::async_trait]
-impl ToolAction for FsGlobSubAction {
-    fn tool_name(&self) -> &'static str {
-        "filesystem.glob"
-    }
-
-    fn definition(&self) -> ToolSpec {
-        ToolSpec {
-            name: ToolName::new("filesystem.glob"),
-            version: ToolVersion::default(),
-            display_name: "Glob Search".to_string(),
-            summary: "Find files and directories matching a glob pattern.".to_string(),
-            description: "Find files and directories matching a glob pattern.".to_string(),
-            category: ToolCategory::Filesystem,
-            keywords: KeywordSet::primary_only([
-                "glob", "find", "search", "files", "pattern", "match",
-            ]),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": "Glob pattern (e.g. '**/*.rs', 'src/**/*.ts')"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Base directory to search from (defaults to cwd)"
-                    }
-                },
-                "required": ["pattern"]
-            }),
-            examples: vec![
-                ToolExample {
-                    description: "Find all Rust source files".to_string(),
-                    input: serde_json::json!({"pattern": "**/*.rs", "path": "/home/user/project"}),
-                    output: Some(
-                        "/home/user/project/src/main.rs\n/home/user/project/src/lib.rs".to_string(),
-                    ),
-                },
-                ToolExample {
-                    description: "Find all JSON config files".to_string(),
-                    input: serde_json::json!({"pattern": "config/**/*.json"}),
-                    output: None,
-                },
-            ],
-            caveats: Vec::new(),
-            side_effects: SideEffects::default(),
-            preconditions: Vec::new(),
-            related: Vec::new(),
+impl FsGlobAction {
+    pub fn new(sandbox: SandboxRef) -> Self {
+        Self {
+            pattern: String::new(),
+            path: None,
+            sandbox,
         }
     }
 
-    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
+    async fn run(&self) -> Result<String, ToolError> {
         let sandbox = {
             let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
             guard.clone().unwrap_or_else(|| {
@@ -143,17 +110,6 @@ impl ToolAction for FsGlobSubAction {
             })
         };
 
-        let args: serde_json::Value =
-            serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
-                message: format!("Failed to parse glob arguments: {e}"),
-            })?;
-
-        let pattern = args["pattern"]
-            .as_str()
-            .ok_or_else(|| ToolError::InvalidArguments {
-                message: "pattern is required for glob".to_string(),
-            })?;
-        let path = args["path"].as_str();
-        glob_search(pattern, path, sandbox.config()).await
+        glob_search(&self.pattern, self.path.as_deref(), sandbox.config()).await
     }
 }

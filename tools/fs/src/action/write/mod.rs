@@ -1,7 +1,8 @@
 use crate::utils::sandbox::SandboxConfig;
 use crate::utils::undo_manager::UndoManager;
-use ene_tool_proto::ToolError;
+use ene_tool_common::prelude::*;
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 
 pub async fn write(
     path: &Path,
@@ -60,67 +61,43 @@ pub async fn write(
     Ok("Wrote file successfully.".to_string())
 }
 
-use ene_tool_common::ToolAction;
-use ene_tool_proto::{
-    KeywordSet, SideEffects, ToolCategory, ToolExample, ToolName, ToolSpec, ToolVersion,
-};
-use std::sync::{Arc, RwLock};
+type SandboxRef = Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>;
 
-/// Filesystem sub-action to write a file.
-pub struct FsWriteSubAction {
-    sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>,
+fn default_sandbox() -> SandboxRef {
+    Arc::new(RwLock::new(None))
 }
 
-impl FsWriteSubAction {
-    /// Creates a new `FsWriteSubAction` with the shared sandbox reference.
-    pub fn new(sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>) -> Self {
-        Self { sandbox }
-    }
+#[derive(Clone, Deserialize, JsonSchema, ToolAction)]
+#[serde(rename_all = "camelCase")]
+#[tool(
+    namespace = "filesystem",
+    name = "write",
+    summary = "Write or create a file at the given path.",
+    description = "Write or create a file at the given path with the specified content.",
+    category = "Filesystem",
+    keywords_primary = "write, create, save, file"
+)]
+pub struct FsWriteAction {
+    /// Absolute path to the file to write.
+    file_path: String,
+    /// Content to write to the file.
+    content: String,
+
+    #[tool(skip)]
+    #[serde(skip, default = "default_sandbox")]
+    sandbox: SandboxRef,
 }
 
-#[async_trait::async_trait]
-impl ToolAction for FsWriteSubAction {
-    fn tool_name(&self) -> &'static str {
-        "filesystem.write"
-    }
-
-    fn definition(&self) -> ToolSpec {
-        ToolSpec {
-            name: ToolName::new("filesystem.write"),
-            version: ToolVersion::default(),
-            display_name: "Write File".to_string(),
-            summary: "Write or create a file at the given path.".to_string(),
-            description: "Write or create a file at the given path with the specified content."
-                .to_string(),
-            category: ToolCategory::Filesystem,
-            keywords: KeywordSet::primary_only(["write", "create", "save", "file"]),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "filePath": {
-                        "type": "string",
-                        "description": "Absolute path to the file to write"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "Content to write to the file"
-                    }
-                },
-                "required": ["filePath", "content"]
-            }),
-            examples: vec![ToolExample {
-                description: "Create or overwrite a file".to_string(),
-                input: serde_json::json!({"filePath": "/home/user/hello.txt", "content": "Hello, world!"}),
-                output: None,
-            }],
-            caveats: Vec::new(),
-            side_effects: SideEffects::default(),
-            preconditions: Vec::new(),
-            related: Vec::new(),
+impl FsWriteAction {
+    pub fn new(sandbox: SandboxRef) -> Self {
+        Self {
+            file_path: String::new(),
+            content: String::new(),
+            sandbox,
         }
     }
 
-    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
+    async fn run(&self) -> Result<String, ToolError> {
         let sandbox = {
             let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
             guard.clone().unwrap_or_else(|| {
@@ -130,31 +107,15 @@ impl ToolAction for FsWriteSubAction {
         let session_id = sandbox.session_id();
         let undo_manager = sandbox.undo_manager();
 
-        let args: serde_json::Value =
-            serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
-                message: format!("Failed to parse write arguments: {e}"),
-            })?;
-
-        let file_path = args["filePath"]
-            .as_str()
-            .ok_or_else(|| ToolError::InvalidArguments {
-                message: "filePath is required for write".to_string(),
-            })?;
-        let content = args["content"]
-            .as_str()
-            .ok_or_else(|| ToolError::InvalidArguments {
-                message: "content is required for write".to_string(),
-            })?;
-
         sandbox.check_permission(
             crate::utils::permission::DestructiveAction::FileOverwrite,
-            file_path,
+            &self.file_path,
             "Writing/Overwriting file",
         )?;
 
         write(
-            Path::new(file_path),
-            content,
+            Path::new(&self.file_path),
+            &self.content,
             sandbox.config(),
             undo_manager,
             &session_id,

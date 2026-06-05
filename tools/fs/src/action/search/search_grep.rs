@@ -1,7 +1,8 @@
 use super::MAX_RESULTS;
 use crate::utils::sandbox::SandboxConfig;
-use ene_tool_proto::ToolError;
+use ene_tool_common::prelude::*;
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 
 pub async fn grep_search(
     pattern: &str,
@@ -144,82 +145,47 @@ pub async fn grep_search(
     Ok(output.join("\n"))
 }
 
-use ene_tool_common::ToolAction;
-use ene_tool_proto::{
-    KeywordSet, SideEffects, ToolCategory, ToolExample, ToolName, ToolSpec, ToolVersion,
-};
-use std::sync::{Arc, RwLock};
+type SandboxRef = Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>;
 
-/// Filesystem sub-action to execute grep search.
-pub struct FsGrepSubAction {
-    sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>,
+fn default_sandbox() -> SandboxRef {
+    Arc::new(RwLock::new(None))
 }
 
-impl FsGrepSubAction {
-    /// Creates a new `FsGrepSubAction` with the shared sandbox reference.
-    pub fn new(sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>) -> Self {
-        Self { sandbox }
-    }
+#[derive(Clone, Deserialize, JsonSchema, ToolAction)]
+#[tool(
+    namespace = "filesystem",
+    name = "grep",
+    summary = "Search for regex patterns within file contents.",
+    description = "Search for regex patterns within file contents.",
+    category = "Filesystem",
+    keywords_primary = "grep, search, regex, find, pattern, content"
+)]
+pub struct FsGrepAction {
+    /// Regex pattern to search for.
+    pattern: String,
+    /// Base directory or file to search in (defaults to cwd).
+    #[serde(default)]
+    path: Option<String>,
+    /// File glob filter (e.g. '*.rs', '*.{ts,tsx}').
+    #[serde(default)]
+    include: Option<String>,
+
+    #[tool(skip)]
+    #[serde(skip, default = "default_sandbox")]
+    sandbox: SandboxRef,
 }
 
-#[async_trait::async_trait]
-impl ToolAction for FsGrepSubAction {
-    fn tool_name(&self) -> &'static str {
-        "filesystem.grep"
-    }
-
-    fn definition(&self) -> ToolSpec {
-        ToolSpec {
-            name: ToolName::new("filesystem.grep"),
-            version: ToolVersion::default(),
-            display_name: "Grep Search".to_string(),
-            summary: "Search for regex patterns within file contents.".to_string(),
-            description: "Search for regex patterns within file contents.".to_string(),
-            category: ToolCategory::Filesystem,
-            keywords: KeywordSet::primary_only([
-                "grep", "search", "regex", "find", "pattern", "content",
-            ]),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": "Regex pattern to search for"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Base directory or file to search in (defaults to cwd)"
-                    },
-                    "include": {
-                        "type": "string",
-                        "description": "File glob filter (e.g. '*.rs', '*.{ts,tsx}')"
-                    }
-                },
-                "required": ["pattern"]
-            }),
-            examples: vec![
-                ToolExample {
-                    description: "Search for a function definition".to_string(),
-                    input: serde_json::json!({"pattern": "fn main", "path": "/home/user/project"}),
-                    output: Some(
-                        "Found 2 matches\n/home/user/project/src/main.rs:\n  Line 1: fn main() {"
-                            .to_string(),
-                    ),
-                },
-                ToolExample {
-                    description: "Search only Rust files".to_string(),
-                    input: serde_json::json!({"pattern": "TODO", "include": "*.rs", "path": "/home/user/project"}),
-                    output: None,
-                },
-            ],
-            caveats: Vec::new(),
-            side_effects: SideEffects::default(),
-            preconditions: Vec::new(),
-            related: Vec::new(),
+impl FsGrepAction {
+    pub fn new(sandbox: SandboxRef) -> Self {
+        Self {
+            pattern: String::new(),
+            path: None,
+            include: None,
+            sandbox,
         }
     }
 
-    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
+    async fn run(&self) -> Result<String, ToolError> {
         let sandbox = {
             let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
             guard.clone().unwrap_or_else(|| {
@@ -227,18 +193,12 @@ impl ToolAction for FsGrepSubAction {
             })
         };
 
-        let args: serde_json::Value =
-            serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
-                message: format!("Failed to parse grep arguments: {e}"),
-            })?;
-
-        let pattern = args["pattern"]
-            .as_str()
-            .ok_or_else(|| ToolError::InvalidArguments {
-                message: "pattern is required for grep".to_string(),
-            })?;
-        let path = args["path"].as_str();
-        let include = args["include"].as_str();
-        grep_search(pattern, path, include, sandbox.config()).await
+        grep_search(
+            &self.pattern,
+            self.path.as_deref(),
+            self.include.as_deref(),
+            sandbox.config(),
+        )
+        .await
     }
 }

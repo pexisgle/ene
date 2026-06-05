@@ -21,7 +21,7 @@
 //! ## Tool RAG
 //!
 //! When a [`ene_memory::MemoryStore`] is attached, tool definitions are embedded into vectors and stored
-//! in the `tool_embeddings` table. [`CompositeToolRegistry::select_tools`] performs
+//! in the `tool_embeddings` table. The RAG pipeline performs
 //! cosine-similarity filtering based on the user's current query embedding.
 #![warn(missing_docs)]
 

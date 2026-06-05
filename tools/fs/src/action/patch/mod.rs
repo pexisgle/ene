@@ -3,8 +3,9 @@ mod patch_parser;
 use self::patch_parser::PatchOperation;
 use crate::utils::sandbox::SandboxConfig;
 use crate::utils::undo_manager::{UndoEntry, UndoManager};
-use ene_tool_proto::ToolError;
+use ene_tool_common::prelude::*;
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 
 pub async fn apply_patch(
     patch_text: &str,
@@ -223,68 +224,40 @@ pub async fn apply_patch(
     ))
 }
 
-use ene_tool_common::ToolAction;
-use ene_tool_proto::{
-    KeywordSet, SideEffects, ToolCategory, ToolExample, ToolName, ToolSpec, ToolVersion,
-};
-use std::sync::{Arc, RwLock};
+type SandboxRef = Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>;
 
-/// Filesystem sub-action to apply a multi-file patch.
-pub struct FsPatchSubAction {
-    sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>,
+fn default_sandbox() -> SandboxRef {
+    Arc::new(RwLock::new(None))
 }
 
-impl FsPatchSubAction {
-    /// Creates a new `FsPatchSubAction` with the shared sandbox reference.
-    pub fn new(sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>) -> Self {
-        Self { sandbox }
-    }
+#[derive(Clone, Deserialize, JsonSchema, ToolAction)]
+#[serde(rename_all = "camelCase")]
+#[tool(
+    namespace = "filesystem",
+    name = "patch",
+    summary = "Apply a multi-file patch in custom format.",
+    description = "Apply a multi-file patch in custom format. Supports Update, Add, and Delete file directives between *** Begin Patch / *** End Patch markers.",
+    category = "Filesystem",
+    keywords_primary = "patch, apply, diff, update, multi-file"
+)]
+pub struct FsPatchAction {
+    /// Full patch text in the custom patch format.
+    patch_text: String,
+
+    #[tool(skip)]
+    #[serde(skip, default = "default_sandbox")]
+    sandbox: SandboxRef,
 }
 
-#[async_trait::async_trait]
-impl ToolAction for FsPatchSubAction {
-    fn tool_name(&self) -> &'static str {
-        "filesystem.patch"
-    }
-
-    fn definition(&self) -> ToolSpec {
-        let description = concat!(
-            "Apply a multi-file patch in custom format. Supports Update, Add, ",
-            "and Delete file directives between *** Begin Patch / *** End Patch markers."
-        );
-        ToolSpec {
-            name: ToolName::new("filesystem.patch"),
-            version: ToolVersion::default(),
-            display_name: "Apply Patch".to_string(),
-            summary: "Apply a multi-file patch in custom format.".to_string(),
-            description: description.to_string(),
-            category: ToolCategory::Filesystem,
-            keywords: KeywordSet::primary_only(["patch", "apply", "diff", "update", "multi-file"]),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "patchText": {
-                        "type": "string",
-                        "description": "Full patch text in the custom patch format"
-                    }
-                },
-                "required": ["patchText"]
-            }),
-            examples: vec![ToolExample {
-                description: "Update a file via patch".to_string(),
-                input: serde_json::json!({"patchText": "*** Begin Patch\n*** Update File: src/main.rs\n--- old\n+++ new\n@@ -1 +1 @@\n-old code\n+new code\n*** End Patch"}),
-                output: Some(
-                    "Patch applied successfully.\nM /home/user/project/src/main.rs".to_string(),
-                ),
-            }],
-            caveats: Vec::new(),
-            side_effects: SideEffects::default(),
-            preconditions: Vec::new(),
-            related: Vec::new(),
+impl FsPatchAction {
+    pub fn new(sandbox: SandboxRef) -> Self {
+        Self {
+            patch_text: String::new(),
+            sandbox,
         }
     }
 
-    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
+    async fn run(&self) -> Result<String, ToolError> {
         let sandbox = {
             let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
             guard.clone().unwrap_or_else(|| {
@@ -294,23 +267,18 @@ impl ToolAction for FsPatchSubAction {
         let session_id = sandbox.session_id();
         let undo_manager = sandbox.undo_manager();
 
-        let args: serde_json::Value =
-            serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
-                message: format!("Failed to parse patch arguments: {e}"),
-            })?;
-
-        let patch_text = args["patchText"]
-            .as_str()
-            .ok_or_else(|| ToolError::InvalidArguments {
-                message: "patchText is required for patch".to_string(),
-            })?;
-
         sandbox.check_permission(
             crate::utils::permission::DestructiveAction::FileOverwrite,
             "multiple files (patch)",
             "Applying patch to files",
         )?;
 
-        apply_patch(patch_text, sandbox.config(), undo_manager, &session_id).await
+        apply_patch(
+            &self.patch_text,
+            sandbox.config(),
+            undo_manager,
+            &session_id,
+        )
+        .await
     }
 }

@@ -1,7 +1,8 @@
 use crate::utils::sandbox::SandboxConfig;
 use crate::utils::undo_manager::UndoManager;
-use ene_tool_proto::ToolError;
+use ene_tool_common::prelude::*;
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 
 pub async fn delete(
     path: &Path,
@@ -54,74 +55,44 @@ pub async fn delete(
     }
 }
 
-use ene_tool_common::ToolAction;
-use ene_tool_proto::{
-    KeywordSet, SideEffects, ToolCategory, ToolExample, ToolName, ToolSpec, ToolVersion,
-};
-use std::sync::{Arc, RwLock};
+type SandboxRef = Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>;
 
-/// Filesystem sub-action to delete a file or directory.
-pub struct FsDeleteSubAction {
-    sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>,
+fn default_sandbox() -> SandboxRef {
+    Arc::new(RwLock::new(None))
 }
 
-impl FsDeleteSubAction {
-    /// Creates a new `FsDeleteSubAction` with the shared sandbox reference.
-    pub fn new(sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>) -> Self {
-        Self { sandbox }
-    }
+#[derive(Clone, Deserialize, JsonSchema, ToolAction)]
+#[serde(rename_all = "camelCase")]
+#[tool(
+    namespace = "filesystem",
+    name = "delete",
+    summary = "Delete a file or directory.",
+    description = "Delete a file or directory. Directories require recursive=true.",
+    category = "Filesystem",
+    keywords_primary = "delete, remove, rm, unlink"
+)]
+pub struct FsDeleteAction {
+    /// Absolute path to delete.
+    file_path: String,
+    /// Required for directories (default false).
+    #[serde(default)]
+    recursive: Option<bool>,
+
+    #[tool(skip)]
+    #[serde(skip, default = "default_sandbox")]
+    sandbox: SandboxRef,
 }
 
-#[async_trait::async_trait]
-impl ToolAction for FsDeleteSubAction {
-    fn tool_name(&self) -> &'static str {
-        "filesystem.delete"
-    }
-
-    fn definition(&self) -> ToolSpec {
-        ToolSpec {
-            name: ToolName::new("filesystem.delete"),
-            version: ToolVersion::default(),
-            display_name: "Delete File".to_string(),
-            summary: "Delete a file or directory.".to_string(),
-            description: "Delete a file or directory. Directories require recursive=true."
-                .to_string(),
-            category: ToolCategory::Filesystem,
-            keywords: KeywordSet::primary_only(["delete", "remove", "rm", "unlink"]),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute path to delete"
-                    },
-                    "recursive": {
-                        "type": "boolean",
-                        "description": "Required for directories (default false)"
-                    }
-                },
-                "required": ["path"]
-            }),
-            examples: vec![
-                ToolExample {
-                    description: "Delete a single file".to_string(),
-                    input: serde_json::json!({"path": "/home/user/temp.txt"}),
-                    output: None,
-                },
-                ToolExample {
-                    description: "Recursively delete a directory".to_string(),
-                    input: serde_json::json!({"path": "/home/user/old_dir", "recursive": true}),
-                    output: None,
-                },
-            ],
-            caveats: Vec::new(),
-            side_effects: SideEffects::default(),
-            preconditions: Vec::new(),
-            related: Vec::new(),
+impl FsDeleteAction {
+    pub fn new(sandbox: SandboxRef) -> Self {
+        Self {
+            file_path: String::new(),
+            recursive: None,
+            sandbox,
         }
     }
 
-    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
+    async fn run(&self) -> Result<String, ToolError> {
         let sandbox = {
             let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
             guard.clone().unwrap_or_else(|| {
@@ -131,27 +102,15 @@ impl ToolAction for FsDeleteSubAction {
         let session_id = sandbox.session_id();
         let undo_manager = sandbox.undo_manager();
 
-        let args: serde_json::Value =
-            serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
-                message: format!("Failed to parse delete arguments: {e}"),
-            })?;
-
-        let path = args["path"]
-            .as_str()
-            .ok_or_else(|| ToolError::InvalidArguments {
-                message: "path is required for delete".to_string(),
-            })?;
-        let recursive = args["recursive"].as_bool().unwrap_or(false);
-
         sandbox.check_permission(
             crate::utils::permission::DestructiveAction::FileDelete,
-            path,
+            &self.file_path,
             "Deleting file or directory",
         )?;
 
         delete(
-            Path::new(path),
-            recursive,
+            Path::new(&self.file_path),
+            self.recursive.unwrap_or(false),
             sandbox.config(),
             undo_manager,
             &session_id,

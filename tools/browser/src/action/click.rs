@@ -1,66 +1,36 @@
-use async_trait::async_trait;
-use ene_tool_common::ToolAction;
-use ene_tool_proto::{
-    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
-};
-use serde::Deserialize;
+use ene_tool_common::prelude::*;
 use std::sync::Arc;
 
-#[derive(Deserialize)]
-struct ClickArgs {
-    selector: String,
+fn default_store() -> Arc<crate::utils::session::BrowserSessionStore> {
+    Arc::new(crate::utils::session::BrowserSessionStore::new())
 }
 
-/// Browser action to click an element.
-pub struct ClickSubAction {
+#[derive(Clone, Deserialize, JsonSchema, ToolAction)]
+#[tool(
+    namespace = "browser",
+    name = "click",
+    summary = "Clicks a page element matching the selector",
+    category = "Browser",
+    keywords_primary = "click, element"
+)]
+pub struct ClickAction {
+    /// CSS selector for the element to click. Use only when navigate cannot reach the target.
+    selector: String,
+
+    #[tool(skip)]
+    #[serde(skip, default = "default_store")]
     store: Arc<crate::utils::session::BrowserSessionStore>,
 }
 
-impl ClickSubAction {
-    /// Creates a new `ClickSubAction` with the shared session store.
+impl ClickAction {
     pub fn new(store: Arc<crate::utils::session::BrowserSessionStore>) -> Self {
-        Self { store }
-    }
-}
-
-#[async_trait]
-impl ToolAction for ClickSubAction {
-    fn tool_name(&self) -> &'static str {
-        "browser.click"
-    }
-
-    fn definition(&self) -> ToolSpec {
-        ToolSpec {
-            name: ToolName::new("browser.click"),
-            version: ToolVersion::default(),
-            display_name: "Clicks a page element matching the selector".to_string(),
-            summary: "Clicks a page element matching the selector".to_string(),
-            description: "Clicks a page element matching the selector".to_string(),
-            category: ToolCategory::Browser,
-            keywords: KeywordSet::primary_only(["click", "element"]),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "selector": {
-                        "type": "string",
-                        "description": "CSS selector for the element to click. Use only when navigate cannot reach the target."
-                    }
-                },
-                "required": ["selector"]
-            }),
-            examples: vec![ToolExample {
-                description: "Click a button by CSS selector".to_string(),
-                input: serde_json::json!({"selector": "#submit-button"}),
-                output: None,
-            }],
-            caveats: Vec::new(),
-            side_effects: SideEffects::default(),
-            preconditions: Vec::new(),
-            related: Vec::new(),
+        Self {
+            selector: String::new(),
+            store,
         }
     }
 
-    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
+    async fn run(&self) -> Result<String, ToolError> {
         let chrome_path = crate::utils::chrome::find_chrome_executable().ok_or_else(|| ToolError::ExecutionFailed {
             message: "No Chrome/Chromium browser found. Please install Google Chrome or Chromium, or set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH environment variable.".to_string(),
         })?;
@@ -69,12 +39,7 @@ impl ToolAction for ClickSubAction {
         let session_guard = session.lock().await;
         let page = &session_guard.page;
 
-        let args: ClickArgs =
-            serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
-                message: format!("Invalid arguments: {e}"),
-            })?;
-
-        page.find_element(&args.selector)
+        page.find_element(&self.selector)
             .await
             .map_err(|e| ToolError::ExecutionFailed {
                 message: format!("Element not found: {e}"),
@@ -85,6 +50,6 @@ impl ToolAction for ClickSubAction {
                 message: format!("Click failed: {e}"),
             })?;
 
-        Ok(format!("Clicked element: {}", args.selector))
+        Ok(format!("Clicked element: {}", self.selector))
     }
 }

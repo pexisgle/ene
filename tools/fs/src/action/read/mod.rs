@@ -2,8 +2,9 @@ mod read_binary;
 
 use self::read_binary::is_binary_file;
 use crate::utils::sandbox::SandboxConfig;
-use ene_tool_proto::ToolError;
+use ene_tool_common::prelude::*;
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 
 const MAX_LINE_LENGTH: usize = 2000;
 const DEFAULT_LINE_LIMIT: usize = 2000;
@@ -211,89 +212,48 @@ async fn read_directory(
     Ok(output)
 }
 
-use ene_tool_common::ToolAction;
-use ene_tool_proto::{
-    KeywordSet, SideEffects, ToolCategory, ToolExample, ToolName, ToolSpec, ToolVersion,
-};
-use std::sync::{Arc, RwLock};
+type SandboxRef = Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>;
 
-/// Filesystem sub-action to read file or directory.
-pub struct FsReadSubAction {
-    sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>,
+fn default_sandbox() -> SandboxRef {
+    Arc::new(RwLock::new(None))
 }
 
-impl FsReadSubAction {
-    /// Creates a new `FsReadSubAction` with the shared sandbox reference.
-    pub fn new(sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>) -> Self {
-        Self { sandbox }
-    }
+#[derive(Clone, Deserialize, JsonSchema, ToolAction)]
+#[serde(rename_all = "camelCase")]
+#[tool(
+    namespace = "filesystem",
+    name = "read",
+    summary = "Read the contents of a file or list a directory.",
+    description = "Read the contents of a file or list a directory. When editing text from Read output, preserve exact indentation (tabs/spaces) as it appears AFTER the line number prefix.",
+    category = "Filesystem",
+    keywords_primary = "read, file, open, cat, directory, list"
+)]
+pub struct FsReadAction {
+    /// Absolute path to the file or directory.
+    file_path: String,
+    /// 1-indexed line number to start reading from.
+    #[serde(default)]
+    offset: Option<u64>,
+    /// Maximum number of lines to read (default 2000).
+    #[serde(default)]
+    limit: Option<u64>,
+
+    #[tool(skip)]
+    #[serde(skip, default = "default_sandbox")]
+    sandbox: SandboxRef,
 }
 
-#[async_trait::async_trait]
-impl ToolAction for FsReadSubAction {
-    fn tool_name(&self) -> &'static str {
-        "filesystem.read"
-    }
-
-    fn definition(&self) -> ToolSpec {
-        let description = concat!(
-            "Read the contents of a file or list a directory. ",
-            "When editing text from Read output, preserve exact indentation (tabs/spaces) ",
-            "as it appears AFTER the line number prefix."
-        );
-        ToolSpec {
-            name: ToolName::new("filesystem.read"),
-            version: ToolVersion::default(),
-            display_name: "Read File".to_string(),
-            summary: "Read the contents of a file or list a directory.".to_string(),
-            description: description.to_string(),
-            category: ToolCategory::Filesystem,
-            keywords: KeywordSet::primary_only([
-                "read",
-                "file",
-                "open",
-                "cat",
-                "directory",
-                "list",
-            ]),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "filePath": {
-                        "type": "string",
-                        "description": "Absolute path to the file or directory"
-                    },
-                    "offset": {
-                        "type": "integer",
-                        "description": "1-indexed line number to start reading from"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of lines to read (default 2000)"
-                    }
-                },
-                "required": ["filePath"]
-            }),
-            examples: vec![
-                ToolExample {
-                    description: "Read a text file".to_string(),
-                    input: serde_json::json!({"filePath": "/home/user/notes.txt"}),
-                    output: Some("file content here".to_string()),
-                },
-                ToolExample {
-                    description: "Read file with line offset and limit".to_string(),
-                    input: serde_json::json!({"filePath": "/home/user/large.log", "offset": 1, "limit": 50}),
-                    output: None,
-                },
-            ],
-            caveats: Vec::new(),
-            side_effects: SideEffects::default(),
-            preconditions: Vec::new(),
-            related: Vec::new(),
+impl FsReadAction {
+    pub fn new(sandbox: SandboxRef) -> Self {
+        Self {
+            file_path: String::new(),
+            offset: None,
+            limit: None,
+            sandbox,
         }
     }
 
-    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
+    async fn run(&self) -> Result<String, ToolError> {
         let sandbox = {
             let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
             guard.clone().unwrap_or_else(|| {
@@ -301,18 +261,8 @@ impl ToolAction for FsReadSubAction {
             })
         };
 
-        let args: serde_json::Value =
-            serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
-                message: format!("Failed to parse read arguments: {e}"),
-            })?;
-
-        let file_path = args["filePath"]
-            .as_str()
-            .ok_or_else(|| ToolError::InvalidArguments {
-                message: "filePath is required for read".to_string(),
-            })?;
-        let offset = args["offset"].as_u64().map(|v| v as usize);
-        let limit = args["limit"].as_u64().map(|v| v as usize);
-        read(Path::new(file_path), offset, limit, sandbox.config()).await
+        let offset = self.offset.map(|v| v as usize);
+        let limit = self.limit.map(|v| v as usize);
+        read(Path::new(&self.file_path), offset, limit, sandbox.config()).await
     }
 }

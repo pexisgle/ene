@@ -1,66 +1,36 @@
-use async_trait::async_trait;
-use ene_tool_common::ToolAction;
-use ene_tool_proto::{
-    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
-};
-use serde::Deserialize;
+use ene_tool_common::prelude::*;
 use std::sync::Arc;
 
-#[derive(Deserialize)]
-struct NavigateArgs {
-    url: String,
+fn default_store() -> Arc<crate::utils::session::BrowserSessionStore> {
+    Arc::new(crate::utils::session::BrowserSessionStore::new())
 }
 
-/// Browser action to navigate to a URL.
-pub struct NavigateSubAction {
+#[derive(Clone, Deserialize, JsonSchema, ToolAction)]
+#[tool(
+    namespace = "browser",
+    name = "navigate",
+    summary = "Navigates to a URL",
+    category = "Browser",
+    keywords_primary = "navigate, url, goto"
+)]
+pub struct NavigateAction {
+    /// URL to navigate to. Prefer navigate+URL over clicking links whenever possible.
+    url: String,
+
+    #[tool(skip)]
+    #[serde(skip, default = "default_store")]
     store: Arc<crate::utils::session::BrowserSessionStore>,
 }
 
-impl NavigateSubAction {
-    /// Creates a new `NavigateSubAction` with the shared session store.
+impl NavigateAction {
     pub fn new(store: Arc<crate::utils::session::BrowserSessionStore>) -> Self {
-        Self { store }
-    }
-}
-
-#[async_trait]
-impl ToolAction for NavigateSubAction {
-    fn tool_name(&self) -> &'static str {
-        "browser.navigate"
-    }
-
-    fn definition(&self) -> ToolSpec {
-        ToolSpec {
-            name: ToolName::new("browser.navigate"),
-            version: ToolVersion::default(),
-            display_name: "Navigates to a URL".to_string(),
-            summary: "Navigates to a URL".to_string(),
-            description: "Navigates to a URL".to_string(),
-            category: ToolCategory::Browser,
-            keywords: KeywordSet::primary_only(["navigate", "url", "goto"]),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "URL to navigate to. Prefer navigate+URL over clicking links whenever possible."
-                    }
-                },
-                "required": ["url"]
-            }),
-            examples: vec![ToolExample {
-                description: "Navigate to a webpage".to_string(),
-                input: serde_json::json!({"url": "https://example.com"}),
-                output: None,
-            }],
-            caveats: Vec::new(),
-            side_effects: SideEffects::default(),
-            preconditions: Vec::new(),
-            related: Vec::new(),
+        Self {
+            url: String::new(),
+            store,
         }
     }
 
-    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
+    async fn run(&self) -> Result<String, ToolError> {
         let chrome_path = crate::utils::chrome::find_chrome_executable().ok_or_else(|| ToolError::ExecutionFailed {
             message: "No Chrome/Chromium browser found. Please install Google Chrome or Chromium, or set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH environment variable.".to_string(),
         })?;
@@ -69,12 +39,7 @@ impl ToolAction for NavigateSubAction {
         let session_guard = session.lock().await;
         let page = &session_guard.page;
 
-        let args: NavigateArgs =
-            serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
-                message: format!("Invalid arguments: {e}"),
-            })?;
-
-        page.goto(&args.url)
+        page.goto(&self.url)
             .await
             .map_err(|e| ToolError::ExecutionFailed {
                 message: format!("Navigation failed: {e}"),
@@ -86,7 +51,7 @@ impl ToolAction for NavigateSubAction {
             .map_err(|e| ToolError::ExecutionFailed {
                 message: format!("Failed to get URL: {e}"),
             })?
-            .unwrap_or_else(|| args.url.clone());
+            .unwrap_or_else(|| self.url.clone());
 
         let title = page
             .evaluate("document.title")

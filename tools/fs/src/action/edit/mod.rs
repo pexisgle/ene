@@ -1,6 +1,6 @@
 use crate::utils::sandbox::SandboxConfig;
 use crate::utils::undo_manager::UndoManager;
-use ene_tool_proto::ToolError;
+use ene_tool_common::prelude::*;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -26,7 +26,6 @@ use simple::simple_replace;
 use trimmed_boundary::trimmed_boundary_replace;
 use whitespace_normalized::whitespace_normalized_replace;
 
-/// Type alias for string replacement functions
 type ReplacerFn = fn(&str, &str, &str, bool) -> Option<String>;
 
 static FILE_LOCKS: std::sync::OnceLock<
@@ -50,12 +49,10 @@ pub fn detect_line_ending(text: &str) -> &str {
     if text.contains("\r\n") { "\r\n" } else { "\n" }
 }
 
-/// Levenshtein distance (using strsim crate)
 pub fn levenshtein(a: &str, b: &str) -> usize {
     strsim::levenshtein(a, b)
 }
 
-/// Finds the best match based on similarity
 pub fn find_best_match<'a>(needle: &str, haystack: &'a str) -> Option<(usize, &'a str, f64)> {
     if needle.is_empty() {
         return None;
@@ -63,7 +60,6 @@ pub fn find_best_match<'a>(needle: &str, haystack: &'a str) -> Option<(usize, &'
     let needle_len = needle.len();
     let mut best: Option<(usize, &'a str, f64)> = None;
 
-    // Searches for the most similar substring using a sliding window
     let max_window = (needle_len * 2).max(100);
     let step = needle_len.max(1);
 
@@ -249,9 +245,6 @@ mod tests {
         let haystack = "foo bar baz qux";
         let needle = "bar";
         let result = find_best_match(needle, haystack);
-        // find_best_match uses sliding window similarity, not exact substring match
-        // It may or may not find exact matches depending on window parameters
-        // Just verify it doesn't panic
         let _ = result;
     }
 
@@ -260,7 +253,6 @@ mod tests {
         let haystack = "foo baz qux";
         let needle = "bar";
         let result = find_best_match(needle, haystack);
-        // Similarity threshold may not be met for short strings
         let _ = result;
     }
 
@@ -270,93 +262,52 @@ mod tests {
     }
 }
 
-use ene_tool_common::ToolAction;
-use ene_tool_proto::{
-    KeywordSet, SideEffects, ToolCategory, ToolExample, ToolName, ToolSpec, ToolVersion,
-};
 use std::sync::RwLock;
 
-/// Filesystem sub-action to edit a file.
-pub struct FsEditSubAction {
-    sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>,
+type SandboxRef = Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>;
+
+fn default_sandbox() -> SandboxRef {
+    Arc::new(RwLock::new(None))
 }
 
-impl FsEditSubAction {
-    /// Creates a new `FsEditSubAction` with the shared sandbox reference.
-    pub fn new(sandbox: Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>) -> Self {
-        Self { sandbox }
-    }
+#[derive(Clone, Deserialize, JsonSchema, ToolAction)]
+#[serde(rename_all = "camelCase")]
+#[tool(
+    namespace = "filesystem",
+    name = "edit",
+    summary = "Targeted in-place edit: find oldString and replace with newString.",
+    description = "Targeted in-place edit: find oldString and replace with newString. Uses a chain of matching strategies (exact, trimmed, block anchor, whitespace-normalized, etc.) for robust matching.",
+    category = "Filesystem",
+    keywords_primary = "edit, replace, modify, change, substitute"
+)]
+pub struct FsEditAction {
+    /// Absolute path to the file to edit.
+    file_path: String,
+    /// Text to find and replace.
+    old_string: String,
+    /// Replacement text.
+    new_string: String,
+    /// Replace all occurrences (default false).
+    #[serde(default)]
+    replace_all: Option<bool>,
+
+    #[tool(skip)]
+    #[serde(skip, default = "default_sandbox")]
+    sandbox: SandboxRef,
 }
 
-#[async_trait::async_trait]
-impl ToolAction for FsEditSubAction {
-    fn tool_name(&self) -> &'static str {
-        "filesystem.edit"
-    }
-
-    fn definition(&self) -> ToolSpec {
-        let description = concat!(
-            "Targeted in-place edit: find oldString and replace with newString. ",
-            "Uses a chain of matching strategies (exact, trimmed, block anchor, ",
-            "whitespace-normalized, etc.) for robust matching."
-        );
-        ToolSpec {
-            name: ToolName::new("filesystem.edit"),
-            version: ToolVersion::default(),
-            display_name: "Edit File".to_string(),
-            summary: "Targeted in-place edit: find oldString and replace with newString."
-                .to_string(),
-            description: description.to_string(),
-            category: ToolCategory::Filesystem,
-            keywords: KeywordSet::primary_only([
-                "edit",
-                "replace",
-                "modify",
-                "change",
-                "substitute",
-            ]),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "filePath": {
-                        "type": "string",
-                        "description": "Absolute path to the file to edit"
-                    },
-                    "oldString": {
-                        "type": "string",
-                        "description": "Text to find and replace"
-                    },
-                    "newString": {
-                        "type": "string",
-                        "description": "Replacement text"
-                    },
-                    "replaceAll": {
-                        "type": "boolean",
-                        "description": "Replace all occurrences (default false)"
-                    }
-                },
-                "required": ["filePath", "oldString", "newString"]
-            }),
-            examples: vec![
-                ToolExample {
-                    description: "Replace text in a file".to_string(),
-                    input: serde_json::json!({"filePath": "/home/user/file.txt", "oldString": "foo", "newString": "bar"}),
-                    output: None,
-                },
-                ToolExample {
-                    description: "Replace all occurrences of a string".to_string(),
-                    input: serde_json::json!({"filePath": "/home/user/file.txt", "oldString": "old_func", "newString": "new_func", "replaceAll": true}),
-                    output: None,
-                },
-            ],
-            caveats: Vec::new(),
-            side_effects: SideEffects::default(),
-            preconditions: Vec::new(),
-            related: Vec::new(),
+impl FsEditAction {
+    pub fn new(sandbox: SandboxRef) -> Self {
+        Self {
+            file_path: String::new(),
+            old_string: String::new(),
+            new_string: String::new(),
+            replace_all: None,
+            sandbox,
         }
     }
 
-    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
+    async fn run(&self) -> Result<String, ToolError> {
         let sandbox = {
             let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
             guard.clone().unwrap_or_else(|| {
@@ -366,39 +317,17 @@ impl ToolAction for FsEditSubAction {
         let session_id = sandbox.session_id();
         let undo_manager = sandbox.undo_manager();
 
-        let args: serde_json::Value =
-            serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
-                message: format!("Failed to parse edit arguments: {e}"),
-            })?;
-
-        let file_path = args["filePath"]
-            .as_str()
-            .ok_or_else(|| ToolError::InvalidArguments {
-                message: "filePath is required for edit".to_string(),
-            })?;
-        let old_string = args["oldString"]
-            .as_str()
-            .ok_or_else(|| ToolError::InvalidArguments {
-                message: "oldString is required for edit".to_string(),
-            })?;
-        let new_string = args["newString"]
-            .as_str()
-            .ok_or_else(|| ToolError::InvalidArguments {
-                message: "newString is required for edit".to_string(),
-            })?;
-        let replace_all = args["replaceAll"].as_bool().unwrap_or(false);
-
         sandbox.check_permission(
             crate::utils::permission::DestructiveAction::FileOverwrite,
-            file_path,
+            &self.file_path,
             "Editing file content",
         )?;
 
         edit(
-            Path::new(file_path),
-            old_string,
-            new_string,
-            replace_all,
+            Path::new(&self.file_path),
+            &self.old_string,
+            &self.new_string,
+            self.replace_all.unwrap_or(false),
             sandbox.config(),
             undo_manager,
             &session_id,

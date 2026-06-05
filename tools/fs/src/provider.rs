@@ -5,34 +5,27 @@ use std::sync::{Arc, RwLock};
 
 use crate::utils::sandbox::Sandbox;
 
-/// Filesystem tool provider backed by diesel undo manager and secure sandbox.
 pub struct FsToolProvider {
     actions: Vec<Box<dyn ToolAction>>,
     sandbox: Arc<RwLock<Option<Arc<Sandbox>>>>,
 }
 
 impl FsToolProvider {
-    /// Creates a new `FsToolProvider` and registers all 9 individual tool actions.
     pub fn new() -> Self {
         let sandbox = Arc::new(RwLock::new(None));
         let actions: Vec<Box<dyn ToolAction>> = vec![
-            // Filesystem tools (7)
-            Box::new(crate::action::read::FsReadSubAction::new(sandbox.clone())),
-            Box::new(crate::action::write::FsWriteSubAction::new(sandbox.clone())),
-            Box::new(crate::action::edit::FsEditSubAction::new(sandbox.clone())),
-            Box::new(crate::action::delete::FsDeleteSubAction::new(
+            Box::new(crate::action::read::FsReadAction::new(sandbox.clone())),
+            Box::new(crate::action::write::FsWriteAction::new(sandbox.clone())),
+            Box::new(crate::action::edit::FsEditAction::new(sandbox.clone())),
+            Box::new(crate::action::delete::FsDeleteAction::new(sandbox.clone())),
+            Box::new(crate::action::search::search_glob::FsGlobAction::new(
                 sandbox.clone(),
             )),
-            Box::new(crate::action::search::search_glob::FsGlobSubAction::new(
+            Box::new(crate::action::search::search_grep::FsGrepAction::new(
                 sandbox.clone(),
             )),
-            Box::new(crate::action::search::search_grep::FsGrepSubAction::new(
-                sandbox.clone(),
-            )),
-            Box::new(crate::action::patch::FsPatchSubAction::new(sandbox.clone())),
-            // Shell tool (1)
+            Box::new(crate::action::patch::FsPatchAction::new(sandbox.clone())),
             Box::new(crate::action::shell::ShellAction::new(sandbox.clone())),
-            // Utility tool (1)
             Box::new(crate::action::undo::UndoAction::new(sandbox.clone())),
         ];
         Self { actions, sandbox }
@@ -53,7 +46,7 @@ impl ToolProvider for FsToolProvider {
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         for action in &self.actions {
-            if action.tool_name() == name {
+            if action.name() == name {
                 return action.execute(arguments).await;
             }
         }

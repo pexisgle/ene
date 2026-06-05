@@ -16,3 +16,4 @@ schemars = { workspace = true }
 
 [dev-dependencies]
 ene-tool-derive = { workspace = true }
+ene-tool-common = { workspace = true }

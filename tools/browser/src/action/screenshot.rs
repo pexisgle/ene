@@ -1,55 +1,30 @@
-use async_trait::async_trait;
-use ene_tool_common::ToolAction;
-use ene_tool_proto::{
-    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
-};
+use ene_tool_common::prelude::*;
 use std::sync::Arc;
 
-/// Browser action to capture screenshot.
-pub struct ScreenshotSubAction {
+fn default_store() -> Arc<crate::utils::session::BrowserSessionStore> {
+    Arc::new(crate::utils::session::BrowserSessionStore::new())
+}
+
+#[derive(Clone, Deserialize, JsonSchema, ToolAction)]
+#[tool(
+    namespace = "browser",
+    name = "screenshot",
+    summary = "Takes a screenshot of the active browser tab.",
+    category = "Browser",
+    keywords_primary = "screenshot, capture, image"
+)]
+pub struct ScreenshotAction {
+    #[tool(skip)]
+    #[serde(skip, default = "default_store")]
     store: Arc<crate::utils::session::BrowserSessionStore>,
 }
 
-impl ScreenshotSubAction {
-    /// Creates a new `ScreenshotSubAction` with the shared session store.
+impl ScreenshotAction {
     pub fn new(store: Arc<crate::utils::session::BrowserSessionStore>) -> Self {
         Self { store }
     }
-}
 
-#[async_trait]
-impl ToolAction for ScreenshotSubAction {
-    fn tool_name(&self) -> &'static str {
-        "browser.screenshot"
-    }
-
-    fn definition(&self) -> ToolSpec {
-        ToolSpec {
-            name: ToolName::new("browser.screenshot"),
-            version: ToolVersion::default(),
-            display_name: "Takes a screenshot of the active browser tab".to_string(),
-            summary: "Takes a screenshot of the active browser tab".to_string(),
-            description: "Takes a screenshot of the active browser tab".to_string(),
-            category: ToolCategory::Browser,
-            keywords: KeywordSet::primary_only(["screenshot", "capture", "image"]),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "required": []
-            }),
-            examples: vec![ToolExample {
-                description: "Capture browser tab screenshot".to_string(),
-                input: serde_json::json!({}),
-                output: None,
-            }],
-            caveats: Vec::new(),
-            side_effects: SideEffects::default(),
-            preconditions: Vec::new(),
-            related: Vec::new(),
-        }
-    }
-
-    async fn execute(&self, _arguments: &str) -> Result<String, ToolError> {
+    async fn run(&self) -> Result<String, ToolError> {
         let chrome_path = crate::utils::chrome::find_chrome_executable().ok_or_else(|| ToolError::ExecutionFailed {
             message: "No Chrome/Chromium browser found. Please install Google Chrome or Chromium, or set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH environment variable.".to_string(),
         })?;

@@ -2,7 +2,7 @@
 //! optional HyDE, optional LLM rerank, and per-category limits.
 //!
 //! Replaces the inline RAG logic previously embedded in
-//! [`CompositeToolRegistry`](super::CompositeToolRegistry).
+//! [`CompositeToolRegistry`](crate::CompositeToolRegistry).
 
 use ene_memory::MemoryStore;
 use ene_provider::{EmbeddingError, EmbeddingProvider, cosine_similarity};
