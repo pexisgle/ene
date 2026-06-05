@@ -4,24 +4,22 @@ use ene_tool_common::ToolAction;
 use ene_tool_proto::{ToolError, ToolProvider, ToolSpec};
 use std::sync::Arc;
 
-/// Browser tool provider managing Chromium automation.
 pub struct BrowserToolProvider {
     actions: Vec<Box<dyn ToolAction>>,
 }
 
 impl BrowserToolProvider {
-    /// Creates a new `BrowserToolProvider` and registers all 8 individual browser actions.
     pub fn new() -> Self {
         let store = Arc::new(crate::utils::session::BrowserSessionStore::new());
         let actions: Vec<Box<dyn ToolAction>> = vec![
-            Box::new(action::NavigateSubAction::new(store.clone())),
-            Box::new(action::ClickSubAction::new(store.clone())),
-            Box::new(action::TypeSubAction::new(store.clone())),
-            Box::new(action::WaitSubAction::new(store.clone())),
-            Box::new(action::ScreenshotSubAction::new(store.clone())),
-            Box::new(action::GetContentSubAction::new(store.clone())),
-            Box::new(action::ScrollSubAction::new(store.clone())),
-            Box::new(action::CloseSubAction::new(store)),
+            Box::new(action::NavigateAction::new(store.clone())),
+            Box::new(action::ClickAction::new(store.clone())),
+            Box::new(action::TypeAction::new(store.clone())),
+            Box::new(action::WaitAction::new(store.clone())),
+            Box::new(action::ScreenshotAction::new(store.clone())),
+            Box::new(action::GetContentAction::new(store.clone())),
+            Box::new(action::ScrollAction::new(store.clone())),
+            Box::new(action::CloseAction::new(store)),
         ];
         Self { actions }
     }
@@ -40,7 +38,7 @@ impl ToolProvider for BrowserToolProvider {
     }
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         for action in &self.actions {
-            if action.tool_name() == name {
+            if action.name() == name {
                 return action.execute(arguments).await;
             }
         }
@@ -49,7 +47,5 @@ impl ToolProvider for BrowserToolProvider {
         })
     }
 
-    fn set_session_id(&self, _session_id: &str) {
-        // Browser sessions are managed by BrowserSessionStore internally
-    }
+    fn set_session_id(&self, _session_id: &str) {}
 }

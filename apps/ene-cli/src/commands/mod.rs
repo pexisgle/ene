@@ -21,7 +21,7 @@ pub trait CliCommand: Send + Sync {
     /// Description of the command, shown in help
     fn description(&self) -> &'static str;
 
-    /// Detailed usage information, e.g. "/card <name>"
+    /// Detailed usage information, e.g. "/card `<name>`"
     fn usage(&self) -> &'static str;
 
     /// Execute the command

@@ -1,18 +1,7 @@
-use async_trait::async_trait;
-use ene_tool_common::ToolAction;
-use ene_tool_proto::{
-    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
-};
+use ene_tool_common::prelude::*;
 use image::{DynamicImage, imageops::FilterType};
-use serde::Deserialize;
 
 mod portal;
-
-#[derive(Deserialize)]
-struct ScreenshotArgs {
-    #[serde(default)]
-    scale_percent: Option<u32>,
-}
 
 fn capture_screen_xcap(scale_percent: u32) -> Result<DynamicImage, ToolError> {
     let mut target_image = None;
@@ -61,56 +50,25 @@ fn capture_screen_xcap(scale_percent: u32) -> Result<DynamicImage, ToolError> {
     Ok(final_image)
 }
 
-/// Action to take a screenshot.
-pub struct ScreenshotAction;
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema, ToolAction)]
+#[tool(
+    namespace = "app",
+    name = "screenshot",
+    summary = "Takes a screenshot of the active window or primary screen.",
+    description = "Takes a screenshot of the active window or primary screen.",
+    category = "App",
+    keywords_primary = "screenshot, screen, capture, image"
+)]
+pub struct ScreenshotAction {
+    /// Resize percentage 1-100 (default: 50).
+    #[arg(minimum = 1, maximum = 100, default = "50")]
+    #[serde(default)]
+    scale_percent: Option<u32>,
+}
 
-#[async_trait]
-impl ToolAction for ScreenshotAction {
-    fn tool_name(&self) -> &'static str {
-        "app.screenshot"
-    }
-
-    fn definition(&self) -> ToolSpec {
-        ToolSpec {
-            name: ToolName::new("app.screenshot"),
-            version: ToolVersion::default(),
-            display_name: "Takes a screenshot of the active window or primary screen.".to_string(),
-            summary: "Takes a screenshot of the active window or primary screen.".to_string(),
-            description: "Takes a screenshot of the active window or primary screen.".to_string(),
-            category: ToolCategory::App,
-            keywords: KeywordSet::primary_only(["screenshot", "screen", "capture", "image"]),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "scale_percent": { "type": "integer", "description": "Resize percentage 1-100 (default: 50)" }
-                },
-                "required": []
-            }),
-            examples: vec![
-                ToolExample {
-                    description: "Take a full screenshot".to_string(),
-                    input: serde_json::json!({}),
-                    output: None,
-                },
-                ToolExample {
-                    description: "Take screenshot with custom scale".to_string(),
-                    input: serde_json::json!({"scale_percent": 25}),
-                    output: None,
-                },
-            ],
-            caveats: Vec::new(),
-            side_effects: SideEffects::default(),
-            preconditions: Vec::new(),
-            related: Vec::new(),
-        }
-    }
-
-    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
-        let args: ScreenshotArgs = serde_json::from_str(arguments).unwrap_or(ScreenshotArgs {
-            scale_percent: None,
-        });
-
-        let scale_percent = args
+impl ScreenshotAction {
+    async fn run(&self) -> Result<String, ToolError> {
+        let scale_percent = self
             .scale_percent
             .unwrap_or(crate::config::DEFAULT_SCALE_PERCENT);
 

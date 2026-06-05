@@ -7,6 +7,8 @@ description = "Built-in utility tools: user questioning, todo list management, s
 [dependencies]
 ene-tool-proto = { workspace = true }
 ene-tool-common = { workspace = true }
+ene-tool-derive = { workspace = true }
+schemars = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }

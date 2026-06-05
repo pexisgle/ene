@@ -1,19 +1,7 @@
-use async_trait::async_trait;
-use ene_tool_common::ToolAction;
-use ene_tool_proto::{
-    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
-};
+use ene_tool_common::prelude::*;
 use image::{DynamicImage, imageops::FilterType};
-use serde::Deserialize;
 
 mod portal;
-
-#[derive(Deserialize)]
-struct CaptureWindowArgs {
-    window_title: String,
-    #[serde(default)]
-    scale_percent: Option<u32>,
-}
 
 fn capture_window_by_title_xcap(
     title: &str,
@@ -47,57 +35,30 @@ fn capture_window_by_title_xcap(
     })
 }
 
-/// Action to capture a specific window.
-pub struct CaptureWindowAction;
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema, ToolAction)]
+#[tool(
+    namespace = "app",
+    name = "capture_window",
+    summary = "Takes a screenshot of a specific window by title substring match.",
+    description = "Takes a screenshot of a specific window by title substring match.",
+    category = "App",
+    keywords_primary = "window, screenshot, capture"
+)]
+pub struct CaptureWindowAction {
+    /// Substring of window title or app name to capture.
+    window_title: String,
+    /// Resize percentage 1-100 (default: 50).
+    #[arg(minimum = 1, maximum = 100, default = "50")]
+    #[serde(default)]
+    scale_percent: Option<u32>,
+}
 
-#[async_trait]
-impl ToolAction for CaptureWindowAction {
-    fn tool_name(&self) -> &'static str {
-        "app.capture_window"
-    }
-
-    fn definition(&self) -> ToolSpec {
-        ToolSpec {
-            name: ToolName::new("app.capture_window"),
-            version: ToolVersion::default(),
-            display_name: "Takes a screenshot of a specific window by title substring match."
-                .to_string(),
-            summary: "Takes a screenshot of a specific window by title substring match."
-                .to_string(),
-            description: "Takes a screenshot of a specific window by title substring match."
-                .to_string(),
-            category: ToolCategory::App,
-            keywords: KeywordSet::primary_only(["window", "screenshot", "capture"]),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "window_title": { "type": "string", "description": "Substring of window title or app name to capture" },
-                    "scale_percent": { "type": "integer", "description": "Resize percentage 1-100 (default: 50)" }
-                },
-                "required": ["window_title"]
-            }),
-            examples: vec![ToolExample {
-                description: "Capture a window screenshot".to_string(),
-                input: serde_json::json!({"window_title": "Firefox"}),
-                output: None,
-            }],
-            caveats: Vec::new(),
-            side_effects: SideEffects::default(),
-            preconditions: Vec::new(),
-            related: Vec::new(),
-        }
-    }
-
-    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
-        let args: CaptureWindowArgs =
-            serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {
-                message: format!("Invalid arguments: {e}"),
-            })?;
-
-        let scale_percent = args
+impl CaptureWindowAction {
+    async fn run(&self) -> Result<String, ToolError> {
+        let scale_percent = self
             .scale_percent
             .unwrap_or(crate::config::DEFAULT_SCALE_PERCENT);
-        let title = args.window_title.clone();
+        let title = self.window_title.clone();
 
         let image = if crate::utils::portal::detect_wayland() {
             portal::capture_window_portal(scale_percent).await

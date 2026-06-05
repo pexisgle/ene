@@ -11,10 +11,12 @@ path = "src/main.rs"
 [dependencies]
 ene-tool-proto = { workspace = true }
 ene-tool-common = { workspace = true }
+ene-tool-derive = { workspace = true }
 tokio = { workspace = true, features = ["fs", "process"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
+schemars = { workspace = true }
 regex = { workspace = true }
 tracing = { workspace = true }
 walkdir = "2"

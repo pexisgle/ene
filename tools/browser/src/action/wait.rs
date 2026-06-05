@@ -1,68 +1,38 @@
-use async_trait::async_trait;
-use ene_tool_common::ToolAction;
-use ene_tool_proto::{
-    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
-};
-use serde::Deserialize;
+use ene_tool_common::prelude::*;
 use std::sync::Arc;
 
-#[derive(Deserialize)]
-struct WaitArgs {
-    #[serde(default)]
-    wait_ms: Option<u64>,
+fn default_store() -> Arc<crate::utils::session::BrowserSessionStore> {
+    Arc::new(crate::utils::session::BrowserSessionStore::new())
 }
 
-/// Browser action to wait for a specific duration.
-pub struct WaitSubAction {
+#[derive(Clone, Default, Deserialize, JsonSchema, ToolAction)]
+#[tool(
+    namespace = "browser",
+    name = "wait",
+    summary = "Waits for a specified duration in milliseconds.",
+    category = "Browser",
+    keywords_primary = "wait, delay, sleep"
+)]
+pub struct WaitAction {
+    /// Milliseconds to wait (default: 1000).
+    #[arg(default = "1000", minimum = 0)]
+    wait_ms: Option<u64>,
+
+    #[tool(skip)]
+    #[serde(skip, default = "default_store")]
     _store: Arc<crate::utils::session::BrowserSessionStore>,
 }
 
-impl WaitSubAction {
-    /// Creates a new `WaitSubAction` with the shared session store.
+impl WaitAction {
     pub fn new(store: Arc<crate::utils::session::BrowserSessionStore>) -> Self {
-        Self { _store: store }
-    }
-}
-
-#[async_trait]
-impl ToolAction for WaitSubAction {
-    fn tool_name(&self) -> &'static str {
-        "browser.wait"
-    }
-
-    fn definition(&self) -> ToolSpec {
-        ToolSpec {
-            name: ToolName::new("browser.wait"),
-            version: ToolVersion::default(),
-            display_name: "Waits for a specified duration in milliseconds".to_string(),
-            summary: "Waits for a specified duration in milliseconds".to_string(),
-            description: "Waits for a specified duration in milliseconds".to_string(),
-            category: ToolCategory::Browser,
-            keywords: KeywordSet::primary_only(["wait", "delay", "sleep"]),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "wait_ms": {
-                        "type": "integer",
-                        "description": "Milliseconds to wait (default: 1000)"
-                    }
-                }
-            }),
-            examples: vec![ToolExample {
-                description: "Wait 2 seconds for page to load".to_string(),
-                input: serde_json::json!({"wait_ms": 2000}),
-                output: None,
-            }],
-            caveats: Vec::new(),
-            side_effects: SideEffects::default(),
-            preconditions: Vec::new(),
-            related: Vec::new(),
+        Self {
+            wait_ms: None,
+            _store: store,
         }
     }
 
-    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
-        let args: WaitArgs = serde_json::from_str(arguments).unwrap_or(WaitArgs { wait_ms: None });
-        let ms = args.wait_ms.unwrap_or(1000);
+    async fn run(&self) -> Result<String, ToolError> {
+        let ms = self.wait_ms.unwrap_or(1000);
         tokio::time::sleep(tokio::time::Duration::from_millis(ms)).await;
         Ok(format!("Waited {} ms", ms))
     }

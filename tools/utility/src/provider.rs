@@ -21,14 +21,14 @@ impl UtilityToolProvider {
     pub fn new() -> Self {
         let db = Arc::new(TodoDb::new());
         let actions: Vec<Box<dyn ToolAction>> = vec![
-            Box::new(action::AskQuestion),
-            Box::new(action::TodoList::new(db.clone())),
-            Box::new(action::TodoAdd::new(db.clone())),
-            Box::new(action::TodoUpdate::new(db.clone())),
-            Box::new(action::TodoComplete::new(db.clone())),
-            Box::new(action::TodoDelete::new(db.clone())),
-            Box::new(action::GetCurrentTime),
-            Box::new(action::GetSystemInfo),
+            Box::new(action::AskQuestionAction::default()),
+            Box::new(action::TodoListAction::new(db.clone())),
+            Box::new(action::TodoAddAction::new(db.clone())),
+            Box::new(action::TodoUpdateAction::new(db.clone())),
+            Box::new(action::TodoCompleteAction::new(db.clone())),
+            Box::new(action::TodoDeleteAction::new(db.clone())),
+            Box::new(action::GetCurrentTimeAction::default()),
+            Box::new(action::GetSystemInfoAction::default()),
         ];
         Self { actions, db }
     }
@@ -47,7 +47,7 @@ impl ToolProvider for UtilityToolProvider {
     }
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         for action in &self.actions {
-            if action.tool_name() == name {
+            if action.name() == name {
                 return action.execute(arguments).await;
             }
         }

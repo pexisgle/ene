@@ -7,6 +7,7 @@ description = "Chromium browser automation via Chrome DevTools Protocol: navigat
 [dependencies]
 ene-tool-proto = { workspace = true }
 ene-tool-common = { workspace = true }
+ene-tool-derive = { workspace = true }
 chromiumoxide = "0.9"
 base64 = { workspace = true }
 dashmap = { workspace = true }
@@ -15,6 +16,7 @@ tokio-stream = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
 async-trait = { workspace = true }
+schemars = { workspace = true }
 uuid = { workspace = true }
 regex = { workspace = true }
 

@@ -1,9 +1,4 @@
-use async_trait::async_trait;
-use ene_tool_common::ToolAction;
-use ene_tool_proto::{
-    KeywordSet, SideEffects, ToolCategory, ToolError, ToolExample, ToolName, ToolSpec, ToolVersion,
-};
-use serde::Deserialize;
+use ene_tool_common::prelude::*;
 use std::sync::Arc;
 
 use crate::db::{TodoDb, TodoError, TodoItem};
@@ -46,61 +41,35 @@ fn err(e: TodoError) -> ToolError {
     }
 }
 
-fn parse<T: for<'de> Deserialize<'de>>(s: &str) -> Result<T, ToolError> {
-    serde_json::from_str(s).map_err(|e| ToolError::InvalidArguments {
-        message: format!("invalid arguments: {e}"),
-    })
+fn default_db() -> Arc<TodoDb> {
+    Arc::new(TodoDb::new())
 }
 
 // ───────────────────────── todo_list ─────────────────────────
 
-/// Returns the current session's todo tree.
-pub struct TodoList {
+#[derive(Clone, Deserialize, JsonSchema, ToolAction)]
+#[tool(
+    namespace = "utility",
+    name = "todo_list",
+    summary = "List all todos in the current session.",
+    description = "Returns the full todo tree for the current session, including each item's id, content, status, priority, parent relationship, and a summary of active vs total items.",
+    category = "Utility",
+    keywords_primary = "todo, task, track, plan, checklist"
+)]
+/// Action to list all todos in the current session.
+pub struct TodoListAction {
+    #[tool(skip)]
+    #[serde(skip, default = "default_db")]
     db: Arc<TodoDb>,
 }
 
-impl TodoList {
-    /// Creates a new `TodoList` action backed by the given `TodoDb`.
+impl TodoListAction {
+    /// Creates a new `TodoListAction` with the given database.
     pub fn new(db: Arc<TodoDb>) -> Self {
         Self { db }
     }
-}
 
-#[async_trait]
-impl ToolAction for TodoList {
-    fn tool_name(&self) -> &'static str {
-        "utility.todo_list"
-    }
-
-    fn definition(&self) -> ToolSpec {
-        ToolSpec {
-            name: ToolName::new("utility.todo_list"),
-            version: ToolVersion::default(),
-            display_name: "List all todos in the current session.".to_string(),
-            summary: "List all todos in the current session.".to_string(),
-            description: "Returns the full todo tree for the current session, including each item's id, content, status, priority, parent relationship, and a summary of active vs total items.".to_string(),
-            category: ToolCategory::Utility,
-            keywords: KeywordSet::primary_only(["todo", "task", "track", "plan", "checklist"]),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "required": []
-            }),
-            examples: vec![
-                ToolExample {
-                    description: "List all todos".to_string(),
-                    input: serde_json::json!({}),
-                    output: Some(r#"{"summary":{"total":3,"active":2},"items":[...]}"#.to_string()),
-                },
-            ],
-            caveats: Vec::new(),
-            side_effects: SideEffects::default(),
-            preconditions: Vec::new(),
-            related: Vec::new(),
-        }
-    }
-
-    async fn execute(&self, _arguments: &str) -> Result<String, ToolError> {
+    async fn run(&self) -> Result<String, ToolError> {
         let items: Vec<TodoItem> = self.db.list().map_err(err)?;
         let count = items.len();
         let active = items
@@ -121,89 +90,46 @@ impl ToolAction for TodoList {
 
 // ───────────────────────── todo_add ─────────────────────────
 
-#[derive(Deserialize)]
-struct AddArgs {
+#[derive(Clone, Deserialize, JsonSchema, ToolAction)]
+#[tool(
+    namespace = "utility",
+    name = "todo_add",
+    summary = "Add a new todo.",
+    description = "Adds a new todo. Set `parent_id` to make this a sub-task of an existing todo; this lets you break a large task into smaller sub-tasks at any depth. New todos start with status='pending'.",
+    category = "Utility",
+    keywords_primary = "todo, task, track, plan, checklist"
+)]
+/// Action to add a new todo.
+pub struct TodoAddAction {
+    #[tool(skip)]
+    #[serde(skip, default = "default_db")]
+    db: Arc<TodoDb>,
+    /// Brief description of the task.
     content: String,
+    /// Priority level.
+    #[arg(enum_values = "high, medium, low")]
     priority: String,
+    /// Optional id of an existing todo to nest this under. Omit for a
+    /// top-level todo.
     #[serde(default)]
     parent_id: Option<i64>,
 }
 
-/// Adds a new todo. Optionally nests it under an existing todo via `parent_id`.
-pub struct TodoAdd {
-    db: Arc<TodoDb>,
-}
-
-impl TodoAdd {
-    /// Creates a new `TodoAdd` action backed by the given `TodoDb`.
+impl TodoAddAction {
+    /// Creates a new `TodoAddAction` with the given database.
     pub fn new(db: Arc<TodoDb>) -> Self {
-        Self { db }
-    }
-}
-
-#[async_trait]
-impl ToolAction for TodoAdd {
-    fn tool_name(&self) -> &'static str {
-        "utility.todo_add"
-    }
-
-    fn definition(&self) -> ToolSpec {
-        ToolSpec {
-            name: ToolName::new("utility.todo_add"),
-            version: ToolVersion::default(),
-            display_name: "Add a new todo.".to_string(),
-            summary: "Add a new todo.".to_string(),
-            description: concat!(
-                "Adds a new todo. Set `parent_id` to make this a sub-task of an existing todo; ",
-                "this lets you break a large task into smaller sub-tasks at any depth. ",
-                "New todos start with status='pending'."
-            )
-            .to_string(),
-            category: ToolCategory::Utility,
-            keywords: KeywordSet::primary_only(["todo", "task", "track", "plan", "checklist"]),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "content": {
-                        "type": "string",
-                        "description": "Brief description of the task."
-                    },
-                    "priority": {
-                        "type": "string",
-                        "enum": ["high", "medium", "low"],
-                        "description": "Priority level."
-                    },
-                    "parent_id": {
-                        "type": "integer",
-                        "description": "Optional id of an existing todo to nest this under. Omit for a top-level todo."
-                    }
-                },
-                "required": ["content", "priority"]
-            }),
-            examples: vec![
-                ToolExample {
-                    description: "Add a high-priority task".to_string(),
-                    input: serde_json::json!({"content": "Buy groceries", "priority": "high"}),
-                    output: None,
-                },
-                ToolExample {
-                    description: "Add a sub-task under an existing todo".to_string(),
-                    input: serde_json::json!({"content": "Buy milk", "priority": "medium", "parent_id": 1}),
-                    output: None,
-                },
-            ],
-            caveats: Vec::new(),
-            side_effects: SideEffects::default(),
-            preconditions: Vec::new(),
-            related: Vec::new(),
+        Self {
+            db,
+            content: String::new(),
+            priority: String::new(),
+            parent_id: None,
         }
     }
 
-    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
-        let args: AddArgs = parse(arguments)?;
+    async fn run(&self) -> Result<String, ToolError> {
         let item = self
             .db
-            .add(args.parent_id, &args.content, &args.priority)
+            .add(self.parent_id, &self.content, &self.priority)
             .map_err(err)?;
         ok_json(&item)
     }
@@ -211,17 +137,35 @@ impl ToolAction for TodoAdd {
 
 // ───────────────────────── todo_update ─────────────────────────
 
-#[derive(Deserialize)]
-struct UpdateArgs {
+#[derive(Clone, Deserialize, JsonSchema, ToolAction)]
+#[tool(
+    namespace = "utility",
+    name = "todo_update",
+    summary = "Update an existing todo's fields.",
+    description = "Updates fields of an existing todo. Any field omitted is left unchanged. To reparent a todo, set parent_id to a new integer id; to detach it (make it a top-level todo), set parent_id to null. Repurposing cannot create a cycle (a todo cannot become a descendant of itself).",
+    category = "Utility",
+    keywords_primary = "todo, task, track, plan, checklist"
+)]
+/// Action to update an existing todo's fields.
+pub struct TodoUpdateAction {
+    #[tool(skip)]
+    #[serde(skip, default = "default_db")]
+    db: Arc<TodoDb>,
+    /// Id of the todo to update.
     id: i64,
+    /// New content (omit to keep).
     #[serde(default)]
     content: Option<String>,
+    /// New status (omit to keep).
+    #[arg(enum_values = "pending, in_progress, completed, cancelled")]
     #[serde(default)]
     status: Option<String>,
+    /// New priority (omit to keep).
+    #[arg(enum_values = "high, medium, low")]
     #[serde(default)]
     priority: Option<String>,
-    /// Tri-state: field absent = don't touch, null = detach (make top-level),
-    /// integer = reparent under that id.
+    /// New parent id (integer) to reparent under, or null to detach to
+    /// a top-level todo. Omit to leave unchanged.
     #[serde(default, deserialize_with = "deserialize_optional_parent_id")]
     parent_id: Option<Option<i64>>,
 }
@@ -241,93 +185,28 @@ where
     }
 }
 
-/// Partial update of a todo. Fields not present are left unchanged.
-pub struct TodoUpdate {
-    db: Arc<TodoDb>,
-}
-
-impl TodoUpdate {
-    /// Creates a new `TodoUpdate` action backed by the given `TodoDb`.
+impl TodoUpdateAction {
+    /// Creates a new `TodoUpdateAction` with the given database.
     pub fn new(db: Arc<TodoDb>) -> Self {
-        Self { db }
-    }
-}
-
-#[async_trait]
-impl ToolAction for TodoUpdate {
-    fn tool_name(&self) -> &'static str {
-        "utility.todo_update"
-    }
-
-    fn definition(&self) -> ToolSpec {
-        ToolSpec {
-            name: ToolName::new("utility.todo_update"),
-            version: ToolVersion::default(),
-            display_name: "Update an existing todo's fields.".to_string(),
-            summary: "Update an existing todo's fields.".to_string(),
-            description: concat!(
-                "Updates fields of an existing todo. Any field omitted is left unchanged. ",
-                "To reparent a todo, set parent_id to a new integer id; to detach it (make it ",
-                "a top-level todo), set parent_id to null. Repurposing cannot create a cycle ",
-                "(a todo cannot become a descendant of itself)."
-            )
-            .to_string(),
-            category: ToolCategory::Utility,
-            keywords: KeywordSet::primary_only(["todo", "task", "track", "plan", "checklist"]),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "integer", "description": "Id of the todo to update." },
-                    "content": { "type": "string", "description": "New content (omit to keep)." },
-                    "status": {
-                        "type": "string",
-                        "enum": ["pending", "in_progress", "completed", "cancelled"],
-                        "description": "New status (omit to keep)."
-                    },
-                    "priority": {
-                        "type": "string",
-                        "enum": ["high", "medium", "low"],
-                        "description": "New priority (omit to keep)."
-                    },
-                    "parent_id": {
-                        "description": "New parent id (integer) to reparent under, or null to detach to a top-level todo. Omit to leave unchanged.",
-                        "anyOf": [
-                            { "type": "integer" },
-                            { "type": "null" }
-                        ]
-                    }
-                },
-                "required": ["id"]
-            }),
-            examples: vec![
-                ToolExample {
-                    description: "Mark a todo as in progress".to_string(),
-                    input: serde_json::json!({"id": 1, "status": "in_progress"}),
-                    output: None,
-                },
-                ToolExample {
-                    description: "Reparent a todo to make it top-level".to_string(),
-                    input: serde_json::json!({"id": 3, "parent_id": null}),
-                    output: None,
-                },
-            ],
-            caveats: Vec::new(),
-            side_effects: SideEffects::default(),
-            preconditions: Vec::new(),
-            related: Vec::new(),
+        Self {
+            db,
+            id: 0,
+            content: None,
+            status: None,
+            priority: None,
+            parent_id: None,
         }
     }
 
-    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
-        let args: UpdateArgs = parse(arguments)?;
+    async fn run(&self) -> Result<String, ToolError> {
         let updated = self
             .db
             .update(
-                args.id,
-                args.content.as_deref(),
-                args.status.as_deref(),
-                args.priority.as_deref(),
-                args.parent_id,
+                self.id,
+                self.content.as_deref(),
+                self.status.as_deref(),
+                self.priority.as_deref(),
+                self.parent_id,
             )
             .map_err(err)?;
         ok_json(&updated)
@@ -336,66 +215,34 @@ impl ToolAction for TodoUpdate {
 
 // ───────────────────────── todo_complete ─────────────────────────
 
-#[derive(Deserialize)]
-struct CompleteArgs {
+#[derive(Clone, Deserialize, JsonSchema, ToolAction)]
+#[tool(
+    namespace = "utility",
+    name = "todo_complete",
+    summary = "Mark a todo and all its sub-tasks as completed.",
+    description = "Marks a todo (and all of its descendants) as completed. Use this when a large task and all of its sub-tasks are finished.",
+    category = "Utility",
+    keywords_primary = "todo, task, track, plan, checklist"
+)]
+/// Action to mark a todo and all its sub-tasks as completed.
+pub struct TodoCompleteAction {
+    #[tool(skip)]
+    #[serde(skip, default = "default_db")]
+    db: Arc<TodoDb>,
+    /// Id of the todo to complete (cascades to descendants).
     id: i64,
 }
 
-/// Marks a todo and all its descendants as `completed`.
-pub struct TodoComplete {
-    db: Arc<TodoDb>,
-}
-
-impl TodoComplete {
-    /// Creates a new `TodoComplete` action backed by the given `TodoDb`.
+impl TodoCompleteAction {
+    /// Creates a new `TodoCompleteAction` with the given database.
     pub fn new(db: Arc<TodoDb>) -> Self {
-        Self { db }
-    }
-}
-
-#[async_trait]
-impl ToolAction for TodoComplete {
-    fn tool_name(&self) -> &'static str {
-        "utility.todo_complete"
+        Self { db, id: 0 }
     }
 
-    fn definition(&self) -> ToolSpec {
-        ToolSpec {
-            name: ToolName::new("utility.todo_complete"),
-            version: ToolVersion::default(),
-            display_name: "Mark a todo and all its sub-tasks as completed.".to_string(),
-            summary: "Mark a todo and all its sub-tasks as completed.".to_string(),
-            description: concat!(
-                "Marks a todo (and all of its descendants) as completed. ",
-                "Use this when a large task and all of its sub-tasks are finished."
-            )
-            .to_string(),
-            category: ToolCategory::Utility,
-            keywords: KeywordSet::primary_only(["todo", "task", "track", "plan", "checklist"]),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "integer", "description": "Id of the todo to complete (cascades to descendants)." }
-                },
-                "required": ["id"]
-            }),
-            examples: vec![ToolExample {
-                description: "Complete a todo and cascade to sub-tasks".to_string(),
-                input: serde_json::json!({"id": 1}),
-                output: Some(r#"{"id":1,"status":"completed","cascaded":[2,3]}"#.to_string()),
-            }],
-            caveats: Vec::new(),
-            side_effects: SideEffects::default(),
-            preconditions: Vec::new(),
-            related: Vec::new(),
-        }
-    }
-
-    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
-        let args: CompleteArgs = parse(arguments)?;
-        let cascaded = self.db.complete(args.id).map_err(err)?;
+    async fn run(&self) -> Result<String, ToolError> {
+        let cascaded = self.db.complete(self.id).map_err(err)?;
         ok_json(&serde_json::json!({
-            "id": args.id,
+            "id": self.id,
             "status": "completed",
             "cascaded": cascaded,
         }))
@@ -404,65 +251,32 @@ impl ToolAction for TodoComplete {
 
 // ───────────────────────── todo_delete ─────────────────────────
 
-#[derive(Deserialize)]
-struct DeleteArgs {
+#[derive(Clone, Deserialize, JsonSchema, ToolAction)]
+#[tool(
+    namespace = "utility",
+    name = "todo_delete",
+    summary = "Soft-delete a todo by marking it as cancelled.",
+    description = "Soft-deletes a todo by setting status='cancelled'. The row is kept for history. Descendants are NOT cascaded — to cancel a whole sub-tree, delete each item individually.",
+    category = "Utility",
+    keywords_primary = "todo, task, track, plan, checklist"
+)]
+/// Action to soft-delete a todo by marking it as cancelled.
+pub struct TodoDeleteAction {
+    #[tool(skip)]
+    #[serde(skip, default = "default_db")]
+    db: Arc<TodoDb>,
+    /// Id of the todo to cancel.
     id: i64,
 }
 
-/// Soft-deletes a todo by setting `status='cancelled'`.
-pub struct TodoDelete {
-    db: Arc<TodoDb>,
-}
-
-impl TodoDelete {
-    /// Creates a new `TodoDelete` action backed by the given `TodoDb`.
+impl TodoDeleteAction {
+    /// Creates a new `TodoDeleteAction` with the given database.
     pub fn new(db: Arc<TodoDb>) -> Self {
-        Self { db }
-    }
-}
-
-#[async_trait]
-impl ToolAction for TodoDelete {
-    fn tool_name(&self) -> &'static str {
-        "utility.todo_delete"
+        Self { db, id: 0 }
     }
 
-    fn definition(&self) -> ToolSpec {
-        ToolSpec {
-            name: ToolName::new("utility.todo_delete"),
-            version: ToolVersion::default(),
-            display_name: "Soft-delete a todo by marking it as cancelled.".to_string(),
-            summary: "Soft-delete a todo by marking it as cancelled.".to_string(),
-            description: concat!(
-                "Soft-deletes a todo by setting status='cancelled'. ",
-                "The row is kept for history. Descendants are NOT cascaded — ",
-                "to cancel a whole sub-tree, delete each item individually."
-            )
-            .to_string(),
-            category: ToolCategory::Utility,
-            keywords: KeywordSet::primary_only(["todo", "task", "track", "plan", "checklist"]),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "integer", "description": "Id of the todo to cancel." }
-                },
-                "required": ["id"]
-            }),
-            examples: vec![ToolExample {
-                description: "Soft-delete a todo by id".to_string(),
-                input: serde_json::json!({"id": 5}),
-                output: None,
-            }],
-            caveats: Vec::new(),
-            side_effects: SideEffects::default(),
-            preconditions: Vec::new(),
-            related: Vec::new(),
-        }
-    }
-
-    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
-        let args: DeleteArgs = parse(arguments)?;
-        let updated = self.db.delete(args.id).map_err(err)?;
+    async fn run(&self) -> Result<String, ToolError> {
+        let updated = self.db.delete(self.id).map_err(err)?;
         ok_json(&updated)
     }
 }
@@ -474,22 +288,22 @@ mod tests {
 
     fn fresh() -> (
         Arc<TodoDb>,
-        TodoList,
-        TodoAdd,
-        TodoUpdate,
-        TodoComplete,
-        TodoDelete,
+        TodoListAction,
+        TodoAddAction,
+        TodoUpdateAction,
+        TodoCompleteAction,
+        TodoDeleteAction,
     ) {
         let db = Arc::new(TodoDb::new());
         db.set_db_path(Path::new(":memory:")).unwrap();
         db.set_session_id("sess");
         (
             db.clone(),
-            TodoList::new(db.clone()),
-            TodoAdd::new(db.clone()),
-            TodoUpdate::new(db.clone()),
-            TodoComplete::new(db.clone()),
-            TodoDelete::new(db.clone()),
+            TodoListAction::new(db.clone()),
+            TodoAddAction::new(db.clone()),
+            TodoUpdateAction::new(db.clone()),
+            TodoCompleteAction::new(db.clone()),
+            TodoDeleteAction::new(db.clone()),
         )
     }
 

@@ -71,7 +71,7 @@ impl ToolProvider for WebToolProvider {
     }
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         for action in &self.actions {
-            if action.tool_name() == name {
+            if action.name() == name {
                 return action.execute(arguments).await;
             }
         }
