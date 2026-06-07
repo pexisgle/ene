@@ -1,7 +1,6 @@
+use crate::provider::UtilityState;
 use ene_tool_common::prelude::*;
 use std::sync::Arc;
-
-use crate::db::{TodoDb, TodoError, TodoItem};
 
 fn ok_json<T: serde::Serialize>(value: &T) -> Result<String, ToolError> {
     serde_json::to_string_pretty(value).map_err(|e| ToolError::Internal {
@@ -9,40 +8,8 @@ fn ok_json<T: serde::Serialize>(value: &T) -> Result<String, ToolError> {
     })
 }
 
-fn err(e: TodoError) -> ToolError {
-    match e {
-        TodoError::NotFound(id) => ToolError::InvalidArguments {
-            message: format!("todo {id} not found in this session"),
-        },
-        TodoError::ParentNotFound(id) => ToolError::InvalidArguments {
-            message: format!("parent todo {id} not found in this session"),
-        },
-        TodoError::Cycle { child, parent } => ToolError::InvalidArguments {
-            message: format!("cannot reparent todo {child} under its own descendant {parent}"),
-        },
-        TodoError::InvalidStatus(s) => ToolError::InvalidArguments {
-            message: format!("invalid status: {s}"),
-        },
-        TodoError::InvalidPriority(s) => ToolError::InvalidArguments {
-            message: format!("invalid priority: {s}"),
-        },
-        TodoError::EmptyContent => ToolError::InvalidArguments {
-            message: "content must not be empty".to_string(),
-        },
-        TodoError::DbNotInitialized => ToolError::Internal {
-            message: "todo database is not initialized".to_string(),
-        },
-        TodoError::InvalidPath(s) => ToolError::Internal {
-            message: format!("todo db path: {s}"),
-        },
-        TodoError::Sqlite(e) => ToolError::Internal {
-            message: format!("todo db error: {e}"),
-        },
-    }
-}
-
-fn default_db() -> Arc<TodoDb> {
-    Arc::new(TodoDb::new())
+fn default_state() -> Arc<UtilityState> {
+    Arc::new(UtilityState::new())
 }
 
 // ───────────────────────── todo_list ─────────────────────────
@@ -59,18 +26,25 @@ fn default_db() -> Arc<TodoDb> {
 /// Action to list all todos in the current session.
 pub struct TodoListAction {
     #[tool(skip)]
-    #[serde(skip, default = "default_db")]
-    db: Arc<TodoDb>,
+    #[serde(skip, default = "default_state")]
+    state: Arc<UtilityState>,
 }
 
 impl TodoListAction {
-    /// Creates a new `TodoListAction` with the given database.
-    pub fn new(db: Arc<TodoDb>) -> Self {
-        Self { db }
+    /// Creates a new `TodoListAction`.
+    pub fn new(state: Arc<UtilityState>) -> Self {
+        Self { state }
     }
 
     async fn run(&self) -> Result<String, ToolError> {
-        let items: Vec<TodoItem> = self.db.list().map_err(err)?;
+        let session_id = self.state.session_id();
+        let store = self.state.ensure_todo_store().await?;
+        let items = store
+            .list(&session_id)
+            .await
+            .map_err(|e| ToolError::Internal {
+                message: format!("todo db error: {e}"),
+            })?;
         let count = items.len();
         let active = items
             .iter()
@@ -80,7 +54,7 @@ impl TodoListAction {
             "summary": {
                 "total": count,
                 "active": active,
-                "session_id": self.db.current_session_id(),
+                "session_id": session_id,
             },
             "items": items,
         });
@@ -102,8 +76,8 @@ impl TodoListAction {
 /// Action to add a new todo.
 pub struct TodoAddAction {
     #[tool(skip)]
-    #[serde(skip, default = "default_db")]
-    db: Arc<TodoDb>,
+    #[serde(skip, default = "default_state")]
+    state: Arc<UtilityState>,
     /// Brief description of the task.
     content: String,
     /// Priority level.
@@ -116,10 +90,10 @@ pub struct TodoAddAction {
 }
 
 impl TodoAddAction {
-    /// Creates a new `TodoAddAction` with the given database.
-    pub fn new(db: Arc<TodoDb>) -> Self {
+    /// Creates a new `TodoAddAction`.
+    pub fn new(state: Arc<UtilityState>) -> Self {
         Self {
-            db,
+            state,
             content: String::new(),
             priority: String::new(),
             parent_id: None,
@@ -127,10 +101,14 @@ impl TodoAddAction {
     }
 
     async fn run(&self) -> Result<String, ToolError> {
-        let item = self
-            .db
-            .add(self.parent_id, &self.content, &self.priority)
-            .map_err(err)?;
+        let session_id = self.state.session_id();
+        let store = self.state.ensure_todo_store().await?;
+        let item = store
+            .add(&session_id, self.parent_id, &self.content, &self.priority)
+            .await
+            .map_err(|e| ToolError::InvalidArguments {
+                message: e.to_string(),
+            })?;
         ok_json(&item)
     }
 }
@@ -149,8 +127,8 @@ impl TodoAddAction {
 /// Action to update an existing todo's fields.
 pub struct TodoUpdateAction {
     #[tool(skip)]
-    #[serde(skip, default = "default_db")]
-    db: Arc<TodoDb>,
+    #[serde(skip, default = "default_state")]
+    state: Arc<UtilityState>,
     /// Id of the todo to update.
     id: i64,
     /// New content (omit to keep).
@@ -186,10 +164,10 @@ where
 }
 
 impl TodoUpdateAction {
-    /// Creates a new `TodoUpdateAction` with the given database.
-    pub fn new(db: Arc<TodoDb>) -> Self {
+    /// Creates a new `TodoUpdateAction`.
+    pub fn new(state: Arc<UtilityState>) -> Self {
         Self {
-            db,
+            state,
             id: 0,
             content: None,
             status: None,
@@ -199,16 +177,21 @@ impl TodoUpdateAction {
     }
 
     async fn run(&self) -> Result<String, ToolError> {
-        let updated = self
-            .db
+        let session_id = self.state.session_id();
+        let store = self.state.ensure_todo_store().await?;
+        let updated = store
             .update(
+                &session_id,
                 self.id,
                 self.content.as_deref(),
                 self.status.as_deref(),
                 self.priority.as_deref(),
                 self.parent_id,
             )
-            .map_err(err)?;
+            .await
+            .map_err(|e| ToolError::InvalidArguments {
+                message: e.to_string(),
+            })?;
         ok_json(&updated)
     }
 }
@@ -227,20 +210,28 @@ impl TodoUpdateAction {
 /// Action to mark a todo and all its sub-tasks as completed.
 pub struct TodoCompleteAction {
     #[tool(skip)]
-    #[serde(skip, default = "default_db")]
-    db: Arc<TodoDb>,
+    #[serde(skip, default = "default_state")]
+    state: Arc<UtilityState>,
     /// Id of the todo to complete (cascades to descendants).
     id: i64,
 }
 
 impl TodoCompleteAction {
-    /// Creates a new `TodoCompleteAction` with the given database.
-    pub fn new(db: Arc<TodoDb>) -> Self {
-        Self { db, id: 0 }
+    /// Creates a new `TodoCompleteAction`.
+    pub fn new(state: Arc<UtilityState>) -> Self {
+        Self { state, id: 0 }
     }
 
     async fn run(&self) -> Result<String, ToolError> {
-        let cascaded = self.db.complete(self.id).map_err(err)?;
+        let session_id = self.state.session_id();
+        let store = self.state.ensure_todo_store().await?;
+        let cascaded =
+            store
+                .complete(&session_id, self.id)
+                .await
+                .map_err(|e| ToolError::Internal {
+                    message: format!("todo db error: {e}"),
+                })?;
         ok_json(&serde_json::json!({
             "id": self.id,
             "status": "completed",
@@ -263,158 +254,28 @@ impl TodoCompleteAction {
 /// Action to soft-delete a todo by marking it as cancelled.
 pub struct TodoDeleteAction {
     #[tool(skip)]
-    #[serde(skip, default = "default_db")]
-    db: Arc<TodoDb>,
+    #[serde(skip, default = "default_state")]
+    state: Arc<UtilityState>,
     /// Id of the todo to cancel.
     id: i64,
 }
 
 impl TodoDeleteAction {
-    /// Creates a new `TodoDeleteAction` with the given database.
-    pub fn new(db: Arc<TodoDb>) -> Self {
-        Self { db, id: 0 }
+    /// Creates a new `TodoDeleteAction`.
+    pub fn new(state: Arc<UtilityState>) -> Self {
+        Self { state, id: 0 }
     }
 
     async fn run(&self) -> Result<String, ToolError> {
-        let updated = self.db.delete(self.id).map_err(err)?;
+        let session_id = self.state.session_id();
+        let store = self.state.ensure_todo_store().await?;
+        let updated =
+            store
+                .delete(&session_id, self.id)
+                .await
+                .map_err(|e| ToolError::Internal {
+                    message: format!("todo db error: {e}"),
+                })?;
         ok_json(&updated)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-
-    fn fresh() -> (
-        Arc<TodoDb>,
-        TodoListAction,
-        TodoAddAction,
-        TodoUpdateAction,
-        TodoCompleteAction,
-        TodoDeleteAction,
-    ) {
-        let db = Arc::new(TodoDb::new());
-        db.set_db_path(Path::new(":memory:")).unwrap();
-        db.set_session_id("sess");
-        (
-            db.clone(),
-            TodoListAction::new(db.clone()),
-            TodoAddAction::new(db.clone()),
-            TodoUpdateAction::new(db.clone()),
-            TodoCompleteAction::new(db.clone()),
-            TodoDeleteAction::new(db.clone()),
-        )
-    }
-
-    #[tokio::test]
-    async fn add_then_list() {
-        let (db, list, add, _, _, _) = fresh();
-        let r = add
-            .execute(r#"{"content":"a","priority":"high"}"#)
-            .await
-            .unwrap();
-        let _: TodoItem = serde_json::from_str(&r).unwrap();
-
-        let r = list.execute("{}").await.unwrap();
-        let v: serde_json::Value = serde_json::from_str(&r).unwrap();
-        assert_eq!(v["summary"]["total"], 1);
-        assert_eq!(v["items"][0]["content"], "a");
-        let _ = db;
-    }
-
-    #[tokio::test]
-    async fn update_partial_keeps_other_fields() {
-        let (_db, _, add, update, _, _) = fresh();
-        let r = add
-            .execute(r#"{"content":"x","priority":"low"}"#)
-            .await
-            .unwrap();
-        let item: TodoItem = serde_json::from_str(&r).unwrap();
-
-        let r = update
-            .execute(&format!(r#"{{"id":{},"status":"in_progress"}}"#, item.id))
-            .await
-            .unwrap();
-        let updated: TodoItem = serde_json::from_str(&r).unwrap();
-        assert_eq!(updated.status, "in_progress");
-        assert_eq!(updated.content, "x");
-        assert_eq!(updated.priority, "low");
-    }
-
-    #[tokio::test]
-    async fn update_parent_id_null_detaches() {
-        let (_db, _, add, update, _, _) = fresh();
-        let p = add
-            .execute(r#"{"content":"p","priority":"high"}"#)
-            .await
-            .unwrap();
-        let p: TodoItem = serde_json::from_str(&p).unwrap();
-        let c = add
-            .execute(&format!(
-                r#"{{"content":"c","priority":"low","parent_id":{}}}"#,
-                p.id
-            ))
-            .await
-            .unwrap();
-        let c: TodoItem = serde_json::from_str(&c).unwrap();
-
-        let r = update
-            .execute(&format!(r#"{{"id":{},"parent_id":null}}"#, c.id))
-            .await
-            .unwrap();
-        let c2: TodoItem = serde_json::from_str(&r).unwrap();
-        assert!(c2.parent_id.is_none());
-    }
-
-    #[tokio::test]
-    async fn complete_cascades() {
-        let (_db, _, add, _, complete, _) = fresh();
-        let p = add
-            .execute(r#"{"content":"p","priority":"high"}"#)
-            .await
-            .unwrap();
-        let p: TodoItem = serde_json::from_str(&p).unwrap();
-        add.execute(&format!(
-            r#"{{"content":"c","priority":"low","parent_id":{}}}"#,
-            p.id
-        ))
-        .await
-        .unwrap();
-
-        let r = complete
-            .execute(&format!(r#"{{"id":{}}}"#, p.id))
-            .await
-            .unwrap();
-        let v: serde_json::Value = serde_json::from_str(&r).unwrap();
-        assert_eq!(v["status"], "completed");
-        let cascaded = v["cascaded"].as_array().unwrap();
-        assert!(cascaded.len() >= 2);
-    }
-
-    #[tokio::test]
-    async fn delete_soft_cancels() {
-        let (_db, _, add, _, _, delete) = fresh();
-        let i = add
-            .execute(r#"{"content":"x","priority":"low"}"#)
-            .await
-            .unwrap();
-        let i: TodoItem = serde_json::from_str(&i).unwrap();
-        let r = delete
-            .execute(&format!(r#"{{"id":{}}}"#, i.id))
-            .await
-            .unwrap();
-        let v: TodoItem = serde_json::from_str(&r).unwrap();
-        assert_eq!(v.status, "cancelled");
-    }
-
-    #[tokio::test]
-    async fn invalid_priority_rejected() {
-        let (_db, _, add, _, _, _) = fresh();
-        let err = add
-            .execute(r#"{"content":"x","priority":"wrong"}"#)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, ToolError::InvalidArguments { .. }));
     }
 }

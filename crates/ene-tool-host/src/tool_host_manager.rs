@@ -225,17 +225,6 @@ impl ToolRegistry for ToolHostManager {
     }
 }
 
-fn resolve_undo_db_path(config: &EneConfig) -> std::path::PathBuf {
-    let memory_config = config
-        .get_section::<ene_memory::MemoryConfig>()
-        .unwrap_or_default();
-    let memory_path = memory_config.resolve_memory_db_path();
-    memory_path
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .join("undo.db")
-}
-
 impl ToolHostManager {
     /// Starts all enabled tool binaries from the settings configuration.
     ///
@@ -244,10 +233,9 @@ impl ToolHostManager {
     /// Also registers each tool's config schema in the global runtime registry
     /// and regenerates `settings.schema.json`.
     pub async fn start(config: &EneConfig) -> Result<Self, ToolError> {
-        let mut sandbox = config
+        let sandbox = config
             .get_section::<ene_tool_proto::SandboxConfigData>()
             .unwrap_or_default();
-        sandbox.undo_db_path = Some(resolve_undo_db_path(config).to_string_lossy().to_string());
         let mut supervised_registries = Vec::new();
 
         std::fs::create_dir_all(paths::tool_socket_dir()).map_err(|e| {
@@ -396,6 +384,24 @@ impl ToolHostManager {
             }
         };
 
+        let db_socket_path: PathBuf = {
+            #[cfg(unix)]
+            {
+                let p = paths::tool_socket_dir().join(format!("ene-db-{}.sock", name));
+                if p.exists() {
+                    let _ = std::fs::remove_file(&p);
+                }
+                p
+            }
+            #[cfg(windows)]
+            {
+                PathBuf::from(format!(r"\\.\pipe\ene-db-{}", name))
+            }
+        };
+
+        let mut tool_sandbox = sandbox.clone();
+        tool_sandbox.db_socket = Some(db_socket_path.to_string_lossy().to_string());
+
         let child = std::process::Command::new(&binary_path)
             .env("ENE_TOOL_SOCKET", &socket_path)
             .spawn()
@@ -408,7 +414,7 @@ impl ToolHostManager {
             child,
             socket_path: socket_path.clone(),
             binary_path: binary_path.clone(),
-            sandbox: sandbox.clone(),
+            sandbox: tool_sandbox.clone(),
             tool_config: tool_config.clone(),
             restart_count: 0,
         };
@@ -417,7 +423,7 @@ impl ToolHostManager {
 
         let registry = Self::connect_with_retry(
             &socket_path,
-            sandbox,
+            &tool_sandbox,
             tool_config,
             CONNECT_RETRIES,
             CONNECT_DELAY_MS,

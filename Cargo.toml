@@ -51,6 +51,7 @@ ene-tool-host = { path = "crates/ene-tool-host" }
 ene-tool-proto = { path = "crates/ene-tool-proto" }
 ene-tool-common = { path = "crates/ene-tool-common" }
 ene-tool-derive = { path = "crates/ene-tool-derive" }
+ene-tool-db = { path = "crates/ene-tool-db" }
 blake3 = "1.5"
 
 # Enable a small amount of optimization in the dev profile.

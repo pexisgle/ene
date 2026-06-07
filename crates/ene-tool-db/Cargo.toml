@@ -1,0 +1,12 @@
+[package]
+name = "ene-tool-db"
+version = "0.1.0"
+edition = "2024"
+description = "Feature-agnostic typed CRUD database API for tool binaries, communicating with the core DB server over IPC"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }

@@ -125,6 +125,7 @@ sequenceDiagram
 * **Database:** SQLite + `sqlite-vec` + `diesel`. `r2d2` for connection pooling.
 * **Constraint:** **Always** use `diesel` for all SQL. **Do NOT** introduce `rusqlite`.
 * **Migrations:** Generate via `diesel migration generate <name>`. Apply via `diesel_migrations::embed_migrations!`.
+* **Tool DB Access:** Tool binaries (e.g. `ene-tool-fs`, `ene-tool-utility`) must NOT link `ene-memory` directly. Instead, they access the database through the per-tool DB IPC server (`DbIpcServer` in `ene-core`, client in `ene-tool-db`). Each tool declares its schema with a tool-name prefix (e.g. `fs_`, `utility_`), and the server enforces prefix-based access control.
 
 ## 8. Configuration
 

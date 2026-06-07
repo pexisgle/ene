@@ -96,8 +96,12 @@ pub fn tool_socket_dir() -> PathBuf {
 /// `assets_dir/characters/{name}/character_settings.json`
 #[must_use]
 pub fn character_settings_path(character_name: &str) -> PathBuf {
-    assets_dir()
-        .join("characters")
-        .join(character_name)
-        .join("character_settings.json")
+    character_dir(character_name).join("character_settings.json")
+}
+
+/// Returns the directory containing the character card and runtime data
+/// (`assets_dir/characters/{name}/`).
+#[must_use]
+pub fn character_dir(character_name: &str) -> PathBuf {
+    assets_dir().join("characters").join(character_name)
 }

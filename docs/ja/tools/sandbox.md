@@ -21,7 +21,7 @@ pub struct SandboxConfigData {
     pub shell_timeout_ms: u64,                // 120s デフォルト
     pub max_shell_output_bytes: usize,        // 50KB デフォルト
     pub max_shell_output_lines: usize,        // 2000 デフォルト
-    pub undo_db_path: Option<String>,
+    pub db_socket: Option<String>,            // ツールごと DB IPC ソケットへのパス
 }
 ```
 
@@ -63,7 +63,7 @@ Sandbox 有効?
 | `track_patch(entries)` | パッチの全変更を 1 つの Undo エントリにグループ化 |
 | `undo_last()` | 最新の操作をロールバック |
 
-Undo は SQLite データベースに zlib 圧縮で保存されます (`undodb_path`/`undo.db`)。
+Undo はツールごと DB IPC サーバー (`db_socket`) 経由でアクセスされる SQLite データベースに保存されます。元のファイル内容は zlib 圧縮で保存されます。
 
 ## エラー型
 

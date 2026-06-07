@@ -1,6 +1,6 @@
 # ファイルシステムツール (`ene-tool-fs`)
 
-**バイナリ:** `ene-tool-fs` | **ステートフル:** はい (Sandbox + UndoManager)
+**バイナリ:** `ene-tool-fs` | **ステートフル:** はい (Sandbox + UndoManager、DB IPC 経由)
 
 ファイルシステム操作、シェル実行、Undo を提供します。全ファイル操作はサンドボックス設定を尊重します。
 
@@ -61,7 +61,7 @@
 - write, edit, delete, patch 操作を取り消し
 - 複数回呼び出して複数操作を順に取り消し可能
 - シェル操作は取り消し不可
-- SQLite ベースの Undo スタック (zlib 圧縮) を使用
+- SQLite ベースの Undo スタック (zlib 圧縮、DB IPC サーバー経由) を使用
 
 **キーワード:** undo, revert, rollback
 

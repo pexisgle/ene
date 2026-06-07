@@ -1,6 +1,8 @@
+use crate::undo::UndoManager;
 use crate::utils::permission::{DestructiveAction, PermissionGate};
 use ene_tool_proto::ToolError;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Sandbox settings — allowed directories and restrictions
 #[derive(Debug, Clone)]
@@ -14,7 +16,7 @@ pub struct SandboxConfig {
     pub shell_timeout_ms: u64,
     pub max_shell_output_bytes: usize,
     pub max_shell_output_lines: usize,
-    pub undo_db_path: Option<PathBuf>,
+    pub db_socket: Option<PathBuf>,
 }
 
 impl Default for SandboxConfig {
@@ -36,12 +38,12 @@ impl Default for SandboxConfig {
                 r":\s*\{\s*\|\s*&\s*;\s*\}".to_string(),
                 r"sudo\s+".to_string(),
             ],
-            max_read_bytes: 50 * 1024,         // 50KB
-            max_write_bytes: 1024 * 1024,      // 1MB
-            shell_timeout_ms: 120_000,         // 2 minutes
-            max_shell_output_bytes: 50 * 1024, // 50KB
+            max_read_bytes: 50 * 1024,
+            max_write_bytes: 1024 * 1024,
+            shell_timeout_ms: 120_000,
+            max_shell_output_bytes: 50 * 1024,
             max_shell_output_lines: 2000,
-            undo_db_path: None,
+            db_socket: None,
         }
     }
 }
@@ -178,19 +180,19 @@ impl From<ene_tool_proto::SandboxConfigData> for SandboxConfig {
             shell_timeout_ms: data.shell_timeout_ms,
             max_shell_output_bytes: data.max_shell_output_bytes,
             max_shell_output_lines: data.max_shell_output_lines,
-            undo_db_path: data.undo_db_path.map(PathBuf::from),
+            db_socket: data.db_socket.map(PathBuf::from),
         }
     }
 }
 
-/// Integrated type combining `SandboxConfig` + `UndoManager` + `session_id`
+/// Integrated type combining `SandboxConfig` + shared `UndoManager` + `session_id`.
 ///
 /// Tool implementers only need to be aware of Sandbox.
 /// Access control (`check_readable` / `check_writable` / `check_command`) and
-/// operation tracking (`track_xxx`) and Undo execution are bundled together
+/// operation tracking (`track_xxx`) and Undo execution are bundled together.
 pub struct Sandbox {
     config: SandboxConfig,
-    undo: crate::utils::undo_manager::UndoManager,
+    undo_manager: tokio::sync::Mutex<Option<Arc<UndoManager>>>,
     session_id: std::sync::RwLock<String>,
     approved_requests: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
     allowed_patterns:
@@ -199,18 +201,9 @@ pub struct Sandbox {
 
 impl Sandbox {
     pub fn new(config: SandboxConfig) -> Self {
-        let undo = crate::utils::undo_manager::UndoManager::new();
-        if let Some(ref path) = config.undo_db_path {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if let Err(e) = undo.set_db_path(path) {
-                eprintln!("[Sandbox] Failed to open undo DB: {e}");
-            }
-        }
         Self {
             config,
-            undo,
+            undo_manager: tokio::sync::Mutex::new(None),
             session_id: std::sync::RwLock::new(String::new()),
             approved_requests: std::sync::Arc::new(std::sync::RwLock::new(
                 std::collections::HashSet::new(),
@@ -221,12 +214,34 @@ impl Sandbox {
         }
     }
 
-    pub fn config(&self) -> &SandboxConfig {
-        &self.config
+    async fn ensure_undo_manager(&self) -> Result<Arc<UndoManager>, ToolError> {
+        let mut guard = self.undo_manager.lock().await;
+        if let Some(mgr) = guard.as_ref() {
+            return Ok(mgr.clone());
+        }
+
+        let socket_path = self
+            .config
+            .db_socket
+            .as_deref()
+            .ok_or_else(|| ToolError::Internal {
+                message: "DB socket path not configured".to_string(),
+            })?;
+
+        let session_id = self.session_id();
+        let mgr = UndoManager::new(socket_path, session_id)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                message: format!("Failed to connect to DB: {e}"),
+            })?;
+
+        let mgr = Arc::new(mgr);
+        *guard = Some(mgr.clone());
+        Ok(mgr)
     }
 
-    pub fn undo_manager(&self) -> &crate::utils::undo_manager::UndoManager {
-        &self.undo
+    pub fn config(&self) -> &SandboxConfig {
+        &self.config
     }
 
     pub fn session_id(&self) -> String {
@@ -241,6 +256,11 @@ impl Sandbox {
             .session_id
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = id.to_string();
+
+        // Reset undo manager so it reconnects with new session_id
+        if let Ok(mut guard) = self.undo_manager.try_lock() {
+            *guard = None;
+        }
     }
 
     /// Adds an approved request ID
@@ -317,48 +337,106 @@ impl Sandbox {
     }
 
     /// Records overwrite of an existing file
-    pub fn track_overwrite(&self, original_content: Option<Vec<u8>>, path: &Path) {
-        self.undo.push_restore_file(
-            &self.session_id(),
-            "filesystem",
-            path.to_path_buf(),
-            original_content,
-        );
+    pub async fn track_overwrite(&self, path: &Path, original_content: Option<Vec<u8>>) {
+        let mgr = match self.ensure_undo_manager().await {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("[Sandbox] Failed to get undo manager: {e}");
+                return;
+            }
+        };
+        mgr.push_restore_file("filesystem", path.display().to_string(), original_content)
+            .await;
     }
 
     /// Records creation of a new file
-    pub fn track_creation(&self, path: &Path) {
-        self.undo
-            .push_delete_created_file(&self.session_id(), "filesystem", path.to_path_buf());
+    pub async fn track_creation(&self, path: &Path) {
+        let mgr = match self.ensure_undo_manager().await {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("[Sandbox] Failed to get undo manager: {e}");
+                return;
+            }
+        };
+        mgr.push_delete_created_file("filesystem", path.display().to_string())
+            .await;
     }
 
     /// Records file deletion
-    pub fn track_deletion(&self, original_content: Option<Vec<u8>>, path: &Path) {
-        self.undo.push_restore_file(
-            &self.session_id(),
-            "filesystem",
-            path.to_path_buf(),
-            original_content,
-        );
+    pub async fn track_deletion(&self, path: &Path, original_content: Option<Vec<u8>>) {
+        let mgr = match self.ensure_undo_manager().await {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("[Sandbox] Failed to get undo manager: {e}");
+                return;
+            }
+        };
+        mgr.push_restore_file("filesystem", path.display().to_string(), original_content)
+            .await;
     }
 
     /// Records a patch application (multiple file operations in one Undo entry)
-    pub fn track_patch(&self, operations: Vec<crate::utils::undo_manager::UndoOperation>) {
-        self.undo.push(
-            &self.session_id(),
-            crate::utils::undo_manager::UndoEntry::new("patch", operations),
-        );
+    pub async fn track_patch(&self, operations: Vec<crate::undo::UndoOperation>) {
+        let mgr = match self.ensure_undo_manager().await {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("[Sandbox] Failed to get undo manager: {e}");
+                return;
+            }
+        };
+        let entry = crate::undo::UndoEntry::new("patch", operations);
+        if let Err(e) = mgr.push(entry).await {
+            eprintln!("[Sandbox] Failed to push patch undo: {e}");
+        }
     }
 
     /// Undoes the most recent operation
     pub async fn undo_last(&self) -> Result<String, ToolError> {
-        let logs =
-            self.undo
-                .undo(&self.session_id())
-                .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    message: format!("Undo failed: {e}"),
-                })?;
-        Ok(logs.join("\n"))
+        let mgr = self.ensure_undo_manager().await?;
+        let entry = mgr.pop().await.map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Undo failed: {e}"),
+        })?;
+
+        match entry {
+            Some(entry) => {
+                let mut logs = Vec::new();
+                for op in &entry.operations {
+                    match op {
+                        crate::undo::UndoOperation::RestoreFile {
+                            path,
+                            original_content,
+                        } => {
+                            if let Some(content) = original_content {
+                                tokio::fs::write(path, content).await.map_err(|e| {
+                                    ToolError::ExecutionFailed {
+                                        message: format!("Failed to restore file {path}: {e}"),
+                                    }
+                                })?;
+                                logs.push(format!("Restored: {path}"));
+                            } else {
+                                tokio::fs::remove_file(path).await.map_err(|e| {
+                                    ToolError::ExecutionFailed {
+                                        message: format!("Failed to remove file {path}: {e}"),
+                                    }
+                                })?;
+                                logs.push(format!("Removed (was not tracked): {path}"));
+                            }
+                        }
+                        crate::undo::UndoOperation::DeleteCreatedFile { path } => {
+                            tokio::fs::remove_file(path).await.map_err(|e| {
+                                ToolError::ExecutionFailed {
+                                    message: format!("Failed to delete created file {path}: {e}"),
+                                }
+                            })?;
+                            logs.push(format!("Deleted: {path}"));
+                        }
+                    }
+                }
+                Ok(logs.join("\n"))
+            }
+            None => Err(ToolError::ExecutionFailed {
+                message: "No operations to undo".to_string(),
+            }),
+        }
     }
 }

@@ -9,12 +9,13 @@ const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 
 /// Current IPC protocol version.
 ///
-/// Version 2 introduced:
+/// Version 1 (reset):
 /// - `IpcResponse::Tools` carries `Vec<ToolSpec>`
 /// - `IpcResponse::ActionSpecs` returns per-action metadata for embedding
 /// - `IpcRequest::CallTool` `name` field accepts the new `ToolName` (still
 ///   a string on the wire)
-pub const IPC_PROTOCOL_VERSION: u32 = 2;
+/// - `SandboxConfigData::db_socket` replaces old `db_path`
+pub const IPC_PROTOCOL_VERSION: u32 = 1;
 
 /// IPC request — core → host
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -234,7 +235,7 @@ mod tests {
             shell_timeout_ms: 0,
             max_shell_output_bytes: 0,
             max_shell_output_lines: 0,
-            undo_db_path: None,
+            db_socket: None,
         };
         let req = IpcRequest::Initialize {
             sandbox: sandbox.clone(),

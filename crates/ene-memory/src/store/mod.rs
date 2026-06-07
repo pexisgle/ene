@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 mod models;
+
 use models::{
     EmbeddingBlob, NewConversationLog, NewConversationSummary, NewKeyFact, NewToolEmbeddingIndex,
 };
@@ -82,8 +83,8 @@ type SqlitePool = diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<SqliteConne
 /// SQLite-backed long-term memory store with vector similarity search.
 ///
 /// Uses `r2d2` connection pooling and `sqlite-vec` for cosine-similarity queries.
-/// Manages four tables: `conversation_summaries`, `conversation_keyfacts`,
-/// `conversation_logs`, and `tool_embedding_index` (multi-vector per tool).
+/// Manages four core tables (`conversation_summaries`, `conversation_keyfacts`,
+/// `conversation_logs`, `tool_embedding_index`).
 pub struct MemoryStore {
     pool: SqlitePool,
     embedding_dim: usize,

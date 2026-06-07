@@ -1,18 +1,13 @@
 mod patch_parser;
 
 use self::patch_parser::PatchOperation;
-use crate::utils::sandbox::SandboxConfig;
-use crate::utils::undo_manager::{UndoEntry, UndoManager};
+use crate::undo::UndoEntry;
+use crate::utils::sandbox::Sandbox;
 use ene_tool_common::prelude::*;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-pub async fn apply_patch(
-    patch_text: &str,
-    sandbox: &SandboxConfig,
-    undo_manager: &UndoManager,
-    session_id: &str,
-) -> Result<String, ToolError> {
+pub async fn apply_patch(patch_text: &str, sandbox: &Sandbox) -> Result<String, ToolError> {
     let normalized = patch_text.replace("\r\n", "\n").replace('\r', "\n");
     let trimmed = normalized.trim();
 
@@ -84,7 +79,7 @@ pub async fn apply_patch(
             PatchOperation::Update {
                 path, old_content, ..
             } => {
-                let resolved = sandbox.resolve_and_check(Path::new(path), true)?;
+                let resolved = sandbox.check_writable(Path::new(path))?;
                 if !resolved.exists() {
                     return Err(ToolError::ExecutionFailed {
                         message: format!(
@@ -107,11 +102,11 @@ pub async fn apply_patch(
                 validated.push((resolved, op.clone()));
             }
             PatchOperation::Add { path, .. } => {
-                let resolved = sandbox.resolve_and_check(Path::new(path), true)?;
+                let resolved = sandbox.check_writable(Path::new(path))?;
                 validated.push((resolved, op.clone()));
             }
             PatchOperation::Delete { path } => {
-                let resolved = sandbox.resolve_and_check(Path::new(path), true)?;
+                let resolved = sandbox.check_writable(Path::new(path))?;
                 if !resolved.exists() {
                     return Err(ToolError::ExecutionFailed {
                         message: format!(
@@ -166,7 +161,10 @@ pub async fn apply_patch(
                     }
                 })?;
 
-                undo_ops.push(UndoEntry::restore_file(resolved.clone(), original));
+                undo_ops.push(UndoEntry::restore_file(
+                    resolved.display().to_string(),
+                    original,
+                ));
                 summary.push(format!("M {}", resolved.display()));
             }
             PatchOperation::Add { content, .. } => {
@@ -183,7 +181,9 @@ pub async fn apply_patch(
                     }
                 })?;
 
-                undo_ops.push(UndoEntry::delete_created_file(resolved.clone()));
+                undo_ops.push(UndoEntry::delete_created_file(
+                    resolved.display().to_string(),
+                ));
                 summary.push(format!("A {}", resolved.display()));
             }
             PatchOperation::Delete { .. } => {
@@ -207,13 +207,16 @@ pub async fn apply_patch(
                     })?;
                 }
 
-                undo_ops.push(UndoEntry::restore_file(resolved.clone(), original));
+                undo_ops.push(UndoEntry::restore_file(
+                    resolved.display().to_string(),
+                    original,
+                ));
                 summary.push(format!("D {}", resolved.display()));
             }
         }
     }
 
-    undo_manager.push(session_id, UndoEntry::new("patch", undo_ops));
+    sandbox.track_patch(undo_ops).await;
 
     Ok(format!(
         "Patch applied successfully.\n{}",
@@ -264,8 +267,6 @@ impl FsPatchAction {
                 Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
             })
         };
-        let session_id = sandbox.session_id();
-        let undo_manager = sandbox.undo_manager();
 
         sandbox.check_permission(
             crate::utils::permission::DestructiveAction::FileOverwrite,
@@ -273,12 +274,6 @@ impl FsPatchAction {
             "Applying patch to files",
         )?;
 
-        apply_patch(
-            &self.patch_text,
-            sandbox.config(),
-            undo_manager,
-            &session_id,
-        )
-        .await
+        apply_patch(&self.patch_text, &sandbox).await
     }
 }

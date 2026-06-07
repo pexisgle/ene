@@ -224,7 +224,7 @@ mod tests {
             shell_timeout_ms: 0,
             max_shell_output_bytes: 0,
             max_shell_output_lines: 0,
-            undo_db_path: None,
+            db_socket: None,
         };
         reg.set_sandbox(&sandbox);
         assert_eq!(sandbox_ref.lock().unwrap().as_ref(), Some(&sandbox));

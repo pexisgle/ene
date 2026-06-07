@@ -1,0 +1,156 @@
+use crate::types::{DbFilter, DbOrderBy, DbSchema, DbValue, Row};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+/// Requests sent from the tool's `DbClient` to the per-tool DB IPC server.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum DbRequest {
+    /// Declare the tool's database schema (tables and indexes).
+    DeclareSchema(DbSchema),
+    /// Insert a row into a table.
+    Insert {
+        /// Target table name.
+        table: String,
+        /// Column-value pairs to insert.
+        row: Row,
+    },
+    /// Insert or update a row on conflict.
+    Upsert {
+        /// Target table name.
+        table: String,
+        /// Column-value pairs to insert/update.
+        row: Row,
+        /// Columns that define the conflict (ON CONFLICT clause).
+        conflict_columns: Vec<String>,
+    },
+    /// Select rows matching a filter.
+    Select {
+        /// Target table name.
+        table: String,
+        /// Columns to return (empty = all).
+        columns: Vec<String>,
+        /// Filter expression.
+        filter: DbFilter,
+        /// Order-by clauses.
+        order_by: Vec<DbOrderBy>,
+        /// Maximum number of rows to return.
+        limit: Option<u64>,
+    },
+    /// Update rows matching a filter.
+    Update {
+        /// Target table name.
+        table: String,
+        /// Column-value pairs to set.
+        set: BTreeMap<String, DbValue>,
+        /// Filter expression.
+        filter: DbFilter,
+    },
+    /// Delete rows matching a filter.
+    Delete {
+        /// Target table name.
+        table: String,
+        /// Filter expression.
+        filter: DbFilter,
+    },
+    /// Count rows matching a filter.
+    Count {
+        /// Target table name.
+        table: String,
+        /// Filter expression.
+        filter: DbFilter,
+    },
+    /// Get the most recently inserted rowid.
+    LastInsertRowId,
+    /// Health-check ping.
+    Ping,
+    /// Request graceful shutdown.
+    Shutdown,
+}
+
+/// Responses sent from the DB IPC server back to the tool's `DbClient`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum DbResponse {
+    /// Schema was accepted and tables/indexes were created.
+    SchemaAccepted {
+        /// Names of created tables.
+        tables: Vec<String>,
+        /// Names of created indexes.
+        indexes: Vec<String>,
+    },
+    /// Row was inserted successfully.
+    Insert {
+        /// The new row's rowid.
+        rowid: i64,
+    },
+    /// Row was upserted successfully.
+    Upsert {
+        /// The row's rowid.
+        rowid: i64,
+    },
+    /// Rows were selected successfully.
+    Select {
+        /// The selected rows.
+        rows: Vec<Row>,
+    },
+    /// Rows were updated successfully.
+    Update {
+        /// Number of affected rows.
+        affected: u64,
+    },
+    /// Rows were deleted successfully.
+    Delete {
+        /// Number of affected rows.
+        affected: u64,
+    },
+    /// Row count result.
+    Count {
+        /// The matching row count.
+        count: i64,
+    },
+    /// Last insert rowid result.
+    LastInsertRowId {
+        /// The most recently inserted rowid.
+        rowid: i64,
+    },
+    /// Pong response to a Ping request.
+    Pong,
+    /// Acknowledgement (e.g. for Shutdown).
+    Ack,
+    /// Error response.
+    Error {
+        /// The error code.
+        code: DbErrorCode,
+        /// Human-readable error message.
+        message: String,
+    },
+}
+
+/// Error codes returned by the DB IPC server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DbErrorCode {
+    /// The tool does not have permission to access the requested resource.
+    PermissionDenied,
+    /// The specified table does not exist or is not declared.
+    UnknownTable,
+    /// The specified column does not exist in the table.
+    UnknownColumn,
+    /// A value's type does not match the column's declared type.
+    TypeMismatch,
+    /// The filter expression is invalid.
+    InvalidFilter,
+    /// An internal server error occurred.
+    Internal,
+}
+
+impl std::fmt::Display for DbErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DbErrorCode::PermissionDenied => write!(f, "PERMISSION_DENIED"),
+            DbErrorCode::UnknownTable => write!(f, "UNKNOWN_TABLE"),
+            DbErrorCode::UnknownColumn => write!(f, "UNKNOWN_COLUMN"),
+            DbErrorCode::TypeMismatch => write!(f, "TYPE_MISMATCH"),
+            DbErrorCode::InvalidFilter => write!(f, "INVALID_FILTER"),
+            DbErrorCode::Internal => write!(f, "INTERNAL"),
+        }
+    }
+}

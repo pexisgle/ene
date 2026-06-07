@@ -8,9 +8,9 @@
 assets/models/
 
 # Runtime database files
-**/memory.db
-memory:
+**/memory.db*
 **/undo.db**
+**/todo.db*
 .env
 
 # Generated settings schemas
