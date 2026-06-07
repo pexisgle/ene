@@ -14,9 +14,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ene-tool-common = { git = "https://github.com/pexisgle/Ene" }
-ene-tool-proto = { git = "https://github.com/pexisgle/Ene" }
-ene-tool-derive = { git = "https://github.com/pexisgle/Ene" }
+ene-tool-common = { git = "https://github.com/pexisgle/ene" }
+ene-tool-proto = { git = "https://github.com/pexisgle/ene" }
+ene-tool-derive = { git = "https://github.com/pexisgle/ene" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
