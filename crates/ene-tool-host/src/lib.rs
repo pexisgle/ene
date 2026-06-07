@@ -27,8 +27,6 @@
 
 /// Tool and MCP configuration types.
 pub mod config;
-/// Tool host error types.
-pub mod error;
 /// IPC client with auto-reconnect for tool binaries.
 pub mod ipc_registry;
 /// MCP server configuration types.
@@ -45,12 +43,12 @@ pub mod tools;
 
 /// Tool configuration types.
 pub use config::{FieldWeightsConfig, ToolConfig, ToolEntry, ToolRagConfig};
+/// Tool error type (re-exported from `ene-tool-proto`).
+#[doc(no_inline)]
+pub use ene_tool_proto::EneToolProtoError as EneToolHostError;
 /// ToolSpec type (re-exported from `ene-tool-proto`).
 #[doc(no_inline)]
 pub use ene_tool_proto::ToolSpec;
-/// Tool error type.
-pub use error::EneToolHostError;
-pub use error::ToolError;
 /// IPC client with auto-reconnect.
 pub use ipc_registry::IpcToolRegistry;
 /// MCP server configuration types.

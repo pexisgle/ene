@@ -91,8 +91,8 @@ pub use sandbox::SandboxConfigData;
 pub use server::run_tool_server;
 /// Shared tool types.
 pub use types::{
-    ActionSpec, EmbeddingField, KeywordSet, SideEffects, ToolCallResult, ToolCategory, ToolExample,
-    ToolName, ToolSpec, ToolVersion,
+    ActionSpec, EmbeddingField, KeywordSet, SideEffects, ToolCategory, ToolExample, ToolName,
+    ToolSpec, ToolVersion,
 };
 
 use async_trait::async_trait;

@@ -5,6 +5,7 @@ use ene_config::EneConfig;
 use ene_memory::RecalledSummary;
 use ene_provider::{LlmMessage, LlmToolCall, LlmToolCallChunk, UserMessagePart};
 use ene_session::ConversationSession;
+use ene_tool_proto::ToolError;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast, oneshot};
@@ -391,7 +392,7 @@ async fn perform_tool_executions(
             match tokio::time::timeout(tool_timeout, registry.call_tool(&name, &args)).await {
                 Ok(Ok(res)) => Ok(res),
                 Ok(Err(e)) => Err(e),
-                Err(_) => Err(ene_tool_host::error::ToolError::Other {
+                Err(_) => Err(ToolError::Other {
                     message: format!(
                         "Tool '{}' timed out after {:.2} seconds",
                         name,
@@ -400,7 +401,7 @@ async fn perform_tool_executions(
                 }),
             };
 
-        if let Err(ene_tool_host::error::ToolError::PermissionRequired {
+        if let Err(ToolError::PermissionRequired {
             request_id,
             action,
             target,
@@ -432,16 +433,14 @@ async fn perform_tool_executions(
                     result = registry.call_tool(&name, &args).await;
                 }
                 _ => {
-                    result = Err(ene_tool_host::error::ToolError::PermissionDenied {
+                    result = Err(ToolError::PermissionDenied {
                         message: "Permission denied by user".to_string(),
                     });
                 }
             }
         }
 
-        if let Err(ene_tool_host::error::ToolError::UserInputRequired { request_id, prompt }) =
-            &result
-        {
+        if let Err(ToolError::UserInputRequired { request_id, prompt }) = &result {
             let req_id = RequestId::from(request_id.clone());
             let _ = event_tx.send(EneEvent::UserInputRequired {
                 request_id: req_id.clone(),
@@ -460,7 +459,7 @@ async fn perform_tool_executions(
                     result = registry.call_tool(&name, &new_args).await;
                 }
                 Ok(UserInputResponse::Cancel) | Err(_) => {
-                    result = Err(ene_tool_host::error::ToolError::ExecutionFailed {
+                    result = Err(ToolError::ExecutionFailed {
                         message: "User cancelled the question".to_string(),
                     });
                 }
