@@ -19,6 +19,7 @@ pub struct McpServerConnection {
 }
 
 /// Registry for MCP server connections and their tools.
+#[derive(Default)]
 pub struct McpToolRegistry {
     servers: Arc<RwLock<Vec<McpServerConnection>>>,
 }
@@ -26,9 +27,7 @@ pub struct McpToolRegistry {
 impl McpToolRegistry {
     /// Creates a new empty MCP tool registry.
     pub fn new() -> Self {
-        Self {
-            servers: Arc::new(RwLock::new(Vec::new())),
-        }
+        Self::default()
     }
 
     /// Connects to an MCP server via stdio transport.

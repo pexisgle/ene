@@ -27,7 +27,7 @@ impl CliCommand for MemoryCommand {
             .handle
             .get_snapshot()
             .await
-            .map_err(|e| format!("Failed to get actor state: {}", e))?;
+            .map_err(|e| format!("Failed to get actor state: {e}"))?;
 
         match subcmd {
             "search" => handle_search(parts.get(1).copied().unwrap_or(""), &snapshot).await,
@@ -56,7 +56,7 @@ async fn handle_search(query: &str, snapshot: &ene_core::EneStateSnapshot) {
     }
     println!(
         "{}",
-        style::header(format!("[Memory] Searching query: {}", query))
+        style::header(format!("[Memory] Searching query: {query}"))
     );
     match snapshot.memory.embed_query(query).await {
         Ok(embedding) => {
@@ -92,13 +92,10 @@ async fn handle_search(query: &str, snapshot: &ene_core::EneStateSnapshot) {
                         }
                     }
                 }
-                Err(e) => println!("{}", style::error(format!("[Memory] Search error: {}", e))),
+                Err(e) => println!("{}", style::error(format!("[Memory] Search error: {e}"))),
             }
         }
-        Err(e) => println!(
-            "{}",
-            style::error(format!("[Memory] Embedding error: {}", e))
-        ),
+        Err(e) => println!("{}", style::error(format!("[Memory] Embedding error: {e}"))),
     }
 }
 
@@ -125,15 +122,15 @@ fn handle_list(snapshot: &ene_core::EneStateSnapshot) {
                 println!("----------------------------------------");
             }
         }
-        Err(e) => println!("[Memory] Error: {}", e),
+        Err(e) => println!("[Memory] Error: {e}"),
     }
-    if let Ok(facts) = snapshot.memory.get_all_keyfacts(card_name) {
-        if !facts.is_empty() {
-            println!("\n--- Key Facts ({}) ---", facts.len());
-            for f in &facts {
-                println!("  {}: {}", f.key, f.value);
-            }
-            println!("------------------------");
+    if let Ok(facts) = snapshot.memory.get_all_keyfacts(card_name)
+        && !facts.is_empty()
+    {
+        println!("\n--- Key Facts ({}) ---", facts.len());
+        for f in &facts {
+            println!("  {}: {}", f.key, f.value);
         }
+        println!("------------------------");
     }
 }

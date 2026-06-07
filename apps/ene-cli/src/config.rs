@@ -13,8 +13,7 @@ pub async fn init() -> Result<EneHandle, EneCoreError> {
         eprintln!(
             "{}",
             style::error(format!(
-                "[Runtime] Warning: Failed to load character card: {}",
-                e
+                "[Runtime] Warning: Failed to load character card: {e}"
             ))
         );
     }

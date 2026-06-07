@@ -65,9 +65,11 @@ pub fn load_model(
     let rms_norm_eps = md_get("qwen3.attention.layer_norm_rms_epsilon")?
         .to_f32()
         .map_err(super::candle_err("rms_epsilon"))?;
-    let rope_theta = md_get("qwen3.rope.freq_base")?
-        .to_f32()
-        .map_err(super::candle_err("freq_base"))? as f64;
+    let rope_theta = f64::from(
+        md_get("qwen3.rope.freq_base")?
+            .to_f32()
+            .map_err(super::candle_err("freq_base"))?,
+    );
     let num_kv_groups = num_heads / num_kv_heads;
 
     tracing::info!(
@@ -190,7 +192,7 @@ pub fn load_model(
 
 /// Resolves GGUF weight and tokenizer file paths for a given model.
 ///
-/// Downloads the model from HuggingFace Hub if not already cached in `model_dir`.
+/// Downloads the model from `HuggingFace` Hub if not already cached in `model_dir`.
 pub fn resolve_gguf_paths(
     model_name: &str,
     quantization: &str,
@@ -254,7 +256,7 @@ pub fn resolve_gguf_paths(
             tracing::info!(
                 "[Embedding] GGUF model ready: {} ({} bytes)",
                 gguf_path.display(),
-                std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0),
+                std::fs::metadata(&gguf_path).map_or(0, |m| m.len()),
             );
 
             Ok((gguf_path, tokenizer_path))

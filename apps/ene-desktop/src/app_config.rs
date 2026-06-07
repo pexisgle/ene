@@ -135,7 +135,7 @@ pub fn target_fps_label(target_fps: u32) -> String {
     if target_fps == 0 {
         "Unlimited".to_string()
     } else {
-        format!("{} FPS", target_fps)
+        format!("{target_fps} FPS")
     }
 }
 
@@ -283,7 +283,7 @@ impl CharacterSettings {
                 folder: DEFAULT_CHARACTER_NAME.to_string(),
                 vrm_paths: vec![DEFAULT_VRM_PATH.to_string()],
                 motion_paths: vec![DEFAULT_VRMA_PATH.to_string()],
-                card_path: format!("characters/{}/character.json", DEFAULT_CHARACTER_NAME),
+                card_path: format!("characters/{DEFAULT_CHARACTER_NAME}/character.json"),
                 default_motion: None,
             });
         }
@@ -293,11 +293,10 @@ impl CharacterSettings {
             .position(|c| c.vrm_paths.iter().any(|v| v == &default_vrm))
             .unwrap_or(0);
 
-        let default_card_path = format!("characters/{}/character.json", DEFAULT_CHARACTER_NAME);
+        let default_card_path = format!("characters/{DEFAULT_CHARACTER_NAME}/character.json");
         let selected_card_path = characters
             .get(selected_character)
-            .map(|c| c.card_path.clone())
-            .unwrap_or(default_card_path);
+            .map_or(default_card_path, |c| c.card_path.clone());
         let selected_motion = characters
             .get(selected_character)
             .and_then(|entry| {
@@ -495,12 +494,12 @@ impl CharacterSettings {
         let card_path = ene_config::resolve_character_path(&full.character);
         if !card_path.is_empty() {
             let path = Path::new(&card_path);
-            if let Some(parent) = path.parent() {
-                if let Some(name_os) = parent.file_name() {
-                    let name = name_os.to_string_lossy();
-                    if let Some(idx) = self.characters.iter().position(|c| c.name == name) {
-                        self.character_state.selected_character = idx;
-                    }
+            if let Some(parent) = path.parent()
+                && let Some(name_os) = parent.file_name()
+            {
+                let name = name_os.to_string_lossy();
+                if let Some(idx) = self.characters.iter().position(|c| c.name == name) {
+                    self.character_state.selected_character = idx;
                 }
             }
         }
@@ -593,7 +592,7 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
             folder: folder.clone(),
             vrm_paths,
             motion_paths,
-            card_path: format!("characters/{}/character.json", folder),
+            card_path: format!("characters/{folder}/character.json"),
             default_motion,
         };
         out.push(entry);

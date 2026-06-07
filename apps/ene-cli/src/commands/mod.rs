@@ -59,9 +59,6 @@ pub async fn execute(input: &str, ctx: &mut AppContext) {
             eprintln!("{}", crate::style::error(err));
         }
     } else {
-        eprintln!(
-            "{}",
-            crate::style::error(format!("Unknown command: {}", cmd))
-        );
+        eprintln!("{}", crate::style::error(format!("Unknown command: {cmd}")));
     }
 }

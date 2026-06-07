@@ -58,7 +58,7 @@ pub struct CharacterCardData {
     pub personality: String,
     /// Scenario / setting description.
     pub scenario: String,
-    /// Notes from the card creator (CCv2+).
+    /// Notes from the card creator (`CCv2`+).
     #[serde(default)]
     pub creator_notes: String,
     /// Optional lorebook for world-building context.
@@ -203,7 +203,7 @@ pub struct ResolvedExpression {
     pub name: String,
     /// A human-readable description of what this expression conveys.
     pub description: String,
-    /// VRM blend-shape weights: expression_name → weight.
+    /// VRM blend-shape weights: `expression_name` → weight.
     pub vrm: HashMap<String, f32>,
 }
 
@@ -232,6 +232,7 @@ fn default_expressions() -> Vec<ResolvedExpression> {
 }
 
 /// Merges the built-in defaults with card-level overrides from `extensions.expressions`.
+#[must_use]
 pub fn resolve_expressions(card: &CharacterCardV3) -> Vec<ResolvedExpression> {
     let overrides = card.data.get_expression_overrides();
     let mut map: indexmap::IndexMap<String, ResolvedExpression> = default_expressions()
@@ -275,6 +276,7 @@ impl CharacterCardData {
     /// Returns the display name for this character.
     ///
     /// Prefers `nickname` over `name` when `nickname` is non-empty.
+    #[must_use]
     pub fn get_character_name(&self) -> &str {
         if self.nickname.is_empty() {
             &self.name
@@ -300,6 +302,7 @@ impl CharacterCardData {
 /// - `{{roll:d20}}` → random dice roll (1..N)
 /// - `{{//...}}`, `{{comment:...}}` → removed
 /// - `{{reverse:text}}` → reversed string
+#[must_use]
 pub fn expand_cbs_macros(text: &str, char_name: &str, user_name: &str) -> String {
     let mut result = text.to_string();
 

@@ -34,7 +34,9 @@ static FILE_LOCKS: std::sync::OnceLock<
 
 fn get_lock(path: &Path) -> Arc<Semaphore> {
     let locks = FILE_LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    let mut locks = locks.lock().unwrap_or_else(|e| e.into_inner());
+    let mut locks = locks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     locks
         .entry(path.to_path_buf())
         .or_insert_with(|| Arc::new(Semaphore::new(1)))
@@ -74,10 +76,8 @@ pub fn find_best_match<'a>(needle: &str, haystack: &'a str) -> Option<(usize, &'
             1.0 - (dist as f64 / max_len as f64)
         };
 
-        if similarity >= 0.7 {
-            if best.map_or(true, |(_, _, b_sim)| similarity > b_sim) {
-                best = Some((start, window, similarity));
-            }
+        if similarity >= 0.7 && best.is_none_or(|(_, _, b_sim)| similarity > b_sim) {
+            best = Some((start, window, similarity));
         }
     }
     best
@@ -157,24 +157,22 @@ pub async fn edit(
         found
     };
 
-    let new_content = match result {
-        Some(c) => c,
-        None => {
-            let simple_matches: Vec<_> =
-                normalized_content.match_indices(&normalized_old).collect();
-            if simple_matches.len() > 1 && !replace_all {
-                return Err(ToolError::ExecutionFailed { message:
-                    "Found multiple matches for oldString. Provide more surrounding context to make the match unique.".to_string()
-                });
-            }
+    let new_content = if let Some(c) = result {
+        c
+    } else {
+        let simple_matches: Vec<_> = normalized_content.match_indices(&normalized_old).collect();
+        if simple_matches.len() > 1 && !replace_all {
             return Err(ToolError::ExecutionFailed { message:
-                "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.".to_string()
+                "Found multiple matches for oldString. Provide more surrounding context to make the match unique.".to_string()
             });
         }
+        return Err(ToolError::ExecutionFailed { message:
+            "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.".to_string()
+        });
     };
 
     let final_content = if ending == "\r\n" {
-        new_content.replace("\n", "\r\n")
+        new_content.replace('\n', "\r\n")
     } else {
         new_content
     };
@@ -309,7 +307,10 @@ impl FsEditAction {
 
     async fn run(&self) -> Result<String, ToolError> {
         let sandbox = {
-            let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
+            let guard = self
+                .sandbox
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.clone().unwrap_or_else(|| {
                 Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
             })

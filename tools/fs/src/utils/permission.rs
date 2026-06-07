@@ -66,7 +66,7 @@ impl PermissionGate {
             return Ok(());
         }
 
-        let req = PermissionRequest::new(&format!("{:?}", action), target, description);
+        let req = PermissionRequest::new(&format!("{action:?}"), target, description);
         Err(req)
     }
 

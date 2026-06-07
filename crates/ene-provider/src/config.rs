@@ -85,10 +85,10 @@ impl ProviderConfig {
                 }
                 #[cfg(debug_assertions)]
                 {
-                    if let Ok(token) = std::env::var("API_TOKEN") {
-                        if !token.trim().is_empty() {
-                            return token;
-                        }
+                    if let Ok(token) = std::env::var("API_TOKEN")
+                        && !token.trim().is_empty()
+                    {
+                        return token;
                     }
                 }
                 String::new()
@@ -113,10 +113,10 @@ impl ProviderConfig {
                 }
                 #[cfg(debug_assertions)]
                 {
-                    if let Ok(token) = std::env::var("API_TOKEN") {
-                        if !token.trim().is_empty() {
-                            return token;
-                        }
+                    if let Ok(token) = std::env::var("API_TOKEN")
+                        && !token.trim().is_empty()
+                    {
+                        return token;
                     }
                 }
                 String::new()
@@ -127,6 +127,7 @@ impl ProviderConfig {
     /// Reads the `local_embedding` sub-section from config.
     ///
     /// Falls back to `LocalEmbeddingConfig::default()` if the key is absent.
+    #[must_use]
     pub fn local_embedding(config: &ene_config::EneConfig) -> LocalEmbeddingConfig {
         config
             .get_section_by_key::<LocalEmbeddingConfig>("provider.local_embedding")

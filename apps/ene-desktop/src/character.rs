@@ -274,7 +274,7 @@ fn apply_character_selection(
                 let motion_name = motion.clone();
                 let vrma_handle = asset_server.load(motion_name.clone());
                 cmd.spawn((
-                    Name::new(format!("MotionVrma: {}", motion_name)),
+                    Name::new(format!("MotionVrma: {motion_name}")),
                     MotionVrma { path: motion_name },
                     VrmaHandle(vrma_handle),
                 ));
@@ -450,8 +450,7 @@ fn update_cursor_look_target(
 
     let head_pos = character_roots
         .single()
-        .map(|gtf| gtf.translation() + Vec3::Y)
-        .unwrap_or(Vec3::new(0.0, 1.0, 0.0));
+        .map_or(Vec3::new(0.0, 1.0, 0.0), |gtf| gtf.translation() + Vec3::Y);
     let neutral_target = head_pos + Vec3::new(0.0, 0.0, 1.8);
 
     #[cfg(target_os = "windows")]
@@ -459,12 +458,13 @@ fn update_cursor_look_target(
         cursor_position_for_window(window, raw_handles.get(_primary_window_entity).ok());
     #[cfg(not(target_os = "windows"))]
     let cursor_position = cursor_position_for_window(window);
-    let desired_target = cursor_world_target(cursor_position, camera, camera_gtf, head_pos)
-        .map(|world_target| {
+    let desired_target = cursor_world_target(cursor_position, camera, camera_gtf, head_pos).map_or(
+        neutral_target,
+        |world_target| {
             let strength = settings.character_state.look_at_strength.clamp(0.0, 1.0);
             neutral_target.lerp(world_target, strength)
-        })
-        .unwrap_or(neutral_target);
+        },
+    );
 
     let smoothed = if let Some(current) = cursor_state.smoothed_world_target {
         let smoothing_speed = 7.0;
@@ -491,7 +491,7 @@ fn cursor_world_target(
     Some(ray.get_point(distance))
 }
 
-/// Creates the shared target entity that the character's LookAt component follows.
+/// Creates the shared target entity that the character's `LookAt` component follows.
 fn spawn_cursor_look_target(
     commands: &mut Commands,
     current_character: &mut CurrentCharacter,

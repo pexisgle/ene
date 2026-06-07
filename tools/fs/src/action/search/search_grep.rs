@@ -21,8 +21,7 @@ pub async fn grep_search(
     })?;
 
     let base = if let Some(p) = path {
-        let resolved = sandbox.resolve_and_check(Path::new(p), false)?;
-        resolved
+        sandbox.resolve_and_check(Path::new(p), false)?
     } else {
         std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf())
     };
@@ -53,10 +52,7 @@ pub async fn grep_search(
 
         if let Some(inc) = include {
             let file_name = file_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if !glob::Pattern::new(inc)
-                .map(|p| p.matches(file_name))
-                .unwrap_or(false)
-            {
+            if !glob::Pattern::new(inc).is_ok_and(|p| p.matches(file_name)) {
                 continue;
             }
         }
@@ -106,9 +102,9 @@ pub async fn grep_search(
         "Found {} matches{}",
         total,
         if truncated {
-            format!(" (showing first {})", MAX_RESULTS)
+            format!(" (showing first {MAX_RESULTS})")
         } else {
-            "".to_string()
+            String::new()
         }
     )];
 
@@ -116,26 +112,22 @@ pub async fn grep_search(
     for (path, line_num, text) in &matches {
         if current_file != path {
             if !current_file.is_empty() {
-                output.push("".to_string());
+                output.push(String::new());
             }
             current_file = path;
-            output.push(format!("{}:", path));
+            output.push(format!("{path}:"));
         }
         let truncated_text = if text.chars().count() > 2000 {
-            let byte_end = text
-                .char_indices()
-                .nth(2000)
-                .map(|(i, _)| i)
-                .unwrap_or(text.len());
+            let byte_end = text.char_indices().nth(2000).map_or(text.len(), |(i, _)| i);
             format!("{}...", &text[..byte_end])
         } else {
             text.clone()
         };
-        output.push(format!("  Line {}: {}", line_num, truncated_text));
+        output.push(format!("  Line {line_num}: {truncated_text}"));
     }
 
     if truncated {
-        output.push("".to_string());
+        output.push(String::new());
         output.push(format!(
             "(Results truncated: showing {} of {} matches ({} hidden). Consider using a more specific path or pattern.)",
             MAX_RESULTS, total, total - MAX_RESULTS
@@ -187,7 +179,10 @@ impl FsGrepAction {
 
     async fn run(&self) -> Result<String, ToolError> {
         let sandbox = {
-            let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
+            let guard = self
+                .sandbox
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.clone().unwrap_or_else(|| {
                 Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
             })

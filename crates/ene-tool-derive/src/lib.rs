@@ -28,7 +28,7 @@ use attr::{ArgAttrs, ToolSpecAttrs, has_tool_skip};
 /// 1. Builds a base JSON schema from `schemars` over `Self`.
 /// 2. Forces `additionalProperties: false` on the root object so the LLM
 ///    cannot invent fields.
-/// 3. Applies per-field `#[arg(...)]` overrides (hide, enum_values,
+/// 3. Applies per-field `#[arg(...)]` overrides (hide, `enum_values`,
 ///    default, min/max, alias-in-description).
 /// 4. Fills the `ToolSpec` body from `#[tool(...)]`.
 ///
@@ -376,7 +376,7 @@ fn collect_field_instructions(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
 ) -> syn::Result<Vec<TokenStream2>> {
     let mut out = Vec::new();
-    for f in fields.iter() {
+    for f in fields {
         let arg = ArgAttrs::from_field(f).map_err(|e| syn::Error::new_spanned(f, e.to_string()))?;
         let field_name = f
             .ident
@@ -413,11 +413,16 @@ fn apply_serde_attrs(f: &syn::Field, instr: &mut FieldInstr) {
         }
         let _ = attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("rename") {
-                if let Ok(lit) = meta.value().and_then(|v| v.parse::<syn::LitStr>()) {
+                if let Ok(lit) = meta
+                    .value()
+                    .and_then(syn::parse::ParseBuffer::parse::<syn::LitStr>)
+                {
                     instr.prop_key = lit.value();
                 }
             } else if meta.path.is_ident("alias")
-                && let Ok(lit) = meta.value().and_then(|v| v.parse::<syn::LitStr>())
+                && let Ok(lit) = meta
+                    .value()
+                    .and_then(syn::parse::ParseBuffer::parse::<syn::LitStr>)
             {
                 instr.aliases.push(lit.value());
             }
@@ -458,7 +463,11 @@ fn emit_field(instr: &FieldInstr) -> TokenStream2 {
     }
 
     if !instr.enum_values.is_empty() {
-        let vals: Vec<&str> = instr.enum_values.iter().map(|s| s.as_str()).collect();
+        let vals: Vec<&str> = instr
+            .enum_values
+            .iter()
+            .map(std::string::String::as_str)
+            .collect();
         edits.push(quote! {
             prop.insert("enum".to_string(), ::serde_json::json!([#(#vals),*]));
         });
@@ -500,7 +509,9 @@ fn emit_field(instr: &FieldInstr) -> TokenStream2 {
         edits.push(quote! { prop.insert("maxItems".to_string(), ::serde_json::json!(#n)); });
     }
 
-    let alias_block = if !instr.aliases.is_empty() {
+    let alias_block = if instr.aliases.is_empty() {
+        quote! {}
+    } else {
         let lits: Vec<String> = instr.aliases.iter().map(|a| format!("`{a}`")).collect();
         let concat = lits.join(", ");
         let append = format!(" Aliases: {concat}.");
@@ -515,8 +526,6 @@ fn emit_field(instr: &FieldInstr) -> TokenStream2 {
                 prop.insert("description".to_string(), ::serde_json::json!(s));
             }
         }
-    } else {
-        quote! {}
     };
 
     quote! {

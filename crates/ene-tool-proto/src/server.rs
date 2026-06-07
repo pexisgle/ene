@@ -87,7 +87,7 @@ pub async fn run_tool_server(
                     }
                 });
             }
-            _ = shutdown.notified() => {
+            () = shutdown.notified() => {
                 break;
             }
         }

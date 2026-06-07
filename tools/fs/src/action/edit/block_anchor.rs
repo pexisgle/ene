@@ -24,12 +24,12 @@ pub fn block_anchor_replace(
     let search_block_size = search_lines.len();
 
     let mut candidates = Vec::new();
-    for i in 0..original_lines.len() {
-        if original_lines[i].trim() != first_line {
+    for (i, line) in original_lines.iter().enumerate() {
+        if line.trim() != first_line {
             continue;
         }
-        for j in (i + 2)..original_lines.len() {
-            if original_lines[j].trim() == last_line {
+        for (j, line) in original_lines.iter().enumerate().skip(i + 2) {
+            if line.trim() == last_line {
                 candidates.push((i, j));
                 break;
             }
@@ -77,17 +77,9 @@ pub fn block_anchor_replace(
     if candidates.len() == 1 {
         let (s, e) = candidates[0];
         check_candidate(s, e)?;
-        let mut start_idx = 0usize;
-        for k in 0..s {
-            start_idx += original_lines[k].len() + 1;
-        }
-        let mut end_idx = start_idx;
-        for k in s..=e {
-            end_idx += original_lines[k].len();
-            if k < e {
-                end_idx += 1;
-            }
-        }
+        let start_idx: usize = original_lines[..s].iter().map(|l| l.len() + 1).sum();
+        let end_idx =
+            start_idx + original_lines[s..=e].iter().map(|l| l.len()).sum::<usize>() + (e - s);
         return Some(content[..start_idx].to_string() + new + &content[end_idx..]);
     }
 
@@ -128,17 +120,9 @@ pub fn block_anchor_replace(
         return None;
     }
     let (s, e) = best?;
-    let mut start_idx = 0usize;
-    for k in 0..s {
-        start_idx += original_lines[k].len() + 1;
-    }
-    let mut end_idx = start_idx;
-    for k in s..=e {
-        end_idx += original_lines[k].len();
-        if k < e {
-            end_idx += 1;
-        }
-    }
+    let start_idx: usize = original_lines[..s].iter().map(|l| l.len() + 1).sum();
+    let end_idx =
+        start_idx + original_lines[s..=e].iter().map(|l| l.len()).sum::<usize>() + (e - s);
     Some(content[..start_idx].to_string() + new + &content[end_idx..])
 }
 

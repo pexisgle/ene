@@ -13,9 +13,9 @@ fn sway_find_windows(node: &serde_json::Value, windows: &mut Vec<String>) {
         let has_window = node["window"].as_i64().is_some();
 
         if has_window || !name.is_empty() || !app_id.is_empty() || !class.is_empty() {
-            let display_id = if !app_id.is_empty() { app_id } else { class };
+            let display_id = if app_id.is_empty() { class } else { app_id };
             if !name.is_empty() || !display_id.is_empty() {
-                windows.push(format!("{} ({})", name, display_id));
+                windows.push(format!("{name} ({display_id})"));
             }
         }
     }
@@ -61,7 +61,7 @@ impl WlCompositor for Sway {
     }
 
     fn focus_window(&self, title: &str) -> Result<String, ToolError> {
-        let criteria = format!("[title=\"{}\"] focus", title);
+        let criteria = format!("[title=\"{title}\"] focus");
         let output = std::process::Command::new("swaymsg")
             .arg(&criteria)
             .output()
@@ -78,6 +78,6 @@ impl WlCompositor for Sway {
             });
         }
 
-        Ok(format!("Focused window matching: {}", title))
+        Ok(format!("Focused window matching: {title}"))
     }
 }

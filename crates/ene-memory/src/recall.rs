@@ -3,6 +3,7 @@ use chrono::Utc;
 use ene_common::truncate::Truncate;
 
 /// Formats past conversation summaries into a text block for prompt injection
+#[must_use]
 pub fn format_summaries_for_prompt(summaries: &[RecalledSummary]) -> String {
     if summaries.is_empty() {
         return String::new();
@@ -33,21 +34,21 @@ fn format_age(dur: chrono::Duration) -> String {
         if mins == 1 {
             "1 minute ago".to_string()
         } else {
-            format!("{} minutes ago", mins)
+            format!("{mins} minutes ago")
         }
     } else if total_seconds < 86400 {
         let hours = total_seconds / 3600;
         if hours == 1 {
             "1 hour ago".to_string()
         } else {
-            format!("{} hours ago", hours)
+            format!("{hours} hours ago")
         }
     } else {
         let days = total_seconds / 86400;
         if days == 1 {
             "1 day ago".to_string()
         } else {
-            format!("{} days ago", days)
+            format!("{days} days ago")
         }
     }
 }

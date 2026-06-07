@@ -130,9 +130,13 @@ fn pace_frame_rate(settings: Res<CharacterSettings>, mut pacing: ResMut<FramePac
 
     let elapsed = now.duration_since(last_frame_end);
     if elapsed < target_frame_duration {
-        let sleep_duration = target_frame_duration - elapsed;
+        let sleep_duration = target_frame_duration.checked_sub(elapsed).unwrap();
         if sleep_duration.as_millis() > 2 {
-            std::thread::sleep(sleep_duration - Duration::from_millis(1));
+            std::thread::sleep(
+                sleep_duration
+                    .checked_sub(Duration::from_millis(1))
+                    .unwrap(),
+            );
         }
         std::hint::spin_loop();
     }

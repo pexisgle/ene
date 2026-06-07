@@ -10,7 +10,7 @@ mod quantized;
 
 use std::path::PathBuf;
 
-/// Publicly export EneEmbeddingError.
+/// Publicly export `EneEmbeddingError`.
 pub use error::EneEmbeddingError;
 /// Local GGUF-quantized embedding provider and path resolution.
 pub use quantized::{GgufEmbeddingProvider, resolve_gguf_paths};

@@ -192,6 +192,7 @@ impl std::fmt::Debug for MemoryQueryHandle {
 
 impl MemoryQueryHandle {
     /// Whether memory is enabled and both store and embedder are available.
+    #[must_use]
     pub fn is_enabled(&self) -> bool {
         self.store.is_some() && self.embedder.is_some()
     }
@@ -204,7 +205,7 @@ impl MemoryQueryHandle {
         embedder
             .embed_query(text)
             .await
-            .map_err(|e| EneCoreError::EmbeddingError(format!("Embedding failed: {}", e)))
+            .map_err(|e| EneCoreError::EmbeddingError(format!("Embedding failed: {e}")))
     }
 
     /// Search conversation summaries by embedding similarity.
@@ -353,6 +354,7 @@ impl EneHandle {
     ///
     /// The actor runs as a background tokio task. When all handles are
     /// dropped the channel closes, which causes the actor to exit.
+    #[must_use]
     pub fn new() -> Self {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let cmd_tx = Arc::new(cmd_tx);
@@ -366,6 +368,7 @@ impl EneHandle {
 
     /// Subscribe to the event stream. Returns a receiver that will see
     /// events from this point forward.
+    #[must_use]
     pub fn subscribe(&self) -> EneEventReceiver {
         EneEventReceiver(self.event_tx.subscribe())
     }
@@ -573,7 +576,7 @@ impl EneActor {
                     }
                     // Regularly check stream completion while active,
                     // so sessions update promptly even without new commands.
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                    () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
                         self.check_stream_completion();
                     }
                 }
@@ -917,7 +920,7 @@ impl EneActor {
         let embedding = embedder
             .embed_query(input)
             .await
-            .map_err(|e| EneCoreError::EmbeddingError(format!("Failed to embed: {}", e)))?;
+            .map_err(|e| EneCoreError::EmbeddingError(format!("Failed to embed: {e}")))?;
 
         self.session.set_pending_embedding(embedding.clone());
         self.session.set_last_input_embedding(embedding.clone());
@@ -969,34 +972,31 @@ async fn build_tool_registry(config: &EneConfig) -> Result<Arc<dyn ToolRegistry>
 fn init_embedding(config: &EneConfig) -> Result<Arc<dyn ene_provider::EmbeddingProvider>, String> {
     let provider_config = config
         .get_section::<ene_provider::ProviderConfig>()
-        .map_err(|e| format!("Failed to load provider config: {}", e))?;
+        .map_err(|e| format!("Failed to load provider config: {e}"))?;
 
-    match provider_config.embedding_backend.as_str() {
-        "local" => {
-            let local_cfg = ene_provider::ProviderConfig::local_embedding(config);
-            let model_dir = ene_config::models_dir();
-            let provider = ene_embedding::create_local_provider(
-                &local_cfg.model,
-                &local_cfg.quantization,
-                model_dir,
-            )
-            .map_err(|e| format!("Failed to create local embedding provider: {}", e))?;
-            Ok(Arc::from(provider))
-        }
-        _ => {
-            let base_url = provider_config
-                .resolve_base_url()
-                .map_err(|e| format!("Failed to resolve base URL for cloud embedding: {}", e))?;
-            let api_key = provider_config.resolve_api_key();
-            let query_prefix = provider_config.query_prefix.clone();
-            Ok(Arc::new(ene_provider::CloudEmbeddingProvider::new(
-                &base_url,
-                &api_key,
-                &provider_config.cloud_embedding_model,
-                provider_config.cloud_embedding_dimensions,
-                query_prefix,
-            )))
-        }
+    if provider_config.embedding_backend.as_str() == "local" {
+        let local_cfg = ene_provider::ProviderConfig::local_embedding(config);
+        let model_dir = ene_config::models_dir();
+        let provider = ene_embedding::create_local_provider(
+            &local_cfg.model,
+            &local_cfg.quantization,
+            model_dir,
+        )
+        .map_err(|e| format!("Failed to create local embedding provider: {e}"))?;
+        Ok(Arc::from(provider))
+    } else {
+        let base_url = provider_config
+            .resolve_base_url()
+            .map_err(|e| format!("Failed to resolve base URL for cloud embedding: {e}"))?;
+        let api_key = provider_config.resolve_api_key();
+        let query_prefix = provider_config.query_prefix.clone();
+        Ok(Arc::new(ene_provider::CloudEmbeddingProvider::new(
+            &base_url,
+            &api_key,
+            &provider_config.cloud_embedding_model,
+            provider_config.cloud_embedding_dimensions,
+            query_prefix,
+        )))
     }
 }
 
@@ -1009,21 +1009,21 @@ fn init_memory_store(
         .unwrap_or_default()
         .resolve_memory_db_path();
 
-    if let Some(parent) = db_path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create memory DB directory: {}", e))?;
-        }
+    if let Some(parent) = db_path.parent()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create memory DB directory: {e}"))?;
     }
 
     let dims = embedder.dimensions();
     let store = ene_memory::MemoryStore::open(&db_path, dims)
-        .map_err(|e| format!("Failed to open memory store: {}", e))?;
+        .map_err(|e| format!("Failed to open memory store: {e}"))?;
 
     Ok(Arc::new(store))
 }
 
-/// Builds the ToolRag pipeline from the current config, embedder, and session state.
+/// Builds the `ToolRag` pipeline from the current config, embedder, and session state.
 fn init_tool_rag(
     config: &EneConfig,
     embedder: &Arc<dyn ene_provider::EmbeddingProvider>,

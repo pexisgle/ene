@@ -118,7 +118,7 @@ impl SandboxConfig {
             })?;
             if re.is_match(command) {
                 return Err(ToolError::SandboxViolation {
-                    message: format!("Command matches blocked pattern: {}", pattern),
+                    message: format!("Command matches blocked pattern: {pattern}"),
                 });
             }
         }
@@ -140,7 +140,7 @@ impl SandboxConfig {
                     crate::utils::permission::PermissionLevel::RequiresApproval {
                         action, ..
                     } => action,
-                    _ => format!("{:?}", action),
+                    _ => format!("{action:?}"),
                 };
                 Err(ToolError::PermissionRequired {
                     request_id: req.id.to_string(),
@@ -183,11 +183,11 @@ impl From<ene_tool_proto::SandboxConfigData> for SandboxConfig {
     }
 }
 
-/// Integrated type combining SandboxConfig + UndoManager + session_id
+/// Integrated type combining `SandboxConfig` + `UndoManager` + `session_id`
 ///
 /// Tool implementers only need to be aware of Sandbox.
-/// Access control (check_readable / check_writable / check_command) and
-/// operation tracking (track_xxx) and Undo execution are bundled together
+/// Access control (`check_readable` / `check_writable` / `check_command`) and
+/// operation tracking (`track_xxx`) and Undo execution are bundled together
 pub struct Sandbox {
     config: SandboxConfig,
     undo: crate::utils::undo_manager::UndoManager,
@@ -232,12 +232,15 @@ impl Sandbox {
     pub fn session_id(&self) -> String {
         self.session_id
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
     pub fn set_session_id(&self, id: &str) {
-        *self.session_id.write().unwrap_or_else(|e| e.into_inner()) = id.to_string();
+        *self
+            .session_id
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = id.to_string();
     }
 
     /// Adds an approved request ID
@@ -261,7 +264,7 @@ impl Sandbox {
         target: &str,
         description: &str,
     ) -> Result<(), ToolError> {
-        let action_str = format!("{:?}", action);
+        let action_str = format!("{action:?}");
 
         // 1. Session-level allow pattern check
         if let Ok(guard) = self.allowed_patterns.read() {
@@ -282,10 +285,10 @@ impl Sandbox {
                 description: desc,
             }) => {
                 // Check if this specific request_id has been approved (Allow Once)
-                if let Ok(guard) = self.approved_requests.read() {
-                    if guard.contains(&request_id) {
-                        return Ok(());
-                    }
+                if let Ok(guard) = self.approved_requests.read()
+                    && guard.contains(&request_id)
+                {
+                    return Ok(());
                 }
                 Err(ToolError::PermissionRequired {
                     request_id,

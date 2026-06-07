@@ -26,7 +26,7 @@ impl KeyComboAction {
                 }
             })?;
 
-            let parts: Vec<&str> = combo.split('+').map(|s| s.trim()).collect();
+            let parts: Vec<&str> = combo.split('+').map(str::trim).collect();
             if parts.is_empty() {
                 return Err(ToolError::ExecutionFailed {
                     message: "Empty key combo".to_string(),
@@ -46,7 +46,7 @@ impl KeyComboAction {
                     .map(|(_, p)| p)
                     .collect();
                 return Err(ToolError::ExecutionFailed {
-                    message: format!("Unrecognized key(s) in combo: {:?}", unrecognized),
+                    message: format!("Unrecognized key(s) in combo: {unrecognized:?}"),
                 });
             }
 
@@ -75,7 +75,7 @@ impl KeyComboAction {
                 })?;
             }
 
-            Ok::<_, ToolError>(format!("Executed key combo: {}", combo))
+            Ok::<_, ToolError>(format!("Executed key combo: {combo}"))
         })
         .await
         .map_err(|e| ToolError::ExecutionFailed {

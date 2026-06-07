@@ -51,8 +51,7 @@ fn format_user_response(questions: &[QuestionItem], answers: &[MultiAnswer]) -> 
     for (i, q) in questions.iter().enumerate() {
         let rendered = answers
             .get(i)
-            .map(format_answer)
-            .unwrap_or_else(|| "(no answer)".to_string());
+            .map_or_else(|| "(no answer)".to_string(), format_answer);
         out.push_str(&format!("{}. {} -> {}\n", i + 1, q.question, rendered));
     }
     out
@@ -69,7 +68,6 @@ fn format_answer(answer: &MultiAnswer) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ene_tool_common::ToolSpecArgs;
 
     #[test]
     fn args_deserialize_with_questions() {

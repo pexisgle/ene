@@ -69,8 +69,7 @@ impl MouseDragAction {
                 })?;
 
             Ok::<_, ToolError>(format!(
-                "Dragged from ({},{}) to ({},{}) with {} button",
-                start_x, start_y, end_x, end_y, button
+                "Dragged from ({start_x},{start_y}) to ({end_x},{end_y}) with {button} button"
             ))
         })
         .await

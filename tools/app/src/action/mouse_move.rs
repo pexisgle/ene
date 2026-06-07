@@ -42,7 +42,7 @@ impl MouseMoveAction {
                     message: format!("Mouse move failed: {e}"),
                 })?;
             let mode = if relative { "relative" } else { "absolute" };
-            Ok::<_, ToolError>(format!("Mouse moved to ({}, {}) [{}]", x, y, mode))
+            Ok::<_, ToolError>(format!("Mouse moved to ({x}, {y}) [{mode}]"))
         })
         .await
         .map_err(|e| ToolError::ExecutionFailed {

@@ -24,7 +24,7 @@ impl CliCommand for PromptCommand {
             .handle
             .get_snapshot()
             .await
-            .map_err(|e| format!("Failed to get actor state: {}", e))?;
+            .map_err(|e| format!("Failed to get actor state: {e}"))?;
 
         if let Some(card) = &snapshot.character_card {
             let sys = ene_core::message_builder::build_system_prompt(
@@ -34,7 +34,7 @@ impl CliCommand for PromptCommand {
             );
             if !sys.trim().is_empty() {
                 println!("--- System Prompt ---");
-                println!("{}", sys);
+                println!("{sys}");
                 println!("---------------------");
             }
 
@@ -45,7 +45,7 @@ impl CliCommand for PromptCommand {
                     card.data.get_character_name(),
                     &snapshot.config.user_name,
                 );
-                println!("{}", ex);
+                println!("{ex}");
                 println!("----------------------------------------------------");
             }
 
@@ -68,14 +68,14 @@ impl CliCommand for PromptCommand {
 
             if snapshot.memory.is_enabled() {
                 let card_name = card.data.get_character_name();
-                if let Ok(facts) = snapshot.memory.get_all_keyfacts(card_name) {
-                    if !facts.is_empty() {
-                        println!("--- Known Facts about {} ---", snapshot.config.user_name);
-                        for f in facts {
-                            println!("• {}: {}", f.key, f.value);
-                        }
-                        println!("-----------------------------");
+                if let Ok(facts) = snapshot.memory.get_all_keyfacts(card_name)
+                    && !facts.is_empty()
+                {
+                    println!("--- Known Facts about {} ---", snapshot.config.user_name);
+                    for f in facts {
+                        println!("• {}: {}", f.key, f.value);
                     }
+                    println!("-----------------------------");
                 }
             }
 
@@ -96,7 +96,7 @@ impl CliCommand for PromptCommand {
                 );
                 if !phi_expanded.trim().is_empty() {
                     println!("--- Expression Protocol (ACT tokens) ---");
-                    println!("{}", phi_expanded);
+                    println!("{phi_expanded}");
                     println!("----------------------------------------");
                 }
             }

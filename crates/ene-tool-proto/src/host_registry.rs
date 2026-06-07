@@ -6,6 +6,7 @@ use std::collections::HashMap;
 ///
 /// Can be used when users want to bundle multiple providers in a custom tool binary.
 /// A single provider is usually sufficient for standalone tool binaries.
+#[derive(Default)]
 pub struct HostRegistry {
     providers: Vec<Box<dyn ToolProvider>>,
     tool_index: HashMap<String, usize>,
@@ -13,11 +14,9 @@ pub struct HostRegistry {
 
 impl HostRegistry {
     /// Creates an empty registry.
+    #[must_use]
     pub fn new() -> Self {
-        Self {
-            providers: Vec::new(),
-            tool_index: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Register a tool provider. First-wins on name conflicts.
@@ -30,6 +29,7 @@ impl HostRegistry {
     }
 
     /// Returns all tool specs from all registered providers.
+    #[must_use]
     pub fn list_specs(&self) -> Vec<ToolSpec> {
         let mut specs = Vec::with_capacity(self.tool_index.len());
         for provider in &self.providers {

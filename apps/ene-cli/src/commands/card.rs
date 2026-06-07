@@ -27,8 +27,8 @@ impl CliCommand for CardCommand {
         let handle = ctx.handle.clone();
         tokio::spawn(async move {
             match handle.load_character(&name).await {
-                Ok(()) => println!("Character card loaded: {}", name),
-                Err(e) => eprintln!("Failed to load character card: {}", e),
+                Ok(()) => println!("Character card loaded: {name}"),
+                Err(e) => eprintln!("Failed to load character card: {e}"),
             }
         });
 

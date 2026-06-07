@@ -84,7 +84,7 @@ pub use types::RequestId;
 pub use ene_tool_host::ToolRegistry;
 /// Tool definition type (re-exported from `ene-tool-host`).
 #[doc(no_inline)]
-/// ToolSpec type (re-exported from `ene-tool-proto`).
+/// `ToolSpec` type (re-exported from `ene-tool-proto`).
 #[doc(no_inline)]
 pub use ene_tool_proto::ToolSpec;
 

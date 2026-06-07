@@ -109,6 +109,7 @@ impl Default for ConversationSession {
 
 impl ConversationSession {
     /// Creates a new empty session with a fresh session ID and zero turn count.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             history: ConversationHistory {
@@ -148,10 +149,11 @@ impl ConversationSession {
         &mut self,
         path: &str,
     ) -> Result<Vec<ResolvedExpression>, crate::error::EneSessionError> {
-        if self.current_card_path == path && self.character_card.is_some() {
-            if let Some(card) = &self.character_card {
-                return Ok(resolve_expressions(card));
-            }
+        if self.current_card_path == path
+            && self.character_card.is_some()
+            && let Some(card) = &self.character_card
+        {
+            return Ok(resolve_expressions(card));
         }
 
         let file_content =
@@ -297,39 +299,45 @@ impl ConversationSession {
     }
 
     /// Returns the current character name, or `"default"` if no card is loaded.
+    #[must_use]
     pub fn card_name(&self) -> &str {
         self.character_card
             .as_ref()
-            .map(|c| c.data.get_character_name())
-            .unwrap_or("default")
+            .map_or("default", |c| c.data.get_character_name())
     }
 
     /// Returns a reference to the conversation history entries.
+    #[must_use]
     pub fn history(&self) -> &[(Role, String)] {
         &self.history.conversation_history
     }
 
     /// Returns the current session ID.
+    #[must_use]
     pub fn session_id(&self) -> &SessionId {
         &self.memory.session_id
     }
 
     /// Returns when the session started (UTC).
+    #[must_use]
     pub fn session_started_at(&self) -> DateTime<Utc> {
         self.memory.session_started_at
     }
 
     /// Returns the current conversation turn count.
+    #[must_use]
     pub fn current_turn_count(&self) -> usize {
         self.state.current_turn_count
     }
 
     /// Returns the timestamp of the last received message, if any.
+    #[must_use]
     pub fn last_message_time(&self) -> Option<DateTime<Utc>> {
         self.state.last_message_time
     }
 
     /// Returns the number of minutes elapsed since the session started.
+    #[must_use]
     pub fn session_elapsed_minutes(&self) -> i64 {
         (Utc::now() - self.memory.session_started_at).num_minutes()
     }

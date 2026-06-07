@@ -6,7 +6,7 @@ use ene_tool_proto::{
     IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, SandboxConfigData, ToolError, read_ipc_response,
     write_ipc_request,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::Mutex as TokioMutex;
@@ -56,7 +56,7 @@ impl IpcToolRegistry {
         match resp {
             Some(IpcResponse::HandshakeAck { .. }) => {}
             Some(IpcResponse::Error { message }) => {
-                return Err(ToolError::IpcClient { message: message });
+                return Err(ToolError::IpcClient { message });
             }
             _ => {
                 return Err(ToolError::IpcClient {
@@ -86,7 +86,7 @@ impl IpcToolRegistry {
         match resp {
             Some(IpcResponse::Ack) => {}
             Some(IpcResponse::Error { message }) => {
-                return Err(ToolError::IpcClient { message: message });
+                return Err(ToolError::IpcClient { message });
             }
             _ => {
                 return Err(ToolError::IpcClient {
@@ -109,7 +109,7 @@ impl IpcToolRegistry {
     }
 
     async fn connect_with_retry(
-        socket_path: &PathBuf,
+        socket_path: &Path,
         max_retries: u32,
     ) -> Result<IpcStream, ToolError> {
         let mut attempts = 0;
@@ -196,7 +196,7 @@ impl IpcToolRegistry {
                 *tools_guard = tools;
                 Ok(())
             }
-            Some(IpcResponse::Error { message }) => Err(ToolError::IpcClient { message: message }),
+            Some(IpcResponse::Error { message }) => Err(ToolError::IpcClient { message }),
             _ => Err(ToolError::IpcClient {
                 message: "Unexpected response for ListTools".to_string(),
             }),

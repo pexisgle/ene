@@ -32,10 +32,10 @@ impl PressKeyAction {
                         message: format!("Key press failed: {e}"),
                     }
                 })?;
-                Ok::<_, ToolError>(format!("Pressed key: {}", key))
+                Ok::<_, ToolError>(format!("Pressed key: {key}"))
             } else {
                 Err(ToolError::ExecutionFailed {
-                    message: format!("Unsupported key: {}", key),
+                    message: format!("Unsupported key: {key}"),
                 })
             }
         })

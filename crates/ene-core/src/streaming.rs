@@ -79,18 +79,18 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
     let (recalled_summaries, key_facts) = fetch_memory_context(&session, &config).await;
 
     // 2. Insert user log if memory enabled
-    if mem_config.enabled {
-        if let Some(store) = &session.memory.memory_store {
-            let session_id_log = session.memory.session_id.clone();
-            let card_name = session.card_name().to_string();
-            ene_memory::MemoryStore::spawn_insert_log(
-                store,
-                session_id_log.as_str(),
-                &card_name,
-                "user",
-                &user_input,
-            );
-        }
+    if mem_config.enabled
+        && let Some(store) = &session.memory.memory_store
+    {
+        let session_id_log = session.memory.session_id.clone();
+        let card_name = session.card_name().to_string();
+        ene_memory::MemoryStore::spawn_insert_log(
+            store,
+            session_id_log.as_str(),
+            &card_name,
+            "user",
+            &user_input,
+        );
     }
 
     // 3. Build initial messages
@@ -151,9 +151,7 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
         let mut stream = match provider.create_chat_stream(&messages, &tools).await {
             Ok(s) => s,
             Err(e) => {
-                let _ = event_tx.send(EneEvent::Failed {
-                    message: e.to_string(),
-                });
+                let _ = event_tx.send(EneEvent::Failed { message: e.clone() });
                 return session;
             }
         };
@@ -185,9 +183,7 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
                     }
                 }
                 Err(e) => {
-                    let _ = event_tx.send(EneEvent::Failed {
-                        message: e.to_string(),
-                    });
+                    let _ = event_tx.send(EneEvent::Failed { message: e.clone() });
                     return session;
                 }
             }
@@ -195,16 +191,16 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
 
         if current_tool_calls.is_empty() {
             // No tool calls - stream is done
-            if !assistant_content.is_empty() {
-                if let Some(store) = &mem_store {
-                    ene_memory::MemoryStore::spawn_insert_log(
-                        store,
-                        session_id.as_str(),
-                        &card_name,
-                        "assistant",
-                        &assistant_content,
-                    );
-                }
+            if !assistant_content.is_empty()
+                && let Some(store) = &mem_store
+            {
+                ene_memory::MemoryStore::spawn_insert_log(
+                    store,
+                    session_id.as_str(),
+                    &card_name,
+                    "assistant",
+                    &assistant_content,
+                );
             }
 
             session.finalize_response();
@@ -243,7 +239,7 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
     }
 }
 
-/// Selects relevant tools using the ToolRag pipeline if available,
+/// Selects relevant tools using the `ToolRag` pipeline if available,
 /// otherwise falls back to the registry's `select_tools` or `list_tools`.
 pub(crate) async fn select_relevant_tools(
     registry: &dyn ene_tool_host::ToolRegistry,
@@ -467,7 +463,7 @@ async fn perform_tool_executions(
 
         let result_str = match result {
             Ok(res) => res,
-            Err(e) => format!("Error executing tool: {}", e),
+            Err(e) => format!("Error executing tool: {e}"),
         };
 
         let _ = event_tx.send(EneEvent::ToolCallResult {
@@ -542,15 +538,14 @@ fn finalize_tool_calls(current_tool_calls: Vec<LlmToolCallChunk>) -> Vec<LlmTool
 }
 
 fn extract_screenshot(result: &str) -> (String, Option<String>) {
-    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(result) {
-        if json_val.get("type").and_then(|v| v.as_str()) == Some("screenshot") {
-            if let Some(data) = json_val.get("data").and_then(|v| v.as_str()) {
-                return (
-                    "[Screenshot successfully captured and sent to vision system]".to_string(),
-                    Some(data.to_string()),
-                );
-            }
-        }
+    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(result)
+        && json_val.get("type").and_then(|v| v.as_str()) == Some("screenshot")
+        && let Some(data) = json_val.get("data").and_then(|v| v.as_str())
+    {
+        return (
+            "[Screenshot successfully captured and sent to vision system]".to_string(),
+            Some(data.to_string()),
+        );
     }
     (result.to_string(), None)
 }
@@ -566,28 +561,25 @@ fn inject_user_answers(args_json: &str, answers: &[MultiAnswer]) -> String {
         Err(_) => serde_json::Value::Array(Vec::new()),
     };
     let parsed: Option<serde_json::Value> = serde_json::from_str(args_json).ok();
-    match parsed {
-        Some(mut value) => {
-            if let Some(obj) = value.as_object_mut() {
-                obj.insert("_user_answers".to_string(), answers_value);
-            } else {
-                let mut obj = serde_json::Map::new();
-                obj.insert("_user_answers".to_string(), answers_value);
-                obj.insert("_original_args".to_string(), value);
-                value = serde_json::Value::Object(obj);
-            }
-            serde_json::to_string(&value).unwrap_or_else(|_| args_json.to_string())
-        }
-        None => {
+    if let Some(mut value) = parsed {
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("_user_answers".to_string(), answers_value);
+        } else {
             let mut obj = serde_json::Map::new();
             obj.insert("_user_answers".to_string(), answers_value);
-            obj.insert(
-                "_original_args".to_string(),
-                serde_json::Value::String(args_json.to_string()),
-            );
-            serde_json::to_string(&serde_json::Value::Object(obj))
-                .unwrap_or_else(|_| args_json.to_string())
+            obj.insert("_original_args".to_string(), value);
+            value = serde_json::Value::Object(obj);
         }
+        serde_json::to_string(&value).unwrap_or_else(|_| args_json.to_string())
+    } else {
+        let mut obj = serde_json::Map::new();
+        obj.insert("_user_answers".to_string(), answers_value);
+        obj.insert(
+            "_original_args".to_string(),
+            serde_json::Value::String(args_json.to_string()),
+        );
+        serde_json::to_string(&serde_json::Value::Object(obj))
+            .unwrap_or_else(|_| args_json.to_string())
     }
 }
 

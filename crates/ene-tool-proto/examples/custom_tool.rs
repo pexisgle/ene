@@ -207,7 +207,7 @@ async fn main() {
     }
 
     if let Err(e) = run_tool_server(Box::new(provider)).await {
-        eprintln!("Tool server error: {}", e);
+        eprintln!("Tool server error: {e}");
         std::process::exit(1);
     }
 }

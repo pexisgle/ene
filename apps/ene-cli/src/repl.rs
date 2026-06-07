@@ -1,15 +1,11 @@
 use crate::{commands, context::AppContext, stream};
 
 pub async fn run(ctx: &mut AppContext) {
-    loop {
-        let input = match dialoguer::Input::<String>::new()
-            .with_prompt(">")
-            .allow_empty(true)
-            .interact()
-        {
-            Ok(input) => input,
-            Err(_) => break,
-        };
+    while let Ok(input) = dialoguer::Input::<String>::new()
+        .with_prompt(">")
+        .allow_empty(true)
+        .interact()
+    {
         let input = input.trim().to_string();
         if input.is_empty() {
             continue;

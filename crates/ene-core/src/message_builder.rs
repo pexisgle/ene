@@ -46,6 +46,7 @@ fn asst_msg(content: impl Into<String>) -> LlmMessage {
 
 /// Builds the system prompt from a character card, including runtime rules,
 /// personality, scenario, and description.
+#[must_use]
 pub fn build_system_prompt(card: &CharacterCardV3, runtime_rules: &str, user_name: &str) -> String {
     let char_name = card.data.get_character_name();
 
@@ -76,6 +77,7 @@ pub fn build_system_prompt(card: &CharacterCardV3, runtime_rules: &str, user_nam
 }
 
 /// Builds the expression protocol instructions (PHI) for emotion token emission.
+#[must_use]
 pub fn build_expression_phi(card: &CharacterCardV3) -> Option<String> {
     let resolved = resolve_expressions(card);
 
@@ -129,7 +131,7 @@ pub fn build_messages(
 
     if ctx.history.is_empty() && !ctx.card.data.mes_example.trim().is_empty() {
         let ex = expand_cbs_macros(&ctx.card.data.mes_example, char_name, ctx.user_name);
-        messages.push(sys_msg(format!("Example Messages:\n{}", ex)));
+        messages.push(sys_msg(format!("Example Messages:\n{ex}")));
     }
 
     if !ctx.recalled_summaries.is_empty() {
@@ -166,11 +168,11 @@ pub fn build_messages(
     }
 
     let mut final_input = ctx.user_input.to_string();
-    if let Some(rc) = ctx.runtime_context {
-        if !rc.trim().is_empty() {
-            final_input.push_str("\n\n[Runtime Context]\n");
-            final_input.push_str(rc);
-        }
+    if let Some(rc) = ctx.runtime_context
+        && !rc.trim().is_empty()
+    {
+        final_input.push_str("\n\n[Runtime Context]\n");
+        final_input.push_str(rc);
     }
 
     messages.push(user_msg(final_input));

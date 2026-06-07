@@ -60,7 +60,7 @@
 
 /// Tool error types.
 pub mod error;
-/// Composite registry that aggregates multiple ToolProvider instances.
+/// Composite registry that aggregates multiple `ToolProvider` instances.
 pub mod host_registry;
 /// IPC wire protocol (request / response).
 pub mod ipc;
@@ -78,7 +78,7 @@ pub use error::EneToolProtoError;
 pub use error::ToolError;
 /// Interactive user input prompt (used inside [`ToolError::UserInputRequired`]).
 pub use error::{MultiAnswer, QuestionItem, UserInputPrompt};
-/// Composite registry that aggregates multiple ToolProvider instances.
+/// Composite registry that aggregates multiple `ToolProvider` instances.
 pub use host_registry::HostRegistry;
 /// IPC message types and serialisation helpers.
 pub use ipc::{
@@ -87,7 +87,7 @@ pub use ipc::{
 };
 /// Sandbox configuration data sent from the host.
 pub use sandbox::SandboxConfigData;
-/// Starts an IPC server for a ToolProvider.
+/// Starts an IPC server for a `ToolProvider`.
 pub use server::run_tool_server;
 /// Shared tool types.
 pub use types::{

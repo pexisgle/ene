@@ -87,12 +87,12 @@ impl WebFetchAction {
         }
 
         let content_length = response.content_length();
-        if let Some(len) = content_length {
-            if len > MAX_RESPONSE_SIZE as u64 {
-                return Err(ToolError::ExecutionFailed {
-                    message: "Response too large (exceeds 5MB limit)".to_string(),
-                });
-            }
+        if let Some(len) = content_length
+            && len > MAX_RESPONSE_SIZE as u64
+        {
+            return Err(ToolError::ExecutionFailed {
+                message: "Response too large (exceeds 5MB limit)".to_string(),
+            });
         }
 
         let bytes = response
@@ -112,7 +112,7 @@ impl WebFetchAction {
 
         match format {
             "html" => Ok(body.to_string()),
-            "text" | "markdown" | _ => Ok(ene_tool_common::html::html_to_markdown(&body)),
+            _ => Ok(ene_tool_common::html::html_to_markdown(&body)),
         }
     }
 }

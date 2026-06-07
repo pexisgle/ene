@@ -28,8 +28,7 @@ pub fn indentation_flexible_replace(
                 indent_re()
                     .captures(l)
                     .and_then(|c| c.get(1))
-                    .map(|m| m.len())
-                    .unwrap_or(0)
+                    .map_or(0, |m| m.len())
             })
             .min()
             .unwrap_or(0);
@@ -54,17 +53,13 @@ pub fn indentation_flexible_replace(
     for i in 0..=content_lines.len().saturating_sub(find_lines.len()) {
         let block = content_lines[i..i + find_lines.len()].join("\n");
         if remove_indent(&block) == normalized_find {
-            let mut start_idx = 0usize;
-            for k in 0..i {
-                start_idx += content_lines[k].len() + 1;
-            }
-            let mut end_idx = start_idx;
-            for k in 0..find_lines.len() {
-                end_idx += content_lines[i + k].len();
-                if k < find_lines.len() - 1 {
-                    end_idx += 1;
-                }
-            }
+            let start_idx: usize = content_lines[..i].iter().map(|l| l.len() + 1).sum();
+            let end_idx = start_idx
+                + content_lines[i..i + find_lines.len()]
+                    .iter()
+                    .map(|l| l.len())
+                    .sum::<usize>()
+                + find_lines.len().saturating_sub(1);
             results.push((start_idx, end_idx));
         }
     }

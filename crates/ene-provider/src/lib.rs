@@ -9,7 +9,7 @@
 
 /// Configuration types for providers and embedding.
 pub mod config;
-/// Hybrid rerank provider (primary embedder + optional LLM for HyDE / rerank).
+/// Hybrid rerank provider (primary embedder + optional LLM for `HyDE` / rerank).
 pub mod hybrid;
 /// Unified chat message and streaming types.
 pub mod message;

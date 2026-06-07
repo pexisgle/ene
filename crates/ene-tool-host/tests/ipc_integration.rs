@@ -9,8 +9,8 @@ use std::time::Duration;
 
 /// End-to-end test of the IPC protocol
 ///
-/// Sets up a mock IPC server and verifies the full flow from IpcToolRegistry
-/// connection through Handshake, ListTools, and CallTool
+/// Sets up a mock IPC server and verifies the full flow from `IpcToolRegistry`
+/// connection through Handshake, `ListTools`, and `CallTool`
 #[tokio::test]
 async fn test_ipc_list_tools_and_call_tool() {
     let socket_path: PathBuf = {
@@ -44,8 +44,7 @@ async fn test_ipc_list_tools_and_call_tool() {
                     version: IPC_PROTOCOL_VERSION
                 }
             ),
-            "Expected Handshake, got {:?}",
-            req
+            "Expected Handshake, got {req:?}"
         );
         write_ipc_response(
             &mut stream,
@@ -63,8 +62,7 @@ async fn test_ipc_list_tools_and_call_tool() {
             .expect("Expected Initialize request");
         assert!(
             matches!(req, IpcRequest::Initialize { .. }),
-            "Expected Initialize, got {:?}",
-            req
+            "Expected Initialize, got {req:?}"
         );
         write_ipc_response(&mut stream, &IpcResponse::Ack)
             .await
@@ -77,8 +75,7 @@ async fn test_ipc_list_tools_and_call_tool() {
             .expect("Expected ListTools request");
         assert!(
             matches!(req, IpcRequest::ListTools),
-            "Expected ListTools, got {:?}",
-            req
+            "Expected ListTools, got {req:?}"
         );
         write_ipc_response(
             &mut stream,
@@ -117,7 +114,7 @@ async fn test_ipc_list_tools_and_call_tool() {
                 assert_eq!(name, "utility.get_current_time");
                 assert_eq!(arguments, "{}");
             }
-            _ => panic!("Expected CallTool, got {:?}", req),
+            _ => panic!("Expected CallTool, got {req:?}"),
         }
         write_ipc_response(
             &mut stream,
@@ -231,18 +228,15 @@ async fn test_ipc_with_real_host() {
     // Utility tools
     assert!(
         names.contains(&"utility.get_current_time"),
-        "Expected utility.get_current_time in tools, got: {:?}",
-        names
+        "Expected utility.get_current_time in tools, got: {names:?}"
     );
     assert!(
         names.contains(&"utility.get_system_info"),
-        "Expected utility.get_system_info in tools, got: {:?}",
-        names
+        "Expected utility.get_system_info in tools, got: {names:?}"
     );
     assert!(
         names.contains(&"utility.question"),
-        "Expected utility.question in tools, got: {:?}",
-        names
+        "Expected utility.question in tools, got: {names:?}"
     );
     for name in &[
         "utility.todo_list",
@@ -253,41 +247,34 @@ async fn test_ipc_with_real_host() {
     ] {
         assert!(
             names.contains(name),
-            "Expected {name} in tools, got: {:?}",
-            names
+            "Expected {name} in tools, got: {names:?}"
         );
     }
     // Web tools
     assert!(
         names.contains(&"web.fetch"),
-        "Expected web.fetch in tools, got: {:?}",
-        names
+        "Expected web.fetch in tools, got: {names:?}"
     );
     assert!(
         names.contains(&"web.search"),
-        "Expected web.search in tools, got: {:?}",
-        names
+        "Expected web.search in tools, got: {names:?}"
     );
     // Filesystem tools
     assert!(
         names.contains(&"filesystem.read"),
-        "Expected filesystem.read in tools, got: {:?}",
-        names
+        "Expected filesystem.read in tools, got: {names:?}"
     );
     assert!(
         names.contains(&"filesystem.write"),
-        "Expected filesystem.write in tools, got: {:?}",
-        names
+        "Expected filesystem.write in tools, got: {names:?}"
     );
     assert!(
         names.contains(&"shell.execute"),
-        "Expected shell.execute in tools, got: {:?}",
-        names
+        "Expected shell.execute in tools, got: {names:?}"
     );
     assert!(
         names.contains(&"utility.undo"),
-        "Expected utility.undo in tools, got: {:?}",
-        names
+        "Expected utility.undo in tools, got: {names:?}"
     );
 
     let result = registry
@@ -295,7 +282,7 @@ async fn test_ipc_with_real_host() {
         .await
         .expect("call_tool utility.get_current_time failed");
     assert!(!result.is_empty(), "Result should not be empty");
-    println!("Real host utility.get_current_time result: {}", result);
+    println!("Real host utility.get_current_time result: {result}");
 
     let result = registry
         .call_tool("utility.get_system_info", "{}")
@@ -303,10 +290,9 @@ async fn test_ipc_with_real_host() {
         .expect("call_tool utility.get_system_info failed");
     assert!(
         result.contains("OS:"),
-        "Result should contain OS info: {}",
-        result
+        "Result should contain OS info: {result}"
     );
-    println!("Real host utility.get_system_info result: {}", result);
+    println!("Real host utility.get_system_info result: {result}");
 
     let result = registry
         .call_tool(
@@ -317,10 +303,9 @@ async fn test_ipc_with_real_host() {
         .expect("call_tool utility.question failed");
     assert!(
         result.contains("What is your name?"),
-        "Result should contain question: {}",
-        result
+        "Result should contain question: {result}"
     );
-    println!("Real host utility.question result: {}", result);
+    println!("Real host utility.question result: {result}");
 
     let result = registry
         .call_tool(
@@ -331,10 +316,9 @@ async fn test_ipc_with_real_host() {
         .expect("call_tool utility.todo_add failed");
     assert!(
         result.contains("Test task"),
-        "Result should contain todo: {}",
-        result
+        "Result should contain todo: {result}"
     );
-    println!("Real host utility.todo_add result: {}", result);
+    println!("Real host utility.todo_add result: {result}");
 
     let result = registry
         .call_tool("utility.todo_list", "{}")
@@ -342,10 +326,9 @@ async fn test_ipc_with_real_host() {
         .expect("call_tool utility.todo_list failed");
     assert!(
         result.contains("Test task"),
-        "Result should contain todo: {}",
-        result
+        "Result should contain todo: {result}"
     );
-    println!("Real host todo_list result: {}", result);
+    println!("Real host todo_list result: {result}");
 
     let _ = child.kill().await;
 }

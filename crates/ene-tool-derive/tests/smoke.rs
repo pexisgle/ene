@@ -73,14 +73,15 @@ fn spec_basics() {
             ToolName::new("filesystem.glob")
         ]
     );
-    assert_eq!(s.keywords, {
-        let mut k = KeywordSet::default();
-        k.primary = vec!["read".into(), "open".into(), "cat".into(), "load".into()];
-        k.secondary = vec!["file".into(), "view".into(), "text".into()];
-        k.domain = vec!["fs".into(), "posix".into()];
-        k.negative = vec!["write".into(), "delete".into()];
-        k
-    });
+    assert_eq!(
+        s.keywords,
+        KeywordSet {
+            primary: vec!["read".into(), "open".into(), "cat".into(), "load".into()],
+            secondary: vec!["file".into(), "view".into(), "text".into()],
+            domain: vec!["fs".into(), "posix".into()],
+            negative: vec!["write".into(), "delete".into()],
+        }
+    );
 }
 
 #[test]

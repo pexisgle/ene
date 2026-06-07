@@ -147,7 +147,7 @@ pub struct ToolSpecAttrs {
     pub description: Option<String>,
 
     /// Tool category. Either a bare identifier (e.g. "Filesystem") or a
-    /// fully qualified path (e.g. "::ene_tool_proto::ToolCategory::Filesystem").
+    /// fully qualified path (e.g. "`::ene_tool_proto::ToolCategory::Filesystem`").
     pub category: String,
 
     /// Side effects expression. Can be a bare variant or fully qualified.
@@ -224,9 +224,10 @@ impl ToolSpecAttrs {
     }
 
     pub fn side_effects_path(&self) -> TokenStream2 {
-        match &self.side_effects {
-            Some(s) => path_token(s, "ene_tool_proto::SideEffects"),
-            None => quote! { ::ene_tool_proto::SideEffects::ReadOnly },
+        if let Some(s) = &self.side_effects {
+            path_token(s, "ene_tool_proto::SideEffects")
+        } else {
+            quote! { ::ene_tool_proto::SideEffects::ReadOnly }
         }
     }
 
@@ -271,10 +272,7 @@ impl ToolSpecAttrs {
             let desc = parts.first().copied().unwrap_or("");
             let input_str = parts.get(1).copied().unwrap_or("");
             let output_str = parts.get(2).copied();
-            let output_expr = match output_str {
-                Some(s) => quote! { ::std::option::Option::Some(#s.to_string()) },
-                None => quote! { ::std::option::Option::None },
-            };
+            let output_expr = if let Some(s) = output_str { quote! { ::std::option::Option::Some(#s.to_string()) } } else { quote! { ::std::option::Option::None } };
             quote! {
                 ::ene_tool_proto::ToolExample {
                     description: #desc.to_string(),

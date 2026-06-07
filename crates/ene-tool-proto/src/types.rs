@@ -67,16 +67,19 @@ impl ToolName {
 
     /// The namespace portion of the name (`"filesystem.read"` -> `"filesystem"`),
     /// or `None` for non-namespaced tools.
+    #[must_use]
     pub fn namespace(&self) -> Option<&str> {
         self.0.split_once('.').map(|(ns, _)| ns)
     }
 
     /// The action portion of the name (`"filesystem.read"` -> `"read"`).
+    #[must_use]
     pub fn action(&self) -> &str {
-        self.0.rsplit_once('.').map(|(_, a)| a).unwrap_or(&self.0)
+        self.0.rsplit_once('.').map_or(&self.0, |(_, a)| a)
     }
 
     /// Returns the inner string.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -115,6 +118,7 @@ pub struct ToolVersion {
 
 impl ToolVersion {
     /// Construct a new version.
+    #[must_use]
     pub const fn new(major: u32, minor: u32, patch: u32) -> Self {
         Self {
             major,
@@ -180,6 +184,7 @@ impl KeywordSet {
     }
 
     /// Returns true if no keywords are present.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.primary.is_empty()
             && self.secondary.is_empty()
@@ -192,8 +197,10 @@ impl KeywordSet {
 /// for filtering tools that need sandboxing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SideEffects {
     /// Read-only: no observable side effects.
+    #[default]
     ReadOnly,
     /// File-system interaction. `mutates: true` if it writes.
     FileSystem {
@@ -219,12 +226,6 @@ pub enum SideEffects {
     Destructive,
     /// Idempotent: calling twice with the same args yields the same effect.
     Idempotent,
-}
-
-impl Default for SideEffects {
-    fn default() -> Self {
-        Self::ReadOnly
-    }
 }
 
 /// One example of the tool in use, shown to the LLM and used for
@@ -272,6 +273,7 @@ pub enum ToolCategory {
 
 impl ToolCategory {
     /// Human-readable label used in the embedding text for this category.
+    #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
             ToolCategory::Filesystem => "filesystem_tools",
@@ -372,6 +374,7 @@ pub struct ToolSpec {
 impl ToolSpec {
     /// Build a text representation of this spec for RAG embedding. The
     /// `field` parameter controls which fields are included.
+    #[must_use]
     pub fn embedding_text(&self, field: EmbeddingField) -> String {
         match field {
             EmbeddingField::Summary => {
@@ -413,6 +416,7 @@ pub enum EmbeddingField {
 
 impl EmbeddingField {
     /// Returns the string label persisted in the index.
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Summary => "summary",
@@ -478,7 +482,7 @@ mod tests {
         let k = KeywordSet::primary_only(["read", "open"]);
         assert_eq!(k.primary, vec!["read", "open"]);
         assert!(k.secondary.is_empty());
-        assert!(k.is_empty() == false);
+        assert!(!k.is_empty());
     }
 
     #[test]
@@ -530,7 +534,7 @@ mod tests {
             version: ToolVersion::default(),
             display_name: "Read File".into(),
             summary: "Read a file".into(),
-            description: "".into(),
+            description: String::new(),
             category: ToolCategory::Filesystem,
             keywords: KeywordSet {
                 negative: vec!["write".into(), "delete".into()],

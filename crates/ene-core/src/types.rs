@@ -11,11 +11,13 @@ impl RequestId {
     }
 
     /// Returns the inner string slice.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Consumes self and returns the inner String.
+    #[must_use]
     pub fn into_inner(self) -> String {
         self.0
     }

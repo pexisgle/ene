@@ -18,6 +18,7 @@ pub struct UtilityToolProvider {
 
 impl UtilityToolProvider {
     /// Creates a new `UtilityToolProvider` and registers all utility actions.
+    #[must_use]
     pub fn new() -> Self {
         let db = Arc::new(TodoDb::new());
         let actions: Vec<Box<dyn ToolAction>> = vec![

@@ -56,7 +56,10 @@ impl ToolProvider for FsToolProvider {
     }
 
     fn set_session_id(&self, session_id: &str) {
-        let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self
+            .sandbox
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(s) = guard.as_ref() {
             s.set_session_id(session_id);
         }
@@ -64,19 +67,28 @@ impl ToolProvider for FsToolProvider {
 
     fn set_sandbox(&self, data: &ene_tool_proto::SandboxConfigData) {
         let new_sandbox = Arc::new(Sandbox::new(data.clone().into()));
-        let mut guard = self.sandbox.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .sandbox
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *guard = Some(new_sandbox);
     }
 
     fn approve_permission(&self, request_id: &str) {
-        let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self
+            .sandbox
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(s) = guard.as_ref() {
             s.approve_request(request_id);
         }
     }
 
     fn allow_pattern(&self, action: &str, target_pattern: &str) {
-        let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self
+            .sandbox
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(s) = guard.as_ref() {
             s.allow_pattern(action, target_pattern);
         }

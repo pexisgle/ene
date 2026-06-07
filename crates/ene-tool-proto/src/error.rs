@@ -124,7 +124,7 @@ pub enum EneToolProtoError {
     PermissionRequired {
         /// Unique request identifier.
         request_id: String,
-        /// The action being requested (e.g. "filesystem_write").
+        /// The action being requested (e.g. "`filesystem_write`").
         action: String,
         /// The target of the action (e.g. file path).
         target: String,
@@ -231,8 +231,7 @@ impl std::fmt::Display for EneToolProtoError {
             } => {
                 write!(
                     f,
-                    "Permission required [id: {}]: {} on {} ({})",
-                    request_id, action, target, description
+                    "Permission required [id: {request_id}]: {action} on {target} ({description})"
                 )
             }
             EneToolProtoError::UserInputRequired { request_id, prompt } => {
@@ -247,7 +246,7 @@ impl std::fmt::Display for EneToolProtoError {
                 write!(f, "File not found: {path}")
             }
             EneToolProtoError::FileTooLarge { path, size, limit } => {
-                write!(f, "File too large: {path} ({} bytes, max: {})", size, limit)
+                write!(f, "File too large: {path} ({size} bytes, max: {limit})")
             }
             EneToolProtoError::CommandBlocked { command, reason } => {
                 write!(f, "Command blocked: {command} ({reason})")
@@ -456,7 +455,7 @@ mod tests {
         };
         let s = format!("{err}");
         assert!(s.contains("abc"));
-        assert!(s.contains("1"));
+        assert!(s.contains('1'));
     }
 
     #[test]

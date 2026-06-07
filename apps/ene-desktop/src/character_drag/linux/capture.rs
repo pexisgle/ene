@@ -196,8 +196,7 @@ pub(super) fn sync_wayland_polygon_lag_compensation(
 
     let offset = lag_state
         .last_projected_character_position
-        .map(|previous| projected_position - previous)
-        .unwrap_or(Vec2::ZERO);
+        .map_or(Vec2::ZERO, |previous| projected_position - previous);
     lag_state.viewport_offset =
         if offset.length_squared() > MAX_VIEWPORT_COMPENSATION_DISTANCE_SQUARED {
             Vec2::ZERO
