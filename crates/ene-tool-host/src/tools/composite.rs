@@ -1,6 +1,6 @@
 use super::registry::ToolRegistry;
-use crate::error::ToolError;
 use async_trait::async_trait;
+use ene_tool_proto::ToolError;
 use ene_tool_proto::ToolSpec;
 use std::collections::HashMap;
 use std::sync::Arc;

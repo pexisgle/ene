@@ -3,6 +3,7 @@ use crate::tools::CompositeToolRegistry;
 use crate::tools::registry::ToolRegistry;
 use ene_config as paths;
 use ene_config::{EneConfig, register_runtime_schema};
+use ene_tool_proto::ToolError;
 use ene_tool_proto::ToolSpec;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,10 +33,10 @@ impl ToolProcess {
         matches!(self.child.try_wait(), Ok(None))
     }
 
-    fn restart(&mut self) -> Result<(), crate::error::ToolError> {
+    fn restart(&mut self) -> Result<(), ToolError> {
         self.restart_count += 1;
         if self.restart_count > MAX_RESTARTS {
-            return Err(crate::error::ToolError::ExecutionFailed {
+            return Err(ToolError::ExecutionFailed {
                 message: format!(
                     "Tool '{}' exceeded max restarts ({})",
                     self.name, MAX_RESTARTS
@@ -58,7 +59,7 @@ impl ToolProcess {
         let child = std::process::Command::new(&self.binary_path)
             .env("ENE_TOOL_SOCKET", &self.socket_path)
             .spawn()
-            .map_err(|e| crate::error::ToolError::ExecutionFailed {
+            .map_err(|e| ToolError::ExecutionFailed {
                 message: format!("Failed to restart '{}': {}", self.binary_path.display(), e),
             })?;
 
@@ -96,11 +97,7 @@ impl ToolRegistry for SupervisedIpcRegistry {
         reg.list_tools()
     }
 
-    async fn call_tool(
-        &self,
-        name: &str,
-        arguments: &str,
-    ) -> Result<String, crate::error::ToolError> {
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         let reg = self
             .registry
             .read()
@@ -207,11 +204,7 @@ impl ToolRegistry for ToolHostManager {
         self.composite.list_tools()
     }
 
-    async fn call_tool(
-        &self,
-        name: &str,
-        arguments: &str,
-    ) -> Result<String, crate::error::ToolError> {
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         self.composite.call_tool(name, arguments).await
     }
 
@@ -250,7 +243,7 @@ impl ToolHostManager {
     /// spawns each binary as a child process, and connects to it over IPC.
     /// Also registers each tool's config schema in the global runtime registry
     /// and regenerates `settings.schema.json`.
-    pub async fn start(config: &EneConfig) -> Result<Self, crate::error::ToolError> {
+    pub async fn start(config: &EneConfig) -> Result<Self, ToolError> {
         let mut sandbox = config
             .get_section::<ene_tool_proto::SandboxConfigData>()
             .unwrap_or_default();
@@ -258,7 +251,7 @@ impl ToolHostManager {
         let mut supervised_registries = Vec::new();
 
         std::fs::create_dir_all(paths::tool_socket_dir()).map_err(|e| {
-            crate::error::ToolError::ExecutionFailed {
+            ToolError::ExecutionFailed {
                 message: format!("Failed to create socket dir: {e}"),
             }
         })?;
@@ -309,9 +302,7 @@ impl ToolHostManager {
     /// Combines [`start`](Self::start) (IPC tool spawn), MCP server connection,
     /// and registry aggregation into a single call. Includes automatic fallback
     /// to an empty tool set if the primary startup fails.
-    pub async fn start_full(
-        config: &EneConfig,
-    ) -> Result<Arc<dyn ToolRegistry>, crate::error::ToolError> {
+    pub async fn start_full(config: &EneConfig) -> Result<Arc<dyn ToolRegistry>, ToolError> {
         let mut manager = match Self::start(config).await {
             Ok(m) => m,
             Err(e) => {
@@ -325,11 +316,11 @@ impl ToolHostManager {
                     ..Default::default()
                 };
                 let _ = fallback_config.set_section(&fallback_tools);
-                Self::start(&fallback_config).await.map_err(|e2| {
-                    crate::error::ToolError::ExecutionFailed {
+                Self::start(&fallback_config)
+                    .await
+                    .map_err(|e2| ToolError::ExecutionFailed {
                         message: format!("Fatal: Failed to start fallback ToolHostManager: {e2}"),
-                    }
-                })?
+                    })?
             }
         };
 
@@ -384,12 +375,11 @@ impl ToolHostManager {
         name: &str,
         sandbox: &ene_tool_proto::SandboxConfigData,
         tool_config: Option<serde_json::Value>,
-    ) -> Result<Arc<dyn ToolRegistry>, crate::error::ToolError> {
-        let binary_path = Self::find_tool_binary(name).ok_or_else(|| {
-            crate::error::ToolError::ExecutionFailed {
+    ) -> Result<Arc<dyn ToolRegistry>, ToolError> {
+        let binary_path =
+            Self::find_tool_binary(name).ok_or_else(|| ToolError::ExecutionFailed {
                 message: format!("Tool binary '{name}' not found"),
-            }
-        })?;
+            })?;
 
         let socket_path: PathBuf = {
             #[cfg(unix)]
@@ -409,7 +399,7 @@ impl ToolHostManager {
         let child = std::process::Command::new(&binary_path)
             .env("ENE_TOOL_SOCKET", &socket_path)
             .spawn()
-            .map_err(|e| crate::error::ToolError::ExecutionFailed {
+            .map_err(|e| ToolError::ExecutionFailed {
                 message: format!("Failed to spawn '{}': {}", binary_path.display(), e),
             })?;
 
@@ -469,7 +459,7 @@ impl ToolHostManager {
         tool_config: Option<serde_json::Value>,
         max_retries: u32,
         delay_ms: u64,
-    ) -> Result<IpcToolRegistry, crate::error::ToolError> {
+    ) -> Result<IpcToolRegistry, ToolError> {
         let mut attempts = 0;
         loop {
             match IpcToolRegistry::new(
@@ -483,7 +473,7 @@ impl ToolHostManager {
                 Err(e) => {
                     attempts += 1;
                     if attempts >= max_retries {
-                        return Err(crate::error::ToolError::ExecutionFailed {
+                        return Err(ToolError::ExecutionFailed {
                             message: format!(
                                 "Failed to connect to tool at {} after {} attempts: {}",
                                 socket_path.display(),

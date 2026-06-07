@@ -439,19 +439,6 @@ fn format_keywords(k: &KeywordSet) -> String {
     parts.join(" | ")
 }
 
-// =================================================================
-// Legacy types (kept for one major release with deprecation warnings)
-// =================================================================
-
-/// Tool execution result (kept for backward compatibility).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
-pub struct ToolCallResult {
-    /// Identifier matching the original tool call.
-    pub tool_call_id: String,
-    /// The tool's output content.
-    pub content: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

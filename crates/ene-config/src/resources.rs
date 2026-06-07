@@ -8,11 +8,9 @@ use std::path::PathBuf;
 /// from the distribution location into the OS-standard data directory.
 /// Returns the absolute path to the initialized assets directory.
 ///
-/// # Note (Development-only)
-/// This first-launch copy from the source tree is a development convenience.
-/// In a future release, assets should be deployed to the app data folder at
-/// install time (e.g. by an installer or package script) so that the running
-/// binary never needs to locate source-tree paths.
+/// In debug builds the source-tree `assets/` is used directly. In release
+/// builds, the assets are copied from a location next to the binary into
+/// the OS-standard data directory on first launch.
 pub fn ensure_resource_dirs() -> PathBuf {
     let assets_dir = crate::paths::assets_dir();
 

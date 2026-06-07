@@ -1,10 +1,9 @@
-use crate::error::ToolError;
 use crate::tools::registry::ToolRegistry;
 use async_trait::async_trait;
 use ene_tool_proto::ToolSpec;
 use ene_tool_proto::transport::IpcStream;
 use ene_tool_proto::{
-    IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, SandboxConfigData, read_ipc_response,
+    IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, SandboxConfigData, ToolError, read_ipc_response,
     write_ipc_request,
 };
 use std::path::PathBuf;
@@ -349,11 +348,7 @@ impl ToolRegistry for IpcToolRegistry {
         }
     }
 
-    async fn call_tool(
-        &self,
-        name: &str,
-        arguments: &str,
-    ) -> Result<String, crate::error::ToolError> {
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         self.send_with_reconnect(IpcRequest::CallTool {
             name: name.to_string(),
             arguments: arguments.to_string(),
@@ -361,8 +356,8 @@ impl ToolRegistry for IpcToolRegistry {
         .await
         .and_then(|resp| match resp {
             IpcResponse::CallResult { result } => result,
-            IpcResponse::Error { message } => Err(crate::error::ToolError::Other { message }),
-            _ => Err(crate::error::ToolError::Other {
+            IpcResponse::Error { message } => Err(ToolError::Other { message }),
+            _ => Err(ToolError::Other {
                 message: "Unexpected response for CallTool".to_string(),
             }),
         })

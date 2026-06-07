@@ -20,7 +20,7 @@ pub enum EneCoreError {
     Session(#[from] ene_session::EneSessionError),
     /// Tool host error.
     #[error(transparent)]
-    Tool(#[from] ene_tool_host::EneToolHostError),
+    Tool(#[from] ene_tool_proto::EneToolProtoError),
     /// Embedding error.
     #[error("Embedding error: {0}")]
     EmbeddingError(String),

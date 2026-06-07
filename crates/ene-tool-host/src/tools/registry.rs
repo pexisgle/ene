@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use ene_tool_proto::ToolError;
 use ene_tool_proto::ToolSpec;
 
 /// Unified tool registry interface — abstracts over both built-in IPC tools and MCP tools.
@@ -13,11 +14,7 @@ pub trait ToolRegistry: Send + Sync {
     /// Returns the list of all available tools.
     fn list_tools(&self) -> Vec<ToolSpec>;
     /// Executes a tool by name with the given JSON arguments from the LLM.
-    async fn call_tool(
-        &self,
-        name: &str,
-        arguments: &str,
-    ) -> Result<String, crate::error::ToolError>;
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>;
 
     /// Sets the current session ID (used for undo tracking, session-scoped state).
     async fn set_session_id(&self, _session_id: &str) {}

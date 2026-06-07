@@ -1,6 +1,8 @@
 use crate::tools::registry::ToolRegistry;
 use async_trait::async_trait;
-use ene_tool_proto::{KeywordSet, SideEffects, ToolCategory, ToolName, ToolSpec, ToolVersion};
+use ene_tool_proto::{
+    KeywordSet, SideEffects, ToolCategory, ToolError, ToolName, ToolSpec, ToolVersion,
+};
 use rmcp::serve_client;
 use rmcp::transport::child_process::{ConfigureCommandExt, TokioChildProcess};
 use std::sync::{Arc, RwLock};
@@ -100,11 +102,7 @@ impl ToolRegistry for McpToolRegistry {
         res
     }
 
-    async fn call_tool(
-        &self,
-        name: &str,
-        arguments: &str,
-    ) -> Result<String, crate::error::ToolError> {
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         let client_opt = {
             let servers = self.servers.read().unwrap_or_else(|e| e.into_inner());
             let mut found = None;
@@ -117,32 +115,30 @@ impl ToolRegistry for McpToolRegistry {
             found
         };
 
-        let client = client_opt.ok_or_else(|| crate::error::ToolError::ExecutionFailed {
+        let client = client_opt.ok_or_else(|| ToolError::ExecutionFailed {
             message: format!("Tool {name} not found in MCP"),
         })?;
 
         // Parse arguments to serde_json::Value
-        let args_val: serde_json::Value = serde_json::from_str(arguments).map_err(|e| {
-            crate::error::ToolError::ExecutionFailed {
+        let args_val: serde_json::Value =
+            serde_json::from_str(arguments).map_err(|e| ToolError::ExecutionFailed {
                 message: e.to_string(),
-            }
-        })?;
+            })?;
 
         let mut params = rmcp::model::CallToolRequestParams::new(name.to_string());
         if let Some(obj) = args_val.as_object() {
             params = params.with_arguments(obj.clone());
         }
 
-        let result = client.call_tool(params).await.map_err(|e| {
-            crate::error::ToolError::ExecutionFailed {
+        let result = client
+            .call_tool(params)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
                 message: e.to_string(),
-            }
-        })?;
+            })?;
 
-        serde_json::to_string(&result.content).map_err(|e| {
-            crate::error::ToolError::ExecutionFailed {
-                message: e.to_string(),
-            }
+        serde_json::to_string(&result.content).map_err(|e| ToolError::ExecutionFailed {
+            message: e.to_string(),
         })
     }
 }

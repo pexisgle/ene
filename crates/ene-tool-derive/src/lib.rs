@@ -10,7 +10,7 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
-use syn::{DeriveInput, Token, parse_macro_input};
+use syn::{DeriveInput, parse_macro_input};
 
 mod attr;
 
@@ -535,13 +535,3 @@ fn emit_field(instr: &FieldInstr) -> TokenStream2 {
         }
     }
 }
-
-#[allow(dead_code)]
-struct _Unused;
-impl Parse for _Unused {
-    fn parse(_input: ParseStream) -> syn::Result<Self> {
-        Ok(_Unused)
-    }
-}
-#[allow(dead_code)]
-fn _mark_used(_: Token![=]) {}
