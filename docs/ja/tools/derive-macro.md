@@ -203,7 +203,7 @@ derive マクロは `schemars` を使用して JSON Schema を自動生成しま
 
 ```toml
 [dependencies]
-ene-tool-common = { path = "../common" }
+ene-tool-common = { path = "../../crates/ene-tool-common" }
 ene-tool-proto = { path = "../../crates/ene-tool-proto" }
 ene-tool-derive = { path = "../../crates/ene-tool-derive" }
 schemars = "1"

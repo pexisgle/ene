@@ -203,7 +203,7 @@ The derive macros use `schemars` to auto-generate JSON Schema. Tips:
 
 ```toml
 [dependencies]
-ene-tool-common = { path = "../common" }
+ene-tool-common = { path = "../../crates/ene-tool-common" }
 ene-tool-proto = { path = "../../crates/ene-tool-proto" }
 ene-tool-derive = { path = "../../crates/ene-tool-derive" }
 schemars = "1"
