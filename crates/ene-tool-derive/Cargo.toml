@@ -16,7 +16,7 @@ schemars = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-ene-tool-proto = { path = "../ene-tool-proto" }
-ene-tool-common = { path = "../../tools/common" }
+ene-tool-proto = { workspace = true }
+ene-tool-common = { workspace = true }
 serde = { workspace = true }
 schemars = { workspace = true }
