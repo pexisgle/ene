@@ -55,7 +55,7 @@ pub struct NewConversationSummary<'a> {
 
 #[derive(Debug, Clone, diesel::Queryable, diesel::Selectable)]
 #[diesel(table_name = crate::schema::conversation_keyfacts)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct KeyFactRow {
     pub id: i64,
     pub card_name: String,
@@ -77,7 +77,7 @@ pub struct NewKeyFact<'a> {
 
 #[derive(Debug, Clone, diesel::Queryable, diesel::Selectable)]
 #[diesel(table_name = crate::schema::conversation_logs)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct ConversationLogRow {
     pub id: i64,
     pub session_id: String,
@@ -99,7 +99,7 @@ pub struct NewConversationLog<'a> {
 
 #[derive(Debug, Clone, diesel::Queryable, diesel::Selectable)]
 #[diesel(table_name = crate::schema::tool_embedding_index)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct ToolEmbeddingIndexRow {
     pub id: i32,
     pub tool_name: String,

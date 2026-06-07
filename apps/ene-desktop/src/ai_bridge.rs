@@ -21,7 +21,7 @@ pub struct EneRequestEvent {
 
 /// Stream events for the settings UI and character system.
 #[derive(Message, Debug, Clone)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub enum EneStreamEvent {
     TextDelta(String),
     SpecialToken(String),

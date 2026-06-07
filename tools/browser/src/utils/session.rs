@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
 
 pub struct BrowserSession {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub browser: chromiumoxide::browser::Browser,
     pub page: chromiumoxide::page::Page,
     pub handler_task: tokio::task::JoinHandle<()>,

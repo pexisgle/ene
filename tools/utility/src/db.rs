@@ -55,7 +55,7 @@ pub struct TodoItem {
 #[diesel(table_name = todo_items)]
 struct TodoRow {
     id: i32,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     session_id: String,
     parent_id: Option<i32>,
     content: String,

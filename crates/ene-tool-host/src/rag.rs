@@ -577,7 +577,7 @@ impl ToolRag {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct FieldScore {
     field: String,
     similarity: f32,

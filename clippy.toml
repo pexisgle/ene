@@ -1,0 +1,5 @@
+# clippy.toml — workspace-wide lints configuration
+# Allow functions to take up to 12 arguments before triggering
+# `too_many_arguments`. Matches the current heaviest functions
+# (max 10 args) with a small headroom for new code.
+too-many-arguments-threshold = 12
