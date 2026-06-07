@@ -1,6 +1,7 @@
 use ene_tool_common::prelude::*;
 use image::{DynamicImage, imageops::FilterType};
 
+#[cfg(target_os = "linux")]
 mod portal;
 
 fn capture_screen_xcap(scale_percent: u32) -> Result<DynamicImage, ToolError> {
@@ -72,7 +73,19 @@ impl ScreenshotAction {
             .unwrap_or(crate::config::DEFAULT_SCALE_PERCENT);
 
         let image = if crate::utils::portal::detect_wayland() {
-            portal::capture_screen_portal(scale_percent).await
+            #[cfg(target_os = "linux")]
+            {
+                portal::capture_screen_portal(scale_percent).await
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let sp = scale_percent;
+                tokio::task::spawn_blocking(move || capture_screen_xcap(sp))
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        message: format!("Task failed: {e}"),
+                    })?
+            }
         } else {
             let sp = scale_percent;
             tokio::task::spawn_blocking(move || capture_screen_xcap(sp))

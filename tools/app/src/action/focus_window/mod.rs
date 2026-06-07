@@ -1,5 +1,6 @@
 use ene_tool_common::prelude::*;
 
+#[cfg(target_os = "linux")]
 mod wayland;
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, ToolAction)]
@@ -20,6 +21,7 @@ impl FocusWindowAction {
     async fn run(&self) -> Result<String, ToolError> {
         let title = &self.window_title;
         if crate::utils::portal::detect_wayland() {
+            #[cfg(target_os = "linux")]
             return wayland::focus_window_wayland(title);
         }
 

@@ -46,13 +46,16 @@ pub fn apply_action(
         SettingsButtonAction::TogglePlay => {
             animation_control.toggle_playing();
         }
+        #[cfg(target_os = "linux")]
         SettingsButtonAction::ToggleDebugOverlay => {
             settings.ui.debug_overlay_visible = !settings.ui.debug_overlay_visible;
         }
+        #[cfg(target_os = "linux")]
         SettingsButtonAction::MaskDownsampleDown => {
             settings.graphics.mask_render_downsample =
                 cycle_mask_render_downsample(settings.graphics.mask_render_downsample, -1);
         }
+        #[cfg(target_os = "linux")]
         SettingsButtonAction::MaskDownsampleUp => {
             settings.graphics.mask_render_downsample =
                 cycle_mask_render_downsample(settings.graphics.mask_render_downsample, 1);
@@ -220,6 +223,7 @@ fn send_ai_request(
     settings.ui.ai_latest_response.clear();
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn cycle_mask_render_downsample(current: u32, step: isize) -> u32 {
     crate::app_config::cycle_mask_render_downsample(current, step)
 }

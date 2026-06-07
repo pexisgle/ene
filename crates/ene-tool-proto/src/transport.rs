@@ -29,6 +29,7 @@ impl IpcStream {
     }
 
     #[cfg(windows)]
+    /// Connect to a Windows named pipe server.
     pub async fn connect(path: &Path) -> io::Result<Self> {
         use tokio::net::windows::named_pipe::ClientOptions;
         let path_str = path.to_string_lossy();

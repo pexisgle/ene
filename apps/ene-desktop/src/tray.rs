@@ -1,10 +1,8 @@
 use bevy::app::AppExit;
 use bevy::prelude::*;
 use std::{fs::File, io::BufReader};
-#[cfg(not(target_os = "windows"))]
-use tray_icon::TrayIcon;
 use tray_icon::{
-    Icon, MouseButton, TrayIconBuilder, TrayIconEvent,
+    Icon, MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent,
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
 };
 

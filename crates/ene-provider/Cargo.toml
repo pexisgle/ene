@@ -8,7 +8,7 @@ description = "Pluggable LLM Provider trait and built-in implementations for the
 crate-type = ["lib"]
 
 [dependencies]
-async-openai = { workspace = true }
+async-openai = { workspace = true, default-features = false }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 serde = { workspace = true }
@@ -19,4 +19,10 @@ ene-config = { workspace = true }
 ene-tool-proto = { workspace = true }
 ctor = { workspace = true }
 thiserror = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+async-openai = { workspace = true, default-features = false, features = ["rustls"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+async-openai = { workspace = true, default-features = false, features = ["native-tls"] }
 

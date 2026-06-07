@@ -12,13 +12,21 @@ ene-provider = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
-hf-hub = { version = "0.5.0", default-features = false, features = [
-    "rustls-tls",
-    "tokio",
-] }
 candle-core = "0.10"
 candle-nn = "0.10"
 tokenizers = "0.23"
 tracing = { workspace = true }
 ene-config = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+hf-hub = { version = "0.5.0", default-features = false, features = [
+    "rustls-tls",
+    "tokio",
+] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+hf-hub = { version = "0.5.0", default-features = false, features = [
+    "default-tls",
+    "tokio",
+] }
 

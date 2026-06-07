@@ -246,6 +246,7 @@ pub struct QuestionDraft {
 #[derive(Clone, Debug, Default)]
 pub struct UiState {
     pub settings_window_visible: bool,
+    #[allow(dead_code)]
     pub debug_overlay_visible: bool,
     pub ai_chat_input: String,
     pub ai_latest_response: String,

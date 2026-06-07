@@ -79,6 +79,43 @@
           skills = { };
         };
         bundle = agentLib.mkBundle { inherit pkgs selection; };
+        # MinGW compat header for aws-lc-sys (jitterentropy needs <sched.h>)
+        mingwCompatHeaders = pkgs.runCommandNoCC "mingw-compat-headers" {} ''
+          mkdir -p $out/include
+          cat > $out/include/sched.h << 'INNEREOF'
+#ifndef _SCHED_H
+#define _SCHED_H
+void __attribute__((stdcall)) Sleep(unsigned long dwMilliseconds);
+static inline int sched_yield(void) { Sleep(0); return 0; }
+#endif
+INNEREOF
+        '';
+        # MinGW winpthreads: Rust's x86_64-pc-windows-gnu target requires libpthread.a
+        mingwPthreads = pkgs.pkgsCross.mingwW64.stdenv.mkDerivation {
+          pname = "mingw-pthreads";
+          version = "13.0.0";
+          src = pkgs.fetchurl {
+            url = "https://sourceforge.net/projects/mingw-w64/files/mingw-w64/mingw-w64-release/mingw-w64-v13.0.0.tar.bz2";
+            hash = "sha256-Wv6CKvXE7b9n2q9F7sYdU49J7vaxlSTeZIl8a5WCjK8=";
+          };
+          nativeBuildInputs = [ pkgs.autoreconfHook ];
+          configurePhase = ''
+            cd mingw-w64-libraries/winpthreads
+            autoreconf -fi
+            ./configure --host=x86_64-w64-mingw32 --enable-static --prefix=$out
+          '';
+          buildPhase = ''
+            make -j$NIX_BUILD_CORES
+          '';
+          installPhase = ''
+            mkdir -p $out/lib $out/include
+            cp .libs/libwinpthread.a $out/lib/
+            cp .libs/libwinpthread.dll.a $out/lib/
+            # Rust x86_64-pc-windows-gnu expects libpthread.a
+            ln -s libwinpthread.a $out/lib/libpthread.a
+            cp include/*.h $out/include/
+          '';
+        };
         localTargets = {
           opencode = agentLib.defaultLocalTargets.opencode // { enable = true; };
         };
@@ -94,6 +131,7 @@
                   "rust-src"
                   "rustc-codegen-cranelift-preview"
                 ];
+                targets = [ "x86_64-pc-windows-gnu" ];
               })
               pkg-config
               rustPlatform.bindgenHook
@@ -101,11 +139,13 @@
               openssl
               diesel-cli
             ]
-            ++ lib.optionals (lib.strings.hasInfix "linux" system) [
+              ++ lib.optionals (lib.strings.hasInfix "linux" system) [
               # for Linux
               # Faster linker
               mold
               clang
+              # Windows cross-compilation (MinGW)
+              pkgs.pkgsCross.mingwW64.stdenv.cc
               # Audio (Linux only)
               alsa-lib
               # Tray indicator compatibility library
@@ -141,6 +181,17 @@
               # Chromium for browser automation (Phase 3)
               chromium
             ];
+            # Windows cross-compilation environment
+            # NOTE: Only use underscore-form env vars; dashed names (e.g. CC_x86_64-pc-windows-gnu)
+            # are invalid in bash and will be silently corrupted.
+            CC_x86_64_pc_windows_gnu = "${pkgs.pkgsCross.mingwW64.stdenv.cc.targetPrefix}cc";
+            CXX_x86_64_pc_windows_gnu = "${pkgs.pkgsCross.mingwW64.stdenv.cc.targetPrefix}c++";
+            AR_x86_64_pc_windows_gnu = "${pkgs.pkgsCross.mingwW64.stdenv.cc.targetPrefix}ar";
+            # MinGW compat header for aws-lc-sys (jitterentropy needs <sched.h>)
+            CFLAGS_x86_64-pc-windows-gnu = "-idirafter ${mingwCompatHeaders}/include";
+            CFLAGS_x86_64_pc_windows_gnu = "-idirafter ${mingwCompatHeaders}/include";
+            # Libpthread for Rust x86_64-pc-windows-gnu target (via winpthreads)
+            CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS = "-L${mingwPthreads}/lib";
             RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
             LD_LIBRARY_PATH = lib.makeLibraryPath [
               libayatana-appindicator

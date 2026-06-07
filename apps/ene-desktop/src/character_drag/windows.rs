@@ -56,7 +56,7 @@ pub(super) fn sync_windows_hit_test_hook(
         return false;
     };
 
-    let requires_reinstall = state.hook.as_ref().map_or(true, |hook| hook.hwnd != hwnd);
+    let requires_reinstall = state.hook.as_ref().is_none_or(|hook| hook.hwnd != hwnd);
     if requires_reinstall {
         if let Some(hook) = state.hook.take() {
             unsafe { uninstall_windows_hit_test_hook(hook) };

@@ -153,7 +153,9 @@ enum SettingsValueKind {
     Character,
     Motion,
     AnimationState,
+    #[cfg(target_os = "linux")]
     DebugOverlay,
+    #[cfg(target_os = "linux")]
     MaskRenderDownsample,
     TargetFps,
     ShadowQuality,
@@ -179,8 +181,11 @@ enum SettingsButtonAction {
     PrevMotion,
     NextMotion,
     TogglePlay,
+    #[cfg(target_os = "linux")]
     ToggleDebugOverlay,
+    #[cfg(target_os = "linux")]
     MaskDownsampleDown,
+    #[cfg(target_os = "linux")]
     MaskDownsampleUp,
     TargetFpsDown,
     TargetFpsUp,
@@ -227,6 +232,7 @@ impl SettingsValueKind {
                     "Paused".to_string()
                 }
             }
+            #[cfg(target_os = "linux")]
             SettingsValueKind::DebugOverlay => {
                 if settings.ui.debug_overlay_visible {
                     "Visible".to_string()
@@ -234,6 +240,7 @@ impl SettingsValueKind {
                     "Hidden".to_string()
                 }
             }
+            #[cfg(target_os = "linux")]
             SettingsValueKind::MaskRenderDownsample => {
                 format!("{}x", settings.graphics.mask_render_downsample)
             }
@@ -351,16 +358,7 @@ impl SettingsValueKind {
                 settings.ui.ai_chat_input = value.to_string();
                 Ok(())
             }
-            SettingsValueKind::Character
-            | SettingsValueKind::Motion
-            | SettingsValueKind::AnimationState
-            | SettingsValueKind::DebugOverlay
-            | SettingsValueKind::MaskRenderDownsample
-            | SettingsValueKind::TargetFps
-            | SettingsValueKind::ShadowQuality
-            | SettingsValueKind::AntialiasingMode
-            | SettingsValueKind::AiProviderName
-            | SettingsValueKind::AiModel => Err(()),
+            _ => Err(()),
         }
     }
 }
