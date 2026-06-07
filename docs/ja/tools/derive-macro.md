@@ -203,9 +203,9 @@ derive マクロは `schemars` を使用して JSON Schema を自動生成しま
 
 ```toml
 [dependencies]
-ene-tool-common = { path = "../../crates/ene-tool-common" }
-ene-tool-proto = { path = "../../crates/ene-tool-proto" }
-ene-tool-derive = { path = "../../crates/ene-tool-derive" }
+ene-tool-common = { git = "https://github.com/pexisgle/ene" }
+ene-tool-proto = { git = "https://github.com/pexisgle/ene" }
+ene-tool-derive = { git = "https://github.com/pexisgle/ene" }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
