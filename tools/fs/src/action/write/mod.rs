@@ -40,8 +40,7 @@ pub async fn write(
 
     let has_bom = original
         .as_ref()
-        .map(|b| b.starts_with(&[0xEF, 0xBB, 0xBF]))
-        .unwrap_or(false);
+        .is_some_and(|b| b.starts_with(&[0xEF, 0xBB, 0xBF]));
     let output = if has_bom {
         let mut with_bom = vec![0xEF, 0xBB, 0xBF];
         with_bom.extend_from_slice(content_bytes);
@@ -99,7 +98,10 @@ impl FsWriteAction {
 
     async fn run(&self) -> Result<String, ToolError> {
         let sandbox = {
-            let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
+            let guard = self
+                .sandbox
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.clone().unwrap_or_else(|| {
                 Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
             })

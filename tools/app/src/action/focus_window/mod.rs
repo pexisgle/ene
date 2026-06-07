@@ -32,13 +32,12 @@ impl FocusWindowAction {
             let app_name = window.app_name().unwrap_or_default();
             if win_title.contains(title) || app_name.contains(title) {
                 return Ok(format!(
-                    "Found window: {} ({}). Focus requires platform-specific implementation.",
-                    win_title, app_name
+                    "Found window: {win_title} ({app_name}). Focus requires platform-specific implementation."
                 ));
             }
         }
         Err(ToolError::ExecutionFailed {
-            message: format!("Window not found: {}", title),
+            message: format!("Window not found: {title}"),
         })
     }
 }

@@ -56,7 +56,7 @@ pub enum IpcRequest {
     },
     /// Register a session-wide permission allow pattern.
     AllowPattern {
-        /// Action pattern (e.g. "filesystem_write").
+        /// Action pattern (e.g. "`filesystem_write`").
         action: String,
         /// Target glob pattern.
         target_pattern: String,
@@ -75,7 +75,7 @@ pub enum IpcResponse {
         /// Agreed protocol version.
         version: u32,
     },
-    /// Acknowledgment (for Initialize, SetSessionId, etc.).
+    /// Acknowledgment (for Initialize, `SetSessionId`, etc.).
     Ack,
     /// List of tool specs (v2).
     Tools {
@@ -106,9 +106,9 @@ pub enum IpcResponse {
     },
 }
 
-/// Reads an IpcRequest as 4-byte length-prefixed JSON
+/// Reads an `IpcRequest` as 4-byte length-prefixed JSON
 ///
-/// Returns `Ok(None)` on UnexpectedEof, indicating connection closed
+/// Returns `Ok(None)` on `UnexpectedEof`, indicating connection closed
 pub async fn read_ipc_request<R: AsyncReadExt + Unpin>(
     reader: &mut R,
 ) -> Result<Option<IpcRequest>, ToolError> {
@@ -124,7 +124,7 @@ pub async fn read_ipc_request<R: AsyncReadExt + Unpin>(
     }
     if len > MAX_MESSAGE_SIZE {
         return Err(ToolError::IpcTransport {
-            message: format!("Request size {} exceeds maximum {}", len, MAX_MESSAGE_SIZE),
+            message: format!("Request size {len} exceeds maximum {MAX_MESSAGE_SIZE}"),
         });
     }
     let mut buf = vec![0u8; len];
@@ -135,7 +135,7 @@ pub async fn read_ipc_request<R: AsyncReadExt + Unpin>(
     Ok(Some(req))
 }
 
-/// Writes an IpcRequest as 4-byte length-prefixed JSON
+/// Writes an `IpcRequest` as 4-byte length-prefixed JSON
 pub async fn write_ipc_request<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     req: &IpcRequest,
@@ -153,9 +153,9 @@ pub async fn write_ipc_request<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
-/// Reads an IpcResponse as 4-byte length-prefixed JSON
+/// Reads an `IpcResponse` as 4-byte length-prefixed JSON
 ///
-/// Returns `Ok(None)` on UnexpectedEof, indicating connection closed
+/// Returns `Ok(None)` on `UnexpectedEof`, indicating connection closed
 pub async fn read_ipc_response<R: AsyncReadExt + Unpin>(
     reader: &mut R,
 ) -> Result<Option<IpcResponse>, ToolError> {
@@ -171,7 +171,7 @@ pub async fn read_ipc_response<R: AsyncReadExt + Unpin>(
     }
     if len > MAX_MESSAGE_SIZE {
         return Err(ToolError::IpcTransport {
-            message: format!("Response size {} exceeds maximum {}", len, MAX_MESSAGE_SIZE),
+            message: format!("Response size {len} exceeds maximum {MAX_MESSAGE_SIZE}"),
         });
     }
     let mut buf = vec![0u8; len];
@@ -182,7 +182,7 @@ pub async fn read_ipc_response<R: AsyncReadExt + Unpin>(
     Ok(Some(resp))
 }
 
-/// Writes an IpcResponse as 4-byte length-prefixed JSON
+/// Writes an `IpcResponse` as 4-byte length-prefixed JSON
 pub async fn write_ipc_response<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     resp: &IpcResponse,

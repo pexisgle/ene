@@ -27,7 +27,7 @@ impl CliCommand for SessionCommand {
             .handle
             .get_snapshot()
             .await
-            .map_err(|e| format!("Failed to get actor state: {}", e))?;
+            .map_err(|e| format!("Failed to get actor state: {e}"))?;
 
         match subcmd {
             "info" => handle_info(&snapshot),
@@ -53,7 +53,7 @@ fn handle_info(snapshot: &ene_core::EneStateSnapshot) {
         "Started: {}",
         snapshot.session_started_at.format("%Y-%m-%d %H:%M:%S UTC")
     );
-    println!("Elapsed: {} min", "? (not tracked locally)");
+    println!("Elapsed: ? (not tracked locally) min");
     println!("Turn count: {}", snapshot.current_turn_count);
     println!("History messages: {}", snapshot.history.len());
     let session_config = snapshot
@@ -101,13 +101,13 @@ async fn handle_split(ctx: &AppContext, snapshot: &ene_core::EneStateSnapshot) {
                     .join(", ");
                 println!(
                     "  {}",
-                    style::warning(format!("[Session] Key Facts: {}", facts_str))
+                    style::warning(format!("[Session] Key Facts: {facts_str}"))
                 );
             }
             println!("{}", style::warning("[Session] Session split completed."));
         }
         Err(e) => {
-            println!("{}", style::error(format!("[Session] Split error: {}", e)));
+            println!("{}", style::error(format!("[Session] Split error: {e}")));
         }
     }
 }
@@ -134,6 +134,6 @@ fn handle_summaries(snapshot: &ene_core::EneStateSnapshot) {
                 println!("----------------------------------------");
             }
         }
-        Err(e) => println!("[Session] Error: {}", e),
+        Err(e) => println!("[Session] Error: {e}"),
     }
 }

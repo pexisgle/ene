@@ -41,7 +41,7 @@ pub(crate) fn dispatch() -> Option<Box<dyn WlCompositor>> {
 #[cfg(target_os = "linux")]
 fn gvariant_string(s: &str) -> String {
     let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{}\"", escaped)
+    format!("\"{escaped}\"")
 }
 
 #[cfg(target_os = "linux")]

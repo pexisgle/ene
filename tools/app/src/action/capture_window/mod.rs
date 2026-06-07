@@ -15,23 +15,24 @@ fn capture_window_by_title_xcap(
         let win_title = window.title().unwrap_or_default();
         let app_name = window.app_name().unwrap_or_default();
         let is_minimized = window.is_minimized().unwrap_or(false);
-        if (win_title.contains(title) || app_name.contains(title)) && !is_minimized {
-            if let Ok(img) = window.capture_image() {
-                let image = DynamicImage::ImageRgba8(img);
-                let final_image = if scale_percent > 0 && scale_percent < 100 {
-                    let nwidth = (image.width() as f32 * (scale_percent as f32 / 100.0)) as u32;
-                    let nheight = (image.height() as f32 * (scale_percent as f32 / 100.0)) as u32;
-                    image.resize(nwidth.max(1), nheight.max(1), FilterType::Lanczos3)
-                } else {
-                    image
-                };
-                return Ok(final_image);
-            }
+        if (win_title.contains(title) || app_name.contains(title))
+            && !is_minimized
+            && let Ok(img) = window.capture_image()
+        {
+            let image = DynamicImage::ImageRgba8(img);
+            let final_image = if scale_percent > 0 && scale_percent < 100 {
+                let nwidth = (image.width() as f32 * (scale_percent as f32 / 100.0)) as u32;
+                let nheight = (image.height() as f32 * (scale_percent as f32 / 100.0)) as u32;
+                image.resize(nwidth.max(1), nheight.max(1), FilterType::Lanczos3)
+            } else {
+                image
+            };
+            return Ok(final_image);
         }
     }
 
     Err(ToolError::ExecutionFailed {
-        message: format!("Window not found: {}", title),
+        message: format!("Window not found: {title}"),
     })
 }
 

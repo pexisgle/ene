@@ -17,7 +17,7 @@ async fn main() {
         Err(e) => {
             eprintln!(
                 "{}",
-                style::error(format!("Fatal: Failed to initialize runtime: {}", e))
+                style::error(format!("Fatal: Failed to initialize runtime: {e}"))
             );
             std::process::exit(1);
         }

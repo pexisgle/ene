@@ -30,8 +30,7 @@ pub fn detect_linux_window_backend() -> LinuxWindowBackend {
     {
         let wayland_display = std::env::var_os("WAYLAND_DISPLAY").is_some();
         let session_type_is_wayland = std::env::var("XDG_SESSION_TYPE")
-            .map(|value| value.eq_ignore_ascii_case("wayland"))
-            .unwrap_or(false);
+            .is_ok_and(|value| value.eq_ignore_ascii_case("wayland"));
 
         if wayland_display || session_type_is_wayland {
             return LinuxWindowBackend::Wayland;

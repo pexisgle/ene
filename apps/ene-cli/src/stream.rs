@@ -11,12 +11,12 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
     loop {
         match rx.recv().await {
             Ok(EneEvent::TextDelta { delta }) => {
-                print!("{}", delta);
+                print!("{delta}");
                 let _ = io::stdout().flush();
             }
             Ok(EneEvent::SpecialToken { token }) => {
                 if let Some(emotion) = extract_emotion_from_token(&token) {
-                    print!("{}", style::emotion(format!("[Emotion: {}]", emotion)));
+                    print!("{}", style::emotion(format!("[Emotion: {emotion}]")));
                 } else {
                     print!("{}", style::warning(token));
                 }
@@ -25,14 +25,14 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
             Ok(EneEvent::ToolCallStart { name, arguments }) => {
                 println!(
                     "\n{}",
-                    style::header(format!("[Tool Calling: {}({})]", name, arguments))
+                    style::header(format!("[Tool Calling: {name}({arguments})]"))
                 );
             }
             Ok(EneEvent::ToolCallResult { name: _, result }) => {
-                println!("{}\n", style::success(format!("[Tool Result: {}]", result)));
+                println!("{}\n", style::success(format!("[Tool Result: {result}]")));
             }
             Ok(EneEvent::SessionSplit { summary, reason }) => {
-                println!("\n{}", style::warning(format!("[Session] {} ", reason)));
+                println!("\n{}", style::warning(format!("[Session] {reason} ")));
                 println!(
                     "{}",
                     style::warning(format!(
@@ -54,8 +54,7 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
                 println!(
                     "\n{}",
                     style::warning(format!(
-                        "[Permission Required] {} on {} ({})",
-                        action, target, description
+                        "[Permission Required] {action} on {target} ({description})"
                     ))
                 );
 
@@ -87,7 +86,7 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
                 let total = prompt.items.len();
                 println!(
                     "\n{}",
-                    style::header(format!("[Question] {} 件の質問があります", total))
+                    style::header(format!("[Question] {total} 件の質問があります"))
                 );
 
                 let mut answers: Vec<MultiAnswer> = Vec::with_capacity(total);
@@ -161,24 +160,23 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
                 description,
             }) => {
                 let steps_display = match total_steps {
-                    Some(total) => format!("{}/{}", step, total),
-                    None => format!("{}/?", step),
+                    Some(total) => format!("{step}/{total}"),
+                    None => format!("{step}/?"),
                 };
                 println!(
                     "\n{}",
                     style::header(format!(
-                        "[Task {}] Step {}: {}",
-                        task_id, steps_display, description
+                        "[Task {task_id}] Step {steps_display}: {description}"
                     ))
                 );
             }
             Ok(EneEvent::Failed { message }) => {
-                eprintln!("\n[Error] {}", message);
+                eprintln!("\n[Error] {message}");
                 break;
             }
             Ok(EneEvent::StatusChanged { .. }) => {}
             Err(e) => {
-                eprintln!("\n[Warning] Event receive error: {:?}", e);
+                eprintln!("\n[Warning] Event receive error: {e:?}");
                 break;
             }
         }

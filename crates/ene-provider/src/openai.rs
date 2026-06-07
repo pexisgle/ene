@@ -39,14 +39,14 @@ fn convert_message(msg: &LlmMessage) -> Result<ChatCompletionRequestMessage, Str
                 ChatCompletionRequestMessageContentPartTextArgs, ImageUrlArgs,
             };
 
-            if parts.len() == 1 {
-                if let UserMessagePart::Text { text } = &parts[0] {
-                    let m = ChatCompletionRequestUserMessageArgs::default()
-                        .content(text.clone())
-                        .build()
-                        .map_err(|e| e.to_string())?;
-                    return Ok(m.into());
-                }
+            if parts.len() == 1
+                && let UserMessagePart::Text { text } = &parts[0]
+            {
+                let m = ChatCompletionRequestUserMessageArgs::default()
+                    .content(text.clone())
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                return Ok(m.into());
             }
 
             let mut oa_parts = Vec::new();
@@ -146,7 +146,8 @@ pub struct OpenAiProvider {
 }
 
 impl OpenAiProvider {
-    /// Creates a new OpenAI provider with the given base URL, API key, and model.
+    /// Creates a new `OpenAI` provider with the given base URL, API key, and model.
+    #[must_use]
     pub fn new(
         base_url: &str,
         api_key: &str,
@@ -163,7 +164,7 @@ impl OpenAiProvider {
 
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "openai-compatible"
     }
 
@@ -177,10 +178,10 @@ impl LlmProvider for OpenAiProvider {
             .map(convert_message)
             .collect::<Result<_, _>>()?;
 
-        let oa_tools = if !tools.is_empty() {
-            Some(convert_tools(tools))
-        } else {
+        let oa_tools = if tools.is_empty() {
             None
+        } else {
+            Some(convert_tools(tools))
         };
 
         let mut req_builder = async_openai::types::chat::CreateChatCompletionRequestArgs::default();
@@ -288,11 +289,11 @@ impl LlmProvider for OpenAiProvider {
     }
 }
 
-/// Factory for the default OpenAI provider.
+/// Factory for the default `OpenAI` provider.
 pub struct OpenAiProviderFactory;
 
 impl LlmProviderFactory for OpenAiProviderFactory {
-    fn provider_name(&self) -> &str {
+    fn provider_name(&self) -> &'static str {
         "openai-compatible"
     }
 
@@ -302,11 +303,11 @@ impl LlmProviderFactory for OpenAiProviderFactory {
     ) -> Result<Box<dyn LlmProvider>, String> {
         let provider_config = config
             .get_section::<ProviderConfig>()
-            .map_err(|e| format!("Failed to parse provider config: {}", e))?;
+            .map_err(|e| format!("Failed to parse provider config: {e}"))?;
 
         let base_url = provider_config
             .resolve_base_url()
-            .map_err(|e| format!("Failed to resolve base URL: {}", e))?;
+            .map_err(|e| format!("Failed to resolve base URL: {e}"))?;
 
         let api_key = provider_config.resolve_api_key();
 
@@ -331,6 +332,7 @@ pub struct CloudEmbeddingProvider {
 
 impl CloudEmbeddingProvider {
     /// Creates a new `CloudEmbeddingProvider`.
+    #[must_use]
     pub fn new(
         base_url: &str,
         api_key: &str,
@@ -347,8 +349,9 @@ impl CloudEmbeddingProvider {
         }
     }
 
-    /// Sets an optional HyDE completion model. When set, `hyde()` will call
+    /// Sets an optional `HyDE` completion model. When set, `hyde()` will call
     /// the LLM to produce a hypothetical document instead of echoing the query.
+    #[must_use]
     pub fn with_hyde_model(mut self, model: String) -> Self {
         self.hyde_model = Some(model);
         self
@@ -389,7 +392,7 @@ impl EmbeddingProvider for CloudEmbeddingProvider {
 
     async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
         if let Some(prefix) = &self.query_prefix {
-            let prefixed = format!("{}{}", prefix, text);
+            let prefixed = format!("{prefix}{text}");
             self.embed(&prefixed, EmbeddingKind::Query).await
         } else {
             self.embed(text, EmbeddingKind::Query).await
@@ -433,7 +436,7 @@ impl EmbeddingProvider for CloudEmbeddingProvider {
             None => return Ok(query.to_string()),
         };
 
-        let messages = vec![
+        let messages = [
             LlmMessage::System {
                 content: "You are an assistant that writes hypothetical documents for retrieval. \
                           Given a user query, generate a short description of what a relevant tool \
@@ -449,9 +452,8 @@ impl EmbeddingProvider for CloudEmbeddingProvider {
 
         use async_openai::types::chat::CreateChatCompletionRequestArgs;
 
-        let openai_messages: Result<Vec<_>, _> =
-            messages.iter().map(|m| convert_message(m)).collect();
-        let openai_messages = openai_messages.map_err(|e| EmbeddingError::Provider(e))?;
+        let openai_messages: Result<Vec<_>, _> = messages.iter().map(convert_message).collect();
+        let openai_messages = openai_messages.map_err(EmbeddingError::Provider)?;
 
         let request = CreateChatCompletionRequestArgs::default()
             .model(&model)

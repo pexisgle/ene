@@ -305,19 +305,19 @@ impl SettingsValueKind {
     fn apply_input(self, value: &str, settings: &mut CharacterSettings) -> Result<(), ()> {
         match self {
             SettingsValueKind::LookAtStrength => parse_and_assign(value, |parsed| {
-                settings.character_state.look_at_strength = parsed
+                settings.character_state.look_at_strength = parsed;
             }),
             SettingsValueKind::ModelScale => parse_and_assign(value, |parsed| {
-                settings.character_state.model_scale = parsed
+                settings.character_state.model_scale = parsed;
             }),
             SettingsValueKind::CharacterPositionX => parse_and_assign(value, |parsed| {
-                settings.character_state.character_position.x = parsed
+                settings.character_state.character_position.x = parsed;
             }),
             SettingsValueKind::CharacterPositionY => parse_and_assign(value, |parsed| {
-                settings.character_state.character_position.y = parsed
+                settings.character_state.character_position.y = parsed;
             }),
             SettingsValueKind::CharacterPositionZ => parse_and_assign(value, |parsed| {
-                settings.character_state.character_position.z = parsed
+                settings.character_state.character_position.z = parsed;
             }),
             SettingsValueKind::AiUserName => {
                 settings.ai.ai.user_name = value.to_string();
@@ -406,9 +406,7 @@ fn handle_settings_keyboard_controls(
         return;
     }
 
-    let egui_has_focus = egui_ctx
-        .map(|mut ctx| ctx.get_mut().wants_keyboard_input())
-        .unwrap_or(false);
+    let egui_has_focus = egui_ctx.is_some_and(|mut ctx| ctx.get_mut().wants_keyboard_input());
 
     if egui_has_focus || input_state.current_page != SettingsPageKind::Character {
         return;
@@ -591,9 +589,9 @@ fn render_settings_window(
         let header_label = if total == 1 {
             "Question".to_string()
         } else {
-            format!("Question ({} items)", total)
+            format!("Question ({total} items)")
         };
-        let window_title = format!("[User Input] {}", header_label);
+        let window_title = format!("[User Input] {header_label}");
         egui::Window::new(window_title)
             .open(&mut open)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -623,7 +621,7 @@ fn render_settings_window(
                                 if !item.options.is_empty() {
                                     ui.add_space(4.0);
                                     ui.label("選択肢 / Options:");
-                                    for option in item.options.iter() {
+                                    for option in &item.options {
                                         let mut checked =
                                             draft.selected.as_deref() == Some(option.as_str());
                                         if ui.checkbox(&mut checked, option.as_str()).changed() {
@@ -649,10 +647,9 @@ fn render_settings_window(
                                     );
                                     if response.lost_focus()
                                         && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                        && !draft.text.trim().is_empty()
                                     {
-                                        if !draft.text.trim().is_empty() {
-                                            draft.skipped = false;
-                                        }
+                                        draft.skipped = false;
                                     }
                                 }
 

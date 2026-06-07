@@ -21,17 +21,13 @@ pub fn line_trimmed_replace(
             }
         }
         if matches {
-            let mut start_idx = 0usize;
-            for k in 0..i {
-                start_idx += original_lines[k].len() + 1;
-            }
-            let mut end_idx = start_idx;
-            for k in 0..search_lines.len() {
-                end_idx += original_lines[i + k].len();
-                if k < search_lines.len() - 1 {
-                    end_idx += 1;
-                }
-            }
+            let start_idx: usize = original_lines[..i].iter().map(|l| l.len() + 1).sum();
+            let end_idx = start_idx
+                + original_lines[i..i + search_lines.len()]
+                    .iter()
+                    .map(|l| l.len())
+                    .sum::<usize>()
+                + search_lines.len().saturating_sub(1);
             results.push((start_idx, end_idx));
         }
     }

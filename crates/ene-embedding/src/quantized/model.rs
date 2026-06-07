@@ -41,7 +41,7 @@ impl EmbeddingModel {
 
         let norm_val: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
         if norm_val > 0.0 {
-            for x in vec.iter_mut() {
+            for x in &mut vec {
                 *x /= norm_val;
             }
         }

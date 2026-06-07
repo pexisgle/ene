@@ -181,21 +181,16 @@ pub fn render_ai_page(
             if current_provider != input_state.ai_embedding_provider {
                 input_state.ai_embedding_provider = current_provider.clone();
                 provider_config.embedding_backend = current_provider.clone();
-                match current_provider.as_str() {
-                    "local" => {
-                        local_emb.model = "jina-embeddings-v5-text-nano".to_string();
-                        input_state.ai_embedding_model = local_emb.model.clone();
-                        input_state.ai_embedding_dimensions = "auto".to_string();
-                    }
-                    _ => {
-                        provider_config.cloud_embedding_model =
-                            "text-embedding-3-small".to_string();
-                        provider_config.cloud_embedding_dimensions = 1536;
-                        input_state.ai_embedding_model =
-                            provider_config.cloud_embedding_model.clone();
-                        input_state.ai_embedding_dimensions =
-                            provider_config.cloud_embedding_dimensions.to_string();
-                    }
+                if current_provider.as_str() == "local" {
+                    local_emb.model = "jina-embeddings-v5-text-nano".to_string();
+                    input_state.ai_embedding_model = local_emb.model.clone();
+                    input_state.ai_embedding_dimensions = "auto".to_string();
+                } else {
+                    provider_config.cloud_embedding_model = "text-embedding-3-small".to_string();
+                    provider_config.cloud_embedding_dimensions = 1536;
+                    input_state.ai_embedding_model = provider_config.cloud_embedding_model.clone();
+                    input_state.ai_embedding_dimensions =
+                        provider_config.cloud_embedding_dimensions.to_string();
                 }
                 let _ = settings.ai.ai.set_section(&provider_config);
                 let _ = settings
@@ -245,11 +240,11 @@ pub fn render_ai_page(
                     egui::TextEdit::singleline(&mut input_state.ai_embedding_dimensions)
                         .desired_width(100.0),
                 );
-                if response.changed() {
-                    if let Ok(dims) = input_state.ai_embedding_dimensions.parse::<usize>() {
-                        provider_config.cloud_embedding_dimensions = dims;
-                        let _ = settings.ai.ai.set_section(&provider_config);
-                    }
+                if response.changed()
+                    && let Ok(dims) = input_state.ai_embedding_dimensions.parse::<usize>()
+                {
+                    provider_config.cloud_embedding_dimensions = dims;
+                    let _ = settings.ai.ai.set_section(&provider_config);
                 }
             }
         });

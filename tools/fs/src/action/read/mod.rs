@@ -25,14 +25,13 @@ pub async fn read(
         if let Ok(entries) = tokio::fs::read_dir(dir).await {
             let mut entries = entries;
             while let Ok(Some(entry)) = entries.next_entry().await {
-                if let Ok(name) = entry.file_name().into_string() {
-                    if name.to_lowercase().contains(&base.to_lowercase())
-                        || base.to_lowercase().contains(&name.to_lowercase())
-                    {
-                        suggestions.push(format!("{}", entry.path().display()));
-                        if suggestions.len() >= 3 {
-                            break;
-                        }
+                if let Ok(name) = entry.file_name().into_string()
+                    && (name.to_lowercase().contains(&base.to_lowercase())
+                        || base.to_lowercase().contains(&name.to_lowercase()))
+                {
+                    suggestions.push(format!("{}", entry.path().display()));
+                    if suggestions.len() >= 3 {
+                        break;
                     }
                 }
             }
@@ -41,15 +40,14 @@ pub async fn read(
             return Err(ToolError::ExecutionFailed {
                 message: format!("File not found: {}", resolved.display()),
             });
-        } else {
-            return Err(ToolError::ExecutionFailed {
-                message: format!(
-                    "File not found: {}\n\nDid you mean one of these?\n{}",
-                    resolved.display(),
-                    suggestions.join("\n")
-                ),
-            });
         }
+        return Err(ToolError::ExecutionFailed {
+            message: format!(
+                "File not found: {}\n\nDid you mean one of these?\n{}",
+                resolved.display(),
+                suggestions.join("\n")
+            ),
+        });
     }
 
     let metadata =
@@ -92,11 +90,11 @@ pub async fn read(
             let line_num = start + i + 1;
             let truncated = if line.chars().count() > MAX_LINE_LENGTH {
                 let s: String = line.chars().take(MAX_LINE_LENGTH).collect();
-                format!("{}{}", s, MAX_LINE_SUFFIX)
+                format!("{s}{MAX_LINE_SUFFIX}")
             } else {
                 line.to_string()
             };
-            output.push_str(&format!("{}: {}\n", line_num, truncated));
+            output.push_str(&format!("{line_num}: {truncated}\n"));
         }
         output.push_str(&format!(
             "\n(Output capped at {}KB. Showing lines {}-{}. Use offset={} to continue.)\n</content>",
@@ -132,11 +130,11 @@ pub async fn read(
         let line_num = start + i + 1;
         let truncated = if line.chars().count() > MAX_LINE_LENGTH {
             let s: String = line.chars().take(MAX_LINE_LENGTH).collect();
-            format!("{}{}", s, MAX_LINE_SUFFIX)
+            format!("{s}{MAX_LINE_SUFFIX}")
         } else {
             line.to_string()
         };
-        output.push_str(&format!("{}: {}\n", line_num, truncated));
+        output.push_str(&format!("{line_num}: {truncated}\n"));
     }
 
     let last = start + sliced.len();
@@ -175,12 +173,12 @@ async fn read_directory(
     while let Ok(Some(entry)) = entries.next_entry().await {
         let name = entry.file_name().into_string().unwrap_or_default();
         let file_type = entry.file_type().await.ok();
-        let suffix = if file_type.map(|t| t.is_dir()).unwrap_or(false) {
+        let suffix = if file_type.is_some_and(|t| t.is_dir()) {
             "/"
         } else {
             ""
         };
-        items.push(format!("{}{}", name, suffix));
+        items.push(format!("{name}{suffix}"));
     }
 
     items.sort();
@@ -196,7 +194,7 @@ async fn read_directory(
         path.display()
     );
     for item in sliced {
-        output.push_str(&format!("{}\n", item));
+        output.push_str(&format!("{item}\n"));
     }
     if truncated {
         output.push_str(&format!(
@@ -255,7 +253,10 @@ impl FsReadAction {
 
     async fn run(&self) -> Result<String, ToolError> {
         let sandbox = {
-            let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
+            let guard = self
+                .sandbox
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.clone().unwrap_or_else(|| {
                 Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
             })

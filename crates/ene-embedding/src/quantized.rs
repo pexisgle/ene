@@ -89,12 +89,15 @@ impl GgufEmbeddingProvider {
             ene_provider::EmbeddingKind::Query | ene_provider::EmbeddingKind::Hyde => "Query: ",
             _ => "Document: ",
         };
-        let prefixed = format!("{}{}", prefix, text);
-        let tokenizer = self.tokenizer.lock().unwrap_or_else(|e| e.into_inner());
+        let prefixed = format!("{prefix}{text}");
+        let tokenizer = self
+            .tokenizer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let encoding = tokenizer
             .encode(prefixed.as_str(), true)
             .map_err(|e| EmbeddingError::EmbeddingError(format!("Tokenization failed: {e}")))?;
-        let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&x| x as i64).collect();
+        let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&x| i64::from(x)).collect();
 
         if input_ids.is_empty() {
             return Ok(vec![0.0; self.dims]);
@@ -109,7 +112,10 @@ impl GgufEmbeddingProvider {
             EmbeddingError::EmbeddingError(format!("Failed to create input tensor: {e}"))
         })?;
 
-        let model = self.model.lock().unwrap_or_else(|e| e.into_inner());
+        let model = self
+            .model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         model.forward(&input_tensor)
     }
 }

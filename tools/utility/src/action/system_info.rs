@@ -16,6 +16,6 @@ impl GetSystemInfoAction {
     async fn run(&self) -> Result<String, ToolError> {
         let os = std::env::consts::OS;
         let arch = std::env::consts::ARCH;
-        Ok(format!("OS: {}, Architecture: {}", os, arch))
+        Ok(format!("OS: {os}, Architecture: {arch}"))
     }
 }

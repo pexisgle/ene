@@ -45,7 +45,7 @@ impl MouseClickAction {
                         message: format!("Mouse click failed: {e}"),
                     })?;
             }
-            Ok::<_, ToolError>(format!("Mouse {} click x{}", button, count))
+            Ok::<_, ToolError>(format!("Mouse {button} click x{count}"))
         })
         .await
         .map_err(|e| ToolError::ExecutionFailed {

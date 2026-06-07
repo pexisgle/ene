@@ -32,7 +32,7 @@ pub mod error;
 pub mod recall;
 /// Diesel-generated database schema.
 pub mod schema;
-/// Core memory store (SQLite + sqlite-vec).
+/// Core memory store (`SQLite` + sqlite-vec).
 pub mod store;
 /// LLM-driven conversation summarization.
 pub mod summarizer;

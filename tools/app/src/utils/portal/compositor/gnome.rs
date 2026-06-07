@@ -50,8 +50,7 @@ impl WlCompositor for Gnome {
     fn focus_window(&self, title: &str) -> Result<String, ToolError> {
         let escaped = title.replace('\\', "\\\\").replace('\'', "\\'");
         let js = format!(
-            "global.get_window_actors().forEach(function(a){{var w=a.meta_window;if(w.get_title().indexOf('{}')!=-1||w.get_wm_class().indexOf('{}')!=-1){{w.activate(global.get_current_time());w.get_workspace().activate(global.get_current_time())}}}})",
-            escaped, escaped
+            "global.get_window_actors().forEach(function(a){{var w=a.meta_window;if(w.get_title().indexOf('{escaped}')!=-1||w.get_wm_class().indexOf('{escaped}')!=-1){{w.activate(global.get_current_time());w.get_workspace().activate(global.get_current_time())}}}})"
         );
 
         let output = std::process::Command::new("gdbus")
@@ -88,10 +87,10 @@ impl WlCompositor for Gnome {
 
         if result == "not found" || result.is_empty() {
             return Err(ToolError::ExecutionFailed {
-                message: format!("Window not found: {}", title),
+                message: format!("Window not found: {title}"),
             });
         }
 
-        Ok(format!("Focused window matching: {}", title))
+        Ok(format!("Focused window matching: {title}"))
     }
 }

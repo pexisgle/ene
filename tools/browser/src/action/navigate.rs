@@ -72,8 +72,7 @@ impl NavigateAction {
             .unwrap_or_default();
 
         Ok(format!(
-            "Navigation successful\nURL: {}\nTitle: {}\nReady State: {}",
-            current_url, title, ready_state
+            "Navigation successful\nURL: {current_url}\nTitle: {title}\nReady State: {ready_state}"
         ))
     }
 }

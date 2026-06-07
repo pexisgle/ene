@@ -44,7 +44,7 @@ impl CompositeToolRegistry {
     /// Write-locks state and calls `f` with a mutable reference to `CompositeState`.
     fn with_state_mut<R>(&self, f: impl FnOnce(&mut CompositeState) -> R) -> R {
         let mut guard = self.state.write().unwrap_or_else(|e| e.into_inner());
-        f(&mut *guard)
+        f(&mut guard)
     }
 
     /// Adds a sub-registry to the composite.

@@ -20,10 +20,7 @@ pub fn whitespace_normalized_replace(
 
     for (i, line) in lines.iter().enumerate() {
         if normalize(line) == normalized_find {
-            let mut start_idx = 0usize;
-            for k in 0..i {
-                start_idx += lines[k].len() + 1;
-            }
+            let start_idx: usize = lines[..i].iter().map(|l| l.len() + 1).sum();
             results.push((start_idx, start_idx + line.len()));
         }
     }
@@ -33,17 +30,13 @@ pub fn whitespace_normalized_replace(
         for i in 0..=lines.len().saturating_sub(find_lines.len()) {
             let block = lines[i..i + find_lines.len()].join("\n");
             if normalize(&block) == normalized_find {
-                let mut start_idx = 0usize;
-                for k in 0..i {
-                    start_idx += lines[k].len() + 1;
-                }
-                let mut end_idx = start_idx;
-                for k in 0..find_lines.len() {
-                    end_idx += lines[i + k].len();
-                    if k < find_lines.len() - 1 {
-                        end_idx += 1;
-                    }
-                }
+                let start_idx: usize = lines[..i].iter().map(|l| l.len() + 1).sum();
+                let end_idx = start_idx
+                    + lines[i..i + find_lines.len()]
+                        .iter()
+                        .map(|l| l.len())
+                        .sum::<usize>()
+                    + find_lines.len().saturating_sub(1);
                 results.push((start_idx, end_idx));
             }
         }

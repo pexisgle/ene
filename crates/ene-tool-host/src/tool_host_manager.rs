@@ -5,7 +5,7 @@ use ene_config as paths;
 use ene_config::{EneConfig, register_runtime_schema};
 use ene_tool_proto::ToolError;
 use ene_tool_proto::ToolSpec;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -454,7 +454,7 @@ impl ToolHostManager {
 
     /// Attempts to connect to a tool binary with retry logic.
     pub(crate) async fn connect_with_retry(
-        socket_path: &PathBuf,
+        socket_path: &Path,
         sandbox: &ene_tool_proto::SandboxConfigData,
         tool_config: Option<serde_json::Value>,
         max_retries: u32,

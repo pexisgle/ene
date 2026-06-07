@@ -14,10 +14,11 @@ pub struct GetActiveWindowAction {}
 impl GetActiveWindowAction {
     async fn run(&self) -> Result<String, ToolError> {
         tokio::task::spawn_blocking(move || {
-            let active_win =
-                active_win_pos_rs::get_active_window().map_err(|_| ToolError::ExecutionFailed {
+            let active_win = active_win_pos_rs::get_active_window().map_err(|()| {
+                ToolError::ExecutionFailed {
                     message: "Failed to get active window".to_string(),
-                })?;
+                }
+            })?;
             Ok::<_, ToolError>(format!(
                 "Active window: {} ({}) at ({}, {}) size {}x{}",
                 active_win.title,

@@ -68,8 +68,8 @@ struct TodoRow {
 impl From<TodoRow> for TodoItem {
     fn from(r: TodoRow) -> Self {
         Self {
-            id: r.id as i64,
-            parent_id: r.parent_id.map(|p| p as i64),
+            id: i64::from(r.id),
+            parent_id: r.parent_id.map(i64::from),
             content: r.content,
             status: r.status,
             priority: r.priority,
@@ -79,7 +79,7 @@ impl From<TodoRow> for TodoItem {
     }
 }
 
-/// Per-session todo storage with an in-memory cache and SQLite persistence.
+/// Per-session todo storage with an in-memory cache and `SQLite` persistence.
 ///
 /// The cache (`DashMap<session_id, Vec<TodoItem>>`) is invalidated on every
 /// write so subsequent reads always re-hydrate from the DB. This mirrors
@@ -109,20 +109,23 @@ impl TodoDb {
         }
     }
 
-    /// Opens the SQLite database at `path` (creating it if missing), enables
+    /// Opens the `SQLite` database at `path` (creating it if missing), enables
     /// WAL mode, and runs the embedded migrations. The connection handle is
     /// stored and used for all subsequent operations.
     pub fn set_db_path(&self, path: &Path) -> Result<(), TodoError> {
         let path_str = path
             .to_str()
-            .ok_or_else(|| TodoError::InvalidPath(format!("{:?}", path)))?;
+            .ok_or_else(|| TodoError::InvalidPath(format!("{path:?}")))?;
         let mut conn = SqliteConnection::establish(path_str)
             .map_err(|e| TodoError::InvalidPath(format!("establish({path_str}): {e}")))?;
         conn.batch_execute("PRAGMA journal_mode=WAL;")
             .map_err(|e| TodoError::InvalidPath(format!("PRAGMA WAL: {e}")))?;
         conn.run_pending_migrations(MIGRATIONS)
             .map_err(|e| TodoError::InvalidPath(format!("migrations: {e}")))?;
-        *self.conn.lock().unwrap_or_else(|e| e.into_inner()) = Some(conn);
+        *self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(conn);
         // Drop any cached data from a previous DB file.
         self.cache.clear();
         Ok(())
@@ -131,7 +134,10 @@ impl TodoDb {
     /// Updates the current session ID. All subsequent operations are scoped
     /// to this session until a new ID is set.
     pub fn set_session_id(&self, session_id: &str) {
-        let mut guard = self.session_id.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .session_id
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *guard = session_id.to_string();
     }
 
@@ -139,7 +145,7 @@ impl TodoDb {
     pub fn current_session_id(&self) -> String {
         self.session_id
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
@@ -149,7 +155,10 @@ impl TodoDb {
     }
 
     fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Option<SqliteConnection>>, TodoError> {
-        Ok(self.conn.lock().unwrap_or_else(|e| e.into_inner()))
+        Ok(self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner))
     }
 
     fn load_session_from_db(&self, session_id: &str) -> Result<Vec<TodoItem>, TodoError> {
@@ -231,7 +240,7 @@ impl TodoDb {
         drop(guard);
 
         self.invalidate_cache();
-        self.fetch_one(new_id as i64)
+        self.fetch_one(i64::from(new_id))
     }
 
     /// Partial update. Any `None` field is left unchanged. `parent_id` is a
@@ -375,7 +384,7 @@ impl TodoDb {
         drop(guard);
 
         self.invalidate_cache();
-        Ok(all_ids.into_iter().map(|i| i as i64).collect())
+        Ok(all_ids.into_iter().map(i64::from).collect())
     }
 
     /// Soft-deletes a todo by setting `status='cancelled'`. Descendants are
@@ -434,7 +443,7 @@ fn is_descendant(
             .load(conn)?;
         let mut next = Vec::new();
         for c in children {
-            if c as i64 == candidate {
+            if i64::from(c) == candidate {
                 return Ok(true);
             }
             if seen.insert(c) {
@@ -603,9 +612,9 @@ mod tests {
 
         let cascaded = db.complete(root.id).unwrap();
         let mut want = vec![root.id, c1.id, c2.id, gc.id];
-        want.sort();
+        want.sort_unstable();
         let mut got = cascaded.clone();
-        got.sort();
+        got.sort_unstable();
         assert_eq!(got, want);
 
         let list = db.list().unwrap();

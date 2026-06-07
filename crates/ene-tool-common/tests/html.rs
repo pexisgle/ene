@@ -2,7 +2,7 @@ use ene_tool_common::html::{extract_html, extract_markdown, html_to_markdown};
 
 #[test]
 fn extract_html_full_no_trim_preserves_script() {
-    let html = r#"<p>hello</p><script>var x = 1;</script>"#;
+    let html = r"<p>hello</p><script>var x = 1;</script>";
     let out = extract_html(html, "full", false);
     assert!(
         out.contains("<script>"),
@@ -13,7 +13,7 @@ fn extract_html_full_no_trim_preserves_script() {
 
 #[test]
 fn extract_html_full_trim_strips_script() {
-    let html = r#"<p>hello</p><script>var x = 1;</script>"#;
+    let html = r"<p>hello</p><script>var x = 1;</script>";
     let out = extract_html(html, "full", true);
     assert!(
         !out.contains("<script>"),
@@ -28,7 +28,7 @@ fn extract_html_full_trim_strips_script() {
 
 #[test]
 fn extract_html_full_trim_strips_style() {
-    let html = r#"<p>hello</p><style>body { background: red; }</style>"#;
+    let html = r"<p>hello</p><style>body { background: red; }</style>";
     let out = extract_html(html, "full", true);
     assert!(
         !out.contains("<style>"),
@@ -39,7 +39,7 @@ fn extract_html_full_trim_strips_style() {
 
 #[test]
 fn extract_html_full_trim_strips_noscript() {
-    let html = r#"<p>hello</p><noscript>fallback</noscript>"#;
+    let html = r"<p>hello</p><noscript>fallback</noscript>";
     let out = extract_html(html, "full", true);
     assert!(
         !out.contains("<noscript>"),
@@ -53,7 +53,7 @@ fn extract_html_full_trim_strips_noscript() {
 
 #[test]
 fn extract_html_body_works() {
-    let html = r#"<header>nav</header><main><p>content</p></main><footer>foot</footer>"#;
+    let html = r"<header>nav</header><main><p>content</p></main><footer>foot</footer>";
     let out = extract_html(html, "body", false);
     assert!(
         out.contains("<body>"),
@@ -67,8 +67,7 @@ fn extract_html_body_works() {
 
 #[test]
 fn extract_html_main_selects_main() {
-    let html =
-        r#"<body><header>nav</header><main><p>content</p></main><footer>foot</footer></body>"#;
+    let html = r"<body><header>nav</header><main><p>content</p></main><footer>foot</footer></body>";
     let out = extract_html(html, "main", false);
     assert!(
         out.contains("<main>"),
@@ -82,7 +81,7 @@ fn extract_html_main_selects_main() {
 
 #[test]
 fn extract_html_main_falls_back_to_body() {
-    let html = r#"<body><p>content</p></body>"#;
+    let html = r"<body><p>content</p></body>";
     let out = extract_html(html, "main", false);
     assert!(
         out.contains("<body>"),
@@ -96,7 +95,7 @@ fn extract_html_main_falls_back_to_body() {
 
 #[test]
 fn extract_html_main_falls_back_to_root() {
-    let html = r#"<p>content</p>"#;
+    let html = r"<p>content</p>";
     let out = extract_html(html, "main", false);
     assert!(
         out.contains("content"),
@@ -106,14 +105,14 @@ fn extract_html_main_falls_back_to_root() {
 
 #[test]
 fn extract_html_strips_multiple_skip_tags() {
-    let html = r#"
+    let html = r"
         <p>keep</p>
         <script>a</script>
         <style>b</style>
         <nav>c</nav>
         <iframe>d</iframe>
         <p>also keep</p>
-    "#;
+    ";
     let out = extract_html(html, "full", true);
     assert!(out.contains("keep"), "non-skip content should be preserved");
     assert!(
@@ -128,7 +127,7 @@ fn extract_html_strips_multiple_skip_tags() {
 
 #[test]
 fn extract_html_nested_skip_tags() {
-    let html = r#"<div>before<script>outer<x>inner</x></script>after</div>"#;
+    let html = r"<div>before<script>outer<x>inner</x></script>after</div>";
     let out = extract_html(html, "full", true);
     assert!(
         out.contains("before"),
@@ -147,7 +146,7 @@ fn extract_html_nested_skip_tags() {
 
 #[test]
 fn extract_markdown_full_trim_strips_script() {
-    let html = r#"<h1>Title</h1><script>alert(1)</script><p>body</p>"#;
+    let html = r"<h1>Title</h1><script>alert(1)</script><p>body</p>";
     let md = extract_markdown(html, "full", true);
     assert!(md.contains("Title"), "markdown should contain heading text");
     assert!(
@@ -162,7 +161,7 @@ fn extract_markdown_full_trim_strips_script() {
 
 #[test]
 fn extract_markdown_full_no_trim_preserves_script_in_md() {
-    let html = r#"<h1>Title</h1><script>alert(1)</script>"#;
+    let html = r"<h1>Title</h1><script>alert(1)</script>";
     let md = extract_markdown(html, "full", false);
     assert!(md.contains("Title"), "markdown should contain heading text");
 }

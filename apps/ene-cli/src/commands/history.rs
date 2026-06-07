@@ -23,7 +23,7 @@ impl CliCommand for HistoryCommand {
             .handle
             .get_snapshot()
             .await
-            .map_err(|e| format!("Failed to get actor state: {}", e))?;
+            .map_err(|e| format!("Failed to get actor state: {e}"))?;
 
         println!("--- Conversation History ---");
         for entry in &snapshot.history {

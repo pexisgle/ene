@@ -41,7 +41,7 @@ impl ScreenshotAction {
                 message: format!("Screenshot failed: {e}"),
             })?;
         let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
-        let data_uri = format!("data:image/png;base64,{}", b64);
+        let data_uri = format!("data:image/png;base64,{b64}");
         Ok(serde_json::json!({ "type": "screenshot", "data": data_uri }).to_string())
     }
 }

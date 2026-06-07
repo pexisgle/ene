@@ -4,7 +4,7 @@
 //! embeddings with cosine similarity comparison.
 //!
 //! Requires a GGUF model file in the `models/` directory.
-//! Download from HuggingFace:
+//! Download from `HuggingFace`:
 //!   huggingface-cli download jinaai/jina-embeddings-v5-text-small
 
 use ene_embedding::{GgufEmbeddingProvider, resolve_gguf_paths};
@@ -29,7 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Resolve GGUF and tokenizer file paths
     let (gguf_path, tokenizer_path) = resolve_gguf_paths(model_name, quantization, model_dir)?;
 
-    println!("Loading model: {}", model_name);
+    println!("Loading model: {model_name}");
     println!("GGUF path: {}", gguf_path.display());
     println!("Tokenizer path: {}", tokenizer_path.display());
 
@@ -56,20 +56,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let similarity = cosine_similarity(&emb1, &emb2);
 
-    println!("\nText 1: \"{}\"", text1);
-    println!("Text 2: \"{}\"", text2);
-    println!("Cosine similarity: {:.4}", similarity);
+    println!("\nText 1: \"{text1}\"");
+    println!("Text 2: \"{text2}\"");
+    println!("Cosine similarity: {similarity:.4}");
 
     // Compare with unrelated text
     let text3 = "The stock market crashed today.";
     let emb3 = tokio::runtime::Runtime::new()?.block_on(provider.embed_query(text3))?;
 
     let similarity_unrelated = cosine_similarity(&emb1, &emb3);
-    println!("\nText 3: \"{}\"", text3);
-    println!(
-        "Cosine similarity (cat vs stocks): {:.4}",
-        similarity_unrelated
-    );
+    println!("\nText 3: \"{text3}\"");
+    println!("Cosine similarity (cat vs stocks): {similarity_unrelated:.4}");
 
     assert!(
         similarity > similarity_unrelated,

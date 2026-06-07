@@ -6,32 +6,31 @@ mod portal;
 fn capture_screen_xcap(scale_percent: u32) -> Result<DynamicImage, ToolError> {
     let mut target_image = None;
 
-    if let Ok(active_win) = active_win_pos_rs::get_active_window() {
-        if let Ok(windows) = xcap::Window::all() {
-            for window in windows {
-                let title = window.title().unwrap_or_default();
-                let app_name = window.app_name().unwrap_or_default();
-                if title == active_win.title || app_name == active_win.app_name {
-                    if !window.is_minimized().unwrap_or(false) {
-                        if let Ok(img) = window.capture_image() {
-                            target_image = Some(DynamicImage::ImageRgba8(img));
-                            break;
-                        }
-                    }
-                }
+    if let Ok(active_win) = active_win_pos_rs::get_active_window()
+        && let Ok(windows) = xcap::Window::all()
+    {
+        for window in windows {
+            let title = window.title().unwrap_or_default();
+            let app_name = window.app_name().unwrap_or_default();
+            if (title == active_win.title || app_name == active_win.app_name)
+                && !window.is_minimized().unwrap_or(false)
+                && let Ok(img) = window.capture_image()
+            {
+                target_image = Some(DynamicImage::ImageRgba8(img));
+                break;
             }
         }
     }
 
-    if target_image.is_none() {
-        if let Ok(monitors) = xcap::Monitor::all() {
-            let primary = monitors
-                .iter()
-                .find(|m| m.is_primary().unwrap_or(false))
-                .unwrap_or_else(|| &monitors[0]);
-            if let Ok(img) = primary.capture_image() {
-                target_image = Some(DynamicImage::ImageRgba8(img));
-            }
+    if target_image.is_none()
+        && let Ok(monitors) = xcap::Monitor::all()
+    {
+        let primary = monitors
+            .iter()
+            .find(|m| m.is_primary().unwrap_or(false))
+            .unwrap_or_else(|| &monitors[0]);
+        if let Ok(img) = primary.capture_image() {
+            target_image = Some(DynamicImage::ImageRgba8(img));
         }
     }
 

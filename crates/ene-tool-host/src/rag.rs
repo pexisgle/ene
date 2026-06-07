@@ -367,16 +367,11 @@ impl ToolRag {
         // 2. Optional HyDE — generate a hypothetical document embedding.
         let hyde_vec = if self.opts.use_hyde {
             match self.embedder.hyde(query).await {
-                Ok(hyde_text) => {
-                    match self
-                        .embedder
-                        .embed(&hyde_text, ene_provider::EmbeddingKind::Hyde)
-                        .await
-                    {
-                        Ok(v) => Some(v),
-                        Err(_) => None,
-                    }
-                }
+                Ok(hyde_text) => self
+                    .embedder
+                    .embed(&hyde_text, ene_provider::EmbeddingKind::Hyde)
+                    .await
+                    .ok(),
                 Err(_) => None,
             }
         } else {
@@ -504,10 +499,10 @@ impl ToolRag {
         {
             let result_names: Vec<ToolName> = result.iter().map(|s| s.name.clone()).collect();
             for forced_name in self.opts.forced_tools.iter().rev() {
-                if !result_names.contains(forced_name) {
-                    if let Some(spec) = all_specs.get(forced_name) {
-                        result.insert(0, spec.clone());
-                    }
+                if !result_names.contains(forced_name)
+                    && let Some(spec) = all_specs.get(forced_name)
+                {
+                    result.insert(0, spec.clone());
                 }
             }
             result.truncate(self.opts.final_n + self.opts.forced_tools.len());

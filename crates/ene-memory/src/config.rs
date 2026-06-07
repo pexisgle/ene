@@ -41,6 +41,7 @@ ene_config::define_config!(
 
 impl MemoryConfig {
     /// Resolves the effective database path, defaulting to a file next to the character card.
+    #[must_use]
     pub fn resolve_memory_db_path(&self) -> std::path::PathBuf {
         if !self.db_path.trim().is_empty() {
             return std::path::PathBuf::from(&self.db_path);
@@ -52,6 +53,7 @@ impl MemoryConfig {
     }
 
     /// Resolves the effective summarisation model, falling back to the chat model.
+    #[must_use]
     pub fn resolve_summarization_model(&self) -> String {
         if !self.summarization_model.trim().is_empty() {
             return self.summarization_model.clone();

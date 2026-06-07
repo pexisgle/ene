@@ -17,7 +17,7 @@ crate::define_config!(
     }
 );
 
-/// Generates the JSON representation of the CharacterConfig JSON Schema
+/// Generates the JSON representation of the `CharacterConfig` JSON Schema
 pub fn generate_character_schema_json() -> Result<String, serde_json::Error> {
     let schema_gen = schemars::SchemaGenerator::default();
     let root_schema = schema_gen.into_root_schema_for::<CharacterConfig>();

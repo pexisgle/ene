@@ -6,7 +6,7 @@ use crate::traits::{
     EmbeddingError, EmbeddingKind, EmbeddingProvider, LlmProvider, cosine_similarity,
 };
 
-/// Wraps a primary embedder with optional LLM-backed HyDE and rerank.
+/// Wraps a primary embedder with optional LLM-backed `HyDE` and rerank.
 ///
 /// When `llm` is set, `hyde()` delegates to the LLM to produce a hypothetical
 /// tool-invocation document and `rerank()` uses LLM scoring. Otherwise both
@@ -20,7 +20,7 @@ pub struct HybridRerankProvider {
 
 impl HybridRerankProvider {
     /// Creates a wrapper that uses `embedder` for all embedding operations.
-    /// HyDE and rerank use default cosine-similarity fallbacks unless
+    /// `HyDE` and rerank use default cosine-similarity fallbacks unless
     /// LLM models are set.
     pub fn new(embedder: Arc<dyn EmbeddingProvider>) -> Self {
         Self {
@@ -31,7 +31,7 @@ impl HybridRerankProvider {
         }
     }
 
-    /// Attaches an LLM provider and optional model overrides for HyDE / rerank.
+    /// Attaches an LLM provider and optional model overrides for `HyDE` / rerank.
     pub fn with_llm(
         mut self,
         llm: Arc<dyn LlmProvider>,
@@ -84,7 +84,7 @@ impl EmbeddingProvider for HybridRerankProvider {
 
         llm.chat_completion(&messages, None)
             .await
-            .map_err(|e| EmbeddingError::Provider(e))
+            .map_err(EmbeddingError::Provider)
     }
 
     async fn rerank(
@@ -92,19 +92,18 @@ impl EmbeddingProvider for HybridRerankProvider {
         query: &str,
         candidates: &[ene_tool_proto::ToolSpec],
     ) -> Result<Vec<f32>, EmbeddingError> {
-        let llm = match &self.llm {
-            Some(llm) => llm,
-            None => {
-                // Fall back to default cosine-similarity rerank.
-                let query_emb = self.embed_query(query).await?;
-                let mut scores = Vec::with_capacity(candidates.len());
-                for spec in candidates {
-                    let text = format!("{} {}", spec.summary, spec.description);
-                    let emb = self.embed(&text, EmbeddingKind::Description).await?;
-                    scores.push(cosine_similarity(&query_emb, &emb));
-                }
-                return Ok(scores);
+        let llm = if let Some(llm) = &self.llm {
+            llm
+        } else {
+            // Fall back to default cosine-similarity rerank.
+            let query_emb = self.embed_query(query).await?;
+            let mut scores = Vec::with_capacity(candidates.len());
+            for spec in candidates {
+                let text = format!("{} {}", spec.summary, spec.description);
+                let emb = self.embed(&text, EmbeddingKind::Description).await?;
+                scores.push(cosine_similarity(&query_emb, &emb));
             }
+            return Ok(scores);
         };
 
         if candidates.is_empty() {
@@ -155,19 +154,19 @@ impl EmbeddingProvider for HybridRerankProvider {
         let raw = llm
             .chat_completion(&messages, Some(schema))
             .await
-            .map_err(|e| EmbeddingError::Provider(e))?;
+            .map_err(EmbeddingError::Provider)?;
 
         // Parse JSON response.
         let parsed: serde_json::Value = serde_json::from_str(&raw)
             .map_err(|e| EmbeddingError::Provider(format!("rerank JSON parse: {e}")))?;
-        let scores: Vec<f32> = parsed["scores"]
-            .as_array()
-            .map(|arr| {
+        let scores: Vec<f32> = parsed["scores"].as_array().map_or_else(
+            || vec![0.0; candidates.len()],
+            |arr| {
                 arr.iter()
                     .map(|v| v.as_f64().unwrap_or(0.0) as f32)
                     .collect()
-            })
-            .unwrap_or_else(|| vec![0.0; candidates.len()]);
+            },
+        );
         Ok(scores)
     }
 

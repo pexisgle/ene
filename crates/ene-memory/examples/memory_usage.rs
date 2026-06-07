@@ -34,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Utc::now(),
     )?;
 
-    println!("Inserted summary with ID: {}", summary_id);
+    println!("Inserted summary with ID: {summary_id}");
 
     // Search for related summaries
     let query_emb = vec![0.9_f32, 0.1, 0.0, 0.0];
@@ -65,8 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         facts
             .iter()
             .find(|f| f.key == "favorite_color")
-            .map(|f| f.value.as_str())
-            .unwrap_or("?")
+            .map_or("?", |f| f.value.as_str())
     );
 
     // Delete a fact

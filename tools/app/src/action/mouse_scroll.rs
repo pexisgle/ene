@@ -49,7 +49,7 @@ impl MouseScrollAction {
                 .map_err(|e| ToolError::ExecutionFailed {
                     message: format!("Scroll failed: {e}"),
                 })?;
-            Ok::<_, ToolError>(format!("Scrolled {} by {}", dir_str, amount))
+            Ok::<_, ToolError>(format!("Scrolled {dir_str} by {amount}"))
         })
         .await
         .map_err(|e| ToolError::ExecutionFailed {

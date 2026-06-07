@@ -11,7 +11,7 @@ use std::path::Path;
 pub static GLOBAL_CONFIG: std::sync::OnceLock<std::sync::RwLock<EneConfig>> =
     std::sync::OnceLock::new();
 
-/// Updates the global EneConfig
+/// Updates the global `EneConfig`
 pub fn update_global_config(config: EneConfig) {
     if let Some(lock) = GLOBAL_CONFIG.get() {
         if let Ok(mut guard) = lock.write() {
@@ -24,10 +24,10 @@ pub fn update_global_config(config: EneConfig) {
 
 /// Gets a clone of the entire global config
 pub fn get_global_config() -> EneConfig {
-    if let Some(lock) = GLOBAL_CONFIG.get() {
-        if let Ok(guard) = lock.read() {
-            return guard.clone();
-        }
+    if let Some(lock) = GLOBAL_CONFIG.get()
+        && let Ok(guard) = lock.read()
+    {
+        return guard.clone();
     }
     EneConfig::default()
 }
@@ -43,20 +43,20 @@ pub fn get_global_section<T>() -> T
 where
     T: serde::de::DeserializeOwned + Default + HasConfigKey,
 {
-    if let Some(lock) = GLOBAL_CONFIG.get() {
-        if let Ok(guard) = lock.read() {
-            return guard.get_section::<T>().unwrap_or_default();
-        }
+    if let Some(lock) = GLOBAL_CONFIG.get()
+        && let Ok(guard) = lock.read()
+    {
+        return guard.get_section::<T>().unwrap_or_default();
     }
     T::default()
 }
 
 /// Loads a subsection by key from the global config.
 pub fn get_global_section_by_key<T: serde::de::DeserializeOwned + Default>(key: &str) -> T {
-    if let Some(lock) = GLOBAL_CONFIG.get() {
-        if let Ok(guard) = lock.read() {
-            return guard.get_section_by_key::<T>(key).unwrap_or_default();
-        }
+    if let Some(lock) = GLOBAL_CONFIG.get()
+        && let Ok(guard) = lock.read()
+    {
+        return guard.get_section_by_key::<T>(key).unwrap_or_default();
     }
     T::default()
 }
@@ -129,31 +129,27 @@ fn merge_child_into_parent(
     };
 
     // Try $defs first (e.g. "ToolEntry")
-    if let Some(defs) = root_schema.get_mut("$defs").and_then(|v| v.as_object_mut()) {
-        if let Some(def) = defs.get_mut(parent_key) {
-            if let Some(def_props) = def.get_mut("properties").and_then(|v| v.as_object_mut()) {
-                for (k, v) in &child_props {
-                    def_props.insert(k.clone(), v.clone());
-                }
-                return;
-            }
+    if let Some(defs) = root_schema.get_mut("$defs").and_then(|v| v.as_object_mut())
+        && let Some(def) = defs.get_mut(parent_key)
+        && let Some(def_props) = def.get_mut("properties").and_then(|v| v.as_object_mut())
+    {
+        for (k, v) in &child_props {
+            def_props.insert(k.clone(), v.clone());
         }
+        return;
     }
 
     // Fall back to root-level property
-    if let Some(root_obj) = root_schema.as_object_mut() {
-        if let Some(parent_val) = root_obj
+    if let Some(root_obj) = root_schema.as_object_mut()
+        && let Some(parent_val) = root_obj
             .get_mut("properties")
             .and_then(|v| v.get_mut(parent_key))
-        {
-            if let Some(parent_props) = parent_val
-                .get_mut("properties")
-                .and_then(|v| v.as_object_mut())
-            {
-                for (k, v) in child_props {
-                    parent_props.insert(k, v);
-                }
-            }
+        && let Some(parent_props) = parent_val
+            .get_mut("properties")
+            .and_then(|v| v.as_object_mut())
+    {
+        for (k, v) in child_props {
+            parent_props.insert(k, v);
         }
     }
 }
@@ -199,8 +195,7 @@ impl EneConfig {
         if let Some(val) = self.extra.get(key) {
             serde_json::from_value(val.clone()).map_err(|e| {
                 EneConfigError::GenericConfigError(format!(
-                    "Failed to deserialize section '{}': {}",
-                    key, e
+                    "Failed to deserialize section '{key}': {e}"
                 ))
             })
         } else {
@@ -222,10 +217,7 @@ impl EneConfig {
         T: serde::Serialize,
     {
         let val = serde_json::to_value(section).map_err(|e| {
-            EneConfigError::GenericConfigError(format!(
-                "Failed to serialize section '{}': {}",
-                key, e
-            ))
+            EneConfigError::GenericConfigError(format!("Failed to serialize section '{key}': {e}"))
         })?;
         self.extra.insert(key.to_string(), val);
         Ok(())
@@ -235,13 +227,14 @@ impl EneConfig {
     ///
     /// This avoids the manual `extra["provider"]["field"]` chain duplicated across
     /// embedding and memory config resolvers.
+    #[must_use]
     pub fn get_provider_field(&self, key: &str) -> Option<String> {
         self.extra
             .get("provider")
             .and_then(|p| p.get(key))
             .and_then(|v| v.as_str())
             .filter(|s| !s.trim().is_empty())
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
     }
 }
 
@@ -250,15 +243,15 @@ fn apply_registry_to_schema(
     registry: &HashMap<String, SchemaEntry>,
 ) {
     // First pass: insert entries without parents and collect all definitions
-    for (key, entry) in registry.iter() {
-        if entry.parent.is_none() {
-            if let Some(root_obj) = root_schema.as_object_mut() {
-                let props = root_obj
-                    .entry("properties".to_string())
-                    .or_insert_with(|| serde_json::json!({}));
-                if let Some(props_obj) = props.as_object_mut() {
-                    props_obj.insert(key.clone(), entry.schema.clone().into());
-                }
+    for (key, entry) in registry {
+        if entry.parent.is_none()
+            && let Some(root_obj) = root_schema.as_object_mut()
+        {
+            let props = root_obj
+                .entry("properties".to_string())
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(props_obj) = props.as_object_mut() {
+                props_obj.insert(key.clone(), entry.schema.clone().into());
             }
         }
         // Copy $defs from child schema into root schema
@@ -275,7 +268,7 @@ fn apply_registry_to_schema(
         }
     }
     // Second pass: merge entries that have parents
-    for (_, entry) in registry.iter() {
+    for entry in registry.values() {
         if let Some(parent_key) = &entry.parent {
             merge_child_into_parent(root_schema, parent_key, &entry.schema);
         }
@@ -287,16 +280,16 @@ pub fn generate_schema_json() -> Result<String, serde_json::Error> {
     let schema_gen = schemars::SchemaGenerator::default();
     let mut root_schema = schema_gen.into_root_schema_for::<EneConfig>();
 
-    if let Some(registry) = SCHEMA_REGISTRY.get() {
-        if let Ok(reg) = registry.lock() {
-            apply_registry_to_schema(&mut root_schema, &reg);
-        }
+    if let Some(registry) = SCHEMA_REGISTRY.get()
+        && let Ok(reg) = registry.lock()
+    {
+        apply_registry_to_schema(&mut root_schema, &reg);
     }
 
-    if let Some(registry) = RUNTIME_SCHEMA_REGISTRY.get() {
-        if let Ok(reg) = registry.lock() {
-            apply_registry_to_schema(&mut root_schema, &reg);
-        }
+    if let Some(registry) = RUNTIME_SCHEMA_REGISTRY.get()
+        && let Ok(reg) = registry.lock()
+    {
+        apply_registry_to_schema(&mut root_schema, &reg);
     }
 
     serde_json::to_string_pretty(&root_schema)
@@ -308,6 +301,7 @@ pub fn generate_schema_json() -> Result<String, serde_json::Error> {
 /// If `name` is a bare name (no path separators), resolves to
 /// `{assets}/characters/{name}/character.json`.
 /// Otherwise, the name is treated as a literal path.
+#[must_use]
 pub fn resolve_character_path(name: &str) -> String {
     let assets_dir = crate::paths::assets_dir();
     if name.trim().is_empty() {
@@ -323,7 +317,8 @@ pub fn resolve_character_path(name: &str) -> String {
     }
 }
 
-/// Reads the asset directory and settings.json, resolves character_card_path, etc., and returns EneConfig.
+/// Reads the asset directory and settings.json, resolves `character_card_path`, etc., and returns `EneConfig`.
+#[must_use]
 pub fn load_config() -> EneConfig {
     let assets_dir = crate::paths::assets_dir();
     let config_path = crate::paths::config_file_path();
@@ -331,18 +326,21 @@ pub fn load_config() -> EneConfig {
 }
 
 /// Loads config from the specified asset directory and config file path
+#[must_use]
 pub fn load_config_from(assets_dir: &Path, config_path: &Path) -> EneConfig {
     load_full_config_from(assets_dir, config_path)
 }
 
 /// Fully loads the config file. Also auto-updates the schema file on startup
+#[must_use]
 pub fn load_full_config() -> EneConfig {
     let assets_dir = crate::paths::assets_dir();
     let config_path = crate::paths::config_file_path();
     load_full_config_from(&assets_dir, &config_path)
 }
 
-/// Fully loads EneConfig from the specified asset directory and config file path
+/// Fully loads `EneConfig` from the specified asset directory and config file path
+#[must_use]
 pub fn load_full_config_from(assets_dir: &Path, config_path: &Path) -> EneConfig {
     use figment::{
         Figment,

@@ -60,7 +60,7 @@ pub enum UndoOperation {
     DeleteCreatedFile { path: PathBuf },
 }
 
-/// Per-session undo stack (in-memory + SQLite persistence)
+/// Per-session undo stack (in-memory + `SQLite` persistence)
 pub struct UndoManager {
     stacks: DashMap<String, VecDeque<UndoEntry>>,
     db: Mutex<Option<SqliteConnection>>,
@@ -118,13 +118,19 @@ impl UndoManager {
         conn.run_pending_migrations(MIGRATIONS)
             .map_err(|e| format!("Failed to run undo migrations: {e}"))?;
 
-        *self.db.lock().unwrap_or_else(|e| e.into_inner()) = Some(conn);
+        *self
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(conn);
         Ok(())
     }
 
     /// Loads entries for a specific session from the DB and restores them to the in-memory stack
     fn load_session_from_db(&self, session_id: &str) -> Result<(), String> {
-        let mut guard = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let conn = guard.as_mut().ok_or("Undo DB not initialized")?;
 
         let entries = undo_entries::table
@@ -220,11 +226,14 @@ impl UndoManager {
         stack.push_back(entry.clone());
         drop(stack);
 
-        let mut guard = self.db.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(conn) = guard.as_mut() {
-            if let Err(e) = Self::persist_entry(conn, session_id, &entry) {
-                tracing::error!("[UndoManager] Failed to persist undo entry: {e}");
-            }
+        let mut guard = self
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(conn) = guard.as_mut()
+            && let Err(e) = Self::persist_entry(conn, session_id, &entry)
+        {
+            tracing::error!("[UndoManager] Failed to persist undo entry: {e}");
         }
     }
 
@@ -290,10 +299,15 @@ impl UndoManager {
     /// Undoes the most recent operation
     pub async fn undo(&self, session_id: &str) -> Result<Vec<String>, String> {
         let has_stack = self.stacks.contains_key(session_id);
-        if !has_stack && self.db.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
-            if let Err(e) = self.load_session_from_db(session_id) {
-                tracing::error!("[UndoManager] Failed to load from DB: {e}");
-            }
+        if !has_stack
+            && self
+                .db
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+            && let Err(e) = self.load_session_from_db(session_id)
+        {
+            tracing::error!("[UndoManager] Failed to load from DB: {e}");
         }
 
         let mut stack = self
@@ -351,7 +365,10 @@ impl UndoManager {
 
         drop(stack);
 
-        let mut guard = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(conn) = guard.as_mut() {
             if let Err(e) =
                 diesel::delete(undo_operations::table.filter(undo_operations::entry_id.eq(&id_str)))
@@ -366,12 +383,7 @@ impl UndoManager {
             }
         }
 
-        if self
-            .stacks
-            .get(session_id)
-            .map(|s| s.is_empty())
-            .unwrap_or(true)
-        {
+        if self.stacks.get(session_id).is_none_or(|s| s.is_empty()) {
             self.stacks.remove(session_id);
         }
 
@@ -382,7 +394,10 @@ impl UndoManager {
     pub fn clear(&self, session_id: &str) {
         self.stacks.remove(session_id);
 
-        let mut guard = self.db.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(conn) = guard.as_mut() {
             let target_ids: Vec<String> = undo_entries::table
                 .filter(undo_entries::session_id.eq(session_id))
@@ -404,12 +419,17 @@ impl UndoManager {
     /// Gets the length of the stack
     pub fn len(&self, session_id: &str) -> usize {
         let has = self.stacks.contains_key(session_id);
-        if !has && self.db.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
-            if let Ok(()) = self.load_session_from_db(session_id) {
-                // fall through to check again
-            }
+        if !has
+            && self
+                .db
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+            && let Ok(()) = self.load_session_from_db(session_id)
+        {
+            // fall through to check again
         }
-        self.stacks.get(session_id).map(|s| s.len()).unwrap_or(0)
+        self.stacks.get(session_id).map_or(0, |s| s.len())
     }
 
     /// Whether the stack is empty

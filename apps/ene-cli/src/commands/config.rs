@@ -24,7 +24,7 @@ impl CliCommand for ConfigCommand {
             .handle
             .get_snapshot()
             .await
-            .map_err(|e| format!("Failed to get actor state: {}", e))?;
+            .map_err(|e| format!("Failed to get actor state: {e}"))?;
 
         let mem_config = snapshot
             .config
@@ -51,21 +51,18 @@ impl CliCommand for ConfigCommand {
         println!("Tool Calling: {}", tool_config.tool_calling_enabled);
         println!("Memory Enabled: {}", mem_config.enabled);
         println!("Embedding Backend: {}", provider_config.embedding_backend);
-        match provider_config.embedding_backend.as_str() {
-            "local" => {
-                let local_emb = ene_core::ProviderConfig::local_embedding(&snapshot.config);
-                println!("Local Embedding Model: {}", local_emb.model);
-            }
-            _ => {
-                println!(
-                    "Cloud Embedding Model: {}",
-                    provider_config.cloud_embedding_model
-                );
-                println!(
-                    "Cloud Embedding Dims: {}",
-                    provider_config.cloud_embedding_dimensions
-                );
-            }
+        if provider_config.embedding_backend.as_str() == "local" {
+            let local_emb = ene_core::ProviderConfig::local_embedding(&snapshot.config);
+            println!("Local Embedding Model: {}", local_emb.model);
+        } else {
+            println!(
+                "Cloud Embedding Model: {}",
+                provider_config.cloud_embedding_model
+            );
+            println!(
+                "Cloud Embedding Dims: {}",
+                provider_config.cloud_embedding_dimensions
+            );
         }
         if mem_config.enabled {
             println!(

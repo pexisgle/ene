@@ -10,8 +10,7 @@ pub async fn glob_search(
     sandbox: &SandboxConfig,
 ) -> Result<String, ToolError> {
     let base = if let Some(p) = path {
-        let resolved = sandbox.resolve_and_check(Path::new(p), false)?;
-        resolved
+        sandbox.resolve_and_check(Path::new(p), false)?
     } else {
         std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf())
     };
@@ -55,10 +54,9 @@ pub async fn glob_search(
     } else {
         output.extend(files);
         if truncated {
-            output.push("".to_string());
+            output.push(String::new());
             output.push(format!(
-                "(Results are truncated: showing first {} results. Consider using a more specific path or pattern.)",
-                MAX_RESULTS
+                "(Results are truncated: showing first {MAX_RESULTS} results. Consider using a more specific path or pattern.)"
             ));
         }
     }
@@ -104,7 +102,10 @@ impl FsGlobAction {
 
     async fn run(&self) -> Result<String, ToolError> {
         let sandbox = {
-            let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
+            let guard = self
+                .sandbox
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.clone().unwrap_or_else(|| {
                 Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
             })

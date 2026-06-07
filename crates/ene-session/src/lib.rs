@@ -6,7 +6,7 @@
 //!
 //! - [`ConversationSession`] — Central session holder: history, display buffer, memory context, character card
 //! - [`SessionConfig`] — Configuration for auto-split thresholds and timing
-//! - [`SplitReason`] — Why a session split was triggered (Timeout, TopicChange, Manual)
+//! - [`SplitReason`] — Why a session split was triggered (Timeout, `TopicChange`, Manual)
 //!
 //! ## Session Splitting
 //!

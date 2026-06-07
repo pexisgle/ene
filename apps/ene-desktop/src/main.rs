@@ -33,7 +33,7 @@ use tray::TrayPlugin;
 fn main() {
     #[cfg(target_os = "linux")]
     if let Err(err) = gtk::init() {
-        panic!("Failed to initialize GTK: {}", err);
+        panic!("Failed to initialize GTK: {err}");
     }
 
     let assets_dir = resources::ensure_resource_dirs();

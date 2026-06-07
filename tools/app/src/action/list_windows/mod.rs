@@ -28,7 +28,7 @@ impl ListWindowsAction {
             let title = window.title().unwrap_or_default();
             let app = window.app_name().unwrap_or_default();
             if !title.is_empty() || !app.is_empty() {
-                result.push(format!("{} ({})", title, app));
+                result.push(format!("{title} ({app})"));
             }
         }
         Ok(result.join("\n"))

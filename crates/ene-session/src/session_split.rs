@@ -54,10 +54,10 @@ impl std::fmt::Display for SplitReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SplitReason::Timeout { elapsed_minutes } => {
-                write!(f, "{}分間の無操作により会話を分割", elapsed_minutes)
+                write!(f, "{elapsed_minutes}分間の無操作により会話を分割")
             }
             SplitReason::TopicChange { similarity } => {
-                write!(f, "トピック変更を検出 (類似度: {:.2})", similarity)
+                write!(f, "トピック変更を検出 (類似度: {similarity:.2})")
             }
             SplitReason::Manual => {
                 write!(f, "手動により会話を分割")
@@ -163,7 +163,7 @@ pub async fn check_boundary(
 ///   by zero-information messages like greetings. For example, a dimension that
 ///   strongly responded to "Python async" will not be overwritten by the low
 ///   activation value of "hello."
-/// - Each message is embedded individually, avoiding model max_length limits
+/// - Each message is embedded individually, avoiding model `max_length` limits
 pub async fn embed_session_messages(
     embedder: &dyn EmbeddingProvider,
     history: &[(Role, String)],
@@ -209,7 +209,7 @@ pub async fn embed_session_messages(
 
     let norm: f32 = max_pooled.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 0.0 {
-        for x in max_pooled.iter_mut() {
+        for x in &mut max_pooled {
             *x /= norm;
         }
     }
@@ -387,6 +387,7 @@ pub fn poll_split_result(
 }
 
 /// Generates a unique session identifier.
+#[must_use]
 pub fn generate_session_id() -> SessionId {
     SessionId::from(format!("session_{}", uuid::Uuid::new_v4()))
 }

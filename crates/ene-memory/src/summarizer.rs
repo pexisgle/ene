@@ -20,7 +20,7 @@ pub struct ConversationSummaryResult {
 
 /// Summarizes a conversation history using an LLM, returning a structured summary
 /// with topics and key facts. The prompt includes existing keyfacts for comparison,
-/// allowing updates, deletions, and retentions via the key_facts output.
+/// allowing updates, deletions, and retentions via the `key_facts` output.
 pub async fn summarize_conversation(
     provider: &dyn ene_provider::LlmProvider,
     history: &[ene_provider::LlmMessage],
@@ -46,14 +46,14 @@ pub async fn summarize_conversation(
                         text.push_str(t);
                     }
                 }
-                conversation_text.push_str(&format!("{}: {}\n", user_name, text));
+                conversation_text.push_str(&format!("{user_name}: {text}\n"));
             }
             ene_provider::LlmMessage::Assistant { content, .. } => {
                 let text = content.as_deref().unwrap_or("");
-                conversation_text.push_str(&format!("{}: {}\n", character_name, text));
+                conversation_text.push_str(&format!("{character_name}: {text}\n"));
             }
             ene_provider::LlmMessage::System { content } => {
-                conversation_text.push_str(&format!("System: {}\n", content));
+                conversation_text.push_str(&format!("System: {content}\n"));
             }
             _ => {}
         }
@@ -124,8 +124,7 @@ pub async fn summarize_conversation(
     );
 
     let user_prompt = format!(
-        "【既存の事実リスト】\n{}\n\n以下の会話履歴を分析して、指定された JSON 形式で要約と最新の事実リストを作成してください。\n\n---\n{}\n---",
-        existing_facts_str, conversation_text
+        "【既存の事実リスト】\n{existing_facts_str}\n\n以下の会話履歴を分析して、指定された JSON 形式で要約と最新の事実リストを作成してください。\n\n---\n{conversation_text}\n---"
     );
 
     let schema = serde_json::json!({
@@ -181,12 +180,12 @@ fn parse_summary_json(raw: &str) -> Result<ConversationSummaryResult, MemoryErro
         return Ok(result);
     }
 
-    if let Some(start) = cleaned.find('{') {
-        if let Some(end) = cleaned.rfind('}') {
-            let json_str = &cleaned[start..=end];
-            if let Ok(result) = serde_json::from_str::<ConversationSummaryResult>(json_str) {
-                return Ok(result);
-            }
+    if let Some(start) = cleaned.find('{')
+        && let Some(end) = cleaned.rfind('}')
+    {
+        let json_str = &cleaned[start..=end];
+        if let Ok(result) = serde_json::from_str::<ConversationSummaryResult>(json_str) {
+            return Ok(result);
         }
     }
 

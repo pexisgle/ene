@@ -5,9 +5,7 @@ use super::{WlCompositor, gvariant_string, parse_gdbus_tuple_string};
 // ==================== Version detection ====================
 
 fn is_kde6() -> bool {
-    std::env::var("KDE_SESSION_VERSION")
-        .map(|v| v == "6")
-        .unwrap_or(false)
+    std::env::var("KDE_SESSION_VERSION").is_ok_and(|v| v == "6")
 }
 
 // ==================== Plasma 6: loadScript + print/journal ====================
@@ -20,7 +18,7 @@ fn capture_kwin_print_output(since_epoch_secs: u64) -> Result<String, ToolError>
             "--no-pager",
             "-o",
             "cat",
-            &format!("--since=@{}", since_epoch_secs),
+            &format!("--since=@{since_epoch_secs}"),
         ])
         .output()
         .map_err(|e| ToolError::ExecutionFailed {
@@ -48,7 +46,7 @@ fn capture_kwin_print_output(since_epoch_secs: u64) -> Result<String, ToolError>
 fn kwin_load_and_run_qdbus(js: &str) -> Result<String, ToolError> {
     let script_name = format!("ene-{}", std::process::id());
     let tmp_dir = std::env::temp_dir();
-    let script_path = tmp_dir.join(format!("{}.js", script_name));
+    let script_path = tmp_dir.join(format!("{script_name}.js"));
     std::fs::write(&script_path, js).map_err(|e| ToolError::ExecutionFailed {
         message: format!("Failed to write KWin script: {e}"),
     })?;
@@ -99,7 +97,7 @@ fn kwin_load_and_run_qdbus(js: &str) -> Result<String, ToolError> {
         });
     }
 
-    let script_obj = format!("/Scripting/Script{}", script_id);
+    let script_obj = format!("/Scripting/Script{script_id}");
     let run_output = std::process::Command::new("qdbus")
         .args(["org.kde.KWin", &script_obj, "org.kde.kwin.Script.run"])
         .output()
@@ -139,7 +137,7 @@ fn kwin_load_and_run_qdbus(js: &str) -> Result<String, ToolError> {
 fn kwin_load_and_run_gdbus(js: &str) -> Result<String, ToolError> {
     let script_name = format!("ene-{}", std::process::id());
     let tmp_dir = std::env::temp_dir();
-    let script_path = tmp_dir.join(format!("{}.js", script_name));
+    let script_path = tmp_dir.join(format!("{script_name}.js"));
     std::fs::write(&script_path, js).map_err(|e| ToolError::ExecutionFailed {
         message: format!("Failed to write KWin script: {e}"),
     })?;
@@ -189,7 +187,7 @@ fn kwin_load_and_run_gdbus(js: &str) -> Result<String, ToolError> {
         .trim()
         .parse()
         .map_err(|_| ToolError::ExecutionFailed {
-            message: format!("Failed to parse script ID from: {}", stdout),
+            message: format!("Failed to parse script ID from: {stdout}"),
         })?;
 
     if script_id < 0 {
@@ -199,7 +197,7 @@ fn kwin_load_and_run_gdbus(js: &str) -> Result<String, ToolError> {
         });
     }
 
-    let script_obj = format!("/Scripting/Script{}", script_id);
+    let script_obj = format!("/Scripting/Script{script_id}");
     let run_output = std::process::Command::new("gdbus")
         .args([
             "call",
@@ -339,24 +337,22 @@ impl WlCompositor for Kde {
 
         if is_kde6() {
             let js = format!(
-                "var ws=workspace.windowList();for(var i=0;i<ws.length;i++){{if(ws[i].caption.indexOf('{}')!=-1||(ws[i].resourceClass||'').indexOf('{}')!=-1){{workspace.activeWindow=ws[i];break}}}}",
-                escaped, escaped
+                "var ws=workspace.windowList();for(var i=0;i<ws.length;i++){{if(ws[i].caption.indexOf('{escaped}')!=-1||(ws[i].resourceClass||'').indexOf('{escaped}')!=-1){{workspace.activeWindow=ws[i];break}}}}"
             );
             if let Ok(_result) = kwin_load_and_run_qdbus(&js) {
-                return Ok(format!("Focused window matching: {}", title));
+                return Ok(format!("Focused window matching: {title}"));
             }
             let _ = kwin_load_and_run_gdbus(&js)?;
-            return Ok(format!("Focused window matching: {}", title));
+            return Ok(format!("Focused window matching: {title}"));
         }
 
         let js = format!(
-            "var cs=workspace.clientList();for(var i=0;i<cs.length;i++){{if(cs[i].caption.indexOf('{}')!=-1||(cs[i].resourceClass||'').indexOf('{}')!=-1){{workspace.activeWindow=cs[i];break}}}}",
-            escaped, escaped
+            "var cs=workspace.clientList();for(var i=0;i<cs.length;i++){{if(cs[i].caption.indexOf('{escaped}')!=-1||(cs[i].resourceClass||'').indexOf('{escaped}')!=-1){{workspace.activeWindow=cs[i];break}}}}"
         );
         if let Ok(_result) = kwin_eval_qdbus(&js) {
-            return Ok(format!("Focused window matching: {}", title));
+            return Ok(format!("Focused window matching: {title}"));
         }
         let _ = kwin_eval_gdbus(&js)?;
-        Ok(format!("Focused window matching: {}", title))
+        Ok(format!("Focused window matching: {title}"))
     }
 }

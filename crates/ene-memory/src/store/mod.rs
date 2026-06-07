@@ -14,6 +14,9 @@ use models::{
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
+/// A row of tool embedding data: `(tool_name, field, field_key, version_hash, model_name, embedding_vec)`.
+pub type ToolEmbeddingFieldRow = (String, String, String, String, String, Vec<f32>);
+
 /// Registers the sqlite-vec extension and runs pending Diesel migrations.
 pub fn init_sqlite_vec(conn: &mut SqliteConnection) -> Result<(), MemoryError> {
     use libsqlite3_sys::sqlite3_auto_extension;
@@ -23,7 +26,14 @@ pub fn init_sqlite_vec(conn: &mut SqliteConnection) -> Result<(), MemoryError> {
     // and transmuting it to *const () is a well-known pattern for registering SQLite
     // extensions. The function pointer remains valid for the lifetime of the process.
     unsafe {
-        sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_vec_init as *const ())));
+        sqlite3_auto_extension(Some(std::mem::transmute::<
+            *const (),
+            unsafe extern "C" fn(
+                *mut libsqlite3_sys::sqlite3,
+                *mut *mut i8,
+                *const libsqlite3_sys::sqlite3_api_routines,
+            ) -> i32,
+        >(sqlite3_vec_init as *const ())));
     }
     conn.run_pending_migrations(MIGRATIONS)
         .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
@@ -80,9 +90,7 @@ pub struct MemoryStore {
 }
 
 fn parse_dt(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
+    DateTime::parse_from_rfc3339(s).map_or_else(|_| Utc::now(), |dt| dt.with_timezone(&Utc))
 }
 
 impl MemoryStore {
@@ -98,6 +106,7 @@ impl MemoryStore {
     }
 
     /// Returns the dimensionality of the embedding vectors.
+    #[must_use]
     pub fn embedding_dim(&self) -> usize {
         self.embedding_dim
     }
@@ -223,7 +232,7 @@ impl MemoryStore {
 
         let results = conversation_summaries::table
             .filter(conversation_summaries::card_name.eq(card_name))
-            .filter(similarity.clone().ge(similarity_threshold as f64))
+            .filter(similarity.clone().ge(f64::from(similarity_threshold)))
             .select((
                 conversation_summaries::id,
                 conversation_summaries::session_id,
@@ -554,10 +563,8 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Lists all stored tool embeddings, one row per (tool_name, field, field_key, model_name).
-    pub fn list_tool_embedding_fields(
-        &self,
-    ) -> Result<Vec<(String, String, String, String, String, Vec<f32>)>, MemoryError> {
+    /// Lists all stored tool embeddings, one row per (`tool_name`, field, `field_key`, `model_name`).
+    pub fn list_tool_embedding_fields(&self) -> Result<Vec<ToolEmbeddingFieldRow>, MemoryError> {
         use crate::schema::tool_embedding_index::dsl;
 
         let mut conn = self
@@ -626,7 +633,7 @@ impl MemoryStore {
         let factor = 4i64;
         let row_cap = (limit as i64).saturating_mul(factor).max(limit as i64);
         let rows = tool_embedding_index::table
-            .filter(similarity.clone().ge(similarity_threshold as f64))
+            .filter(similarity.clone().ge(f64::from(similarity_threshold)))
             .select((
                 tool_embedding_index::tool_name,
                 tool_embedding_index::field,
@@ -702,7 +709,7 @@ mod tests {
         let blob = EmbeddingBlob(original.clone());
         let restored = blob.0;
         for (a, b) in original.iter().zip(restored.iter()) {
-            assert!((a - b).abs() < 1e-7, "Mismatch: {} != {}", a, b);
+            assert!((a - b).abs() < 1e-7, "Mismatch: {a} != {b}");
         }
     }
 
@@ -845,7 +852,7 @@ mod tests {
                     },
                     KeyFact {
                         key: "hobby".to_string(),
-                        value: "".to_string(),
+                        value: String::new(),
                     },
                 ],
                 &emb2,

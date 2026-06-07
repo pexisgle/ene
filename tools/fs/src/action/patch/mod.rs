@@ -13,7 +13,7 @@ pub async fn apply_patch(
     undo_manager: &UndoManager,
     session_id: &str,
 ) -> Result<String, ToolError> {
-    let normalized = patch_text.replace("\r\n", "\n").replace("\r", "\n");
+    let normalized = patch_text.replace("\r\n", "\n").replace('\r', "\n");
     let trimmed = normalized.trim();
 
     if trimmed == "*** Begin Patch\n*** End Patch" || trimmed == "*** Begin Patch\n\n*** End Patch"
@@ -37,8 +37,8 @@ pub async fn apply_patch(
     while i < lines.len() - 1 {
         let line = lines[i].trim();
 
-        if line.starts_with("*** Update File:") {
-            let file_path = line["*** Update File:".len()..].trim();
+        if let Some(rest) = line.strip_prefix("*** Update File:") {
+            let file_path = rest.trim();
             let start = i + 1;
             let (old_content, new_content, consumed) =
                 patch_parser::parse_update_block(&lines, start)?;
@@ -48,8 +48,8 @@ pub async fn apply_patch(
                 new_content,
             });
             i = start + consumed + 1;
-        } else if line.starts_with("*** Add File:") {
-            let file_path = line["*** Add File:".len()..].trim();
+        } else if let Some(rest) = line.strip_prefix("*** Add File:") {
+            let file_path = rest.trim();
             let start = i + 1;
             let (content, consumed) = patch_parser::parse_code_block(&lines, start)?;
             operations.push(PatchOperation::Add {
@@ -57,8 +57,8 @@ pub async fn apply_patch(
                 content,
             });
             i = start + consumed + 1;
-        } else if line.starts_with("*** Delete File:") {
-            let file_path = line["*** Delete File:".len()..].trim();
+        } else if let Some(rest) = line.strip_prefix("*** Delete File:") {
+            let file_path = rest.trim();
             operations.push(PatchOperation::Delete {
                 path: file_path.to_string(),
             });
@@ -88,21 +88,19 @@ pub async fn apply_patch(
                 if !resolved.exists() {
                     return Err(ToolError::ExecutionFailed {
                         message: format!(
-                            "Patch verification failed: File to update does not exist: {}",
-                            path
+                            "Patch verification failed: File to update does not exist: {path}"
                         ),
                     });
                 }
                 let current = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
                     ToolError::ExecutionFailed {
-                        message: format!("Patch verification failed: Cannot read {}: {}", path, e),
+                        message: format!("Patch verification failed: Cannot read {path}: {e}"),
                     }
                 })?;
                 if !current.contains(old_content) {
                     return Err(ToolError::ExecutionFailed {
                         message: format!(
-                            "Patch verification failed: old_content not found in {}. The file may have changed.",
-                            path
+                            "Patch verification failed: old_content not found in {path}. The file may have changed."
                         ),
                     });
                 }
@@ -117,8 +115,7 @@ pub async fn apply_patch(
                 if !resolved.exists() {
                     return Err(ToolError::ExecutionFailed {
                         message: format!(
-                            "Patch verification failed: File to delete does not exist: {}",
-                            path
+                            "Patch verification failed: File to delete does not exist: {path}"
                         ),
                     });
                 }
@@ -259,7 +256,10 @@ impl FsPatchAction {
 
     async fn run(&self) -> Result<String, ToolError> {
         let sandbox = {
-            let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
+            let guard = self
+                .sandbox
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.clone().unwrap_or_else(|| {
                 Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
             })

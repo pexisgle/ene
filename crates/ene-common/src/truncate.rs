@@ -12,6 +12,7 @@ pub struct TruncateResult {
 
 impl Truncate {
     /// Simply truncates text to a maximum number of Unicode characters and appends `...` if exceeded.
+    #[must_use]
     pub fn simple(text: &str, max_chars: usize) -> String {
         if text.chars().count() <= max_chars {
             text.to_string()
@@ -19,13 +20,13 @@ impl Truncate {
             let end = text
                 .char_indices()
                 .nth(max_chars)
-                .map(|(i, _)| i)
-                .unwrap_or(text.len());
+                .map_or(text.len(), |(i, _)| i);
             format!("{}...", &text[..end])
         }
     }
 
     /// Truncates text to a maximum number of Unicode characters and appends a detailed notice when cut.
+    #[must_use]
     pub fn detailed(text: &str, max_chars: usize) -> String {
         let char_count = text.chars().count();
         if char_count <= max_chars {
@@ -34,8 +35,7 @@ impl Truncate {
             let byte_end = text
                 .char_indices()
                 .nth(max_chars)
-                .map(|(i, _)| i)
-                .unwrap_or(text.len());
+                .map_or(text.len(), |(i, _)| i);
             format!(
                 "{}\n\n[... truncated, total {} chars ...]",
                 &text[..byte_end],
@@ -45,11 +45,13 @@ impl Truncate {
     }
 
     /// Alias for detailed truncation, used by tools.
+    #[must_use]
     pub fn chars(text: &str, max_chars: usize) -> String {
         Self::detailed(text, max_chars)
     }
 
-    /// Fits text within max_lines / max_bytes (head direction)
+    /// Fits text within `max_lines` / `max_bytes` (head direction)
+    #[must_use]
     pub fn output(text: &str, max_lines: usize, max_bytes: usize) -> TruncateResult {
         let lines: Vec<&str> = text.lines().collect();
         let total_bytes = text.len();
@@ -66,7 +68,7 @@ impl Truncate {
         let mut hit_bytes = false;
 
         for line in lines.iter().take(max_lines) {
-            let size = line.len() + if out.is_empty() { 0 } else { 1 };
+            let size = line.len() + usize::from(!out.is_empty());
             if bytes + size > max_bytes {
                 hit_bytes = true;
                 break;
@@ -86,14 +88,14 @@ impl Truncate {
 
         TruncateResult {
             content: format!(
-                "{}\n\n...{} {} truncated...\n\nUse offset/limit or grep to view specific sections.",
-                preview, removed, unit
+                "{preview}\n\n...{removed} {unit} truncated...\n\nUse offset/limit or grep to view specific sections."
             ),
             truncated: true,
         }
     }
 
     /// Truncation from the tail direction
+    #[must_use]
     pub fn tail(text: &str, max_lines: usize, max_bytes: usize) -> TruncateResult {
         let lines: Vec<&str> = text.lines().collect();
         let total_bytes = text.len();
@@ -110,7 +112,7 @@ impl Truncate {
         let mut hit_bytes = false;
 
         for line in lines.iter().rev().take(max_lines) {
-            let size = line.len() + if out.is_empty() { 0 } else { 1 };
+            let size = line.len() + usize::from(!out.is_empty());
             if bytes + size > max_bytes {
                 hit_bytes = true;
                 break;
@@ -129,7 +131,7 @@ impl Truncate {
         let unit = if hit_bytes { "bytes" } else { "lines" };
 
         TruncateResult {
-            content: format!("...{} {} truncated...\n\n{}", removed, unit, preview),
+            content: format!("...{removed} {unit} truncated...\n\n{preview}"),
             truncated: true,
         }
     }

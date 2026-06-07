@@ -45,10 +45,7 @@ fn apply_render_layers_recursive(
     layers_query: &Query<&RenderLayers>,
     commands: &mut Commands,
 ) {
-    if layers_query
-        .get(entity)
-        .map_or(true, |layers| layers != desired_layers)
-    {
+    if layers_query.get(entity) != Ok(desired_layers) {
         commands.entity(entity).insert(desired_layers.clone());
     }
 

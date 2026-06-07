@@ -45,13 +45,13 @@ impl ScrollAction {
         let x = self.scroll_x.unwrap_or(0);
         let y = self.scroll_y.unwrap_or(0);
 
-        let js = format!("window.scrollBy({}, {});", x, y);
+        let js = format!("window.scrollBy({x}, {y});");
         page.evaluate(js)
             .await
             .map_err(|e| ToolError::ExecutionFailed {
                 message: format!("Scroll failed: {e}"),
             })?;
 
-        Ok(format!("Scrolled by ({}, {})", x, y))
+        Ok(format!("Scrolled by ({x}, {y})"))
     }
 }

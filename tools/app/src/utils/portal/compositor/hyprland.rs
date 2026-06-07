@@ -32,7 +32,7 @@ impl WlCompositor for Hyprland {
             let title = client["title"].as_str().unwrap_or("");
             let class = client["class"].as_str().unwrap_or("");
             if !title.is_empty() || !class.is_empty() {
-                windows.push(format!("{} ({})", title, class));
+                windows.push(format!("{title} ({class})"));
             }
         }
         Ok(windows.join("\n"))
@@ -40,7 +40,7 @@ impl WlCompositor for Hyprland {
 
     fn focus_window(&self, title: &str) -> Result<String, ToolError> {
         let output = std::process::Command::new("hyprctl")
-            .args(["dispatch", "focuswindow", &format!("title:{}", title)])
+            .args(["dispatch", "focuswindow", &format!("title:{title}")])
             .output()
             .map_err(|e| ToolError::ExecutionFailed {
                 message: format!("Failed to run hyprctl: {e}"),
@@ -55,6 +55,6 @@ impl WlCompositor for Hyprland {
             });
         }
 
-        Ok(format!("Focused window matching: {}", title))
+        Ok(format!("Focused window matching: {title}"))
     }
 }

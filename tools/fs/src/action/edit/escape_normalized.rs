@@ -53,17 +53,14 @@ pub fn escape_normalized_replace(
         let block = lines[i..(i + find_lines.len()).min(lines.len())].join("\n");
         let unescaped_block = unescape(&block);
         if unescaped_block == unescaped_find {
-            let mut start_idx = 0usize;
-            for k in 0..i {
-                start_idx += lines[k].len() + 1;
-            }
-            let mut end_idx = start_idx;
-            for k in 0..find_lines.len().min(lines.len() - i) {
-                end_idx += lines[i + k].len();
-                if k < find_lines.len() - 1 && i + k + 1 < lines.len() {
-                    end_idx += 1;
-                }
-            }
+            let start_idx: usize = lines[..i].iter().map(|l| l.len() + 1).sum();
+            let block_len = find_lines.len().min(lines.len() - i);
+            let end_idx = start_idx
+                + lines[i..i + block_len]
+                    .iter()
+                    .map(|l| l.len())
+                    .sum::<usize>()
+                + block_len.saturating_sub(1).min(lines.len() - i - 1);
             results.push((start_idx, end_idx));
         }
     }

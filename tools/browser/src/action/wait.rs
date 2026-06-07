@@ -34,6 +34,6 @@ impl WaitAction {
     async fn run(&self) -> Result<String, ToolError> {
         let ms = self.wait_ms.unwrap_or(1000);
         tokio::time::sleep(tokio::time::Duration::from_millis(ms)).await;
-        Ok(format!("Waited {} ms", ms))
+        Ok(format!("Waited {ms} ms"))
     }
 }

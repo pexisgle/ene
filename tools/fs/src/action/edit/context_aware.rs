@@ -23,12 +23,12 @@ pub fn context_aware_replace(
 
     let mut results = Vec::new();
 
-    for i in 0..content_lines.len() {
-        if content_lines[i].trim() != first_line {
+    for (i, line) in content_lines.iter().enumerate() {
+        if line.trim() != first_line {
             continue;
         }
-        for j in (i + 2)..content_lines.len() {
-            if content_lines[j].trim() == last_line {
+        for (j, line) in content_lines.iter().enumerate().skip(i + 2) {
+            if line.trim() == last_line {
                 let block_lines = &content_lines[i..=j];
 
                 if block_lines.len() == search_lines.len() {
@@ -37,7 +37,7 @@ pub fn context_aware_replace(
                     for k in 1..block_lines.len() - 1 {
                         let bl = block_lines[k].trim();
                         let fl = search_lines[k].trim();
-                        if bl.len() > 0 || fl.len() > 0 {
+                        if !bl.is_empty() || !fl.is_empty() {
                             total += 1;
                             if bl == fl {
                                 matching += 1;
@@ -45,17 +45,10 @@ pub fn context_aware_replace(
                         }
                     }
                     if total == 0 || matching as f64 / total as f64 >= 0.5 {
-                        let mut start_idx = 0usize;
-                        for k in 0..i {
-                            start_idx += content_lines[k].len() + 1;
-                        }
-                        let mut end_idx = start_idx;
-                        for k in i..=j {
-                            end_idx += content_lines[k].len();
-                            if k < j {
-                                end_idx += 1;
-                            }
-                        }
+                        let start_idx: usize = content_lines[..i].iter().map(|l| l.len() + 1).sum();
+                        let end_idx = start_idx
+                            + content_lines[i..=j].iter().map(|l| l.len()).sum::<usize>()
+                            + (j - i);
                         results.push((start_idx, end_idx));
                     }
                 }

@@ -24,8 +24,7 @@ pub async fn shell_exec(
             .to_string()
     } else {
         std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| ".".to_string())
+            .map_or_else(|_| ".".to_string(), |p| p.to_string_lossy().to_string())
     };
 
     let timeout_ms = timeout.unwrap_or(sandbox.shell_timeout_ms);
@@ -37,7 +36,7 @@ pub async fn shell_exec(
         Ok(o) => o,
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
             return Err(ToolError::Timeout {
-                message: format!("Command timed out after {} ms", timeout_ms),
+                message: format!("Command timed out after {timeout_ms} ms"),
             });
         }
         Err(e) => {
@@ -75,8 +74,7 @@ pub async fn shell_exec(
             result
                 .status
                 .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "?".to_string()),
+                .map_or_else(|| "?".to_string(), |c| c.to_string()),
             output_text
         );
     }
@@ -89,7 +87,7 @@ pub async fn shell_exec(
         ));
     }
 
-    let final_output = format!("# {}\n{}", description, output_text);
+    let final_output = format!("# {description}\n{output_text}");
 
     Ok(final_output)
 }
@@ -139,7 +137,10 @@ impl ShellAction {
 
     async fn run(&self) -> Result<String, ToolError> {
         let sandbox = {
-            let guard = self.sandbox.read().unwrap_or_else(|e| e.into_inner());
+            let guard = self
+                .sandbox
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.clone().unwrap_or_else(|| {
                 Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
             })
