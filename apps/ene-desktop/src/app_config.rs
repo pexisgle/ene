@@ -180,7 +180,7 @@ pub fn window_plugin() -> WindowPlugin {
 #[derive(Debug, Clone)]
 pub struct CharacterEntry {
     pub name: String,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub folder: String,
     pub vrm_paths: Vec<String>,
     pub motion_paths: Vec<String>,

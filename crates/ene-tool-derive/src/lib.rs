@@ -341,8 +341,8 @@ fn expand_tool_spec(ast: DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
 
-        #[allow(dead_code)]
-        const #args_const_ident: () = ();
+    #[expect(dead_code)]
+    const #args_const_ident: () = ();
     };
 
     Ok(output)

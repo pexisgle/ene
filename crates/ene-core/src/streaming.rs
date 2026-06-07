@@ -354,7 +354,6 @@ pub(crate) fn build_chat_messages_list(
 }
 
 /// Executes a batch of tool calls and sends result events through the broadcast channel.
-#[allow(clippy::too_many_arguments)]
 async fn perform_tool_executions(
     registry: &dyn ene_tool_host::ToolRegistry,
     session_id: &str,
