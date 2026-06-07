@@ -137,7 +137,7 @@ async fn test_ipc_list_tools_and_call_tool() {
         shell_timeout_ms: 120_000,
         max_shell_output_bytes: 50 * 1024,
         max_shell_output_lines: 2000,
-        undo_db_path: None,
+        db_socket: None,
     };
 
     let registry = ene_tool_host::IpcToolRegistry::new(socket_path, sandbox, None)
@@ -216,7 +216,7 @@ async fn test_ipc_with_real_host() {
         shell_timeout_ms: 120_000,
         max_shell_output_bytes: 50 * 1024,
         max_shell_output_lines: 2000,
-        undo_db_path: None,
+        db_socket: None,
     };
 
     let registry = ene_tool_host::IpcToolRegistry::new(socket_path, sandbox, None)

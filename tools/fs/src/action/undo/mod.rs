@@ -1,15 +1,14 @@
-use crate::utils::undo_manager::UndoManager;
 use ene_tool_common::prelude::*;
 use std::sync::{Arc, RwLock};
 
-pub async fn undo(undo_manager: &UndoManager, session_id: &str) -> Result<String, ToolError> {
-    let logs = undo_manager
-        .undo(session_id)
+pub async fn undo(sandbox: &crate::utils::sandbox::Sandbox) -> Result<String, ToolError> {
+    let logs = sandbox
+        .undo_last()
         .await
         .map_err(|e| ToolError::ExecutionFailed {
             message: format!("Undo failed: {e}"),
         })?;
-    Ok(format!("Undo successful:\n{}", logs.join("\n")))
+    Ok(format!("Undo successful:\n{logs}"))
 }
 
 type SandboxRef = Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>;
@@ -48,7 +47,6 @@ impl UndoAction {
                 Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
             })
         };
-        let session_id = sandbox.session_id();
-        undo(sandbox.undo_manager(), &session_id).await
+        undo(&sandbox).await
     }
 }

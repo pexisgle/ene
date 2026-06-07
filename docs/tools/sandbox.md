@@ -21,7 +21,7 @@ pub struct SandboxConfigData {
     pub shell_timeout_ms: u64,                // 120s default
     pub max_shell_output_bytes: usize,        // 50KB default
     pub max_shell_output_lines: usize,        // 2000 default
-    pub undo_db_path: Option<String>,
+    pub db_socket: Option<String>,            // Path to per-tool DB IPC socket
 }
 ```
 
@@ -63,7 +63,7 @@ The `Sandbox` maintains an undo stack for all file modifications:
 | `track_patch(entries)` | Groups all patch changes as one undo entry |
 | `undo_last()` | Rolls back the most recent operation |
 
-Undo is backed by a SQLite database with zlib compression (`undodb_path`/`undo.db`).
+Undo is backed by a SQLite database accessed through the per-tool DB IPC server (`db_socket`). Original file contents are stored with zlib compression.
 
 ## Error Types
 

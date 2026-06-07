@@ -12,6 +12,7 @@ path = "src/main.rs"
 ene-tool-proto = { workspace = true }
 ene-tool-common = { workspace = true }
 ene-tool-derive = { workspace = true }
+ene-tool-db = { workspace = true }
 tokio = { workspace = true, features = ["fs", "process"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -25,7 +26,4 @@ strsim = "0.11"
 dashmap = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
-diesel = { version = "2.3", features = ["sqlite", "chrono"] }
-diesel_migrations = { version = "2.3", features = ["sqlite"] }
-libsqlite3-sys = { version = "0.35", features = ["bundled"] }
 flate2 = "1"

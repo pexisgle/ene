@@ -66,7 +66,16 @@ tool_embedding_index (
     created_at TEXT NOT NULL,
     UNIQUE(tool_name, field, field_key, model_name)
 )
+
+__tool_schemas (
+    prefix TEXT PRIMARY KEY,    -- tool name prefix (e.g. "fs_", "utility_")
+    schema_json TEXT,           -- full JSON schema declaration
+    fingerprint TEXT,           -- blake3 hash of schema_json
+    created_at TEXT             -- RFC3339
+)
 ```
+
+The `__tool_schemas` table is a metadata registry used by the Tool DB IPC server to track which tools have declared their table schemas. Tool-specific tables (e.g. `fs_undo_entries`, `utility_todo_items`) are created dynamically when tools connect and declare their schemas.
 
 ### Summaries
 
@@ -106,6 +115,43 @@ Each tool has multiple embedding rows (one per field: `summary`, `description`, 
 | `list_tool_embedding_fields()` | List all `(name, field, field_key, model, hash, vector)` rows |
 | `delete_tool_embeddings(name)` | Remove all field rows for a tool |
 | `search_tools(query_emb, limit, threshold)` | Cosine similarity across all fields, max-pool per tool for Tool RAG |
+
+## Tool DB IPC Server
+
+Tools that need persistent storage (e.g. `ene-tool-fs` for undo, `ene-tool-utility` for todos) access the database through a per-tool IPC server rather than linking `ene-memory` directly.
+
+### Architecture
+
+```
+Core (ene-core)                     Tool binary (e.g. ene-tool-fs)
+┌─────────────────────┐             ┌──────────────────────┐
+│ DbIpcServer         │  Unix sock  │ DbClient             │
+│  - listens on       │◄───────────►│  - connect()         │
+│    ene-db-{name}.sock│             │  - declare_schema()  │
+│  - validates prefix │             │  - insert/select/... │
+│  - enforces schema  │             └──────────────────────┘
+│  - dispatches to    │
+│    memory.db via    │
+│    diesel           │
+└─────────────────────┘
+```
+
+### Security Model
+
+- Each tool declares its tables via `DeclareSchema` with a prefix (e.g. `fs_`, `utility_`)
+- All table names must start with the tool's prefix
+- All column references are validated against the declared schema
+- Access to internal tables (`sqlite_*`, `__tool_schemas`, core tables) is blocked
+- No DDL is exposed — tools can only use CRUD operations on their declared tables
+
+### ene-tool-db Crate
+
+The `ene-tool-db` crate provides:
+- `DbValue` — type-safe value enum (Null/Bool/Int/Float/Text/Blob)
+- `DbFilter` — structured filter expressions (Eq/Ne/Lt/Gt/In/Like/And/Or/Not/...)
+- `DbSchema` / `DbTable` / `DbColumn` / `DbIndex` — schema declaration types
+- `DbClient` — async client that connects to the per-tool Unix socket
+- `DbRequest` / `DbResponse` — IPC message types
 
 ## EmbeddingProvider
 

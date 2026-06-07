@@ -55,11 +55,23 @@ diesel::table! {
     }
 }
 
+// Registry of tool-declared schemas. Each row records the tool prefix and a
+// fingerprint of the declared schema so the server can detect changes.
+diesel::table! {
+    __tool_schemas (prefix) {
+        prefix -> Text,
+        schema_json -> Text,
+        fingerprint -> Text,
+        created_at -> Text,
+    }
+}
+
 diesel::allow_tables_to_appear_in_same_query!(
     conversation_keyfacts,
     conversation_logs,
     conversation_summaries,
     tool_embedding_index,
+    __tool_schemas,
 );
 
 diesel::joinable!(conversation_keyfacts -> conversation_summaries (summary_id));

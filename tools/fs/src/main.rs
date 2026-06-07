@@ -7,6 +7,8 @@
 
 mod action;
 mod provider;
+mod schema;
+mod undo;
 mod utils;
 
 use ene_tool_proto::run_tool_server;

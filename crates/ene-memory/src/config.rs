@@ -40,16 +40,15 @@ ene_config::define_config!(
 );
 
 impl MemoryConfig {
-    /// Resolves the effective database path, defaulting to a file next to the character card.
+    /// Resolves the effective database path, defaulting to a file inside the
+    /// character's directory (`assets/characters/{name}/memory.db`).
     #[must_use]
     pub fn resolve_memory_db_path(&self) -> std::path::PathBuf {
         if !self.db_path.trim().is_empty() {
             return std::path::PathBuf::from(&self.db_path);
         }
-        let config = ene_config::get_global_config();
-        let card_path = std::path::Path::new(&config.character);
-        let dir = card_path.parent().unwrap_or(std::path::Path::new("."));
-        dir.join("memory.db")
+        let character = ene_config::get_global_config().character;
+        ene_config::paths::character_dir(&character).join("memory.db")
     }
 
     /// Resolves the effective summarisation model, falling back to the chat model.

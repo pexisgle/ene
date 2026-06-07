@@ -3764,16 +3764,20 @@ dependencies = [
 name = "ene-core"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "cargo-husky",
  "chrono",
+ "diesel",
  "ene-common",
  "ene-config",
  "ene-embedding",
  "ene-memory",
  "ene-provider",
  "ene-session",
+ "ene-tool-db",
  "ene-tool-host",
  "ene-tool-proto",
+ "libsqlite3-sys",
  "regex",
  "serde",
  "serde_json",
@@ -3946,6 +3950,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-tool-db"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ene-tool-derive"
 version = "0.1.0"
 dependencies = [
@@ -3967,14 +3982,12 @@ dependencies = [
  "async-trait",
  "chrono",
  "dashmap",
- "diesel",
- "diesel_migrations",
  "ene-tool-common",
+ "ene-tool-db",
  "ene-tool-derive",
  "ene-tool-proto",
  "flate2",
  "glob",
- "libsqlite3-sys",
  "regex",
  "schemars",
  "serde",
@@ -4030,17 +4043,13 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
- "dashmap",
- "diesel",
- "diesel_migrations",
  "ene-tool-common",
+ "ene-tool-db",
  "ene-tool-derive",
  "ene-tool-proto",
- "libsqlite3-sys",
  "schemars",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",

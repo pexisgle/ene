@@ -66,7 +66,16 @@ tool_embedding_index (
     created_at TEXT NOT NULL,
     UNIQUE(tool_name, field, field_key, model_name)
 )
+
+__tool_schemas (
+    prefix TEXT PRIMARY KEY,    -- ツール名プレフィックス (例: "fs_", "utility_")
+    schema_json TEXT,           -- 完全な JSON スキーマ宣言
+    fingerprint TEXT,           -- schema_json の blake3 ハッシュ
+    created_at TEXT             -- RFC3339
+)
 ```
+
+`__tool_schemas` テーブルは、ツール DB IPC サーバーがどのツールがテーブルスキーマを宣言したかを追跡するためのメタデータレジストリです。ツール固有のテーブル (例: `fs_undo_entries`, `utility_todo_items`) は、ツールが接続してスキーマを宣言する際に動的に作成されます。
 
 ### 要約
 
@@ -106,6 +115,44 @@ tool_embedding_index (
 | `list_tool_embedding_fields()` | 全 `(name, field, field_key, model, hash, vector)` 行を列挙 |
 | `delete_tool_embeddings(name)` | ツールの全フィールド行を削除 |
 | `search_tools(query_emb, limit, threshold)` | 全フィールドでコサイン類似度、ツールごとに max-pool で Tool RAG |
+
+## ツール DB IPC サーバー
+
+永続ストレージを必要とするツール (例: undo 用の `ene-tool-fs`、todo 用の `ene-tool-utility`) は、`ene-memory` を直接リンクするのではなく、ツールごとの IPC サーバー経由でデータベースにアクセスします。
+
+### アーキテクチャ
+
+```
+Core (ene-core)                     ツールバイナリ (例: ene-tool-fs)
+┌─────────────────────┐             ┌──────────────────────┐
+│ DbIpcServer         │  Unix sock  │ DbClient             │
+│  - リッスン:        │◄───────────►│  - connect()         │
+│    ene-db-{name}.sock│             │  - declare_schema()  │
+│  - プレフィックス   │             │  - insert/select/... │
+│    検証             │             └──────────────────────┘
+│  - スキーマ強制     │
+│  - diesel 経由で    │
+│    memory.db に     │
+│    ディスパッチ     │
+└─────────────────────┘
+```
+
+### セキュリティモデル
+
+- 各ツールは `DeclareSchema` でプレフィックス (例: `fs_`, `utility_`) を付けてテーブルを宣言
+- 全テーブル名はツールのプレフィックスで始まる必要がある
+- 全カラム参照は宣言済みスキーマに対して検証される
+- 内部テーブル (`sqlite_*`, `__tool_schemas`, コアテーブル) へのアクセスはブロック
+- DDL は公開されない — ツールは宣言済みテーブルで CRUD 操作のみ使用可能
+
+### ene-tool-db クレート
+
+`ene-tool-db` クレートが以下を提供:
+- `DbValue` — 型安全な値列挙型 (Null/Bool/Int/Float/Text/Blob)
+- `DbFilter` — 構造化フィルタ式 (Eq/Ne/Lt/Gt/In/Like/And/Or/Not/...)
+- `DbSchema` / `DbTable` / `DbColumn` / `DbIndex` — スキーマ宣言型
+- `DbClient` — ツールごとの Unix ソケットに接続する非同期クライアント
+- `DbRequest` / `DbResponse` — IPC メッセージ型
 
 ## EmbeddingProvider
 

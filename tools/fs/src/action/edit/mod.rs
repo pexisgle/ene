@@ -1,5 +1,4 @@
-use crate::utils::sandbox::SandboxConfig;
-use crate::utils::undo_manager::UndoManager;
+use crate::utils::sandbox::Sandbox;
 use ene_tool_common::prelude::*;
 use std::collections::HashMap;
 use std::path::Path;
@@ -88,9 +87,7 @@ pub async fn edit(
     old_string: &str,
     new_string: &str,
     replace_all: bool,
-    sandbox: &SandboxConfig,
-    undo_manager: &UndoManager,
-    session_id: &str,
+    sandbox: &Sandbox,
 ) -> Result<String, ToolError> {
     if old_string == new_string {
         return Err(ToolError::ExecutionFailed {
@@ -98,7 +95,7 @@ pub async fn edit(
         });
     }
 
-    let resolved = sandbox.resolve_and_check(path, true)?;
+    let resolved = sandbox.check_writable(path)?;
 
     if !resolved.exists() {
         return Err(ToolError::ExecutionFailed {
@@ -183,12 +180,9 @@ pub async fn edit(
             message: format!("Failed to write file: {e}"),
         })?;
 
-    undo_manager.push_restore_file(
-        session_id,
-        "edit",
-        resolved.clone(),
-        Some(original.into_bytes()),
-    );
+    sandbox
+        .track_overwrite(&resolved, Some(original.into_bytes()))
+        .await;
 
     Ok("Edit applied successfully.".to_string())
 }
@@ -315,8 +309,6 @@ impl FsEditAction {
                 Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
             })
         };
-        let session_id = sandbox.session_id();
-        let undo_manager = sandbox.undo_manager();
 
         sandbox.check_permission(
             crate::utils::permission::DestructiveAction::FileOverwrite,
@@ -329,9 +321,7 @@ impl FsEditAction {
             &self.old_string,
             &self.new_string,
             self.replace_all.unwrap_or(false),
-            sandbox.config(),
-            undo_manager,
-            &session_id,
+            &sandbox,
         )
         .await
     }

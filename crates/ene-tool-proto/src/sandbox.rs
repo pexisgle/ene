@@ -31,8 +31,9 @@ ene_config::define_config!(
         pub max_shell_output_bytes: usize = 50 * 1024,
         /// Maximum lines in shell output.
         pub max_shell_output_lines: usize = 2000,
-        /// Optional path to the undo database.
-        pub undo_db_path: Option<String> = None,
+        /// Path to the per-tool DB socket. Tool binaries connect to this
+        /// Unix socket to access the core DB server for typed CRUD operations.
+        pub db_socket: Option<String> = None,
     }
 );
 
@@ -52,7 +53,7 @@ mod tests {
             shell_timeout_ms: 30_000,
             max_shell_output_bytes: 1_000_000,
             max_shell_output_lines: 5000,
-            undo_db_path: Some("/tmp/undo.db".into()),
+            db_socket: Some("/tmp/db.sock".into()),
         };
         let json = serde_json::to_string(&config).unwrap();
         let deser: SandboxConfigData = serde_json::from_str(&json).unwrap();
@@ -65,6 +66,6 @@ mod tests {
         let config: SandboxConfigData = serde_json::from_str(json).unwrap();
         assert!(!config.enabled);
         assert!(config.allowed_directories.is_empty());
-        assert!(config.undo_db_path.is_none());
+        assert!(config.db_socket.is_none());
     }
 }

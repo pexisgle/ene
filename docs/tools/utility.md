@@ -1,6 +1,6 @@
 # Utility Tools (`ene-tool-utility`)
 
-**Binary:** `ene-tool-utility` | **Stateful:** Yes (TodoDb — SQLite-backed, session-scoped)
+**Binary:** `ene-tool-utility` | **Stateful:** Yes (TodoStore — DB IPC backed, session-scoped)
 
 Provides helper tools for user interaction and task management.
 
@@ -87,7 +87,7 @@ Soft-delete tasks (sets status to `cancelled`).
 |-----------|------|----------|-------------|
 | `todos` | object[] | Yes | Tasks to remove |
 
-**State:** Persistent per session via `TodoDb` (SQLite with embedded migrations, WAL mode). Each session's todos are isolated by `session_id`. Survives tool binary restarts within the same session. Supports parent/child hierarchy with cycle detection.
+**State:** Persistent per session via `TodoStore` (accessed through the per-tool DB IPC server, WAL mode). Each session's todos are isolated by `session_id`. Survives tool binary restarts within the same session. Supports parent/child hierarchy with cycle detection.
 
 ---
 

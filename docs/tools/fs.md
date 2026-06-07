@@ -1,6 +1,6 @@
 # Filesystem Tools (`ene-tool-fs`)
 
-**Binary:** `ene-tool-fs` | **Stateful:** Yes (Sandbox + UndoManager)
+**Binary:** `ene-tool-fs` | **Stateful:** Yes (Sandbox + UndoManager via DB IPC)
 
 Provides filesystem operations, shell execution, and undo. All file operations respect sandbox configuration.
 
@@ -126,7 +126,7 @@ Revert the most recent file operation.
 |-----------|------|-------------|
 | (none) | — | — |
 
-**Behavior:** Reverts write, edit, delete, and patch operations. Shell operations cannot be undone. Uses SQLite-backed undo stack with zlib compression.
+**Behavior:** Reverts write, edit, delete, and patch operations. Shell operations cannot be undone. Undo stack is persisted via the per-tool DB IPC server with zlib compression.
 
 ## Category
 

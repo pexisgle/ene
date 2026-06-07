@@ -8,19 +8,15 @@ description = "Built-in utility tools: user questioning, todo list management, s
 ene-tool-proto = { workspace = true }
 ene-tool-common = { workspace = true }
 ene-tool-derive = { workspace = true }
+ene-tool-db = { workspace = true }
 schemars = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
-dashmap = { workspace = true }
-uuid = { workspace = true }
 tracing = { workspace = true }
-thiserror = { workspace = true }
-diesel = { version = "2.3", features = ["sqlite", "chrono"] }
-diesel_migrations = { version = "2.3", features = ["sqlite"] }
-libsqlite3-sys = { version = "0.35", features = ["bundled"] }
+uuid = { workspace = true }
 
 [[bin]]
 name = "ene-tool-utility"

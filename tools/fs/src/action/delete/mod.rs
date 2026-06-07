@@ -1,17 +1,10 @@
-use crate::utils::sandbox::SandboxConfig;
-use crate::utils::undo_manager::UndoManager;
+use crate::utils::sandbox::Sandbox;
 use ene_tool_common::prelude::*;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-pub async fn delete(
-    path: &Path,
-    recursive: bool,
-    sandbox: &SandboxConfig,
-    undo_manager: &UndoManager,
-    session_id: &str,
-) -> Result<String, ToolError> {
-    let resolved = sandbox.resolve_and_check(path, true)?;
+pub async fn delete(path: &Path, recursive: bool, sandbox: &Sandbox) -> Result<String, ToolError> {
+    let resolved = sandbox.config().resolve_and_check(path, true)?;
 
     if !resolved.exists() {
         return Err(ToolError::ExecutionFailed {
@@ -37,7 +30,7 @@ pub async fn delete(
                 message: format!("Failed to delete directory: {e}"),
             })?;
 
-        undo_manager.push_delete_created_file(session_id, "delete", resolved.clone());
+        sandbox.track_deletion(&resolved, None).await;
 
         Ok(format!("Deleted directory: {}", resolved.display()))
     } else {
@@ -49,13 +42,13 @@ pub async fn delete(
                 message: format!("Failed to delete file: {e}"),
             })?;
 
-        undo_manager.push_restore_file(session_id, "delete", resolved.clone(), original);
+        sandbox.track_overwrite(&resolved, original).await;
 
         Ok(format!("Deleted file: {}", resolved.display()))
     }
 }
 
-type SandboxRef = Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>;
+type SandboxRef = Arc<RwLock<Option<Arc<Sandbox>>>>;
 
 fn default_sandbox() -> SandboxRef {
     Arc::new(RwLock::new(None))
@@ -98,12 +91,10 @@ impl FsDeleteAction {
                 .sandbox
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.clone().unwrap_or_else(|| {
-                Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
-            })
+            guard
+                .clone()
+                .unwrap_or_else(|| Arc::new(Sandbox::new(Default::default())))
         };
-        let session_id = sandbox.session_id();
-        let undo_manager = sandbox.undo_manager();
 
         sandbox.check_permission(
             crate::utils::permission::DestructiveAction::FileDelete,
@@ -114,9 +105,7 @@ impl FsDeleteAction {
         delete(
             Path::new(&self.file_path),
             self.recursive.unwrap_or(false),
-            sandbox.config(),
-            undo_manager,
-            &session_id,
+            &sandbox,
         )
         .await
     }

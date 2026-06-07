@@ -22,6 +22,10 @@ tracing = { workspace = true }
 ene-config = { workspace = true }
 ene-embedding = { workspace = true }
 ene-memory = { workspace = true }
+ene-tool-db = { workspace = true }
+diesel = { version = "2.3", features = ["sqlite", "chrono", "r2d2"] }
+libsqlite3-sys = { version = "0.35", features = ["bundled"] }
+blake3 = { workspace = true }
 
 ene-session = { workspace = true }
 ene-tool-host = { workspace = true }
