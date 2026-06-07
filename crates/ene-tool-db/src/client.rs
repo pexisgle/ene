@@ -1,17 +1,17 @@
 use crate::messages::{DbErrorCode, DbRequest, DbResponse};
 use crate::types::{DbFilter, DbOrderBy, DbSchema, DbValue, Row};
+use ene_tool_proto::transport::IpcStream;
 use std::collections::BTreeMap;
 use std::path::Path;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
 
 const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 
 /// Errors that can occur when communicating with the DB IPC server.
 #[derive(Error, Debug)]
 pub enum DbError {
-    /// IO or transport error on the Unix socket.
+    /// IO or transport error.
     #[error("transport error: {0}")]
     Transport(#[from] std::io::Error),
     /// Server returned an error response.
@@ -30,15 +30,15 @@ pub enum DbError {
     ConnectionClosed,
 }
 
-/// Client for communicating with the per-tool DB IPC server over a Unix socket.
+/// Client for communicating with the per-tool DB IPC server.
 pub struct DbClient {
-    stream: UnixStream,
+    stream: IpcStream,
 }
 
 impl DbClient {
     /// Connects to the DB IPC server at the given socket path.
     pub async fn connect(socket_path: &Path) -> Result<Self, DbError> {
-        let stream = UnixStream::connect(socket_path).await?;
+        let stream = IpcStream::connect(socket_path).await?;
         Ok(Self { stream })
     }
 

@@ -1,12 +1,17 @@
+#[cfg(target_os = "linux")]
 mod gnome;
+#[cfg(target_os = "linux")]
 mod hyprland;
+#[cfg(target_os = "linux")]
 mod kde;
+#[cfg(target_os = "linux")]
 mod sway;
 
 use ene_tool_proto::ToolError;
 
 // ==================== Compositor trait ====================
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) trait WlCompositor {
     fn list_windows(&self) -> Result<String, ToolError>;
     fn focus_window(&self, title: &str) -> Result<String, ToolError>;
@@ -14,24 +19,28 @@ pub(crate) trait WlCompositor {
 
 // ==================== Detection ====================
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn dispatch() -> Option<Box<dyn WlCompositor>> {
-    if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
-        return Some(Box::new(hyprland::Hyprland));
-    }
-    if std::env::var("SWAYSOCK").is_ok() {
-        return Some(Box::new(sway::Sway));
-    }
-    if let Ok(desktop) = std::env::var("XDG_CURRENT_DESKTOP") {
-        let d = desktop.to_lowercase();
-        if d.contains("gnome") {
-            return Some(Box::new(gnome::Gnome));
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
+            return Some(Box::new(hyprland::Hyprland));
         }
-        if d.contains("kde") || d.contains("plasma") {
+        if std::env::var("SWAYSOCK").is_ok() {
+            return Some(Box::new(sway::Sway));
+        }
+        if let Ok(desktop) = std::env::var("XDG_CURRENT_DESKTOP") {
+            let d = desktop.to_lowercase();
+            if d.contains("gnome") {
+                return Some(Box::new(gnome::Gnome));
+            }
+            if d.contains("kde") || d.contains("plasma") {
+                return Some(Box::new(kde::Kde));
+            }
+        }
+        if std::env::var("KDE_FULL_SESSION").is_ok() {
             return Some(Box::new(kde::Kde));
         }
-    }
-    if std::env::var("KDE_FULL_SESSION").is_ok() {
-        return Some(Box::new(kde::Kde));
     }
     None
 }

@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use crate::db_server::DbIpcServer;
 use crate::error::EneCoreError;
 use crate::streaming::{self, PermissionDecision, UserInputResponse};
@@ -971,38 +972,44 @@ async fn build_tool_registry(
     memory_store: Option<Arc<ene_memory::MemoryStore>>,
 ) -> Result<Arc<dyn ToolRegistry>, EneCoreError> {
     if memory_store.is_some() {
+        #[cfg(unix)]
         let tool_config = config
             .get_section::<ene_tool_host::ToolConfig>()
             .unwrap_or_default();
 
+        #[cfg(unix)]
         let db_path = config
             .get_section::<ene_memory::MemoryConfig>()
             .unwrap_or_default()
             .resolve_memory_db_path();
 
-        let socket_dir = ene_config::paths::tool_socket_dir();
-        std::fs::create_dir_all(&socket_dir).map_err(|e| {
-            EneCoreError::Tool(ene_tool_proto::ToolError::ExecutionFailed {
-                message: format!("Failed to create socket dir: {e}"),
-            })
-        })?;
+        #[cfg(unix)]
+        {
+            let socket_dir = ene_config::paths::tool_socket_dir();
+            std::fs::create_dir_all(&socket_dir).map_err(|e| {
+                EneCoreError::Tool(ene_tool_proto::ToolError::ExecutionFailed {
+                    message: format!("Failed to create socket dir: {e}"),
+                })
+            })?;
 
-        for (name, entry) in &tool_config.tools {
-            if !entry.enable {
-                continue;
-            }
-
-            let tool_name = name.clone();
-            let prefix = format!("{name}_");
-            let socket_path = socket_dir.join(format!("ene-db-{name}.sock"));
-
-            let server = DbIpcServer::new(db_path.clone(), socket_path, tool_name.clone(), prefix);
-
-            tokio::spawn(async move {
-                if let Err(e) = server.run().await {
-                    tracing::error!(tool = %tool_name, error = %e, "DB IPC server error");
+            for (name, entry) in &tool_config.tools {
+                if !entry.enable {
+                    continue;
                 }
-            });
+
+                let tool_name = name.clone();
+                let prefix = format!("{name}_");
+                let socket_path = socket_dir.join(format!("ene-db-{name}.sock"));
+
+                let server =
+                    DbIpcServer::new(db_path.clone(), socket_path, tool_name.clone(), prefix);
+
+                tokio::spawn(async move {
+                    if let Err(e) = server.run().await {
+                        tracing::error!(tool = %tool_name, error = %e, "DB IPC server error");
+                    }
+                });
+            }
         }
     }
 

@@ -1,5 +1,6 @@
 use ene_tool_common::prelude::*;
 
+#[cfg(target_os = "linux")]
 mod wayland;
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, ToolAction)]
@@ -16,6 +17,7 @@ pub struct ListWindowsAction {}
 impl ListWindowsAction {
     async fn run(&self) -> Result<String, ToolError> {
         if crate::utils::portal::detect_wayland() {
+            #[cfg(target_os = "linux")]
             return wayland::list_windows_wayland();
         }
 

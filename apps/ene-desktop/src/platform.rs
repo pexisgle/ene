@@ -12,6 +12,12 @@ use windows_sys::Win32::{
     UI::WindowsAndMessaging::GetCursorPos,
 };
 
+/// The layers used for the visible character and the offscreen silhouette camera.
+pub fn character_render_layers() -> RenderLayers {
+    RenderLayers::layer(0).with(1)
+}
+
+#[cfg(not(target_os = "windows"))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LinuxWindowBackend {
     #[default]
@@ -19,12 +25,8 @@ pub enum LinuxWindowBackend {
     Wayland,
 }
 
-/// The layers used for the visible character and the offscreen silhouette camera.
-pub fn character_render_layers() -> RenderLayers {
-    RenderLayers::layer(0).with(1)
-}
-
 /// Detects whether the current Linux desktop session is Wayland-backed.
+#[cfg(not(target_os = "windows"))]
 pub fn detect_linux_window_backend() -> LinuxWindowBackend {
     #[cfg(target_os = "linux")]
     {

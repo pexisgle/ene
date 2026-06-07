@@ -6,6 +6,7 @@
 #![warn(missing_docs)]
 
 /// Per-tool DB IPC server.
+#[cfg(unix)]
 pub mod db_server;
 /// Core error types.
 pub mod error;

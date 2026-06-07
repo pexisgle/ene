@@ -1,6 +1,7 @@
 use ene_tool_common::prelude::*;
 use image::{DynamicImage, imageops::FilterType};
 
+#[cfg(target_os = "linux")]
 mod portal;
 
 fn capture_window_by_title_xcap(
@@ -62,7 +63,20 @@ impl CaptureWindowAction {
         let title = self.window_title.clone();
 
         let image = if crate::utils::portal::detect_wayland() {
-            portal::capture_window_portal(scale_percent).await
+            #[cfg(target_os = "linux")]
+            {
+                portal::capture_window_portal(scale_percent).await
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let t = title.clone();
+                let sp = scale_percent;
+                tokio::task::spawn_blocking(move || capture_window_by_title_xcap(&t, sp))
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed {
+                        message: format!("Task failed: {e}"),
+                    })?
+            }
         } else {
             let t = title.clone();
             let sp = scale_percent;
