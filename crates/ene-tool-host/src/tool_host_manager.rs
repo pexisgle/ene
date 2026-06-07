@@ -387,11 +387,7 @@ impl ToolHostManager {
         let db_socket_path: PathBuf = {
             #[cfg(unix)]
             {
-                let p = paths::tool_socket_dir().join(format!("ene-db-{}.sock", name));
-                if p.exists() {
-                    let _ = std::fs::remove_file(&p);
-                }
-                p
+                paths::tool_socket_dir().join(format!("ene-db-{}.sock", name))
             }
             #[cfg(windows)]
             {
