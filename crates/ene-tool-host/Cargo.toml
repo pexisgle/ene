@@ -15,8 +15,8 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-dashmap = "6"
-rmcp = { version = "1.7", features = ["client", "transport-child-process", "transport-streamable-http-client"] }
+dashmap = { workspace = true }
+rmcp = { workspace = true }
 ene-config = { workspace = true }
 ene-provider = { workspace = true }
 ene-memory = { workspace = true }

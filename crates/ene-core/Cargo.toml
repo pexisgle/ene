@@ -23,8 +23,8 @@ ene-config = { workspace = true }
 ene-embedding = { workspace = true }
 ene-memory = { workspace = true }
 ene-tool-db = { workspace = true }
-diesel = { version = "2.3", features = ["sqlite", "chrono", "r2d2"] }
-libsqlite3-sys = { version = "0.35", features = ["bundled"] }
+diesel = { workspace = true }
+libsqlite3-sys = { workspace = true }
 blake3 = { workspace = true }
 
 ene-session = { workspace = true }
@@ -37,10 +37,7 @@ ene-tool-proto = { workspace = true }
 # symbols to ene-core, and its hook side-effects only fire inside a git
 # working tree. The `user-hooks` feature copies the executable scripts
 # under `.cargo-husky/hooks/` into `.git/hooks/`.
-cargo-husky = { version = "1.5", default-features = false, features = [
-    "user-hooks",
-    "run-for-all",
-] }
+cargo-husky = { workspace = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

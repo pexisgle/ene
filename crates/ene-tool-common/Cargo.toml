@@ -5,9 +5,9 @@ edition = "2024"
 description = "Shared utilities for tool crates — HTML-to-Markdown conversion and content truncation"
 
 [dependencies]
-htmd = "0.5"
-scraper = "0.27"
-ego-tree = "0.11"
+htmd = { workspace = true }
+scraper = { workspace = true }
+ego-tree = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
