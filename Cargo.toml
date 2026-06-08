@@ -54,6 +54,35 @@ ene-tool-derive = { path = "crates/ene-tool-derive" }
 ene-tool-db = { path = "crates/ene-tool-db" }
 blake3 = "1.5"
 
+# --- Database ---
+diesel = { version = "2.3", features = ["sqlite", "chrono", "r2d2"] }
+diesel_migrations = { version = "2.3", features = ["sqlite"] }
+libsqlite3-sys = { version = "0.35", features = ["bundled"] }
+sqlite-vec = "0.1"
+
+# --- Proc macros ---
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
+darling = "0.20"
+
+# --- ML / Embedding ---
+candle-core = "0.10"
+candle-nn = "0.10"
+tokenizers = "0.23"
+hf-hub = { version = "0.5.0", default-features = false }
+
+# --- Tooling ---
+cargo-husky = { version = "1.5", default-features = false, features = ["user-hooks", "run-for-all"] }
+directories = "6"
+rmcp = { version = "1.7", features = ["client", "transport-child-process", "transport-streamable-http-client"] }
+htmd = "0.5"
+scraper = "0.27"
+ego-tree = "0.11"
+
+# --- Cross-cutting (used by 2+ crates) ---
+arboard = { version = "3.6", features = ["wayland-data-control"] }
+
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]
 opt-level = 1

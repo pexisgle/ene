@@ -22,7 +22,7 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-arboard = { version = "3", features = ["wayland-data-control"] }
+arboard = { workspace = true }
 gtk = "0.18.2"
 raw-window-handle = "0.6.2"
 tray-icon = { version = "0.24", default-features = false, features = ["gtk"] }

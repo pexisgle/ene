@@ -12,7 +12,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
-directories = "6"
+directories = { workspace = true }
 indexmap = { workspace = true }
 rand = { workspace = true }
 tracing = { workspace = true }
