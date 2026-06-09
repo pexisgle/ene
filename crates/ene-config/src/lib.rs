@@ -23,7 +23,7 @@ pub mod store;
 
 pub use character_card::{
     CharacterAsset, CharacterCardData, CharacterCardV3, ExpressionDefinition, Lorebook,
-    LorebookEntry, ResolvedExpression, expand_cbs_macros, resolve_expressions,
+    LorebookEntry, ResolvedExpression, expand_cbs_macros, resolve_expressions, EneExtension,
 };
 
 pub use character_config::{CharacterConfig, MotionEntry};
@@ -32,14 +32,14 @@ pub use config::{
     generate_schema_json, generate_character_schema_json, get_global_config, get_global_section,
     load_config, load_config_from, load_full_config, load_full_config_from,
     register_runtime_schema, resolve_character_path,
-    save_full_config, update_global_config, update_section,
+    save_full_config, update_global_config, update_section, write_schemas,
 };
 pub use error::ConfigError;
 pub use error::EneConfigError;
 pub use paths::{
     IS_DEV_BUILD, app_data_dir, assets_dir, builtin_tools_dir, character_schema_file_path,
     character_settings_path, config_file_path, models_dir, schema_file_path, tool_socket_dir,
-    user_tools_dir,
+    user_tools_dir, character_card_schema_file_path,
 };
 pub use resources::ensure_resource_dirs;
 pub use store::ConfigStore;

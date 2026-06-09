@@ -52,13 +52,19 @@ pub fn config_file_path() -> PathBuf {
 /// Returns the path to `settings.schema.json`.
 #[must_use]
 pub fn schema_file_path() -> PathBuf {
-    assets_dir().join("settings.schema.json")
+    assets_dir().join("schema").join("settings.schema.json")
 }
 
 /// Returns the path to `character_settings.schema.json`.
 #[must_use]
 pub fn character_schema_file_path() -> PathBuf {
-    assets_dir().join("character_settings.schema.json")
+    assets_dir().join("schema").join("character_settings.schema.json")
+}
+
+/// Returns the path to `character.schema.json`.
+#[must_use]
+pub fn character_card_schema_file_path() -> PathBuf {
+    assets_dir().join("schema").join("character.schema.json")
 }
 
 /// Directory for built-in tool binaries
