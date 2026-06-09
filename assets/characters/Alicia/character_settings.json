@@ -1,18 +1,12 @@
 {
-  "$schema": "./character_settings.schema.json",
-  "character_position": [0.0, 0.0, 0.0],
+  "character_position": [
+    0.0,
+    0.0,
+    0.0
+  ],
   "model_scale": 1.0,
   "look_at_strength": 0.6,
-  "default_motion": "VRMA_02",
+  "default_motion": "VRMA_01",
   "default_expression": "neutral",
-  "motions": [
-    { "name": "VRMA_01", "path": "motions/VRMA_01.vrma" },
-    { "name": "VRMA_02", "path": "motions/VRMA_02.vrma" },
-    { "name": "VRMA_03", "path": "motions/VRMA_03.vrma" },
-    { "name": "VRMA_04", "path": "motions/VRMA_04.vrma" },
-    { "name": "VRMA_05", "path": "motions/VRMA_05.vrma" },
-    { "name": "VRMA_06", "path": "motions/VRMA_06.vrma" },
-    { "name": "VRMA_07", "path": "motions/VRMA_07.vrma" }
-  ],
-  "expressions": null
+  "$schema": "../../schema/character_settings.schema.json"
 }
