@@ -14,5 +14,6 @@ assets/models/
 .env
 
 # Generated settings schemas
-assets/settings.schema.json
-assets/character_settings.schema.json
+assets/schema/settings.schema.json
+assets/schema/character_settings.schema.json
+assets/schema/character.schema.json
