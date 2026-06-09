@@ -2,23 +2,6 @@
 //!
 //! Centralized JSON-based configuration management and schema generation for the ene AI character platform.
 //!
-//! ## Key Features
-//!
-//! - **Settings loading**: Multi-layer config resolution from `settings.json`, environment variables, and defaults
-//! - **Auto schema generation**: `settings.schema.json` and character schemas are generated automatically
-//! - **Character cards**: V3-format character card models with expression definitions and CBS macro expansion
-//! - **Declarative macros**: `define_config!` and `define_label_enum!` for boilerplate-free config struct and enum definitions
-//! - **Path resolution**: Platform-aware directory discovery for assets, tools, sockets, and config files
-//!
-//! ## Quick Start
-//!
-//! ```rust,ignore
-//! use ene_config::load_settings;
-//!
-//! let settings = load_settings();
-//! println!("Using character: {}", settings.character);
-//! ```
-//!
 //! Re-exports `serde`, `schemars`, and `ctor` for use by downstream crates.
 #![warn(missing_docs)]
 extern crate self as ene_config;
@@ -43,11 +26,12 @@ pub use character_card::{
     LorebookEntry, ResolvedExpression, expand_cbs_macros, resolve_expressions,
 };
 
-pub use character_config::{CharacterConfig, generate_character_schema_json};
+pub use character_config::{CharacterConfig, MotionEntry};
 pub use config::{
-    EneConfig, HasConfigKey, generate_schema_json, get_global_config, get_global_section,
+    EneConfig, HasConfigKey, ConfigTarget, __register_schema, __register_tool_schema,
+    generate_schema_json, generate_character_schema_json, get_global_config, get_global_section,
     load_config, load_config_from, load_full_config, load_full_config_from,
-    register_runtime_schema, register_schema, register_schema_with_parent, resolve_character_path,
+    register_runtime_schema, resolve_character_path,
     save_full_config, update_global_config, update_section,
 };
 pub use error::ConfigError;
@@ -65,37 +49,31 @@ pub use ctor::ctor;
 pub use schemars;
 pub use serde;
 
+/// Helper macro to handle default values for config struct fields.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __field_default {
+    ($type:ty, $default:expr) => {
+        $default
+    };
+    ($type:ty) => {
+        <$type as Default>::default()
+    };
+}
+
 /// Declarative macro for defining Config structs with zero boilerplate.
 ///
-/// Each field uses `= default_value` inline syntax. The macro automatically derives
-/// `Default`, `Serialize`, `Deserialize`, and `JsonSchema`, and auto-registers the schema.
-///
-/// Use `parent = "ParentName"` to nest the schema under a parent definition at generation time.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use ene_config::define_config;
-///
-/// define_config!(
-///     "provider",
-///     pub struct ProviderConfig {
-///         pub model: String = "gpt-4o-mini".into(),
-///         pub base_url: String = String::new(),
-///         pub api_key: String = String::new(),
-///     }
-/// );
-/// ```
+/// Each field uses `= default_value` inline syntax (optional).
 #[macro_export]
 macro_rules! define_config {
     (
+        settings,
         $key:expr,
-        parent = $parent:expr,
         $(#[$meta:meta])*
         pub struct $name:ident {
             $(
                 $(#[$field_meta:meta])*
-                pub $field:ident : $type:ty = $default:expr
+                pub $field:ident : $type:ty $( = $default:expr )?
             ),* $(,)?
         }
     ) => {
@@ -114,7 +92,7 @@ macro_rules! define_config {
             fn default() -> Self {
                 Self {
                     $(
-                        $field : $default,
+                        $field : $crate::__field_default!($type $(, $default)?),
                     )*
                 }
             }
@@ -122,23 +100,28 @@ macro_rules! define_config {
 
         impl $crate::HasConfigKey for $name {
             const KEY: &'static str = $key;
+            const TARGET: $crate::ConfigTarget = $crate::ConfigTarget::Settings;
+            fn path() -> &'static [&'static str] {
+                &[$key]
+            }
         }
 
         const _: () = {
             #[ctor::ctor(unsafe)]
             fn register() {
-                $crate::register_schema_with_parent::<$name>($key, $parent);
+                $crate::__register_schema::<$name>($crate::ConfigTarget::Settings, None);
             }
         };
     };
 
     (
+        character,
         $key:expr,
         $(#[$meta:meta])*
         pub struct $name:ident {
             $(
                 $(#[$field_meta:meta])*
-                pub $field:ident : $type:ty = $default:expr
+                pub $field:ident : $type:ty $( = $default:expr )?
             ),* $(,)?
         }
     ) => {
@@ -157,7 +140,7 @@ macro_rules! define_config {
             fn default() -> Self {
                 Self {
                     $(
-                        $field : $default,
+                        $field : $crate::__field_default!($type $(, $default)?),
                     )*
                 }
             }
@@ -165,38 +148,122 @@ macro_rules! define_config {
 
         impl $crate::HasConfigKey for $name {
             const KEY: &'static str = $key;
+            const TARGET: $crate::ConfigTarget = $crate::ConfigTarget::Character;
+            fn path() -> &'static [&'static str] {
+                &[$key]
+            }
         }
 
         const _: () = {
             #[ctor::ctor(unsafe)]
             fn register() {
-                $crate::register_schema::<$name>($key);
+                $crate::__register_schema::<$name>($crate::ConfigTarget::Character, None);
+            }
+        };
+    };
+
+    (
+        $parent:ident,
+        $key:expr,
+        $(#[$meta:meta])*
+        pub struct $name:ident {
+            $(
+                $(#[$field_meta:meta])*
+                pub $field:ident : $type:ty $( = $default:expr )?
+            ),* $(,)?
+        }
+    ) => {
+        #[derive(Debug, Clone, $crate::serde::Serialize, $crate::serde::Deserialize, $crate::schemars::JsonSchema)]
+        #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+        #[schemars(crate = "::ene_config::schemars")]
+        $(#[$meta])*
+        pub struct $name {
+            $(
+                $(#[$field_meta])*
+                pub $field : $type,
+            )*
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self {
+                    $(
+                        $field : $crate::__field_default!($type $(, $default)?),
+                    )*
+                }
+            }
+        }
+
+        impl $crate::HasConfigKey for $name {
+            const KEY: &'static str = $key;
+            const TARGET: $crate::ConfigTarget = <$parent as $crate::HasConfigKey>::TARGET;
+            fn path() -> &'static [&'static str] {
+                use std::sync::OnceLock;
+                static PATH: OnceLock<Vec<&'static str>> = OnceLock::new();
+                PATH.get_or_init(|| {
+                    let mut p = <$parent as $crate::HasConfigKey>::path().to_vec();
+                    p.push($key);
+                    p
+                }).as_slice()
+            }
+        }
+
+        const _: () = {
+            #[ctor::ctor(unsafe)]
+            fn register() {
+                $crate::__register_schema::<$name>(
+                    <$parent as $crate::HasConfigKey>::TARGET,
+                    Some(<$parent as $crate::HasConfigKey>::KEY),
+                );
+            }
+        };
+    };
+}
+
+/// Declarative macro for defining tool configuration schemas.
+#[macro_export]
+macro_rules! define_tool_config {
+    (
+        $tool_name:expr,
+        $(#[$meta:meta])*
+        pub struct $name:ident {
+            $(
+                $(#[$field_meta:meta])*
+                pub $field:ident : $type:ty $( = $default:expr )?
+            ),* $(,)?
+        }
+    ) => {
+        #[derive(Debug, Clone, $crate::serde::Serialize, $crate::serde::Deserialize, $crate::schemars::JsonSchema)]
+        #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+        #[schemars(crate = "::ene_config::schemars")]
+        $(#[$meta])*
+        pub struct $name {
+            $(
+                $(#[$field_meta])*
+                pub $field : $type,
+            )*
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self {
+                    $(
+                        $field : $crate::__field_default!($type $(, $default)?),
+                    )*
+                }
+            }
+        }
+
+        const _: () = {
+            #[ctor::ctor(unsafe)]
+            fn register() {
+                $crate::__register_tool_schema::<$name>($tool_name);
             }
         };
     };
 }
 
 /// Declarative macro for defining labeled enums with a consistent API.
-///
-/// Each variant uses `Variant => "label_string"` syntax. Optionally supports
-/// `| extra_data` and a trailing `[method_name: Type]` to auto-generate an extra data accessor.
-///
-/// Automatically derives: `Serialize`, `Deserialize`, `JsonSchema`, `Default`, `Copy`, `Clone`,
-/// `Debug`, `PartialEq`, `Eq`, and generates a `label(&self) -> &'static str` method.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use ene_config::define_label_enum;
-///
-/// define_label_enum!(
-///     pub enum EmbeddingProviderType {
-///         Api => "API",
-///         Local => "Local",
-///     }
-///     [default_model: &str]
-/// );
-/// ```
 #[macro_export]
 macro_rules! define_label_enum {
     (

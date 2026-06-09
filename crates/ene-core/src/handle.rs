@@ -981,7 +981,7 @@ async fn build_tool_registry(
         let db_path = config
             .get_section::<ene_memory::MemoryConfig>()
             .unwrap_or_default()
-            .resolve_memory_db_path();
+            .resolve_memory_db_path(&config.character);
 
         #[cfg(unix)]
         {
@@ -1024,7 +1024,7 @@ fn init_embedding(config: &EneConfig) -> Result<Arc<dyn ene_provider::EmbeddingP
         .map_err(|e| format!("Failed to load provider config: {e}"))?;
 
     if provider_config.embedding_backend.as_str() == "local" {
-        let local_cfg = ene_provider::ProviderConfig::local_embedding(config);
+        let local_cfg = config.get_section::<ene_provider::LocalEmbeddingConfig>().unwrap_or_default();
         let model_dir = ene_config::models_dir();
         let provider = ene_embedding::create_local_provider(
             &local_cfg.model,
@@ -1056,7 +1056,7 @@ fn init_memory_store(
     let db_path = config
         .get_section::<ene_memory::MemoryConfig>()
         .unwrap_or_default()
-        .resolve_memory_db_path();
+        .resolve_memory_db_path(&config.character);
 
     if let Some(parent) = db_path.parent()
         && !parent.exists()
@@ -1079,7 +1079,8 @@ fn init_tool_rag(
     session: &ConversationSession,
 ) -> Option<Arc<ene_tool_host::ToolRag>> {
     let rag_config = config
-        .get_section::<ene_tool_host::ToolRagConfig>()
+        .get_section::<ene_tool_host::ToolConfig>()
+        .map(|tc| tc.rag)
         .unwrap_or_default();
 
     if !rag_config.enabled {

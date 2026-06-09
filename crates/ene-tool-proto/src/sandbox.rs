@@ -1,11 +1,7 @@
-ene_config::define_config!(
-    "sandbox",
+ene_config::define_tool_config!(
+    "fs",
     #[derive(PartialEq, Eq)]
     /// Serializable sandbox configuration data (POD).
-    ///
-    /// Contains no validation logic — the `ene-tool-fs::Sandbox` type builds
-    /// and validates the actual sandbox. This struct is used in IPC between
-    /// core and tool binaries.
     pub struct SandboxConfigData {
         /// Whether the sandbox is enabled.
         pub enabled: bool = true,

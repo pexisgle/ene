@@ -41,6 +41,9 @@ pub use ene_provider::LlmProvider;
 /// OpenAI-compatible provider config.
 #[doc(no_inline)]
 pub use ene_provider::ProviderConfig;
+/// Configuration for the local GGUF embedding backend.
+#[doc(no_inline)]
+pub use ene_provider::LocalEmbeddingConfig;
 
 // ── Memory types ──
 /// Memory configuration (re-exported from `ene-memory`).

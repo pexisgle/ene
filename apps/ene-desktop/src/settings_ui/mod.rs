@@ -142,7 +142,11 @@ impl SettingsInputState {
             .get_section::<ene_core::ProviderConfig>()
             .unwrap_or_default();
         self.ai_embedding_provider = provider_config2.embedding_backend.clone();
-        let local_emb = ene_core::ProviderConfig::local_embedding(&settings.ai.ai);
+        let local_emb = settings
+            .ai
+            .ai
+            .get_section::<ene_core::LocalEmbeddingConfig>()
+            .unwrap_or_default();
         self.ai_embedding_model = local_emb.model.clone();
         self.ai_embedding_base_url = String::new();
         self.ai_embedding_dimensions = provider_config2.cloud_embedding_dimensions.to_string();
@@ -220,12 +224,20 @@ impl SettingsValueKind {
                 settings.characters.len(),
                 settings.current_entry().name
             ),
-            SettingsValueKind::Motion => format!(
-                "[{}/{}] {}",
-                settings.character_state.selected_motion + 1,
-                settings.current_entry().motion_paths.len(),
-                compact_asset_name(settings.current_motion())
-            ),
+            SettingsValueKind::Motion => {
+                let name = settings
+                    .current_entry()
+                    .motion_names
+                    .get(settings.character_state.selected_motion)
+                    .cloned()
+                    .unwrap_or_else(|| compact_asset_name(settings.current_motion()));
+                format!(
+                    "[{}/{}] {}",
+                    settings.character_state.selected_motion + 1,
+                    settings.current_entry().motion_names.len(),
+                    name
+                )
+            }
             SettingsValueKind::AnimationState => {
                 if animation_control.playing {
                     "Playing".to_string()

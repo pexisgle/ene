@@ -233,8 +233,17 @@ impl ToolHostManager {
     /// Also registers each tool's config schema in the global runtime registry
     /// and regenerates `settings.schema.json`.
     pub async fn start(config: &EneConfig) -> Result<Self, ToolError> {
-        let sandbox = config
-            .get_section::<ene_tool_proto::SandboxConfigData>()
+        let tool_config = config
+            .get_section::<crate::config::ToolConfig>()
+            .unwrap_or_default();
+
+        let sandbox = tool_config
+            .tools
+            .get("fs")
+            .map(|entry| {
+                serde_json::from_value::<ene_tool_proto::SandboxConfigData>(entry.config.clone())
+                    .unwrap_or_default()
+            })
             .unwrap_or_default();
         let mut supervised_registries = Vec::new();
 
@@ -263,7 +272,6 @@ impl ToolHostManager {
                         register_runtime_schema(
                             &schema_key,
                             schema,
-                            Some("tool_entry".to_string()),
                         );
                     }
                     supervised_registries.push(supervised_entry);
@@ -313,7 +321,8 @@ impl ToolHostManager {
         };
 
         let mcp_servers = config
-            .get_section_by_key::<Vec<crate::mcp_config::McpServerConfig>>("mcp_servers")
+            .get_section::<crate::config::ToolConfig>()
+            .map(|tc| tc.mcp_servers)
             .unwrap_or_default();
         if !mcp_servers.is_empty() {
             let mcp = crate::McpToolRegistry::new();

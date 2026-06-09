@@ -143,6 +143,11 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
             provider.allow_pattern(action, target_pattern);
             IpcResponse::Ack
         }
+        IpcRequest::GetMyConfig => IpcResponse::MyConfig(provider.get_config()),
+        IpcRequest::SetMyConfig(config) => {
+            provider.set_config(config);
+            IpcResponse::Ack
+        }
         IpcRequest::Ping => IpcResponse::Pong,
         IpcRequest::Shutdown => IpcResponse::Ack,
     }

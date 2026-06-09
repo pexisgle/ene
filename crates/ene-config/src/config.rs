@@ -4,10 +4,6 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// Global singleton holding the active [`EneConfig`].
-///
-/// Set once at startup by [`load_full_config`] and updated by
-/// [`update_global_config`]. Accessed by [`get_global_config`]
-/// and [`get_global_section`].
 pub static GLOBAL_CONFIG: std::sync::OnceLock<std::sync::RwLock<EneConfig>> =
     std::sync::OnceLock::new();
 
@@ -34,11 +30,17 @@ pub fn get_global_config() -> EneConfig {
 
 /// Trait for config structs that possess a unique config key.
 pub trait HasConfigKey {
-    /// The string key of this configuration section under the root config's `extra` map.
+    /// The string key of this configuration section under its parent.
     const KEY: &'static str;
+
+    /// The target configuration file (Settings or Character).
+    const TARGET: ConfigTarget;
+
+    /// The full path from the root.
+    fn path() -> &'static [&'static str];
 }
 
-/// Loads a subsection from the global config using the type's associated key.
+/// Loads a subsection from the global config using the type's associated key and path.
 pub fn get_global_section<T>() -> T
 where
     T: serde::de::DeserializeOwned + Default + HasConfigKey,
@@ -51,256 +53,331 @@ where
     T::default()
 }
 
-/// Loads a subsection by key from the global config.
-pub fn get_global_section_by_key<T: serde::de::DeserializeOwned + Default>(key: &str) -> T {
-    if let Some(lock) = GLOBAL_CONFIG.get()
-        && let Ok(guard) = lock.read()
-    {
-        return guard.get_section_by_key::<T>(key).unwrap_or_default();
-    }
-    T::default()
+/// The target of the configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigTarget {
+    /// Config belongs to settings.json
+    Settings,
+    /// Config belongs to character_settings.json
+    Character,
 }
 
 /// A registered config schema entry.
 pub struct SchemaEntry {
-    /// The JSON Schema definition for this config section.
+    /// The JSON Schema definition.
     pub schema: schemars::Schema,
-    /// Optional parent key under which this schema should be nested at merge time.
-    pub parent: Option<String>,
+    /// Target file.
+    pub target: ConfigTarget,
+    /// Parent key.
+    pub parent_key: Option<String>,
 }
 
 static SCHEMA_REGISTRY: std::sync::OnceLock<std::sync::Mutex<HashMap<String, SchemaEntry>>> =
     std::sync::OnceLock::new();
 
-/// Registry holding schemas collected from tools at runtime
-static RUNTIME_SCHEMA_REGISTRY: std::sync::OnceLock<
-    std::sync::Mutex<HashMap<String, SchemaEntry>>,
-> = std::sync::OnceLock::new();
-
-/// Global static helper for each crate to register its own Config schema
-pub fn register_schema<T: JsonSchema>(key: &str) {
-    register_schema_inner::<T>(key, None);
-}
-
-/// Registers schemas collected from tools at runtime
-pub fn register_runtime_schema(key: &str, schema: serde_json::Value, parent: Option<String>) {
-    let root_schema: schemars::Schema = serde_json::from_value(schema).unwrap_or_else(|e| {
-        tracing::error!("Failed to parse runtime schema for '{}': {}", key, e);
-        schemars::Schema::default()
-    });
-    let registry = RUNTIME_SCHEMA_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+/// Registers schemas collected from tools or compile-time config structs
+#[doc(hidden)]
+pub fn __register_schema<T: JsonSchema + HasConfigKey>(target: ConfigTarget, parent_key: Option<&str>) {
+    let schema_gen = schemars::SchemaGenerator::default();
+    let schema = schema_gen.into_root_schema_for::<T>();
+    let registry = SCHEMA_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     if let Ok(mut reg) = registry.lock() {
         reg.insert(
-            key.to_string(),
+            T::KEY.to_string(),
             SchemaEntry {
-                schema: root_schema,
-                parent,
+                schema,
+                target,
+                parent_key: parent_key.map(String::from),
             },
         );
     }
 }
 
-/// Registers nested within a parent schema's definition/property
-pub fn register_schema_with_parent<T: JsonSchema>(key: &str, parent: &str) {
-    register_schema_inner::<T>(key, Some(parent.to_string()));
-}
-
-fn register_schema_inner<T: JsonSchema>(key: &str, parent: Option<String>) {
+/// Tool schema registration helper
+#[doc(hidden)]
+pub fn __register_tool_schema<T: JsonSchema>(tool_name: &str) {
     let schema_gen = schemars::SchemaGenerator::default();
     let schema = schema_gen.into_root_schema_for::<T>();
     let registry = SCHEMA_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     if let Ok(mut reg) = registry.lock() {
-        reg.insert(key.to_string(), SchemaEntry { schema, parent });
+        reg.insert(
+            tool_name.to_string(),
+            SchemaEntry {
+                schema,
+                target: ConfigTarget::Settings,
+                parent_key: Some("tools_map".to_string()),
+            },
+        );
     }
 }
 
-fn merge_child_into_parent(
-    root_schema: &mut schemars::Schema,
-    parent_key: &str,
-    child_schema: &schemars::Schema,
-) {
-    let child_props = child_schema
-        .get("properties")
-        .and_then(|v| v.as_object())
-        .cloned();
-    let child_props = match child_props {
-        Some(p) if !p.is_empty() => p,
-        _ => return,
-    };
-
-    // Try $defs first (e.g. "ToolEntry")
-    if let Some(defs) = root_schema.get_mut("$defs").and_then(|v| v.as_object_mut())
-        && let Some(def) = defs.get_mut(parent_key)
-        && let Some(def_props) = def.get_mut("properties").and_then(|v| v.as_object_mut())
-    {
-        for (k, v) in &child_props {
-            def_props.insert(k.clone(), v.clone());
-        }
-        return;
-    }
-
-    // Fall back to root-level property
-    if let Some(root_obj) = root_schema.as_object_mut()
-        && let Some(parent_val) = root_obj
-            .get_mut("properties")
-            .and_then(|v| v.get_mut(parent_key))
-        && let Some(parent_props) = parent_val
-            .get_mut("properties")
-            .and_then(|v| v.as_object_mut())
-    {
-        for (k, v) in child_props {
-            parent_props.insert(k, v);
-        }
+/// Registers schemas collected at runtime
+pub fn register_runtime_schema(key: &str, schema: serde_json::Value) {
+    let root_schema: schemars::Schema = serde_json::from_value(schema).unwrap_or_else(|e| {
+        tracing::error!("Failed to parse runtime schema for '{}': {}", key, e);
+        schemars::Schema::default()
+    });
+    let registry = SCHEMA_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(mut reg) = registry.lock() {
+        reg.insert(
+            key.to_string(),
+            SchemaEntry {
+                schema: root_schema,
+                target: ConfigTarget::Settings,
+                parent_key: None,
+            },
+        );
     }
 }
 
-crate::define_config!(
-    "ene_config",
-    /// Top-level application configuration for ene.
-    pub struct EneConfig {
-        /// Schema version number.
-        pub version: u32 = 1,
-        /// Character card name or path.
-        pub character: String = String::new(),
-        /// Display name shown to the user.
-        pub user_name: String = "User".to_string(),
-        /// Behavioural rules injected into every system prompt.
-        pub runtime_rules: String = "Keep responses relatively short and sweet, suitable for displaying on a screen overlay.".to_string(),
+/// Top-level settings configuration for the Ene platform.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct EneConfig {
+    /// Schema version number.
+    pub version: u32,
+    /// Character card name or path.
+    pub character: String,
+    /// Display name shown to the user.
+    pub user_name: String,
+    /// Behavioural rules injected into every system prompt.
+    pub runtime_rules: String,
 
-        #[serde(flatten)]
-        #[schemars(skip)]
-        /// Catch-all for provider, tool, and other sub-configurations.
-        pub extra: HashMap<String, serde_json::Value> = HashMap::new(),
+    #[serde(flatten)]
+    #[schemars(skip)]
+    /// Catch-all for provider, tool, and other sub-configurations.
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+impl Default for EneConfig {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            character: String::new(),
+            user_name: "User".to_string(),
+            runtime_rules: "Keep responses relatively short and sweet, suitable for displaying on a screen overlay.".to_string(),
+            extra: HashMap::new(),
+        }
     }
-);
+}
 
 impl EneConfig {
-    /// Deserialise a sub-section from the `extra` map using the type's associated key.
+    /// Deserialise a sub-section from the `extra` map using the type's associated path.
     ///
-    /// Returns `Ok(T::default())` when the key is absent.
+    /// Returns `Ok(T::default())` when the key/path is absent.
     pub fn get_section<T>(&self) -> Result<T, EneConfigError>
     where
         T: serde::de::DeserializeOwned + Default + HasConfigKey,
     {
-        self.get_section_by_key(T::KEY)
-    }
-
-    /// Deserialise a sub-section from the `extra` map by key.
-    ///
-    /// Returns `Ok(T::default())` when the key is absent.
-    pub fn get_section_by_key<T>(&self, key: &str) -> Result<T, EneConfigError>
-    where
-        T: serde::de::DeserializeOwned + Default,
-    {
-        if let Some(val) = self.extra.get(key) {
-            serde_json::from_value(val.clone()).map_err(|e| {
-                EneConfigError::GenericConfigError(format!(
-                    "Failed to deserialize section '{key}': {e}"
-                ))
-            })
-        } else {
-            Ok(T::default())
+        debug_assert_eq!(T::TARGET, ConfigTarget::Settings);
+        let mut cur = serde_json::Value::Object(
+            self.extra.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        );
+        for key in T::path() {
+            match cur.get(key).cloned() {
+                Some(v) => cur = v,
+                None => return Ok(T::default()),
+            }
         }
+        serde_json::from_value(cur).map_err(|e| {
+            EneConfigError::GenericConfigError(format!("Failed to deserialize nested section: {e}"))
+        })
     }
 
-    /// Serialise and insert a sub-section into the `extra` map using the type's associated key.
+    /// Serialise and insert a sub-section into the `extra` map using the type's associated path.
     pub fn set_section<T>(&mut self, section: &T) -> Result<(), EneConfigError>
     where
         T: serde::Serialize + HasConfigKey,
     {
-        self.set_section_by_key(T::KEY, section)
-    }
-
-    /// Serialise and insert a sub-section into the `extra` map by key.
-    pub fn set_section_by_key<T>(&mut self, key: &str, section: &T) -> Result<(), EneConfigError>
-    where
-        T: serde::Serialize,
-    {
+        debug_assert_eq!(T::TARGET, ConfigTarget::Settings);
         let val = serde_json::to_value(section).map_err(|e| {
-            EneConfigError::GenericConfigError(format!("Failed to serialize section '{key}': {e}"))
+            EneConfigError::GenericConfigError(format!("Failed to serialize section: {e}"))
         })?;
-        self.extra.insert(key.to_string(), val);
+        set_nested(&mut self.extra, T::path(), val)?;
         Ok(())
     }
-
-    /// Extracts a nested field value from the provider section in the `extra` map.
-    ///
-    /// This avoids the manual `extra["provider"]["field"]` chain duplicated across
-    /// embedding and memory config resolvers.
-    #[must_use]
-    pub fn get_provider_field(&self, key: &str) -> Option<String> {
-        self.extra
-            .get("provider")
-            .and_then(|p| p.get(key))
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.trim().is_empty())
-            .map(std::string::ToString::to_string)
-    }
 }
 
-fn apply_registry_to_schema(
-    root_schema: &mut schemars::Schema,
-    registry: &HashMap<String, SchemaEntry>,
-) {
-    // First pass: insert entries without parents and collect all definitions
-    for (key, entry) in registry {
-        if entry.parent.is_none()
-            && let Some(root_obj) = root_schema.as_object_mut()
-        {
-            let props = root_obj
-                .entry("properties".to_string())
-                .or_insert_with(|| serde_json::json!({}));
-            if let Some(props_obj) = props.as_object_mut() {
-                props_obj.insert(key.clone(), entry.schema.clone().into());
+fn set_nested(
+    extra: &mut HashMap<String, serde_json::Value>,
+    path: &[&str],
+    value: serde_json::Value,
+) -> Result<(), EneConfigError> {
+    if path.is_empty() {
+        return Err(EneConfigError::GenericConfigError("Empty path for nested config".to_string()));
+    }
+    
+    let mut root = serde_json::Value::Object(
+        extra.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    );
+    
+    let mut cur = &mut root;
+    for (i, &key) in path.iter().enumerate() {
+        if i == path.len() - 1 {
+            if let Some(obj) = cur.as_object_mut() {
+                obj.insert(key.to_string(), value);
             }
-        }
-        // Copy $defs from child schema into root schema
-        if let Some(child_defs) = entry.schema.get("$defs").and_then(|v| v.as_object()) {
-            let root_defs = root_schema
-                .ensure_object()
-                .entry("$defs".to_string())
-                .or_insert_with(|| serde_json::json!({}));
-            if let Some(root_defs_obj) = root_defs.as_object_mut() {
-                for (def_name, def_schema) in child_defs {
-                    root_defs_obj.insert(def_name.clone(), def_schema.clone());
-                }
+            break;
+        } else {
+            if !cur.is_object() {
+                *cur = serde_json::Value::Object(serde_json::Map::new());
             }
+            let obj = cur.as_object_mut().unwrap();
+            cur = obj.entry(key.to_string()).or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
         }
     }
-    // Second pass: merge entries that have parents
-    for entry in registry.values() {
-        if let Some(parent_key) = &entry.parent {
-            merge_child_into_parent(root_schema, parent_key, &entry.schema);
-        }
+    
+    if let serde_json::Value::Object(obj) = root {
+        *extra = obj.into_iter().collect();
     }
+    
+    Ok(())
 }
 
-/// Generates the JSON representation of the JSON Schema
+/// Generates the JSON representation of the JSON Schema for settings.json
 pub fn generate_schema_json() -> Result<String, serde_json::Error> {
     let schema_gen = schemars::SchemaGenerator::default();
-    let mut root_schema = schema_gen.into_root_schema_for::<EneConfig>();
+    let root_schema = schema_gen.into_root_schema_for::<EneConfig>();
+    let mut root_val = serde_json::to_value(&root_schema)?;
 
     if let Some(registry) = SCHEMA_REGISTRY.get()
         && let Ok(reg) = registry.lock()
+        && let Some(root_obj) = root_val.as_object_mut()
     {
-        apply_registry_to_schema(&mut root_schema, &reg);
+        // 1. Copy definitions
+        for entry in reg.values() {
+            if entry.target != ConfigTarget::Settings {
+                continue;
+            }
+            let entry_val = serde_json::to_value(&entry.schema)?;
+            if let Some(definitions) = entry_val.get("definitions").or_else(|| entry_val.get("$defs")).and_then(|v| v.as_object()) {
+                let root_defs = root_obj
+                    .entry("definitions".to_string())
+                    .or_insert_with(|| serde_json::json!({}))
+                    .as_object_mut()
+                    .unwrap();
+                for (def_name, def_schema) in definitions {
+                    root_defs.insert(def_name.clone(), def_schema.clone());
+                }
+            }
+        }
+
+        // 2. Add properties
+        for (key, entry) in reg.iter() {
+            if entry.target != ConfigTarget::Settings {
+                continue;
+            }
+            let entry_val = serde_json::to_value(&entry.schema)?;
+
+            if let Some(parent_key) = &entry.parent_key {
+                if parent_key == "tools_map" {
+                    let tool_config_def = if root_obj.contains_key("definitions") {
+                        root_obj.get_mut("definitions").and_then(|d| d.get_mut("ToolConfig"))
+                    } else {
+                        root_obj.get_mut("$defs").and_then(|d| d.get_mut("ToolConfig"))
+                    };
+                    if let Some(tool_config_def) = tool_config_def
+                        && let Some(tools_prop) = tool_config_def
+                            .get_mut("properties")
+                            .and_then(|p| p.get_mut("tools"))
+                    {
+                        let tools_obj = tools_prop.as_object_mut().unwrap();
+                        let properties = tools_obj
+                            .entry("properties".to_string())
+                            .or_insert_with(|| serde_json::json!({}))
+                            .as_object_mut()
+                            .unwrap();
+
+                        let mut clean_entry = entry_val.clone();
+                        if let Some(obj) = clean_entry.as_object_mut() {
+                            obj.remove("definitions");
+                            obj.remove("$schema");
+                        }
+                        properties.insert(
+                            key.clone(),
+                            serde_json::json!({
+                                "allOf": [
+                                    { "$ref": "#/definitions/ToolEntry" },
+                                    clean_entry
+                                ]
+                            })
+                        );
+                    }
+                }
+            } else {
+                let properties = root_obj
+                    .entry("properties".to_string())
+                    .or_insert_with(|| serde_json::json!({}))
+                    .as_object_mut()
+                    .unwrap();
+                let mut clean_entry = entry_val.clone();
+                if let Some(obj) = clean_entry.as_object_mut() {
+                    obj.remove("definitions");
+                    obj.remove("$schema");
+                }
+                properties.insert(key.clone(), clean_entry);
+            }
+        }
     }
 
-    if let Some(registry) = RUNTIME_SCHEMA_REGISTRY.get()
+    let root_schema: schemars::Schema = serde_json::from_value(root_val)?;
+    serde_json::to_string_pretty(&root_schema)
+}
+
+/// Generates the JSON representation of the JSON Schema for character_settings.json
+pub fn generate_character_schema_json() -> Result<String, serde_json::Error> {
+    let schema_gen = schemars::SchemaGenerator::default();
+    let root_schema = schema_gen.into_root_schema_for::<crate::character_config::CharacterConfig>();
+    let mut root_val = serde_json::to_value(&root_schema)?;
+
+    if let Some(registry) = SCHEMA_REGISTRY.get()
         && let Ok(reg) = registry.lock()
+        && let Some(root_obj) = root_val.as_object_mut()
     {
-        apply_registry_to_schema(&mut root_schema, &reg);
+        // 1. Copy definitions
+        for entry in reg.values() {
+            if entry.target != ConfigTarget::Character {
+                continue;
+            }
+            let entry_val = serde_json::to_value(&entry.schema)?;
+            if let Some(definitions) = entry_val.get("definitions").or_else(|| entry_val.get("$defs")).and_then(|v| v.as_object()) {
+                let root_defs = root_obj
+                    .entry("definitions".to_string())
+                    .or_insert_with(|| serde_json::json!({}))
+                    .as_object_mut()
+                    .unwrap();
+                for (def_name, def_schema) in definitions {
+                    root_defs.insert(def_name.clone(), def_schema.clone());
+                }
+            }
+        }
+
+        // 2. Add properties
+        for (key, entry) in reg.iter() {
+            if entry.target != ConfigTarget::Character {
+                continue;
+            }
+            let entry_val = serde_json::to_value(&entry.schema)?;
+            let properties = root_obj
+                .entry("properties".to_string())
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+                .unwrap();
+            let mut clean_entry = entry_val.clone();
+            if let Some(obj) = clean_entry.as_object_mut() {
+                obj.remove("definitions");
+                obj.remove("$schema");
+            }
+            properties.insert(key.clone(), clean_entry);
+        }
     }
 
+    let root_schema: schemars::Schema = serde_json::from_value(root_val)?;
     serde_json::to_string_pretty(&root_schema)
 }
 
 /// Resolves a character name to a full card path.
-///
-/// If `name` is empty, defaults to the built-in `Alicia` character.
-/// If `name` is a bare name (no path separators), resolves to
-/// `{assets}/characters/{name}/character.json`.
-/// Otherwise, the name is treated as a literal path.
 #[must_use]
 pub fn resolve_character_path(name: &str) -> String {
     let assets_dir = crate::paths::assets_dir();
@@ -364,7 +441,7 @@ pub fn load_full_config_from(assets_dir: &Path, config_path: &Path) -> EneConfig
 
     // Auto-generate schema write-out for character-specific settings
     let char_schema_path = crate::paths::character_schema_file_path();
-    if let Ok(char_schema_json) = crate::character_config::generate_character_schema_json() {
+    if let Ok(char_schema_json) = generate_character_schema_json() {
         let _ = std::fs::write(&char_schema_path, char_schema_json);
     }
 
@@ -386,8 +463,6 @@ pub fn save_full_config(config: &EneConfig) -> Result<(), std::io::Error> {
 }
 
 /// Loads settings, patches a single section, and saves in one call.
-///
-/// Convenience wrapper around the load → `set_section` → save pattern.
 pub fn update_section<T>(value: &T) -> Result<(), EneConfigError>
 where
     T: serde::Serialize + serde::de::DeserializeOwned + HasConfigKey,
@@ -395,105 +470,4 @@ where
     let mut config = load_config();
     config.set_section(value)?;
     save_full_config(&config).map_err(|e| EneConfigError::GenericConfigError(e.to_string()))
-}
-
-/// Loads settings, patches a single section by key, and saves in one call.
-pub fn update_section_by_key<T>(key: &str, value: &T) -> Result<(), EneConfigError>
-where
-    T: serde::Serialize + serde::de::DeserializeOwned,
-{
-    let mut config = load_config();
-    config.set_section_by_key(key, value)?;
-    save_full_config(&config).map_err(|e| EneConfigError::GenericConfigError(e.to_string()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    crate::define_config!(
-        "dummy_test_config",
-        pub struct DummyTestConfig {
-            pub test_value: String = "hello".to_string(),
-            pub test_number: i32 = 42,
-        }
-    );
-
-    crate::define_config!(
-        "child_config",
-        parent = "ParentDef",
-        pub struct ChildTestConfig {
-            pub child_field: String = "child".to_string(),
-        }
-    );
-
-    #[test]
-    fn test_define_config_self_registration() {
-        let schema_json = generate_schema_json().unwrap();
-        assert!(
-            schema_json.contains("dummy_test_config"),
-            "Schema should automatically include dummy_test_config"
-        );
-        assert!(
-            schema_json.contains("test_value"),
-            "Schema should automatically include dummy_test_config field test_value"
-        );
-    }
-
-    #[test]
-    fn test_parent_merge() {
-        // Test that merge_child_into_parent merges properties into a definition
-        let child_schema = {
-            let g = schemars::SchemaGenerator::default();
-            g.into_root_schema_for::<ChildTestConfig>()
-        };
-
-        let mut parent_schema = {
-            let g = schemars::SchemaGenerator::default();
-            let mut schema = g.into_root_schema_for::<DummyTestConfig>();
-            // Add a dummy ParentDef definition to test against
-            let def_schema = schemars::json_schema!({
-                "type": "object",
-                "properties": {}
-            });
-            let defs = schema
-                .ensure_object()
-                .entry("$defs".to_string())
-                .or_insert_with(|| serde_json::json!({}));
-            defs.as_object_mut()
-                .unwrap()
-                .insert("ParentDef".to_string(), def_schema.into());
-            schema
-        };
-
-        merge_child_into_parent(&mut parent_schema, "ParentDef", &child_schema);
-
-        let parent_def = parent_schema
-            .get("$defs")
-            .and_then(|v| v.get("ParentDef"))
-            .unwrap();
-        let child_props = parent_def.get("properties").and_then(|v| v.as_object());
-        assert!(child_props.is_some(), "ParentDef should have properties");
-        assert!(
-            child_props.unwrap().contains_key("child_field"),
-            "ParentDef should contain child_field"
-        );
-    }
-
-    #[test]
-    fn test_global_config_accessor() {
-        let mut raw_config = EneConfig::default();
-        raw_config.extra.insert(
-            "dummy_test_config".to_string(),
-            serde_json::json!({
-                "test_value": "custom_val",
-                "test_number": 999
-            }),
-        );
-        update_global_config(raw_config);
-
-        let config = get_global_section::<DummyTestConfig>();
-        assert_eq!(config.test_value, "custom_val");
-        assert_eq!(config.test_number, 999);
-    }
 }
