@@ -36,6 +36,9 @@ fn main() {
         panic!("Failed to initialize GTK: {err}");
     }
 
+    let runtime = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+    let _runtime_guard = runtime.enter();
+
     let assets_dir = resources::ensure_resource_dirs();
     let (default_vrm, _default_vrma) = app_config::read_cli_paths();
     let settings = CharacterSettings::discover(&assets_dir, default_vrm);

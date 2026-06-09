@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 
 ene_config::define_label_enum!(
     pub enum ShadowQuality {
@@ -272,6 +273,7 @@ pub struct CharacterSettings {
     pub character_state: CharacterState,
     pub ui: UiState,
     pub ai: AiConfig,
+    pub store: RwLock<ene_config::ConfigStore>,
 }
 
 impl CharacterSettings {
@@ -324,6 +326,9 @@ impl CharacterSettings {
                     ..Default::default()
                 },
             },
+            store: RwLock::new(ene_config::ConfigStore::from_config(
+                ene_config::EneConfig::default(),
+            )),
         };
         settings.load_from_file();
         settings
@@ -471,18 +476,43 @@ impl CharacterSettings {
     }
 
     pub fn save(&self) {
-        let mut saved = self.ai.ai.clone();
-        saved.version = 1;
+        self.sync_to_store();
+        let char_name = self.current_entry().name.clone();
+        let store = self.store.read().unwrap();
+        if let Err(e) = store.flush(Some(&char_name)) {
+            eprintln!("[Config] Failed to save config: {e}");
+        }
+    }
+
+    pub fn mark_dirty(&self) {
+        self.sync_to_store();
+    }
+
+    fn sync_to_store(&self) {
+        let mut config = self.ai.ai.clone();
+        config.version = 1;
         let desktop = DesktopSection {
             graphics: self.graphics.clone(),
         };
-        if let Err(e) = saved.set_section(&desktop) {
+        if let Err(e) = config.set_section(&desktop) {
             eprintln!("[Config] Failed to set desktop section: {e}");
         }
-        if let Err(e) = ene_config::save_full_config(&saved) {
-            eprintln!("[Config] Failed to save config: {e}");
-        }
-        self.save_per_character_settings();
+        let store = self.store.read().unwrap();
+        store.set_config(config);
+
+        let char_config = ene_config::CharacterConfig {
+            character_position: [
+                self.character_state.character_position.x,
+                self.character_state.character_position.y,
+                self.character_state.character_position.z,
+            ],
+            selected_motion_path: self.motion_path_relative(),
+            model_scale: self.character_state.model_scale,
+            look_at_strength: self.character_state.look_at_strength,
+            default_motion: self.motion_path_relative(),
+            expressions: None,
+        };
+        store.set_character_config(char_config);
     }
 
     pub fn load_from_file(&mut self) {
@@ -490,6 +520,7 @@ impl CharacterSettings {
         let full = ene_config::load_config_from(&self.assets_dir, &path);
 
         self.ai.ai = full.clone();
+        *self.store.write().unwrap() = ene_config::ConfigStore::from_config(full.clone());
 
         // Character selection
         let card_path = ene_config::resolve_character_path(&full.character);

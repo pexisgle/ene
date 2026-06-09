@@ -35,6 +35,8 @@ pub mod error;
 pub mod paths;
 /// First-launch asset deployment and resource directory initialization.
 pub mod resources;
+/// Centralized config store with dirty tracking for auto-save.
+pub mod store;
 
 pub use character_card::{
     CharacterAsset, CharacterCardData, CharacterCardV3, ExpressionDefinition, Lorebook,
@@ -56,6 +58,7 @@ pub use paths::{
     user_tools_dir,
 };
 pub use resources::ensure_resource_dirs;
+pub use store::ConfigStore;
 
 // Re-export serde / schemars / ctor for sub-crates
 pub use ctor::ctor;

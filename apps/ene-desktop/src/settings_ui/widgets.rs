@@ -118,6 +118,7 @@ pub fn apply_action(
     }
 
     settings.clamp_runtime_values();
+    settings.mark_dirty();
 }
 
 pub fn render_cycle_row(
@@ -190,6 +191,7 @@ pub fn render_numeric_row(
             || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
         if commit && value_kind.apply_input(text_buffer.trim(), settings).is_ok() {
             settings.clamp_runtime_values();
+            settings.mark_dirty();
         }
         if ui.button("+").clicked() {
             action = Some(up_action);

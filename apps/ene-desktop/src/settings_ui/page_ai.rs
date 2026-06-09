@@ -115,6 +115,7 @@ pub fn render_ai_page(
             if current_source != provider_config.api_key_source {
                 provider_config.api_key_source = current_source;
                 let _ = settings.ai.ai.set_section(&provider_config);
+                settings.mark_dirty();
             }
         });
 
@@ -197,6 +198,7 @@ pub fn render_ai_page(
                     .ai
                     .ai
                     .set_section_by_key("provider.local_embedding", &local_emb);
+                settings.mark_dirty();
             }
         });
 
@@ -217,6 +219,7 @@ pub fn render_ai_page(
                     provider_config.cloud_embedding_model = input_state.ai_embedding_model.clone();
                     let _ = settings.ai.ai.set_section(&provider_config);
                 }
+                settings.mark_dirty();
             }
         });
 
@@ -245,6 +248,7 @@ pub fn render_ai_page(
                 {
                     provider_config.cloud_embedding_dimensions = dims;
                     let _ = settings.ai.ai.set_section(&provider_config);
+                    settings.mark_dirty();
                 }
             }
         });
@@ -259,6 +263,7 @@ pub fn render_ai_page(
                 input_state.ai_memory_enabled = checked;
                 mem_config.enabled = checked;
                 let _ = settings.ai.ai.set_section(&mem_config);
+                settings.mark_dirty();
             }
         });
 
