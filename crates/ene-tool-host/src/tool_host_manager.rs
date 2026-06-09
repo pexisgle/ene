@@ -283,10 +283,7 @@ impl ToolHostManager {
         }
 
         // Regenerate schema file to include runtime tool schemas
-        if let Ok(schema_json) = ene_config::generate_schema_json() {
-            let schema_path = paths::assets_dir().join("settings.schema.json");
-            let _ = std::fs::write(&schema_path, schema_json);
-        }
+        paths::write_schemas(&paths::assets_dir());
 
         let composite = Arc::new(CompositeToolRegistry::new(supervised_registries));
 

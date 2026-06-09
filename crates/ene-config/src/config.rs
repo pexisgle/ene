@@ -377,6 +377,13 @@ pub fn generate_character_schema_json() -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(&root_schema)
 }
 
+/// Generates the JSON representation of the JSON Schema for character.json (CharacterCardV3)
+pub fn generate_character_card_schema_json() -> Result<String, serde_json::Error> {
+    let schema_gen = schemars::SchemaGenerator::default();
+    let root_schema = schema_gen.into_root_schema_for::<crate::character_card::CharacterCardV3>();
+    serde_json::to_string_pretty(&root_schema)
+}
+
 /// Resolves a character name to a full card path.
 #[must_use]
 pub fn resolve_character_path(name: &str) -> String {
@@ -433,8 +440,22 @@ pub fn load_full_config_from(assets_dir: &Path, config_path: &Path) -> EneConfig
         EneConfig::default()
     });
 
+    // Ensure schema directory exists
+    let schema_dir = assets_dir.join("schema");
+    let _ = std::fs::create_dir_all(&schema_dir);
+
+    write_schemas(assets_dir);
+
+    update_global_config(config.clone());
+    config
+}
+
+/// Auto-generates and writes out settings and character schemas under the assets schema directory.
+pub fn write_schemas(assets_dir: &Path) {
+    let _ = std::fs::create_dir_all(assets_dir.join("schema"));
+
     // Auto-generate schema write-out
-    let schema_path = assets_dir.join("settings.schema.json");
+    let schema_path = crate::paths::schema_file_path();
     if let Ok(schema_json) = generate_schema_json() {
         let _ = std::fs::write(&schema_path, schema_json);
     }
@@ -445,8 +466,11 @@ pub fn load_full_config_from(assets_dir: &Path, config_path: &Path) -> EneConfig
         let _ = std::fs::write(&char_schema_path, char_schema_json);
     }
 
-    update_global_config(config.clone());
-    config
+    // Auto-generate schema write-out for character card (character.json)
+    let char_card_schema_path = crate::paths::character_card_schema_file_path();
+    if let Ok(char_card_schema_json) = generate_character_card_schema_json() {
+        let _ = std::fs::write(&char_card_schema_path, char_card_schema_json);
+    }
 }
 
 /// Saves the config file in a type-safe manner
