@@ -38,6 +38,7 @@ impl Plugin for SettingsUiPlugin {
                     apply_ai_stream_events,
                     apply_settings_window_visibility,
                     handle_settings_window_close,
+                    auto_save_config,
                 )
                     .chain(),
             )
@@ -310,7 +311,7 @@ impl SettingsValueKind {
     }
 
     fn apply_input(self, value: &str, settings: &mut CharacterSettings) -> Result<(), ()> {
-        match self {
+        let result = match self {
             SettingsValueKind::LookAtStrength => parse_and_assign(value, |parsed| {
                 settings.character_state.look_at_strength = parsed;
             }),
@@ -356,10 +357,14 @@ impl SettingsValueKind {
             }
             SettingsValueKind::AiChatInput => {
                 settings.ui.ai_chat_input = value.to_string();
-                Ok(())
+                return Ok(());
             }
             _ => Err(()),
+        };
+        if result.is_ok() {
+            settings.mark_dirty();
         }
+        result
     }
 }
 
@@ -865,5 +870,13 @@ fn handle_settings_window_close(
             settings.ui.settings_window_visible = false;
             settings.save();
         }
+    }
+}
+
+fn auto_save_config(settings: Res<CharacterSettings>) {
+    let char_name = settings.current_entry().name.clone();
+    let store = settings.store.read().unwrap();
+    if let Err(e) = store.flush_if_dirty(Some(&char_name)) {
+        eprintln!("[Config] Auto-save failed: {e}");
     }
 }
