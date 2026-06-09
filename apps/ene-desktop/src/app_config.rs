@@ -397,97 +397,38 @@ impl CharacterSettings {
         self.graphics.target_fps = normalize_target_fps(self.graphics.target_fps);
     }
 
-    pub fn character_settings_path(&self) -> PathBuf {
-        ene_config::character_settings_path(&self.current_entry().name)
-    }
+
 
     pub fn save_per_character_settings(&self) {
-        let entry = self.current_entry();
-        let motions: Vec<ene_config::MotionEntry> = entry
-            .motion_names
-            .iter()
-            .zip(entry.motion_paths.iter())
-            .map(|(name, path)| {
-                let relative = path
-                    .strip_prefix(&format!("characters/{}/", entry.name))
-                    .unwrap_or(path);
-                ene_config::MotionEntry {
-                    name: name.clone(),
-                    path: relative.to_string(),
-                }
-            })
-            .collect();
-        let default_motion_name = entry
-            .motion_names
-            .get(self.character_state.selected_motion)
-            .cloned()
-            .unwrap_or_default();
-
-        let existing_extra = fs::read_to_string(self.character_settings_path())
-            .ok()
-            .and_then(|json| serde_json::from_str::<CharacterConfig>(&json).ok())
-            .map(|c| c.extra)
-            .unwrap_or_default();
-
-        let per = CharacterConfig {
-            character_position: [
-                self.character_state.character_position.x,
-                self.character_state.character_position.y,
-                self.character_state.character_position.z,
-            ],
-            model_scale: self.character_state.model_scale,
-            look_at_strength: self.character_state.look_at_strength,
-            default_motion: default_motion_name,
-            default_expression: "neutral".to_string(),
-            motions,
-            expressions: None,
-            schema: Some("./character_settings.schema.json".to_string()),
-            extra: existing_extra,
-        };
-        if let Ok(json) = serde_json::to_string_pretty(&per) {
-            let path = self.character_settings_path();
-            if let Some(parent) = path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            if let Err(e) = fs::write(path, json) {
-                eprintln!("[Config] Failed to save per-character settings: {e}");
-            }
+        self.sync_to_store();
+        let char_name = self.current_entry().name.clone();
+        let store = self.store.read().unwrap();
+        if let Err(e) = store.flush(Some(&char_name)) {
+            eprintln!("[Config] Failed to save per-character settings: {e}");
         }
     }
 
     pub fn load_per_character_settings(&mut self) {
-        let path = self.character_settings_path();
-        let Ok(json) = fs::read_to_string(&path) else {
-            return;
-        };
+        let char_name = self.current_entry().name.clone();
+        let store = self.store.read().unwrap();
+        store.load_character_config(&char_name);
+        let per = store.character_config();
 
-        let per = serde_json::from_str::<CharacterConfig>(&json).ok();
-
-        match per {
-            Some(per) => {
-                self.character_state.character_position = Vec3::new(
-                    per.character_position[0],
-                    per.character_position[1],
-                    per.character_position[2],
-                );
-                self.character_state.model_scale = per.model_scale;
-                self.character_state.look_at_strength = per.look_at_strength;
-                if !per.default_motion.is_empty()
-                    && let Some(m) = self
-                        .current_entry()
-                        .motion_names
-                        .iter()
-                        .position(|n| n == &per.default_motion)
-                {
-                    self.character_state.selected_motion = m;
-                }
-            }
-            None => {
-                eprintln!(
-                    "[Config] Failed to parse per-character settings {}",
-                    path.display()
-                );
-            }
+        self.character_state.character_position = Vec3::new(
+            per.character_position[0],
+            per.character_position[1],
+            per.character_position[2],
+        );
+        self.character_state.model_scale = per.model_scale;
+        self.character_state.look_at_strength = per.look_at_strength;
+        if !per.default_motion.is_empty()
+            && let Some(m) = self
+                .current_entry()
+                .motion_names
+                .iter()
+                .position(|n| n == &per.default_motion)
+        {
+            self.character_state.selected_motion = m;
         }
     }
 
@@ -529,20 +470,6 @@ impl CharacterSettings {
         store.set_config(config);
 
         let entry = self.current_entry();
-        let motions: Vec<ene_config::MotionEntry> = entry
-            .motion_names
-            .iter()
-            .zip(entry.motion_paths.iter())
-            .map(|(name, path)| {
-                let relative = path
-                    .strip_prefix(&format!("characters/{}/", entry.name))
-                    .unwrap_or(path);
-                ene_config::MotionEntry {
-                    name: name.clone(),
-                    path: relative.to_string(),
-                }
-            })
-            .collect();
         let default_motion_name = entry
             .motion_names
             .get(self.character_state.selected_motion)
@@ -561,9 +488,6 @@ impl CharacterSettings {
             look_at_strength: self.character_state.look_at_strength,
             default_motion: default_motion_name,
             default_expression: "neutral".to_string(),
-            motions,
-            expressions: None,
-            schema: None,
             extra: existing_extra,
         };
         store.set_character_config(char_config);
@@ -619,18 +543,17 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
             .then(|| path.join("character.json"))
             .or_else(|| {
                 path.join("charactor.json")
-                    .exists()
-                    .then(|| path.join("charactor.json"))
+                     .exists()
+                     .then(|| path.join("charactor.json"))
             })
             .unwrap_or_else(|| path.join("character.json"));
         if !card_path.exists() {
             continue;
         }
-        let (name, default_motion_name) =
-            read_character_json_meta(&card_path).unwrap_or((folder.clone(), None));
+        let (name, default_motion_name, card_motions) =
+            read_character_json_meta(&card_path).unwrap_or((folder.clone(), None, None));
 
         let mut vrm_paths = Vec::new();
-        let mut motion_paths = Vec::new();
         if let Ok(entries) = fs::read_dir(&path) {
             for file in entries.flatten() {
                 let file_path = file.path();
@@ -650,27 +573,35 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
                 }
             }
         }
-        let motions_dir = path.join("motions");
-        if let Ok(entries) = fs::read_dir(&motions_dir) {
-            for file in entries.flatten() {
-                let file_path = file.path();
-                if file_path.is_dir() {
-                    continue;
-                }
-                let relative = format!(
-                    "characters/{}/motions/{}",
-                    folder,
-                    file_path.file_name().unwrap().to_string_lossy()
-                );
-                if file_path
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("vrma"))
-                {
-                    motion_paths.push(relative);
+        vrm_paths.sort();
+
+        let mut motion_paths = Vec::new();
+        if let Some(motions) = card_motions {
+            for m in motions {
+                motion_paths.push(format!("characters/{}/{}", folder, m.path));
+            }
+        } else {
+            let motions_dir = path.join("motions");
+            if let Ok(entries) = fs::read_dir(&motions_dir) {
+                for file in entries.flatten() {
+                    let file_path = file.path();
+                    if file_path.is_dir() {
+                        continue;
+                    }
+                    let relative = format!(
+                        "characters/{}/motions/{}",
+                        folder,
+                        file_path.file_name().unwrap().to_string_lossy()
+                    );
+                    if file_path
+                        .extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("vrma"))
+                    {
+                        motion_paths.push(relative);
+                    }
                 }
             }
         }
-        vrm_paths.sort();
         motion_paths.sort();
 
         let motion_names = motion_paths
@@ -699,7 +630,7 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
     out
 }
 
-fn read_character_json_meta(path: &Path) -> Option<(String, Option<String>)> {
+fn read_character_json_meta(path: &Path) -> Option<(String, Option<String>, Option<Vec<ene_config::MotionEntry>>)> {
     let content = fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
     let name = v.get("data")?.get("name")?.as_str()?.to_string();
@@ -718,5 +649,13 @@ fn read_character_json_meta(path: &Path) -> Option<(String, Option<String>)> {
         None
     })();
 
-    Some((name, default_motion))
+    let motions = (|| {
+        let extensions = v.get("data")?.get("extensions")?;
+        let ene = extensions.get("ene")?;
+        let motions_val = ene.get("motions")?;
+        let motions: Vec<ene_config::MotionEntry> = serde_json::from_value(motions_val.clone()).ok()?;
+        Some(motions)
+    })();
+
+    Some((name, default_motion, motions))
 }
