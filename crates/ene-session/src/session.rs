@@ -158,44 +158,8 @@ impl ConversationSession {
         let file_content =
             std::fs::read_to_string(path).map_err(crate::error::EneSessionError::CardReadError)?;
 
-        let mut card = serde_json::from_str::<CharacterCardV3>(&file_content)
+        let card = serde_json::from_str::<CharacterCardV3>(&file_content)
             .map_err(crate::error::EneSessionError::JsonError)?;
-
-        // Merge expressions from character_settings.json
-        if let Some(parent) = std::path::Path::new(path).parent() {
-            let folder = parent.file_name().unwrap_or_default().to_string_lossy();
-            let settings_path = ene_config::character_settings_path(&folder);
-            if let Ok(settings_content) = std::fs::read_to_string(&settings_path) {
-                let per =
-                    serde_json::from_str::<ene_config::CharacterConfig>(&settings_content).ok();
-
-                if let Some(per) = per {
-                    if let Some(expr) = per.expressions
-                        && let Ok(val) = serde_json::to_value(expr)
-                    {
-                        card.data.extensions.insert("expressions".to_string(), val);
-                    }
-                    if !per.default_motion.is_empty() {
-                        let motion_path = per
-                            .motions
-                            .iter()
-                            .find(|m| m.name == per.default_motion)
-                            .map(|m| m.path.clone())
-                            .unwrap_or_default();
-                        if !motion_path.is_empty() {
-                            let mut ene = serde_json::Map::new();
-                            ene.insert(
-                                "default_motion".to_string(),
-                                serde_json::Value::String(motion_path),
-                            );
-                            card.data
-                                .extensions
-                                .insert("ene".to_string(), serde_json::Value::Object(ene));
-                        }
-                    }
-                }
-            }
-        }
 
         self.character_card = Some(card);
         self.current_card_path = path.to_string();

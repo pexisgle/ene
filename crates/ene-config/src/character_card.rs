@@ -287,6 +287,7 @@ pub fn resolve_expressions(card: &CharacterCardV3) -> Vec<ResolvedExpression> {
 
 impl CharacterCardData {
     /// Returns the display name for this character.
+    /// Returns the display name for this character.
     ///
     /// Prefers `nickname` over `name` when `nickname` is non-empty.
     #[must_use]
@@ -298,12 +299,35 @@ impl CharacterCardData {
         }
     }
 
+    /// Returns the EneExtension object if defined under `extensions.ene`.
+    #[must_use]
+    pub fn get_ene_extension(&self) -> Option<EneExtension> {
+        let value = self.extensions.get("ene")?;
+        serde_json::from_value(value.clone()).ok()
+    }
+
     fn get_expression_overrides(&self) -> Vec<ExpressionDefinition> {
+        if let Some(ene) = self.get_ene_extension()
+            && let Some(exprs) = ene.expressions
+        {
+            return exprs;
+        }
         let Some(value) = self.extensions.get("expressions") else {
             return Vec::new();
         };
         serde_json::from_value(value.clone()).unwrap_or_default()
     }
+}
+
+/// Ene extension block stored in character.json under `data.extensions.ene`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, JsonSchema)]
+#[serde(crate = "crate::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "crate::schemars")]
+pub struct EneExtension {
+    /// Motions list
+    pub motions: Vec<crate::character_config::MotionEntry>,
+    /// Optional expressions list
+    pub expressions: Option<Vec<ExpressionDefinition>>,
 }
 
 /// Expands CBS (Character Book Spec) template macros in `text`.
