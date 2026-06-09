@@ -13,7 +13,7 @@ pub struct MotionEntry {
     pub path: String,
 }
 
-/// Per-character visual and motion config used by the desktop GUI.
+/// Per-character visual config used by the desktop GUI.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(crate = "crate::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "crate::schemars")]
@@ -28,14 +28,6 @@ pub struct CharacterConfig {
     pub default_motion: String,
     /// Name of the default expression (e.g. `"neutral"`).
     pub default_expression: String,
-    /// Available motions for this character.
-    pub motions: Vec<MotionEntry>,
-    /// Expression overrides.
-    pub expressions: Option<Vec<crate::character_card::ExpressionDefinition>>,
-    #[serde(rename = "$schema", skip_serializing_if = "Option::is_none")]
-    #[schemars(skip)]
-    /// JSON Schema reference for editor support.
-    pub schema: Option<String>,
 
     /// Catch-all for extra configurations.
     #[serde(flatten)]
@@ -51,9 +43,6 @@ impl Default for CharacterConfig {
             look_at_strength: 0.6,
             default_motion: String::new(),
             default_expression: "neutral".to_string(),
-            motions: Vec::new(),
-            expressions: None,
-            schema: None,
             extra: HashMap::new(),
         }
     }
