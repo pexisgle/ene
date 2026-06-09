@@ -3,6 +3,23 @@
   "character": "Alicia",
   "user_name": "pexisgle",
   "runtime_rules": "Keep responses relatively short and sweet, suitable for displaying on a screen overlay.",
+  "provider": {
+    "api_key": "",
+    "api_key_env": "OPENAI_API_KEY",
+    "api_key_source": "inline",
+    "base_url": "https://openrouter.ai/api/v1",
+    "cloud_embedding_dimensions": 1536,
+    "cloud_embedding_model": "text-embedding-3-small",
+    "embedding_backend": "local",
+    "model": "xiaomi/mimo-v2.5",
+    "provider_name": "openai-compatible",
+    "query_prefix": null
+  },
+  "memory": {
+    "enabled": true,
+    "topic_change_threshold": 0.4
+  },
+  "$schema": "./schema/settings.schema.json",
   "tools": {
     "tools": {
       "app": {
@@ -25,6 +42,10 @@
       }
     }
   },
+  "provider.local_embedding": {
+    "model": "jina-embeddings-v5-text-nano",
+    "quantization": "F16"
+  },
   "desktop": {
     "graphics": {
       "mask_render_downsample": 8,
@@ -32,26 +53,5 @@
       "shadow_quality": "medium",
       "antialiasing_mode": "fxaa"
     }
-  },
-  "provider.local_embedding": {
-    "model": "jina-embeddings-v5-text-nano",
-    "quantization": "F16"
-  },
-  "provider": {
-    "provider_name": "openai-compatible",
-    "model": "xiaomi/mimo-v2.5",
-    "base_url": "https://openrouter.ai/api/v1",
-    "api_key": "",
-    "api_key_source": "inline",
-    "api_key_env": "OPENAI_API_KEY",
-    "embedding_backend": "local",
-    "cloud_embedding_model": "text-embedding-3-small",
-    "cloud_embedding_dimensions": 1536,
-    "query_prefix": null
-  },
-  "memory": {
-    "enabled": true,
-    "topic_change_threshold": 0.4
-  },
-  "$schema": "./settings.schema.json"
+  }
 }

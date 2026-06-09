@@ -1,4 +1,5 @@
 {
+  "$schema": "../../schema/character.schema.json",
   "spec": "chara_card_v3",
   "spec_version": "3.0",
   "data": {
@@ -13,13 +14,44 @@
     "group_only_greetings": [],
     "mes_example": "",
     "creator_notes": "Default ene character",
-    "tags": [
-      "desktop",
-      "companion"
-    ],
+    "tags": ["desktop", "companion"],
     "creator": "ene",
     "character_version": "1.0",
-    "extensions": {},
+    "extensions": {
+      "ene": {
+        "motions": [
+          {
+            "name": "VRMA_01",
+            "path": "motions/VRMA_01.vrma"
+          },
+          {
+            "name": "VRMA_02",
+            "path": "motions/VRMA_02.vrma"
+          },
+          {
+            "name": "VRMA_03",
+            "path": "motions/VRMA_03.vrma"
+          },
+          {
+            "name": "VRMA_04",
+            "path": "motions/VRMA_04.vrma"
+          },
+          {
+            "name": "VRMA_05",
+            "path": "motions/VRMA_05.vrma"
+          },
+          {
+            "name": "VRMA_06",
+            "path": "motions/VRMA_06.vrma"
+          },
+          {
+            "name": "VRMA_07",
+            "path": "motions/VRMA_07.vrma"
+          }
+        ],
+        "expressions": null
+      }
+    },
     "nickname": "",
     "assets": [
       {
