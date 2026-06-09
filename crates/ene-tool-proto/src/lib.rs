@@ -82,8 +82,8 @@ pub use error::{MultiAnswer, QuestionItem, UserInputPrompt};
 pub use host_registry::HostRegistry;
 /// IPC message types and serialisation helpers.
 pub use ipc::{
-    IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, read_ipc_request, read_ipc_response,
-    write_ipc_request, write_ipc_response,
+    IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, ToolConfigAccessor, read_ipc_request,
+    read_ipc_response, write_ipc_request, write_ipc_response,
 };
 /// Sandbox configuration data sent from the host.
 pub use sandbox::SandboxConfigData;
@@ -132,6 +132,11 @@ pub trait ToolProvider: Send + Sync {
 
     /// Receives tool-specific configuration (called once during Initialize).
     fn set_config(&self, _config: &serde_json::Value) {}
+
+    /// Returns the tool's current configuration.
+    fn get_config(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
 
     /// Returns the JSON Schema for the configuration this tool accepts.
     fn config_schema(&self) -> Option<serde_json::Value> {

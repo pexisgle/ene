@@ -30,18 +30,22 @@ pub fn apply_action(
         SettingsButtonAction::PrevMotion => {
             settings.character_state.selected_motion = cycle_index(
                 settings.character_state.selected_motion,
-                settings.current_entry().motion_paths.len(),
+                settings.current_entry().motion_names.len(),
                 -1,
             );
+            settings.character_state.motion_override = None;
             settings.character_state.needs_respawn = true;
+            settings.mark_dirty();
         }
         SettingsButtonAction::NextMotion => {
             settings.character_state.selected_motion = cycle_index(
                 settings.character_state.selected_motion,
-                settings.current_entry().motion_paths.len(),
+                settings.current_entry().motion_names.len(),
                 1,
             );
+            settings.character_state.motion_override = None;
             settings.character_state.needs_respawn = true;
+            settings.mark_dirty();
         }
         SettingsButtonAction::TogglePlay => {
             animation_control.toggle_playing();

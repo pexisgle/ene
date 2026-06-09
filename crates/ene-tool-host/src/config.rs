@@ -8,32 +8,25 @@ fn default_tools() -> HashMap<String, ToolEntry> {
         .collect()
 }
 
-ene_config::define_config!(
-    "tools",
-    /// Global tool subsystem config.
-    pub struct ToolConfig {
-        /// Whether tool calling is enabled globally.
-        pub tool_calling_enabled: bool = true,
-        /// Maximum number of sequential tool calls per turn.
-        pub max_tool_call_rounds: usize = 10,
-        /// Tool call execution timeout in milliseconds.
-        pub tool_call_timeout_ms: u64 = 60_000,
-        /// Per-tool enable/disable map with optional extra config.
-        pub tools: HashMap<String, ToolEntry> = default_tools(),
-    }
-);
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+/// A single tool entry in the `tools` map.
+pub struct ToolEntry {
+    /// Whether this tool is enabled.
+    pub enable: bool,
+    /// Tool-specific configuration (flattened into the parent).
+    #[serde(flatten)]
+    pub config: serde_json::Value,
+}
 
-ene_config::define_config!(
-    "tool_entry",
-    /// A single tool entry in the `tools` map.
-    pub struct ToolEntry {
-        /// Whether this tool is enabled.
-        pub enable: bool = true,
-        /// Tool-specific configuration (flattened into the parent).
-        #[serde(flatten)]
-        pub config: serde_json::Value = serde_json::Value::Object(Default::default()),
+impl Default for ToolEntry {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            config: serde_json::Value::Object(Default::default()),
+        }
     }
-);
+}
 
 fn default_forced_tools() -> Vec<String> {
     vec![
@@ -43,35 +36,50 @@ fn default_forced_tools() -> Vec<String> {
     ]
 }
 
-ene_config::define_config!(
-    "tool_rag",
-    /// Tool RAG pipeline configuration.
-    pub struct ToolRagConfig {
-        /// Whether Tool RAG is enabled.
-        pub enabled: bool = true,
-        /// Number of candidates to retrieve from the vector index.
-        pub top_k: usize = 12,
-        /// Final number of tools returned after reranking and filtering.
-        pub final_n: usize = 6,
-        /// Whether to use Hypothetical Document Embedding to expand the query.
-        pub use_hyde: bool = true,
-        /// Whether to use LLM-based reranking on the candidate set.
-        pub use_rerank: bool = true,
-        /// Number of candidates to pass to the reranker.
-        pub rerank_candidates: usize = 24,
-        /// Minimum similarity score for a tool to be considered.
-        pub min_similarity: f32 = 0.25,
-        /// Whether to warm the index at startup in a background task.
-        pub background_index_on_startup: bool = false,
-        /// Tool names that are always included regardless of relevance.
-        pub forced_tools: Vec<String> = default_forced_tools(),
-        /// Per-field weighting for the multi-vector similarity computation.
-        pub weights: FieldWeightsConfig = FieldWeightsConfig::default(),
-    }
-);
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+/// Tool RAG pipeline configuration.
+pub struct ToolRagConfig {
+    /// Whether Tool RAG is enabled.
+    pub enabled: bool,
+    /// Number of candidates to retrieve from the vector index.
+    pub top_k: usize,
+    /// Final number of tools returned after reranking and filtering.
+    pub final_n: usize,
+    /// Whether to use Hypothetical Document Embedding to expand the query.
+    pub use_hyde: bool,
+    /// Whether to use LLM-based reranking on the candidate set.
+    pub use_rerank: bool,
+    /// Number of candidates to pass to the reranker.
+    pub rerank_candidates: usize,
+    /// Minimum similarity score for a tool to be considered.
+    pub min_similarity: f32,
+    /// Whether to warm the index at startup in a background task.
+    pub background_index_on_startup: bool,
+    /// Tool names that are always included regardless of relevance.
+    pub forced_tools: Vec<String>,
+    /// Per-field weighting for the multi-vector similarity computation.
+    pub weights: FieldWeightsConfig,
+}
 
-/// Serializable field weights, config-level counterpart of
-/// [`crate::rag::FieldWeights`].
+impl Default for ToolRagConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            top_k: 12,
+            final_n: 6,
+            use_hyde: true,
+            use_rerank: true,
+            rerank_candidates: 24,
+            min_similarity: 0.25,
+            background_index_on_startup: false,
+            forced_tools: default_forced_tools(),
+            weights: FieldWeightsConfig::default(),
+        }
+    }
+}
+
+/// Serializable field weights.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct FieldWeightsConfig {
@@ -101,6 +109,26 @@ impl Default for FieldWeightsConfig {
         }
     }
 }
+
+ene_config::define_config!(
+    settings,
+    "tools",
+    /// Global tool subsystem config.
+    pub struct ToolConfig {
+        /// Whether tool calling is enabled globally.
+        pub tool_calling_enabled: bool = true,
+        /// Maximum number of sequential tool calls per turn.
+        pub max_tool_call_rounds: usize = 10,
+        /// Tool call execution timeout in milliseconds.
+        pub tool_call_timeout_ms: u64 = 60_000,
+        /// Per-tool enable/disable map with optional extra config.
+        pub tools: HashMap<String, ToolEntry> = default_tools(),
+        /// MCP servers.
+        pub mcp_servers: Vec<crate::mcp_config::McpServerConfig>,
+        /// Tool RAG configuration.
+        pub rag: ToolRagConfig,
+    }
+);
 
 impl ToolEntry {
     /// Deserializes tool-specific settings in a type-safe manner and supports type completion

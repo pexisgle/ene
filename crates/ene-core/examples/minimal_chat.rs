@@ -55,14 +55,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // load_config() merges assets/settings.json and ENE_* environment variables,
     // and initializes the provider, memory store, and tool registry.
     let config = handle.load_config().await?;
+    let provider_cfg = config
+        .get_section::<ene_core::ProviderConfig>()
+        .unwrap_or_default();
     println!(
         "[Setup] provider: {}, model: {}",
-        config
-            .get_provider_field("provider_name")
-            .unwrap_or_else(|| "unknown".to_string()),
-        config
-            .get_provider_field("model")
-            .unwrap_or_else(|| "unknown".to_string()),
+        provider_cfg.provider_name,
+        provider_cfg.model,
     );
     println!("[Setup] Reconfigured.\n");
 

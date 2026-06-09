@@ -127,6 +127,26 @@ impl ConfigStore {
         self.character_dirty.store(true, Ordering::Release);
     }
 
+    /// character_settings の extra セクションを型安全に取得（新規）
+    pub fn get_character_section<T>(&self) -> T
+    where
+        T: serde::de::DeserializeOwned + Default + crate::HasConfigKey,
+    {
+        self.character_config()
+            .get_section::<T>()
+            .unwrap_or_default()
+    }
+
+    /// character_settings の extra セクションを型安全に書き込み（新規）
+    pub fn set_character_section<T>(&self, section: &T)
+    where
+        T: serde::Serialize + crate::HasConfigKey,
+    {
+        self.with_character_config_mut(|c| {
+            c.set_section(section).ok();
+        });
+    }
+
     // ── Persistence ───────────────────────────────────────────────────
 
     /// Saves the global config to disk if it has been modified.

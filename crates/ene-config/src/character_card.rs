@@ -177,6 +177,19 @@ pub struct LorebookEntry {
     pub position: Option<String>,
 }
 
+fn default_enabled() -> bool {
+    true
+}
+
+fn vrm_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let schema = <HashMap<String, f32> as schemars::JsonSchema>::json_schema(generator);
+    let mut value = serde_json::to_value(&schema).unwrap_or_default();
+    if let serde_json::Value::Object(ref mut obj) = value {
+        obj.insert("minProperties".to_string(), serde_json::json!(1));
+    }
+    serde_json::from_value(value).unwrap_or(schema)
+}
+
 /// A single expression override in `extensions.expressions`.
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
 #[serde(crate = "crate::serde")]
@@ -189,11 +202,11 @@ pub struct ExpressionDefinition {
     pub description: String,
     /// VRM blend-shape weights to set when this expression fires.
     /// Keys are VRM Expression names (e.g. "happy", "aa"), values are 0.0–1.0.
-    #[serde(default)]
+    #[schemars(schema_with = "vrm_schema")]
     pub vrm: HashMap<String, f32>,
-    /// If true, this expression is removed from the active set.
-    #[serde(default)]
-    pub disabled: bool,
+    /// Whether this expression is enabled. If false, it is removed from the active set.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
 }
 
 /// A fully resolved expression ready for use at runtime.
@@ -241,7 +254,7 @@ pub fn resolve_expressions(card: &CharacterCardV3) -> Vec<ResolvedExpression> {
         .collect();
 
     for ovr in &overrides {
-        if ovr.disabled {
+        if !ovr.enabled {
             map.shift_remove(&ovr.name);
             continue;
         }

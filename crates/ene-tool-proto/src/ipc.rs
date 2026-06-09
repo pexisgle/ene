@@ -62,6 +62,10 @@ pub enum IpcRequest {
         /// Target glob pattern.
         target_pattern: String,
     },
+    /// Get tool configuration.
+    GetMyConfig,
+    /// Set tool configuration.
+    SetMyConfig(serde_json::Value),
     /// Health-check ping.
     Ping,
     /// Graceful shutdown.
@@ -98,6 +102,8 @@ pub enum IpcResponse {
         /// The result, or an error.
         result: Result<String, ToolError>,
     },
+    /// Tool configuration.
+    MyConfig(serde_json::Value),
     /// Pong response to Ping.
     Pong,
     /// Error response.
@@ -105,6 +111,36 @@ pub enum IpcResponse {
         /// Error description.
         message: String,
     },
+}
+
+/// Accessor for tool configuration.
+pub struct ToolConfigAccessor {
+    config: std::sync::Arc<tokio::sync::RwLock<serde_json::Value>>,
+}
+
+impl ToolConfigAccessor {
+    /// Create a new accessor.
+    pub fn new(initial_config: serde_json::Value) -> Self {
+        Self {
+            config: std::sync::Arc::new(tokio::sync::RwLock::new(initial_config)),
+        }
+    }
+
+    /// Gets the tool configuration.
+    pub async fn get<T: serde::de::DeserializeOwned + Default>(&self) -> T {
+        let guard = self.config.read().await;
+        serde_json::from_value(guard.clone()).unwrap_or_default()
+    }
+
+    /// Sets the tool configuration.
+    pub async fn set<T: serde::Serialize>(&self, config: &T) -> Result<(), ToolError> {
+        let val = serde_json::to_value(config).map_err(|e| ToolError::InvalidArguments {
+            message: format!("Failed to serialize config: {e}"),
+        })?;
+        let mut guard = self.config.write().await;
+        *guard = val;
+        Ok(())
+    }
 }
 
 /// Reads an `IpcRequest` as 4-byte length-prefixed JSON

@@ -10,7 +10,6 @@ use ene_provider::EmbeddingProvider;
 use ene_provider::Role;
 
 use ene_memory::MemoryStore;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Manages the conversation history with automatic trimming.
@@ -162,38 +161,37 @@ impl ConversationSession {
         let mut card = serde_json::from_str::<CharacterCardV3>(&file_content)
             .map_err(crate::error::EneSessionError::JsonError)?;
 
-        // Merge expressions from character_settings.json (section-based with fallback)
+        // Merge expressions from character_settings.json
         if let Some(parent) = std::path::Path::new(path).parent() {
             let folder = parent.file_name().unwrap_or_default().to_string_lossy();
             let settings_path = ene_config::character_settings_path(&folder);
             if let Ok(settings_content) = std::fs::read_to_string(&settings_path) {
                 let per =
-                    serde_json::from_str::<HashMap<String, serde_json::Value>>(&settings_content)
-                        .ok()
-                        .and_then(|map| {
-                            map.get("character_settings").cloned().and_then(|v| {
-                                serde_json::from_value::<ene_config::CharacterConfig>(v).ok()
-                            })
-                        })
-                        // Fallback: flat CharacterConfig
-                        .or_else(|| {
-                            serde_json::from_str::<ene_config::CharacterConfig>(&settings_content)
-                                .ok()
-                        });
+                    serde_json::from_str::<ene_config::CharacterConfig>(&settings_content).ok();
 
                 if let Some(per) = per {
-                    if let Some(expr) = per.expressions {
-                        card.data.extensions.insert("expressions".to_string(), expr);
+                    if let Some(expr) = per.expressions
+                        && let Ok(val) = serde_json::to_value(expr)
+                    {
+                        card.data.extensions.insert("expressions".to_string(), val);
                     }
                     if !per.default_motion.is_empty() {
-                        let mut ene = serde_json::Map::new();
-                        ene.insert(
-                            "default_motion".to_string(),
-                            serde_json::Value::String(per.default_motion),
-                        );
-                        card.data
-                            .extensions
-                            .insert("ene".to_string(), serde_json::Value::Object(ene));
+                        let motion_path = per
+                            .motions
+                            .iter()
+                            .find(|m| m.name == per.default_motion)
+                            .map(|m| m.path.clone())
+                            .unwrap_or_default();
+                        if !motion_path.is_empty() {
+                            let mut ene = serde_json::Map::new();
+                            ene.insert(
+                                "default_motion".to_string(),
+                                serde_json::Value::String(motion_path),
+                            );
+                            card.data
+                                .extensions
+                                .insert("ene".to_string(), serde_json::Value::Object(ene));
+                        }
                     }
                 }
             }

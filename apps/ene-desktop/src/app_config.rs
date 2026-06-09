@@ -7,7 +7,6 @@ use bevy::window::{WindowLevel, WindowMode, WindowPlugin, WindowResolution};
 use ene_core::RequestId;
 use ene_tool_proto::UserInputPrompt;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -32,25 +31,34 @@ ene_config::define_label_enum!(
     }
 );
 
+#[derive(Debug, Clone, Serialize, Deserialize, ene_config::schemars::JsonSchema)]
+#[serde(default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct GraphicsSection {
+    pub mask_render_downsample: u32,
+    pub target_fps: u32,
+    pub shadow_quality: ShadowQuality,
+    pub antialiasing_mode: AntialiasingMode,
+}
+
+impl Default for GraphicsSection {
+    fn default() -> Self {
+        Self {
+            mask_render_downsample: 8,
+            target_fps: 60,
+            shadow_quality: ShadowQuality::Medium,
+            antialiasing_mode: AntialiasingMode::Fxaa,
+        }
+    }
+}
+
 ene_config::define_config!(
-    "graphics",
-    pub struct GraphicsSection {
-        pub mask_render_downsample: u32 = 8,
-        pub target_fps: u32 = 60,
-        pub shadow_quality: ShadowQuality = ShadowQuality::Medium,
-        pub antialiasing_mode: AntialiasingMode = AntialiasingMode::Fxaa,
+    settings,
+    "desktop",
+    pub struct DesktopSection {
+        pub graphics: GraphicsSection,
     }
 );
-
-#[derive(Debug, Default, Clone, Serialize, Deserialize, ene_config::schemars::JsonSchema)]
-#[schemars(crate = "::ene_config::schemars")]
-pub struct DesktopSection {
-    pub graphics: GraphicsSection,
-}
-
-impl ene_config::HasConfigKey for DesktopSection {
-    const KEY: &'static str = "desktop";
-}
 
 pub const DEFAULT_CHARACTER_NAME: &str = "Alicia";
 pub const DEFAULT_VRM_PATH: &str = "characters/Alicia/AliciaSolid.vrm";
@@ -185,6 +193,7 @@ pub struct CharacterEntry {
     pub folder: String,
     pub vrm_paths: Vec<String>,
     pub motion_paths: Vec<String>,
+    pub motion_names: Vec<String>,
     pub card_path: String,
     pub default_motion: Option<String>,
 }
@@ -199,6 +208,7 @@ pub struct CharacterState {
     pub model_scale: f32,
     pub character_position: Vec3,
     pub look_at_strength: f32,
+    pub motion_override: Option<String>,
 }
 
 impl Default for CharacterState {
@@ -210,6 +220,7 @@ impl Default for CharacterState {
             model_scale: 1.0,
             character_position: Vec3::ZERO,
             look_at_strength: 0.60,
+            motion_override: None,
         }
     }
 }
@@ -286,6 +297,7 @@ impl CharacterSettings {
                 folder: DEFAULT_CHARACTER_NAME.to_string(),
                 vrm_paths: vec![DEFAULT_VRM_PATH.to_string()],
                 motion_paths: vec![DEFAULT_VRMA_PATH.to_string()],
+                motion_names: vec!["VRMA_01".to_string()],
                 card_path: format!("characters/{DEFAULT_CHARACTER_NAME}/character.json"),
                 default_motion: None,
             });
@@ -303,10 +315,18 @@ impl CharacterSettings {
         let selected_motion = characters
             .get(selected_character)
             .and_then(|entry| {
-                entry
-                    .default_motion
-                    .as_ref()
-                    .and_then(|dm| entry.motion_paths.iter().position(|m| m.ends_with(dm)))
+                entry.default_motion.as_ref().and_then(|dm_name| {
+                    entry
+                        .motion_names
+                        .iter()
+                        .position(|n| n == dm_name)
+                        .or_else(|| {
+                            entry
+                                .motion_paths
+                                .iter()
+                                .position(|m| m.ends_with(dm_name))
+                        })
+                })
             })
             .unwrap_or(0);
 
@@ -343,6 +363,9 @@ impl CharacterSettings {
     }
 
     pub fn current_motion(&self) -> &str {
+        if let Some(ref override_path) = self.character_state.motion_override {
+            return override_path;
+        }
         &self.current_entry().motion_paths[self.character_state.selected_motion]
     }
 
@@ -378,32 +401,50 @@ impl CharacterSettings {
         ene_config::character_settings_path(&self.current_entry().name)
     }
 
-    fn motion_path_relative(&self) -> String {
-        let prefix = format!("characters/{}/", self.current_entry().name);
-        self.current_motion()
-            .strip_prefix(&prefix)
-            .unwrap_or("")
-            .to_string()
-    }
-
     pub fn save_per_character_settings(&self) {
+        let entry = self.current_entry();
+        let motions: Vec<ene_config::MotionEntry> = entry
+            .motion_names
+            .iter()
+            .zip(entry.motion_paths.iter())
+            .map(|(name, path)| {
+                let relative = path
+                    .strip_prefix(&format!("characters/{}/", entry.name))
+                    .unwrap_or(path);
+                ene_config::MotionEntry {
+                    name: name.clone(),
+                    path: relative.to_string(),
+                }
+            })
+            .collect();
+        let default_motion_name = entry
+            .motion_names
+            .get(self.character_state.selected_motion)
+            .cloned()
+            .unwrap_or_default();
+
+        let existing_extra = fs::read_to_string(self.character_settings_path())
+            .ok()
+            .and_then(|json| serde_json::from_str::<CharacterConfig>(&json).ok())
+            .map(|c| c.extra)
+            .unwrap_or_default();
+
         let per = CharacterConfig {
             character_position: [
                 self.character_state.character_position.x,
                 self.character_state.character_position.y,
                 self.character_state.character_position.z,
             ],
-            selected_motion_path: self.motion_path_relative(),
             model_scale: self.character_state.model_scale,
             look_at_strength: self.character_state.look_at_strength,
-            default_motion: self.motion_path_relative(),
+            default_motion: default_motion_name,
+            default_expression: "neutral".to_string(),
+            motions,
             expressions: None,
+            schema: Some("./character_settings.schema.json".to_string()),
+            extra: existing_extra,
         };
-        let mut sections = serde_json::Map::new();
-        if let Ok(val) = serde_json::to_value(&per) {
-            sections.insert("character_settings".to_string(), val);
-        }
-        if let Ok(json) = serde_json::to_string_pretty(&sections) {
+        if let Ok(json) = serde_json::to_string_pretty(&per) {
             let path = self.character_settings_path();
             if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
@@ -420,14 +461,7 @@ impl CharacterSettings {
             return;
         };
 
-        let per = serde_json::from_str::<HashMap<String, serde_json::Value>>(&json)
-            .ok()
-            .and_then(|map| {
-                map.get("character_config")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value::<CharacterConfig>(v).ok())
-            })
-            .or_else(|| serde_json::from_str::<CharacterConfig>(&json).ok());
+        let per = serde_json::from_str::<CharacterConfig>(&json).ok();
 
         match per {
             Some(per) => {
@@ -438,20 +472,14 @@ impl CharacterSettings {
                 );
                 self.character_state.model_scale = per.model_scale;
                 self.character_state.look_at_strength = per.look_at_strength;
-                if !per.selected_motion_path.is_empty() {
-                    let abs_path = format!(
-                        "characters/{}/{}",
-                        self.current_entry().name,
-                        per.selected_motion_path
-                    );
-                    if let Some(m) = self
+                if !per.default_motion.is_empty()
+                    && let Some(m) = self
                         .current_entry()
-                        .motion_paths
+                        .motion_names
                         .iter()
-                        .position(|p| p == &abs_path)
-                    {
-                        self.character_state.selected_motion = m;
-                    }
+                        .position(|n| n == &per.default_motion)
+                {
+                    self.character_state.selected_motion = m;
                 }
             }
             None => {
@@ -500,17 +528,43 @@ impl CharacterSettings {
         let store = self.store.read().unwrap();
         store.set_config(config);
 
+        let entry = self.current_entry();
+        let motions: Vec<ene_config::MotionEntry> = entry
+            .motion_names
+            .iter()
+            .zip(entry.motion_paths.iter())
+            .map(|(name, path)| {
+                let relative = path
+                    .strip_prefix(&format!("characters/{}/", entry.name))
+                    .unwrap_or(path);
+                ene_config::MotionEntry {
+                    name: name.clone(),
+                    path: relative.to_string(),
+                }
+            })
+            .collect();
+        let default_motion_name = entry
+            .motion_names
+            .get(self.character_state.selected_motion)
+            .cloned()
+            .unwrap_or_default();
+
+        let existing_extra = store.character_config().extra;
+
         let char_config = ene_config::CharacterConfig {
             character_position: [
                 self.character_state.character_position.x,
                 self.character_state.character_position.y,
                 self.character_state.character_position.z,
             ],
-            selected_motion_path: self.motion_path_relative(),
             model_scale: self.character_state.model_scale,
             look_at_strength: self.character_state.look_at_strength,
-            default_motion: self.motion_path_relative(),
+            default_motion: default_motion_name,
+            default_expression: "neutral".to_string(),
+            motions,
             expressions: None,
+            schema: None,
+            extra: existing_extra,
         };
         store.set_character_config(char_config);
     }
@@ -572,7 +626,7 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
         if !card_path.exists() {
             continue;
         }
-        let (name, default_motion) =
+        let (name, default_motion_name) =
             read_character_json_meta(&card_path).unwrap_or((folder.clone(), None));
 
         let mut vrm_paths = Vec::new();
@@ -619,13 +673,25 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
         vrm_paths.sort();
         motion_paths.sort();
 
+        let motion_names = motion_paths
+            .iter()
+            .map(|p| {
+                std::path::Path::new(p)
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+
         let entry = CharacterEntry {
             name,
             folder: folder.clone(),
             vrm_paths,
+            motion_names,
             motion_paths,
             card_path: format!("characters/{folder}/character.json"),
-            default_motion,
+            default_motion: default_motion_name,
         };
         out.push(entry);
     }

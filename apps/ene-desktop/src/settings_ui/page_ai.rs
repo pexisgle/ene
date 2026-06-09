@@ -18,7 +18,11 @@ pub fn render_ai_page(
         .ai
         .get_section::<ene_core::ProviderConfig>()
         .unwrap_or_default();
-    let mut local_emb = ene_core::ProviderConfig::local_embedding(&settings.ai.ai);
+    let mut local_emb = settings
+        .ai
+        .ai
+        .get_section::<ene_core::LocalEmbeddingConfig>()
+        .unwrap_or_default();
     let mut mem_config = settings
         .ai
         .ai
@@ -194,10 +198,7 @@ pub fn render_ai_page(
                         provider_config.cloud_embedding_dimensions.to_string();
                 }
                 let _ = settings.ai.ai.set_section(&provider_config);
-                let _ = settings
-                    .ai
-                    .ai
-                    .set_section_by_key("provider.local_embedding", &local_emb);
+                let _ = settings.ai.ai.set_section(&local_emb);
                 settings.mark_dirty();
             }
         });
@@ -211,10 +212,7 @@ pub fn render_ai_page(
             if response.changed() {
                 if input_state.ai_embedding_provider == "local" {
                     local_emb.model = input_state.ai_embedding_model.clone();
-                    let _ = settings
-                        .ai
-                        .ai
-                        .set_section_by_key("provider.local_embedding", &local_emb);
+                    let _ = settings.ai.ai.set_section(&local_emb);
                 } else {
                     provider_config.cloud_embedding_model = input_state.ai_embedding_model.clone();
                     let _ = settings.ai.ai.set_section(&provider_config);
