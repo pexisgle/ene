@@ -3,25 +3,54 @@
   "character": "Alicia",
   "user_name": "pexisgle",
   "runtime_rules": "Keep responses relatively short and sweet, suitable for displaying on a screen overlay.",
+  "$schema": "./schema/settings.schema.json",
   "provider": {
-    "api_key": "",
-    "api_key_env": "OPENAI_API_KEY",
-    "api_key_source": "inline",
-    "base_url": "https://openrouter.ai/api/v1",
-    "cloud_embedding_dimensions": 1536,
-    "cloud_embedding_model": "text-embedding-3-small",
-    "embedding_backend": "local",
+    "name": "openai-compatible",
     "model": "xiaomi/mimo-v2.5",
-    "provider_name": "openai-compatible",
-    "query_prefix": null
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key": {
+      "source": "inline",
+      "inline": "",
+      "env": "OPENAI_API_KEY"
+    },
+    "embedding": {
+      "backend": "local",
+      "query_prefix": null,
+      "cloud": {
+        "model": "text-embedding-3-small",
+        "dimensions": 1536
+      },
+      "local": {
+        "model": "jina-embeddings-v5-text-small",
+        "quantization": "F16"
+      }
+    }
   },
   "memory": {
     "enabled": true,
-    "topic_change_threshold": 0.4
+    "db_path": "",
+    "recall_limit": 5,
+    "similarity_threshold": 0.5,
+    "time_decay_hours": 24.0,
+    "similarity_weight": 0.7,
+    "recency_weight": 0.3
   },
-  "$schema": "./schema/settings.schema.json",
+  "session": {
+    "auto_split": true,
+    "timeout_minutes": 30,
+    "topic_similarity_threshold": 0.5,
+    "min_turns_before_split": 3,
+    "recall_limit": 3,
+    "summarization": {
+      "model": "",
+      "base_url": ""
+    }
+  },
   "tools": {
-    "tools": {
+    "enabled": true,
+    "max_rounds": 10,
+    "timeout_ms": 60000,
+    "list": {
       "app": {
         "enable": true
       },
@@ -40,11 +69,23 @@
         "exa_api_key": "",
         "tavily_api_key": ""
       }
+    },
+    "mcp_servers": [],
+    "rag": {
+      "enabled": true,
+      "top_k": 12,
+      "final_n": 6,
+      "use_hyde": true,
+      "use_rerank": true,
+      "rerank_candidates": 24,
+      "min_similarity": 0.25,
+      "background_index_on_startup": false,
+      "forced": [
+        "utility.question",
+        "utility.todo_add",
+        "utility.get_current_time"
+      ]
     }
-  },
-  "provider.local_embedding": {
-    "model": "jina-embeddings-v5-text-nano",
-    "quantization": "F16"
   },
   "desktop": {
     "graphics": {

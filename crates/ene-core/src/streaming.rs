@@ -121,8 +121,8 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
     let tool_config = config
         .get_section::<ene_tool_host::ToolConfig>()
         .unwrap_or_default();
-    let tool_calling_enabled = tool_config.tool_calling_enabled;
-    let max_rounds = tool_config.max_tool_call_rounds;
+    let tool_calling_enabled = tool_config.enabled;
+    let max_rounds = tool_config.max_rounds;
     let session_id_for_tools = session.memory.session_id.clone();
 
     // 4. Select relevant tools
@@ -220,7 +220,7 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
             &event_tx,
             &pending_permissions,
             &pending_user_inputs,
-            tool_config.tool_call_timeout_ms,
+            tool_config.timeout_ms,
         )
         .await;
 
@@ -303,7 +303,7 @@ pub(crate) async fn fetch_memory_context(
             .recall_context(
                 &card_name,
                 &pending_embedding,
-                session_config.summary_recall_limit,
+                session_config.recall_limit,
                 mem_config.similarity_threshold,
             )
             .unwrap_or_else(|e| {

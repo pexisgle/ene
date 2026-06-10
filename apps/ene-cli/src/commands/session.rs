@@ -60,9 +60,9 @@ fn handle_info(snapshot: &ene_core::EneStateSnapshot) {
         .config
         .get_section::<SessionConfig>()
         .unwrap_or_default();
-    println!("Auto-split: {}", session_config.auto_session_split);
-    println!("Timeout: {} min", session_config.session_timeout_minutes);
-    println!("Topic threshold: {}", session_config.topic_change_threshold);
+    println!("Auto-split: {}", session_config.auto_split);
+    println!("Timeout: {} min", session_config.timeout_minutes);
+    println!("Topic threshold: {}", session_config.topic_similarity_threshold);
     println!("--------------------");
 }
 

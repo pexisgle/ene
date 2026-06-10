@@ -27,19 +27,25 @@ pub struct EneConfig {
 ```json
 {
   "provider": {
-    "provider_name": "openai-compatible",
+    "name": "openai-compatible",
     "model": "gpt-4o-mini",
     "base_url": "https://api.openai.com/v1",
-    "api_key": "",
-    "api_key_source": "inline",
-    "api_key_env": "OPENAI_API_KEY",
-    "embedding_backend": "cloud",
-    "cloud_embedding_model": "text-embedding-3-small",
-    "cloud_embedding_dimensions": 1536,
-    "query_prefix": null,
-    "local_embedding": {
-      "model": "jina-embeddings-v5-text-small",
-      "quantization": "F16"
+    "api_key": {
+      "source": "inline",
+      "inline": "",
+      "env": "OPENAI_API_KEY"
+    },
+    "embedding": {
+      "backend": "cloud",
+      "query_prefix": null,
+      "cloud": {
+        "model": "text-embedding-3-small",
+        "dimensions": 1536
+      },
+      "local": {
+        "model": "jina-embeddings-v5-text-small",
+        "quantization": "F16"
+      }
     }
   }
 }
@@ -47,19 +53,37 @@ pub struct EneConfig {
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `provider_name` | string | `"openai-compatible"` | Provider identifier |
+| `name` | string | `"openai-compatible"` | Provider identifier |
 | `model` | string | `"gpt-4o-mini"` | Chat model name |
 | `base_url` | string | `""` | API base URL |
-| `api_key` | string | `""` | API key (inline — use with caution) |
-| `api_key_source` | string | `"inline"` | Key source: `"inline"` or `"env"` |
-| `api_key_env` | string | `"OPENAI_API_KEY"` | Env var name when `api_key_source = "env"` |
-| `embedding_backend` | string | `"cloud"` | `"cloud"` uses the provider's embedding API; `"local"` uses a local GGUF model |
-| `cloud_embedding_model` | string | `"text-embedding-3-small"` | Cloud embedding model (when `embedding_backend = "cloud"`) |
-| `cloud_embedding_dimensions` | int | `1536` | Expected dimensions for cloud embedding vectors |
-| `query_prefix` | string or null | `null` | Optional prefix prepended to search queries |
-| `local_embedding` | object | `{ "model": "jina-embeddings-v5-text-small", "quantization": "F16" }` | Local GGUF embedding config (see below) |
+| `api_key` | object | (see below) | API key configuration |
+| `embedding` | object | (see below) | Embedding configuration |
 
-#### `provider.local_embedding` — Local Embedding Config
+#### `provider.api_key` — API Key Config
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `source` | string | `"inline"` | Key source: `"inline"` or `"env"` |
+| `inline` | string | `""` | API key when `source = "inline"` (use with caution) |
+| `env` | string | `"OPENAI_API_KEY"` | Env var name when `source = "env"` |
+
+#### `provider.embedding` — Embedding Config
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `backend` | string | `"cloud"` | `"cloud"` uses the provider's embedding API; `"local"` uses a local GGUF model |
+| `query_prefix` | string or null | `null` | Optional prefix prepended to search queries |
+| `cloud` | object | (see below) | Cloud embedding model config |
+| `local` | object | (see below) | Local GGUF embedding config |
+
+##### `provider.embedding.cloud` — Cloud Embedding Config
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `model` | string | `"text-embedding-3-small"` | Cloud embedding model |
+| `dimensions` | int | `1536` | Expected dimensions for cloud embedding vectors |
+
+##### `provider.embedding.local` — Local Embedding Config
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -77,20 +101,7 @@ pub struct EneConfig {
     "similarity_threshold": 0.5,
     "time_decay_hours": 24.0,
     "similarity_weight": 0.7,
-    "recency_weight": 0.3,
-    "tool_rag_enabled": true,
-    "tool_rag_limit": 6,
-    "tool_rag_always_include": [
-      "question",
-      "todo_list",
-      "todo_add",
-      "todo_update",
-      "todo_complete",
-      "todo_delete",
-      "get_current_time"
-    ],
-    "summarization_model": "",
-    "summarization_base_url": ""
+    "recency_weight": 0.3
   }
 }
 ```
@@ -104,43 +115,50 @@ pub struct EneConfig {
 | `time_decay_hours` | float | `24.0` | Hours before recency decays |
 | `similarity_weight` | float | `0.7` | Weight for similarity score in recall ranking |
 | `recency_weight` | float | `0.3` | Weight for recency score in recall ranking |
-| `tool_rag_enabled` | bool | `true` | Enable embedding-based tool filtering |
-| `tool_rag_limit` | int | `6` | Max tools returned by RAG filtering |
-| `tool_rag_always_include` | string[] | `["question", "todo_list", "todo_add", "todo_update", "todo_complete", "todo_delete", "get_current_time"]` | Tools always included regardless of similarity |
-| `summarization_model` | string | `""` | Model for summarization (empty = uses chat model) |
-| `summarization_base_url` | string | `""` | Base URL for summarization (empty = uses chat base URL) |
 
 ### `session` — Session Management
 
 ```json
 {
   "session": {
-    "auto_session_split": true,
-    "session_timeout_minutes": 30,
-    "topic_change_threshold": 0.5,
+    "auto_split": true,
+    "timeout_minutes": 30,
+    "topic_similarity_threshold": 0.5,
     "min_turns_before_split": 3,
-    "summary_recall_limit": 3
+    "recall_limit": 3,
+    "summarization": {
+      "model": "",
+      "base_url": ""
+    }
   }
 }
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `auto_session_split` | bool | `true` | Enable automatic session splitting |
-| `session_timeout_minutes` | int | `30` | Idle timeout before split |
-| `topic_change_threshold` | float | `0.5` | Cosine similarity threshold for topic drift detection (0.0–1.0) |
+| `auto_split` | bool | `true` | Enable automatic session splitting |
+| `timeout_minutes` | int | `30` | Idle timeout before split |
+| `topic_similarity_threshold` | float | `0.5` | Cosine similarity threshold for topic drift detection (0.0–1.0) |
 | `min_turns_before_split` | int | `3` | Minimum turns before any split can occur |
-| `summary_recall_limit` | int | `3` | Max summaries to inject into the prompt |
+| `recall_limit` | int | `3` | Max summaries to inject into the prompt |
+| `summarization` | object | (see below) | Summarization model configuration |
+
+#### `session.summarization` — Summarization Model Config
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `model` | string | `""` | Model for summarization (empty = uses chat model) |
+| `base_url` | string | `""` | Base URL for summarization (empty = uses chat base URL) |
 
 ### `tools` — Tool Configuration
 
 ```json
 {
   "tools": {
-    "tool_calling_enabled": true,
-    "max_tool_call_rounds": 10,
-    "tool_call_timeout_ms": 60000,
-    "tools": {
+    "enabled": true,
+    "max_rounds": 10,
+    "timeout_ms": 60000,
+    "list": {
       "fs": { "enable": true },
       "web": { "enable": true },
       "browser": { "enable": true },
@@ -157,7 +175,7 @@ pub struct EneConfig {
       "rerank_candidates": 24,
       "min_similarity": 0.25,
       "background_index_on_startup": false,
-      "forced_tools": [
+      "forced": [
         "utility.question",
         "utility.todo_add",
         "utility.get_current_time"
@@ -177,11 +195,19 @@ pub struct EneConfig {
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `tool_calling_enabled` | bool | `true` | Enable function calling for all tools |
-| `max_tool_call_rounds` | int | `10` | Max tool-call iterations per user turn |
-| `tool_call_timeout_ms` | int | `60000` | Timeout for individual tool calls in milliseconds |
-| `tools.<name>.enable` | bool | `true` | Enable/disable a specific tool |
-| `tools.<name>.config` | object | `{}` | Optional tool-specific config (flattened into the entry) |
+| `enabled` | bool | `true` | Enable function calling for all tools |
+| `max_rounds` | int | `10` | Max tool-call iterations per user turn |
+| `timeout_ms` | int | `60000` | Timeout for individual tool calls in milliseconds |
+| `list` | object | (see below) | Per-tool enable/disable map with optional extra config |
+| `mcp_servers` | array | `[]` | MCP servers list |
+| `rag` | object | (see below) | Tool RAG configuration |
+
+#### `tools.list` — Enabled Tools Map
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `<name>.enable` | bool | `true` | Enable/disable a specific tool |
+| `<name>.config` | object | `{}` | Optional tool-specific config (flattened into the entry) |
 
 #### `tools.mcp_servers` — Model Context Protocol Servers
 
@@ -237,7 +263,7 @@ Tool RAG dynamically selects only user-input-relevant tools to reduce token cons
     "rerank_candidates": 24,
     "min_similarity": 0.25,
     "background_index_on_startup": false,
-    "forced_tools": ["utility.question", "utility.todo_add", "utility.get_current_time"],
+    "forced": ["utility.question", "utility.todo_add", "utility.get_current_time"],
     "weights": {
       "summary": 1.0,
       "description": 0.6,
@@ -260,7 +286,7 @@ Tool RAG dynamically selects only user-input-relevant tools to reduce token cons
 | `rerank_candidates` | int | `24` | Number of candidates to pass to the reranker |
 | `min_similarity` | float | `0.25` | Minimum similarity score for a tool to be considered |
 | `background_index_on_startup` | bool | `false` | Warm the index at startup in a background task |
-| `forced_tools` | string[] | `["utility.question", "utility.todo_add", "utility.get_current_time"]` | Tools always included regardless of relevance |
+| `forced` | string[] | `["utility.question", "utility.todo_add", "utility.get_current_time"]` | Tools always included regardless of relevance |
 | `weights` | object | (see below) | Per-field weighting for multi-vector similarity |
 
 ##### `tools.rag.weights` — Field Weights
@@ -392,7 +418,7 @@ ene_config::define_config!(
     /// AI provider connection config.
     pub struct ProviderConfig {
         /// Provider name.
-        pub provider_name: String = "openai-compatible".to_string(),
+        pub name: String = "openai-compatible".to_string(),
         /// Chat model name.
         pub model: String = "gpt-4o-mini".to_string(),
     }
@@ -423,8 +449,8 @@ Same as above but `TARGET = Character` and schema is registered for `character_s
 
 ```rust
 ene_config::define_config!(
-    ProviderConfig,    // parent struct (must impl HasConfigKey)
-    "local_embedding", // JSON key under provider.*
+    EmbeddingConfig,   // parent struct (must impl HasConfigKey)
+    "local",           // JSON key under provider.embedding.*
     pub struct LocalEmbeddingConfig {
         pub model: String = "jina-embeddings-v5-text-small".to_string(),
         pub quantization: String = "F16".to_string(),

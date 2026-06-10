@@ -122,14 +122,14 @@ pub async fn check_boundary(
     user_input: &str,
     embedder: &dyn EmbeddingProvider,
 ) -> SessionBoundary {
-    if !settings.auto_session_split {
+    if !settings.auto_split {
         return SessionBoundary::Continue;
     }
 
     if let Some(last_time) = last_message_time {
         let elapsed = Utc::now() - last_time;
         let elapsed_minutes = elapsed.num_minutes().max(0) as u64;
-        if elapsed_minutes >= settings.session_timeout_minutes
+        if elapsed_minutes >= settings.timeout_minutes
             && current_turn_count >= settings.min_turns_before_split
         {
             return SessionBoundary::Split(SplitReason::Timeout { elapsed_minutes });
@@ -142,7 +142,7 @@ pub async fn check_boundary(
         match embedder.embed_query(user_input).await {
             Ok(current_embedding) => {
                 let similarity = cosine_similarity(prev_embedding, &current_embedding);
-                if similarity < settings.topic_change_threshold {
+                if similarity < settings.topic_similarity_threshold {
                     return SessionBoundary::Split(SplitReason::TopicChange { similarity });
                 }
             }

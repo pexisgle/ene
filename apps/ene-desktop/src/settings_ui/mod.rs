@@ -80,7 +80,9 @@ struct SettingsInputState {
     ai_embedding_provider: String,
     ai_embedding_model: String,
     ai_embedding_dimensions: String,
-    ai_embedding_base_url: String,
+    ai_provider_name: String,
+    ai_model: String,
+    ai_api_key_env: String,
 }
 
 #[derive(Resource, Default, Debug)]
@@ -104,10 +106,12 @@ impl Default for SettingsInputState {
             ai_api_key: String::new(),
             ai_chat_input: String::new(),
             ai_memory_enabled: false,
-            ai_embedding_provider: "local".to_string(),
+            ai_embedding_provider: "cloud".to_string(),
             ai_embedding_model: "jina-embeddings-v5-text-small".to_string(),
             ai_embedding_dimensions: "auto".to_string(),
-            ai_embedding_base_url: String::new(),
+            ai_provider_name: String::new(),
+            ai_model: String::new(),
+            ai_api_key_env: String::new(),
         }
     }
 }
@@ -127,7 +131,7 @@ impl SettingsInputState {
             .get_section::<ene_core::ProviderConfig>()
             .unwrap_or_default();
         self.ai_base_url = provider_config.base_url.clone();
-        self.ai_api_key = provider_config.api_key.clone();
+        self.ai_api_key = provider_config.api_key.inline.clone();
         self.ai_chat_input = settings.ui.ai_chat_input.clone();
         let mem_config = settings
             .ai
@@ -136,20 +140,21 @@ impl SettingsInputState {
             .unwrap_or_default();
 
         self.ai_memory_enabled = mem_config.enabled;
-        let provider_config2 = settings
-            .ai
-            .ai
-            .get_section::<ene_core::ProviderConfig>()
-            .unwrap_or_default();
-        self.ai_embedding_provider = provider_config2.embedding_backend.clone();
-        let local_emb = settings
-            .ai
-            .ai
-            .get_section::<ene_core::LocalEmbeddingConfig>()
-            .unwrap_or_default();
-        self.ai_embedding_model = local_emb.model.clone();
-        self.ai_embedding_base_url = String::new();
-        self.ai_embedding_dimensions = provider_config2.cloud_embedding_dimensions.to_string();
+        self.ai_embedding_provider = provider_config.embedding.backend.clone();
+        let local_emb = &provider_config.embedding.local;
+        self.ai_embedding_model = if provider_config.embedding.backend == "local" {
+            local_emb.model.clone()
+        } else {
+            provider_config.embedding.cloud.model.clone()
+        };
+        self.ai_embedding_dimensions = if provider_config.embedding.backend == "local" {
+            "auto".to_string()
+        } else {
+            provider_config.embedding.cloud.dimensions.to_string()
+        };
+        self.ai_provider_name = provider_config.name.clone();
+        self.ai_model = provider_config.model.clone();
+        self.ai_api_key_env = provider_config.api_key.env.clone();
     }
 }
 
@@ -176,6 +181,7 @@ enum SettingsValueKind {
     AiModel,
     AiBaseUrl,
     AiApiKey,
+    AiApiKeyEnv,
     AiChatInput,
 }
 
@@ -292,7 +298,7 @@ impl SettingsValueKind {
                     .ai
                     .get_section::<ene_core::ProviderConfig>()
                     .unwrap_or_default();
-                provider_config.provider_name.clone()
+                provider_config.name.clone()
             }
             SettingsValueKind::AiModel => {
                 let provider_config = settings
@@ -316,7 +322,15 @@ impl SettingsValueKind {
                     .ai
                     .get_section::<ene_core::ProviderConfig>()
                     .unwrap_or_default();
-                masked_secret(&provider_config.api_key)
+                masked_secret(&provider_config.api_key.inline)
+            }
+            SettingsValueKind::AiApiKeyEnv => {
+                let provider_config = settings
+                    .ai
+                    .ai
+                    .get_section::<ene_core::ProviderConfig>()
+                    .unwrap_or_default();
+                provider_config.api_key.env.clone()
             }
             SettingsValueKind::AiChatInput => settings.ui.ai_chat_input.clone(),
         }
@@ -347,6 +361,26 @@ impl SettingsValueKind {
                 settings.ai.ai.runtime_rules = value.to_string();
                 Ok(())
             }
+            SettingsValueKind::AiProviderName => {
+                let mut provider_config = settings
+                    .ai
+                    .ai
+                    .get_section::<ene_core::ProviderConfig>()
+                    .unwrap_or_default();
+                provider_config.name = value.to_string();
+                let _ = settings.ai.ai.set_section(&provider_config);
+                Ok(())
+            }
+            SettingsValueKind::AiModel => {
+                let mut provider_config = settings
+                    .ai
+                    .ai
+                    .get_section::<ene_core::ProviderConfig>()
+                    .unwrap_or_default();
+                provider_config.model = value.to_string();
+                let _ = settings.ai.ai.set_section(&provider_config);
+                Ok(())
+            }
             SettingsValueKind::AiBaseUrl => {
                 let mut provider_config = settings
                     .ai
@@ -363,7 +397,17 @@ impl SettingsValueKind {
                     .ai
                     .get_section::<ene_core::ProviderConfig>()
                     .unwrap_or_default();
-                provider_config.api_key = value.to_string();
+                provider_config.api_key.inline = value.to_string();
+                let _ = settings.ai.ai.set_section(&provider_config);
+                Ok(())
+            }
+            SettingsValueKind::AiApiKeyEnv => {
+                let mut provider_config = settings
+                    .ai
+                    .ai
+                    .get_section::<ene_core::ProviderConfig>()
+                    .unwrap_or_default();
+                provider_config.api_key.env = value.to_string();
                 let _ = settings.ai.ai.set_section(&provider_config);
                 Ok(())
             }

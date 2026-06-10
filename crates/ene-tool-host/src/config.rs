@@ -28,7 +28,7 @@ impl Default for ToolEntry {
     }
 }
 
-fn default_forced_tools() -> Vec<String> {
+fn default_forced() -> Vec<String> {
     vec![
         "utility.question".to_string(),
         "utility.todo_add".to_string(),
@@ -57,7 +57,7 @@ pub struct ToolRagConfig {
     /// Whether to warm the index at startup in a background task.
     pub background_index_on_startup: bool,
     /// Tool names that are always included regardless of relevance.
-    pub forced_tools: Vec<String>,
+    pub forced: Vec<String>,
     /// Per-field weighting for the multi-vector similarity computation.
     pub weights: FieldWeightsConfig,
 }
@@ -73,7 +73,7 @@ impl Default for ToolRagConfig {
             rerank_candidates: 24,
             min_similarity: 0.25,
             background_index_on_startup: false,
-            forced_tools: default_forced_tools(),
+            forced: default_forced(),
             weights: FieldWeightsConfig::default(),
         }
     }
@@ -116,13 +116,13 @@ ene_config::define_config!(
     /// Global tool subsystem config.
     pub struct ToolConfig {
         /// Whether tool calling is enabled globally.
-        pub tool_calling_enabled: bool = true,
+        pub enabled: bool = true,
         /// Maximum number of sequential tool calls per turn.
-        pub max_tool_call_rounds: usize = 10,
+        pub max_rounds: usize = 10,
         /// Tool call execution timeout in milliseconds.
-        pub tool_call_timeout_ms: u64 = 60_000,
+        pub timeout_ms: u64 = 60_000,
         /// Per-tool enable/disable map with optional extra config.
-        pub tools: HashMap<String, ToolEntry> = default_tools(),
+        pub list: HashMap<String, ToolEntry> = default_tools(),
         /// MCP servers.
         pub mcp_servers: Vec<crate::mcp_config::McpServerConfig>,
         /// Tool RAG configuration.

@@ -4,7 +4,33 @@ fn default_string() -> String {
 
 ene_config::define_config!(
     ProviderConfig,
-    "local_embedding",
+    "api_key",
+    /// Configuration for API key retrieval.
+    pub struct ApiKeyConfig {
+        /// Key source: `"inline"` or `"env"`.
+        pub source: String = "inline".to_string(),
+        /// API key (inline — use with caution).
+        pub inline: String = default_string(),
+        /// Environment variable name when `source = "env"`.
+        pub env: String = "OPENAI_API_KEY".to_string(),
+    }
+);
+
+ene_config::define_config!(
+    EmbeddingConfig,
+    "cloud",
+    /// Configuration for the cloud embedding backend.
+    pub struct CloudEmbeddingConfig {
+        /// Cloud embedding model name (used when `backend = "cloud"`).
+        pub model: String = "text-embedding-3-small".to_string(),
+        /// Expected dimensions for cloud embedding vectors.
+        pub dimensions: usize = 1536,
+    }
+);
+
+ene_config::define_config!(
+    EmbeddingConfig,
+    "local",
     /// Configuration for the local GGUF embedding backend.
     pub struct LocalEmbeddingConfig {
         /// Local GGUF embedding model name (e.g. `"jina-embeddings-v5-text-small"`).
@@ -15,33 +41,37 @@ ene_config::define_config!(
 );
 
 ene_config::define_config!(
+    ProviderConfig,
+    "embedding",
+    /// Configuration for the embedding system.
+    pub struct EmbeddingConfig {
+        /// Embedding backend: `"cloud"` uses the same provider's embedding API;
+        /// `"local"` uses a local GGUF model via `ene-embedding`.
+        pub backend: String = "cloud".to_string(),
+        /// Optional query prefix to prepend to search queries (e.g. "Query: ").
+        pub query_prefix: Option<String> = None,
+        /// Cloud embedding configuration.
+        pub cloud: CloudEmbeddingConfig,
+        /// Local embedding configuration.
+        pub local: LocalEmbeddingConfig,
+    }
+);
+
+ene_config::define_config!(
     settings,
     "provider",
     /// AI provider connection config, including embedding backend settings.
     pub struct ProviderConfig {
         /// Provider name (e.g. `"openai-compatible"`).
-        pub provider_name: String = "openai-compatible".to_string(),
+        pub name: String = "openai-compatible".to_string(),
         /// Chat model name (e.g. `"gpt-4o-mini"`).
         pub model: String = "gpt-4o-mini".to_string(),
         /// API base URL.
         pub base_url: String = default_string(),
-        /// API key (inline — use with caution).
-        pub api_key: String = default_string(),
-        /// Key source: `"inline"` or `"env"`.
-        pub api_key_source: String = "inline".to_string(),
-        /// Environment variable name when `api_key_source = "env"`.
-        pub api_key_env: String = "OPENAI_API_KEY".to_string(),
-        /// Embedding backend: `"cloud"` uses the same provider's embedding API;
-        /// `"local"` uses a local GGUF model via `ene-embedding`.
-        pub embedding_backend: String = "cloud".to_string(),
-        /// Cloud embedding model name (used when `embedding_backend = "cloud"`).
-        pub cloud_embedding_model: String = "text-embedding-3-small".to_string(),
-        /// Expected dimensions for cloud embedding vectors.
-        pub cloud_embedding_dimensions: usize = 1536,
-        /// Optional query prefix to prepend to search queries (e.g. "Query: ").
-        pub query_prefix: Option<String> = None,
-        /// Local embedding configuration.
-        pub local_embedding: LocalEmbeddingConfig,
+        /// API key configuration.
+        pub api_key: ApiKeyConfig,
+        /// Embedding configuration.
+        pub embedding: EmbeddingConfig,
     }
 );
 
@@ -58,10 +88,10 @@ impl ProviderConfig {
 
     /// Resolves the API key from the configured source (inline or env).
     pub fn resolve_api_key(&self) -> String {
-        match self.api_key_source.as_str() {
+        match self.api_key.source.as_str() {
             "inline" => {
-                if !self.api_key.trim().is_empty() {
-                    return self.api_key.clone();
+                if !self.api_key.inline.trim().is_empty() {
+                    return self.api_key.inline.clone();
                 }
                 #[cfg(debug_assertions)]
                 {
@@ -74,16 +104,16 @@ impl ProviderConfig {
                 String::new()
             }
             "env" => {
-                let var_name = if self.api_key_env.trim().is_empty() {
+                let var_name = if self.api_key.env.trim().is_empty() {
                     "OPENAI_API_KEY"
                 } else {
-                    self.api_key_env.trim()
+                    self.api_key.env.trim()
                 };
                 std::env::var(var_name).unwrap_or_default()
             }
             _ => {
-                if !self.api_key.trim().is_empty() {
-                    return self.api_key.clone();
+                if !self.api_key.inline.trim().is_empty() {
+                    return self.api_key.inline.clone();
                 }
                 #[cfg(debug_assertions)]
                 {

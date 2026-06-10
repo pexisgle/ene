@@ -38,6 +38,15 @@ pub use ene_provider::LlmMessage;
 /// LLM provider trait (re-exported from `ene-provider`).
 #[doc(no_inline)]
 pub use ene_provider::LlmProvider;
+/// Configuration for API key retrieval.
+#[doc(no_inline)]
+pub use ene_provider::ApiKeyConfig;
+/// Configuration for the cloud embedding backend.
+#[doc(no_inline)]
+pub use ene_provider::CloudEmbeddingConfig;
+/// Configuration for the embedding system.
+#[doc(no_inline)]
+pub use ene_provider::EmbeddingConfig;
 /// Configuration for the local GGUF embedding backend.
 #[doc(no_inline)]
 pub use ene_provider::LocalEmbeddingConfig;
@@ -65,7 +74,7 @@ pub use ene_provider::Role;
 pub use ene_session::CardName;
 /// Session configuration (re-exported from `ene-session`).
 #[doc(no_inline)]
-pub use ene_session::SessionConfig;
+pub use ene_session::{SessionConfig, SummarizationConfig};
 /// Unique session identifier (re-exported from `ene-session`).
 #[doc(no_inline)]
 pub use ene_session::SessionId;

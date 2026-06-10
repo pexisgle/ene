@@ -18,11 +18,6 @@ pub fn render_ai_page(
         .ai
         .get_section::<ene_core::ProviderConfig>()
         .unwrap_or_default();
-    let mut local_emb = settings
-        .ai
-        .ai
-        .get_section::<ene_core::LocalEmbeddingConfig>()
-        .unwrap_or_default();
     let mut mem_config = settings
         .ai
         .ai
@@ -64,22 +59,26 @@ pub fn render_ai_page(
 
         ui.horizontal(|ui| {
             ui.label("Provider Name");
-            ui.add_sized(
-                [280.0, 0.0],
-                egui::Label::new(
-                    SettingsValueKind::AiProviderName.current_text(settings, animation_control),
-                ),
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut input_state.ai_provider_name)
+                    .desired_width(f32::INFINITY),
             );
+            if response.changed() {
+                let _ = SettingsValueKind::AiProviderName
+                    .apply_input(input_state.ai_provider_name.trim(), settings);
+            }
         });
 
         ui.horizontal(|ui| {
             ui.label("Model");
-            ui.add_sized(
-                [280.0, 0.0],
-                egui::Label::new(
-                    SettingsValueKind::AiModel.current_text(settings, animation_control),
-                ),
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut input_state.ai_model)
+                    .desired_width(f32::INFINITY),
             );
+            if response.changed() {
+                let _ = SettingsValueKind::AiModel
+                    .apply_input(input_state.ai_model.trim(), settings);
+            }
         });
 
         ui.horizontal(|ui| {
@@ -96,12 +95,7 @@ pub fn render_ai_page(
 
         ui.horizontal(|ui| {
             ui.label("API Key Source");
-            let mut provider_config = settings
-                .ai
-                .ai
-                .get_section::<ene_core::ProviderConfig>()
-                .unwrap_or_default();
-            let mut current_source = provider_config.api_key_source.clone();
+            let mut current_source = provider_config.api_key.source.clone();
             egui::ComboBox::from_id_salt("api_key_source")
                 .selected_text(&current_source)
                 .show_ui(ui, |ui| {
@@ -116,25 +110,39 @@ pub fn render_ai_page(
                         "Environment (環境変数)",
                     );
                 });
-            if current_source != provider_config.api_key_source {
-                provider_config.api_key_source = current_source;
+            if current_source != provider_config.api_key.source {
+                provider_config.api_key.source = current_source;
                 let _ = settings.ai.ai.set_section(&provider_config);
                 settings.mark_dirty();
             }
         });
 
-        ui.horizontal(|ui| {
-            ui.label("API Key");
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut input_state.ai_api_key)
-                    .password(true)
-                    .desired_width(f32::INFINITY),
-            );
-            if response.changed() {
-                let _ = SettingsValueKind::AiApiKey
-                    .apply_input(input_state.ai_api_key.trim(), settings);
-            }
-        });
+        if provider_config.api_key.source == "env" {
+            ui.horizontal(|ui| {
+                ui.label("API Key Env Var");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut input_state.ai_api_key_env)
+                        .desired_width(f32::INFINITY),
+                );
+                if response.changed() {
+                    let _ = SettingsValueKind::AiApiKeyEnv
+                        .apply_input(input_state.ai_api_key_env.trim(), settings);
+                }
+            });
+        } else {
+            ui.horizontal(|ui| {
+                ui.label("API Key");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut input_state.ai_api_key)
+                        .password(true)
+                        .desired_width(f32::INFINITY),
+                );
+                if response.changed() {
+                    let _ = SettingsValueKind::AiApiKey
+                        .apply_input(input_state.ai_api_key.trim(), settings);
+                }
+            });
+        }
 
         ui.horizontal(|ui| {
             ui.label("Chat Input");
@@ -174,8 +182,8 @@ pub fn render_ai_page(
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
                         &mut current_provider,
-                        "api".to_string(),
-                        "API (OpenAI-compatible)",
+                        "cloud".to_string(),
+                        "Cloud (API-compatible)",
                     );
                     ui.selectable_value(
                         &mut current_provider,
@@ -185,20 +193,19 @@ pub fn render_ai_page(
                 });
             if current_provider != input_state.ai_embedding_provider {
                 input_state.ai_embedding_provider = current_provider.clone();
-                provider_config.embedding_backend = current_provider.clone();
+                provider_config.embedding.backend = current_provider.clone();
                 if current_provider.as_str() == "local" {
-                    local_emb.model = "jina-embeddings-v5-text-nano".to_string();
-                    input_state.ai_embedding_model = local_emb.model.clone();
+                    provider_config.embedding.local.model = "jina-embeddings-v5-text-small".to_string();
+                    input_state.ai_embedding_model = provider_config.embedding.local.model.clone();
                     input_state.ai_embedding_dimensions = "auto".to_string();
                 } else {
-                    provider_config.cloud_embedding_model = "text-embedding-3-small".to_string();
-                    provider_config.cloud_embedding_dimensions = 1536;
-                    input_state.ai_embedding_model = provider_config.cloud_embedding_model.clone();
+                    provider_config.embedding.cloud.model = "text-embedding-3-small".to_string();
+                    provider_config.embedding.cloud.dimensions = 1536;
+                    input_state.ai_embedding_model = provider_config.embedding.cloud.model.clone();
                     input_state.ai_embedding_dimensions =
-                        provider_config.cloud_embedding_dimensions.to_string();
+                        provider_config.embedding.cloud.dimensions.to_string();
                 }
                 let _ = settings.ai.ai.set_section(&provider_config);
-                let _ = settings.ai.ai.set_section(&local_emb);
                 settings.mark_dirty();
             }
         });
@@ -211,26 +218,17 @@ pub fn render_ai_page(
             );
             if response.changed() {
                 if input_state.ai_embedding_provider == "local" {
-                    local_emb.model = input_state.ai_embedding_model.clone();
-                    let _ = settings.ai.ai.set_section(&local_emb);
+                    provider_config.embedding.local.model = input_state.ai_embedding_model.clone();
+                    let _ = settings.ai.ai.set_section(&provider_config);
                 } else {
-                    provider_config.cloud_embedding_model = input_state.ai_embedding_model.clone();
+                    provider_config.embedding.cloud.model = input_state.ai_embedding_model.clone();
                     let _ = settings.ai.ai.set_section(&provider_config);
                 }
                 settings.mark_dirty();
             }
         });
 
-        ui.horizontal(|ui| {
-            ui.label("Base URL");
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut input_state.ai_embedding_base_url)
-                    .desired_width(f32::INFINITY),
-            );
-            if response.changed() {
-                // base_url removed from new config design; no-op
-            }
-        });
+
 
         ui.horizontal(|ui| {
             ui.label("Dimensions");
@@ -244,7 +242,7 @@ pub fn render_ai_page(
                 if response.changed()
                     && let Ok(dims) = input_state.ai_embedding_dimensions.parse::<usize>()
                 {
-                    provider_config.cloud_embedding_dimensions = dims;
+                    provider_config.embedding.cloud.dimensions = dims;
                     let _ = settings.ai.ai.set_section(&provider_config);
                     settings.mark_dirty();
                 }
