@@ -27,19 +27,25 @@ pub struct EneConfig {
 ```json
 {
   "provider": {
-    "provider_name": "openai-compatible",
+    "name": "openai-compatible",
     "model": "gpt-4o-mini",
     "base_url": "https://api.openai.com/v1",
-    "api_key": "",
-    "api_key_source": "inline",
-    "api_key_env": "OPENAI_API_KEY",
-    "embedding_backend": "cloud",
-    "cloud_embedding_model": "text-embedding-3-small",
-    "cloud_embedding_dimensions": 1536,
-    "query_prefix": null,
-    "local_embedding": {
-      "model": "jina-embeddings-v5-text-small",
-      "quantization": "F16"
+    "api_key": {
+      "source": "inline",
+      "inline": "",
+      "env": "OPENAI_API_KEY"
+    },
+    "embedding": {
+      "backend": "cloud",
+      "query_prefix": null,
+      "cloud": {
+        "model": "text-embedding-3-small",
+        "dimensions": 1536
+      },
+      "local": {
+        "model": "jina-embeddings-v5-text-small",
+        "quantization": "F16"
+      }
     }
   }
 }
@@ -47,19 +53,37 @@ pub struct EneConfig {
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
-| `provider_name` | string | `"openai-compatible"` | プロバイダ識別子 |
+| `name` | string | `"openai-compatible"` | プロバイダ識別子 |
 | `model` | string | `"gpt-4o-mini"` | チャットモデル名 |
 | `base_url` | string | `""` | API ベース URL |
-| `api_key` | string | `""` | API キー (インライン — 注意して使用) |
-| `api_key_source` | string | `"inline"` | キーソース: `"inline"` または `"env"` |
-| `api_key_env` | string | `"OPENAI_API_KEY"` | `api_key_source = "env"` 時の環境変数名 |
-| `embedding_backend` | string | `"cloud"` | `"cloud"` はプロバイダの埋め込み API を使用、`"local"` はローカル GGUF モデルを使用 |
-| `cloud_embedding_model` | string | `"text-embedding-3-small"` | クラウド埋め込みモデル名 (`embedding_backend = "cloud"` 時) |
-| `cloud_embedding_dimensions` | int | `1536` | クラウド埋め込みベクトルの次元数 |
-| `query_prefix` | string or null | `null` | 検索クエリに付加するプレフィックス |
-| `local_embedding` | object | `{ "model": "jina-embeddings-v5-text-small", "quantization": "F16" }` | ローカル GGUF 埋め込み設定 (下記参照) |
+| `api_key` | object | (下記参照) | API キー設定 |
+| `embedding` | object | (下記参照) | 埋め込み設定 |
 
-#### `provider.local_embedding` — ローカル埋め込み設定
+#### `provider.api_key` — API キー設定
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|------|---------|------|
+| `source` | string | `"inline"` | キーソース: `"inline"` または `"env"` |
+| `inline` | string | `""` | API キー (`source = "inline"` 時、注意して使用) |
+| `env` | string | `"OPENAI_API_KEY"` | `source = "env"` 時の環境変数名 |
+
+#### `provider.embedding` — 埋め込み設定
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|------|---------|------|
+| `backend` | string | `"cloud"` | `"cloud"` はプロバイダの埋め込み API を使用、`"local"` はローカル GGUF モデルを使用 |
+| `query_prefix` | string or null | `null` | 検索クエリに付加するプレフィックス |
+| `cloud` | object | (下記参照) | クラウド埋め込みモデル設定 |
+| `local` | object | (下記参照) | ローカル GGUF 埋め込み設定 |
+
+##### `provider.embedding.cloud` — クラウド埋め込み設定
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|------|---------|------|
+| `model` | string | `"text-embedding-3-small"` | クラウド埋め込みモデル名 |
+| `dimensions` | int | `1536` | クラウド埋め込みベクトルの次元数 |
+
+##### `provider.embedding.local` — ローカル埋め込み設定
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
@@ -77,20 +101,7 @@ pub struct EneConfig {
     "similarity_threshold": 0.5,
     "time_decay_hours": 24.0,
     "similarity_weight": 0.7,
-    "recency_weight": 0.3,
-    "tool_rag_enabled": true,
-    "tool_rag_limit": 6,
-    "tool_rag_always_include": [
-      "question",
-      "todo_list",
-      "todo_add",
-      "todo_update",
-      "todo_complete",
-      "todo_delete",
-      "get_current_time"
-    ],
-    "summarization_model": "",
-    "summarization_base_url": ""
+    "recency_weight": 0.3
   }
 }
 ```
@@ -104,43 +115,50 @@ pub struct EneConfig {
 | `time_decay_hours` | float | `24.0` | 直近性が減衰するまでの時間 (時間) |
 | `similarity_weight` | float | `0.7` | 呼び出しランキングにおける類似度スコアの重み |
 | `recency_weight` | float | `0.3` | 呼び出しランキングにおける直近性スコアの重み |
-| `tool_rag_enabled` | bool | `true` | 埋め込みベースのツールフィルタリングを有効化 |
-| `tool_rag_limit` | int | `6` | RAG フィルタリングで返される最大ツール数 |
-| `tool_rag_always_include` | string[] | `["question", "todo_list", "todo_add", "todo_update", "todo_complete", "todo_delete", "get_current_time"]` | 類似度に関わらず常に含めるツール |
-| `summarization_model` | string | `""` | 要約に使用するモデル (空 = チャットモデルを使用) |
-| `summarization_base_url` | string | `""` | 要約に使用するベース URL (空 = チャットベース URL を使用) |
 
 ### `session` — セッション管理
 
 ```json
 {
   "session": {
-    "auto_session_split": true,
-    "session_timeout_minutes": 30,
-    "topic_change_threshold": 0.5,
+    "auto_split": true,
+    "timeout_minutes": 30,
+    "topic_similarity_threshold": 0.5,
     "min_turns_before_split": 3,
-    "summary_recall_limit": 3
+    "recall_limit": 3,
+    "summarization": {
+      "model": "",
+      "base_url": ""
+    }
   }
 }
 ```
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
-| `auto_session_split` | bool | `true` | 自動セッション分割を有効化 |
-| `session_timeout_minutes` | int | `30` | 分割前のアイドルタイムアウト |
-| `topic_change_threshold` | float | `0.5` | 話題変化検出のコサイン類似度しきい値 (0.0–1.0) |
+| `auto_split` | bool | `true` | 自動セッション分割を有効化 |
+| `timeout_minutes` | int | `30` | 分割前のアイドルタイムアウト |
+| `topic_similarity_threshold` | float | `0.5` | 話題変化検出のコサイン類似度しきい値 (0.0–1.0) |
 | `min_turns_before_split` | int | `3` | 分割が発生する最小ターン数 |
-| `summary_recall_limit` | int | `3` | プロンプトに注入する要約の最大数 |
+| `recall_limit` | int | `3` | プロンプトに注入する要約の最大数 |
+| `summarization` | object | (下記参照) | 要約モデルの設定 |
+
+#### `session.summarization` — 要約モデル設定
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|------|---------|------|
+| `model` | string | `""` | 要約に使用するモデル (空 = チャットモデルを使用) |
+| `base_url` | string | `""` | 要約に使用するベース URL (空 = チャットベース URL を使用) |
 
 ### `tools` — ツール設定
 
 ```json
 {
   "tools": {
-    "tool_calling_enabled": true,
-    "max_tool_call_rounds": 10,
-    "tool_call_timeout_ms": 60000,
-    "tools": {
+    "enabled": true,
+    "max_rounds": 10,
+    "timeout_ms": 60000,
+    "list": {
       "fs": { "enable": true },
       "web": { "enable": true },
       "browser": { "enable": true },
@@ -157,7 +175,7 @@ pub struct EneConfig {
       "rerank_candidates": 24,
       "min_similarity": 0.25,
       "background_index_on_startup": false,
-      "forced_tools": [
+      "forced": [
         "utility.question",
         "utility.todo_add",
         "utility.get_current_time"
@@ -177,11 +195,19 @@ pub struct EneConfig {
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
-| `tool_calling_enabled` | bool | `true` | 全ツールの関数呼び出しを有効化 |
-| `max_tool_call_rounds` | int | `10` | ユーザーターンあたりの最大ツール呼び出し反復数 |
-| `tool_call_timeout_ms` | int | `60000` | 個別ツール呼び出しのタイムアウト (ミリ秒) |
-| `tools.<name>.enable` | bool | `true` | 特定のツールを有効/無効化 |
-| `tools.<name>.config` | object | `{}` | ツール固有の追加設定 (エントリにフラット化) |
+| `enabled` | bool | `true` | 全ツールの関数呼び出しを有効化 |
+| `max_rounds` | int | `10` | ユーザーターンあたりの最大ツール呼び出し反復数 |
+| `timeout_ms` | int | `60000` | 個別ツール呼び出しのタイムアウト (ミリ秒) |
+| `list` | object | (下記参照) | ツール個別有効化マップとオプション設定 |
+| `mcp_servers` | array | `[]` | MCP サーバーリスト |
+| `rag` | object | (下記参照) | ツール RAG 設定 |
+
+#### `tools.list` — ツール個別有効化マップ
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|------|---------|------|
+| `<name>.enable` | bool | `true` | 特定のツールを有効/無効化 |
+| `<name>.config` | object | `{}` | ツール固有の追加設定 (エントリにフラット化) |
 
 #### `tools.mcp_servers` — Model Context Protocol サーバー
 
@@ -237,7 +263,7 @@ pub struct EneConfig {
     "rerank_candidates": 24,
     "min_similarity": 0.25,
     "background_index_on_startup": false,
-    "forced_tools": ["utility.question", "utility.todo_add", "utility.get_current_time"],
+    "forced": ["utility.question", "utility.todo_add", "utility.get_current_time"],
     "weights": {
       "summary": 1.0,
       "description": 0.6,
@@ -260,7 +286,7 @@ pub struct EneConfig {
 | `rerank_candidates` | int | `24` | リランキングに渡す候補数 |
 | `min_similarity` | float | `0.25` | ツールが考慮される最小類似度スコア |
 | `background_index_on_startup` | bool | `false` | 起動時にバックグラウンドタスクでインデックスをウォーム |
-| `forced_tools` | string[] | `["utility.question", "utility.todo_add", "utility.get_current_time"]` | 関連性に関わらず常に含めるツール |
+| `forced` | string[] | `["utility.question", "utility.todo_add", "utility.get_current_time"]` | 関連性に関わらず常に含めるツール |
 | `weights` | object | (下記参照) | マルチベクトル類似度計算のフィールド別重み |
 
 ##### `tools.rag.weights` — フィールド重み
@@ -392,7 +418,7 @@ ene_config::define_config!(
     /// AI プロバイダ接続設定。
     pub struct ProviderConfig {
         /// プロバイダ名。
-        pub provider_name: String = "openai-compatible".to_string(),
+        pub name: String = "openai-compatible".to_string(),
         /// チャットモデル名。
         pub model: String = "gpt-4o-mini".to_string(),
     }
@@ -423,8 +449,8 @@ ene_config::define_config!(
 
 ```rust
 ene_config::define_config!(
-    ProviderConfig,    // 親構造体 (HasConfigKey を実装していること)
-    "local_embedding", // provider.* の JSON キー
+    EmbeddingConfig,   // 親構造体 (HasConfigKey を実装していること)
+    "local",           // provider.embedding.* の JSON キー
     pub struct LocalEmbeddingConfig {
         pub model: String = "jina-embeddings-v5-text-small".to_string(),
         pub quantization: String = "F16".to_string(),

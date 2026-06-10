@@ -40,7 +40,7 @@ impl CliCommand for ConfigCommand {
             .unwrap_or_default();
 
         println!("--- Current Config ---");
-        println!("Provider: {}", provider_config.provider_name);
+        println!("Provider: {}", provider_config.name);
         println!("Model: {}", provider_config.model);
         println!("Base URL: {}", provider_config.base_url);
         println!("Card Path: {}", snapshot.config.character);
@@ -48,23 +48,20 @@ impl CliCommand for ConfigCommand {
             .config
             .get_section::<ene_tool_host::ToolConfig>()
             .unwrap_or_default();
-        println!("Tool Calling: {}", tool_config.tool_calling_enabled);
+        println!("Tool Calling: {}", tool_config.enabled);
         println!("Memory Enabled: {}", mem_config.enabled);
-        println!("Embedding Backend: {}", provider_config.embedding_backend);
-        if provider_config.embedding_backend.as_str() == "local" {
-            let local_emb = snapshot
-                .config
-                .get_section::<ene_core::LocalEmbeddingConfig>()
-                .unwrap_or_default();
+        println!("Embedding Backend: {}", provider_config.embedding.backend);
+        if provider_config.embedding.backend.as_str() == "local" {
+            let local_emb = &provider_config.embedding.local;
             println!("Local Embedding Model: {}", local_emb.model);
         } else {
             println!(
                 "Cloud Embedding Model: {}",
-                provider_config.cloud_embedding_model
+                provider_config.embedding.cloud.model
             );
             println!(
                 "Cloud Embedding Dims: {}",
-                provider_config.cloud_embedding_dimensions
+                provider_config.embedding.cloud.dimensions
             );
         }
         if mem_config.enabled {
@@ -76,7 +73,7 @@ impl CliCommand for ConfigCommand {
             );
             println!(
                 "Summary Recall Limit: {}",
-                session_config.summary_recall_limit
+                session_config.recall_limit
             );
             println!("Similarity Threshold: {}", mem_config.similarity_threshold);
         }

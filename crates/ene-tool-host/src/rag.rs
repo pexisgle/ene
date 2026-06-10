@@ -80,7 +80,7 @@ pub struct ToolRagOptions {
     /// Whether to index tools in the background on startup.
     pub background_index_on_startup: bool,
     /// Tools that are always included regardless of RAG scoring.
-    pub forced_tools: Vec<ToolName>,
+    pub forced: Vec<ToolName>,
     /// Per-field embedding weights used for scoring.
     pub weights: FieldWeights,
     /// Maximum number of tools to include per category.
@@ -98,7 +98,7 @@ impl Default for ToolRagOptions {
             rerank_candidates: 24,
             min_similarity: 0.25,
             background_index_on_startup: false,
-            forced_tools: vec![
+            forced: vec![
                 ToolName::new("utility.question"),
                 ToolName::new("utility.todo_add"),
                 ToolName::new("utility.get_current_time"),
@@ -120,7 +120,7 @@ impl From<super::config::ToolRagConfig> for ToolRagOptions {
             rerank_candidates: c.rerank_candidates,
             min_similarity: c.min_similarity,
             background_index_on_startup: c.background_index_on_startup,
-            forced_tools: c.forced_tools.into_iter().map(ToolName::new).collect(),
+            forced: c.forced.into_iter().map(ToolName::new).collect(),
             weights: FieldWeights::from(c.weights),
             per_category_limits: HashMap::new(),
         }
@@ -498,14 +498,14 @@ impl ToolRag {
         // 8. Union with forced_tools (no duplicates, prepended).
         {
             let result_names: Vec<ToolName> = result.iter().map(|s| s.name.clone()).collect();
-            for forced_name in self.opts.forced_tools.iter().rev() {
+            for forced_name in self.opts.forced.iter().rev() {
                 if !result_names.contains(forced_name)
                     && let Some(spec) = all_specs.get(forced_name)
                 {
                     result.insert(0, spec.clone());
                 }
             }
-            result.truncate(self.opts.final_n + self.opts.forced_tools.len());
+            result.truncate(self.opts.final_n + self.opts.forced.len());
         }
 
         result

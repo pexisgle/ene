@@ -61,7 +61,7 @@ impl CliCommand for PromptCommand {
                 println!("--- Recalled Summaries ---");
                 println!(
                     "Up to {} past conversation summaries will be injected dynamically based on embedding similarity.",
-                    session_config.summary_recall_limit
+                    session_config.recall_limit
                 );
                 println!("----------------------------");
             }

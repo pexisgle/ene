@@ -21,28 +21,6 @@ ene_config::define_config!(
         pub similarity_weight: f64 = 0.7,
         /// Recency weight.
         pub recency_weight: f64 = 0.3,
-
-        // ── Tool RAG ─────────────────────────────────────────────────────────────
-        /// Tool RAG settings — dynamically select only user-input-relevant tools to reduce token consumption
-        pub tool_rag_enabled: bool = true,
-        /// Tool RAG limit.
-        pub tool_rag_limit: usize = 6,
-        /// Tool names that are always included (kept even after RAG filtering)
-        pub tool_rag_always_include: Vec<String> = vec![
-            "question".to_string(),
-            "todo_list".to_string(),
-            "todo_add".to_string(),
-            "todo_update".to_string(),
-            "todo_complete".to_string(),
-            "todo_delete".to_string(),
-            "get_current_time".to_string(),
-        ],
-
-        // ── Summarization Model ──────────────────────────────────────────────────
-        /// Model used for summarization (uses the chat model if empty)
-        pub summarization_model: String = default_string(),
-        /// Base URL used for summarization (uses the chat base URL if empty)
-        pub summarization_base_url: String = default_string(),
     }
 );
 
@@ -55,30 +33,5 @@ impl MemoryConfig {
             return std::path::PathBuf::from(&self.db_path);
         }
         ene_config::paths::character_dir(character_name).join("memory.db")
-    }
-
-    /// Resolves the effective summarisation model, falling back to the chat model.
-    #[must_use]
-    pub fn resolve_summarization_model(&self, fallback_model: &str) -> String {
-        if !self.summarization_model.trim().is_empty() {
-            return self.summarization_model.clone();
-        }
-        fallback_model.to_string()
-    }
-
-    /// Resolves the effective summarisation base URL, falling back to the provider settings.
-    pub fn resolve_summarization_base_url(
-        &self,
-        fallback_url: &str,
-    ) -> Result<String, ene_config::ConfigError> {
-        if !self.summarization_base_url.trim().is_empty() {
-            return Ok(self.summarization_base_url.clone());
-        }
-        if !fallback_url.trim().is_empty() {
-            return Ok(fallback_url.to_string());
-        }
-        Err(ene_config::ConfigError::MissingBaseUrl {
-            env_var: String::new(),
-        })
     }
 }

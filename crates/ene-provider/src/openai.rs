@@ -315,8 +315,8 @@ impl LlmProviderFactory for OpenAiProviderFactory {
             &base_url,
             &api_key,
             &provider_config.model,
-            &provider_config.cloud_embedding_model,
-            provider_config.cloud_embedding_dimensions,
+            &provider_config.embedding.cloud.model,
+            provider_config.embedding.cloud.dimensions,
         )))
     }
 }

@@ -39,7 +39,7 @@ pub mod special_token;
 pub mod types;
 
 /// Session auto-split configuration.
-pub use config::SessionConfig;
+pub use config::{SessionConfig, SummarizationConfig};
 /// Truncation utility.
 pub use ene_common::truncate::Truncate;
 /// Character-card types re-exported from `ene-config`.

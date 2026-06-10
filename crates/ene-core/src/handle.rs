@@ -805,7 +805,7 @@ impl EneActor {
 
     fn create_provider(&self) -> Result<Arc<dyn ene_provider::LlmProvider>, EneCoreError> {
         let provider_config = self.config.get_section::<ene_provider::ProviderConfig>()?;
-        LlmProviderRegistry::create_provider(&provider_config.provider_name, &self.config)
+        LlmProviderRegistry::create_provider(&provider_config.name, &self.config)
             .map(Arc::from)
             .map_err(EneCoreError::Provider)
     }
@@ -879,7 +879,7 @@ impl EneActor {
             Err(_) => return,
         };
 
-        if !mem_config.enabled || !session_config.auto_session_split {
+        if !mem_config.enabled || !session_config.auto_split {
             return;
         }
 
@@ -889,7 +889,7 @@ impl EneActor {
                 Err(_) => return,
             };
             let provider = match LlmProviderRegistry::create_provider(
-                &provider_config.provider_name,
+                &provider_config.name,
                 &self.config,
             ) {
                 Ok(p) => Arc::from(p),
@@ -992,7 +992,7 @@ async fn build_tool_registry(
                 })
             })?;
 
-            for (name, entry) in &tool_config.tools {
+            for (name, entry) in &tool_config.list {
                 if !entry.enable {
                     continue;
                 }
@@ -1023,10 +1023,8 @@ fn init_embedding(config: &EneConfig) -> Result<Arc<dyn ene_provider::EmbeddingP
         .get_section::<ene_provider::ProviderConfig>()
         .map_err(|e| format!("Failed to load provider config: {e}"))?;
 
-    if provider_config.embedding_backend.as_str() == "local" {
-        let local_cfg = config
-            .get_section::<ene_provider::LocalEmbeddingConfig>()
-            .unwrap_or_default();
+    if provider_config.embedding.backend.as_str() == "local" {
+        let local_cfg = &provider_config.embedding.local;
         let model_dir = ene_config::models_dir();
         let provider = ene_embedding::create_local_provider(
             &local_cfg.model,
@@ -1040,12 +1038,12 @@ fn init_embedding(config: &EneConfig) -> Result<Arc<dyn ene_provider::EmbeddingP
             .resolve_base_url()
             .map_err(|e| format!("Failed to resolve base URL for cloud embedding: {e}"))?;
         let api_key = provider_config.resolve_api_key();
-        let query_prefix = provider_config.query_prefix.clone();
+        let query_prefix = provider_config.embedding.query_prefix.clone();
         Ok(Arc::new(ene_provider::CloudEmbeddingProvider::new(
             &base_url,
             &api_key,
-            &provider_config.cloud_embedding_model,
-            provider_config.cloud_embedding_dimensions,
+            &provider_config.embedding.cloud.model,
+            provider_config.embedding.cloud.dimensions,
             query_prefix,
         )))
     }

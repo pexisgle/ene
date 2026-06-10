@@ -238,7 +238,7 @@ impl ToolHostManager {
             .unwrap_or_default();
 
         let sandbox = tool_config
-            .tools
+            .list
             .get("fs")
             .map(|entry| {
                 serde_json::from_value::<ene_tool_proto::SandboxConfigData>(entry.config.clone())
@@ -256,7 +256,7 @@ impl ToolHostManager {
         let tool_config = config
             .get_section::<crate::config::ToolConfig>()
             .unwrap_or_default();
-        for (name, entry) in &tool_config.tools {
+        for (name, entry) in &tool_config.list {
             if !entry.enable {
                 continue;
             }
@@ -302,7 +302,7 @@ impl ToolHostManager {
                 );
                 let mut fallback_config = config.clone();
                 let fallback_tools = crate::config::ToolConfig {
-                    tools: std::collections::HashMap::new(),
+                    list: std::collections::HashMap::new(),
                     ..Default::default()
                 };
                 let _ = fallback_config.set_section(&fallback_tools);
