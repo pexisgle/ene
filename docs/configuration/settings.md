@@ -2,7 +2,7 @@
 
 ene settings are centralized in `assets/settings.json`. A `settings.schema.json` is auto-generated for editor validation.
 
-Loading: `ene_config::load_full_settings()` resolves defaults, file, and environment variables.
+Loading: `ene_config::load_full_config()` resolves defaults, file, and environment variables.
 
 ## Top-Level Structure (`EneConfig`)
 
@@ -22,7 +22,7 @@ pub struct EneConfig {
 
 ## Sections
 
-### `provider` — LLM Connection
+### `provider` — AI Provider Connection
 
 ```json
 {
@@ -30,39 +30,41 @@ pub struct EneConfig {
     "provider_name": "openai-compatible",
     "model": "gpt-4o-mini",
     "base_url": "https://api.openai.com/v1",
-    "api_key": ""
-  }
-}
-```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `provider_name` | string | Provider identifier (default: `"openai-compatible"`) |
-| `model` | string | Model name (default: `"gpt-4o-mini"`) |
-| `base_url` | string | API endpoint (must not be empty for production) |
-| `api_key` | string | API key (falls back to `API_TOKEN` env var in debug) |
-
-### `embedding` — Vector Embedding
-
-```json
-{
-  "embedding": {
-    "provider_type": "local",
-    "model": "jina-embeddings-v5-text-small",
-    "base_url": "",
-    "dimensions": null,
-    "gguf_quantization": "F16"
+    "api_key": "",
+    "api_key_source": "inline",
+    "api_key_env": "OPENAI_API_KEY",
+    "embedding_backend": "cloud",
+    "cloud_embedding_model": "text-embedding-3-small",
+    "cloud_embedding_dimensions": 1536,
+    "query_prefix": null,
+    "local_embedding": {
+      "model": "jina-embeddings-v5-text-small",
+      "quantization": "F16"
+    }
   }
 }
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `provider_type` | `"api"` or `"local"` | `"local"` | Backend type |
-| `model` | string | `"jina-embeddings-v5-text-small"` | Model name |
-| `base_url` | string | `""` | API URL (API mode only) |
-| `dimensions` | int or null | `null` | Output dimensions |
-| `gguf_quantization` | string | `"F16"` | GGUF quantization level |
+| `provider_name` | string | `"openai-compatible"` | Provider identifier |
+| `model` | string | `"gpt-4o-mini"` | Chat model name |
+| `base_url` | string | `""` | API base URL |
+| `api_key` | string | `""` | API key (inline — use with caution) |
+| `api_key_source` | string | `"inline"` | Key source: `"inline"` or `"env"` |
+| `api_key_env` | string | `"OPENAI_API_KEY"` | Env var name when `api_key_source = "env"` |
+| `embedding_backend` | string | `"cloud"` | `"cloud"` uses the provider's embedding API; `"local"` uses a local GGUF model |
+| `cloud_embedding_model` | string | `"text-embedding-3-small"` | Cloud embedding model (when `embedding_backend = "cloud"`) |
+| `cloud_embedding_dimensions` | int | `1536` | Expected dimensions for cloud embedding vectors |
+| `query_prefix` | string or null | `null` | Optional prefix prepended to search queries |
+| `local_embedding` | object | `{ "model": "jina-embeddings-v5-text-small", "quantization": "F16" }` | Local GGUF embedding config (see below) |
+
+#### `provider.local_embedding` — Local Embedding Config
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `model` | string | `"jina-embeddings-v5-text-small"` | Local GGUF embedding model name |
+| `quantization` | string | `"F16"` | Quantization level (e.g. `"F16"`, `"Q4_K_M"`) |
 
 ### `memory` — Long-Term Memory
 
@@ -78,22 +80,35 @@ pub struct EneConfig {
     "recency_weight": 0.3,
     "tool_rag_enabled": true,
     "tool_rag_limit": 6,
-    "tool_rag_always_include": ["question", "todo", "get_current_time"],
+    "tool_rag_always_include": [
+      "question",
+      "todo_list",
+      "todo_add",
+      "todo_update",
+      "todo_complete",
+      "todo_delete",
+      "get_current_time"
+    ],
     "summarization_model": "",
     "summarization_base_url": ""
   }
 }
 ```
 
-| Key field | Description |
-|-----------|-------------|
-| `enabled` | Enable long-term memory |
-| `db_path` | SQLite database path (empty = default location) |
-| `recall_limit` | Max summaries to recall per query |
-| `similarity_threshold` | Minimum cosine similarity for recall |
-| `tool_rag_enabled` | Enable embedding-based tool filtering |
-| `tool_rag_limit` | Max tools returned by RAG filtering |
-| `tool_rag_always_include` | Tools always included regardless of similarity |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable long-term memory |
+| `db_path` | string | `""` | SQLite database path (empty = default location) |
+| `recall_limit` | int | `5` | Max summaries to recall per query |
+| `similarity_threshold` | float | `0.5` | Minimum cosine similarity for recall |
+| `time_decay_hours` | float | `24.0` | Hours before recency decays |
+| `similarity_weight` | float | `0.7` | Weight for similarity score in recall ranking |
+| `recency_weight` | float | `0.3` | Weight for recency score in recall ranking |
+| `tool_rag_enabled` | bool | `true` | Enable embedding-based tool filtering |
+| `tool_rag_limit` | int | `6` | Max tools returned by RAG filtering |
+| `tool_rag_always_include` | string[] | `["question", "todo_list", "todo_add", "todo_update", "todo_complete", "todo_delete", "get_current_time"]` | Tools always included regardless of similarity |
+| `summarization_model` | string | `""` | Model for summarization (empty = uses chat model) |
+| `summarization_base_url` | string | `""` | Base URL for summarization (empty = uses chat base URL) |
 
 ### `session` — Session Management
 
@@ -109,32 +124,13 @@ pub struct EneConfig {
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `auto_session_split` | Enable automatic session splitting |
-| `session_timeout_minutes` | Idle timeout before split |
-| `topic_change_threshold` | Cosine similarity threshold for topic drift |
-| `min_turns_before_split` | Minimum turns before any split can occur |
-| `summary_recall_limit` | Max summaries to inject into the prompt (default: 3) |
-
-### `sandbox` — Tool Security
-
-```json
-{
-  "sandbox": {
-    "enabled": true,
-    "allowed_directories": ["/home/user/projects"],
-    "writable_directories": ["/home/user/projects"],
-    "blocked_commands": ["rm -rf /", "dd if=", "mkfs", "sudo"],
-    "max_read_bytes": 51200,
-    "max_write_bytes": 1048576,
-    "shell_timeout_ms": 120000,
-    "max_shell_output_bytes": 51200,
-    "max_shell_output_lines": 2000,
-    "undo_db_path": null
-  }
-}
-```
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `auto_session_split` | bool | `true` | Enable automatic session splitting |
+| `session_timeout_minutes` | int | `30` | Idle timeout before split |
+| `topic_change_threshold` | float | `0.5` | Cosine similarity threshold for topic drift detection (0.0–1.0) |
+| `min_turns_before_split` | int | `3` | Minimum turns before any split can occur |
+| `summary_recall_limit` | int | `3` | Max summaries to inject into the prompt |
 
 ### `tools` — Tool Configuration
 
@@ -150,20 +146,44 @@ pub struct EneConfig {
       "browser": { "enable": true },
       "utility": { "enable": true },
       "app": { "enable": true }
+    },
+    "mcp_servers": [],
+    "rag": {
+      "enabled": true,
+      "top_k": 12,
+      "final_n": 6,
+      "use_hyde": true,
+      "use_rerank": true,
+      "rerank_candidates": 24,
+      "min_similarity": 0.25,
+      "background_index_on_startup": false,
+      "forced_tools": [
+        "utility.question",
+        "utility.todo_add",
+        "utility.get_current_time"
+      ],
+      "weights": {
+        "summary": 1.0,
+        "description": 0.6,
+        "capability": 0.8,
+        "example": 0.4,
+        "negative": -0.5,
+        "hyde": 0.7
+      }
     }
   }
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `tool_calling_enabled` | Enable function calling for all tools |
-| `max_tool_call_rounds` | Max tool-call iterations per user turn |
-| `tool_call_timeout_ms` | Timeout for individual tool calls in milliseconds (default: 60000) |
-| `tools.<name>.enable` | Enable/disable a specific tool |
-| `tools.<name>.config` | Optional tool-specific config (merged) |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `tool_calling_enabled` | bool | `true` | Enable function calling for all tools |
+| `max_tool_call_rounds` | int | `10` | Max tool-call iterations per user turn |
+| `tool_call_timeout_ms` | int | `60000` | Timeout for individual tool calls in milliseconds |
+| `tools.<name>.enable` | bool | `true` | Enable/disable a specific tool |
+| `tools.<name>.config` | object | `{}` | Optional tool-specific config (flattened into the entry) |
 
-### `mcp_servers` — Model Context Protocol
+#### `tools.mcp_servers` — Model Context Protocol Servers
 
 ```json
 {
@@ -189,7 +209,94 @@ pub struct EneConfig {
 }
 ```
 
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Server name (used for display and routing) |
+| `enabled` | bool | Whether this MCP server is enabled |
+| `transport` | object | Transport configuration (see below) |
+
+**Transport types:**
+
+| Type | Fields | Description |
+|------|--------|-------------|
+| `stdio` | `command`, `args` | Spawn a child process with stdio transport |
+| `http` | `url` | Connect via HTTP |
+
+#### `tools.rag` — Tool RAG Pipeline
+
+Tool RAG dynamically selects only user-input-relevant tools to reduce token consumption.
+
+```json
+{
+  "rag": {
+    "enabled": true,
+    "top_k": 12,
+    "final_n": 6,
+    "use_hyde": true,
+    "use_rerank": true,
+    "rerank_candidates": 24,
+    "min_similarity": 0.25,
+    "background_index_on_startup": false,
+    "forced_tools": ["utility.question", "utility.todo_add", "utility.get_current_time"],
+    "weights": {
+      "summary": 1.0,
+      "description": 0.6,
+      "capability": 0.8,
+      "example": 0.4,
+      "negative": -0.5,
+      "hyde": 0.7
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable Tool RAG |
+| `top_k` | int | `12` | Number of candidates to retrieve from the vector index |
+| `final_n` | int | `6` | Final number of tools returned after reranking |
+| `use_hyde` | bool | `true` | Use Hypothetical Document Embedding to expand the query |
+| `use_rerank` | bool | `true` | Use LLM-based reranking on the candidate set |
+| `rerank_candidates` | int | `24` | Number of candidates to pass to the reranker |
+| `min_similarity` | float | `0.25` | Minimum similarity score for a tool to be considered |
+| `background_index_on_startup` | bool | `false` | Warm the index at startup in a background task |
+| `forced_tools` | string[] | `["utility.question", "utility.todo_add", "utility.get_current_time"]` | Tools always included regardless of relevance |
+| `weights` | object | (see below) | Per-field weighting for multi-vector similarity |
+
+##### `tools.rag.weights` — Field Weights
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `summary` | float | `1.0` | Weight for the tool summary embedding |
+| `description` | float | `0.6` | Weight for the tool description embedding |
+| `capability` | float | `0.8` | Weight for the tool capability embedding |
+| `example` | float | `0.4` | Weight for the tool example embedding |
+| `negative` | float | `-0.5` | Weight for the negative/unwanted embedding (penalizes matches) |
+| `hyde` | float | `0.7` | Weight for the HyDE (hypothetical document embedding) |
+
+### `web_config` — Web Search Providers
+
+API keys for web search providers used by the web tool. This is a tool-specific config injected at runtime.
+
+```json
+{
+  "web_config": {
+    "tavily_api_key": "",
+    "brave_api_key": "",
+    "exa_api_key": ""
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `tavily_api_key` | string | `""` | Tavily Search API key |
+| `brave_api_key` | string | `""` | Brave Search API key |
+| `exa_api_key` | string | `""` | Exa Search API key |
+
 ### `desktop` — GUI Settings
+
+GUI-specific settings for the desktop application. Only available when running `ene-desktop`.
 
 ```json
 {
@@ -204,10 +311,236 @@ pub struct EneConfig {
 }
 ```
 
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `graphics.mask_render_downsample` | int | `1` | Downsample factor for mask rendering |
+| `graphics.target_fps` | int | `60` | Target frames per second |
+| `graphics.shadow_quality` | string | `"medium"` | Shadow quality level |
+| `graphics.antialiasing_mode` | string | `"fxaa"` | Antialiasing mode |
+
+## Tool-Specific Configuration
+
+Tool-specific settings are stored inside `tools.tools.<name>.config` and vary per tool.
+
+### `tools.tools.fs.config` — Sandbox Configuration
+
+The `fs` tool exposes sandbox controls for file system access:
+
+```json
+{
+  "tools": {
+    "tools": {
+      "fs": {
+        "enable": true,
+        "config": {
+          "enabled": true,
+          "allowed_directories": ["/home/user/projects"],
+          "writable_directories": ["/home/user/projects"],
+          "blocked_commands": ["rm -rf /", "dd if=", "mkfs", "sudo"],
+          "max_read_bytes": 51200,
+          "max_write_bytes": 1048576,
+          "shell_timeout_ms": 120000,
+          "max_shell_output_bytes": 51200,
+          "max_shell_output_lines": 2000
+        }
+      }
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable sandbox |
+| `allowed_directories` | string[] | `["."]` | Directories allowed for read access |
+| `writable_directories` | string[] | `["."]` | Directories allowed for write access |
+| `blocked_commands` | string[] | (see code) | Regex patterns for blocked shell commands |
+| `max_read_bytes` | int | `51200` | Maximum bytes per read operation |
+| `max_write_bytes` | int | `1048576` | Maximum bytes per write operation |
+| `shell_timeout_ms` | int | `120000` | Shell command timeout in milliseconds |
+| `max_shell_output_bytes` | int | `51200` | Maximum bytes in shell output |
+| `max_shell_output_lines` | int | `2000` | Maximum lines in shell output |
+
 ## Loading Order
 
-1. `EneConfig::default()`
-2. `assets/settings.json`
+1. `EneConfig::default()` — compile-time defaults
+2. `assets/settings.json` — user overrides
 3. Environment variables (`ENE_` prefix, `__` separator for nesting)
 
-After loading, `settings.schema.json` and `character_settings.schema.json` are auto-generated.
+After loading, `settings.schema.json` and `character_settings.schema.json` are auto-generated into `assets/schema/`.
+
+## JSON Schema
+
+A `settings.schema.json` is auto-generated on `cargo run -p ene-cli` (or any build) and written to `assets/schema/settings.schema.json`. This file is gitignored — do not commit or hand-edit it.
+
+The schema can be used for editor validation (VS Code `"json.schemas"` config) or programmatic config construction.
+
+## Config Registration API
+
+The config system is built on declarative macros and a global schema registry. Each config section is defined with a macro that auto-generates `Serialize`, `Deserialize`, `JsonSchema`, `Default`, and `HasConfigKey` implementations, and registers its schema at program startup via `#[ctor]`.
+
+### `define_config!`
+
+The primary macro for defining config structs. It comes in three forms:
+
+#### Top-level settings section
+
+```rust
+ene_config::define_config!(
+    settings,          // target: ConfigTarget::Settings
+    "provider",        // JSON key under EneConfig.extra
+    /// AI provider connection config.
+    pub struct ProviderConfig {
+        /// Provider name.
+        pub provider_name: String = "openai-compatible".to_string(),
+        /// Chat model name.
+        pub model: String = "gpt-4o-mini".to_string(),
+    }
+);
+```
+
+Generates:
+- `#[derive(Serialize, Deserialize, JsonSchema)]` with `#[serde(rename_all = "snake_case", default)]`
+- `impl Default` using inline `= default_value` syntax (or `Default::default()` if omitted)
+- `impl HasConfigKey` with `KEY = "provider"`, `TARGET = Settings`, `path() = ["provider"]`
+- `#[ctor]` function that calls `__register_schema::<ProviderConfig>(Settings, None)`
+
+#### Top-level character section
+
+```rust
+ene_config::define_config!(
+    character,         // target: ConfigTarget::Character
+    "expressions",     // JSON key in character_settings.json
+    pub struct ExpressionsConfig {
+        pub entries: Vec<ExpressionEntry> = vec![],
+    }
+);
+```
+
+Same as above but `TARGET = Character` and schema is registered for `character_settings.json`.
+
+#### Nested section (child of another config struct)
+
+```rust
+ene_config::define_config!(
+    ProviderConfig,    // parent struct (must impl HasConfigKey)
+    "local_embedding", // JSON key under provider.*
+    pub struct LocalEmbeddingConfig {
+        pub model: String = "jina-embeddings-v5-text-small".to_string(),
+        pub quantization: String = "F16".to_string(),
+    }
+);
+```
+
+Inherits `TARGET` from the parent. `path()` returns the parent's path + own key (e.g. `["provider", "local_embedding"]`). The `#[ctor]` call passes the parent key so the schema is nested correctly.
+
+### `define_tool_config!`
+
+For tool-specific config schemas (injected into `tools.tools.<name>.config`):
+
+```rust
+ene_config::define_tool_config!(
+    "fs",              // tool name
+    /// Sandbox configuration for the fs tool.
+    pub struct SandboxConfigData {
+        pub enabled: bool = true,
+        pub allowed_directories: Vec<String> = vec![".".to_string()],
+    }
+);
+```
+
+Generates the same derives/defaults but calls `__register_tool_schema::<T>("fs")` instead. The schema is registered under `parent_key = "tools_map"` and merged into the `ToolConfig` definition's `tools` property in the generated JSON Schema.
+
+### `HasConfigKey` Trait
+
+```rust
+pub trait HasConfigKey {
+    const KEY: &'static str;       // JSON key (e.g. "provider")
+    const TARGET: ConfigTarget;    // Settings or Character
+    fn path() -> &'static [&'static str]; // Full path from root (e.g. ["provider", "local_embedding"])
+}
+```
+
+Implemented automatically by `define_config!`. Used by:
+- `EneConfig::get_section::<T>()` / `set_section()` — type-safe sub-section access
+- `ConfigStore::get_section::<T>()` / `set_section()` — same via the store
+- `get_global_section::<T>()` — reads directly from the global singleton
+- `update_section::<T>()` — load → patch → save in one call
+
+### `ConfigTarget`
+
+```rust
+pub enum ConfigTarget {
+    Settings,   // belongs to settings.json
+    Character,  // belongs to character_settings.json
+}
+```
+
+Determines which JSON file and schema the config section targets.
+
+### Schema Registry
+
+A global `OnceLock<Mutex<HashMap<String, SchemaEntry>>>` collects all config schemas at startup:
+
+```rust
+pub struct SchemaEntry {
+    pub schema: schemars::Schema,
+    pub target: ConfigTarget,
+    pub parent_key: Option<String>,  // None = top-level, Some("tools_map") = tool config
+}
+```
+
+Registration functions:
+| Function | Called by | Purpose |
+|----------|-----------|---------|
+| `__register_schema::<T>(target, parent_key)` | `#[ctor]` from `define_config!` | Register a settings/character section schema |
+| `__register_tool_schema::<T>(tool_name)` | `#[ctor]` from `define_tool_config!` | Register a tool-specific config schema |
+| `register_runtime_schema(key, schema_json)` | Runtime (e.g. MCP tool providers) | Register a schema dynamically |
+
+During `generate_schema_json()`, the registry is merged into the root `EneConfig` schema:
+- **Top-level sections** (`parent_key = None`) are added as `properties` of the root schema.
+- **Tool configs** (`parent_key = "tools_map"`) are injected into `ToolConfig`'s `tools` property as `allOf: [ToolEntry, <tool schema>]`.
+- **Definitions** (`$defs`) from each entry are copied into the root schema's definitions.
+
+### `ConfigStore`
+
+Centralized persistence layer with dirty tracking for auto-save:
+
+```rust
+pub struct ConfigStore {
+    config: RwLock<EneConfig>,
+    character_config: RwLock<CharacterConfig>,
+    global_dirty: AtomicBool,
+    character_dirty: AtomicBool,
+}
+```
+
+Key methods:
+
+| Method | Description |
+|--------|-------------|
+| `ConfigStore::load()` | Load from disk via figment pipeline |
+| `config()` / `set_config()` | Get/replace the global config |
+| `with_config_mut(f)` | Mutable access via closure (auto-marks dirty) |
+| `get_section::<T>()` / `set_section(&T)` | Type-safe section read/write |
+| `character_config()` / `set_character_config()` | Per-character config access |
+| `load_character_config(name)` | Load character settings from disk |
+| `flush_if_dirty(name)` | Save to disk only if modified (returns `Ok(true)` if wrote) |
+| `flush(name)` | Force-save regardless of dirty state |
+| `is_dirty()` | Check if any config has unsaved changes |
+
+Typical usage in a game loop (e.g. Bevy):
+
+```rust
+fn auto_save(store: Res<ConfigStore>, character: Res<CharacterName>) {
+    let _ = store.flush_if_dirty(Some(&character.0));
+}
+```
+
+### Adding a New Config Section (Checklist)
+
+1. **Define the struct** with `define_config!(settings, "my_key", ...)` in the appropriate crate.
+2. **Run `cargo build`** — the `#[ctor]` auto-registers the schema.
+3. **Run `cargo run -p ene-cli`** once to regenerate `assets/schema/settings.schema.json`.
+4. **Document** the new section in `docs/configuration/settings.md` and `docs/ja/configuration/settings.md`.
+5. **Access** via `config.get_section::<MyConfig>()` or `store.get_section::<MyConfig>()`.
