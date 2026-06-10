@@ -107,6 +107,7 @@ pub struct ToolEmbeddingIndexRow {
     pub field_key: String,
     pub version_hash: String,
     pub model_name: String,
+    pub source_text: String,
     pub embedding: EmbeddingBlob,
     pub created_at: String,
 }
@@ -119,6 +120,7 @@ pub struct NewToolEmbeddingIndex<'a> {
     pub field_key: &'a str,
     pub version_hash: &'a str,
     pub model_name: &'a str,
+    pub source_text: &'a str,
     pub embedding: EmbeddingBlob,
     pub created_at: &'a str,
 }

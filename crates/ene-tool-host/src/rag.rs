@@ -202,7 +202,7 @@ impl ToolRag {
                         // Key: (tool_name, field, field_key) → (version_hash, model_name)
                         let mut map: HashMap<(String, String, String), (String, String)> =
                             HashMap::new();
-                        for (name, field, fkey, hash, model, _emb) in entries {
+                        for (name, field, fkey, hash, model, _emb, _src) in entries {
                             map.insert((name, field, fkey), (hash, model));
                         }
                         map
@@ -241,6 +241,7 @@ impl ToolRag {
                         &hash,
                         &model_name,
                         &emb,
+                        &summary_text,
                     )?;
                     indexed += 1;
                 } else {
@@ -266,6 +267,7 @@ impl ToolRag {
                         &hash,
                         &model_name,
                         &emb,
+                        &desc_text,
                     )?;
                     indexed += 1;
                 } else {
@@ -291,6 +293,7 @@ impl ToolRag {
                         &hash,
                         &model_name,
                         &emb,
+                        &neg_text,
                     )?;
                     indexed += 1;
                 } else {
@@ -317,6 +320,7 @@ impl ToolRag {
                         &hash,
                         &model_name,
                         &emb,
+                        &ex_text,
                     )?;
                     indexed += 1;
                 } else {
@@ -384,7 +388,7 @@ impl ToolRag {
             match tokio::task::spawn_blocking(move || store.list_tool_embedding_fields()).await {
                 Ok(Ok(rows)) => rows
                     .into_iter()
-                    .map(|(name, field, fkey, _hash, _model, emb)| (name, field, fkey, emb))
+                    .map(|(name, field, fkey, _hash, _model, emb, _src)| (name, field, fkey, emb))
                     .collect(),
                 Ok(Err(e)) => {
                     tracing::warn!("[ToolRag] Could not load embeddings: {}", e);
@@ -548,7 +552,7 @@ impl ToolRag {
 
         let total_fields = fields.len();
         let mut by_tool: HashMap<String, Vec<String>> = HashMap::new();
-        for (name, field, _fkey, _hash, _model, _emb) in fields {
+        for (name, field, _fkey, _hash, _model, _emb, _src) in fields {
             by_tool.entry(name).or_default().push(field);
         }
 
@@ -612,6 +616,7 @@ fn persist(
     version_hash: &str,
     model_name: &str,
     embedding: &[f32],
+    source_text: &str,
 ) -> Result<(), EmbeddingError> {
     store
         .upsert_tool_embedding_field(
@@ -621,6 +626,7 @@ fn persist(
             version_hash,
             model_name,
             embedding,
+            source_text,
         )
         .map_err(|e| EmbeddingError::Provider(e.to_string()))
 }
