@@ -8,18 +8,18 @@
     "graphics": {
       "mask_render_downsample": 8,
       "target_fps": 60,
-      "shadow_quality": "medium",
-      "antialiasing_mode": "fxaa"
+      "shadow_quality": "high",
+      "antialiasing_mode": "smaa"
     }
   },
   "memory": {
-    "enabled": true,
     "db_path": "",
+    "enabled": true,
     "recall_limit": 5,
+    "recency_weight": 0.3,
     "similarity_threshold": 0.5,
-    "time_decay_hours": 24.0,
     "similarity_weight": 0.7,
-    "recency_weight": 0.3
+    "time_decay_hours": 24.0
   },
   "provider": {
     "api_key": {

@@ -64,6 +64,24 @@ impl Default for EneResource {
     fn default() -> Self {
         let handle = EneHandle::new();
         let receiver = handle.subscribe();
+
+        // Load config and character in the background (mirrors ene-cli init).
+        tokio::spawn({
+            let handle = handle.clone();
+            async move {
+                match handle.load_config().await {
+                    Ok(config) => {
+                        if let Err(e) = handle.load_character(&config.character).await {
+                            warn!("[Ene] Failed to load character: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        warn!("[Ene] Failed to load config: {e}");
+                    }
+                }
+            }
+        });
+
         Self {
             handle,
             receiver,
