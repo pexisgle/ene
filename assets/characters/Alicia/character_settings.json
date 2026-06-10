@@ -1,10 +1,10 @@
 {
   "character_position": [
-    0.0,
-    0.0,
+    0.94851846,
+    -0.0060185194,
     0.0
   ],
-  "model_scale": 0.9,
+  "model_scale": 1.0,
   "look_at_strength": 0.6,
   "default_motion": "VRMA_01",
   "default_expression": "neutral",
