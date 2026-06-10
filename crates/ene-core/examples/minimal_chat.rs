@@ -60,8 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_default();
     println!(
         "[Setup] provider: {}, model: {}",
-        provider_cfg.provider_name,
-        provider_cfg.model,
+        provider_cfg.provider_name, provider_cfg.model,
     );
     println!("[Setup] Reconfigured.\n");
 

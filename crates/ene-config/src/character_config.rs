@@ -1,6 +1,6 @@
-use std::collections::HashMap;
 use crate::error::EneConfigError;
-use crate::{HasConfigKey, ConfigTarget};
+use crate::{ConfigTarget, HasConfigKey};
+use std::collections::HashMap;
 
 /// A single motion entry with a display name and relative file path.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -56,7 +56,10 @@ impl CharacterConfig {
     {
         debug_assert_eq!(T::TARGET, ConfigTarget::Character);
         let mut cur = serde_json::Value::Object(
-            self.extra.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+            self.extra
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         );
         for key in T::path() {
             match cur.get(key).cloned() {
@@ -65,7 +68,9 @@ impl CharacterConfig {
             }
         }
         serde_json::from_value(cur).map_err(|e| {
-            EneConfigError::GenericConfigError(format!("Failed to deserialize character nested section: {e}"))
+            EneConfigError::GenericConfigError(format!(
+                "Failed to deserialize character nested section: {e}"
+            ))
         })
     }
 
@@ -76,11 +81,16 @@ impl CharacterConfig {
     {
         debug_assert_eq!(T::TARGET, ConfigTarget::Character);
         let val = serde_json::to_value(section).map_err(|e| {
-            EneConfigError::GenericConfigError(format!("Failed to serialize character section: {e}"))
+            EneConfigError::GenericConfigError(format!(
+                "Failed to serialize character section: {e}"
+            ))
         })?;
-        
+
         let mut root = serde_json::Value::Object(
-            self.extra.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+            self.extra
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         );
         let mut cur = &mut root;
         let path = T::path();
@@ -95,13 +105,15 @@ impl CharacterConfig {
                     *cur = serde_json::Value::Object(serde_json::Map::new());
                 }
                 let obj = cur.as_object_mut().unwrap();
-                cur = obj.entry(key.to_string()).or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+                cur = obj
+                    .entry(key.to_string())
+                    .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
             }
         }
         if let serde_json::Value::Object(obj) = root {
             self.extra = obj.into_iter().collect();
         }
-        
+
         Ok(())
     }
 }

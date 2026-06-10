@@ -31,7 +31,9 @@ pub async fn init() -> Result<EneHandle, EneCoreError> {
             "{}",
             style::header(format!(
                 "[Memory] DB: {}",
-                mem_config.resolve_memory_db_path(&config.character).display()
+                mem_config
+                    .resolve_memory_db_path(&config.character)
+                    .display()
             ))
         );
     }

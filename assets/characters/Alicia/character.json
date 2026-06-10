@@ -49,7 +49,44 @@
             "path": "motions/VRMA_07.vrma"
           }
         ],
-        "expressions": null
+        "expressions": [
+          {
+            "name": "neutral",
+            "description": "Default resting expression",
+            "vrm": { "neutral": 1.0 },
+            "enabled": true
+          },
+          {
+            "name": "happy",
+            "description": "Feeling joyful, excited, or pleased",
+            "vrm": { "happy": 1.0 },
+            "enabled": true
+          },
+          {
+            "name": "sad",
+            "description": "Feeling down, disappointed, or sorrowful",
+            "vrm": { "sad": 1.0 },
+            "enabled": true
+          },
+          {
+            "name": "angry",
+            "description": "Feeling frustrated or upset",
+            "vrm": { "angry": 1.0 },
+            "enabled": true
+          },
+          {
+            "name": "relaxed",
+            "description": "Feeling calm, content, or at ease",
+            "vrm": { "relaxed": 1.0 },
+            "enabled": true
+          },
+          {
+            "name": "surprised",
+            "description": "Feeling shocked or caught off guard",
+            "vrm": { "surprised": 1.0 },
+            "enabled": true
+          }
+        ]
       }
     },
     "nickname": "",

@@ -77,7 +77,10 @@ static SCHEMA_REGISTRY: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Sch
 
 /// Registers schemas collected from tools or compile-time config structs
 #[doc(hidden)]
-pub fn __register_schema<T: JsonSchema + HasConfigKey>(target: ConfigTarget, parent_key: Option<&str>) {
+pub fn __register_schema<T: JsonSchema + HasConfigKey>(
+    target: ConfigTarget,
+    parent_key: Option<&str>,
+) {
     let schema_gen = schemars::SchemaGenerator::default();
     let schema = schema_gen.into_root_schema_for::<T>();
     let registry = SCHEMA_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
@@ -172,7 +175,10 @@ impl EneConfig {
     {
         debug_assert_eq!(T::TARGET, ConfigTarget::Settings);
         let mut cur = serde_json::Value::Object(
-            self.extra.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+            self.extra
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         );
         for key in T::path() {
             match cur.get(key).cloned() {
@@ -205,13 +211,14 @@ fn set_nested(
     value: serde_json::Value,
 ) -> Result<(), EneConfigError> {
     if path.is_empty() {
-        return Err(EneConfigError::GenericConfigError("Empty path for nested config".to_string()));
+        return Err(EneConfigError::GenericConfigError(
+            "Empty path for nested config".to_string(),
+        ));
     }
-    
-    let mut root = serde_json::Value::Object(
-        extra.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-    );
-    
+
+    let mut root =
+        serde_json::Value::Object(extra.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+
     let mut cur = &mut root;
     for (i, &key) in path.iter().enumerate() {
         if i == path.len() - 1 {
@@ -224,14 +231,16 @@ fn set_nested(
                 *cur = serde_json::Value::Object(serde_json::Map::new());
             }
             let obj = cur.as_object_mut().unwrap();
-            cur = obj.entry(key.to_string()).or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            cur = obj
+                .entry(key.to_string())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
         }
     }
-    
+
     if let serde_json::Value::Object(obj) = root {
         *extra = obj.into_iter().collect();
     }
-    
+
     Ok(())
 }
 
@@ -251,7 +260,11 @@ pub fn generate_schema_json() -> Result<String, serde_json::Error> {
                 continue;
             }
             let entry_val = serde_json::to_value(&entry.schema)?;
-            if let Some(definitions) = entry_val.get("definitions").or_else(|| entry_val.get("$defs")).and_then(|v| v.as_object()) {
+            if let Some(definitions) = entry_val
+                .get("definitions")
+                .or_else(|| entry_val.get("$defs"))
+                .and_then(|v| v.as_object())
+            {
                 let root_defs = root_obj
                     .entry("definitions".to_string())
                     .or_insert_with(|| serde_json::json!({}))
@@ -273,9 +286,13 @@ pub fn generate_schema_json() -> Result<String, serde_json::Error> {
             if let Some(parent_key) = &entry.parent_key {
                 if parent_key == "tools_map" {
                     let tool_config_def = if root_obj.contains_key("definitions") {
-                        root_obj.get_mut("definitions").and_then(|d| d.get_mut("ToolConfig"))
+                        root_obj
+                            .get_mut("definitions")
+                            .and_then(|d| d.get_mut("ToolConfig"))
                     } else {
-                        root_obj.get_mut("$defs").and_then(|d| d.get_mut("ToolConfig"))
+                        root_obj
+                            .get_mut("$defs")
+                            .and_then(|d| d.get_mut("ToolConfig"))
                     };
                     if let Some(tool_config_def) = tool_config_def
                         && let Some(tools_prop) = tool_config_def
@@ -301,7 +318,7 @@ pub fn generate_schema_json() -> Result<String, serde_json::Error> {
                                     { "$ref": "#/definitions/ToolEntry" },
                                     clean_entry
                                 ]
-                            })
+                            }),
                         );
                     }
                 }
@@ -341,7 +358,11 @@ pub fn generate_character_schema_json() -> Result<String, serde_json::Error> {
                 continue;
             }
             let entry_val = serde_json::to_value(&entry.schema)?;
-            if let Some(definitions) = entry_val.get("definitions").or_else(|| entry_val.get("$defs")).and_then(|v| v.as_object()) {
+            if let Some(definitions) = entry_val
+                .get("definitions")
+                .or_else(|| entry_val.get("$defs"))
+                .and_then(|v| v.as_object())
+            {
                 let root_defs = root_obj
                     .entry("definitions".to_string())
                     .or_insert_with(|| serde_json::json!({}))

@@ -269,10 +269,7 @@ impl ToolHostManager {
                     // Collect config schema and register it in the runtime registry
                     if let Some(schema) = supervised_entry.config_schema().await {
                         let schema_key = format!("{}_config", name);
-                        register_runtime_schema(
-                            &schema_key,
-                            schema,
-                        );
+                        register_runtime_schema(&schema_key, schema);
                     }
                     supervised_registries.push(supervised_entry);
                 }
