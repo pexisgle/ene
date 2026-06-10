@@ -1,6 +1,6 @@
 use crate::error::EneConfigError;
 use crate::{ConfigTarget, HasConfigKey};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// A single motion entry with a display name and relative file path.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -32,7 +32,7 @@ pub struct CharacterConfig {
     /// Catch-all for extra configurations.
     #[serde(flatten)]
     #[schemars(skip)]
-    pub extra: HashMap<String, serde_json::Value>,
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for CharacterConfig {
@@ -43,7 +43,7 @@ impl Default for CharacterConfig {
             look_at_strength: 0.6,
             default_motion: String::new(),
             default_expression: "neutral".to_string(),
-            extra: HashMap::new(),
+            extra: BTreeMap::new(),
         }
     }
 }

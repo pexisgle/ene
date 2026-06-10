@@ -72,12 +72,11 @@ pub fn render_ai_page(
         ui.horizontal(|ui| {
             ui.label("Model");
             let response = ui.add(
-                egui::TextEdit::singleline(&mut input_state.ai_model)
-                    .desired_width(f32::INFINITY),
+                egui::TextEdit::singleline(&mut input_state.ai_model).desired_width(f32::INFINITY),
             );
             if response.changed() {
-                let _ = SettingsValueKind::AiModel
-                    .apply_input(input_state.ai_model.trim(), settings);
+                let _ =
+                    SettingsValueKind::AiModel.apply_input(input_state.ai_model.trim(), settings);
             }
         });
 
@@ -195,7 +194,8 @@ pub fn render_ai_page(
                 input_state.ai_embedding_provider = current_provider.clone();
                 provider_config.embedding.backend = current_provider.clone();
                 if current_provider.as_str() == "local" {
-                    provider_config.embedding.local.model = "jina-embeddings-v5-text-small".to_string();
+                    provider_config.embedding.local.model =
+                        "jina-embeddings-v5-text-small".to_string();
                     input_state.ai_embedding_model = provider_config.embedding.local.model.clone();
                     input_state.ai_embedding_dimensions = "auto".to_string();
                 } else {
@@ -227,8 +227,6 @@ pub fn render_ai_page(
                 settings.mark_dirty();
             }
         });
-
-
 
         ui.horizontal(|ui| {
             ui.label("Dimensions");

@@ -32,12 +32,6 @@ pub use handle::{
 pub use ene_config::EneConfig;
 
 // ── Provider types ──
-/// LLM message types (re-exported from `ene-provider`).
-#[doc(no_inline)]
-pub use ene_provider::LlmMessage;
-/// LLM provider trait (re-exported from `ene-provider`).
-#[doc(no_inline)]
-pub use ene_provider::LlmProvider;
 /// Configuration for API key retrieval.
 #[doc(no_inline)]
 pub use ene_provider::ApiKeyConfig;
@@ -47,6 +41,12 @@ pub use ene_provider::CloudEmbeddingConfig;
 /// Configuration for the embedding system.
 #[doc(no_inline)]
 pub use ene_provider::EmbeddingConfig;
+/// LLM message types (re-exported from `ene-provider`).
+#[doc(no_inline)]
+pub use ene_provider::LlmMessage;
+/// LLM provider trait (re-exported from `ene-provider`).
+#[doc(no_inline)]
+pub use ene_provider::LlmProvider;
 /// Configuration for the local GGUF embedding backend.
 #[doc(no_inline)]
 pub use ene_provider::LocalEmbeddingConfig;
@@ -72,9 +72,6 @@ pub use ene_provider::Role;
 /// Character card name (re-exported from `ene-session`).
 #[doc(no_inline)]
 pub use ene_session::CardName;
-/// Session configuration (re-exported from `ene-session`).
-#[doc(no_inline)]
-pub use ene_session::{SessionConfig, SummarizationConfig};
 /// Unique session identifier (re-exported from `ene-session`).
 #[doc(no_inline)]
 pub use ene_session::SessionId;
@@ -90,6 +87,9 @@ pub use ene_session::extract_emotion_from_token;
 /// Split text and special tokens (re-exported from `ene-session`).
 #[doc(no_inline)]
 pub use ene_session::split_text_and_special_tokens;
+/// Session configuration (re-exported from `ene-session`).
+#[doc(no_inline)]
+pub use ene_session::{SessionConfig, SummarizationConfig};
 /// Unique permission request identifier.
 pub use types::RequestId;
 

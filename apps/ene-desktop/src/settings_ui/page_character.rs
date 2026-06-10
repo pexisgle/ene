@@ -63,9 +63,10 @@ pub fn render_character_page(
             settings,
             SettingsButtonAction::LookAtStrengthDown,
             SettingsButtonAction::LookAtStrengthUp,
-            |s| format!("{:.2}", s.character_state.look_at_strength),
         ) {
             apply_action(action, settings, animation_control, ai_request_writer);
+            input_state.look_at_strength =
+                format!("{:.2}", settings.character_state.look_at_strength);
         }
 
         if let Some(action) = render_numeric_row(
@@ -76,9 +77,9 @@ pub fn render_character_page(
             settings,
             SettingsButtonAction::ModelScaleDown,
             SettingsButtonAction::ModelScaleUp,
-            |s| format!("{:.2}", s.character_state.model_scale),
         ) {
             apply_action(action, settings, animation_control, ai_request_writer);
+            input_state.model_scale = format!("{:.2}", settings.character_state.model_scale);
         }
 
         if let Some(action) = render_numeric_row(
@@ -89,9 +90,10 @@ pub fn render_character_page(
             settings,
             SettingsButtonAction::CharacterPosXDown,
             SettingsButtonAction::CharacterPosXUp,
-            |s| format!("{:+.2}", s.character_state.character_position.x),
         ) {
             apply_action(action, settings, animation_control, ai_request_writer);
+            input_state.character_pos_x =
+                format!("{:+.2}", settings.character_state.character_position.x);
         }
 
         if let Some(action) = render_numeric_row(
@@ -102,9 +104,10 @@ pub fn render_character_page(
             settings,
             SettingsButtonAction::CharacterPosYDown,
             SettingsButtonAction::CharacterPosYUp,
-            |s| format!("{:+.2}", s.character_state.character_position.y),
         ) {
             apply_action(action, settings, animation_control, ai_request_writer);
+            input_state.character_pos_y =
+                format!("{:+.2}", settings.character_state.character_position.y);
         }
 
         if let Some(action) = render_numeric_row(
@@ -115,9 +118,10 @@ pub fn render_character_page(
             settings,
             SettingsButtonAction::CharacterPosZDown,
             SettingsButtonAction::CharacterPosZUp,
-            |s| format!("{:+.2}", s.character_state.character_position.z),
         ) {
             apply_action(action, settings, animation_control, ai_request_writer);
+            input_state.character_pos_z =
+                format!("{:+.2}", settings.character_state.character_position.z);
         }
 
         ui.separator();

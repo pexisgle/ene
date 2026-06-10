@@ -181,14 +181,12 @@ pub fn render_numeric_row(
     settings: &mut CharacterSettings,
     down_action: SettingsButtonAction,
     up_action: SettingsButtonAction,
-    format_fn: impl Fn(&CharacterSettings) -> String,
 ) -> Option<SettingsButtonAction> {
     let mut action = None;
     ui.horizontal(|ui| {
         ui.label(label);
         if ui.button("-").clicked() {
             action = Some(down_action);
-            *text_buffer = format_fn(settings);
         }
         let response = ui.add(egui::TextEdit::singleline(text_buffer).desired_width(220.0));
         let commit = response.changed()
@@ -199,7 +197,6 @@ pub fn render_numeric_row(
         }
         if ui.button("+").clicked() {
             action = Some(up_action);
-            *text_buffer = format_fn(settings);
         }
     });
     action

@@ -4,7 +4,7 @@
     0.0,
     0.0
   ],
-  "model_scale": 1.0,
+  "model_scale": 0.9,
   "look_at_strength": 0.6,
   "default_motion": "VRMA_01",
   "default_expression": "neutral",

@@ -71,10 +71,7 @@ impl CliCommand for ConfigCommand {
                     .resolve_memory_db_path(&snapshot.config.character)
                     .display()
             );
-            println!(
-                "Summary Recall Limit: {}",
-                session_config.recall_limit
-            );
+            println!("Summary Recall Limit: {}", session_config.recall_limit);
             println!("Similarity Threshold: {}", mem_config.similarity_threshold);
         }
         println!("----------------------");

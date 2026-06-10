@@ -20,7 +20,9 @@ pub mod traits;
 
 pub mod role;
 
-pub use config::{ApiKeyConfig, CloudEmbeddingConfig, EmbeddingConfig, LocalEmbeddingConfig, ProviderConfig};
+pub use config::{
+    ApiKeyConfig, CloudEmbeddingConfig, EmbeddingConfig, LocalEmbeddingConfig, ProviderConfig,
+};
 pub use hybrid::HybridRerankProvider;
 pub use message::{LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart};
 pub use openai::{CloudEmbeddingProvider, OpenAiProvider, OpenAiProviderFactory};

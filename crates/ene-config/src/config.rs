@@ -1,6 +1,6 @@
 use crate::error::EneConfigError;
 use schemars::JsonSchema;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 /// Global singleton holding the active [`EneConfig`].
@@ -150,7 +150,7 @@ pub struct EneConfig {
     #[serde(flatten)]
     #[schemars(skip)]
     /// Catch-all for provider, tool, and other sub-configurations.
-    pub extra: HashMap<String, serde_json::Value>,
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for EneConfig {
@@ -160,7 +160,7 @@ impl Default for EneConfig {
             character: String::new(),
             user_name: "User".to_string(),
             runtime_rules: "Keep responses relatively short and sweet, suitable for displaying on a screen overlay.".to_string(),
-            extra: HashMap::new(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -206,7 +206,7 @@ impl EneConfig {
 }
 
 fn set_nested(
-    extra: &mut HashMap<String, serde_json::Value>,
+    extra: &mut BTreeMap<String, serde_json::Value>,
     path: &[&str],
     value: serde_json::Value,
 ) -> Result<(), EneConfigError> {

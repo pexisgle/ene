@@ -4,26 +4,12 @@
   "user_name": "pexisgle",
   "runtime_rules": "Keep responses relatively short and sweet, suitable for displaying on a screen overlay.",
   "$schema": "./schema/settings.schema.json",
-  "provider": {
-    "name": "openai-compatible",
-    "model": "xiaomi/mimo-v2.5",
-    "base_url": "https://openrouter.ai/api/v1",
-    "api_key": {
-      "source": "inline",
-      "inline": "",
-      "env": "OPENAI_API_KEY"
-    },
-    "embedding": {
-      "backend": "local",
-      "query_prefix": null,
-      "cloud": {
-        "model": "text-embedding-3-small",
-        "dimensions": 1536
-      },
-      "local": {
-        "model": "jina-embeddings-v5-text-small",
-        "quantization": "F16"
-      }
+  "desktop": {
+    "graphics": {
+      "mask_render_downsample": 8,
+      "target_fps": 60,
+      "shadow_quality": "medium",
+      "antialiasing_mode": "fxaa"
     }
   },
   "memory": {
@@ -35,21 +21,41 @@
     "similarity_weight": 0.7,
     "recency_weight": 0.3
   },
+  "provider": {
+    "api_key": {
+      "env": "OPENAI_API_KEY",
+      "inline": "",
+      "source": "inline"
+    },
+    "base_url": "https://openrouter.ai/api/v1",
+    "embedding": {
+      "backend": "local",
+      "cloud": {
+        "dimensions": 1536,
+        "model": "text-embedding-3-small"
+      },
+      "local": {
+        "model": "jina-embeddings-v5-text-small",
+        "quantization": "F16"
+      },
+      "query_prefix": null
+    },
+    "model": "xiaomi/mimo-v2.5",
+    "name": "openai-compatible"
+  },
   "session": {
     "auto_split": true,
-    "timeout_minutes": 30,
-    "topic_similarity_threshold": 0.5,
     "min_turns_before_split": 3,
     "recall_limit": 3,
     "summarization": {
-      "model": "",
-      "base_url": ""
-    }
+      "base_url": "",
+      "model": ""
+    },
+    "timeout_minutes": 30,
+    "topic_similarity_threshold": 0.5
   },
   "tools": {
     "enabled": true,
-    "max_rounds": 10,
-    "timeout_ms": 60000,
     "list": {
       "app": {
         "enable": true
@@ -70,29 +76,23 @@
         "tavily_api_key": ""
       }
     },
+    "max_rounds": 10,
     "mcp_servers": [],
     "rag": {
-      "enabled": true,
-      "top_k": 12,
-      "final_n": 6,
-      "use_hyde": true,
-      "use_rerank": true,
-      "rerank_candidates": 24,
-      "min_similarity": 0.25,
       "background_index_on_startup": false,
+      "enabled": true,
+      "final_n": 6,
       "forced": [
         "utility.question",
         "utility.todo_add",
         "utility.get_current_time"
-      ]
-    }
-  },
-  "desktop": {
-    "graphics": {
-      "mask_render_downsample": 8,
-      "target_fps": 60,
-      "shadow_quality": "medium",
-      "antialiasing_mode": "fxaa"
-    }
+      ],
+      "min_similarity": 0.25,
+      "rerank_candidates": 24,
+      "top_k": 12,
+      "use_hyde": true,
+      "use_rerank": true
+    },
+    "timeout_ms": 60000
   }
 }
