@@ -15,8 +15,8 @@ use models::{
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 
-/// A row of tool embedding data: `(tool_name, field, field_key, version_hash, model_name, embedding_vec)`.
-pub type ToolEmbeddingFieldRow = (String, String, String, String, String, Vec<f32>);
+/// A row of tool embedding data: `(tool_name, field, field_key, version_hash, model_name, embedding_vec, source_text)`.
+pub type ToolEmbeddingFieldRow = (String, String, String, String, String, Vec<f32>, String);
 
 /// Registers the sqlite-vec extension and runs pending Diesel migrations.
 pub fn init_sqlite_vec(conn: &mut SqliteConnection) -> Result<(), MemoryError> {
@@ -528,6 +528,7 @@ impl MemoryStore {
         version_hash: &str,
         model_name: &str,
         embedding: &[f32],
+        source_text: &str,
     ) -> Result<(), MemoryError> {
         let now = Utc::now().to_rfc3339();
         let mut conn = self
@@ -541,6 +542,7 @@ impl MemoryStore {
             field_key,
             version_hash,
             model_name,
+            source_text,
             embedding: EmbeddingBlob(embedding.to_vec()),
             created_at: &now,
         };
@@ -557,6 +559,7 @@ impl MemoryStore {
             .set((
                 crate::schema::tool_embedding_index::version_hash.eq(&new_embedding.version_hash),
                 crate::schema::tool_embedding_index::embedding.eq(&new_embedding.embedding),
+                crate::schema::tool_embedding_index::source_text.eq(&new_embedding.source_text),
                 crate::schema::tool_embedding_index::created_at.eq(&new_embedding.created_at),
             ))
             .execute(&mut *conn)?;
@@ -586,6 +589,7 @@ impl MemoryStore {
                     row.version_hash,
                     row.model_name,
                     row.embedding.0,
+                    row.source_text,
                 )
             })
             .collect())
@@ -873,28 +877,60 @@ mod tests {
         let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
 
         store
-            .upsert_tool_embedding_field("web_search", "description", "", "hash-a", "", &emb)
+            .upsert_tool_embedding_field(
+                "web_search",
+                "description",
+                "",
+                "hash-a",
+                "",
+                &emb,
+                "desc text",
+            )
             .unwrap();
         store
-            .upsert_tool_embedding_field("web_search", "summary", "", "hash-a", "", &emb)
+            .upsert_tool_embedding_field(
+                "web_search",
+                "summary",
+                "",
+                "hash-a",
+                "",
+                &emb,
+                "sum text",
+            )
             .unwrap();
         store
-            .upsert_tool_embedding_field("web_search", "negative", "", "hash-a", "", &emb)
+            .upsert_tool_embedding_field(
+                "web_search",
+                "negative",
+                "",
+                "hash-a",
+                "",
+                &emb,
+                "neg text",
+            )
             .unwrap();
         store
-            .upsert_tool_embedding_field("other_tool", "description", "", "hash-b", "", &emb)
+            .upsert_tool_embedding_field(
+                "other_tool",
+                "description",
+                "",
+                "hash-b",
+                "",
+                &emb,
+                "other desc",
+            )
             .unwrap();
 
         let rows = store.list_tool_embedding_fields().unwrap();
         assert_eq!(rows.len(), 4);
         let web_rows: Vec<_> = rows
             .iter()
-            .filter(|(name, _, _, _, _, _)| name == "web_search")
+            .filter(|(name, _, _, _, _, _, _)| name == "web_search")
             .collect();
         assert_eq!(web_rows.len(), 3);
         let fields: std::collections::HashSet<&str> = web_rows
             .iter()
-            .map(|(_, f, _, _, _, _)| f.as_str())
+            .map(|(_, f, _, _, _, _, _)| f.as_str())
             .collect();
         assert!(fields.contains("summary"));
         assert!(fields.contains("description"));
@@ -903,15 +939,24 @@ mod tests {
         // Upsert (replace) on the same (tool_name, field, field_key, model_name) overwrites.
         let emb2 = vec![0.0_f32, 1.0, 0.0, 0.0];
         store
-            .upsert_tool_embedding_field("web_search", "summary", "", "hash-a2", "", &emb2)
+            .upsert_tool_embedding_field(
+                "web_search",
+                "summary",
+                "",
+                "hash-a2",
+                "",
+                &emb2,
+                "sum text v2",
+            )
             .unwrap();
         let rows = store.list_tool_embedding_fields().unwrap();
         let web_summary = rows
             .iter()
-            .find(|(n, f, _, _, _, _)| n == "web_search" && f == "summary")
+            .find(|(n, f, _, _, _, _, _)| n == "web_search" && f == "summary")
             .unwrap();
         assert_eq!(web_summary.3, "hash-a2");
         assert_eq!(web_summary.5, emb2);
+        assert_eq!(web_summary.6, "sum text v2");
     }
 
     #[test]
@@ -921,11 +966,19 @@ mod tests {
 
         for field in ["summary", "description", "negative"] {
             store
-                .upsert_tool_embedding_field("web_search", field, "", "hash", "", &emb)
+                .upsert_tool_embedding_field("web_search", field, "", "hash", "", &emb, "text")
                 .unwrap();
         }
         store
-            .upsert_tool_embedding_field("keep_me", "description", "", "hash", "", &emb)
+            .upsert_tool_embedding_field(
+                "keep_me",
+                "description",
+                "",
+                "hash",
+                "",
+                &emb,
+                "keep text",
+            )
             .unwrap();
 
         assert_eq!(store.list_tool_embedding_fields().unwrap().len(), 4);
