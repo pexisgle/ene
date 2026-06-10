@@ -165,6 +165,9 @@ fn update_drag_state(
                 drag_state.last_cursor_world_pos = cursor_world_pos;
             }
             ButtonState::Released => {
+                if drag_state.last_cursor_world_pos.is_some() {
+                    settings.mark_dirty();
+                }
                 drag_state.last_cursor_world_pos = None;
             }
             _ => {}
@@ -175,6 +178,7 @@ fn update_drag_state(
         return;
     };
     let Some(cursor_world_pos) = cursor_world_pos else {
+        settings.mark_dirty();
         drag_state.last_cursor_world_pos = None;
         return;
     };

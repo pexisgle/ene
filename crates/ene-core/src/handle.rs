@@ -888,13 +888,11 @@ impl EneActor {
                 Ok(c) => c,
                 Err(_) => return,
             };
-            let provider = match LlmProviderRegistry::create_provider(
-                &provider_config.name,
-                &self.config,
-            ) {
-                Ok(p) => Arc::from(p),
-                Err(_) => return,
-            };
+            let provider =
+                match LlmProviderRegistry::create_provider(&provider_config.name, &self.config) {
+                    Ok(p) => Arc::from(p),
+                    Err(_) => return,
+                };
 
             if let Some(input) = self.session.prepare_split_input(
                 &self.config,
