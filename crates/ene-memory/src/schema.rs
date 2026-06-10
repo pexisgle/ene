@@ -1,7 +1,6 @@
 #![allow(missing_docs)]
 // @generated automatically by Diesel CLI.
 
-// Key-value facts extracted from conversations, linked to summaries.
 diesel::table! {
     conversation_keyfacts (id) {
         id -> BigInt,
@@ -13,7 +12,6 @@ diesel::table! {
     }
 }
 
-// Raw conversation logs, ordered by creation time within a session.
 diesel::table! {
     conversation_logs (id) {
         id -> BigInt,
@@ -25,7 +23,6 @@ diesel::table! {
     }
 }
 
-// Summarized conversation entries with vector embeddings for similarity search.
 diesel::table! {
     conversation_summaries (id) {
         id -> BigInt,
@@ -38,10 +35,6 @@ diesel::table! {
     }
 }
 
-// Multi-vector tool embedding index. One row per (tool_name, field, field_key,
-// model_name) where `field` ∈ { 'summary', 'description', 'capability',
-// 'example', 'negative' }. Enables per-field embedding, storage, and retrieval
-// for the ToolRag pipeline.
 diesel::table! {
     tool_embedding_index (id) {
         id -> Integer,
@@ -50,18 +43,8 @@ diesel::table! {
         field_key -> Text,
         version_hash -> Text,
         model_name -> Text,
+        source_text -> Text,
         embedding -> Binary,
-        created_at -> Text,
-    }
-}
-
-// Registry of tool-declared schemas. Each row records the tool prefix and a
-// fingerprint of the declared schema so the server can detect changes.
-diesel::table! {
-    __tool_schemas (prefix) {
-        prefix -> Text,
-        schema_json -> Text,
-        fingerprint -> Text,
         created_at -> Text,
     }
 }
@@ -71,7 +54,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     conversation_logs,
     conversation_summaries,
     tool_embedding_index,
-    __tool_schemas,
 );
 
 diesel::joinable!(conversation_keyfacts -> conversation_summaries (summary_id));
