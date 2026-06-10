@@ -38,12 +38,12 @@ pub use ene_provider::LlmMessage;
 /// LLM provider trait (re-exported from `ene-provider`).
 #[doc(no_inline)]
 pub use ene_provider::LlmProvider;
-/// OpenAI-compatible provider config.
-#[doc(no_inline)]
-pub use ene_provider::ProviderConfig;
 /// Configuration for the local GGUF embedding backend.
 #[doc(no_inline)]
 pub use ene_provider::LocalEmbeddingConfig;
+/// OpenAI-compatible provider config.
+#[doc(no_inline)]
+pub use ene_provider::ProviderConfig;
 
 // ── Memory types ──
 /// Memory configuration (re-exported from `ene-memory`).

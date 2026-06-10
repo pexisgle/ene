@@ -320,12 +320,7 @@ impl CharacterSettings {
                         .motion_names
                         .iter()
                         .position(|n| n == dm_name)
-                        .or_else(|| {
-                            entry
-                                .motion_paths
-                                .iter()
-                                .position(|m| m.ends_with(dm_name))
-                        })
+                        .or_else(|| entry.motion_paths.iter().position(|m| m.ends_with(dm_name)))
                 })
             })
             .unwrap_or(0);
@@ -396,8 +391,6 @@ impl CharacterSettings {
             normalize_mask_render_downsample(self.graphics.mask_render_downsample);
         self.graphics.target_fps = normalize_target_fps(self.graphics.target_fps);
     }
-
-
 
     pub fn save_per_character_settings(&self) {
         self.sync_to_store();
@@ -543,8 +536,8 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
             .then(|| path.join("character.json"))
             .or_else(|| {
                 path.join("charactor.json")
-                     .exists()
-                     .then(|| path.join("charactor.json"))
+                    .exists()
+                    .then(|| path.join("charactor.json"))
             })
             .unwrap_or_else(|| path.join("character.json"));
         if !card_path.exists() {
@@ -630,7 +623,9 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
     out
 }
 
-fn read_character_json_meta(path: &Path) -> Option<(String, Option<String>, Option<Vec<ene_config::MotionEntry>>)> {
+fn read_character_json_meta(
+    path: &Path,
+) -> Option<(String, Option<String>, Option<Vec<ene_config::MotionEntry>>)> {
     let content = fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
     let name = v.get("data")?.get("name")?.as_str()?.to_string();
@@ -653,7 +648,8 @@ fn read_character_json_meta(path: &Path) -> Option<(String, Option<String>, Opti
         let extensions = v.get("data")?.get("extensions")?;
         let ene = extensions.get("ene")?;
         let motions_val = ene.get("motions")?;
-        let motions: Vec<ene_config::MotionEntry> = serde_json::from_value(motions_val.clone()).ok()?;
+        let motions: Vec<ene_config::MotionEntry> =
+            serde_json::from_value(motions_val.clone()).ok()?;
         Some(motions)
     })();
 

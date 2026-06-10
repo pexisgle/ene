@@ -52,7 +52,10 @@ impl CliCommand for ConfigCommand {
         println!("Memory Enabled: {}", mem_config.enabled);
         println!("Embedding Backend: {}", provider_config.embedding_backend);
         if provider_config.embedding_backend.as_str() == "local" {
-            let local_emb = snapshot.config.get_section::<ene_core::LocalEmbeddingConfig>().unwrap_or_default();
+            let local_emb = snapshot
+                .config
+                .get_section::<ene_core::LocalEmbeddingConfig>()
+                .unwrap_or_default();
             println!("Local Embedding Model: {}", local_emb.model);
         } else {
             println!(
@@ -67,7 +70,9 @@ impl CliCommand for ConfigCommand {
         if mem_config.enabled {
             println!(
                 "Memory DB: {}",
-                mem_config.resolve_memory_db_path(&snapshot.config.character).display()
+                mem_config
+                    .resolve_memory_db_path(&snapshot.config.character)
+                    .display()
             );
             println!(
                 "Summary Recall Limit: {}",

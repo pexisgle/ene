@@ -1,4 +1,3 @@
-
 fn default_string() -> String {
     String::new()
 }

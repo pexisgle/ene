@@ -67,7 +67,10 @@ impl MemoryConfig {
     }
 
     /// Resolves the effective summarisation base URL, falling back to the provider settings.
-    pub fn resolve_summarization_base_url(&self, fallback_url: &str) -> Result<String, ene_config::ConfigError> {
+    pub fn resolve_summarization_base_url(
+        &self,
+        fallback_url: &str,
+    ) -> Result<String, ene_config::ConfigError> {
         if !self.summarization_base_url.trim().is_empty() {
             return Ok(self.summarization_base_url.clone());
         }

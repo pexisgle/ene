@@ -45,7 +45,7 @@ pub struct CharacterCardData {
     pub mes_example: String,
     /// Extension key-value store (expressions, ene metadata, etc.).
     #[serde(default)]
-    pub extensions: HashMap<String, serde_json::Value>,
+    pub extensions: Extensions,
     /// The character's system prompt.
     pub system_prompt: String,
     /// Instructions appended after the conversation history (PHI).
@@ -85,6 +85,36 @@ pub struct CharacterCardData {
     /// Unix timestamp of the last modification.
     #[serde(default)]
     pub modification_date: Option<u64>,
+}
+
+/// Typed extension store for character cards.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(crate = "crate::serde")]
+pub struct Extensions {
+    /// Ene-specific extension block (motions, expressions, etc.).
+    #[serde(default)]
+    pub ene: Option<EneExtension>,
+    /// Catch-all for other extension keys.
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+impl schemars::JsonSchema for Extensions {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Extensions".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let ene_schema = generator.subschema_for::<Option<EneExtension>>();
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "ene": ene_schema
+            },
+            "additionalProperties": true
+        });
+        serde_json::from_value(schema).unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
@@ -302,8 +332,7 @@ impl CharacterCardData {
     /// Returns the EneExtension object if defined under `extensions.ene`.
     #[must_use]
     pub fn get_ene_extension(&self) -> Option<EneExtension> {
-        let value = self.extensions.get("ene")?;
-        serde_json::from_value(value.clone()).ok()
+        self.extensions.ene.clone()
     }
 
     fn get_expression_overrides(&self) -> Vec<ExpressionDefinition> {
@@ -312,11 +341,53 @@ impl CharacterCardData {
         {
             return exprs;
         }
-        let Some(value) = self.extensions.get("expressions") else {
+        let Some(value) = self.extensions.extra.get("expressions") else {
             return Vec::new();
         };
         serde_json::from_value(value.clone()).unwrap_or_default()
     }
+}
+
+/// Default expressions for the schema.
+fn default_ene_expressions() -> Option<Vec<ExpressionDefinition>> {
+    Some(vec![
+        ExpressionDefinition {
+            name: "neutral".to_string(),
+            description: "Default resting expression".to_string(),
+            vrm: [("neutral".to_string(), 1.0)].into_iter().collect(),
+            enabled: true,
+        },
+        ExpressionDefinition {
+            name: "happy".to_string(),
+            description: "Feeling joyful, excited, or pleased".to_string(),
+            vrm: [("happy".to_string(), 1.0)].into_iter().collect(),
+            enabled: true,
+        },
+        ExpressionDefinition {
+            name: "sad".to_string(),
+            description: "Feeling down, disappointed, or sorrowful".to_string(),
+            vrm: [("sad".to_string(), 1.0)].into_iter().collect(),
+            enabled: true,
+        },
+        ExpressionDefinition {
+            name: "angry".to_string(),
+            description: "Feeling frustrated or upset".to_string(),
+            vrm: [("angry".to_string(), 1.0)].into_iter().collect(),
+            enabled: true,
+        },
+        ExpressionDefinition {
+            name: "relaxed".to_string(),
+            description: "Feeling calm, content, or at ease".to_string(),
+            vrm: [("relaxed".to_string(), 1.0)].into_iter().collect(),
+            enabled: true,
+        },
+        ExpressionDefinition {
+            name: "surprised".to_string(),
+            description: "Feeling shocked or caught off guard".to_string(),
+            vrm: [("surprised".to_string(), 1.0)].into_iter().collect(),
+            enabled: true,
+        },
+    ])
 }
 
 /// Ene extension block stored in character.json under `data.extensions.ene`.
@@ -327,6 +398,7 @@ pub struct EneExtension {
     /// Motions list
     pub motions: Vec<crate::character_config::MotionEntry>,
     /// Optional expressions list
+    #[schemars(default = "default_ene_expressions")]
     pub expressions: Option<Vec<ExpressionDefinition>>,
 }
 

@@ -1024,7 +1024,9 @@ fn init_embedding(config: &EneConfig) -> Result<Arc<dyn ene_provider::EmbeddingP
         .map_err(|e| format!("Failed to load provider config: {e}"))?;
 
     if provider_config.embedding_backend.as_str() == "local" {
-        let local_cfg = config.get_section::<ene_provider::LocalEmbeddingConfig>().unwrap_or_default();
+        let local_cfg = config
+            .get_section::<ene_provider::LocalEmbeddingConfig>()
+            .unwrap_or_default();
         let model_dir = ene_config::models_dir();
         let provider = ene_embedding::create_local_provider(
             &local_cfg.model,
