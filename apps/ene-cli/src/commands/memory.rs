@@ -31,7 +31,7 @@ impl CliCommand for MemoryCommand {
 
         match subcmd {
             "search" => handle_search(parts.get(1).copied().unwrap_or(""), &snapshot).await,
-            "list" => handle_list(&snapshot),
+            "list" => handle_list(&snapshot).await,
             _ => {
                 println!("{}", style::warning("Usage: /memory <search|list>"));
                 println!("  search <query> - Search memories by similarity");
@@ -65,6 +65,7 @@ async fn handle_search(query: &str, snapshot: &ene_core::EneStateSnapshot) {
             match snapshot
                 .memory
                 .search_summaries(&embedding, card_name, 10, threshold)
+                .await
             {
                 Ok(results) => {
                     if results.is_empty() {
@@ -99,13 +100,13 @@ async fn handle_search(query: &str, snapshot: &ene_core::EneStateSnapshot) {
     }
 }
 
-fn handle_list(snapshot: &ene_core::EneStateSnapshot) {
+async fn handle_list(snapshot: &ene_core::EneStateSnapshot) {
     if !snapshot.memory.is_enabled() {
         println!("{}", style::warning("[Memory] Memory is not enabled."));
         return;
     }
     let card_name = snapshot.card_name.as_str();
-    match snapshot.memory.list_recent_summaries(card_name, 50) {
+    match snapshot.memory.list_recent_summaries(card_name, 50).await {
         Ok(summaries) => {
             if summaries.is_empty() {
                 println!("[Memory] No saved conversation summaries found.");
@@ -124,7 +125,7 @@ fn handle_list(snapshot: &ene_core::EneStateSnapshot) {
         }
         Err(e) => println!("[Memory] Error: {e}"),
     }
-    if let Ok(facts) = snapshot.memory.get_all_keyfacts(card_name)
+    if let Ok(facts) = snapshot.memory.get_all_keyfacts(card_name).await
         && !facts.is_empty()
     {
         println!("\n--- Key Facts ({}) ---", facts.len());

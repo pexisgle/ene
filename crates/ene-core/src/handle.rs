@@ -211,7 +211,7 @@ impl MemoryQueryHandle {
     }
 
     /// Search conversation summaries by embedding similarity.
-    pub fn search_summaries(
+    pub async fn search_summaries(
         &self,
         query_embedding: &[f32],
         card_name: &str,
@@ -224,11 +224,12 @@ impl MemoryQueryHandle {
             .ok_or_else(|| EneCoreError::EmbeddingError("Memory store not available".into()))?;
         store
             .search_summaries(query_embedding, card_name, limit, threshold)
+            .await
             .map_err(EneCoreError::Memory)
     }
 
     /// List recent conversation summaries for a character card.
-    pub fn list_recent_summaries(
+    pub async fn list_recent_summaries(
         &self,
         card_name: &str,
         limit: usize,
@@ -239,11 +240,12 @@ impl MemoryQueryHandle {
             .ok_or_else(|| EneCoreError::EmbeddingError("Memory store not available".into()))?;
         store
             .list_recent_summaries(card_name, limit)
+            .await
             .map_err(EneCoreError::Memory)
     }
 
     /// List all known key facts for a character card.
-    pub fn get_all_keyfacts(
+    pub async fn get_all_keyfacts(
         &self,
         card_name: &str,
     ) -> Result<Vec<ene_memory::KeyFact>, EneCoreError> {
@@ -253,6 +255,7 @@ impl MemoryQueryHandle {
             .ok_or_else(|| EneCoreError::EmbeddingError("Memory store not available".into()))?;
         store
             .get_all_keyfacts(card_name)
+            .await
             .map_err(EneCoreError::Memory)
     }
 }
@@ -938,7 +941,7 @@ impl EneActor {
         let mem_config = self.config.get_section::<ene_memory::MemoryConfig>()?;
 
         if mem_config.enabled {
-            let store = init_memory_store(&self.config, &*embedder).map_err(|e| {
+            let store = init_memory_store(&self.config, &*embedder).await.map_err(|e| {
                 EneCoreError::Memory(ene_memory::MemoryError::MemoryStoreConnectionError(e))
             })?;
             self.session.memory.memory_store = Some(store);
@@ -1047,7 +1050,7 @@ fn init_embedding(config: &EneConfig) -> Result<Arc<dyn ene_provider::EmbeddingP
     }
 }
 
-fn init_memory_store(
+async fn init_memory_store(
     config: &EneConfig,
     embedder: &dyn ene_provider::EmbeddingProvider,
 ) -> Result<Arc<ene_memory::MemoryStore>, String> {
@@ -1065,6 +1068,7 @@ fn init_memory_store(
 
     let dims = embedder.dimensions();
     let store = ene_memory::MemoryStore::open(&db_path, dims)
+        .await
         .map_err(|e| format!("Failed to open memory store: {e}"))?;
 
     Ok(Arc::new(store))

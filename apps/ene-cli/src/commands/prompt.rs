@@ -68,7 +68,7 @@ impl CliCommand for PromptCommand {
 
             if snapshot.memory.is_enabled() {
                 let card_name = card.data.get_character_name();
-                if let Ok(facts) = snapshot.memory.get_all_keyfacts(card_name)
+                if let Ok(facts) = snapshot.memory.get_all_keyfacts(card_name).await
                     && !facts.is_empty()
                 {
                     println!("--- Known Facts about {} ---", snapshot.config.user_name);

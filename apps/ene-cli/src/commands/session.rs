@@ -34,7 +34,7 @@ impl CliCommand for SessionCommand {
             "split" => {
                 handle_split(ctx, &snapshot).await;
             }
-            "summaries" => handle_summaries(&snapshot),
+            "summaries" => handle_summaries(&snapshot).await,
             _ => {
                 println!(
                     "{}",
@@ -115,13 +115,13 @@ async fn handle_split(ctx: &AppContext, snapshot: &ene_core::EneStateSnapshot) {
     }
 }
 
-fn handle_summaries(snapshot: &ene_core::EneStateSnapshot) {
+async fn handle_summaries(snapshot: &ene_core::EneStateSnapshot) {
     if !snapshot.memory.is_enabled() {
         println!("{}", style::warning("[Session] Memory is not enabled."));
         return;
     }
     let card_name = snapshot.card_name.as_str();
-    match snapshot.memory.list_recent_summaries(card_name, 10) {
+    match snapshot.memory.list_recent_summaries(card_name, 10).await {
         Ok(summaries) => {
             if summaries.is_empty() {
                 println!("[Session] No saved conversation summaries found.");
