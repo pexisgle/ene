@@ -16,11 +16,12 @@
 //! ```rust,no_run
 //! use ene_memory::MemoryStore;
 //!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let store = MemoryStore::open(std::path::Path::new(":memory:"), 768)?;
-//! // Use store.search_summaries(), store.insert_summary(), etc.
-//! # Ok(())
-//! # }
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let store = MemoryStore::open(std::path::Path::new(":memory:"), 768).await?;
+//!     // Use store.search_summaries(), store.insert_summary(), etc.
+//!     Ok(())
+//! }
 //! ```
 #![warn(missing_docs)]
 
@@ -30,8 +31,10 @@ pub mod config;
 pub mod error;
 /// Summary recall and prompt formatting utilities.
 pub mod recall;
-/// Diesel-generated database schema.
-pub mod schema;
+/// SeaORM entities representation.
+pub mod entities;
+/// SeaORM schema migrations.
+pub mod migrator;
 /// Core memory store (`SQLite` + sqlite-vec).
 pub mod store;
 /// LLM-driven conversation summarization.

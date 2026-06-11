@@ -6,9 +6,10 @@
 use chrono::Utc;
 use ene_memory::{KeyFact, MemoryStore, RecalledSummary};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open an in-memory store with 4-dimensional embeddings
-    let store = MemoryStore::open_in_memory(4)?;
+    let store = MemoryStore::open_in_memory(4).await?;
 
     let card_name = "Alicia";
 
@@ -25,20 +26,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     ];
 
-    let summary_id = store.insert_summary(
-        "session-001",
-        card_name,
-        "User Alice said she loves blue and works as a designer.",
-        &key_facts,
-        &embedding,
-        Utc::now(),
-    )?;
+    let summary_id = store
+        .insert_summary(
+            "session-001",
+            card_name,
+            "User Alice said she loves blue and works as a designer.",
+            &key_facts,
+            &embedding,
+            Utc::now(),
+        )
+        .await?;
 
     println!("Inserted summary with ID: {summary_id}");
 
     // Search for related summaries
     let query_emb = vec![0.9_f32, 0.1, 0.0, 0.0];
-    let results: Vec<RecalledSummary> = store.search_summaries(&query_emb, card_name, 5, 0.5)?;
+    let results: Vec<RecalledSummary> = store
+        .search_summaries(&query_emb, card_name, 5, 0.5)
+        .await?;
 
     println!("\nFound {} related summaries:", results.len());
     for (i, rs) in results.iter().enumerate() {
@@ -51,15 +56,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Retrieve all key facts
-    let facts = store.get_all_keyfacts(card_name)?;
+    let facts = store.get_all_keyfacts(card_name).await?;
     println!("\nKey facts:");
     for fact in &facts {
         println!("  {} = {}", fact.key, fact.value);
     }
 
     // Upsert a fact
-    store.upsert_keyfact(card_name, "favorite_color", "green")?;
-    let facts = store.get_all_keyfacts(card_name)?;
+    store.upsert_keyfact(card_name, "favorite_color", "green").await?;
+    let facts = store.get_all_keyfacts(card_name).await?;
     println!(
         "\nAfter upsert - favorite_color = {}",
         facts
@@ -69,8 +74,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Delete a fact
-    store.delete_keyfact(card_name, "favorite_color")?;
-    let facts = store.get_all_keyfacts(card_name)?;
+    store.delete_keyfact(card_name, "favorite_color").await?;
+    let facts = store.get_all_keyfacts(card_name).await?;
     println!("\nAfter delete - {} facts remain", facts.len());
 
     Ok(())

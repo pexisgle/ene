@@ -1,4 +1,4 @@
-//! Per-tool DB IPC server using diesel.
+//! Per-tool DB IPC server using SeaORM.
 //!
 //! Listens on a Unix socket, accepts tool connections, and dispatches
 //! [`DbRequest`] messages against the shared `memory.db`.
@@ -13,24 +13,20 @@
 //! - `sqlite_master` and other internal tables are blocked.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::{CStr, CString};
-use std::os::raw::c_int;
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use diesel::prelude::*;
-use diesel::r2d2::{self, ConnectionManager, Pool};
-use diesel::sql_types::{BigInt, Binary, Double, Integer, Text};
-use diesel::{SqliteConnection, sql_query};
+use ene_memory::entities::tool_schemas;
 use ene_tool_db::{
     DbErrorCode, DbFilter, DbOrderBy, DbRequest, DbResponse, DbSchema, DbTable, DbValue, Row,
 };
-use libsqlite3_sys::*;
+use sea_orm::{
+    ConnectOptions, Database, DatabaseBackend, DatabaseConnection, Statement,
+    ConnectionTrait, EntityTrait,
+};
+use sea_orm::sea_query::{Alias, Condition, Expr, Query, SqliteQueryBuilder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info, warn};
-
-type DbPool = Pool<ConnectionManager<SqliteConnection>>;
 
 /// Errors from the DB IPC server.
 #[derive(Debug, thiserror::Error)]
@@ -41,12 +37,9 @@ pub enum DbServerError {
     /// JSON serialization/deserialization error.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
-    /// Diesel query error.
-    #[error("Diesel error: {0}")]
-    Diesel(#[from] diesel::result::Error),
-    /// Connection pool error.
-    #[error("Pool error: {0}")]
-    Pool(#[from] r2d2::PoolError),
+    /// SeaORM database error.
+    #[error("Database error: {0}")]
+    Db(#[from] sea_orm::DbErr),
     /// The tool does not have permission to access the resource.
     #[error("Permission denied: {0}")]
     PermissionDenied(String),
@@ -77,8 +70,7 @@ impl DbServerError {
             ),
             Self::Io(e) => (DbErrorCode::Internal, e.to_string()),
             Self::Json(e) => (DbErrorCode::Internal, e.to_string()),
-            Self::Diesel(e) => (DbErrorCode::Internal, e.to_string()),
-            Self::Pool(e) => (DbErrorCode::Internal, e.to_string()),
+            Self::Db(e) => (DbErrorCode::Internal, e.to_string()),
             Self::Internal(msg) => (DbErrorCode::Internal, msg.clone()),
         };
         DbResponse::Error { code, message }
@@ -117,27 +109,21 @@ impl DbIpcServer {
             "DB IPC server listening"
         );
 
-        let manager = ConnectionManager::<SqliteConnection>::new(self.db_path.to_str().unwrap());
-        let pool = Pool::builder()
-            .max_size(10)
-            .build(manager)
+        let opt = ConnectOptions::new(format!("sqlite:{}", self.db_path.to_str().unwrap()));
+        let db = Database::connect(opt)
+            .await
             .map_err(|e| DbServerError::Internal(e.to_string()))?;
-
-        let pool = Arc::new(pool);
 
         loop {
             let (stream, _) = listener.accept().await?;
             debug!(tool = %self.tool_name, "Accepted DB IPC connection");
 
-            let pool = pool.clone();
-            let db_path = self.db_path.clone();
+            let db = db.clone();
             let tool_name = self.tool_name.clone();
             let prefix = self.prefix.clone();
 
             tokio::spawn(async move {
-                if let Err(e) =
-                    Self::handle_connection(stream, pool, db_path, tool_name, prefix).await
-                {
+                if let Err(e) = Self::handle_connection(stream, db, tool_name, prefix).await {
                     error!(error = %e, "DB IPC connection error");
                 }
             });
@@ -146,8 +132,7 @@ impl DbIpcServer {
 
     async fn handle_connection(
         stream: UnixStream,
-        pool: Arc<DbPool>,
-        db_path: PathBuf,
+        db: DatabaseConnection,
         tool_name: String,
         prefix: String,
     ) -> Result<(), DbServerError> {
@@ -190,8 +175,7 @@ impl DbIpcServer {
             };
 
             let response = Self::handle_request(
-                &pool,
-                &db_path,
+                &db,
                 &tool_name,
                 &prefix,
                 &mut declared_tables,
@@ -225,8 +209,7 @@ impl DbIpcServer {
     }
 
     async fn handle_request(
-        pool: &Arc<DbPool>,
-        db_path: &std::path::Path,
+        db: &DatabaseConnection,
         tool_name: &str,
         prefix: &str,
         declared_tables: &mut HashMap<String, DbTable>,
@@ -235,7 +218,7 @@ impl DbIpcServer {
     ) -> DbResponse {
         match request {
             DbRequest::DeclareSchema(schema) => Self::handle_declare_schema(
-                pool,
+                db,
                 tool_name,
                 prefix,
                 declared_tables,
@@ -245,59 +228,79 @@ impl DbIpcServer {
             .await
             .unwrap_or_else(|e| e.to_error_response()),
             DbRequest::Insert { table, row } => {
-                Self::validate_table_access(declared_tables, &table)
-                    .and_then(|_| Self::validate_row_columns(declared_columns, &table, &row))
-                    .and_then(|_| Self::handle_insert(pool, &table, row))
-                    .map(|id| DbResponse::Insert { rowid: id })
-                    .unwrap_or_else(|e| e.to_error_response())
+                let res = Self::validate_table_access(declared_tables, &table)
+                    .and_then(|_| Self::validate_row_columns(declared_columns, &table, &row));
+                match res {
+                    Ok(_) => match Self::handle_insert(db, &table, row).await {
+                        Ok(id) => DbResponse::Insert { rowid: id },
+                        Err(e) => e.to_error_response(),
+                    },
+                    Err(e) => e.to_error_response(),
+                }
             }
             DbRequest::Upsert {
                 table,
                 row,
                 conflict_columns,
-            } => Self::validate_table_access(declared_tables, &table)
-                .and_then(|_| Self::validate_row_columns(declared_columns, &table, &row))
-                .and_then(|_| Self::handle_upsert(pool, &table, row, conflict_columns))
-                .map(|rowid| DbResponse::Upsert { rowid })
-                .unwrap_or_else(|e| e.to_error_response()),
+            } => {
+                let res = Self::validate_table_access(declared_tables, &table)
+                    .and_then(|_| Self::validate_row_columns(declared_columns, &table, &row));
+                match res {
+                    Ok(_) => match Self::handle_upsert(db, &table, row, conflict_columns).await {
+                        Ok(rowid) => DbResponse::Upsert { rowid },
+                        Err(e) => e.to_error_response(),
+                    },
+                    Err(e) => e.to_error_response(),
+                }
+            }
             DbRequest::Select {
                 table,
                 columns,
                 filter,
                 order_by,
                 limit,
-            } => Self::validate_table_access(declared_tables, &table)
-                .and_then(|_| Self::validate_select_columns(declared_columns, &table, &columns))
-                .and_then(|_| Self::validate_filter_columns(declared_columns, &table, &filter))
-                .and_then(|_| Self::validate_order_by_columns(declared_columns, &table, &order_by))
-                .and_then(|_| {
-                    Self::handle_select(pool, db_path, &table, columns, filter, order_by, limit)
-                })
-                .map(|rows| DbResponse::Select { rows })
-                .unwrap_or_else(|e| e.to_error_response()),
+            } => {
+                match Self::handle_select(db, declared_tables, declared_columns, &table, columns, filter, order_by, limit).await {
+                    Ok(rows) => DbResponse::Select { rows },
+                    Err(e) => e.to_error_response(),
+                }
+            }
             DbRequest::Update { table, set, filter } => {
-                Self::validate_table_access(declared_tables, &table)
+                let res = Self::validate_table_access(declared_tables, &table)
                     .and_then(|_| Self::validate_row_columns(declared_columns, &table, &set))
-                    .and_then(|_| Self::validate_filter_columns(declared_columns, &table, &filter))
-                    .and_then(|_| Self::handle_update(pool, &table, set, filter))
-                    .map(|affected| DbResponse::Update { affected })
-                    .unwrap_or_else(|e| e.to_error_response())
+                    .and_then(|_| Self::validate_filter_columns(declared_columns, &table, &filter));
+                match res {
+                    Ok(_) => match Self::handle_update(db, &table, set, filter).await {
+                        Ok(affected) => DbResponse::Update { affected },
+                        Err(e) => e.to_error_response(),
+                    },
+                    Err(e) => e.to_error_response(),
+                }
             }
             DbRequest::Delete { table, filter } => {
-                Self::validate_table_access(declared_tables, &table)
-                    .and_then(|_| Self::validate_filter_columns(declared_columns, &table, &filter))
-                    .and_then(|_| Self::handle_delete(pool, &table, filter))
-                    .map(|affected| DbResponse::Delete { affected })
-                    .unwrap_or_else(|e| e.to_error_response())
+                let res = Self::validate_table_access(declared_tables, &table)
+                    .and_then(|_| Self::validate_filter_columns(declared_columns, &table, &filter));
+                match res {
+                    Ok(_) => match Self::handle_delete(db, &table, filter).await {
+                        Ok(affected) => DbResponse::Delete { affected },
+                        Err(e) => e.to_error_response(),
+                    },
+                    Err(e) => e.to_error_response(),
+                }
             }
             DbRequest::Count { table, filter } => {
-                Self::validate_table_access(declared_tables, &table)
-                    .and_then(|_| Self::validate_filter_columns(declared_columns, &table, &filter))
-                    .and_then(|_| Self::handle_count(pool, &table, filter))
-                    .map(|count| DbResponse::Count { count })
-                    .unwrap_or_else(|e| e.to_error_response())
+                let res = Self::validate_table_access(declared_tables, &table)
+                    .and_then(|_| Self::validate_filter_columns(declared_columns, &table, &filter));
+                match res {
+                    Ok(_) => match Self::handle_count(db, &table, filter).await {
+                        Ok(count) => DbResponse::Count { count },
+                        Err(e) => e.to_error_response(),
+                    },
+                    Err(e) => e.to_error_response(),
+                }
             }
-            DbRequest::LastInsertRowId => Self::handle_last_insert_rowid(pool)
+            DbRequest::LastInsertRowId => Self::handle_last_insert_rowid(db)
+                .await
                 .map(|rowid| DbResponse::LastInsertRowId { rowid })
                 .unwrap_or_else(|e| e.to_error_response()),
             DbRequest::Ping => DbResponse::Pong,
@@ -411,7 +414,7 @@ impl DbIpcServer {
     }
 
     async fn handle_declare_schema(
-        pool: &Arc<DbPool>,
+        db: &DatabaseConnection,
         tool_name: &str,
         prefix: &str,
         declared_tables: &mut HashMap<String, DbTable>,
@@ -440,28 +443,42 @@ impl DbIpcServer {
         let fingerprint = blake3::hash(schema_json.as_bytes()).to_hex().to_string();
 
         let mut created_indexes = Vec::new();
-        {
-            let mut conn = pool.get()?;
+        
+        // Use SeaORM ActiveModel to insert into tool_schemas
+        let active_model = tool_schemas::ActiveModel {
+            prefix: sea_orm::ActiveValue::Set(prefix.to_string()),
+            schema_json: sea_orm::ActiveValue::Set(schema_json.clone()),
+            fingerprint: sea_orm::ActiveValue::Set(fingerprint.clone()),
+            created_at: sea_orm::ActiveValue::Set(chrono::Utc::now().to_rfc3339()),
+        };
 
-            sql_query(
-                "INSERT OR REPLACE INTO __tool_schemas (prefix, schema_json, fingerprint, created_at)
-                 VALUES (?1, ?2, ?3, datetime('now'))",
+        tool_schemas::Entity::insert(active_model)
+            .on_conflict(
+                sea_orm::sea_query::OnConflict::column(tool_schemas::Column::Prefix)
+                    .update_columns([
+                        tool_schemas::Column::SchemaJson,
+                        tool_schemas::Column::Fingerprint,
+                        tool_schemas::Column::CreatedAt,
+                    ])
+                    .to_owned(),
             )
-            .bind::<Text, _>(prefix)
-            .bind::<Text, _>(&schema_json)
-            .bind::<Text, _>(&fingerprint)
-            .execute(&mut conn)?;
+            .exec(db)
+            .await
+            .map_err(|e| DbServerError::Internal(e.to_string()))?;
 
-            for table in &schema.tables {
-                let create_sql = Self::build_create_table_sql(table);
-                sql_query(&create_sql).execute(&mut conn)?;
+        for table in &schema.tables {
+            let create_sql = Self::build_create_table_sql(table);
+            db.execute(Statement::from_string(DatabaseBackend::Sqlite, create_sql))
+                .await
+                .map_err(|e| DbServerError::Internal(e.to_string()))?;
 
-                for index in &schema.indexes {
-                    if index.table == table.name {
-                        let create_index_sql = Self::build_create_index_sql(index);
-                        sql_query(&create_index_sql).execute(&mut conn)?;
-                        created_indexes.push(index.name.clone());
-                    }
+            for index in &schema.indexes {
+                if index.table == table.name {
+                    let create_index_sql = Self::build_create_index_sql(index);
+                    db.execute(Statement::from_string(DatabaseBackend::Sqlite, create_index_sql))
+                        .await
+                        .map_err(|e| DbServerError::Internal(e.to_string()))?;
+                    created_indexes.push(index.name.clone());
                 }
             }
         }
@@ -556,486 +573,360 @@ impl DbIpcServer {
         )
     }
 
-    fn handle_insert(pool: &Arc<DbPool>, table: &str, row: Row) -> Result<i64, DbServerError> {
-        let mut conn = pool.get()?;
-
-        let columns: Vec<String> = row.keys().cloned().collect();
-        let values: Vec<DbValue> = columns.iter().map(|k| row[k].clone()).collect();
-
-        let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("?{i}")).collect();
-        let sql = format!(
-            "INSERT INTO {} ({}) VALUES ({})",
-            table,
-            columns.join(", "),
-            placeholders.join(", ")
-        );
-
-        let mut query = sql_query(&sql).into_boxed();
-        for value in &values {
-            query = match value {
-                DbValue::Null => query.bind::<diesel::sql_types::Nullable<Integer>, _>(None::<i32>),
-                DbValue::Bool(b) => query.bind::<Integer, _>(*b as i32),
-                DbValue::Int(i) => query.bind::<BigInt, _>(*i),
-                DbValue::Float(f) => query.bind::<Double, _>(*f),
-                DbValue::Text(s) => query.bind::<Text, _>(s),
-                DbValue::Blob(b) => query.bind::<Binary, _>(b),
-            };
+    fn db_value_to_sea_value(val: &DbValue) -> sea_orm::Value {
+        match val {
+            DbValue::Null => sea_orm::Value::from(None::<i32>),
+            DbValue::Bool(b) => sea_orm::Value::from(*b),
+            DbValue::Int(i) => sea_orm::Value::from(*i),
+            DbValue::Float(f) => sea_orm::Value::from(*f),
+            DbValue::Text(s) => sea_orm::Value::from(s.clone()),
+            DbValue::Blob(b) => sea_orm::Value::from(b.clone()),
         }
-
-        query.execute(&mut conn)?;
-
-        let rowid: i64 = diesel::select(diesel::dsl::sql::<BigInt>("last_insert_rowid()"))
-            .get_result(&mut conn)?;
-
-        Ok(rowid)
     }
 
-    fn handle_upsert(
-        pool: &Arc<DbPool>,
+    async fn handle_insert(
+        db: &DatabaseConnection,
+        table: &str,
+        row: Row,
+    ) -> Result<i64, DbServerError> {
+        let mut insert = Query::insert();
+        insert.into_table(Alias::new(table));
+
+        let columns: Vec<String> = row.keys().cloned().collect();
+        insert.columns(columns.iter().map(Alias::new));
+
+        let values: Vec<sea_orm::sea_query::SimpleExpr> = columns
+            .iter()
+            .map(|k| Self::db_value_to_sea_value(&row[k]).into())
+            .collect();
+
+        insert
+            .values(values)
+            .map_err(|e| DbServerError::Internal(e.to_string()))?;
+
+        let (sql, params) = insert.build(SqliteQueryBuilder);
+        let stmt = Statement::from_sql_and_values(DatabaseBackend::Sqlite, &sql, params);
+
+        let exec_res = db
+            .execute(stmt)
+            .await
+            .map_err(|e| DbServerError::Internal(e.to_string()))?;
+
+        Ok(exec_res.last_insert_id() as i64)
+    }
+
+    async fn handle_upsert(
+        db: &DatabaseConnection,
         table: &str,
         row: Row,
         conflict_columns: Vec<String>,
     ) -> Result<i64, DbServerError> {
-        let mut conn = pool.get()?;
+        let mut insert = Query::insert();
+        insert.into_table(Alias::new(table));
 
         let columns: Vec<String> = row.keys().cloned().collect();
-        let values: Vec<DbValue> = columns.iter().map(|k| row[k].clone()).collect();
+        insert.columns(columns.iter().map(Alias::new));
 
-        let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("?{i}")).collect();
-        let update_columns: Vec<String> = columns
+        let values: Vec<sea_orm::sea_query::SimpleExpr> = columns
             .iter()
-            .filter(|c| !conflict_columns.contains(c))
-            .map(|c| format!("{c} = excluded.{c}"))
+            .map(|k| Self::db_value_to_sea_value(&row[k]).into())
             .collect();
 
-        let sql = format!(
-            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}",
-            table,
-            columns.join(", "),
-            placeholders.join(", "),
-            conflict_columns.join(", "),
-            update_columns.join(", ")
+        insert
+            .values(values)
+            .map_err(|e| DbServerError::Internal(e.to_string()))?;
+
+        let mut on_conflict = sea_orm::sea_query::OnConflict::columns(
+            conflict_columns.iter().map(Alias::new)
         );
 
-        let mut query = sql_query(&sql).into_boxed();
-        for value in &values {
-            query = match value {
-                DbValue::Null => query.bind::<diesel::sql_types::Nullable<Integer>, _>(None::<i32>),
-                DbValue::Bool(b) => query.bind::<Integer, _>(*b as i32),
-                DbValue::Int(i) => query.bind::<BigInt, _>(*i),
-                DbValue::Float(f) => query.bind::<Double, _>(*f),
-                DbValue::Text(s) => query.bind::<Text, _>(s),
-                DbValue::Blob(b) => query.bind::<Binary, _>(b),
-            };
+        let update_cols: Vec<Alias> = columns
+            .iter()
+            .filter(|c| !conflict_columns.contains(c))
+            .map(Alias::new)
+            .collect();
+
+        if !update_cols.is_empty() {
+            on_conflict.update_columns(update_cols);
+            insert.on_conflict(on_conflict);
         }
 
-        query.execute(&mut conn)?;
+        let (sql, params) = insert.build(SqliteQueryBuilder);
+        let stmt = Statement::from_sql_and_values(DatabaseBackend::Sqlite, &sql, params);
 
-        let rowid: i64 = diesel::select(diesel::dsl::sql::<BigInt>("last_insert_rowid()"))
-            .get_result(&mut conn)?;
+        let exec_res = db
+            .execute(stmt)
+            .await
+            .map_err(|e| DbServerError::Internal(e.to_string()))?;
 
-        Ok(rowid)
+        Ok(exec_res.last_insert_id() as i64)
     }
 
-    fn handle_select(
-        pool: &Arc<DbPool>,
-        db_path: &std::path::Path,
+    async fn handle_select(
+        db: &DatabaseConnection,
+        declared_tables: &HashMap<String, DbTable>,
+        declared_columns: &HashMap<String, HashSet<String>>,
         table: &str,
         columns: Vec<String>,
         filter: DbFilter,
         order_by: Vec<DbOrderBy>,
         limit: Option<u64>,
     ) -> Result<Vec<Row>, DbServerError> {
-        let mut conn = pool.get()?;
+        Self::validate_table_access(declared_tables, table)?;
+        Self::validate_select_columns(declared_columns, table, &columns)?;
+        Self::validate_filter_columns(declared_columns, table, &filter)?;
+        Self::validate_order_by_columns(declared_columns, table, &order_by)?;
 
-        let select_cols = if columns.is_empty() {
-            "*".to_string()
+        let mut select = Query::select();
+        select.from(Alias::new(table));
+
+        if columns.is_empty() {
+            select.column(sea_orm::sea_query::Asterisk);
         } else {
-            columns.join(", ")
-        };
-
-        let mut sql = format!("SELECT {select_cols} FROM {table}");
-
-        let mut params: Vec<DbValue> = Vec::new();
-        let (where_clause, filter_params) = Self::build_where_clause(&filter)?;
-        if !where_clause.is_empty() {
-            sql.push_str(&format!(" WHERE {where_clause}"));
-            params.extend(filter_params);
+            for col in &columns {
+                select.column(Alias::new(col));
+            }
         }
 
-        if !order_by.is_empty() {
-            let order_parts: Vec<String> = order_by
-                .iter()
-                .map(|o| {
-                    format!(
-                        "{} {}",
-                        o.column,
-                        if matches!(o.direction, ene_tool_db::DbOrderDirection::Desc) {
-                            "DESC"
-                        } else {
-                            "ASC"
-                        }
-                    )
-                })
-                .collect();
-            sql.push_str(&format!(" ORDER BY {}", order_parts.join(", ")));
+        let cond = Self::build_sea_query_filter(&filter)?;
+        select.cond_where(cond);
+
+        for o in &order_by {
+            let order = if matches!(o.direction, ene_tool_db::DbOrderDirection::Desc) {
+                sea_orm::sea_query::Order::Desc
+            } else {
+                sea_orm::sea_query::Order::Asc
+            };
+            select.order_by(Alias::new(&o.column), order);
         }
 
         if let Some(limit) = limit {
-            sql.push_str(&format!(" LIMIT {limit}"));
+            select.limit(limit);
         }
 
-        let mut query = sql_query(&sql).into_boxed();
-        for param in &params {
-            query = match param {
-                DbValue::Null => query.bind::<diesel::sql_types::Nullable<Integer>, _>(None::<i32>),
-                DbValue::Bool(b) => query.bind::<Integer, _>(*b as i32),
-                DbValue::Int(i) => query.bind::<BigInt, _>(*i),
-                DbValue::Float(f) => query.bind::<Double, _>(*f),
-                DbValue::Text(s) => query.bind::<Text, _>(s),
-                DbValue::Blob(b) => query.bind::<Binary, _>(b),
-            };
-        }
+        let (sql, params) = select.build(SqliteQueryBuilder);
+        let stmt = Statement::from_sql_and_values(DatabaseBackend::Sqlite, &sql, params);
 
-        let _ = query.execute(&mut conn)?;
-
-        Self::raw_select(db_path, &sql, &params)
-    }
-
-    fn raw_select(
-        db_path: &std::path::Path,
-        sql: &str,
-        params: &[DbValue],
-    ) -> Result<Vec<Row>, DbServerError> {
-        unsafe {
-            let path_c = CString::new(
-                db_path
-                    .to_str()
-                    .ok_or_else(|| DbServerError::Internal("invalid path".to_string()))?,
-            )
+        let query_results = db
+            .query_all(stmt)
+            .await
             .map_err(|e| DbServerError::Internal(e.to_string()))?;
-            let mut db: *mut sqlite3 = std::ptr::null_mut();
 
-            let rc = sqlite3_open(path_c.as_ptr(), &mut db);
-            if rc != SQLITE_OK {
-                let err = CStr::from_ptr(sqlite3_errmsg(db))
-                    .to_string_lossy()
-                    .into_owned();
-                sqlite3_close(db);
-                return Err(DbServerError::Internal(format!("open failed: {err}")));
-            }
+        let cols_to_fetch = if columns.is_empty() {
+            declared_columns.get(table).cloned().unwrap_or_default()
+        } else {
+            columns.into_iter().collect::<HashSet<_>>()
+        };
 
-            let sql_c = CString::new(sql).map_err(|e| DbServerError::Internal(e.to_string()))?;
-            let mut stmt: *mut sqlite3_stmt = std::ptr::null_mut();
+        let table_def = declared_tables
+            .get(table)
+            .ok_or_else(|| DbServerError::UnknownTable(table.to_string()))?;
 
-            let rc = sqlite3_prepare_v2(db, sql_c.as_ptr(), -1, &mut stmt, std::ptr::null_mut());
-            if rc != SQLITE_OK {
-                let err = CStr::from_ptr(sqlite3_errmsg(db))
-                    .to_string_lossy()
-                    .into_owned();
-                sqlite3_close(db);
-                return Err(DbServerError::Internal(format!("prepare failed: {err}")));
-            }
-
-            for (i, param) in params.iter().enumerate() {
-                let idx = (i + 1) as c_int;
-                match param {
-                    DbValue::Null => {
-                        sqlite3_bind_null(stmt, idx);
-                    }
-                    DbValue::Bool(b) => {
-                        sqlite3_bind_int(stmt, idx, *b as c_int);
-                    }
-                    DbValue::Int(i) => {
-                        sqlite3_bind_int64(stmt, idx, *i);
-                    }
-                    DbValue::Float(f) => {
-                        sqlite3_bind_double(stmt, idx, *f);
-                    }
-                    DbValue::Text(s) => {
-                        let c = CString::new(s.as_str())
-                            .map_err(|e| DbServerError::Internal(e.to_string()))?;
-                        sqlite3_bind_text(stmt, idx, c.as_ptr(), -1, Self::SQLITE_TRANSIENT());
-                    }
-                    DbValue::Blob(b) => {
-                        sqlite3_bind_blob(
-                            stmt,
-                            idx,
-                            b.as_ptr() as *const _,
-                            b.len() as c_int,
-                            Self::SQLITE_TRANSIENT(),
-                        );
-                    }
-                }
-            }
-
-            let col_count = sqlite3_column_count(stmt);
-            let col_names: Vec<String> = (0..col_count)
-                .map(|i| {
-                    let name = sqlite3_column_name(stmt, i);
-                    CStr::from_ptr(name).to_string_lossy().into_owned()
-                })
-                .collect();
-
-            let mut rows = Vec::new();
-            loop {
-                let rc = sqlite3_step(stmt);
-                if rc == SQLITE_DONE {
-                    break;
-                }
-                if rc != SQLITE_ROW {
-                    sqlite3_finalize(stmt);
-                    sqlite3_close(db);
-                    let err = CStr::from_ptr(sqlite3_errmsg(db))
-                        .to_string_lossy()
-                        .into_owned();
-                    return Err(DbServerError::Internal(format!("step failed: {err}")));
-                }
-
-                let mut row = Row::new();
-                for i in 0..col_count {
-                    let col_type = sqlite3_column_type(stmt, i);
-                    let value = match col_type {
-                        SQLITE_NULL => DbValue::Null,
-                        SQLITE_INTEGER => DbValue::Int(sqlite3_column_int64(stmt, i)),
-                        SQLITE_FLOAT => DbValue::Float(sqlite3_column_double(stmt, i)),
-                        SQLITE_TEXT => {
-                            let text = sqlite3_column_text(stmt, i);
-                            let s = CStr::from_ptr(text as *const _)
-                                .to_string_lossy()
-                                .into_owned();
-                            DbValue::Text(s)
+        let mut rows = Vec::new();
+        for result in query_results {
+            let mut row = Row::new();
+            for col in &cols_to_fetch {
+                let col_def = table_def.columns.iter().find(|c| &c.name == col);
+                let val = if let Some(def) = col_def {
+                    match def.ty {
+                        ene_tool_db::DbType::Integer => {
+                            if let Ok(Some(v)) = result.try_get::<Option<i64>>("", col) {
+                                DbValue::Int(v)
+                            } else {
+                                DbValue::Null
+                            }
                         }
-                        SQLITE_BLOB => {
-                            let blob = sqlite3_column_blob(stmt, i);
-                            let len = sqlite3_column_bytes(stmt, i) as usize;
-                            let bytes = std::slice::from_raw_parts(blob as *const u8, len).to_vec();
-                            DbValue::Blob(bytes)
+                        ene_tool_db::DbType::Real => {
+                            if let Ok(Some(v)) = result.try_get::<Option<f64>>("", col) {
+                                DbValue::Float(v)
+                            } else {
+                                DbValue::Null
+                            }
                         }
-                        _ => DbValue::Null,
-                    };
-                    row.insert(col_names[i as usize].clone(), value);
-                }
-                rows.push(row);
+                        ene_tool_db::DbType::Text => {
+                            if let Ok(Some(v)) = result.try_get::<Option<String>>("", col) {
+                                DbValue::Text(v)
+                            } else {
+                                DbValue::Null
+                            }
+                        }
+                        ene_tool_db::DbType::Blob => {
+                            if let Ok(Some(v)) = result.try_get::<Option<Vec<u8>>>("", col) {
+                                DbValue::Blob(v)
+                            } else {
+                                DbValue::Null
+                            }
+                        }
+                        ene_tool_db::DbType::Boolean => {
+                            if let Ok(Some(v)) = result.try_get::<Option<bool>>("", col) {
+                                DbValue::Bool(v)
+                            } else if let Ok(Some(v)) = result.try_get::<Option<i64>>("", col) {
+                                DbValue::Bool(v != 0)
+                            } else {
+                                DbValue::Null
+                            }
+                        }
+                    }
+                } else {
+                    DbValue::Null
+                };
+                row.insert(col.clone(), val);
             }
-
-            sqlite3_finalize(stmt);
-            sqlite3_close(db);
-            Ok(rows)
+            rows.push(row);
         }
+
+        Ok(rows)
     }
 
-    #[allow(non_snake_case)]
-    unsafe fn SQLITE_TRANSIENT() -> Option<unsafe extern "C" fn(*mut std::os::raw::c_void)> {
-        // SAFETY: -1 as a destructor function pointer is a special SQLite constant meaning
-        // "SQLite will make a copy of the data", which is what we want since our CString
-        // will be dropped at the end of the match arm.
-        Some(unsafe {
-            std::mem::transmute::<isize, unsafe extern "C" fn(*mut std::os::raw::c_void)>(-1)
-        })
-    }
-
-    fn handle_update(
-        pool: &Arc<DbPool>,
+    async fn handle_update(
+        db: &DatabaseConnection,
         table: &str,
         set: Row,
         filter: DbFilter,
     ) -> Result<u64, DbServerError> {
-        let mut conn = pool.get()?;
+        let mut update = Query::update();
+        update.table(Alias::new(table));
 
-        let set_columns: Vec<String> = set.keys().cloned().collect();
-        let set_values: Vec<DbValue> = set_columns.iter().map(|k| set[k].clone()).collect();
-
-        let set_parts: Vec<String> = set_columns
+        let columns: Vec<String> = set.keys().cloned().collect();
+        let values: Vec<sea_orm::Value> = columns
             .iter()
-            .enumerate()
-            .map(|(i, col)| format!("{col} = ?{}", i + 1))
+            .map(|k| Self::db_value_to_sea_value(&set[k]))
             .collect();
 
-        let mut sql = format!("UPDATE {table} SET {}", set_parts.join(", "));
-
-        let mut params = set_values;
-        let (where_clause, filter_params) = Self::build_where_clause(&filter)?;
-        if !where_clause.is_empty() {
-            sql.push_str(&format!(" WHERE {where_clause}"));
-            params.extend(filter_params);
+        for (col, val) in columns.iter().zip(values) {
+            update.value(Alias::new(col), Expr::val(val));
         }
 
-        let mut query = sql_query(&sql).into_boxed();
-        for param in &params {
-            query = match param {
-                DbValue::Null => query.bind::<diesel::sql_types::Nullable<Integer>, _>(None::<i32>),
-                DbValue::Bool(b) => query.bind::<Integer, _>(*b as i32),
-                DbValue::Int(i) => query.bind::<BigInt, _>(*i),
-                DbValue::Float(f) => query.bind::<Double, _>(*f),
-                DbValue::Text(s) => query.bind::<Text, _>(s),
-                DbValue::Blob(b) => query.bind::<Binary, _>(b),
-            };
-        }
+        let cond = Self::build_sea_query_filter(&filter)?;
+        update.cond_where(cond);
 
-        let count = query.execute(&mut conn)?;
-        Ok(count as u64)
+        let (sql, params) = update.build(SqliteQueryBuilder);
+        let stmt = Statement::from_sql_and_values(DatabaseBackend::Sqlite, &sql, params);
+
+        let exec_res = db
+            .execute(stmt)
+            .await
+            .map_err(|e| DbServerError::Internal(e.to_string()))?;
+
+        Ok(exec_res.rows_affected())
     }
 
-    fn handle_delete(
-        pool: &Arc<DbPool>,
+    async fn handle_delete(
+        db: &DatabaseConnection,
         table: &str,
         filter: DbFilter,
     ) -> Result<u64, DbServerError> {
-        let mut conn = pool.get()?;
+        let mut delete = Query::delete();
+        delete.from_table(Alias::new(table));
 
-        let mut sql = format!("DELETE FROM {table}");
+        let cond = Self::build_sea_query_filter(&filter)?;
+        delete.cond_where(cond);
 
-        let (where_clause, params) = Self::build_where_clause(&filter)?;
-        if !where_clause.is_empty() {
-            sql.push_str(&format!(" WHERE {where_clause}"));
-        }
+        let (sql, params) = delete.build(SqliteQueryBuilder);
+        let stmt = Statement::from_sql_and_values(DatabaseBackend::Sqlite, &sql, params);
 
-        let mut query = sql_query(&sql).into_boxed();
-        for param in &params {
-            query = match param {
-                DbValue::Null => query.bind::<diesel::sql_types::Nullable<Integer>, _>(None::<i32>),
-                DbValue::Bool(b) => query.bind::<Integer, _>(*b as i32),
-                DbValue::Int(i) => query.bind::<BigInt, _>(*i),
-                DbValue::Float(f) => query.bind::<Double, _>(*f),
-                DbValue::Text(s) => query.bind::<Text, _>(s),
-                DbValue::Blob(b) => query.bind::<Binary, _>(b),
-            };
-        }
+        let exec_res = db
+            .execute(stmt)
+            .await
+            .map_err(|e| DbServerError::Internal(e.to_string()))?;
 
-        let count = query.execute(&mut conn)?;
-        Ok(count as u64)
+        Ok(exec_res.rows_affected())
     }
 
-    fn handle_count(
-        pool: &Arc<DbPool>,
+    async fn handle_count(
+        db: &DatabaseConnection,
         table: &str,
         filter: DbFilter,
     ) -> Result<i64, DbServerError> {
-        let mut conn = pool.get()?;
+        let mut select = Query::select();
+        select.from(Alias::new(table));
+        select.expr_as(Expr::cust("COUNT(*)"), Alias::new("count"));
 
-        let mut sql = format!("SELECT COUNT(*) as count FROM {table}");
+        let cond = Self::build_sea_query_filter(&filter)?;
+        select.cond_where(cond);
 
-        let (where_clause, params) = Self::build_where_clause(&filter)?;
-        if !where_clause.is_empty() {
-            sql.push_str(&format!(" WHERE {where_clause}"));
-        }
+        let (sql, params) = select.build(SqliteQueryBuilder);
+        let stmt = Statement::from_sql_and_values(DatabaseBackend::Sqlite, &sql, params);
 
-        let mut query = sql_query(&sql).into_boxed();
-        for param in &params {
-            query = match param {
-                DbValue::Null => query.bind::<diesel::sql_types::Nullable<Integer>, _>(None::<i32>),
-                DbValue::Bool(b) => query.bind::<Integer, _>(*b as i32),
-                DbValue::Int(i) => query.bind::<BigInt, _>(*i),
-                DbValue::Float(f) => query.bind::<Double, _>(*f),
-                DbValue::Text(s) => query.bind::<Text, _>(s),
-                DbValue::Blob(b) => query.bind::<Binary, _>(b),
-            };
-        }
+        let res = db
+            .query_one(stmt)
+            .await
+            .map_err(|e| DbServerError::Internal(e.to_string()))?;
 
-        let result = query.load::<CountRow>(&mut conn)?;
-        Ok(result.first().map(|r| r.count).unwrap_or(0))
+        let count: i64 = match res {
+            Some(row) => row.try_get("", "count").unwrap_or(0),
+            None => 0,
+        };
+
+        Ok(count)
     }
 
-    fn handle_last_insert_rowid(pool: &Arc<DbPool>) -> Result<i64, DbServerError> {
-        let mut conn = pool.get()?;
-        let rowid: i64 = diesel::select(diesel::dsl::sql::<BigInt>("last_insert_rowid()"))
-            .get_result(&mut conn)?;
-        Ok(rowid)
+    async fn handle_last_insert_rowid(db: &DatabaseConnection) -> Result<i64, DbServerError> {
+        let stmt = Statement::from_string(DatabaseBackend::Sqlite, "SELECT last_insert_rowid() AS id");
+        let res = db
+            .query_one(stmt)
+            .await
+            .map_err(|e| DbServerError::Internal(e.to_string()))?;
+        let id = match res {
+            Some(row) => row.try_get("", "id").unwrap_or(0),
+            None => 0,
+        };
+        Ok(id)
     }
 
-    fn build_where_clause(filter: &DbFilter) -> Result<(String, Vec<DbValue>), DbServerError> {
-        let mut params = Vec::new();
-        let clause = Self::build_filter_expr(filter, &mut params)?;
-        Ok((clause, params))
-    }
-
-    fn build_filter_expr(
-        filter: &DbFilter,
-        params: &mut Vec<DbValue>,
-    ) -> Result<String, DbServerError> {
+    fn build_sea_query_filter(filter: &DbFilter) -> Result<Condition, DbServerError> {
         match filter {
-            DbFilter::Always => Ok("1=1".to_string()),
+            DbFilter::Always => Ok(Condition::all()),
             DbFilter::And(filters) => {
-                if filters.is_empty() {
-                    return Ok("1=1".to_string());
+                let mut cond = Condition::all();
+                for f in filters {
+                    cond = cond.add(Self::build_sea_query_filter(f)?);
                 }
-                let parts: Result<Vec<String>, _> = filters
-                    .iter()
-                    .map(|f| Self::build_filter_expr(f, params))
-                    .collect();
-                Ok(format!("({})", parts?.join(" AND ")))
+                Ok(cond)
             }
             DbFilter::Or(filters) => {
-                if filters.is_empty() {
-                    return Ok("1=0".to_string());
+                let mut cond = Condition::any();
+                for f in filters {
+                    cond = cond.add(Self::build_sea_query_filter(f)?);
                 }
-                let parts: Result<Vec<String>, _> = filters
-                    .iter()
-                    .map(|f| Self::build_filter_expr(f, params))
-                    .collect();
-                Ok(format!("({})", parts?.join(" OR ")))
+                Ok(cond)
             }
             DbFilter::Not(f) => {
-                let inner = Self::build_filter_expr(f, params)?;
-                Ok(format!("NOT ({inner})"))
+                let inner = Self::build_sea_query_filter(f)?;
+                Ok(Condition::all().not().add(inner))
             }
-            DbFilter::Eq { column, value } => {
-                params.push(value.clone());
-                let idx = params.len();
-                Ok(format!("{column} = ?{idx}"))
-            }
-            DbFilter::Ne { column, value } => {
-                params.push(value.clone());
-                let idx = params.len();
-                Ok(format!("{column} != ?{idx}"))
-            }
-            DbFilter::Lt { column, value } => {
-                params.push(value.clone());
-                let idx = params.len();
-                Ok(format!("{column} < ?{idx}"))
-            }
-            DbFilter::Le { column, value } => {
-                params.push(value.clone());
-                let idx = params.len();
-                Ok(format!("{column} <= ?{idx}"))
-            }
-            DbFilter::Gt { column, value } => {
-                params.push(value.clone());
-                let idx = params.len();
-                Ok(format!("{column} > ?{idx}"))
-            }
-            DbFilter::Ge { column, value } => {
-                params.push(value.clone());
-                let idx = params.len();
-                Ok(format!("{column} >= ?{idx}"))
-            }
+            DbFilter::Eq { column, value } => Ok(Condition::all().add(
+                Expr::col(Alias::new(column)).eq(Self::db_value_to_sea_value(value)),
+            )),
+            DbFilter::Ne { column, value } => Ok(Condition::all().add(
+                Expr::col(Alias::new(column)).ne(Self::db_value_to_sea_value(value)),
+            )),
+            DbFilter::Lt { column, value } => Ok(Condition::all().add(
+                Expr::col(Alias::new(column)).lt(Self::db_value_to_sea_value(value)),
+            )),
+            DbFilter::Le { column, value } => Ok(Condition::all().add(
+                Expr::col(Alias::new(column)).lte(Self::db_value_to_sea_value(value)),
+            )),
+            DbFilter::Gt { column, value } => Ok(Condition::all().add(
+                Expr::col(Alias::new(column)).gt(Self::db_value_to_sea_value(value)),
+            )),
+            DbFilter::Ge { column, value } => Ok(Condition::all().add(
+                Expr::col(Alias::new(column)).gte(Self::db_value_to_sea_value(value)),
+            )),
             DbFilter::In { column, values } => {
-                if values.is_empty() {
-                    return Ok("1=0".to_string());
-                }
-                let start_idx = params.len() + 1;
-                for v in values {
-                    params.push(v.clone());
-                }
-                let end_idx = params.len();
-                let placeholders: Vec<String> =
-                    (start_idx..=end_idx).map(|i| format!("?{i}")).collect();
-                Ok(format!("{column} IN ({})", placeholders.join(", ")))
+                let sea_vals: Vec<sea_orm::Value> =
+                    values.iter().map(Self::db_value_to_sea_value).collect();
+                Ok(Condition::all().add(Expr::col(Alias::new(column)).is_in(sea_vals)))
             }
             DbFilter::Like { column, pattern } => {
-                params.push(DbValue::Text(pattern.clone()));
-                let idx = params.len();
-                Ok(format!("{column} LIKE ?{idx}"))
+                Ok(Condition::all().add(Expr::col(Alias::new(column)).like(pattern.clone())))
             }
-            DbFilter::IsNull { column } => Ok(format!("{column} IS NULL")),
-            DbFilter::IsNotNull { column } => Ok(format!("{column} IS NOT NULL")),
+            DbFilter::IsNull { column } => {
+                Ok(Condition::all().add(Expr::col(Alias::new(column)).is_null()))
+            }
+            DbFilter::IsNotNull { column } => {
+                Ok(Condition::all().add(Expr::col(Alias::new(column)).is_not_null()))
+            }
         }
     }
-}
-
-#[derive(QueryableByName)]
-struct CountRow {
-    #[diesel(sql_type = BigInt)]
-    count: i64,
 }

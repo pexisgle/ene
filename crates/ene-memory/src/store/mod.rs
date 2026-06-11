@@ -1,32 +1,32 @@
+use crate::entities;
 use crate::error::MemoryError;
+use crate::migrator::Migrator;
 use chrono::{DateTime, Utc};
-use diesel::prelude::*;
-use diesel::sqlite::SqliteConnection;
-use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
+use sea_orm::{
+    ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait,
+    FromQueryResult, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    PaginatorTrait, ConnectionTrait,
+};
+
+use sea_orm::sea_query::{Expr, OnConflict};
+use sea_orm_migration::MigratorTrait;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 
-mod models;
-
-use models::{
-    EmbeddingBlob, NewConversationLog, NewConversationSummary, NewKeyFact, NewToolEmbeddingIndex,
-};
-
-const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
-
 /// A row of tool embedding data: `(tool_name, field, field_key, version_hash, model_name, embedding_vec, source_text)`.
 pub type ToolEmbeddingFieldRow = (String, String, String, String, String, Vec<f32>, String);
 
-/// Registers the sqlite-vec extension and runs pending Diesel migrations.
-pub fn init_sqlite_vec(conn: &mut SqliteConnection) -> Result<(), MemoryError> {
+/// Registers the sqlite-vec extension globally for the process.
+pub fn init_sqlite_vec() {
     use libsqlite3_sys::sqlite3_auto_extension;
     use sqlite_vec::sqlite3_vec_init;
-    // SAFETY: sqlite3_auto_extension expects a function pointer cast to a void pointer.
-    // sqlite3_vec_init is a C function with the correct signature (extern "C" fn()),
-    // and transmuting it to *const () is a well-known pattern for registering SQLite
-    // extensions. The function pointer remains valid for the lifetime of the process.
-    unsafe {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        // SAFETY: sqlite3_auto_extension expects a function pointer cast to a void pointer.
+        // sqlite3_vec_init is a C function with the correct signature (extern "C" fn()),
+        // and transmuting it to *const () is a well-known pattern for registering SQLite
+        // extensions. The function pointer remains valid for the lifetime of the process.
         sqlite3_auto_extension(Some(std::mem::transmute::<
             *const (),
             unsafe extern "C" fn(
@@ -35,10 +35,21 @@ pub fn init_sqlite_vec(conn: &mut SqliteConnection) -> Result<(), MemoryError> {
                 *const libsqlite3_sys::sqlite3_api_routines,
             ) -> i32,
         >(sqlite3_vec_init as *const ())));
+    });
+}
+
+fn embedding_to_bytes(v: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(v.len() * 4);
+    for f in v {
+        bytes.extend_from_slice(&f.to_le_bytes());
     }
-    conn.run_pending_migrations(MIGRATIONS)
-        .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
-    Ok(())
+    bytes
+}
+
+fn bytes_to_embedding(b: &[u8]) -> Vec<f32> {
+    b.chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
 }
 
 /// A key-value fact about the user.
@@ -78,15 +89,11 @@ pub struct RecalledSummary {
     pub similarity: f32,
 }
 
-type SqlitePool = diesel::r2d2::Pool<diesel::r2d2::ConnectionManager<SqliteConnection>>;
-
 /// SQLite-backed long-term memory store with vector similarity search.
 ///
-/// Uses `r2d2` connection pooling and `sqlite-vec` for cosine-similarity queries.
-/// Manages four core tables (`conversation_summaries`, `conversation_keyfacts`,
-/// `conversation_logs`, `tool_embedding_index`).
+/// Uses `SeaORM` for async database connection management and `sqlite-vec` for cosine-similarity queries.
 pub struct MemoryStore {
-    pool: SqlitePool,
+    db: DatabaseConnection,
     embedding_dim: usize,
 }
 
@@ -95,15 +102,15 @@ fn parse_dt(s: &str) -> DateTime<Utc> {
 }
 
 impl MemoryStore {
-    fn init(pool: SqlitePool, embedding_dim: usize) -> Result<Self, MemoryError> {
-        let mut conn = pool
-            .get()
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
-        init_sqlite_vec(&mut conn)?;
-        Ok(Self {
-            pool,
-            embedding_dim,
-        })
+    fn init(db: DatabaseConnection, embedding_dim: usize) -> Self {
+        init_sqlite_vec();
+        Self { db, embedding_dim }
+    }
+
+    /// Returns the database connection handle.
+    #[must_use]
+    pub fn connection(&self) -> &DatabaseConnection {
+        &self.db
     }
 
     /// Returns the dimensionality of the embedding vectors.
@@ -114,29 +121,39 @@ impl MemoryStore {
 
     /// Opens a persistent memory store at the given file path.
     ///
-    /// Creates the database file if it doesn't exist. Runs embedded Diesel migrations
+    /// Creates the database file if it doesn't exist. Runs database migrations
     /// and registers the `sqlite-vec` extension automatically.
-    pub fn open(path: &Path, embedding_dim: usize) -> Result<Self, MemoryError> {
+    pub async fn open(path: &Path, embedding_dim: usize) -> Result<Self, MemoryError> {
         let path_str = path
             .to_str()
             .ok_or_else(|| MemoryError::MemoryStoreConnectionError("Invalid path".to_string()))?;
-        let manager = diesel::r2d2::ConnectionManager::<SqliteConnection>::new(path_str);
-        let pool = diesel::r2d2::Pool::builder()
-            .build(manager)
+        let opt = ConnectOptions::new(format!("sqlite:{path_str}"));
+        let db = Database::connect(opt)
+            .await
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
-        Self::init(pool, embedding_dim)
+
+        Migrator::up(&db, None)
+            .await
+            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+
+        Ok(Self::init(db, embedding_dim))
     }
 
     /// Opens an in-memory memory store (useful for testing).
     ///
-    /// Uses `":memory:"` as the database path with a pool limited to one connection.
-    pub fn open_in_memory(embedding_dim: usize) -> Result<Self, MemoryError> {
-        let manager = diesel::r2d2::ConnectionManager::<SqliteConnection>::new(":memory:");
-        let pool = diesel::r2d2::Pool::builder()
-            .max_size(1)
-            .build(manager)
+    /// Uses `"sqlite::memory:"` as the database path with a pool limited to one connection.
+    pub async fn open_in_memory(embedding_dim: usize) -> Result<Self, MemoryError> {
+        let mut opt = ConnectOptions::new("sqlite::memory:");
+        opt.max_connections(1);
+        let db = Database::connect(opt)
+            .await
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
-        Self::init(pool, embedding_dim)
+
+        Migrator::up(&db, None)
+            .await
+            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+
+        Ok(Self::init(db, embedding_dim))
     }
 
     // ── Conversation Summaries ────────────────────────────────────────────────
@@ -145,7 +162,7 @@ impl MemoryStore {
     ///
     /// Facts with an empty `value` field are treated as deletions for that key.
     /// Returns the new summary's auto-increment ID.
-    pub fn insert_summary(
+    pub async fn insert_summary(
         &self,
         session_id: &str,
         card_name: &str,
@@ -154,316 +171,318 @@ impl MemoryStore {
         embedding: &[f32],
         ended_at: DateTime<Utc>,
     ) -> Result<i64, MemoryError> {
+        use sea_orm::ActiveModelTrait;
+        use sea_orm::ActiveValue::Set;
+
         let now = Utc::now().to_rfc3339();
         let ended_str = ended_at.to_rfc3339();
 
-        let mut conn = self
-            .pool
-            .get()
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+        let session_id = session_id.to_string();
+        let card_name = card_name.to_string();
+        let summary = summary.to_string();
+        let key_facts = key_facts.to_vec();
+        let embedding_bytes = embedding_to_bytes(embedding);
 
-        conn.transaction(|conn| {
-            let new_summary = NewConversationSummary {
-                session_id,
-                card_name,
-                summary,
-                embedding: EmbeddingBlob(embedding.to_vec()),
-                created_at: &now,
-                ended_at: &ended_str,
-            };
-
-            diesel::insert_into(crate::schema::conversation_summaries::table)
-                .values(&new_summary)
-                .execute(conn)?;
-
-            let summary_id: i64 = diesel::select(diesel::dsl::sql::<diesel::sql_types::BigInt>(
-                "last_insert_rowid()",
-            ))
-            .get_result(conn)?;
-
-            for fact in key_facts {
-                if fact.value.is_empty() {
-                    diesel::delete(
-                        crate::schema::conversation_keyfacts::table
-                            .filter(crate::schema::conversation_keyfacts::card_name.eq(card_name))
-                            .filter(crate::schema::conversation_keyfacts::key.eq(&fact.key)),
-                    )
-                    .execute(conn)?;
-                } else {
-                    let new_fact = NewKeyFact {
-                        card_name,
-                        summary_id: Some(summary_id),
-                        key: &fact.key,
-                        value: &fact.value,
-                        created_at: &now,
+        let summary_id = self
+            .db
+            .transaction::<_, i64, MemoryError>(|txn| {
+                Box::pin(async move {
+                    let new_summary = entities::conversation_summaries::ActiveModel {
+                        session_id: Set(session_id),
+                        card_name: Set(card_name.clone()),
+                        summary: Set(summary),
+                        embedding: Set(embedding_bytes),
+                        created_at: Set(now.clone()),
+                        ended_at: Set(ended_str),
+                        ..Default::default()
                     };
-                    diesel::insert_into(crate::schema::conversation_keyfacts::table)
-                        .values(&new_fact)
-                        .execute(conn)?;
-                }
-            }
 
-            Ok(summary_id)
-        })
+                    let res = new_summary
+                        .insert(txn)
+                        .await
+                        .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+                    let summary_id = res.id;
+
+                    for fact in key_facts {
+                        if fact.value.is_empty() {
+                            entities::conversation_keyfacts::Entity::delete_many()
+                                .filter(entities::conversation_keyfacts::Column::CardName.eq(&card_name))
+                                .filter(entities::conversation_keyfacts::Column::Key.eq(&fact.key))
+                                .exec(txn)
+                                .await
+                                .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+                        } else {
+                            let new_fact = entities::conversation_keyfacts::ActiveModel {
+                                card_name: Set(card_name.clone()),
+                                summary_id: Set(Some(summary_id)),
+                                key: Set(fact.key),
+                                value: Set(fact.value),
+                                created_at: Set(now.clone()),
+                                ..Default::default()
+                            };
+                            new_fact
+                                .insert(txn)
+                                .await
+                                .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+                        }
+                    }
+
+                    Ok(summary_id)
+                })
+            })
+            .await
+            .map_err(|e| match e {
+                sea_orm::TransactionError::Connection(db_err) => MemoryError::MemoryStoreError(db_err),
+                sea_orm::TransactionError::Transaction(e) => e,
+            })?;
+
+        Ok(summary_id)
     }
 
     /// Searches summaries by cosine similarity to the query embedding.
     ///
     /// Uses `vec_distance_cosine` for fast approximate matching.
     /// Results are filtered by `card_name` and `similarity_threshold`.
-    pub fn search_summaries(
+    pub async fn search_summaries(
         &self,
         query_embedding: &[f32],
         card_name: &str,
         limit: usize,
         similarity_threshold: f32,
     ) -> Result<Vec<RecalledSummary>, MemoryError> {
-        let query_blob = EmbeddingBlob(query_embedding.to_vec());
-        let mut conn = self
-            .pool
-            .get()
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+        #[derive(Debug, FromQueryResult)]
+        struct SearchSummaryResultRow {
+            id: i64,
+            session_id: String,
+            card_name: String,
+            summary: String,
+            embedding: Vec<u8>,
+            created_at: String,
+            ended_at: String,
+            similarity: f64,
+        }
 
-        use crate::schema::conversation_summaries;
-
-        let similarity = diesel::dsl::sql::<diesel::sql_types::Double>(
+        let query_bytes = embedding_to_bytes(query_embedding);
+        let similarity_expr = Expr::cust_with_values(
             "1.0 - vec_distance_cosine(embedding, ?)",
-        )
-        .bind::<diesel::sql_types::Binary, _>(&query_blob);
+            vec![query_bytes.clone()],
+        );
 
-        let results = conversation_summaries::table
-            .filter(conversation_summaries::card_name.eq(card_name))
-            .filter(similarity.clone().ge(f64::from(similarity_threshold)))
-            .select((
-                conversation_summaries::id,
-                conversation_summaries::session_id,
-                conversation_summaries::card_name,
-                conversation_summaries::summary,
-                conversation_summaries::embedding,
-                conversation_summaries::created_at,
-                conversation_summaries::ended_at,
-                similarity.clone(),
+        let select = entities::conversation_summaries::Entity::find()
+            .filter(entities::conversation_summaries::Column::CardName.eq(card_name))
+            .expr_as(similarity_expr, "similarity")
+            .filter(Expr::cust_with_values(
+                "1.0 - vec_distance_cosine(embedding, ?) >= ?",
+                vec![
+                    sea_orm::Value::from(query_bytes),
+                    sea_orm::Value::from(f64::from(similarity_threshold)),
+                ],
             ))
-            .order(similarity.desc())
-            .limit(limit as i64)
-            .load::<SearchSummaryRow>(&mut *conn)?;
+            .order_by_desc(Expr::col("similarity"))
+            .limit(limit as u64);
 
-        results
-            .into_iter()
-            .map(|row| {
-                Ok(RecalledSummary {
-                    entry: ConversationSummary {
-                        id: row.id,
-                        session_id: row.session_id,
-                        card_name: row.card_name,
-                        summary: row.summary,
-                        embedding: row.embedding.0,
-                        created_at: parse_dt(&row.created_at),
-                        ended_at: parse_dt(&row.ended_at),
-                    },
-                    similarity: row.similarity as f32,
-                })
-            })
-            .collect()
-    }
-
-    /// Lists the most recent conversation summaries for a card.
-    pub fn list_recent_summaries(
-        &self,
-        card_name: &str,
-        limit: usize,
-    ) -> Result<Vec<ConversationSummary>, MemoryError> {
-        use crate::schema::conversation_summaries::dsl;
-
-        let mut conn = self
-            .pool
-            .get()
+        let results = select
+            .into_model::<SearchSummaryResultRow>()
+            .all(&self.db)
+            .await
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
-        let rows = dsl::conversation_summaries
-            .filter(dsl::card_name.eq(card_name))
-            .order(dsl::created_at.desc())
-            .limit(limit as i64)
-            .select(models::ConversationSummaryRow::as_select())
-            .load(&mut *conn)?;
 
-        rows.into_iter()
-            .map(|row| {
-                Ok(ConversationSummary {
+        Ok(results
+            .into_iter()
+            .map(|row| RecalledSummary {
+                entry: ConversationSummary {
                     id: row.id,
                     session_id: row.session_id,
                     card_name: row.card_name,
                     summary: row.summary,
-                    embedding: row.embedding.0,
+                    embedding: bytes_to_embedding(&row.embedding),
                     created_at: parse_dt(&row.created_at),
                     ended_at: parse_dt(&row.ended_at),
-                })
+                },
+                similarity: row.similarity as f32,
             })
-            .collect()
+            .collect())
+    }
+
+    /// Lists the most recent conversation summaries for a card.
+    pub async fn list_recent_summaries(
+        &self,
+        card_name: &str,
+        limit: usize,
+    ) -> Result<Vec<ConversationSummary>, MemoryError> {
+        let rows = entities::conversation_summaries::Entity::find()
+            .filter(entities::conversation_summaries::Column::CardName.eq(card_name))
+            .order_by_desc(entities::conversation_summaries::Column::CreatedAt)
+            .limit(limit as u64)
+            .all(&self.db)
+            .await
+            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| ConversationSummary {
+                id: row.id,
+                session_id: row.session_id,
+                card_name: row.card_name,
+                summary: row.summary,
+                embedding: bytes_to_embedding(&row.embedding),
+                created_at: parse_dt(&row.created_at),
+                ended_at: parse_dt(&row.ended_at),
+            })
+            .collect())
     }
 
     /// Counts the number of summaries for a card.
-    pub fn count_summaries(&self, card_name: &str) -> Result<i64, MemoryError> {
-        use crate::schema::conversation_summaries::dsl;
-
-        let mut conn = self
-            .pool
-            .get()
+    pub async fn count_summaries(&self, card_name: &str) -> Result<i64, MemoryError> {
+        let count = entities::conversation_summaries::Entity::find()
+            .filter(entities::conversation_summaries::Column::CardName.eq(card_name))
+            .count(&self.db)
+            .await
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
-        let count = dsl::conversation_summaries
-            .filter(dsl::card_name.eq(card_name))
-            .count()
-            .get_result(&mut *conn)?;
-        Ok(count)
+        Ok(count as i64)
     }
 
     /// Deletes a summary and its associated keyfacts.
-    pub fn delete_summary(&self, id: i64) -> Result<usize, MemoryError> {
-        use crate::schema::{conversation_keyfacts, conversation_summaries};
+    pub async fn delete_summary(&self, id: i64) -> Result<usize, MemoryError> {
+        let db = &self.db;
+        db.transaction::<_, usize, MemoryError>(|txn| {
+            Box::pin(async move {
+                entities::conversation_keyfacts::Entity::delete_many()
+                    .filter(entities::conversation_keyfacts::Column::SummaryId.eq(id))
+                    .exec(txn)
+                    .await
+                    .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
 
-        let mut conn = self
-            .pool
-            .get()
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
-        conn.transaction(|conn| {
-            diesel::delete(
-                conversation_keyfacts::table.filter(conversation_keyfacts::summary_id.eq(id)),
-            )
-            .execute(conn)?;
+                let res = entities::conversation_summaries::Entity::delete_by_id(id)
+                    .exec(txn)
+                    .await
+                    .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
 
-            let count = diesel::delete(
-                conversation_summaries::table.filter(conversation_summaries::id.eq(id)),
-            )
-            .execute(conn)?;
-
-            Ok(count)
+                Ok(res.rows_affected as usize)
+            })
+        })
+        .await
+        .map_err(|e| match e {
+            sea_orm::TransactionError::Connection(db_err) => MemoryError::MemoryStoreError(db_err),
+            sea_orm::TransactionError::Transaction(e) => e,
         })
     }
 
     // ── Key Facts ─────────────────────────────────────────────────────────────
 
     /// Returns all unique keyfacts for a card, with the latest value per key.
-    pub fn get_all_keyfacts(&self, card_name: &str) -> Result<Vec<KeyFact>, MemoryError> {
-        let mut conn = self
-            .pool
-            .get()
+    pub async fn get_all_keyfacts(&self, card_name: &str) -> Result<Vec<KeyFact>, MemoryError> {
+        let stmt = sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Sqlite,
+            "SELECT key, value FROM (
+                SELECT key, value, ROW_NUMBER() OVER (PARTITION BY key ORDER BY created_at DESC) as rn
+                FROM conversation_keyfacts
+                WHERE card_name = ?
+            ) WHERE rn = 1
+            ORDER BY key ASC",
+            vec![card_name.into()],
+        );
+
+        let rows = self
+            .db
+            .query_all(stmt)
+            .await
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
 
-        let query = "SELECT key, value FROM (
-            SELECT key, value, ROW_NUMBER() OVER (PARTITION BY key ORDER BY created_at DESC) as rn
-            FROM conversation_keyfacts
-            WHERE card_name = ?
-        ) WHERE rn = 1
-        ORDER BY key ASC";
-
-        let rows = diesel::sql_query(query)
-            .bind::<diesel::sql_types::Text, _>(card_name)
-            .load::<KeyFactQueryResult>(&mut *conn)?;
-
-        Ok(rows
-            .into_iter()
-            .map(|row| KeyFact {
-                key: row.key,
-                value: row.value,
+        rows.into_iter()
+            .map(|row| {
+                let key: String = row
+                    .try_get("", "key")
+                    .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+                let value: String = row
+                    .try_get("", "value")
+                    .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+                Ok(KeyFact { key, value })
             })
-            .collect())
+            .collect()
     }
 
     /// Inserts or updates a keyfact for a card.
-    pub fn upsert_keyfact(
+    pub async fn upsert_keyfact(
         &self,
         card_name: &str,
         key: &str,
         value: &str,
     ) -> Result<(), MemoryError> {
-        let now = Utc::now().to_rfc3339();
-        let mut conn = self
-            .pool
-            .get()
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+        use sea_orm::ActiveModelTrait;
+        use sea_orm::ActiveValue::Set;
 
-        let new_fact = NewKeyFact {
-            card_name,
-            summary_id: Some(0),
-            key,
-            value,
-            created_at: &now,
+        let now = Utc::now().to_rfc3339();
+        let new_fact = entities::conversation_keyfacts::ActiveModel {
+            card_name: Set(card_name.to_string()),
+            summary_id: Set(Some(0)),
+            key: Set(key.to_string()),
+            value: Set(value.to_string()),
+            created_at: Set(now),
+            ..Default::default()
         };
 
-        diesel::insert_into(crate::schema::conversation_keyfacts::table)
-            .values(&new_fact)
-            .execute(&mut *conn)?;
+        new_fact
+            .insert(&self.db)
+            .await
+            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
 
         Ok(())
     }
 
     /// Deletes all entries for a specific keyfact key.
-    pub fn delete_keyfact(&self, card_name: &str, key: &str) -> Result<usize, MemoryError> {
-        use crate::schema::conversation_keyfacts::dsl;
-
-        let mut conn = self
-            .pool
-            .get()
+    pub async fn delete_keyfact(&self, card_name: &str, key: &str) -> Result<usize, MemoryError> {
+        let res = entities::conversation_keyfacts::Entity::delete_many()
+            .filter(entities::conversation_keyfacts::Column::CardName.eq(card_name))
+            .filter(entities::conversation_keyfacts::Column::Key.eq(key))
+            .exec(&self.db)
+            .await
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
-        let count = diesel::delete(
-            dsl::conversation_keyfacts
-                .filter(dsl::card_name.eq(card_name))
-                .filter(dsl::key.eq(key)),
-        )
-        .execute(&mut *conn)?;
-        Ok(count)
+        Ok(res.rows_affected as usize)
     }
 
     /// Counts the number of distinct keyfacts for a card.
-    pub fn count_keyfacts(&self, card_name: &str) -> Result<i64, MemoryError> {
-        let mut conn = self
-            .pool
-            .get()
+    pub async fn count_keyfacts(&self, card_name: &str) -> Result<i64, MemoryError> {
+        let count = entities::conversation_keyfacts::Entity::find()
+            .filter(entities::conversation_keyfacts::Column::CardName.eq(card_name))
+            .select_only()
+            .column(entities::conversation_keyfacts::Column::Key)
+            .distinct()
+            .count(&self.db)
+            .await
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
-
-        use crate::schema::conversation_keyfacts;
-
-        let count = conversation_keyfacts::table
-            .filter(conversation_keyfacts::card_name.eq(card_name))
-            .select(diesel::dsl::count(conversation_keyfacts::key).aggregate_distinct())
-            .get_result::<i64>(&mut *conn)?;
-
-        Ok(count)
+        Ok(count as i64)
     }
 
     // ── Conversation Logs ─────────────────────────────────────────────────────
 
     /// Inserts a conversation log entry.
-    pub fn insert_log(
+    pub async fn insert_log(
         &self,
         session_id: &str,
         card_name: &str,
         role: &str,
         content: &str,
     ) -> Result<i64, MemoryError> {
-        let now = Utc::now().to_rfc3339();
-        let mut conn = self
-            .pool
-            .get()
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+        use sea_orm::ActiveModelTrait;
+        use sea_orm::ActiveValue::Set;
 
-        let new_log = NewConversationLog {
-            session_id,
-            card_name,
-            role,
-            content,
-            created_at: &now,
+        let now = Utc::now().to_rfc3339();
+        let new_log = entities::conversation_logs::ActiveModel {
+            session_id: Set(session_id.to_string()),
+            card_name: Set(card_name.to_string()),
+            role: Set(role.to_string()),
+            content: Set(content.to_string()),
+            created_at: Set(now),
+            ..Default::default()
         };
 
-        diesel::insert_into(crate::schema::conversation_logs::table)
-            .values(&new_log)
-            .execute(&mut *conn)?;
+        let res = new_log
+            .insert(&self.db)
+            .await
+            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
 
-        let id: i64 = diesel::select(diesel::dsl::sql::<diesel::sql_types::BigInt>(
-            "last_insert_rowid()",
-        ))
-        .get_result(&mut *conn)?;
-
-        Ok(id)
+        Ok(res.id)
     }
 
     /// Spawns a fire-and-forget task that inserts a conversation log entry.
@@ -483,28 +502,23 @@ impl MemoryStore {
         let role = role.to_string();
         let content = content.to_string();
         tokio::spawn(async move {
-            if let Err(e) = store.insert_log(&session_id, &card_name, &role, &content) {
+            if let Err(e) = store.insert_log(&session_id, &card_name, &role, &content).await {
                 tracing::error!("[Memory] Failed to save {} log: {}", role, e);
             }
         });
     }
 
     /// Returns all conversation logs for a session.
-    pub fn get_logs_by_session(
+    pub async fn get_logs_by_session(
         &self,
         session_id: &str,
     ) -> Result<Vec<(String, String, String)>, MemoryError> {
-        use crate::schema::conversation_logs::dsl;
-
-        let mut conn = self
-            .pool
-            .get()
+        let rows = entities::conversation_logs::Entity::find()
+            .filter(entities::conversation_logs::Column::SessionId.eq(session_id))
+            .order_by_asc(entities::conversation_logs::Column::CreatedAt)
+            .all(&self.db)
+            .await
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
-        let rows = dsl::conversation_logs
-            .filter(dsl::session_id.eq(session_id))
-            .order(dsl::created_at.asc())
-            .select(models::ConversationLogRow::as_select())
-            .load(&mut *conn)?;
 
         Ok(rows
             .into_iter()
@@ -520,7 +534,7 @@ impl MemoryStore {
     /// `"example"`, or `"negative"`, matching `ene_provider::EmbeddingKind`.
     /// `field_key` disambiguates multiple entries of the same field type
     /// (e.g. separate `"example"` rows with keys `"ex_0"`, `"ex_1"`).
-    pub fn upsert_tool_embedding_field(
+    pub async fn upsert_tool_embedding_field(
         &self,
         tool_name: &str,
         field: &str,
@@ -530,54 +544,52 @@ impl MemoryStore {
         embedding: &[f32],
         source_text: &str,
     ) -> Result<(), MemoryError> {
-        let now = Utc::now().to_rfc3339();
-        let mut conn = self
-            .pool
-            .get()
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+        use sea_orm::ActiveValue::Set;
 
-        let new_embedding = NewToolEmbeddingIndex {
-            tool_name,
-            field,
-            field_key,
-            version_hash,
-            model_name,
-            source_text,
-            embedding: EmbeddingBlob(embedding.to_vec()),
-            created_at: &now,
+        let now = Utc::now().to_rfc3339();
+        let embedding_bytes = embedding_to_bytes(embedding);
+
+        let new_embedding = entities::tool_embedding_index::ActiveModel {
+            tool_name: Set(tool_name.to_string()),
+            field: Set(field.to_string()),
+            field_key: Set(field_key.to_string()),
+            version_hash: Set(version_hash.to_string()),
+            model_name: Set(model_name.to_string()),
+            source_text: Set(source_text.to_string()),
+            embedding: Set(embedding_bytes),
+            created_at: Set(now),
+            ..Default::default()
         };
 
-        diesel::insert_into(crate::schema::tool_embedding_index::table)
-            .values(&new_embedding)
-            .on_conflict((
-                crate::schema::tool_embedding_index::tool_name,
-                crate::schema::tool_embedding_index::field,
-                crate::schema::tool_embedding_index::field_key,
-                crate::schema::tool_embedding_index::model_name,
-            ))
-            .do_update()
-            .set((
-                crate::schema::tool_embedding_index::version_hash.eq(&new_embedding.version_hash),
-                crate::schema::tool_embedding_index::embedding.eq(&new_embedding.embedding),
-                crate::schema::tool_embedding_index::source_text.eq(&new_embedding.source_text),
-                crate::schema::tool_embedding_index::created_at.eq(&new_embedding.created_at),
-            ))
-            .execute(&mut *conn)?;
+        entities::tool_embedding_index::Entity::insert(new_embedding)
+            .on_conflict(
+                OnConflict::columns([
+                    entities::tool_embedding_index::Column::ToolName,
+                    entities::tool_embedding_index::Column::Field,
+                    entities::tool_embedding_index::Column::FieldKey,
+                    entities::tool_embedding_index::Column::ModelName,
+                ])
+                .update_columns([
+                    entities::tool_embedding_index::Column::VersionHash,
+                    entities::tool_embedding_index::Column::Embedding,
+                    entities::tool_embedding_index::Column::SourceText,
+                    entities::tool_embedding_index::Column::CreatedAt,
+                ])
+                .to_owned(),
+            )
+            .exec(&self.db)
+            .await
+            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
 
         Ok(())
     }
 
     /// Lists all stored tool embeddings, one row per (`tool_name`, field, `field_key`, `model_name`).
-    pub fn list_tool_embedding_fields(&self) -> Result<Vec<ToolEmbeddingFieldRow>, MemoryError> {
-        use crate::schema::tool_embedding_index::dsl;
-
-        let mut conn = self
-            .pool
-            .get()
+    pub async fn list_tool_embedding_fields(&self) -> Result<Vec<ToolEmbeddingFieldRow>, MemoryError> {
+        let rows = entities::tool_embedding_index::Entity::find()
+            .all(&self.db)
+            .await
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
-        let rows = dsl::tool_embedding_index
-            .select(models::ToolEmbeddingIndexRow::as_select())
-            .load(&mut *conn)?;
 
         Ok(rows
             .into_iter()
@@ -588,7 +600,7 @@ impl MemoryStore {
                     row.field_key,
                     row.version_hash,
                     row.model_name,
-                    row.embedding.0,
+                    bytes_to_embedding(&row.embedding),
                     row.source_text,
                 )
             })
@@ -596,63 +608,65 @@ impl MemoryStore {
     }
 
     /// Deletes all field embeddings for a tool (cascades across all fields).
-    pub fn delete_tool_embeddings(&self, tool_name: &str) -> Result<usize, MemoryError> {
-        use crate::schema::tool_embedding_index::dsl;
-
-        let mut conn = self
-            .pool
-            .get()
+    pub async fn delete_tool_embeddings(&self, tool_name: &str) -> Result<usize, MemoryError> {
+        let res = entities::tool_embedding_index::Entity::delete_many()
+            .filter(entities::tool_embedding_index::Column::ToolName.eq(tool_name))
+            .exec(&self.db)
+            .await
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
-        let count = diesel::delete(dsl::tool_embedding_index.filter(dsl::tool_name.eq(tool_name)))
-            .execute(&mut *conn)?;
-        Ok(count)
+        Ok(res.rows_affected as usize)
     }
 
     /// Searches tool embeddings by cosine similarity to the query across ALL
     /// fields, then aggregates the per-field similarity scores for each tool
     /// using max-pool (the strongest signal wins). Returns tools sorted by
     /// aggregated similarity.
-    pub fn search_tools(
+    pub async fn search_tools(
         &self,
         query_embedding: &[f32],
         limit: usize,
         similarity_threshold: f32,
     ) -> Result<Vec<(String, f32)>, MemoryError> {
-        let query_blob = EmbeddingBlob(query_embedding.to_vec());
+        #[derive(Debug, FromQueryResult)]
+        struct SearchToolRow {
+            tool_name: String,
+            similarity: f64,
+        }
 
-        let mut conn = self
-            .pool
-            .get()
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
-
-        use crate::schema::tool_embedding_index;
-
-        let similarity = diesel::dsl::sql::<diesel::sql_types::Double>(
+        let query_bytes = embedding_to_bytes(query_embedding);
+        let similarity_expr = Expr::cust_with_values(
             "1.0 - vec_distance_cosine(embedding, ?)",
-        )
-        .bind::<diesel::sql_types::Binary, _>(&query_blob);
+            vec![query_bytes.clone()],
+        );
 
-        // Fetch a generous number of (tool_name, field, similarity) rows then
-        // collapse per tool by taking the max similarity. Cheap because the
-        // index is small.
-        let factor = 4i64;
-        let row_cap = (limit as i64).saturating_mul(factor).max(limit as i64);
-        let rows = tool_embedding_index::table
-            .filter(similarity.clone().ge(f64::from(similarity_threshold)))
-            .select((
-                tool_embedding_index::tool_name,
-                tool_embedding_index::field,
-                similarity.clone(),
+        let factor = 4u64;
+        let row_cap = (limit as u64).saturating_mul(factor).max(limit as u64);
+
+        let select = entities::tool_embedding_index::Entity::find()
+            .select_only()
+            .column(entities::tool_embedding_index::Column::ToolName)
+            .expr_as(similarity_expr, "similarity")
+            .filter(Expr::cust_with_values(
+                "1.0 - vec_distance_cosine(embedding, ?) >= ?",
+                vec![
+                    sea_orm::Value::from(query_bytes),
+                    sea_orm::Value::from(f64::from(similarity_threshold)),
+                ],
             ))
-            .order(similarity.desc())
-            .limit(row_cap)
-            .load::<(String, String, f64)>(&mut *conn)?;
+            .order_by_desc(Expr::col("similarity"))
+            .limit(row_cap);
+
+        let rows = select
+            .into_model::<SearchToolRow>()
+            .all(&self.db)
+            .await
+            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
 
         use std::collections::HashMap;
         let mut by_tool: HashMap<String, f32> = HashMap::new();
-        for (name, _field, sim) in rows {
-            let sim = sim as f32;
-            let entry = by_tool.entry(name).or_insert(f32::MIN);
+        for row in rows {
+            let sim = row.similarity as f32;
+            let entry = by_tool.entry(row.tool_name).or_insert(f32::MIN);
             if sim > *entry {
                 *entry = sim;
             }
@@ -669,82 +683,65 @@ impl MemoryStore {
     ///
     /// Combines [`search_summaries`](Self::search_summaries) and
     /// [`get_all_keyfacts`](Self::get_all_keyfacts) for convenient prompt context assembly.
-    pub fn recall_context(
+    pub async fn recall_context(
         &self,
         card_name: &str,
         query_embedding: &[f32],
         limit: usize,
         similarity_threshold: f32,
     ) -> Result<(Vec<RecalledSummary>, Vec<KeyFact>), MemoryError> {
-        let summaries =
-            self.search_summaries(query_embedding, card_name, limit, similarity_threshold)?;
-        let key_facts = self.get_all_keyfacts(card_name).unwrap_or_default();
+        let summaries = self
+            .search_summaries(query_embedding, card_name, limit, similarity_threshold)
+            .await?;
+        let key_facts = self.get_all_keyfacts(card_name).await.unwrap_or_default();
         Ok((summaries, key_facts))
     }
 }
 
-#[derive(diesel::Queryable)]
-struct SearchSummaryRow {
-    id: i64,
-    session_id: String,
-    card_name: String,
-    summary: String,
-    embedding: EmbeddingBlob,
-    created_at: String,
-    ended_at: String,
-    similarity: f64,
-}
-
-#[derive(diesel::QueryableByName)]
-struct KeyFactQueryResult {
-    #[diesel(sql_type = diesel::sql_types::Text)]
-    key: String,
-    #[diesel(sql_type = diesel::sql_types::Text)]
-    value: String,
-}
-
 #[cfg(test)]
 mod tests {
-    use super::models::EmbeddingBlob;
     use super::*;
 
     #[test]
     fn test_roundtrip_bytes() {
         let original = vec![1.0_f32, 0.5, -0.25, 0.0];
-        let blob = EmbeddingBlob(original.clone());
-        let restored = blob.0;
+        let bytes = embedding_to_bytes(&original);
+        let restored = bytes_to_embedding(&bytes);
         for (a, b) in original.iter().zip(restored.iter()) {
             assert!((a - b).abs() < 1e-7, "Mismatch: {a} != {b}");
         }
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore = "sqlite-vec extension not available for in-memory DB in test environment"]
-    fn test_insert_and_search_summaries() {
-        let store = MemoryStore::open_in_memory(4).unwrap();
+    async fn test_insert_and_search_summaries() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
         let emb_a = vec![1.0_f32, 0.0, 0.0, 0.0];
         let emb_b = vec![0.0_f32, 1.0, 0.0, 0.0];
 
         store
             .insert_summary("s1", "char", "Summary A", &[], &emb_a, Utc::now())
+            .await
             .unwrap();
         store
             .insert_summary("s2", "char", "Summary B", &[], &emb_b, Utc::now())
+            .await
             .unwrap();
 
-        let results = store.search_summaries(&emb_a, "char", 5, 0.5).unwrap();
+        let results = store.search_summaries(&emb_a, "char", 5, 0.5).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].entry.summary, "Summary A");
         assert!((results[0].similarity - 1.0).abs() < 1e-5);
     }
 
-    #[test]
-    fn test_keyfacts_crud() {
-        let store = MemoryStore::open_in_memory(4).unwrap();
+    #[tokio::test]
+    async fn test_keyfacts_crud() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
 
         let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
         let summary_id = store
             .insert_summary("s1", "char", "Summary", &[], &emb, Utc::now())
+            .await
             .unwrap();
 
         let facts = vec![
@@ -758,91 +755,85 @@ mod tests {
             },
         ];
         let now = Utc::now().to_rfc3339();
-        let mut conn = store.pool.get().unwrap();
+        
         for f in &facts {
-            let new_fact = NewKeyFact {
-                card_name: "char",
-                summary_id: Some(summary_id),
-                key: &f.key,
-                value: &f.value,
-                created_at: &now,
+            let new_fact = entities::conversation_keyfacts::ActiveModel {
+                card_name: sea_orm::ActiveValue::Set("char".to_string()),
+                summary_id: sea_orm::ActiveValue::Set(Some(summary_id)),
+                key: sea_orm::ActiveValue::Set(f.key.clone()),
+                value: sea_orm::ActiveValue::Set(f.value.clone()),
+                created_at: sea_orm::ActiveValue::Set(now.clone()),
+                ..Default::default()
             };
-            diesel::insert_into(crate::schema::conversation_keyfacts::table)
-                .values(&new_fact)
-                .execute(&mut *conn)
-                .unwrap();
+            use sea_orm::ActiveModelTrait;
+            new_fact.insert(&store.db).await.unwrap();
         }
-        drop(conn);
 
-        let all_facts = store.get_all_keyfacts("char").unwrap();
+        let all_facts = store.get_all_keyfacts("char").await.unwrap();
         assert_eq!(all_facts.len(), 2);
         assert_eq!(all_facts[0].key, "food");
         assert_eq!(all_facts[1].key, "job");
 
-        store.upsert_keyfact("char", "food", "sushi").unwrap();
-        let all_facts = store.get_all_keyfacts("char").unwrap();
+        store.upsert_keyfact("char", "food", "sushi").await.unwrap();
+        let all_facts = store.get_all_keyfacts("char").await.unwrap();
         let food_fact = all_facts.iter().find(|f| f.key == "food").unwrap();
         assert_eq!(food_fact.value, "sushi");
 
-        store.delete_keyfact("char", "food").unwrap();
-        let all_facts = store.get_all_keyfacts("char").unwrap();
+        store.delete_keyfact("char", "food").await.unwrap();
+        let all_facts = store.get_all_keyfacts("char").await.unwrap();
         assert_eq!(all_facts.len(), 1);
     }
 
-    #[test]
-    fn test_delete_summary_cascades() {
-        let store = MemoryStore::open_in_memory(4).unwrap();
+    #[tokio::test]
+    async fn test_delete_summary_cascades() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
         let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
         let summary_id = store
             .insert_summary("s1", "char", "Summary", &[], &emb, Utc::now())
+            .await
             .unwrap();
 
         let now = Utc::now().to_rfc3339();
-        let mut conn = store.pool.get().unwrap();
-        let new_fact = NewKeyFact {
-            card_name: "char",
-            summary_id: Some(summary_id),
-            key: "job",
-            value: "engineer",
-            created_at: &now,
+        let new_fact = entities::conversation_keyfacts::ActiveModel {
+            card_name: sea_orm::ActiveValue::Set("char".to_string()),
+            summary_id: sea_orm::ActiveValue::Set(Some(summary_id)),
+            key: sea_orm::ActiveValue::Set("job".to_string()),
+            value: sea_orm::ActiveValue::Set("engineer".to_string()),
+            created_at: sea_orm::ActiveValue::Set(now.clone()),
+            ..Default::default()
         };
-        diesel::insert_into(crate::schema::conversation_keyfacts::table)
-            .values(&new_fact)
-            .execute(&mut *conn)
-            .unwrap();
-        drop(conn);
+        use sea_orm::ActiveModelTrait;
+        new_fact.insert(&store.db).await.unwrap();
 
-        store.delete_summary(summary_id).unwrap();
-        assert_eq!(store.count_summaries("char").unwrap(), 0);
-        assert_eq!(store.count_keyfacts("char").unwrap(), 0);
+        store.delete_summary(summary_id).await.unwrap();
+        assert_eq!(store.count_summaries("char").await.unwrap(), 0);
+        assert_eq!(store.count_keyfacts("char").await.unwrap(), 0);
     }
 
-    #[test]
-    fn test_insert_summary_with_empty_value_deletes_keyfact() {
-        let store = MemoryStore::open_in_memory(4).unwrap();
+    #[tokio::test]
+    async fn test_insert_summary_with_empty_value_deletes_keyfact() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
         let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
         let summary_id = store
             .insert_summary("s1", "char", "Summary", &[], &emb, Utc::now())
+            .await
             .unwrap();
 
         let now = Utc::now().to_rfc3339();
-        let mut conn = store.pool.get().unwrap();
         for (k, v) in &[("job", "engineer"), ("hobby", "guitar")] {
-            let new_fact = NewKeyFact {
-                card_name: "char",
-                summary_id: Some(summary_id),
-                key: k,
-                value: v,
-                created_at: &now,
+            let new_fact = entities::conversation_keyfacts::ActiveModel {
+                card_name: sea_orm::ActiveValue::Set("char".to_string()),
+                summary_id: sea_orm::ActiveValue::Set(Some(summary_id)),
+                key: sea_orm::ActiveValue::Set(k.to_string()),
+                value: sea_orm::ActiveValue::Set(v.to_string()),
+                created_at: sea_orm::ActiveValue::Set(now.clone()),
+                ..Default::default()
             };
-            diesel::insert_into(crate::schema::conversation_keyfacts::table)
-                .values(&new_fact)
-                .execute(&mut *conn)
-                .unwrap();
+            use sea_orm::ActiveModelTrait;
+            new_fact.insert(&store.db).await.unwrap();
         }
-        drop(conn);
 
-        assert_eq!(store.get_all_keyfacts("char").unwrap().len(), 2);
+        assert_eq!(store.get_all_keyfacts("char").await.unwrap().len(), 2);
 
         let emb2 = vec![0.0_f32, 1.0, 0.0, 0.0];
         store
@@ -863,17 +854,18 @@ mod tests {
                 &emb2,
                 Utc::now(),
             )
+            .await
             .unwrap();
 
-        let all_facts = store.get_all_keyfacts("char").unwrap();
+        let all_facts = store.get_all_keyfacts("char").await.unwrap();
         assert_eq!(all_facts.len(), 1);
         assert_eq!(all_facts[0].key, "job");
         assert_eq!(all_facts[0].value, "designer");
     }
 
-    #[test]
-    fn test_tool_embedding_field_upsert_and_list() {
-        let store = MemoryStore::open_in_memory(4).unwrap();
+    #[tokio::test]
+    async fn test_tool_embedding_field_upsert_and_list() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
         let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
 
         store
@@ -886,6 +878,7 @@ mod tests {
                 &emb,
                 "desc text",
             )
+            .await
             .unwrap();
         store
             .upsert_tool_embedding_field(
@@ -897,6 +890,7 @@ mod tests {
                 &emb,
                 "sum text",
             )
+            .await
             .unwrap();
         store
             .upsert_tool_embedding_field(
@@ -908,6 +902,7 @@ mod tests {
                 &emb,
                 "neg text",
             )
+            .await
             .unwrap();
         store
             .upsert_tool_embedding_field(
@@ -919,9 +914,10 @@ mod tests {
                 &emb,
                 "other desc",
             )
+            .await
             .unwrap();
 
-        let rows = store.list_tool_embedding_fields().unwrap();
+        let rows = store.list_tool_embedding_fields().await.unwrap();
         assert_eq!(rows.len(), 4);
         let web_rows: Vec<_> = rows
             .iter()
@@ -948,8 +944,9 @@ mod tests {
                 &emb2,
                 "sum text v2",
             )
+            .await
             .unwrap();
-        let rows = store.list_tool_embedding_fields().unwrap();
+        let rows = store.list_tool_embedding_fields().await.unwrap();
         let web_summary = rows
             .iter()
             .find(|(n, f, _, _, _, _, _)| n == "web_search" && f == "summary")
@@ -959,14 +956,15 @@ mod tests {
         assert_eq!(web_summary.6, "sum text v2");
     }
 
-    #[test]
-    fn test_delete_tool_embeddings_cascades() {
-        let store = MemoryStore::open_in_memory(4).unwrap();
+    #[tokio::test]
+    async fn test_delete_tool_embeddings_cascades() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
         let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
 
         for field in ["summary", "description", "negative"] {
             store
                 .upsert_tool_embedding_field("web_search", field, "", "hash", "", &emb, "text")
+                .await
                 .unwrap();
         }
         store
@@ -979,11 +977,12 @@ mod tests {
                 &emb,
                 "keep text",
             )
+            .await
             .unwrap();
 
-        assert_eq!(store.list_tool_embedding_fields().unwrap().len(), 4);
-        let deleted = store.delete_tool_embeddings("web_search").unwrap();
+        assert_eq!(store.list_tool_embedding_fields().await.unwrap().len(), 4);
+        let deleted = store.delete_tool_embeddings("web_search").await.unwrap();
         assert_eq!(deleted, 3);
-        assert_eq!(store.list_tool_embedding_fields().unwrap().len(), 1);
+        assert_eq!(store.list_tool_embedding_fields().await.unwrap().len(), 1);
     }
 }

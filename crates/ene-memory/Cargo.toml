@@ -12,8 +12,8 @@ ene-provider = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
-diesel = { workspace = true }
-diesel_migrations = { workspace = true }
+sea-orm = { workspace = true }
+sea-orm-migration = { workspace = true }
 sqlite-vec = { workspace = true }
 libsqlite3-sys = { workspace = true }
 uuid = { workspace = true }

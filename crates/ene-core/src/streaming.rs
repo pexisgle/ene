@@ -298,21 +298,18 @@ pub(crate) async fn fetch_memory_context(
     let card_name = session.card_name().to_string();
     let pending_embedding = pending_embedding.clone();
 
-    tokio::task::spawn_blocking(move || {
-        store
-            .recall_context(
-                &card_name,
-                &pending_embedding,
-                session_config.recall_limit,
-                mem_config.similarity_threshold,
-            )
-            .unwrap_or_else(|e| {
-                tracing::error!("[Memory] Context recall error: {}", e);
-                (vec![], vec![])
-            })
-    })
-    .await
-    .unwrap_or_else(|_| (vec![], vec![]))
+    store
+        .recall_context(
+            &card_name,
+            &pending_embedding,
+            session_config.recall_limit,
+            mem_config.similarity_threshold,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("[Memory] Context recall error: {}", e);
+            (vec![], vec![])
+        })
 }
 
 /// Builds the full list of chat completion request messages for the AI stream.

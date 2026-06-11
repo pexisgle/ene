@@ -9,9 +9,9 @@ pub enum EneMemoryError {
         /// The environment variable name for the base URL.
         env_var: String,
     },
-    /// Diesel/sqlite error from the memory store.
+    /// SeaORM error from the memory store.
     #[error("Memory store error: {0}")]
-    MemoryStoreError(#[from] diesel::result::Error),
+    MemoryStoreError(#[from] sea_orm::DbErr),
     /// Failed to connect to the memory store.
     #[error("Memory store connection error: {0}")]
     MemoryStoreConnectionError(String),
