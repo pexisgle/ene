@@ -18,6 +18,10 @@ mod tray;
 use bevy::asset::AssetPlugin;
 use bevy::light::DirectionalLightShadowMap;
 use bevy::prelude::*;
+use bevy::render::{
+    RenderPlugin,
+    settings::{Backends, RenderCreation, WgpuSettings},
+};
 use bevy::winit::WinitSettings;
 use bevy_egui::EguiPlugin;
 use bevy_vrm1::prelude::*;
@@ -31,6 +35,11 @@ use settings_ui::SettingsUiPlugin;
 use tray::TrayPlugin;
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        std::env::set_var("WGPU_DX12_PRESENTATION_SYSTEM", "DxgiFromVisual");
+    }
+
     #[cfg(target_os = "linux")]
     if let Err(err) = gtk::init() {
         panic!("Failed to initialize GTK: {err}");
@@ -48,13 +57,16 @@ fn main() {
         .insert_resource(DirectionalLightShadowMap {
             size: DEFAULT_SHADOW_QUALITY.shadow_map_size(),
         })
-        .insert_resource(ClearColor(Color::NONE))
+        .insert_resource(clear_color())
         .insert_resource(WinitSettings::desktop_app())
         .add_plugins((
-            DefaultPlugins.set(window_plugin()).set(AssetPlugin {
-                file_path: assets_dir.to_string_lossy().into(),
-                ..default()
-            }),
+            DefaultPlugins
+                .set(window_plugin())
+                .set(render_plugin())
+                .set(AssetPlugin {
+                    file_path: assets_dir.to_string_lossy().into(),
+                    ..default()
+                }),
             EguiPlugin::default(),
             VrmPlugin,
             VrmaPlugin,
@@ -66,4 +78,31 @@ fn main() {
             CharacterDragPlugin,
         ))
         .run();
+}
+
+#[cfg(target_os = "windows")]
+fn clear_color() -> ClearColor {
+    ClearColor(Color::NONE)
+}
+
+fn render_plugin() -> RenderPlugin {
+    #[cfg(target_os = "windows")]
+    {
+        RenderPlugin {
+            render_creation: RenderCreation::Automatic(WgpuSettings {
+                backends: Some(Backends::DX12),
+                ..default()
+            }),
+            ..default()
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        RenderPlugin::default()
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clear_color() -> ClearColor {
+    ClearColor(Color::NONE)
 }

@@ -170,6 +170,7 @@ fn bootstrap_primary_window_presentation(
     window
         .resolution
         .set_physical_resolution(target_size.x, target_size.y);
+
     bootstrap.applied = true;
 }
 

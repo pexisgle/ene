@@ -1,8 +1,5 @@
 use bevy::prelude::*;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 use bevy::window::CompositeAlphaMode;
-#[cfg(target_os = "windows")]
-use bevy::window::PresentMode;
 use bevy::window::{WindowLevel, WindowMode, WindowPlugin, WindowResolution};
 use ene_core::RequestId;
 use ene_tool_proto::UserInputPrompt;
@@ -170,9 +167,9 @@ pub fn window_plugin() -> WindowPlugin {
             decorations: false,
             transparent: true,
             #[cfg(target_os = "windows")]
-            mode: WindowMode::Windowed,
+            composite_alpha_mode: CompositeAlphaMode::PreMultiplied,
             #[cfg(target_os = "windows")]
-            present_mode: PresentMode::Mailbox,
+            mode: WindowMode::Windowed,
             #[cfg(not(target_os = "windows"))]
             mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
             #[cfg(target_os = "macos")]
