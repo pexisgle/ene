@@ -197,8 +197,7 @@ impl ToolRag {
         let cached = match store.list_tool_embedding_fields().await {
             Ok(entries) => {
                 // Key: (tool_name, field, field_key) → (version_hash, model_name)
-                let mut map: HashMap<(String, String, String), (String, String)> =
-                    HashMap::new();
+                let mut map: HashMap<(String, String, String), (String, String)> = HashMap::new();
                 for (name, field, fkey, hash, model, _emb, _src) in entries {
                     map.insert((name, field, fkey), (hash, model));
                 }
@@ -235,7 +234,8 @@ impl ToolRag {
                         &model_name,
                         &emb,
                         &summary_text,
-                    ).await?;
+                    )
+                    .await?;
                     indexed += 1;
                 } else {
                     reused += 1;
@@ -261,7 +261,8 @@ impl ToolRag {
                         &model_name,
                         &emb,
                         &desc_text,
-                    ).await?;
+                    )
+                    .await?;
                     indexed += 1;
                 } else {
                     reused += 1;
@@ -287,7 +288,8 @@ impl ToolRag {
                         &model_name,
                         &emb,
                         &neg_text,
-                    ).await?;
+                    )
+                    .await?;
                     indexed += 1;
                 } else {
                     reused += 1;
@@ -314,7 +316,8 @@ impl ToolRag {
                         &model_name,
                         &emb,
                         &ex_text,
-                    ).await?;
+                    )
+                    .await?;
                     indexed += 1;
                 } else {
                     reused += 1;
@@ -376,16 +379,17 @@ impl ToolRag {
         };
 
         // 3. Load all tool embeddings from the store.
-        let field_rows: Vec<(String, String, String, Vec<f32>)> = match store.list_tool_embedding_fields().await {
-            Ok(rows) => rows
-                .into_iter()
-                .map(|(name, field, fkey, _hash, _model, emb, _src)| (name, field, fkey, emb))
-                .collect(),
-            Err(e) => {
-                tracing::warn!("[ToolRag] Could not load embeddings: {}", e);
-                Vec::new()
-            }
-        };
+        let field_rows: Vec<(String, String, String, Vec<f32>)> =
+            match store.list_tool_embedding_fields().await {
+                Ok(rows) => rows
+                    .into_iter()
+                    .map(|(name, field, fkey, _hash, _model, emb, _src)| (name, field, fkey, emb))
+                    .collect(),
+                Err(e) => {
+                    tracing::warn!("[ToolRag] Could not load embeddings: {}", e);
+                    Vec::new()
+                }
+            };
 
         // 4. Group by tool, compute weighted similarity.
         let w = &self.opts.weights;
@@ -527,9 +531,7 @@ impl ToolRag {
             None => return ToolRagStats::default(),
         };
 
-        let fields = store.list_tool_embedding_fields()
-            .await
-            .unwrap_or_default();
+        let fields = store.list_tool_embedding_fields().await.unwrap_or_default();
 
         let total_fields = fields.len();
         let mut by_tool: HashMap<String, Vec<String>> = HashMap::new();

@@ -3,9 +3,8 @@ use crate::error::MemoryError;
 use crate::migrator::Migrator;
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ColumnTrait, ConnectOptions, Database, DatabaseConnection, EntityTrait,
-    FromQueryResult, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
-    PaginatorTrait, ConnectionTrait,
+    ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, EntityTrait,
+    FromQueryResult, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 
 use sea_orm::sea_query::{Expr, OnConflict};
@@ -206,11 +205,16 @@ impl MemoryStore {
                     for fact in key_facts {
                         if fact.value.is_empty() {
                             entities::conversation_keyfacts::Entity::delete_many()
-                                .filter(entities::conversation_keyfacts::Column::CardName.eq(&card_name))
+                                .filter(
+                                    entities::conversation_keyfacts::Column::CardName
+                                        .eq(&card_name),
+                                )
                                 .filter(entities::conversation_keyfacts::Column::Key.eq(&fact.key))
                                 .exec(txn)
                                 .await
-                                .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+                                .map_err(|e| {
+                                    MemoryError::MemoryStoreConnectionError(e.to_string())
+                                })?;
                         } else {
                             let new_fact = entities::conversation_keyfacts::ActiveModel {
                                 card_name: Set(card_name.clone()),
@@ -220,10 +224,9 @@ impl MemoryStore {
                                 created_at: Set(now.clone()),
                                 ..Default::default()
                             };
-                            new_fact
-                                .insert(txn)
-                                .await
-                                .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+                            new_fact.insert(txn).await.map_err(|e| {
+                                MemoryError::MemoryStoreConnectionError(e.to_string())
+                            })?;
                         }
                     }
 
@@ -232,7 +235,9 @@ impl MemoryStore {
             })
             .await
             .map_err(|e| match e {
-                sea_orm::TransactionError::Connection(db_err) => MemoryError::MemoryStoreError(db_err),
+                sea_orm::TransactionError::Connection(db_err) => {
+                    MemoryError::MemoryStoreError(db_err)
+                }
                 sea_orm::TransactionError::Transaction(e) => e,
             })?;
 
@@ -502,7 +507,10 @@ impl MemoryStore {
         let role = role.to_string();
         let content = content.to_string();
         tokio::spawn(async move {
-            if let Err(e) = store.insert_log(&session_id, &card_name, &role, &content).await {
+            if let Err(e) = store
+                .insert_log(&session_id, &card_name, &role, &content)
+                .await
+            {
                 tracing::error!("[Memory] Failed to save {} log: {}", role, e);
             }
         });
@@ -585,7 +593,9 @@ impl MemoryStore {
     }
 
     /// Lists all stored tool embeddings, one row per (`tool_name`, field, `field_key`, `model_name`).
-    pub async fn list_tool_embedding_fields(&self) -> Result<Vec<ToolEmbeddingFieldRow>, MemoryError> {
+    pub async fn list_tool_embedding_fields(
+        &self,
+    ) -> Result<Vec<ToolEmbeddingFieldRow>, MemoryError> {
         let rows = entities::tool_embedding_index::Entity::find()
             .all(&self.db)
             .await
@@ -728,7 +738,10 @@ mod tests {
             .await
             .unwrap();
 
-        let results = store.search_summaries(&emb_a, "char", 5, 0.5).await.unwrap();
+        let results = store
+            .search_summaries(&emb_a, "char", 5, 0.5)
+            .await
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].entry.summary, "Summary A");
         assert!((results[0].similarity - 1.0).abs() < 1e-5);
@@ -755,7 +768,7 @@ mod tests {
             },
         ];
         let now = Utc::now().to_rfc3339();
-        
+
         for f in &facts {
             let new_fact = entities::conversation_keyfacts::ActiveModel {
                 card_name: sea_orm::ActiveValue::Set("char".to_string()),

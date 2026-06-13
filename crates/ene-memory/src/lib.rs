@@ -27,14 +27,14 @@
 
 /// Memory configuration types.
 pub mod config;
-/// Memory-related error types.
-pub mod error;
-/// Summary recall and prompt formatting utilities.
-pub mod recall;
 /// SeaORM entities representation.
 pub mod entities;
+/// Memory-related error types.
+pub mod error;
 /// SeaORM schema migrations.
 pub mod migrator;
+/// Summary recall and prompt formatting utilities.
+pub mod recall;
 /// Core memory store (`SQLite` + sqlite-vec).
 pub mod store;
 /// LLM-driven conversation summarization.

@@ -941,9 +941,11 @@ impl EneActor {
         let mem_config = self.config.get_section::<ene_memory::MemoryConfig>()?;
 
         if mem_config.enabled {
-            let store = init_memory_store(&self.config, &*embedder).await.map_err(|e| {
-                EneCoreError::Memory(ene_memory::MemoryError::MemoryStoreConnectionError(e))
-            })?;
+            let store = init_memory_store(&self.config, &*embedder)
+                .await
+                .map_err(|e| {
+                    EneCoreError::Memory(ene_memory::MemoryError::MemoryStoreConnectionError(e))
+                })?;
             self.session.memory.memory_store = Some(store);
         }
 

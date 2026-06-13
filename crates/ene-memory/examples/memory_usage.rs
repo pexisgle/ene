@@ -63,7 +63,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Upsert a fact
-    store.upsert_keyfact(card_name, "favorite_color", "green").await?;
+    store
+        .upsert_keyfact(card_name, "favorite_color", "green")
+        .await?;
     let facts = store.get_all_keyfacts(card_name).await?;
     println!(
         "\nAfter upsert - favorite_color = {}",
