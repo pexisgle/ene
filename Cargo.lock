@@ -2123,8 +2123,6 @@ dependencies = [
 [[package]]
 name = "bevy_winit"
 version = "0.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2de1c13d32ab8528435b58eca7ab874a1068184c6d6f266ee11433ae99d4069"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -11455,6 +11453,16 @@ dependencies = [
  "sha1",
  "thiserror 2.0.18",
  "utf-8",
+]
+
+[[package]]
+name = "tw-test"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "log",
+ "raw-window-handle",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

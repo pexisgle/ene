@@ -110,3 +110,6 @@ strip = "debuginfo"
 # workspace manifests cannot carry `[dev-dependencies]`.
 [workspace.metadata.cargo-husky]
 run-for-all = true
+
+[patch.crates-io]
+bevy_winit = { path = "patches/bevy_winit" }
