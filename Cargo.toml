@@ -83,6 +83,19 @@ ego-tree = "0.11"
 # --- Cross-cutting (used by 2+ crates) ---
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 
+# --- Rendering stack (ene-desktop-v2: winit + wgpu + egui) ---
+winit = "0.30"
+wgpu = "27"
+egui = "0.33"
+egui-wgpu = "0.33"
+egui-winit = "0.33"
+glam = { version = "0.29", features = ["bytemuck"] }
+gltf = "1.4"
+encase = "0.12"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+raw-window-handle = "0.6"
+
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]
 opt-level = 1
@@ -110,6 +123,3 @@ strip = "debuginfo"
 # workspace manifests cannot carry `[dev-dependencies]`.
 [workspace.metadata.cargo-husky]
 run-for-all = true
-
-[patch.crates-io]
-bevy_winit = { path = "patches/bevy_winit" }
