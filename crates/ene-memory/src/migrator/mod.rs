@@ -30,12 +30,36 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(ConversationSummaries::SessionId).string().not_null())
-                    .col(ColumnDef::new(ConversationSummaries::CardName).string().not_null())
-                    .col(ColumnDef::new(ConversationSummaries::Summary).string().not_null())
-                    .col(ColumnDef::new(ConversationSummaries::Embedding).blob().not_null())
-                    .col(ColumnDef::new(ConversationSummaries::CreatedAt).string().not_null())
-                    .col(ColumnDef::new(ConversationSummaries::EndedAt).string().not_null())
+                    .col(
+                        ColumnDef::new(ConversationSummaries::SessionId)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ConversationSummaries::CardName)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ConversationSummaries::Summary)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ConversationSummaries::Embedding)
+                            .blob()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ConversationSummaries::CreatedAt)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ConversationSummaries::EndedAt)
+                            .string()
+                            .not_null(),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -73,11 +97,31 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(ConversationKeyFacts::CardName).string().not_null())
-                    .col(ColumnDef::new(ConversationKeyFacts::SummaryId).integer().null())
-                    .col(ColumnDef::new(ConversationKeyFacts::Key).string().not_null())
-                    .col(ColumnDef::new(ConversationKeyFacts::Value).string().not_null())
-                    .col(ColumnDef::new(ConversationKeyFacts::CreatedAt).string().not_null())
+                    .col(
+                        ColumnDef::new(ConversationKeyFacts::CardName)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ConversationKeyFacts::SummaryId)
+                            .integer()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(ConversationKeyFacts::Key)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ConversationKeyFacts::Value)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ConversationKeyFacts::CreatedAt)
+                            .string()
+                            .not_null(),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -116,11 +160,27 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(ConversationLogs::SessionId).string().not_null())
-                    .col(ColumnDef::new(ConversationLogs::CardName).string().not_null())
+                    .col(
+                        ColumnDef::new(ConversationLogs::SessionId)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ConversationLogs::CardName)
+                            .string()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(ConversationLogs::Role).string().not_null())
-                    .col(ColumnDef::new(ConversationLogs::Content).string().not_null())
-                    .col(ColumnDef::new(ConversationLogs::CreatedAt).string().not_null())
+                    .col(
+                        ColumnDef::new(ConversationLogs::Content)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ConversationLogs::CreatedAt)
+                            .string()
+                            .not_null(),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -148,15 +208,27 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(ToolEmbeddingIndex::ToolName).string().not_null())
-                    .col(ColumnDef::new(ToolEmbeddingIndex::Field).string().not_null())
+                    .col(
+                        ColumnDef::new(ToolEmbeddingIndex::ToolName)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ToolEmbeddingIndex::Field)
+                            .string()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(ToolEmbeddingIndex::FieldKey)
                             .string()
                             .not_null()
                             .default(""),
                     )
-                    .col(ColumnDef::new(ToolEmbeddingIndex::VersionHash).string().not_null())
+                    .col(
+                        ColumnDef::new(ToolEmbeddingIndex::VersionHash)
+                            .string()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(ToolEmbeddingIndex::ModelName)
                             .string()
@@ -169,8 +241,16 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default(""),
                     )
-                    .col(ColumnDef::new(ToolEmbeddingIndex::Embedding).blob().not_null())
-                    .col(ColumnDef::new(ToolEmbeddingIndex::CreatedAt).string().not_null())
+                    .col(
+                        ColumnDef::new(ToolEmbeddingIndex::Embedding)
+                            .blob()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ToolEmbeddingIndex::CreatedAt)
+                            .string()
+                            .not_null(),
+                    )
                     .check(Expr::col(ToolEmbeddingIndex::Field).is_in([
                         "summary",
                         "description",

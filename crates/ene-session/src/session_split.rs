@@ -241,8 +241,9 @@ pub async fn execute_split(
             Role::Assistant => "assistant",
             _ => "system",
         };
-        if let Err(e) =
-            store.insert_log(&session_id_clone, &card_name_clone, role_str, content).await
+        if let Err(e) = store
+            .insert_log(&session_id_clone, &card_name_clone, role_str, content)
+            .await
         {
             tracing::error!("[Session] Failed to save log: {}", e);
         }
@@ -285,15 +286,16 @@ pub async fn execute_split(
     let summary = summary_result.summary.clone();
     let facts = summary_result.key_facts.clone();
 
-    store.insert_summary(
-        &session_id_clone,
-        &card_name_clone,
-        &summary,
-        &facts,
-        &summary_embedding,
-        ended_at,
-    )
-    .await?;
+    store
+        .insert_summary(
+            &session_id_clone,
+            &card_name_clone,
+            &summary,
+            &facts,
+            &summary_embedding,
+            ended_at,
+        )
+        .await?;
 
     let new_session_id = generate_session_id();
 

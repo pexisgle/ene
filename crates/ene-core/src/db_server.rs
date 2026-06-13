@@ -19,11 +19,11 @@ use ene_memory::entities::tool_schemas;
 use ene_tool_db::{
     DbErrorCode, DbFilter, DbOrderBy, DbRequest, DbResponse, DbSchema, DbTable, DbValue, Row,
 };
-use sea_orm::{
-    ConnectOptions, Database, DatabaseBackend, DatabaseConnection, Statement,
-    ConnectionTrait, EntityTrait,
-};
 use sea_orm::sea_query::{Alias, Condition, Expr, Query, SqliteQueryBuilder};
+use sea_orm::{
+    ConnectOptions, ConnectionTrait, Database, DatabaseBackend, DatabaseConnection, EntityTrait,
+    Statement,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info, warn};
@@ -260,7 +260,18 @@ impl DbIpcServer {
                 order_by,
                 limit,
             } => {
-                match Self::handle_select(db, declared_tables, declared_columns, &table, columns, filter, order_by, limit).await {
+                match Self::handle_select(
+                    db,
+                    declared_tables,
+                    declared_columns,
+                    &table,
+                    columns,
+                    filter,
+                    order_by,
+                    limit,
+                )
+                .await
+                {
                     Ok(rows) => DbResponse::Select { rows },
                     Err(e) => e.to_error_response(),
                 }
@@ -443,7 +454,7 @@ impl DbIpcServer {
         let fingerprint = blake3::hash(schema_json.as_bytes()).to_hex().to_string();
 
         let mut created_indexes = Vec::new();
-        
+
         // Use SeaORM ActiveModel to insert into tool_schemas
         let active_model = tool_schemas::ActiveModel {
             prefix: sea_orm::ActiveValue::Set(prefix.to_string()),
@@ -475,9 +486,12 @@ impl DbIpcServer {
             for index in &schema.indexes {
                 if index.table == table.name {
                     let create_index_sql = Self::build_create_index_sql(index);
-                    db.execute(Statement::from_string(DatabaseBackend::Sqlite, create_index_sql))
-                        .await
-                        .map_err(|e| DbServerError::Internal(e.to_string()))?;
+                    db.execute(Statement::from_string(
+                        DatabaseBackend::Sqlite,
+                        create_index_sql,
+                    ))
+                    .await
+                    .map_err(|e| DbServerError::Internal(e.to_string()))?;
                     created_indexes.push(index.name.clone());
                 }
             }
@@ -636,9 +650,8 @@ impl DbIpcServer {
             .values(values)
             .map_err(|e| DbServerError::Internal(e.to_string()))?;
 
-        let mut on_conflict = sea_orm::sea_query::OnConflict::columns(
-            conflict_columns.iter().map(Alias::new)
-        );
+        let mut on_conflict =
+            sea_orm::sea_query::OnConflict::columns(conflict_columns.iter().map(Alias::new));
 
         let update_cols: Vec<Alias> = columns
             .iter()
@@ -862,7 +875,8 @@ impl DbIpcServer {
     }
 
     async fn handle_last_insert_rowid(db: &DatabaseConnection) -> Result<i64, DbServerError> {
-        let stmt = Statement::from_string(DatabaseBackend::Sqlite, "SELECT last_insert_rowid() AS id");
+        let stmt =
+            Statement::from_string(DatabaseBackend::Sqlite, "SELECT last_insert_rowid() AS id");
         let res = db
             .query_one(stmt)
             .await
@@ -895,24 +909,18 @@ impl DbIpcServer {
                 let inner = Self::build_sea_query_filter(f)?;
                 Ok(Condition::all().not().add(inner))
             }
-            DbFilter::Eq { column, value } => Ok(Condition::all().add(
-                Expr::col(Alias::new(column)).eq(Self::db_value_to_sea_value(value)),
-            )),
-            DbFilter::Ne { column, value } => Ok(Condition::all().add(
-                Expr::col(Alias::new(column)).ne(Self::db_value_to_sea_value(value)),
-            )),
-            DbFilter::Lt { column, value } => Ok(Condition::all().add(
-                Expr::col(Alias::new(column)).lt(Self::db_value_to_sea_value(value)),
-            )),
-            DbFilter::Le { column, value } => Ok(Condition::all().add(
-                Expr::col(Alias::new(column)).lte(Self::db_value_to_sea_value(value)),
-            )),
-            DbFilter::Gt { column, value } => Ok(Condition::all().add(
-                Expr::col(Alias::new(column)).gt(Self::db_value_to_sea_value(value)),
-            )),
-            DbFilter::Ge { column, value } => Ok(Condition::all().add(
-                Expr::col(Alias::new(column)).gte(Self::db_value_to_sea_value(value)),
-            )),
+            DbFilter::Eq { column, value } => Ok(Condition::all()
+                .add(Expr::col(Alias::new(column)).eq(Self::db_value_to_sea_value(value)))),
+            DbFilter::Ne { column, value } => Ok(Condition::all()
+                .add(Expr::col(Alias::new(column)).ne(Self::db_value_to_sea_value(value)))),
+            DbFilter::Lt { column, value } => Ok(Condition::all()
+                .add(Expr::col(Alias::new(column)).lt(Self::db_value_to_sea_value(value)))),
+            DbFilter::Le { column, value } => Ok(Condition::all()
+                .add(Expr::col(Alias::new(column)).lte(Self::db_value_to_sea_value(value)))),
+            DbFilter::Gt { column, value } => Ok(Condition::all()
+                .add(Expr::col(Alias::new(column)).gt(Self::db_value_to_sea_value(value)))),
+            DbFilter::Ge { column, value } => Ok(Condition::all()
+                .add(Expr::col(Alias::new(column)).gte(Self::db_value_to_sea_value(value)))),
             DbFilter::In { column, values } => {
                 let sea_vals: Vec<sea_orm::Value> =
                     values.iter().map(Self::db_value_to_sea_value).collect();
