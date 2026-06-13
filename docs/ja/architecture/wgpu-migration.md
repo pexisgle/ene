@@ -1,20 +1,49 @@
 # `ene-desktop`: Bevy → wgpu / winit / egui 移行プラン
 
-> **ステータス:** 承認済み設計 — 未実装。
-> **スコープ:** `apps/ene-desktop` と新設する `crates/ene-vrm` クレート。`ene-core`, `ene-memory`, `ene-cli`, ツールバイナリは変更しない。
+> **ステータス:** 承認済み設計 — 部分実装済み。
+> **スコープ:** `apps/ene-desktop-v2` (新設、winit + wgpu) と `crates/ene-vrm` (新設、スタブ)、および既存 Bevy ベースの `apps/ene-desktop` (移行中、依然として残置)。`ene-core`, `ene-memory`, `ene-cli`, ツールバイナリは変更しない。
 > **担当 / 推進:** 未定
 > **到達目標:** デスクトップアプリの長年の 2 件の不具合を解消し、我々が完全に所有するスリムで保守性の高い描画スタックを実現する。
 
 ---
 
+## 0. 現在の実装状況
+
+本ドキュメントは移行の **設計プラン** である。以下の表は執筆時点でディスク上に実際にあるものをまとめたもので、読者がワークスペースを diff しなくてもどのフェーズが降りているか把握できるようにしている。
+
+| フェーズ | プラン参照 | 状態 | メモ |
+|----------|------------|------|------|
+| **PR0 — `ene-desktop-v2` スケフォールド + Windows 透過スモーク** | §22.3 | **出荷済み** | `apps/ene-desktop-v2/` (`main.rs`, `gpu.rs`, `runtime.rs` の 3 ファイル、約 330 行) が当初計画した 7 モジュール分割を置換済み。単一の透過ウィンドウと赤矩形レンダラ、`Space` で透過切替、`Escape` で終了。開発者の Windows 機での動作確認済み。 |
+| **PR1 ステップ 1 — `ene-vrm` クレートのスケルトン** | §4 PR1 / ステップ 2 | **出荷済み** | `crates/ene-vrm/{Cargo.toml, src/lib.rs}` を空の `pub fn version()` スタブとユニットテスト 1 件で作成済み。`gltf` / `wgpu` / `winit` の依存はまだ追加していない。 |
+| **PR1 ステップ 3〜8 — `apps/ene-desktop` から Bevy を剥がし winit ウィンドウ・トレイ・AI ブリッジを移植** | §4 PR1 / ステップ 3〜8 | **未着手** | 既存 `apps/ene-desktop` は Bevy 0.18 のまま無修正。`apps/tw-test` と `patches/bevy_winit/` も依然として存在する。 |
+| **PR2 — egui 統合 + 設定ウィンドウ** | §4 PR2 | **未着手** | — |
+| **PR3 — `ene-vrm` 静的描画 (MToon + スキニング)** | §4 PR3 | **未着手** | — |
+| **PR4 — 表情、LookAt、BodyTracking** | §4 PR4 | **未着手** | — |
+| **PR5+ — VRMA、Spring Bone、FXAA/SMAA、ドラッグ改善** | §4 PR5+ | **未着手** | — |
+
+### 0.1 2 つのデスクトップアプリの共存
+
+PR1 の「スケルトン差し替え」ステップ 3 が完了するまでの間、両バイナリが並行してビルドされる:
+
+- **`apps/ene-desktop`** — 既存 Bevy 0.18 ビルド。依然としてユーザ向けデスクトップアプリ。`bevy`, `bevy_egui`, `bevy_vrm1`、ローカルの `patches/bevy_winit` パッチ、Linux では `tray-icon`, `gtk`, `wayland-client` に依存している。PR1 ステップ 3 まで本移行では **変更しない**。
+- **`apps/ene-desktop-v2`** — 新設クレート、既存のものと並列に配置。`winit` + `wgpu` 27 で単一の透過ウィンドウとハードコード赤矩形を描画する。**`cargo run -p ene-desktop-v2`** で起動。
+
+PR1 完了後、`apps/ene-desktop` は削除され、`apps/ene-desktop-v2` のソース群を `apps/ene-desktop` に移動する。移行プラン (§4) では「PR1 が削除ステップ」と明記されている。それまでは両者を並行コードベースとして扱う。
+
+### 0.2 レシピの実証場所
+
+PR0 が出荷した透過レシピは、ワークスペースに依然として残っている `apps/tw-test` (独立した Bevy 0.18 テストベッド) と同じものである。相互参照は §22.3 末尾に記載。ファイル自体は PR1 ステップ 3 でクリーンアップされるまで残置。
+
+---
+
 ## 1. 背景と動機
 
-現在の `ene-desktop` は Bevy 0.18 (`bevy_winit`, `bevy_egui`, `bevy_vrm1`, …) の上に構築されている。2 件の具体的なバグにより、サポート対象の 2 つのプラットフォームの少なくとも一方で本番ビルドが使い物にならない。
+現在の `ene-desktop` は Bevy 0.18 (`bevy_winit`, `bevy_egui`, `bevy_vrm1`, …) の上に構築されている。2 件の具体的なバグにより、Windows で本番ビルドが使い物にならない。
 
 | # | バグ | トリガー | 影響 |
 |---|------|---------|------|
-| B1 | egui の入力 / 描画が壊れる | Windows + `WGPU_DX12_PRESENTATION_SYSTEM=DxgiFromVisual`(ウィンドウ単位アルファ取得のため必須) | egui パネルの位置がずれる、クリップ矩形が壊れる、ポインタ追跡が誤る。現状は環境変数を未設定にしてウィンドウ透過がピクセルパーフェクトでないことを許容するワークアラウンド。 |
-| B2 | ウィンドウ透過が壊れる | Linux + Vulkan バックエンド (Wayland での唯一の選択肢) | キャラクターウィンドウが完全不透明になり、デスクトップオーバーレイ機能全体が破綻。 |
+| B1 | egui のレンダリングがクラッシュする | Windows + DX12 + `WGPU_DX12_PRESENTATION_SYSTEM=DxgiFromVisual` | egui がレンダリング中にパニックまたはクラッシュする。現状は環境変数を未設定にしてウィンドウ透過がピクセルパーフェクトでないことを許容するワークアラウンド。 |
+| B2 | ウィンドウ透過が壊れる | Windows + Vulkan バックエンド | `transparent: true` を指定してもキャラクターウィンドウが完全不透明になり、デスクトップオーバーレイ機能全体が破綻。 |
 
 加えて、Bevy ラッパー内の winit 問題を回避するため、ローカルに `bevy_winit` のパッチ (`patches/bevy_winit`、`[patch.crates-io]` で配線) を保持している。これは技術的負債であり、常にマージの苦痛を伴う。
 
@@ -37,7 +66,7 @@
 
 ### 2.1 ゴール (必ず出す)
 
-- G1. Windows 10/11: `WGPU_DX12_PRESENTATION_SYSTEM=DxgiFromVisual` を設定した状態で、egui と 3D が透過ウィンドウに正しく合成される。
+- G1. Windows 10/11 (DX12): `WGPU_DX12_PRESENTATION_SYSTEM=DxgiFromVisual` を設定した状態で、egui と 3D が透過ウィンドウに正しく合成される。
 - G2. Linux + X11 (Vulkan): キャラクターウィンドウは透過、設定ウィンドウは不透明。
 - G3. Linux + Wayland (Vulkan、利用可能なら layer-shell): キャラクターウィンドウは透過、コンポジタblur/クリッピングが正しく機能する適切なレイヤを使用。
 - G4. `crates/ene-vrm` が glTF / VRM 1.0 を読み込み、スキニング行列を計算し、MToon で描画し、`LookAt` / 表情 API を提供する。
@@ -49,7 +78,7 @@
 - N1. VRMA 再生と Spring Bone シミュレーション。PR5+ で別管理。
 - N2. フレーム単位のシャドウ品質切替 (FXAA / SMAA / TAA トグル)。当面は単一のデフォルトに固定。
 - N3. VRM クレートの新規 C-ABI / プラグイン公開面。
-- N4. macOS 対応。新コードは macOS でもコンパイル可能だが、ネイティブ依存は用意しない。
+- N4. macOS 対応。新コードは macOS でも Vulkan を使ってコンパイル可能だが、日常テストは対象外。
 - N5. クロスプラットフォーム統一「透過抽象化」ライブラリ。プラットフォーム固有経路を受け入れる。
 
 ### 2.3 スコープ外の整理 (適宜実施)
@@ -113,6 +142,8 @@
 
 ### PR1 — スケルトン差し替え (最も難しい PR)
 
+> **ステータス:** 進行中。 **ステップ 2** (`crates/ene-vrm` スケルトン) とレシピの動機となった **PR0 透過スモーク** は出荷済み; PR1 の残り (ステップ 3〜8: 既存 `apps/ene-desktop` から Bevy を剥がし、ソースを v2 へ移し、winit ウィンドウ・トレイ・AI ブリッジ・設定を移植) は未着手。現状は §0 と §22.3 を参照。
+
 **目的:** Bevy を除去し、クリアカラーだけの透過ウィンドウと動作するシステムトレイを実現。AI ブリッジはフックされたままで、描画は何もしない。
 
 **手順**
@@ -125,9 +156,9 @@
 3. `apps/ene-desktop/Cargo.toml` の依存をワークスペースのものに書き換え。
 4. `apps/ene-desktop/src/main.rs` を書き換え:
    - `tokio::runtime::Runtime::new()` と `runtime.enter()` は維持。
-   - `wgpu::Instance` (Linux は Vulkan、Windows / macOS は既定) と `wgpu::Adapter` + `wgpu::Device` + `wgpu::Queue` を `pollster::block_on` もしくは oneshot で初期化。
+    - `wgpu::Instance` (Windows は DX12 + `DxgiFromVisual`、Linux / macOS は Vulkan) と `wgpu::Adapter` + `wgpu::Device` + `wgpu::Queue` を `pollster::block_on` もしくは oneshot で初期化。
    - `winit::EventLoop` を構築し、`ControlFlow::Wait` を設定し、`window_plugin()` を反映する `WindowAttributes` を持つプライマリキャラクターウィンドウ (`Arc<winit::Window>`) を登録: `WindowLevel::AlwaysOnTop`, `transparent: true`, `decorations: false`, `resizable: true`, `inner_size: (320, 480)`。
-   - Windows では `Instance::new` の前に `std::env::set_var("WGPU_DX12_PRESENTATION_SYSTEM", "DxgiFromVisual")` を維持。
+    - Windows では `Instance::new` の前に `std::env::set_var("WGPU_DX12_PRESENTATION_SYSTEM", "DxgiFromVisual")` を設定し、DX12 バックエンドを使用。
    - Linux では早期に `gtk::init()` を呼ぶ (トレイ用)。
    - フレーム毎ハンドラ: プライマリウィンドウを `clear_color: (0,0,0,0)` で再描画し、present して戻る。
 5. AI ブリッジを移植: `bevy::Message` を捨て、`ai_bridge::AiBridge { handle: EneHandle, receiver, processing: AtomicBool, pending: Mutex<VecDeque<EneStreamEvent>> }` を導入。ブリッジは `EneHandle::events()` から pull して deque に push するバックグラウンド tokio タスクを起動する。
@@ -278,11 +309,13 @@
 
 ## 5. 新規 / 削除ファイル (一覧)
 
+> **執筆時点の状態:** **太字** の項目のみが現在ディスク上に存在する。それ以外はすべて計画であり、対応する PR で降りてくる。PR0 固有の現実 (当初スケッチした 7 モジュール分割の代わりに `apps/ene-desktop-v2/` が 3 ファイルにまとまった点) は §22.3 に記載。
+
 ### 5.1 新規 (トップレベル)
 
-- `crates/ene-vrm/Cargo.toml`
-- `crates/ene-vrm/src/lib.rs`
-- `crates/ene-vrm/src/loader.rs`
+- **`crates/ene-vrm/Cargo.toml`** (PR1 ステップ 2、出荷済み)
+- **`crates/ene-vrm/src/lib.rs`** (PR1 ステップ 2、出荷済み — スタブのみ)
+- `crates/ene-vrm/src/loader.rs` (PR3)
 - `crates/ene-vrm/src/model.rs`
 - `crates/ene-vrm/src/skeleton.rs`
 - `crates/ene-vrm/src/mtoon.rs`
@@ -327,6 +360,15 @@
 - `src/character/cursor.rs`
 - `src/character/drag.rs`
 
+### 5.2b 新規 (`apps/ene-desktop-v2` 内、PR0 にて出荷済み)
+
+これが現在ディスク上にある **実際の** ファイル配置である。下記の分割は PR1〜PR5 の進行に伴い降りてくるもので、移行完了後に v2 クレートを `apps/ene-desktop` に移設し §5.2 の配置に置き換わる。
+
+- **`apps/ene-desktop-v2/Cargo.toml`** — 依存をスリム化: `winit`, `wgpu`, `pollster`, `bytemuck`, `glam`, `tracing`, `tracing-subscriber`。`raw-window-handle`, `windows-sys`, `ene-core`, `tokio`, `egui`, `tray-icon` はまだ含まない。
+- **`apps/ene-desktop-v2/src/main.rs`** — `tracing_subscriber::fmt` のインストールと `EventLoop::run_app`。
+- **`apps/ene-desktop-v2/src/gpu.rs`** — `GpuContext`, `pick_format_and_alpha`, `backend_options` (Windows は DX12 / `DxgiFromVisual`、それ以外は `Backends::PRIMARY`)。
+- **`apps/ene-desktop-v2/src/runtime.rs`** — `Runtime`, `WindowSlot`, `RectRenderer`, `ApplicationHandler` impl, `AcquireError`。入力ハンドリングは match arm にインライン化、独立した `input.rs` / `surface.rs` / `rect.rs` モジュールは存在しない。
+
 ### 5.3 削除
 
 - `patches/bevy_winit/` (ディレクトリ丸ごと)
@@ -335,26 +377,29 @@
 - `apps/ene-desktop/src/settings_ui/` (`src/ui/` で置換)
 - `apps/ene-desktop/src/character_drag/` (ロジックは `src/platform/drag_subclass.rs` へ)
 - `apps/ene-desktop/src/platform.rs` (`src/platform/` に分割)
+- `apps/tw-test/` (Bevy 透過テストベッド — 現時点では §22.3 の相互参照を成立させるため残置、PR1 で他 Bevy スタックと一緒に削除)
 
 ---
 
 ## 6. 依存関係の変更
 
+> **執筆時点の状態:** 下の **"完了?"** 列が現状のワークスペースを反映する。`追加` は半分完了 (全ワークスペース依存を宣言済み、実際に利用しているのは `apps/ene-desktop-v2` のみ)。`削除` は未着手 — `bevy` は依然として `apps/ene-desktop/Cargo.toml` にあり、`[patch.crates-io] bevy_winit` もワークスペースに配線されている。
+
 ### 6.1 追加 (ワークスペース)
 
-| クレート | バージョン | 用途 |
-|---------|-----------|------|
-| `wgpu` | 27 | wgpu コア (Bevy 0.18 と同じ 27 系) |
-| `winit` | 0.30 | イベントループとウィンドウ |
-| `egui` | 0.33 | イミディエイトモード UI |
-| `egui-wgpu` | 0.33 | egui → wgpu レンダラ |
-| `egui-winit` | 0.33 | egui 入力統合 |
-| `glam` | 0.29 | 線形代数 |
-| `gltf` | 1.4 | VRM / glTF パーサ |
-| `encase` | 0.12 | シェーダ互換の構造体パッキング (UBO) |
-| `bytemuck` | 1 | 安全な `Pod` / `Zeroable` キャスト |
-| `pollster` | 0.4 | 起動用の最小 `block_on` |
-| `raw-window-handle` | 0.6 | wgpu サーフェス作成 |
+| クレート | バージョン | 用途 | 完了? |
+|---------|-----------|------|-------|
+| `wgpu` | 27 | wgpu コア (Bevy 0.18 と同じ 27 系) | 完了 (ワークスペース依存; `apps/ene-desktop-v2` が利用) |
+| `winit` | 0.30 | イベントループとウィンドウ | 完了 (ワークスペース依存; `apps/ene-desktop-v2` が利用) |
+| `egui` | 0.33 | イミディエイトモード UI | ワークスペース依存宣言済み、利用は PR2 |
+| `egui-wgpu` | 0.33 | egui → wgpu レンダラ | ワークスペース依存宣言済み、利用は PR2 |
+| `egui-winit` | 0.33 | egui 入力統合 | ワークスペース依存宣言済み、利用は PR2 |
+| `glam` | 0.29 | 線形代数 | 完了 (`apps/ene-desktop-v2` が利用) |
+| `gltf` | 1.4 | VRM / glTF パーサ | ワークスペース依存宣言済み、利用は PR3 |
+| `encase` | 0.12 | シェーダ互換の構造体パッキング (UBO) | ワークスペース依存宣言済み、利用は PR3 |
+| `bytemuck` | 1 | 安全な `Pod` / `Zeroable` キャスト | 完了 (`apps/ene-desktop-v2` が利用) |
+| `pollster` | 0.4 | 起動用の最小 `block_on` | 完了 (`apps/ene-desktop-v2` が利用) |
+| `raw-window-handle` | 0.6 | wgpu サーフェス作成 | ワークスペース依存宣言済み、利用は PR3 |
 
 ### 6.2 維持
 
@@ -364,8 +409,10 @@
 
 ### 6.3 削除 (ワークスペース)
 
+> **未着手。** 以下はすべて現存している:
+
 - `bevy`, `bevy_ecs`, `bevy_pbr`, `bevy_winit`, `bevy_egui`, `bevy_vrm1`, `bevy_animation`, `bevy_asset`, `bevy_render`, `bevy_math`, `bevy_mesh`, `bevy_window`, `bevy_input`, `bevy_image`, `bevy_transform`, `bevy_utils`。
-- `[patch.crates-io] bevy_winit`。
+- `[patch.crates-io] bevy_winit` および `patches/bevy_winit/` ディレクトリ。
 
 ---
 
@@ -397,7 +444,7 @@ fn configure(surface: &wgpu::Surface, device: &wgpu::Device, format: wgpu::Textu
 
 プラットフォーム別:
 
-- **Windows** — `format = device.adapter.get_supported_surface_formats(...).first()`。`WGPU_DX12_PRESENTATION_SYSTEM=DxgiFromVisual` 下では `CompositeAlphaMode::PreMultiplied` がサポートされ、真のピクセル単位アルファが得られる (B1 解消: 我々がサーフェス / スワップチェイン経路を所有するため)。
+- **Windows (DX12)** — `format = device.adapter.get_supported_surface_formats(...).first()`。`WGPU_DX12_PRESENTATION_SYSTEM=DxgiFromVisual` 下では `CompositeAlphaMode::PreMultiplied` がサポートされ、真のピクセル単位アルファが得られる (B1 解消: 我々がサーフェス / スワップチェイン経路を所有するため)。
 - **Linux + X11 (Vulkan)** — wgpu は X11 ビジュアルが ARGB の場合のみ `CompositeAlphaMode::PreMultiplied` を報告する。winit ウィンドウ作成時に 32bit RGBA ビジュアルを強制する。利用不可なら `Auto` にフォールバックし制限を文書化。
 - **Linux + Wayland** — §10 参照。
 
@@ -461,8 +508,9 @@ frame.present();
 - ドラッグは layer サーフェスの `pointer_motion` / `pointer_button` をアプリで処理し、`layer_surface::Surface::commit()` で位置更新。
 - フォールバック: `zwlr-layer-shell-v1` 非提供時は通常の `xdg-shell` にフォールバック。ドラッグスルーはグローバルホットキー "freeze character window" トグルに限定。
 
-### 8.4 macOS (コンパイルのみ)
+### 8.4 macOS
 
+- `wgpu::Backends::VULKAN` を強制。
 - `WindowAttributes::with_transparent(true)` と `CompositeAlphaMode::PreMultiplied`。テスト / 文書化対象外。
 
 ---
@@ -818,4 +866,107 @@ CI ではディスプレイサーバ依存のステップは当面実行しな�
 - [ ] 英語ドキュメントを `docs/` 配下更新
 - [ ] 日本語ドキュメントを `docs/ja/` 配下更新
 - [ ] `docs/architecture/wgpu-migration.md` を新状態に合わせて更新 (本ファイル)
+
+---
+
+## 22. PR1 実装メモ
+
+### 22.1 実機 Windows で判明した落とし穴: `Opaque` のみ対応サーフェス — **§22.3 で訂正済み**
+
+> **§22.3 (PR0) で訂正済み。** 本節にある "正しい診断" も全部古く、 本当の根本原因は「wgpu 27 は `WGPU_DX12_PRESENTATION_SYSTEM` env var を自動では読まない」 — アプリ側が `Dx12SwapchainKind` を直接 `BackendOptions::dx12::presentation_system` に設定し、 `Instance::new` に渡す必要がある (Bevy 0.18 は `bevy_render/src/renderer/mod.rs:201` で、 v2 は `apps/ene-desktop-v2/src/gpu.rs::backend_options` でそうしている)。 詳細は §22.3 を参照。
+
+旧 PR1 試行 (DX12 env var + `WS_EX_LAYERED` nudge、 Vulkan 入れ替え) と中間の「`WS_EX_NOREDIRECTIONBITMAP` 不足」診断は git 履歴には残るが、 本ファイルを読む人には不要。 外部からの相互参照が 404 にならないよう 1 行ポインタとして残す。
+
+### 22.2 PR1 ファイル単位の状態 (執筆時点)
+
+| アクション | ファイル / ディレクトリ | 状態 |
+|------------|------------------------|------|
+| **新規** | `crates/ene-vrm/Cargo.toml` | 出荷済み (PR1 ステップ 2) |
+| **新規** | `crates/ene-vrm/src/lib.rs` | 出荷済み (PR1 ステップ 2 — `pub fn version()` スタブ + ユニットテスト 1 件) |
+| **新規** | `apps/ene-desktop-v2/Cargo.toml` | 出荷済み (PR0) |
+| **新規** | `apps/ene-desktop-v2/src/{main,gpu,runtime}.rs` | 出荷済み (PR0 — v2 スモーク完成) |
+| **書き換え** | `apps/ene-desktop/src/{main,app_config,ai_bridge,tray}.rs` | **未着手** — 既存 Bevy バイナリは無修正 |
+| **書き換え** | `apps/ene-desktop/Cargo.toml` | **未着手** — 依然 Bevy 0.18 |
+| **削除** | `apps/ene-desktop/src/{scene,character,platform}.rs` | **未着手** |
+| **削除** | `apps/ene-desktop/src/{settings_ui,character_drag}/` | **未着手** |
+| **削除** | `patches/bevy_winit/` | **未着手** — パッチと `[patch.crates-io]` が `Cargo.toml` に残置 |
+| **削除** | `apps/tw-test/` | **未着手** — Bevy テストベッドが透過レシピの相互参照として残置 |
+| **ワークスペース** | `Cargo.toml` のレンダリングスタック節 | **部分** — 依存は追加済み (PR0)、`[patch.crates-io] bevy_winit` は未削除 |
+
+上層の意図 ("PR1 が削除ステップ") は変わらない。PR0 が進めた行だけを出荷済みとマークしている。
+
+### 22.3 PR0 — Minimum v2 transparency smoke
+
+> **ステータス:** 出荷済み。 この開発機で §8.1 の Windows 透過レシピがエンドツーエンドで動くことを示す最小 `apps/ene-desktop-v2` スケフォールド。 (誤りだった) §22.1 診断を置き換える。
+
+**v2 の配置 (3 ファイル / 約 330 行):**
+
+```text
+apps/ene-desktop-v2/
+├── Cargo.toml        # winit, wgpu, pollster, bytemuck, glam, tracing, tracing-subscriber
+└── src/
+    ├── main.rs       # tracing-subscriber 初期化 + EventLoop::run_app
+    ├── gpu.rs        # GpuContext, pick_format_and_alpha, backend_options (DX12 / DxgiFromVisual)
+    └── runtime.rs    # Runtime, WindowSlot, RectRenderer, ApplicationHandler, AcquireError
+```
+
+当初 §5.2 で計画した 7 モジュール分割 (`runtime/{mod,input,surface,window_slot,loop,rect}.rs`, `gpu/{mod,depth,surface_format}.rs`, `platform/{mod,...}.rs`) は上記の 3 ファイルに集約した。理由は §22.3 末尾の "PR0 のファイル" ブロック参照。
+
+**目的:** winit + wgpu 27 の Windows ウィンドウで、 (a) 透過 (DWM が swapchain の per-pixel α を尊重する)、 (b) 単色の矩形を 1 つ描画、 (c) `Space` で透過 / 不透明を切替、 `Escape` で終了。 egui / VRM / AI ブリッジなし。 純粋な描画スモーク。
+
+**ようやく動いたレシピ (4 つ全部揃えること):**
+
+1. **`wgpu::Dx12SwapchainKind::DxgiFromVisual`** — `apps/ene-desktop-v2/src/gpu.rs::backend_options` で `BackendOptions::dx12::presentation_system` に直接設定し、 `wgpu::Instance::new` に渡す。 wgpu 27 DX12 バックエンドが HWND の visual から swapchain を作るためのオプションで、 per-pixel α に必要。 **`WGPU_DX12_PRESENTATION_SYSTEM` 環境変数は単独では効果なし** — wgpu 27 は `Dx12SwapchainKind::from_env()` の中だけで env を読むが、 v2 はそれを呼ばない。 `DxgiFromVisual` が無いと wgpu の DX12 サーフェスは `SurfaceTarget::WndHandle` で作られ、 `Surface::get_capabilities` は `[CompositeAlphaMode::Opaque]` だけを返す (`wgpu-hal-27.0.4/src/dx12/adapter.rs:1006-1018` 参照)。 これが PR0 でずっと出ていた「不透明な黒」の根本原因。
+
+2. `WindowAttributesExtWindows::with_no_redirection_bitmap(true)` — `apps/ene-desktop-v2/src/runtime.rs::window_attributes` の `WindowAttributes` ビルダーで `transparent` の値に関わらず常に設定。 HWND の exstyle に `WS_EX_NOREDIRECTIONBITMAP` (0x00200000) を create 時点で追加する。 **§22.1 の `force_layered_window` アプローチが取りこぼしていたのはこのピース。** `WS_EX_LAYERED` だけ立てても wgpu は `PreMultiplied` を advertise するが、 DWM はリダイレクションバitmap 経由でコンポジットし、 swapchain の per-pixel α を読まないため背景が不透明な黒になる。 両スタイルが揃って初めて成立する:
+
+   ```text
+   WS_EX_LAYERED            = 0x00080000   (with_transparent(true) で追加)
+   WS_EX_NOREDIRECTIONBITMAP = 0x00200000   (with_no_redirection_bitmap(true) で追加)
+   ```
+
+   > **WARNING — PR0 クロージング後の更新。** winit 0.30.x の `with_transparent(true)` は HWND に `WS_EX_LAYERED` を **追加しない** (セットされるのは `WindowFlags::TRANSPARENT` のみで、 これはレガシー DWM blur-behind 経路でだけ参照されるが、 `with_no_redirection_bitmap(true)` も立っているとその経路はスキップされる)。 winit 0.30 が exstyle に `WS_EX_LAYERED` を足すのは `with_ignore_cursor_events(true)` 経路だけ。 **作成後のフックから `SetWindowLongPtrW(WS_EX_LAYERED)` で補おうとしてはならない** — PR0 開発機では、 `WS_EX_NOREDIRECTIONBITMAP` の上にそれを足すと DWM がコンポジションを不透明な黒に戻した (レガシー layered 経路が non-redirected 経路を上書きしてしまうためと思われる)。 `apps/ene-desktop-v2/src/platform/windows.rs` は PR0 で **診断専用** ヘルパ (`log_window_styles`) に降格し、 exstyle をミューテートしない方針に統一。 `with_no_redirection_bitmap` を `window_attributes` で叩く以外の Win32 変更はしない。
+
+3. `CompositeAlphaMode::PreMultiplied` を `SurfaceConfiguration` に — **プラットフォームから直接 picking** ( `SurfaceCapabilities::alpha_modes` を見ない )。 旧実装は caps を走査して `PreMultiplied` / `PostMultiplied` を探し、 どちらも無ければ `Opaque` にフォールバックしていた — これが PR0 でずっと出ていた「不透明な黒」のもう片方の根本原因で、 サーフェスがエラーを返さず黙って `Opaque` に degrade していた。 現実装は Windows / Linux では `CompositeAlphaMode::PreMultiplied`、 macOS では `CompositeAlphaMode::PostMultiplied` を無条件で返す。 `apps/tw-test` と完全に一致。 本当にサポートされていない場合は `Surface::configure` が `PreMultiplied` で呼ばれ、 wgpu 27 が次の `get_current_texture` で失敗する。 `Runtime::window_event` の `AcquireError::Reconfigure` 経路が明確な `WARN` をログして reconfigure するので失敗は黙らない。 `WindowSlot::new` も、 要求した alpha_mode が caps に無いとき即座に `WARN` を出す — サーフェス設定ミスを 1 ログ行で検知できる。
+
+4. 透過モードで `(0, 0, 0, 0)`、 不透明モードで `(0.2, 0.2, 0.2, 1.0)` にクリア — `WindowSlot::render_frame` を参照。 赤矩形は同じパス内で `LoadOp::Load` で重ねて描画される (クリアが透けて見える)。
+
+**動作中の `apps/tw-test` レシピとの対照:** パッチ済み `bevy_winit` が `patches/bevy_winit/src/winit_windows.rs:133-146` で `with_transparent(true)` と `with_no_redirection_bitmap(true)` を一緒に呼んでいる。 PR0 はそのレシピをパッチ無しで v2 に再実装。
+
+**起動時の診断ログ** (`gpu::GpuContext::new` / `WindowSlot::new` から出力。 `tracing-subscriber` を `main.rs` の冒頭で `EnvFilter("info,wgpu_core=warn,wgpu_hal=warn,naga=warn")` デフォルトで初期化 — `RUST_LOG` で上書き可。 これにより次回以降のリグレッションが 1 ログ行で検知できる):
+
+```text
+INFO  wgpu surface capabilities: formats=[Bgra8UnormSrgb], alpha_modes=[Opaque, PreMultiplied, PostMultiplied, Inherit, Auto]
+INFO  SurfaceConfiguration picked: format=Bgra8UnormSrgb, alpha_mode=PreMultiplied
+```
+
+`caps.alpha_modes` が `[Opaque]` のみの場合、 picker が明示的な `WARN` を出し、 そのまま `Surface::configure` を `alpha_mode=PreMultiplied` で呼ぶ。 1 フレーム目で `SurfaceError::Outdated` または `Lost` になり、 input ループが「Surface acquire returned Outdated/Lost」を連続ログ、 ユーザには設定ミスを指す明確な `WARN` チェーンが見える。 それが DX12 / wgpu / ホスト環境を直すか、 PR0 のスコープ外である `UpdateLayeredWindow` の手動 GDI 経路に逃げる合図。 `caps.alpha_modes` に `PreMultiplied` があるのに表示が不透明な黒のままなら、 まず `NO_REDIRECTION_BITMAP=true` の行を確認。 `NO_REDIRECTION_BITMAP=false` なのに `with_no_redirection_bitmap(true)` を呼んでいるなら、 使用中の winit バージョンがフラグを無視している — ワークスペース `Cargo.lock` で winit 0.30 + `WindowAttributesExtWindows` トレイトが入っているか確認。
+
+**デフォルト起動状態:** `Runtime::new` は `transparent = false` で初期化 (灰色の不透明ウィンドウ + 装飾 + 赤矩形)。 ユーザーが `Space` で透過を試せる。 透過が効かない環境でもウィンドウ自体は正しく見える (グレー + 赤矩形) ので、 描画パイプラインが生きていることを目視で確認できる UX セーフネット。
+
+**キーボード / ライフサイクル (PR0 スコープ、 `Runtime::window_event` 参照):**
+- `Space` — `transparent` をトグル。 `Window::set_decorations(!transparent)` を呼ぶ。 `WindowSlot::render_frame` のクリア色が切り替わる。
+- `Escape` または閉じるボタン — `EventLoop::exit()`。
+- `Resized` / `ScaleFactorChanged` — `WindowSlot::reconfigure` 後 `request_redraw`。
+- `RedrawRequested` — `WindowSlot::render_frame`。 `SurfaceError::Outdated | Lost` の場合 reconfig 後再 redraw。
+
+**PR0 のファイル (`git diff --stat` 参照):**
+- `apps/ene-desktop-v2/Cargo.toml` — `winit`, `wgpu`, `pollster`, `bytemuck`, `glam`, `tracing`, `tracing-subscriber` (env-filter + fmt) にスリム化。 `raw-window-handle`, `windows-sys`, `ene-core`, `tokio`, `egui`, `tray-icon` なし。
+- **レイアウト: 3 ファイル / 約 330 行**。 `src/main.rs` (tracing 初期化 + イベントループ)、 `src/gpu.rs` (`GpuContext` + `pick_format_and_alpha` + DX12 backend options)、 `src/runtime.rs` (`Runtime` + `WindowSlot` + `RectRenderer` + `ApplicationHandler` impl + `AcquireError`)。
+- 削除: `src/gpu/{mod,surface_format}.rs` (gpu.rs に統合)、 `src/platform/{mod,linux,windows}.rs` (HWND exstyle 診断ログ削除; Linux ディスプレイサーバログ削除 — どちらも nice-to-have でレシピには不要)、 `src/runtime/{mod,input,surface,window_slot,rect}.rs` (runtime.rs に統合)。
+- `RectRenderer` 簡素化: UBO / bind group / bind 付き pipeline layout なし。 NDC `[-0.5, 0.5]²` クアッド (6 頂点 `TriangleList`)、 色は WGSL 内でハードコード、 pipeline layout は空。 元の 211 行レンダラが ~80 行に。
+- 入力ハンドリングは `ApplicationHandler::window_event` の match arm にインライン化。 7 引数の `input::route` は消滅、 `toggle_transparency` ロジックは `Space` arm 内に。
+- `main.rs` — `tracing_subscriber::fmt` を他の処理より先にインストールし、 wgpu caps とサーフェス format が起動時にログされる。
+
+**手動スモーク (本開発機で検証済み):**
+1. `cargo run -p ene-desktop-v2` — 灰色の不透明ウィンドウにタイトルバー、 中央に赤矩形。
+2. `Space` を押す — ボーダーレス、 背景が実際のデスクトップに、 赤矩形はそのまま。
+3. もう一度 `Space` — グレー + タイトルバーに戻る。
+4. `Escape` — きれいに終了。
+5. リサイズ — フレーム再構築、 赤矩形は NDC 原点に留まる。
+
+**既知の制限 (PR1+ へ持ち越し):**
+- v2 は単一ウィンドウスロットのみ。 設定ウィンドウ、 トレイ、 AI ブリッジ、 VRM レンダラは PR1+。
+- wgpu 27 のサーフェスフォーマット picker はもう `Opaque` にフォールバック **しない**。 ホストの DXGI が `PreMultiplied` を advertise しない場合、 1 フレーム目の acquire が失敗し、 input ループが `WARN` をログし続けてリグレッションが即座に分かる。
+- `force_layered_window` ヘルパは診断 no-op として残置。 実際の透過有効化は `window_attributes` の `with_no_redirection_bitmap` 呼び出し。
 

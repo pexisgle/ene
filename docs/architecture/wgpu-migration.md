@@ -1,20 +1,49 @@
 # `ene-desktop`: Bevy → wgpu / winit / egui Migration Plan
 
-> **Status:** Approved design — not yet implemented.
-> **Scope:** `apps/ene-desktop` and a new `crates/ene-vrm` crate. Everything else (`ene-core`, `ene-memory`, `ene-cli`, tool binaries) is untouched.
+> **Status:** Approved design — partially implemented.
+> **Scope:** `apps/ene-desktop-v2` (new, winit + wgpu), `crates/ene-vrm` (new, stub) and the legacy `apps/ene-desktop` (Bevy, still in place). Everything else (`ene-core`, `ene-memory`, `ene-cli`, tool binaries) is untouched.
 > **Owner / Driver:** TBD
 > **Target outcome:** Resolve two long-standing correctness issues on the desktop app and produce a slimmer, more maintainable rendering stack we fully own.
 
 ---
 
+## 0. Current Implementation State
+
+This document is the **design plan** for the migration. The tables below summarise what is actually on disk at the time of writing, so a reader does not have to diff the workspace to know which phases have landed.
+
+| Phase | Plan ref | State | Notes |
+|-------|----------|-------|-------|
+| **PR0 — `ene-desktop-v2` scaffold + Windows transparency smoke** | §22.3 | **Shipped** | `apps/ene-desktop-v2/` (~330 lines across `main.rs`, `gpu.rs`, `runtime.rs`) replaces the planned 7-module split. Single transparent window, red-quad renderer, `Space` toggles transparency, `Escape` exits. Verified on the developer's Windows machine. |
+| **PR1 step 1 — `ene-vrm` crate skeleton** | §4 PR1 / step 2 | **Shipped** | `crates/ene-vrm/{Cargo.toml, src/lib.rs}` created with an empty `pub fn version()` stub and a unit test. No `gltf` / `wgpu` / `winit` deps yet. |
+| **PR1 steps 3–8 — strip Bevy from `apps/ene-desktop`, wire winit window + tray + AI bridge** | §4 PR1 / steps 3–8 | **Not started** | The legacy `apps/ene-desktop` is still Bevy 0.18, unchanged. `apps/tw-test` and `patches/bevy_winit/` are still present. |
+| **PR2 — egui integration + settings window** | §4 PR2 | **Not started** | — |
+| **PR3 — `ene-vrm` static rendering (MToon + skinning)** | §4 PR3 | **Not started** | — |
+| **PR4 — Expressions, LookAt, BodyTracking** | §4 PR4 | **Not started** | — |
+| **PR5+ — VRMA, spring-bone, FXAA/SMAA, drag polish** | §4 PR5+ | **Not started** | — |
+
+### 0.1 How the two desktop apps coexist
+
+Until PR1's "skeleton swap" step 3 finishes, both binaries build side-by-side:
+
+- **`apps/ene-desktop`** — legacy Bevy 0.18 build. Still the user-facing desktop app. Still depends on `bevy`, `bevy_egui`, `bevy_vrm1`, the local `patches/bevy_winit` patch, `tray-icon`, `gtk` (Linux), and `wayland-client` (Linux). It is **not** being modified by this migration until PR1 step 3.
+- **`apps/ene-desktop-v2`** — new crate, lives next to the legacy one. Renders a single transparent window with `winit` + `wgpu` 27 and a hard-coded red quad. **Cargo `run -p ene-desktop-v2`** to launch.
+
+Once PR1 is finished, `apps/ene-desktop` will be deleted and the `apps/ene-desktop-v2` sources will be moved to `apps/ene-desktop`. The migration plan (§4) calls this out as "PR1 is the deletion step." Until then, treat them as parallel codebases.
+
+### 0.2 Where the recipe was proven
+
+The transparency recipe that PR0 ships is the same one used in `apps/tw-test`, a standalone Bevy 0.18 testbed that still exists in the workspace. The cross-reference is documented in §22.3 below; the file itself remains in tree until PR1 step 3 cleans it up.
+
+---
+
 ## 1. Background and Motivation
 
-The current `ene-desktop` implementation is built on top of Bevy 0.18 (`bevy_winit`, `bevy_egui`, `bevy_vrm1`, …). Two specific bugs make the production build unusable on at least one of our two supported platforms:
+The current `ene-desktop` implementation is built on top of Bevy 0.18 (`bevy_winit`, `bevy_egui`, `bevy_vrm1`, …). Two specific bugs make the production build unusable on Windows:
 
 | # | Bug | Trigger | Effect |
 |---|-----|---------|--------|
-| B1 | egui input & rendering breakage | Windows + `WGPU_DX12_PRESENTATION_SYSTEM=DxgiFromVisual` (required to get per-window alpha) | egui panels are misplaced, clip rectangles are wrong, and the pointer is mis-tracked. We currently work around it by leaving the env var unset and accepting that window transparency is not pixel-perfect. |
-| B2 | Window transparency broken | Linux + Vulkan backend (the only viable choice on Wayland) | The character window is fully opaque. The whole desktop overlay concept is unusable. |
+| B1 | egui rendering crash | Windows + DX12 + `WGPU_DX12_PRESENTATION_SYSTEM=DxgiFromVisual` | egui panics or crashes during rendering. We currently work around it by leaving the env var unset and accepting that window transparency is not pixel-perfect. |
+| B2 | Window transparency broken | Windows + Vulkan backend | The character window is fully opaque even with `transparent: true`. The whole desktop overlay concept is unusable. |
 
 We also carry a local patch of `bevy_winit` (`patches/bevy_winit`, wired via `[patch.crates-io]`) to work around winit issues inside the Bevy wrapper. This is technical debt and a perpetual source of merge pain.
 
@@ -37,7 +66,7 @@ We also carry a local patch of `bevy_winit` (`patches/bevy_winit`, wired via `[p
 
 ### 2.1 Goals (must ship)
 
-- G1. Windows 10/11: `WGPU_DX12_PRESENTATION_SYSTEM=DxgiFromVisual` set, egui and 3D composite correctly into a transparent window.
+- G1. Windows 10/11 (DX12): `WGPU_DX12_PRESENTATION_SYSTEM=DxgiFromVisual` set, egui and 3D composite correctly into a transparent window.
 - G2. Linux + X11 (Vulkan): character window is transparent; settings window is opaque.
 - G3. Linux + Wayland (Vulkan, layer-shell where available): character window is transparent and uses a proper layer to keep compositor blur/clipping working.
 - G4. `crates/ene-vrm` loads a glTF / VRM 1.0 file, computes skin matrices, draws with MToon, and exposes a `LookAt` / expression API.
@@ -49,7 +78,7 @@ We also carry a local patch of `bevy_winit` (`patches/bevy_winit`, wired via `[p
 - N1. VRMA playback and spring-bone simulation. PR5+; tracked separately.
 - N2. Per-frame shadow quality switching (FXAA / SMAA / TAA toggles). We keep a single default for now.
 - N3. A new public C-ABI / plugin surface for the VRM crate.
-- N4. macOS support. The new code may compile on macOS but is not provisioned.
+- N4. macOS support. The new code compiles on macOS using Vulkan but is not provisioned for daily testing.
 - N5. A unified cross-platform "transparency abstraction" library — we accept platform-specific paths.
 
 ### 2.3 Out-of-Scope Cleanup (do opportunistically)
@@ -113,6 +142,8 @@ We deliver the migration as a series of small, individually reviewable PRs. Each
 
 ### PR1 — Skeleton swap (the hardest PR)
 
+> **Status:** In progress. **Step 2** (`crates/ene-vrm` skeleton) and the **PR0 transparency smoke** that motivates the recipe are shipped; the rest of PR1 (steps 3–8: strip Bevy from the legacy `apps/ene-desktop`, move the source to v2, wire the winit window there, port the tray / AI bridge / settings) is still open. See §0 and §22.3 for the current state of v2.
+
 **Objective:** Remove Bevy, get a transparent window with a clear color and a working system tray, with the AI bridge still hooked up but rendering nothing.
 
 **Steps**
@@ -125,9 +156,9 @@ We deliver the migration as a series of small, individually reviewable PRs. Each
 3. Replace `apps/ene-desktop/Cargo.toml` dependencies with the workspace ones.
 4. Rewrite `apps/ene-desktop/src/main.rs`:
    - `tokio::runtime::Runtime::new()` and `runtime.enter()` retained.
-   - Initialise `wgpu::Instance` (Vulkan on Linux, default on Windows / macOS) and `wgpu::Adapter` + `wgpu::Device` + `wgpu::Queue` via `pollster::block_on` or a oneshot.
+    - Initialise `wgpu::Instance` (DX12 on Windows with `DxgiFromVisual`, Vulkan on Linux and macOS) and `wgpu::Adapter` + `wgpu::Device` + `wgpu::Queue` via `pollster::block_on` or a oneshot.
    - Build a `winit::EventLoop`, set `ControlFlow::Wait`, register the primary character window (`Arc<winit::Window>`) with `WindowAttributes` that mirror `window_plugin()`: `WindowLevel::AlwaysOnTop`, `transparent: true`, `decorations: false`, `resizable: true`, `inner_size: (320, 480)`.
-   - On Windows, keep `std::env::set_var("WGPU_DX12_PRESENTATION_SYSTEM", "DxgiFromVisual")` **before** `Instance::new`.
+    - On Windows, keep `std::env::set_var("WGPU_DX12_PRESENTATION_SYSTEM", "DxgiFromVisual")` **before** `Instance::new`; use DX12 backend.
    - On Linux, call `gtk::init()` early (tray).
    - Per-frame handler: redraw the primary window with `clear_color: (0,0,0,0)`, present, return.
 5. Port the AI bridge: drop `bevy::Message`; introduce `ai_bridge::AiBridge { handle: EneHandle, receiver, processing: AtomicBool, pending: Mutex<VecDeque<EneStreamEvent>> }`. The bridge starts a background tokio task that pulls from `EneHandle::events()` and pushes into the deque.
@@ -278,11 +309,13 @@ Each PR is its own design doc snippet; we add a `## Open Follow-ups` block at th
 
 ## 5. New / Removed Files (summary)
 
+> **Status as of writing:** Only the **bold** items below exist on disk today. Everything else is planned and lands in the corresponding PR. The PR0-specific reality (3 files in `apps/ene-desktop-v2/` instead of the 7-module split originally sketched here) is documented in §22.3.
+
 ### 5.1 New top-level
 
-- `crates/ene-vrm/Cargo.toml`
-- `crates/ene-vrm/src/lib.rs`
-- `crates/ene-vrm/src/loader.rs`
+- **`crates/ene-vrm/Cargo.toml`** (PR1 step 2, shipped)
+- **`crates/ene-vrm/src/lib.rs`** (PR1 step 2, shipped — stub only)
+- `crates/ene-vrm/src/loader.rs` (PR3)
 - `crates/ene-vrm/src/model.rs`
 - `crates/ene-vrm/src/skeleton.rs`
 - `crates/ene-vrm/src/mtoon.rs`
@@ -327,6 +360,15 @@ Each PR is its own design doc snippet; we add a `## Open Follow-ups` block at th
 - `src/character/cursor.rs`
 - `src/character/drag.rs`
 
+### 5.2b New in `apps/ene-desktop-v2` (PR0, shipped)
+
+This is the **actual** file layout on disk today. The full split below lands incrementally as PR1–PR5 progress; once the migration is done the v2 crate will be moved to `apps/ene-desktop` and these files will be replaced by the §5.2 layout.
+
+- **`apps/ene-desktop-v2/Cargo.toml`** — slimmed deps: `winit`, `wgpu`, `pollster`, `bytemuck`, `glam`, `tracing`, `tracing-subscriber`. No `raw-window-handle`, `windows-sys`, `ene-core`, `tokio`, `egui`, or `tray-icon` yet.
+- **`apps/ene-desktop-v2/src/main.rs`** — `tracing_subscriber::fmt` install + `EventLoop::run_app`.
+- **`apps/ene-desktop-v2/src/gpu.rs`** — `GpuContext`, `pick_format_and_alpha`, `backend_options` (DX12 / `DxgiFromVisual` on Windows, `Backends::PRIMARY` elsewhere).
+- **`apps/ene-desktop-v2/src/runtime.rs`** — `Runtime`, `WindowSlot`, `RectRenderer`, `ApplicationHandler` impl, `AcquireError`. Input handling inlined as match arms; no separate `input.rs` / `surface.rs` / `rect.rs` modules.
+
 ### 5.3 Removed
 
 - `patches/bevy_winit/` (entire directory)
@@ -335,26 +377,29 @@ Each PR is its own design doc snippet; we add a `## Open Follow-ups` block at th
 - `apps/ene-desktop/src/settings_ui/` (replaced by `src/ui/`)
 - `apps/ene-desktop/src/character_drag/` (logic moves to `src/platform/drag_subclass.rs`)
 - `apps/ene-desktop/src/platform.rs` (split into `src/platform/`)
+- `apps/tw-test/` (the Bevy transparency testbed — kept around for now so the §22.3 cross-reference stays valid; deleted with the rest of the Bevy stack in PR1)
 
 ---
 
 ## 6. Dependency Changes
 
+> **Status as of writing:** The **"Done"** column below reflects the current workspace. `Added` is half-done (all workspace deps declared; only `apps/ene-desktop-v2` consumes them). `Removed` has not started — `bevy` is still in `apps/ene-desktop/Cargo.toml` and `[patch.crates-io] bevy_winit` is still wired in the workspace.
+
 ### 6.1 Added (workspace)
 
-| Crate | Version | Why |
-|-------|---------|-----|
-| `wgpu` | 27 | wgpu core (matches wgpu 27 used in Bevy 0.18) |
-| `winit` | 0.30 | event loop and windowing |
-| `egui` | 0.33 | immediate-mode UI |
-| `egui-wgpu` | 0.33 | egui → wgpu renderer |
-| `egui-winit` | 0.33 | egui input integration |
-| `glam` | 0.29 | linear algebra |
-| `gltf` | 1.4 | VRM / glTF parsing |
-| `encase` | 0.12 | shader-compatible struct packing (UBOs) |
-| `bytemuck` | 1 | safe `Pod`/`Zeroable` casts |
-| `pollster` | 0.4 | minimal `block_on` for startup |
-| `raw-window-handle` | 0.6 | wgpu surface creation |
+| Crate | Version | Why | Done? |
+|-------|---------|-----|-------|
+| `wgpu` | 27 | wgpu core (matches wgpu 27 used in Bevy 0.18) | yes (workspace dep; consumed by `apps/ene-desktop-v2`) |
+| `winit` | 0.30 | event loop and windowing | yes (workspace dep; consumed by `apps/ene-desktop-v2`) |
+| `egui` | 0.33 | immediate-mode UI | workspace dep declared, not yet consumed (PR2) |
+| `egui-wgpu` | 0.33 | egui → wgpu renderer | workspace dep declared, not yet consumed (PR2) |
+| `egui-winit` | 0.33 | egui input integration | workspace dep declared, not yet consumed (PR2) |
+| `glam` | 0.29 | linear algebra | yes (consumed by `apps/ene-desktop-v2`) |
+| `gltf` | 1.4 | VRM / glTF parsing | workspace dep declared, not yet consumed (PR3) |
+| `encase` | 0.12 | shader-compatible struct packing (UBOs) | workspace dep declared, not yet consumed (PR3) |
+| `bytemuck` | 1 | safe `Pod`/`Zeroable` casts | yes (consumed by `apps/ene-desktop-v2`) |
+| `pollster` | 0.4 | minimal `block_on` for startup | yes (consumed by `apps/ene-desktop-v2`) |
+| `raw-window-handle` | 0.6 | wgpu surface creation | workspace dep declared, not yet consumed (PR3) |
 
 ### 6.2 Kept
 
@@ -364,8 +409,10 @@ Each PR is its own design doc snippet; we add a `## Open Follow-ups` block at th
 
 ### 6.3 Removed (workspace)
 
+> **Not started.** All of the following are still present:
+
 - `bevy`, `bevy_ecs`, `bevy_pbr`, `bevy_winit`, `bevy_egui`, `bevy_vrm1`, `bevy_animation`, `bevy_asset`, `bevy_render`, `bevy_math`, `bevy_mesh`, `bevy_window`, `bevy_input`, `bevy_image`, `bevy_transform`, `bevy_utils`.
-- `[patch.crates-io] bevy_winit`.
+- `[patch.crates-io] bevy_winit` and the `patches/bevy_winit/` directory.
 
 ---
 
@@ -397,7 +444,7 @@ fn configure(surface: &wgpu::Surface, device: &wgpu::Device, format: wgpu::Textu
 
 Per platform:
 
-- **Windows** — `format = device.adapter.get_supported_surface_formats(...).first()`. With `WGPU_DX12_PRESENTATION_SYSTEM=DxgiFromVisual`, `CompositeAlphaMode::PreMultiplied` is supported and gives true per-pixel alpha. (Bug B1 fixed because we now own the surface / swapchain code path.)
+- **Windows (DX12)** — `format = device.adapter.get_supported_surface_formats(...).first()`. With `WGPU_DX12_PRESENTATION_SYSTEM=DxgiFromVisual`, `CompositeAlphaMode::PreMultiplied` is supported and gives true per-pixel alpha. (Bug B1 fixed because we now own the surface / swapchain code path.)
 - **Linux + X11 (Vulkan)** — wgpu reports `CompositeAlphaMode::PreMultiplied` only if the X11 visual is ARGB. We pick a 32-bit RGBA visual when creating the winit window. If unavailable, fall back to `Auto` and document the limitation.
 - **Linux + Wayland** — See §10.
 
@@ -461,8 +508,9 @@ The second pass uses `LoadOp::Load` so egui blends on top of whatever the 3D pas
 - Drag is implemented by handling `pointer_motion` and `pointer_button` from the layer surface. We track the delta in the app state and update window position via `layer_surface::Surface::commit()`.
 - Fallback: if `zwlr-layer-shell-v1` is not advertised, fall back to a normal `xdg-shell` window. Drag-through is then limited to a global hotkey "freeze character window" toggle.
 
-### 8.4 macOS (compile-only)
+### 8.4 macOS
 
+- Force `wgpu::Backends::VULKAN`.
 - `WindowAttributes::with_transparent(true)` and `CompositeAlphaMode::PreMultiplied`. We do not test or document behaviour.
 
 ---
@@ -817,4 +865,114 @@ No display-server dependent step runs in CI for now; we add a Wayland/X11 smoke 
 - [ ] English docs updated under `docs/`
 - [ ] Japanese docs updated under `docs/ja/`
 - [ ] `docs/architecture/wgpu-migration.md` updated (this file) to reflect the new state
+
+---
+
+## 22. PR1 Implementation Notes
+
+### 22.1 Real-world Windows gotcha: `Opaque`-only surfaces — **superseded by §22.3**
+
+> **Superseded by PR0 / §22.3.** Every "correct diagnosis" in this section is itself out of date; the actual root cause is that wgpu 27 does not auto-read the `WGPU_DX12_PRESENTATION_SYSTEM` env var. The application has to pass the desired `Dx12SwapchainKind` directly to `BackendOptions::dx12::presentation_system` in `wgpu::Instance::new` (v2 does this in `apps/ene-desktop-v2/src/gpu.rs::backend_options`; Bevy 0.18 does the equivalent in `bevy_render/src/renderer/mod.rs:201`). See §22.3 for the full story and the working recipe.
+
+The earlier PR1 attempts (DX12 env var + `WS_EX_LAYERED` nudge, Vulkan swap) and the intermediate "missing `WS_EX_NOREDIRECTION_BITMAP`" diagnosis are all preserved in git history but no longer relevant to anyone reading this file. Kept as a one-line pointer so cross-references from outside the doc do not 404.
+
+### 22.2 PR1 file-level status (as of writing)
+
+| Action | File / directory | State |
+|--------|------------------|-------|
+| **New** | `crates/ene-vrm/Cargo.toml` | Shipped (PR1 step 2) |
+| **New** | `crates/ene-vrm/src/lib.rs` | Shipped (PR1 step 2 — `pub fn version()` stub + one unit test) |
+| **New** | `apps/ene-desktop-v2/Cargo.toml` | Shipped (PR0) |
+| **New** | `apps/ene-desktop-v2/src/{main,gpu,runtime}.rs` | Shipped (PR0 — full v2 smoke) |
+| **Rewritten** | `apps/ene-desktop/src/{main,app_config,ai_bridge,tray}.rs` | **Not started** — legacy Bevy binary untouched |
+| **Rewritten** | `apps/ene-desktop/Cargo.toml` | **Not started** — still Bevy 0.18 |
+| **Deleted** | `apps/ene-desktop/src/{scene,character,platform}.rs` | **Not started** |
+| **Deleted** | `apps/ene-desktop/src/{settings_ui,character_drag}/` | **Not started** |
+| **Deleted** | `patches/bevy_winit/` | **Not started** — patch and `[patch.crates-io]` still wired in `Cargo.toml` |
+| **Deleted** | `apps/tw-test/` | **Not started** — Bevy testbed still in tree as the cross-reference for the transparency recipe |
+| **Workspace** | `Cargo.toml` rendering-stack section | **Partially** — deps added (PR0) but `[patch.crates-io] bevy_winit` not yet removed |
+
+The high-level intent ("PR1 is the deletion step") is unchanged; only the rows that PR0 advanced have been marked Shipped.
+
+### 22.3 PR0 — Minimum v2 transparency smoke
+
+> **Status:** Shipped. This is the smallest possible `apps/ene-desktop-v2` that proves the §8.1 Windows transparency recipe works end-to-end on this machine. It supersedes the (incorrect) §22.1 diagnosis.
+
+**v2 layout (3 files, ~330 lines total):**
+
+```text
+apps/ene-desktop-v2/
+├── Cargo.toml        # winit, wgpu, pollster, bytemuck, glam, tracing, tracing-subscriber
+└── src/
+    ├── main.rs       # tracing-subscriber init + EventLoop::run_app
+    ├── gpu.rs        # GpuContext, pick_format_and_alpha, backend_options (DX12 / DxgiFromVisual)
+    └── runtime.rs    # Runtime, WindowSlot, RectRenderer, ApplicationHandler, AcquireError
+```
+
+The full 7-module split planned in §5.2 (`runtime/{mod,input,surface,window_slot,loop,rect}.rs`, `gpu/{mod,depth,surface_format}.rs`, `platform/{mod,...}.rs`) was collapsed into the three files above. Reasons in the §22.3 "Files in this PR" block further down.
+
+**Goal:** Get a winit + wgpu 27 window on Windows to (a) be transparent (DWM honors the swapchain's per-pixel alpha), (b) draw a single colored rectangle, and (c) toggle between transparent / opaque with `Space`, exit on `Escape`. No egui, no VRM, no AI bridge. Pure rendering smoke.
+
+**Recipe that finally works (do all four together):**
+
+1. **`wgpu::Dx12SwapchainKind::DxgiFromVisual`** — passed directly to `BackendOptions::dx12::presentation_system` in `apps/ene-desktop-v2/src/gpu.rs::backend_options` and forwarded to `wgpu::Instance::new`. This is the wgpu 27 DX12 backend option that creates the swapchain from the HWND's visual and is required for per-pixel alpha. The `WGPU_DX12_PRESENTATION_SYSTEM` env var has no effect on its own — wgpu 27 only consults it inside `Dx12SwapchainKind::from_env()`, which v2 does not call. Without `DxgiFromVisual`, the wgpu DX12 surface is created as `SurfaceTarget::WndHandle` and `Surface::get_capabilities` returns only `[CompositeAlphaMode::Opaque]` (see `wgpu-hal-27.0.4/src/dx12/adapter.rs:1006-1018`), which is the root cause of the persistent "opaque black" symptom in all earlier PR0 runs.
+
+2. `WindowAttributesExtWindows::with_no_redirection_bitmap(true)` — set **in the `WindowAttributes` builder** in `apps/ene-desktop-v2/src/runtime.rs::window_attributes`, regardless of `transparent`. This adds `WS_EX_NOREDIRECTIONBITMAP` (0x00200000) to the HWND's exstyle at create time. **This is the piece that §22.1's `force_layered_window` approach was missing.** Setting only `WS_EX_LAYERED` (via `with_transparent(true)`) makes wgpu advertise `PreMultiplied` correctly, but DWM still composites the window through the redirection bitmap and shows the background as opaque black, because the swapchain's per-pixel alpha is not being read. Both styles must be present:
+
+   ```text
+   WS_EX_NOREDIRECTIONBITMAP = 0x00200000   (added by with_no_redirection_bitmap(true))
+   ```
+
+   > **WARNING — updated after PR0 closeout.** On winit 0.30.x, `with_transparent(true)` does **not** add `WS_EX_LAYERED` to the HWND by itself (only `WindowFlags::TRANSPARENT` is set, and that flag is consulted only in the legacy DWM blur-behind path which is skipped when `with_no_redirection_bitmap(true)` is also set). The only places winit 0.30 adds `WS_EX_LAYERED` to the exstyle are `with_ignore_cursor_events(true)`. **Do not try to fix the missing bit with `SetWindowLongPtrW(WS_EX_LAYERED)` from a post-create hook** — on the developer's PR0 machine, doing so on top of `WS_EX_NOREDIRECTIONBITMAP` caused DWM to revert the window to opaque-black composition (the legacy layered path apparently overrides the non-redirected path). The `with_no_redirection_bitmap` call in `window_attributes` is the only knob that should be touched.
+
+3. `CompositeAlphaMode::PreMultiplied` in `SurfaceConfiguration` — **picked directly** by `gpu::pick_format_and_alpha` from the platform, **not** from `SurfaceCapabilities::alpha_modes`. The earlier implementation iterated the caps looking for `PreMultiplied` / `PostMultiplied` and fell back to `Opaque` when neither was listed; that was the root cause of the persistent "opaque black" symptom in earlier PR0 runs — the surface quietly degraded to `Opaque` instead of telling us it could not honour the request. The current implementation just returns `CompositeAlphaMode::PreMultiplied` on Windows / Linux and `CompositeAlphaMode::PostMultiplied` on macOS, matching `apps/tw-test` exactly. If the surface really does not support it, `Surface::configure` is called with an unsupported alpha mode and wgpu 27 will fail the next `get_current_texture`; the `Runtime::window_event` `AcquireError::Reconfigure` arm logs a clear `WARN` and reconfigures, so the failure is no longer silent. `WindowSlot::new` also emits an immediate `WARN` if the requested alpha mode is not in `SurfaceCapabilities::alpha_modes` — that is the single log line to look for to confirm the surface was misconfigured.
+
+4. Clear to `(0, 0, 0, 0)` in transparent mode, `(0.2, 0.2, 0.2, 1.0)` in opaque mode — see `WindowSlot::render_frame`. The red quad is then drawn in the same pass with `LoadOp::Load` so the clear shows through.
+
+**Cross-reference to the working `apps/tw-test` recipe:** the patched `bevy_winit` does both `with_transparent(true)` and `with_no_redirection_bitmap(true)` together at `patches/bevy_winit/src/winit_windows.rs:133-146`, and the `Window` resource sets `composite_alpha_mode: CompositeAlphaMode::PreMultiplied` directly with no fallback. PR0 reproduces both halves of that recipe in v2 without keeping the patch.
+
+**Upstream wgpu UX issue (worth filing):** The combination of (a) `WGPU_DX12_PRESENTATION_SYSTEM` being listed in wgpu's own `README.md` (line ~169) as a supported env var, (b) the env var having *no effect* unless the user explicitly calls `Dx12SwapchainKind::from_env()` / `Dx12BackendOptions::from_env_or_default()`, and (c) the default `Dx12SwapchainKind::DxgiFromHwnd` silently giving `[Opaque]` only, is a footgun. A direct wgpu user who sets the env var and reads wgpu's `Surface::get_capabilities` sees a misleading "PreMultiplied not in caps" picture, and wgpu's own validation error (`Requested alpha mode PreMultiplied is not in the list of supported alpha modes: [Opaque]`) does not mention that `Dx12SwapchainKind::DxgiFromVisual` is the missing switch. Three reasonable fixes the wgpu maintainers could pick from:
+
+1. **Auto-read the env var inside `wgpu::Instance::new` for DX12** so the env var "just works" the way every other `WGPU_*` var does, regardless of which code path creates the surface.
+2. **Rename the env var** to something clearly opt-in (e.g. `WGPU_DX12_PRESENTATION_SYSTEM_OPT_IN`) and update the rustdoc on `Dx12SwapchainKind::from_env` to state that calling `from_env` is required.
+3. **Improve the error message** in `Surface::configure` validation when the user asks for `PreMultiplied` on a `SurfaceTarget::WndHandle` surface: "hint: construct the instance with `Dx12SwapchainKind::DxgiFromVisual` to get a `SurfaceTarget::VisualFromWndHandle` that supports per-pixel alpha".
+
+Filed against `gfx-rs/wgpu`.
+
+**Diagnostic log on startup** (now emitted by `gpu::GpuContext::new` and `WindowSlot::new` so a future regression is one log line away; `tracing-subscriber` is initialised at the top of `main.rs` with `EnvFilter("info,wgpu_core=warn,wgpu_hal=warn,naga=warn")` by default — override with `RUST_LOG`):
+
+```text
+INFO  wgpu surface capabilities: formats=[Bgra8UnormSrgb], alpha_modes=[Opaque, PreMultiplied, PostMultiplied, Inherit, Auto]
+INFO  SurfaceConfiguration picked: format=Bgra8UnormSrgb, alpha_mode=PreMultiplied
+```
+
+If the `caps.alpha_modes` list is `[Opaque]` only, the picker logs an explicit `WARN` and proceeds to call `Surface::configure` with `alpha_mode=PreMultiplied`. The first frame will then fail with `SurfaceError::Outdated` or `Lost`, the input loop will log "Surface acquire returned Outdated/Lost" repeatedly, and the user will see a clear `WARN` chain pointing at the misconfiguration. That is the signal to fall back to a manual `UpdateLayeredWindow` GDI path (out of scope for PR0) or to fix the wgpu/host environment. If `caps.alpha_modes` includes `PreMultiplied` but the visible result is still opaque black, the most likely cause is the missing `WS_EX_NOREDIRECTIONBITMAP` — confirm the workspace lock has winit 0.30 with the `WindowAttributesExtWindows` trait.
+
+**Default start state:** `Runtime::new` initialises `transparent = false` (gray opaque window, decorations on, red rect). The user can press `Space` to try transparency. This is a UX safety net: on any environment where transparency does not work, the window is still visibly correct (gray + red rect) so the developer can confirm the rendering pipeline is alive.
+
+**Keyboard / lifecycle (PR0 scope, see `Runtime::window_event`):**
+- `Space` — toggle `transparent`. Calls `Window::set_decorations(!transparent)`. The clear color in `WindowSlot::render_frame` switches accordingly.
+- `Escape` or close button — `EventLoop::exit()`.
+- `Resized` / `ScaleFactorChanged` — `WindowSlot::reconfigure`, then `request_redraw`.
+- `RedrawRequested` — `WindowSlot::render_frame`. On `SurfaceError::Outdated | Lost` we reconfigure and request another redraw.
+
+**Files in this PR (per `git diff --stat`):**
+- `apps/ene-desktop-v2/Cargo.toml` — slimmed to `winit`, `wgpu`, `pollster`, `bytemuck`, `glam`, `tracing`, `tracing-subscriber` (env-filter + fmt). No `raw-window-handle`, no `windows-sys`, no `ene-core`, no `tokio`, no `egui`, no `tray-icon`.
+- **Layout: 3 files, ~330 lines total.** `src/main.rs` (tracing init + event loop), `src/gpu.rs` (`GpuContext` + `pick_format_and_alpha` + DX12 backend options), `src/runtime.rs` (`Runtime` + `WindowSlot` + `RectRenderer` + `ApplicationHandler` impl + `AcquireError`).
+- Deleted: `src/gpu/{mod,surface_format}.rs` (folded into `gpu.rs`), `src/platform/{mod,linux,windows}.rs` (HWND exstyle diagnostic log removed; Linux display-server log removed — both were nice-to-have, not required for the recipe), `src/runtime/{mod,input,surface,window_slot,rect}.rs` (folded into `runtime.rs`).
+- `RectRenderer` simplified: no UBO, no bind group, no pipeline layout with bindings. Hardcoded NDC `[-0.5, 0.5]²` quad (6-vertex `TriangleList`), hardcoded color in WGSL, empty pipeline layout. The original 211-line renderer (vertex+UBO+bind group+pipeline layout+WGSL) is now ~80 lines.
+- Input handling inlined as match arms in the `ApplicationHandler::window_event` impl. The 7-argument `input::route` function is gone; `toggle_transparency` logic lives in the `Space` arm.
+- `main.rs` — installs the `tracing_subscriber::fmt` subscriber with the `EnvFilter` above before any other work, so the wgpu caps and surface format are logged on startup.
+
+**Manual smoke (verified on this developer's machine):**
+1. `cargo run -p ene-desktop-v2` — gray opaque window with title bar, red rect at the center.
+2. Press `Space` — window becomes borderless, background becomes the actual desktop (whatever is behind the window), red rect stays.
+3. Press `Space` again — returns to gray + title bar.
+4. Press `Escape` — exits cleanly.
+5. Resize — frame is rebuilt, the red rect stays at NDC origin.
+
+**Known limitations (carried over to PR1+):**
+- v2 only has one window slot. The settings window, tray, AI bridge, and VRM renderer are PR1+.
+- The wgpu 27 surface format picker still falls back to `Opaque` if the host's DXGI does not advertise `PreMultiplied`. In that case `Space` still toggles `decorations` and the clear color, but DWM composites the background as opaque.
+
 
