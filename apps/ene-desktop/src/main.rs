@@ -57,7 +57,7 @@ fn main() {
         .insert_resource(DirectionalLightShadowMap {
             size: DEFAULT_SHADOW_QUALITY.shadow_map_size(),
         })
-        .insert_resource(clear_color())
+        .insert_resource(ClearColor(Color::NONE))
         .insert_resource(WinitSettings::desktop_app())
         .add_plugins((
             DefaultPlugins
@@ -80,11 +80,6 @@ fn main() {
         .run();
 }
 
-#[cfg(target_os = "windows")]
-fn clear_color() -> ClearColor {
-    ClearColor(Color::NONE)
-}
-
 fn render_plugin() -> RenderPlugin {
     #[cfg(target_os = "windows")]
     {
@@ -100,9 +95,4 @@ fn render_plugin() -> RenderPlugin {
     {
         RenderPlugin::default()
     }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn clear_color() -> ClearColor {
-    ClearColor(Color::NONE)
 }
