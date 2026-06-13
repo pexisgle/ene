@@ -15,7 +15,7 @@ This document is the **design plan** for the migration. The tables below summari
 |-------|----------|-------|-------|
 | **PR0 — `ene-desktop-v2` scaffold + Windows transparency smoke** | §22.3 | **Shipped** | `apps/ene-desktop-v2/` (~330 lines across `main.rs`, `gpu.rs`, `runtime.rs`) replaces the planned 7-module split. Single transparent window, red-quad renderer, `Space` toggles transparency, `Escape` exits. Verified on the developer's Windows machine. |
 | **PR1 step 1 — `ene-vrm` crate skeleton** | §4 PR1 / step 2 | **Shipped** | `crates/ene-vrm/{Cargo.toml, src/lib.rs}` created with an empty `pub fn version()` stub and a unit test. No `gltf` / `wgpu` / `winit` deps yet. |
-| **PR1 steps 3–8 — strip Bevy from `apps/ene-desktop`, wire winit window + tray + AI bridge** | §4 PR1 / steps 3–8 | **Not started** | The legacy `apps/ene-desktop` is still Bevy 0.18, unchanged. `apps/tw-test` and `patches/bevy_winit/` are still present. |
+| **PR1 steps 3–8 — strip Bevy from `apps/ene-desktop`, wire winit window + tray + AI bridge** | §4 PR1 / steps 3–8 | **Not started** | The legacy `apps/ene-desktop` is still Bevy 0.18, unchanged. The `patches/bevy_winit/` patch has been removed (the legacy build now uses upstream `bevy_winit`); `apps/tw-test/` has also been removed. |
 | **PR2 — egui integration + settings window** | §4 PR2 | **Not started** | — |
 | **PR3 — `ene-vrm` static rendering (MToon + skinning)** | §4 PR3 | **Not started** | — |
 | **PR4 — Expressions, LookAt, BodyTracking** | §4 PR4 | **Not started** | — |
@@ -25,14 +25,14 @@ This document is the **design plan** for the migration. The tables below summari
 
 Until PR1's "skeleton swap" step 3 finishes, both binaries build side-by-side:
 
-- **`apps/ene-desktop`** — legacy Bevy 0.18 build. Still the user-facing desktop app. Still depends on `bevy`, `bevy_egui`, `bevy_vrm1`, the local `patches/bevy_winit` patch, `tray-icon`, `gtk` (Linux), and `wayland-client` (Linux). It is **not** being modified by this migration until PR1 step 3.
+- **`apps/ene-desktop`** — legacy Bevy 0.18 build. Still the user-facing desktop app. Still depends on `bevy`, `bevy_egui`, `bevy_vrm1`, `tray-icon`, `gtk` (Linux), and `wayland-client` (Linux). The local `patches/bevy_winit` patch has been removed; the legacy build now uses upstream `bevy_winit` 0.18 from crates.io. The legacy binary is **not** being modified by this migration until PR1 step 3.
 - **`apps/ene-desktop-v2`** — new crate, lives next to the legacy one. Renders a single transparent window with `winit` + `wgpu` 27 and a hard-coded red quad. **Cargo `run -p ene-desktop-v2`** to launch.
 
 Once PR1 is finished, `apps/ene-desktop` will be deleted and the `apps/ene-desktop-v2` sources will be moved to `apps/ene-desktop`. The migration plan (§4) calls this out as "PR1 is the deletion step." Until then, treat them as parallel codebases.
 
 ### 0.2 Where the recipe was proven
 
-The transparency recipe that PR0 ships is the same one used in `apps/tw-test`, a standalone Bevy 0.18 testbed that still exists in the workspace. The cross-reference is documented in §22.3 below; the file itself remains in tree until PR1 step 3 cleans it up.
+The transparency recipe that PR0 ships was originally proved out in `apps/tw-test`, a standalone Bevy 0.18 testbed. The cross-reference to that testbed is preserved in §22.3 below for historical context; the testbed itself has been deleted along with the `patches/bevy_winit` patch as they are no longer needed.
 
 ---
 
@@ -45,7 +45,7 @@ The current `ene-desktop` implementation is built on top of Bevy 0.18 (`bevy_win
 | B1 | egui rendering crash | Windows + DX12 + `WGPU_DX12_PRESENTATION_SYSTEM=DxgiFromVisual` | egui panics or crashes during rendering. We currently work around it by leaving the env var unset and accepting that window transparency is not pixel-perfect. |
 | B2 | Window transparency broken | Windows + Vulkan backend | The character window is fully opaque even with `transparent: true`. The whole desktop overlay concept is unusable. |
 
-We also carry a local patch of `bevy_winit` (`patches/bevy_winit`, wired via `[patch.crates-io]`) to work around winit issues inside the Bevy wrapper. This is technical debt and a perpetual source of merge pain.
+The two bugs together motivated carrying a local patch of `bevy_winit` (deleted with PR0 / step 1 of this migration) to work around winit issues inside the Bevy wrapper. With the patch gone, the legacy Bevy build uses upstream `bevy_winit` 0.18; the v2 stack no longer has this technical debt.
 
 ### 1.1 Why drop Bevy (not patch it)
 
@@ -142,7 +142,7 @@ We deliver the migration as a series of small, individually reviewable PRs. Each
 
 ### PR1 — Skeleton swap (the hardest PR)
 
-> **Status:** In progress. **Step 2** (`crates/ene-vrm` skeleton) and the **PR0 transparency smoke** that motivates the recipe are shipped; the rest of PR1 (steps 3–8: strip Bevy from the legacy `apps/ene-desktop`, move the source to v2, wire the winit window there, port the tray / AI bridge / settings) is still open. See §0 and §22.3 for the current state of v2.
+> **Status:** In progress. **Step 1** (workspace `Cargo.toml` rendering-stack deps + `[patch.crates-io] bevy_winit` removal) is **shipped**, the **`patches/bevy_winit/` directory and `apps/tw-test/` are deleted**, and **Step 2** (`crates/ene-vrm` skeleton) and the **PR0 transparency smoke** that motivates the recipe are shipped. The rest of PR1 (steps 3–8: strip Bevy from the legacy `apps/ene-desktop`, move the source to v2, wire the winit window there, port the tray / AI bridge / settings) is still open. See §0 and §22.3 for the current state of v2.
 
 **Objective:** Remove Bevy, get a transparent window with a clear color and a working system tray, with the AI bridge still hooked up but rendering nothing.
 
@@ -371,19 +371,19 @@ This is the **actual** file layout on disk today. The full split below lands inc
 
 ### 5.3 Removed
 
-- `patches/bevy_winit/` (entire directory)
+- **`patches/bevy_winit/`** (entire directory — done; the `[patch.crates-io] bevy_winit` entry in the workspace `Cargo.toml` is also gone)
 - `apps/ene-desktop/src/scene.rs`
 - `apps/ene-desktop/src/character.rs`
 - `apps/ene-desktop/src/settings_ui/` (replaced by `src/ui/`)
 - `apps/ene-desktop/src/character_drag/` (logic moves to `src/platform/drag_subclass.rs`)
 - `apps/ene-desktop/src/platform.rs` (split into `src/platform/`)
-- `apps/tw-test/` (the Bevy transparency testbed — kept around for now so the §22.3 cross-reference stays valid; deleted with the rest of the Bevy stack in PR1)
+- **`apps/tw-test/`** (the Bevy transparency testbed — done; the cross-reference in §22.3 is preserved as a historical note only)
 
 ---
 
 ## 6. Dependency Changes
 
-> **Status as of writing:** The **"Done"** column below reflects the current workspace. `Added` is half-done (all workspace deps declared; only `apps/ene-desktop-v2` consumes them). `Removed` has not started — `bevy` is still in `apps/ene-desktop/Cargo.toml` and `[patch.crates-io] bevy_winit` is still wired in the workspace.
+> **Status as of writing:** The **"Done"** column below reflects the current workspace. `Added` is half-done (all workspace deps declared; only `apps/ene-desktop-v2` consumes them). `Removed` is partly done: the local `bevy_winit` patch is gone (the legacy `apps/ene-desktop` now uses upstream `bevy_winit` 0.18 from crates.io), but the rest of the Bevy stack is still in `apps/ene-desktop/Cargo.toml`.
 
 ### 6.1 Added (workspace)
 
@@ -409,10 +409,10 @@ This is the **actual** file layout on disk today. The full split below lands inc
 
 ### 6.3 Removed (workspace)
 
-> **Not started.** All of the following are still present:
+> **Partly done.** The patch line is gone and the legacy build now uses upstream `bevy_winit`. The Bevy crates themselves are still in `apps/ene-desktop/Cargo.toml` (the legacy binary is untouched until PR1 step 3).
 
 - `bevy`, `bevy_ecs`, `bevy_pbr`, `bevy_winit`, `bevy_egui`, `bevy_vrm1`, `bevy_animation`, `bevy_asset`, `bevy_render`, `bevy_math`, `bevy_mesh`, `bevy_window`, `bevy_input`, `bevy_image`, `bevy_transform`, `bevy_utils`.
-- `[patch.crates-io] bevy_winit` and the `patches/bevy_winit/` directory.
+- ~~`[patch.crates-io] bevy_winit` and the `patches/bevy_winit/` directory~~ **(done — both deleted)**.
 
 ---
 
@@ -888,8 +888,8 @@ The earlier PR1 attempts (DX12 env var + `WS_EX_LAYERED` nudge, Vulkan swap) and
 | **Rewritten** | `apps/ene-desktop/Cargo.toml` | **Not started** — still Bevy 0.18 |
 | **Deleted** | `apps/ene-desktop/src/{scene,character,platform}.rs` | **Not started** |
 | **Deleted** | `apps/ene-desktop/src/{settings_ui,character_drag}/` | **Not started** |
-| **Deleted** | `patches/bevy_winit/` | **Not started** — patch and `[patch.crates-io]` still wired in `Cargo.toml` |
-| **Deleted** | `apps/tw-test/` | **Not started** — Bevy testbed still in tree as the cross-reference for the transparency recipe |
+| **Deleted** | `patches/bevy_winit/` | **Shipped** — patch directory and `[patch.crates-io] bevy_winit` in workspace `Cargo.toml` are both gone; the legacy `apps/ene-desktop` now uses upstream `bevy_winit` 0.18 from crates.io |
+| **Deleted** | `apps/tw-test/` | **Shipped** — Bevy testbed removed; the §22.3 cross-reference is preserved as a historical note only |
 | **Workspace** | `Cargo.toml` rendering-stack section | **Partially** — deps added (PR0) but `[patch.crates-io] bevy_winit` not yet removed |
 
 The high-level intent ("PR1 is the deletion step") is unchanged; only the rows that PR0 advanced have been marked Shipped.
