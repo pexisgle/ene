@@ -12,3 +12,7 @@ bytemuck = { workspace = true }
 glam = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+egui-winit = { workspace = true }
+eframe = "0.34.3"

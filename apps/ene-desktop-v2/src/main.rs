@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gpu = pollster::block_on(gpu::GpuContext::new())?;
 
     let event_loop = winit::event_loop::EventLoop::new()?;
-    event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
+    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
 
     let mut runtime = runtime::Runtime::new(gpu);
     event_loop

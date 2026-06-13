@@ -21,7 +21,7 @@ pub struct GpuContext {
 
 impl GpuContext {
     pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: {
                 #[cfg(target_os = "windows")]
                 {
@@ -33,7 +33,9 @@ impl GpuContext {
                 }
             },
             backend_options: backend_options(),
-            ..Default::default()
+            flags: wgpu::InstanceFlags::default(),
+            display: std::default::Default::default(),
+            memory_budget_thresholds: std::default::Default::default(),
         });
 
         let adapter = instance

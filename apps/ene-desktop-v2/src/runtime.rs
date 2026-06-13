@@ -25,7 +25,8 @@ pub struct Runtime {
     /// `true` = transparent window, no decorations, clear to
     /// `(0,0,0,0)`. `false` = opaque gray window with title bar.
     transparent: bool,
-    slot: Option<WindowSlot>,
+    char_window: Option<CharacterWindow>,
+    ui_window: Option<UiWindow>,
     rect: Option<RectRenderer>,
 }
 
@@ -34,7 +35,8 @@ impl Runtime {
         Self {
             gpu,
             transparent: false,
-            slot: None,
+            char_window: None,
+            ui_window: None,
             rect: None,
         }
     }
@@ -42,35 +44,72 @@ impl Runtime {
 
 impl ApplicationHandler for Runtime {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.slot.is_some() {
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+        if self.char_window.is_some() {
             return;
         }
-        let attrs = window_attributes(self.transparent);
-        let window = match event_loop.create_window(attrs) {
+
+        // Create character window
+        let char_attrs = window_attributes(self.transparent);
+        let char_w = match event_loop.create_window(char_attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
-                tracing::error!("Failed to create window: {e}");
+                tracing::error!("Failed to create character window: {e}");
                 event_loop.exit();
                 return;
             }
         };
 
-        let size = window.inner_size();
-        match WindowSlot::new(
-            window,
+        let char_size = char_w.inner_size();
+        match CharacterWindow::new(
+            char_w,
             &self.gpu.instance,
             &self.gpu.adapter,
             &self.gpu.device,
-            size,
+            char_size,
         ) {
-            Ok(slot) => {
-                let format = slot.config.format;
+            Ok(cw) => {
+                let format = cw.config.format;
                 self.rect = Some(RectRenderer::new(&self.gpu.device, format));
-                slot.window.request_redraw();
-                self.slot = Some(slot);
+                cw.window.request_redraw();
+                self.char_window = Some(cw);
             }
             Err(e) => {
-                tracing::error!("Failed to create WindowSlot: {e}");
+                tracing::error!("Failed to create CharacterWindow: {e}");
+                event_loop.exit();
+                return;
+            }
+        }
+
+        // Create UI window
+        let ui_attrs = WindowAttributes::default()
+            .with_title("ene UI")
+            .with_inner_size(LogicalSize::new(400.0, 300.0))
+            .with_resizable(true);
+
+        let ui_w = match event_loop.create_window(ui_attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                tracing::error!("Failed to create ui window: {e}");
+                event_loop.exit();
+                return;
+            }
+        };
+
+        let ui_size = ui_w.inner_size();
+        match UiWindow::new(
+            ui_w,
+            &self.gpu.instance,
+            &self.gpu.adapter,
+            &self.gpu.device,
+            ui_size,
+        ) {
+            Ok(uw) => {
+                uw.window.request_redraw();
+                self.ui_window = Some(uw);
+            }
+            Err(e) => {
+                tracing::error!("Failed to create UiWindow: {e}");
                 event_loop.exit();
             }
         }
@@ -79,55 +118,108 @@ impl ApplicationHandler for Runtime {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
+        window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(slot) = self.slot.as_mut() else {
-            return;
-        };
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                slot.reconfigure(&self.gpu.device, slot.window.inner_size());
-                slot.window.request_redraw();
-            }
-            WindowEvent::KeyboardInput { .. } => match key_pressed(&event) {
-                Some(NamedKey::Space) => {
-                    self.transparent = !self.transparent;
-                    slot.window.set_decorations(!self.transparent);
-                    slot.window.request_redraw();
+        let is_char = self
+            .char_window
+            .as_ref()
+            .map(|w| w.window.id() == window_id)
+            .unwrap_or(false);
+        let is_ui = self
+            .ui_window
+            .as_ref()
+            .map(|w| w.window.id() == window_id)
+            .unwrap_or(false);
+
+        if is_ui {
+            if let Some(uw) = self.ui_window.as_mut() {
+                let response = uw.egui_state.on_window_event(&uw.window, &event);
+
+                if response.repaint {
+                    uw.window.request_redraw();
                 }
-                Some(NamedKey::Escape) => event_loop.exit(),
-                _ => {}
-            },
-            WindowEvent::RedrawRequested => {
-                let Some(rect) = self.rect.as_ref() else {
+                if response.consumed {
                     return;
-                };
-                if let Err(e) =
-                    slot.render_frame(&self.gpu.device, &self.gpu.queue, rect, self.transparent)
-                {
-                    match e {
-                        AcquireError::Reconfigure => {
-                            tracing::warn!("Surface acquire Outdated/Lost; reconfiguring");
-                            slot.reconfigure(&self.gpu.device, slot.window.inner_size());
-                            slot.window.request_redraw();
-                        }
-                        AcquireError::Timeout => slot.window.request_redraw(),
-                        AcquireError::Fatal => {
-                            tracing::error!("Surface acquire failed fatally; exiting");
-                            event_loop.exit();
+                }
+
+                match event {
+                    WindowEvent::CloseRequested => event_loop.exit(),
+                    WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                        uw.reconfigure(&self.gpu.device, uw.window.inner_size());
+                        uw.window.request_redraw();
+                    }
+                    WindowEvent::RedrawRequested => {
+                        // Ignored on Windows because it's buggy in winit 0.30.
+                        // We render in about_to_wait instead.
+                    }
+                    _ => {}
+                }
+            }
+        } else if is_char {
+            let cw = self.char_window.as_mut().unwrap();
+            match event {
+                WindowEvent::CloseRequested => event_loop.exit(),
+                WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                    cw.reconfigure(&self.gpu.device, cw.window.inner_size());
+                    cw.window.request_redraw();
+                }
+                WindowEvent::KeyboardInput { .. } => match key_pressed(&event) {
+                    Some(NamedKey::Space) => {
+                        self.transparent = !self.transparent;
+                        cw.window.set_decorations(!self.transparent);
+                        cw.window.request_redraw();
+                    }
+                    Some(NamedKey::Escape) => event_loop.exit(),
+                    _ => {}
+                },
+                WindowEvent::RedrawRequested => {
+                    let Some(rect) = self.rect.as_ref() else {
+                        return;
+                    };
+                    if let Err(e) =
+                        cw.render_frame(&self.gpu.device, &self.gpu.queue, rect, self.transparent)
+                    {
+                        match e {
+                            AcquireError::Reconfigure => {
+                                tracing::warn!(
+                                    "Character Surface acquire Outdated/Lost; reconfiguring"
+                                );
+                                cw.reconfigure(&self.gpu.device, cw.window.inner_size());
+                                cw.window.request_redraw();
+                            }
+                            AcquireError::Timeout => cw.window.request_redraw(),
+                            AcquireError::Fatal => {
+                                tracing::error!(
+                                    "Character Surface acquire failed fatally; exiting"
+                                );
+                                event_loop.exit();
+                            }
                         }
                     }
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(slot) = self.slot.as_ref() {
-            slot.window.request_redraw();
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(cw) = self.char_window.as_mut() {
+            cw.window.request_redraw();
+        }
+        if let Some(uw) = self.ui_window.as_mut() {
+            match uw.render_frame(&self.gpu.device, &self.gpu.queue) {
+                Ok(_) => {}
+                Err(e) => match e {
+                    AcquireError::Reconfigure => {
+                        uw.reconfigure(&self.gpu.device, uw.window.inner_size());
+                    }
+                    AcquireError::Timeout => {}
+                    AcquireError::Fatal => {
+                        event_loop.exit();
+                    }
+                },
+            }
         }
     }
 }
@@ -149,21 +241,6 @@ fn key_pressed(event: &WindowEvent) -> Option<NamedKey> {
     }
 }
 
-/// Build the [`WindowAttributes`] used by the character window.
-///
-/// Mirrors the working-transparency recipe in `apps/tw-test` (which
-/// runs the patched `bevy_winit` and sets both styles together at
-/// `patches/bevy_winit/src/winit_windows.rs:133-146`):
-/// * `transparent = transparent` — runtime knob. Drives the winit
-///   `WindowFlags::TRANSPARENT` flag and `decorations`.
-/// * `with_no_redirection_bitmap(true)` on Windows — **always** set,
-///   regardless of `transparent`. Adds `WS_EX_NOREDIRECTIONBITMAP` to
-///   the HWND exstyle at create time, which is what makes wgpu's
-///   DX12 backend advertise `PreMultiplied` for the surface.
-/// * `decorations = !transparent` — visible title bar in the opaque
-///   state, none in the transparent state.
-/// * `WindowLevel::AlwaysOnTop` — the character floats above other
-///   windows. Cannot be changed at runtime in winit 0.30.
 fn window_attributes(transparent: bool) -> WindowAttributes {
     let attrs = WindowAttributes::default()
         .with_title("ene v2 (tw-test wgpu port)")
@@ -184,15 +261,13 @@ fn window_attributes(transparent: bool) -> WindowAttributes {
     }
 }
 
-/// One window backed by one `wgpu::Surface`. The character window is
-/// the only slot in the minimum v2 scaffold.
-struct WindowSlot {
+struct CharacterWindow {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
 }
 
-impl WindowSlot {
+impl CharacterWindow {
     fn new(
         window: Arc<Window>,
         instance: &wgpu::Instance,
@@ -205,21 +280,7 @@ impl WindowSlot {
             .map_err(|e| format!("Failed to create wgpu surface: {e}"))?;
 
         let caps = surface.get_capabilities(adapter);
-        tracing::debug!(
-            "wgpu surface capabilities: formats={:?}, alpha_modes={:?}",
-            caps.formats,
-            caps.alpha_modes
-        );
         let (format, alpha_mode) = pick_format_and_alpha(&caps);
-        if !caps.alpha_modes.contains(&alpha_mode) {
-            tracing::warn!(
-                "alpha_mode={alpha_mode:?} not in surface caps ({:?}); surface.configure() may fail",
-                caps.alpha_modes
-            );
-        }
-        tracing::debug!(
-            "SurfaceConfiguration picked: format={format:?}, alpha_mode={alpha_mode:?}"
-        );
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -256,11 +317,17 @@ impl WindowSlot {
         rect: &RectRenderer,
         transparent: bool,
     ) -> Result<(), AcquireError> {
-        let frame = self.surface.get_current_texture().map_err(|e| match e {
-            wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost => AcquireError::Reconfigure,
-            wgpu::SurfaceError::Timeout => AcquireError::Timeout,
-            wgpu::SurfaceError::OutOfMemory | wgpu::SurfaceError::Other => AcquireError::Fatal,
-        })?;
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return Err(AcquireError::Timeout);
+            }
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                return Err(AcquireError::Reconfigure);
+            }
+            wgpu::CurrentSurfaceTexture::Validation => return Err(AcquireError::Fatal),
+        };
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -290,6 +357,7 @@ impl WindowSlot {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             rect.draw(&mut rp);
         }
@@ -299,35 +367,222 @@ impl WindowSlot {
     }
 }
 
-/// Errors from acquiring the current swap-chain image.
+struct UiWindow {
+    window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    egui_ctx: egui::Context,
+    egui_state: egui_winit::State,
+    egui_renderer: egui_wgpu::Renderer,
+    text_input: String,
+    click_count: u32,
+    textures_to_free: Vec<Vec<egui::TextureId>>,
+}
+
+impl UiWindow {
+    fn new(
+        window: Arc<Window>,
+        instance: &wgpu::Instance,
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        size: PhysicalSize<u32>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let surface = instance
+            .create_surface(window.clone())
+            .map_err(|e| format!("Failed to create wgpu surface: {e}"))?;
+
+        let caps = surface.get_capabilities(adapter);
+        let format = *caps
+            .formats
+            .iter()
+            .find(|f| !f.is_srgb())
+            .unwrap_or(&caps.formats[0]);
+        let alpha_mode = caps.alpha_modes[0];
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode: wgpu::PresentMode::AutoVsync,
+            alpha_mode,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(device, &config);
+
+        let egui_ctx = egui::Context::default();
+        let viewport_id = egui::ViewportId::ROOT;
+        let egui_state = egui_winit::State::new(
+            egui_ctx.clone(),
+            viewport_id,
+            &window,
+            Some(window.scale_factor() as f32),
+            None,
+            Some(device.limits().max_texture_dimension_2d as usize),
+        );
+        let egui_renderer =
+            egui_wgpu::Renderer::new(device, format, egui_wgpu::RendererOptions::default());
+
+        Ok(Self {
+            window,
+            surface,
+            config,
+            egui_ctx,
+            egui_state,
+            egui_renderer,
+            text_input: String::new(),
+            click_count: 0,
+            textures_to_free: vec![Vec::new(), Vec::new(), Vec::new()],
+        })
+    }
+
+    fn reconfigure(&mut self, device: &wgpu::Device, new_size: PhysicalSize<u32>) {
+        if new_size.width == 0 || new_size.height == 0 {
+            return;
+        }
+        self.config.width = new_size.width;
+        self.config.height = new_size.height;
+        self.surface.configure(device, &self.config);
+    }
+
+    fn render_frame(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<(), AcquireError> {
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return Err(AcquireError::Timeout);
+            }
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                return Err(AcquireError::Reconfigure);
+            }
+            wgpu::CurrentSurfaceTexture::Validation => return Err(AcquireError::Fatal),
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let raw_input = self.egui_state.take_egui_input(&self.window);
+        self.egui_ctx.begin_pass(raw_input);
+
+        let mut panel_ui = egui::Ui::new(
+            self.egui_ctx.clone(),
+            egui::Id::new("central_panel"),
+            egui::UiBuilder::new()
+                .layer_id(egui::LayerId::background())
+                .max_rect(self.egui_ctx.content_rect()),
+        );
+        panel_ui.set_clip_rect(self.egui_ctx.content_rect());
+
+        egui::CentralPanel::default().show_inside(&mut panel_ui, |ui| {
+            ui.heading("ene UI Settings");
+            ui.label("Hello from separate egui window!");
+
+            ui.separator();
+            ui.horizontal_top(|ui| {
+                ui.label("Name: ");
+                ui.add_sized(
+                    [300.0, ui.spacing().interact_size.y],
+                    egui::TextEdit::singleline(&mut self.text_input),
+                );
+            });
+
+            if ui.button("Click me!").clicked() {
+                self.click_count += 1;
+            }
+            ui.label(format!("Button clicked {} times", self.click_count));
+        });
+
+        let full_output = self.egui_ctx.end_pass();
+        let platform_output = full_output.platform_output;
+        self.egui_state
+            .handle_platform_output(&self.window, platform_output);
+
+        let tris = self
+            .egui_ctx
+            .tessellate(full_output.shapes, full_output.pixels_per_point);
+
+        for (id, image_delta) in &full_output.textures_delta.set {
+            self.egui_renderer
+                .update_texture(device, queue, *id, image_delta);
+        }
+
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+        let screen_descriptor = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [self.config.width, self.config.height],
+            pixels_per_point: self.window.scale_factor() as f32,
+        };
+
+        let user_cmds = self.egui_renderer.update_buffers(
+            device,
+            queue,
+            &mut encoder,
+            &tris,
+            &screen_descriptor,
+        );
+
+        {
+            let mut rp = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: None,
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                })
+                .forget_lifetime();
+
+            self.egui_renderer
+                .render(&mut rp, &tris, &screen_descriptor);
+        }
+
+        queue.submit(
+            user_cmds
+                .into_iter()
+                .chain(std::iter::once(encoder.finish())),
+        );
+
+        let to_free_now = self.textures_to_free.remove(0);
+        for id in to_free_now {
+            self.egui_renderer.free_texture(&id);
+        }
+        self.textures_to_free.push(full_output.textures_delta.free);
+
+        frame.present();
+        Ok(())
+    }
+}
+
 enum AcquireError {
-    /// The surface configuration is stale; caller should reconfigure
-    /// and request a redraw.
     Reconfigure,
-    /// Surface acquire timed out; safe to ignore and retry.
     Timeout,
-    /// Out of memory or backend-reported unrecoverable error.
     Fatal,
 }
 
-/// Single colored rectangle renderer (Bevy-logo replacement).
-///
-/// The PR0 quad sits at NDC `[-0.5, 0.5]²` with a hardcoded
-/// identity transform, hardcoded color, and a six-vertex
-/// `TriangleList` (two triangles, no index buffer). That keeps the
-/// pipeline layout empty (no bind group) and the shader to a handful
-/// of WGSL lines.
 struct RectRenderer {
     pipeline: wgpu::RenderPipeline,
     vbuf: wgpu::Buffer,
 }
 
 const QUAD: &[glam::Vec2] = &[
-    // Triangle 1: BL, BR, TR
     glam::Vec2::new(-0.5, -0.5),
     glam::Vec2::new(0.5, -0.5),
     glam::Vec2::new(0.5, 0.5),
-    // Triangle 2: BL, TR, TL
     glam::Vec2::new(-0.5, -0.5),
     glam::Vec2::new(0.5, 0.5),
     glam::Vec2::new(-0.5, 0.5),
@@ -372,7 +627,7 @@ impl RectRenderer {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &[],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -404,7 +659,7 @@ impl RectRenderer {
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
