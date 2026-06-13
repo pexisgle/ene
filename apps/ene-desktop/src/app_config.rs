@@ -63,7 +63,9 @@ pub const DEFAULT_VRMA_PATH: &str = "characters/Alicia/motions/VRMA_01.vrma";
 pub const APP_ID: &str = "dev.pexisgle.ene";
 pub const WINDOW_WIDTH: u32 = 560;
 pub const WINDOW_HEIGHT: u32 = 980;
+#[allow(dead_code)]
 pub const SETTINGS_WINDOW_WIDTH: u32 = 460;
+#[allow(dead_code)]
 pub const SETTINGS_WINDOW_HEIGHT: u32 = 620;
 pub const MASK_RENDER_DOWNSAMPLE_CHOICES: [u32; 3] = [4, 6, 8];
 pub const DEFAULT_MASK_RENDER_DOWNSAMPLE: u32 = 8;
