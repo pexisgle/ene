@@ -71,17 +71,24 @@ impl CharacterRenderer {
         };
         match load_vrm(&default_vrm, device, queue) {
             Ok(model) => {
+                let prim_count = model.mesh.primitives.len();
+                let total_vertices: u32 =
+                    model.mesh.primitives.iter().map(|p| p.vertex_count).sum();
+                let total_indices: u32 = model.mesh.primitives.iter().map(|p| p.index_count).sum();
+                let textured = model
+                    .mesh
+                    .primitives
+                    .iter()
+                    .filter(|p| p.base_color.is_some())
+                    .count();
                 tracing::info!(
-                    "Loaded VRM {}: {} vertices, {} indices, {} joints, base_color={}",
+                    "Loaded VRM {}: {} primitives, {} vertices, {} indices, {} with base-color, {} joints",
                     default_vrm.display(),
-                    model.mesh.vertex_count,
-                    model.mesh.index_count,
+                    prim_count,
+                    total_vertices,
+                    total_indices,
+                    textured,
                     model.joint_count(),
-                    if model.base_color.is_some() {
-                        "yes"
-                    } else {
-                        "no"
-                    },
                 );
                 let renderer = VrmRenderer::new(device, surface_format, &model);
                 self.model = Some(model);
