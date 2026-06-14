@@ -191,27 +191,27 @@ fn synthetic_icon() -> Icon {
 fn install_event_pump(event_tx: AppEventSender) {
     #[cfg(target_os = "windows")]
     {
+        // The Win32 message pump must run on the same thread that
+        // owns the icon (the tray-icon backend stores the icon
+        // HWND in thread-local state). It also blocks in
+        // `GetMessageW` for the lifetime of the process, so we
+        // run the `tray-icon` event poll on a **second** thread
+        // that just forwards `TrayIconEvent::Click` and
+        // `MenuEvent`s into the cross-subsystem bus. Forgetting
+        // the icon at the end of the message pump keeps the
+        // notification-area entry alive after the function returns.
         std::thread::spawn(move || {
-            // Build + own the icon on this thread; the
-            // `tray-icon` Win32 backend needs a thread-local
-            // message pump. Forgetting the icon at the end of this
-            // closure keeps the notification-area entry alive for
-            // the lifetime of the process.
             let _tray_icon = TrayIconBuilder::new()
                 .with_menu(Box::new(build_menu()))
                 .with_tooltip(TOOLTIP)
                 .with_icon(build_icon().unwrap_or_else(synthetic_icon))
                 .build()
                 .expect("tray icon must build on Windows");
-            // The Win32 message pump is what dispatches WM_RBUTTONUP
-            // to the tray icon's window proc, which in turn shows
-            // the context menu attached via `with_menu(...)`.
-            // Without this loop, right-click on the tray icon does
-            // nothing — the OS sees the click but nobody is
-            // processing the message.
             pump_win32_messages();
-            pump_tray_events(&event_tx);
             std::mem::forget(_tray_icon);
+        });
+        std::thread::spawn(move || {
+            pump_tray_events(&event_tx);
         });
     }
 
