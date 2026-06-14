@@ -157,12 +157,12 @@ impl VrmRenderer {
                 // triangles wound CCW when viewed from outside the
                 // model. The camera at `(0, 1, 3)` looking at the
                 // origin sees the back of a model that natively
-                // faces -Z. With PR4.1's per-frame model
-                // transform, the runtime can pre-rotate the model
-                // 180 degrees around Y so its face points toward the
-                // camera; until then we leave culling off so the
-                // silhouette is always visible.
-                cull_mode: None,
+                // faces -Z; PR4.1's per-frame model transform lets
+                // the runtime pre-rotate the model 180 degrees
+                // around Y so the face points toward the camera.
+                // With that pre-rotation, `CullMode::Back` is the
+                // natural choice and halves the fragment work.
+                cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
