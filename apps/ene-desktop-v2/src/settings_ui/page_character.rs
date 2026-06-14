@@ -77,6 +77,7 @@ pub fn render(
             ai,
             SettingsAction::LookAtStrengthDown,
             SettingsAction::LookAtStrengthUp,
+            |s, buf| *buf = format!("{:.2}", s.character_state.look_at_strength),
         );
         render_numeric_row(
             ui,
@@ -87,6 +88,7 @@ pub fn render(
             ai,
             SettingsAction::ModelScaleDown,
             SettingsAction::ModelScaleUp,
+            |s, buf| *buf = format!("{:.2}", s.character_state.model_scale),
         );
         render_numeric_row(
             ui,
@@ -97,6 +99,7 @@ pub fn render(
             ai,
             SettingsAction::CharacterPosXDown,
             SettingsAction::CharacterPosXUp,
+            |s, buf| *buf = format!("{:+.2}", s.character_state.character_position.x),
         );
         render_numeric_row(
             ui,
@@ -107,6 +110,7 @@ pub fn render(
             ai,
             SettingsAction::CharacterPosYDown,
             SettingsAction::CharacterPosYUp,
+            |s, buf| *buf = format!("{:+.2}", s.character_state.character_position.y),
         );
         render_numeric_row(
             ui,
@@ -117,6 +121,7 @@ pub fn render(
             ai,
             SettingsAction::CharacterPosZDown,
             SettingsAction::CharacterPosZUp,
+            |s, buf| *buf = format!("{:+.2}", s.character_state.character_position.z),
         );
 
         ui.separator();
@@ -136,7 +141,7 @@ pub fn render(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_numeric_row(
+fn render_numeric_row<F>(
     ui: &mut egui::Ui,
     label: &str,
     buffer: &mut String,
@@ -145,15 +150,24 @@ fn render_numeric_row(
     ai: &Arc<AiBridge>,
     down: SettingsAction,
     up: SettingsAction,
-) {
+    refresh: F,
+) where
+    F: Fn(&CharacterSettings, &mut String),
+{
     ui.horizontal(|ui| {
         ui.label(label);
         if ui.button("-").clicked() {
             apply_action(down, settings, animation, ai);
+            // PR4.2 follow-up: re-derive the textbox content from
+            // the new settings value so the displayed number stays
+            // in sync with the +/- button input. The legacy Bevy
+            // code did the same re-format on every dispatch.
+            refresh(settings, buffer);
         }
         let _response = ui.add(egui::TextEdit::singleline(buffer).desired_width(220.0));
         if ui.button("+").clicked() {
             apply_action(up, settings, animation, ai);
+            refresh(settings, buffer);
         }
     });
 }
