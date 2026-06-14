@@ -71,19 +71,29 @@ impl CharacterRenderer {
         };
         match load_vrm(&default_vrm, device, queue) {
             Ok(model) => {
-                let prim_count = model.mesh.primitives.len();
-                let total_vertices: u32 =
-                    model.mesh.primitives.iter().map(|p| p.vertex_count).sum();
-                let total_indices: u32 = model.mesh.primitives.iter().map(|p| p.index_count).sum();
-                let textured = model
-                    .mesh
-                    .primitives
+                let prim_count: usize = model.meshes.iter().map(|m| m.primitives.len()).sum();
+                let total_vertices: u32 = model
+                    .meshes
                     .iter()
+                    .flat_map(|m| m.primitives.iter())
+                    .map(|p| p.vertex_count)
+                    .sum();
+                let total_indices: u32 = model
+                    .meshes
+                    .iter()
+                    .flat_map(|m| m.primitives.iter())
+                    .map(|p| p.index_count)
+                    .sum();
+                let textured = model
+                    .meshes
+                    .iter()
+                    .flat_map(|m| m.primitives.iter())
                     .filter(|p| p.base_color.is_some())
                     .count();
                 tracing::info!(
-                    "Loaded VRM {}: {} primitives, {} vertices, {} indices, {} with base-color, {} joints",
+                    "Loaded VRM {}: {} meshes, {} primitives, {} vertices, {} indices, {} with base-color, {} joints",
                     default_vrm.display(),
+                    model.meshes.len(),
                     prim_count,
                     total_vertices,
                     total_indices,
