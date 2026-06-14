@@ -18,6 +18,9 @@
 use std::path::PathBuf;
 
 use ene_vrm::{ModelUniform, OrthographicCamera, VrmModel, VrmRenderer, load_vrm};
+use glam::Vec3;
+
+use crate::look_at::{LookAtState, compute_world_target};
 
 /// Owns the loaded [`VrmModel`] and its [`VrmRenderer`].
 ///
@@ -40,6 +43,8 @@ pub struct CharacterRenderer {
     depth_size: (u32, u32),
     /// Default VRM path (resolved at construction time).
     default_vrm: Option<PathBuf>,
+    /// PR4.2: cursor → smoothed world target state.
+    look_at: LookAtState,
 }
 
 impl CharacterRenderer {
@@ -54,6 +59,7 @@ impl CharacterRenderer {
             depth_view: None,
             depth_size: (0, 0),
             default_vrm: Some(assets_dir.join(default_vrm)),
+            look_at: LookAtState::default(),
         }
     }
 
@@ -215,5 +221,54 @@ impl CharacterRenderer {
     #[expect(dead_code)] // PR4 will read this when wiring per-character selection.
     pub fn default_vrm_path(&self) -> Option<&std::path::Path> {
         self.default_vrm.as_deref()
+    }
+
+    /// PR4.2: update the cursor-driven head-look-at state.
+    ///
+    /// `head_world` is the world-space position of the character's
+    /// head, derived from `character_state.character_position` plus
+    /// the model's head offset. The smoothed world target is stored
+    /// in [`LookAtState`] and exposed via
+    /// [`CharacterRenderer::look_at_target`]. PR4.5+ (skinning) will
+    /// consume the target to rotate the humanoid bones; until then
+    /// the runtime may feed the target into the orthographic camera
+    /// to give a subtle pan.
+    pub fn update_look_at(
+        &mut self,
+        cursor_logical: glam::Vec2,
+        viewport_size: (u32, u32),
+        head_world: Vec3,
+        strength: f32,
+        dt_secs: f32,
+    ) -> Vec3 {
+        let eye = ene_vrm::camera::DEFAULT_EYE.into();
+        let target = ene_vrm::camera::DEFAULT_TARGET.into();
+        let up = ene_vrm::camera::DEFAULT_UP.into();
+        compute_world_target(
+            cursor_logical,
+            viewport_size,
+            eye,
+            target,
+            up,
+            head_world,
+            strength,
+            &mut self.look_at,
+            dt_secs,
+        )
+    }
+
+    /// The most recent smoothed world target (or `None` if no cursor
+    /// sample has been processed yet).
+    #[expect(dead_code)] // PR4.5+ skinning will read this to drive bone rotations.
+    pub fn look_at_target(&self) -> Option<Vec3> {
+        self.look_at.smoothed_world_target
+    }
+
+    /// Mutable access to the underlying [`LookAtState`]. Used by the
+    /// runtime to compute `body_tracking_for_strength` for the
+    /// current `look_at_strength` slider value.
+    #[expect(dead_code)] // PR4.5+ will read body-tracking profile.
+    pub fn body_tracking(&self, strength: f32) -> crate::look_at::BodyTracking {
+        crate::look_at::body_tracking_for_strength(strength)
     }
 }

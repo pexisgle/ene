@@ -19,8 +19,10 @@
 //!    is performed in `about_to_wait` to avoid winit 0.30's
 //!    `RedrawRequested` double-fire on Windows.
 use std::sync::Arc;
+use std::time::Instant;
+
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalSize};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
@@ -44,6 +46,11 @@ pub struct Runtime {
     transparent: bool,
     char_window: Option<CharacterWindow>,
     ui_window: Option<UiWindow>,
+    /// PR4.2: last cursor position in physical pixels (only
+    /// populated when the character window has cursor events).
+    last_cursor_logical: Option<PhysicalPosition<f64>>,
+    /// PR4.2: monotonic clock for `dt_secs` smoothing.
+    last_frame_instant: Option<Instant>,
 }
 
 impl Runtime {
@@ -59,6 +66,8 @@ impl Runtime {
             transparent: true,
             char_window: None,
             ui_window: None,
+            last_cursor_logical: None,
+            last_frame_instant: None,
         }
     }
 
@@ -337,6 +346,14 @@ impl Runtime {
                 cw.reconfigure(&self.state.gpu.device, cw.window.inner_size());
                 cw.window.request_redraw();
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                // PR4.2: store the last cursor position (in logical
+                // pixels) for the look-at projection. The actual
+                // smoothing happens in `update_look_at` during
+                // `RedrawRequested`, so the dt is correct.
+                self.last_cursor_logical = Some(position);
+                cw.window.request_redraw();
+            }
             WindowEvent::KeyboardInput { .. } => {
                 if let Some(named) = key_pressed(&event) {
                     if matches!(named, NamedKey::Space) {
@@ -386,7 +403,7 @@ impl Runtime {
                 // mutably here, so we inline it.
                 let transparent = self.transparent;
                 let AppState {
-                    ref character,
+                    ref mut character,
                     ref gpu,
                     ref settings,
                     ..
@@ -401,6 +418,32 @@ impl Runtime {
                     cs.character_position.to_array(),
                     cs.model_scale,
                 );
+
+                // PR4.2: advance the cursor-driven head-look-at
+                // state. The smoothed target is stored on the
+                // renderer; PR4.5+ skinning will read it. Until
+                // then the value is observable via the debug
+                // `look_at_target` accessor and via
+                // `body_tracking(strength)`.
+                let now = Instant::now();
+                let dt_secs = self
+                    .last_frame_instant
+                    .map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32())
+                    .clamp(0.0, 0.1);
+                self.last_frame_instant = Some(now);
+                if let Some(cursor) = self.last_cursor_logical {
+                    let head_world = cs.character_position + glam::Vec3::new(0.0, 1.0, 0.0);
+                    let viewport: (u32, u32) =
+                        (cw.window.inner_size().width, cw.window.inner_size().height);
+                    let _smoothed = character.update_look_at(
+                        glam::Vec2::new(cursor.x as f32, cursor.y as f32),
+                        viewport,
+                        head_world,
+                        cs.look_at_strength,
+                        dt_secs,
+                    );
+                }
+
                 let result = cw.with_surface_view(|view| {
                     character.render(device, queue, view, transparent, &model_uniform);
                 });
