@@ -17,7 +17,7 @@
 //! consume the `EmotionQueue` to drive morph targets.
 use std::path::PathBuf;
 
-use ene_vrm::{OrthographicCamera, VrmModel, VrmRenderer, load_vrm};
+use ene_vrm::{ModelUniform, OrthographicCamera, VrmModel, VrmRenderer, load_vrm};
 
 /// Owns the loaded [`VrmModel`] and its [`VrmRenderer`].
 ///
@@ -100,7 +100,7 @@ impl CharacterRenderer {
                     textured,
                     model.joint_count(),
                 );
-                let renderer = VrmRenderer::new(device, surface_format, &model);
+                let renderer = VrmRenderer::new(device, queue, surface_format, &model);
                 self.model = Some(model);
                 self.renderer = Some(renderer);
             }
@@ -139,12 +139,16 @@ impl CharacterRenderer {
     }
 
     /// Draw the model into `view`. No-op if the model failed to load.
+    /// `model_uniform` is composed by the runtime every frame from
+    /// `CharacterState` (position + scale) and applied between
+    /// view-proj and the vertex position in the shader.
     pub fn render(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         view: &wgpu::TextureView,
         transparent: bool,
+        model_uniform: &ModelUniform,
     ) {
         let (Some(model), Some(renderer), Some(depth_view)) =
             (&self.model, &self.renderer, &self.depth_view)
@@ -157,10 +161,6 @@ impl CharacterRenderer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("character.encoder"),
         });
-        if transparent {
-            // The `VrmRenderer::render` already clears with
-            // `wgpu::Color::TRANSPARENT`. Nothing extra to do.
-        }
         renderer.render(
             queue,
             &mut encoder,
@@ -168,6 +168,7 @@ impl CharacterRenderer {
             depth_view,
             model,
             &self.camera,
+            model_uniform,
             transparent,
         );
         queue.submit(std::iter::once(encoder.finish()));

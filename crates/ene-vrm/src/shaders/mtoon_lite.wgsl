@@ -1,8 +1,12 @@
 // PR3 lit-lite shader. Vertex transforms the position by the
 // camera's view-projection matrix and forwards the UV / normal to
 // the fragment stage. Fragment samples the base-color texture (if
-// present in bind group `(1)`) and applies a half-Lambert diffuse
+// present in bind group `(2)`) and applies a half-Lambert diffuse
 // term against a single fixed directional light.
+//
+// PR4.1: the per-frame `model` uniform (bind group 1) is applied
+// between view-proj and the vertex position. The runtime composes
+// it from `CharacterState::character_position` + `model_scale`.
 //
 // Outline / rim / matcap / emission / shading-shift all live in
 // follow-up PRs (the full MToon material model).
@@ -16,27 +20,42 @@ struct VsIn {
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
-    @location(1) normal: vec3<f32>,
+    @location(1) world_pos: vec3<f32>,
+    @location(2) normal: vec3<f32>,
 };
 
 struct CameraUniform {
     view_proj: mat4x4<f32>,
 };
 
+struct ModelUniform {
+    model: mat4x4<f32>,
+};
+
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;
 
 @group(1) @binding(0)
+var<uniform> model: ModelUniform;
+
+@group(2) @binding(0)
 var base_color_tex: texture_2d<f32>;
-@group(1) @binding(1)
+@group(2) @binding(1)
 var base_color_smp: sampler;
 
 @vertex
 fn vs_main(in: VsIn) -> VsOut {
     var out: VsOut;
-    out.clip_pos = camera.view_proj * vec4<f32>(in.position, 1.0);
+    let world_pos = model.model * vec4<f32>(in.position, 1.0);
+    out.clip_pos = camera.view_proj * world_pos;
     out.uv = in.uv;
-    out.normal = in.normal;
+    out.world_pos = world_pos.xyz;
+    // PR4.x will switch the lighting term to use `world_pos` so
+    // the half-Lambert light direction stays fixed in world space
+    // even when the model translates. For now we just transform the
+    // normal through the (rotation-only) model matrix; scale
+    // uniform so no inverse-transpose is required.
+    out.normal = (model.model * vec4<f32>(in.normal, 0.0)).xyz;
     return out;
 }
 

@@ -388,11 +388,21 @@ impl Runtime {
                 let AppState {
                     ref character,
                     ref gpu,
+                    ref settings,
                     ..
                 } = self.state;
                 let (device, queue) = (&gpu.device, &gpu.queue);
+                // PR4.1: compose the per-frame model transform
+                // from `CharacterState`. `character_position` and
+                // `model_scale` are clamped by `clamp_runtime_values`
+                // on every mutation, so we can read them directly.
+                let cs = &settings.character_state;
+                let model_uniform = ene_vrm::ModelUniform::from_position_scale(
+                    cs.character_position.to_array(),
+                    cs.model_scale,
+                );
                 let result = cw.with_surface_view(|view| {
-                    character.render(device, queue, view, transparent);
+                    character.render(device, queue, view, transparent, &model_uniform);
                 });
                 if let Err(err) = result {
                     match err {
