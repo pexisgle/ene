@@ -153,15 +153,21 @@ impl VrmRenderer {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Ccw,
-                // glTF and VRM 1.0 share the same convention:
+                // glTF 2.0 and VRM 1.0 share the same convention:
                 // triangles wound CCW when viewed from outside the
-                // model. The camera at `(0, 1, 3)` looking at the
-                // origin sees the back of a model that natively
-                // faces -Z; PR4.1's per-frame model transform lets
-                // the runtime pre-rotate the model 180 degrees
-                // around Y so the face points toward the camera.
-                // With that pre-rotation, `CullMode::Back` is the
-                // natural choice and halves the fragment work.
+                // model. VRoid (Alicia) and other VRM 1.0 humanoid
+                // models are exported with their face at `+Z`, so
+                // the camera at `(0, 0.3, 3)` looking at the origin
+                // already sees the model as front-facing. With that
+                // orientation, `CullMode::Back` is the natural
+                // choice and halves the fragment work.
+                //
+                // An earlier 180°-around-Y pre-rotation in
+                // `ModelUniform::from_position_scale` was the wrong
+                // direction: it showed the back of the character
+                // and mirrored `character_state.character_position.x`,
+                // which is what was making the model appear shifted
+                // to the right and half off-screen.
                 cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
