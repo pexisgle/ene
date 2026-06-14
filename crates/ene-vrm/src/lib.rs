@@ -41,7 +41,7 @@ pub mod loader;
 pub mod model;
 pub mod renderer;
 
-pub use camera::OrthographicCamera;
+pub use camera::{ModelUniform, OrthographicCamera};
 pub use error::{VrmError, VrmResult};
 pub use loader::load_vrm;
 pub use model::{Skeleton, VrmMesh, VrmModel, VrmTexture};

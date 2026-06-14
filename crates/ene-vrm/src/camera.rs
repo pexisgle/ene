@@ -90,3 +90,39 @@ pub struct CameraUniform {
     /// Combined view-projection matrix in column-major form.
     pub view_proj: [[f32; 4]; 4],
 }
+
+/// Per-frame model transform uniform. PR4.1: the runtime
+/// composes a translation (`position`) and uniform scale from
+/// `CharacterState` and uploads it as a single `mat4x4`. The
+/// vertex shader applies `view_proj * model * pos`. PR4.x will
+/// add a per-joint palette on top of this (skin) and a humanoid
+/// root rotation (model rotation).
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+pub struct ModelUniform {
+    /// Combined model-to-world matrix in column-major form.
+    pub model: [[f32; 4]; 4],
+}
+
+impl Default for ModelUniform {
+    fn default() -> Self {
+        Self {
+            model: Mat4::IDENTITY.to_cols_array_2d(),
+        }
+    }
+}
+
+impl ModelUniform {
+    /// Build a model matrix from a translation (world units) and a
+    /// uniform scale.
+    pub fn from_position_scale(position: [f32; 3], scale: f32) -> Self {
+        let m = Mat4::from_scale_rotation_translation(
+            glam::Vec3::splat(scale),
+            glam::Quat::IDENTITY,
+            position.into(),
+        );
+        Self {
+            model: m.to_cols_array_2d(),
+        }
+    }
+}
