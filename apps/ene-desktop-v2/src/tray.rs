@@ -46,34 +46,45 @@ impl TrayHandle {
     /// (e.g. on a headless build); the runtime should treat that as
     /// a soft failure.
     pub fn new(event_tx: AppEventSender) -> Option<Self> {
-        let menu = build_menu();
-        let icon = build_icon().unwrap_or_else(synthetic_icon);
-
-        let tray_icon = TrayIconBuilder::new()
-            .with_menu(Box::new(menu))
-            .with_tooltip(TOOLTIP)
-            .with_icon(icon)
-            .build()
-            .ok()?;
-
         // Forward click + menu events from the (potentially
         // different-thread) tray-icon global receivers into the bus.
         // The channel is unbounded so `send` is non-blocking.
+        //
+        // IMPORTANT: on Windows the icon must be built **on the same
+        // thread** that runs the Win32 message pump — building it on
+        // the calling (main) thread and then calling
+        // `mem::forget` creates a second, orphaned icon in the
+        // notification area. So the Windows path builds the icon
+        // inside the spawned thread; the Linux path builds it on the
+        // main thread because the GTK backend requires it there.
         install_event_pump(event_tx);
-
-        #[cfg(target_os = "windows")]
-        {
-            // On Windows the tray icon must live on a thread that
-            // pumps Win32 messages. `install_event_pump` already
-            // started that thread; we keep no handle here so the
-            // icon is forgotten intentionally.
-            std::mem::forget(tray_icon);
-            Some(Self {})
-        }
 
         #[cfg(target_os = "linux")]
         {
+            let menu = build_menu();
+            let icon = build_icon().unwrap_or_else(synthetic_icon);
+
+            let tray_icon = TrayIconBuilder::new()
+                .with_menu(Box::new(menu))
+                .with_tooltip(TOOLTIP)
+                .with_icon(icon)
+                .build()
+                .ok()?;
+
             Some(Self { _icon: tray_icon })
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            // Icon lives in the spawned thread (see
+            // `install_event_pump`); nothing to keep here.
+            Some(Self {})
+        }
+
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        {
+            let _ = event_tx;
+            None
         }
     }
 
@@ -183,7 +194,9 @@ fn install_event_pump(event_tx: AppEventSender) {
         std::thread::spawn(move || {
             // Build + own the icon on this thread; the
             // `tray-icon` Win32 backend needs a thread-local
-            // message pump.
+            // message pump. Forgetting the icon at the end of this
+            // closure keeps the notification-area entry alive for
+            // the lifetime of the process.
             let _tray_icon = TrayIconBuilder::new()
                 .with_menu(Box::new(build_menu()))
                 .with_tooltip(TOOLTIP)
