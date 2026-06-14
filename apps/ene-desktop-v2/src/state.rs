@@ -9,6 +9,8 @@
 //! - the [`AiBridge`] (the actor handle plus its drain buffer),
 //! - the optional [`TrayHandle`],
 //! - the cross-subsystem [`AppEventReceiver`](crate::events::AppEventReceiver).
+//! - the [`CharacterRenderer`](crate::character::CharacterRenderer) (PR3
+//!   onward; loads the default VRM and owns the depth texture).
 //!
 //! Senders (clones of the [`AppEventSender`](crate::events::AppEventSender))
 //! are passed into the AI bridge and the tray at construction time
@@ -19,6 +21,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::ai_bridge::AiBridge;
+use crate::character::CharacterRenderer;
 use crate::events::{AppEvent, AppEventReceiver, AppEventSender};
 use crate::gpu::GpuContext;
 use crate::settings::CharacterSettings;
@@ -33,12 +36,22 @@ pub struct AppState {
     /// Receiver end of the cross-subsystem bus. The runtime drains
     /// this in `about_to_wait`.
     pub event_rx: AppEventReceiver,
+    /// PR3 character renderer (loads the default VRM and owns the
+    /// depth texture for the character window).
+    pub character: CharacterRenderer,
 }
 
 impl AppState {
     /// Construct the AppState together with a fresh `AppEvent`
     /// channel. The sender half is returned to the caller for
     /// optional auxiliary producers.
+    ///
+    /// The character renderer is **deferred** until the runtime
+    /// creates the surface — it needs the actual surface format to
+    /// build a compatible render pipeline. `with_channel` produces
+    /// a `CharacterRenderer` that hasn't been `init`-ed yet;
+    /// [`crate::runtime::Runtime::resumed`] calls
+    /// [`CharacterRenderer::init`] right after the surface exists.
     pub fn with_channel(
         gpu: GpuContext,
         settings: CharacterSettings,
@@ -46,6 +59,9 @@ impl AppState {
     ) -> (Self, AppEventSender) {
         let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
         let ai = Arc::new(AiBridge::new(tx.clone(), bootstrap_handle));
+        let character =
+            CharacterRenderer::uninit(&settings.assets_dir, settings.current_character());
+
         (
             Self {
                 gpu,
@@ -53,6 +69,7 @@ impl AppState {
                 ai,
                 tray: None,
                 event_rx: rx,
+                character,
             },
             tx,
         )
