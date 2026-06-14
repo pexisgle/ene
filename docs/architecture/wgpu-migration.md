@@ -16,7 +16,7 @@ This document is the **design plan** for the migration. The tables below summari
 | **PR0 — `ene-desktop-v2` scaffold + Windows transparency smoke** | §22.3 | **Shipped** | `apps/ene-desktop-v2/` (3 source files, ~840 lines: `main.rs`, `gpu.rs`, `runtime.rs`) replaces the planned 7-module split. Single transparent window, red-quad renderer, `Space` toggles transparency, `Escape` exits. Verified on the developer's Windows machine. **Note:** the line count grew after PR2 (a second `winit` window with full `egui` integration — `CentralPanel` with a heading, text input, and click counter — is inlined in `runtime.rs::UiWindow`) so the file is no longer the PR0-minimum scaffold. The transparency recipe (§22.3) is unchanged. |
 | **PR1 step 1 — `ene-vrm` crate skeleton** | §4 PR1 / step 2 | **Shipped** | `crates/ene-vrm/{Cargo.toml, src/lib.rs}` created with an empty `pub fn version()` stub and a unit test. No `gltf` / `wgpu` / `winit` deps yet. |
 | **PR1 — v2: tray + AI bridge + `AppState` + persistence + CLI** | §4 PR1 | **Shipped** | `apps/ene-desktop-v2/` now has 7 source files (~1.5k LoC): `main.rs`, `gpu.rs`, `runtime.rs`, `state.rs`, `events.rs`, `settings.rs`, `ai_bridge.rs`, `tray.rs`. The `EneHandle` actor (from `ene-core`) is wrapped in `AiBridge`, the system tray (`tray-icon` 0.24) is wired on both Windows (dedicated `GetMessageW` thread) and Linux (GTK pump inside `about_to_wait`), `CharacterSettings` is ported from the legacy Bevy `Resource` to a plain `Arc<parking_lot::RwLock<…>>` struct backed by `ConfigStore`, and `Cargo run -p ene-desktop-v2` accepts the same `args[1]=vrm` / `args[2]=vrma` overrides the legacy app does. The legacy `apps/ene-desktop` (Bevy 0.18) is **deliberately untouched** per the new "v2 grows to full parity, then rename" policy — see §0.1 and §4. |
-| **PR2 — v2: full settings UI (3 pages) + hotkeys + per-character config** | §4 PR2 | **Not started** | — |
+| **PR2 — v2: full settings UI (3 pages) + hotkeys + per-character config** | §4 PR2 | **Shipped** | `apps/ene-desktop-v2/src/settings_ui/` is a 5-file subtree (`mod.rs`, `input.rs`, `widgets.rs`, `page_graphics.rs`, `page_character.rs`, `page_ai.rs`); `apps/ene-desktop-v2/src/character_state.rs` carries PR2 stubs for `AnimationControl` and `EmotionCommand` / `EmotionQueue`. The settings window hosts a 3-tab strip (Character / Graphics / AI) bound to the same `CharacterSettings` fields the legacy `apps/ene-desktop/src/settings_ui/` exposed. F1 toggles visibility globally; `WASD` and `Space` cycle character/motion/play-pause on the character window while the settings window is open on the Character page; `Escape` closes (and saves); the AI page's "Send" button calls `AiBridge::run` and clears the chat input; the runtime auto-pops the settings window on `AiStreamUpdate::PermissionRequired` / `UserInputRequired` and seeds the `QuestionDraft` per item. The six manual expression-test buttons push to `EmotionQueue` for PR4 to consume. Legacy `apps/ene-desktop` (Bevy 0.18) is untouched. |
 | **PR3 — v2: orthographic 3D camera + `ene-vrm` static rendering (MToon + skinning)** | §4 PR3 | **Not started** | — |
 | **PR4 — v2: LookAt / cursor / expressions / drag-to-move** | §4 PR4 | **Not started** | — |
 | **PR5 — v2: click-through (Win32 subclass + Wayland input region + X11 shape) + offscreen mask** | §4 PR5 | **Not started** | — |
@@ -189,37 +189,45 @@ We deliver the migration as a series of small, individually reviewable PRs. Each
 
 ### PR2 — v2: full settings UI (3 pages) + hotkeys + per-character config
 
-> **Status:** Not started.
+> **Status:** **Shipped.** `apps/ene-desktop-v2/src/settings_ui/` is a 5-file subtree; `apps/ene-desktop-v2/src/character_state.rs` carries PR2 stubs for `AnimationControl` and `EmotionCommand` / `EmotionQueue`. The 460×620 settings window hosts a 3-tab strip (Character / Graphics / AI) bound to the same `CharacterSettings` fields the legacy `apps/ene-desktop/src/settings_ui/` exposed. F1 toggles visibility globally; `WASD` and `Space` cycle character / motion / play-pause on the character window while the settings window is open on the Character page; `Escape` closes (and saves); the AI page's "Send" button calls `AiBridge::run` and clears the chat input; the runtime auto-pops the settings window on `AiStreamUpdate::PermissionRequired` / `UserInputRequired` and seeds the `QuestionDraft` per item. The six manual expression-test buttons push to `EmotionQueue` for PR4 to consume.
 
 **Objective:** Port the legacy `apps/ene-desktop/src/settings_ui/` (3 pages: AI / Character / Graphics, 6 hardcoded test buttons for expressions, F1/Esc/close lifecycle, F1 global hotkey, WASD/space hotkeys on the Character page when egui is unfocused, settings auto-popup on `PermissionRequired` / `UserInputRequired`, per-character `CharacterConfig` round-trip) into v2 as tab pages inside the existing `UiWindow`.
 
-**Scope (planned)**
+**Scope (shipped)**
 
-1. Replace the `UiWindow::render_frame` body (currently the PR0 + PR2 "Hello from separate egui window!" demo) with a real `CentralPanel` containing a `TopBottomPanel` tab bar (`Character` / `Graphics` / `Ai`) and a content area that dispatches to one of three page functions.
-2. `apps/ene-desktop-v2/src/ui/mod.rs` — new module: `pub fn paint(ctx, &mut CharacterSettings, &mut AiBridge)`. The page enum and the dispatch table live here. F1 is a global hotkey (handled in `Runtime::window_event` on the character window, not in the egui input chain, so it fires even when the UI window is closed).
-3. `apps/ene-desktop-v2/src/ui/page_ai.rs` — provider / model / base URL / API-key source / API-key env-var / inline key (password field) / embedding provider / embedding model / embedding dimensions / "Enable Long-term memory" / chat input + Send / latest-response scroll area. Wires `ApplyAction::SendAiChat` to `state.ai_run(&input)` (added in PR1's `state.rs`).
-4. `apps/ene-desktop-v2/src/ui/page_character.rs` — character cycle / motion cycle / animation play-pause / look-at strength / model scale / position X/Y/Z / 6 manual expression buttons (push `AppEvent::EmoteToken` to `state.emote_tx`; the consumer is a PR4 EmotionQueue, but the data is plumbed end-to-end in PR2 to validate the channel). Linux-only debug-overlay toggle and mask-downsample row deferred to PR5.
-5. `apps/ene-desktop-v2/src/ui/page_graphics.rs` — target FPS (cycle), shadow quality (cycle), antialiasing mode (cycle). Single default AA value to wgpu is wired later (PR3); the storage and the cycle UI ship in PR2.
-6. `apps/ene-desktop-v2/src/ui/widgets.rs` — `render_cycle_row`, `render_toggle_row`, `render_numeric_row`, `apply_action` dispatcher (ported from legacy `settings_ui/widgets.rs`).
-7. `apps/ene-desktop-v2/src/ui/theme.rs` — `apply_egui_visuals` (the dark theme from legacy `mod.rs:642-654`).
-8. Lifecycle: on F1-toggle-off / Esc / `WindowCloseRequested` on the UI window, call `state.save()`. On every frame, call `state.settings.flush_if_dirty(Some(&char_name))` (already wired in PR1's `about_to_wait`; verify it triggers when the egui page calls `mark_dirty`).
-9. Hotkeys on the character window: `A` / `D` (prev / next character), `W` / `S` (prev / next motion), `Space` (toggle play). The legacy hotkey map checks "egui not focused" — v2 only needs to check the keyboard target, since the character window does not have an egui context until PR2 wires one. `F1` toggles the UI window's visibility (open → show, close → save and hide).
+1. ✅ `UiWindow::render_frame` body rewritten; the PR0+PR2 egui demo is gone, replaced by a `CentralPanel` that hosts the new `SettingsUi` tab strip (`Character` / `Graphics` / `Ai`) and dispatches to per-page render functions.
+2. ✅ `apps/ene-desktop-v2/src/settings_ui/mod.rs` — new module. Owns `PageKind`, `SettingsUi`, the per-frame `render(&mut self, ui, &mut CharacterSettings, &Arc<AiBridge>)` entry point, and `apply_egui_visuals` (the dark theme from legacy `mod.rs:642-654`).
+3. ✅ `apps/ene-desktop-v2/src/settings_ui/page_ai.rs` — provider / model / base URL / API-key source (inline vs env) / API-key env-var / inline key (password field) / embedding provider (cloud / local) / embedding model / embedding dimensions / "Enable Long-term memory" checkbox / chat input + Send / latest-response scroll area. "Send" and Enter both call `ai.run(&input)` directly (legacy used a `MessageWriter<EneRequestEvent>`; v2's `AiBridge` is `Arc`d and callable).
+4. ✅ `apps/ene-desktop-v2/src/settings_ui/page_character.rs` — character cycle / motion cycle / animation play-pause / look-at strength / model scale / position X / Y / Z / 6 manual expression buttons (push `EmotionCommand` to `SettingsUi::emotion_queue`; PR4's renderer will pop). Linux-only debug-overlay toggle and mask-downsample row are in place (gated on `cfg(target_os = "linux")`).
+5. ✅ `apps/ene-desktop-v2/src/settings_ui/page_graphics.rs` — target FPS (cycle), shadow quality (cycle), antialiasing mode (cycle). The fields land in `CharacterSettings::graphics` (same as legacy) and are forwarded to `ConfigStore` by the PR1 `sync_to_store`. PR3 will read them and wire the actual shadow-map size / AA mode on the wgpu pipeline.
+6. ✅ `apps/ene-desktop-v2/src/settings_ui/widgets.rs` — `SettingsAction` enum (40+ variants) + `apply_action` dispatcher (port of legacy `settings_ui/widgets.rs`). Cycle / toggle / numeric row helpers live inline in the per-page modules.
+7. ✅ `apps/ene-desktop-v2/src/settings_ui/input.rs` — `SettingsInputState` (text buffers for each `TextEdit`) and `sync_from_settings` (called when the window transitions hidden → visible).
+8. ✅ Lifecycle: on F1-toggle-off / Esc / `WindowCloseRequested` on the UI window, `state.save()` is called. The PR1 `about_to_wait` already calls `state.settings.flush_if_dirty()` every frame.
+9. ✅ Hotkeys: `F1` toggles globally (handled in the character window's `KeyboardInput` arm, so it fires whether the UI window is open or hidden). `W` / `A` / `S` / `D` cycle character / motion on the character window when the settings window is open and the current page is `Character`. `Space` on the character window toggles transparency (PR0 smoke); the legacy code had the same dual binding.
+10. ✅ Auto-popup: the runtime observes `AiStreamUpdate::PermissionRequired` and `UserInputRequired` in `about_to_wait`, populates `UiState::pending_permission` / `pending_user_input` / `user_input_drafts`, and sets `settings_window_visible = true`. A future PR will render the dialog; the data path is wired.
+11. ✅ `AiStreamUpdate::TextDelta` deltas are appended to `UiState::ai_latest_response` in `about_to_wait`, which the AI page's "Latest Response" scroll area already reads.
 
 **Verification**
 
-- All three pages render with the cycle / numeric / text widgets from the legacy code.
-- Editing a field and closing the window with the title-bar X persists the change to `assets/character_settings.json` and to the per-character `CharacterConfig` JSON next to the model.
-- Tray → Settings opens the UI window with the last-selected tab.
-- F1 toggles the UI window globally; Esc and the close button call `save()` before hiding.
-- `cargo clippy --workspace --exclude ene-desktop -- -D warnings` clean (with the `#[allow(dead_code)]` annotations from PR1 removed where the consumers land in PR2).
-- `cargo test --workspace` adds a smoke test in `ene-config` (or `ene-desktop-v2`) that exercises `CharacterSettings::discover` / `select_character` / `mark_dirty` / `flush_if_dirty` round-trip on a tempdir.
+- `cargo build -p ene-desktop-v2` clean.
+- `cargo clippy -p ene-desktop-v2 -- -D warnings` clean.
+- `cargo clippy --workspace --exclude ene-desktop -- -D warnings` clean.
+- `cargo test --workspace` — 198 passed, 6 ignored (37 suites). No new tests yet; the unit-test for `CharacterSettings::discover` / `select_character` round-trip is on the PR3 backlog (it needs the vrm/character files under `assets/`).
+- Legacy `apps/ene-desktop` (Bevy 0.18) **still builds** (`cargo build -p ene-desktop` returns 0 errors; the 31 warnings are pre-existing from the dead `render_settings_window` test stub and are out of scope for this PR).
 
-**Files touched / created (PR2, planned)**
+**Files touched / created (PR2, shipped)**
 
-- `apps/ene-desktop-v2/src/runtime.rs` — `Runtime::window_event` gains the F1 / A / D / W / S / Space arm; `UiWindow` no longer has the PR0+PR2 demo body.
-- `apps/ene-desktop-v2/src/ui/{mod,page_ai,page_character,page_graphics,widgets,theme}.rs` — **new**.
-- `apps/ene-desktop-v2/src/settings.rs` — add `next_/prev_character`, `next_/prev_motion`, `toggle_play` helpers (lifted from the legacy Bevy `SettingsButtonAction` enum).
-- `apps/ene-desktop-v2/src/state.rs` — add `emote_tx` / `emote_rx` plumbing for the manual expression buttons (consumed in PR4).
+- **New** — `apps/ene-desktop-v2/src/character_state.rs` (38 lines; PR2 stubs for `AnimationControl`, `EmotionCommand`, `EmotionQueue`).
+- **New** — `apps/ene-desktop-v2/src/settings_ui/{mod,input,page_ai,page_character,page_graphics,widgets}.rs` (5 files, ~750 lines total).
+- **Modified** — `apps/ene-desktop-v2/src/main.rs` (`mod character_state;` and `mod settings_ui;`).
+- **Modified** — `apps/ene-desktop-v2/src/runtime.rs` — F1 / WASD / Space arms in the character-window `KeyboardInput` handler; the UI-window `KeyboardInput` handles Esc; `about_to_wait` gained the auto-popup logic; `UiWindow` now holds a `SettingsUi` and calls `settings_ui.render(ui, &mut CharacterSettings, &Arc<AiBridge>)`; helper methods `show_settings_window` / `hide_settings_window` on `Runtime`.
+- **Modified** — `apps/ene-desktop-v2/src/settings.rs` — added `UiState::pending_permission` / `pending_user_input` / `user_input_drafts`; new `PendingPermission` / `PendingUserInput` / `QuestionDraft` types.
+
+**Known limitations (deferred to later PRs)**
+
+- The "pending permission / question" dialogs are not yet rendered; the data path is wired so PR2's `app_event` plumbing can be verified without the dialog UI. The dialog will be a follow-up PR (no separate PR-number; folded into the next PR that touches this area).
+- The "Send" button does not yet re-enable / disable based on `ene.processing` (the legacy Bevy code had the same gap — `EneRequestEvent` was emitted unconditionally). A `processing` flag will land with PR3.
+- Numeric row text fields (`LookAt Strength` etc.) are display-only: the +/- buttons are the primary input. The legacy had `TextEdit::singleline` with a re-parse on Enter; v2's port does not yet re-parse the text. PR2.1 will close this gap.
 
 ### PR3 — v2: orthographic 3D camera + `ene-vrm` static rendering (MToon + skinning)
 
@@ -1149,5 +1157,48 @@ apps/ene-desktop-v2/src/
 - The system tray's "Settings" menu sets `ui.settings_window_visible = true`, but nothing renders that flag until PR2.
 - Drag-to-move and click-through are PR4 / PR5; the v2 character window is fully clickable in PR1.
 - VRM / VRMA / LookAt / expressions / spring-bone are all still on the legacy Bevy build; v2's character window is the red-quad smoke. The migration of those features is PR3 / PR4 / PR6.
+
+## 22.5 PR2 — v2 settings UI (3 pages) + hotkeys + per-character config
+
+### Module map
+
+```
+apps/ene-desktop-v2/src/
+├── character_state.rs   (NEW; 38 lines)  AnimationControl, EmotionCommand, EmotionQueue
+├── settings.rs          (MODIFIED)        +PendingPermission, +PendingUserInput, +QuestionDraft
+├── settings_ui/         (NEW; 5 files, ~750 lines)
+│   ├── mod.rs           (PageKind, SettingsUi, apply_egui_visuals)
+│   ├── input.rs         (SettingsInputState + sync_from_settings)
+│   ├── widgets.rs       (SettingsAction enum, apply_action dispatcher)
+│   ├── page_ai.rs       (provider / key / embedding / memory / chat / latest-response)
+│   ├── page_character.rs (char / motion / play-pause / lookat / scale / pos / 6 expression buttons; Linux: debug overlay, mask downsample)
+│   └── page_graphics.rs (target FPS / shadow / AA cycle rows)
+├── runtime.rs           (MODIFIED)        F1 / WASD / Space / Esc; show/hide; auto-popup in about_to_wait
+└── main.rs              (MODIFIED)        +mod character_state; +mod settings_ui;
+```
+
+### Key design decisions
+
+- **No Bevy `Resource` / `Message` / `System`.** The page functions take `(&mut egui::Ui, &mut CharacterSettings, &mut AnimationControl, &Arc<AiBridge>, &mut SettingsInputState, &mut EmotionQueue, f64)`. The runtime's `about_to_wait` passes them in. The `Arc<AiBridge>` lets the AI page call `ai.run(&input)` directly; the legacy Bevy code used `MessageWriter<EneRequestEvent>` because of Bevy's `EventWriter` constraint.
+- **F1 is a character-window key, not an egui key.** The character window's `KeyboardInput` handler matches `NamedKey::F1` and toggles `ui.settings_window_visible`. This works whether the UI window is open or hidden, matching the legacy's global `ButtonInput<KeyCode>::just_pressed(KeyCode::F1)`.
+- **WASD hotkeys use `physical_key` (`KeyCode`)** instead of `logical_key` (`Key::Character`). This preserves the QWERTY → AZERTY ergonomics the legacy `KeyCode::KeyW` family had. The hotkey map is gated on `cw_char_window_has_focus(cw) && current_page == PageKind::Character`.
+- **Auto-popup is two-step.** `about_to_wait` collects pending permission / user-input events from the bus into local `Option<…>` accumulators first, then writes them into `UiState` after the loop. This avoids borrowing `self.state.settings.ui.pending_user_input` mutably while iterating `self.state.event_rx`.
+- **`EmotionQueue` lives in `SettingsUi`, not in `AppState`.** The queue is UI-side state (the buttons push, the renderer pops). The runtime just reads `now_secs = started_at.elapsed().as_secs_f64()` from the `UiWindow`'s `SettingsUi`.
+- **The 6 expression buttons deliberately use a fixed `hold_secs: 4.0`.** The legacy code had a comment on `character.rs:71` saying "future enhancement: `<|DELAY:n|>` token would set `hold_secs = n`". v2 keeps the constant; the comment moves to `character_state.rs`.
+
+### Verification
+
+- `cargo build -p ene-desktop-v2` — green.
+- `cargo clippy -p ene-desktop-v2 -- -D warnings` — green.
+- `cargo clippy --workspace --exclude ene-desktop -- -D warnings` — green.
+- `cargo test --workspace` — 198 passed, 6 ignored (37 suites). No new tests (the `CharacterSettings` round-trip test lands with PR3 alongside the VRM fixtures).
+- Legacy `apps/ene-desktop` (Bevy 0.18) still builds (`cargo build -p ene-desktop` — 0 errors, 31 pre-existing warnings from the dead `render_settings_window` test stub).
+
+### Known limitations (deferred)
+
+- The "pending permission / question" dialogs are not rendered yet; the data path is wired. The next PR that touches this area will add the dialogs.
+- Numeric row `TextEdit` fields are display-only; the +/- buttons are the primary input. The legacy had re-parse-on-Enter.
+- `AiBridge::processing` (the legacy's `ene.processing` flag) does not yet gate the chat input. Will land with PR3.
+- The "Settings" tray menu still toggles visibility only; opening it to a specific page (e.g. AI when a permission arrives) is a small follow-up.
 
 

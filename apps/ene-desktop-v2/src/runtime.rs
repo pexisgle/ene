@@ -7,14 +7,17 @@
 //! Each frame:
 //!
 //! 1. `about_to_wait` drains the cross-subsystem [`AppEvent`] bus,
-//!    forwarding tray actions to UI state and pushing AI events
-//!    into the bridge's inbox. It also ticks the GTK pump on
-//!    Linux and calls `flush_if_dirty` on the settings.
-//! 2. `window_event` dispatches input. Keyboard `Space` toggles
-//!    transparency (PR0 smoke test), `Escape` quits, the window
-//!    close button quits. The egui UI window consumes
-//!    `WindowEvent`s via its `egui_winit::State`.
-//! 3. `RedrawRequested` renders the current frame to each surface.
+//!    forwarding tray actions to UI state, applying AI inbox
+//!    updates to the latest-response buffer, auto-popping the
+//!    settings window on permission / user-input requests, ticking
+//!    the GTK pump on Linux, and calling `flush_if_dirty` on the
+//!    settings.
+//! 2. `window_event` dispatches input. Keyboard `F1` toggles the
+//!    settings window, `Escape` closes (and saves) the focused
+//!    window, the window close button exits.
+//! 3. Redraw happens via `request_redraw` from `about_to_wait` and
+//!    is performed in `about_to_wait` to avoid winit 0.30's
+//!    `RedrawRequested` double-fire on Windows.
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
@@ -24,8 +27,11 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
 
+use crate::ai_bridge::AiBridge;
 use crate::events::{AppEvent, AppEventSender, TrayAction};
 use crate::gpu::pick_format_and_alpha;
+use crate::settings::{CharacterSettings, PendingPermission, PendingUserInput, QuestionDraft};
+use crate::settings_ui::{PageKind, SettingsUi};
 use crate::state::AppState;
 
 /// Top-level runtime. One per process.
@@ -51,6 +57,27 @@ impl Runtime {
             char_window: None,
             ui_window: None,
             rect: None,
+        }
+    }
+
+    fn show_settings_window(&mut self) {
+        if let Some(uw) = self.ui_window.as_mut()
+            && !self.state.settings.ui.settings_window_visible
+        {
+            self.state.settings.ui.settings_window_visible = true;
+            uw.settings_ui.sync_from_settings(&self.state.settings);
+            uw.window.set_visible(true);
+            uw.window.request_redraw();
+        }
+    }
+
+    fn hide_settings_window(&mut self) {
+        if self.state.settings.ui.settings_window_visible {
+            self.state.save();
+            self.state.settings.ui.settings_window_visible = false;
+            if let Some(uw) = self.ui_window.as_mut() {
+                uw.window.set_visible(false);
+            }
         }
     }
 }
@@ -99,10 +126,12 @@ impl ApplicationHandler for Runtime {
             }
         }
 
-        // Create the UI window
+        // Create the UI window. The settings UI is only revealed
+        // when the user toggles it via F1 or the tray; the window
+        // itself is always alive in the background.
         let ui_attrs = WindowAttributes::default()
             .with_title("ene UI")
-            .with_inner_size(LogicalSize::new(400.0, 300.0))
+            .with_inner_size(LogicalSize::new(460.0, 620.0))
             .with_resizable(true);
         let ui_w = match event_loop.create_window(ui_attrs) {
             Ok(w) => Arc::new(w),
@@ -121,7 +150,11 @@ impl ApplicationHandler for Runtime {
             ui_size,
         ) {
             Ok(uw) => {
-                uw.window.request_redraw();
+                uw.window
+                    .set_visible(self.state.settings.ui.settings_window_visible);
+                if self.state.settings.ui.settings_window_visible {
+                    uw.window.request_redraw();
+                }
                 self.ui_window = Some(uw);
             }
             Err(e) => {
@@ -149,148 +182,294 @@ impl ApplicationHandler for Runtime {
             .unwrap_or(false);
 
         if is_ui {
-            if let Some(uw) = self.ui_window.as_mut() {
-                let response = uw.egui_state.on_window_event(&uw.window, &event);
-                if response.repaint {
-                    uw.window.request_redraw();
-                }
-                if response.consumed {
-                    return;
-                }
-                match event {
-                    WindowEvent::CloseRequested => {
-                        self.state.save();
-                        self.state.settings.ui.settings_window_visible = false;
-                        event_loop.exit();
-                    }
-                    WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                        uw.reconfigure(&self.state.gpu.device, uw.window.inner_size());
-                        uw.window.request_redraw();
-                    }
-                    WindowEvent::RedrawRequested => {
-                        // Rendering happens in `about_to_wait` to
-                        // avoid winit 0.30's `RedrawRequested`
-                        // double-fire on Windows.
-                    }
-                    _ => {}
-                }
-            }
+            self.handle_ui_window_event(event_loop, event);
         } else if is_char {
-            let cw = self.char_window.as_mut().unwrap();
-            match event {
-                WindowEvent::CloseRequested => {
-                    self.state.save();
-                    event_loop.exit();
-                }
-                WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                    cw.reconfigure(&self.state.gpu.device, cw.window.inner_size());
-                    cw.window.request_redraw();
-                }
-                WindowEvent::KeyboardInput { .. } => match key_pressed(&event) {
-                    Some(NamedKey::Space) => {
-                        self.transparent = !self.transparent;
-                        cw.window.set_decorations(!self.transparent);
-                        cw.window.request_redraw();
-                    }
-                    Some(NamedKey::Escape) => {
-                        self.state.save();
-                        event_loop.exit();
-                    }
-                    _ => {}
-                },
-                WindowEvent::RedrawRequested => {
-                    let Some(rect) = self.rect.as_ref() else {
-                        return;
-                    };
-                    if let Err(e) = cw.render_frame(
-                        &self.state.gpu.device,
-                        &self.state.gpu.queue,
-                        rect,
-                        self.transparent,
-                    ) {
-                        match e {
-                            AcquireError::Reconfigure => {
-                                tracing::warn!(
-                                    "Character Surface acquire Outdated/Lost; reconfiguring"
-                                );
-                                cw.reconfigure(&self.state.gpu.device, cw.window.inner_size());
-                                cw.window.request_redraw();
-                            }
-                            AcquireError::Timeout => cw.window.request_redraw(),
-                            AcquireError::Fatal => {
-                                tracing::error!(
-                                    "Character Surface acquire failed fatally; exiting"
-                                );
-                                event_loop.exit();
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
+            self.handle_char_window_event(event_loop, event);
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Drain the cross-subsystem bus. Tray actions update UI
-        // state; AI events are absorbed by the bridge. `Quit` exits.
+        // 1. Drain the cross-subsystem bus. Tray actions update UI
+        //    state; AI events drive the latest-response buffer and
+        //    auto-popup. `Quit` exits.
+        let mut pending_permission: Option<PendingPermission> = None;
+        let mut pending_user_input: Option<PendingUserInput> = None;
         while let Ok(event) = self.state.event_rx.try_recv() {
             match event {
                 AppEvent::Tray(TrayAction::OpenSettings) => {
-                    self.state.settings.ui.settings_window_visible = true;
-                    if let Some(uw) = self.ui_window.as_ref() {
-                        uw.window.request_redraw();
-                    }
+                    self.show_settings_window();
                 }
                 AppEvent::Tray(TrayAction::Quit) => {
                     self.state.save();
                     event_loop.exit();
+                    return;
                 }
                 AppEvent::Quit => {
                     self.state.save();
                     event_loop.exit();
+                    return;
                 }
-                AppEvent::Ai(_update) => {
-                    // Drain holds these for the UI; the bridge has
-                    // its own inbox buffer.
-                }
-                AppEvent::EmoteToken(token) => {
-                    tracing::info!("[Ene] emotion token: {token}");
+                AppEvent::Ai(update) => match update {
+                    crate::events::AiStreamUpdate::TextDelta(text) => {
+                        self.state.settings.ui.ai_latest_response.push_str(&text);
+                    }
+                    crate::events::AiStreamUpdate::Finished
+                    | crate::events::AiStreamUpdate::Error(_) => {
+                        // Latest response is appended-to as text
+                        // deltas arrive; Finished/Error is the
+                        // end-of-stream sentinel.
+                    }
+                    crate::events::AiStreamUpdate::PermissionRequired {
+                        request_id,
+                        action,
+                        target,
+                        description,
+                    } => {
+                        pending_permission = Some(PendingPermission {
+                            request_id,
+                            action,
+                            target,
+                            description,
+                        });
+                        self.state.settings.ui.settings_window_visible = true;
+                    }
+                    crate::events::AiStreamUpdate::UserInputRequired { request_id, prompt } => {
+                        pending_user_input = Some(PendingUserInput { request_id, prompt });
+                        self.state.settings.ui.settings_window_visible = true;
+                    }
+                    _ => {}
+                },
+                AppEvent::EmoteToken(name) => {
+                    let now_secs = self
+                        .ui_window
+                        .as_ref()
+                        .map(|uw| uw.settings_ui.started_at.elapsed().as_secs_f64())
+                        .unwrap_or(0.0);
+                    if let Some(uw) = self.ui_window.as_mut() {
+                        uw.settings_ui
+                            .emotion_queue
+                            .push(crate::character_state::EmotionCommand {
+                                emotion: name,
+                                target_time: now_secs,
+                                hold_secs: 4.0,
+                            });
+                    }
                 }
             }
         }
-        // Push remaining AI events into the bridge inbox for the
-        // UI pass to read.
-        self.state.ai.drain(&mut self.state.event_rx);
+        if let Some(perm) = pending_permission {
+            self.state.settings.ui.pending_permission = Some(perm);
+        }
+        if let Some(pui) = pending_user_input {
+            self.state.settings.ui.user_input_drafts = (0..pui.prompt.items.len())
+                .map(|_| QuestionDraft::default())
+                .collect();
+            self.state.settings.ui.pending_user_input = Some(pui);
+        }
 
-        // Auto-save any settings that were marked dirty by UI
-        // handlers in this frame.
+        // 2. Auto-save any settings that were marked dirty by UI
+        //    handlers in this frame.
         self.state.settings.flush_if_dirty();
 
-        // Pump GTK on Linux so the tray stays alive.
+        // 3. Pump GTK on Linux so the tray stays alive.
         if let Some(_tray) = self.state.tray.as_ref() {
             #[cfg(target_os = "linux")]
             _tray.tick_gtk();
         }
 
-        // Trigger a redraw for both windows.
+        // 4. Trigger a redraw for both windows.
         if let Some(cw) = self.char_window.as_mut() {
             cw.window.request_redraw();
         }
         if let Some(uw) = self.ui_window.as_mut() {
-            match uw.render_frame(&self.state.gpu.device, &self.state.gpu.queue) {
-                Ok(_) => {}
-                Err(e) => match e {
-                    AcquireError::Reconfigure => {
-                        uw.reconfigure(&self.state.gpu.device, uw.window.inner_size());
-                    }
-                    AcquireError::Timeout => {}
-                    AcquireError::Fatal => {
-                        event_loop.exit();
-                    }
-                },
+            if uw.window.is_visible() != Some(self.state.settings.ui.settings_window_visible) {
+                uw.window
+                    .set_visible(self.state.settings.ui.settings_window_visible);
+            }
+            if self.state.settings.ui.settings_window_visible {
+                uw.window.request_redraw();
+                match uw.render_frame(
+                    &self.state.gpu.device,
+                    &self.state.gpu.queue,
+                    &mut self.state.settings,
+                    &self.state.ai,
+                ) {
+                    Ok(_) => {}
+                    Err(e) => match e {
+                        AcquireError::Reconfigure => {
+                            uw.reconfigure(&self.state.gpu.device, uw.window.inner_size());
+                        }
+                        AcquireError::Timeout => {}
+                        AcquireError::Fatal => {
+                            event_loop.exit();
+                        }
+                    },
+                }
             }
         }
+    }
+}
+
+impl Runtime {
+    fn handle_char_window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
+        let cw = self.char_window.as_mut().unwrap();
+        match event {
+            WindowEvent::CloseRequested => {
+                self.state.save();
+                event_loop.exit();
+            }
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                cw.reconfigure(&self.state.gpu.device, cw.window.inner_size());
+                cw.window.request_redraw();
+            }
+            WindowEvent::KeyboardInput { .. } => {
+                if let Some(named) = key_pressed(&event) {
+                    if matches!(named, NamedKey::Space) {
+                        self.transparent = !self.transparent;
+                        cw.window.set_decorations(!self.transparent);
+                        cw.window.request_redraw();
+                    } else if matches!(named, NamedKey::Escape) {
+                        self.state.save();
+                        event_loop.exit();
+                    } else if matches!(named, NamedKey::F1) {
+                        if self.state.settings.ui.settings_window_visible {
+                            self.hide_settings_window();
+                        } else {
+                            self.show_settings_window();
+                        }
+                    } else {
+                        // Character-window WASD / Space shortcuts
+                        // when the settings window is open on the
+                        // Character page and egui is not focused.
+                        if self.state.settings.ui.settings_window_visible
+                            && let Some(action) = char_settings_hotkey_from_event(
+                                &event,
+                                cw_char_window_has_focus(cw),
+                            )
+                        {
+                            self.dispatch_settings_action(action);
+                        }
+                    }
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                let Some(rect) = self.rect.as_ref() else {
+                    return;
+                };
+                if let Err(e) = cw.render_frame(
+                    &self.state.gpu.device,
+                    &self.state.gpu.queue,
+                    rect,
+                    self.transparent,
+                ) {
+                    match e {
+                        AcquireError::Reconfigure => {
+                            tracing::warn!(
+                                "Character Surface acquire Outdated/Lost; reconfiguring"
+                            );
+                            cw.reconfigure(&self.state.gpu.device, cw.window.inner_size());
+                            cw.window.request_redraw();
+                        }
+                        AcquireError::Timeout => cw.window.request_redraw(),
+                        AcquireError::Fatal => {
+                            tracing::error!("Character Surface acquire failed fatally; exiting");
+                            event_loop.exit();
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_ui_window_event(&mut self, _event_loop: &ActiveEventLoop, event: WindowEvent) {
+        let uw = self.ui_window.as_mut().unwrap();
+        let response = uw.egui_state.on_window_event(&uw.window, &event);
+        if response.repaint {
+            uw.window.request_redraw();
+        }
+        if response.consumed {
+            return;
+        }
+        match event {
+            WindowEvent::CloseRequested => {
+                self.state.save();
+                self.state.settings.ui.settings_window_visible = false;
+            }
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                uw.reconfigure(&self.state.gpu.device, uw.window.inner_size());
+                uw.window.request_redraw();
+            }
+            WindowEvent::KeyboardInput { .. } => {
+                if let Some(NamedKey::Escape) = key_pressed(&event) {
+                    self.state.save();
+                    self.state.settings.ui.settings_window_visible = false;
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                // Rendering happens in `about_to_wait` to avoid
+                // winit 0.30's `RedrawRequested` double-fire on
+                // Windows.
+            }
+            _ => {}
+        }
+    }
+
+    fn dispatch_settings_action(&mut self, action: crate::settings_ui::widgets::SettingsAction) {
+        let Some(uw) = self.ui_window.as_mut() else {
+            return;
+        };
+        if uw.settings_ui.current_page != PageKind::Character {
+            return;
+        }
+        // Split-borrow: the runtime holds a `&mut AppState` so we
+        // can hand separate `&mut` / `&` references to the
+        // dispatcher.
+        let AppState {
+            ref mut settings,
+            ref ai,
+            ..
+        } = self.state;
+        crate::settings_ui::widgets::apply_action(
+            action,
+            settings,
+            &mut uw.settings_ui.animation,
+            ai,
+        );
+    }
+}
+
+fn cw_char_window_has_focus(cw: &CharacterWindow) -> bool {
+    cw.window.has_focus()
+}
+
+fn char_settings_hotkey_from_event(
+    event: &WindowEvent,
+    has_focus: bool,
+) -> Option<crate::settings_ui::widgets::SettingsAction> {
+    use crate::settings_ui::widgets::SettingsAction;
+    if !has_focus {
+        return None;
+    }
+    let WindowEvent::KeyboardInput {
+        event:
+            KeyEvent {
+                physical_key: winit::keyboard::PhysicalKey::Code(code),
+                state: ElementState::Pressed,
+                ..
+            },
+        ..
+    } = event
+    else {
+        return None;
+    };
+    use winit::keyboard::KeyCode;
+    match code {
+        KeyCode::KeyA => Some(SettingsAction::PrevCharacter),
+        KeyCode::KeyD => Some(SettingsAction::NextCharacter),
+        KeyCode::KeyW => Some(SettingsAction::PrevMotion),
+        KeyCode::KeyS => Some(SettingsAction::NextMotion),
+        _ => None,
     }
 }
 
@@ -444,8 +623,7 @@ struct UiWindow {
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
-    text_input: String,
-    click_count: u32,
+    settings_ui: SettingsUi,
     textures_to_free: Vec<Vec<egui::TextureId>>,
 }
 
@@ -501,8 +679,7 @@ impl UiWindow {
             egui_ctx,
             egui_state,
             egui_renderer,
-            text_input: String::new(),
-            click_count: 0,
+            settings_ui: SettingsUi::new(),
             textures_to_free: vec![Vec::new(), Vec::new(), Vec::new()],
         })
     }
@@ -520,6 +697,8 @@ impl UiWindow {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        settings: &mut CharacterSettings,
+        ai: &Arc<AiBridge>,
     ) -> Result<(), AcquireError> {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -541,7 +720,7 @@ impl UiWindow {
 
         let mut panel_ui = egui::Ui::new(
             self.egui_ctx.clone(),
-            egui::Id::new("central_panel"),
+            egui::Id::new("settings_panel"),
             egui::UiBuilder::new()
                 .layer_id(egui::LayerId::background())
                 .max_rect(self.egui_ctx.content_rect()),
@@ -549,22 +728,7 @@ impl UiWindow {
         panel_ui.set_clip_rect(self.egui_ctx.content_rect());
 
         egui::CentralPanel::default().show_inside(&mut panel_ui, |ui| {
-            ui.heading("ene UI Settings");
-            ui.label("Hello from separate egui window!");
-
-            ui.separator();
-            ui.horizontal_top(|ui| {
-                ui.label("Name: ");
-                ui.add_sized(
-                    [300.0, ui.spacing().interact_size.y],
-                    egui::TextEdit::singleline(&mut self.text_input),
-                );
-            });
-
-            if ui.button("Click me!").clicked() {
-                self.click_count += 1;
-            }
-            ui.label(format!("Button clicked {} times", self.click_count));
+            self.settings_ui.render(ui, settings, ai);
         });
 
         let full_output = self.egui_ctx.end_pass();
@@ -742,9 +906,3 @@ impl RectRenderer {
         rp.draw(0..6, 0..1);
     }
 }
-
-// `CharacterSettings` is the only import we expose to keep
-// `clippy --fix` quiet about unused imports while the smoke UI
-// does not yet reach into the struct.
-#[allow(unused_imports)]
-use crate::settings::CharacterSettings as _CharacterSettings;
