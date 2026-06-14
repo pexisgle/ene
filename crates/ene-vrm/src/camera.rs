@@ -65,6 +65,12 @@ impl OrthographicCamera {
         self.target = target;
     }
 
+    /// PR4.2 follow-up diagnostic: returns `(eye, target, viewport_height, aspect)`.
+    #[allow(dead_code)] // One-shot diagnostic log only.
+    pub fn debug(&self) -> ([f32; 3], [f32; 3], f32, f32) {
+        (self.eye, self.target, self.viewport_height, self.aspect)
+    }
+
     /// Build the per-frame uniform.
     pub fn uniform(&self) -> VrmResult<CameraUniform> {
         let view = Mat4::look_at_rh(self.eye.into(), self.target.into(), self.up.into());

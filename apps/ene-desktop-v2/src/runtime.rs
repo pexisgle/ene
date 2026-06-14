@@ -51,6 +51,10 @@ pub struct Runtime {
     last_cursor_logical: Option<PhysicalPosition<f64>>,
     /// PR4.2: monotonic clock for `dt_secs` smoothing.
     last_frame_instant: Option<Instant>,
+    /// PR4.2 follow-up: one-shot diagnostic log on the very
+    /// first `RedrawRequested` so we can verify surface / depth /
+    /// camera-aspect / model-uniform are in sync.
+    diagnostics_logged: bool,
 }
 
 impl Runtime {
@@ -68,6 +72,7 @@ impl Runtime {
             ui_window: None,
             last_cursor_logical: None,
             last_frame_instant: None,
+            diagnostics_logged: false,
         }
     }
 
@@ -427,6 +432,45 @@ impl Runtime {
                     ..
                 } = self.state;
                 let (device, queue) = (&gpu.device, &gpu.queue);
+
+                // PR4.2 follow-up: one-shot diagnostic so we can
+                // see whether the char window size / surface config
+                // / depth texture / camera aspect / model uniform
+                // are all in agreement. Logs on the very first
+                // RedrawRequested only.
+                if !self.diagnostics_logged {
+                    self.diagnostics_logged = true;
+                    let phys = cw.window.inner_size();
+                    let surface_w = cw.config.width;
+                    let surface_h = cw.config.height;
+                    let cs = &settings.character_state;
+                    let model_uniform_dbg = ene_vrm::ModelUniform::from_position_scale(
+                        cs.character_position.to_array(),
+                        cs.model_scale,
+                    );
+                    let cam = character.camera_dbg();
+                    let depth = character.depth_size_dbg();
+                    let loaded = character.model_aabb_dbg();
+                    tracing::info!(
+                        "PR4.2-diag: char_win={}x{} scale_factor={:.3} surface_config={}x{} depth_texture={}x{} camera_aspect={:.3} char_pos={:?} model_scale={:.3} model_uniform={:?} cam_eye={:?} cam_target={:?} cam_viewport_h={:.3} loaded_aabb={:?}",
+                        phys.width,
+                        phys.height,
+                        cw.window.scale_factor(),
+                        surface_w,
+                        surface_h,
+                        depth.0,
+                        depth.1,
+                        cam.0,
+                        cs.character_position,
+                        cs.model_scale,
+                        model_uniform_dbg.model,
+                        cam.1,
+                        cam.2,
+                        cam.3,
+                        loaded,
+                    );
+                }
+
                 // PR4.1: compose the per-frame model transform
                 // from `CharacterState`. `character_position` and
                 // `model_scale` are clamped by `clamp_runtime_values`
