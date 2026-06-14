@@ -144,7 +144,15 @@ impl CharacterRenderer {
             // The `VrmRenderer::render` already clears with
             // `wgpu::Color::TRANSPARENT`. Nothing extra to do.
         }
-        renderer.render(queue, &mut encoder, view, depth_view, model, &self.camera);
+        renderer.render(
+            queue,
+            &mut encoder,
+            view,
+            depth_view,
+            model,
+            &self.camera,
+            transparent,
+        );
         queue.submit(std::iter::once(encoder.finish()));
     }
 
