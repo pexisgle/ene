@@ -1,16 +1,20 @@
 //! GPU-side data types produced by [`crate::loader::load_vrm`].
 //!
-//! PR3 ships a single mesh + single texture. Multi-mesh / multi-material
-//! support lands in a follow-up PR.
+//! PR3.1 loads **every primitive of the first mesh** (each
+//! primitive is a separate material / base-color texture in glTF;
+//! for AliciaSolid.vrm this is what makes body + clothes + face
+//! all appear). Multi-mesh support lands in a follow-up PR.
 use std::num::NonZeroU64;
 
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
 
-/// A single mesh primitive loaded from the VRM. The PR3 loader
-/// extracts the first primitive of the first mesh only.
+/// A single mesh primitive loaded from the VRM. The PR3.1 loader
+/// extracts every primitive of the first mesh, so the body, the
+/// clothes, the face, etc. all end up here as separate
+/// `VrmPrimitive` entries.
 #[derive(Debug)]
-pub struct VrmMesh {
+pub struct VrmPrimitive {
     /// Per-vertex data: `position (vec3) + uv (vec2) + normal (vec3)`.
     /// 8 floats = 32 bytes per vertex.
     pub vertex_buf: wgpu::Buffer,
@@ -20,6 +24,20 @@ pub struct VrmMesh {
     pub index_buf: wgpu::Buffer,
     /// Number of indices to draw.
     pub index_count: u32,
+    /// Base-color texture for this primitive, if its material has
+    /// one. `None` falls back to a flat color in the shader.
+    pub base_color: Option<VrmTexture>,
+}
+
+/// A mesh, as a list of primitives. The first mesh's primitives
+/// are what v2 actually renders; the field name keeps the door open
+/// for multi-mesh support later.
+#[derive(Debug, Default)]
+pub struct VrmMesh {
+    /// All primitives that make up the first mesh. The renderer
+    /// draws each one with its own base-color texture (or a flat
+    /// color when `VrmPrimitive::base_color` is `None`).
+    pub primitives: Vec<VrmPrimitive>,
 }
 
 /// A single GPU texture plus its sampler.
@@ -29,10 +47,10 @@ pub struct VrmTexture {
     pub texture: wgpu::Texture,
     /// Default sampler (linear filtering, clamp-to-edge).
     pub sampler: wgpu::Sampler,
-    /// Bind group layout `(2)` — used by the renderer to build the
-    /// per-model bind group.
+    /// Bind group layout `(1)` — used by the renderer to build the
+    /// per-primitive bind group.
     pub bind_group_layout: wgpu::BindGroupLayout,
-    /// Bind group `(2)` — used by the renderer.
+    /// Bind group `(1)` — used by the renderer.
     pub bind_group: wgpu::BindGroup,
 }
 
@@ -51,11 +69,8 @@ pub struct Skeleton {
 /// the VRM once.
 #[derive(Debug)]
 pub struct VrmModel {
-    /// Vertex + index buffers for the first primitive.
+    /// The first mesh's primitives. PR3.1 only ever reads `mesh.primitives`.
     pub mesh: VrmMesh,
-    /// Base-color texture (or `None` if the material has no base
-    /// texture — the shader falls back to a flat color).
-    pub base_color: Option<VrmTexture>,
     /// Skeleton metadata. Not consumed by the renderer in PR3.
     pub skeleton: Skeleton,
 }

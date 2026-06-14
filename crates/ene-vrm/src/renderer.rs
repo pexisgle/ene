@@ -66,14 +66,18 @@ impl VrmRenderer {
             }],
         });
 
-        // The base-color bind group layout comes from the texture
-        // (slot `(1)`). For models with no base color, fall back to
-        // a dummy empty layout — the shader's `has_base_color`
-        // uniform branch reads a flat color.
+        // The base-color bind group layout comes from the first
+        // primitive that has a base color texture (slot `(1)`).
+        // All primitives share the same layout — just different
+        // bind groups — so the pipeline is built once and the
+        // renderer binds a different bind group per primitive in
+        // the `render` loop. For models where every primitive
+        // lacks a base color, fall back to a dummy empty layout.
         let base_color_bgl = model
-            .base_color
-            .as_ref()
-            .map(|t| t.bind_group_layout.clone())
+            .mesh
+            .primitives
+            .iter()
+            .find_map(|p| p.base_color.as_ref().map(|t| t.bind_group_layout.clone()))
             .unwrap_or_else(|| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("vrm.dummy_bgl"),
@@ -203,11 +207,13 @@ impl VrmRenderer {
 
         rp.set_pipeline(&self.pipeline);
         rp.set_bind_group(0, &self.camera_bind_group, &[]);
-        if let Some(t) = &model.base_color {
-            rp.set_bind_group(1, &t.bind_group, &[]);
+        for prim in &model.mesh.primitives {
+            if let Some(t) = &prim.base_color {
+                rp.set_bind_group(1, &t.bind_group, &[]);
+            }
+            rp.set_vertex_buffer(0, prim.vertex_buf.slice(..));
+            rp.set_index_buffer(prim.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..prim.index_count, 0, 0..1);
         }
-        rp.set_vertex_buffer(0, model.mesh.vertex_buf.slice(..));
-        rp.set_index_buffer(model.mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
-        rp.draw_indexed(0..model.mesh.index_count, 0, 0..1);
     }
 }

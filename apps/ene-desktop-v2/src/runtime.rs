@@ -48,10 +48,15 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn new(state: AppState, event_tx: AppEventSender) -> Self {
+        // Default to transparent mode (matches the legacy
+        // Bevy app's behavior: undecorated, per-pixel alpha so
+        // the desktop shows through). Pressing `Space` toggles
+        // decorations + window transparency together so the
+        // user can grab the title bar for debugging.
         Self {
             state,
             event_tx,
-            transparent: false,
+            transparent: true,
             char_window: None,
             ui_window: None,
         }
@@ -336,7 +341,14 @@ impl Runtime {
                 if let Some(named) = key_pressed(&event) {
                     if matches!(named, NamedKey::Space) {
                         self.transparent = !self.transparent;
+                        // `set_decorations` toggles the title bar;
+                        // `set_transparent` toggles per-pixel alpha
+                        // (both are best-effort — on Windows the
+                        // latter is fixed at window creation time
+                        // because `WS_EX_LAYERED` is set then, but
+                        // the call is still cheap and safe).
                         cw.window.set_decorations(!self.transparent);
+                        cw.window.set_transparent(self.transparent);
                         cw.window.request_redraw();
                     } else if matches!(named, NamedKey::Escape) {
                         self.state.save();
