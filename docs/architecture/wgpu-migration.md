@@ -15,20 +15,27 @@ This document is the **design plan** for the migration. The tables below summari
 |-------|----------|-------|-------|
 | **PR0 — `ene-desktop-v2` scaffold + Windows transparency smoke** | §22.3 | **Shipped** | `apps/ene-desktop-v2/` (3 source files, ~840 lines: `main.rs`, `gpu.rs`, `runtime.rs`) replaces the planned 7-module split. Single transparent window, red-quad renderer, `Space` toggles transparency, `Escape` exits. Verified on the developer's Windows machine. **Note:** the line count grew after PR2 (a second `winit` window with full `egui` integration — `CentralPanel` with a heading, text input, and click counter — is inlined in `runtime.rs::UiWindow`) so the file is no longer the PR0-minimum scaffold. The transparency recipe (§22.3) is unchanged. |
 | **PR1 step 1 — `ene-vrm` crate skeleton** | §4 PR1 / step 2 | **Shipped** | `crates/ene-vrm/{Cargo.toml, src/lib.rs}` created with an empty `pub fn version()` stub and a unit test. No `gltf` / `wgpu` / `winit` deps yet. |
-| **PR1 steps 3–8 — strip Bevy from `apps/ene-desktop`, wire winit window + tray + AI bridge** | §4 PR1 / steps 3–8 | **Not started** | The legacy `apps/ene-desktop` is still Bevy 0.18, unchanged. The `patches/bevy_winit/` patch has been removed (the legacy build now uses upstream `bevy_winit`); `apps/tw-test/` has also been removed. |
-| **PR2 — egui integration + settings window** | §4 PR2 | **Not started** | — |
-| **PR3 — `ene-vrm` static rendering (MToon + skinning)** | §4 PR3 | **Not started** | — |
-| **PR4 — Expressions, LookAt, BodyTracking** | §4 PR4 | **Not started** | — |
-| **PR5+ — VRMA, spring-bone, FXAA/SMAA, drag polish** | §4 PR5+ | **Not started** | — |
+| **PR1 — v2: tray + AI bridge + `AppState` + persistence + CLI** | §4 PR1 | **Shipped** | `apps/ene-desktop-v2/` now has 7 source files (~1.5k LoC): `main.rs`, `gpu.rs`, `runtime.rs`, `state.rs`, `events.rs`, `settings.rs`, `ai_bridge.rs`, `tray.rs`. The `EneHandle` actor (from `ene-core`) is wrapped in `AiBridge`, the system tray (`tray-icon` 0.24) is wired on both Windows (dedicated `GetMessageW` thread) and Linux (GTK pump inside `about_to_wait`), `CharacterSettings` is ported from the legacy Bevy `Resource` to a plain `Arc<parking_lot::RwLock<…>>` struct backed by `ConfigStore`, and `Cargo run -p ene-desktop-v2` accepts the same `args[1]=vrm` / `args[2]=vrma` overrides the legacy app does. The legacy `apps/ene-desktop` (Bevy 0.18) is **deliberately untouched** per the new "v2 grows to full parity, then rename" policy — see §0.1 and §4. |
+| **PR2 — v2: full settings UI (3 pages) + hotkeys + per-character config** | §4 PR2 | **Not started** | — |
+| **PR3 — v2: orthographic 3D camera + `ene-vrm` static rendering (MToon + skinning)** | §4 PR3 | **Not started** | — |
+| **PR4 — v2: LookAt / cursor / expressions / drag-to-move** | §4 PR4 | **Not started** | — |
+| **PR5 — v2: click-through (Win32 subclass + Wayland input region + X11 shape) + offscreen mask** | §4 PR5 | **Not started** | — |
+| **PR5.5 — rename `apps/ene-desktop-v2` → `apps/ene-desktop`, delete legacy Bevy sources** | §4 PR5.5 | **Not started** | Gated on PR1–PR5 being feature-complete. |
 
 ### 0.1 How the two desktop apps coexist
 
-Until PR1's "skeleton swap" step 3 finishes, both binaries build side-by-side:
+Both binaries build side-by-side throughout the entire migration:
 
-- **`apps/ene-desktop`** — legacy Bevy 0.18 build. Still the user-facing desktop app. Still depends on `bevy`, `bevy_egui`, `bevy_vrm1`, `tray-icon`, `gtk` (Linux), and `wayland-client` (Linux). The local `patches/bevy_winit` patch has been removed; the legacy build now uses upstream `bevy_winit` 0.18 from crates.io. The legacy binary is **not** being modified by this migration until PR1 step 3.
-- **`apps/ene-desktop-v2`** — new crate, lives next to the legacy one. Renders a single transparent window with `winit` + `wgpu` 27 and a hard-coded red quad. **Cargo `run -p ene-desktop-v2`** to launch.
+- **`apps/ene-desktop`** — legacy Bevy 0.18 build. Still the user-facing desktop app. Still depends on `bevy`, `bevy_egui`, `bevy_vrm1`, `tray-icon`, `gtk` (Linux), and `wayland-client` (Linux). The local `patches/bevy_winit` patch has been removed; the legacy build now uses upstream `bevy_winit` 0.18 from crates.io. **The legacy binary is not being modified by this migration at all** — it stays as-is until the rename step.
+- **`apps/ene-desktop-v2`** — new crate, lives next to the legacy one. Started as a `winit` + `wgpu` 29 + `egui` 0.34 transparent-window smoke (PR0, §22.3). PR1 added a tokio-runtime-driven `AppState`, an `EneHandle` wrapper, a system tray, and a `CharacterSettings` port. **Cargo `run -p ene-desktop-v2`** to launch.
 
-Once PR1 is finished, `apps/ene-desktop` will be deleted and the `apps/ene-desktop-v2` sources will be moved to `apps/ene-desktop`. The migration plan (§4) calls this out as "PR1 is the deletion step." Until then, treat them as parallel codebases.
+The original plan called for "PR1 is the deletion step" — strip Bevy from `apps/ene-desktop` and move the v2 sources into it. That plan is **superseded by the new policy below** so we never have a half-broken intermediate state where a feature works in one binary and not the other.
+
+#### New policy (PR1 onwards)
+
+> **v2 grows incrementally through PR1–PR5+ until it is a feature-complete replacement for the legacy `apps/ene-desktop` (Bevy 0.18). The legacy crate keeps building throughout the migration. The rename `apps/ene-desktop-v2/` → `apps/ene-desktop/` and the deletion of the legacy Bevy sources happen in a single commit at the end of PR5 (gated by §0's PR1–PR5 all being "Shipped").**
+
+The full PR roadmap is in §4. Treat the two crates as **parallel codebases** until PR5.5.
 
 ### 0.2 Where the recipe was proven
 
@@ -140,80 +147,81 @@ The two bugs together motivated carrying a local patch of `bevy_winit` (deleted 
 
 We deliver the migration as a series of small, individually reviewable PRs. Each PR must keep `cargo build --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace` green. **Direct commits to `main` remain acceptable during the early-development phase per AGENTS.md §10.**
 
-### PR1 — Skeleton swap (the hardest PR)
+### PR1 — v2: tray + AI bridge + `AppState` + persistence + CLI
 
-> **Status:** In progress. **Step 1** (workspace `Cargo.toml` rendering-stack deps + `[patch.crates-io] bevy_winit` removal) is **shipped**, the **`patches/bevy_winit/` directory and `apps/tw-test/` are deleted**, and **Step 2** (`crates/ene-vrm` skeleton) and the **PR0 transparency smoke** that motivates the recipe are shipped. The rest of PR1 (steps 3–8: strip Bevy from the legacy `apps/ene-desktop`, move the source to v2, wire the winit window there, port the tray / AI bridge / settings) is still open. See §0 and §22.3 for the current state of v2.
+> **Status:** **Shipped** (commit `9b4a2d4` pending). The v2 crate now boots a tokio runtime, owns a tokio-driven `EneHandle` actor, a system tray (`tray-icon` 0.24), and the `CharacterSettings` schema (ported from the legacy Bevy `Resource` to a plain struct). The legacy `apps/ene-desktop` is unchanged.
 
-**Objective:** Remove Bevy, get a transparent window with a clear color and a working system tray, with the AI bridge still hooked up but rendering nothing.
+**Objective:** Wire the non-rendering half of the desktop app (AI bridge, tray, settings persistence) into v2, and bring v2 up to the same non-rendering feature level the legacy Bevy app has today, but without Bevy. Visual rendering is still PR0's red-quad smoke on the character window and the PR0 + PR2 egui demo on the UI window — the full VRM, LookAt, drag, and click-through features arrive in PR3–PR5.
 
-**Steps**
+**Scope (shipped)**
 
-1. Edit the workspace `Cargo.toml`:
-   - Add `[workspace.dependencies]`: `wgpu = "29"`, `winit = "0.30"`, `egui = "0.34"`, `egui-wgpu = "0.34"`, `egui-winit = "0.34"`, `glam = "0.33"`, `gltf = "1.4"`, `encase = "0.12"`, `bytemuck = "1"`, `pollster = "0.4"`, `raw-window-handle = "0.6"`.
-   - Remove from `[workspace.dependencies]` and from `apps/ene-desktop/Cargo.toml`: `bevy`, `bevy_pbr`, `bevy_winit`, `bevy_egui`, `bevy_vrm1`, `bevy_animation`, `bevy_asset`, `bevy_render`, `bevy_math`, `bevy_mesh`, `bevy_window`, `bevy_input`, `bevy_image`, `bevy_transform`, `bevy_utils`, `bevy_ecs`.
-   - Remove `[patch.crates-io] bevy_winit = { path = "patches/bevy_winit" }` and delete the `patches/bevy_winit` directory.
-2. Create `crates/ene-vrm/` with `Cargo.toml`, `src/lib.rs` (just an empty `pub fn version() -> &'static str`), and add to workspace members (`crates/ene-vrm` is already covered by `crates/*`).
-3. Replace `apps/ene-desktop/Cargo.toml` dependencies with the workspace ones.
-4. Rewrite `apps/ene-desktop/src/main.rs`:
-   - `tokio::runtime::Runtime::new()` and `runtime.enter()` retained.
-    - Initialise `wgpu::Instance` (DX12 on Windows with `DxgiFromVisual`, Vulkan on Linux and macOS) and `wgpu::Adapter` + `wgpu::Device` + `wgpu::Queue` via `pollster::block_on` or a oneshot.
-   - Build a `winit::EventLoop`, set `ControlFlow::Wait`, register the primary character window (`Arc<winit::Window>`) with `WindowAttributes` that mirror `window_plugin()`: `WindowLevel::AlwaysOnTop`, `transparent: true`, `decorations: false`, `resizable: true`, `inner_size: (320, 480)`.
-    - On Windows, keep `std::env::set_var("WGPU_DX12_PRESENTATION_SYSTEM", "DxgiFromVisual")` **before** `Instance::new`; use DX12 backend.
-   - On Linux, call `gtk::init()` early (tray).
-   - Per-frame handler: redraw the primary window with `clear_color: (0,0,0,0)`, present, return.
-5. Port the AI bridge: drop `bevy::Message`; introduce `ai_bridge::AiBridge { handle: EneHandle, receiver, processing: AtomicBool, pending: Mutex<VecDeque<EneStreamEvent>> }`. The bridge starts a background tokio task that pulls from `EneHandle::events()` and pushes into the deque.
-6. Port the tray: keep `tray-icon` exactly as it is. The Windows message thread is independent of winit. On Linux, the GTK main thread still polls the tray; we just have to be careful that the winit event loop is created on the main thread (it is, since `gtk::init` does not steal main).
-7. Port the settings window: **deferred to PR2**. For now, settings can be opened as a no-op toast or an unimplemented menu entry.
-8. **Verification:** Manual smoke only. `cargo run -p ene-desktop` should show a transparent (or fully white) window that follows the cursor and re-creates on resize. No VRM, no settings yet.
+1. **Workspace `Cargo.toml`**: add `parking_lot = "0.12"` (for non-poisoning `RwLock`), `png = "0.18"` (tray icon decode), `tray-icon = { version = "0.24", default-features = false }` (tray). All other rendering-stack deps from PR0 stay.
+2. **`apps/ene-desktop-v2/Cargo.toml`**: add `ene-core`, `ene-config`, `ene-tool-proto` (the non-rendering half of the legacy app's dep graph), `tokio` (workspace), `parking_lot`, `png`, `tray-icon`, `ctor`, `serde`, `serde_json`, `thiserror`. Linux target adds `gtk = "0.18.2"` and enables the `gtk` feature on `tray-icon`.
+3. **`apps/ene-desktop-v2/src/events.rs` (new)**: `AppEvent` enum (Tray / Ai / EmoteToken / Quit variants) and the `AiStreamUpdate` enum (9 flattened variants of `ene_core::EneEvent`). The bus is a `tokio::sync::mpsc::unbounded_channel`. The `Sender` is cloned into the tray thread and into the AI bridge's pump task; the `Receiver` lives in `Runtime` and is drained in `about_to_wait`.
+4. **`apps/ene-desktop-v2/src/settings.rs` (new)**: port of legacy `apps/ene-desktop/src/app_config.rs` to a plain struct (no Bevy `Resource`). `CharacterSettings { assets_dir, characters, graphics, character_state, ui, ai, store: Arc<parking_lot::RwLock<ConfigStore>> }`. Includes `GraphicsSection` (declared via `ene_config::define_config!(settings, "desktop", DesktopSection { graphics })`), `ShadowQuality` / `AntialiasingMode` enums via `define_label_enum!`, `CharacterEntry`, `CharacterState`, `UiState`, `AiConfig`, `discover()`, `current_*()`, `select_character()`, `save()` / `mark_dirty()` / `flush_if_dirty()` / `sync_to_store()` / `load_from_file()`. Also `read_cli_paths()` (the `args[1]=vrm` / `args[2]=vrma` parser) and the cycle helpers. The legacy file stays put; the port is structural-only.
+5. **`apps/ene-desktop-v2/src/ai_bridge.rs` (new)**: `AiBridge` wraps `EneHandle`. Constructor spawns (a) a `pump_events` tokio task that loops `try_recv` on `EneHandle::subscribe()` and pushes `AiStreamUpdate` into an inbox, and (b) a `bootstrap` tokio task that calls `handle.load_config()` then `handle.load_character()`. Exposes `run(&str)`, `cancel()`, `drain()` (for the main thread), `take_inbox()`, and a `latest_response()` reader. `<|emo:NAME|>` tokens are pulled out of `SpecialToken` events and forwarded as `AppEvent::EmoteToken`; the actual `EmotionQueue` (which drives VRM morph weights) lands in PR4.
+6. **`apps/ene-desktop-v2/src/tray.rs` (new)**: `TrayHandle`. On Windows, spawns a dedicated thread that runs `TrayIconBuilder` + a hand-rolled `GetMessageW` / `TranslateMessage` / `DispatchMessageW` loop (the legacy code's recipe), `mem::forget`s the icon so the thread keeps it alive. On Linux, builds the icon on the main thread and a separate thread polls `TrayIconEvent::receiver()` and `MenuEvent::receiver()`. A `tick_gtk()` method is called from `Runtime::about_to_wait` to pump `gtk::main_iteration_do(false)`. The menu is "Settings" and "Quit" (matching the legacy). PNG decode accepts `Rgba` / `Rgb` / `Grayscale` / `GrayscaleAlpha`, falls back to a 32×32 opaque blue square if `assets/icon.png` is missing.
+7. **`apps/ene-desktop-v2/src/state.rs` (new)**: `AppState { gpu, settings, ai: Arc<AiBridge>, tray: Option<TrayHandle>, event_rx }`. `with_channel(gpu, settings, &handle)` builds a paired `(AppState, AppEventSender)`. The `Sender` is handed to `AiBridge::new` and to `TrayHandle::new`. Exposes `init_tray`, `ai_run`, `save`, `request_quit`, `resolve_paths` (helper for `main`).
+8. **`apps/ene-desktop-v2/src/main.rs` (rewrite)**: tracing init → `tokio::runtime::Builder::new_multi_thread().enable_all().build()` + `runtime.enter()` guard → `resolve_paths()` → `gpu::GpuContext::new` → `CharacterSettings::discover` → `AppState::with_channel` → `EventLoop::new` → `Runtime::new(state, event_tx).run_app`.
+9. **`apps/ene-desktop-v2/src/runtime.rs` (refactor)**: `Runtime { state, event_tx, transparent, char_window, ui_window, rect }`. `ApplicationHandler`:
+   - `resumed` — `init_tray` (which also dispatches the GTK pump start on Linux) → create the `CharacterWindow` and the `UiWindow` (PR0 + PR2 code, unchanged).
+   - `window_event` — dispatches by `WindowId` (char vs ui), handles `Space` / `Escape` / `close` / `Resized` / `ScaleFactorChanged` / `RedrawRequested` / `KeyboardInput`.
+   - `about_to_wait` — drain `event_rx`: on `Tray::OpenSettings` set `settings.ui.settings_window_visible = true`; on `Ai(_)` push the update to `AiBridge::take_inbox` (the PR2 egui page will render from it); on `Quit` save and `event_loop.exit()`; on `EmoteToken(_)` stash for PR4; always call `settings.flush_if_dirty(Some(&char_name))`; on Linux call `state.tray.tick_gtk()`; redraw both windows.
+10. **Verification (PR1 closeout):**
+    - `cargo build -p ene-desktop-v2` succeeds.
+    - `cargo clippy -p ene-desktop-v2 -- -D warnings` clean. Most of the new public API (`AiBridge::run`, `AppEvent::Quit`, `AiStreamUpdate` variants, several `CharacterSettings` helpers) is `#[allow(dead_code)]`-annotated because the consumers land in PR2; the annotations are scoped and will be removed as PR2–PR5 land.
+    - `cargo clippy --workspace --exclude ene-desktop -- -D warnings` clean. Legacy `apps/ene-desktop` clippy errors are **pre-existing** and out of scope for this migration (the live `render_settings_window` in the legacy code is a "test" stub, so `page_ai_page` / `page_character_page` / `page_graphics_page` are reported as dead — left for the legacy maintainers).
+    - `cargo test --workspace`: 198 passed, 6 ignored. No new tests added by PR1 (all the action is plumbing; the first real behavior tests land with the settings UI in PR2).
+    - Manual smoke on Windows: `cargo run -p ene-desktop-v2` shows the system tray icon "ene", left-click opens the UI window (PR0 + PR2 demo), "Settings" tray menu sets `ui.settings_window_visible` (currently a no-op visual; PR2 wires the page), "Quit" exits cleanly. The character window still shows the red-quad smoke from PR0. The legacy `cargo run -p ene-desktop` is unchanged and still launches the Bevy 0.18 build.
 
-**Files touched / created**
+**Files touched / created (PR1)**
 
-- `Cargo.toml` (workspace): dep changes
-- `apps/ene-desktop/Cargo.toml`: dep changes
-- `apps/ene-desktop/src/main.rs`: rewrite
-- `apps/ene-desktop/src/{app_config,resources,ai_bridge,tray,platform}.rs`: rewrite (strip Bevy, keep public functions)
-- `apps/ene-desktop/src/{scene,character,settings_ui,character_drag}.rs`: **delete** (PR1 is the deletion step; ported modules arrive in later PRs)
-- `crates/ene-vrm/Cargo.toml` + `src/lib.rs`: new
-- `patches/bevy_winit/`: delete
+- `Cargo.toml` (workspace) — add `parking_lot`, `png`, `tray-icon`.
+- `apps/ene-desktop-v2/Cargo.toml` — full rewrite: new deps + Linux-target section.
+- `apps/ene-desktop-v2/src/main.rs` — rewrite (tokio runtime + `AppState::with_channel`).
+- `apps/ene-desktop-v2/src/runtime.rs` — refactor (ApplicationHandler now owns `state` + drains `event_rx` in `about_to_wait`).
+- `apps/ene-desktop-v2/src/events.rs` — **new**.
+- `apps/ene-desktop-v2/src/settings.rs` — **new**.
+- `apps/ene-desktop-v2/src/ai_bridge.rs` — **new**.
+- `apps/ene-desktop-v2/src/tray.rs` — **new**.
+- `apps/ene-desktop-v2/src/state.rs` — **new**.
+- No changes to `apps/ene-desktop/` (legacy) — it stays as-is. The rename is deferred to PR5.5.
 
-### PR2 — egui integration + settings window
+### PR2 — v2: full settings UI (3 pages) + hotkeys + per-character config
 
-**Objective:** Wire egui into the per-window renderer and bring the settings window back.
+> **Status:** Not started.
 
-**Steps**
+**Objective:** Port the legacy `apps/ene-desktop/src/settings_ui/` (3 pages: AI / Character / Graphics, 6 hardcoded test buttons for expressions, F1/Esc/close lifecycle, F1 global hotkey, WASD/space hotkeys on the Character page when egui is unfocused, settings auto-popup on `PermissionRequired` / `UserInputRequired`, per-character `CharacterConfig` round-trip) into v2 as tab pages inside the existing `UiWindow`.
 
-1. New module `apps/ene-desktop/src/runtime/window_slot.rs`:
-   ```rust
-   pub struct WindowSlot {
-       pub window: Arc<winit::Window>,
-       pub surface: wgpu::Surface<'static>,
-       pub config: wgpu::SurfaceConfiguration,
-       pub depth: wgpu::Texture,           // for PR3+; created lazily
-       pub egui_ctx: egui::Context,
-       pub egui_state: egui_winit::State,
-       pub egui_renderer: egui_wgpu::Renderer,
-   }
-   ```
-2. New module `apps/ene-desktop/src/runtime/surface.rs`: create / reconfigure `wgpu::Surface` on `Resized`, `ScaleFactorChanged`.
-3. New module `apps/ene-desktop/src/runtime/input.rs`: route `winit::WindowEvent` to either `egui_state.on_window_event` (if the window has an egui context) or to app-level handlers (drag, hotkeys).
-4. Render pipeline per window per frame:
-   1. Update `egui_ctx` from input.
-   2. Run a `ui::paint(window_id, &egui_ctx, &state.settings, &state.ai)` closure that fills an `egui::FullOutput`.
-   3. `egui_ctx.tessellate(...)` → list of meshes.
-   4. Encode a wgpu command encoder: clear with `(0,0,0,0)` for the character window, opaque for the settings window. Draw nothing in 3D. Then `egui_renderer.render(...)` blending over the cleared color.
-5. New module `apps/ene-desktop/src/ui/`:
-   - `mod.rs` — `pub fn paint(ctx: &egui::Context, settings: &mut CharacterSettings, ai: &mut AiBridge)`. Decides which page is shown.
-   - `page_ai.rs`, `page_character.rs`, `page_graphics.rs`, `widgets.rs` — ported from `settings_ui/`.
-6. Tray menu gains a "Settings" item that opens a second `winit::Window` (opaque) with its own `WindowSlot` and egui context.
+**Scope (planned)**
+
+1. Replace the `UiWindow::render_frame` body (currently the PR0 + PR2 "Hello from separate egui window!" demo) with a real `CentralPanel` containing a `TopBottomPanel` tab bar (`Character` / `Graphics` / `Ai`) and a content area that dispatches to one of three page functions.
+2. `apps/ene-desktop-v2/src/ui/mod.rs` — new module: `pub fn paint(ctx, &mut CharacterSettings, &mut AiBridge)`. The page enum and the dispatch table live here. F1 is a global hotkey (handled in `Runtime::window_event` on the character window, not in the egui input chain, so it fires even when the UI window is closed).
+3. `apps/ene-desktop-v2/src/ui/page_ai.rs` — provider / model / base URL / API-key source / API-key env-var / inline key (password field) / embedding provider / embedding model / embedding dimensions / "Enable Long-term memory" / chat input + Send / latest-response scroll area. Wires `ApplyAction::SendAiChat` to `state.ai_run(&input)` (added in PR1's `state.rs`).
+4. `apps/ene-desktop-v2/src/ui/page_character.rs` — character cycle / motion cycle / animation play-pause / look-at strength / model scale / position X/Y/Z / 6 manual expression buttons (push `AppEvent::EmoteToken` to `state.emote_tx`; the consumer is a PR4 EmotionQueue, but the data is plumbed end-to-end in PR2 to validate the channel). Linux-only debug-overlay toggle and mask-downsample row deferred to PR5.
+5. `apps/ene-desktop-v2/src/ui/page_graphics.rs` — target FPS (cycle), shadow quality (cycle), antialiasing mode (cycle). Single default AA value to wgpu is wired later (PR3); the storage and the cycle UI ship in PR2.
+6. `apps/ene-desktop-v2/src/ui/widgets.rs` — `render_cycle_row`, `render_toggle_row`, `render_numeric_row`, `apply_action` dispatcher (ported from legacy `settings_ui/widgets.rs`).
+7. `apps/ene-desktop-v2/src/ui/theme.rs` — `apply_egui_visuals` (the dark theme from legacy `mod.rs:642-654`).
+8. Lifecycle: on F1-toggle-off / Esc / `WindowCloseRequested` on the UI window, call `state.save()`. On every frame, call `state.settings.flush_if_dirty(Some(&char_name))` (already wired in PR1's `about_to_wait`; verify it triggers when the egui page calls `mark_dirty`).
+9. Hotkeys on the character window: `A` / `D` (prev / next character), `W` / `S` (prev / next motion), `Space` (toggle play). The legacy hotkey map checks "egui not focused" — v2 only needs to check the keyboard target, since the character window does not have an egui context until PR2 wires one. `F1` toggles the UI window's visibility (open → show, close → save and hide).
 
 **Verification**
 
-- On Windows with `DxgiFromVisual`, egui panels appear at the right positions in both windows.
-- On Linux X11, the character window is transparent; the settings window is opaque.
-- Closing the settings window via its title bar removes its `WindowSlot` and disposes the surface.
-- `cargo clippy --workspace -- -D warnings` is clean.
+- All three pages render with the cycle / numeric / text widgets from the legacy code.
+- Editing a field and closing the window with the title-bar X persists the change to `assets/character_settings.json` and to the per-character `CharacterConfig` JSON next to the model.
+- Tray → Settings opens the UI window with the last-selected tab.
+- F1 toggles the UI window globally; Esc and the close button call `save()` before hiding.
+- `cargo clippy --workspace --exclude ene-desktop -- -D warnings` clean (with the `#[allow(dead_code)]` annotations from PR1 removed where the consumers land in PR2).
+- `cargo test --workspace` adds a smoke test in `ene-config` (or `ene-desktop-v2`) that exercises `CharacterSettings::discover` / `select_character` / `mark_dirty` / `flush_if_dirty` round-trip on a tempdir.
 
-### PR3 — `ene-vrm` static rendering (MToon + skinning)
+**Files touched / created (PR2, planned)**
+
+- `apps/ene-desktop-v2/src/runtime.rs` — `Runtime::window_event` gains the F1 / A / D / W / S / Space arm; `UiWindow` no longer has the PR0+PR2 demo body.
+- `apps/ene-desktop-v2/src/ui/{mod,page_ai,page_character,page_graphics,widgets,theme}.rs` — **new**.
+- `apps/ene-desktop-v2/src/settings.rs` — add `next_/prev_character`, `next_/prev_motion`, `toggle_play` helpers (lifted from the legacy Bevy `SettingsButtonAction` enum).
+- `apps/ene-desktop-v2/src/state.rs` — add `emote_tx` / `emote_rx` plumbing for the manual expression buttons (consumed in PR4).
+
+### PR3 — v2: orthographic 3D camera + `ene-vrm` static rendering (MToon + skinning)
 
 **Objective:** Load a `.vrm` and render it with a hand-written MToon WGSL shader.
 
@@ -272,36 +280,105 @@ We deliver the migration as a series of small, individually reviewable PRs. Each
 - Drag the window; the camera distance updates; the model stays centered.
 - `cargo test -p ene-vrm` (new unit tests for loader and skeleton math).
 
-### PR4 — Expressions, LookAt, BodyTracking
+### PR4 — v2: LookAt / cursor / expressions / drag-to-move
 
-**Objective:** Make the character react to the cursor and to AI-emitted emotions.
+> **Status:** Not started. **The PR4 step list below is unchanged from the legacy plan** (Expressions, LookAt, BodyTracking all port as before), but the consumers move to `apps/ene-desktop-v2::character` (new) / `runtime` (existing), and a new drag-to-move step (which used to live in the legacy `character_drag/mod.rs` plugin) gets its first cut here — the full click-through story (Win32 `WM_NCHITTEST`, Wayland `wl_surface::set_input_region`, X11 shape extension, offscreen mask capture) is PR5.
+
+**Objective:** Make the character react to the cursor and to AI-emitted emotions; let the user click-and-drag the character to reposition it on the desktop.
 
 **Subtasks**
 
 1. **Expression** — port `bevy_vrm1::vrm::expression`:
-   - Each frame, build a `BTreeMap<ExpressionName, f32>` from the latest `EmotionQueue` (driven by `ai_bridge`).
+   - Each frame, build a `BTreeMap<ExpressionName, f32>` from the latest `EmotionQueue` (driven by `ai_bridge`). PR1's `AppEvent::EmoteToken` channel is the input; PR4 adds the `EmotionQueue` consumer.
    - Multiply the per-expression weight into the per-primitive morph-target buffer.
    - Public API: `VrmModel::set_expression(name, weight)`, `VrmModel::expression_names()`.
 2. **LookAt** — port `bevy_vrm1::vrm::body_tracking` (only the look-at part for now):
    - Provide a `LookAtTarget { world_position: Vec3 }` per frame.
    - Solve two-bone IK on the spine → head → eyes chain to point the eyes at the target.
    - Clamp yaw / pitch to the model's VRM-defined ranges.
-   - In `apps/ene-desktop/src/character/cursor.rs`, convert the OS cursor position to world coordinates in front of the camera at a fixed depth and feed it in.
+   - In `apps/ene-desktop-v2/src/character/cursor.rs` (new), convert the OS cursor position to world coordinates in front of the camera at a fixed depth and feed it in. The cursor→world conversion is the legacy `apps/ene-desktop/src/platform.rs::cursor_position_for_window()` logic, lifted and rewrapped.
 3. **BodyTracking** — keep a minimal version: only head + eyes follow cursor; shoulder / hand sway is out of scope until we re-add spring bone.
-4. **AI bridge integration** — `AiBridge::drain()` is called from `runtime` once per frame; resulting `EmotionQueue` is fed to `VrmModel::apply_emotions`.
+4. **AI bridge integration** — `AiBridge::take_inbox()` is called from `runtime` once per frame; `AppEvent::EmoteToken` items push onto `EmotionQueue`; the queue is then drained and applied to `VrmModel::apply_emotions`.
+5. **Drag-to-move (new for v2)** — implement the legacy `character_drag/mod.rs::update_character_drag` flow on top of the new winit event loop:
+   - On `MouseButtonInput::Pressed { Left }`, raycast the cursor against every `CharacterRoot`'s transformed AABB. If it hits, start tracking the cursor's world position in `settings.character_state`.
+   - Every frame while the button is held, integrate `(cursor_world_pos - last)`.`extend(0.0)` into `settings.character_state.character_position`.
+   - On `MouseButtonInput::Released { Left }`, call `settings.mark_dirty()`.
+   - The click-through logic (which makes the empty area around the character pass clicks through to the desktop) is **out of scope for PR4**; in PR4 the entire character window is still clickable. PR5 makes only the silhouette clickable.
+6. **VRMA playback (was PR5 in the legacy plan, but PR1 in the new v2 plan puts the audio / animation engine inside `apps/ene-desktop-v2::character::vrma` — new module, ported from `bevy_vrm1::vrma`).** Subtasks: load all VRMA files in `assets/characters/<name>/motions/*.vrma` at character-spawn time; play the selected one in `PlayVrma { repeat: Forever, transition_duration: 300 ms, vrma: entity, reset_spring_bones: false }` mode; per-character `default_motion` is honored (already stored in `CharacterConfig`, plumbed in PR2).
 
 **Verification**
 
 - Move the OS cursor: the model's head / eyes track it within the configured clamp angles.
 - Type "I'm so happy!" in the chat: the model transitions to a happy blend shape.
+- Click and drag the character across the screen: `character_position` updates, the model follows, and the new position persists on release.
 - Add an automated test in `ene-vrm` that loads a tiny synthetic VRM, sets an expression, and asserts the morph-target buffer reflects the weight.
 
-### PR5+ — Deferred Work
+**Files touched / created (PR4, planned)**
 
-- **PR5** — VRMA playback (cloning `bevy_vrm1::vrma`).
-- **PR6** — Spring-bone (cloth / hair) — full port of `bevy_vrm1::vrm::spring_bone`.
-- **PR7** — Shadow quality switching (FXAA / SMAA / TAA) and a settings UI page to control it.
-- **PR8** — Drag-while-clicked improvements (smoother multi-monitor handling).
+- `apps/ene-desktop-v2/src/character/{mod,cursor,emotion,drag}.rs` — **new**.
+- `apps/ene-desktop-v2/src/character/vrma.rs` — **new**.
+- `apps/ene-desktop-v2/src/runtime.rs` — `Runtime::window_event` gains `MouseButtonInput` handling and integrates drag into `state.settings`.
+- `apps/ene-desktop-v2/src/state.rs` — consume `AppEvent::EmoteToken` into the `EmotionQueue`; expose `state.drag_state()`.
+- `crates/ene-vrm/src/{expression,look_at}.rs` — **new** (per the legacy PR4 list).
+
+### PR5 — v2: click-through (Win32 + Wayland + X11) + offscreen mask
+
+> **Status:** Not started. **The bulk of this PR is the legacy `character_drag/{windows.rs, linux/*}.rs` paths, lifted onto the new `apps/ene-desktop-v2` platform layer** and gated by the `Runtime` event loop. Click-through on the character window is the last big missing piece of the v2 feature surface.
+
+**Objective:** Make the character window clickable only on the visible silhouette; pass everything else through to the desktop.
+
+**Subtasks**
+
+1. **Windows click-through** — port `apps/ene-desktop/src/character_drag/windows.rs` (the `SetWindowSubclass` + `WM_NCHITTEST` + `WS_EX_TRANSPARENT` recipe) into `apps/ene-desktop-v2/src/platform/windows_hit_test.rs`. Hook the `passthrough` atomic into `Runtime::about_to_wait` (compute `allows_input = cursor_over_character || drag_state.is_dragging()` every frame and forward to the hook).
+2. **Wayland input region** — port `apps/ene-desktop/src/character_drag/linux/region.rs` (the `wayland_client::Connection::from_backend` + `wl_surface::set_input_region` recipe) into `apps/ene-desktop-v2/src/platform/wayland_region.rs`.
+3. **Wayland offscreen mask capture** — port `apps/ene-desktop/src/character_drag/linux/capture.rs` (the 581-line `R8Unorm` + `Readback::texture` + tile-grid rectangle decomposition) into `apps/ene-desktop-v2/src/platform/wayland_mask_capture.rs`. The `MaskCaptureCamera` lives on a second `wgpu::RenderTarget::Image` (not on the character window's swapchain), reads back the silhouette, and feeds rectangles into the `WaylandInputRegionContext`.
+4. **X11 fallback** — port the `CursorOptions::hit_test` path (which is the only X11 mechanism the legacy code uses; the X11 shape extension is not implemented in the legacy code) and the `_NET_WM_STATE_SKIP_TASKBAR` / `_SKIP_PAGER` direct `X11` FFI from `apps/ene-desktop/src/character_drag/linux/taskbar.rs` into `apps/ene-desktop-v2/src/platform/x11_taskbar.rs`.
+5. **Linux-only debug overlay** — port the mask-rectangle gizmo from `apps/ene-desktop/src/character_drag/linux/capture.rs::draw_visible_rect_gizmos` to `apps/ene-desktop-v2/src/platform/wayland_mask_gizmo.rs`, gated on the `ui.debug_overlay_visible` flag in the Character settings page.
+6. **Mask downsample UI row** — the `Mask Downsample` row on the Character settings page is Linux-only (legacy convention). Wired in PR2's `page_character.rs` (storage), consumed in PR5's `WaylandMaskCaptureState::texture_size` computation.
+7. **Frame pacer** — port `apps/ene-desktop/src/scene.rs::pace_frame_rate` into `apps/ene-desktop-v2/src/runtime.rs::pace_frame_rate`. Targets `[15, 30, 60, 120, 0]` (0 = unlimited). `0` is "Unlimited" in the UI.
+
+**Verification**
+
+- On Windows: the empty area around the character passes clicks through to the desktop; clicking on the character silhouette drags it.
+- On Linux + Wayland: same as Windows, plus a wayland-layer-shell-aware test (or at minimum a non-regression test for the existing X11 build).
+- On Linux + X11: same as Windows, with `_NET_WM_STATE_SKIP_TASKBAR` set so the desktop app does not appear in the taskbar.
+- The mask gizmo (debug overlay) shows the extracted silhouette rectangles as purple lineloops when toggled on.
+
+**Files touched / created (PR5, planned)**
+
+- `apps/ene-desktop-v2/src/platform/{mod,windows_hit_test,wayland_region,wayland_mask_capture,wayland_mask_gizmo,x11_taskbar}.rs` — **new**.
+- `apps/ene-desktop-v2/src/runtime.rs` — add `pace_frame_rate`, drag→hit-test integration, `MouseButtonInput` consumption.
+- `apps/ene-desktop-v2/Cargo.toml` — Linux target adds `wayland-client` and `raw-window-handle`; Windows target adds `windows-sys` (the legacy feature flags: `Win32_Foundation`, `Win32_UI_WindowsAndMessaging`).
+- `apps/ene-desktop-v2/src/ui/page_character.rs` — wire `Mask Downsample` row (Linux-only `cfg`).
+
+### PR5.5 — rename + delete legacy
+
+> **Status:** Not started. **Gated on PR1–PR5 all being "Shipped" in §0.**
+
+**Objective:** Replace the legacy Bevy `apps/ene-desktop` with the v2 binary, in a single commit, without breaking the workspace.
+
+**Subtasks**
+
+1. `git mv apps/ene-desktop-v2 apps/ene-desktop` (after deleting the legacy dir to avoid a name clash; or vice versa, depending on which is faster).
+2. `rm -rf apps/ene-desktop-LEGACY` (the Bevy sources).
+3. In `apps/ene-desktop/Cargo.toml` and the `Cargo.toml` workspace `[members]` list, drop the Bevy deps (already gone in v2) and the legacy `tray-icon` / `png` / `windows-sys` / `wayland-client` cfg-gates (consolidated into v2's single `Cargo.toml`).
+4. Update the `description` in `apps/ene-desktop/Cargo.toml` to reflect the new stack.
+5. Verify `cargo build --workspace`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace` are all green with **no** `--exclude`.
+6. Update `docs/architecture/wgpu-migration.md` to mark the "v2 grows to full parity" journey as complete; keep §22 (implementation notes) as a historical record.
+7. Mark §0 table: all PR1–PR5 rows as "Shipped"; PR5.5 as "Shipped" (the rename is the final commit).
+
+**Verification**
+
+- `cargo run -p ene-desktop` launches the v2 binary with the full feature set (tray, settings, VRM, drag, click-through, etc.).
+- The workspace has **zero** Bevy deps left (`cargo tree | rg bevy` returns nothing).
+- The legacy `patches/bevy_winit/` and `apps/tw-test/` are already gone (PR0).
+
+### PR6+ — Deferred Work (carried over from the legacy plan)
+
+- **PR6** — Spring-bone (cloth / hair) — full port of `bevy_vrm1::vrm::spring_bone`. Lands in `crates/ene-vrm/src/spring_bone.rs` and is consumed by `apps/ene-desktop-v2::character`.
+- **PR7** — Shadow quality switching (FXAA / SMAA / TAA). The settings UI row ships in PR2 (`page_graphics.rs`); the actual wgpu pipeline variants land in PR7. The legacy app had this; v2 defers it because (per N2 in §2.2) the migration keeps a single default until the full stack is on v2.
+- **PR8** — Drag-while-clicked polish (smoother multi-monitor handling, sub-pixel position rounding).
+- **PR9** — Per-character `default_expression` actually applied (the legacy code persists it to JSON but never reads it back; the field stays neutral on character respawn).
 
 Each PR is its own design doc snippet; we add a `## Open Follow-ups` block at the end of this file when PR3 lands.
 
@@ -360,14 +437,44 @@ Each PR is its own design doc snippet; we add a `## Open Follow-ups` block at th
 - `src/character/cursor.rs`
 - `src/character/drag.rs`
 
-### 5.2b New in `apps/ene-desktop-v2` (PR0, shipped)
+### 5.2b New in `apps/ene-desktop-v2` (PR0 + PR1, shipped)
 
-This is the **actual** file layout on disk today. The full split below lands incrementally as PR1–PR5 progress; once the migration is done the v2 crate will be moved to `apps/ene-desktop` and these files will be replaced by the §5.2 layout.
+This is the **actual** file layout on disk today. The full split below lands incrementally as PR2–PR5 progress; once the migration is done the v2 crate will be moved to `apps/ene-desktop` and these files will be replaced by the §5.2 layout.
 
-- **`apps/ene-desktop-v2/Cargo.toml`** — current deps: `winit`, `wgpu`, `pollster`, `bytemuck`, `glam`, `tracing`, `tracing-subscriber`, plus **PR2-merged** `egui` / `egui-wgpu` / `egui-winit` (consumed by `runtime::UiWindow`). No `raw-window-handle`, `windows-sys`, `ene-core`, `tokio`, or `tray-icon` yet.
-- **`apps/ene-desktop-v2/src/main.rs`** — `tracing_subscriber::fmt` install + `EventLoop::run_app`.
-- **`apps/ene-desktop-v2/src/gpu.rs`** — `GpuContext`, `pick_format_and_alpha`, `backend_options` (DX12 / `DxgiFromVisual` on Windows, `Backends::PRIMARY` elsewhere).
-- **`apps/ene-desktop-v2/src/runtime.rs`** — `Runtime`, `CharacterWindow` (the transparent window from PR0), `UiWindow` (PR2 scope, with a `egui::Context` + `egui_winit::State` + `egui_wgpu::Renderer` and a `CentralPanel` demo), `RectRenderer`, `ApplicationHandler` impl, `AcquireError`. Input handling inlined as match arms; no separate `input.rs` / `surface.rs` / `rect.rs` modules.
+**Layout (8 source files, ~1.5k LoC as of writing):**
+
+```text
+apps/ene-desktop-v2/
+├── Cargo.toml        # winit, wgpu, pollster, bytemuck, glam, tracing, tracing-subscriber,
+│                     # egui, egui-wgpu, egui-winit, ene-core, ene-config, ene-tool-proto,
+│                     # tokio, parking_lot, png, tray-icon, ctor, serde, serde_json, thiserror
+│                     # Linux target: gtk (with tray-icon/gtk), wayland-client (PR5)
+│                     # Windows target: windows-sys (PR5)
+└── src/
+    ├── main.rs       # tracing init + tokio multi-thread runtime + AppState::with_channel + EventLoop::run_app
+    ├── gpu.rs        # GpuContext, pick_format_and_alpha, backend_options (DX12 / DxgiFromVisual)
+    ├── runtime.rs    # Runtime, CharacterWindow, UiWindow, RectRenderer, ApplicationHandler, AcquireError
+    ├── state.rs      # AppState (gpu, settings, ai, tray, event_rx), AppStateError, with_channel
+    ├── events.rs     # AppEvent, AiStreamUpdate, AppEventSender/Receiver (tokio mpsc)
+    ├── settings.rs   # CharacterSettings (plain struct, ported from legacy app_config.rs)
+    ├── ai_bridge.rs  # AiBridge wrapping EneHandle, tokio tasks: pump_events, bootstrap
+    └── tray.rs       # TrayHandle (Windows: GetMessageW thread; Linux: GTK pump + receiver thread)
+```
+
+**File-by-file responsibility:**
+
+- **`apps/ene-desktop-v2/Cargo.toml`** — see the comment block above. PR1 added `ene-core`, `ene-config`, `ene-tool-proto`, `tokio`, `parking_lot`, `png`, `tray-icon`, `ctor`, `serde`, `serde_json`, `thiserror`. Linux target adds `gtk = "0.18.2"` and enables the `gtk` feature on `tray-icon`. PR5 will add `wayland-client` (Linux) and `windows-sys` (Windows).
+- **`apps/ene-desktop-v2/src/main.rs`** — `tracing_subscriber::fmt` install + `tokio::runtime::Builder::new_multi_thread().enable_all().build()` + `runtime.enter()` guard (held for the duration of `EventLoop::run_app`) + `AppState::resolve_paths()` (resolves `assets_dir` via `ene_config::ensure_resource_dirs()`, reads `args[1]=vrm` / `args[2]=vrma` overrides) + `pollster::block_on(GpuContext::new)` + `CharacterSettings::discover(assets_dir, default_vrm)` + `AppState::with_channel(gpu, settings, &handle)` + `EventLoop::new` + `Runtime::new(state, sender).run_app`.
+- **`apps/ene-desktop-v2/src/gpu.rs`** — `GpuContext`, `pick_format_and_alpha`, `backend_options` (DX12 / `DxgiFromVisual` on Windows, `Backends::PRIMARY` elsewhere). Unchanged from PR0.
+- **`apps/ene-desktop-v2/src/runtime.rs`** — `Runtime { state, event_tx, transparent, char_window, ui_window, rect }`. `ApplicationHandler`:
+  - `resumed` — `state.init_tray()` → create the `CharacterWindow` and the `UiWindow` (PR0 + PR2 code, unchanged).
+  - `window_event` — dispatches by `WindowId` (char vs ui), handles `Space` / `Escape` / `close` / `Resized` / `ScaleFactorChanged` / `RedrawRequested` / `KeyboardInput`.
+  - `about_to_wait` — drain `event_rx`: on `Tray::OpenSettings` set `state.settings.ui.settings_window_visible = true`; on `Ai(_)` push the update to `state.ai.take_inbox()`; on `Quit` `state.save()` and `event_loop.exit()`; on `EmoteToken(_)` stash for PR4; always call `state.settings.flush_if_dirty(Some(&char_name))`; on Linux call `state.tray.tick_gtk()`; redraw both windows.
+- **`apps/ene-desktop-v2/src/state.rs` (new, PR1)** — `AppState { gpu, settings: Arc<RwLock<CharacterSettings>>, ai: Arc<AiBridge>, tray: Option<TrayHandle>, event_rx: UnboundedReceiver<AppEvent> }`. The `Sender` half is returned to `main` and then handed back to `Runtime`. `with_channel(gpu, settings, &handle) -> (Self, AppEventSender)`. Methods: `init_tray`, `ai_run(&str)`, `save`, `request_quit`, `resolve_paths`. `AppStateError` (thiserror).
+- **`apps/ene-desktop-v2/src/events.rs` (new, PR1)** — `pub enum AppEvent { Tray(TrayAction), Ai(AiStreamUpdate), EmoteToken(String), Quit }`, `pub enum AiStreamUpdate { TextDelta, ToolCallStart, ToolCallResult, PermissionRequired, UserInputRequired, TaskProgress, Finished, Error }` (mirrors `ene_core::EneEvent` minus the internal `StatusChanged` / `SessionSplit`), `pub type AppEventSender = tokio::sync::mpsc::UnboundedSender<AppEvent>`, `pub type AppEventReceiver = tokio::sync::mpsc::UnboundedReceiver<AppEvent>`.
+- **`apps/ene-desktop-v2/src/settings.rs` (new, PR1)** — `pub struct CharacterSettings { pub assets_dir: PathBuf, pub characters: Vec<CharacterEntry>, pub graphics: GraphicsSettings, pub character_state: CharacterState, pub ui: UiState, pub ai: AiConfig, pub store: Arc<parking_lot::RwLock<ene_config::ConfigStore>> }`. Includes the `GraphicsSection` (declared via `ene_config::define_config!(settings, "desktop", DesktopSection { graphics })`), `ShadowQuality` / `AntialiasingMode` enums via `define_label_enum!`, `CharacterEntry`, `CharacterState`, `UiState`, `AiConfig`. Methods: `discover`, `current_entry`, `current_character`, `current_motion`, `current_character_card`, `sync_card_path`, `clamp_runtime_values`, `save_per_character_settings`, `load_per_character_settings`, `select_character`, `save`, `mark_dirty`, `sync_to_store`, `load_from_file`, `flush_if_dirty`. Helpers: `read_cli_paths`, `cycle_mask_render_downsample`, `cycle_target_fps`, `cycle_shadow_quality`, `cycle_antialiasing_mode`, `target_fps_label`, `normalize_*`. Constants: `DEFAULT_CHARACTER_NAME`, `DEFAULT_VRM_PATH`, `DEFAULT_VRMA_PATH`, `APP_ID`, `WINDOW_WIDTH`, `WINDOW_HEIGHT`, `SETTINGS_WINDOW_WIDTH`, `SETTINGS_WINDOW_HEIGHT`, `MASK_RENDER_DOWNSAMPLE_CHOICES`, `TARGET_FPS_CHOICES`, `SHADOW_QUALITY_CHOICES`, `ANTIALIASING_MODE_CHOICES`, plus their `DEFAULT_*` constants.
+- **`apps/ene-desktop-v2/src/ai_bridge.rs` (new, PR1)** — `pub struct AiBridge { handle: EneHandle, event_rx: broadcast::Receiver<EneEvent>, inbox: parking_lot::Mutex<VecDeque<AiStreamUpdate>>, latest_response: parking_lot::Mutex<String>, processing: AtomicBool }`. Constructor spawns two tokio tasks: `pump_events` (loops `try_recv` on `handle.subscribe()`, translates `EneEvent → AiStreamUpdate` and pushes into `inbox`; `SpecialToken` events are scanned for `<|emo:NAME|>` via `ene_core::extract_emotion_from_token` and forwarded as `AppEvent::EmoteToken`) and `bootstrap` (calls `handle.load_config()` then `handle.load_character()` in sequence; logs `warn!` on failure). Public methods: `run(&str)`, `cancel()`, `drain(&AppEventSender)`, `take_inbox()`, `latest_response()`, `processing()`, `set_processing(bool)`.
+- **`apps/ene-desktop-v2/src/tray.rs` (new, PR1)** — `pub struct TrayHandle { _tray_icon: Option<TrayIcon>, gtk_pump: bool, sender: AppEventSender }`. On Windows: spawns a dedicated thread that calls `TrayIconBuilder::new().with_icon(...).with_menu(...).build()`, then runs a hand-rolled `GetMessageW` / `TranslateMessage` / `DispatchMessageW` loop forever; `mem::forget`s the icon so the thread keeps it alive. On Linux: builds the icon on the main thread (must happen on the GTK main thread), spawns a separate thread that polls `TrayIconEvent::receiver()` and `MenuEvent::receiver()` and forwards `OpenSettings` / `Quit` to `AppEventSender`. `tick_gtk(&mut self)` calls `gtk::main_iteration_do(false)` once, gated on `gtk::events_pending()`. PNG decode accepts `Rgba` / `Rgb` / `Grayscale` / `GrayscaleAlpha`; on `Indexed` or any decode error, falls back to a 32×32 opaque blue square `(0, 128, 255, 255)`. Menu IDs: `ene.settings` ("Settings") and `ene.quit` ("Quit"); left-click on the tray icon also fires `OpenSettings` (matches the legacy UX).
 
 ### 5.3 Removed
 
@@ -400,6 +507,9 @@ This is the **actual** file layout on disk today. The full split below lands inc
 | `bytemuck` | 1 | safe `Pod`/`Zeroable` casts | yes (consumed by `apps/ene-desktop-v2`) |
 | `pollster` | 0.4 | minimal `block_on` for startup | yes (consumed by `apps/ene-desktop-v2`) |
 | `raw-window-handle` | 0.6 | wgpu surface creation | workspace dep declared, not yet consumed (PR3) |
+| `parking_lot` | 0.12 | non-poisoning `RwLock` for `CharacterSettings` / `AiBridge` inbox | yes (consumed by `apps/ene-desktop-v2` for PR1 `state.rs` / `ai_bridge.rs`) |
+| `png` | 0.18 | tray icon decode (`Rgba` / `Rgb` / `Grayscale` / `GrayscaleAlpha`) | yes (consumed by `apps/ene-desktop-v2` for PR1 `tray.rs`) |
+| `tray-icon` | 0.24 | system tray, used by both `apps/ene-desktop` (legacy) and `apps/ene-desktop-v2` (PR1) | yes (consumed by `apps/ene-desktop-v2` for PR1 `tray.rs`; the legacy app also keeps using it until the PR5.5 rename) |
 
 ### 6.2 Kept
 
@@ -878,21 +988,29 @@ The earlier PR1 attempts (DX12 env var + `WS_EX_LAYERED` nudge, Vulkan swap) and
 
 ### 22.2 PR1 file-level status (as of writing)
 
+> **Status:** PR1 is **Shipped**. The legacy `apps/ene-desktop/` (Bevy 0.18) is intentionally **untouched** per the new §0.1 / §4 policy (v2 grows to full parity, then a single rename at PR5.5). The two crates build side-by-side.
+
 | Action | File / directory | State |
 |--------|------------------|-------|
 | **New** | `crates/ene-vrm/Cargo.toml` | Shipped (PR1 step 2) |
 | **New** | `crates/ene-vrm/src/lib.rs` | Shipped (PR1 step 2 — `pub fn version()` stub + one unit test) |
-| **New** | `apps/ene-desktop-v2/Cargo.toml` | Shipped (PR0) |
+| **New** | `apps/ene-desktop-v2/Cargo.toml` | Shipped (PR0 + PR1) |
 | **New** | `apps/ene-desktop-v2/src/{main,gpu,runtime}.rs` | Shipped (PR0 — full v2 smoke) |
-| **Rewritten** | `apps/ene-desktop/src/{main,app_config,ai_bridge,tray}.rs` | **Not started** — legacy Bevy binary untouched |
+| **New** | `apps/ene-desktop-v2/src/state.rs` | Shipped (PR1) |
+| **New** | `apps/ene-desktop-v2/src/events.rs` | Shipped (PR1) |
+| **New** | `apps/ene-desktop-v2/src/settings.rs` | Shipped (PR1) |
+| **New** | `apps/ene-desktop-v2/src/ai_bridge.rs` | Shipped (PR1) |
+| **New** | `apps/ene-desktop-v2/src/tray.rs` | Shipped (PR1) |
+| **Workspace** | `Cargo.toml` rendering-stack section | Shipped (PR0 + PR1: `wgpu`, `winit`, `egui*`, `glam`, `pollster`, `bytemuck`, `parking_lot`, `png`, `tray-icon`) |
+| **Workspace** | `Cargo.toml` `[patch.crates-io] bevy_winit` | **Shipped** — the local `patches/bevy_winit/` patch was removed in PR0; the legacy `apps/ene-desktop` now uses upstream `bevy_winit` 0.18 from crates.io |
+| **Rewritten** | `apps/ene-desktop/src/{main,app_config,ai_bridge,tray}.rs` | **Not started** — legacy Bevy binary untouched. These files stay in place until the PR5.5 rename. |
 | **Rewritten** | `apps/ene-desktop/Cargo.toml` | **Not started** — still Bevy 0.18 |
-| **Deleted** | `apps/ene-desktop/src/{scene,character,platform}.rs` | **Not started** |
-| **Deleted** | `apps/ene-desktop/src/{settings_ui,character_drag}/` | **Not started** |
-| **Deleted** | `patches/bevy_winit/` | **Shipped** — patch directory and `[patch.crates-io] bevy_winit` in workspace `Cargo.toml` are both gone; the legacy `apps/ene-desktop` now uses upstream `bevy_winit` 0.18 from crates.io |
+| **Deleted** | `apps/ene-desktop/src/{scene,character,platform}.rs` | **Not started** — deferred to PR5.5 (rename) |
+| **Deleted** | `apps/ene-desktop/src/{settings_ui,character_drag}/` | **Not started** — deferred to PR5.5 (rename) |
+| **Deleted** | `patches/bevy_winit/` | **Shipped** — patch directory and `[patch.crates-io] bevy_winit` in workspace `Cargo.toml` are both gone |
 | **Deleted** | `apps/tw-test/` | **Shipped** — Bevy testbed removed; the §22.3 cross-reference is preserved as a historical note only |
-| **Workspace** | `Cargo.toml` rendering-stack section | **Partially** — deps added (PR0) but `[patch.crates-io] bevy_winit` not yet removed |
 
-The high-level intent ("PR1 is the deletion step") is unchanged; only the rows that PR0 advanced have been marked Shipped.
+The high-level intent ("rename `apps/ene-desktop-v2/` to `apps/ene-desktop/` once v2 has full legacy feature parity") is unchanged; the timing of the rename is now end-of-PR5 (PR5.5) instead of end-of-PR1. See §22.4 below for the full PR1 implementation notes.
 
 ### 22.3 PR0 — Minimum v2 transparency smoke
 
@@ -974,5 +1092,62 @@ If the `caps.alpha_modes` list is `[Opaque]` only, the picker logs an explicit `
 **Known limitations (carried over to PR1+):**
 - v2 only has one window slot. The settings window, tray, AI bridge, and VRM renderer are PR1+.
 - The wgpu surface format picker still falls back to `Opaque` if the host's DXGI does not advertise `PreMultiplied`. In that case `Space` still toggles `decorations` and the clear color, but DWM composites the background as opaque.
+
+---
+
+## 22.4 PR1 — v2 tray + AI bridge + `AppState` + persistence + CLI
+
+> **Status:** **Shipped.** v2 now boots a tokio runtime, owns a tokio-driven `EneHandle` actor, a system tray (`tray-icon` 0.24), and the `CharacterSettings` schema (ported from the legacy Bevy `Resource` to a plain `Arc<parking_lot::RwLock<…>>` struct). The legacy `apps/ene-desktop` (Bevy 0.18) is deliberately untouched per the new §0.1 / §4 policy. See the §0 table for the summary and §4 PR1 for the step-by-step plan.
+
+### Why "v2 grows to full parity, then rename" instead of the old "PR1 is the deletion step"
+
+The original plan called for "PR1 is the deletion step" — strip Bevy from `apps/ene-desktop`, move the v2 sources into it. The risk with that policy is that at any given commit the workspace can be in a state where a feature works in one binary and not the other, or where neither binary launches. The new policy (see §0.1) is that **both binaries build side-by-side throughout the entire migration**; v2 grows incrementally through PR1–PR5+; and the rename + deletion of the legacy sources happens in a single commit at the end of PR5 (PR5.5). The two-crate coexistence is now the project's default mode, not a transitional state.
+
+This is a developer-experience change only. From a user's perspective, the migration is invisible until PR5.5, at which point the Bevy binary disappears and the v2 binary is the one that launches.
+
+### Module map (8 files, ~1.5k LoC as of writing)
+
+```text
+apps/ene-desktop-v2/src/
+├── main.rs       # tracing init + tokio runtime + AppState::with_channel + EventLoop::run_app
+├── gpu.rs        # GpuContext, pick_format_and_alpha, backend_options (DX12 / DxgiFromVisual)
+├── runtime.rs    # Runtime, CharacterWindow, UiWindow, RectRenderer, ApplicationHandler
+├── state.rs      # AppState (gpu, settings, ai, tray, event_rx), AppStateError, with_channel
+├── events.rs     # AppEvent, AiStreamUpdate, AppEventSender/Receiver (tokio mpsc)
+├── settings.rs   # CharacterSettings (plain struct, ported from legacy app_config.rs)
+├── ai_bridge.rs  # AiBridge wrapping EneHandle, tokio tasks: pump_events, bootstrap
+└── tray.rs       # TrayHandle (Windows: GetMessageW thread; Linux: GTK pump + receiver thread)
+```
+
+### Key design decisions
+
+1. **`CharacterSettings` is a plain struct, not a `Resource`.** The legacy Bevy app used `bevy::ecs::resource::Resource` which gives you automatic `Arc`-wrapping and `Deref` ergonomics. v2 has no Bevy; we use `Arc<parking_lot::RwLock<CharacterSettings>>` instead. The `Arc` is cloned into `AiBridge` (so the bridge can read `ai.ai.character` / `ai.ai.*` to drive the actor's reconfigure) and into `Runtime` (so the winit event loop can mutate `ui.settings_window_visible` on `Tray::OpenSettings`). `parking_lot` is used instead of `std::sync::RwLock` to avoid poison-related panics on a winit keypress that races with a background config save.
+
+2. **`AppEvent` is a `tokio::sync::mpsc` channel, not a `bevy::Message` bus.** The legacy Bevy app used `bevy::prelude::Messages` for inter-system communication. v2 has no Bevy ECS, so the producer–consumer pattern is a `mpsc::UnboundedSender<AppEvent>` (cloned into the tray thread and into the AI bridge's tokio task) plus an `UnboundedReceiver<AppEvent>` owned by `Runtime`. The drain happens once per frame in `Runtime::about_to_wait`, so the channel is effectively the same as a frame-bounded event bus but without Bevy's macro overhead. The `tokio` mpsc (not `std::sync::mpsc`) was chosen because (a) `AiBridge::pump_events` runs inside a tokio task and tokio mpsc is the natural cross-task channel, and (b) `tokio::sync::mpsc::UnboundedSender` is `Send + Sync` and supports `try_send` from any thread (including the Windows tray thread and the Linux GTK thread).
+
+3. **Tray on Windows uses a dedicated `GetMessageW` thread; on Linux, the icon is built on the main thread and a separate thread polls the `tray-icon` receivers.** The split is forced by GTK's threading model: `tray-icon` with the `gtk` feature holds GTK objects (icons, menus) that are **not** `Send`; they must live on the main thread. On Windows there is no such constraint, so the legacy code's "spawn a thread that owns the icon and runs a hand-rolled Win32 message pump" recipe carries over verbatim. The Linux thread reads `TrayIconEvent::receiver()` and `MenuEvent::receiver()` and forwards the parsed action to `AppEventSender`; the icon itself never leaves the main thread.
+
+4. **The `<|emo:NAME|>` token is parsed in `AiBridge::pump_events`, not in a Bevy `system`.** Legacy `character::enqueue_ai_special_tokens` did the same thing on a Bevy schedule. v2 does it in the bridge: every `EneEvent::SpecialToken` is fed through `ene_core::extract_emotion_from_token(token)` and, if it matches, forwarded as `AppEvent::EmoteToken(String)`. The consumer (the `EmotionQueue` in `apps/ene-desktop-v2::character::emotion`) lands in PR4; PR1's job is just to plumb the channel.
+
+5. **Per-frame `flush_if_dirty` lives in `Runtime::about_to_wait`.** The legacy `settings_ui::auto_save_config` ran as a Bevy system in the `SettingsWindowContextPass` schedule. v2 has no schedules, so the equivalent is a single `state.settings.flush_if_dirty(Some(&char_name))` call after the `event_rx` drain. The `ConfigStore` debounces the actual `std::fs::write` (it tracks the dirty flag internally), so calling it every frame is safe and does not write to disk unless something actually changed.
+
+6. **CLI is `args[1]=vrm` / `args[2]=vrma` with a hard-coded fallback.** `AppState::resolve_paths` reads `std::env::args().nth(1)` and `.nth(2)`, falling back to `DEFAULT_VRM_PATH` / `DEFAULT_VRMA_PATH` (matching the legacy). The v2-only difference is that the second value is **also** used — legacy `read_cli_paths` returned `(vrm, vrma)` but `main` only used `vrm` (legacy comment: "The motion path comes entirely from the discovered character's `motion_paths` list"). v2 mirrors that behavior; PR3 will add explicit VRMA override when VRM/VRMA loading lands.
+
+### Verification (PR1 closeout)
+
+- `cargo build -p ene-desktop-v2` — green.
+- `cargo clippy -p ene-desktop-v2 -- -D warnings` — green. The 23 dead-code errors that surfaced during development (most of the new public API is `#[allow(dead_code)]`-annotated because the consumers land in PR2) are scoped and will be removed as PR2–PR5 land.
+- `cargo clippy --workspace --exclude ene-desktop -- -D warnings` — green. Legacy `apps/ene-desktop` clippy errors are **pre-existing** and out of scope (the live `render_settings_window` in the legacy code is a "test" stub, so `page_ai_page` / `page_character_page` / `page_graphics_page` are reported as dead — left for the legacy maintainers).
+- `cargo test --workspace` — 198 passed, 6 ignored. No new tests added by PR1 (all the action is plumbing; the first real behavior tests land with the settings UI in PR2).
+- Manual smoke on Windows: `cargo run -p ene-desktop-v2` shows the system tray icon "ene", left-click opens the UI window (PR0 + PR2 demo), the "Settings" tray menu sets `ui.settings_window_visible` (a no-op visual until PR2 wires the page), the "Quit" tray menu exits cleanly. The character window still shows the red-quad smoke from PR0. The legacy `cargo run -p ene-desktop` is unchanged and still launches the Bevy 0.18 build.
+- Manual smoke on Linux (developer machine): same behavior, with the GTK pump running in `Runtime::about_to_wait` (a single `gtk::main_iteration_do(false)` per frame is enough to keep the tray responsive; the icon never leaves the main thread).
+
+### Known limitations (carried over to PR2+)
+
+- `AiBridge::run`, `AppEvent::Quit`, `AppEvent::EmoteToken`, and most `AiStreamUpdate` variants are `#[allow(dead_code)]`. The consumers (settings page, hotkeys, drag, etc.) land in PR2–PR4.
+- The settings UI is still the PR0 + PR2 demo (`"Hello from separate egui window!"` and a click counter). The real 3-page settings UI is PR2.
+- The system tray's "Settings" menu sets `ui.settings_window_visible = true`, but nothing renders that flag until PR2.
+- Drag-to-move and click-through are PR4 / PR5; the v2 character window is fully clickable in PR1.
+- VRM / VRMA / LookAt / expressions / spring-bone are all still on the legacy Bevy build; v2's character window is the red-quad smoke. The migration of those features is PR3 / PR4 / PR6.
 
 

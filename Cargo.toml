@@ -82,6 +82,9 @@ ego-tree = "0.11"
 
 # --- Cross-cutting (used by 2+ crates) ---
 arboard = { version = "3.6", features = ["wayland-data-control"] }
+parking_lot = "0.12"
+png = "0.18"
+tray-icon = { version = "0.24", default-features = false }
 
 # --- Rendering stack (ene-desktop-v2: winit + wgpu + egui) ---
 winit = "0.30"
