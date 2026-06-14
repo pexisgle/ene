@@ -2,7 +2,7 @@
 name = "ene-desktop-v2"
 version = "0.1.0"
 edition = "2024"
-description = "ene desktop v2 minimum: winit + wgpu transparent-window smoke test (wgpu-migration PR0)"
+description = "ene desktop v2: winit + wgpu + egui shell, AI bridge, and system tray (wgpu-migration PR0+PR1)"
 
 [dependencies]
 winit = { workspace = true }
@@ -15,3 +15,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 egui = { workspace = true }
 egui-wgpu = { workspace = true }
 egui-winit = { workspace = true }
+ene-core = { workspace = true }
+ene-config = { workspace = true }
+ene-tool-proto = { workspace = true }
+tokio = { workspace = true }
+parking_lot = { workspace = true }
+png = { workspace = true }
+tray-icon = { workspace = true }
+ctor = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18.2"
+tray-icon = { workspace = true, default-features = false, features = ["gtk"] }

@@ -1,0 +1,118 @@
+//! Per-process application state.
+//!
+//! [`AppState`] is constructed in `main` (where the tokio runtime
+//! is alive) and then handed to the winit [`Runtime`](crate::runtime::Runtime).
+//! It owns:
+//!
+//! - the [`GpuContext`](crate::gpu::GpuContext) (instance / adapter / device / queue),
+//! - the [`CharacterSettings`],
+//! - the [`AiBridge`] (the actor handle plus its drain buffer),
+//! - the optional [`TrayHandle`],
+//! - the cross-subsystem [`AppEventReceiver`](crate::events::AppEventReceiver).
+//!
+//! Senders (clones of the [`AppEventSender`](crate::events::AppEventSender))
+//! are passed into the AI bridge and the tray at construction time
+//! so producers can push without holding a reference to the state.
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use tokio::sync::mpsc;
+
+use crate::ai_bridge::AiBridge;
+use crate::events::{AppEvent, AppEventReceiver, AppEventSender};
+use crate::gpu::GpuContext;
+use crate::settings::CharacterSettings;
+use crate::tray::TrayHandle;
+
+/// Container for the winit runtime.
+pub struct AppState {
+    pub gpu: GpuContext,
+    pub settings: CharacterSettings,
+    pub ai: Arc<AiBridge>,
+    pub tray: Option<TrayHandle>,
+    /// Receiver end of the cross-subsystem bus. The runtime drains
+    /// this in `about_to_wait`.
+    pub event_rx: AppEventReceiver,
+}
+
+impl AppState {
+    /// Construct the AppState together with a fresh `AppEvent`
+    /// channel. The sender half is returned to the caller for
+    /// optional auxiliary producers.
+    pub fn with_channel(
+        gpu: GpuContext,
+        settings: CharacterSettings,
+        bootstrap_handle: &tokio::runtime::Handle,
+    ) -> (Self, AppEventSender) {
+        let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
+        let ai = Arc::new(AiBridge::new(tx.clone(), bootstrap_handle));
+        (
+            Self {
+                gpu,
+                settings,
+                ai,
+                tray: None,
+                event_rx: rx,
+            },
+            tx,
+        )
+    }
+
+    /// Initialise the tray. Safe to call multiple times; the second
+    /// call is a no-op if the tray already exists.
+    pub fn init_tray(&mut self, event_tx: &AppEventSender) {
+        if self.tray.is_some() {
+            return;
+        }
+        match TrayHandle::new(event_tx.clone()) {
+            Some(handle) => self.tray = Some(handle),
+            None => tracing::warn!("System tray failed to initialise; running headless"),
+        }
+    }
+
+    /// Forward a one-shot user input string into the AI bridge.
+    /// Mirrors the legacy Bevy `EneRequestEvent { user_input }`
+    /// pathway.
+    #[allow(dead_code)] // PR2 will call this from the AI page chat input.
+    pub fn ai_run(&self, input: impl Into<String>) {
+        self.ai.run(input);
+    }
+
+    /// Persist current runtime state. The legacy Bevy code calls
+    /// `settings.save()` on F1-toggle-off, Escape, and
+    /// `WindowCloseRequested`.
+    pub fn save(&self) {
+        self.settings.save();
+    }
+
+    /// Forward `Quit` into the bus. The runtime observes the next
+    /// `about_to_wait` and calls `event_loop.exit()`.
+    #[allow(dead_code)] // PR2 will call this from a "Quit" menu item.
+    pub fn request_quit(&self, event_tx: &AppEventSender) {
+        let _ = event_tx.send(AppEvent::Quit);
+    }
+}
+
+/// Path resolution + error type for AppState construction. Lives
+/// here because both `main` and the runtime need to report
+/// construction failures uniformly.
+#[derive(Debug, thiserror::Error)]
+pub enum AppStateError {
+    #[error("GPU context failed to initialise: {0}")]
+    Gpu(#[from] Box<dyn std::error::Error>),
+    #[allow(dead_code)] // Reserved for the PR1→PR2 path-resolution error variants.
+    #[error("Failed to resolve assets directory: {0}")]
+    AssetsDir(String),
+    #[error("Tokio runtime error: {0}")]
+    Tokio(#[from] tokio::io::Error),
+}
+
+/// Read CLI overrides and return `(assets_dir, default_vrm,
+/// default_vrma)`. `assets_dir` comes from
+/// [`ene_config::ensure_resource_dirs`], which also creates the
+/// directory if missing.
+pub fn resolve_paths() -> Result<(PathBuf, String, String), AppStateError> {
+    let assets_dir = ene_config::ensure_resource_dirs();
+    let (default_vrm, default_vrma) = crate::settings::read_cli_paths();
+    Ok((assets_dir, default_vrm, default_vrma))
+}

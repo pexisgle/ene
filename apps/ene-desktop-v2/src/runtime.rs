@@ -1,13 +1,20 @@
-//! winit event loop driver.
+//! Winit event loop driver.
 //!
-//! Owns the winit window, its wgpu surface, and the red-rect
-//! renderer. Implements winit 0.30's `ApplicationHandler` so
+//! Owns the winit window(s), their wgpu surfaces, and the
+//! [`AppState`]. Implements winit 0.30's `ApplicationHandler` so
 //! `EventLoop::run_app` is a single call from `main`.
 //!
-//! PR0 scope (see `docs/architecture/wgpu-migration.md` §22.3): a
-//! single transparent window, a red rect on top of a clear color,
-//! `Space` toggles transparency, `Escape` / close exits. Tray, AI
-//! bridge, egui, VRM, etc. arrive in later PRs.
+//! Each frame:
+//!
+//! 1. `about_to_wait` drains the cross-subsystem [`AppEvent`] bus,
+//!    forwarding tray actions to UI state and pushing AI events
+//!    into the bridge's inbox. It also ticks the GTK pump on
+//!    Linux and calls `flush_if_dirty` on the settings.
+//! 2. `window_event` dispatches input. Keyboard `Space` toggles
+//!    transparency (PR0 smoke test), `Escape` quits, the window
+//!    close button quits. The egui UI window consumes
+//!    `WindowEvent`s via its `egui_winit::State`.
+//! 3. `RedrawRequested` renders the current frame to each surface.
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
@@ -17,11 +24,16 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
 
-use crate::gpu::{GpuContext, pick_format_and_alpha};
+use crate::events::{AppEvent, AppEventSender, TrayAction};
+use crate::gpu::pick_format_and_alpha;
+use crate::state::AppState;
 
 /// Top-level runtime. One per process.
 pub struct Runtime {
-    gpu: GpuContext,
+    state: AppState,
+    /// Clone of the cross-subsystem sender; used to push `Quit`
+    /// from inside event handlers that only have `&mut self`.
+    event_tx: AppEventSender,
     /// `true` = transparent window, no decorations, clear to
     /// `(0,0,0,0)`. `false` = opaque gray window with title bar.
     transparent: bool,
@@ -31,9 +43,10 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    pub fn new(gpu: GpuContext) -> Self {
+    pub fn new(state: AppState, event_tx: AppEventSender) -> Self {
         Self {
-            gpu,
+            state,
+            event_tx,
             transparent: false,
             char_window: None,
             ui_window: None,
@@ -45,11 +58,17 @@ impl Runtime {
 impl ApplicationHandler for Runtime {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+
+        // Initialise the tray on first resume. The Windows backend
+        // spawns its own pump thread; on Linux we just need to
+        // register the icon (GTK pump runs in `about_to_wait`).
+        self.state.init_tray(&self.event_tx);
+
         if self.char_window.is_some() {
             return;
         }
 
-        // Create character window
+        // Create the character window
         let char_attrs = window_attributes(self.transparent);
         let char_w = match event_loop.create_window(char_attrs) {
             Ok(w) => Arc::new(w),
@@ -59,18 +78,17 @@ impl ApplicationHandler for Runtime {
                 return;
             }
         };
-
         let char_size = char_w.inner_size();
         match CharacterWindow::new(
             char_w,
-            &self.gpu.instance,
-            &self.gpu.adapter,
-            &self.gpu.device,
+            &self.state.gpu.instance,
+            &self.state.gpu.adapter,
+            &self.state.gpu.device,
             char_size,
         ) {
             Ok(cw) => {
                 let format = cw.config.format;
-                self.rect = Some(RectRenderer::new(&self.gpu.device, format));
+                self.rect = Some(RectRenderer::new(&self.state.gpu.device, format));
                 cw.window.request_redraw();
                 self.char_window = Some(cw);
             }
@@ -81,12 +99,11 @@ impl ApplicationHandler for Runtime {
             }
         }
 
-        // Create UI window
+        // Create the UI window
         let ui_attrs = WindowAttributes::default()
             .with_title("ene UI")
             .with_inner_size(LogicalSize::new(400.0, 300.0))
             .with_resizable(true);
-
         let ui_w = match event_loop.create_window(ui_attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -95,13 +112,12 @@ impl ApplicationHandler for Runtime {
                 return;
             }
         };
-
         let ui_size = ui_w.inner_size();
         match UiWindow::new(
             ui_w,
-            &self.gpu.instance,
-            &self.gpu.adapter,
-            &self.gpu.device,
+            &self.state.gpu.instance,
+            &self.state.gpu.adapter,
+            &self.state.gpu.device,
             ui_size,
         ) {
             Ok(uw) => {
@@ -135,23 +151,26 @@ impl ApplicationHandler for Runtime {
         if is_ui {
             if let Some(uw) = self.ui_window.as_mut() {
                 let response = uw.egui_state.on_window_event(&uw.window, &event);
-
                 if response.repaint {
                     uw.window.request_redraw();
                 }
                 if response.consumed {
                     return;
                 }
-
                 match event {
-                    WindowEvent::CloseRequested => event_loop.exit(),
+                    WindowEvent::CloseRequested => {
+                        self.state.save();
+                        self.state.settings.ui.settings_window_visible = false;
+                        event_loop.exit();
+                    }
                     WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                        uw.reconfigure(&self.gpu.device, uw.window.inner_size());
+                        uw.reconfigure(&self.state.gpu.device, uw.window.inner_size());
                         uw.window.request_redraw();
                     }
                     WindowEvent::RedrawRequested => {
-                        // Ignored on Windows because it's buggy in winit 0.30.
-                        // We render in about_to_wait instead.
+                        // Rendering happens in `about_to_wait` to
+                        // avoid winit 0.30's `RedrawRequested`
+                        // double-fire on Windows.
                     }
                     _ => {}
                 }
@@ -159,9 +178,12 @@ impl ApplicationHandler for Runtime {
         } else if is_char {
             let cw = self.char_window.as_mut().unwrap();
             match event {
-                WindowEvent::CloseRequested => event_loop.exit(),
+                WindowEvent::CloseRequested => {
+                    self.state.save();
+                    event_loop.exit();
+                }
                 WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                    cw.reconfigure(&self.gpu.device, cw.window.inner_size());
+                    cw.reconfigure(&self.state.gpu.device, cw.window.inner_size());
                     cw.window.request_redraw();
                 }
                 WindowEvent::KeyboardInput { .. } => match key_pressed(&event) {
@@ -170,22 +192,28 @@ impl ApplicationHandler for Runtime {
                         cw.window.set_decorations(!self.transparent);
                         cw.window.request_redraw();
                     }
-                    Some(NamedKey::Escape) => event_loop.exit(),
+                    Some(NamedKey::Escape) => {
+                        self.state.save();
+                        event_loop.exit();
+                    }
                     _ => {}
                 },
                 WindowEvent::RedrawRequested => {
                     let Some(rect) = self.rect.as_ref() else {
                         return;
                     };
-                    if let Err(e) =
-                        cw.render_frame(&self.gpu.device, &self.gpu.queue, rect, self.transparent)
-                    {
+                    if let Err(e) = cw.render_frame(
+                        &self.state.gpu.device,
+                        &self.state.gpu.queue,
+                        rect,
+                        self.transparent,
+                    ) {
                         match e {
                             AcquireError::Reconfigure => {
                                 tracing::warn!(
                                     "Character Surface acquire Outdated/Lost; reconfiguring"
                                 );
-                                cw.reconfigure(&self.gpu.device, cw.window.inner_size());
+                                cw.reconfigure(&self.state.gpu.device, cw.window.inner_size());
                                 cw.window.request_redraw();
                             }
                             AcquireError::Timeout => cw.window.request_redraw(),
@@ -204,15 +232,57 @@ impl ApplicationHandler for Runtime {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Drain the cross-subsystem bus. Tray actions update UI
+        // state; AI events are absorbed by the bridge. `Quit` exits.
+        while let Ok(event) = self.state.event_rx.try_recv() {
+            match event {
+                AppEvent::Tray(TrayAction::OpenSettings) => {
+                    self.state.settings.ui.settings_window_visible = true;
+                    if let Some(uw) = self.ui_window.as_ref() {
+                        uw.window.request_redraw();
+                    }
+                }
+                AppEvent::Tray(TrayAction::Quit) => {
+                    self.state.save();
+                    event_loop.exit();
+                }
+                AppEvent::Quit => {
+                    self.state.save();
+                    event_loop.exit();
+                }
+                AppEvent::Ai(_update) => {
+                    // Drain holds these for the UI; the bridge has
+                    // its own inbox buffer.
+                }
+                AppEvent::EmoteToken(token) => {
+                    tracing::info!("[Ene] emotion token: {token}");
+                }
+            }
+        }
+        // Push remaining AI events into the bridge inbox for the
+        // UI pass to read.
+        self.state.ai.drain(&mut self.state.event_rx);
+
+        // Auto-save any settings that were marked dirty by UI
+        // handlers in this frame.
+        self.state.settings.flush_if_dirty();
+
+        // Pump GTK on Linux so the tray stays alive.
+        if let Some(_tray) = self.state.tray.as_ref() {
+            #[cfg(target_os = "linux")]
+            _tray.tick_gtk();
+        }
+
+        // Trigger a redraw for both windows.
         if let Some(cw) = self.char_window.as_mut() {
             cw.window.request_redraw();
         }
         if let Some(uw) = self.ui_window.as_mut() {
-            match uw.render_frame(&self.gpu.device, &self.gpu.queue) {
+            match uw.render_frame(&self.state.gpu.device, &self.state.gpu.queue) {
                 Ok(_) => {}
                 Err(e) => match e {
                     AcquireError::Reconfigure => {
-                        uw.reconfigure(&self.gpu.device, uw.window.inner_size());
+                        uw.reconfigure(&self.state.gpu.device, uw.window.inner_size());
                     }
                     AcquireError::Timeout => {}
                     AcquireError::Fatal => {
@@ -672,3 +742,9 @@ impl RectRenderer {
         rp.draw(0..6, 0..1);
     }
 }
+
+// `CharacterSettings` is the only import we expose to keep
+// `clippy --fix` quiet about unused imports while the smoke UI
+// does not yet reach into the struct.
+#[allow(unused_imports)]
+use crate::settings::CharacterSettings as _CharacterSettings;
