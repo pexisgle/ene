@@ -1,15 +1,51 @@
 //! `ene-vrm` — VRM 1.0 character renderer for the ene desktop app.
 //!
-//! This crate is the platform-agnostic replacement for `bevy_vrm1`. It is built
-//! directly on top of `wgpu` 27 and the `gltf` 1.4 crate. The full design is
-//! documented in `docs/architecture/wgpu-migration.md`.
+//! This crate is the platform-agnostic replacement for `bevy_vrm1`. It is
+//! built directly on top of `wgpu` 29 and the `gltf` 1.4 crate. The full
+//! design is documented in `docs/architecture/wgpu-migration.md`.
 //!
-//! PR1 only ships a stub. Subsequent PRs will land:
-//! - PR3: glTF/VRM loading, MToon WGSL pipeline, skinning.
-//! - PR4: expressions, look-at, body tracking.
-//! - PR5+: VRMA, spring-bone.
+//! ## PR3 scope
+//!
+//! PR3 ships the **minimum viable** VRM pipeline:
+//!
+//! - Load a `.vrm` (glTF binary with the `VRMC_vrm` extension) and
+//!   extract the first mesh, the first base-color texture, and the
+//!   skeleton (with **identity** skinning; the actual joint math ships
+//!   with PR4+).
+//! - Render the mesh with a basic PBR-lite WGSL shader (diffuse + lit
+//!   + alpha) through an orthographic camera. The full MToon shader
+//!     (rim / matcap / outline / emission) ships as a follow-up PR.
+//! - No animation, no expressions, no look-at, no drag, no spring
+//!   bone, no multi-mesh / multi-material handling. All of those are
+//!   PR4 or later.
+//!
+//! ## Module map
+//!
+//! - [`camera`] — orthographic camera uniform + view-projection
+//!   helpers. Lives at the crate root because the renderer is the
+//!   only consumer and pulling it out keeps the import surface small.
+//! - [`loader`] — read a `.vrm` file from disk and produce a
+//!   [`VrmModel`]. Buffers are uploaded to the GPU; the returned
+//!   `VrmModel` owns them.
+//! - [`model`] — public data types: [`VrmModel`], [`VrmMesh`],
+//!   [`VrmTexture`], [`Skeleton`].
+//! - [`renderer`] — wgpu render pipeline + bind group layouts that
+//!   can render a [`VrmModel`] into a `wgpu::TextureView`.
+//! - [`error`] — top-level error type.
 
 #![warn(missing_docs)]
+
+pub mod camera;
+pub mod error;
+pub mod loader;
+pub mod model;
+pub mod renderer;
+
+pub use camera::OrthographicCamera;
+pub use error::{VrmError, VrmResult};
+pub use loader::load_vrm;
+pub use model::{Skeleton, VrmMesh, VrmModel, VrmTexture};
+pub use renderer::VrmRenderer;
 
 /// Returns the crate version. Useful for diagnostics and the `about` panel.
 pub fn version() -> &'static str {

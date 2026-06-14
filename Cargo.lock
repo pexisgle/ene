@@ -4061,6 +4061,7 @@ dependencies = [
  "ene-config",
  "ene-core",
  "ene-tool-proto",
+ "ene-vrm",
  "glam 0.33.1",
  "gtk",
  "parking_lot",
@@ -4338,6 +4339,16 @@ dependencies = [
 [[package]]
 name = "ene-vrm"
 version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bytemuck",
+ "glam 0.33.1",
+ "gltf",
+ "image",
+ "thiserror 2.0.18",
+ "tracing",
+ "wgpu 29.0.3",
+]
 
 [[package]]
 name = "enigo"
