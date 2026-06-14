@@ -65,5 +65,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     event_loop
         .run_app(&mut app)
         .expect("winit event loop failed");
+
+    // PR4.2 fix: shut the tokio runtime down gracefully so the
+    // AI-bridge background tasks (`pump_events` + the bootstrap
+    // `load_config` / `load_character` task) get a chance to exit
+    // cleanly. Without this, `runtime` is dropped at the end of
+    // `main`, the runtime cancels in-flight tasks, and any
+    // `tokio::time::Timeout` future inside `EneHandle::load_config`
+    // panics on drop with "A Tokio 1.x context was found, but it
+    // is being shutdown." A 500 ms budget is enough for the actor
+    // to drain its broadcast receiver and the bootstrap task to
+    // finish / log its warn.
+    drop(_guard);
+    runtime.shutdown_timeout(std::time::Duration::from_millis(500));
+
     Ok(())
 }

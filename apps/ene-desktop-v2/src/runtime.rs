@@ -343,7 +343,25 @@ impl Runtime {
                 event_loop.exit();
             }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                cw.reconfigure(&self.state.gpu.device, cw.window.inner_size());
+                // PR4.2 fix: reconfigure BOTH the surface and the
+                // depth texture. winit fires a `Resized` (often
+                // with a different size than the `with_inner_size`
+                // hint we passed at window creation — e.g. the OS
+                // can clamp to a minimum, or the DPI scale has
+                // shifted). If we only reconfigure the surface and
+                // leave the depth texture at its initial 640×480,
+                // the next `RedrawRequested` triggers
+                // "Attachments have differing sizes" because the
+                // surface texture and the depth view no longer
+                // match.
+                let AppState {
+                    ref mut character,
+                    ref gpu,
+                    ..
+                } = self.state;
+                let new_size = cw.window.inner_size();
+                cw.reconfigure(&gpu.device, new_size);
+                character.resize(&gpu.device, (new_size.width, new_size.height));
                 cw.window.request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
