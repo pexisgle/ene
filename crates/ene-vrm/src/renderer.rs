@@ -74,9 +74,9 @@ impl VrmRenderer {
         // the `render` loop. For models where every primitive
         // lacks a base color, fall back to a dummy empty layout.
         let base_color_bgl = model
-            .mesh
-            .primitives
+            .meshes
             .iter()
+            .flat_map(|m| m.primitives.iter())
             .find_map(|p| p.base_color.as_ref().map(|t| t.bind_group_layout.clone()))
             .unwrap_or_else(|| {
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -207,13 +207,15 @@ impl VrmRenderer {
 
         rp.set_pipeline(&self.pipeline);
         rp.set_bind_group(0, &self.camera_bind_group, &[]);
-        for prim in &model.mesh.primitives {
-            if let Some(t) = &prim.base_color {
-                rp.set_bind_group(1, &t.bind_group, &[]);
+        for mesh in &model.meshes {
+            for prim in &mesh.primitives {
+                if let Some(t) = &prim.base_color {
+                    rp.set_bind_group(1, &t.bind_group, &[]);
+                }
+                rp.set_vertex_buffer(0, prim.vertex_buf.slice(..));
+                rp.set_index_buffer(prim.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..prim.index_count, 0, 0..1);
             }
-            rp.set_vertex_buffer(0, prim.vertex_buf.slice(..));
-            rp.set_index_buffer(prim.index_buf.slice(..), wgpu::IndexFormat::Uint32);
-            rp.draw_indexed(0..prim.index_count, 0, 0..1);
         }
     }
 }

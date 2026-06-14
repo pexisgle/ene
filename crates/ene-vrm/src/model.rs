@@ -1,9 +1,11 @@
 //! GPU-side data types produced by [`crate::loader::load_vrm`].
 //!
-//! PR3.1 loads **every primitive of the first mesh** (each
-//! primitive is a separate material / base-color texture in glTF;
-//! for AliciaSolid.vrm this is what makes body + clothes + face
-//! all appear). Multi-mesh support lands in a follow-up PR.
+//! PR3.3 loads **every primitive of every mesh** in the glTF
+//! document. A VRM 1.0 model like AliciaSolid.vrm has 12 separate
+//! glTF Mesh objects (body, clothes, hair, face, accessories,
+//! etc.) — not one mesh with 12 primitives. Iterating only
+//! `meshes[0]` (PR3.0/3.1/3.2) rendered the head/face area only;
+//! PR3.3 fixes this by walking every `Mesh` and every `Primitive`.
 use std::num::NonZeroU64;
 
 use bytemuck::{Pod, Zeroable};
@@ -29,14 +31,16 @@ pub struct VrmPrimitive {
     pub base_color: Option<VrmTexture>,
 }
 
-/// A mesh, as a list of primitives. The first mesh's primitives
-/// are what v2 actually renders; the field name keeps the door open
-/// for multi-mesh support later.
+/// A single glTF mesh object, as a list of primitives. PR3.3 loads
+/// every `Mesh` in the glTF document — a VRM 1.0 has ~12 of these
+/// (body, hair_front, hair_back, face, clothes_top, clothes_bottom,
+/// etc.), one per body part. Earlier PRs that only loaded
+/// `meshes[0]` therefore rendered the head/face area only.
 #[derive(Debug, Default)]
 pub struct VrmMesh {
-    /// All primitives that make up the first mesh. The renderer
-    /// draws each one with its own base-color texture (or a flat
-    /// color when `VrmPrimitive::base_color` is `None`).
+    /// All primitives that make up this mesh. The renderer draws
+    /// each one with its own base-color texture (or a flat color
+    /// when `VrmPrimitive::base_color` is `None`).
     pub primitives: Vec<VrmPrimitive>,
 }
 
@@ -69,8 +73,11 @@ pub struct Skeleton {
 /// the VRM once.
 #[derive(Debug)]
 pub struct VrmModel {
-    /// The first mesh's primitives. PR3.1 only ever reads `mesh.primitives`.
-    pub mesh: VrmMesh,
+    /// All glTF meshes in the file. PR3.3 iterates every `Mesh`
+    /// (PR3.0–3.2 only loaded `meshes[0]`, which is why most of
+    /// the model was missing — VRM 1.0 uses one glTF Mesh per body
+    /// part rather than one Mesh with many primitives).
+    pub meshes: Vec<VrmMesh>,
     /// Skeleton metadata. Not consumed by the renderer in PR3.
     pub skeleton: Skeleton,
 }

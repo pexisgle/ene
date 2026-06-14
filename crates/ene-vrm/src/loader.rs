@@ -1,21 +1,39 @@
 //! VRM file loader.
 //!
 //! Reads a `.vrm` file from disk and produces a [`VrmModel`] with
-//! every primitive of the first mesh uploaded to the GPU (vertex
-//! / index buffers + each primitive's own base-color texture) and
-//! the first skin's inverse-bind matrices preserved for PR4's
-//! skinning pass.
+//! every primitive of **every** glTF `Mesh` uploaded to the GPU
+//! (vertex / index buffers + each primitive's own base-color
+//! texture) and the first skin's inverse-bind matrices preserved
+//! for PR4's skinning pass.
 //!
-//! PR3.1 deliberately does **not** support:
-//! - Multi-mesh VRM models (only the first mesh is rendered).
+//! ## Multi-mesh scope (PR3.3)
+//!
+//! A VRM 1.0 file such as `AliciaSolid.vrm` contains ~12 separate
+//! glTF `Mesh` objects (body, hair, face, clothes, accessories,
+//! …), not one mesh with many primitives. PR3.0/3.1/3.2 only
+//! loaded `meshes[0]` (the head/face area) and therefore rendered
+//! only the skin. PR3.3 walks the entire `gltf.meshes()` iterator,
+//! computing one global AABB across all primitive positions so the
+//! per-vertex normalization (`TARGET_MODEL_SIZE = 1.5` m) is
+//! applied uniformly across the whole body.
+//!
+//! ## PR3.x deliberately does **not** support
+//!
 //! - MToon's full PBR parameters (rim / matcap / outline /
 //!   emission). The shader applies a simple diffuse + lit + base
 //!   color. The MToon-flavored `KHR_materials_unlit` flag is
 //!   *read* so the loader can log a warning if it is set, but
 //!   does not yet alter rendering.
+//! - Per-mesh glTF node transforms. The PR3.3 loader uses raw
+//!   vertex positions from each mesh without applying the glTF
+//!   node hierarchy's world transforms. For VRoid-exported models
+//!   this is fine because the body parts are already in
+//!   world-space positions in their local vertex buffers. The
+//!   humanoid bone system (PR4) will eventually apply the
+//!   per-joint skinning matrices on top of this.
 //! - Animation, expressions, morph targets, spring bone.
 //! - `.gltf` (non-binary) VRM files. Only `.glb` (binary) is
-//!   supported in PR3.1; the glTF binary payload (`BIN` chunk)
+//!   supported in PR3.x; the glTF binary payload (`BIN` chunk)
 //!   holds all the meshes / textures. External `.bin` files
 //!   require the `gltf` crate's `import` feature and ship as a
 //!   follow-up PR.
@@ -61,7 +79,7 @@ pub fn load_vrm(
         return Err(VrmError::NotVrm);
     }
 
-    let mesh = load_first_mesh(&gltf, device, queue)?;
+    let mesh = load_all_meshes(&gltf, device, queue)?;
     let skeleton = load_first_skeleton(&gltf);
 
     for material in gltf.document.materials() {
@@ -73,33 +91,36 @@ pub fn load_vrm(
         }
     }
 
-    Ok(VrmModel { mesh, skeleton })
+    Ok(VrmModel {
+        meshes: mesh,
+        skeleton,
+    })
 }
 
-/// Load every triangle-list primitive of the **first** mesh in the
-/// glTF document. Each primitive gets its own vertex / index
-/// buffers and (when its material has one) its own base-color
-/// texture, so the body, clothes, face, etc. all render.
-fn load_first_mesh(
+/// Load every triangle-list primitive of every glTF `Mesh` in the
+/// document. Returns a `Vec<VrmMesh>` — one entry per glTF `Mesh`.
+/// Each primitive gets its own vertex / index buffers and (when
+/// its material has one) its own base-color texture, so the body,
+/// clothes, face, hair, and accessories all render.
+fn load_all_meshes(
     gltf: &gltf::Gltf,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-) -> VrmResult<VrmMesh> {
-    let Some(mesh) = gltf.document.meshes().next() else {
-        return Err(VrmError::NoMeshes);
-    };
-
-    // 1. Collect every primitive's positions so we can compute
-    //    a single AABB that normalizes the model (the same
-    //    normalize-scale applies to all primitives in the mesh).
+) -> VrmResult<Vec<VrmMesh>> {
+    // First pass: collect every triangle-list primitive's
+    // positions across **all** glTF meshes so we can compute one
+    // global AABB and apply a uniform normalize-scale. (A VRM
+    // 1.0 has ~12 separate glTF Mesh objects, not one.)
     let mut all_positions: Vec<[f32; 3]> = Vec::new();
-    for primitive in mesh.primitives() {
-        if primitive.mode() != gltf::mesh::Mode::Triangles {
-            continue;
-        }
-        let reader = primitive.reader(|_buffer| gltf.blob.as_deref());
-        if let Some(positions) = reader.read_positions() {
-            all_positions.extend(positions);
+    for mesh in gltf.document.meshes() {
+        for primitive in mesh.primitives() {
+            if primitive.mode() != gltf::mesh::Mode::Triangles {
+                continue;
+            }
+            let reader = primitive.reader(|_buffer| gltf.blob.as_deref());
+            if let Some(positions) = reader.read_positions() {
+                all_positions.extend(positions);
+            }
         }
     }
     if all_positions.is_empty() {
@@ -130,99 +151,122 @@ fn load_first_mesh(
     } else {
         1.0
     };
+    let total_mesh_count = gltf.document.meshes().count();
+    let total_primitive_count: usize = gltf.document.meshes().map(|m| m.primitives().count()).sum();
     tracing::info!(
-        "VRM AABB: min={:?} max={:?} extent={:?} max_extent={} center={:?} normalize_scale={} primitive_count={}",
+        "VRM AABB: min={:?} max={:?} extent={:?} max_extent={} center={:?} normalize_scale={} mesh_count={} primitive_count={}",
         bb_min,
         bb_max,
         extent,
         max_extent,
         center,
         scale,
-        mesh.primitives().count()
+        total_mesh_count,
+        total_primitive_count
     );
 
-    // 2. Build one `VrmPrimitive` per glTF primitive. Skip any
-    //    non-triangle primitive (AliciaSolid has none, but be
-    //    defensive about future models).
-    let mut primitives = Vec::new();
-    for (idx, primitive) in mesh.primitives().enumerate() {
-        if primitive.mode() != gltf::mesh::Mode::Triangles {
-            tracing::warn!(
-                "VRM mesh primitive {idx} uses unsupported topology {:?}; skipping",
-                primitive.mode()
-            );
-            continue;
-        }
-        let reader = primitive.reader(|_buffer| gltf.blob.as_deref());
-
-        let positions: Vec<[f32; 3]> = match reader.read_positions() {
-            Some(p) => p.collect(),
-            None => {
-                tracing::warn!("VRM mesh primitive {idx} has no POSITION; skipping");
+    // Second pass: build one `VrmMesh` per glTF mesh, each holding
+    // its triangle-list primitives. The same `(center, scale)`
+    // transform is applied to every vertex so the whole body
+    // ends up centered on origin and bounded by the target size.
+    let mut meshes = Vec::new();
+    for (mesh_idx, mesh) in gltf.document.meshes().enumerate() {
+        let mut primitives = Vec::new();
+        for (prim_idx, primitive) in mesh.primitives().enumerate() {
+            if primitive.mode() != gltf::mesh::Mode::Triangles {
+                tracing::warn!(
+                    "VRM mesh[{mesh_idx}].primitive[{prim_idx}] uses unsupported topology {:?}; skipping",
+                    primitive.mode()
+                );
                 continue;
             }
-        };
-        let normals: Vec<[f32; 3]> = reader
-            .read_normals()
-            .map(|n| n.collect())
-            .unwrap_or_else(|| vec![[0.0, 0.0, 1.0]; positions.len()]);
-        let uvs: Vec<[f32; 2]> = reader
-            .read_tex_coords(0)
-            .map(|tc| tc.into_f32().collect())
-            .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
-        let indices: Vec<u32> = match reader.read_indices() {
-            Some(i) => i.into_u32().collect(),
-            None => {
-                tracing::warn!("VRM mesh primitive {idx} has no index buffer; skipping");
+            let reader = primitive.reader(|_buffer| gltf.blob.as_deref());
+
+            let positions: Vec<[f32; 3]> = match reader.read_positions() {
+                Some(p) => p.collect(),
+                None => {
+                    tracing::warn!(
+                        "VRM mesh[{mesh_idx}].primitive[{prim_idx}] has no POSITION; skipping"
+                    );
+                    continue;
+                }
+            };
+            let normals: Vec<[f32; 3]> = reader
+                .read_normals()
+                .map(|n| n.collect())
+                .unwrap_or_else(|| vec![[0.0, 0.0, 1.0]; positions.len()]);
+            let uvs: Vec<[f32; 2]> = reader
+                .read_tex_coords(0)
+                .map(|tc| tc.into_f32().collect())
+                .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
+            let indices: Vec<u32> = match reader.read_indices() {
+                Some(i) => i.into_u32().collect(),
+                None => {
+                    tracing::warn!(
+                        "VRM mesh[{mesh_idx}].primitive[{prim_idx}] has no index buffer; skipping"
+                    );
+                    continue;
+                }
+            };
+            if indices.is_empty() {
                 continue;
             }
-        };
-        if indices.is_empty() {
-            continue;
-        }
 
-        let mut vertices = Vec::with_capacity(positions.len());
-        for ((pos, normal), uv) in positions.iter().zip(normals.iter()).zip(uvs.iter()) {
-            vertices.push(MeshVertex {
-                position: [
-                    (pos[0] - center[0]) * scale,
-                    (pos[1] - center[1]) * scale,
-                    (pos[2] - center[2]) * scale,
-                ],
-                uv: *uv,
-                normal: *normal,
+            let mut vertices = Vec::with_capacity(positions.len());
+            for ((pos, normal), uv) in positions.iter().zip(normals.iter()).zip(uvs.iter()) {
+                vertices.push(MeshVertex {
+                    position: [
+                        (pos[0] - center[0]) * scale,
+                        (pos[1] - center[1]) * scale,
+                        (pos[2] - center[2]) * scale,
+                    ],
+                    uv: *uv,
+                    normal: *normal,
+                });
+            }
+
+            let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("vrm.mesh{mesh_idx}.prim{prim_idx}.vertex_buf")),
+                contents: MeshVertex::as_bytes(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("vrm.mesh{mesh_idx}.prim{prim_idx}.index_buf")),
+                contents: bytemuck::cast_slice(&indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+
+            let base_color = match load_primitive_base_color_texture(
+                &primitive, gltf, device, queue,
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(
+                        "VRM mesh[{mesh_idx}].primitive[{prim_idx}] base-color decode failed: {e}"
+                    );
+                    None
+                }
+            };
+
+            primitives.push(VrmPrimitive {
+                vertex_buf,
+                vertex_count: vertices.len() as u32,
+                index_buf,
+                index_count: indices.len() as u32,
+                base_color,
             });
         }
-
-        let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(&format!("vrm.primitive{idx}.vertex_buf")),
-            contents: MeshVertex::as_bytes(&vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(&format!("vrm.primitive{idx}.index_buf")),
-            contents: bytemuck::cast_slice(&indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
-        let base_color = match load_primitive_base_color_texture(&primitive, gltf, device, queue) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!("VRM primitive {idx} base-color decode failed: {e}");
-                None
-            }
-        };
-
-        primitives.push(VrmPrimitive {
-            vertex_buf,
-            vertex_count: vertices.len() as u32,
-            index_buf,
-            index_count: indices.len() as u32,
-            base_color,
-        });
+        if primitives.is_empty() {
+            tracing::debug!("VRM mesh[{mesh_idx}] has no renderable primitives; skipping");
+            continue;
+        }
+        meshes.push(VrmMesh { primitives });
     }
 
-    Ok(VrmMesh { primitives })
+    if meshes.is_empty() {
+        return Err(VrmError::NoMeshes);
+    }
+    Ok(meshes)
 }
 
 fn load_first_skeleton(gltf: &gltf::Gltf) -> Skeleton {
