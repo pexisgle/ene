@@ -115,12 +115,18 @@ impl Default for ModelUniform {
 impl ModelUniform {
     /// Build a model matrix from a translation (world units) and a
     /// uniform scale.
+    ///
+    /// The matrix applies a **180° rotation around Y** before the
+    /// translation, so that glTF / VRM 1.0 models whose native
+    /// forward direction is `-Z` end up facing the camera (which
+    /// sits at `+Z` in the orthographic view). With culling on
+    /// (`CullMode::Back`, `FrontFace::Ccw`) this pre-rotation is
+    /// what makes the front of the character visible instead of
+    /// its back.
     pub fn from_position_scale(position: [f32; 3], scale: f32) -> Self {
-        let m = Mat4::from_scale_rotation_translation(
-            glam::Vec3::splat(scale),
-            glam::Quat::IDENTITY,
-            position.into(),
-        );
+        let y180 = glam::Quat::from_rotation_y(std::f32::consts::PI);
+        let m =
+            Mat4::from_scale_rotation_translation(glam::Vec3::splat(scale), y180, position.into());
         Self {
             model: m.to_cols_array_2d(),
         }
