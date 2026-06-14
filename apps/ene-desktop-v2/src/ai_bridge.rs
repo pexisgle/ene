@@ -100,6 +100,7 @@ impl AiBridge {
     /// Pull every AI event currently sitting in the bus into the
     /// bridge's inbox. The runtime calls this once per frame from
     /// `about_to_wait`.
+    #[expect(dead_code)] // Reserved for callers that need the inbox pre-loaded.
     pub fn drain(&self, rx: &mut mpsc::UnboundedReceiver<AppEvent>) {
         loop {
             match rx.try_recv() {

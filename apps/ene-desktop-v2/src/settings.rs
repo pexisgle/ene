@@ -215,6 +215,45 @@ pub struct UiState {
     pub ai_chat_input: String,
     #[allow(dead_code)] // PR2 will display this in the AI page "Latest Response" panel.
     pub ai_latest_response: String,
+    /// A pending permission request (Yes / No / Always) from the AI
+    /// bridge. Populated when the runtime observes
+    /// `AiStreamUpdate::PermissionRequired`. The settings UI is
+    /// auto-shown when this transitions from `None` → `Some(_)`.
+    #[allow(dead_code)] // PR2 will render a permission dialog.
+    pub pending_permission: Option<PendingPermission>,
+    /// A pending interactive question (multi-select + free-text)
+    /// from the AI bridge. Mirrors
+    /// `EneStreamEvent::UserInputRequired`.
+    #[allow(dead_code)] // PR2 will render a questions dialog.
+    pub pending_user_input: Option<PendingUserInput>,
+    /// One per [`UserInputPrompt::items`] entry, used as scratch
+    /// state for the question dialog.
+    #[allow(dead_code)] // PR2 will render a questions dialog.
+    pub user_input_drafts: Vec<QuestionDraft>,
+}
+
+#[derive(Clone, Debug)]
+#[expect(dead_code)] // PR2 populates via AI bridge; the dialog renderer (PR2+) reads.
+pub struct PendingPermission {
+    pub request_id: ene_core::RequestId,
+    pub action: String,
+    pub target: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug)]
+#[expect(dead_code)] // PR2 populates via AI bridge; the dialog renderer (PR2+) reads.
+pub struct PendingUserInput {
+    pub request_id: ene_core::RequestId,
+    pub prompt: ene_tool_proto::UserInputPrompt,
+}
+
+#[derive(Clone, Debug, Default)]
+#[expect(dead_code)] // Per-question scratch state; the dialog renderer (PR2+) reads.
+pub struct QuestionDraft {
+    pub text: String,
+    pub selected: Option<String>,
+    pub skipped: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -324,7 +363,6 @@ impl CharacterSettings {
         &self.current_entry().vrm_paths[0]
     }
 
-    #[expect(dead_code)]
     pub fn current_motion(&self) -> &str {
         if let Some(ref override_path) = self.character_state.motion_override {
             return override_path;

@@ -18,10 +18,12 @@
 //! See `docs/architecture/wgpu-migration.md` §22.3 (PR0) and §22
 //! (full roadmap) for context.
 mod ai_bridge;
+mod character_state;
 mod events;
 mod gpu;
 mod runtime;
 mod settings;
+mod settings_ui;
 mod state;
 mod tray;
 
