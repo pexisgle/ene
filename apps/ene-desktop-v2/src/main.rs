@@ -55,7 +55,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let gpu = pollster::block_on(gpu::GpuContext::new())?;
-    let settings = settings::CharacterSettings::discover(&assets_dir, default_vrm);
+    let mut settings = settings::CharacterSettings::discover(&assets_dir, default_vrm);
+    // PR4.2 follow-up: the per-character `CharacterConfig::character_position`
+    // round-trip in `load_per_character_settings` can leave the model
+    // parked off-screen (1.72 m to the right is what the user
+    // observed) when the position was mutated by an earlier debug
+    // run before drag-to-move (PR4.3) shipped a real UI. Reset to
+    // origin on every launch until PR4.3 wires a "Reset position"
+    // button. The reset is saved immediately so subsequent launches
+    // start at origin too.
+    settings.character_state.character_position = glam::Vec3::ZERO;
+    settings.save();
     let (app_state, event_tx) = state::AppState::with_channel(gpu, settings, &handle);
 
     let event_loop = winit::event_loop::EventLoop::new()?;
