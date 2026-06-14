@@ -80,6 +80,43 @@ pub struct VrmModel {
     pub meshes: Vec<VrmMesh>,
     /// Skeleton metadata. Not consumed by the renderer in PR3.
     pub skeleton: Skeleton,
+    /// Post-normalize AABB `(min, max)` of every vertex. The
+    /// loader's normalize centres this on origin so the model
+    /// should be symmetric around `(0, 0, 0)`. Storing the value
+    /// here lets the runtime log it (PR4.2 diagnostic) without
+    /// reading back the GPU vertex buffers.
+    aabb_min: [f32; 3],
+    aabb_max: [f32; 3],
+}
+
+impl VrmModel {
+    /// AABB `(min, max)` of the loaded (post-normalize) vertex
+    /// data. Symmetric around origin if the loader's
+    /// centre-and-scale is correct.
+    pub fn aabb(&self) -> ([f32; 3], [f32; 3]) {
+        (self.aabb_min, self.aabb_max)
+    }
+
+    /// Number of joints in the skeleton. Zero for models with no skin.
+    pub fn joint_count(&self) -> usize {
+        self.skeleton.inverse_bind.len()
+    }
+
+    /// Construct a `VrmModel` from its already-built pieces plus
+    /// the post-normalize AABB. Used by the loader.
+    pub(crate) fn new(
+        meshes: Vec<VrmMesh>,
+        skeleton: Skeleton,
+        aabb_min: [f32; 3],
+        aabb_max: [f32; 3],
+    ) -> Self {
+        Self {
+            meshes,
+            skeleton,
+            aabb_min,
+            aabb_max,
+        }
+    }
 }
 
 /// Per-vertex layout used by the loader and the shader.

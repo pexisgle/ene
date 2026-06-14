@@ -79,7 +79,7 @@ pub fn load_vrm(
         return Err(VrmError::NotVrm);
     }
 
-    let mesh = load_all_meshes(&gltf, device, queue)?;
+    let (mesh, aabb_min, aabb_max) = load_all_meshes(&gltf, device, queue)?;
     let skeleton = load_first_skeleton(&gltf);
 
     for material in gltf.document.materials() {
@@ -91,10 +91,7 @@ pub fn load_vrm(
         }
     }
 
-    Ok(VrmModel {
-        meshes: mesh,
-        skeleton,
-    })
+    Ok(VrmModel::new(mesh, skeleton, aabb_min, aabb_max))
 }
 
 /// Load every triangle-list primitive of every glTF `Mesh` in the
@@ -106,7 +103,7 @@ fn load_all_meshes(
     gltf: &gltf::Gltf,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-) -> VrmResult<Vec<VrmMesh>> {
+) -> VrmResult<(Vec<VrmMesh>, [f32; 3], [f32; 3])> {
     // First pass: collect every triangle-list primitive's
     // positions across **all** glTF meshes so we can compute one
     // global AABB and apply a uniform normalize-scale. (A VRM
@@ -266,7 +263,25 @@ fn load_all_meshes(
     if meshes.is_empty() {
         return Err(VrmError::NoMeshes);
     }
-    Ok(meshes)
+
+    // Compute the AABB of the **normalized** vertices so the
+    // runtime can log it as a diagnostic. Without this the loader
+    // only ever logs the raw AABB (before centering + scaling).
+    // Derived analytically from the raw AABB + center + scale,
+    // which is exact because every vertex was transformed by
+    // `(pos - center) * scale` (linear transform preserves AABB
+    // shape up to axis sign).
+    let post_min = [
+        (bb_min[0] - center[0]) * scale,
+        (bb_min[1] - center[1]) * scale,
+        (bb_min[2] - center[2]) * scale,
+    ];
+    let post_max = [
+        (bb_max[0] - center[0]) * scale,
+        (bb_max[1] - center[1]) * scale,
+        (bb_max[2] - center[2]) * scale,
+    ];
+    Ok((meshes, post_min, post_max))
 }
 
 fn load_first_skeleton(gltf: &gltf::Gltf) -> Skeleton {
@@ -446,8 +461,6 @@ fn load_image_data(
 }
 
 impl VrmModel {
-    /// Number of joints in the skeleton. Zero for models with no skin.
-    pub fn joint_count(&self) -> usize {
-        self.skeleton.inverse_bind.len()
-    }
+    // `joint_count` is defined in `model.rs` alongside the rest of
+    // the public API.
 }

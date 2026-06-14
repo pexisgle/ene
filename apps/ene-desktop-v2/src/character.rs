@@ -271,4 +271,27 @@ impl CharacterRenderer {
     pub fn body_tracking(&self, strength: f32) -> crate::look_at::BodyTracking {
         crate::look_at::body_tracking_for_strength(strength)
     }
+
+    /// PR4.2 follow-up diagnostic: (aspect_ratio, eye, target,
+    /// viewport_height).
+    #[allow(dead_code)] // One-shot diagnostic log only.
+    pub fn camera_dbg(&self) -> (f32, [f32; 3], [f32; 3], f32) {
+        let (eye, target, viewport_height, aspect) = self.camera.debug();
+        (aspect, eye, target, viewport_height)
+    }
+
+    /// PR4.2 follow-up diagnostic: (depth_width, depth_height).
+    #[allow(dead_code)] // One-shot diagnostic log only.
+    pub fn depth_size_dbg(&self) -> (u32, u32) {
+        self.depth_size
+    }
+
+    /// PR4.2 follow-up diagnostic: AABB of the loaded vertex data
+    /// (min, max). The loader's normalize centres the AABB on
+    /// origin so both halves should be symmetric; if not, that's
+    /// the bug.
+    #[allow(dead_code)] // One-shot diagnostic log only.
+    pub fn model_aabb_dbg(&self) -> Option<([f32; 3], [f32; 3])> {
+        self.model.as_ref().map(|m| m.aabb())
+    }
 }
