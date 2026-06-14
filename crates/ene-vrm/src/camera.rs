@@ -116,17 +116,24 @@ impl ModelUniform {
     /// Build a model matrix from a translation (world units) and a
     /// uniform scale.
     ///
-    /// The matrix applies a **180° rotation around Y** before the
-    /// translation, so that glTF / VRM 1.0 models whose native
-    /// forward direction is `-Z` end up facing the camera (which
-    /// sits at `+Z` in the orthographic view). With culling on
-    /// (`CullMode::Back`, `FrontFace::Ccw`) this pre-rotation is
-    /// what makes the front of the character visible instead of
-    /// its back.
+    /// No rotation is applied: VRoid (Alicia) and other VRM 1.0
+    /// humanoid models are exported with their **face already at
+    /// `+Z`** (the legacy `apps/ene-desktop` Bevy build used
+    /// `Transform::from_translation(character_position).with_scale(model_scale)`
+    /// with no extra rotation and was rendering the character
+    /// front-facing toward the camera at `+Z`). With culling on
+    /// (`CullMode::Back`, `FrontFace::Ccw`) the camera at `+Z` sees
+    /// the model as front-facing, so it is kept. An earlier
+    /// 180°-around-Y pre-rotation was the wrong direction; it
+    /// showed the back of the character and mirrored `character_state.character_position.x`,
+    /// which is what was making the model appear shifted to the
+    /// right and half off-screen.
     pub fn from_position_scale(position: [f32; 3], scale: f32) -> Self {
-        let y180 = glam::Quat::from_rotation_y(std::f32::consts::PI);
-        let m =
-            Mat4::from_scale_rotation_translation(glam::Vec3::splat(scale), y180, position.into());
+        let m = Mat4::from_scale_rotation_translation(
+            glam::Vec3::splat(scale),
+            glam::Quat::IDENTITY,
+            position.into(),
+        );
         Self {
             model: m.to_cols_array_2d(),
         }
