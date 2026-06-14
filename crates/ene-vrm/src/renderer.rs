@@ -104,7 +104,12 @@ impl VrmRenderer {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                // glTF models use -Z forward; without a baked
+                // model transform we don't yet know which side
+                // the camera is looking at. Disable culling in
+                // the MVP and re-enable it once PR3.1 adds the
+                // VRM 1.0 humanoid orientation transform.
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -142,6 +147,10 @@ impl VrmRenderer {
     ///
     /// `queue` is used to upload the camera uniform before the
     /// render pass; the encoder is responsible for the rest.
+    /// `transparent` controls the clear color: in transparent mode
+    /// we clear to (0,0,0,0) so the surface alpha works; in opaque
+    /// mode we clear to the runtime's gray so un-windowed areas
+    /// match the title-bar / system color.
     pub fn render(
         &self,
         queue: &wgpu::Queue,
@@ -150,11 +159,23 @@ impl VrmRenderer {
         depth_view: &wgpu::TextureView,
         model: &VrmModel,
         camera: &OrthographicCamera,
+        transparent: bool,
     ) {
         let uniform = camera
             .uniform()
             .expect("orthographic camera uniform is infallible");
         queue.write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&uniform));
+
+        let clear_color = if transparent {
+            wgpu::Color::TRANSPARENT
+        } else {
+            wgpu::Color {
+                r: 0.2,
+                g: 0.2,
+                b: 0.2,
+                a: 1.0,
+            }
+        };
 
         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("vrm.pass"),
@@ -162,7 +183,7 @@ impl VrmRenderer {
                 view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    load: wgpu::LoadOp::Clear(clear_color),
                     store: wgpu::StoreOp::Store,
                 },
                 depth_slice: None,

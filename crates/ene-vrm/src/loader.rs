@@ -111,6 +111,54 @@ fn load_first_mesh(gltf: &gltf::Gltf, device: &wgpu::Device) -> VrmResult<VrmMes
         });
     }
 
+    // Normalize the model: center it on the origin and scale it so
+    // the longest axis is `TARGET_MODEL_SIZE` world units. The
+    // legacy Bevy `bevy_vrm1` does this implicitly (its world
+    // scale is 1.0, but VRM models vary wildly in source units —
+    // cm, mm, dm, sometimes even inches). Without this, the camera
+    // at (0, 1, 3) with `viewport_height = 2.6` either sees a
+    // sliver of the model (when source units are large) or
+    // completely fills the frustum (when source units are small).
+    let mut bb_min = vertices[0].position;
+    let mut bb_max = vertices[0].position;
+    for v in &vertices {
+        for i in 0..3 {
+            bb_min[i] = bb_min[i].min(v.position[i]);
+            bb_max[i] = bb_max[i].max(v.position[i]);
+        }
+    }
+    let extent: [f32; 3] = [
+        bb_max[0] - bb_min[0],
+        bb_max[1] - bb_min[1],
+        bb_max[2] - bb_min[2],
+    ];
+    let max_extent = extent.iter().copied().fold(0.0f32, f32::max);
+    let center: [f32; 3] = [
+        (bb_min[0] + bb_max[0]) * 0.5,
+        (bb_min[1] + bb_max[1]) * 0.5,
+        (bb_min[2] + bb_max[2]) * 0.5,
+    ];
+    const TARGET_MODEL_SIZE: f32 = 1.5;
+    let scale = if max_extent > 0.0001 {
+        TARGET_MODEL_SIZE / max_extent
+    } else {
+        1.0
+    };
+    tracing::info!(
+        "VRM AABB: min={:?} max={:?} extent={:?} max_extent={} center={:?} normalize_scale={}",
+        bb_min,
+        bb_max,
+        extent,
+        max_extent,
+        center,
+        scale
+    );
+    for v in &mut vertices {
+        v.position[0] = (v.position[0] - center[0]) * scale;
+        v.position[1] = (v.position[1] - center[1]) * scale;
+        v.position[2] = (v.position[2] - center[2]) * scale;
+    }
+
     let indices: Vec<u32> = reader
         .read_indices()
         .map(|i| i.into_u32().collect())

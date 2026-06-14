@@ -18,10 +18,10 @@ use crate::error::VrmResult;
 pub const VIEWPORT_HEIGHT: f32 = 2.6;
 
 /// Default camera position.
-pub const DEFAULT_EYE: [f32; 3] = [0.0, 1.0, 3.0];
+pub const DEFAULT_EYE: [f32; 3] = [0.0, 0.3, 3.0];
 
 /// Default look-at target.
-pub const DEFAULT_TARGET: [f32; 3] = [0.0, 1.0, 0.0];
+pub const DEFAULT_TARGET: [f32; 3] = [0.0, 0.0, 0.0];
 
 /// Up vector.
 pub const DEFAULT_UP: [f32; 3] = [0.0, 1.0, 0.0];
@@ -70,7 +70,13 @@ impl OrthographicCamera {
         let view = Mat4::look_at_rh(self.eye.into(), self.target.into(), self.up.into());
         let half_h = self.viewport_height * 0.5;
         let half_w = half_h * self.aspect;
-        let proj = Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, -10.0, 100.0);
+        // glam's `orthographic_rh` expects `near` and `far` to be
+        // **positive** distances from the camera plane. A negative
+        // `near` (the previous value was `-10.0`) shifts the depth
+        // range so that geometry between the camera and the
+        // original near plane is clipped — which is exactly what
+        // was making the model look like a tiny silhouette.
+        let proj = Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, 0.1, 100.0);
         Ok(CameraUniform {
             view_proj: (proj * view).to_cols_array_2d(),
         })
