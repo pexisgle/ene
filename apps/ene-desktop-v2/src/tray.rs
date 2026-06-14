@@ -203,6 +203,13 @@ fn install_event_pump(event_tx: AppEventSender) {
                 .with_icon(build_icon().unwrap_or_else(synthetic_icon))
                 .build()
                 .expect("tray icon must build on Windows");
+            // The Win32 message pump is what dispatches WM_RBUTTONUP
+            // to the tray icon's window proc, which in turn shows
+            // the context menu attached via `with_menu(...)`.
+            // Without this loop, right-click on the tray icon does
+            // nothing — the OS sees the click but nobody is
+            // processing the message.
+            pump_win32_messages();
             pump_tray_events(&event_tx);
             std::mem::forget(_tray_icon);
         });
@@ -222,6 +229,20 @@ fn install_event_pump(event_tx: AppEventSender) {
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = event_tx;
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn pump_win32_messages() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, GetMessageW, TranslateMessage,
+    };
+    unsafe {
+        let mut msg: windows_sys::Win32::UI::WindowsAndMessaging::MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
     }
 }
 

@@ -30,3 +30,9 @@ thiserror = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18.2"
 tray-icon = { workspace = true, default-features = false, features = ["gtk"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
