@@ -50,8 +50,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let light_dir = normalize(vec3<f32>(0.3, 0.8, 0.5));
     let n = normalize(in.normal);
     let ndotl = clamp(dot(n, light_dir), 0.0, 1.0);
-    let half_lambert = pow(ndotl * 0.5 + 0.5, vec2<f32>(2.0));
-    let lit = vec3<f32>(0.4) + vec3<f32>(0.6) * half_lambert;
+    let half_lambert = pow(ndotl * 0.5 + 0.5, 2.0);
+    let lit = vec3<f32>(0.4) + vec3<f32>(0.6) * vec3<f32>(half_lambert);
     let color = base.rgb * lit;
     return vec4<f32>(color * base.a, base.a);
 }
