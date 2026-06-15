@@ -133,6 +133,7 @@ pub fn render(
                         emotion: emotion.to_string(),
                         target_time: now_secs,
                         hold_secs: 4.0,
+                        weight: 1.0,
                     });
                 }
             }

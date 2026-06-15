@@ -13,13 +13,13 @@
 
 | フェーズ | プラン参照 | 状態 | メモ |
 |----------|------------|------|------|
-| **PR0 — `ene-desktop-v2` スケフォールド + Windows 透過スモーク** | §22.3 | **出荷済み** | `apps/ene-desktop-v2/` (`main.rs`, `gpu.rs`, `runtime.rs` の 3 ファイル、約 330 行) が当初計画した 7 モジュール分割を置換済み。単一の透過ウィンドウと赤矩形レンダラ、`Space` で透過切替、`Escape` で終了。開発者の Windows 機での動作確認済み。 |
-| **PR1 ステップ 1 — `ene-vrm` クレートのスケルトン** | §4 PR1 / ステップ 2 | **出荷済み** | `crates/ene-vrm/{Cargo.toml, src/lib.rs}` を空の `pub fn version()` スタブとユニットテスト 1 件で作成済み。`gltf` / `wgpu` / `winit` の依存はまだ追加していない。 |
-| **PR1 ステップ 3〜8 — `apps/ene-desktop` から Bevy を剥がし winit ウィンドウ・トレイ・AI ブリッジを移植** | §4 PR1 / ステップ 3〜8 | **未着手** | 既存 `apps/ene-desktop` は Bevy 0.18 のまま無修正。`apps/tw-test` と `patches/bevy_winit/` も依然として存在する。 |
-| **PR2 — egui 統合 + 設定ウィンドウ** | §4 PR2 | **未着手** | — |
-| **PR3 — `ene-vrm` 静的描画 (MToon + スキニング)** | §4 PR3 | **未着手** | — |
-| **PR4 — 表情、LookAt、BodyTracking** | §4 PR4 | **未着手** | — |
-| **PR5+ — VRMA、Spring Bone、FXAA/SMAA、ドラッグ改善** | §4 PR5+ | **未着手** | — |
+| **PR0 — `ene-desktop-v2` スケフォールド + Windows 透過スモーク** | §22.3 | **出荷済み** | `apps/ene-desktop-v2/` (`main.rs`, `gpu.rs`, `runtime.rs` の 3 ファイル、約 840 行) が当初計画した 7 モジュール分割を置換済み。`DxgiFromVisual` + `WS_EX_NOREDIRECTIONBITMAP` + `CompositeAlphaMode::PreMultiplied` の透過レシピ。`Space` で透過切替、`Escape` で終了。開発者の Windows 機での動作確認済み。 |
+| **PR1 — v2: トレイ + AI ブリッジ + AppState + 永続化 + CLI** | §4 PR1 | **出荷済み** | 7 ファイル・~1.5k LoC (`+ state.rs, events.rs, settings.rs, ai_bridge.rs, tray.rs`)。レガシー `apps/ene-desktop` (Bevy 0.18) は意図的に無修正のまま。 |
+| **PR2 — v2: 設定 UI 3 ページ + ホットキー + キャラクター別設定** | §4 PR2 | **出荷済み** | `settings_ui/` 5 ファイル・サブツリー、`character_state.rs` に PR2 スタブ。F1 / WASD / Space / Esc ホットキー、`PermissionRequired` / `UserInputRequired` で自動ポップアップ、6 個の表情テストボタンが `EmotionQueue` を push。 |
+| **PR3 — v2: ortho 3D カメラ + `ene-vrm` 静的描画 (MToon + スキニング)** | §4 PR3 | **出荷済み (MVP)** | `crates/ene-vrm/src/{lib,error,camera,model,renderer,loader,shaders/mtoon_lite.wgsl}.rs` (7 ファイル)。GLB 専用ローダ (`gltf 1.4`)、単一 ortho カメラ、深度テスト付き PBR-lite WGSL シェーダ (half-Lambert + ベースカラー + プリマルチプライド アルファ)、identity スキニング。`assets/characters/Alicia/AliciaSolid.vrm` を描画。**後回し**: フル MToon (rim / matcap / outline / emission)、実スキニング算術、マルチメッシュ / マルチマテリアル、非 GLB VRM、アニメーション、表情、LookAt、ドラッグ、Spring Bone。 |
+| **PR4 — v2: LookAt / カーソル / 表情 / ドラッグで移動** | §4 PR4 | **進行中** (PR4.1 ModelUniform + カリング 出荷済み / **PR4.2 LookAt カーソル射影 + BodyTracking プロファイル 出荷済み** / **PR4.4 表情 出荷済み** / PR4.3 ドラッグで移動、PR4.5+ スキニング が残り) | `apps/ene-desktop-v2/src/look_at.rs` がレガシー `update_cursor_look_target` (435–478 行) + `body_tracking_for_strength` (514–537 行) を 1:1 移植。`Runtime` が `WindowEvent::CursorMoved` を `last_cursor_logical` に記録し、`RedrawRequested` で `CharacterRenderer::update_look_at` が `dt_secs` スムージングを進める。`look_at_target()` は PR4.5+ スキニングが humanoid 骨回転駆動に使うため公開済み。**PR4.4 表情** は `crates/ene-vrm/src/expression.rs` (新規、`ExpressionName` / `PrimitiveMorphs` / `ExpressionLayer` / `PrimitiveMorphMeta` ユニフォーム = 16 個のパック済み `vec4` 重みスロット = プリミティブあたり最大 64 ターゲット)、`resolve_expression_names` (VRMC_vrm エクステンション ウォーカー)、バインドグループ `(3)` (storage + uniform)、`shaders/mtoon_lite.wgsl` への `if (target_count > 0u)` 早期脱出、`EmotionQueue` → `CharacterRenderer::apply_emotions` のランタイム配線を出荷。 |
+| **PR5 — v2: クリックスルー + オフスクリーン マスク** | §4 PR5 | **未着手** | Windows `WM_NCHITTEST` (SetWindowSubclass)、Wayland `wl_surface::set_input_region`、X11 フォールバック、Linux オフスクリーン マスク キャプチャ + gizmo、フレーム ペーサーを含む。 |
+| **PR5.5 — v2: レガシー `apps/ene-desktop` (Bevy) のリネーム / 削除** | §4 PR5.5 | **未着手** | — |
 
 ### 0.1 2 つのデスクトップアプリの共存
 
@@ -274,36 +274,68 @@ PR0 が出荷した透過レシピは、ワークスペースに依然として�
 
 ### PR4 — 表情、LookAt、BodyTracking
 
-**目的:** キャラクターがカーソルと AI が出力する感情に反応するようにする。
+> **ステータス:** 進行中。**PR4.1 (ModelUniform + カリング)**、**PR4.2 (LookAt カーソル射影 + BodyTracking プロファイル)**、**PR4.4 (表情 / モーフターゲット)** が出荷済み。**PR4.3 (ドラッグで移動)** と **PR4.5+ (スキニング)** が残り。PR4 のステップ一覧 (表情、LookAt、BodyTracking) はレガシー計画から変更なしだが、消費側は `apps/ene-desktop-v2::character` (新規) / `runtime` (既存) に移動し、新しくドラッグで移動ステップ (旧レガシー `character_drag/mod.rs` プラグイン) の初版がここに入る。フル クリックスルー (Win32 `WM_NCHITTEST`、Wayland `wl_surface::set_input_region`、X11 shape 拡張、オフスクリーン マスク キャプチャ) は PR5。
 
-**サブタスク**
+**PR4.4 進捗 (本 PR で出荷済み)**
 
-1. **表情** — `bevy_vrm1::vrm::expression` を移植:
-   - 毎フレーム、最新の `EmotionQueue` (AI ブリッジ駆動) から `BTreeMap<ExpressionName, f32>` を構築。
-   - 表情毎の重みをプリミティブ毎のモーフターゲットバッファに乗算。
-   - 公開 API: `VrmModel::set_expression(name, weight)`, `VrmModel::expression_names()`。
-2. **LookAt** — `bevy_vrm1::vrm::body_tracking` の look-at 部分のみ移植 (当面):
-   - 毎フレーム `LookAtTarget { world_position: Vec3 }` を提供。
-   - スパイン → ヘッド → 目のチェーンで 2-bone IK を解き、目がターゲットを向くようにする。
-   - ヨー / ピッチをモデル定義の VRM クランプ範囲に収める。
-   - `apps/ene-desktop/src/character/cursor.rs` で OS カーソル位置をカメラ前方の固定深度のワールド座標に変換して渡す。
-3. **BodyTracking** — 最小版のみ: 頭 + 目がカーソルに追従。肩 / 手の揺れは spring bone 再導入まで範囲外。
-4. **AI ブリッジ統合** — `AiBridge::drain()` を `runtime` が毎フレーム呼び出し、得られた `EmotionQueue` を `VrmModel::apply_emotions` に供給。
+- **データモデル** (`crates/ene-vrm/src/expression.rs`):
+  - `ExpressionName` newtype (大文字小文字は保持、VRM 1.0 規約で小文字正規化)。
+  - `PrimitiveId`、`MorphTarget { name, position_offsets: Vec<[f32; 3]> }`、`PrimitiveMorphs { primitive_id, targets, name_to_slot: BTreeMap<ExpressionName, u32>, target_count, vertex_count }` — モーフターゲットを持つプリミティブごとに 1 個。
+  - `ExpressionLayer { per_primitive: Vec<Option<PrimitiveMorphs>>, weights: BTreeMap<ExpressionName, f32> }` を `VrmModel` に保持。
+  - `PrimitiveMorphMeta` ユニフォーム (`#[repr(C)] Pod`): `vertex_count: u32`、`target_count: u32`、2 個の `u32` パッド、`[[f32; 4]; 16]` パック済み重み (= プリミティブあたり最大 64 スロット)。WGSL `MorphMeta` 構造体と 1 バイト単位で一致。
+- **ローダ** (`crates/ene-vrm/src/loader.rs`):
+  - `resolve_expression_names(gltf)` が `Document::extensions()["VRMC_vrm"]["expressions"].{preset,custom}.<name>.morphTargetBinds[*]` を走査し、各 `{node, index}` を `Node::mesh().index()` 経由で `(mesh_idx, prim_idx, morph_target_index)` に解決する。そのメッシュの **全** プリミティブに名前をバインド (仕様では「全プリミティブが同じ morphTarget を共有する」)。エクステンションが参照しないターゲットは `morph_target_<i>` にフォールバック。
+- **レンダラ** (`crates/ene-vrm/src/renderer.rs`):
+  - 新規バインドグループレイアウト `(3)` — モーフ用 `storage<read>` (`morph_offsets: array<vec3<f32>>`、長さ `target_count * vertex_count`) と `uniform` (`morph_meta`、`min_binding_size = PrimitiveMorphMeta::SIZE`)。
+  - モーフを持つプリミティブごとに `MorphGpu { offsets_buf, meta_buf, bind_group }` を 1 個、モーフを持たないプリミティブは単一の `DummyMorphGpu` を共有 (シェーダの `target_count == 0u` 早期脱出で参照スキップ)。
+- **シェーダ** (`crates/ene-vrm/src/shaders/mtoon_lite.wgsl`):
+  - `struct MorphMeta { vertex_count, target_count, _pad0, _pad1, weights: array<vec4<f32>, 16> }`。
+  - `@group(3) @binding(0) var<storage, read> morph_offsets: array<vec3<f32>>`、`@group(3) @binding(1) var<uniform> morph_meta: MorphMeta`。
+  - `vs_main` は `@builtin(vertex_index) vidx: u32` を取り、`morph_offsets[t * vertex_count + vidx] * weights[t/4][t%4]` を `morph_delta: vec3<f32>` に累積し、`view_proj * world_pos` の前に `world_pos` に加算。
+- **ランタイム** (`apps/ene-desktop-v2/src/character_state.rs`、`character.rs`、`runtime.rs`):
+  - `EmotionCommand` は `weight: f32` (AI ブリッジと手動ボタンの両方とも既定 1.0) を運ぶようになった。`EmotionQueue::drain_due(now_secs)` が期日到来コマンドと未来スケジュール (リップシンク用プレースホルダ) を分離する。
+  - `ActiveEmotion { name, weight, hold_until_secs }` がレンダラの「現在表示中」の表情。
+  - `CharacterRenderer::apply_emotions(&mut EmotionQueue, now_secs)` を `Runtime::about_to_wait` から 1 フレーム 1 回 (EmoteToken drain ループの直後、再描画前) 呼び出す。期日到来コマンドを drain し、`VrmModel::expressions_mut().set_expression(&ExpressionName::from(name.as_str()), weight)` を呼び、`hold_secs` 経過後にアクティブ表情の重みを `FADE_RATE = 0.9` で乗算フェードする (重みが `FADE_FLOOR = 0.01` を下回ったら `None` にする)。
+  - **重みクリアの不変条件:** 表情 → 重みパイプラインは *マージ* ではなく *置換* である。`happy` → `neutral` (同梱の Alicia モデルではモーフ ターゲットではない) に切り替えた場合、前の `happy` の重みをゼロクリアしないとシェーダはまぶたを細め続ける。純粋ヘルパ `transition_emotions(drained, current, now_secs, fade_rate, fade_floor) -> (Option<ActiveEmotion>, Vec<(String, f32)>)` を `character_state::transition_emotions` に切り出し、新しいコマンドが異なる名前で来たときに `(prev.name, 0.0)` を `(new.name, weight)` の *前* に emit することで、レンダラの `set_expression` が先にクリアを適用するようにしている。これはレガシー Bevy アプリの `SetExpressions` リソース (毎フレーム存在しない名前を暗黙にドロップしていた) と同じ振る舞い。
 
-**検証**
+**PR4.3 / PR4.5+ 残り (計画)**
 
-- OS カーソルを動かすとモデルの頭 / 目がクランプ角内で追従。
-- チャットに "I'm so happy!" を打つと happy ブレンドシェイプへ遷移。
-- `ene-vrm` に自動テストを追加: 極小合成 VRM を読み込み、表情を設定し、モーフターゲットバッファがウェイトを反映していることを確認。
+1. **ドラッグで移動** — レガシー `apps/ene-desktop/src/character_drag/mod.rs` (246 行) の 1:1 移植。`MouseButtonInput::Pressed { Left }` で AABB ヒットテスト → ドラッグ中は `settings.character_state.character_position` を Δ で更新 → `Released` で `mark_dirty()`。PR4 のスコープではウィンドウ全面がまだクリック可能 (PR5 でクリックスルー)。
+2. **スキニング** — `VrmModel` に `joints: Vec<NodeIndex>` + `humanoid: Option<HumanoidBoneMap>` を追加。`loader.rs` で `skin.joints()` を全走査。WGSL 側に `mat4 skin[joints_count]` 追加 + `joints: vec4<u32>, weights: vec4<f32>` 頂点属性追加。シェーダは `mtoon_lite` を `mtoon_skinned` にリネーム。
 
-### PR5+ — 先送り作業
+**検証 (PR4 全体)**
 
-- **PR5** — VRMA 再生 (`bevy_vrm1::vrma` のクローン)。
-- **PR6** — Spring Bone (髪 / 布) — `bevy_vrm1::vrm::spring_bone` の完全移植。
-- **PR7** — シャドウ品質切替 (FXAA / SMAA / TAA) と設定 UI ページ追加。
-- **PR8** — ドラッグ中の操作性改善 (マルチモニタ処理のスムース化)。
+- OS カーソルを動かすとモデルの頭 / 目がクランプ角内で追従 (PR4.5+ で視覚化、現状は `look_at_target()` のみ)。
+- チャットに "I'm so happy!" を打つと `happy` ブレンドシェイプへ遷移 (PR4.4 で有効化済み)。
+- `ene-vrm` に自動テスト: 表情を設定し、`ExpressionLayer::set_expression` のクランプ / 名前引きを検証 (8 テスト合格済み)。
+- 6 個の手動表情テスト ボタン (`SettingsUi::emotion_queue` を push) で VRM の表情変化を目視確認 (PR4.4 で出荷済み)。
 
-各 PR は個別の設計ドキュメントスニペットとし、PR3 着地時に本ファイル末尾に `## オープンフォローアップ` を追記する。
+### PR5 — クリックスルー + オフスクリーン マスク
+
+**目的:** キャラクター シルエットの外側がクリック / ホバー / フォーカスをデスクトップに透過する。背景のウィンドウ操作性を維持しつつ、キャラクターの操作性を保持する。
+
+**サブタスク (Windows 先行、Linux は後続)**
+
+1. **Windows クリックスルー** — `apps/ene-desktop/src/character_drag/windows.rs` (162 行、`SetWindowSubclass` + `WM_NCHITTEST` + `WS_EX_TRANSPARENT` レシピ) を `apps/ene-desktop-v2/src/platform/windows_hit_test.rs` に移植。`allows_input = cursor_over_character || drag_state.is_dragging()` を毎フレーム計算し、atomic 経由でフックに転送。
+2. **Wayland input region** — `apps/ene-desktop/src/character_drag/linux/region.rs` を `apps/ene-desktop-v2/src/platform/wayland_region.rs` に移植。
+3. **Wayland オフスクリーン マスク キャプチャ** — `apps/ene-desktop/src/character_drag/linux/capture.rs` (581 行、`R8Unorm` + `Readback::texture` + タイルグリッド矩形分解) を `apps/ene-desktop-v2/src/platform/wayland_mask_capture.rs` に移植。第 2 `wgpu::RenderTarget::Image` 上の `MaskCaptureCamera`。
+4. **X11 フォールバック** — `CursorOptions::hit_test` + `_NET_WM_STATE_SKIP_TASKBAR` / `_SKIP_PAGER` FFI を `apps/ene-desktop-v2/src/platform/x11_taskbar.rs` に移植。
+5. **Linux デバッグ オーバーレイ** — `draw_visible_rect_gizmos` を `apps/ene-desktop-v2/src/platform/wayland_mask_gizmo.rs` に移植。
+6. **マスク ダウンサンプル UI 行** — Linux 限定 `cfg` (PR2 ストレージ配線済み、PR5 で消費)。
+7. **フレーム ペーサー** — `apps/ene-desktop/src/scene.rs::pace_frame_rate` を `apps/ene-desktop-v2/src/runtime.rs` に移植。`[15, 30, 60, 120, 0]` をターゲット。
+
+### PR5.5 — レガシー削除
+
+- `apps/ene-desktop` を `apps/ene-desktop-v1` にリネーム → 1 リリース置いて削除。
+- ワークスペース `Cargo.toml` から `bevy_*` 全削除。
+- `[patch.crates-io] bevy_winit` および `patches/bevy_winit/` 削除。
+
+### PR6+ — 先送り作業
+
+- **PR6** — VRMA 再生 (`bevy_vrm1::vrma` のクローン)。
+- **PR7** — Spring Bone (髪 / 布) — `bevy_vrm1::vrm::spring_bone` の完全移植。
+- **PR8** — シャドウ品質切替 (FXAA / SMAA / TAA) と設定 UI ページ追加。
+- **PR9** — ドラッグ中の操作性改善 (マルチモニタ処理のスムース化)。
 
 ---
 
@@ -389,17 +421,17 @@ PR0 が出荷した透過レシピは、ワークスペースに依然として�
 
 | クレート | バージョン | 用途 | 完了? |
 |---------|-----------|------|-------|
-| `wgpu` | 27 | wgpu コア (Bevy 0.18 と同じ 27 系) | 完了 (ワークスペース依存; `apps/ene-desktop-v2` が利用) |
+| `wgpu` | 29 | wgpu コア (Bevy 0.18 の 27 系から更新) | 完了 (ワークスペース依存; `apps/ene-desktop-v2` が利用) |
 | `winit` | 0.30 | イベントループとウィンドウ | 完了 (ワークスペース依存; `apps/ene-desktop-v2` が利用) |
-| `egui` | 0.33 | イミディエイトモード UI | ワークスペース依存宣言済み、利用は PR2 |
-| `egui-wgpu` | 0.33 | egui → wgpu レンダラ | ワークスペース依存宣言済み、利用は PR2 |
-| `egui-winit` | 0.33 | egui 入力統合 | ワークスペース依存宣言済み、利用は PR2 |
-| `glam` | 0.29 | 線形代数 | 完了 (`apps/ene-desktop-v2` が利用) |
-| `gltf` | 1.4 | VRM / glTF パーサ | ワークスペース依存宣言済み、利用は PR3 |
-| `encase` | 0.12 | シェーダ互換の構造体パッキング (UBO) | ワークスペース依存宣言済み、利用は PR3 |
-| `bytemuck` | 1 | 安全な `Pod` / `Zeroable` キャスト | 完了 (`apps/ene-desktop-v2` が利用) |
+| `egui` | 0.34 | イミディエイトモード UI | 完了 (`apps/ene-desktop-v2` が PR2 から利用) |
+| `egui-wgpu` | 0.34 | egui → wgpu レンダラ | 完了 (PR2 から利用) |
+| `egui-winit` | 0.34 | egui 入力統合 | 完了 (PR2 から利用) |
+| `glam` | 0.33 (`bytemuck` フィーチャ付き) | 線形代数 | 完了 (`apps/ene-desktop-v2` / `ene-vrm` が利用) |
+| `gltf` | 1.4 | VRM / glTF パーサ | 完了 (PR3 から `ene-vrm` が利用) |
+| `encase` | 0.12 | シェーダ互換の構造体パッキング (UBO) | 完了 (PR3 から利用) |
+| `bytemuck` | 1 (`derive` フィーチャ付き) | 安全な `Pod` / `Zeroable` キャスト | 完了 (PR3 / PR4 から利用) |
 | `pollster` | 0.4 | 起動用の最小 `block_on` | 完了 (`apps/ene-desktop-v2` が利用) |
-| `raw-window-handle` | 0.6 | wgpu サーフェス作成 | ワークスペース依存宣言済み、利用は PR3 |
+| `raw-window-handle` | 0.6 | wgpu サーフェス作成 | 完了 (PR3 から利用) |
 
 ### 6.2 維持
 
@@ -628,10 +660,12 @@ glTF の読み取り:
 
 ### 10.4 表情 / モーフ
 
-- glTF メッシュプリミティブの `targets` フィールドがブレンドシェイプの頂点デルタを保持。
-- メッシュ毎に 1 ストレージバッファ: `morph_offsets: array<vec3>` を `[primitive_index][target_index]` で索引。
-- 表情名 (例: `joy`, `blink`, `aa`) は `VRMC_vrm-1.0` の `blendShapeMaster` から glTF ターゲットを引き、`ExpressionState` BTreeMap を名前で事前確保。
-- 頂点シェーダは `morph_weights: array<vec4>` (4 つ毎にパック) と `morph_offset_count: u32` を取り、`position += Σ(weight[i] * offsets[i])`。
+- glTF メッシュプリミティブの `targets` フィールドがブレンドシェイプの頂点デルタを保持。`crates/ene-vrm/src/expression.rs` が `PrimitiveMorphs { primitive_id, targets: Vec<MorphTarget>, name_to_slot, target_count, vertex_count }` を定義し、ローダは `primitive.reader(...).read_morph_targets()` の POSITION 変位をローダの `scale` のみで正規化して詰める(**`(p - center) * scale` ではない** — モーフデルタは線形量なので `-center` で変換すると、重み付き頂点がすべてモデル中心方向にドラッグされる)。`loader::normalize_morph_offset` および回帰テスト `morph_offset_is_not_translated_by_model_centre` を参照。
+- モーフ名は **`gltf::mesh::MorphTarget` の公開ビューには存在しない**。ローダは `VRMC_vrm` エクステンション ツリーから取り出す: `Document::extensions()["VRMC_vrm"]["expressions"].{preset,custom}.<name>.morphTargetBinds[*]` (各 bind は `{node, index}`、`Node::mesh().index()` で解決)。名前はそのメッシュの **全** プリミティブにバインドされる (仕様では「全プリミティブが同じ morphTarget を共有する」)。エクステンションが参照しないターゲットは `morph_target_<i>` にフォールバック。
+- モーフを持つプリミティブごとに 1 ストレージバッファを確保: `morph_offsets: array<vec3>` (長さ `target_count * vertex_count`)、`morph_offsets[target_index * vertex_count + vertex_index]` で索引する。モーフを持たないプリミティブは単一のダミー レイアウト (`target_count = 0`) を共有し、シェーダの `if (target_count > 0u)` 早期脱出で storage lookup をスキップ。
+- 表情名 (例: `happy`, `sad`, `blink`) ごとに、`ExpressionState` / `ExpressionLayer::weights` のキーをモデルが解決した名前で事前投入する。`VrmModel::set_expression(name, weight)` がランタイムの書き込み経路、レンダラは `model.expressions().weights.get(name)` で読み取る。
+- 頂点シェーダは `morph_meta: MorphMeta { vertex_count, target_count, _pad0, _pad1, weights: array<vec4<f32>, 16> }` を取る。パック済み `weights` 配列は `vec4` あたり 4 個のモーフ重みを保持 (16 vec4 = 64 スロット/プリミティブ)。`position += Σ_t( weights[t/4][t%4] * morph_offsets[t * vertex_count + vidx] )` を適用する。
+- **後回し (PR4.5+)**: 法線 / 接線 モーフ変位、マルチターゲット ブレンドシェイプ グラフ (例: `blink_l + blink_r → blink`)、LookAt `expression` モード (`lookLeft/Right/Up/Down` を重みマップに直接書き込み)。
 
 ### 10.5 LookAt
 
