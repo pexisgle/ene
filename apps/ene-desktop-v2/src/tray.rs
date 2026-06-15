@@ -23,7 +23,7 @@ use std::fs::File;
 use std::io::BufReader;
 
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, MouseButton, TrayIconBuilder, TrayIconEvent};
+use tray_icon::{Icon, MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::events::{AppEvent, AppEventSender, TrayAction};
 
@@ -61,6 +61,11 @@ impl TrayHandle {
 
         #[cfg(target_os = "linux")]
         {
+            if let Err(err) = gtk::init() {
+                tracing::warn!("Failed to initialize GTK for tray: {err}");
+                return None;
+            }
+
             let menu = build_menu();
             let icon = build_icon().unwrap_or_else(synthetic_icon);
 
