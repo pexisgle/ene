@@ -17,7 +17,7 @@
 | **PR1 — v2: トレイ + AI ブリッジ + AppState + 永続化 + CLI** | §4 PR1 | **出荷済み** | 7 ファイル・~1.5k LoC (`+ state.rs, events.rs, settings.rs, ai_bridge.rs, tray.rs`)。レガシー `apps/ene-desktop` (Bevy 0.18) は意図的に無修正のまま。 |
 | **PR2 — v2: 設定 UI 3 ページ + ホットキー + キャラクター別設定** | §4 PR2 | **出荷済み** | `settings_ui/` 5 ファイル・サブツリー、`character_state.rs` に PR2 スタブ。F1 / WASD / Space / Esc ホットキー、`PermissionRequired` / `UserInputRequired` で自動ポップアップ、6 個の表情テストボタンが `EmotionQueue` を push。 |
 | **PR3 — v2: ortho 3D カメラ + `ene-vrm` 静的描画 (MToon + スキニング)** | §4 PR3 | **出荷済み (MVP)** | `crates/ene-vrm/src/{lib,error,camera,model,renderer,loader,shaders/mtoon_lite.wgsl}.rs` (7 ファイル)。GLB 専用ローダ (`gltf 1.4`)、単一 ortho カメラ、深度テスト付き PBR-lite WGSL シェーダ (half-Lambert + ベースカラー + プリマルチプライド アルファ)、identity スキニング。`assets/characters/Alicia/AliciaSolid.vrm` を描画。**後回し**: フル MToon (rim / matcap / outline / emission)、実スキニング算術、マルチメッシュ / マルチマテリアル、非 GLB VRM、アニメーション、表情、LookAt、ドラッグ、Spring Bone。 |
-| **PR4 — v2: LookAt / カーソル / 表情 / ドラッグで移動** | §4 PR4 | **進行中** (PR4.1 ModelUniform + カリング 出荷済み / **PR4.2 LookAt カーソル射影 + BodyTracking プロファイル 出荷済み** / **PR4.4 表情 出荷済み** / PR4.3 ドラッグで移動、PR4.5+ スキニング が残り) | `apps/ene-desktop-v2/src/look_at.rs` がレガシー `update_cursor_look_target` (435–478 行) + `body_tracking_for_strength` (514–537 行) を 1:1 移植。`Runtime` が `WindowEvent::CursorMoved` を `last_cursor_logical` に記録し、`RedrawRequested` で `CharacterRenderer::update_look_at` が `dt_secs` スムージングを進める。`look_at_target()` は PR4.5+ スキニングが humanoid 骨回転駆動に使うため公開済み。**PR4.4 表情** は `crates/ene-vrm/src/expression.rs` (新規、`ExpressionName` / `PrimitiveMorphs` / `ExpressionLayer` / `PrimitiveMorphMeta` ユニフォーム = 16 個のパック済み `vec4` 重みスロット = プリミティブあたり最大 64 ターゲット)、`resolve_expression_names` (VRMC_vrm エクステンション ウォーカー)、バインドグループ `(3)` (storage + uniform)、`shaders/mtoon_lite.wgsl` への `if (target_count > 0u)` 早期脱出、`EmotionQueue` → `CharacterRenderer::apply_emotions` のランタイム配線を出荷。 |
+| **PR4 — v2: LookAt / カーソル / 表情 / ドラッグで移動** | §4 PR4 | **進行中** (PR4.1 ModelUniform + カリング 出荷済み / **PR4.2 LookAt カーソル射影 + BodyTracking プロファイル 出荷済み** / **PR4.3 ドラッグで移動 出荷済み** / **PR4.4 表情 出荷済み** / PR4.5+ スキニング が残り) | `apps/ene-desktop-v2/src/look_at.rs` がレガシー `update_cursor_look_target` (435–478 行) + `body_tracking_for_strength` (514–537 行) を 1:1 移植。`Runtime` が `WindowEvent::CursorMoved` を `last_cursor_logical` に記録し、`RedrawRequested` で `CharacterRenderer::update_look_at` が `dt_secs` スムージングを進める。`look_at_target()` は PR4.5+ スキニングが humanoid 骨回転駆動に使うため公開済み。**PR4.3 ドラッグで移動** は新 `apps/ene-desktop-v2/src/character/drag.rs` (レガシー `character_drag/mod.rs` の 1:1 移植)。ヘルパ: `aabb_world_corners`、`transformed_aabb_bounds`、`ray_intersects_aabb` (スラブ テスト、レガシーと同一)、`cursor_logical_to_world_2d` (カメラ view-z=0 平面への ortho 射影、`look_at::compute_world_target` パターンに合流)、`cursor_over_character` (カーソル レイ vs. 変形後 AABB ヒット テスト)。ステート マシン: `on_press_or_release` (`DragAction::None / Started / Ended` を返す) + `tick` (積分用 `Option<Vec3>` デルタを返す)。ランタイム配線: `WindowEvent::CursorMoved` が `drag::tick` を呼びデルタを `settings.character_state.character_position` に積分; `WindowEvent::MouseInput { Left, Pressed / Released }` が `drag::on_press_or_release` を呼び; `Ended` 時に `settings.mark_dirty()`。**クリックスルーは意図的にスコープ外** (PR5) — キャラクター ウィンドウ全面がまだクリック可能。**PR4.4 表情** は `crates/ene-vrm/src/expression.rs` (新規、`ExpressionName` / `PrimitiveMorphs` / `ExpressionLayer` / `PrimitiveMorphMeta` ユニフォーム = 16 個のパック済み `vec4` 重みスロット = プリミティブあたり最大 64 ターゲット)、`resolve_expression_names` (VRMC_vrm エクステンション ウォーカー)、バインドグループ `(3)` (storage + uniform)、`shaders/mtoon_lite.wgsl` への `if (target_count > 0u)` 早期脱出、`EmotionQueue` → `CharacterRenderer::apply_emotions` のランタイム配線を出荷。 |
 | **PR5 — v2: クリックスルー + オフスクリーン マスク** | §4 PR5 | **未着手** | Windows `WM_NCHITTEST` (SetWindowSubclass)、Wayland `wl_surface::set_input_region`、X11 フォールバック、Linux オフスクリーン マスク キャプチャ + gizmo、フレーム ペーサーを含む。 |
 | **PR5.5 — v2: レガシー `apps/ene-desktop` (Bevy) のリネーム / 削除** | §4 PR5.5 | **未着手** | — |
 
@@ -297,6 +297,29 @@ PR0 が出荷した透過レシピは、ワークスペースに依然として�
   - `ActiveEmotion { name, weight, hold_until_secs }` がレンダラの「現在表示中」の表情。
   - `CharacterRenderer::apply_emotions(&mut EmotionQueue, now_secs)` を `Runtime::about_to_wait` から 1 フレーム 1 回 (EmoteToken drain ループの直後、再描画前) 呼び出す。期日到来コマンドを drain し、`VrmModel::expressions_mut().set_expression(&ExpressionName::from(name.as_str()), weight)` を呼び、`hold_secs` 経過後にアクティブ表情の重みを `FADE_RATE = 0.9` で乗算フェードする (重みが `FADE_FLOOR = 0.01` を下回ったら `None` にする)。
   - **重みクリアの不変条件:** 表情 → 重みパイプラインは *マージ* ではなく *置換* である。`happy` → `neutral` (同梱の Alicia モデルではモーフ ターゲットではない) に切り替えた場合、前の `happy` の重みをゼロクリアしないとシェーダはまぶたを細め続ける。純粋ヘルパ `transition_emotions(drained, current, now_secs, fade_rate, fade_floor) -> (Option<ActiveEmotion>, Vec<(String, f32)>)` を `character_state::transition_emotions` に切り出し、新しいコマンドが異なる名前で来たときに `(prev.name, 0.0)` を `(new.name, weight)` の *前* に emit することで、レンダラの `set_expression` が先にクリアを適用するようにしている。これはレガシー Bevy アプリの `SetExpressions` リソース (毎フレーム存在しない名前を暗黙にドロップしていた) と同じ振る舞い。
+
+**PR4.3 進捗 (本 PR で出荷済み)**
+
+- 新 `apps/ene-desktop-v2/src/character/` フォルダ (旧 `character.rs` を置き換え):
+  - `mod.rs` — `CharacterRenderer` に `pub drag: CharacterDragState` フィールドと `aabb_world(&ModelUniform)` アクセサを追加。
+  - `drag.rs` — レガシー `apps/ene-desktop/src/character_drag/mod.rs` の v2 スタック向け 1:1 移植。
+- ステート マシン (`apps/ene-desktop-v2/src/character/drag.rs`):
+  - `CharacterDragState { last_cursor_world_pos: Option<Vec2> }` + `is_dragging()` (後者は PR5.1 でクリックスルー `allows_input` に接続するまで `#[allow(dead_code)]`)。
+  - `enum DragButtonEvent { Pressed, Released }` + `enum DragAction { None, Started, Ended }` (`tick` ヘルパは `Option<Vec3>` を直接返すので、`DragAction` は press/release 専用に絞った)。
+  - `on_press_or_release(state, event, cursor_world_2d, cursor_over_character) -> DragAction`: キャラクター上で押下 → ドラッグ開始 (ワールド座標カーソルを記憶)、リリース → ドラッグ終了。ドラッグしていない時のリリースは no-op。
+  - `tick(state, cursor_world_2d) -> Option<Vec3>`: 1 フレーム デルタ `(new - last).extend(0.0)`、レガシー `update_drag_state` と同一の算術。
+- 数学ヘルパ (すべてレガシーと 1:1):
+  - `aabb_world_corners` (8 頂点変換) と `transformed_aabb_bounds` (ワールド AABB)。
+  - `ray_intersects_aabb` (スラブ テスト、eps=1e-6、軸ごとのクロージャ、同一)。
+  - `cursor_logical_to_world_2d` (NDC → view-z=0 平面 → ワールド 2D) — `look_at::compute_world_target` の `view_pos = Vec3::new(ndc.x * half_w, ndc.y * half_h, 0)` パターンを踏襲。ortho では絶対ワールド位置はカメラ eye になる; ドラッグ システムは 2 サンプル間の *差分* のみを必要とする (Bevy `Camera::viewport_to_world_2d` の意味論と同じ)。
+  - `cursor_over_character` (毎フレーム ヒット テスト: カーソル レイ vs. 変形後ワールド AABB)。
+- ランタイム配線 (`apps/ene-desktop-v2/src/runtime.rs`):
+  - 新ヘルパ `cursor_world_2d_for_char_window(cw, position)` と `cursor_over_char_window(cw, character, settings, position)` で winit `PhysicalPosition` 入力に対する射影とヒット テストをラップ。
+  - `WindowEvent::CursorMoved` が `character::drag::tick(&mut character.drag, cursor_world_2d)` を呼び、`None` 以外のデルタを `settings.character_state.character_position` に積分 (`cw` と `character` を独立に借用できるよう mut-borrow を分離)。
+  - `WindowEvent::MouseInput { state, button: Left }` が `character::drag::on_press_or_release` を呼び、`DragAction::Ended` の時に `settings.mark_dirty()`。
+  - 新インポート: `winit::event::MouseButton` (既存の `ElementState` に追加)。
+- 12 件の新規ユニット テスト (`character::drag::tests`): AABB 変換 (平行移動 + スケール)、恒等変換 bounds、レイ ヒット + ミス (軸並行)、キャラクター上押下でドラッグ開始、キャラクター外押下は no-op、カーソル位置なし押下は no-op、ドラッグ中リリースで終了、未ドラッグ リリースは no-op、アイドル時 tick は `None`、不変時 tick は `None`、移動時 tick はデルタ返却 + 原点前進、カーソル消失時 tick は状態保持、ortho 中心がカメラ eye に射影、ワールド デルタがカーソル ピクセル デルタに比例、退化 viewport は `None`。
+- **PR4.3 スコープ外:** クリックスルー/パススルー。ランタイムは winit ヒット テストをオーバーライドしないので、キャラクター ウィンドウ全面がまだクリック可能。PR5.1 (Windows: `SetWindowSubclass` + `WM_NCHITTEST` + `WS_EX_TRANSPARENT`) と PR5.2 (Wayland: `wl_surface::set_input_region`) がその作業を引き受ける。`is_dragging()` アクセサは `allows_input = cursor_over_character || drag_state.is_dragging()` 述語用に予約済み。
 
 **PR4.3 / PR4.5+ 残り (計画)**
 

@@ -23,7 +23,7 @@ use std::time::Instant;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
@@ -390,6 +390,58 @@ impl Runtime {
                 // `RedrawRequested`, so the dt is correct.
                 self.last_cursor_logical = Some(position);
                 cw.window.request_redraw();
+
+                // PR4.3: integrate the drag delta if the user is
+                // currently dragging. The hit-test and the
+                // position projection are computed against the
+                // loaded character's transformed AABB.
+                let cursor_world_2d = cursor_world_2d_for_char_window(cw, position);
+                let AppState {
+                    ref mut character,
+                    ref mut settings,
+                    ..
+                } = self.state;
+                if let Some(delta) =
+                    crate::character::drag::tick(&mut character.drag, cursor_world_2d)
+                {
+                    settings.character_state.character_position += delta;
+                }
+            }
+            WindowEvent::MouseInput {
+                state: btn_state,
+                button: MouseButton::Left,
+                ..
+            } => {
+                // PR4.3: start / end a drag on the left button. The
+                // hit-test determines whether the press landed on
+                // the character silhouette.
+                use crate::character::drag::{DragAction, DragButtonEvent};
+                let Some(cursor_phys) = self.last_cursor_logical else {
+                    return;
+                };
+                let AppState {
+                    ref settings,
+                    ref mut character,
+                    ..
+                } = self.state;
+                let event = match btn_state {
+                    ElementState::Pressed => DragButtonEvent::Pressed,
+                    ElementState::Released => DragButtonEvent::Released,
+                };
+                let cursor_world_2d = cursor_world_2d_for_char_window(cw, cursor_phys);
+                let cursor_over = cursor_over_char_window(cw, character, settings, cursor_phys);
+                let action = crate::character::drag::on_press_or_release(
+                    &mut character.drag,
+                    event,
+                    cursor_world_2d,
+                    cursor_over,
+                );
+                if matches!(action, DragAction::Ended) {
+                    let AppState {
+                        ref mut settings, ..
+                    } = self.state;
+                    settings.mark_dirty();
+                }
             }
             WindowEvent::KeyboardInput { .. } => {
                 if let Some(named) = key_pressed(&event) {
@@ -603,6 +655,67 @@ impl Runtime {
 
 fn cw_char_window_has_focus(cw: &CharacterWindow) -> bool {
     cw.window.has_focus()
+}
+
+/// PR4.3: compute the cursor's 2D world position for the drag
+/// hit-test and the drag integration. `position` is the latest
+/// winit `PhysicalPosition<f64>` (already plumbed via
+/// `Runtime::last_cursor_logical`); the function converts it to
+/// window-logical pixels (so the projection matches
+/// `look_at::compute_world_target` which expects logical pixels).
+fn cursor_world_2d_for_char_window(
+    cw: &CharacterWindow,
+    position: winit::dpi::PhysicalPosition<f64>,
+) -> Option<glam::Vec2> {
+    use crate::character::drag::cursor_logical_to_world_2d;
+    let size = cw.window.inner_size();
+    let scale = cw.window.scale_factor();
+    let logical = position.to_logical::<f64>(scale);
+    let viewport = (size.width.max(1), size.height.max(1));
+    let eye = ene_vrm::camera::DEFAULT_EYE.into();
+    let target = ene_vrm::camera::DEFAULT_TARGET.into();
+    let up = ene_vrm::camera::DEFAULT_UP.into();
+    cursor_logical_to_world_2d(
+        glam::Vec2::new(logical.x as f32, logical.y as f32),
+        viewport,
+        eye,
+        target,
+        up,
+    )
+}
+
+/// PR4.3: hit-test the cursor against the character's transformed
+/// AABB. Returns `false` (no hit) when no model is loaded.
+fn cursor_over_char_window(
+    cw: &CharacterWindow,
+    character: &crate::character::CharacterRenderer,
+    settings: &CharacterSettings,
+    position: winit::dpi::PhysicalPosition<f64>,
+) -> bool {
+    use crate::character::drag::cursor_over_character as hit_test;
+    let model = character.model_aabb_dbg();
+    let Some((lo, hi)) = model else {
+        return false;
+    };
+    let cs = &settings.character_state;
+    let model_uniform = ene_vrm::ModelUniform::from_position_scale(
+        cs.character_position.to_array(),
+        cs.model_scale,
+    );
+    let model_mat = glam::Mat4::from_cols_array_2d(&model_uniform.model);
+    let size = cw.window.inner_size();
+    let scale = cw.window.scale_factor();
+    let logical = position.to_logical::<f64>(scale);
+    hit_test(
+        glam::Vec2::new(logical.x as f32, logical.y as f32),
+        (size.width.max(1), size.height.max(1)),
+        ene_vrm::camera::DEFAULT_EYE.into(),
+        ene_vrm::camera::DEFAULT_TARGET.into(),
+        ene_vrm::camera::DEFAULT_UP.into(),
+        lo,
+        hi,
+        model_mat,
+    )
 }
 
 fn char_settings_hotkey_from_event(
