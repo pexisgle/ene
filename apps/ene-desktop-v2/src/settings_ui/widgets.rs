@@ -8,7 +8,7 @@ use crate::ai_bridge::AiBridge;
 use crate::character_state::AnimationControl;
 use crate::settings::{
     AntialiasingMode, CharacterSettings, ShadowQuality, cycle_antialiasing_mode,
-    cycle_shadow_quality, cycle_target_fps, target_fps_label,
+    cycle_mask_render_downsample, cycle_shadow_quality, cycle_target_fps, target_fps_label,
 };
 use std::sync::Arc;
 
