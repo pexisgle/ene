@@ -25,6 +25,9 @@ use glam::Vec3;
 use crate::character_state::{ActiveEmotion, EmotionQueue, transition_emotions};
 use crate::look_at::{LookAtState, compute_world_target};
 
+pub mod drag;
+pub use drag::CharacterDragState;
+
 /// Weight below which an active emotion is considered fully
 /// faded and can be discarded.
 const FADE_FLOOR: f32 = 0.01;
@@ -61,6 +64,9 @@ pub struct CharacterRenderer {
     /// back to zero after the hold elapses. `None` means the
     /// model is at its neutral state.
     active_emotion: Option<ActiveEmotion>,
+    /// PR4.3: drag state. `last_cursor_world_pos.is_some()` means
+    /// the user is currently dragging the character.
+    pub drag: CharacterDragState,
 }
 
 impl CharacterRenderer {
@@ -77,6 +83,7 @@ impl CharacterRenderer {
             default_vrm: Some(assets_dir.join(default_vrm)),
             look_at: LookAtState::default(),
             active_emotion: None,
+            drag: CharacterDragState::default(),
         }
     }
 
@@ -362,5 +369,18 @@ impl CharacterRenderer {
     #[allow(dead_code)] // One-shot diagnostic log only.
     pub fn model_aabb_dbg(&self) -> Option<([f32; 3], [f32; 3])> {
         self.model.as_ref().map(|m| m.aabb())
+    }
+
+    /// PR4.3: world-space AABB `(min, max)` of the loaded model
+    /// after the per-frame `ModelUniform` is applied. `None` if no
+    /// model is loaded. Reserved for the drag hit-test and future
+    /// click-through logic (PR5); the runtime currently computes
+    /// the AABB inline so the helper is not yet plumbed.
+    #[allow(dead_code)]
+    pub fn aabb_world(&self, model_uniform: &ModelUniform) -> Option<(Vec3, Vec3)> {
+        let model = self.model.as_ref()?;
+        let (lo, hi) = model.aabb();
+        let model_mat = glam::Mat4::from_cols_array_2d(&model_uniform.model);
+        Some(drag::transformed_aabb_bounds(lo, hi, model_mat))
     }
 }
