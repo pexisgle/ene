@@ -14,13 +14,76 @@
 //!   composes it from `CharacterState::character_position` +
 //!   `model_scale`, so the Character settings page X/Y/Z sliders
 //!   now move the model in world space.
+//! - **PR4.4**: bind group `(3)` carries the morph-target data
+//!   (storage + uniform). Primitives that define morph targets
+//!   get a per-primitive storage buffer (the position
+//!   displacements, already normalized by the loader) and a
+//!   uniform [`PrimitiveMorphMeta`] that the renderer fills
+//!   every frame from the model's global
+//!   `BTreeMap<ExpressionName, f32>` weight map. Primitives
+//!   without morph targets bind a shared dummy layout with
+//!   `target_count = 0`; the shader's `if (target_count > 0u)`
+//!   early-out makes the cost near zero. The slot index used
+//!   to look up weights is the **per-primitive local** index
+//!   (the position of the target in `PrimitiveMorphs::targets`)
+//!   — not a global name-flattened index — so the shader's
+//!   `weights[t / 4][t % 4]` lookup always matches the
+//!   corresponding row in the offsets storage buffer.
 //!
 //! The full MToon shader (rim / matcap / outline / emission) is a
 //! follow-up PR.
+use wgpu::util::DeviceExt;
+
 use crate::camera::{CameraUniform, ModelUniform, OrthographicCamera};
-use crate::model::{MeshVertex, VrmModel};
+use crate::expression::{PrimitiveMorphMeta, PrimitiveMorphs};
+use crate::model::VrmModel;
 
 const SHADER_SOURCE: &str = include_str!("shaders/mtoon_lite.wgsl");
+
+/// Per-primitive GPU resources backing the morph bind group.
+///
+/// One instance per primitive that has at least one morph target.
+/// Primitives without morphs share a single [`DummyMorphGpu`]
+/// installed on the renderer at construction time.
+struct MorphGpu {
+    /// `storage<read>` array of `vec3<f32>` (one entry per
+    /// `(target, vertex)` pair). Uploaded once at
+    /// [`VrmRenderer::new`] from the loader's normalized
+    /// displacement data.
+    #[allow(dead_code)]
+    offsets_buf: wgpu::Buffer,
+    /// Per-frame uniform that the renderer writes from the
+    /// model's global weight map. See [`PrimitiveMorphMeta`].
+    meta_buf: wgpu::Buffer,
+    /// Pre-built bind group combining `offsets_buf` and
+    /// `meta_buf`. Set as group `(3)` for every draw of the
+    /// owning primitive.
+    bind_group: wgpu::BindGroup,
+    /// Cached copy of the primitive's target count. Used by the
+    /// render loop to decide whether to re-pack the meta
+    /// uniform.
+    #[allow(dead_code)]
+    target_count: u32,
+    /// Cached copy of the primitive's vertex count. Same
+    /// purpose as `target_count`.
+    #[allow(dead_code)]
+    vertex_count: u32,
+}
+
+/// Shared dummy morph bind group used by every primitive without
+/// morph targets. Keeps the pipeline layout (which always
+/// declares group `(3)`) consistent without paying for per-
+/// primitive dummy storage allocations.
+struct DummyMorphGpu {
+    /// Single `vec4` storage entry. Never read by the shader
+    /// because the bound `meta_buf` has `target_count = 0`.
+    #[allow(dead_code)]
+    offsets_buf: wgpu::Buffer,
+    /// Meta uniform with `target_count = 0` and zero weights.
+    #[allow(dead_code)]
+    meta_buf: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
 
 /// Render pipeline + bind group layouts for one VRM model.
 ///
@@ -37,11 +100,26 @@ pub struct VrmRenderer {
     model_bind_group: wgpu::BindGroup,
     /// Render pipeline.
     pipeline: wgpu::RenderPipeline,
+    /// Dummy morph resources, bound for primitives that have no
+    /// morph targets.
+    dummy_morph: DummyMorphGpu,
+    /// Per-primitive morph GPU resources, aligned 1:1 with
+    /// the renderer's draw loop (mesh-major, then primitive-
+    /// within-mesh). `None` for primitives that have no
+    /// morph targets; the renderer binds `dummy_morph` in
+    /// that case.
+    morph_gpu: Vec<Option<MorphGpu>>,
+    /// Scratch `PrimitiveMorphMeta` reused every frame to
+    /// avoid a per-draw allocation. Default-initialised to
+    /// all zeros.
+    meta_scratch: PrimitiveMorphMeta,
 }
 
 impl VrmRenderer {
     /// Build a renderer for the given model. The model's
     /// base-color texture (if any) is bound at group `(2)`.
+    /// Morph-target data is bound at group `(3)` on a
+    /// per-primitive basis.
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -130,9 +208,43 @@ impl VrmRenderer {
                 })
             });
 
+        // PR4.4: group `(3)` — morph targets. The layout is
+        // shared by every per-primitive bind group and the
+        // dummy group.
+        let morph_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vrm.morph_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(PrimitiveMorphMeta::SIZE),
+                    },
+                    count: None,
+                },
+            ],
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("vrm.pipeline_layout"),
-            bind_group_layouts: &[Some(&camera_bgl), Some(&model_bgl), Some(&base_color_bgl)],
+            bind_group_layouts: &[
+                Some(&camera_bgl),
+                Some(&model_bgl),
+                Some(&base_color_bgl),
+                Some(&morph_bgl),
+            ],
             immediate_size: 0,
         });
 
@@ -148,7 +260,7 @@ impl VrmRenderer {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[MeshVertex::LAYOUT],
+                buffers: &[crate::model::MeshVertex::LAYOUT],
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -193,12 +305,35 @@ impl VrmRenderer {
             cache: None,
         });
 
+        // PR4.4: build the per-primitive morph GPU resources.
+        // The linear order matches the renderer's draw loop:
+        // mesh-major, then primitive-within-mesh, skipping any
+        // primitives that the loader dropped (e.g. non-triangle
+        // topology).
+        let mut morph_gpu: Vec<Option<MorphGpu>> = Vec::new();
+        for (idx, prim_morphs) in model.expressions().per_primitive.iter().enumerate() {
+            morph_gpu.push(
+                prim_morphs
+                    .as_ref()
+                    .map(|p| build_morph_gpu(device, &morph_bgl, p, idx)),
+            );
+        }
+
+        // Allocate a single dummy bind group used by every
+        // primitive without morph targets. The shader never
+        // reads from the storage buffer because the bound meta
+        // has `target_count = 0`.
+        let dummy_morph = build_dummy_morph_gpu(device, queue, &morph_bgl);
+
         Self {
             camera_buf,
             camera_bind_group,
             model_buf,
             model_bind_group,
             pipeline,
+            dummy_morph,
+            morph_gpu,
+            meta_scratch: PrimitiveMorphMeta::default(),
         }
     }
 
@@ -206,9 +341,10 @@ impl VrmRenderer {
     /// transform. `depth_view` is the depth attachment (must
     /// match the pipeline's `Depth32Float` format).
     ///
-    /// `queue` is used to upload the camera and model uniforms
-    /// before the render pass; the encoder is responsible for
-    /// the rest. `transparent` controls the clear color.
+    /// `queue` is used to upload the camera, model, and morph
+    /// uniforms before the render pass; the encoder is
+    /// responsible for the rest. `transparent` controls the
+    /// clear color.
     pub fn render(
         &self,
         queue: &wgpu::Queue,
@@ -237,6 +373,11 @@ impl VrmRenderer {
             }
         };
 
+        // PR4.4: each morph-capable primitive is rendered with
+        // its own pre-built bind group (group 3). The slot index
+        // used to look up weights is the **per-primitive local**
+        // index — see `upload_morph_meta` for the rationale.
+
         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("vrm.pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -264,15 +405,186 @@ impl VrmRenderer {
         rp.set_pipeline(&self.pipeline);
         rp.set_bind_group(0, &self.camera_bind_group, &[]);
         rp.set_bind_group(1, &self.model_bind_group, &[]);
+
+        let mut linear_index: usize = 0;
         for mesh in &model.meshes {
             for prim in &mesh.primitives {
                 if let Some(t) = &prim.base_color {
                     rp.set_bind_group(2, &t.bind_group, &[]);
                 }
+                if let Some(morph) = self.morph_gpu.get(linear_index).and_then(Option::as_ref) {
+                    if let Some(prim_morphs) = model
+                        .expressions()
+                        .per_primitive
+                        .get(linear_index)
+                        .and_then(Option::as_ref)
+                    {
+                        self.upload_morph_meta(queue, morph, prim_morphs, model);
+                    }
+                    rp.set_bind_group(3, &morph.bind_group, &[]);
+                } else {
+                    rp.set_bind_group(3, &self.dummy_morph.bind_group, &[]);
+                }
                 rp.set_vertex_buffer(0, prim.vertex_buf.slice(..));
                 rp.set_index_buffer(prim.index_buf.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(0..prim.index_count, 0, 0..1);
+                linear_index += 1;
             }
         }
+    }
+
+    /// Build the per-frame [`PrimitiveMorphMeta`] uniform for
+    /// `morph` from the model's global weight map and upload it.
+    ///
+    /// The slot index used to look up weights is the
+    /// **per-primitive local** index (the position of the
+    /// target in `prim_morphs.targets`) — not a model-wide
+    /// name-flattened index. The shader's `weights[t / 4][t % 4]`
+    /// layout mirrors that local order, and the offsets storage
+    /// buffer is filled in the same order at
+    /// [`build_morph_gpu`]. Anything past
+    /// `MAX_MORPH_TARGETS_PER_PRIMITIVE` is skipped (with a
+    /// warning) so a malformed model does not overwrite the
+    /// uniform header.
+    fn upload_morph_meta(
+        &self,
+        queue: &wgpu::Queue,
+        morph: &MorphGpu,
+        prim_morphs: &PrimitiveMorphs,
+        model: &VrmModel,
+    ) {
+        let mut meta = self.meta_scratch;
+        meta.vertex_count = morph.vertex_count;
+        meta.target_count = morph.target_count;
+        for (slot, target) in prim_morphs.targets.iter().enumerate() {
+            let slot = slot as u32;
+            if (slot as usize) >= crate::expression::MAX_MORPH_TARGETS_PER_PRIMITIVE {
+                tracing::warn!(
+                    "primitive {:?} has more than {} morph targets; the extras are ignored",
+                    prim_morphs.primitive_id,
+                    crate::expression::MAX_MORPH_TARGETS_PER_PRIMITIVE,
+                );
+                break;
+            }
+            let weight = model
+                .expressions()
+                .weights
+                .get(&target.name)
+                .copied()
+                .unwrap_or(0.0);
+            let vec4_idx = (slot / 4) as usize;
+            let comp = (slot % 4) as usize;
+            meta.weights[vec4_idx][comp] = weight;
+        }
+        queue.write_buffer(&morph.meta_buf, 0, bytemuck::bytes_of(&meta));
+    }
+}
+
+/// Build a one-shot morph bind group for a single primitive that
+/// has at least one morph target. The storage buffer is uploaded
+/// once with the loader's normalized displacement data; the meta
+/// uniform is rewritten every frame by
+/// [`VrmRenderer::upload_morph_meta`].
+///
+/// `bgl` is the shared morph bind group layout installed on the
+/// renderer (and on every other per-primitive bind group). All
+/// morph bind groups in the model share this layout so the
+/// pipeline layout only needs to reference it once.
+fn build_morph_gpu(
+    device: &wgpu::Device,
+    bgl: &wgpu::BindGroupLayout,
+    prim_morphs: &PrimitiveMorphs,
+    linear_index: usize,
+) -> MorphGpu {
+    // Pack the displacements as `vec4` entries so the GPU sees
+    // a 16-byte stride per element. WGSL's `vec3` in a storage
+    // buffer also has 16-byte alignment, so the shader-side
+    // `array<vec3<f32>>` indexing is correct; we just pad each
+    // entry with a 0 in `.w` to satisfy the alignment on the
+    // host side.
+    let total = prim_morphs.target_count as usize * prim_morphs.vertex_count as usize;
+    let mut offsets: Vec<[f32; 4]> = Vec::with_capacity(total);
+    for target in &prim_morphs.targets {
+        for v in &target.position_offsets {
+            offsets.push([v[0], v[1], v[2], 0.0]);
+        }
+    }
+    let offsets_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some(&format!("vrm.morph_offsets[{linear_index}]")),
+        contents: bytemuck::cast_slice(&offsets),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+
+    let meta_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(&format!("vrm.morph_meta[{linear_index}]")),
+        size: PrimitiveMorphMeta::SIZE,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(&format!("vrm.morph_bg[{linear_index}]")),
+        layout: bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: offsets_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: meta_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    MorphGpu {
+        offsets_buf,
+        meta_buf,
+        bind_group,
+        target_count: prim_morphs.target_count,
+        vertex_count: prim_morphs.vertex_count,
+    }
+}
+
+/// Shared dummy morph bind group for primitives without morph
+/// targets. The bound storage buffer is a single `vec4` of
+/// zeros; the bound meta has `target_count = 0` so the shader
+/// never indexes into it.
+fn build_dummy_morph_gpu(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    bgl: &wgpu::BindGroupLayout,
+) -> DummyMorphGpu {
+    let offsets_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("vrm.morph_offsets_dummy"),
+        contents: bytemuck::bytes_of(&[0.0f32; 4]),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+    let meta_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("vrm.morph_meta_dummy"),
+        size: PrimitiveMorphMeta::SIZE,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let zero_meta = PrimitiveMorphMeta::default();
+    queue.write_buffer(&meta_buf, 0, bytemuck::bytes_of(&zero_meta));
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("vrm.morph_bg_dummy"),
+        layout: bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: offsets_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: meta_buf.as_entire_binding(),
+            },
+        ],
+    });
+    DummyMorphGpu {
+        offsets_buf,
+        meta_buf,
+        bind_group,
     }
 }

@@ -17,3 +17,6 @@ assets/models/
 assets/schema/settings.schema.json
 assets/schema/character_settings.schema.json
 assets/schema/character.schema.json
+
+# Personal debug / inspection scripts (not part of the workspace)
+scripts/inspect_vrm/

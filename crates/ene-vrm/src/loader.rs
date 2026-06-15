@@ -40,6 +40,7 @@
 //!
 //! See `docs/architecture/wgpu-migration.md` §22.6 for the PR3
 //! status.
+use std::collections::HashMap;
 use std::path::Path;
 
 use base64::Engine as _;
@@ -48,6 +49,7 @@ use image::ImageReader;
 use wgpu::util::DeviceExt;
 
 use crate::error::{VrmError, VrmResult};
+use crate::expression::{ExpressionLayer, PrimitiveId, PrimitiveMorphs};
 use crate::model::{MeshVertex, Skeleton, VrmMesh, VrmModel, VrmPrimitive, VrmTexture};
 
 /// Target world-space size of the model along its longest axis
@@ -79,7 +81,9 @@ pub fn load_vrm(
         return Err(VrmError::NotVrm);
     }
 
-    let (mesh, aabb_min, aabb_max) = load_all_meshes(&gltf, device, queue)?;
+    let expression_names = resolve_expression_names(&gltf);
+    let (mesh, morph_per_primitive, (aabb_min, aabb_max)) =
+        load_all_meshes(&gltf, device, queue, &expression_names)?;
     let skeleton = load_first_skeleton(&gltf);
 
     for material in gltf.document.materials() {
@@ -91,7 +95,31 @@ pub fn load_vrm(
         }
     }
 
-    Ok(VrmModel::new(mesh, skeleton, aabb_min, aabb_max))
+    // PR4.4: Build the expression layer from the per-primitive
+    // morph target data collected during mesh load. Primitives
+    // without morphs already have `None` slots.
+    let expression_layer = ExpressionLayer::new(morph_per_primitive);
+    let expression_count: usize = expression_layer
+        .per_primitive
+        .iter()
+        .map(|p| p.as_ref().map(|m| m.targets.len()).unwrap_or(0))
+        .sum();
+    if expression_count > 0 {
+        tracing::info!(
+            "VRM {} loaded {} expression(s) across {} primitive(s)",
+            path.display(),
+            expression_layer.expression_names().len(),
+            expression_layer.morphic_primitive_count(),
+        );
+    }
+
+    Ok(VrmModel::new(
+        mesh,
+        skeleton,
+        aabb_min,
+        aabb_max,
+        expression_layer,
+    ))
 }
 
 /// Load every triangle-list primitive of every glTF `Mesh` in the
@@ -99,11 +127,25 @@ pub fn load_vrm(
 /// Each primitive gets its own vertex / index buffers and (when
 /// its material has one) its own base-color texture, so the body,
 /// clothes, face, hair, and accessories all render.
+///
+/// The third return value is the per-primitive morph-target data
+/// (PR4.4), aligned 1:1 with the linearized primitive list
+/// `(mesh_idx, prim_idx)`. The fourth and fifth are the
+/// post-normalize AABB `(min, max)`.
+///
+/// `expression_names` is the resolver map produced by
+/// [`resolve_expression_names`]; the loader uses it to rename
+/// each primitive's morph targets to the real VRMC_vrm
+/// expression name (e.g. `happy`, `sad`) instead of the
+/// synthetic `morph_target_<i>` fallback.
+type Aabb = ([f32; 3], [f32; 3]);
+
 fn load_all_meshes(
     gltf: &gltf::Gltf,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-) -> VrmResult<(Vec<VrmMesh>, [f32; 3], [f32; 3])> {
+    expression_names: &HashMap<(usize, usize, usize), String>,
+) -> VrmResult<(Vec<VrmMesh>, Vec<Option<PrimitiveMorphs>>, Aabb)> {
     // First pass: collect every triangle-list primitive's
     // positions across **all** glTF meshes so we can compute one
     // global AABB and apply a uniform normalize-scale. (A VRM
@@ -166,7 +208,16 @@ fn load_all_meshes(
     // its triangle-list primitives. The same `(center, scale)`
     // transform is applied to every vertex so the whole body
     // ends up centered on origin and bounded by the target size.
+    //
+    // PR4.4: also extract morph targets per primitive (position
+    // displacements only, normalised by `(center, scale)` so the
+    // GPU matches the vertex buffer's scale). The per-primitive
+    // morph data is stored in a parallel `Vec<Option<PrimitiveMorphs>>`
+    // aligned 1:1 with the final `VrmPrimitive` list (skipped
+    // primitives are recorded as `None` so the indices stay
+    // stable).
     let mut meshes = Vec::new();
+    let mut morph_per_primitive: Vec<Option<PrimitiveMorphs>> = Vec::new();
     for (mesh_idx, mesh) in gltf.document.meshes().enumerate() {
         let mut primitives = Vec::new();
         for (prim_idx, primitive) in mesh.primitives().enumerate() {
@@ -245,6 +296,21 @@ fn load_all_meshes(
                 }
             };
 
+            // PR4.4: extract morph targets BEFORE pushing the
+            // primitive, so the index lines up. The resolver from
+            // `resolve_expression_names` is used to map the
+            // synthetic slot index to the real VRMC_vrm
+            // expression name (e.g. `happy`, `sad`).
+            let morphs = load_primitive_morph_targets(
+                &primitive,
+                gltf,
+                positions.len(),
+                mesh_idx,
+                prim_idx,
+                expression_names,
+                scale,
+            );
+
             primitives.push(VrmPrimitive {
                 vertex_buf,
                 vertex_count: vertices.len() as u32,
@@ -252,9 +318,26 @@ fn load_all_meshes(
                 index_count: indices.len() as u32,
                 base_color,
             });
+            // Allocate a stable PrimitiveId based on the running
+            // count of successfully-loaded primitives. The
+            // renderer's draw loop will use the same ordering
+            // (mesh-major, primitive-within-mesh) to look up the
+            // matching morph data.
+            let pid = PrimitiveId(morph_per_primitive.len());
+            morph_per_primitive.push(
+                morphs.map(|raw| PrimitiveMorphs::from_targets(pid, vertices.len() as u32, raw)),
+            );
         }
         if primitives.is_empty() {
             tracing::debug!("VRM mesh[{mesh_idx}] has no renderable primitives; skipping");
+            // Drop the morph records we pushed for this empty
+            // mesh so the indices stay aligned with `VrmPrimitive`
+            // in `meshes`. PR3.x already had a
+            // `meshes.push(VrmMesh { ... })` only on the
+            // non-empty branch, so this matches that.
+            let dropped = mesh.primitives().count();
+            let new_len = morph_per_primitive.len().saturating_sub(dropped);
+            morph_per_primitive.truncate(new_len);
             continue;
         }
         meshes.push(VrmMesh { primitives });
@@ -281,7 +364,207 @@ fn load_all_meshes(
         (bb_max[1] - center[1]) * scale,
         (bb_max[2] - center[2]) * scale,
     ];
-    Ok((meshes, post_min, post_max))
+    Ok((meshes, morph_per_primitive, (post_min, post_max)))
+}
+
+/// Read every morph target on a single primitive and return the
+/// position displacements in normalized model space.
+///
+/// `expected_vertex_count` is the host primitive's vertex count;
+/// targets whose accessor is shorter are padded with zeros so the
+/// GPU storage buffer length is always
+/// `target_count * expected_vertex_count`.
+///
+/// Returns `Some(targets)` (with at least one entry) if the
+/// primitive defines morph targets; `None` otherwise. The
+/// `scale` matches the normalization the renderer's vertex
+/// buffer applied, so the resulting offsets can be summed
+/// directly with the base position in the vertex shader.
+#[allow(clippy::too_many_arguments)]
+fn load_primitive_morph_targets(
+    primitive: &gltf::Primitive,
+    gltf: &gltf::Gltf,
+    expected_vertex_count: usize,
+    mesh_idx: usize,
+    prim_idx: usize,
+    expression_names: &HashMap<(usize, usize, usize), String>,
+    scale: f32,
+) -> Option<Vec<(String, Vec<[f32; 3]>)>> {
+    let target_count = primitive.morph_targets().count();
+    if target_count == 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(target_count);
+    // Read all displacement data once. The `Reader` type is
+    // bound to the `gltf` lifetime so we cannot return it from
+    // this helper — instead we walk the iterator here.
+    let mut all_displacements: Vec<Vec<[f32; 3]>> = Vec::with_capacity(target_count);
+    for (positions, _normals, _tangents) in primitive
+        .reader(|_buffer| gltf.blob.as_deref())
+        .read_morph_targets()
+    {
+        let mut offsets = Vec::with_capacity(expected_vertex_count);
+        if let Some(positions) = positions {
+            for (i, p) in positions.enumerate() {
+                if i >= expected_vertex_count {
+                    break;
+                }
+                // Morph target POSITION is a per-vertex *delta*
+                // (not an absolute position), so it must be
+                // normalised by `scale` only — NOT by
+                // `(p - center) * scale` like the base positions
+                // are. Translating by `-center` adds a spurious
+                // shift equal to the model's centre, which makes
+                // weighted morphs drag the mesh toward the
+                // origin. Verified against the PR4.4 visual
+                // regression where "happy" slid the face down by
+                // ~0.9 normalised units.
+                offsets.push(normalize_morph_offset(p, scale));
+            }
+        }
+        // Pad with zeros if the accessor was shorter.
+        offsets.resize(expected_vertex_count, [0.0; 3]);
+        all_displacements.push(offsets);
+    }
+    // Pair each entry with the name. VRM 1.0 stores expression
+    // names in the `VRMC_vrm.expressions.{preset,custom}.<name>`
+    // ext tree — not on the morph target itself. The resolver
+    // `resolve_expression_names` walks that tree once and returns
+    // a `HashMap<(mesh_idx, prim_idx, target_idx), name>`. We
+    // look the name up here; when the resolver didn't find a
+    // matching bind (e.g. legacy VRM 0.x that has no
+    // VRMC_vrm.expressions block) we fall back to the synthetic
+    // name `morph_target_<i>` so the GPU buffers always get a
+    // name.
+    for (target_index, _json_target) in primitive.morph_targets().enumerate() {
+        let name = expression_names
+            .get(&(mesh_idx, prim_idx, target_index))
+            .cloned()
+            .unwrap_or_else(|| format!("morph_target_{target_index}"));
+        let offsets = all_displacements
+            .get(target_index)
+            .cloned()
+            .unwrap_or_else(|| vec![[0.0; 3]; expected_vertex_count]);
+        out.push((name, offsets));
+    }
+    Some(out)
+}
+
+/// Walk the `VRMC_vrm.expressions.{preset,custom}.<name>.morphTargetBinds`
+/// tree and return a `HashMap` keyed by
+/// `(mesh_idx, prim_idx, morph_target_idx)` whose values are the
+/// expression name.
+///
+/// VRM 1.0 puts expression names in the
+/// `VRMC_vrm.expressions.preset.<name>.morphTargetBinds[*]` and
+/// `.custom.<name>.morphTargetBinds[*]` JSON arrays (see
+/// <https://github.com/vrm-c/vrm-specification/blob/master/specification/VRMC_vrm-1.0/expressions.md>).
+/// Each bind has `{ node, index, weight }` referring to a
+/// `(glTF node, morph_target_index)` pair. The glTF `Mesh` the
+/// node points at gets that morph target bound to the named
+/// expression.
+///
+/// Per the spec the `index` is the morph target index "assuming
+/// all primitives have the same morphTarget" — so we apply the
+/// name to every primitive of the bound mesh. This matches the
+/// loader's flat-indexed `morph_per_primitive` layout.
+///
+/// Returns an empty map when the extension is missing (e.g. on
+/// VRM 0.x). The caller is then expected to fall back to the
+/// synthetic `morph_target_<i>` naming convention.
+fn resolve_expression_names(gltf: &gltf::Gltf) -> HashMap<(usize, usize, usize), String> {
+    let mut map: HashMap<(usize, usize, usize), String> = HashMap::new();
+
+    let Some(ext) = gltf.document.extensions() else {
+        return map;
+    };
+    let Some(vrm) = ext.get("VRMC_vrm") else {
+        return map;
+    };
+    let Some(expressions) = vrm.get("expressions") else {
+        return map;
+    };
+    let Some(expressions_obj) = expressions.as_object() else {
+        return map;
+    };
+
+    // Cache the (node_index, mesh_index) lookup so we do not
+    // re-walk `gltf.document.nodes()` once per bind. Built
+    // lazily on first use because most models have a few
+    // hundred nodes and the loop dominates when we have to
+    // re-walk.
+    let mut node_to_mesh: Vec<Option<usize>> = Vec::new();
+    let mut resolve_node_mesh = |node_idx: usize| -> Option<usize> {
+        if node_to_mesh.is_empty() {
+            // Pre-fill with `None` for every node so the
+            // `node_to_mesh.len()` check below stays correct
+            // when looking up nodes whose mesh slot has not
+            // been visited yet.
+            node_to_mesh = gltf
+                .document
+                .nodes()
+                .map(|n| n.mesh().map(|m| m.index()))
+                .collect();
+        }
+        node_to_mesh.get(node_idx).copied().flatten()
+    };
+
+    for (group_name, group) in expressions_obj {
+        if group_name != "preset" && group_name != "custom" {
+            continue;
+        }
+        let Some(exprs) = group.as_object() else {
+            continue;
+        };
+        for (name, expr) in exprs {
+            let Some(binds) = expr.get("morphTargetBinds").and_then(|b| b.as_array()) else {
+                continue;
+            };
+            for bind in binds {
+                let Some(node_idx) = bind
+                    .get("node")
+                    .and_then(|n| n.as_u64())
+                    .map(|n| n as usize)
+                else {
+                    continue;
+                };
+                let Some(target_idx) = bind
+                    .get("index")
+                    .and_then(|n| n.as_u64())
+                    .map(|n| n as usize)
+                else {
+                    continue;
+                };
+                let Some(mesh_idx) = resolve_node_mesh(node_idx) else {
+                    continue;
+                };
+                // Bind the name to every primitive of the mesh;
+                // see the doc comment for why.
+                let prim_count = gltf
+                    .document
+                    .meshes()
+                    .nth(mesh_idx)
+                    .map(|m| m.primitives().count())
+                    .unwrap_or(0);
+                for prim_idx in 0..prim_count {
+                    // Last write wins if the same (mesh, prim,
+                    // target) appears in multiple expressions —
+                    // VRM 1.0 says expressions are uniquely
+                    // named, but a malformed file with
+                    // overlapping binds should not panic.
+                    map.insert((mesh_idx, prim_idx, target_idx), name.clone());
+                }
+            }
+        }
+    }
+
+    if !map.is_empty() {
+        tracing::debug!(
+            "VRM {} expression bind(s) resolved from VRMC_vrm",
+            map.len()
+        );
+    }
+    map
 }
 
 fn load_first_skeleton(gltf: &gltf::Gltf) -> Skeleton {
@@ -460,7 +743,57 @@ fn load_image_data(
     })
 }
 
-impl VrmModel {
-    // `joint_count` is defined in `model.rs` alongside the rest of
-    // the public API.
+/// Map a raw glTF morph-target POSITION displacement into the
+/// renderer's normalised vertex space.
+///
+/// The vertex buffer is normalised as `(p - center) * scale`, but
+/// morph target POSITION is a per-vertex *delta* — so the linear
+/// transform collapses to `delta' = delta * scale`. Applying
+/// `-center` here was the PR4.4 visual-regression bug: a 0.5 m
+/// torso centre × a 1.5 / 0.8 ≈ 1.875 scale dragged the face
+/// down by ≈ 0.94 normalised units the moment any emotion weight
+/// went above zero.
+fn normalize_morph_offset(raw: [f32; 3], scale: f32) -> [f32; 3] {
+    [raw[0] * scale, raw[1] * scale, raw[2] * scale]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_morph_offset;
+
+    /// Regression for the PR4.4 face-shift bug. Earlier code did
+    /// `(p - center) * scale` for the morph delta, which added
+    /// `center * scale` to every vertex and dragged the face
+    /// down by ≈ 0.9 m the moment a weight became non-zero.
+    #[test]
+    fn morph_offset_is_not_translated_by_model_centre() {
+        // A typical Alicia-like setup: torso-centred model, longest
+        // extent 0.8 m, target 1.5 m.
+        let center = [0.0, 0.5, 0.0];
+        let scale = 1.5 / 0.8;
+        // A "happy" smile might add 2 cm to a mouth corner.
+        let raw = [0.0, 0.02, 0.01];
+        let out = normalize_morph_offset(raw, scale);
+        // Expected: `raw * scale` only — no `-center` term.
+        let expected = [0.0, 0.02 * scale, 0.01 * scale];
+        for i in 0..3 {
+            let diff = (out[i] - expected[i]).abs();
+            assert!(
+                diff < 1e-6,
+                "axis {i}: got {out:?}, expected {expected:?}, \
+                 centre * scale = {ys:?} (must NOT be subtracted)",
+                ys = [center[0] * scale, center[1] * scale, center[2] * scale],
+            );
+        }
+    }
+
+    #[test]
+    fn morph_offset_scales_linearly() {
+        // Doubling the raw delta must double the result.
+        let a = normalize_morph_offset([0.1, 0.0, -0.05], 0.5);
+        let b = normalize_morph_offset([0.2, 0.0, -0.10], 0.5);
+        for i in 0..3 {
+            assert!((a[i] * 2.0 - b[i]).abs() < 1e-6, "axis {i}");
+        }
+    }
 }

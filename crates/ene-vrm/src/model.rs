@@ -11,6 +11,8 @@ use std::num::NonZeroU64;
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
 
+use crate::expression::ExpressionLayer;
+
 /// A single mesh primitive loaded from the VRM. The PR3.1 loader
 /// extracts every primitive of the first mesh, so the body, the
 /// clothes, the face, etc. all end up here as separate
@@ -87,6 +89,10 @@ pub struct VrmModel {
     /// reading back the GPU vertex buffers.
     aabb_min: [f32; 3],
     aabb_max: [f32; 3],
+    /// Expression / blend-shape layer (PR4.4). `Default` for
+    /// models without morph targets; the renderer treats the
+    /// empty layer as a no-op.
+    pub expressions: ExpressionLayer,
 }
 
 impl VrmModel {
@@ -102,6 +108,20 @@ impl VrmModel {
         self.skeleton.inverse_bind.len()
     }
 
+    /// Borrow the expression layer. The runtime writes into
+    /// `expressions.weights` every frame; the renderer reads it.
+    pub fn expressions(&self) -> &ExpressionLayer {
+        &self.expressions
+    }
+
+    /// Mutable access to the expression layer. Used by
+    /// `CharacterRenderer::apply_emotions` in
+    /// `apps/ene-desktop-v2` to push the latest emotion weights
+    /// into the model.
+    pub fn expressions_mut(&mut self) -> &mut ExpressionLayer {
+        &mut self.expressions
+    }
+
     /// Construct a `VrmModel` from its already-built pieces plus
     /// the post-normalize AABB. Used by the loader.
     pub(crate) fn new(
@@ -109,12 +129,14 @@ impl VrmModel {
         skeleton: Skeleton,
         aabb_min: [f32; 3],
         aabb_max: [f32; 3],
+        expressions: ExpressionLayer,
     ) -> Self {
         Self {
             meshes,
             skeleton,
             aabb_min,
             aabb_max,
+            expressions,
         }
     }
 }

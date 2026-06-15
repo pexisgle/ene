@@ -11,16 +11,28 @@
 //! - Exposes [`CharacterRenderer::render`], which the
 //!   [`Runtime`](crate::runtime::Runtime) calls every frame from
 //!   `RedrawRequested`.
-//!
-//! PR4 will swap the hard-coded default for the user-selected
-//! character from `CharacterSettings::current_character()` and
-//! consume the `EmotionQueue` to drive morph targets.
+//! - PR4.4: drains due commands from the settings UI's
+//!   [`EmotionQueue`](crate::character_state::EmotionQueue) and
+//!   pushes the resulting weights into the loaded VRM. After the
+//!   active emotion's `hold_secs` elapses the renderer fades the
+//!   weight multiplicatively each frame until it drops below
+//!   `FADE_FLOOR`, then forgets it.
 use std::path::PathBuf;
 
-use ene_vrm::{ModelUniform, OrthographicCamera, VrmModel, VrmRenderer, load_vrm};
+use ene_vrm::{ExpressionName, ModelUniform, OrthographicCamera, VrmModel, VrmRenderer, load_vrm};
 use glam::Vec3;
 
+use crate::character_state::{ActiveEmotion, EmotionQueue, transition_emotions};
 use crate::look_at::{LookAtState, compute_world_target};
+
+/// Weight below which an active emotion is considered fully
+/// faded and can be discarded.
+const FADE_FLOOR: f32 = 0.01;
+
+/// Per-frame fade factor applied to the active emotion's
+/// weight once its `hold_secs` elapses. `0.9` means the weight
+/// decays to 1 % in ~44 frames (≈ 0.7 s at 60 fps).
+const FADE_RATE: f32 = 0.9;
 
 /// Owns the loaded [`VrmModel`] and its [`VrmRenderer`].
 ///
@@ -45,6 +57,10 @@ pub struct CharacterRenderer {
     default_vrm: Option<PathBuf>,
     /// PR4.2: cursor → smoothed world target state.
     look_at: LookAtState,
+    /// PR4.4: currently-applied emotion, used to fade the weight
+    /// back to zero after the hold elapses. `None` means the
+    /// model is at its neutral state.
+    active_emotion: Option<ActiveEmotion>,
 }
 
 impl CharacterRenderer {
@@ -60,6 +76,7 @@ impl CharacterRenderer {
             depth_size: (0, 0),
             default_vrm: Some(assets_dir.join(default_vrm)),
             look_at: LookAtState::default(),
+            active_emotion: None,
         }
     }
 
@@ -117,6 +134,58 @@ impl CharacterRenderer {
                 );
             }
         }
+    }
+
+    /// PR4.4: drain every due command from `queue`, push the
+    /// resulting weights into the loaded VRM, and fade the
+    /// active emotion back to zero once its `hold_secs` has
+    /// elapsed. Safe to call once per frame from
+    /// `Runtime::about_to_wait`; no-op if the model failed to
+    /// load.
+    ///
+    /// `now_secs` is the same clock used by
+    /// [`SettingsUi::started_at`](crate::settings_ui::SettingsUi::started_at)
+    /// — the runtime passes
+    /// `uw.settings_ui.started_at.elapsed().as_secs_f64()` so
+    /// queue timestamps and the fade clock stay in lock-step.
+    ///
+    /// The renderer's `active_emotion` is overwritten by every
+    /// new command of a different expression (last write wins);
+    /// the same-name case simply refreshes the hold window. This
+    /// matches the legacy `bevy_vrm1` "blend stack = single
+    /// emotion" behaviour and is sufficient for the AI bridge
+    /// and the manual-expression test buttons.
+    ///
+    /// **Important — weight clearing**: when a new emotion is
+    /// drained, the *previous* active emotion's weight is set to
+    /// `0.0` in the model's `ExpressionLayer` *before* the new
+    /// weight is written. Without this clear, a previous "happy"
+    /// weight would survive a click on "neutral" (which is not
+    /// a morph target) and keep squinting the eyes forever.
+    /// This was the source of the "every expression squints the
+    /// eyes" bug reported in the PR4.4 review. The actual
+    /// transition computation lives in
+    /// [`transition_emotions`](crate::character_state::transition_emotions)
+    /// so it can be unit-tested without a live `wgpu` device.
+    pub fn apply_emotions(&mut self, queue: &mut EmotionQueue, now_secs: f64) {
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+
+        let drained = queue.drain_due(now_secs);
+        let (new_active, updates) = transition_emotions(
+            &drained,
+            self.active_emotion.as_ref(),
+            now_secs,
+            FADE_RATE,
+            FADE_FLOOR,
+        );
+        for (name, weight) in updates {
+            model
+                .expressions_mut()
+                .set_expression(&ExpressionName::from(name.as_str()), weight);
+        }
+        self.active_emotion = new_active;
     }
 
     /// Update the depth texture to match the surface size. Call this

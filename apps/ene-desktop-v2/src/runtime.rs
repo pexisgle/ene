@@ -275,6 +275,7 @@ impl ApplicationHandler for Runtime {
                                 emotion: name,
                                 target_time: now_secs,
                                 hold_secs: 4.0,
+                                weight: 1.0,
                             });
                     }
                 }
@@ -288,6 +289,19 @@ impl ApplicationHandler for Runtime {
                 .map(|_| QuestionDraft::default())
                 .collect();
             self.state.settings.ui.pending_user_input = Some(pui);
+        }
+
+        // 1.5. PR4.4: drain the `EmotionQueue` and apply the
+        //      resulting weights to the loaded VRM. Uses the
+        //      same `started_at` clock as the `EmoteToken`
+        //      producer above so timestamps line up. The
+        //      renderer no-ops if the model failed to load.
+        if let Some(uw) = self.ui_window.as_mut() {
+            let now_secs = uw.settings_ui.started_at.elapsed().as_secs_f64();
+            let AppState {
+                ref mut character, ..
+            } = self.state;
+            character.apply_emotions(&mut uw.settings_ui.emotion_queue, now_secs);
         }
 
         // 2. Auto-save any settings that were marked dirty by UI

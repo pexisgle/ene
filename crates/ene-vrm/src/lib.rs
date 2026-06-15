@@ -29,6 +29,9 @@
 //!   `VrmModel` owns them.
 //! - [`model`] — public data types: [`VrmModel`], [`VrmMesh`],
 //!   [`VrmTexture`], [`Skeleton`].
+//! - [`expression`] — PR4.4 expression (blend-shape) layer.
+//!   Per-primitive morph targets and the global
+//!   `BTreeMap<ExpressionName, f32>` of weights.
 //! - [`renderer`] — wgpu render pipeline + bind group layouts that
 //!   can render a [`VrmModel`] into a `wgpu::TextureView`.
 //! - [`error`] — top-level error type.
@@ -37,12 +40,14 @@
 
 pub mod camera;
 pub mod error;
+pub mod expression;
 pub mod loader;
 pub mod model;
 pub mod renderer;
 
 pub use camera::{ModelUniform, OrthographicCamera};
 pub use error::{VrmError, VrmResult};
+pub use expression::{ExpressionLayer, ExpressionName, PrimitiveMorphMeta, PrimitiveMorphs};
 pub use loader::load_vrm;
 pub use model::{Skeleton, VrmMesh, VrmModel, VrmTexture};
 pub use renderer::VrmRenderer;

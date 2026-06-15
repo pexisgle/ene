@@ -8,6 +8,14 @@
 // between view-proj and the vertex position. The runtime composes
 // it from `CharacterState::character_position` + `model_scale`.
 //
+// PR4.4: bind group `(3)` carries the morph-target data for
+// primitives that have blend shapes. `morph_offsets` is a
+// `storage<read>` array of `vec3<f32>` laid out
+// `[target_idx * vertex_count + vertex_idx]`; `morph_meta` is
+// the per-primitive [`PrimitiveMorphMeta`] uniform (see
+// `expression.rs`). The vertex shader early-outs when
+// `target_count == 0u` so primitives without morphs pay no cost.
+//
 // Outline / rim / matcap / emission / shading-shift all live in
 // follow-up PRs (the full MToon material model).
 
@@ -32,6 +40,16 @@ struct ModelUniform {
     model: mat4x4<f32>,
 };
 
+const MAX_WEIGHT_SLOTS: u32 = 16u;
+
+struct MorphMeta {
+    vertex_count: u32,
+    target_count: u32,
+    _pad0: u32,
+    _pad1: u32,
+    weights: array<vec4<f32>, MAX_WEIGHT_SLOTS>,
+};
+
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;
 
@@ -43,10 +61,36 @@ var base_color_tex: texture_2d<f32>;
 @group(2) @binding(1)
 var base_color_smp: sampler;
 
+@group(3) @binding(0)
+var<storage, read> morph_offsets: array<vec3<f32>>;
+@group(3) @binding(1)
+var<uniform> morph_meta: MorphMeta;
+
 @vertex
-fn vs_main(in: VsIn) -> VsOut {
+fn vs_main(in: VsIn, @builtin(vertex_index) vidx: u32) -> VsOut {
     var out: VsOut;
-    let world_pos = model.model * vec4<f32>(in.position, 1.0);
+    var world_pos = model.model * vec4<f32>(in.position, 1.0);
+
+    // PR4.4: accumulate morph-target offsets. The `target_count`
+    // gate keeps the cost near zero on primitives that do not
+    // define morph targets (their bind group uses a dummy layout
+    // with `target_count = 0u`). The bound storage buffer is
+    // always at least one vec3 wide, so the array indexing is
+    // valid as long as we never enter the loop.
+    if (morph_meta.target_count > 0u) {
+        var morph_delta = vec3<f32>(0.0);
+        for (var t: u32 = 0u; t < morph_meta.target_count; t = t + 1u) {
+            let slot = t / 4u;
+            let comp = t % 4u;
+            let w = morph_meta.weights[slot][comp];
+            if (w != 0.0) {
+                let offset = morph_offsets[t * morph_meta.vertex_count + vidx];
+                morph_delta = morph_delta + offset * w;
+            }
+        }
+        world_pos = world_pos + vec4<f32>(morph_delta, 0.0);
+    }
+
     out.clip_pos = camera.view_proj * world_pos;
     out.uv = in.uv;
     out.world_pos = world_pos.xyz;
