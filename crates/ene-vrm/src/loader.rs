@@ -49,7 +49,9 @@ use image::ImageReader;
 use wgpu::util::DeviceExt;
 
 use crate::error::{VrmError, VrmResult};
-use crate::expression::{ExpressionLayer, PrimitiveId, PrimitiveMorphs};
+use crate::expression::{
+    ExpressionLayer, MAX_MORPH_TARGETS_PER_PRIMITIVE, PrimitiveId, PrimitiveMorphs,
+};
 use crate::model::{MeshVertex, Skeleton, VrmMesh, VrmModel, VrmPrimitive, VrmTexture};
 
 /// Target world-space size of the model along its longest axis
@@ -82,9 +84,30 @@ pub fn load_vrm(
     }
 
     let expression_names = resolve_expression_names(&gltf);
-    let (mesh, morph_per_primitive, (aabb_min, aabb_max)) =
+    let (mesh, morph_per_primitive, (aabb_min, aabb_max), has_nonzero_joints) =
         load_all_meshes(&gltf, device, queue, &expression_names)?;
-    let skeleton = load_first_skeleton(&gltf);
+    let skin_joint_to_node = load_skin_joint_to_node(&gltf);
+    let skeleton = load_first_skeleton(&gltf, &skin_joint_to_node);
+
+    // Issue #8: a model that defines no skin but whose
+    // primitives carry non-trivial `JOINTS_0` data is
+    // malformed (most likely a VRM 0.x file that lost its
+    // skin during export, or a hand-rolled glTF whose exporter
+    // wrote `JOINTS_0` without an `IBM`). The renderer
+    // currently falls back to a one-element
+    // `Mat4::IDENTITY` skin palette + `joints = [0, 0, 0, 0]`,
+    // which is a silent no-op: the per-vertex weighting looks
+    // like identity, but the model really wants
+    // skinning. Warn here so the user can re-export the model;
+    // PR5+ will promote this to a load-time error once the
+    // refactor lands a proper "load is malformed" channel.
+    if skeleton.joint_count() == 0 && has_nonzero_joints {
+        tracing::warn!(
+            "VRM {} has no skin but primitive(s) carry non-trivial JOINTS_0; \
+             skinning will fall back to identity. Re-export with VRMC_vrm 1.0 to fix.",
+            path.display()
+        );
+    }
 
     for material in gltf.document.materials() {
         if material.unlit() {
@@ -140,12 +163,19 @@ pub fn load_vrm(
 /// synthetic `morph_target_<i>` fallback.
 type Aabb = ([f32; 3], [f32; 3]);
 
+/// Aggregate return of [`load_all_meshes`]: the per-primitive
+/// mesh data, the parallel morph-target slot vector, the
+/// post-normalize AABB, and the "any primitive carries a
+/// non-trivial `JOINTS_0` accessor?" flag that powers the
+/// issue #8 malformed-skin warning.
+type LoadAllMeshesResult = (Vec<VrmMesh>, Vec<Option<PrimitiveMorphs>>, Aabb, bool);
+
 fn load_all_meshes(
     gltf: &gltf::Gltf,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     expression_names: &HashMap<(usize, usize, usize), String>,
-) -> VrmResult<(Vec<VrmMesh>, Vec<Option<PrimitiveMorphs>>, Aabb)> {
+) -> VrmResult<LoadAllMeshesResult> {
     // First pass: collect every triangle-list primitive's
     // positions across **all** glTF meshes so we can compute one
     // global AABB and apply a uniform normalize-scale. (A VRM
@@ -216,8 +246,17 @@ fn load_all_meshes(
     // aligned 1:1 with the final `VrmPrimitive` list (skipped
     // primitives are recorded as `None` so the indices stay
     // stable).
+    //
+    // Issue #8: we also track whether any primitive carries a
+    // non-trivial `JOINTS_0` (i.e. any index > 0). When
+    // combined with a missing skin (decided by the caller
+    // after `load_first_skeleton` runs) this signals a
+    // malformed model. The flag is returned alongside the
+    // mesh and morph data so the caller can log a single
+    // combined warning.
     let mut meshes = Vec::new();
     let mut morph_per_primitive: Vec<Option<PrimitiveMorphs>> = Vec::new();
+    let mut has_nonzero_joints = false;
     for (mesh_idx, mesh) in gltf.document.meshes().enumerate() {
         let mut primitives = Vec::new();
         for (prim_idx, primitive) in mesh.primitives().enumerate() {
@@ -247,6 +286,44 @@ fn load_all_meshes(
                 .read_tex_coords(0)
                 .map(|tc| tc.into_f32().collect())
                 .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
+            // PR4.5: per-vertex joints / weights. glTF stores
+            // `JOINTS_0` as a u8/u16 accessor and `WEIGHTS_0` as
+            // f32. When the primitive does not carry skinning
+            // data the defaults `[joints = [0,0,0,0],
+            // weights = [1,0,0,0]]` make the skinned shader
+            // reduce to `weights[0] * skin[0] * pos` and the
+            // renderer uploads a one-element `skin[]` of
+            // `Mat4::IDENTITY`.
+            //
+            // The gltf 1.4 `ReadJoints` enum exposes `into_u16`
+            // (which handles both u8 and u16 accessors uniformly
+            // via a `CastingIter`) — we promote the joint index
+            // to `u32` so 256+-joint humanoid models (per-finger
+            // bones, etc.) can address every joint. An earlier
+            // `[u8; 4]` representation silently aliased every
+            // joint >= 255 onto `skin_matrices[255]`, which
+            // stuck finger / wrist skinning to the same matrix.
+            let joints: Vec<[u32; 4]> = reader
+                .read_joints(0)
+                .map(|js| {
+                    js.into_u16()
+                        .map(|j| [j[0] as u32, j[1] as u32, j[2] as u32, j[3] as u32])
+                        .collect()
+                })
+                .unwrap_or_else(|| vec![[0, 0, 0, 0]; positions.len()]);
+            // Issue #8: detect malformed models that carry
+            // `JOINTS_0` indices without an accompanying skin.
+            // We only need one primitive with a non-zero index
+            // to flag the model — once a real skin lands the
+            // indices will be honoured and the warning will
+            // disappear.
+            if !has_nonzero_joints && joints.iter().any(|j| j.iter().any(|x| *x != 0)) {
+                has_nonzero_joints = true;
+            }
+            let weights: Vec<[f32; 4]> = reader
+                .read_weights(0)
+                .map(|ws| ws.into_f32().collect())
+                .unwrap_or_else(|| vec![[1.0, 0.0, 0.0, 0.0]; positions.len()]);
             let indices: Vec<u32> = match reader.read_indices() {
                 Some(i) => i.into_u32().collect(),
                 None => {
@@ -261,7 +338,12 @@ fn load_all_meshes(
             }
 
             let mut vertices = Vec::with_capacity(positions.len());
-            for ((pos, normal), uv) in positions.iter().zip(normals.iter()).zip(uvs.iter()) {
+            for (((pos, normal), uv), (joint, weight)) in positions
+                .iter()
+                .zip(normals.iter())
+                .zip(uvs.iter())
+                .zip(joints.iter().zip(weights.iter()))
+            {
                 vertices.push(MeshVertex {
                     position: [
                         (pos[0] - center[0]) * scale,
@@ -270,6 +352,8 @@ fn load_all_meshes(
                     ],
                     uv: *uv,
                     normal: *normal,
+                    joints: *joint,
+                    weights: *weight,
                 });
             }
 
@@ -364,7 +448,12 @@ fn load_all_meshes(
         (bb_max[1] - center[1]) * scale,
         (bb_max[2] - center[2]) * scale,
     ];
-    Ok((meshes, morph_per_primitive, (post_min, post_max)))
+    Ok((
+        meshes,
+        morph_per_primitive,
+        (post_min, post_max),
+        has_nonzero_joints,
+    ))
 }
 
 /// Read every morph target on a single primitive and return the
@@ -394,14 +483,33 @@ fn load_primitive_morph_targets(
     if target_count == 0 {
         return None;
     }
+    // Issue #6: enforce the per-primitive cap that the GPU
+    // uniform reserves (`MAX_WEIGHT_SLOTS * 4` = 64 weight
+    // slots). A model that ships more morph targets than the
+    // cap would silently overflow the `weights: array<vec4, 16>`
+    // uniform and the extras would never reach the GPU; we
+    // warn and truncate here so the user can see the issue and
+    // the bound uniform stays consistent.
+    if target_count > MAX_MORPH_TARGETS_PER_PRIMITIVE {
+        tracing::warn!(
+            "VRM mesh[{mesh_idx}].primitive[{prim_idx}] has {target_count} morph targets, \
+             capping at MAX_MORPH_TARGETS_PER_PRIMITIVE = {MAX_MORPH_TARGETS_PER_PRIMITIVE}; \
+             the extras will be dropped"
+        );
+    }
     let mut out = Vec::with_capacity(target_count);
     // Read all displacement data once. The `Reader` type is
     // bound to the `gltf` lifetime so we cannot return it from
-    // this helper — instead we walk the iterator here.
+    // this helper — instead we walk the iterator here. The
+    // `take` cap mirrors the warning above: any extras are
+    // dropped at both the storage-collection and the name-pair
+    // pass so the `out` vec never exceeds
+    // `MAX_MORPH_TARGETS_PER_PRIMITIVE`.
     let mut all_displacements: Vec<Vec<[f32; 3]>> = Vec::with_capacity(target_count);
     for (positions, _normals, _tangents) in primitive
         .reader(|_buffer| gltf.blob.as_deref())
         .read_morph_targets()
+        .take(MAX_MORPH_TARGETS_PER_PRIMITIVE)
     {
         let mut offsets = Vec::with_capacity(expected_vertex_count);
         if let Some(positions) = positions {
@@ -436,7 +544,11 @@ fn load_primitive_morph_targets(
     // VRMC_vrm.expressions block) we fall back to the synthetic
     // name `morph_target_<i>` so the GPU buffers always get a
     // name.
-    for (target_index, _json_target) in primitive.morph_targets().enumerate() {
+    for (target_index, _json_target) in primitive
+        .morph_targets()
+        .enumerate()
+        .take(MAX_MORPH_TARGETS_PER_PRIMITIVE)
+    {
         let name = expression_names
             .get(&(mesh_idx, prim_idx, target_index))
             .cloned()
@@ -567,7 +679,18 @@ fn resolve_expression_names(gltf: &gltf::Gltf) -> HashMap<(usize, usize, usize),
     map
 }
 
-fn load_first_skeleton(gltf: &gltf::Gltf) -> Skeleton {
+/// Walk `document.skins().next().joints()` and return the
+/// `(joint_index) -> glTF node_index` map the renderer will need
+/// to look up the humanoid bone per joint in Phase 2. Returns an
+/// empty vec for models with no skin.
+fn load_skin_joint_to_node(gltf: &gltf::Gltf) -> Vec<usize> {
+    let Some(skin) = gltf.document.skins().next() else {
+        return Vec::new();
+    };
+    skin.joints().map(|n| n.index()).collect()
+}
+
+fn load_first_skeleton(gltf: &gltf::Gltf, joint_to_node: &[usize]) -> Skeleton {
     let mut skel = Skeleton::default();
     let Some(skin) = gltf.document.skins().next() else {
         return skel;
@@ -575,6 +698,22 @@ fn load_first_skeleton(gltf: &gltf::Gltf) -> Skeleton {
     let reader = skin.reader(|_buffer| gltf.blob.as_deref());
     if let Some(ibm) = reader.read_inverse_bind_matrices() {
         skel.inverse_bind = ibm.map(|m| glam::Mat4::from_cols_array_2d(&m)).collect();
+        // Pre-compute the bind matrix `inverse_bind[i].inverse()`
+        // so the renderer can upload `skin_matrices[]` as
+        // `bind_matrices` for the rest-pose pass (Phase 1).
+        // `glam::Mat4::inverse` returns `Mat4::IDENTITY` for
+        // singular matrices so a malformed skin still produces
+        // a valid (if visually wrong) rest pose.
+        skel.bind_matrices = skel.inverse_bind.iter().map(|m| m.inverse()).collect();
+    }
+    // The `joint_to_node` list is `skin.joints()` and may be
+    // longer than the inverse_bind list when a model ships
+    // joints without bind matrices (rare but possible). Truncate
+    // to the IBM length so the two arrays stay aligned.
+    let ibm_len = skel.inverse_bind.len();
+    skel.joint_to_node = joint_to_node.iter().take(ibm_len).copied().collect();
+    if skel.joint_count() > 0 {
+        tracing::info!("VRM skeleton loaded: {} joints", skel.joint_count());
     }
     skel
 }
@@ -794,6 +933,89 @@ mod tests {
         let b = normalize_morph_offset([0.2, 0.0, -0.10], 0.5);
         for i in 0..3 {
             assert!((a[i] * 2.0 - b[i]).abs() < 1e-6, "axis {i}");
+        }
+    }
+
+    /// PR4.5: when the loader computes `bind_matrices` from
+    /// `inverse_bind`, the identity `bind * inverse_bind`
+    /// must hold at every joint (modulo float round-off).
+    /// This is the algebraic invariant the skinned shader
+    /// relies on at rest pose.
+    #[test]
+    fn bind_matrices_are_inverse_of_inverse_bind() {
+        // A non-trivial inverse-bind matrix (translation +
+        // uniform scale, the kind glTF exporters actually
+        // produce for humanoid bones).
+        let ibm = glam::Mat4::from_scale_rotation_translation(
+            glam::Vec3::splat(1.25),
+            glam::Quat::IDENTITY,
+            glam::Vec3::new(0.0, 1.2, 0.05),
+        );
+        let bind = ibm.inverse();
+        let product = bind * ibm;
+        // bind * inverse_bind should be the identity matrix.
+        let identity = glam::Mat4::IDENTITY;
+        for col in 0..4 {
+            for row in 0..4 {
+                let diff = (product.col(col)[row] - identity.col(col)[row]).abs();
+                assert!(
+                    diff < 1e-5,
+                    "bind * ibm at ({row}, {col}) = {}, expected identity",
+                    product.col(col)[row]
+                );
+            }
+        }
+    }
+
+    /// Issue #5: humanoid models with 256+ joints (e.g. every
+    /// per-finger bone) used to clamp `JOINTS_0` to `[u8; 4]`
+    /// and silently aliased every joint >= 255 onto
+    /// `skin_matrices[255]`, gluing finger / wrist skinning to
+    /// the same matrix. The `MeshVertex` is now `[u32; 4]` and
+    /// the `into_u16 → u32` cast in the loader preserves
+    /// indices up to 65535 — the full u16 range glTF allows.
+    #[test]
+    fn joints_preserve_indices_above_255() {
+        // Simulate the cast path the loader uses: read as u16,
+        // widen to u32, no clamp. A 512-joint model with a
+        // wrist + fingertip vertex exercises the upper half of
+        // the range.
+        let high_index: u16 = 511;
+        let joints: [u32; 4] = [high_index as u32, 0, 0, 0];
+        // The WGSL palette index is `u32` so a `Uint32x4`
+        // attribute is the only correct upload format. The
+        // `[u8; 4]` packing (PR4.5) would have saturated
+        // `511` to `255`.
+        assert_eq!(joints[0], 511);
+        // The cast path must not produce 0 / 255 by truncation.
+        assert_ne!(joints[0] as u8 as u32, 511);
+    }
+
+    /// Issue #8: the loader flags a malformed model as
+    /// "has_nonzero_joints" when any primitive carries a
+    /// non-trivial `JOINTS_0` accessor. The predicate is the
+    /// one the `load_all_meshes` body uses inline (it is not
+    /// pulled into a public function because the glTF
+    /// `ReadJoints` iterator is not `Clone`). This test
+    /// documents the contract: the model is malformed when
+    /// at least one vertex has any non-zero joint index.
+    #[test]
+    fn nonzero_joint_detector_trips_on_nontrivial_indices() {
+        // The four shapes `load_all_meshes` produces, plus the
+        // all-zero default.
+        let cases: Vec<([u32; 4], bool)> = vec![
+            ([0, 0, 0, 0], false),
+            ([1, 0, 0, 0], true),
+            ([0, 0, 0, 7], true),
+            ([12, 34, 56, 78], true),
+        ];
+        for (joints, expected) in cases {
+            let has = joints.iter().any(|x| *x != 0);
+            assert_eq!(
+                has, expected,
+                "joints {:?} should be flagged = {}",
+                joints, expected
+            );
         }
     }
 }

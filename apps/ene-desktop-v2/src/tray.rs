@@ -22,8 +22,10 @@
 use std::fs::File;
 use std::io::BufReader;
 
+#[cfg(target_os = "linux")]
+use tray_icon::TrayIcon;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tray_icon::{Icon, MouseButton, TrayIconBuilder, TrayIconEvent};
 
 use crate::events::{AppEvent, AppEventSender, TrayAction};
 

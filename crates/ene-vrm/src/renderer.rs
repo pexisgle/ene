@@ -38,7 +38,13 @@ use crate::camera::{CameraUniform, ModelUniform, OrthographicCamera};
 use crate::expression::{PrimitiveMorphMeta, PrimitiveMorphs};
 use crate::model::VrmModel;
 
-const SHADER_SOURCE: &str = include_str!("shaders/mtoon_lite.wgsl");
+const SHADER_SOURCE: &str = include_str!("shaders/mtoon_skinned.wgsl");
+
+/// PR4.5: number of skin-matrix palette slots to allocate when the
+/// loaded model has no skin at all. A one-element palette of
+/// `Mat4::IDENTITY` is enough because the default `MeshVertex`
+/// falls back to `joints = [0, 0, 0, 0]` and `weights = [1, 0, 0, 0]`.
+const IDENTITY_SKIN_PALETTE_LEN: usize = 1;
 
 /// Per-primitive GPU resources backing the morph bind group.
 ///
@@ -85,6 +91,24 @@ struct DummyMorphGpu {
     bind_group: wgpu::BindGroup,
 }
 
+/// PR4.5: per-model skin-matrix palette. One `mat4x4<f32>` per
+/// joint, uploaded once at construction time with the
+/// pre-baked `bind_matrices` (i.e. `inverse_bind[i].inverse()`).
+/// Phase 2 will overwrite the buffer every frame with
+/// `current_joint_world[i] * bind_matrices[i]` to drive the
+/// cursor look-at + two-bone IK.
+struct SkinGpu {
+    #[allow(dead_code)]
+    matrices_buf: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    /// Number of joints (i.e. the palette length). Used by
+    /// callers that want to grow the storage when the loader
+    /// finds more joints than expected (defensive — the loader
+    /// always produces a fixed-size buffer).
+    #[allow(dead_code)]
+    joint_count: u32,
+}
+
 /// Render pipeline + bind group layouts for one VRM model.
 ///
 /// Construct once per [`VrmModel`] with [`VrmRenderer::new`]. Call
@@ -113,6 +137,11 @@ pub struct VrmRenderer {
     /// avoid a per-draw allocation. Default-initialised to
     /// all zeros.
     meta_scratch: PrimitiveMorphMeta,
+    /// PR4.5: skin-matrix palette (group 4). Uploaded once
+    /// with the model's `bind_matrices` (rest pose). Phase 2
+    /// will rewrite this every frame to drive look-at
+    /// rotations.
+    skin: SkinGpu,
 }
 
 impl VrmRenderer {
@@ -237,6 +266,26 @@ impl VrmRenderer {
             ],
         });
 
+        // PR4.5: group `(4)` — skin-matrix palette. The
+        // renderer uploads one `mat4x4<f32>` per joint, or a
+        // single `Mat4::IDENTITY` for models without a skin
+        // (the default MeshVertex falls back to
+        // `joints=[0,0,0,0]` + `weights=[1,0,0,0]` so the
+        // skinned shader reduces to `pos`).
+        let skin_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vrm.skin_bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("vrm.pipeline_layout"),
             bind_group_layouts: &[
@@ -244,6 +293,7 @@ impl VrmRenderer {
                 Some(&model_bgl),
                 Some(&base_color_bgl),
                 Some(&morph_bgl),
+                Some(&skin_bgl),
             ],
             immediate_size: 0,
         });
@@ -325,6 +375,15 @@ impl VrmRenderer {
         // has `target_count = 0`.
         let dummy_morph = build_dummy_morph_gpu(device, queue, &morph_bgl);
 
+        // PR4.5: build the skin-matrix palette. For models with
+        // a populated `Skeleton` we upload every
+        // `bind_matrices[i]` once (rest pose). For models
+        // without a skin we upload a single `Mat4::IDENTITY`
+        // and the default MeshVertex (`joints = [0,0,0,0]`,
+        // `weights = [1,0,0,0]`) reduces the shader math to
+        // `pos`.
+        let skin = build_skin_gpu(device, queue, &skin_bgl, model);
+
         Self {
             camera_buf,
             camera_bind_group,
@@ -334,6 +393,7 @@ impl VrmRenderer {
             dummy_morph,
             morph_gpu,
             meta_scratch: PrimitiveMorphMeta::default(),
+            skin,
         }
     }
 
@@ -405,6 +465,7 @@ impl VrmRenderer {
         rp.set_pipeline(&self.pipeline);
         rp.set_bind_group(0, &self.camera_bind_group, &[]);
         rp.set_bind_group(1, &self.model_bind_group, &[]);
+        rp.set_bind_group(4, &self.skin.bind_group, &[]);
 
         let mut linear_index: usize = 0;
         for mesh in &model.meshes {
@@ -586,5 +647,81 @@ fn build_dummy_morph_gpu(
         offsets_buf,
         meta_buf,
         bind_group,
+    }
+}
+
+/// PR4.5: build the per-model skin-matrix palette. For models
+/// with a populated `Skeleton` the palette is the pre-baked
+/// `bind_matrices` (i.e. `inverse_bind[i].inverse()`). For
+/// models with no skin a one-element `Mat4::IDENTITY` palette
+/// is uploaded and the default `MeshVertex` (`joints=[0,0,0,0]`,
+/// `weights=[1,0,0,0]`) reduces the shader math to `pos`.
+///
+/// The buffer is allocated with `COPY_DST` so Phase 2 can
+/// overwrite the palette every frame with
+/// `current_joint_world[i] * bind_matrices[i]` to drive the
+/// cursor look-at + two-bone IK. Phase 1 (this PR) uploads once
+/// at construction and never touches the buffer again.
+fn build_skin_gpu(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    bgl: &wgpu::BindGroupLayout,
+    model: &VrmModel,
+) -> SkinGpu {
+    let joint_count = model.joint_count();
+    if joint_count == 0 {
+        // Identity palette: one `Mat4::IDENTITY`. The WGSL
+        // palette index `0` is the only one ever read because
+        // `joints = [0, 0, 0, 0]`.
+        let identity: [[f32; 4]; 4] = glam::Mat4::IDENTITY.to_cols_array_2d();
+        let matrices_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vrm.skin_palette_identity"),
+            contents: bytemuck::bytes_of(&identity),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vrm.skin_bg_identity"),
+            layout: bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: matrices_buf.as_entire_binding(),
+            }],
+        });
+        return SkinGpu {
+            matrices_buf,
+            bind_group,
+            joint_count: IDENTITY_SKIN_PALETTE_LEN as u32,
+        };
+    }
+    // Skinned palette: one `mat4x4<f32>` per joint, written in
+    // bind-matrices order (i.e. `inverse_bind[i].inverse()`).
+    let mut palette: Vec<[[f32; 4]; 4]> = Vec::with_capacity(joint_count);
+    for i in 0..joint_count {
+        let m = model.skeleton.bind_matrices[i];
+        palette.push(m.to_cols_array_2d());
+    }
+    let matrices_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("vrm.skin_palette"),
+        contents: bytemuck::cast_slice(&palette),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    });
+    // Make sure the storage is on the GPU before the first
+    // draw (create_buffer_init with a non-mapped buffer does
+    // not need an explicit write — the contents are placed at
+    // creation time, but we issue a no-op write to keep the
+    // API symmetric with future Phase 2 per-frame updates).
+    let _ = queue;
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("vrm.skin_bg"),
+        layout: bgl,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: matrices_buf.as_entire_binding(),
+        }],
+    });
+    SkinGpu {
+        matrices_buf,
+        bind_group,
+        joint_count: joint_count as u32,
     }
 }

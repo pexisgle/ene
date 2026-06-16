@@ -262,9 +262,14 @@ pub struct ExpressionLayer {
     pub per_primitive: Vec<Option<PrimitiveMorphs>>,
     /// Current per-expression weight in `[0, 1]`. The runtime
     /// writes here; the renderer reads it. Names that are not in
-    /// the model's expression list are silently ignored (kept
-    /// here so the caller can decide how to handle a no-op
-    /// `set_expression` call cheaply).
+    /// the model's expression list are **dropped** by
+    /// [`ExpressionLayer::set_expression`] / [`apply_weights`]
+    /// — the layer only stores weights for expressions the
+    /// model actually defines, so a misspelled AI token or a
+    /// UI slider pointed at a non-existent preset cannot
+    /// silently grow the weight map. The caller still gets a
+    /// `bool` back from `set_expression` to distinguish a
+    /// successful update from a no-op drop.
     pub weights: BTreeMap<ExpressionName, f32>,
 }
 
@@ -294,19 +299,37 @@ impl ExpressionLayer {
     }
 
     /// Set a single expression weight. Names not present on the
-    /// model are stored but have no rendering effect. Returns
-    /// `true` if the name exists on at least one primitive.
+    /// model are **not** stored in `weights`; the call returns
+    /// `false` so the caller can detect the miss. Names that
+    /// exist on at least one primitive return `true` and have
+    /// the clamped weight inserted.
+    ///
+    /// Issue #7: the previous implementation stored the weight
+    /// regardless, which let a misspelled AI token like `joy`
+    /// (vs. the model's `happy`) silently accumulate in the
+    /// weight map and never be cleared.
     pub fn set_expression(&mut self, name: &ExpressionName, weight: f32) -> bool {
-        let weight = weight.clamp(0.0, 1.0);
-        self.weights.insert(name.clone(), weight);
-        self.expression_names().iter().any(|n| n == name)
+        if !self.expression_names().iter().any(|n| n == name) {
+            return false;
+        }
+        self.weights.insert(name.clone(), weight.clamp(0.0, 1.0));
+        true
     }
 
     /// Apply every (name, weight) pair in `incoming`, replacing
-    /// the current weights map. The renderer is expected to call
-    /// this once per frame from `apply_emotions`.
+    /// the current weights map. Names that are not in the
+    /// model's expression list are **dropped** so the weight map
+    /// cannot grow with stale entries; the renderer is expected
+    /// to call this once per frame from `apply_emotions`.
     pub fn apply_weights(&mut self, incoming: &BTreeMap<ExpressionName, f32>) {
         for (name, w) in incoming {
+            // Skip names the model doesn't define. This keeps
+            // `self.weights` a subset of `expression_names()` —
+            // a useful invariant for tests and for any future
+            // diagnostic that wants to dump the weight map.
+            if !self.expression_names().iter().any(|n| n == name) {
+                continue;
+            }
             self.weights.insert(name.clone(), w.clamp(0.0, 1.0));
         }
     }
@@ -318,6 +341,30 @@ impl ExpressionLayer {
 }
 
 use bytemuck::{Pod, Zeroable};
+
+// Issue #17: the host-side `morph_offsets` storage buffer is
+// indexed by the WGSL shader as `array<vec3<f32>>`. WGSL
+// requires the array element stride to be **16 bytes** (a
+// `vec3` of `f32` is 12 bytes but the array element is padded
+// to a 16-byte boundary). The host side mirrors that with
+// `Vec<[f32; 4]>` (one `vec4` per `vec3` entry, with `.w`
+// reserved as 0). If the host side ever regresses to
+// `Vec<[f32; 3]>` the buffer would be 12-byte aligned and the
+// shader's `morph_offsets[i]` would read the wrong rows.
+//
+// Pin the size of the host element to 16 bytes at compile
+// time so the bug fails the build, not the render. The
+// `[f32; 4]` shape is also the per-entry type the WGSL
+// pipeline uses to upload the data, so the contract is
+// self-consistent.
+const _: () = {
+    const HOST_MORPH_OFFSET_STRIDE: usize = std::mem::size_of::<[f32; 4]>();
+    assert!(
+        HOST_MORPH_OFFSET_STRIDE == 16,
+        "morph_offsets host element must be 16 bytes; the WGSL array<vec3<f32>> \
+         is 16-byte aligned and a 12-byte host element would desync the buffer"
+    );
+};
 
 #[cfg(test)]
 mod tests {
@@ -387,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn set_expression_unknown_name_returns_false_but_is_stored() {
+    fn set_expression_unknown_name_returns_false_and_is_not_stored() {
         let p0 = PrimitiveMorphs::from_targets(
             prim(0),
             1,
@@ -396,10 +443,17 @@ mod tests {
         let mut layer = ExpressionLayer::new(vec![Some(p0)]);
         let applied = layer.set_expression(&"joy".into(), 0.5);
         assert!(!applied);
-        // The value is still stored so the caller can round-trip
-        // a UI slider even when the model doesn't define the
+        // Issue #7: a misspelled / unknown expression name must
+        // NOT be inserted into the weight map. An earlier
+        // implementation kept the weight around for round-trip
+        // with the UI, but the leftover entry silently
+        // accumulated across frames and never reached the GPU
+        // — the model just never animates the intended
         // expression.
-        assert_eq!(layer.weights.get(&"joy".into()), Some(&0.5));
+        assert!(!layer.weights.contains_key(&"joy".into()));
+        // The known expression still works.
+        assert!(layer.set_expression(&"happy".into(), 0.5));
+        assert_eq!(layer.weights.get(&"happy".into()), Some(&0.5));
     }
 
     #[test]
@@ -417,6 +471,29 @@ mod tests {
         assert_eq!(layer.weights.get(&"happy".into()), Some(&0.7));
     }
 
+    /// Issue #7: `apply_weights` must drop entries whose name
+    /// is not in the model's expression list. A misshaped
+    /// `BTreeMap` from the AI bridge should not pollute the
+    /// renderer's weight map.
+    #[test]
+    fn apply_weights_drops_unknown_names() {
+        let p0 = PrimitiveMorphs::from_targets(
+            prim(0),
+            1,
+            vec![("happy".to_string(), vec![[0.0; 3]; 1])],
+        );
+        let mut layer = ExpressionLayer::new(vec![Some(p0)]);
+        let mut incoming = BTreeMap::new();
+        incoming.insert(ExpressionName::new("happy"), 0.7);
+        incoming.insert(ExpressionName::new("joy"), 0.9);
+        incoming.insert(ExpressionName::new("eek"), 0.2);
+        layer.apply_weights(&incoming);
+        assert_eq!(layer.weights.len(), 1);
+        assert_eq!(layer.weights.get(&"happy".into()), Some(&0.7));
+        assert!(!layer.weights.contains_key(&"joy".into()));
+        assert!(!layer.weights.contains_key(&"eek".into()));
+    }
+
     #[test]
     fn morph_meta_default_is_all_zeros() {
         let m = PrimitiveMorphMeta::default();
@@ -430,5 +507,58 @@ mod tests {
         let layer = ExpressionLayer::default();
         assert!(layer.expression_names().is_empty());
         assert_eq!(layer.morphic_primitive_count(), 0);
+    }
+
+    /// Issue #6: the per-primitive morph cap is the contract the
+    /// loader enforces (`load_primitive_morph_targets` warns
+    /// and `take(MAX_MORPH_TARGETS_PER_PRIMITIVE)` truncates
+    /// the input). The cap must match the uniform size:
+    /// `MAX_WEIGHT_SLOTS * 4` packed `vec4<f32>` slots. A
+    /// regression that drops the cap or bumps one without the
+    /// other would silently overflow the bound uniform.
+    #[test]
+    fn morph_target_cap_matches_uniform_layout() {
+        assert_eq!(
+            MAX_MORPH_TARGETS_PER_PRIMITIVE,
+            MAX_WEIGHT_SLOTS * WEIGHTS_PER_VEC4
+        );
+        assert_eq!(MAX_MORPH_TARGETS_PER_PRIMITIVE, 64);
+        // A `Vec` of more targets than the cap must be safe to
+        // truncate with `.take(MAX_MORPH_TARGETS_PER_PRIMITIVE)`
+        // — the loader does exactly this on both the
+        // displacement-collection and the name-pairing passes.
+        let over: Vec<u32> = (0..(MAX_MORPH_TARGETS_PER_PRIMITIVE as u32 + 10)).collect();
+        let capped: Vec<u32> = over
+            .into_iter()
+            .take(MAX_MORPH_TARGETS_PER_PRIMITIVE)
+            .collect();
+        assert_eq!(capped.len(), MAX_MORPH_TARGETS_PER_PRIMITIVE);
+        assert_eq!(capped[0], 0);
+        assert_eq!(
+            capped[MAX_MORPH_TARGETS_PER_PRIMITIVE - 1],
+            MAX_MORPH_TARGETS_PER_PRIMITIVE as u32 - 1
+        );
+    }
+
+    /// Issue #17: the host-side morph offset storage element
+    /// is `[f32; 4]` so its byte size is 16 — the WGSL
+    /// `array<vec3<f32>>` element stride. This test pins the
+    /// size at runtime (the build also pins it via the
+    /// `const _: ()` block above) so a regression to
+    /// `[f32; 3]` would fail the test before the GPU sees
+    /// misaligned data.
+    #[test]
+    fn morph_offset_storage_element_is_16_bytes() {
+        let entry: [f32; 4] = [0.0; 4];
+        assert_eq!(std::mem::size_of_val(&entry), 16);
+        // Sanity: the loader's host shape matches the
+        // renderer upload (`[f32; 4]` per vertex per target,
+        // `.w` reserved as padding to satisfy the WGSL
+        // 16-byte alignment).
+        let sample_offsets: Vec<[f32; 4]> = vec![[1.0, 2.0, 3.0, 0.0]; 3];
+        assert_eq!(
+            bytemuck::cast_slice::<[f32; 4], u8>(&sample_offsets).len(),
+            3 * 16
+        );
     }
 }

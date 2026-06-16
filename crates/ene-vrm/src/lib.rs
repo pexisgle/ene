@@ -47,7 +47,10 @@ pub mod renderer;
 
 pub use camera::{ModelUniform, OrthographicCamera};
 pub use error::{VrmError, VrmResult};
-pub use expression::{ExpressionLayer, ExpressionName, PrimitiveMorphMeta, PrimitiveMorphs};
+pub use expression::{
+    ExpressionLayer, ExpressionName, MAX_MORPH_TARGETS_PER_PRIMITIVE, PrimitiveMorphMeta,
+    PrimitiveMorphs,
+};
 pub use loader::load_vrm;
 pub use model::{Skeleton, VrmMesh, VrmModel, VrmTexture};
 pub use renderer::VrmRenderer;
