@@ -560,7 +560,12 @@ impl Runtime {
                     .clamp(0.0, 0.1);
                 self.last_frame_instant = Some(now);
                 if let Some(cursor) = self.last_cursor_logical {
-                    let head_world = cs.character_position + glam::Vec3::new(0.0, 1.0, 0.0);
+                    // Issue #9: the head offset used to be a
+                    // magic number inline here; the constant
+                    // lives in `look_at::HEAD_OFFSET_Y` so
+                    // tuning the head's world height is a
+                    // single-file change.
+                    let head_world = crate::look_at::head_world_for(cs.character_position);
                     let viewport: (u32, u32) =
                         (cw.window.inner_size().width, cw.window.inner_size().height);
                     let _smoothed = character.update_look_at(

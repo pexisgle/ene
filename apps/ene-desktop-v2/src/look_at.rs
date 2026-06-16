@@ -40,6 +40,27 @@ const SMOOTHING_SPEED: f32 = 7.0;
 /// 1.8)`.
 const NEUTRAL_TARGET_Z: f32 = 1.8;
 
+/// Y offset (in world units) of the head above the character's
+/// origin. The legacy Bevy build hard-coded this as
+/// `glam::Vec3::new(0.0, 1.0, 0.0)` directly in
+/// `Runtime::RedrawRequested`; PR4.2 hoisted the look-at math
+/// into this module but left the magic number inline in the
+/// runtime. Centralising it here makes the value discoverable
+/// and easy to tune alongside [`NEUTRAL_TARGET_Z`].
+///
+/// The 1.0-metre value is an approximation of a humanoid head
+/// position above the model's pivot. A future PR will replace
+/// it with a bone-driven value sourced from the loaded
+/// humanoid registry.
+pub const HEAD_OFFSET_Y: f32 = 1.0;
+
+/// Build the world-space head position from a model's pivot.
+/// Mirrors `character_position + Vec3::new(0, HEAD_OFFSET_Y, 0)`
+/// in the runtime, but keeps the magic number in one place.
+pub fn head_world_for(pivot: Vec3) -> Vec3 {
+    pivot + Vec3::new(0.0, HEAD_OFFSET_Y, 0.0)
+}
+
 /// Convert a cursor position in window-logical pixels to normalized
 /// device coordinates, with the Y axis flipped (winit's origin is
 /// top-left, NDC's origin is bottom-left).
@@ -154,5 +175,34 @@ pub fn body_tracking_for_strength(strength: f32) -> BodyTracking {
         smoothing: 4.5 + 5.5 * s,
         output_smoothing: 6.5 + 7.5 * s,
         reference_depth: (1.20 + (1.0 - s) * 0.45).clamp(1.0, 1.8),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #9: `head_world_for` must offset the pivot by
+    /// exactly `HEAD_OFFSET_Y` on the Y axis and leave X / Z
+    /// untouched. The runtime used to inline
+    /// `character_position + glam::Vec3::new(0.0, 1.0, 0.0)`;
+    /// the helper is the single source of truth now.
+    #[test]
+    fn head_world_for_offsets_y_only() {
+        let pivot = Vec3::new(-1.5, 0.0, 2.25);
+        let head = head_world_for(pivot);
+        assert_eq!(head.x, pivot.x);
+        assert_eq!(head.z, pivot.z);
+        assert_eq!(head.y, HEAD_OFFSET_Y);
+    }
+
+    /// Sanity: the constant is the expected 1.0 m so the
+    /// runtime regression test (which uses a fixed head
+    /// position) keeps producing the same look-at target.
+    /// Bumping this is a deliberate decision; the test
+    /// forces anyone changing it to update the comment.
+    #[test]
+    fn head_offset_y_constant_is_documented() {
+        assert_eq!(HEAD_OFFSET_Y, 1.0);
     }
 }
