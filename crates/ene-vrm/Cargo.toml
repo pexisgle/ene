@@ -23,3 +23,26 @@ glam = { workspace = true }
 bytemuck = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+# PR4.8: hand-rolled JSON parse of the
+# `VRMC_vrm.lookAt` block. The runtime walks the
+# `serde_json::Value` tree produced by the `gltf`
+# crate's `Document::extensions()` accessor; pulling in
+# `serde_json` directly is the path of least resistance
+# (the alternative — write our own JSON walker — would
+# be hundreds of lines for negligible benefit). The
+# `gltf` crate already pulls in `serde_json` transitively
+# so this is a one-line Cargo.toml change with no
+# additional binary weight.
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# PR4.8: tests for `load_look_at` build a minimal glTF
+# document with a `VRMC_vrm.lookAt` block. The runtime
+# parser is hand-rolled, but the test fixture needs a
+# JSON serializer to round-trip the block through the
+# `gltf::Gltf::from_slice` path. `serde_json` is also a
+# regular dep (the lib consumes the parsed JSON values
+# via `serde_json::Value`); listed under dev-dependencies
+# so the test-only `json!` macro usage is documented.
+serde_json = { workspace = true }

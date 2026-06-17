@@ -4345,6 +4345,7 @@ dependencies = [
  "glam 0.33.1",
  "gltf",
  "image",
+ "serde_json",
  "thiserror 2.0.18",
  "tracing",
  "wgpu 29.0.3",

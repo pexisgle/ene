@@ -32,6 +32,14 @@
 //! - [`expression`] — PR4.4 expression (blend-shape) layer.
 //!   Per-primitive morph targets and the global
 //!   `BTreeMap<ExpressionName, f32>` of weights.
+//! - [`humanoid`] — PR4.7 humanoid bone registry. Maps the
+//!   spec's 55 bone names to glTF `Node` indices and
+//!   per-bone rest transforms.
+//! - [`look_at`] — PR4.8 look-at properties (range map +
+//!   type discriminator) and the per-frame
+//!   `(head_world, target_world) → (yaw, pitch)` evaluator.
+//!   Produces per-bone deltas for `"bone"`-type models and
+//!   morph weights for `"expression"`-type models.
 //! - [`renderer`] — wgpu render pipeline + bind group layouts that
 //!   can render a [`VrmModel`] into a `wgpu::TextureView`.
 //! - [`error`] — top-level error type.
@@ -43,6 +51,7 @@ pub mod error;
 pub mod expression;
 pub mod humanoid;
 pub mod loader;
+pub mod look_at;
 pub mod model;
 pub mod renderer;
 
@@ -57,6 +66,10 @@ pub use humanoid::{
     canonicalize_bone_name, load_humanoid_bones,
 };
 pub use loader::load_vrm;
+pub use look_at::{
+    LookAtBoneDelta, LookAtBoneOutput, LookAtDirection, LookAtEvaluator, LookAtExpressionOutput,
+    LookAtOutput, LookAtProperties, LookAtRangeMap, LookAtRangeMapSet, LookAtType, load_look_at,
+};
 pub use model::{Skeleton, VrmMesh, VrmModel, VrmTexture};
 pub use renderer::VrmRenderer;
 

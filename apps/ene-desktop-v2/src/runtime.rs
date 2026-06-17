@@ -560,18 +560,24 @@ impl Runtime {
                     .clamp(0.0, 0.1);
                 self.last_frame_instant = Some(now);
                 if let Some(cursor) = self.last_cursor_logical {
-                    // Issue #9: the head offset used to be a
-                    // magic number inline here; the constant
-                    // lives in `look_at::HEAD_OFFSET_Y` so
-                    // tuning the head's world height is a
-                    // single-file change.
-                    let head_world = crate::look_at::head_world_for(cs.character_position);
+                    // PR4.8: the renderer reads the humanoid
+                    // registry's `head` bone (when present) to
+                    // derive the head world position. The
+                    // runtime no longer pre-computes
+                    // `head_world_for(...)` — that helper
+                    // stayed as the fallback for models
+                    // without humanoid metadata. We pass the
+                    // model pivot + scale instead so the
+                    // renderer can scale the bone's rest
+                    // translation by `model_scale` and add
+                    // the character position.
                     let viewport: (u32, u32) =
                         (cw.window.inner_size().width, cw.window.inner_size().height);
                     let _smoothed = character.update_look_at(
                         glam::Vec2::new(cursor.x as f32, cursor.y as f32),
                         viewport,
-                        head_world,
+                        cs.character_position,
+                        cs.model_scale,
                         cs.look_at_strength,
                         dt_secs,
                     );
