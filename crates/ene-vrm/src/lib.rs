@@ -40,6 +40,10 @@
 //!   `(head_world, target_world) → (yaw, pitch)` evaluator.
 //!   Produces per-bone deltas for `"bone"`-type models and
 //!   morph weights for `"expression"`-type models.
+//! - [`expression_override`] — PR4.9 expression override
+//!   semantics (`isBinary`, `overrideMouth/Blink/LookAt`).
+//!   The per-frame override evaluator applies the spec's
+//!   `block` / `blend` rules to procedural targets.
 //! - [`renderer`] — wgpu render pipeline + bind group layouts that
 //!   can render a [`VrmModel`] into a `wgpu::TextureView`.
 //! - [`error`] — top-level error type.
@@ -49,6 +53,7 @@
 pub mod camera;
 pub mod error;
 pub mod expression;
+pub mod expression_override;
 pub mod humanoid;
 pub mod loader;
 pub mod look_at;
@@ -60,6 +65,11 @@ pub use error::{VrmError, VrmResult};
 pub use expression::{
     ExpressionLayer, ExpressionName, MAX_MORPH_TARGETS_PER_PRIMITIVE, PrimitiveMorphMeta,
     PrimitiveMorphs,
+};
+pub use expression_override::{
+    BLINK_TARGET_NAMES, ExpressionDefinition, ExpressionOverrideSettings, ExpressionOverrideType,
+    GAZE_TARGET_NAMES, MOUTH_TARGET_NAMES, apply_overrides, is_procedural,
+    load_expression_overrides,
 };
 pub use humanoid::{
     BoneRestTransform, HUMANOID_BONE_NAMES, HumanoidBoneEntry, HumanoidBoneRegistry, VrmBone,

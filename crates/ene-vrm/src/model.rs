@@ -12,6 +12,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
 
 use crate::expression::ExpressionLayer;
+use crate::expression_override::ExpressionDefinition;
 use crate::humanoid::HumanoidBoneRegistry;
 use crate::look_at::LookAtProperties;
 
@@ -132,6 +133,13 @@ pub struct VrmModel {
     /// still gets the spec-default 90→10 range map and
     /// `"bone"` consumer type.
     pub look_at: Option<LookAtProperties>,
+    /// Per-expression override definitions (PR4.9).
+    /// Parsed from the `VRMC_vrm.expressions.{preset,custom}.<name>`
+    /// tree — `isBinary`, `overrideMouth`, `overrideBlink`,
+    /// `overrideLookAt`. Empty for models without the
+    /// `VRMC_vrm.expressions` block, in which case the
+    /// override pass is a no-op.
+    pub expressions_meta: Vec<ExpressionDefinition>,
 }
 
 impl VrmModel {
@@ -180,6 +188,7 @@ impl VrmModel {
         expressions: ExpressionLayer,
         humanoid: HumanoidBoneRegistry,
         look_at: Option<LookAtProperties>,
+        expressions_meta: Vec<ExpressionDefinition>,
     ) -> Self {
         Self {
             meshes,
@@ -189,6 +198,7 @@ impl VrmModel {
             expressions,
             humanoid,
             look_at,
+            expressions_meta,
         }
     }
 }

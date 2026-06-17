@@ -52,6 +52,7 @@ use crate::error::{VrmError, VrmResult};
 use crate::expression::{
     ExpressionLayer, MAX_MORPH_TARGETS_PER_PRIMITIVE, PrimitiveId, PrimitiveMorphs,
 };
+use crate::expression_override;
 use crate::humanoid;
 use crate::look_at;
 use crate::model::{MeshVertex, Skeleton, VrmMesh, VrmModel, VrmPrimitive, VrmTexture};
@@ -161,6 +162,19 @@ pub fn load_vrm(
         );
     }
 
+    // PR4.9: parse per-expression override settings from the
+    // `VRMC_vrm.expressions.{preset,custom}.<name>` tree.
+    // Empty for models without the block, in which case the
+    // per-frame override pass is a no-op.
+    let expressions_meta = expression_override::load_expression_overrides(&gltf);
+    if !expressions_meta.is_empty() {
+        tracing::info!(
+            "VRM {} {} expression definition(s) with override metadata",
+            path.display(),
+            expressions_meta.len(),
+        );
+    }
+
     Ok(VrmModel::new(
         mesh,
         skeleton,
@@ -169,6 +183,7 @@ pub fn load_vrm(
         expression_layer,
         humanoid,
         look_at,
+        expressions_meta,
     ))
 }
 

@@ -202,6 +202,14 @@ impl CharacterRenderer {
                 .expressions_mut()
                 .set_expression(&ExpressionName::from(name.as_str()), weight);
         }
+        // PR4.9: evaluate override semantics after writing
+        // the raw per-frame weights. This ensures `happy`
+        // with `overrideBlink=block` suppresses blink, and
+        // `isBinary` expressions are clamped to 0/1.
+        {
+            let meta = model.expressions_meta.clone();
+            model.expressions_mut().apply_overrides(&meta);
+        }
         self.active_emotion = new_active;
     }
 
@@ -385,6 +393,16 @@ impl CharacterRenderer {
         //    `ExpressionLayer`; for `"bone"`-type models
         //    it is stashed for the next skinning palette
         //    pass to consume.
+        //
+        //    Clone the expression metadata before mutating
+        //    `expressions_mut()` so the borrow checker stays
+        //    happy (a typical model has ~30 definitions,
+        //    ~60 bytes each — cheap to clone).
+        let expressions_meta = self
+            .model
+            .as_ref()
+            .map(|m| m.expressions_meta.clone())
+            .unwrap_or_default();
         let evaluator = LookAtEvaluator::new(&props);
         match evaluator.evaluate(head_world, smoothed_target, head_rest_rotation) {
             LookAtOutput::Expression(e) => {
@@ -394,6 +412,17 @@ impl CharacterRenderer {
                     layer.set_expression(&ExpressionName::new("lookDown"), e.look_down);
                     layer.set_expression(&ExpressionName::new("lookLeft"), e.look_left);
                     layer.set_expression(&ExpressionName::new("lookRight"), e.look_right);
+                    // PR4.9: evaluate override semantics
+                    // after writing the gaze weights.
+                    // This ensures `happy` with
+                    // `overrideLookAt=block` suppresses
+                    // the look-at gaze when the model is
+                    // expressing happy. The same
+                    // `expressions_meta` clone is used
+                    // here (the `apply_emotions` call
+                    // earlier in the frame writes emotion
+                    // weights — overrides apply to both).
+                    layer.apply_overrides(&expressions_meta);
                 }
                 // Clear any stale bone output (the model
                 // toggled type at runtime, e.g. via a
