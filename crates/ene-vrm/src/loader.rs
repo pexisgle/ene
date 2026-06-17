@@ -57,6 +57,7 @@ use crate::humanoid;
 use crate::look_at;
 use crate::model::{AlphaMode, MeshVertex, Skeleton, VrmMesh, VrmModel, VrmPrimitive, VrmTexture};
 use crate::node_constraint;
+use crate::spring_bone;
 
 /// Target world-space size of the model along its longest axis
 /// after PR3.1's per-vertex normalization. The legacy Bevy
@@ -184,6 +185,19 @@ pub fn load_vrm(
     // node. Empty for models without the extension.
     let node_constraints = node_constraint::load_node_constraints(&gltf);
 
+    // Issue #13: parse `VRMC_springBone` from the glTF root
+    // extensions. `None` for models without the extension.
+    let spring_bones = spring_bone::load_spring_bones(&gltf);
+    if let Some(ref sb) = spring_bones {
+        tracing::info!(
+            "VRM {} springBone: {} collider(s), {} group(s), {} chain(s)",
+            path.display(),
+            sb.colliders.len(),
+            sb.collider_groups.len(),
+            sb.springs.len(),
+        );
+    }
+
     Ok(VrmModel::new(
         mesh,
         skeleton,
@@ -194,6 +208,7 @@ pub fn load_vrm(
         look_at,
         expressions_meta,
         node_constraints,
+        spring_bones,
     ))
 }
 
