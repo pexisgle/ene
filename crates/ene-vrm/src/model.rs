@@ -15,6 +15,7 @@ use crate::expression::ExpressionLayer;
 use crate::expression_override::ExpressionDefinition;
 use crate::humanoid::HumanoidBoneRegistry;
 use crate::look_at::LookAtProperties;
+use crate::mtoon::{MToonGpuTextures, MToonMaterial};
 use crate::node_constraint::NodeConstraintRegistry;
 use crate::spring_bone::SpringBoneProperties;
 
@@ -44,6 +45,15 @@ pub struct VrmPrimitive {
     /// `KHR_materials_unlit`. Unlit primitives skip all lighting
     /// in the fragment shader and output the base color directly.
     pub unlit: bool,
+    /// PR4.15: parsed `VRMC_materials_mtoon` parameters. `None`
+    /// for materials without the extension (the renderer falls
+    /// back to the half-Lambert lite shader in that case).
+    pub mtoon: Option<MToonMaterial>,
+    /// PR4.15: GPU textures for MToon (shade multiply, shading
+    /// shift, emissive, matcap, rim multiply, outline width,
+    /// UV animation mask). `None` when the material has no MToon
+    /// extension or no MToon textures.
+    pub mtoon_textures: Option<MToonGpuTextures>,
 }
 
 /// Alpha blending mode of a primitive's material, parsed from

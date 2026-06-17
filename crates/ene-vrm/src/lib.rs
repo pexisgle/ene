@@ -59,6 +59,7 @@ pub mod humanoid;
 pub mod loader;
 pub mod look_at;
 pub mod model;
+pub mod mtoon;
 pub mod node_constraint;
 pub mod renderer;
 pub mod spring_bone;
@@ -89,6 +90,10 @@ pub use look_at::{
     LookAtOutput, LookAtProperties, LookAtRangeMap, LookAtRangeMapSet, LookAtType, load_look_at,
 };
 pub use model::{AlphaMode, Skeleton, VrmMesh, VrmModel, VrmTexture};
+pub use mtoon::{
+    MToonGpuTextures, MToonMaterial, MToonTextureRef, MToonUniform, OutlineWidthMode, flags,
+    load_mtoon_materials, texture_flags,
+};
 pub use node_constraint::{
     AimAxis, ConstraintEntry, NodeConstraint, NodeConstraintRegistry, RollAxis,
     load_node_constraints,
