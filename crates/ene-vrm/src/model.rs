@@ -34,6 +34,43 @@ pub struct VrmPrimitive {
     /// Base-color texture for this primitive, if its material has
     /// one. `None` falls back to a flat color in the shader.
     pub base_color: Option<VrmTexture>,
+    /// Alpha blending mode parsed from the glTF material's
+    /// `alphaMode`. Controls draw order and pipeline selection
+    /// in the renderer.
+    pub alpha_mode: AlphaMode,
+}
+
+/// Alpha blending mode of a primitive's material, parsed from
+/// glTF `material.alphaMode`. Controls draw order and pipeline
+/// selection in the renderer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum AlphaMode {
+    /// Opaque surface — depth write enabled, no blending.
+    #[default]
+    Opaque,
+    /// Alpha cutout — depth write enabled, alpha test in shader.
+    /// Currently rendered with the same pipeline as
+    /// [`AlphaMode::Opaque`] (the alpha-test shader variant is a
+    /// follow-up PR).
+    Mask,
+    /// Transparent blend — depth write disabled,
+    /// pre-multiplied alpha blending. Drawn after opaque/mask
+    /// primitives so the depth buffer is already filled.
+    Blend,
+}
+
+impl AlphaMode {
+    /// Render phase index for draw-ordering.
+    ///
+    /// - `0` — opaque / mask (depth write on, drawn first).
+    /// - `1` — blend (depth write off, drawn after opaque).
+    #[inline]
+    pub fn render_phase(self) -> u8 {
+        match self {
+            Self::Opaque | Self::Mask => 0,
+            Self::Blend => 1,
+        }
+    }
 }
 
 /// A single glTF mesh object, as a list of primitives. PR3.3 loads
