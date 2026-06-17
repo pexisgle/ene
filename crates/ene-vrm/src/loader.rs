@@ -112,13 +112,17 @@ pub fn load_vrm(
         );
     }
 
-    for material in gltf.document.materials() {
-        if material.unlit() {
-            tracing::info!(
-                "VRM {} uses KHR_materials_unlit; PR3 shader ignores the flag",
-                path.display()
-            );
-        }
+    let unlit_count: usize = mesh
+        .iter()
+        .flat_map(|m| m.primitives.iter())
+        .filter(|p| p.unlit)
+        .count();
+    if unlit_count > 0 {
+        tracing::info!(
+            "VRM {} has {} unlit primitive(s) (KHR_materials_unlit)",
+            path.display(),
+            unlit_count,
+        );
     }
 
     // PR4.4: Build the expression layer from the per-primitive
@@ -443,6 +447,8 @@ fn load_all_meshes(
                 gltf::material::AlphaMode::Blend => AlphaMode::Blend,
             };
 
+            let unlit = primitive.material().unlit();
+
             primitives.push(VrmPrimitive {
                 vertex_buf,
                 vertex_count: vertices.len() as u32,
@@ -450,6 +456,7 @@ fn load_all_meshes(
                 index_count: indices.len() as u32,
                 base_color,
                 alpha_mode,
+                unlit,
             });
             // Allocate a stable PrimitiveId based on the running
             // count of successfully-loaded primitives. The

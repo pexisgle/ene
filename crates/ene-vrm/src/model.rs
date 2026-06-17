@@ -38,6 +38,10 @@ pub struct VrmPrimitive {
     /// `alphaMode`. Controls draw order and pipeline selection
     /// in the renderer.
     pub alpha_mode: AlphaMode,
+    /// Issue #19: whether this primitive's material declares
+    /// `KHR_materials_unlit`. Unlit primitives skip all lighting
+    /// in the fragment shader and output the base color directly.
+    pub unlit: bool,
 }
 
 /// Alpha blending mode of a primitive's material, parsed from

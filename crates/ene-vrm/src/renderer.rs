@@ -39,6 +39,7 @@ use crate::expression::{PrimitiveMorphMeta, PrimitiveMorphs};
 use crate::model::{AlphaMode, VrmModel};
 
 const SHADER_SOURCE: &str = include_str!("shaders/mtoon_skinned.wgsl");
+const UNLIT_SHADER_SOURCE: &str = include_str!("shaders/unlit_skinned.wgsl");
 
 /// PR4.5: number of skin-matrix palette slots to allocate when the
 /// loaded model has no skin at all. A one-element palette of
@@ -133,6 +134,12 @@ pub struct VrmRenderer {
     /// populated and transparent surfaces are correctly
     /// occluded by opaque geometry.
     pipeline_transparent: wgpu::RenderPipeline,
+    /// Issue #19: unlit opaque pipeline. Same depth state as
+    /// `pipeline_opaque` but uses the unlit shader (no lighting).
+    pipeline_unlit_opaque: wgpu::RenderPipeline,
+    /// Issue #19: unlit transparent pipeline. Same blend state
+    /// as `pipeline_transparent` but uses the unlit shader.
+    pipeline_unlit_transparent: wgpu::RenderPipeline,
     /// Dummy morph resources, bound for primitives that have no
     /// morph targets.
     dummy_morph: DummyMorphGpu,
@@ -312,6 +319,11 @@ impl VrmRenderer {
             source: wgpu::ShaderSource::Wgsl(SHADER_SOURCE.into()),
         });
 
+        let unlit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vrm.unlit_shader"),
+            source: wgpu::ShaderSource::Wgsl(UNLIT_SHADER_SOURCE.into()),
+        });
+
         let pipeline_opaque = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("vrm.pipeline_opaque"),
             layout: Some(&pipeline_layout),
@@ -386,6 +398,89 @@ impl VrmRenderer {
             cache: None,
         });
 
+        // Issue #19: unlit opaque pipeline. Same layout and
+        // depth state as the lit opaque pipeline, but the
+        // fragment shader outputs base color directly without
+        // any half-Lambert lighting term.
+        let pipeline_unlit_opaque =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("vrm.pipeline_unlit_opaque"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &unlit_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[crate::model::MeshVertex::LAYOUT],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &unlit_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+
+        // Issue #19: unlit transparent pipeline. Same blend
+        // state as the lit transparent pipeline but without
+        // lighting.
+        let pipeline_unlit_transparent =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("vrm.pipeline_unlit_transparent"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &unlit_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[crate::model::MeshVertex::LAYOUT],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &unlit_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+
         // PR4.4: build the per-primitive morph GPU resources.
         // The linear order matches the renderer's draw loop:
         // mesh-major, then primitive-within-mesh, skipping any
@@ -422,6 +517,8 @@ impl VrmRenderer {
             model_bind_group,
             pipeline_opaque,
             pipeline_transparent,
+            pipeline_unlit_opaque,
+            pipeline_unlit_transparent,
             dummy_morph,
             morph_gpu,
             meta_scratch: PrimitiveMorphMeta::default(),
@@ -499,16 +596,14 @@ impl VrmRenderer {
         rp.set_bind_group(1, &self.model_bind_group, &[]);
         rp.set_bind_group(4, &self.skin.bind_group, &[]);
 
-        // Build a flat draw list with alpha mode so we can sort
-        // opaque/mask before transparent. The `linear_index` maps
-        // 1:1 to `morph_gpu` and `model.expressions().per_primitive`
-        // and is computed in declaration order (mesh-major, then
-        // primitive-within-mesh) — the same order used at
-        // [`VrmRenderer::new`] construction time.
+        // Build a flat draw list with alpha mode and unlit flag
+        // so we can sort opaque/mask before transparent and
+        // route unlit primitives to the unlit pipeline.
         #[derive(Copy, Clone)]
         struct DrawItem {
             linear_index: usize,
             alpha_mode: AlphaMode,
+            unlit: bool,
         }
         let mut draw_items: Vec<DrawItem> = Vec::new();
         {
@@ -518,6 +613,7 @@ impl VrmRenderer {
                     draw_items.push(DrawItem {
                         linear_index: idx,
                         alpha_mode: prim.alpha_mode,
+                        unlit: prim.unlit,
                     });
                     idx += 1;
                 }
@@ -534,11 +630,15 @@ impl VrmRenderer {
             .collect();
 
         // Phase 1: opaque + mask (depth write on, no blending).
-        rp.set_pipeline(&self.pipeline_opaque);
         for item in draw_items
             .iter()
             .filter(|d| d.alpha_mode.render_phase() == 0)
         {
+            if item.unlit {
+                rp.set_pipeline(&self.pipeline_unlit_opaque);
+            } else {
+                rp.set_pipeline(&self.pipeline_opaque);
+            }
             let prim = all_prims[item.linear_index];
             self.draw_primitive(&mut rp, queue, model, prim, item.linear_index);
         }
@@ -547,11 +647,15 @@ impl VrmRenderer {
         // alpha blending). Drawn in declaration order (which is
         // roughly back-to-front for most humanoid VRM models);
         // a proper view-Z depth sort is a follow-up PR.
-        rp.set_pipeline(&self.pipeline_transparent);
         for item in draw_items
             .iter()
             .filter(|d| d.alpha_mode.render_phase() == 1)
         {
+            if item.unlit {
+                rp.set_pipeline(&self.pipeline_unlit_transparent);
+            } else {
+                rp.set_pipeline(&self.pipeline_transparent);
+            }
             let prim = all_prims[item.linear_index];
             self.draw_primitive(&mut rp, queue, model, prim, item.linear_index);
         }
