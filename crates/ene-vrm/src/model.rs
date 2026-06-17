@@ -16,6 +16,7 @@ use crate::expression_override::ExpressionDefinition;
 use crate::humanoid::HumanoidBoneRegistry;
 use crate::look_at::LookAtProperties;
 use crate::node_constraint::NodeConstraintRegistry;
+use crate::spring_bone::SpringBoneProperties;
 
 /// A single mesh primitive loaded from the VRM. The PR3.1 loader
 /// extracts every primitive of the first mesh, so the body, the
@@ -186,6 +187,12 @@ pub struct VrmModel {
     /// `VRMC_node_constraint` on glTF nodes. Empty for
     /// models without the extension.
     pub node_constraints: NodeConstraintRegistry,
+    /// Spring bone properties (issue #13). Parsed from
+    /// `VRMC_springBone`. `None` for models without the
+    /// extension. The runtime creates a
+    /// [`SpringBoneSimulator`](crate::spring_bone::SpringBoneSimulator)
+    /// from this to drive hair / cloth sway.
+    pub spring_bones: Option<SpringBoneProperties>,
 }
 
 impl VrmModel {
@@ -236,6 +243,7 @@ impl VrmModel {
         look_at: Option<LookAtProperties>,
         expressions_meta: Vec<ExpressionDefinition>,
         node_constraints: NodeConstraintRegistry,
+        spring_bones: Option<SpringBoneProperties>,
     ) -> Self {
         Self {
             meshes,
@@ -247,6 +255,7 @@ impl VrmModel {
             look_at,
             expressions_meta,
             node_constraints,
+            spring_bones,
         }
     }
 }

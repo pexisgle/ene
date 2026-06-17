@@ -60,6 +60,7 @@ pub mod look_at;
 pub mod model;
 pub mod node_constraint;
 pub mod renderer;
+pub mod spring_bone;
 
 pub use camera::{ModelUniform, OrthographicCamera};
 pub use error::{VrmError, VrmResult};
@@ -87,6 +88,12 @@ pub use node_constraint::{
     load_node_constraints,
 };
 pub use renderer::VrmRenderer;
+pub use spring_bone::{
+    DEFAULT_DRAG_FORCE, DEFAULT_GRAVITY_DIR, DEFAULT_GRAVITY_POWER, DEFAULT_HIT_RADIUS,
+    DEFAULT_STIFFNESS, SpringBoneChain, SpringBoneChainState, SpringBoneCollider,
+    SpringBoneColliderGroup, SpringBoneJoint, SpringBoneJointState, SpringBoneProperties,
+    SpringBoneShape, SpringBoneSimulator, load_spring_bones,
+};
 
 /// Returns the crate version. Useful for diagnostics and the `about` panel.
 pub fn version() -> &'static str {
