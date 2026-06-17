@@ -58,6 +58,7 @@ pub mod humanoid;
 pub mod loader;
 pub mod look_at;
 pub mod model;
+pub mod node_constraint;
 pub mod renderer;
 
 pub use camera::{ModelUniform, OrthographicCamera};
@@ -81,6 +82,10 @@ pub use look_at::{
     LookAtOutput, LookAtProperties, LookAtRangeMap, LookAtRangeMapSet, LookAtType, load_look_at,
 };
 pub use model::{AlphaMode, Skeleton, VrmMesh, VrmModel, VrmTexture};
+pub use node_constraint::{
+    AimAxis, ConstraintEntry, NodeConstraint, NodeConstraintRegistry, RollAxis,
+    load_node_constraints,
+};
 pub use renderer::VrmRenderer;
 
 /// Returns the crate version. Useful for diagnostics and the `about` panel.

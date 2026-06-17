@@ -15,6 +15,7 @@ use crate::expression::ExpressionLayer;
 use crate::expression_override::ExpressionDefinition;
 use crate::humanoid::HumanoidBoneRegistry;
 use crate::look_at::LookAtProperties;
+use crate::node_constraint::NodeConstraintRegistry;
 
 /// A single mesh primitive loaded from the VRM. The PR3.1 loader
 /// extracts every primitive of the first mesh, so the body, the
@@ -181,6 +182,10 @@ pub struct VrmModel {
     /// `VRMC_vrm.expressions` block, in which case the
     /// override pass is a no-op.
     pub expressions_meta: Vec<ExpressionDefinition>,
+    /// Node constraints (issue #15). Parsed from
+    /// `VRMC_node_constraint` on glTF nodes. Empty for
+    /// models without the extension.
+    pub node_constraints: NodeConstraintRegistry,
 }
 
 impl VrmModel {
@@ -230,6 +235,7 @@ impl VrmModel {
         humanoid: HumanoidBoneRegistry,
         look_at: Option<LookAtProperties>,
         expressions_meta: Vec<ExpressionDefinition>,
+        node_constraints: NodeConstraintRegistry,
     ) -> Self {
         Self {
             meshes,
@@ -240,6 +246,7 @@ impl VrmModel {
             humanoid,
             look_at,
             expressions_meta,
+            node_constraints,
         }
     }
 }
