@@ -52,6 +52,7 @@ use crate::error::{VrmError, VrmResult};
 use crate::expression::{
     ExpressionLayer, MAX_MORPH_TARGETS_PER_PRIMITIVE, PrimitiveId, PrimitiveMorphs,
 };
+use crate::humanoid;
 use crate::model::{MeshVertex, Skeleton, VrmMesh, VrmModel, VrmPrimitive, VrmTexture};
 
 /// Target world-space size of the model along its longest axis
@@ -136,12 +137,22 @@ pub fn load_vrm(
         );
     }
 
+    // PR4.7: Build the humanoid bone registry from the
+    // `VRMC_vrm.humanoid.humanBones` block. The loader
+    // walks every entry, canonicalises the bone name,
+    // resolves the glTF node + rest transform + Skeleton
+    // joint index, and returns an empty registry for
+    // models without humanoid metadata. The `humanoid`
+    // module logs per-entry warnings itself.
+    let humanoid = humanoid::load_humanoid_bones(&gltf, &skeleton);
+
     Ok(VrmModel::new(
         mesh,
         skeleton,
         aabb_min,
         aabb_max,
         expression_layer,
+        humanoid,
     ))
 }
 

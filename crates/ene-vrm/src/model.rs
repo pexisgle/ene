@@ -12,6 +12,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
 
 use crate::expression::ExpressionLayer;
+use crate::humanoid::HumanoidBoneRegistry;
 
 /// A single mesh primitive loaded from the VRM. The PR3.1 loader
 /// extracts every primitive of the first mesh, so the body, the
@@ -115,6 +116,13 @@ pub struct VrmModel {
     /// models without morph targets; the renderer treats the
     /// empty layer as a no-op.
     pub expressions: ExpressionLayer,
+    /// Humanoid bone registry (PR4.7). Built from the
+    /// `VRMC_vrm.humanoid.humanBones` block — empty for
+    /// models without humanoid metadata (e.g. legacy
+    /// VRM 0.x). Consumers (#11 LookAt, #13 SpringBone,
+    /// #14 VRMA, #15 NodeConstraint) use this to map bone
+    /// names to glTF node / Skeleton joint indices.
+    pub humanoid: HumanoidBoneRegistry,
 }
 
 impl VrmModel {
@@ -152,6 +160,7 @@ impl VrmModel {
         aabb_min: [f32; 3],
         aabb_max: [f32; 3],
         expressions: ExpressionLayer,
+        humanoid: HumanoidBoneRegistry,
     ) -> Self {
         Self {
             meshes,
@@ -159,6 +168,7 @@ impl VrmModel {
             aabb_min,
             aabb_max,
             expressions,
+            humanoid,
         }
     }
 }
