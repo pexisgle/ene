@@ -40,6 +40,7 @@ use crate::model::{AlphaMode, VrmModel};
 
 const SHADER_SOURCE: &str = include_str!("shaders/mtoon_skinned.wgsl");
 const UNLIT_SHADER_SOURCE: &str = include_str!("shaders/unlit_skinned.wgsl");
+const MTOON_SHADER_SOURCE: &str = include_str!("shaders/mtoon_full.wgsl");
 
 /// PR4.5: number of skin-matrix palette slots to allocate when the
 /// loaded model has no skin at all. A one-element palette of
@@ -110,6 +111,11 @@ struct SkinGpu {
     joint_count: u32,
 }
 
+/// PR4.15: per-primitive MToon uniform buffer (group 5).
+struct MToonUniformGpu {
+    bind_group: wgpu::BindGroup,
+}
+
 /// Render pipeline + bind group layouts for one VRM model.
 ///
 /// Construct once per [`VrmModel`] with [`VrmRenderer::new`]. Call
@@ -158,6 +164,14 @@ pub struct VrmRenderer {
     /// will rewrite this every frame to drive look-at
     /// rotations.
     skin: SkinGpu,
+    /// PR4.15: MToon per-material uniform buffer (group 5).
+    /// One buffer per primitive that has MToon; `None` for
+    /// primitives that use the lite shader.
+    mtoon_uniforms: Vec<Option<MToonUniformGpu>>,
+    /// PR4.15: MToon opaque pipeline.
+    pipeline_mtoon_opaque: wgpu::RenderPipeline,
+    /// PR4.15: MToon transparent pipeline.
+    pipeline_mtoon_transparent: wgpu::RenderPipeline,
 }
 
 impl VrmRenderer {
@@ -302,6 +316,143 @@ impl VrmRenderer {
             }],
         });
 
+        // PR4.15: group `(5)` — MToon per-material uniform.
+        let mtoon_uniform_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vrm.mtoon_uniform_bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(
+                        crate::mtoon::MToonUniform::SIZE as u64,
+                    ),
+                },
+                count: None,
+            }],
+        });
+
+        // PR4.15: group `(6)` — MToon textures (14 bindings: 7 tex + 7 smp).
+        let mtoon_textures_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("vrm.mtoon_textures_bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 9,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 10,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 11,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 12,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 13,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("vrm.pipeline_layout"),
             bind_group_layouts: &[
@@ -314,6 +465,22 @@ impl VrmRenderer {
             immediate_size: 0,
         });
 
+        // PR4.15: MToon pipeline layout (7 bind groups).
+        let mtoon_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("vrm.mtoon_pipeline_layout"),
+                bind_group_layouts: &[
+                    Some(&camera_bgl),
+                    Some(&model_bgl),
+                    Some(&base_color_bgl),
+                    Some(&morph_bgl),
+                    Some(&skin_bgl),
+                    Some(&mtoon_uniform_bgl),
+                    Some(&mtoon_textures_bgl),
+                ],
+                immediate_size: 0,
+            });
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vrm.shader"),
             source: wgpu::ShaderSource::Wgsl(SHADER_SOURCE.into()),
@@ -322,6 +489,12 @@ impl VrmRenderer {
         let unlit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vrm.unlit_shader"),
             source: wgpu::ShaderSource::Wgsl(UNLIT_SHADER_SOURCE.into()),
+        });
+
+        // PR4.15: MToon full shader.
+        let mtoon_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vrm.mtoon_shader"),
+            source: wgpu::ShaderSource::Wgsl(MTOON_SHADER_SOURCE.into()),
         });
 
         let pipeline_opaque = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -481,6 +654,85 @@ impl VrmRenderer {
                 cache: None,
             });
 
+        // PR4.15: MToon opaque pipeline. Uses the full MToon
+        // shader with 7 bind groups.
+        let pipeline_mtoon_opaque =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("vrm.pipeline_mtoon_opaque"),
+                layout: Some(&mtoon_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &mtoon_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[crate::model::MeshVertex::LAYOUT],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &mtoon_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+
+        // PR4.15: MToon transparent pipeline.
+        let pipeline_mtoon_transparent =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("vrm.pipeline_mtoon_transparent"),
+                layout: Some(&mtoon_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &mtoon_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: &[crate::model::MeshVertex::LAYOUT],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &mtoon_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+
         // PR4.4: build the per-primitive morph GPU resources.
         // The linear order matches the renderer's draw loop:
         // mesh-major, then primitive-within-mesh, skipping any
@@ -510,6 +762,38 @@ impl VrmRenderer {
         // `pos`.
         let skin = build_skin_gpu(device, queue, &skin_bgl, model);
 
+        // PR4.15: build per-primitive MToon uniform buffers.
+        // Primitives without MToon get `None` slots.
+        let mut mtoon_uniforms: Vec<Option<MToonUniformGpu>> = Vec::new();
+        for mesh in &model.meshes {
+            for prim in &mesh.primitives {
+                if let Some(mat) = &prim.mtoon {
+                    let has_base_color = prim.base_color.is_some();
+                    let tex_flags = crate::mtoon::texture_flags(mat, has_base_color);
+                    let uniform = crate::mtoon::MToonUniform::from_material(mat, tex_flags, 0.0);
+                    let uniform_buf =
+                        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("vrm.mtoon_uniform"),
+                            contents: bytemuck::bytes_of(&uniform),
+                            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                        });
+                    let uniform_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("vrm.mtoon_uniform_bg"),
+                        layout: &mtoon_uniform_bgl,
+                        entries: &[wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: uniform_buf.as_entire_binding(),
+                        }],
+                    });
+                    mtoon_uniforms.push(Some(MToonUniformGpu {
+                        bind_group: uniform_bg,
+                    }));
+                } else {
+                    mtoon_uniforms.push(None);
+                }
+            }
+        }
+
         Self {
             camera_buf,
             camera_bind_group,
@@ -523,6 +807,9 @@ impl VrmRenderer {
             morph_gpu,
             meta_scratch: PrimitiveMorphMeta::default(),
             skin,
+            mtoon_uniforms,
+            pipeline_mtoon_opaque,
+            pipeline_mtoon_transparent,
         }
     }
 
@@ -634,12 +921,14 @@ impl VrmRenderer {
             .iter()
             .filter(|d| d.alpha_mode.render_phase() == 0)
         {
-            if item.unlit {
+            let prim = all_prims[item.linear_index];
+            if prim.mtoon.is_some() {
+                rp.set_pipeline(&self.pipeline_mtoon_opaque);
+            } else if item.unlit {
                 rp.set_pipeline(&self.pipeline_unlit_opaque);
             } else {
                 rp.set_pipeline(&self.pipeline_opaque);
             }
-            let prim = all_prims[item.linear_index];
             self.draw_primitive(&mut rp, queue, model, prim, item.linear_index);
         }
 
@@ -651,12 +940,14 @@ impl VrmRenderer {
             .iter()
             .filter(|d| d.alpha_mode.render_phase() == 1)
         {
-            if item.unlit {
+            let prim = all_prims[item.linear_index];
+            if prim.mtoon.is_some() {
+                rp.set_pipeline(&self.pipeline_mtoon_transparent);
+            } else if item.unlit {
                 rp.set_pipeline(&self.pipeline_unlit_transparent);
             } else {
                 rp.set_pipeline(&self.pipeline_transparent);
             }
-            let prim = all_prims[item.linear_index];
             self.draw_primitive(&mut rp, queue, model, prim, item.linear_index);
         }
     }
@@ -685,6 +976,17 @@ impl VrmRenderer {
             rp.set_bind_group(3, &morph.bind_group, &[]);
         } else {
             rp.set_bind_group(3, &self.dummy_morph.bind_group, &[]);
+        }
+        // PR4.15: bind MToon uniform + textures if present.
+        if let Some(mtoon) = self
+            .mtoon_uniforms
+            .get(linear_index)
+            .and_then(Option::as_ref)
+        {
+            rp.set_bind_group(5, &mtoon.bind_group, &[]);
+        }
+        if let Some(textures) = &prim.mtoon_textures {
+            rp.set_bind_group(6, &textures.combined_bind_group, &[]);
         }
         rp.set_vertex_buffer(0, prim.vertex_buf.slice(..));
         rp.set_index_buffer(prim.index_buf.slice(..), wgpu::IndexFormat::Uint32);

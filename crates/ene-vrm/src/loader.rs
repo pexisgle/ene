@@ -56,6 +56,7 @@ use crate::expression_override;
 use crate::humanoid;
 use crate::look_at;
 use crate::model::{AlphaMode, MeshVertex, Skeleton, VrmMesh, VrmModel, VrmPrimitive, VrmTexture};
+use crate::mtoon;
 use crate::node_constraint;
 use crate::spring_bone;
 
@@ -89,8 +90,9 @@ pub fn load_vrm(
     }
 
     let expression_names = resolve_expression_names(&gltf);
+    let mtoon_materials = mtoon::load_mtoon_materials(&gltf);
     let (mesh, morph_per_primitive, (aabb_min, aabb_max), has_nonzero_joints) =
-        load_all_meshes(&gltf, device, queue, &expression_names)?;
+        load_all_meshes(&gltf, device, queue, &expression_names, &mtoon_materials)?;
     let skin_joint_to_node = load_skin_joint_to_node(&gltf);
     let skeleton = load_first_skeleton(&gltf, &skin_joint_to_node);
 
@@ -242,6 +244,7 @@ fn load_all_meshes(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     expression_names: &HashMap<(usize, usize, usize), String>,
+    mtoon_materials: &[Option<mtoon::MToonMaterial>],
 ) -> VrmResult<LoadAllMeshesResult> {
     // First pass: collect every triangle-list primitive's
     // positions across **all** glTF meshes so we can compute one
@@ -470,6 +473,17 @@ fn load_all_meshes(
 
             let unlit = primitive.material().unlit();
 
+            // PR4.15: attach MToon material if present.
+            let mat_idx = primitive.material().index();
+            let mtoon_mat = mat_idx.and_then(|i| mtoon_materials.get(i).cloned().flatten());
+
+            // PR4.15: load MToon textures if the material has them.
+            let mtoon_textures = mtoon_mat.as_ref().and_then(|m| {
+                load_mtoon_gpu_textures(m, gltf, device, queue)
+                    .ok()
+                    .flatten()
+            });
+
             primitives.push(VrmPrimitive {
                 vertex_buf,
                 vertex_count: vertices.len() as u32,
@@ -478,6 +492,8 @@ fn load_all_meshes(
                 base_color,
                 alpha_mode,
                 unlit,
+                mtoon: mtoon_mat,
+                mtoon_textures,
             });
             // Allocate a stable PrimitiveId based on the running
             // count of successfully-loaded primitives. The
@@ -971,6 +987,412 @@ fn load_image_data(
 /// went above zero.
 fn normalize_morph_offset(raw: [f32; 3], scale: f32) -> [f32; 3] {
     [raw[0] * scale, raw[1] * scale, raw[2] * scale]
+}
+
+/// PR4.15: load all MToon textures referenced by a material and
+/// create the combined GPU bind group. Returns `Ok(None)` if the
+/// material has no MToon textures at all.
+fn load_mtoon_gpu_textures(
+    mat: &mtoon::MToonMaterial,
+    gltf: &gltf::Gltf,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> VrmResult<Option<mtoon::MToonGpuTextures>> {
+    // Check if any MToon textures are referenced.
+    let has_any = mat.shade_multiply_texture.is_some()
+        || mat.shading_shift_texture.is_some()
+        || mat.emissive_texture.is_some()
+        || mat.matcap_texture.is_some()
+        || mat.rim_multiply_texture.is_some()
+        || mat.outline_width_multiply_texture.is_some()
+        || mat.uv_animation_mask_texture.is_some();
+
+    if !has_any {
+        return Ok(None);
+    }
+
+    // Load each texture (or create a 1x1 white dummy).
+    let shade_multiply = load_mtoon_texture_or_dummy(
+        mat.shade_multiply_texture.map(|t| t.index),
+        gltf,
+        device,
+        queue,
+        "shade_multiply",
+    )?;
+    let shading_shift = load_mtoon_texture_or_dummy(
+        mat.shading_shift_texture.map(|t| t.index),
+        gltf,
+        device,
+        queue,
+        "shading_shift",
+    )?;
+    let emissive = load_mtoon_texture_or_dummy(
+        mat.emissive_texture.map(|t| t.index),
+        gltf,
+        device,
+        queue,
+        "emissive",
+    )?;
+    let matcap = load_mtoon_texture_or_dummy(
+        mat.matcap_texture.map(|t| t.index),
+        gltf,
+        device,
+        queue,
+        "matcap",
+    )?;
+    let rim_multiply = load_mtoon_texture_or_dummy(
+        mat.rim_multiply_texture.map(|t| t.index),
+        gltf,
+        device,
+        queue,
+        "rim_multiply",
+    )?;
+    let outline_width = load_mtoon_texture_or_dummy(
+        mat.outline_width_multiply_texture.map(|t| t.index),
+        gltf,
+        device,
+        queue,
+        "outline_width",
+    )?;
+    let uv_mask = load_mtoon_texture_or_dummy(
+        mat.uv_animation_mask_texture.map(|t| t.index),
+        gltf,
+        device,
+        queue,
+        "uv_mask",
+    )?;
+
+    // Create the combined bind group layout and bind group.
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("vrm.mtoon_textures_bgl"),
+        entries: &[
+            // shade_multiply tex + smp
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            // shading_shift tex + smp
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            // emissive tex + smp
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            // matcap tex + smp
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 7,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            // rim_multiply tex + smp
+            wgpu::BindGroupLayoutEntry {
+                binding: 8,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 9,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            // outline_width tex + smp
+            wgpu::BindGroupLayoutEntry {
+                binding: 10,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 11,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            // uv_mask tex + smp
+            wgpu::BindGroupLayoutEntry {
+                binding: 12,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 13,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+
+    let combined_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("vrm.mtoon_textures_bg"),
+        layout: &bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&shade_multiply.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&shade_multiply.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(&shading_shift.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::Sampler(&shading_shift.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(&emissive.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::Sampler(&emissive.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(&matcap.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::Sampler(&matcap.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::TextureView(&rim_multiply.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: wgpu::BindingResource::Sampler(&rim_multiply.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 10,
+                resource: wgpu::BindingResource::TextureView(&outline_width.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 11,
+                resource: wgpu::BindingResource::Sampler(&outline_width.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 12,
+                resource: wgpu::BindingResource::TextureView(&uv_mask.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 13,
+                resource: wgpu::BindingResource::Sampler(&uv_mask.sampler),
+            },
+        ],
+    });
+
+    // Create individual bind groups for each texture slot (for flexibility).
+    let single_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("vrm.mtoon_single_tex_bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+
+    let make_single = |tex: &MToonGpuTexture, label: &str| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout: &single_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&tex.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&tex.sampler),
+                },
+            ],
+        })
+    };
+
+    Ok(Some(mtoon::MToonGpuTextures {
+        shade_multiply: make_single(&shade_multiply, "vrm.mtoon_shade_multiply_bg"),
+        shading_shift: make_single(&shading_shift, "vrm.mtoon_shading_shift_bg"),
+        emissive: make_single(&emissive, "vrm.mtoon_emissive_bg"),
+        matcap: make_single(&matcap, "vrm.mtoon_matcap_bg"),
+        rim_multiply: make_single(&rim_multiply, "vrm.mtoon_rim_multiply_bg"),
+        outline_width: make_single(&outline_width, "vrm.mtoon_outline_width_bg"),
+        uv_mask: make_single(&uv_mask, "vrm.mtoon_uv_mask_bg"),
+        combined_bind_group,
+    }))
+}
+
+/// A single GPU texture + sampler for MToon.
+struct MToonGpuTexture {
+    #[allow(dead_code)]
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    sampler: wgpu::Sampler,
+}
+
+/// Load a single glTF texture by index, or create a 1×1 white
+/// dummy if `index` is `None`.
+fn load_mtoon_texture_or_dummy(
+    index: Option<usize>,
+    gltf: &gltf::Gltf,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+) -> VrmResult<MToonGpuTexture> {
+    if let Some(idx) = index {
+        let texture = gltf.document.textures().nth(idx);
+        if let Some(tex) = texture {
+            let image =
+                load_image_data(&tex, gltf).map_err(|e| VrmError::TextureDecode(e.to_string()))?;
+            return upload_mtoon_texture(image, device, queue, label);
+        }
+    }
+    // 1×1 white dummy.
+    let white = DecodedImage {
+        width: 1,
+        height: 1,
+        rgba: vec![255, 255, 255, 255],
+    };
+    upload_mtoon_texture(white, device, queue, label)
+}
+
+fn upload_mtoon_texture(
+    image: DecodedImage,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+) -> VrmResult<MToonGpuTexture> {
+    let (width, height) = (image.width, image.height);
+    let gpu_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &gpu_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &image.rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * width),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = gpu_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some(&format!("{label}.sampler")),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        address_mode_w: wgpu::AddressMode::Repeat,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    });
+    Ok(MToonGpuTexture {
+        texture: gpu_texture,
+        view,
+        sampler,
+    })
 }
 
 #[cfg(test)]
