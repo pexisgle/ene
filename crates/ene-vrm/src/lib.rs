@@ -41,6 +41,7 @@
 pub mod camera;
 pub mod error;
 pub mod expression;
+pub mod humanoid;
 pub mod loader;
 pub mod model;
 pub mod renderer;
@@ -50,6 +51,10 @@ pub use error::{VrmError, VrmResult};
 pub use expression::{
     ExpressionLayer, ExpressionName, MAX_MORPH_TARGETS_PER_PRIMITIVE, PrimitiveMorphMeta,
     PrimitiveMorphs,
+};
+pub use humanoid::{
+    BoneRestTransform, HUMANOID_BONE_NAMES, HumanoidBoneEntry, HumanoidBoneRegistry, VrmBone,
+    canonicalize_bone_name, load_humanoid_bones,
 };
 pub use loader::load_vrm;
 pub use model::{Skeleton, VrmMesh, VrmModel, VrmTexture};
