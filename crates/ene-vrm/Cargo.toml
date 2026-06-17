@@ -11,7 +11,7 @@ description = "VRM 1.0 character renderer for the ene desktop app, built on wgpu
 # `utils` for the `Primitive::reader` / `Skin::reader` API that
 # pulls positions / normals / tex coords / inverse-bind matrices
 # out of the BIN chunk.
-gltf = { version = "1.4", default-features = false, features = ["KHR_materials_unlit", "extensions", "utils"] }
+gltf = { version = "1.4", default-features = false, features = ["KHR_materials_unlit", "extensions", "utils", "names"] }
 
 # PNG decode for embedded base-color textures.
 image = { version = "0.25", default-features = false, features = ["png"] }

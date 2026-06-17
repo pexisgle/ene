@@ -50,6 +50,7 @@
 
 #![warn(missing_docs)]
 
+pub mod animation;
 pub mod camera;
 pub mod error;
 pub mod expression;
@@ -62,6 +63,11 @@ pub mod node_constraint;
 pub mod renderer;
 pub mod spring_bone;
 
+pub use animation::{
+    BoneChannel, ExpressionChannel, Interpolation, LookAtChannel, RepeatMode, Sampler, VrmaAsset,
+    VrmaClip, VrmaFrame, VrmaPlayer, VrmaProperties, evaluate_clip, load_vrma, quat_to_yaw_pitch,
+    retarget_hips_translation, retarget_rotation,
+};
 pub use camera::{ModelUniform, OrthographicCamera};
 pub use error::{VrmError, VrmResult};
 pub use expression::{
