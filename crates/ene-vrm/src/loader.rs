@@ -55,7 +55,7 @@ use crate::expression::{
 use crate::expression_override;
 use crate::humanoid;
 use crate::look_at;
-use crate::model::{MeshVertex, Skeleton, VrmMesh, VrmModel, VrmPrimitive, VrmTexture};
+use crate::model::{AlphaMode, MeshVertex, Skeleton, VrmMesh, VrmModel, VrmPrimitive, VrmTexture};
 
 /// Target world-space size of the model along its longest axis
 /// after PR3.1's per-vertex normalization. The legacy Bevy
@@ -437,12 +437,19 @@ fn load_all_meshes(
                 scale,
             );
 
+            let alpha_mode = match primitive.material().alpha_mode() {
+                gltf::material::AlphaMode::Opaque => AlphaMode::Opaque,
+                gltf::material::AlphaMode::Mask => AlphaMode::Mask,
+                gltf::material::AlphaMode::Blend => AlphaMode::Blend,
+            };
+
             primitives.push(VrmPrimitive {
                 vertex_buf,
                 vertex_count: vertices.len() as u32,
                 index_buf,
                 index_count: indices.len() as u32,
                 base_color,
+                alpha_mode,
             });
             // Allocate a stable PrimitiveId based on the running
             // count of successfully-loaded primitives. The

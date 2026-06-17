@@ -80,7 +80,7 @@ pub use look_at::{
     LookAtBoneDelta, LookAtBoneOutput, LookAtDirection, LookAtEvaluator, LookAtExpressionOutput,
     LookAtOutput, LookAtProperties, LookAtRangeMap, LookAtRangeMapSet, LookAtType, load_look_at,
 };
-pub use model::{Skeleton, VrmMesh, VrmModel, VrmTexture};
+pub use model::{AlphaMode, Skeleton, VrmMesh, VrmModel, VrmTexture};
 pub use renderer::VrmRenderer;
 
 /// Returns the crate version. Useful for diagnostics and the `about` panel.

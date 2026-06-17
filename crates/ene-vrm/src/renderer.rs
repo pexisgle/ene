@@ -36,7 +36,7 @@ use wgpu::util::DeviceExt;
 
 use crate::camera::{CameraUniform, ModelUniform, OrthographicCamera};
 use crate::expression::{PrimitiveMorphMeta, PrimitiveMorphs};
-use crate::model::VrmModel;
+use crate::model::{AlphaMode, VrmModel};
 
 const SHADER_SOURCE: &str = include_str!("shaders/mtoon_skinned.wgsl");
 
@@ -122,8 +122,17 @@ pub struct VrmRenderer {
     model_buf: wgpu::Buffer,
     /// Per-frame model bind group (group 1).
     model_bind_group: wgpu::BindGroup,
-    /// Render pipeline.
-    pipeline: wgpu::RenderPipeline,
+    /// Opaque + mask render pipeline. Depth write on, no
+    /// blending. Used for [`AlphaMode::Opaque`] and
+    /// [`AlphaMode::Mask`] primitives.
+    pipeline_opaque: wgpu::RenderPipeline,
+    /// Transparent render pipeline. Depth write off,
+    /// pre-multiplied alpha blending. Used for
+    /// [`AlphaMode::Blend`] primitives, drawn after all
+    /// opaque/mask primitives so the depth buffer is already
+    /// populated and transparent surfaces are correctly
+    /// occluded by opaque geometry.
+    pipeline_transparent: wgpu::RenderPipeline,
     /// Dummy morph resources, bound for primitives that have no
     /// morph targets.
     dummy_morph: DummyMorphGpu,
@@ -303,8 +312,8 @@ impl VrmRenderer {
             source: wgpu::ShaderSource::Wgsl(SHADER_SOURCE.into()),
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("vrm.pipeline"),
+        let pipeline_opaque = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("vrm.pipeline_opaque"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -315,27 +324,49 @@ impl VrmRenderer {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Ccw,
-                // glTF 2.0 and VRM 1.0 share the same convention:
-                // triangles wound CCW when viewed from outside the
-                // model. VRoid (Alicia) and other VRM 1.0 humanoid
-                // models are exported with their face at `+Z`, so
-                // the camera at `(0, 0.3, 3)` looking at the origin
-                // already sees the model as front-facing. With that
-                // orientation, `CullMode::Back` is the natural
-                // choice and halves the fragment work.
-                //
-                // An earlier 180°-around-Y pre-rotation in
-                // `ModelUniform::from_position_scale` was the wrong
-                // direction: it showed the back of the character
-                // and mirrored `character_state.character_position.x`,
-                // which is what was making the model appear shifted
-                // to the right and half off-screen.
                 cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let pipeline_transparent = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("vrm.pipeline_transparent"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[crate::model::MeshVertex::LAYOUT],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
                 depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
@@ -389,7 +420,8 @@ impl VrmRenderer {
             camera_bind_group,
             model_buf,
             model_bind_group,
-            pipeline,
+            pipeline_opaque,
+            pipeline_transparent,
             dummy_morph,
             morph_gpu,
             meta_scratch: PrimitiveMorphMeta::default(),
@@ -462,36 +494,97 @@ impl VrmRenderer {
             multiview_mask: None,
         });
 
-        rp.set_pipeline(&self.pipeline);
+        rp.set_pipeline(&self.pipeline_opaque);
         rp.set_bind_group(0, &self.camera_bind_group, &[]);
         rp.set_bind_group(1, &self.model_bind_group, &[]);
         rp.set_bind_group(4, &self.skin.bind_group, &[]);
 
-        let mut linear_index: usize = 0;
-        for mesh in &model.meshes {
-            for prim in &mesh.primitives {
-                if let Some(t) = &prim.base_color {
-                    rp.set_bind_group(2, &t.bind_group, &[]);
+        // Build a flat draw list with alpha mode so we can sort
+        // opaque/mask before transparent. The `linear_index` maps
+        // 1:1 to `morph_gpu` and `model.expressions().per_primitive`
+        // and is computed in declaration order (mesh-major, then
+        // primitive-within-mesh) — the same order used at
+        // [`VrmRenderer::new`] construction time.
+        #[derive(Copy, Clone)]
+        struct DrawItem {
+            linear_index: usize,
+            alpha_mode: AlphaMode,
+        }
+        let mut draw_items: Vec<DrawItem> = Vec::new();
+        {
+            let mut idx: usize = 0;
+            for mesh in &model.meshes {
+                for prim in &mesh.primitives {
+                    draw_items.push(DrawItem {
+                        linear_index: idx,
+                        alpha_mode: prim.alpha_mode,
+                    });
+                    idx += 1;
                 }
-                if let Some(morph) = self.morph_gpu.get(linear_index).and_then(Option::as_ref) {
-                    if let Some(prim_morphs) = model
-                        .expressions()
-                        .per_primitive
-                        .get(linear_index)
-                        .and_then(Option::as_ref)
-                    {
-                        self.upload_morph_meta(queue, morph, prim_morphs, model);
-                    }
-                    rp.set_bind_group(3, &morph.bind_group, &[]);
-                } else {
-                    rp.set_bind_group(3, &self.dummy_morph.bind_group, &[]);
-                }
-                rp.set_vertex_buffer(0, prim.vertex_buf.slice(..));
-                rp.set_index_buffer(prim.index_buf.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(0..prim.index_count, 0, 0..1);
-                linear_index += 1;
             }
         }
+        draw_items.sort_by_key(|d| d.alpha_mode.render_phase());
+
+        // We need access to the vertex/index buffers by linear_index.
+        // Build a flat reference array once.
+        let all_prims: Vec<&_> = model
+            .meshes
+            .iter()
+            .flat_map(|m| m.primitives.iter())
+            .collect();
+
+        // Phase 1: opaque + mask (depth write on, no blending).
+        rp.set_pipeline(&self.pipeline_opaque);
+        for item in draw_items
+            .iter()
+            .filter(|d| d.alpha_mode.render_phase() == 0)
+        {
+            let prim = all_prims[item.linear_index];
+            self.draw_primitive(&mut rp, queue, model, prim, item.linear_index);
+        }
+
+        // Phase 2: transparent (depth write off, premultiplied
+        // alpha blending). Drawn in declaration order (which is
+        // roughly back-to-front for most humanoid VRM models);
+        // a proper view-Z depth sort is a follow-up PR.
+        rp.set_pipeline(&self.pipeline_transparent);
+        for item in draw_items
+            .iter()
+            .filter(|d| d.alpha_mode.render_phase() == 1)
+        {
+            let prim = all_prims[item.linear_index];
+            self.draw_primitive(&mut rp, queue, model, prim, item.linear_index);
+        }
+    }
+
+    /// Bind the per-primitive resources and issue a single draw.
+    fn draw_primitive(
+        &self,
+        rp: &mut wgpu::RenderPass,
+        queue: &wgpu::Queue,
+        model: &VrmModel,
+        prim: &crate::model::VrmPrimitive,
+        linear_index: usize,
+    ) {
+        if let Some(t) = &prim.base_color {
+            rp.set_bind_group(2, &t.bind_group, &[]);
+        }
+        if let Some(morph) = self.morph_gpu.get(linear_index).and_then(Option::as_ref) {
+            if let Some(prim_morphs) = model
+                .expressions()
+                .per_primitive
+                .get(linear_index)
+                .and_then(Option::as_ref)
+            {
+                self.upload_morph_meta(queue, morph, prim_morphs, model);
+            }
+            rp.set_bind_group(3, &morph.bind_group, &[]);
+        } else {
+            rp.set_bind_group(3, &self.dummy_morph.bind_group, &[]);
+        }
+        rp.set_vertex_buffer(0, prim.vertex_buf.slice(..));
+        rp.set_index_buffer(prim.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+        rp.draw_indexed(0..prim.index_count, 0, 0..1);
     }
 
     /// Build the per-frame [`PrimitiveMorphMeta`] uniform for
