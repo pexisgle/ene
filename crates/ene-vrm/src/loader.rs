@@ -56,6 +56,7 @@ use crate::expression_override;
 use crate::humanoid;
 use crate::look_at;
 use crate::model::{AlphaMode, MeshVertex, Skeleton, VrmMesh, VrmModel, VrmPrimitive, VrmTexture};
+use crate::node_constraint;
 
 /// Target world-space size of the model along its longest axis
 /// after PR3.1's per-vertex normalization. The legacy Bevy
@@ -179,6 +180,10 @@ pub fn load_vrm(
         );
     }
 
+    // Issue #15: parse `VRMC_node_constraint` from every glTF
+    // node. Empty for models without the extension.
+    let node_constraints = node_constraint::load_node_constraints(&gltf);
+
     Ok(VrmModel::new(
         mesh,
         skeleton,
@@ -188,6 +193,7 @@ pub fn load_vrm(
         humanoid,
         look_at,
         expressions_meta,
+        node_constraints,
     ))
 }
 
