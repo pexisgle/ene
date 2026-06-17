@@ -13,6 +13,7 @@ use glam::Mat4;
 
 use crate::expression::ExpressionLayer;
 use crate::humanoid::HumanoidBoneRegistry;
+use crate::look_at::LookAtProperties;
 
 /// A single mesh primitive loaded from the VRM. The PR3.1 loader
 /// extracts every primitive of the first mesh, so the body, the
@@ -123,6 +124,14 @@ pub struct VrmModel {
     /// #14 VRMA, #15 NodeConstraint) use this to map bone
     /// names to glTF node / Skeleton joint indices.
     pub humanoid: HumanoidBoneRegistry,
+    /// Look-at properties (PR4.8). Parsed from the
+    /// `VRMC_vrm.lookAt` block — `None` for models
+    /// without the block (e.g. legacy VRM 0.x). The
+    /// runtime falls back to [`LookAtProperties::default`]
+    /// when this is `None` so a model missing the block
+    /// still gets the spec-default 90→10 range map and
+    /// `"bone"` consumer type.
+    pub look_at: Option<LookAtProperties>,
 }
 
 impl VrmModel {
@@ -152,6 +161,15 @@ impl VrmModel {
         &mut self.expressions
     }
 
+    /// Borrow the look-at properties. `None` for models
+    /// without the `VRMC_vrm.lookAt` block (e.g. legacy
+    /// VRM 0.x). The desktop runtime supplies the spec
+    /// default in that case via
+    /// [`LookAtProperties::default`].
+    pub fn look_at(&self) -> Option<&LookAtProperties> {
+        self.look_at.as_ref()
+    }
+
     /// Construct a `VrmModel` from its already-built pieces plus
     /// the post-normalize AABB. Used by the loader.
     pub(crate) fn new(
@@ -161,6 +179,7 @@ impl VrmModel {
         aabb_max: [f32; 3],
         expressions: ExpressionLayer,
         humanoid: HumanoidBoneRegistry,
+        look_at: Option<LookAtProperties>,
     ) -> Self {
         Self {
             meshes,
@@ -169,6 +188,7 @@ impl VrmModel {
             aabb_max,
             expressions,
             humanoid,
+            look_at,
         }
     }
 }

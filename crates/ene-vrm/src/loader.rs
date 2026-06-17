@@ -53,6 +53,7 @@ use crate::expression::{
     ExpressionLayer, MAX_MORPH_TARGETS_PER_PRIMITIVE, PrimitiveId, PrimitiveMorphs,
 };
 use crate::humanoid;
+use crate::look_at;
 use crate::model::{MeshVertex, Skeleton, VrmMesh, VrmModel, VrmPrimitive, VrmTexture};
 
 /// Target world-space size of the model along its longest axis
@@ -146,6 +147,20 @@ pub fn load_vrm(
     // module logs per-entry warnings itself.
     let humanoid = humanoid::load_humanoid_bones(&gltf, &skeleton);
 
+    // PR4.8: parse the `VRMC_vrm.lookAt` block.
+    // `None` for models without the block (legacy VRM
+    // 0.x, hand-rolled test fixtures) — the runtime falls
+    // back to `LookAtProperties::default()` in that case.
+    let look_at = look_at::load_look_at(&gltf);
+    if look_at.is_some() {
+        tracing::info!(
+            "VRM {} lookAt: type={:?}, offsetFromHeadBone={:?}",
+            path.display(),
+            look_at.as_ref().map(|p| p.look_at_type),
+            look_at.as_ref().map(|p| p.offset_from_head_bone),
+        );
+    }
+
     Ok(VrmModel::new(
         mesh,
         skeleton,
@@ -153,6 +168,7 @@ pub fn load_vrm(
         aabb_max,
         expression_layer,
         humanoid,
+        look_at,
     ))
 }
 

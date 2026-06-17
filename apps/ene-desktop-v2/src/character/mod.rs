@@ -19,11 +19,14 @@
 //!   `FADE_FLOOR`, then forgets it.
 use std::path::PathBuf;
 
-use ene_vrm::{ExpressionName, ModelUniform, OrthographicCamera, VrmModel, VrmRenderer, load_vrm};
-use glam::Vec3;
+use ene_vrm::{
+    ExpressionName, LookAtBoneOutput, LookAtEvaluator, LookAtOutput, LookAtProperties,
+    ModelUniform, OrthographicCamera, VrmModel, VrmRenderer, load_vrm,
+};
+use glam::{Quat, Vec3};
 
 use crate::character_state::{ActiveEmotion, EmotionQueue, transition_emotions};
-use crate::look_at::{LookAtState, compute_world_target};
+use crate::look_at::{LookAtState, compute_world_target, head_world_for};
 
 pub mod drag;
 pub use drag::CharacterDragState;
@@ -60,6 +63,12 @@ pub struct CharacterRenderer {
     default_vrm: Option<PathBuf>,
     /// PR4.2: cursor → smoothed world target state.
     look_at: LookAtState,
+    /// PR4.8: latest per-bone output for `"bone"`-type models.
+    /// `None` for `"expression"`-type models (which write into
+    /// [`VrmModel::expressions_mut`] directly) or before the
+    /// first frame. The skinning palette update is the next
+    /// pass — when it lands, this field feeds it.
+    look_at_bone_output: Option<LookAtBoneOutput>,
     /// PR4.4: currently-applied emotion, used to fade the weight
     /// back to zero after the hold elapses. `None` means the
     /// model is at its neutral state.
@@ -82,6 +91,7 @@ impl CharacterRenderer {
             depth_size: (0, 0),
             default_vrm: Some(assets_dir.join(default_vrm)),
             look_at: LookAtState::default(),
+            look_at_bone_output: None,
             active_emotion: None,
             drag: CharacterDragState::default(),
         }
@@ -299,28 +309,65 @@ impl CharacterRenderer {
         self.default_vrm.as_deref()
     }
 
-    /// PR4.2: update the cursor-driven head-look-at state.
+    /// PR4.2 / PR4.8: update the cursor-driven head-look-at
+    /// state.
     ///
-    /// `head_world` is the world-space position of the character's
-    /// head, derived from `character_state.character_position` plus
-    /// the model's head offset. The smoothed world target is stored
-    /// in [`LookAtState`] and exposed via
-    /// [`CharacterRenderer::look_at_target`]. PR4.5+ (skinning) will
-    /// consume the target to rotate the humanoid bones; until then
-    /// the runtime may feed the target into the orthographic camera
-    /// to give a subtle pan.
+    /// `character_position` is the model's pivot in world
+    /// space (the legacy `character_state.character_position`).
+    /// `model_scale` is the per-frame uniform scale (the legacy
+    /// `character_state.model_scale`); both are read by the
+    /// runtime from `CharacterState`. The head world position
+    /// is derived from the humanoid registry's `head` bone
+    /// (when present) so the look-at follows the model's
+    /// actual head geometry, with a fallback to
+    /// [`head_world_for`] (a 1 m Y offset) for models without
+    /// humanoid metadata.
+    ///
+    /// The smoothed world target is stored in [`LookAtState`]
+    /// and returned. PR4.8 also runs the
+    /// [`LookAtEvaluator`] on the result and either:
+    /// - writes `lookUp` / `lookDown` / `lookLeft` / `lookRight`
+    ///   morph weights into the model's
+    ///   [`VrmModel::expressions_mut`] for `"expression"`-type
+    ///   models (the path the legacy `bevy_vrm1` silently
+    ///   no-op'd), or
+    /// - stores the per-bone `Quat` deltas in
+    ///   [`CharacterRenderer::look_at_bone_output`] for
+    ///   `"bone"`-type models. The next skinning palette pass
+    ///   consumes this field; for now it sits in memory.
     pub fn update_look_at(
         &mut self,
         cursor_logical: glam::Vec2,
         viewport_size: (u32, u32),
-        head_world: Vec3,
+        character_position: Vec3,
+        model_scale: f32,
         strength: f32,
         dt_secs: f32,
     ) -> Vec3 {
+        // 1. Derive the head world position from the
+        //    humanoid registry when possible. PR4.7 ships
+        //    the registry; PR4.8 is the first consumer
+        //    that actually changes the math based on it
+        //    (the previous consumers just read joint
+        //    indices). The fallback keeps models without
+        //    a humanoid head bone (legacy VRM 0.x) on
+        //    the legacy 1 m Y offset.
+        let (head_world, head_rest_rotation) = self.head_world_for(character_position, model_scale);
+
+        // 2. Build the look-at properties (model-driven or
+        //    spec default).
+        let props = self
+            .model
+            .as_ref()
+            .and_then(|m| m.look_at().copied())
+            .unwrap_or_default();
+        let smoothing = LookAtProperties::DEFAULT_SMOOTHING;
+
+        // 3. Compute the smoothed world target.
         let eye = ene_vrm::camera::DEFAULT_EYE.into();
         let target = ene_vrm::camera::DEFAULT_TARGET.into();
         let up = ene_vrm::camera::DEFAULT_UP.into();
-        compute_world_target(
+        let smoothed_target = compute_world_target(
             cursor_logical,
             viewport_size,
             eye,
@@ -330,7 +377,71 @@ impl CharacterRenderer {
             strength,
             &mut self.look_at,
             dt_secs,
-        )
+            smoothing,
+        );
+
+        // 4. Run the evaluator. For `"expression"`-type
+        //    models the result is written straight into
+        //    `ExpressionLayer`; for `"bone"`-type models
+        //    it is stashed for the next skinning palette
+        //    pass to consume.
+        let evaluator = LookAtEvaluator::new(&props);
+        match evaluator.evaluate(head_world, smoothed_target, head_rest_rotation) {
+            LookAtOutput::Expression(e) => {
+                if let Some(model) = self.model.as_mut() {
+                    let layer = model.expressions_mut();
+                    layer.set_expression(&ExpressionName::new("lookUp"), e.look_up);
+                    layer.set_expression(&ExpressionName::new("lookDown"), e.look_down);
+                    layer.set_expression(&ExpressionName::new("lookLeft"), e.look_left);
+                    layer.set_expression(&ExpressionName::new("lookRight"), e.look_right);
+                }
+                // Clear any stale bone output (the model
+                // toggled type at runtime, e.g. via a
+                // future settings switch).
+                self.look_at_bone_output = None;
+            }
+            LookAtOutput::Bone(b) => {
+                self.look_at_bone_output = Some(b);
+            }
+        }
+
+        smoothed_target
+    }
+
+    /// Compute the world-space head position and rest
+    /// rotation. Returns the head's world position and the
+    /// bone's rest rotation in `(world_pos, rest_rotation)`
+    /// form. The rest rotation is `Quat::IDENTITY` when the
+    /// model has no humanoid head bone (the legacy
+    /// behaviour, where the head was implicitly aligned
+    /// with the world frame).
+    fn head_world_for(&self, character_position: Vec3, model_scale: f32) -> (Vec3, Quat) {
+        let Some(model) = self.model.as_ref() else {
+            return (head_world_for(character_position), Quat::IDENTITY);
+        };
+        let Some(head) = model.humanoid.head() else {
+            return (head_world_for(character_position), Quat::IDENTITY);
+        };
+        // The model's loader centres the AABB on the
+        // origin and normalises the longest extent to
+        // `TARGET_MODEL_SIZE` (1.5 m). The head bone's
+        // rest translation is in this normalised space, so
+        // we scale it by `model_scale` to bring it back
+        // to the world-space size the user selected, then
+        // translate by the character's world position.
+        let world = character_position + head.rest.translation * model_scale;
+        (world, head.rest.rotation)
+    }
+
+    /// PR4.8: latest per-bone output for `"bone"`-type
+    /// models. `None` for `"expression"`-type models or
+    /// before the first frame. The next skinning palette
+    /// pass consumes this field; for now it is observable
+    /// via this accessor (and via the
+    /// [`Self::look_at_bone_output_dbg`] diagnostic).
+    #[allow(dead_code)] // Wired in PR4.9 (skinning palette update).
+    pub fn look_at_bone_output(&self) -> Option<&LookAtBoneOutput> {
+        self.look_at_bone_output.as_ref()
     }
 
     /// The most recent smoothed world target (or `None` if no cursor

@@ -13,7 +13,9 @@
 //! All numbers match the legacy exactly so screenshots /
 //! regression tests stay comparable:
 //!
-//! - smoothing speed `7.0`,
+//! - smoothing speed `7.0` (the spec doesn't declare a
+//!   smoothing value; PR4.8 reads it from
+//!   [`ene_vrm::LookAtProperties::DEFAULT_SMOOTHING`]),
 //! - neutral target `(head_x, head_y, head_z + 1.8)`,
 //! - cursor NDC multiplied by `viewport_height / 2` and
 //!   `viewport_height / 2 * aspect`,
@@ -33,8 +35,6 @@ pub struct LookAtState {
     pub last_cursor_logical: Option<Vec2>,
 }
 
-const SMOOTHING_SPEED: f32 = 7.0;
-
 /// Z offset (in world units) of the neutral "look straight ahead"
 /// target relative to the head. Mirrors the legacy `Vec3::new(0, 0,
 /// 1.8)`.
@@ -49,14 +49,21 @@ const NEUTRAL_TARGET_Z: f32 = 1.8;
 /// and easy to tune alongside [`NEUTRAL_TARGET_Z`].
 ///
 /// The 1.0-metre value is an approximation of a humanoid head
-/// position above the model's pivot. A future PR will replace
-/// it with a bone-driven value sourced from the loaded
-/// humanoid registry.
+/// position above the model's pivot. PR4.8 keeps the constant
+/// as the **fallback** for models without a humanoid `head`
+/// bone; models that ship a humanoid head bone use the bone's
+/// rest position scaled by `model_scale` instead.
 pub const HEAD_OFFSET_Y: f32 = 1.0;
 
 /// Build the world-space head position from a model's pivot.
 /// Mirrors `character_position + Vec3::new(0, HEAD_OFFSET_Y, 0)`
 /// in the runtime, but keeps the magic number in one place.
+///
+/// PR4.8 keeps this helper as the **fallback** path for
+/// models without a humanoid head bone. The
+/// [`CharacterRenderer`](crate::character::CharacterRenderer)
+/// uses the humanoid registry's `head.rest.translation` when
+/// present and falls back to this helper otherwise.
 pub fn head_world_for(pivot: Vec3) -> Vec3 {
     pivot + Vec3::new(0.0, HEAD_OFFSET_Y, 0.0)
 }
@@ -78,6 +85,13 @@ pub fn neutral_target(head_world: Vec3) -> Vec3 {
 /// Compute the smoothed world target the character should look at.
 ///
 /// `state` is updated in place. Returns the new smoothed target.
+///
+/// `smoothing` is the per-frame exponential-smoothing rate (in
+/// `1/seconds`). The legacy `SMOOTHING_SPEED = 7.0` constant
+/// (PR4.2–PR4.7) is now a parameter — the runtime passes
+/// [`ene_vrm::LookAtProperties::DEFAULT_SMOOTHING`] by default
+/// (the VRM 1.0 spec does not declare a smoothing value, so the
+/// legacy value stands until a future spec extension lands).
 #[allow(clippy::too_many_arguments)]
 pub fn compute_world_target(
     cursor_logical: Vec2,
@@ -89,6 +103,7 @@ pub fn compute_world_target(
     strength: f32,
     state: &mut LookAtState,
     dt_secs: f32,
+    smoothing: f32,
 ) -> Vec3 {
     let ndc = cursor_logical_to_ndc(cursor_logical, viewport_size);
     let aspect = (viewport_size.0 as f32 / viewport_size.1 as f32).max(0.0001);
@@ -117,8 +132,9 @@ pub fn compute_world_target(
     let neutral = neutral_target(head_world);
     let desired = neutral.lerp(cursor_world, strength);
 
+    let smoothing = if smoothing > 0.0 { smoothing } else { 0.0 };
     let smoothed = if let Some(current) = state.smoothed_world_target {
-        let alpha = 1.0 - (-SMOOTHING_SPEED * dt_secs).exp();
+        let alpha = 1.0 - (-smoothing * dt_secs).exp();
         current.lerp(desired, alpha)
     } else {
         desired
