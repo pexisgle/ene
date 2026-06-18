@@ -15,7 +15,7 @@ use crate::animation::VrmaFrame;
 use crate::expression::ExpressionLayer;
 use crate::expression_override::ExpressionDefinition;
 use crate::humanoid::HumanoidBoneRegistry;
-use crate::look_at::LookAtProperties;
+use crate::look_at::{LookAtBoneOutput, LookAtProperties};
 use crate::mtoon::{MToonGpuTextures, MToonMaterial};
 use crate::node_constraint::NodeConstraintRegistry;
 use crate::spring_bone::SpringBoneProperties;
@@ -37,7 +37,7 @@ pub struct VrmPrimitive {
     pub index_count: u32,
     /// Base-color texture for this primitive, if its material has
     /// one. `None` falls back to a flat color in the shader.
-    pub base_color: Option<VrmTexture>,
+    pub base_color: Option<std::sync::Arc<VrmTexture>>,
     /// Alpha blending mode parsed from the glTF material's
     /// `alphaMode`. Controls draw order and pipeline selection
     /// in the renderer.
@@ -54,7 +54,7 @@ pub struct VrmPrimitive {
     /// shift, emissive, matcap, rim multiply, outline width,
     /// UV animation mask). `None` when the material has no MToon
     /// extension or no MToon textures.
-    pub mtoon_textures: Option<MToonGpuTextures>,
+    pub mtoon_textures: Option<std::sync::Arc<MToonGpuTextures>>,
 }
 
 /// Alpha blending mode of a primitive's material, parsed from
@@ -405,9 +405,13 @@ impl VrmModel {
 
     /// Construct a `VrmModel` from its already-built pieces plus
     /// the raw AABB and the centre/scale the runtime needs to
-    /// build the model matrix. Used by the loader.
+    /// build the model matrix. Used by the loader and by
+    /// downstream test fixtures (the `ene-desktop-v2` camera
+    /// target test attaches a minimal synthetic model so it can
+    /// mutate `nodes.world_positions` and assert the camera
+    /// target is unaffected by animation).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub fn new(
         meshes: Vec<VrmMesh>,
         skeleton: Skeleton,
         aabb_min: [f32; 3],
@@ -460,6 +464,23 @@ impl VrmModel {
     ///    local rotation of `nodes.local_rotations[entry.node]`
     ///    with the VRMA's bone rotation. Bones that aren't
     ///    in the humanoid registry are silently dropped.
+    /// 2. **Apply LookAt bone deltas** (PR4.16): for the
+    ///    `head` / `leftEye` / `rightEye` humanoid bones
+    ///    whose [`LookAtBoneOutput`] carries a non-identity
+    ///    delta, overwrite the local rotation with
+    ///    `rest_local_rotations[node] * look_at_delta`. The
+    ///    spec defines the LookAt delta as a rotation
+    ///    applied to the bone's *rest* rotation, so a
+    ///    LookAt-active head/eye wins over the VRMA's
+    ///    contribution for the same bone (this matches the
+    ///    legacy `bevy_vrm1` "head tracking overrides the
+    ///    active motion" behaviour). Bones missing from
+    ///    the humanoid registry are silently dropped, so
+    ///    the call is a no-op on models without humanoid
+    ///    metadata. The LookAt step runs **after** the
+    ///    VRMA step so head/eye bones that the motion also
+    ///    animates end up looking at the cursor rather than
+    ///    blending the two sources.
     /// 3. **Walk the hierarchy**: `nodes.compute_world_transforms()`
     ///    fills `world_rotations` / `world_positions`.
     /// 4. **Hips translation**: if the frame carries an
@@ -489,10 +510,22 @@ impl VrmModel {
     /// helper is re-exported so the runtime can use it once
     /// the per-frame rest-pose comparison is available.
     ///
+    /// **LookAt semantics** (PR4.16): `look_at` is the
+    /// [`LookAtBoneOutput`] of the current frame, or `None`
+    /// when the model is `"expression"`-type (the LookAt
+    /// signal then routes into morph weights via
+    /// [`crate::expression::ExpressionLayer`], not into bone
+    /// rotations) or when no cursor sample has been
+    /// processed yet. `None` makes step 2 a no-op.
+    ///
     /// Returns an empty `Vec` when the model has zero
     /// skeleton joints — the renderer's identity palette
     /// stays in effect and no GPU write is needed.
-    pub fn update_skin_palette(&mut self, frame: &VrmaFrame) -> Vec<Mat4> {
+    pub fn update_skin_palette(
+        &mut self,
+        frame: &VrmaFrame,
+        look_at: Option<&LookAtBoneOutput>,
+    ) -> Vec<Mat4> {
         let joint_count = self.skeleton.joint_count();
         if joint_count == 0 || self.nodes.is_empty() {
             return Vec::new();
@@ -527,6 +560,38 @@ impl VrmModel {
                 continue;
             };
             self.nodes.local_rotations[entry.node] = *rot;
+        }
+
+        // 2.5 PR4.16: apply the LookAt cursor-tracking deltas
+        //    on top of the VRMA pose. The spec defines the
+        //    delta as a rotation applied to the bone's *rest*
+        //    rotation (not a delta on top of the current
+        //    local rotation), so head/eye bones that the
+        //    motion also animates end up looking at the
+        //    cursor rather than blending the two sources.
+        //    Identity deltas are skipped (the rest pose
+        //    would rotate to itself; cheaper to leave the
+        //    VRMA result untouched). Unknown humanoid bone
+        //    names are silently dropped — `by_name` returns
+        //    `None` and the existing local rotation wins.
+        if let Some(look_at) = look_at {
+            for (bone_name, delta) in [
+                ("head", look_at.head),
+                ("leftEye", look_at.left_eye),
+                ("rightEye", look_at.right_eye),
+            ] {
+                if delta.delta == Quat::IDENTITY {
+                    continue;
+                }
+                let Some(entry) = self.humanoid.by_name(bone_name) else {
+                    continue;
+                };
+                if entry.node >= self.nodes.local_rotations.len() {
+                    continue;
+                }
+                self.nodes.local_rotations[entry.node] =
+                    self.nodes.rest_local_rotations[entry.node] * delta.delta;
+            }
         }
 
         // 3. Walk the hierarchy with the new local
@@ -706,6 +771,7 @@ const _: () = {
 mod tests {
     use super::*;
     use crate::humanoid::{BoneRestTransform, HumanoidBoneEntry, HumanoidBoneRegistry, VrmBone};
+    use crate::look_at::{LookAtBoneDelta, LookAtBoneOutput};
 
     /// Build a `NodeHierarchy` with a single root node at
     /// `pos` rotated by `rot`. The world buffers start at
@@ -1251,10 +1317,183 @@ mod tests {
     /// owned copy of the model and return the palette plus
     /// the (mutated) model. Tests that need to assert
     /// against the world-transform side effects use the
-    /// returned model.
+    /// returned model. The LookAt argument defaults to
+    /// `None`; tests that exercise the LookAt composition
+    /// call `model.update_skin_palette(&frame, look_at)`
+    /// directly.
     fn model_palette(mut model: VrmModel, frame: &VrmaFrame) -> (VrmModel, Vec<Mat4>) {
-        let palette = model.update_skin_palette(frame);
+        let palette = model.update_skin_palette(frame, None);
         (model, palette)
+    }
+
+    // -----------------------------------------------------------------
+    // VrmModel::update_skin_palette — LookAt composition (PR4.16)
+    // -----------------------------------------------------------------
+
+    /// A LookAt delta on the `head` bone must rotate the
+    /// head's local transform to `rest * delta` and the
+    /// resulting world rotation must reach the palette.
+    /// We construct a single-node model with the head as
+    /// the only humanoid bone, drive a 90° Y LookAt delta,
+    /// and assert that the per-joint palette rotates a
+    /// +X point to -Z (the same assertion used in
+    /// `update_skin_palette_applies_bone_rotation`, which
+    /// proves the LookAt path ends up in the GPU-readable
+    /// palette, not just the local buffer).
+    #[test]
+    fn update_skin_palette_applies_look_at_bone_delta_to_head() {
+        let mut humanoid = HumanoidBoneRegistry::new();
+        humanoid.insert(
+            VrmBone("head".into()),
+            HumanoidBoneEntry {
+                node: 0,
+                joint: Some(0),
+                rest: BoneRestTransform::default(),
+            },
+        );
+        let mut model =
+            single_joint_model(humanoid, single_node_hierarchy(Quat::IDENTITY, Vec3::ZERO));
+        let frame = VrmaFrame::default();
+        let look_at = LookAtBoneOutput {
+            head: LookAtBoneDelta {
+                delta: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            },
+            left_eye: LookAtBoneDelta::default(),
+            right_eye: LookAtBoneDelta::default(),
+        };
+        let palette = model.update_skin_palette(&frame, Some(&look_at));
+        assert_eq!(palette.len(), 1);
+        let transformed = palette[0].transform_point3(Vec3::new(1.0, 0.0, 0.0));
+        assert!(
+            (transformed - Vec3::new(0.0, 0.0, -1.0)).length() < 1e-5,
+            "expected +X to rotate to -Z via LookAt, got {transformed:?}"
+        );
+        // The local rotation must be `rest * delta = delta`
+        // (rest is identity in this fixture).
+        assert!(
+            (model.nodes.local_rotations[0]
+                .dot(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)))
+            .abs()
+                > 1.0 - 1e-5,
+            "head local rotation must be `rest * delta` after LookAt"
+        );
+    }
+
+    /// The LookAt step runs **after** the VRMA step, so a
+    /// frame that animates `head` plus an active LookAt
+    /// delta on the same bone must end up with the LookAt
+    /// rotation, not the VRMA rotation. This is the
+    /// "head tracking overrides the active motion" rule
+    /// from the spec and is what the user expects when a
+    /// waving VRMA also has the head follow the cursor.
+    #[test]
+    fn update_skin_palette_look_at_overrides_vrma_for_head() {
+        let mut humanoid = HumanoidBoneRegistry::new();
+        humanoid.insert(
+            VrmBone("head".into()),
+            HumanoidBoneEntry {
+                node: 0,
+                joint: Some(0),
+                rest: BoneRestTransform::default(),
+            },
+        );
+        let mut model =
+            single_joint_model(humanoid, single_node_hierarchy(Quat::IDENTITY, Vec3::ZERO));
+        let mut frame = VrmaFrame::default();
+        // VRMA rotates the head 90° around X.
+        frame.bone_rotations.insert(
+            "head".into(),
+            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+        );
+        // LookAt rotates the head 90° around Y.
+        let look_at = LookAtBoneOutput {
+            head: LookAtBoneDelta {
+                delta: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            },
+            left_eye: LookAtBoneDelta::default(),
+            right_eye: LookAtBoneDelta::default(),
+        };
+        let palette = model.update_skin_palette(&frame, Some(&look_at));
+        // LookAt wins: +X rotates to -Z (Y rotation), not
+        // to +X (X rotation, identity case).
+        let transformed = palette[0].transform_point3(Vec3::new(1.0, 0.0, 0.0));
+        assert!(
+            (transformed - Vec3::new(0.0, 0.0, -1.0)).length() < 1e-5,
+            "LookAt must override VRMA on the head, got {transformed:?}"
+        );
+    }
+
+    /// Identity LookAt deltas must be a no-op (the
+    /// implementation skips them to avoid an unnecessary
+    /// `rest * identity` write). A model whose humanoid
+    /// registry has none of `head` / `leftEye` / `rightEye`
+    /// must produce a palette identical to the
+    /// `None`-LookAt case — the call must not panic on
+    /// `by_name` returning `None`.
+    #[test]
+    fn update_skin_palette_look_at_idempotent_for_zero_delta_or_missing_bones() {
+        let mut humanoid = HumanoidBoneRegistry::new();
+        humanoid.insert(
+            VrmBone("hips".into()),
+            HumanoidBoneEntry {
+                node: 0,
+                joint: Some(0),
+                rest: BoneRestTransform::default(),
+            },
+        );
+        let model_lookat = single_joint_model(
+            humanoid.clone(),
+            single_node_hierarchy(Quat::IDENTITY, Vec3::ZERO),
+        );
+        let model_none =
+            single_joint_model(humanoid, single_node_hierarchy(Quat::IDENTITY, Vec3::ZERO));
+        let frame = VrmaFrame::default();
+        // Identity deltas on bones the model does not have
+        // — the step must be a no-op.
+        let look_at = LookAtBoneOutput::default();
+        let palette_lookat = {
+            let mut m = model_lookat;
+            m.update_skin_palette(&frame, Some(&look_at))
+        };
+        let palette_none = {
+            let mut m = model_none;
+            m.update_skin_palette(&frame, None)
+        };
+        assert_eq!(palette_lookat, palette_none);
+    }
+
+    /// Non-identity LookAt deltas on bones that the
+    /// humanoid registry does **not** contain (e.g. a
+    /// legacy VRM 0.x model without humanoid metadata,
+    /// or a model whose author left the head/eye bones
+    /// out of the skin) must be silently dropped. The
+    /// palette must equal the rest-pose result, no
+    /// `index out of bounds` panic.
+    #[test]
+    fn update_skin_palette_look_at_ignores_missing_humanoid_bones() {
+        // Empty humanoid registry (no head / leftEye / rightEye).
+        let humanoid = HumanoidBoneRegistry::new();
+        let mut model =
+            single_joint_model(humanoid, single_node_hierarchy(Quat::IDENTITY, Vec3::ZERO));
+        let frame = VrmaFrame::default();
+        let look_at = LookAtBoneOutput {
+            head: LookAtBoneDelta {
+                delta: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            },
+            left_eye: LookAtBoneDelta {
+                delta: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            },
+            right_eye: LookAtBoneDelta {
+                delta: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            },
+        };
+        let palette = model.update_skin_palette(&frame, Some(&look_at));
+        assert_eq!(palette.len(), 1);
+        // The hips joint must still be at the rest pose.
+        assert_eq!(palette[0], Mat4::IDENTITY);
+        // No panic, no partial write — the model's local
+        // rotation buffer keeps its rest value.
+        assert_eq!(model.nodes.local_rotations[0], Quat::IDENTITY);
     }
 }
 
