@@ -40,7 +40,7 @@
 //!
 //! See `docs/architecture/wgpu-migration.md` §22.6 for the PR3
 //! status.
-use std::collections::HashMap;
+
 use std::path::Path;
 
 use base64::Engine as _;
@@ -91,7 +91,6 @@ pub fn load_vrm(
         return Err(VrmError::NotVrm);
     }
 
-    let expression_names = resolve_expression_names(&gltf);
     let mtoon_materials = mtoon::load_mtoon_materials(&gltf);
     // PR4.19: walk every skin (not just the first) and
     // build a merged skeleton + per-primitive JOINTS_0
@@ -111,7 +110,6 @@ pub fn load_vrm(
         &gltf,
         device,
         queue,
-        &expression_names,
         &mtoon_materials,
         &primitive_joint_remap,
     )?;
@@ -150,10 +148,19 @@ pub fn load_vrm(
         );
     }
 
-    // PR4.4: Build the expression layer from the per-primitive
-    // morph target data collected during mesh load. Primitives
-    // without morphs already have `None` slots.
-    let expression_layer = ExpressionLayer::new(morph_per_primitive);
+    let expressions_meta = expression_override::load_expression_overrides(&gltf);
+    if !expressions_meta.is_empty() {
+        tracing::info!(
+            "VRM {} {} expression definition(s) with override metadata",
+            path.display(),
+            expressions_meta.len(),
+        );
+    }
+
+    let expression_layer = ExpressionLayer::new(
+        morph_per_primitive,
+        (!expressions_meta.is_empty()).then_some(&expressions_meta),
+    );
     let expression_count: usize = expression_layer
         .per_primitive
         .iter()
@@ -195,14 +202,6 @@ pub fn load_vrm(
     // `VRMC_vrm.expressions.{preset,custom}.<name>` tree.
     // Empty for models without the block, in which case the
     // per-frame override pass is a no-op.
-    let expressions_meta = expression_override::load_expression_overrides(&gltf);
-    if !expressions_meta.is_empty() {
-        tracing::info!(
-            "VRM {} {} expression definition(s) with override metadata",
-            path.display(),
-            expressions_meta.len(),
-        );
-    }
 
     // Issue #15: parse `VRMC_node_constraint` from every glTF
     // node. Empty for models without the extension.
@@ -277,10 +276,11 @@ fn load_all_meshes(
     gltf: &gltf::Gltf,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    expression_names: &HashMap<(usize, usize, usize), String>,
     mtoon_materials: &[Option<mtoon::MToonMaterial>],
     primitive_joint_remap: &[Vec<Vec<u32>>],
 ) -> VrmResult<LoadAllMeshesResult> {
+    let mut base_color_cache = std::collections::HashMap::new();
+    let mut mtoon_textures_cache = std::collections::HashMap::new();
     // First pass: collect every triangle-list primitive's
     // positions across **all** glTF meshes so we can compute one
     // global AABB. (A VRM 1.0 has ~12 separate glTF Mesh
@@ -362,6 +362,14 @@ fn load_all_meshes(
     // malformed model. The flag is returned alongside the
     // mesh and morph data so the caller can log a single
     // combined warning.
+
+    let mut mesh_to_node = std::collections::HashMap::new();
+    for node in gltf.document.nodes() {
+        if let Some(mesh) = node.mesh() {
+            mesh_to_node.insert(mesh.index(), node.index());
+        }
+    }
+
     let mut meshes = Vec::new();
     let mut morph_per_primitive: Vec<Option<PrimitiveMorphs>> = Vec::new();
     let mut has_nonzero_joints = false;
@@ -504,19 +512,30 @@ fn load_all_meshes(
                 });
             }
 
+            // PR5.1: include `COPY_SRC` on both buffers so the
+            // runtime can read them back at model-load time to
+            // build a Rapier trimesh collider (which owns the
+            // BVH used by the per-frame hit test). The readback
+            // itself goes through a `MAP_READ | COPY_DST`
+            // staging buffer; the source only needs to be a
+            // valid copy source.
             let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(&format!("vrm.mesh{mesh_idx}.prim{prim_idx}.vertex_buf")),
                 contents: MeshVertex::as_bytes(&vertices),
-                usage: wgpu::BufferUsages::VERTEX,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_SRC,
             });
             let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(&format!("vrm.mesh{mesh_idx}.prim{prim_idx}.index_buf")),
                 contents: bytemuck::cast_slice(&indices),
-                usage: wgpu::BufferUsages::INDEX,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_SRC,
             });
 
             let base_color = match load_primitive_base_color_texture(
-                &primitive, gltf, device, queue,
+                &primitive,
+                gltf,
+                device,
+                queue,
+                &mut base_color_cache,
             ) {
                 Ok(t) => t,
                 Err(e) => {
@@ -529,6 +548,8 @@ fn load_all_meshes(
 
             // PR4.4: extract morph targets BEFORE pushing the
             // primitive, so the index lines up. The resolver from
+            let node_idx = mesh_to_node.get(&mesh_idx).copied().unwrap_or(0);
+
             // `resolve_expression_names` is used to map the
             // synthetic slot index to the real VRMC_vrm
             // expression name (e.g. `happy`, `sad`).
@@ -538,7 +559,6 @@ fn load_all_meshes(
                 positions.len(),
                 mesh_idx,
                 prim_idx,
-                expression_names,
                 scale,
             );
 
@@ -555,8 +575,8 @@ fn load_all_meshes(
             let mtoon_mat = mat_idx.and_then(|i| mtoon_materials.get(i).cloned().flatten());
 
             // PR4.15: load MToon textures if the material has them.
-            let mtoon_textures = mtoon_mat.as_ref().and_then(|m| {
-                load_mtoon_gpu_textures(m, gltf, device, queue)
+            let mtoon_textures = mtoon_mat.as_ref().zip(mat_idx).and_then(|(m, i)| {
+                load_mtoon_gpu_textures(i, m, gltf, device, queue, &mut mtoon_textures_cache)
                     .ok()
                     .flatten()
             });
@@ -578,9 +598,9 @@ fn load_all_meshes(
             // (mesh-major, primitive-within-mesh) to look up the
             // matching morph data.
             let pid = PrimitiveId(morph_per_primitive.len());
-            morph_per_primitive.push(
-                morphs.map(|raw| PrimitiveMorphs::from_targets(pid, vertices.len() as u32, raw)),
-            );
+            morph_per_primitive.push(morphs.map(|raw| {
+                PrimitiveMorphs::from_targets(pid, node_idx, vertices.len() as u32, raw)
+            }));
         }
         if primitives.is_empty() {
             tracing::debug!("VRM mesh[{mesh_idx}] has no renderable primitives; skipping");
@@ -640,9 +660,8 @@ fn load_primitive_morph_targets(
     expected_vertex_count: usize,
     mesh_idx: usize,
     prim_idx: usize,
-    expression_names: &HashMap<(usize, usize, usize), String>,
     scale: f32,
-) -> Option<Vec<(String, Vec<[f32; 3]>)>> {
+) -> Option<Vec<crate::expression::MorphTarget>> {
     let target_count = primitive.morph_targets().count();
     if target_count == 0 {
         return None;
@@ -698,149 +717,22 @@ fn load_primitive_morph_targets(
         offsets.resize(expected_vertex_count, [0.0; 3]);
         all_displacements.push(offsets);
     }
-    // Pair each entry with the name. VRM 1.0 stores expression
-    // names in the `VRMC_vrm.expressions.{preset,custom}.<name>`
-    // ext tree — not on the morph target itself. The resolver
-    // `resolve_expression_names` walks that tree once and returns
-    // a `HashMap<(mesh_idx, prim_idx, target_idx), name>`. We
-    // look the name up here; when the resolver didn't find a
-    // matching bind (e.g. legacy VRM 0.x that has no
-    // VRMC_vrm.expressions block) we fall back to the synthetic
-    // name `morph_target_<i>` so the GPU buffers always get a
-    // name.
+    // The target index is stored in `target_index` directly.
     for (target_index, _json_target) in primitive
         .morph_targets()
         .enumerate()
         .take(MAX_MORPH_TARGETS_PER_PRIMITIVE)
     {
-        let name = expression_names
-            .get(&(mesh_idx, prim_idx, target_index))
-            .cloned()
-            .unwrap_or_else(|| format!("morph_target_{target_index}"));
         let offsets = all_displacements
             .get(target_index)
             .cloned()
             .unwrap_or_else(|| vec![[0.0; 3]; expected_vertex_count]);
-        out.push((name, offsets));
+        out.push(crate::expression::MorphTarget {
+            target_index,
+            position_offsets: offsets,
+        });
     }
     Some(out)
-}
-
-/// Walk the `VRMC_vrm.expressions.{preset,custom}.<name>.morphTargetBinds`
-/// tree and return a `HashMap` keyed by
-/// `(mesh_idx, prim_idx, morph_target_idx)` whose values are the
-/// expression name.
-///
-/// VRM 1.0 puts expression names in the
-/// `VRMC_vrm.expressions.preset.<name>.morphTargetBinds[*]` and
-/// `.custom.<name>.morphTargetBinds[*]` JSON arrays (see
-/// <https://github.com/vrm-c/vrm-specification/blob/master/specification/VRMC_vrm-1.0/expressions.md>).
-/// Each bind has `{ node, index, weight }` referring to a
-/// `(glTF node, morph_target_index)` pair. The glTF `Mesh` the
-/// node points at gets that morph target bound to the named
-/// expression.
-///
-/// Per the spec the `index` is the morph target index "assuming
-/// all primitives have the same morphTarget" — so we apply the
-/// name to every primitive of the bound mesh. This matches the
-/// loader's flat-indexed `morph_per_primitive` layout.
-///
-/// Returns an empty map when the extension is missing (e.g. on
-/// VRM 0.x). The caller is then expected to fall back to the
-/// synthetic `morph_target_<i>` naming convention.
-fn resolve_expression_names(gltf: &gltf::Gltf) -> HashMap<(usize, usize, usize), String> {
-    let mut map: HashMap<(usize, usize, usize), String> = HashMap::new();
-
-    let Some(ext) = gltf.document.extensions() else {
-        return map;
-    };
-    let Some(vrm) = ext.get("VRMC_vrm") else {
-        return map;
-    };
-    let Some(expressions) = vrm.get("expressions") else {
-        return map;
-    };
-    let Some(expressions_obj) = expressions.as_object() else {
-        return map;
-    };
-
-    // Cache the (node_index, mesh_index) lookup so we do not
-    // re-walk `gltf.document.nodes()` once per bind. Built
-    // lazily on first use because most models have a few
-    // hundred nodes and the loop dominates when we have to
-    // re-walk.
-    let mut node_to_mesh: Vec<Option<usize>> = Vec::new();
-    let mut resolve_node_mesh = |node_idx: usize| -> Option<usize> {
-        if node_to_mesh.is_empty() {
-            // Pre-fill with `None` for every node so the
-            // `node_to_mesh.len()` check below stays correct
-            // when looking up nodes whose mesh slot has not
-            // been visited yet.
-            node_to_mesh = gltf
-                .document
-                .nodes()
-                .map(|n| n.mesh().map(|m| m.index()))
-                .collect();
-        }
-        node_to_mesh.get(node_idx).copied().flatten()
-    };
-
-    for (group_name, group) in expressions_obj {
-        if group_name != "preset" && group_name != "custom" {
-            continue;
-        }
-        let Some(exprs) = group.as_object() else {
-            continue;
-        };
-        for (name, expr) in exprs {
-            let Some(binds) = expr.get("morphTargetBinds").and_then(|b| b.as_array()) else {
-                continue;
-            };
-            for bind in binds {
-                let Some(node_idx) = bind
-                    .get("node")
-                    .and_then(|n| n.as_u64())
-                    .map(|n| n as usize)
-                else {
-                    continue;
-                };
-                let Some(target_idx) = bind
-                    .get("index")
-                    .and_then(|n| n.as_u64())
-                    .map(|n| n as usize)
-                else {
-                    continue;
-                };
-                let Some(mesh_idx) = resolve_node_mesh(node_idx) else {
-                    continue;
-                };
-                // Bind the name to every primitive of the mesh;
-                // see the doc comment for why.
-                let prim_count = gltf
-                    .document
-                    .meshes()
-                    .nth(mesh_idx)
-                    .map(|m| m.primitives().count())
-                    .unwrap_or(0);
-                for prim_idx in 0..prim_count {
-                    // Last write wins if the same (mesh, prim,
-                    // target) appears in multiple expressions —
-                    // VRM 1.0 says expressions are uniquely
-                    // named, but a malformed file with
-                    // overlapping binds should not panic.
-                    map.insert((mesh_idx, prim_idx, target_idx), name.clone());
-                }
-            }
-        }
-    }
-
-    if !map.is_empty() {
-        tracing::debug!(
-            "VRM {} expression bind(s) resolved from VRMC_vrm",
-            map.len()
-        );
-    }
-    map
 }
 
 /// Walk `document.skins().next().joints()` and return the
@@ -1058,13 +950,20 @@ fn load_primitive_base_color_texture(
     gltf: &gltf::Gltf,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-) -> VrmResult<Option<VrmTexture>> {
+    cache: &mut std::collections::HashMap<usize, std::sync::Arc<VrmTexture>>,
+) -> VrmResult<Option<std::sync::Arc<VrmTexture>>> {
     let material = primitive.material();
     let pbr = material.pbr_metallic_roughness();
     let Some(info) = pbr.base_color_texture() else {
         return Ok(None);
     };
     let texture = info.texture();
+    let tex_index = texture.index();
+
+    if let Some(cached) = cache.get(&tex_index) {
+        return Ok(Some(cached.clone()));
+    }
+
     let image =
         load_image_data(&texture, gltf).map_err(|e| VrmError::TextureDecode(e.to_string()))?;
 
@@ -1152,12 +1051,14 @@ fn load_primitive_base_color_texture(
         ],
     });
 
-    Ok(Some(VrmTexture {
+    let vrm_tex = std::sync::Arc::new(VrmTexture {
         texture: gpu_texture,
         sampler,
         bind_group_layout,
         bind_group,
-    }))
+    });
+    cache.insert(tex_index, vrm_tex.clone());
+    Ok(Some(vrm_tex))
 }
 
 struct DecodedImage {
@@ -1239,11 +1140,17 @@ fn normalize_morph_offset(raw: [f32; 3], _scale: f32) -> [f32; 3] {
 /// create the combined GPU bind group. Returns `Ok(None)` if the
 /// material has no MToon textures at all.
 fn load_mtoon_gpu_textures(
+    mat_index: usize,
     mat: &mtoon::MToonMaterial,
     gltf: &gltf::Gltf,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-) -> VrmResult<Option<mtoon::MToonGpuTextures>> {
+    cache: &mut std::collections::HashMap<usize, std::sync::Arc<mtoon::MToonGpuTextures>>,
+) -> VrmResult<Option<std::sync::Arc<mtoon::MToonGpuTextures>>> {
+    if let Some(cached) = cache.get(&mat_index) {
+        return Ok(Some(cached.clone()));
+    }
+
     // Check if any MToon textures are referenced.
     let has_any = mat.shade_multiply_texture.is_some()
         || mat.shading_shift_texture.is_some()
@@ -1537,7 +1444,7 @@ fn load_mtoon_gpu_textures(
         })
     };
 
-    Ok(Some(mtoon::MToonGpuTextures {
+    let gpu_tex = std::sync::Arc::new(mtoon::MToonGpuTextures {
         shade_multiply: make_single(&shade_multiply, "vrm.mtoon_shade_multiply_bg"),
         shading_shift: make_single(&shading_shift, "vrm.mtoon_shading_shift_bg"),
         emissive: make_single(&emissive, "vrm.mtoon_emissive_bg"),
@@ -1546,7 +1453,9 @@ fn load_mtoon_gpu_textures(
         outline_width: make_single(&outline_width, "vrm.mtoon_outline_width_bg"),
         uv_mask: make_single(&uv_mask, "vrm.mtoon_uv_mask_bg"),
         combined_bind_group,
-    }))
+    });
+    cache.insert(mat_index, gpu_tex.clone());
+    Ok(Some(gpu_tex))
 }
 
 /// A single GPU texture + sampler for MToon.

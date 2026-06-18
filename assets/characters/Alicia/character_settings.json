@@ -4,9 +4,9 @@
     0.0,
     0.0
   ],
-  "model_scale": 1.0,
-  "look_at_strength": 0.6,
-  "default_motion": "VRMA_01",
+  "model_scale": 0.99999994,
+  "look_at_strength": 1.0,
+  "default_motion": "VRMA_03",
   "default_expression": "neutral",
   "$schema": "../../schema/character_settings.schema.json"
 }

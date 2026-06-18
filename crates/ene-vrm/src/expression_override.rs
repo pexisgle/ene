@@ -106,17 +106,28 @@ pub struct ExpressionOverrideSettings {
     pub look_at: ExpressionOverrideType,
 }
 
-/// Parsed expression definition, holding the override fields
-/// and the `isBinary` flag. Lives on [`VrmModel`] so the
-/// runtime can apply override semantics every frame.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
+/// Maps a morph target index of a glTF node to an expression definition.
+pub struct MorphTargetBind {
+    /// The glTF node index that contains the mesh to morph.
+    pub node: usize,
+    /// The morph target index on the mesh primitives.
+    pub index: usize,
+    /// The weight scalar applied to the morph target when this expression is at 1.0.
+    pub weight: f32,
+}
+
+/// A parsed definition from the `VRMC_vrm.expressions` glTF extension.
+#[derive(Clone, Debug)]
 pub struct ExpressionDefinition {
     /// Expression name (e.g. `happy`, `sad`).
     pub name: ExpressionName,
     /// Override settings for this expression.
     pub overrides: ExpressionOverrideSettings,
-    /// `weight > 0.5` → 1.0, else 0.0.
+    /// `weight > 0.5` -> 1.0, else 0.0.
     pub is_binary: bool,
+    /// Morph targets driven by this expression.
+    pub morph_target_binds: Vec<MorphTargetBind>,
 }
 
 impl ExpressionDefinition {
@@ -129,6 +140,7 @@ impl ExpressionDefinition {
             name: name.into(),
             overrides: ExpressionOverrideSettings::default(),
             is_binary: false,
+            morph_target_binds: Vec::new(),
         }
     }
 }
@@ -324,6 +336,27 @@ pub fn load_expression_overrides(gltf: &gltf::Gltf) -> Vec<ExpressionDefinition>
                 .map(ExpressionOverrideType::from_json_str)
                 .unwrap_or_default();
 
+            if let Some(binds) = expr.get("morphTargetBinds").and_then(|v| v.as_array()) {
+                for bind in binds {
+                    if let (Some(node), Some(index)) = (
+                        bind.get("node")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as usize),
+                        bind.get("index")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as usize),
+                    ) {
+                        let weight =
+                            bind.get("weight").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+                        def.morph_target_binds.push(MorphTargetBind {
+                            node,
+                            index,
+                            weight,
+                        });
+                    }
+                }
+            }
+
             defs.push(def);
             parsed_count += 1;
         }
@@ -353,6 +386,27 @@ impl ExpressionLayer {
     /// call is a no-op.
     pub fn apply_overrides(&mut self, defs: &[ExpressionDefinition]) {
         apply_overrides(&mut self.weights, defs);
+
+        self.morph_target_weights.clear();
+        for def in defs {
+            if let Some(&expr_weight) = self.weights.get(&def.name) {
+                if expr_weight <= 0.0 {
+                    continue;
+                }
+                let weight = if def.is_binary && expr_weight > 0.5 {
+                    1.0
+                } else {
+                    expr_weight
+                };
+                for bind in &def.morph_target_binds {
+                    let current = self
+                        .morph_target_weights
+                        .entry((bind.node, bind.index))
+                        .or_insert(0.0);
+                    *current = (*current + weight * bind.weight).clamp(0.0, 1.0);
+                }
+            }
+        }
     }
 }
 
@@ -383,6 +437,7 @@ mod tests {
                 blink,
                 look_at,
             },
+            morph_target_binds: Vec::new(),
         }
     }
 

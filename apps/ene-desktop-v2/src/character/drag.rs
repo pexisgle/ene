@@ -13,21 +13,30 @@
 //!   `WindowEvent::MouseInput { state, button }` events.
 //! - Bevy `MessageReader<CursorMoved>` → winit
 //!   `WindowEvent::CursorMoved { position }`, already mirrored into
-//!   `Runtime::last_cursor_logical`.
+//!   `Runtime::last_cursor_physical`.
 //! - Bevy `Assets<Mesh>::compute_aabb()` + per-mesh `GlobalTransform`
 //!   → `VrmModel::aabb()` (post-normalize) plus
 //!   `ModelUniform::from_position_scale(position, scale).model`
 //!   to transform the 8 corners to world space.
 //!
-//! **Out of scope for PR4.3:** the click-through / passthrough logic
-//! that lives in `apps/ene-desktop/src/character_drag/windows.rs`
-//! (Win32 `SetWindowSubclass` + `WM_NCHITTEST` + `WS_EX_TRANSPARENT`)
-//! and `linux/region.rs` (Wayland `wl_surface::set_input_region` /
-//! X11 shape ext) waits for PR5. The drag-state machine does track
-//! "cursor over character" for the press predicate, but this PR does
-//! **not** override the winit hit-test — the entire character window
-//! is still clickable. PR5.1 (Windows) and PR5.2 (Wayland) carry
-//! that work.
+//! Windows click-through (PR5.2) is in place as of 2026-06-19: the
+//! runtime reads the global cursor via `device_query`, projects it
+//! through the orthographic camera, casts a Rapier ray against the
+//! character's per-bone sphere colliders (one auto-sized sphere
+//! per humanoid bone; fingers are filtered out), and toggles
+//! winit's `Window::set_cursor_hittest` so the rest of the desktop
+//! receives the click when the cursor is not on the silhouette.
+//! The `is_dragging` accessor on `CharacterDragState` keeps the
+//! window receiving input while a drag is in progress, so the
+//! user can pull the character off the silhouette mid-drag.
+//! Bone positions are refreshed every frame from
+//! `VrmModel::nodes::world_positions` (which `update_skin_palette`
+//! updates with the current VRMA), so the colliders follow the
+//! animation without any per-frame GPU readback.
+//!
+//! PR5.3+ (Wayland `wl_surface::set_input_region`, X11 shape,
+//! Linux offscreen mask + gizmo, frame pacer) is still pending;
+//! Linux currently has no click-through on the character window.
 use glam::{Mat4, Vec2, Vec3};
 
 /// Per-window drag state. `None` = idle, `Some(_)` = dragging.
@@ -44,10 +53,9 @@ pub struct CharacterDragState {
 
 impl CharacterDragState {
     /// `true` while the user is holding left-mouse-button and
-    /// dragging the character. The runtime may also use this for
-    /// the "even outside the AABB, allow drag tracking" case the
-    /// legacy feeds into `allows_input` for click-through.
-    #[allow(dead_code)] // Wired in PR5.1 (Windows click-through).
+    /// dragging the character. The Windows click-through hook reads
+    /// this so a drag in progress keeps the window receiving input
+    /// even when the cursor has left the silhouette.
     pub fn is_dragging(&self) -> bool {
         self.last_cursor_world_pos.is_some()
     }
@@ -215,8 +223,9 @@ pub fn cursor_over_character(
     let view_pos = Vec3::new(ndc.x * half_w, ndc.y * half_h, 0.0);
     let view = Mat4::look_at_rh(camera_eye, camera_target, camera_up);
     let world_3d = view.inverse().transform_point3(view_pos);
-    let ray_dir = (world_3d - camera_eye).normalize_or_zero();
-    ray_intersects_aabb(camera_eye, ray_dir, world_min, world_max)
+    let ray_origin = world_3d;
+    let ray_dir = (camera_target - camera_eye).normalize_or_zero();
+    ray_intersects_aabb(ray_origin, ray_dir, world_min, world_max)
 }
 
 /// Process a press / release event. Mirrors

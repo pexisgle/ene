@@ -114,19 +114,12 @@ pub fn compute_world_target(
     let view_pos = Vec3::new(ndc.x * half_w, ndc.y * half_h, 0.0);
 
     let view = Mat4::look_at_rh(camera_eye, camera_target, camera_up);
-    let world_at_view_z0 = view.inverse().transform_point3(view_pos);
-
-    let camera_forward = (camera_target - camera_eye).normalize_or_zero();
-    let ray_dir = (world_at_view_z0 - camera_eye).normalize_or_zero();
-
-    let head_to_eye = camera_eye - head_world;
-    let denom = ray_dir.dot(camera_forward);
-    let t = if denom.abs() < 1e-6 {
-        0.0
-    } else {
-        head_to_eye.dot(camera_forward) / denom
-    };
-    let cursor_world = camera_eye + ray_dir * t;
+    let head_view = view.transform_point3(head_world);
+    let cursor_world = view.inverse().transform_point3(Vec3::new(
+        view_pos.x,
+        view_pos.y,
+        head_view.z + NEUTRAL_TARGET_Z,
+    ));
 
     let strength = strength.clamp(0.0, 1.0);
     let neutral = neutral_target(head_world);

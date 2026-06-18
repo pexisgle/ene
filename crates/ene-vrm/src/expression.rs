@@ -49,7 +49,7 @@
 //! Primitives without morph targets share a single dummy
 //! bind-group layout with empty storage; the shader's
 //! `target_count == 0u` early-out skips the lookup.
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// Maximum number of morph-target weight slots packed per
 /// primitive. 16 vec4s = 64 slots. PR4.4 ships a uniform buffer
@@ -123,10 +123,8 @@ impl PrimitiveMorphMeta {
 /// `name_to_slot` map is local to one primitive.
 #[derive(Clone, Debug)]
 pub struct MorphTarget {
-    /// Human-readable name (`happy`, `sad`, `blink`, …). VRM
-    /// 1.0 stores these in lower-case; the loader preserves the
-    /// raw string.
-    pub name: ExpressionName,
+    /// The index of the morph target in the glTF mesh primitives' morph target list.
+    pub target_index: usize,
     /// One position offset per vertex, in object space. Length
     /// must equal the primitive's `vertex_count`; the loader
     /// pads with zeros if the glTF accessor is shorter.
@@ -176,7 +174,7 @@ impl From<&str> for ExpressionName {
 /// global (model-wide) name → target-slot mapping local to that
 /// primitive. The renderer walks this structure when it
 /// populates the per-frame `PrimitiveMorphMeta` uniform.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct PrimitiveMorphs {
     /// Stable identifier so the renderer can correlate a
     /// `PrimitiveMorphs` with the `VrmPrimitive` whose draw call
@@ -185,16 +183,15 @@ pub struct PrimitiveMorphs {
     /// `(mesh, prim)` if the renderer keeps the linear order it
     /// received at `new` time).
     pub primitive_id: PrimitiveId,
+    /// The node index for the glTF mesh this primitive belongs to.
+    pub node_index: usize,
     /// Morph targets in load order. The slot index in this vec
     /// is the index used by the GPU shader to look up offsets.
     pub targets: Vec<MorphTarget>,
-    /// `name → slot-in-`targets``. Built once at load time. The
-    /// runtime reads this every frame to translate the global
-    /// weight map into per-primitive `vec4` slots.
-    pub name_to_slot: BTreeMap<ExpressionName, u32>,
     /// Cached `targets.len()` so the renderer can size uniforms
-    /// without re-counting.
-    pub target_count: u32,
+    /// without a load. Limited to
+    /// [`MAX_MORPH_TARGETS_PER_PRIMITIVE`].
+    pub uniform_buffer_len: u32,
     /// Vertex count of the host primitive. Required to validate
     /// the offsets length at load time and to fill the GPU
     /// uniform header.
@@ -202,50 +199,22 @@ pub struct PrimitiveMorphs {
 }
 
 impl PrimitiveMorphs {
-    /// Build a `PrimitiveMorphs` from a list of `(name, offsets)`
-    /// pairs. Panics on duplicate names within a single
-    /// primitive; the loader is responsible for the uniqueness
-    /// invariant (VRM 1.0 says targets on one primitive must
-    /// have unique names).
+    /// Build a `PrimitiveMorphs` from a list of morph targets.
     pub fn from_targets(
         primitive_id: PrimitiveId,
+        node_index: usize,
         vertex_count: u32,
-        raw: Vec<(String, Vec<[f32; 3]>)>,
+        targets: Vec<MorphTarget>,
     ) -> Self {
-        let mut targets = Vec::with_capacity(raw.len());
-        let mut name_to_slot = BTreeMap::new();
-        for (slot, (name, offsets)) in raw.into_iter().enumerate() {
-            let slot = slot as u32;
-            let name = ExpressionName(name);
-            // Last write wins on duplicate; warn so the loader
-            // can log the issue.
-            if name_to_slot.insert(name.clone(), slot).is_some() {
-                tracing::warn!(
-                    "Primitive {:?} has duplicate morph target name '{}'; overwriting",
-                    primitive_id,
-                    name
-                );
-            }
-            targets.push(MorphTarget {
-                name,
-                position_offsets: offsets,
-            });
-        }
+        let uniform_buffer_len = targets.len() as u32;
+
         Self {
             primitive_id,
-            target_count: targets.len() as u32,
-            vertex_count,
+            node_index,
             targets,
-            name_to_slot,
+            uniform_buffer_len,
+            vertex_count,
         }
-    }
-
-    /// Look up the slot index of a morph target by name on this
-    /// primitive. Returns `None` if the primitive does not carry
-    /// that expression (different primitives often have a
-    /// different subset of the global expression list).
-    pub fn slot_for(&self, name: &ExpressionName) -> Option<u32> {
-        self.name_to_slot.get(name).copied()
     }
 }
 
@@ -271,16 +240,29 @@ pub struct ExpressionLayer {
     /// `bool` back from `set_expression` to distinguish a
     /// successful update from a no-op drop.
     pub weights: BTreeMap<ExpressionName, f32>,
+    /// Accumulated weights for individual morph targets.
+    /// Keyed by `(node_index, morph_target_index)`.
+    pub morph_target_weights: BTreeMap<(usize, usize), f32>,
 }
 
 impl ExpressionLayer {
     /// Build a fresh layer from per-primitive data. The model
     /// has zero expressions if `per_primitive` is empty.
-    pub fn new(per_primitive: Vec<Option<PrimitiveMorphs>>) -> Self {
-        let weights = BTreeMap::new();
+    pub fn new(
+        per_primitive: Vec<Option<PrimitiveMorphs>>,
+        overrides: Option<&[crate::expression_override::ExpressionDefinition]>,
+    ) -> Self {
+        let mut weights = BTreeMap::new();
+        if let Some(overrides) = overrides {
+            for def in overrides {
+                weights.insert(def.name.clone(), 0.0);
+            }
+        }
+        let morph_target_weights = BTreeMap::new();
         Self {
             per_primitive,
             weights,
+            morph_target_weights,
         }
     }
 
@@ -289,13 +271,7 @@ impl ExpressionLayer {
     /// settings UI's "Manual Expressions (Test)" buttons and by
     /// the AI bridge to look up the next emotion's name.
     pub fn expression_names(&self) -> Vec<ExpressionName> {
-        let mut set: BTreeSet<ExpressionName> = BTreeSet::new();
-        for prim in self.per_primitive.iter().flatten() {
-            for t in &prim.targets {
-                set.insert(t.name.clone());
-            }
-        }
-        set.into_iter().collect()
+        self.weights.keys().cloned().collect()
     }
 
     /// Set a single expression weight. Names not present on the
@@ -309,7 +285,7 @@ impl ExpressionLayer {
     /// (vs. the model's `happy`) silently accumulate in the
     /// weight map and never be cleared.
     pub fn set_expression(&mut self, name: &ExpressionName, weight: f32) -> bool {
-        if !self.expression_names().iter().any(|n| n == name) {
+        if !self.weights.contains_key(name) {
             return false;
         }
         self.weights.insert(name.clone(), weight.clamp(0.0, 1.0));
@@ -327,7 +303,7 @@ impl ExpressionLayer {
             // `self.weights` a subset of `expression_names()` —
             // a useful invariant for tests and for any future
             // diagnostic that wants to dump the weight map.
-            if !self.expression_names().iter().any(|n| n == name) {
+            if !self.weights.contains_key(name) {
                 continue;
             }
             self.weights.insert(name.clone(), w.clamp(0.0, 1.0));
@@ -376,28 +352,16 @@ mod tests {
 
     #[test]
     fn expression_names_dedupes_across_primitives() {
-        let p0 = PrimitiveMorphs::from_targets(
-            prim(0),
-            4,
-            vec![
-                ("happy".to_string(), vec![[0.0; 3]; 4]),
-                ("sad".to_string(), vec![[0.0; 3]; 4]),
-            ],
-        );
-        let p1 = PrimitiveMorphs::from_targets(
-            prim(1),
-            4,
-            vec![
-                ("happy".to_string(), vec![[0.0; 3]; 4]),
-                ("angry".to_string(), vec![[0.0; 3]; 4]),
-            ],
-        );
-        let layer = ExpressionLayer::new(vec![Some(p0), Some(p1)]);
-        let names = layer.expression_names();
+        let defs = vec![
+            crate::expression_override::ExpressionDefinition::new("happy"),
+            crate::expression_override::ExpressionDefinition::new("sad"),
+        ];
+        let layer = ExpressionLayer::new(vec![], Some(&defs));
+        let mut names = layer.expression_names();
+        names.sort_by_key(|n| n.as_str().to_string());
         assert_eq!(
             names,
             vec![
-                ExpressionName("angry".to_string()),
                 ExpressionName("happy".to_string()),
                 ExpressionName("sad".to_string()),
             ]
@@ -405,28 +369,11 @@ mod tests {
     }
 
     #[test]
-    fn slot_for_returns_local_index() {
-        let p0 = PrimitiveMorphs::from_targets(
-            prim(0),
-            3,
-            vec![
-                ("happy".to_string(), vec![[0.0; 3]; 3]),
-                ("sad".to_string(), vec![[0.0; 3]; 3]),
-            ],
-        );
-        assert_eq!(p0.slot_for(&"happy".into()), Some(0));
-        assert_eq!(p0.slot_for(&"sad".into()), Some(1));
-        assert_eq!(p0.slot_for(&"missing".into()), None);
-    }
-
-    #[test]
     fn set_expression_clamps_weight() {
-        let p0 = PrimitiveMorphs::from_targets(
-            prim(0),
-            1,
-            vec![("happy".to_string(), vec![[0.0; 3]; 1])],
-        );
-        let mut layer = ExpressionLayer::new(vec![Some(p0)]);
+        let defs = vec![crate::expression_override::ExpressionDefinition::new(
+            "happy",
+        )];
+        let mut layer = ExpressionLayer::new(vec![], Some(&defs));
         assert!(layer.set_expression(&"happy".into(), 1.5));
         assert_eq!(layer.weights.get(&"happy".into()), Some(&1.0));
         layer.set_expression(&"happy".into(), -0.3);
@@ -435,12 +382,10 @@ mod tests {
 
     #[test]
     fn set_expression_unknown_name_returns_false_and_is_not_stored() {
-        let p0 = PrimitiveMorphs::from_targets(
-            prim(0),
-            1,
-            vec![("happy".to_string(), vec![[0.0; 3]; 1])],
-        );
-        let mut layer = ExpressionLayer::new(vec![Some(p0)]);
+        let defs = vec![crate::expression_override::ExpressionDefinition::new(
+            "happy",
+        )];
+        let mut layer = ExpressionLayer::new(vec![], Some(&defs));
         let applied = layer.set_expression(&"joy".into(), 0.5);
         assert!(!applied);
         // Issue #7: a misspelled / unknown expression name must
@@ -448,7 +393,7 @@ mod tests {
         // implementation kept the weight around for round-trip
         // with the UI, but the leftover entry silently
         // accumulated across frames and never reached the GPU
-        // — the model just never animates the intended
+        //  Ethe model just never animates the intended
         // expression.
         assert!(!layer.weights.contains_key(&"joy".into()));
         // The known expression still works.
@@ -458,12 +403,10 @@ mod tests {
 
     #[test]
     fn apply_weights_overwrites() {
-        let p0 = PrimitiveMorphs::from_targets(
-            prim(0),
-            1,
-            vec![("happy".to_string(), vec![[0.0; 3]; 1])],
-        );
-        let mut layer = ExpressionLayer::new(vec![Some(p0)]);
+        let defs = vec![crate::expression_override::ExpressionDefinition::new(
+            "happy",
+        )];
+        let mut layer = ExpressionLayer::new(vec![], Some(&defs));
         layer.set_expression(&"happy".into(), 0.1);
         let mut incoming = BTreeMap::new();
         incoming.insert(ExpressionName::new("happy"), 0.7);
@@ -477,12 +420,10 @@ mod tests {
     /// renderer's weight map.
     #[test]
     fn apply_weights_drops_unknown_names() {
-        let p0 = PrimitiveMorphs::from_targets(
-            prim(0),
-            1,
-            vec![("happy".to_string(), vec![[0.0; 3]; 1])],
-        );
-        let mut layer = ExpressionLayer::new(vec![Some(p0)]);
+        let defs = vec![crate::expression_override::ExpressionDefinition::new(
+            "happy",
+        )];
+        let mut layer = ExpressionLayer::new(vec![], Some(&defs));
         let mut incoming = BTreeMap::new();
         incoming.insert(ExpressionName::new("happy"), 0.7);
         incoming.insert(ExpressionName::new("joy"), 0.9);

@@ -31,6 +31,7 @@ use crate::character_state::{ActiveEmotion, EmotionQueue, transition_emotions};
 use crate::look_at::{LookAtState, compute_world_target, head_world_for};
 
 pub mod drag;
+
 pub use drag::CharacterDragState;
 
 /// Weight below which an active emotion is considered fully
@@ -97,6 +98,78 @@ pub struct CharacterRenderer {
     vrma_path: Option<PathBuf>,
 }
 
+/// PR5.2: minimum bone radius (in world units). Bones whose
+/// computed radius falls below this — typically finger segments,
+/// which are characteristically short — are filtered out so the
+/// per-character collider count stays small and the per-frame
+/// `update_character_bone_positions` call stays cheap.
+const MIN_BONE_RADIUS: f32 = 0.025;
+
+/// PR5.2: name-based default radius (in model-local units,
+/// before `actual_scale`) for the major humanoid bones. The
+/// values are intentionally generous — the chest, hips, head,
+/// hand, and foot all need a sphere that covers the whole
+/// trunk/extremity, not just half the distance to the next
+/// child (which would be far too small for a 30 cm wide chest).
+/// The user accepted a slightly loose collider, so the values
+/// err on the side of "everything inside the body is hittable".
+const HEAD_BONE_RADIUS: f32 = 0.15;
+const NECK_BONE_RADIUS: f32 = 0.04;
+const CHEST_BONE_RADIUS: f32 = 0.15;
+const UPPER_CHEST_BONE_RADIUS: f32 = 0.12;
+const SPINE_BONE_RADIUS: f32 = 0.08;
+const HIPS_BONE_RADIUS: f32 = 0.12;
+const SHOULDER_BONE_RADIUS: f32 = 0.05;
+const UPPER_ARM_BONE_RADIUS: f32 = 0.07;
+const LOWER_ARM_BONE_RADIUS: f32 = 0.06;
+const HAND_BONE_RADIUS: f32 = 0.08;
+const UPPER_LEG_BONE_RADIUS: f32 = 0.08;
+const LOWER_LEG_BONE_RADIUS: f32 = 0.07;
+const FOOT_BONE_RADIUS: f32 = 0.10;
+const TOES_BONE_RADIUS: f32 = 0.05;
+const JAW_BONE_RADIUS: f32 = 0.04;
+const EYE_BONE_RADIUS: f32 = 0.03;
+/// Fallback for any other bone (typically a finger segment).
+/// Below `MIN_BONE_RADIUS` after `actual_scale` is applied, so
+/// the per-finger colliders are filtered out — the parent
+/// `hand` collider already covers the fingertips.
+const GENERIC_BONE_RADIUS: f32 = 0.02;
+
+/// PR5.2: pick a name-based default radius (in model-local
+/// units) for one humanoid bone.
+///
+/// The humanoid registry stores canonical names with the
+/// `left` / `right` prefix glued on (e.g. `leftfoot`, `rightfoot`,
+/// `leftupperarm`), so we strip the prefix before the lookup —
+/// the central bone (`head`, `chest`, `hips`, ...) and its
+/// left/right siblings land on the same match arm.
+fn name_radius(canonical_name: Option<&str>) -> f32 {
+    let suffix = canonical_name.map(|n| {
+        n.strip_prefix("left")
+            .or_else(|| n.strip_prefix("right"))
+            .unwrap_or(n)
+    });
+    match suffix {
+        Some("head") => HEAD_BONE_RADIUS,
+        Some("neck") => NECK_BONE_RADIUS,
+        Some("chest") => CHEST_BONE_RADIUS,
+        Some("upperchest") => UPPER_CHEST_BONE_RADIUS,
+        Some("spine") => SPINE_BONE_RADIUS,
+        Some("hips") => HIPS_BONE_RADIUS,
+        Some("shoulder") => SHOULDER_BONE_RADIUS,
+        Some("upperarm") => UPPER_ARM_BONE_RADIUS,
+        Some("lowerarm") => LOWER_ARM_BONE_RADIUS,
+        Some("hand") => HAND_BONE_RADIUS,
+        Some("upperleg") => UPPER_LEG_BONE_RADIUS,
+        Some("lowerleg") => LOWER_LEG_BONE_RADIUS,
+        Some("foot") => FOOT_BONE_RADIUS,
+        Some("toes") => TOES_BONE_RADIUS,
+        Some("jaw") => JAW_BONE_RADIUS,
+        Some("eye") => EYE_BONE_RADIUS,
+        _ => GENERIC_BONE_RADIUS,
+    }
+}
+
 impl CharacterRenderer {
     /// Build an un-initialized renderer. The runtime calls
     /// [`CharacterRenderer::init`] once it has the actual surface
@@ -117,6 +190,17 @@ impl CharacterRenderer {
             vrma_player: VrmaPlayer::default(),
             vrma_path: None,
         }
+    }
+
+    /// Test-only: install a fully-built `VrmModel` directly on
+    /// the renderer. The normal `init` path goes through
+    /// `load_vrm` + a `wgpu` device, which makes pure unit
+    /// tests of the per-frame CPU math (e.g. camera target)
+    /// awkward. The setter is `pub(crate)` + `#[cfg(test)]`
+    /// so it is only visible from sibling test modules.
+    #[cfg(test)]
+    pub(crate) fn set_model_for_test(&mut self, model: VrmModel) {
+        self.model = Some(model);
     }
 
     /// Load the default VRM and build the render pipeline. Safe to
@@ -235,15 +319,42 @@ impl CharacterRenderer {
     /// `VrmRenderer::update_skin_palette` separately
     /// with the returned `Vec<Mat4>`.
     pub fn update_motion(&mut self, dt_secs: f32) -> Option<Vec<glam::Mat4>> {
-        if !self.vrma_player.playing {
-            return None;
-        }
-        let asset = self.vrma.as_ref()?;
         let model = self.model.as_mut()?;
-        let clip = asset.clips.first()?;
 
-        self.vrma_player.advance(dt_secs, clip.duration);
-        let frame = evaluate_clip(clip, self.vrma_player.time);
+        let mut frame = if self.vrma_player.playing {
+            if let Some(asset) = &self.vrma
+                && let Some(clip) = asset.clips.first()
+            {
+                self.vrma_player.advance(dt_secs, clip.duration);
+                evaluate_clip(clip, self.vrma_player.time)
+            } else {
+                ene_vrm::VrmaFrame::default()
+            }
+        } else {
+            ene_vrm::VrmaFrame::default()
+        };
+
+        // Retarget hips translation (convert absolute canonical position to a relative delta)
+        if let Some(ref mut hips_trans) = frame.hips_translation {
+            if let Some(asset) = &self.vrma
+                && let Some(&src_hips_node) = asset.properties.humanoid_bones.get("hips")
+                && let Some(dst_hips_entry) = model.humanoid.hips()
+            {
+                let src_rest_local = asset.node_rest_positions[src_hips_node];
+                let src_rest_global_y = asset.node_world_rest_positions[src_hips_node].y;
+                let dst_rest_global_y = bone_world_rest_position(model, dst_hips_entry).y;
+
+                let delta = *hips_trans - src_rest_local;
+                let scale = if src_rest_global_y.abs() < 1e-6 {
+                    1.0
+                } else {
+                    dst_rest_global_y / src_rest_global_y
+                };
+                *hips_trans = delta * scale;
+            } else {
+                frame.hips_translation = None;
+            }
+        }
 
         // Expression weights (morph targets).
         if !frame.expression_weights.is_empty() {
@@ -256,8 +367,13 @@ impl CharacterRenderer {
             layer_mut.apply_overrides(&expressions_meta);
         }
 
-        // Skin palette.
-        let palette = model.update_skin_palette(&frame);
+        // Skin palette. PR4.16: the LookAt bone output (set
+        // by `update_look_at` for `"bone"`-type models) is
+        // composed on top of the VRMA pose so the head and
+        // eyes track the cursor. `None` for `"expression"`-
+        // type models, where the LookAt signal routes into
+        // morph weights via `apply_emotions` instead.
+        let palette = model.update_skin_palette(&frame, self.look_at_bone_output.as_ref());
         if palette.is_empty() {
             None
         } else {
@@ -497,8 +613,8 @@ impl CharacterRenderer {
         let smoothing = LookAtProperties::DEFAULT_SMOOTHING;
 
         // 3. Compute the smoothed world target.
-        let eye = ene_vrm::camera::DEFAULT_EYE.into();
-        let target = ene_vrm::camera::DEFAULT_TARGET.into();
+        let eye = self.camera.eye().into();
+        let target = self.camera.target().into();
         let up = ene_vrm::camera::DEFAULT_UP.into();
         let smoothed_target = compute_world_target(
             cursor_logical,
@@ -577,7 +693,7 @@ impl CharacterRenderer {
             return (head_world_for(character_position), Quat::IDENTITY);
         };
         let world = bone_world_position(
-            head,
+            bone_world_rest_position(model, head),
             model.center(),
             model.normalize_scale(),
             character_position,
@@ -609,7 +725,7 @@ impl CharacterRenderer {
         };
         match pick_body_center_bone(&model.humanoid) {
             Some(bone) => bone_world_position(
-                bone,
+                bone_world_rest_position(model, bone),
                 model.center(),
                 model.normalize_scale(),
                 character_position,
@@ -620,34 +736,74 @@ impl CharacterRenderer {
     }
 
     /// Update the camera target to perfectly frame the character's AABB
-    pub fn update_camera_target(&mut self, _character_position: Vec3, model_scale: f32) {
-        // Track the animated chest bone to perfectly frame the character even if
-        // a VRMA animation contains a massive root offset (e.g. jumping or floating).
-        // We use the previous frame's `world_positions` which is perfectly fine for camera tracking.
+    pub fn update_camera_target(&mut self, model_scale: f32) {
+        // PR-fix: the camera target is read by `look_at::compute_world_target`
+        // (via the orthographic camera's eye / target) which then drives the
+        // head-look-at output every frame. The original implementation read
+        // `model.nodes.world_positions[chest.node][1]` — the **animated**
+        // chest bone world Y from the previous frame. With an active VRMA
+        // motion that oscillated the chest, the camera target oscillated
+        // frame-to-frame, the cursor→world projection oscillated with it,
+        // and the resulting look-at was visibly choppy.
+        //
+        // The fix is to read the chest bone's **world rest Y** (computed by
+        // walking the parent chain through `nodes.parents` +
+        // `nodes.rest_local_positions`). The rest pose is constant for the
+        // lifetime of the model, so the camera target is now stable under
+        // animation. The first fix pass accidentally read
+        // `chest.rest.translation[1]` — the **local** glTF `Node::transform()`
+        // (offset from the parent bone) — which made the camera target
+        // ~7× too low for a humanoid chest deep in the chain and broke the
+        // framing, the look-at, and the drag.
         let mut target = Vec3::ZERO;
 
-        if let Some(model) = &self.model
-            && let Some(chest) = model.humanoid.chest()
-            && chest.node < model.nodes.world_positions.len()
-        {
-            let animated_y = model.nodes.world_positions[chest.node][1];
-            let local_y = animated_y - model.center()[1];
-            target.y += local_y * model.normalize_scale() * model_scale;
+        if let Some(model) = &self.model {
+            let bone = model
+                .humanoid
+                .chest()
+                .or_else(|| model.humanoid.by_name("upperChest"))
+                .or_else(|| model.humanoid.by_name("spine"))
+                .or_else(|| model.humanoid.hips());
+
+            if let Some(bone) = bone {
+                target.y += chest_target_y(
+                    chest_world_rest_y(model, bone),
+                    model.center()[1],
+                    model.normalize_scale(),
+                    model_scale,
+                );
+            }
         }
 
         let mut eye = target;
         eye.z += ene_vrm::camera::DEFAULT_EYE[2];
+        eye.y += ene_vrm::camera::DEFAULT_EYE[1];
 
         self.camera.look_at(eye.into(), target.into());
     }
 
+    /// Returns the current camera eye position.
+    pub fn camera_eye(&self) -> [f32; 3] {
+        self.camera.eye()
+    }
+
+    /// Returns the current camera target position.
+    pub fn camera_target(&self) -> [f32; 3] {
+        self.camera.target()
+    }
+
     /// PR4.8: latest per-bone output for `"bone"`-type
     /// models. `None` for `"expression"`-type models or
-    /// before the first frame. The next skinning palette
-    /// pass consumes this field; for now it is observable
-    /// via this accessor (and via the
-    /// [`Self::look_at_bone_output_dbg`] diagnostic).
-    #[allow(dead_code)] // Wired in PR4.9 (skinning palette update).
+    /// before the first frame. Consumed by
+    /// [`Self::update_motion`] (PR4.16) — the value is
+    /// forwarded into
+    /// [`ene_vrm::VrmModel::update_skin_palette`] every
+    /// frame, so the head and eyes track the cursor. The
+    /// accessor stays for diagnostics and future
+    /// settings-UI work (e.g. an "override LookAt from
+    /// expression" toggle that wants to peek at the
+    /// current value).
+    #[allow(dead_code)] // Diagnostic accessor; the per-frame read happens inside `update_motion`.
     pub fn look_at_bone_output(&self) -> Option<&LookAtBoneOutput> {
         self.look_at_bone_output.as_ref()
     }
@@ -845,6 +1001,161 @@ impl CharacterRenderer {
         let model_mat = glam::Mat4::from_cols_array_2d(&model_uniform.model);
         Some(drag::transformed_aabb_bounds(lo, hi, model_mat))
     }
+
+    /// PR5.2: build the list of `(local_position, radius)` pairs
+    /// that the runtime hands to
+    /// [`crate::physics::PhysicsWorld::add_character_bone_colliders`].
+    /// Each entry corresponds to one humanoid bone. Bones with
+    /// an auto-computed radius below [`MIN_BONE_RADIUS`] — almost
+    /// always finger segments — are filtered out so the
+    /// collider count stays small.
+    ///
+    /// `actual_scale` is `auto_fit_scale * model_scale`. The
+    /// returned **radius** is in world units: leaf bones use a
+    /// name-based default (head/foot/hand) that covers the whole
+    /// body part including the tips; non-leaf bones use half the
+    /// distance to the farthest child. Both are scaled by
+    /// `actual_scale` so the collider matches the rendered mesh
+    /// even when the user has not set `model_scale = 1.0`.
+    pub fn build_character_bone_data(&self, actual_scale: f32) -> Vec<(Vec3, f32)> {
+        let Some(model) = self.model.as_ref() else {
+            return Vec::new();
+        };
+        let center = Vec3::from(model.center());
+        let normalize_scale = model.normalize_scale();
+        // Cache the rest-pose world positions once for the whole
+        // model; `compute_bone_radius` walks the hierarchy for
+        // every bone and would otherwise re-walk the same chain
+        // ~50 times per call.
+        let rest_world = compute_rest_world_positions(model);
+
+        let mut out = Vec::new();
+
+        for (bone, entry) in model.humanoid.iter() {
+            let pos_raw = rest_world[entry.node];
+            let pos_local = (pos_raw - center) * normalize_scale;
+            let radius = compute_bone_radius(
+                &rest_world,
+                model,
+                entry.node,
+                Some(bone.as_str()),
+                normalize_scale,
+                actual_scale,
+            );
+            if radius < MIN_BONE_RADIUS {
+                continue;
+            }
+            out.push((pos_local, radius));
+        }
+        out
+    }
+
+    /// PR5.2: read the **current** (animated) local-frame
+    /// positions of the humanoid bones, in the same order as
+    /// [`Self::build_character_bone_data`]. The animation
+    /// system (`update_skin_palette` inside `update_motion`)
+    /// updates `model.nodes.world_positions` every frame, so
+    /// reading it here gives the live post-animation position
+    /// without any per-frame GPU readback.
+    pub fn current_bone_local_positions(&self) -> Vec<Vec3> {
+        let Some(model) = self.model.as_ref() else {
+            return Vec::new();
+        };
+        let center = Vec3::from(model.center());
+        let normalize_scale = model.normalize_scale();
+        let mut out = Vec::new();
+        for (_bone, entry) in model.humanoid.iter() {
+            let pos_raw = model.nodes.world_positions[entry.node];
+            let pos_local = (pos_raw - center) * normalize_scale;
+            out.push(pos_local);
+        }
+        out
+    }
+}
+
+/// PR5.2: walk the parent chain once and return the rest-pose
+/// world position of every node. The character has ~30-50
+/// humanoid bones; calling this once at model-load time and
+/// re-using the result for every `compute_bone_radius` call is
+/// far cheaper than re-walking the chain per bone.
+fn compute_rest_world_positions(model: &VrmModel) -> Vec<Vec3> {
+    let mut world_positions = model.nodes.rest_local_positions.clone();
+    let n = model.nodes.len();
+    for i in 0..n {
+        if let Some(&p) = model.nodes.parents.get(i)
+            && p >= 0
+        {
+            let p = p as usize;
+            if i > p {
+                let rot_p = model.nodes.rest_local_rotations[p];
+                let pos_p = world_positions[p];
+                world_positions[i] = rot_p * model.nodes.rest_local_positions[i] + pos_p;
+            }
+        }
+    }
+    world_positions
+}
+
+/// PR5.2: compute a sensible sphere radius for one bone, in
+/// **world units** (after `actual_scale`).
+///
+/// Two complementary estimates are taken and the larger wins:
+///
+/// - **Name-based default** (in model-local units, then scaled by
+///   `actual_scale`): the per-bone name table in [`name_radius`]
+///   picks generous values for `head` / `chest` / `hips` / etc.
+///   that cover the whole trunk or extremity, not just half the
+///   distance to the next child (which would be far too small
+///   for a 30 cm wide chest).
+/// - **Auto-computed**: `0.5 × (max distance to any child bone)`,
+///   in model-local units, then scaled. Half the gap to the
+///   farthest child is enough to cover the child region's
+///   halfway point; this estimate is usually larger than the
+///   name default for long limb segments (e.g. `upperArm` →
+///   `lowerArm`).
+///
+/// Taking the max means the chest is covered by its generous
+/// name default (the children `neck` / `shoulder` are too
+/// close for `0.5 × max_dist` to cover the whole trunk), while
+/// `upperArm` is covered by the auto-computed estimate (which
+/// sees the long reach to `lowerArm`).
+///
+/// The `MIN_BONE_RADIUS` filter (in `build_character_bone_data`)
+/// drops very small radii afterwards — typically finger
+/// segments, which are filtered out at this stage so the hand
+/// bone (with a generous radius) ends up covering the
+/// fingertips instead.
+fn compute_bone_radius(
+    rest_world: &[Vec3],
+    model: &VrmModel,
+    bone_node: usize,
+    bone_name: Option<&str>,
+    normalize_scale: f32,
+    actual_scale: f32,
+) -> f32 {
+    let bone_pos = rest_world[bone_node];
+    let mut max_child_dist_local = 0.0f32;
+    let mut has_children = false;
+    for (i, &parent) in model.nodes.parents.iter().enumerate() {
+        if parent >= 0 && parent as usize == bone_node {
+            has_children = true;
+            let child_pos = rest_world[i];
+            let dist = (child_pos - bone_pos).length() * normalize_scale;
+            if dist > max_child_dist_local {
+                max_child_dist_local = dist;
+            }
+        }
+    }
+    // Both estimates are in model-local units; take the larger
+    // then scale to world units.
+    let name_default = name_radius(bone_name);
+    let auto_radius = if has_children {
+        max_child_dist_local * 0.5
+    } else {
+        0.0
+    };
+    let base_radius = name_default.max(auto_radius);
+    base_radius * actual_scale
 }
 
 /// Compute the world-space position of a humanoid bone. Mirrors
@@ -860,15 +1171,19 @@ impl CharacterRenderer {
 /// ([`VrmModel::center`] / [`VrmModel::normalize_scale`]) and
 /// are taken as primitives so the helper can be unit-tested
 /// without constructing a full `VrmModel`.
+fn bone_world_rest_position(model: &VrmModel, bone: &HumanoidBoneEntry) -> Vec3 {
+    compute_rest_world_positions(model)[bone.node]
+}
+
 fn bone_world_position(
-    bone: &HumanoidBoneEntry,
+    bone_world_rest_translation: Vec3,
     center: [f32; 3],
     normalize_scale: f32,
     character_position: Vec3,
     model_scale: f32,
 ) -> Vec3 {
     let center = Vec3::from(center);
-    let local = (bone.rest.translation - center) * normalize_scale;
+    let local = (bone_world_rest_translation - center) * normalize_scale;
     character_position + local * model_scale
 }
 
@@ -883,6 +1198,55 @@ fn pick_body_center_bone(humanoid: &ene_vrm::HumanoidBoneRegistry) -> Option<&Hu
         .head()
         .or_else(|| humanoid.chest())
         .or_else(|| humanoid.hips())
+}
+
+/// Compute the chest bone's **world** rest Y position by
+/// walking the parent chain in the rest pose, accumulating
+/// each ancestor's `rest_local_positions` Y. Mirrors the math
+/// the loader's `NodeHierarchy::compute_world_transforms`
+/// does in `loader.rs` (one frame, but for a single bone's Y
+/// axis).
+///
+/// PR-fix follow-up: the first PR-fix pass read
+/// `chest.rest.translation[1]` directly. That field is the
+/// **local** glTF `Node::transform()` (the offset from the
+/// parent bone), not the world position. For a humanoid
+/// chest deep in the chain (hips → spine → chest → …) the
+/// local value is just the offset from the parent (~0.2 m)
+/// while the world value is the sum of all ancestors
+/// (~1.4 m). Using the local value pushed the camera
+/// target ~7× lower than the model, framing the head at the
+/// very top of the viewport and breaking the look-at
+/// (which depends on the camera matrix) and the drag (the
+/// user couldn't see the model well enough to click on it).
+fn chest_world_rest_y(model: &VrmModel, bone: &HumanoidBoneEntry) -> f32 {
+    bone_world_rest_position(model, bone).y
+}
+
+/// Compute the Y component of the camera target from the
+/// chest bone's **world** rest Y. Pure rest-pose math: the
+/// function deliberately takes a pre-computed world rest Y
+/// (and not any animated per-frame value) so VRMA /
+/// node-constraint / spring-bone motion cannot make the
+/// camera (and therefore the head look-at output, which
+/// depends on the camera) jitter.
+///
+/// PR-fix: the previous `update_camera_target` read
+/// `model.nodes.world_positions[chest.node][1]` — the
+/// previous frame's animated chest world Y — which made the
+/// look-at visibly choppy when a motion oscillated the
+/// chest. The follow-up replaces that with
+/// [`chest_world_rest_y`], which is the **rest** world Y
+/// (stable) and not the local rest Y (the first fix
+/// accidentally read the local value, which broke the
+/// framing).
+fn chest_target_y(
+    chest_world_rest_y: f32,
+    model_center_y: f32,
+    normalize_scale: f32,
+    model_scale: f32,
+) -> f32 {
+    (chest_world_rest_y - model_center_y) * normalize_scale * model_scale
 }
 
 #[cfg(test)]
@@ -915,7 +1279,7 @@ mod body_center_tests {
         // (2.0 - 1.0) * 0.75 = 0.75
         // character_position + 0.75 * 1.0 = (0.5, 0.75, 0.0)
         let world = bone_world_position(
-            &bone,
+            bone.rest.translation,
             center,
             normalize_scale,
             character_position,
@@ -931,7 +1295,13 @@ mod body_center_tests {
     #[test]
     fn bone_world_position_scales_offset_by_model_scale() {
         let bone = make_bone(Vec3::new(0.0, 2.0, 0.0));
-        let world = bone_world_position(&bone, [0.0, 1.0, 0.0], 0.75, Vec3::ZERO, 2.0);
+        let world = bone_world_position(
+            bone.rest.translation,
+            [0.0, 1.0, 0.0],
+            0.75,
+            Vec3::ZERO,
+            2.0,
+        );
         // 0.75 * 2.0 = 1.5
         assert_eq!(world, Vec3::new(0.0, 1.5, 0.0));
     }
@@ -988,5 +1358,241 @@ mod body_center_tests {
         let renderer = CharacterRenderer::uninit(std::path::Path::new("."), "missing.vrm");
         let center = renderer.body_center_world(Vec3::new(1.0, 2.0, 3.0), 1.5);
         assert_eq!(center, Vec3::new(1.0, 2.0, 3.0));
+    }
+}
+
+#[cfg(test)]
+mod camera_target_tests {
+    //! PR-fix regression tests: the camera target must remain
+    //! stable when a VRMA motion oscillates the chest bone,
+    //! and must use the chest's **world** rest Y (not the
+    //! local glTF `Node::transform()`) so a humanoid chest
+    //! deep in the chain (hips → spine → chest → …) frames
+    //! the model correctly.
+    //!
+    //! History:
+    //! - Original code read `nodes.world_positions[chest.node][1]`
+    //!   (animated). Choppy under VRMA.
+    //! - First fix read `chest.rest.translation[1]` (local).
+    //!   Camera ~7× too low; broke framing + look-at + drag.
+    //! - Second fix (this module) walks the parent chain to
+    //!   compute the **world** rest Y, then applies the same
+    //!   Y arithmetic. The tests below pin the parent-chain
+    //!   semantics by building a 2- and a 3-node hierarchy
+    //!   where the local and world values differ.
+    use super::*;
+    use ene_vrm::{
+        BoneRestTransform, ExpressionLayer, HumanoidBoneEntry, HumanoidBoneRegistry,
+        NodeConstraintRegistry, NodeHierarchy, Skeleton,
+    };
+    use glam::Quat;
+
+    /// Build a minimal `VrmModel` with a chain of nodes. The
+    /// chain is `nodes[0]` (root) → `nodes[1]` (child) →
+    /// `nodes[2]` (grandchild) — every `rest_local_position[i]`
+    /// is the Y offset of node `i` relative to its parent.
+    /// The chest bone is registered at the **last** node so
+    /// the world rest Y is the sum of all chain offsets.
+    ///
+    /// `chain_y` carries the per-link Y offsets; the model
+    /// is built with `normalize_scale` (the loader's
+    /// `1.5 / max_extent` — drives how much the camera
+    /// target Y is shrunk by).
+    fn model_with_chest_chain(
+        chain_y: &[f32],
+        chest_y_at_last_node: f32,
+        normalize_scale: f32,
+    ) -> VrmModel {
+        assert!(!chain_y.is_empty(), "chain must have at least a root");
+
+        let mut humanoid = HumanoidBoneRegistry::new();
+        humanoid.insert(
+            "chest".into(),
+            HumanoidBoneEntry {
+                node: chain_y.len() - 1,
+                joint: None,
+                rest: BoneRestTransform {
+                    translation: Vec3::new(0.0, chest_y_at_last_node, 0.0),
+                    rotation: Quat::IDENTITY,
+                },
+            },
+        );
+
+        let n = chain_y.len();
+        let nodes = NodeHierarchy {
+            local_rotations: vec![Quat::IDENTITY; n],
+            local_positions: (0..n).map(|i| Vec3::new(0.0, chain_y[i], 0.0)).collect(),
+            rest_local_rotations: vec![Quat::IDENTITY; n],
+            rest_local_positions: (0..n).map(|i| Vec3::new(0.0, chain_y[i], 0.0)).collect(),
+            parents: (0..n)
+                .map(|i| if i == 0 { -1 } else { (i - 1) as i32 })
+                .collect(),
+            world_rotations: vec![Quat::IDENTITY; n],
+            world_positions: vec![Vec3::ZERO; n],
+        };
+
+        VrmModel::new(
+            Vec::new(),
+            Skeleton {
+                inverse_bind: Vec::new(),
+                bind_matrices: Vec::new(),
+                joint_to_node: Vec::new(),
+            },
+            [-1.0, -1.0, -1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0],
+            normalize_scale,
+            ExpressionLayer::default(),
+            humanoid,
+            nodes,
+            None,
+            Vec::new(),
+            NodeConstraintRegistry::default(),
+            None,
+        )
+    }
+
+    /// Pin the formula: `(world_rest_y - center_y) *
+    /// normalize_scale * model_scale`. A hand-computed
+    /// example guards against a typo in the pure helper.
+    #[test]
+    fn chest_target_y_matches_hand_computed_formula() {
+        let got = chest_target_y(1.5, 0.5, 0.75, 2.0);
+        // (1.5 - 0.5) * 0.75 * 2.0 = 1.0 * 1.5 = 1.5
+        assert_eq!(got, 1.5);
+    }
+
+    /// `chest_world_rest_y` must walk the parent chain and
+    /// sum the per-link Y offsets. A 3-node chain (hips at
+    /// 1.0, spine at +0.2, chest at +0.2) gives a world
+    /// chest Y of 1.4. The first-fix code (which read
+    /// `chest.rest.translation[1]` directly) would have
+    /// returned 0.2 here.
+    #[test]
+    fn chest_world_rest_y_sums_parent_chain_offsets() {
+        let model = model_with_chest_chain(&[1.0, 0.2, 0.2], 0.2, 1.0);
+        let chest = model.humanoid.chest().expect("chest registered");
+        let world_y = chest_world_rest_y(&model, chest);
+        assert!(
+            (world_y - 1.4).abs() < 1e-5,
+            "expected world rest Y = 1.4 (sum of hips 1.0 + spine 0.2 + chest 0.2), got {world_y}"
+        );
+    }
+
+    /// `chest_world_rest_y` must not accidentally sum X or Z
+    /// — only Y. A 2-link chain with non-zero X / Z offsets
+    /// on the parent must still report the world Y as the
+    /// pure Y sum.
+    #[test]
+    fn chest_world_rest_y_sums_only_y_axis() {
+        // Custom builder with mixed-axis offsets so any bug
+        // in the sum (e.g. summing a Vec3 instead of [1]) is
+        // caught immediately.
+        let mut humanoid = HumanoidBoneRegistry::new();
+        humanoid.insert(
+            "chest".into(),
+            HumanoidBoneEntry {
+                node: 1,
+                joint: None,
+                rest: BoneRestTransform {
+                    translation: Vec3::new(0.0, 0.2, 0.0),
+                    rotation: Quat::IDENTITY,
+                },
+            },
+        );
+        let nodes = NodeHierarchy {
+            local_rotations: vec![Quat::IDENTITY; 2],
+            // Parent at (5, 1, -3) — the X and Z must not
+            // bleed into the world Y sum.
+            local_positions: vec![Vec3::new(5.0, 1.0, -3.0), Vec3::new(0.0, 0.2, 0.0)],
+            rest_local_rotations: vec![Quat::IDENTITY; 2],
+            rest_local_positions: vec![Vec3::new(5.0, 1.0, -3.0), Vec3::new(0.0, 0.2, 0.0)],
+            parents: vec![-1, 0],
+            world_rotations: vec![Quat::IDENTITY; 2],
+            world_positions: vec![Vec3::ZERO; 2],
+        };
+        let model = VrmModel::new(
+            Vec::new(),
+            Skeleton {
+                inverse_bind: Vec::new(),
+                bind_matrices: Vec::new(),
+                joint_to_node: Vec::new(),
+            },
+            [-1.0, -1.0, -1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0],
+            1.0,
+            ExpressionLayer::default(),
+            humanoid,
+            nodes,
+            None,
+            Vec::new(),
+            NodeConstraintRegistry::default(),
+            None,
+        );
+        let chest = model.humanoid.chest().expect("chest registered");
+        let world_y = chest_world_rest_y(&model, chest);
+        assert!(
+            (world_y - 1.2).abs() < 1e-5,
+            "expected world rest Y = 1.2 (parent 1.0 + chest 0.2), got {world_y}"
+        );
+    }
+
+    /// PR-fix: the camera target Y must come from the
+    /// chest's **world** rest Y (sum of parent chain), not
+    /// the local glTF `Node::transform()`. With a 2-link
+    /// chain (parent at rest y=1.0, chest at local y=0.2)
+    /// and `center.y=0`, `normalize_scale=0.5`,
+    /// `model_scale=1.0`, the world rest Y is 1.2, so the
+    /// camera target y must be `1.2 * 0.5 = 0.6`.
+    /// Mutating `world_positions` between two
+    /// `update_camera_target` calls must leave the target
+    /// unchanged (chop test).
+    #[test]
+    fn update_camera_target_is_stable_and_uses_world_rest_y() {
+        let mut renderer = CharacterRenderer::uninit(std::path::Path::new("."), "missing.vrm");
+        // 2-link chain: parent (root) at y=1.0, child (chest)
+        // at local y=0.2 → world rest Y = 1.2.
+        // normalize_scale = 0.5 to match Alicia's loaded value.
+        renderer.set_model_for_test(model_with_chest_chain(&[1.0, 0.2], 0.2, 0.5));
+
+        renderer.update_camera_target(1.0);
+        let (_eye1, target1, _vh1, _aspect1) = renderer.camera.debug();
+        let y_after_first_call = target1[1];
+
+        // Simulate a VRMA frame that has just pushed the
+        // chest bone up by 1 m (e.g. the model jumping).
+        {
+            let model = renderer.model.as_mut().expect("model installed");
+            model.nodes.world_positions[1] = Vec3::new(0.0, 5.0, 0.0);
+        }
+        renderer.update_camera_target(1.0);
+        let (_eye2, target2, _vh2, _aspect2) = renderer.camera.debug();
+        let y_after_animation = target2[1];
+
+        // 1.2 (world rest Y) * 0.5 (normalize_scale) *
+        // 1.0 (model_scale) = 0.6. The first fix returned
+        // 0.1 (local only), the original choppy code
+        // returned 2.5/5.0 after mutation.
+        assert!(
+            (y_after_first_call - 0.6).abs() < 1e-5,
+            "first call must read the world rest Y (1.2) * 0.5 = 0.6, got {y_after_first_call}"
+        );
+        assert!(
+            (y_after_animation - 0.6).abs() < 1e-5,
+            "second call must still read the world rest Y after world_positions[1] is mutated, got {y_after_animation}"
+        );
+    }
+
+    /// `update_camera_target` on a renderer with no model
+    /// must not panic; the camera target stays at the
+    /// orthographic default (Vec3::ZERO) so the cleared
+    /// window continues to render.
+    #[test]
+    fn update_camera_target_without_model_keeps_default_target() {
+        let mut renderer = CharacterRenderer::uninit(std::path::Path::new("."), "missing.vrm");
+        renderer.update_camera_target(1.0);
+        let (_eye, target, _vh, _aspect) = renderer.camera.debug();
+        assert_eq!(target, [0.0, 0.0, 0.0]);
     }
 }

@@ -1026,8 +1026,8 @@ impl VrmRenderer {
             }
             let weight = model
                 .expressions()
-                .weights
-                .get(&target.name)
+                .morph_target_weights
+                .get(&(prim_morphs.node_index, target.target_index))
                 .copied()
                 .unwrap_or(0.0);
             let vec4_idx = (slot / 4) as usize;
@@ -1096,7 +1096,7 @@ fn build_morph_gpu(
     // `array<vec3<f32>>` indexing is correct; we just pad each
     // entry with a 0 in `.w` to satisfy the alignment on the
     // host side.
-    let total = prim_morphs.target_count as usize * prim_morphs.vertex_count as usize;
+    let total = prim_morphs.uniform_buffer_len as usize * prim_morphs.vertex_count as usize;
     let mut offsets: Vec<[f32; 4]> = Vec::with_capacity(total);
     for target in &prim_morphs.targets {
         for v in &target.position_offsets {
@@ -1135,7 +1135,7 @@ fn build_morph_gpu(
         offsets_buf,
         meta_buf,
         bind_group,
-        target_count: prim_morphs.target_count,
+        target_count: prim_morphs.uniform_buffer_len,
         vertex_count: prim_morphs.vertex_count,
     }
 }
@@ -1226,12 +1226,10 @@ fn build_skin_gpu(
             joint_count: IDENTITY_SKIN_PALETTE_LEN as u32,
         };
     }
-    // Skinned palette: one `mat4x4<f32>` per joint, written in
-    // bind-matrices order (i.e. `inverse_bind[i].inverse()`).
+    // Skinned palette: one `mat4x4<f32>` per joint, initialized to identity at rest pose.
     let mut palette: Vec<[[f32; 4]; 4]> = Vec::with_capacity(joint_count);
-    for i in 0..joint_count {
-        let m = model.skeleton.bind_matrices[i];
-        palette.push(m.to_cols_array_2d());
+    for _ in 0..joint_count {
+        palette.push(glam::Mat4::IDENTITY.to_cols_array_2d());
     }
     let matrices_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("vrm.skin_palette"),

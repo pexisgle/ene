@@ -65,6 +65,16 @@ impl OrthographicCamera {
         self.target = target;
     }
 
+    /// Returns the current camera eye position.
+    pub fn eye(&self) -> [f32; 3] {
+        self.eye
+    }
+
+    /// Returns the current camera target position.
+    pub fn target(&self) -> [f32; 3] {
+        self.target
+    }
+
     /// PR4.2 follow-up diagnostic: returns `(eye, target, viewport_height, aspect)`.
     #[allow(dead_code)] // One-shot diagnostic log only.
     pub fn debug(&self) -> ([f32; 3], [f32; 3], f32, f32) {

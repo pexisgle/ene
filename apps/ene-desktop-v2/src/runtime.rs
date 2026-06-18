@@ -34,6 +34,7 @@ use crate::gpu::pick_format_and_alpha;
 use crate::settings::{CharacterSettings, PendingPermission, PendingUserInput, QuestionDraft};
 use crate::settings_ui::{PageKind, SettingsUi};
 use crate::state::AppState;
+use device_query::DeviceQuery;
 
 /// Top-level runtime. One per process.
 pub struct Runtime {
@@ -48,13 +49,19 @@ pub struct Runtime {
     ui_window: Option<UiWindow>,
     /// PR4.2: last cursor position in physical pixels (only
     /// populated when the character window has cursor events).
-    last_cursor_logical: Option<PhysicalPosition<f64>>,
+    last_cursor_physical: Option<PhysicalPosition<f64>>,
     /// PR4.2: monotonic clock for `dt_secs` smoothing.
     last_frame_instant: Option<Instant>,
     /// PR4.2 follow-up: one-shot diagnostic log on the very
     /// first `RedrawRequested` so we can verify surface / depth /
     /// camera-aspect / model-uniform are in sync.
     diagnostics_logged: bool,
+    /// PR5.1: global mouse position poll, refreshed every frame in
+    /// `about_to_wait` regardless of whether the character window
+    /// is currently receiving events (so the click-through hit test
+    /// stays correct while the window is in the click-through state
+    /// and the OS stops delivering `CursorMoved` to it).
+    device_state: device_query::DeviceState,
 }
 
 impl Runtime {
@@ -70,9 +77,10 @@ impl Runtime {
             transparent: true,
             char_window: None,
             ui_window: None,
-            last_cursor_logical: None,
+            last_cursor_physical: None,
             last_frame_instant: None,
             diagnostics_logged: false,
+            device_state: device_query::DeviceState::new(),
         }
     }
 
@@ -142,6 +150,25 @@ impl ApplicationHandler for Runtime {
                 self.state
                     .character
                     .resize(&self.state.gpu.device, (char_size.width, char_size.height));
+                // PR5.1: read the loaded mesh back from the
+                // GPU and feed it to Rapier as a trimesh. The
+                // PR5.2: one sphere collider per humanoid bone
+                // (fingers auto-filtered). `update_motion`
+                // (called every `about_to_wait`) keeps the bone
+                // world positions fresh, so the colliders
+                // follow the animation without any per-frame
+                // readback. The radius is baked in
+                // pre-scaled by `actual_scale` so the
+                // collider matches the rendered mesh; one-time
+                // cost at model load.
+                let actual_scale = self.state.character.auto_fit_scale(0.9)
+                    * self.state.settings.character_state.model_scale;
+                let bones = self.state.character.build_character_bone_data(actual_scale);
+                if !bones.is_empty() {
+                    self.state
+                        .physics
+                        .add_character_bone_colliders(self.state.character_entity, &bones);
+                }
                 // PR4.16: load the default VRMA motion. The
                 // resolved path comes from
                 // `CharacterState::current_motion()` (CLI
@@ -332,22 +359,59 @@ impl ApplicationHandler for Runtime {
         // 3.5. Sync ECS transform and step Rapier physics
         let cs = &self.state.settings.character_state;
         let auto_scale = self.state.character.auto_fit_scale(0.9);
+        let actual_scale = auto_scale * cs.model_scale;
         if let Ok(transform) = self
             .state
             .world
             .query_one_mut::<&mut crate::physics::Transform>(self.state.character_entity)
         {
             transform.translation = cs.character_position;
-            transform.scale = auto_scale;
+            transform.scale = actual_scale;
         }
 
-        self.state.physics.update_character_collider(
-            self.state.character_entity,
-            self.state.character.model_aabb_dbg(),
-            cs.character_position,
-            auto_scale,
-        );
+        // PR5.2: push the animated bone positions into the
+        // colliders that `add_character_bone_colliders`
+        // registered at model load, and slide the underlying
+        // body to `character_position` so the whole rig follows
+        // drag and animation. The collider local positions are
+        // scaled by `actual_scale` here so the world-space
+        // spheres land in the same frame the per-frame model
+        // matrix produces. The update happens *after* the model
+        // transform has been resolved above so the body sees the
+        // freshest `character_position`; the bone positions are
+        // current because `update_skin_palette` (called from
+        // `update_motion` in the `RedrawRequested` handler of
+        // the previous iteration) writes them every frame.
+        let bone_positions = self.state.character.current_bone_local_positions();
+        if !bone_positions.is_empty() {
+            self.state.physics.update_character_bone_positions(
+                self.state.character_entity,
+                &bone_positions,
+                cs.character_position,
+                actual_scale,
+            );
+        }
         self.state.physics.step();
+
+        // PR5.1: per-frame click-through. `device_query` gives us
+        // the global cursor in screen pixels regardless of which
+        // window currently owns focus; combined with the
+        // character window's outer position this yields the
+        // window-local cursor even when the window is currently
+        // click-through (and so is not receiving `CursorMoved`
+        // events from winit). The hit test is a BVH-backed Rapier
+        // raycast against the character trimesh, not a single
+        // AABB cuboid.
+        if let Some(cw) = self.char_window.as_ref() {
+            update_char_window_cursor_and_hittest(
+                &self.state,
+                &self.device_state,
+                cw,
+                self.transparent,
+                self.state.character.drag.is_dragging(),
+                &mut self.last_cursor_physical,
+            );
+        }
 
         // 4. Trigger a redraw for both windows.
         if let Some(cw) = self.char_window.as_mut() {
@@ -425,14 +489,16 @@ impl Runtime {
                 // pixels) for the look-at projection. The actual
                 // smoothing happens in `update_look_at` during
                 // `RedrawRequested`, so the dt is correct.
-                self.last_cursor_logical = Some(position);
+                self.last_cursor_physical = Some(position);
                 cw.window.request_redraw();
 
                 // PR4.3: integrate the drag delta if the user is
                 // currently dragging. The hit-test and the
                 // position projection are computed against the
                 // loaded character's transformed AABB.
-                let cursor_world_2d = cursor_world_2d_for_char_window(cw, position);
+                let eye = self.state.character.camera_eye();
+                let target = self.state.character.camera_target();
+                let cursor_world_2d = cursor_world_2d_for_char_window(cw, eye, target, position);
                 let AppState {
                     ref mut character,
                     ref mut settings,
@@ -453,7 +519,7 @@ impl Runtime {
                 // hit-test determines whether the press landed on
                 // the character silhouette.
                 use crate::character::drag::{DragAction, DragButtonEvent};
-                let Some(cursor_phys) = self.last_cursor_logical else {
+                let Some(cursor_phys) = self.last_cursor_physical else {
                     return;
                 };
                 let AppState {
@@ -463,8 +529,41 @@ impl Runtime {
                     ElementState::Pressed => DragButtonEvent::Pressed,
                     ElementState::Released => DragButtonEvent::Released,
                 };
-                let cursor_world_2d = cursor_world_2d_for_char_window(cw, cursor_phys);
-                let cursor_over = cursor_over_char_window(cw, &self.state.physics, cursor_phys);
+                let eye = character.camera_eye();
+                let target = character.camera_target();
+                let cursor_world_2d = cursor_world_2d_for_char_window(cw, eye, target, cursor_phys);
+                // Re-run the per-bone hit test for the *event*
+                // cursor position. The `about_to_wait` poll
+                // may be a frame stale by the time `MouseInput`
+                // fires; running it again here keeps the press
+                // predicate synchronised with the actual click
+                // coordinates.
+                let scale = cw.window.scale_factor();
+                let logical_size = cw.window.inner_size().to_logical::<f64>(scale);
+                let logical = cursor_phys.to_logical::<f64>(scale);
+                let ndc_x = (logical.x / logical_size.width.max(1.0)) * 2.0 - 1.0;
+                let ndc_y = -((logical.y / logical_size.height.max(1.0)) * 2.0 - 1.0);
+                let aspect = (logical_size.width / logical_size.height.max(0.0001)) as f32;
+                let half_h = ene_vrm::camera::VIEWPORT_HEIGHT * 0.5;
+                let half_w = half_h * aspect;
+                let view = glam::Mat4::look_at_rh(
+                    eye.into(),
+                    target.into(),
+                    ene_vrm::camera::DEFAULT_UP.into(),
+                );
+                let view_pos = glam::Vec3::new(ndc_x as f32 * half_w, ndc_y as f32 * half_h, 0.0);
+                let world_3d = view.inverse().transform_point3(view_pos);
+                let ray_origin = rapier3d::prelude::Point::new(world_3d.x, world_3d.y, world_3d.z);
+                let ray_dir = rapier3d::prelude::Vector::new(
+                    target[0] - eye[0],
+                    target[1] - eye[1],
+                    target[2] - eye[2],
+                );
+                let cursor_over = self
+                    .state
+                    .physics
+                    .cast_ray(ray_origin, ray_dir, 100.0)
+                    .is_some_and(|(entity, _)| entity == self.state.character_entity);
                 let action = crate::character::drag::on_press_or_release(
                     &mut character.drag,
                     event,
@@ -548,8 +647,9 @@ impl Runtime {
                     let surface_h = cw.config.height;
                     let cs = &settings.character_state;
                     let auto_fit = character.auto_fit_scale(0.9);
+                    let actual_scale_dbg = auto_fit * cs.model_scale;
                     let model_uniform_dbg = ene_vrm::ModelUniform::from_mat4(
-                        character.model_matrix(cs.character_position, auto_fit),
+                        character.model_matrix(cs.character_position, actual_scale_dbg),
                     );
                     let cam = character.camera_dbg();
                     let depth = character.depth_size_dbg();
@@ -609,7 +709,7 @@ impl Runtime {
                             cs.character_position.y,
                             cs.character_position.z,
                         ],
-                        auto_fit,
+                        actual_scale_dbg,
                     );
                     let model_matrix_runtime = character.model_matrix_runtime_dbg(
                         [
@@ -617,7 +717,7 @@ impl Runtime {
                             cs.character_position.y,
                             cs.character_position.z,
                         ],
-                        auto_fit,
+                        actual_scale_dbg,
                     );
                     let view_only = character.camera_view_dbg();
                     let proj_only = character.camera_proj_dbg();
@@ -629,7 +729,7 @@ impl Runtime {
                         proj_only,
                     );
                     tracing::info!(
-                        "PR4.2-diag: char_win={}x{} scale_factor={:.3} surface_config={}x{} depth_texture={}x{} camera_aspect={:.3} char_pos={:?} user_model_scale={:.3} (ignored) auto_fit_scale={:.3} model_uniform={:?} cam_eye={:?} cam_target={:?} cam_viewport_h={:.3} loaded_aabb={:?}",
+                        "PR4.2-diag: char_win={}x{} scale_factor={:.3} surface_config={}x{} depth_texture={}x{} camera_aspect={:.3} char_pos={:?} user_model_scale={:.3} auto_fit_scale={:.3} actual_scale={:.3} model_uniform={:?} cam_eye={:?} cam_target={:?} cam_viewport_h={:.3} loaded_aabb={:?}",
                         phys.width,
                         phys.height,
                         cw.window.scale_factor(),
@@ -641,6 +741,7 @@ impl Runtime {
                         cs.character_position,
                         cs.model_scale,
                         auto_fit,
+                        actual_scale_dbg,
                         model_uniform_dbg.model,
                         cam.1,
                         cam.2,
@@ -683,7 +784,7 @@ impl Runtime {
                 // multiplies on top of the fit (see
                 // `CharacterRenderer::auto_fit_scale` docs).
                 let cs = &settings.character_state;
-                let actual_scale = character.auto_fit_scale(0.9);
+                let actual_scale = character.auto_fit_scale(0.9) * cs.model_scale;
                 // PR-fix (character pushed to top of viewport):
                 // point the orthographic camera at the humanoid
                 // body center (head → chest → hips → AABB center)
@@ -691,7 +792,16 @@ impl Runtime {
                 // window regardless of the AABB shape. Done before
                 // the model matrix is composed so the camera and
                 // the draw agree on `actual_scale`.
-                character.update_camera_target(cs.character_position, actual_scale);
+                //
+                // PR-fix: `update_camera_target` now reads the
+                // chest bone's *rest* translation, not the
+                // previous frame's animated `world_positions`, so
+                // a VRMA motion that oscillates the chest no
+                // longer makes the camera (and therefore the
+                // look-at output that depends on the camera)
+                // jitter frame-to-frame.
+
+                character.update_camera_target(actual_scale);
                 let model_uniform = ene_vrm::ModelUniform::from_mat4(
                     character.model_matrix(cs.character_position, actual_scale),
                 );
@@ -723,7 +833,7 @@ impl Runtime {
                     character.update_skin_palette_gpu(queue, &palette);
                 }
 
-                if let Some(cursor) = self.last_cursor_logical {
+                if let Some(cursor) = self.last_cursor_physical {
                     // PR4.8: the renderer reads the humanoid
                     // registry's `head` bone (when present) to
                     // derive the head world position. The
@@ -847,20 +957,26 @@ fn cw_char_window_has_focus(cw: &CharacterWindow) -> bool {
 /// PR4.3: compute the cursor's 2D world position for the drag
 /// hit-test and the drag integration. `position` is the latest
 /// winit `PhysicalPosition<f64>` (already plumbed via
-/// `Runtime::last_cursor_logical`); the function converts it to
+/// `Runtime::last_cursor_physical`); the function converts it to
 /// window-logical pixels (so the projection matches
-/// `look_at::compute_world_target` which expects logical pixels).
+/// `look_at::compute_world_target` which expects logical pixels) for the look-at projection.
 fn cursor_world_2d_for_char_window(
     cw: &CharacterWindow,
+    eye: [f32; 3],
+    target: [f32; 3],
     position: winit::dpi::PhysicalPosition<f64>,
 ) -> Option<glam::Vec2> {
     use crate::character::drag::cursor_logical_to_world_2d;
     let size = cw.window.inner_size();
     let scale = cw.window.scale_factor();
     let logical = position.to_logical::<f64>(scale);
-    let viewport = (size.width.max(1), size.height.max(1));
-    let eye = ene_vrm::camera::DEFAULT_EYE.into();
-    let target = ene_vrm::camera::DEFAULT_TARGET.into();
+    let logical_size = size.to_logical::<f64>(scale);
+    let viewport = (
+        logical_size.width.max(1.0) as u32,
+        logical_size.height.max(1.0) as u32,
+    );
+    let eye = eye.into();
+    let target = target.into();
     let up = ene_vrm::camera::DEFAULT_UP.into();
     cursor_logical_to_world_2d(
         glam::Vec2::new(logical.x as f32, logical.y as f32),
@@ -871,48 +987,99 @@ fn cursor_world_2d_for_char_window(
     )
 }
 
-/// PR4.3: hit-test the cursor against the character's transformed
-/// AABB. Returns `false` (no hit) when no model is loaded.
-fn cursor_over_char_window(
+/// PR5.1: per-frame click-through update for the character
+/// window. Reads the global cursor via `device_query`, projects
+/// it through the orthographic camera, casts a Rapier ray
+/// against the character trimesh (BVH-accelerated), and toggles
+/// winit's `set_cursor_hittest` so the rest of the desktop
+/// receives the click when the cursor is not on the silhouette.
+///
+/// This is called every `about_to_wait`, including while the
+/// window is in the click-through state, so the OS is not
+/// delivering `CursorMoved` to it and the runtime must rely on
+/// `device_query` for the global position.
+fn update_char_window_cursor_and_hittest(
+    state: &AppState,
+    device_state: &device_query::DeviceState,
     cw: &CharacterWindow,
-    physics: &crate::physics::PhysicsWorld,
-    position: winit::dpi::PhysicalPosition<f64>,
-) -> bool {
-    let size = cw.window.inner_size();
+    transparent: bool,
+    drag_is_dragging: bool,
+    last_cursor: &mut Option<winit::dpi::PhysicalPosition<f64>>,
+) {
+    // 1. Global cursor in screen pixels.
+    let mouse = device_state.get_mouse();
+    let (gx, gy) = (mouse.coords.0, mouse.coords.1);
+
+    // 2. Window's top-left in screen pixels (physical).
+    //    `outer_position` returns `Result` because some Wayland
+    //    compositors can't report it; we treat the failure as
+    //    "cursor is outside the window" and let the NDC clip
+    //    decide.
+    let outer = match cw.window.outer_position() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let local_physical_x = gx as f64 - outer.x as f64;
+    let local_physical_y = gy as f64 - outer.y as f64;
+
+    // 3. Convert to logical pixels and NDC. The NDC is what the
+    //    orthographic camera math consumes.
     let scale = cw.window.scale_factor();
-    let logical = position.to_logical::<f64>(scale);
-    let viewport = (size.width.max(1), size.height.max(1));
+    let logical_x = local_physical_x / scale;
+    let logical_y = local_physical_y / scale;
+    let inner = cw.window.inner_size();
+    let logical_w = (inner.width as f64 / scale).max(1.0);
+    let logical_h = (inner.height as f64 / scale).max(1.0);
+    let ndc_x = (logical_x / logical_w) * 2.0 - 1.0;
+    let ndc_y = -((logical_y / logical_h) * 2.0 - 1.0);
 
-    let w = viewport.0 as f32;
-    let h = viewport.1 as f32;
-    if w <= 0.0 || h <= 0.0 {
-        return false;
-    }
-    let ndc = glam::Vec2::new(
-        (logical.x as f32 / w) * 2.0 - 1.0,
-        -((logical.y as f32 / h) * 2.0 - 1.0),
-    );
-    let aspect = (w / h).max(0.0001);
-    let half_h = ene_vrm::camera::VIEWPORT_HEIGHT * 0.5;
-    let half_w = half_h * aspect;
-    let view_pos = glam::Vec3::new(ndc.x * half_w, ndc.y * half_h, 0.0);
+    // Outside the window's NDC rect? Skip the BVH raycast — the
+    // window is click-through anyway.
+    let inside_window = ndc_x.abs() <= 1.0 && ndc_y.abs() <= 1.0;
 
-    let camera_eye: glam::Vec3 = ene_vrm::camera::DEFAULT_EYE.into();
-    let camera_target: glam::Vec3 = ene_vrm::camera::DEFAULT_TARGET.into();
-    let camera_up: glam::Vec3 = ene_vrm::camera::DEFAULT_UP.into();
+    let cursor_over = if inside_window {
+        let eye: [f32; 3] = state.character.camera_eye();
+        let target: [f32; 3] = state.character.camera_target();
+        let aspect = (logical_w / logical_h) as f32;
+        let half_h = ene_vrm::camera::VIEWPORT_HEIGHT * 0.5;
+        let half_w = half_h * aspect.max(0.0001);
+        let ndc = glam::Vec2::new(ndc_x as f32, ndc_y as f32);
+        let view = glam::Mat4::look_at_rh(
+            eye.into(),
+            target.into(),
+            ene_vrm::camera::DEFAULT_UP.into(),
+        );
+        let view_pos = glam::Vec3::new(ndc.x * half_w, ndc.y * half_h, 0.0);
+        let world_3d = view.inverse().transform_point3(view_pos);
+        let ray_origin = rapier3d::prelude::Point::new(world_3d.x, world_3d.y, world_3d.z);
+        let ray_dir = rapier3d::prelude::Vector::new(
+            target[0] - eye[0],
+            target[1] - eye[1],
+            target[2] - eye[2],
+        );
+        state
+            .physics
+            .cast_ray(ray_origin, ray_dir, 100.0)
+            .is_some_and(|(entity, _)| entity == state.character_entity)
+    } else {
+        false
+    };
 
-    let view = glam::Mat4::look_at_rh(camera_eye, camera_target, camera_up);
-    let world_3d = view.inverse().transform_point3(view_pos);
-    let ray_dir = (world_3d - camera_eye).normalize_or_zero();
+    let allows_input = !transparent || cursor_over || drag_is_dragging;
 
-    // Rapier Raycast
-    physics
-        .cast_ray(
-            rapier3d::prelude::Point::new(camera_eye.x, camera_eye.y, camera_eye.z),
-            rapier3d::prelude::Vector::new(ray_dir.x, ray_dir.y, ray_dir.z),
-            100.0,
-        )
-        .is_some()
+    // Stash the latest window-local cursor for the press / drag
+    // state machine (which is fed by winit's `CursorMoved` /
+    // `MouseInput` events).
+    *last_cursor = Some(winit::dpi::PhysicalPosition::new(
+        local_physical_x,
+        local_physical_y,
+    ));
+
+    // 4. winit handles the OS-level click-through for us.
+    //    `allows_input == false` toggles `WS_EX_TRANSPARENT` on
+    //    Windows and the platform equivalent elsewhere, so the
+    //    click goes to the window underneath.
+    let _ = cw.window.set_cursor_hittest(allows_input);
 }
 
 fn char_settings_hotkey_from_event(
