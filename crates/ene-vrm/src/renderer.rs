@@ -100,14 +100,12 @@ struct DummyMorphGpu {
 /// `current_joint_world[i] * bind_matrices[i]` to drive the
 /// cursor look-at + two-bone IK.
 struct SkinGpu {
-    #[allow(dead_code)]
     matrices_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     /// Number of joints (i.e. the palette length). Used by
     /// callers that want to grow the storage when the loader
     /// finds more joints than expected (defensive — the loader
     /// always produces a fixed-size buffer).
-    #[allow(dead_code)]
     joint_count: u32,
 }
 
@@ -1037,6 +1035,42 @@ impl VrmRenderer {
             meta.weights[vec4_idx][comp] = weight;
         }
         queue.write_buffer(&morph.meta_buf, 0, bytemuck::bytes_of(&meta));
+    }
+
+    /// PR4.16: overwrite the skin-palette storage buffer with
+    /// the joint world transforms returned by
+    /// [`VrmModel::update_skin_palette`].
+    ///
+    /// `palette` is a `Vec<Mat4>` of length
+    /// `VrmModel::joint_count()`. The renderer copies the
+    /// 64 bytes-per-matrix data straight into
+    /// `self.skin.matrices_buf` via `queue.write_buffer`; the
+    /// bind group was created at construction and is
+    /// reused, so no pipeline rebuild is needed.
+    ///
+    /// No-op when the model has no skin (the renderer was
+    /// built with the identity one-element palette) or
+    /// when `palette.len()` is zero. The runtime should
+    /// not call this on every frame for an unsninned
+    /// model — the GPU write would be wasted.
+    pub fn update_skin_palette(&self, queue: &wgpu::Queue, palette: &[glam::Mat4]) {
+        if palette.is_empty() || self.skin.joint_count == 0 {
+            return;
+        }
+        debug_assert_eq!(
+            palette.len() as u32,
+            self.skin.joint_count,
+            "palette length must match the renderer's joint_count"
+        );
+        queue.write_buffer(&self.skin.matrices_buf, 0, bytemuck::cast_slice(palette));
+    }
+
+    /// PR4.16: the joint count of the renderer's skin
+    /// palette. Zero for models built with the identity
+    /// one-element palette (no skin).
+    #[allow(dead_code)]
+    pub fn skin_joint_count(&self) -> u32 {
+        self.skin.joint_count
     }
 }
 

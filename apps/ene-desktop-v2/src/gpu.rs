@@ -51,8 +51,19 @@ impl GpuContext {
             .request_device(&wgpu::DeviceDescriptor {
                 label: None,
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults()
-                    .using_resolution(adapter.limits()),
+                // `downlevel_defaults()` is the WebGPU spec
+                // minimum and caps `max_bind_groups` to 4, which
+                // is too low for the VRM renderer (it uses 5
+                // bind groups in the standard pipeline and 7 in
+                // the MToon pipeline). Keep the downlevel base
+                // for portability but raise `max_bind_groups` to
+                // whatever the adapter actually supports.
+                required_limits: {
+                    let mut limits =
+                        wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits());
+                    limits.max_bind_groups = adapter.limits().max_bind_groups;
+                    limits
+                },
                 memory_hints: wgpu::MemoryHints::default(),
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 trace: wgpu::Trace::Off,

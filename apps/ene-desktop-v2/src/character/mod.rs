@@ -21,9 +21,10 @@ use std::path::PathBuf;
 
 use ene_vrm::{
     ExpressionName, LookAtBoneOutput, LookAtEvaluator, LookAtOutput, LookAtProperties,
-    ModelUniform, OrthographicCamera, VrmModel, VrmRenderer, load_vrm,
+    ModelUniform, OrthographicCamera, VrmModel, VrmRenderer, evaluate_clip, load_vrm, load_vrma,
 };
-use glam::{Quat, Vec3};
+use ene_vrm::{VrmaAsset, VrmaPlayer};
+use glam::{Mat4, Quat, Vec3};
 
 use crate::character_state::{ActiveEmotion, EmotionQueue, transition_emotions};
 use crate::look_at::{LookAtState, compute_world_target, head_world_for};
@@ -76,6 +77,23 @@ pub struct CharacterRenderer {
     /// PR4.3: drag state. `last_cursor_world_pos.is_some()` means
     /// the user is currently dragging the character.
     pub drag: CharacterDragState,
+    /// PR4.16: currently-loaded VRMA asset, or `None` when
+    /// no motion has been bound. The runtime calls
+    /// [`CharacterRenderer::play_motion`] once on startup
+    /// (using the `default_motion` from settings) and may
+    /// call it again when the user picks a different
+    /// motion from the settings UI.
+    vrma: Option<VrmaAsset>,
+    /// PR4.16: per-frame VRMA playback state. `time` is
+    /// advanced by [`CharacterRenderer::update_motion`].
+    vrma_player: VrmaPlayer,
+    /// PR4.16: resolved on-disk path of the currently-loaded
+    /// VRMA. Tracked alongside `vrma` so the runtime can
+    /// log which motion is active and the settings UI
+    /// can show a "current motion" label without
+    /// re-reading the asset. `None` when no motion is
+    /// loaded.
+    vrma_path: Option<PathBuf>,
 }
 
 impl CharacterRenderer {
@@ -94,6 +112,9 @@ impl CharacterRenderer {
             look_at_bone_output: None,
             active_emotion: None,
             drag: CharacterDragState::default(),
+            vrma: None,
+            vrma_player: VrmaPlayer::default(),
+            vrma_path: None,
         }
     }
 
@@ -150,6 +171,109 @@ impl CharacterRenderer {
                     default_vrm.display()
                 );
             }
+        }
+    }
+
+    /// PR4.16: load a `.vrma` from disk, reset the
+    /// playback clock, and store the asset on the
+    /// renderer. Safe to call before the model is
+    /// loaded (the asset is kept in `self.vrma` and
+    /// applied on the first `update_motion` call
+    /// that finds a model).
+    ///
+    /// The runtime calls this on startup with the
+    /// `default_motion` resolved from the settings.
+    /// Errors are logged and the previous motion is
+    /// kept — the model just stays in its rest pose
+    /// (which is exactly what the user sees when
+    /// `default_motion` is empty or the file is
+    /// missing).
+    pub fn play_motion(&mut self, vrma_path: &std::path::Path) {
+        match load_vrma(vrma_path) {
+            Ok(asset) => {
+                tracing::info!(
+                    "Loaded VRMA {} ({} clip(s))",
+                    vrma_path.display(),
+                    asset.clips.len()
+                );
+                self.vrma_player = VrmaPlayer {
+                    time: 0.0,
+                    speed: 1.0,
+                    playing: true,
+                    repeat: VrmaPlayer::default().repeat,
+                };
+                self.vrma = Some(asset);
+                self.vrma_path = Some(vrma_path.to_path_buf());
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to load VRMA {}: {err}; model will stay in rest pose",
+                    vrma_path.display()
+                );
+            }
+        }
+    }
+
+    /// PR4.16: advance the VrmaPlayer by `dt_secs`,
+    /// evaluate the active clip, push expression
+    /// weights into the morph layer, and recompute
+    /// the skin palette. Returns the new palette
+    /// (length `model.joint_count()`) when the GPU
+    /// needs a write — the runtime forwards the
+    /// returned slice to
+    /// [`VrmRenderer::update_skin_palette`]. Returns
+    /// `None` when there is no motion, no model, or
+    /// the player is paused.
+    ///
+    /// **Borrow-safety note**: this method borrows
+    /// `self` mutably twice (once for the model and
+    /// once for the renderer) which would conflict
+    /// if both were on `self`. The implementation
+    /// only touches the model and avoids the
+    /// renderer here; the runtime calls
+    /// `VrmRenderer::update_skin_palette` separately
+    /// with the returned `Vec<Mat4>`.
+    pub fn update_motion(&mut self, dt_secs: f32) -> Option<Vec<glam::Mat4>> {
+        if !self.vrma_player.playing {
+            return None;
+        }
+        let asset = self.vrma.as_ref()?;
+        let model = self.model.as_mut()?;
+        let clip = asset.clips.first()?;
+
+        self.vrma_player.advance(dt_secs, clip.duration);
+        let frame = evaluate_clip(clip, self.vrma_player.time);
+
+        // Expression weights (morph targets).
+        if !frame.expression_weights.is_empty() {
+            let expressions_meta = model.expressions_meta.clone();
+            let layer_mut = model.expressions_mut();
+            for (name, weight) in &frame.expression_weights {
+                let name = ene_vrm::ExpressionName::new(name.clone());
+                layer_mut.set_expression(&name, *weight);
+            }
+            layer_mut.apply_overrides(&expressions_meta);
+        }
+
+        // Skin palette.
+        let palette = model.update_skin_palette(&frame);
+        if palette.is_empty() {
+            None
+        } else {
+            Some(palette)
+        }
+    }
+
+    /// PR4.16: forward a new skin palette to the GPU.
+    /// The runtime calls this with the
+    /// `Vec<Mat4>` returned by
+    /// [`CharacterRenderer::update_motion`] and the
+    /// per-frame `&wgpu::Queue`. No-op when the
+    /// renderer is missing (model failed to load) or
+    /// the palette is empty.
+    pub fn update_skin_palette_gpu(&self, queue: &wgpu::Queue, palette: &[glam::Mat4]) {
+        if let Some(renderer) = self.renderer.as_ref() {
+            renderer.update_skin_palette(queue, palette);
         }
     }
 
@@ -451,14 +575,22 @@ impl CharacterRenderer {
         let Some(head) = model.humanoid.head() else {
             return (head_world_for(character_position), Quat::IDENTITY);
         };
-        // The model's loader centres the AABB on the
-        // origin and normalises the longest extent to
-        // `TARGET_MODEL_SIZE` (1.5 m). The head bone's
-        // rest translation is in this normalised space, so
-        // we scale it by `model_scale` to bring it back
-        // to the world-space size the user selected, then
-        // translate by the character's world position.
-        let world = character_position + head.rest.translation * model_scale;
+        // PR4.18: the vertex buffer is now in raw glTF space.
+        // `head.rest.translation` is also raw (loaded from
+        // `node.transform().decomposed()`). The model matrix
+        // folds `T(-center) * S(normalize_scale)` in at draw
+        // time, so the head's world position is:
+        //   character_position + model_scale *
+        //   (head.rest.translation - center) * normalize_scale
+        // which is what `model_matrix(character_position,
+        // model_scale)` would produce if we substituted the
+        // head's raw translation as the position. Keep the
+        // arithmetic explicit here so the next reader sees
+        // the dependency on the loader's `center` and
+        // `normalize_scale` fields.
+        let center = Vec3::from(model.center());
+        let head_local = (head.rest.translation - center) * model.normalize_scale();
+        let world = character_position + head_local * model_scale;
         (world, head.rest.rotation)
     }
 
@@ -496,6 +628,58 @@ impl CharacterRenderer {
         (aspect, eye, target, viewport_height)
     }
 
+    /// Compute the per-frame auto-fit scale: the multiplier that
+    /// makes the loaded model's normalised AABB fit the current
+    /// viewport with `margin` of unused space on every side.
+    /// Returns `1.0` if the model is not loaded (e.g. the default
+    /// VRM failed to load and the renderer is only clearing).
+    ///
+    /// The runtime multiplies this by
+    /// `settings.character_state.model_scale` so the user's "zoom"
+    /// slider still works on top of the fit. At the default
+    /// `model_scale = 1.0` the model now hugs the viewport
+    /// (with `margin = 0.9` it occupies 90 % of the viewport
+    /// height and fits horizontally). Larger `model_scale` values
+    /// zoom in past the fit (e.g. `2.0` → 2× the fit size), which
+    /// is what the user wants when they want a close-up.
+    ///
+    /// PR4.18: the vertex buffer is now in raw glTF space; the
+    /// model matrix folds `T(-center) * S(normalize_scale) *
+    /// T(position)` in at draw time. The fit is computed
+    /// against the **normalised** AABB (max extent 1.5) so the
+    /// returned scale is the multiplier on the normalised
+    /// space — not on the raw space.
+    pub fn auto_fit_scale(&self, margin: f32) -> f32 {
+        match self.model.as_ref() {
+            None => 1.0,
+            Some(model) => {
+                let (lo, hi) = model.normalized_aabb();
+                self.camera.compute_auto_fit_scale(lo, hi, margin)
+            }
+        }
+    }
+
+    /// The full per-character model matrix that folds the
+    /// raw-space vertex buffer through the loader's
+    /// `T(-center) * S(normalize_scale)` and the per-character
+    /// translation / scale.
+    ///
+    /// `actual_scale` is the (auto-fit) scale to apply on top
+    /// of the normalised space. The runtime multiplies this by
+    /// the user's `model_scale` setting before calling
+    /// [`Self::model_matrix`], so the helper just receives the
+    /// already-resolved `actual_scale`.
+    pub fn model_matrix(&self, character_position: Vec3, actual_scale: f32) -> Mat4 {
+        let (center, normalize_scale) = match self.model.as_ref() {
+            None => ([0.0, 0.0, 0.0], 1.0),
+            Some(m) => (m.center(), m.normalize_scale()),
+        };
+        Mat4::from_translation(character_position)
+            * Mat4::from_scale(Vec3::splat(actual_scale))
+            * Mat4::from_scale(Vec3::splat(normalize_scale))
+            * Mat4::from_translation(Vec3::from(center) * -1.0)
+    }
+
     /// PR4.2 follow-up diagnostic: (depth_width, depth_height).
     #[allow(dead_code)] // One-shot diagnostic log only.
     pub fn depth_size_dbg(&self) -> (u32, u32) {
@@ -509,6 +693,97 @@ impl CharacterRenderer {
     #[allow(dead_code)] // One-shot diagnostic log only.
     pub fn model_aabb_dbg(&self) -> Option<([f32; 3], [f32; 3])> {
         self.model.as_ref().map(|m| m.aabb())
+    }
+
+    /// PR4.19 diagnostic: the loader-captured AABB centre. The
+    /// runtime folds `T(-center)` into the model matrix; if the
+    /// centre is wildly off (e.g. a hair vertex got included in
+    /// the AABB) the model will be shifted out of the viewport.
+    #[allow(dead_code)]
+    pub fn model_dbg_center(&self) -> [f32; 3] {
+        self.model.as_ref().map(|m| m.center()).unwrap_or([0.0; 3])
+    }
+
+    /// PR4.19 diagnostic: the loader's `1.5 / max_extent` scale.
+    /// `actual_scale × normalize_scale` should be ~1.42 for
+    /// Alicia; if the runtime sees a different value, the loader
+    /// computed the wrong AABB.
+    #[allow(dead_code)]
+    pub fn model_dbg_normalize_scale(&self) -> f32 {
+        self.model
+            .as_ref()
+            .map(|m| m.normalize_scale())
+            .unwrap_or(1.0)
+    }
+
+    /// PR4.19 diagnostic: the merged skeleton joint count after
+    /// the multiple-skin merge. Should be the deduplicated total
+    /// of every skin's joint list.
+    #[allow(dead_code)]
+    pub fn model_dbg_merged_skel_joints(&self) -> Option<usize> {
+        self.model.as_ref().map(|m| m.joint_count())
+    }
+
+    /// PR4.19 diagnostic: the camera's view_proj matrix in
+    /// column-major format. Returned as `[[f32; 4]; 4]` so the
+    /// runtime can read individual cells for the diagnostic log.
+    #[allow(dead_code)]
+    pub fn camera_view_proj_dbg(&self) -> [[f32; 4]; 4] {
+        self.camera
+            .uniform()
+            .map(|u| u.view_proj)
+            .unwrap_or([[0.0; 4]; 4])
+    }
+
+    /// PR4.19 diagnostic: just the view matrix (proj * view is
+    /// what's actually uploaded, but the view alone tells us if
+    /// `look_at_rh` is producing the expected rotation+translation).
+    #[allow(dead_code)]
+    pub fn camera_view_dbg(&self) -> [[f32; 4]; 4] {
+        self.camera.debug_view().to_cols_array_2d()
+    }
+
+    /// PR4.19 diagnostic: just the orthographic projection
+    /// matrix. Exposed so the runtime can dump it for the
+    /// "5x taller" investigation.
+    #[allow(dead_code)]
+    pub fn camera_proj_dbg(&self) -> [[f32; 4]; 4] {
+        self.camera.debug_proj().to_cols_array_2d()
+    }
+
+    /// PR4.19 diagnostic: the full `view_proj * model.model`
+    /// matrix. If this dump shows a 5x Y scale, the bug is in
+    /// the camera/projection, not in the model matrix.
+    #[allow(dead_code)]
+    pub fn model_view_proj_dbg(
+        &self,
+        character_position: [f32; 3],
+        actual_scale: f32,
+    ) -> [[f32; 4]; 4] {
+        let model = self.model_matrix(character_position.into(), actual_scale);
+        let view_proj = self
+            .camera
+            .uniform()
+            .map(|u| u.view_proj)
+            .unwrap_or([[0.0; 4]; 4]);
+        let vp = glam::Mat4::from_cols_array_2d(&view_proj);
+        let combined = vp * model;
+        combined.to_cols_array_2d()
+    }
+
+    /// PR4.19 diagnostic: the **exact** matrix the runtime
+    /// produces and ships to the GPU. Captures any divergence
+    /// between what we compute here and what the runtime
+    /// actually uses (the runtime had been observed to send a
+    /// different `char_pos` than the user configured).
+    #[allow(dead_code)]
+    pub fn model_matrix_runtime_dbg(
+        &self,
+        character_position: [f32; 3],
+        actual_scale: f32,
+    ) -> [[f32; 4]; 4] {
+        self.model_matrix(character_position.into(), actual_scale)
+            .to_cols_array_2d()
     }
 
     /// PR4.3: world-space AABB `(min, max)` of the loaded model

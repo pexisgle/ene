@@ -55,7 +55,9 @@ use crate::expression::{
 use crate::expression_override;
 use crate::humanoid;
 use crate::look_at;
-use crate::model::{AlphaMode, MeshVertex, Skeleton, VrmMesh, VrmModel, VrmPrimitive, VrmTexture};
+use crate::model::{
+    AlphaMode, MeshVertex, NodeHierarchy, Skeleton, VrmMesh, VrmModel, VrmPrimitive, VrmTexture,
+};
 use crate::mtoon;
 use crate::node_constraint;
 use crate::spring_bone;
@@ -91,10 +93,29 @@ pub fn load_vrm(
 
     let expression_names = resolve_expression_names(&gltf);
     let mtoon_materials = mtoon::load_mtoon_materials(&gltf);
-    let (mesh, morph_per_primitive, (aabb_min, aabb_max), has_nonzero_joints) =
-        load_all_meshes(&gltf, device, queue, &expression_names, &mtoon_materials)?;
-    let skin_joint_to_node = load_skin_joint_to_node(&gltf);
-    let skeleton = load_first_skeleton(&gltf, &skin_joint_to_node);
+    // PR4.19: walk every skin (not just the first) and
+    // build a merged skeleton + per-primitive JOINTS_0
+    // remap. The remap is applied inside `load_all_meshes`
+    // so each vertex's `JOINTS_0` is translated from its
+    // own skin's index space into the merged-skeleton
+    // index space the runtime updates every frame.
+    let (skeleton, primitive_joint_remap) = load_merged_skeleton_and_remaps(&gltf);
+    let (
+        mesh,
+        morph_per_primitive,
+        (aabb_min, aabb_max),
+        center,
+        normalize_scale,
+        has_nonzero_joints,
+    ) = load_all_meshes(
+        &gltf,
+        device,
+        queue,
+        &expression_names,
+        &mtoon_materials,
+        &primitive_joint_remap,
+    )?;
+    let nodes = load_node_hierarchy(&gltf);
 
     // Issue #8: a model that defines no skin but whose
     // primitives carry non-trivial `JOINTS_0` data is
@@ -205,8 +226,11 @@ pub fn load_vrm(
         skeleton,
         aabb_min,
         aabb_max,
+        center,
+        normalize_scale,
         expression_layer,
         humanoid,
+        nodes,
         look_at,
         expressions_meta,
         node_constraints,
@@ -234,10 +258,20 @@ type Aabb = ([f32; 3], [f32; 3]);
 
 /// Aggregate return of [`load_all_meshes`]: the per-primitive
 /// mesh data, the parallel morph-target slot vector, the
-/// post-normalize AABB, and the "any primitive carries a
+/// raw AABB plus the AABB centre and `1.5 / max_extent`
+/// normalize scale (the runtime folds both into the model
+/// matrix at draw time — the vertex buffer is no longer
+/// re-centered on load), and the "any primitive carries a
 /// non-trivial `JOINTS_0` accessor?" flag that powers the
 /// issue #8 malformed-skin warning.
-type LoadAllMeshesResult = (Vec<VrmMesh>, Vec<Option<PrimitiveMorphs>>, Aabb, bool);
+type LoadAllMeshesResult = (
+    Vec<VrmMesh>,
+    Vec<Option<PrimitiveMorphs>>,
+    Aabb,
+    [f32; 3],
+    f32,
+    bool,
+);
 
 fn load_all_meshes(
     gltf: &gltf::Gltf,
@@ -245,11 +279,15 @@ fn load_all_meshes(
     queue: &wgpu::Queue,
     expression_names: &HashMap<(usize, usize, usize), String>,
     mtoon_materials: &[Option<mtoon::MToonMaterial>],
+    primitive_joint_remap: &[Vec<Vec<u32>>],
 ) -> VrmResult<LoadAllMeshesResult> {
     // First pass: collect every triangle-list primitive's
     // positions across **all** glTF meshes so we can compute one
-    // global AABB and apply a uniform normalize-scale. (A VRM
-    // 1.0 has ~12 separate glTF Mesh objects, not one.)
+    // global AABB. (A VRM 1.0 has ~12 separate glTF Mesh
+    // objects, not one.) Vertices are kept in raw glTF
+    // space — we only record the AABB and the `center` /
+    // `normalize_scale` pair that the runtime needs to build
+    // the model matrix.
     let mut all_positions: Vec<[f32; 3]> = Vec::new();
     for mesh in gltf.document.meshes() {
         for primitive in mesh.primitives() {
@@ -373,11 +411,42 @@ fn load_all_meshes(
             // `[u8; 4]` representation silently aliased every
             // joint >= 255 onto `skin_matrices[255]`, which
             // stuck finger / wrist skinning to the same matrix.
+            // PR4.19: apply the per-primitive `JOINTS_0`
+            // remap. The accessor gives us indices into the
+            // primitive's own skin's joint list (e.g. the
+            // body's vertices reference body-skin indices
+            // 0..14); the merged skeleton unifies every
+            // unique joint, so we have to translate each
+            // slot through the per-primitive remap table
+            // built by `load_merged_skeleton_and_remaps`
+            // before uploading the vertex buffer. A missing
+            // remap entry (e.g. the primitive's skin was
+            // missing) yields 0 — the renderer's
+            // `VrmModel::update_skin_palette` then maps
+            // `joint 0` of the merged skeleton to the first
+            // joint, which is the humanoid `upperChest` for
+            // Alicia, so the affected vertices are at least
+            // visibly bound to a real joint instead of being
+            // a hard panic.
+            let remap_for_this_prim: &[u32] = primitive_joint_remap
+                .get(mesh_idx)
+                .and_then(|m| m.get(prim_idx))
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            let remap_one =
+                |slot: u16| -> u32 { remap_for_this_prim.get(slot as usize).copied().unwrap_or(0) };
             let joints: Vec<[u32; 4]> = reader
                 .read_joints(0)
                 .map(|js| {
                     js.into_u16()
-                        .map(|j| [j[0] as u32, j[1] as u32, j[2] as u32, j[3] as u32])
+                        .map(|j| {
+                            [
+                                remap_one(j[0]),
+                                remap_one(j[1]),
+                                remap_one(j[2]),
+                                remap_one(j[3]),
+                            ]
+                        })
                         .collect()
                 })
                 .unwrap_or_else(|| vec![[0, 0, 0, 0]; positions.len()]);
@@ -414,12 +483,20 @@ fn load_all_meshes(
                 .zip(uvs.iter())
                 .zip(joints.iter().zip(weights.iter()))
             {
+                // Vertices stay in raw glTF space; the loader
+                // records `(center, scale)` separately on the
+                // model and the runtime folds them into the
+                // `model.model` matrix at draw time. Mutating
+                // vertex positions would also force the bind
+                // matrices (which were computed against the
+                // raw positions) to be recomputed — keeping the
+                // mesh in its authored space means
+                // `inverse_bind` lines up with the vertex
+                // buffer and the standard glTF skinning
+                // identity `joint_world * inverse_bind` stays
+                // valid as-is.
                 vertices.push(MeshVertex {
-                    position: [
-                        (pos[0] - center[0]) * scale,
-                        (pos[1] - center[1]) * scale,
-                        (pos[2] - center[2]) * scale,
-                    ],
+                    position: *pos,
                     uv: *uv,
                     normal: *normal,
                     joints: *joint,
@@ -524,27 +601,21 @@ fn load_all_meshes(
         return Err(VrmError::NoMeshes);
     }
 
-    // Compute the AABB of the **normalized** vertices so the
-    // runtime can log it as a diagnostic. Without this the loader
-    // only ever logs the raw AABB (before centering + scaling).
-    // Derived analytically from the raw AABB + center + scale,
-    // which is exact because every vertex was transformed by
-    // `(pos - center) * scale` (linear transform preserves AABB
-    // shape up to axis sign).
-    let post_min = [
-        (bb_min[0] - center[0]) * scale,
-        (bb_min[1] - center[1]) * scale,
-        (bb_min[2] - center[2]) * scale,
-    ];
-    let post_max = [
-        (bb_max[0] - center[0]) * scale,
-        (bb_max[1] - center[1]) * scale,
-        (bb_max[2] - center[2]) * scale,
-    ];
+    // PR4.18: the vertex buffer now holds the raw glTF
+    // positions — we no longer recenter / scale vertices
+    // during the load. The raw AABB is what the GPU sees
+    // (and what `inverse_bind` was computed against), so
+    // we hand that back to the runtime unchanged. The
+    // `center` and `normalize_scale` pair travels alongside
+    // the AABB so the runtime can fold `T(-center) *
+    // S(normalize_scale) * T(position)` into the model
+    // matrix.
     Ok((
         meshes,
         morph_per_primitive,
-        (post_min, post_max),
+        (bb_min, bb_max),
+        center,
+        scale,
         has_nonzero_joints,
     ))
 }
@@ -776,39 +847,210 @@ fn resolve_expression_names(gltf: &gltf::Gltf) -> HashMap<(usize, usize, usize),
 /// `(joint_index) -> glTF node_index` map the renderer will need
 /// to look up the humanoid bone per joint in Phase 2. Returns an
 /// empty vec for models with no skin.
-fn load_skin_joint_to_node(gltf: &gltf::Gltf) -> Vec<usize> {
-    let Some(skin) = gltf.document.skins().next() else {
-        return Vec::new();
+///
+/// **PR4.19**: the previous single-skin assumption was wrong —
+/// a VRM model like `AliciaSolid.vrm` ships **12 separate
+/// skins** (one per body part), and the `Mesh` that a primitive
+/// belongs to is referenced by a `Node` whose `skin` property
+/// points to the right skin. The new pipeline loads every
+/// skin, builds a **merged skeleton** whose `joint_to_node`
+/// is the union of all unique joint nodes, and pre-computes a
+/// per-primitive remap table so each vertex's `JOINTS_0` (an
+/// index into its own skin's joint list) is translated into
+/// the merged-skeleton index. The renderer keeps using a
+/// single `Skeleton`; the per-primitive remap is a one-time
+/// preprocessing step at load time.
+fn load_merged_skeleton_and_remaps(gltf: &gltf::Gltf) -> (Skeleton, Vec<Vec<Vec<u32>>>) {
+    // 1. Walk every skin and collect (joint_node_indices, ibms).
+    let mut per_skin: Vec<(Vec<usize>, Vec<glam::Mat4>)> = Vec::new();
+    for skin in gltf.document.skins() {
+        let joints: Vec<usize> = skin.joints().map(|n| n.index()).collect();
+        let ibms: Vec<glam::Mat4> = skin
+            .reader(|_b| gltf.blob.as_deref())
+            .read_inverse_bind_matrices()
+            .map(|ibm| ibm.map(|m| glam::Mat4::from_cols_array_2d(&m)).collect())
+            .unwrap_or_default();
+        per_skin.push((joints, ibms));
+    }
+
+    // 2. Build the merged skeleton: union of all unique
+    //    joint nodes across every skin. The IBM for each
+    //    merged joint is the IBM from the first skin that
+    //    declared it (in practice all skins share the same
+    //    bind pose, so the values match for every joint
+    //    that appears in more than one skin).
+    let mut merged_joints: Vec<usize> = Vec::new();
+    let mut merged_ibms: Vec<glam::Mat4> = Vec::new();
+    let mut node_to_merged: std::collections::HashMap<usize, usize> =
+        std::collections::HashMap::new();
+    for (joints, ibms) in &per_skin {
+        for (i, &joint_node) in joints.iter().enumerate() {
+            node_to_merged.entry(joint_node).or_insert_with(|| {
+                let merged_idx = merged_joints.len();
+                merged_joints.push(joint_node);
+                merged_ibms.push(ibms[i]);
+                merged_idx
+            });
+        }
+    }
+    // `Skeleton.inverse_bind` is the **inverse-bind matrix** (IBM)
+    // read from `skin.inverse_bind_matrices`; the per-frame palette
+    // is `joint_world * inverse_bind[i]` (the standard glTF
+    // identity, which collapses to the bind matrix at rest). The
+    // accompanying `bind_matrices` field is the bind matrix itself
+    // (`inverse_bind[i].inverse()`), pre-baked for the renderer's
+    // initial rest-pose upload.
+    //
+    // The previous build was assigning the two fields in the
+    // opposite order, which produced `palette[j] = joint_world *
+    // bind_matrix ≈ bind_matrix²` for a T-pose humanoid. Because
+    // most joint bind matrices are pure translations, that doubled
+    // the joint's rest position and stretched the model ~5x
+    // vertically — the "5x taller" symptom in the screenshot.
+    let skel = Skeleton {
+        inverse_bind: merged_ibms.clone(),
+        bind_matrices: merged_ibms.iter().map(|m| m.inverse()).collect(),
+        joint_to_node: merged_joints,
     };
-    skin.joints().map(|n| n.index()).collect()
+
+    // 3. Build a `mesh_idx -> skin_idx` map by walking every
+    //    node — the skin reference is on the node, not the
+    //    primitive, so a mesh attached to a node with no
+    //    skin property falls back to skin 0 (the glTF
+    //    default).
+    let mut mesh_to_skin: std::collections::HashMap<usize, usize> =
+        std::collections::HashMap::new();
+    for node in gltf.document.nodes() {
+        if let Some(mesh) = node.mesh() {
+            let skin_idx = node.skin().map(|s| s.index()).unwrap_or(0);
+            mesh_to_skin.entry(mesh.index()).or_insert(skin_idx);
+        }
+    }
+
+    // 4. Build the per-primitive remap table. The table is
+    //    indexed `[mesh_idx][prim_idx][old_joint_idx]` and
+    //    yields the merged-skeleton joint index. If a
+    //    primitive references a joint that's not in the
+    //    merged skeleton (shouldn't happen for a
+    //    well-formed model), the remap falls back to 0.
+    let mut primitive_remap: Vec<Vec<Vec<u32>>> = Vec::new();
+    for (mesh_idx, mesh) in gltf.document.meshes().enumerate() {
+        let mut prim_remaps: Vec<Vec<u32>> = Vec::new();
+        let skin_idx = mesh_to_skin.get(&mesh_idx).copied().unwrap_or(0);
+        let Some((skin_joints, _)) = per_skin.get(skin_idx) else {
+            // No matching skin (malformed model) — leave the
+            // remap empty so the vertex loader keeps the
+            // original JOINTS_0 (which the renderer's
+            // `usize::MAX` sentinel handling in
+            // `VrmModel::update_skin_palette` will treat as
+            // "out of range" and reduce to identity).
+            for _ in 0..mesh.primitives().count() {
+                prim_remaps.push(Vec::new());
+            }
+            primitive_remap.push(prim_remaps);
+            continue;
+        };
+        for _ in 0..mesh.primitives().count() {
+            let table: Vec<u32> = skin_joints
+                .iter()
+                .map(|&node_idx| node_to_merged.get(&node_idx).copied().unwrap_or(0) as u32)
+                .collect();
+            prim_remaps.push(table);
+        }
+        primitive_remap.push(prim_remaps);
+    }
+
+    (skel, primitive_remap)
 }
 
-fn load_first_skeleton(gltf: &gltf::Gltf, joint_to_node: &[usize]) -> Skeleton {
-    let mut skel = Skeleton::default();
-    let Some(skin) = gltf.document.skins().next() else {
-        return skel;
-    };
-    let reader = skin.reader(|_buffer| gltf.blob.as_deref());
-    if let Some(ibm) = reader.read_inverse_bind_matrices() {
-        skel.inverse_bind = ibm.map(|m| glam::Mat4::from_cols_array_2d(&m)).collect();
-        // Pre-compute the bind matrix `inverse_bind[i].inverse()`
-        // so the renderer can upload `skin_matrices[]` as
-        // `bind_matrices` for the rest-pose pass (Phase 1).
-        // `glam::Mat4::inverse` returns `Mat4::IDENTITY` for
-        // singular matrices so a malformed skin still produces
-        // a valid (if visually wrong) rest pose.
-        skel.bind_matrices = skel.inverse_bind.iter().map(|m| m.inverse()).collect();
+/// Walk every glTF `Node` and capture the local
+/// rotation / position, the parent index, and the world
+/// rest-pose transform. The result feeds
+/// [`VrmModel::update_skin_palette`] for the per-frame
+/// VRMA playback pass (PR4.16).
+///
+/// The glTF spec only mandates the local transform
+/// (`translation`, `rotation`, `scale`); the world
+/// transform is computed here by walking the parent
+/// chain. Valid glTF is topologically ordered
+/// (parents appear before children in
+/// `document.nodes()`), which is the assumption the
+/// single-pass cascade makes. A malformed file with
+/// out-of-order nodes would produce a wrong world
+/// transform; the loader logs a warning when that
+/// happens.
+fn load_node_hierarchy(gltf: &gltf::Gltf) -> NodeHierarchy {
+    use crate::model::NodeHierarchy;
+
+    let node_count = gltf.document.nodes().count();
+    let mut rest_local_rotations = vec![glam::Quat::IDENTITY; node_count];
+    let mut rest_local_positions = vec![glam::Vec3::ZERO; node_count];
+    let mut parents = vec![-1i32; node_count];
+    let mut world_rotations = vec![glam::Quat::IDENTITY; node_count];
+    let mut world_positions = vec![glam::Vec3::ZERO; node_count];
+
+    for (i, node) in gltf.document.nodes().enumerate() {
+        let (t, r, _s) = node.transform().decomposed();
+        rest_local_positions[i] = glam::Vec3::from(t);
+        rest_local_rotations[i] = glam::Quat::from_array(r);
     }
-    // The `joint_to_node` list is `skin.joints()` and may be
-    // longer than the inverse_bind list when a model ships
-    // joints without bind matrices (rare but possible). Truncate
-    // to the IBM length so the two arrays stay aligned.
-    let ibm_len = skel.inverse_bind.len();
-    skel.joint_to_node = joint_to_node.iter().take(ibm_len).copied().collect();
-    if skel.joint_count() > 0 {
-        tracing::info!("VRM skeleton loaded: {} joints", skel.joint_count());
+    for node in gltf.document.nodes() {
+        let idx = node.index();
+        for child in node.children() {
+            parents[child.index()] = idx as i32;
+        }
     }
-    skel
+
+    // Single-pass cascade. The `gl` crate yields nodes in
+    // declaration order, which is topologically sorted for
+    // well-formed glTF — the same assumption the
+    // `compute_node_rest_transforms` helper in
+    // `animation.rs` relies on.
+    let mut out_of_order = 0usize;
+    for i in 0..node_count {
+        let p = parents[i];
+        if p < 0 {
+            world_rotations[i] = rest_local_rotations[i];
+            world_positions[i] = rest_local_positions[i];
+        } else {
+            let p = p as usize;
+            // If `i < p` the assumption is violated; fall
+            // back to treating the node as a root so the
+            // cascade stays sound for its descendants.
+            if i < p {
+                out_of_order += 1;
+                world_rotations[i] = rest_local_rotations[i];
+                world_positions[i] = rest_local_positions[i];
+            } else {
+                world_rotations[i] = world_rotations[p] * rest_local_rotations[i];
+                world_positions[i] =
+                    world_rotations[p] * rest_local_positions[i] + world_positions[p];
+            }
+        }
+    }
+    if out_of_order > 0 {
+        tracing::warn!(
+            "VRM has {out_of_order} glTF node(s) declared before their parent; \
+             VRMA playback may produce incorrect poses for the affected bones"
+        );
+    }
+
+    // The local_* buffers start as a copy of the rest pose
+    // and get mutated by `update_skin_palette` every frame.
+    // Resetting to `rest_local_*` at the top of every call
+    // keeps the rest pose authoritative.
+    let local_rotations = rest_local_rotations.clone();
+    let local_positions = rest_local_positions.clone();
+
+    NodeHierarchy {
+        local_rotations,
+        local_positions,
+        rest_local_rotations,
+        rest_local_positions,
+        parents,
+        world_rotations,
+        world_positions,
+    }
 }
 
 fn load_primitive_base_color_texture(
@@ -976,17 +1218,21 @@ fn load_image_data(
 }
 
 /// Map a raw glTF morph-target POSITION displacement into the
-/// renderer's normalised vertex space.
+/// vertex buffer's coordinate space.
 ///
-/// The vertex buffer is normalised as `(p - center) * scale`, but
-/// morph target POSITION is a per-vertex *delta* — so the linear
-/// transform collapses to `delta' = delta * scale`. Applying
-/// `-center` here was the PR4.4 visual-regression bug: a 0.5 m
-/// torso centre × a 1.5 / 0.8 ≈ 1.875 scale dragged the face
-/// down by ≈ 0.94 normalised units the moment any emotion weight
-/// went above zero.
-fn normalize_morph_offset(raw: [f32; 3], scale: f32) -> [f32; 3] {
-    [raw[0] * scale, raw[1] * scale, raw[2] * scale]
+/// As of the PR4.18 mesh-unnormalisation pass, the vertex
+/// buffer is now in raw glTF space (we no longer recenter or
+/// scale vertices on load — the model matrix folds those in
+/// at draw time). Morph target POSITION is a per-vertex
+/// *delta* in the same glTF space, so the function is the
+/// identity. The previous `(raw - center) * scale` form
+/// (with the linear-only simplification `delta' = delta *
+/// scale`) is preserved by the function signature for
+/// forward-compat — a future model that bakes normalisation
+/// into the vertices could reintroduce the linear pass
+/// without touching call sites.
+fn normalize_morph_offset(raw: [f32; 3], _scale: f32) -> [f32; 3] {
+    raw
 }
 
 /// PR4.15: load all MToon textures referenced by a material and
@@ -1399,26 +1645,33 @@ fn upload_mtoon_texture(
 mod tests {
     use super::normalize_morph_offset;
 
-    /// Regression for the PR4.4 face-shift bug. Earlier code did
-    /// `(p - center) * scale` for the morph delta, which added
-    /// `center * scale` to every vertex and dragged the face
-    /// down by ≈ 0.9 m the moment a weight became non-zero.
+    /// PR4.18: as of the mesh-unnormalisation pass the vertex
+    /// buffer is in raw glTF space; the morph offset is
+    /// already in the same raw space, so
+    /// `normalize_morph_offset` is the identity. The helper
+    /// keeps the `(center, scale)` signature for forward
+    /// compatibility with a future model that bakes
+    /// normalisation into the vertices, but the shipped
+    /// pass-through must not pick up the model's centre or
+    /// scale.
     #[test]
-    fn morph_offset_is_not_translated_by_model_centre() {
-        // A typical Alicia-like setup: torso-centred model, longest
-        // extent 0.8 m, target 1.5 m.
+    fn morph_offset_is_passthrough_in_raw_space() {
         let center = [0.0, 0.5, 0.0];
         let scale = 1.5 / 0.8;
-        // A "happy" smile might add 2 cm to a mouth corner.
+        // A "happy" smile might add 2 cm to a mouth
+        // corner. With the raw-space pass-through the
+        // helper must return the raw delta untouched,
+        // regardless of `center` / `scale`. The earlier
+        // PR4.4 assertion (`raw * scale`) is now obsolete:
+        // the per-vertex `scale` lives in the model matrix,
+        // not in the morph offset buffer.
         let raw = [0.0, 0.02, 0.01];
         let out = normalize_morph_offset(raw, scale);
-        // Expected: `raw * scale` only — no `-center` term.
-        let expected = [0.0, 0.02 * scale, 0.01 * scale];
         for i in 0..3 {
-            let diff = (out[i] - expected[i]).abs();
+            let diff = (out[i] - raw[i]).abs();
             assert!(
                 diff < 1e-6,
-                "axis {i}: got {out:?}, expected {expected:?}, \
+                "axis {i}: got {out:?}, expected passthrough {raw:?}, \
                  centre * scale = {ys:?} (must NOT be subtracted)",
                 ys = [center[0] * scale, center[1] * scale, center[2] * scale],
             );
