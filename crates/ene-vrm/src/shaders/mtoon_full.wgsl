@@ -185,7 +185,7 @@ fn vs_main(in: VsIn, @builtin(vertex_index) vidx: u32) -> VsOut {
     }
 
     out.clip_pos = camera.view_proj * world_pos;
-    out.uv = compute_uv_animation(in.uv);
+    out.uv = in.uv;
     out.world_pos = world_pos.xyz;
     out.normal = (model.model * vec4<f32>(in.normal, 0.0)).xyz;
     out.view_dir = normalize(camera.camera_pos.xyz - world_pos.xyz);
@@ -212,12 +212,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let v = normalize(in.view_dir);
     let light_dir = normalize(vec3<f32>(0.3, 0.8, 0.5));
 
+    // UV animation (scroll / rotation / mask). Done in the
+    // fragment stage because the mask is a texture sample,
+    // which WGSL forbids in the vertex stage.
+    let uv = compute_uv_animation(in.uv);
+
     // Base color
-    var base = textureSample(base_color_tex, base_color_smp, in.uv);
+    var base = textureSample(base_color_tex, base_color_smp, uv);
 
     // Shade multiply texture
     if has_flag(flags, FLAG_SHADE_MULTIPLY) {
-        let shade_tex = textureSample(shade_multiply_tex, shade_multiply_smp, in.uv);
+        let shade_tex = textureSample(shade_multiply_tex, shade_multiply_smp, uv);
         base = base * shade_tex;
     }
 
@@ -228,7 +233,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Shading shift texture
     var shift_add = 0.0;
     if has_flag(flags, FLAG_SHADING_SHIFT) {
-        let shift_tex = textureSample(shading_shift_tex, shading_shift_smp, in.uv);
+        let shift_tex = textureSample(shading_shift_tex, shading_shift_smp, uv);
         shift_add = shift_tex.r * mtoon.outline_color_and_shift_scale.w;
     }
     let shaded = clamp(shade_factor + shift_add, 0.0, 1.0);
@@ -245,7 +250,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Emission
     if has_flag(flags, FLAG_EMISSIVE) {
-        let emis_tex = textureSample(emissive_tex, emissive_smp, in.uv);
+        let emis_tex = textureSample(emissive_tex, emissive_smp, uv);
         let emis = mtoon.emissive_and_matcap_r.xyz * emis_tex.rgb;
         color = color + emis;
     } else {
@@ -281,7 +286,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Rim multiply texture
     if has_flag(flags, FLAG_RIM_MULTIPLY) {
-        let rim_tex = textureSample(rim_multiply_tex, rim_multiply_smp, in.uv);
+        let rim_tex = textureSample(rim_multiply_tex, rim_multiply_smp, uv);
         rim = rim * rim_tex.rgb;
     }
 

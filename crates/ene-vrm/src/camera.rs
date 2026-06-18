@@ -71,9 +71,35 @@ impl OrthographicCamera {
         (self.eye, self.target, self.viewport_height, self.aspect)
     }
 
+    /// Compute the scale factor that makes an axis-aligned bounding
+    /// box of the given extents fit the current orthographic
+    /// viewport, leaving `margin` of the viewport unused on every
+    /// side. `margin = 0.9` is a sensible default (5 % padding on
+    /// each side).
+    ///
+    /// Used by `ene-desktop-v2` to keep user-supplied
+    /// `model_scale` values from rendering the model larger than
+    /// the viewport. The runtime multiplies the returned scale by
+    /// the user's slider value, so `model_scale = 1.0` is now "the
+    /// model fits the viewport" rather than "1× whatever the
+    /// loader happened to normalise to".
+    pub fn compute_auto_fit_scale(
+        &self,
+        aabb_min: [f32; 3],
+        aabb_max: [f32; 3],
+        margin: f32,
+    ) -> f32 {
+        let extent_x = (aabb_max[0] - aabb_min[0]).max(0.0001);
+        let extent_y = (aabb_max[1] - aabb_min[1]).max(0.0001);
+        let viewport_w = self.viewport_height * self.aspect;
+        let scale_x = viewport_w * margin / extent_x;
+        let scale_y = self.viewport_height * margin / extent_y;
+        scale_x.min(scale_y).max(0.0001)
+    }
+
     /// Build the per-frame uniform.
     pub fn uniform(&self) -> VrmResult<CameraUniform> {
-        let view = Mat4::look_at_rh(self.eye.into(), self.target.into(), self.up.into());
+        let view = self.debug_view();
         let half_h = self.viewport_height * 0.5;
         let half_w = half_h * self.aspect;
         // glam's `orthographic_rh` expects `near` and `far` to be
@@ -85,16 +111,43 @@ impl OrthographicCamera {
         let proj = Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, 0.1, 100.0);
         Ok(CameraUniform {
             view_proj: (proj * view).to_cols_array_2d(),
+            camera_pos: [self.eye[0], self.eye[1], self.eye[2], 1.0],
         })
+    }
+
+    /// PR4.19 diagnostic: just the view matrix (the look_at
+    /// rotation+translation). Exposed so the runtime can dump
+    /// it without having to plumb the private eye/target/up
+    /// fields out to the desktop app.
+    pub fn debug_view(&self) -> Mat4 {
+        Mat4::look_at_rh(self.eye.into(), self.target.into(), self.up.into())
+    }
+
+    /// PR4.19 diagnostic: just the orthographic projection
+    /// matrix. Used by `runtime.rs` to verify the projection
+    /// side isn't the source of the "5x taller" mystery.
+    pub fn debug_proj(&self) -> Mat4 {
+        let half_h = self.viewport_height * 0.5;
+        let half_w = half_h * self.aspect;
+        Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, 0.1, 100.0)
     }
 }
 
 /// Uniform buffer data uploaded each frame.
+///
+/// Total size: 80 bytes (16-byte aligned: 64 for `view_proj` + 16
+/// for `camera_pos`). All VRM shaders (lite / skinned / unlit /
+/// MToon) share this layout so the same `camera` bind group can
+/// be bound on every pipeline.
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct CameraUniform {
     /// Combined view-projection matrix in column-major form.
     pub view_proj: [[f32; 4]; 4],
+    /// Camera world-space position with `w = 1.0`. The MToon
+    /// shader uses this to build the view direction for matcap /
+    /// fresnel rim.
+    pub camera_pos: [f32; 4],
 }
 
 /// Per-frame model transform uniform. PR4.1: the runtime
@@ -132,7 +185,7 @@ impl ModelUniform {
     /// the model as front-facing, so it is kept. An earlier
     /// 180°-around-Y pre-rotation was the wrong direction; it
     /// showed the back of the character and mirrored `character_state.character_position.x`,
-    /// which is what was making the model appear shifted to the
+    /// which was what was making the model appear shifted to the
     /// right and half off-screen.
     pub fn from_position_scale(position: [f32; 3], scale: f32) -> Self {
         let m = Mat4::from_scale_rotation_translation(
@@ -143,5 +196,82 @@ impl ModelUniform {
         Self {
             model: m.to_cols_array_2d(),
         }
+    }
+
+    /// Wrap an already-composed `Mat4` (e.g. one built by
+    /// `CharacterRenderer::model_matrix` that folds the
+    /// loader's `T(-center) * S(normalize_scale)` in alongside
+    /// the character's translation and per-frame scale).
+    /// Kept as a thin conversion so the renderer and the
+    /// runtime can compose the matrix in `glam` space and
+    /// hand the result off in one shot.
+    pub fn from_mat4(m: Mat4) -> Self {
+        Self {
+            model: m.to_cols_array_2d(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn camera(aspect: f32) -> OrthographicCamera {
+        let mut c = OrthographicCamera::default();
+        c.set_aspect(aspect);
+        c
+    }
+
+    /// A 1.5 × 1.5 box at viewport (2.6h × 3.9w, aspect 1.5) is
+    /// Y-limited: the longest axis is Y, so `scale_y` drives the
+    /// fit. `scale_y = 2.6 * 0.9 / 1.5 = 1.56`. `scale_x` would be
+    /// `3.9 * 0.9 / 1.5 = 2.34`, larger, so `min` picks 1.56.
+    #[test]
+    fn auto_fit_tall_box_at_1_5_aspect_picks_y_axis() {
+        let c = camera(1.5);
+        let s = c.compute_auto_fit_scale([-0.75, 0.0, 0.0], [0.75, 1.5, 0.0], 0.9);
+        assert!((s - 1.56).abs() < 1e-4, "expected ~1.56, got {s}");
+    }
+
+    /// A 2.0 × 1.0 box at the same viewport is X-limited: `scale_x
+    /// = 3.9 * 0.9 / 2.0 = 1.755`, `scale_y = 2.6 * 0.9 / 1.0 =
+    /// 2.34`. `min` picks 1.755.
+    #[test]
+    fn auto_fit_wide_box_at_1_5_aspect_picks_x_axis() {
+        let c = camera(1.5);
+        let s = c.compute_auto_fit_scale([-1.0, 0.0, 0.0], [1.0, 1.0, 0.0], 0.9);
+        assert!((s - 1.755).abs() < 1e-4, "expected ~1.755, got {s}");
+    }
+
+    /// A zero-extent AABB (degenerate / uninitialised model) must
+    /// not produce NaN / Inf. The implementation clamps the divisor
+    /// to `0.0001` and the result to a `max(0.0001)` floor.
+    #[test]
+    fn auto_fit_degenerate_aabb_returns_floor() {
+        let c = camera(1.5);
+        let s = c.compute_auto_fit_scale([0.0; 3], [0.0; 3], 0.9);
+        assert!(s.is_finite(), "expected finite scale, got {s}");
+        assert!(s >= 0.0001, "expected >= 0.0001, got {s}");
+    }
+
+    /// Margin of 1.0 (no padding) on a 1 × 1 box at aspect 1.5
+    /// should produce exactly `2.6 * 1.0 / 1.0 = 2.6` (Y-driven).
+    #[test]
+    fn auto_fit_margin_one_yields_exact_viewport_height() {
+        let c = camera(1.5);
+        let s = c.compute_auto_fit_scale([0.0, 0.0, 0.0], [1.0, 1.0, 0.0], 1.0);
+        assert!((s - 2.6).abs() < 1e-4, "expected 2.6, got {s}");
+    }
+
+    /// PR4.20 diagnostic: confirm what glam's
+    /// `orthographic_rh(-half_w, half_w, -half_h, half_h, 0.1, 100.0)`
+    /// actually produces, so the PR4.19-diag log can be
+    /// interpreted correctly. Just prints the matrix.
+    #[test]
+    fn orthographic_rh_diag_640x480() {
+        let half_h = 2.6 * 0.5;
+        let half_w = half_h * 1.3333333;
+        let p = Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, 0.1, 100.0);
+        println!("P = {p:?}");
     }
 }

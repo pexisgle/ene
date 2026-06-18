@@ -89,7 +89,7 @@ pub use look_at::{
     LookAtBoneDelta, LookAtBoneOutput, LookAtDirection, LookAtEvaluator, LookAtExpressionOutput,
     LookAtOutput, LookAtProperties, LookAtRangeMap, LookAtRangeMapSet, LookAtType, load_look_at,
 };
-pub use model::{AlphaMode, Skeleton, VrmMesh, VrmModel, VrmTexture};
+pub use model::{AlphaMode, NodeHierarchy, Skeleton, VrmMesh, VrmModel, VrmTexture};
 pub use mtoon::{
     MToonGpuTextures, MToonMaterial, MToonTextureRef, MToonUniform, OutlineWidthMode, flags,
     load_mtoon_materials, texture_flags,

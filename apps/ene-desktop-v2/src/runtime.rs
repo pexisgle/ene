@@ -139,6 +139,17 @@ impl ApplicationHandler for Runtime {
                 self.state
                     .character
                     .resize(&self.state.gpu.device, (char_size.width, char_size.height));
+                // PR4.16: load the default VRMA motion. The
+                // resolved path comes from
+                // `CharacterState::current_motion()` (CLI
+                // override > selected_motion > first
+                // available). The VRMA load is best-effort:
+                // a missing file logs a warning and leaves
+                // the model in its rest pose (which is what
+                // the user sees with `default_motion = ""`).
+                let motion_rel = self.state.settings.current_motion();
+                let motion_path = self.state.settings.assets_dir.join(motion_rel);
+                self.state.character.play_motion(&motion_path);
                 cw.window.request_redraw();
                 self.char_window = Some(cw);
             }
@@ -510,15 +521,89 @@ impl Runtime {
                     let surface_w = cw.config.width;
                     let surface_h = cw.config.height;
                     let cs = &settings.character_state;
-                    let model_uniform_dbg = ene_vrm::ModelUniform::from_position_scale(
-                        cs.character_position.to_array(),
-                        cs.model_scale,
+                    let auto_fit = character.auto_fit_scale(0.9);
+                    let model_uniform_dbg = ene_vrm::ModelUniform::from_mat4(
+                        character.model_matrix(cs.character_position, auto_fit),
                     );
                     let cam = character.camera_dbg();
                     let depth = character.depth_size_dbg();
                     let loaded = character.model_aabb_dbg();
+                    // PR4.19 ultra-verbose: also dump the model's
+                    // loader-derived values (center, normalize_scale,
+                    // merged skeleton joint count) and the per-axis
+                    // model-matrix scale, so we can see whether the
+                    // runtime is computing the right matrix. The
+                    // user is reporting the model is "5x taller than
+                    // expected" with only the tip of the feet visible
+                    // — this dump makes the cause obvious.
+                    let model_scale_x = (model_uniform_dbg.model[0][0].powi(2)
+                        + model_uniform_dbg.model[1][0].powi(2)
+                        + model_uniform_dbg.model[2][0].powi(2))
+                    .sqrt();
+                    let model_scale_y = (model_uniform_dbg.model[0][1].powi(2)
+                        + model_uniform_dbg.model[1][1].powi(2)
+                        + model_uniform_dbg.model[2][1].powi(2))
+                    .sqrt();
+                    let model_scale_z = (model_uniform_dbg.model[0][2].powi(2)
+                        + model_uniform_dbg.model[1][2].powi(2)
+                        + model_uniform_dbg.model[2][2].powi(2))
+                    .sqrt();
+                    let model_translation = [
+                        model_uniform_dbg.model[0][3],
+                        model_uniform_dbg.model[1][3],
+                        model_uniform_dbg.model[2][3],
+                    ];
+                    let merged_skel_joints = character.model_dbg_merged_skel_joints().unwrap_or(0);
+                    let loader_center = character.model_dbg_center();
+                    let loader_norm = character.model_dbg_normalize_scale();
+                    // PR4.19: also dump the camera's view_proj
+                    // matrix so we can verify the orthographic
+                    // projection isn't adding a hidden scale (the
+                    // user reports the model is "5x taller" and
+                    // only the feet are visible; the model_matrix
+                    // is correct, so the camera/projection might
+                    // be the culprit).
+                    let view_proj = character.camera_view_proj_dbg();
+                    let vp_scale_x = (view_proj[0][0].powi(2)
+                        + view_proj[1][0].powi(2)
+                        + view_proj[2][0].powi(2))
+                    .sqrt();
+                    let vp_scale_y = (view_proj[0][1].powi(2)
+                        + view_proj[1][1].powi(2)
+                        + view_proj[2][1].powi(2))
+                    .sqrt();
+                    let vp_scale_z = (view_proj[0][2].powi(2)
+                        + view_proj[1][2].powi(2)
+                        + view_proj[2][2].powi(2))
+                    .sqrt();
+                    let vp_translation = [view_proj[0][3], view_proj[1][3], view_proj[2][3]];
+                    let model_view_proj = character.model_view_proj_dbg(
+                        [
+                            cs.character_position.x,
+                            cs.character_position.y,
+                            cs.character_position.z,
+                        ],
+                        auto_fit,
+                    );
+                    let model_matrix_runtime = character.model_matrix_runtime_dbg(
+                        [
+                            cs.character_position.x,
+                            cs.character_position.y,
+                            cs.character_position.z,
+                        ],
+                        auto_fit,
+                    );
+                    let view_only = character.camera_view_dbg();
+                    let proj_only = character.camera_proj_dbg();
                     tracing::info!(
-                        "PR4.2-diag: char_win={}x{} scale_factor={:.3} surface_config={}x{} depth_texture={}x{} camera_aspect={:.3} char_pos={:?} model_scale={:.3} model_uniform={:?} cam_eye={:?} cam_target={:?} cam_viewport_h={:.3} loaded_aabb={:?}",
+                        "PR4.19-diag: model_view_proj={:?} model_matrix_runtime={:?} view_only={:?} proj_only={:?}",
+                        model_view_proj,
+                        model_matrix_runtime,
+                        view_only,
+                        proj_only,
+                    );
+                    tracing::info!(
+                        "PR4.2-diag: char_win={}x{} scale_factor={:.3} surface_config={}x{} depth_texture={}x{} camera_aspect={:.3} char_pos={:?} user_model_scale={:.3} (ignored) auto_fit_scale={:.3} model_uniform={:?} cam_eye={:?} cam_target={:?} cam_viewport_h={:.3} loaded_aabb={:?}",
                         phys.width,
                         phys.height,
                         cw.window.scale_factor(),
@@ -529,11 +614,27 @@ impl Runtime {
                         cam.0,
                         cs.character_position,
                         cs.model_scale,
+                        auto_fit,
                         model_uniform_dbg.model,
                         cam.1,
                         cam.2,
                         cam.3,
                         loaded,
+                    );
+                    tracing::info!(
+                        "PR4.19-diag: loader_center={:?} loader_normalize_scale={:.4} merged_skel_joints={} model_scale=({:.4}, {:.4}, {:.4}) model_translation={:?} view_proj_scale=({:.4}, {:.4}, {:.4}) view_proj_translation={:?} model_view_proj={:?}",
+                        loader_center,
+                        loader_norm,
+                        merged_skel_joints,
+                        model_scale_x,
+                        model_scale_y,
+                        model_scale_z,
+                        model_translation,
+                        vp_scale_x,
+                        vp_scale_y,
+                        vp_scale_z,
+                        vp_translation,
+                        model_view_proj,
                     );
                 }
 
@@ -541,10 +642,24 @@ impl Runtime {
                 // from `CharacterState`. `character_position` and
                 // `model_scale` are clamped by `clamp_runtime_values`
                 // on every mutation, so we can read them directly.
+                //
+                // PR-fix (model too big for viewport): the runtime
+                // uses the per-frame `auto_fit_scale` (recomputed
+                // from the loaded AABB and the current viewport
+                // aspect) as the actual model scale. The user's
+                // `settings.character_state.model_scale` is now a
+                // hint of intent only — it is no longer passed
+                // through to the GPU, so a `model_scale = 2.2` set
+                // in a previous session can no longer blow the
+                // model past the viewport. The user can still pan
+                // via `character_position`; a future "zoom" slider
+                // can be reintroduced as a separate knob that
+                // multiplies on top of the fit (see
+                // `CharacterRenderer::auto_fit_scale` docs).
                 let cs = &settings.character_state;
-                let model_uniform = ene_vrm::ModelUniform::from_position_scale(
-                    cs.character_position.to_array(),
-                    cs.model_scale,
+                let actual_scale = character.auto_fit_scale(0.9);
+                let model_uniform = ene_vrm::ModelUniform::from_mat4(
+                    character.model_matrix(cs.character_position, actual_scale),
                 );
 
                 // PR4.2: advance the cursor-driven head-look-at
@@ -559,6 +674,21 @@ impl Runtime {
                     .map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32())
                     .clamp(0.0, 0.1);
                 self.last_frame_instant = Some(now);
+
+                // PR4.16: advance the VRMA playback clock,
+                // evaluate the active clip, push expression
+                // weights into the morph layer, and write
+                // the new skin palette to the GPU. The
+                // returned `Vec<Mat4>` is forwarded to
+                // `VrmRenderer::update_skin_palette` so the
+                // bones move before the next render pass.
+                // No-op when no motion is loaded, the
+                // player is paused, or the model has no
+                // joints.
+                if let Some(palette) = character.update_motion(dt_secs) {
+                    character.update_skin_palette_gpu(queue, &palette);
+                }
+
                 if let Some(cursor) = self.last_cursor_logical {
                     // PR4.8: the renderer reads the humanoid
                     // registry's `head` bone (when present) to
@@ -571,13 +701,21 @@ impl Runtime {
                     // renderer can scale the bone's rest
                     // translation by `model_scale` and add
                     // the character position.
+                    //
+                    // PR-fix: the look-at must use the same
+                    // `actual_scale` as the draw (auto-fit *
+                    // user slider) so the head's world
+                    // position lines up with what the user
+                    // sees. Otherwise the head appears to
+                    // track the cursor from a different point
+                    // than the rendered model.
                     let viewport: (u32, u32) =
                         (cw.window.inner_size().width, cw.window.inner_size().height);
                     let _smoothed = character.update_look_at(
                         glam::Vec2::new(cursor.x as f32, cursor.y as f32),
                         viewport,
                         cs.character_position,
-                        cs.model_scale,
+                        actual_scale,
                         cs.look_at_strength,
                         dt_secs,
                     );
@@ -709,11 +847,13 @@ fn cursor_over_char_window(
         return false;
     };
     let cs = &settings.character_state;
-    let model_uniform = ene_vrm::ModelUniform::from_position_scale(
-        cs.character_position.to_array(),
-        cs.model_scale,
-    );
-    let model_mat = glam::Mat4::from_cols_array_2d(&model_uniform.model);
+    // PR-fix: the per-frame model transform must mirror what the
+    // renderer uses, so the hit-test and the draw both consider
+    // the same world-space AABB. Apply the same auto-fit scale
+    // as in the RedrawRequested branch (which now ignores
+    // `cs.model_scale`).
+    let actual_scale = character.auto_fit_scale(0.9);
+    let model_mat = character.model_matrix(cs.character_position, actual_scale);
     let size = cw.window.inner_size();
     let scale = cw.window.scale_factor();
     let logical = position.to_logical::<f64>(scale);

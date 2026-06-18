@@ -46,3 +46,7 @@ serde_json = { workspace = true }
 # via `serde_json::Value`); listed under dev-dependencies
 # so the test-only `json!` macro usage is documented.
 serde_json = { workspace = true }
+# `inspect_aabb` example extracts a `.glb` payload from a
+# VRM 1.0 zip archive. Pulled in as a dev-dep so the lib
+# itself stays slim.
+zip = { version = "2", default-features = false, features = ["deflate"] }
