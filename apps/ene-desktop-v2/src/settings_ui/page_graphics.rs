@@ -16,33 +16,63 @@ pub fn render(
     settings: &mut CharacterSettings,
     animation: &mut AnimationControl,
     ai: &Arc<AiBridge>,
+    world: &mut hecs::World,
+    ui_entity: hecs::Entity,
 ) {
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
             ui.label("Target FPS");
             if ui.button("<").clicked() {
-                apply_action(SettingsAction::TargetFpsDown, settings, animation, ai);
+                apply_action(
+                    SettingsAction::TargetFpsDown,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                );
             }
             ui.add_sized(
                 [220.0, 0.0],
                 egui::Label::new(format_fps_label(settings.graphics.target_fps)),
             );
             if ui.button(">").clicked() {
-                apply_action(SettingsAction::TargetFpsUp, settings, animation, ai);
+                apply_action(
+                    SettingsAction::TargetFpsUp,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                );
             }
         });
 
         ui.horizontal(|ui| {
             ui.label("Shadow Quality");
             if ui.button("<").clicked() {
-                apply_action(SettingsAction::ShadowQualityDown, settings, animation, ai);
+                apply_action(
+                    SettingsAction::ShadowQualityDown,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                );
             }
             ui.add_sized(
                 [220.0, 0.0],
                 egui::Label::new(format_shadow_label(settings.graphics.shadow_quality)),
             );
             if ui.button(">").clicked() {
-                apply_action(SettingsAction::ShadowQualityUp, settings, animation, ai);
+                apply_action(
+                    SettingsAction::ShadowQualityUp,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                );
             }
         });
 
@@ -54,6 +84,8 @@ pub fn render(
                     settings,
                     animation,
                     ai,
+                    world,
+                    ui_entity,
                 );
             }
             ui.add_sized(
@@ -61,7 +93,14 @@ pub fn render(
                 egui::Label::new(format_aa_label(settings.graphics.antialiasing_mode)),
             );
             if ui.button(">").clicked() {
-                apply_action(SettingsAction::AntialiasingModeUp, settings, animation, ai);
+                apply_action(
+                    SettingsAction::AntialiasingModeUp,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                );
             }
         });
     });

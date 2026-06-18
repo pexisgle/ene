@@ -38,6 +38,7 @@ ctor = "1.0"
 # --- Workspace dependencies (shared across crates) ---
 dashmap = "6"
 base64 = "0.22"
+blake3 = "1.5"
 
 # --- Internal libraries ---
 ene-common = { path = "crates/ene-common" }
@@ -53,7 +54,6 @@ ene-tool-common = { path = "crates/ene-tool-common" }
 ene-tool-derive = { path = "crates/ene-tool-derive" }
 ene-tool-db = { path = "crates/ene-tool-db" }
 ene-vrm = { path = "crates/ene-vrm" }
-blake3 = "1.5"
 
 # --- Database ---
 sea-orm = { version = "1.1", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros", "with-chrono"] }
@@ -99,6 +99,9 @@ encase = "0.12"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 raw-window-handle = "0.6"
+hecs = "0.10"
+rapier3d = "0.22"
+rayon = "1.10"
 
 # Git hooks installed by `cargo-husky` on the first `cargo build`.
 # Hooks live under `.cargo-husky/hooks/` and are auto-installed for the

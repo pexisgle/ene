@@ -269,6 +269,13 @@ impl HumanoidBoneRegistry {
         self.by_name("hips")
     }
 
+    /// Convenience accessor for the `chest` bone. Used as the
+    /// body-center fallback when the model has no `head` bone
+    /// (see `apps/ene-desktop-v2::character::body_center_world`).
+    pub fn chest(&self) -> Option<&HumanoidBoneEntry> {
+        self.by_name("chest")
+    }
+
     /// Convenience accessor for the `jaw` bone.
     pub fn jaw(&self) -> Option<&HumanoidBoneEntry> {
         self.by_name("jaw")

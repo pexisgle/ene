@@ -16,6 +16,8 @@ pub fn render(
     _animation: &mut AnimationControl,
     ai: &Arc<AiBridge>,
     input: &mut SettingsInputState,
+    world: &mut hecs::World,
+    ui_entity: hecs::Entity,
 ) {
     let mut provider = settings
         .ai
@@ -154,16 +156,20 @@ pub fn render(
             );
             let send_clicked = ui.button("Send").clicked();
             if response.changed() {
-                settings.ui.ai_chat_input = input.ai_chat_input.clone();
+                if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
+                    ui_state.ai_chat_input = input.ai_chat_input.clone();
+                }
                 settings.mark_dirty();
             }
             let send_with_enter =
                 response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if send_clicked || send_with_enter {
                 // Sync the in-memory text buffer, then send.
-                settings.ui.ai_chat_input = input.ai_chat_input.clone();
+                if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
+                    ui_state.ai_chat_input = input.ai_chat_input.clone();
+                }
                 let _ = SettingsAction::SendAiChat; // silence unused import in narrow builds
-                send_chat(settings, ai);
+                send_chat(settings, ai, world, ui_entity);
                 input.ai_chat_input.clear();
             }
         });
@@ -250,25 +256,38 @@ pub fn render(
 
         ui.separator();
         ui.label("Latest Response");
+        let ai_latest_response =
+            if let Ok(ui_state) = world.get::<&crate::settings::UiState>(ui_entity) {
+                ui_state.ai_latest_response.clone()
+            } else {
+                String::new()
+            };
         egui::ScrollArea::vertical()
             .max_height(180.0)
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                if settings.ui.ai_latest_response.is_empty() {
+                if ai_latest_response.is_empty() {
                     ui.weak("(empty)");
                 } else {
-                    ui.label(settings.ui.ai_latest_response.clone());
+                    ui.label(ai_latest_response);
                 }
             });
     });
 }
 
-fn send_chat(settings: &mut CharacterSettings, ai: &Arc<AiBridge>) {
-    let trimmed = settings.ui.ai_chat_input.trim().to_string();
-    if trimmed.is_empty() {
-        return;
+fn send_chat(
+    _settings: &mut CharacterSettings,
+    ai: &Arc<AiBridge>,
+    world: &mut hecs::World,
+    ui_entity: hecs::Entity,
+) {
+    if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
+        let trimmed = ui_state.ai_chat_input.trim().to_string();
+        if trimmed.is_empty() {
+            return;
+        }
+        ai.run(trimmed);
+        ui_state.ai_chat_input.clear();
+        ui_state.ai_latest_response.clear();
     }
-    ai.run(trimmed);
-    settings.ui.ai_chat_input.clear();
-    settings.ui.ai_latest_response.clear();
 }

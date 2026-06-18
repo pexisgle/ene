@@ -54,6 +54,8 @@ pub fn apply_action(
     settings: &mut CharacterSettings,
     animation: &mut AnimationControl,
     ai: &Arc<AiBridge>,
+    world: &mut hecs::World,
+    ui_entity: hecs::Entity,
 ) {
     match action {
         SettingsAction::PrevCharacter => {
@@ -97,7 +99,9 @@ pub fn apply_action(
         }
         #[cfg(target_os = "linux")]
         SettingsAction::ToggleDebugOverlay => {
-            settings.ui.debug_overlay_visible = !settings.ui.debug_overlay_visible;
+            if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
+                ui_state.debug_overlay_visible = !ui_state.debug_overlay_visible;
+            }
             settings.mark_dirty();
         }
         #[cfg(target_os = "linux")]
@@ -171,7 +175,7 @@ pub fn apply_action(
             adjust_f32(&mut settings.character_state.character_position.z, 0.05);
         }
         SettingsAction::SendAiChat => {
-            send_ai_chat(settings, ai);
+            send_ai_chat(settings, ai, world, ui_entity);
         }
     }
 
@@ -190,14 +194,21 @@ fn adjust_f32(value: &mut f32, delta: f32) {
     *value += delta;
 }
 
-fn send_ai_chat(settings: &mut CharacterSettings, ai: &Arc<AiBridge>) {
-    let user_input = settings.ui.ai_chat_input.trim().to_string();
-    if user_input.is_empty() {
-        return;
+fn send_ai_chat(
+    _settings: &mut CharacterSettings,
+    ai: &Arc<AiBridge>,
+    world: &mut hecs::World,
+    ui_entity: hecs::Entity,
+) {
+    if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
+        let user_input = ui_state.ai_chat_input.trim().to_string();
+        if user_input.is_empty() {
+            return;
+        }
+        ai.run(user_input);
+        ui_state.ai_chat_input.clear();
+        ui_state.ai_latest_response.clear();
     }
-    ai.run(user_input);
-    settings.ui.ai_chat_input.clear();
-    settings.ui.ai_latest_response.clear();
 }
 
 #[allow(dead_code)] // `format` is used by the public `cycle_label` family below.

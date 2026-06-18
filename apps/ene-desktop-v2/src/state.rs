@@ -39,6 +39,14 @@ pub struct AppState {
     /// PR3 character renderer (loads the default VRM and owns the
     /// depth texture for the character window).
     pub character: CharacterRenderer,
+    /// ECS World for entities (character, camera, physics, etc).
+    pub world: hecs::World,
+    /// The primary character entity ID
+    pub character_entity: hecs::Entity,
+    /// The UI state entity ID
+    pub ui_entity: hecs::Entity,
+    /// Rapier physics state
+    pub physics: crate::physics::PhysicsWorld,
 }
 
 impl AppState {
@@ -62,6 +70,13 @@ impl AppState {
         let character =
             CharacterRenderer::uninit(&settings.assets_dir, settings.current_character());
 
+        let mut world = hecs::World::new();
+        let character_entity = world.spawn((crate::physics::Transform {
+            translation: glam::Vec3::ZERO,
+            scale: 1.0,
+        },));
+        let ui_entity = world.spawn((crate::settings::UiState::default(),));
+
         (
             Self {
                 gpu,
@@ -70,6 +85,10 @@ impl AppState {
                 tray: None,
                 event_rx: rx,
                 character,
+                world,
+                character_entity,
+                ui_entity,
+                physics: crate::physics::PhysicsWorld::new(),
             },
             tx,
         )
@@ -107,6 +126,18 @@ impl AppState {
     #[allow(dead_code)] // PR2 will call this from a "Quit" menu item.
     pub fn request_quit(&self, event_tx: &AppEventSender) {
         let _ = event_tx.send(AppEvent::Quit);
+    }
+
+    pub fn ui_state(&self) -> hecs::Ref<'_, crate::settings::UiState> {
+        self.world
+            .get::<&crate::settings::UiState>(self.ui_entity)
+            .expect("UI entity not found")
+    }
+
+    pub fn ui_state_mut(&self) -> hecs::RefMut<'_, crate::settings::UiState> {
+        self.world
+            .get::<&mut crate::settings::UiState>(self.ui_entity)
+            .expect("UI entity not found")
     }
 }
 

@@ -45,7 +45,11 @@ impl SettingsInputState {
     /// Mirror the on-disk `CharacterSettings` into the editable
     /// text buffers. Called when the settings window becomes
     /// visible.
-    pub fn sync_from_settings(&mut self, settings: &CharacterSettings) {
+    pub fn sync_from_settings(
+        &mut self,
+        settings: &CharacterSettings,
+        ui_state: &crate::settings::UiState,
+    ) {
         self.look_at_strength = format!("{:.2}", settings.character_state.look_at_strength);
         self.model_scale = format!("{:.2}", settings.character_state.model_scale);
         self.character_pos_x = format!("{:+.2}", settings.character_state.character_position.x);
@@ -60,7 +64,7 @@ impl SettingsInputState {
             .unwrap_or_default();
         self.ai_base_url = provider.base_url.clone();
         self.ai_api_key = provider.api_key.inline.clone();
-        self.ai_chat_input = settings.ui.ai_chat_input.clone();
+        self.ai_chat_input = ui_state.ai_chat_input.clone();
         let mem = settings
             .ai
             .ai

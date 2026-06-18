@@ -35,6 +35,7 @@ tracing = { workspace = true }
 # so this is a one-line Cargo.toml change with no
 # additional binary weight.
 serde_json = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 # PR4.8: tests for `load_look_at` build a minimal glTF

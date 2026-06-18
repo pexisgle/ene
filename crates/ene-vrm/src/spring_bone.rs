@@ -28,6 +28,7 @@
 use std::collections::HashMap;
 
 use glam::{Quat, Vec3};
+use rayon::prelude::*;
 use serde_json::Value;
 
 /// Default hit radius (metres) when the JSON omits it.
@@ -454,157 +455,167 @@ impl SpringBoneSimulator {
         collider_world_positions: &HashMap<usize, Vec3>,
         collider_world_rotations: &HashMap<usize, Quat>,
     ) -> HashMap<usize, Quat> {
-        let mut updated_rotations = HashMap::new();
+        let thread_results: Vec<HashMap<usize, Quat>> = props
+            .springs
+            .par_iter()
+            .zip(self.chains.par_iter_mut())
+            .map(|(chain, chain_state)| {
+                let mut updated_rotations = HashMap::new();
 
-        for (chain_idx, chain) in props.springs.iter().enumerate() {
-            let chain_state = &mut self.chains[chain_idx];
-
-            // Collect colliders for this chain
-            let mut chain_colliders: Vec<(usize, &SpringBoneShape)> = Vec::new();
-            for &cg_idx in &chain.collider_group_indices {
-                if let Some(cg) = props.collider_groups.get(cg_idx) {
-                    for &c_idx in &cg.collider_indices {
-                        if let Some(collider) = props.colliders.get(c_idx) {
-                            chain_colliders.push((collider.node, &collider.shape));
+                // Collect colliders for this chain
+                let mut chain_colliders: Vec<(usize, &SpringBoneShape)> = Vec::new();
+                for &cg_idx in &chain.collider_group_indices {
+                    if let Some(cg) = props.collider_groups.get(cg_idx) {
+                        for &c_idx in &cg.collider_indices {
+                            if let Some(collider) = props.colliders.get(c_idx) {
+                                chain_colliders.push((collider.node, &collider.shape));
+                            }
                         }
                     }
                 }
-            }
 
-            // Center space transform (if set)
-            let center_world_pos = chain
-                .center
-                .and_then(|c| node_world_positions.get(&c).copied());
-            let center_world_rot = chain
-                .center
-                .and_then(|c| node_world_rotations.get(&c).copied());
+                // Center space transform (if set)
+                let center_world_pos = chain
+                    .center
+                    .and_then(|c| node_world_positions.get(&c).copied());
+                let center_world_rot = chain
+                    .center
+                    .and_then(|c| node_world_rotations.get(&c).copied());
 
-            for (joint_idx, joint) in chain.joints.iter().enumerate() {
-                // Skip the last joint (it's only a tail target)
-                if joint_idx + 1 >= chain.joints.len() {
-                    break;
-                }
+                for (joint_idx, joint) in chain.joints.iter().enumerate() {
+                    // Skip the last joint (it's only a tail target)
+                    if joint_idx + 1 >= chain.joints.len() {
+                        break;
+                    }
 
-                let state = &mut chain_state.joints[joint_idx];
+                    let state = &mut chain_state.joints[joint_idx];
 
-                let world_pos = node_world_positions
-                    .get(&joint.node)
-                    .copied()
-                    .unwrap_or(Vec3::ZERO);
-                let parent_world_rot = node_parent_world_rotations
-                    .get(&joint.node)
-                    .copied()
-                    .unwrap_or(Quat::IDENTITY);
-
-                // Transform to center space if needed
-                let (world_pos, parent_world_rot) =
-                    if let (Some(c_pos), Some(c_rot)) = (center_world_pos, center_world_rot) {
-                        let local_pos = c_rot.inverse() * (world_pos - c_pos);
-                        let local_rot = c_rot.inverse() * parent_world_rot;
-                        (local_pos, local_rot)
-                    } else {
-                        (world_pos, parent_world_rot)
-                    };
-
-                // Verlet integration
-                let drag = joint.drag_force.clamp(0.0, 1.0);
-                let inertia = (state.current_tail - state.prev_tail) * (1.0 - drag);
-
-                let stiffness_dir =
-                    parent_world_rot * state.initial_local_rotation * state.bone_axis;
-                let stiffness = stiffness_dir * joint.stiffness * dt;
-
-                let gravity = Vec3::from(joint.gravity_dir) * joint.gravity_power * dt;
-
-                let mut next_tail = state.current_tail + inertia + stiffness + gravity;
-
-                // Constrain bone length
-                let to_tail = next_tail - world_pos;
-                if to_tail.length_squared() > 1e-10 {
-                    next_tail = world_pos + to_tail.normalize() * state.bone_length;
-                } else {
-                    next_tail = world_pos + stiffness_dir * state.bone_length;
-                }
-
-                // Collision resolution
-                let joint_radius = joint.hit_radius;
-                for &(collider_node, shape) in &chain_colliders {
-                    let collider_pos = collider_world_positions
-                        .get(&collider_node)
+                    let world_pos = node_world_positions
+                        .get(&joint.node)
                         .copied()
                         .unwrap_or(Vec3::ZERO);
-                    let collider_rot = collider_world_rotations
-                        .get(&collider_node)
+                    let parent_world_rot = node_parent_world_rotations
+                        .get(&joint.node)
                         .copied()
                         .unwrap_or(Quat::IDENTITY);
 
-                    let (distance, direction) = match shape {
-                        SpringBoneShape::Sphere { offset, radius } => {
-                            let world_offset = collider_rot * Vec3::from(*offset);
-                            let sphere_center = collider_pos + world_offset;
-                            let delta = next_tail - sphere_center;
-                            let dist = delta.length() - radius - joint_radius;
-                            let dir = if delta.length_squared() > 1e-10 {
-                                delta.normalize()
-                            } else {
-                                Vec3::Y
-                            };
-                            (dist, dir)
-                        }
-                        SpringBoneShape::Capsule {
-                            offset,
-                            radius,
-                            tail,
-                        } => {
-                            let world_offset = collider_rot * Vec3::from(*offset);
-                            let world_tail = collider_rot * Vec3::from(*tail);
-                            let capsule_start = collider_pos + world_offset;
-                            let capsule_end = collider_pos + world_tail;
-                            let capsule_axis = capsule_end - capsule_start;
-                            let axis_len_sq = capsule_axis.length_squared();
+                    // Transform to center space if needed
+                    let (world_pos, parent_world_rot) =
+                        if let (Some(c_pos), Some(c_rot)) = (center_world_pos, center_world_rot) {
+                            let local_pos = c_rot.inverse() * (world_pos - c_pos);
+                            let local_rot = c_rot.inverse() * parent_world_rot;
+                            (local_pos, local_rot)
+                        } else {
+                            (world_pos, parent_world_rot)
+                        };
 
-                            let delta = next_tail - capsule_start;
-                            let t = if axis_len_sq > 1e-10 {
-                                (delta.dot(capsule_axis) / axis_len_sq).clamp(0.0, 1.0)
-                            } else {
-                                0.0
-                            };
+                    // Verlet integration
+                    let drag = joint.drag_force.clamp(0.0, 1.0);
+                    let inertia = (state.current_tail - state.prev_tail) * (1.0 - drag);
 
-                            let closest = capsule_start + capsule_axis * t;
-                            let diff = next_tail - closest;
-                            let dist = diff.length() - radius - joint_radius;
-                            let dir = if diff.length_squared() > 1e-10 {
-                                diff.normalize()
-                            } else {
-                                Vec3::Y
-                            };
-                            (dist, dir)
-                        }
-                    };
+                    let stiffness_dir =
+                        parent_world_rot * state.initial_local_rotation * state.bone_axis;
+                    let stiffness = stiffness_dir * joint.stiffness * dt;
 
-                    if distance < 0.0 {
-                        next_tail -= direction * distance;
-                        // Re-constrain bone length
-                        let to_tail = next_tail - world_pos;
-                        if to_tail.length_squared() > 1e-10 {
-                            next_tail = world_pos + to_tail.normalize() * state.bone_length;
+                    let gravity = Vec3::from(joint.gravity_dir) * joint.gravity_power * dt;
+
+                    let mut next_tail = state.current_tail + inertia + stiffness + gravity;
+
+                    // Constrain bone length
+                    let to_tail = next_tail - world_pos;
+                    if to_tail.length_squared() > 1e-10 {
+                        next_tail = world_pos + to_tail.normalize() * state.bone_length;
+                    } else {
+                        next_tail = world_pos + stiffness_dir * state.bone_length;
+                    }
+
+                    // Collision resolution
+                    let joint_radius = joint.hit_radius;
+                    for &(collider_node, shape) in &chain_colliders {
+                        let collider_pos = collider_world_positions
+                            .get(&collider_node)
+                            .copied()
+                            .unwrap_or(Vec3::ZERO);
+                        let collider_rot = collider_world_rotations
+                            .get(&collider_node)
+                            .copied()
+                            .unwrap_or(Quat::IDENTITY);
+
+                        let (distance, direction) = match shape {
+                            SpringBoneShape::Sphere { offset, radius } => {
+                                let world_offset = collider_rot * Vec3::from(*offset);
+                                let sphere_center = collider_pos + world_offset;
+                                let delta = next_tail - sphere_center;
+                                let dist = delta.length() - radius - joint_radius;
+                                let dir = if delta.length_squared() > 1e-10 {
+                                    delta.normalize()
+                                } else {
+                                    Vec3::Y
+                                };
+                                (dist, dir)
+                            }
+                            SpringBoneShape::Capsule {
+                                offset,
+                                radius,
+                                tail,
+                            } => {
+                                let world_offset = collider_rot * Vec3::from(*offset);
+                                let world_tail = collider_rot * Vec3::from(*tail);
+                                let capsule_start = collider_pos + world_offset;
+                                let capsule_end = collider_pos + world_tail;
+                                let capsule_axis = capsule_end - capsule_start;
+                                let axis_len_sq = capsule_axis.length_squared();
+
+                                let delta = next_tail - capsule_start;
+                                let t = if axis_len_sq > 1e-10 {
+                                    (delta.dot(capsule_axis) / axis_len_sq).clamp(0.0, 1.0)
+                                } else {
+                                    0.0
+                                };
+
+                                let closest = capsule_start + capsule_axis * t;
+                                let diff = next_tail - closest;
+                                let dist = diff.length() - radius - joint_radius;
+                                let dir = if diff.length_squared() > 1e-10 {
+                                    diff.normalize()
+                                } else {
+                                    Vec3::Y
+                                };
+                                (dist, dir)
+                            }
+                        };
+
+                        if distance < 0.0 {
+                            next_tail -= direction * distance;
+                            // Re-constrain bone length
+                            let to_tail = next_tail - world_pos;
+                            if to_tail.length_squared() > 1e-10 {
+                                next_tail = world_pos + to_tail.normalize() * state.bone_length;
+                            }
                         }
                     }
+
+                    // Update state
+                    state.prev_tail = state.current_tail;
+                    state.current_tail = next_tail;
+
+                    // Compute rotation
+                    let parent_world_matrix = parent_world_rot;
+                    let to_local =
+                        (parent_world_matrix.inverse() * (next_tail - world_pos)).normalize();
+                    let from_to = Quat::from_rotation_arc(state.bone_axis, to_local);
+                    let new_rotation = state.initial_local_rotation * from_to;
+
+                    updated_rotations.insert(joint.node, new_rotation);
                 }
 
-                // Update state
-                state.prev_tail = state.current_tail;
-                state.current_tail = next_tail;
+                updated_rotations
+            })
+            .collect();
 
-                // Compute rotation
-                let parent_world_matrix = parent_world_rot;
-                let to_local =
-                    (parent_world_matrix.inverse() * (next_tail - world_pos)).normalize();
-                let from_to = Quat::from_rotation_arc(state.bone_axis, to_local);
-                let new_rotation = state.initial_local_rotation * from_to;
-
-                updated_rotations.insert(joint.node, new_rotation);
-            }
+        let mut updated_rotations = HashMap::new();
+        for res in thread_results {
+            updated_rotations.extend(res);
         }
 
         updated_rotations
