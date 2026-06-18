@@ -77,20 +77,23 @@ impl Runtime {
     }
 
     fn show_settings_window(&mut self) {
-        if let Some(uw) = self.ui_window.as_mut()
-            && !self.state.settings.ui.settings_window_visible
-        {
-            self.state.settings.ui.settings_window_visible = true;
-            uw.settings_ui.sync_from_settings(&self.state.settings);
-            uw.window.set_visible(true);
-            uw.window.request_redraw();
+        if let Some(uw) = self.ui_window.as_mut() {
+            let mut ui_state = self.state.ui_state_mut();
+            if !ui_state.settings_window_visible {
+                ui_state.settings_window_visible = true;
+                uw.settings_ui
+                    .sync_from_settings(&self.state.settings, &ui_state);
+                uw.window.set_visible(true);
+                uw.window.request_redraw();
+            }
         }
     }
 
     fn hide_settings_window(&mut self) {
-        if self.state.settings.ui.settings_window_visible {
+        let mut ui_state = self.state.ui_state_mut();
+        if ui_state.settings_window_visible {
             self.state.save();
-            self.state.settings.ui.settings_window_visible = false;
+            ui_state.settings_window_visible = false;
             if let Some(uw) = self.ui_window.as_mut() {
                 uw.window.set_visible(false);
             }
@@ -184,9 +187,9 @@ impl ApplicationHandler for Runtime {
             ui_size,
         ) {
             Ok(uw) => {
-                uw.window
-                    .set_visible(self.state.settings.ui.settings_window_visible);
-                if self.state.settings.ui.settings_window_visible {
+                let visible = self.state.ui_state().settings_window_visible;
+                uw.window.set_visible(visible);
+                if visible {
                     uw.window.request_redraw();
                 }
                 self.ui_window = Some(uw);
@@ -245,7 +248,7 @@ impl ApplicationHandler for Runtime {
                 }
                 AppEvent::Ai(update) => match update {
                     crate::events::AiStreamUpdate::TextDelta(text) => {
-                        self.state.settings.ui.ai_latest_response.push_str(&text);
+                        self.state.ui_state_mut().ai_latest_response.push_str(&text);
                     }
                     crate::events::AiStreamUpdate::Finished
                     | crate::events::AiStreamUpdate::Error(_) => {
@@ -265,11 +268,11 @@ impl ApplicationHandler for Runtime {
                             target,
                             description,
                         });
-                        self.state.settings.ui.settings_window_visible = true;
+                        self.state.ui_state_mut().settings_window_visible = true;
                     }
                     crate::events::AiStreamUpdate::UserInputRequired { request_id, prompt } => {
                         pending_user_input = Some(PendingUserInput { request_id, prompt });
-                        self.state.settings.ui.settings_window_visible = true;
+                        self.state.ui_state_mut().settings_window_visible = true;
                     }
                     _ => {}
                 },
@@ -293,13 +296,14 @@ impl ApplicationHandler for Runtime {
             }
         }
         if let Some(perm) = pending_permission {
-            self.state.settings.ui.pending_permission = Some(perm);
+            self.state.ui_state_mut().pending_permission = Some(perm);
         }
         if let Some(pui) = pending_user_input {
-            self.state.settings.ui.user_input_drafts = (0..pui.prompt.items.len())
+            let mut ui_state = self.state.ui_state_mut();
+            ui_state.user_input_drafts = (0..pui.prompt.items.len())
                 .map(|_| QuestionDraft::default())
                 .collect();
-            self.state.settings.ui.pending_user_input = Some(pui);
+            ui_state.pending_user_input = Some(pui);
         }
 
         // 1.5. PR4.4: drain the `EmotionQueue` and apply the
@@ -325,22 +329,44 @@ impl ApplicationHandler for Runtime {
             _tray.tick_gtk();
         }
 
+        // 3.5. Sync ECS transform and step Rapier physics
+        let cs = &self.state.settings.character_state;
+        let auto_scale = self.state.character.auto_fit_scale(0.9);
+        if let Ok(transform) = self
+            .state
+            .world
+            .query_one_mut::<&mut crate::physics::Transform>(self.state.character_entity)
+        {
+            transform.translation = cs.character_position;
+            transform.scale = auto_scale;
+        }
+
+        self.state.physics.update_character_collider(
+            self.state.character_entity,
+            self.state.character.model_aabb_dbg(),
+            cs.character_position,
+            auto_scale,
+        );
+        self.state.physics.step();
+
         // 4. Trigger a redraw for both windows.
         if let Some(cw) = self.char_window.as_mut() {
             cw.window.request_redraw();
         }
         if let Some(uw) = self.ui_window.as_mut() {
-            if uw.window.is_visible() != Some(self.state.settings.ui.settings_window_visible) {
-                uw.window
-                    .set_visible(self.state.settings.ui.settings_window_visible);
+            let visible = self.state.ui_state().settings_window_visible;
+            if uw.window.is_visible() != Some(visible) {
+                uw.window.set_visible(visible);
             }
-            if self.state.settings.ui.settings_window_visible {
+            if visible {
                 uw.window.request_redraw();
                 match uw.render_frame(
                     &self.state.gpu.device,
                     &self.state.gpu.queue,
                     &mut self.state.settings,
                     &self.state.ai,
+                    &mut self.state.world,
+                    self.state.ui_entity,
                 ) {
                     Ok(_) => {}
                     Err(e) => match e {
@@ -431,16 +457,14 @@ impl Runtime {
                     return;
                 };
                 let AppState {
-                    ref settings,
-                    ref mut character,
-                    ..
+                    ref mut character, ..
                 } = self.state;
                 let event = match btn_state {
                     ElementState::Pressed => DragButtonEvent::Pressed,
                     ElementState::Released => DragButtonEvent::Released,
                 };
                 let cursor_world_2d = cursor_world_2d_for_char_window(cw, cursor_phys);
-                let cursor_over = cursor_over_char_window(cw, character, settings, cursor_phys);
+                let cursor_over = cursor_over_char_window(cw, &self.state.physics, cursor_phys);
                 let action = crate::character::drag::on_press_or_release(
                     &mut character.drag,
                     event,
@@ -471,7 +495,8 @@ impl Runtime {
                         self.state.save();
                         event_loop.exit();
                     } else if matches!(named, NamedKey::F1) {
-                        if self.state.settings.ui.settings_window_visible {
+                        let visible = self.state.ui_state().settings_window_visible;
+                        if visible {
                             self.hide_settings_window();
                         } else {
                             self.show_settings_window();
@@ -480,7 +505,8 @@ impl Runtime {
                         // Character-window WASD / Space shortcuts
                         // when the settings window is open on the
                         // Character page and egui is not focused.
-                        if self.state.settings.ui.settings_window_visible
+                        let visible = self.state.ui_state().settings_window_visible;
+                        if visible
                             && let Some(action) = char_settings_hotkey_from_event(
                                 &event,
                                 cw_char_window_has_focus(cw),
@@ -658,6 +684,14 @@ impl Runtime {
                 // `CharacterRenderer::auto_fit_scale` docs).
                 let cs = &settings.character_state;
                 let actual_scale = character.auto_fit_scale(0.9);
+                // PR-fix (character pushed to top of viewport):
+                // point the orthographic camera at the humanoid
+                // body center (head → chest → hips → AABB center)
+                // so the character is framed in the middle of the
+                // window regardless of the AABB shape. Done before
+                // the model matrix is composed so the camera and
+                // the draw agree on `actual_scale`.
+                character.update_camera_target(cs.character_position, actual_scale);
                 let model_uniform = ene_vrm::ModelUniform::from_mat4(
                     character.model_matrix(cs.character_position, actual_scale),
                 );
@@ -757,7 +791,7 @@ impl Runtime {
         match event {
             WindowEvent::CloseRequested => {
                 self.state.save();
-                self.state.settings.ui.settings_window_visible = false;
+                self.state.ui_state_mut().settings_window_visible = false;
             }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                 uw.reconfigure(&self.state.gpu.device, uw.window.inner_size());
@@ -766,7 +800,7 @@ impl Runtime {
             WindowEvent::KeyboardInput { .. } => {
                 if let Some(NamedKey::Escape) = key_pressed(&event) {
                     self.state.save();
-                    self.state.settings.ui.settings_window_visible = false;
+                    self.state.ui_state_mut().settings_window_visible = false;
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -791,6 +825,8 @@ impl Runtime {
         let AppState {
             ref mut settings,
             ref ai,
+            ref mut world,
+            ui_entity,
             ..
         } = self.state;
         crate::settings_ui::widgets::apply_action(
@@ -798,6 +834,8 @@ impl Runtime {
             settings,
             &mut uw.settings_ui.animation,
             ai,
+            world,
+            ui_entity,
         );
     }
 }
@@ -837,36 +875,44 @@ fn cursor_world_2d_for_char_window(
 /// AABB. Returns `false` (no hit) when no model is loaded.
 fn cursor_over_char_window(
     cw: &CharacterWindow,
-    character: &crate::character::CharacterRenderer,
-    settings: &CharacterSettings,
+    physics: &crate::physics::PhysicsWorld,
     position: winit::dpi::PhysicalPosition<f64>,
 ) -> bool {
-    use crate::character::drag::cursor_over_character as hit_test;
-    let model = character.model_aabb_dbg();
-    let Some((lo, hi)) = model else {
-        return false;
-    };
-    let cs = &settings.character_state;
-    // PR-fix: the per-frame model transform must mirror what the
-    // renderer uses, so the hit-test and the draw both consider
-    // the same world-space AABB. Apply the same auto-fit scale
-    // as in the RedrawRequested branch (which now ignores
-    // `cs.model_scale`).
-    let actual_scale = character.auto_fit_scale(0.9);
-    let model_mat = character.model_matrix(cs.character_position, actual_scale);
     let size = cw.window.inner_size();
     let scale = cw.window.scale_factor();
     let logical = position.to_logical::<f64>(scale);
-    hit_test(
-        glam::Vec2::new(logical.x as f32, logical.y as f32),
-        (size.width.max(1), size.height.max(1)),
-        ene_vrm::camera::DEFAULT_EYE.into(),
-        ene_vrm::camera::DEFAULT_TARGET.into(),
-        ene_vrm::camera::DEFAULT_UP.into(),
-        lo,
-        hi,
-        model_mat,
-    )
+    let viewport = (size.width.max(1), size.height.max(1));
+
+    let w = viewport.0 as f32;
+    let h = viewport.1 as f32;
+    if w <= 0.0 || h <= 0.0 {
+        return false;
+    }
+    let ndc = glam::Vec2::new(
+        (logical.x as f32 / w) * 2.0 - 1.0,
+        -((logical.y as f32 / h) * 2.0 - 1.0),
+    );
+    let aspect = (w / h).max(0.0001);
+    let half_h = ene_vrm::camera::VIEWPORT_HEIGHT * 0.5;
+    let half_w = half_h * aspect;
+    let view_pos = glam::Vec3::new(ndc.x * half_w, ndc.y * half_h, 0.0);
+
+    let camera_eye: glam::Vec3 = ene_vrm::camera::DEFAULT_EYE.into();
+    let camera_target: glam::Vec3 = ene_vrm::camera::DEFAULT_TARGET.into();
+    let camera_up: glam::Vec3 = ene_vrm::camera::DEFAULT_UP.into();
+
+    let view = glam::Mat4::look_at_rh(camera_eye, camera_target, camera_up);
+    let world_3d = view.inverse().transform_point3(view_pos);
+    let ray_dir = (world_3d - camera_eye).normalize_or_zero();
+
+    // Rapier Raycast
+    physics
+        .cast_ray(
+            rapier3d::prelude::Point::new(camera_eye.x, camera_eye.y, camera_eye.z),
+            rapier3d::prelude::Vector::new(ray_dir.x, ray_dir.y, ray_dir.z),
+            100.0,
+        )
+        .is_some()
 }
 
 fn char_settings_hotkey_from_event(
@@ -1098,6 +1144,8 @@ impl UiWindow {
         queue: &wgpu::Queue,
         settings: &mut CharacterSettings,
         ai: &Arc<AiBridge>,
+        world: &mut hecs::World,
+        ui_entity: hecs::Entity,
     ) -> Result<(), AcquireError> {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -1127,7 +1175,7 @@ impl UiWindow {
         panel_ui.set_clip_rect(self.egui_ctx.content_rect());
 
         egui::CentralPanel::default().show_inside(&mut panel_ui, |ui| {
-            self.settings_ui.render(ui, settings, ai);
+            self.settings_ui.render(ui, settings, ai, world, ui_entity);
         });
 
         let full_output = self.egui_ctx.end_pass();

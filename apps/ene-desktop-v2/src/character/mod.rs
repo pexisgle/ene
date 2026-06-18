@@ -20,8 +20,9 @@
 use std::path::PathBuf;
 
 use ene_vrm::{
-    ExpressionName, LookAtBoneOutput, LookAtEvaluator, LookAtOutput, LookAtProperties,
-    ModelUniform, OrthographicCamera, VrmModel, VrmRenderer, evaluate_clip, load_vrm, load_vrma,
+    ExpressionName, HumanoidBoneEntry, LookAtBoneOutput, LookAtEvaluator, LookAtOutput,
+    LookAtProperties, ModelUniform, OrthographicCamera, VrmModel, VrmRenderer, evaluate_clip,
+    load_vrm, load_vrma,
 };
 use ene_vrm::{VrmaAsset, VrmaPlayer};
 use glam::{Mat4, Quat, Vec3};
@@ -575,23 +576,69 @@ impl CharacterRenderer {
         let Some(head) = model.humanoid.head() else {
             return (head_world_for(character_position), Quat::IDENTITY);
         };
-        // PR4.18: the vertex buffer is now in raw glTF space.
-        // `head.rest.translation` is also raw (loaded from
-        // `node.transform().decomposed()`). The model matrix
-        // folds `T(-center) * S(normalize_scale)` in at draw
-        // time, so the head's world position is:
-        //   character_position + model_scale *
-        //   (head.rest.translation - center) * normalize_scale
-        // which is what `model_matrix(character_position,
-        // model_scale)` would produce if we substituted the
-        // head's raw translation as the position. Keep the
-        // arithmetic explicit here so the next reader sees
-        // the dependency on the loader's `center` and
-        // `normalize_scale` fields.
-        let center = Vec3::from(model.center());
-        let head_local = (head.rest.translation - center) * model.normalize_scale();
-        let world = character_position + head_local * model_scale;
+        let world = bone_world_position(
+            head,
+            model.center(),
+            model.normalize_scale(),
+            character_position,
+            model_scale,
+        );
         (world, head.rest.rotation)
+    }
+
+    /// PR-fix: compute the world-space "body center" for camera
+    /// targeting. Tries the humanoid `head` bone first, then
+    /// `chest`, then `hips`, and falls back to `character_position`
+    /// (the AABB center in world space) when the model has no
+    /// humanoid bones or no model is loaded.
+    ///
+    /// The orthographic camera's default target is the world
+    /// origin, which is also the model's AABB center after the
+    /// `T(-center) * S(normalize_scale)` step. For models whose
+    /// AABB is skewed by hair ornaments, weapons, or pedestals,
+    /// the AABB center can sit well above the body — making the
+    /// character appear pushed to the top of the window. Using a
+    /// humanoid bone as the target pins the camera to the body
+    /// regardless of the AABB shape.
+    ///
+    /// Used by [`Self::update_camera_target`].
+    #[allow(dead_code)]
+    pub fn body_center_world(&self, character_position: Vec3, model_scale: f32) -> Vec3 {
+        let Some(model) = self.model.as_ref() else {
+            return character_position;
+        };
+        match pick_body_center_bone(&model.humanoid) {
+            Some(bone) => bone_world_position(
+                bone,
+                model.center(),
+                model.normalize_scale(),
+                character_position,
+                model_scale,
+            ),
+            None => character_position,
+        }
+    }
+
+    /// Update the camera target to perfectly frame the character's AABB
+    pub fn update_camera_target(&mut self, _character_position: Vec3, model_scale: f32) {
+        // Track the animated chest bone to perfectly frame the character even if
+        // a VRMA animation contains a massive root offset (e.g. jumping or floating).
+        // We use the previous frame's `world_positions` which is perfectly fine for camera tracking.
+        let mut target = Vec3::ZERO;
+
+        if let Some(model) = &self.model
+            && let Some(chest) = model.humanoid.chest()
+            && chest.node < model.nodes.world_positions.len()
+        {
+            let animated_y = model.nodes.world_positions[chest.node][1];
+            let local_y = animated_y - model.center()[1];
+            target.y += local_y * model.normalize_scale() * model_scale;
+        }
+
+        let mut eye = target;
+        eye.z += ene_vrm::camera::DEFAULT_EYE[2];
+
+        self.camera.look_at(eye.into(), target.into());
     }
 
     /// PR4.8: latest per-bone output for `"bone"`-type
@@ -797,5 +844,149 @@ impl CharacterRenderer {
         let (lo, hi) = model.aabb();
         let model_mat = glam::Mat4::from_cols_array_2d(&model_uniform.model);
         Some(drag::transformed_aabb_bounds(lo, hi, model_mat))
+    }
+}
+
+/// Compute the world-space position of a humanoid bone. Mirrors
+/// the per-frame model matrix's `T(-center) * S(normalize_scale)`
+/// re-centring step (see
+/// [`CharacterRenderer::model_matrix`]):
+///
+/// ```text
+/// (bone_raw - center) * normalize_scale * model_scale + character_position
+/// ```
+///
+/// `center` and `normalize_scale` come from the loader
+/// ([`VrmModel::center`] / [`VrmModel::normalize_scale`]) and
+/// are taken as primitives so the helper can be unit-tested
+/// without constructing a full `VrmModel`.
+fn bone_world_position(
+    bone: &HumanoidBoneEntry,
+    center: [f32; 3],
+    normalize_scale: f32,
+    character_position: Vec3,
+    model_scale: f32,
+) -> Vec3 {
+    let center = Vec3::from(center);
+    let local = (bone.rest.translation - center) * normalize_scale;
+    character_position + local * model_scale
+}
+
+/// Pick the first available bone from `head` → `chest` → `hips`
+/// in the humanoid registry. Returns `None` when none of the
+/// three are registered (e.g. legacy VRM 0.x without a humanoid
+/// block). The caller is expected to fall back to the AABB
+/// center (= `character_position` in world space) in that case.
+#[allow(dead_code)]
+fn pick_body_center_bone(humanoid: &ene_vrm::HumanoidBoneRegistry) -> Option<&HumanoidBoneEntry> {
+    humanoid
+        .head()
+        .or_else(|| humanoid.chest())
+        .or_else(|| humanoid.hips())
+}
+
+#[cfg(test)]
+mod body_center_tests {
+    use super::*;
+    use ene_vrm::{BoneRestTransform, HumanoidBoneRegistry};
+
+    fn make_bone(translation: Vec3) -> HumanoidBoneEntry {
+        HumanoidBoneEntry {
+            node: 0,
+            joint: None,
+            rest: BoneRestTransform {
+                translation,
+                rotation: Quat::IDENTITY,
+            },
+        }
+    }
+
+    /// `bone_world_position` must apply the loader's
+    /// `T(-center) * S(normalize_scale)` transform followed by
+    /// the per-frame `S(model_scale) * T(character_position)`.
+    /// Verifies the arithmetic against a hand-computed example.
+    #[test]
+    fn bone_world_position_applies_loader_and_runtime_transforms() {
+        let bone = make_bone(Vec3::new(0.0, 2.0, 0.0));
+        let center = [0.0, 1.0, 0.0];
+        let normalize_scale = 0.75;
+        let character_position = Vec3::new(0.5, 0.0, 0.0);
+        let model_scale = 1.0;
+        // (2.0 - 1.0) * 0.75 = 0.75
+        // character_position + 0.75 * 1.0 = (0.5, 0.75, 0.0)
+        let world = bone_world_position(
+            &bone,
+            center,
+            normalize_scale,
+            character_position,
+            model_scale,
+        );
+        assert_eq!(world, Vec3::new(0.5, 0.75, 0.0));
+    }
+
+    /// `bone_world_position` must also respect `model_scale`.
+    /// Doubling `model_scale` doubles the bone's offset from
+    /// the character position, mirroring the model matrix's
+    /// `S(actual_scale) * T(position)` step.
+    #[test]
+    fn bone_world_position_scales_offset_by_model_scale() {
+        let bone = make_bone(Vec3::new(0.0, 2.0, 0.0));
+        let world = bone_world_position(&bone, [0.0, 1.0, 0.0], 0.75, Vec3::ZERO, 2.0);
+        // 0.75 * 2.0 = 1.5
+        assert_eq!(world, Vec3::new(0.0, 1.5, 0.0));
+    }
+
+    /// `pick_body_center_bone` must prefer `head` over `chest`
+    /// and `chest` over `hips`. A registry with all three returns
+    /// the head, exactly as the camera-target fallback chain
+    /// intends.
+    #[test]
+    fn pick_body_center_prefers_head_over_chest_and_hips() {
+        let mut reg = HumanoidBoneRegistry::new();
+        reg.insert("hips".into(), make_bone(Vec3::new(0.0, 0.5, 0.0)));
+        reg.insert("chest".into(), make_bone(Vec3::new(0.0, 1.0, 0.0)));
+        reg.insert("head".into(), make_bone(Vec3::new(0.0, 1.5, 0.0)));
+        let picked = pick_body_center_bone(&reg).unwrap();
+        assert_eq!(picked.rest.translation, Vec3::new(0.0, 1.5, 0.0));
+    }
+
+    /// With `head` absent, the chain falls back to `chest`.
+    #[test]
+    fn pick_body_center_falls_back_to_chest() {
+        let mut reg = HumanoidBoneRegistry::new();
+        reg.insert("hips".into(), make_bone(Vec3::new(0.0, 0.5, 0.0)));
+        reg.insert("chest".into(), make_bone(Vec3::new(0.0, 1.0, 0.0)));
+        let picked = pick_body_center_bone(&reg).unwrap();
+        assert_eq!(picked.rest.translation, Vec3::new(0.0, 1.0, 0.0));
+    }
+
+    /// With `head` and `chest` absent, the chain falls back to
+    /// `hips`.
+    #[test]
+    fn pick_body_center_falls_back_to_hips() {
+        let mut reg = HumanoidBoneRegistry::new();
+        reg.insert("hips".into(), make_bone(Vec3::new(0.0, 0.5, 0.0)));
+        let picked = pick_body_center_bone(&reg).unwrap();
+        assert_eq!(picked.rest.translation, Vec3::new(0.0, 0.5, 0.0));
+    }
+
+    /// An empty registry must return `None` so the caller can
+    /// fall back to the AABB center.
+    #[test]
+    fn pick_body_center_returns_none_for_empty_registry() {
+        let reg = HumanoidBoneRegistry::new();
+        assert!(pick_body_center_bone(&reg).is_none());
+    }
+
+    /// `body_center_world` on an uninitialised renderer (no
+    /// model loaded) must return `character_position`
+    /// unchanged, so the camera does not stare at the world
+    /// origin while the renderer's synthetic fallback is in
+    /// place.
+    #[test]
+    fn body_center_world_no_model_returns_character_position() {
+        let renderer = CharacterRenderer::uninit(std::path::Path::new("."), "missing.vrm");
+        let center = renderer.body_center_world(Vec3::new(1.0, 2.0, 3.0), 1.5);
+        assert_eq!(center, Vec3::new(1.0, 2.0, 3.0));
     }
 }

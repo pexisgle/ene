@@ -68,8 +68,12 @@ impl SettingsUi {
     /// Mirror the on-disk `CharacterSettings` into the editable text
     /// buffers. The runtime calls this when the settings window
     /// transitions from hidden → visible.
-    pub fn sync_from_settings(&mut self, settings: &CharacterSettings) {
-        self.input.sync_from_settings(settings);
+    pub fn sync_from_settings(
+        &mut self,
+        settings: &CharacterSettings,
+        ui_state: &crate::settings::UiState,
+    ) {
+        self.input.sync_from_settings(settings, ui_state);
     }
 
     /// Render the full settings window. The caller is expected to
@@ -80,6 +84,8 @@ impl SettingsUi {
         ui: &mut egui::Ui,
         settings: &mut CharacterSettings,
         ai: &Arc<AiBridge>,
+        world: &mut hecs::World,
+        ui_entity: hecs::Entity,
     ) {
         apply_egui_visuals(ui.ctx());
 
@@ -107,9 +113,21 @@ impl SettingsUi {
                 &mut self.input,
                 &mut self.emotion_queue,
                 now_secs,
+                world,
+                ui_entity,
             ),
-            PageKind::Graphics => page_graphics::render(ui, settings, &mut self.animation, ai),
-            PageKind::Ai => page_ai::render(ui, settings, &mut self.animation, ai, &mut self.input),
+            PageKind::Graphics => {
+                page_graphics::render(ui, settings, &mut self.animation, ai, world, ui_entity)
+            }
+            PageKind::Ai => page_ai::render(
+                ui,
+                settings,
+                &mut self.animation,
+                ai,
+                &mut self.input,
+                world,
+                ui_entity,
+            ),
         }
     }
 }

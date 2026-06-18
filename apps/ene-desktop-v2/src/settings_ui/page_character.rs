@@ -21,40 +21,77 @@ pub fn render(
     input: &mut SettingsInputState,
     emotion_queue: &mut EmotionQueue,
     now_secs: f64,
+    world: &mut hecs::World,
+    ui_entity: hecs::Entity,
 ) {
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
             ui.label("Character");
             if ui.button("<").clicked() {
-                apply_action(SettingsAction::PrevCharacter, settings, animation, ai);
+                apply_action(
+                    SettingsAction::PrevCharacter,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                );
             }
             ui.add_sized(
                 [220.0, 0.0],
                 egui::Label::new(format_character_label(settings)),
             );
             if ui.button(">").clicked() {
-                apply_action(SettingsAction::NextCharacter, settings, animation, ai);
+                apply_action(
+                    SettingsAction::NextCharacter,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                );
             }
         });
 
         ui.horizontal(|ui| {
             ui.label("Motion");
             if ui.button("<").clicked() {
-                apply_action(SettingsAction::PrevMotion, settings, animation, ai);
+                apply_action(
+                    SettingsAction::PrevMotion,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                );
             }
             ui.add_sized(
                 [220.0, 0.0],
                 egui::Label::new(format_motion_label(settings)),
             );
             if ui.button(">").clicked() {
-                apply_action(SettingsAction::NextMotion, settings, animation, ai);
+                apply_action(
+                    SettingsAction::NextMotion,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                );
             }
         });
 
         ui.horizontal(|ui| {
             ui.label("Animation");
             if ui.button("Toggle").clicked() {
-                apply_action(SettingsAction::TogglePlay, settings, animation, ai);
+                apply_action(
+                    SettingsAction::TogglePlay,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                );
             }
             ui.add_sized(
                 [220.0, 0.0],
@@ -66,7 +103,7 @@ pub fn render(
             );
         });
 
-        render_linux_only(ui, settings, animation, ai);
+        render_linux_only(ui, settings, animation, ai, world, ui_entity);
 
         render_numeric_row(
             ui,
@@ -78,6 +115,8 @@ pub fn render(
             SettingsAction::LookAtStrengthDown,
             SettingsAction::LookAtStrengthUp,
             |s, buf| *buf = format!("{:.2}", s.character_state.look_at_strength),
+            world,
+            ui_entity,
         );
         render_numeric_row(
             ui,
@@ -89,6 +128,8 @@ pub fn render(
             SettingsAction::ModelScaleDown,
             SettingsAction::ModelScaleUp,
             |s, buf| *buf = format!("{:.2}", s.character_state.model_scale),
+            world,
+            ui_entity,
         );
         render_numeric_row(
             ui,
@@ -100,6 +141,8 @@ pub fn render(
             SettingsAction::CharacterPosXDown,
             SettingsAction::CharacterPosXUp,
             |s, buf| *buf = format!("{:+.2}", s.character_state.character_position.x),
+            world,
+            ui_entity,
         );
         render_numeric_row(
             ui,
@@ -111,6 +154,8 @@ pub fn render(
             SettingsAction::CharacterPosYDown,
             SettingsAction::CharacterPosYUp,
             |s, buf| *buf = format!("{:+.2}", s.character_state.character_position.y),
+            world,
+            ui_entity,
         );
         render_numeric_row(
             ui,
@@ -122,6 +167,8 @@ pub fn render(
             SettingsAction::CharacterPosZDown,
             SettingsAction::CharacterPosZUp,
             |s, buf| *buf = format!("{:+.2}", s.character_state.character_position.z),
+            world,
+            ui_entity,
         );
 
         ui.separator();
@@ -152,13 +199,15 @@ fn render_numeric_row<F>(
     down: SettingsAction,
     up: SettingsAction,
     refresh: F,
+    world: &mut hecs::World,
+    ui_entity: hecs::Entity,
 ) where
     F: Fn(&CharacterSettings, &mut String),
 {
     ui.horizontal(|ui| {
         ui.label(label);
         if ui.button("-").clicked() {
-            apply_action(down, settings, animation, ai);
+            apply_action(down, settings, animation, ai, world, ui_entity);
             // PR4.2 follow-up: re-derive the textbox content from
             // the new settings value so the displayed number stays
             // in sync with the +/- button input. The legacy Bevy
@@ -167,7 +216,7 @@ fn render_numeric_row<F>(
         }
         let _response = ui.add(egui::TextEdit::singleline(buffer).desired_width(220.0));
         if ui.button("+").clicked() {
-            apply_action(up, settings, animation, ai);
+            apply_action(up, settings, animation, ai, world, ui_entity);
             refresh(settings, buffer);
         }
     });
@@ -210,15 +259,30 @@ fn render_linux_only(
     settings: &mut CharacterSettings,
     animation: &mut AnimationControl,
     ai: &Arc<AiBridge>,
+    world: &mut hecs::World,
+    ui_entity: hecs::Entity,
 ) {
     ui.horizontal(|ui| {
         ui.label("Debug Overlay");
         if ui.button("Toggle").clicked() {
-            apply_action(SettingsAction::ToggleDebugOverlay, settings, animation, ai);
+            apply_action(
+                SettingsAction::ToggleDebugOverlay,
+                settings,
+                animation,
+                ai,
+                world,
+                ui_entity,
+            );
         }
+        let debug_overlay_visible =
+            if let Ok(ui_state) = world.get::<crate::settings::UiState>(ui_entity) {
+                ui_state.debug_overlay_visible
+            } else {
+                false
+            };
         ui.add_sized(
             [220.0, 0.0],
-            egui::Label::new(if settings.ui.debug_overlay_visible {
+            egui::Label::new(if debug_overlay_visible {
                 "Visible"
             } else {
                 "Hidden"
@@ -229,14 +293,28 @@ fn render_linux_only(
     ui.horizontal(|ui| {
         ui.label("Mask Downsample");
         if ui.button("<").clicked() {
-            apply_action(SettingsAction::MaskDownsampleDown, settings, animation, ai);
+            apply_action(
+                SettingsAction::MaskDownsampleDown,
+                settings,
+                animation,
+                ai,
+                world,
+                ui_entity,
+            );
         }
         ui.add_sized(
             [220.0, 0.0],
             egui::Label::new(format!("{}x", settings.graphics.mask_render_downsample)),
         );
         if ui.button(">").clicked() {
-            apply_action(SettingsAction::MaskDownsampleUp, settings, animation, ai);
+            apply_action(
+                SettingsAction::MaskDownsampleUp,
+                settings,
+                animation,
+                ai,
+                world,
+                ui_entity,
+            );
         }
     });
 }
@@ -247,5 +325,7 @@ fn render_linux_only(
     _settings: &mut CharacterSettings,
     _animation: &mut AnimationControl,
     _ai: &Arc<AiBridge>,
+    _world: &mut hecs::World,
+    _ui_entity: hecs::Entity,
 ) {
 }

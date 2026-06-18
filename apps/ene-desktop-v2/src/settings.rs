@@ -268,7 +268,6 @@ pub struct CharacterSettings {
     pub characters: Vec<CharacterEntry>,
     pub graphics: GraphicsSettings,
     pub character_state: CharacterState,
-    pub ui: UiState,
     pub ai: AiConfig,
     /// Shared with the AI bridge bootstrap task: that task loads
     /// the on-disk config into a fresh `ConfigStore`, then the
@@ -283,7 +282,6 @@ impl std::fmt::Debug for CharacterSettings {
             .field("characters", &self.characters)
             .field("graphics", &self.graphics)
             .field("character_state", &self.character_state)
-            .field("ui", &self.ui)
             .field("ai", &self.ai)
             .finish()
     }
@@ -340,7 +338,6 @@ impl CharacterSettings {
                 selected_motion,
                 ..Default::default()
             },
-            ui: UiState::default(),
             ai: AiConfig {
                 ai: ene_config::EneConfig {
                     character: format!("{}/{}", assets_dir.display(), selected_card),

@@ -114,6 +114,7 @@ pub fn transformed_aabb_bounds(
 
 /// Fast slab test against an axis-aligned bounding box. 1:1 with
 /// `legacy::ray_intersects_aabb`.
+#[allow(dead_code)]
 pub fn ray_intersects_aabb(origin: Vec3, direction: Vec3, min: Vec3, max: Vec3) -> bool {
     let eps = 1e-6;
     let mut t_min = f32::NEG_INFINITY;
@@ -187,6 +188,7 @@ pub fn cursor_logical_to_world_2d(
 /// the result is identical to "is the AABB in front of the camera
 /// and within the viewport rect" — but the algorithm matches the
 /// legacy exactly.
+#[allow(dead_code)]
 pub fn cursor_over_character(
     cursor_logical: Vec2,
     viewport: (u32, u32),

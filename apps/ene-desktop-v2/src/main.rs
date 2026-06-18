@@ -23,6 +23,7 @@ mod character_state;
 mod events;
 mod gpu;
 mod look_at;
+mod physics;
 mod runtime;
 mod settings;
 mod settings_ui;
