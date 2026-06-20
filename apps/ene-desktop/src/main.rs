@@ -1,98 +1,95 @@
-//! # ene-desktop
+//! # ene-desktop-v2
 //!
-//! Desktop GUI application for the ene AI character platform.
-//! Built with Bevy, featuring a VRM character overlay, egui settings window,
-//! character drag interaction, and system tray integration.
-#![warn(missing_docs)]
-
+//! Winit + wgpu shell for the ene AI character platform.
+//!
+//! PR0 (shipped) wired the transparent-window recipe and a
+//! single-window red-rect smoke test.
+//!
+//! PR1 (this revision) layers on the runtime skeleton needed for
+//! the rest of the migration:
+//!
+//! - tokio multi-thread runtime (for [`EneHandle`](ene_core::EneHandle))
+//! - [`AiBridge`] forwarding AI events into the cross-subsystem bus
+//! - [`TrayHandle`] for the system tray (Win32 message thread / GTK pump)
+//! - [`CharacterSettings`] plain-struct analog of the legacy Bevy resource
+//! - CLI argument parsing for VRM/VRMA overrides
+//! - cross-subsystem [`AppEvent`] bus drained by the winit runtime
+//!
+//! See `docs/architecture/wgpu-migration.md` §22.3 (PR0) and §22
+//! (full roadmap) for context.
 mod ai_bridge;
-mod app_config;
 mod character;
-mod character_drag;
-mod platform;
-mod resources;
-mod scene;
+mod character_state;
+mod events;
+mod gpu;
+mod look_at;
+mod physics;
+mod raycast_debug;
+mod runtime;
+mod settings;
 mod settings_ui;
+mod state;
 mod tray;
 
-use bevy::asset::AssetPlugin;
-use bevy::light::DirectionalLightShadowMap;
-use bevy::prelude::*;
-use bevy::render::{
-    RenderPlugin,
-    settings::{Backends, RenderCreation, WgpuSettings},
-};
-use bevy::winit::WinitSettings;
-use bevy_egui::EguiPlugin;
-use bevy_vrm1::prelude::*;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use tracing_subscriber::{EnvFilter, fmt};
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,wgpu_core=warn,wgpu_hal=warn,naga=warn"));
+    fmt().with_env_filter(filter).init();
 
-use ai_bridge::EnePlugin;
-use app_config::{CharacterSettings, DEFAULT_SHADOW_QUALITY, window_plugin};
-use character::CharacterPlugin;
-use character_drag::CharacterDragPlugin;
-use scene::ScenePlugin;
-use settings_ui::SettingsUiPlugin;
-use tray::TrayPlugin;
+    // Build the tokio multi-thread runtime; keep its `enter()` guard
+    // alive for the lifetime of `main` so that `AiBridge::new` (and
+    // any other subsystem) can `tokio::spawn` from synchronous
+    // contexts.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let handle = runtime.handle().clone();
+    let _guard = runtime.enter();
 
-fn main() {
-    #[cfg(target_os = "windows")]
-    unsafe {
-        std::env::set_var("WGPU_DX12_PRESENTATION_SYSTEM", "DxgiFromVisual");
-    }
+    // Resolve assets + CLI overrides, then build the GpuContext and
+    // the cross-subsystem AppState.
+    let (assets_dir, default_vrm, _default_vrma) = state::resolve_paths()?;
+    tracing::info!(
+        "ene-desktop-v2 starting: assets={}, default_vrm={}",
+        assets_dir.display(),
+        default_vrm
+    );
 
-    #[cfg(target_os = "linux")]
-    if let Err(err) = gtk::init() {
-        panic!("Failed to initialize GTK: {err}");
-    }
+    let gpu = pollster::block_on(gpu::GpuContext::new())?;
+    let mut settings = settings::CharacterSettings::discover(&assets_dir, default_vrm);
+    // PR4.2 follow-up: the per-character `CharacterConfig::character_position`
+    // round-trip in `load_per_character_settings` can leave the model
+    // parked off-screen (1.72 m to the right is what the user
+    // observed) when the position was mutated by an earlier debug
+    // run before drag-to-move (PR4.3) shipped a real UI. Reset to
+    // origin on every launch until PR4.3 wires a "Reset position"
+    // button. The reset is saved immediately so subsequent launches
+    // start at origin too.
+    settings.character_state.character_position = glam::Vec3::ZERO;
+    settings.save();
+    let (app_state, event_tx) = state::AppState::with_channel(gpu, settings, &handle);
 
-    let runtime = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
-    let _runtime_guard = runtime.enter();
+    let event_loop = winit::event_loop::EventLoop::new()?;
+    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
 
-    let assets_dir = resources::ensure_resource_dirs();
-    let (default_vrm, _default_vrma) = app_config::read_cli_paths();
-    let settings = CharacterSettings::discover(&assets_dir, default_vrm);
+    let mut app = runtime::Runtime::new(app_state, event_tx);
+    event_loop
+        .run_app(&mut app)
+        .expect("winit event loop failed");
 
-    App::new()
-        .insert_resource(settings)
-        .insert_resource(DirectionalLightShadowMap {
-            size: DEFAULT_SHADOW_QUALITY.shadow_map_size(),
-        })
-        .insert_resource(ClearColor(Color::NONE))
-        .insert_resource(WinitSettings::desktop_app())
-        .add_plugins((
-            DefaultPlugins
-                .set(window_plugin())
-                .set(render_plugin())
-                .set(AssetPlugin {
-                    file_path: assets_dir.to_string_lossy().into(),
-                    ..default()
-                }),
-            EguiPlugin::default(),
-            VrmPlugin,
-            VrmaPlugin,
-            ScenePlugin,
-            EnePlugin,
-            CharacterPlugin,
-            TrayPlugin,
-            SettingsUiPlugin,
-            CharacterDragPlugin,
-        ))
-        .run();
-}
+    // PR4.2 fix: shut the tokio runtime down gracefully so the
+    // AI-bridge background tasks (`pump_events` + the bootstrap
+    // `load_config` / `load_character` task) get a chance to exit
+    // cleanly. Without this, `runtime` is dropped at the end of
+    // `main`, the runtime cancels in-flight tasks, and any
+    // `tokio::time::Timeout` future inside `EneHandle::load_config`
+    // panics on drop with "A Tokio 1.x context was found, but it
+    // is being shutdown." A 500 ms budget is enough for the actor
+    // to drain its broadcast receiver and the bootstrap task to
+    // finish / log its warn.
+    drop(_guard);
+    runtime.shutdown_timeout(std::time::Duration::from_millis(500));
 
-fn render_plugin() -> RenderPlugin {
-    #[cfg(target_os = "windows")]
-    {
-        RenderPlugin {
-            render_creation: RenderCreation::Automatic(WgpuSettings {
-                backends: Some(Backends::DX12),
-                ..default()
-            }),
-            ..default()
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        RenderPlugin::default()
-    }
+    Ok(())
 }

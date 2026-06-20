@@ -19,12 +19,12 @@
 //!    is performed in `about_to_wait` to avoid winit 0.30's
 //!    `RedrawRequested` double-fire on Windows.
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
-use winit::event_loop::ActiveEventLoop;
+use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
 
@@ -32,7 +32,7 @@ use crate::ai_bridge::AiBridge;
 use crate::events::{AppEvent, AppEventSender, TrayAction};
 use crate::gpu::pick_format_and_alpha;
 use crate::settings::{CharacterSettings, PendingPermission, PendingUserInput, QuestionDraft};
-use crate::settings_ui::{PageKind, SettingsUi};
+use crate::settings_ui::{PageKind, SettingsUi, widgets::SettingsAction};
 use crate::state::AppState;
 use device_query::DeviceQuery;
 
@@ -62,6 +62,14 @@ pub struct Runtime {
     /// stays correct while the window is in the click-through state
     /// and the OS stops delivering `CursorMoved` to it).
     device_state: device_query::DeviceState,
+    /// PR5.7: set to `true` when the char surface acquisition
+    /// returns `AcquireError::Fatal`. The runtime exits the
+    /// event loop at the tail of the next `about_to_wait` to
+    /// avoid logging the same fatal every frame (the error
+    /// path is now reached from `about_to_wait` instead of
+    /// `RedrawRequested`, so we can't `event_loop.exit()`
+    /// inline).
+    char_surface_fatal: bool,
 }
 
 impl Runtime {
@@ -81,6 +89,7 @@ impl Runtime {
             last_frame_instant: None,
             diagnostics_logged: false,
             device_state: device_query::DeviceState::new(),
+            char_surface_fatal: false,
         }
     }
 
@@ -111,7 +120,14 @@ impl Runtime {
 
 impl ApplicationHandler for Runtime {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+        // The actual frame pacing is done at the tail of
+        // `about_to_wait`. We keep this one-shot
+        // `set_control_flow(Poll)` so the very first frame
+        // kicks off without a synthetic `RedrawRequested` in
+        // the cold-start path. (Winit 0.30 resets the control
+        // flow to `Wait` after every `about_to_wait`, so this
+        // initial value only affects the first wake-up.)
+        event_loop.set_control_flow(ControlFlow::Poll);
 
         // Initialise the tray on first resume. The Windows backend
         // spawns its own pump thread; on Linux we just need to
@@ -163,11 +179,14 @@ impl ApplicationHandler for Runtime {
                 // cost at model load.
                 let actual_scale = self.state.character.auto_fit_scale(0.9)
                     * self.state.settings.character_state.model_scale;
-                let bones = self.state.character.build_character_bone_data(actual_scale);
-                if !bones.is_empty() {
+                let specs = self
+                    .state
+                    .character
+                    .build_character_bone_specs(actual_scale);
+                if !specs.is_empty() {
                     self.state
                         .physics
-                        .add_character_bone_colliders(self.state.character_entity, &bones);
+                        .add_character_bone_colliders(self.state.character_entity, &specs);
                 }
                 // PR4.16: load the default VRMA motion. The
                 // resolved path comes from
@@ -260,8 +279,18 @@ impl ApplicationHandler for Runtime {
         let mut pending_user_input: Option<PendingUserInput> = None;
         while let Ok(event) = self.state.event_rx.try_recv() {
             match event {
-                AppEvent::Tray(TrayAction::OpenSettings) => {
+                AppEvent::Tray(TrayAction::OpenSettings { page }) => {
                     self.show_settings_window();
+                    // A.2: when the runtime triggers the open (e.g. on a
+                    // `PermissionRequired` event), it can pass `Some(page)` to
+                    // jump the tab strip straight to the AI page. The tray
+                    // menu and click handlers always pass `None` (default =
+                    // current page, falling back to Character on first show).
+                    if let Some(page) = page
+                        && let Some(uw) = self.ui_window.as_mut()
+                    {
+                        uw.settings_ui.show(page);
+                    }
                 }
                 AppEvent::Tray(TrayAction::Quit) => {
                     self.state.save();
@@ -296,10 +325,23 @@ impl ApplicationHandler for Runtime {
                             description,
                         });
                         self.state.ui_state_mut().settings_window_visible = true;
+                        // A.2: jump to the AI page so the user
+                        // immediately sees the permission dialog
+                        // (data path wired in PR2; dialog rendering
+                        // lands in A.5).
+                        if let Some(uw) = self.ui_window.as_mut() {
+                            uw.settings_ui.show(crate::settings_ui::PageKind::Ai);
+                        }
                     }
                     crate::events::AiStreamUpdate::UserInputRequired { request_id, prompt } => {
                         pending_user_input = Some(PendingUserInput { request_id, prompt });
                         self.state.ui_state_mut().settings_window_visible = true;
+                        // A.2: same as above — open to the AI page
+                        // so the user sees the question dialog
+                        // (rendering in A.5).
+                        if let Some(uw) = self.ui_window.as_mut() {
+                            uw.settings_ui.show(crate::settings_ui::PageKind::Ai);
+                        }
                     }
                     _ => {}
                 },
@@ -382,11 +424,11 @@ impl ApplicationHandler for Runtime {
         // current because `update_skin_palette` (called from
         // `update_motion` in the `RedrawRequested` handler of
         // the previous iteration) writes them every frame.
-        let bone_positions = self.state.character.current_bone_local_positions();
-        if !bone_positions.is_empty() {
+        let bone_poses = self.state.character.current_bone_poses();
+        if !bone_poses.is_empty() {
             self.state.physics.update_character_bone_positions(
                 self.state.character_entity,
-                &bone_positions,
+                &bone_poses,
                 cs.character_position,
                 actual_scale,
             );
@@ -402,8 +444,13 @@ impl ApplicationHandler for Runtime {
         // events from winit). The hit test is a BVH-backed Rapier
         // raycast against the character trimesh, not a single
         // AABB cuboid.
+        //
+        // PR5.6: the latest hit is stashed in `last_raycast_hit`
+        // so the debug overlay (F3 / settings checkbox) can
+        // highlight the hit collider and draw the hit-point
+        // cross.
         if let Some(cw) = self.char_window.as_ref() {
-            update_char_window_cursor_and_hittest(
+            self.state.last_raycast_hit = update_char_window_cursor_and_hittest(
                 &self.state,
                 &self.device_state,
                 cw,
@@ -411,11 +458,38 @@ impl ApplicationHandler for Runtime {
                 self.state.character.drag.is_dragging(),
                 &mut self.last_cursor_physical,
             );
+
+            let hovered_name = if let Some(hit) = self.state.last_raycast_hit
+                && hit.entity == self.state.character_entity
+            {
+                let colliders = self
+                    .state
+                    .physics
+                    .colliders_for(self.state.character_entity);
+                if let Some(idx) = colliders.iter().position(|&h| h == hit.collider) {
+                    self.state.character.get_active_bone_name(idx)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            self.state.ui_state_mut().hovered_bone_name = hovered_name;
         }
 
-        // 4. Trigger a redraw for both windows.
-        if let Some(cw) = self.char_window.as_mut() {
-            cw.window.request_redraw();
+        // 4. Render both windows directly. Driving the
+        //    `request_redraw` → `RedrawRequested` → render path
+        //    is broken under winit 0.30.13's multi-window +
+        //    `WaitUntil` bug (see PR5.7 in
+        //    `docs/architecture/wgpu-migration.md`), so the
+        //    character render is now invoked from
+        //    `about_to_wait` instead. The UI window already
+        //    rendered here for the same reason; we're aligning
+        //    the char window to the same pattern.
+        if let Err(AcquireError::Fatal) = self.render_char_frame() {
+            // `render_char_frame` already logged and set
+            // `char_surface_fatal`; the pacer below will
+            // call `event_loop.exit()`.
         }
         if let Some(uw) = self.ui_window.as_mut() {
             let visible = self.state.ui_state().settings_window_visible;
@@ -444,6 +518,35 @@ impl ApplicationHandler for Runtime {
                     },
                 }
             }
+        }
+
+        // 5. Frame pacing. `target_fps == 0` is the
+        //    "Unlimited" choice in the settings UI; map it
+        //    to `ControlFlow::Poll` (the swap chain's vsync
+        //    is the only throttle). Otherwise sleep until
+        //    the next frame deadline — the deadline is
+        //    anchored to `last_frame_instant` (updated at
+        //    the top of `render_char_frame`) with a `now()`
+        //    fallback for the very first frame, so the
+        //    elapsed `dt_secs` used by `update_motion` lines
+        //    up with the chosen rate. PR5.7: this works
+        //    because the char render is no longer driven by
+        //    `RedrawRequested` (see the comment above); the
+        //    earlier `WaitUntil(deadline)` pacer was blocked
+        //    by the winit 0.30.13 multi-window bug, which
+        //    this redesign sidesteps entirely.
+        if self.char_surface_fatal {
+            event_loop.exit();
+            return;
+        }
+        let target_fps = self.state.settings.graphics.target_fps;
+        if target_fps == 0 {
+            event_loop.set_control_flow(ControlFlow::Poll);
+        } else {
+            let frame_interval = Duration::from_secs_f64(f64::from(target_fps).recip());
+            let last = self.last_frame_instant.unwrap_or_else(Instant::now);
+            let next_deadline = last + frame_interval;
+            event_loop.set_control_flow(ControlFlow::WaitUntil(next_deadline));
         }
     }
 }
@@ -482,6 +585,17 @@ impl Runtime {
                 let new_size = cw.window.inner_size();
                 cw.reconfigure(&gpu.device, new_size);
                 character.resize(&gpu.device, (new_size.width, new_size.height));
+                // A.7: rebuild the FXAA post-processor to
+                // match the new swapchain size. The lazy
+                // build in `character.render` is also keyed
+                // on the size, but rebuilding here avoids
+                // a single-frame miss when the user resizes
+                // the character window while FXAA is on.
+                character.resize_post_processor(
+                    &gpu.device,
+                    &gpu.queue,
+                    (new_size.width, new_size.height),
+                );
                 cw.window.request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -507,7 +621,19 @@ impl Runtime {
                 if let Some(delta) =
                     crate::character::drag::tick(&mut character.drag, cursor_world_2d)
                 {
+                    // A.8: round the integrated position to
+                    // 0.01 world units (1 cm at the default
+                    // ortho viewport). The legacy Bevy code
+                    // had no rounding; on a high-resolution
+                    // mouse this produced single-pixel
+                    // sub-pixel jitter because the world
+                    // coordinates stored more precision than
+                    // the renderer can actually draw.
                     settings.character_state.character_position += delta;
+                    settings.character_state.character_position.x =
+                        (settings.character_state.character_position.x * 100.0).round() / 100.0;
+                    settings.character_state.character_position.y =
+                        (settings.character_state.character_position.y * 100.0).round() / 100.0;
                 }
             }
             WindowEvent::MouseInput {
@@ -563,7 +689,7 @@ impl Runtime {
                     .state
                     .physics
                     .cast_ray(ray_origin, ray_dir, 100.0)
-                    .is_some_and(|(entity, _)| entity == self.state.character_entity);
+                    .is_some_and(|hit| hit.entity == self.state.character_entity);
                 let action = crate::character::drag::on_press_or_release(
                     &mut character.drag,
                     event,
@@ -600,6 +726,14 @@ impl Runtime {
                         } else {
                             self.show_settings_window();
                         }
+                    } else if key_code_pressed(&event) == Some(winit::keyboard::KeyCode::F3) {
+                        // PR5.6: F3 toggles the per-bone
+                        // collider wireframe + raycast
+                        // hit-point overlay. Stays OFF across
+                        // launches (no persistence).
+                        let mut ui_state = self.state.ui_state_mut();
+                        ui_state.show_collider_debug = !ui_state.show_collider_debug;
+                        cw.window.request_redraw();
                     } else {
                         // Character-window WASD / Space shortcuts
                         // when the settings window is open on the
@@ -617,275 +751,353 @@ impl Runtime {
                 }
             }
             WindowEvent::RedrawRequested => {
-                // PR3: the character window renders the VRM model
-                // owned by `self.state.character`. The depth
-                // texture and the wgpu pipeline are managed inside
-                // `CharacterRenderer::render`. The window's surface
-                // acquisition is hidden behind `with_surface_view`.
-                //
-                // The error path can't be a method call on
-                // `&mut self` because `cw` is still borrowed
-                // mutably here, so we inline it.
-                let transparent = self.transparent;
-                let AppState {
-                    ref mut character,
-                    ref gpu,
-                    ref settings,
-                    ..
-                } = self.state;
-                let (device, queue) = (&gpu.device, &gpu.queue);
+                // PR5.7: rendering is now driven directly from
+                // `about_to_wait` (`render_char_frame`), so this
+                // handler is a no-op. The `request_redraw` calls
+                // sprinkled through the rest of this file
+                // (e.g. resize, cursor-moved) are kept as
+                // defensive wake-ups; they will simply enqueue
+                // a no-op redraw that the next about_to_wait
+                // overwrites.
+            }
+            _ => {}
+        }
+    }
 
-                // PR4.2 follow-up: one-shot diagnostic so we can
-                // see whether the char window size / surface config
-                // / depth texture / camera aspect / model uniform
-                // are all in agreement. Logs on the very first
-                // RedrawRequested only.
-                if !self.diagnostics_logged {
-                    self.diagnostics_logged = true;
-                    let phys = cw.window.inner_size();
-                    let surface_w = cw.config.width;
-                    let surface_h = cw.config.height;
-                    let cs = &settings.character_state;
-                    let auto_fit = character.auto_fit_scale(0.9);
-                    let actual_scale_dbg = auto_fit * cs.model_scale;
-                    let model_uniform_dbg = ene_vrm::ModelUniform::from_mat4(
-                        character.model_matrix(cs.character_position, actual_scale_dbg),
-                    );
-                    let cam = character.camera_dbg();
-                    let depth = character.depth_size_dbg();
-                    let loaded = character.model_aabb_dbg();
-                    // PR4.19 ultra-verbose: also dump the model's
-                    // loader-derived values (center, normalize_scale,
-                    // merged skeleton joint count) and the per-axis
-                    // model-matrix scale, so we can see whether the
-                    // runtime is computing the right matrix. The
-                    // user is reporting the model is "5x taller than
-                    // expected" with only the tip of the feet visible
-                    // — this dump makes the cause obvious.
-                    let model_scale_x = (model_uniform_dbg.model[0][0].powi(2)
-                        + model_uniform_dbg.model[1][0].powi(2)
-                        + model_uniform_dbg.model[2][0].powi(2))
-                    .sqrt();
-                    let model_scale_y = (model_uniform_dbg.model[0][1].powi(2)
-                        + model_uniform_dbg.model[1][1].powi(2)
-                        + model_uniform_dbg.model[2][1].powi(2))
-                    .sqrt();
-                    let model_scale_z = (model_uniform_dbg.model[0][2].powi(2)
-                        + model_uniform_dbg.model[1][2].powi(2)
-                        + model_uniform_dbg.model[2][2].powi(2))
-                    .sqrt();
-                    let model_translation = [
-                        model_uniform_dbg.model[0][3],
-                        model_uniform_dbg.model[1][3],
-                        model_uniform_dbg.model[2][3],
-                    ];
-                    let merged_skel_joints = character.model_dbg_merged_skel_joints().unwrap_or(0);
-                    let loader_center = character.model_dbg_center();
-                    let loader_norm = character.model_dbg_normalize_scale();
-                    // PR4.19: also dump the camera's view_proj
-                    // matrix so we can verify the orthographic
-                    // projection isn't adding a hidden scale (the
-                    // user reports the model is "5x taller" and
-                    // only the feet are visible; the model_matrix
-                    // is correct, so the camera/projection might
-                    // be the culprit).
-                    let view_proj = character.camera_view_proj_dbg();
-                    let vp_scale_x = (view_proj[0][0].powi(2)
-                        + view_proj[1][0].powi(2)
-                        + view_proj[2][0].powi(2))
-                    .sqrt();
-                    let vp_scale_y = (view_proj[0][1].powi(2)
-                        + view_proj[1][1].powi(2)
-                        + view_proj[2][1].powi(2))
-                    .sqrt();
-                    let vp_scale_z = (view_proj[0][2].powi(2)
-                        + view_proj[1][2].powi(2)
-                        + view_proj[2][2].powi(2))
-                    .sqrt();
-                    let vp_translation = [view_proj[0][3], view_proj[1][3], view_proj[2][3]];
-                    let model_view_proj = character.model_view_proj_dbg(
-                        [
-                            cs.character_position.x,
-                            cs.character_position.y,
-                            cs.character_position.z,
-                        ],
-                        actual_scale_dbg,
-                    );
-                    let model_matrix_runtime = character.model_matrix_runtime_dbg(
-                        [
-                            cs.character_position.x,
-                            cs.character_position.y,
-                            cs.character_position.z,
-                        ],
-                        actual_scale_dbg,
-                    );
-                    let view_only = character.camera_view_dbg();
-                    let proj_only = character.camera_proj_dbg();
-                    tracing::info!(
-                        "PR4.19-diag: model_view_proj={:?} model_matrix_runtime={:?} view_only={:?} proj_only={:?}",
-                        model_view_proj,
-                        model_matrix_runtime,
-                        view_only,
-                        proj_only,
-                    );
-                    tracing::info!(
-                        "PR4.2-diag: char_win={}x{} scale_factor={:.3} surface_config={}x{} depth_texture={}x{} camera_aspect={:.3} char_pos={:?} user_model_scale={:.3} auto_fit_scale={:.3} actual_scale={:.3} model_uniform={:?} cam_eye={:?} cam_target={:?} cam_viewport_h={:.3} loaded_aabb={:?}",
-                        phys.width,
-                        phys.height,
-                        cw.window.scale_factor(),
-                        surface_w,
-                        surface_h,
-                        depth.0,
-                        depth.1,
-                        cam.0,
-                        cs.character_position,
-                        cs.model_scale,
-                        auto_fit,
-                        actual_scale_dbg,
-                        model_uniform_dbg.model,
-                        cam.1,
-                        cam.2,
-                        cam.3,
-                        loaded,
-                    );
-                    tracing::info!(
-                        "PR4.19-diag: loader_center={:?} loader_normalize_scale={:.4} merged_skel_joints={} model_scale=({:.4}, {:.4}, {:.4}) model_translation={:?} view_proj_scale=({:.4}, {:.4}, {:.4}) view_proj_translation={:?} model_view_proj={:?}",
-                        loader_center,
-                        loader_norm,
-                        merged_skel_joints,
-                        model_scale_x,
-                        model_scale_y,
-                        model_scale_z,
-                        model_translation,
-                        vp_scale_x,
-                        vp_scale_y,
-                        vp_scale_z,
-                        vp_translation,
-                        model_view_proj,
-                    );
-                }
+    /// PR5.7: render the character window directly from
+    /// `about_to_wait`, sidestepping `Window::request_redraw` and
+    /// the `RedrawRequested` event path. This was originally
+    /// done in `handle_char_window_event` but winit 0.30.13 has a
+    /// bug where multi-window + `ControlFlow::WaitUntil` mode
+    /// never delivers `RedrawRequested` to the first window
+    /// created in the process — so the char window would freeze
+    /// whenever the settings window was open. Driving the render
+    /// from `about_to_wait` (where the UI window's render is
+    /// already driven) makes the char render independent of
+    /// `RedrawRequested` delivery, the winit bug becomes
+    /// irrelevant, and we can restore the `WaitUntil(deadline)`
+    /// frame pacer to save the CPU core that the
+    /// `ControlFlow::Poll` workaround was burning.
+    ///
+    /// Returns `Err(AcquireError::Fatal)` only on a fatal
+    /// surface error; `Reconfigure` and `Timeout` are handled
+    /// inline (reconfigure the surface, or just retry next
+    /// frame) and return `Ok(())`.
+    fn render_char_frame(&mut self) -> Result<(), AcquireError> {
+        let Some(cw) = self.char_window.as_mut() else {
+            return Ok(());
+        };
+        let transparent = self.transparent;
+        // PR5.6: snapshot the bits of state the debug overlay
+        // needs before we destructure `self.state` (the
+        // `&mut character` borrow would otherwise conflict
+        // with the `ui_state()` borrow).
+        let show_collider_debug = self.state.ui_state().show_collider_debug;
+        let last_raycast_hit = self.state.last_raycast_hit;
+        let character_entity = self.state.character_entity;
+        let AppState {
+            ref mut character,
+            ref mut physics,
+            ref mut debug_renderer,
+            ref gpu,
+            ref settings,
+            ..
+        } = self.state;
+        let (device, queue) = (&gpu.device, &gpu.queue);
 
-                // PR4.1: compose the per-frame model transform
-                // from `CharacterState`. `character_position` and
-                // `model_scale` are clamped by `clamp_runtime_values`
-                // on every mutation, so we can read them directly.
-                //
-                // PR-fix (model too big for viewport): the runtime
-                // uses the per-frame `auto_fit_scale` (recomputed
-                // from the loaded AABB and the current viewport
-                // aspect) as the actual model scale. The user's
-                // `settings.character_state.model_scale` is now a
-                // hint of intent only — it is no longer passed
-                // through to the GPU, so a `model_scale = 2.2` set
-                // in a previous session can no longer blow the
-                // model past the viewport. The user can still pan
-                // via `character_position`; a future "zoom" slider
-                // can be reintroduced as a separate knob that
-                // multiplies on top of the fit (see
-                // `CharacterRenderer::auto_fit_scale` docs).
-                let cs = &settings.character_state;
-                let actual_scale = character.auto_fit_scale(0.9) * cs.model_scale;
-                // PR-fix (character pushed to top of viewport):
-                // point the orthographic camera at the humanoid
-                // body center (head → chest → hips → AABB center)
-                // so the character is framed in the middle of the
-                // window regardless of the AABB shape. Done before
-                // the model matrix is composed so the camera and
-                // the draw agree on `actual_scale`.
-                //
-                // PR-fix: `update_camera_target` now reads the
-                // chest bone's *rest* translation, not the
-                // previous frame's animated `world_positions`, so
-                // a VRMA motion that oscillates the chest no
-                // longer makes the camera (and therefore the
-                // look-at output that depends on the camera)
-                // jitter frame-to-frame.
+        // PR4.2 follow-up: one-shot diagnostic so we can
+        // see whether the char window size / surface config
+        // / depth texture / camera aspect / model uniform
+        // are all in agreement. Logs on the very first
+        // rendered frame only.
+        if !self.diagnostics_logged {
+            self.diagnostics_logged = true;
+            let phys = cw.window.inner_size();
+            let surface_w = cw.config.width;
+            let surface_h = cw.config.height;
+            let cs = &settings.character_state;
+            let auto_fit = character.auto_fit_scale(0.9);
+            let actual_scale_dbg = auto_fit * cs.model_scale;
+            let model_uniform_dbg = ene_vrm::ModelUniform::from_mat4(
+                character.model_matrix(cs.character_position, actual_scale_dbg),
+            );
+            let cam = character.camera_dbg();
+            let depth = character.depth_size_dbg();
+            let loaded = character.model_aabb_dbg();
+            let model_scale_x = (model_uniform_dbg.model[0][0].powi(2)
+                + model_uniform_dbg.model[1][0].powi(2)
+                + model_uniform_dbg.model[2][0].powi(2))
+            .sqrt();
+            let model_scale_y = (model_uniform_dbg.model[0][1].powi(2)
+                + model_uniform_dbg.model[1][1].powi(2)
+                + model_uniform_dbg.model[2][1].powi(2))
+            .sqrt();
+            let model_scale_z = (model_uniform_dbg.model[0][2].powi(2)
+                + model_uniform_dbg.model[1][2].powi(2)
+                + model_uniform_dbg.model[2][2].powi(2))
+            .sqrt();
+            let model_translation = [
+                model_uniform_dbg.model[0][3],
+                model_uniform_dbg.model[1][3],
+                model_uniform_dbg.model[2][3],
+            ];
+            let merged_skel_joints = character.model_dbg_merged_skel_joints().unwrap_or(0);
+            let loader_center = character.model_dbg_center();
+            let loader_norm = character.model_dbg_normalize_scale();
+            let view_proj = character.camera_view_proj_dbg();
+            let vp_scale_x =
+                (view_proj[0][0].powi(2) + view_proj[1][0].powi(2) + view_proj[2][0].powi(2))
+                    .sqrt();
+            let vp_scale_y =
+                (view_proj[0][1].powi(2) + view_proj[1][1].powi(2) + view_proj[2][1].powi(2))
+                    .sqrt();
+            let vp_scale_z =
+                (view_proj[0][2].powi(2) + view_proj[1][2].powi(2) + view_proj[2][2].powi(2))
+                    .sqrt();
+            let vp_translation = [view_proj[0][3], view_proj[1][3], view_proj[2][3]];
+            let model_view_proj = character.model_view_proj_dbg(
+                [
+                    cs.character_position.x,
+                    cs.character_position.y,
+                    cs.character_position.z,
+                ],
+                actual_scale_dbg,
+            );
+            let model_matrix_runtime = character.model_matrix_runtime_dbg(
+                [
+                    cs.character_position.x,
+                    cs.character_position.y,
+                    cs.character_position.z,
+                ],
+                actual_scale_dbg,
+            );
+            let view_only = character.camera_view_dbg();
+            let proj_only = character.camera_proj_dbg();
+            tracing::info!(
+                "PR4.19-diag: model_view_proj={:?} model_matrix_runtime={:?} view_only={:?} proj_only={:?}",
+                model_view_proj,
+                model_matrix_runtime,
+                view_only,
+                proj_only,
+            );
+            tracing::info!(
+                "PR4.2-diag: char_win={}x{} scale_factor={:.3} surface_config={}x{} depth_texture={}x{} camera_aspect={:.3} char_pos={:?} user_model_scale={:.3} auto_fit_scale={:.3} actual_scale={:.3} model_uniform={:?} cam_eye={:?} cam_target={:?} cam_viewport_h={:.3} loaded_aabb={:?}",
+                phys.width,
+                phys.height,
+                cw.window.scale_factor(),
+                surface_w,
+                surface_h,
+                depth.0,
+                depth.1,
+                cam.0,
+                cs.character_position,
+                cs.model_scale,
+                auto_fit,
+                actual_scale_dbg,
+                model_uniform_dbg.model,
+                cam.1,
+                cam.2,
+                cam.3,
+                loaded,
+            );
+            tracing::info!(
+                "PR4.19-diag: loader_center={:?} loader_normalize_scale={:.4} merged_skel_joints={} model_scale=({:.4}, {:.4}, {:.4}) model_translation={:?} view_proj_scale=({:.4}, {:.4}, {:.4}) view_proj_translation={:?} model_view_proj={:?}",
+                loader_center,
+                loader_norm,
+                merged_skel_joints,
+                model_scale_x,
+                model_scale_y,
+                model_scale_z,
+                model_translation,
+                vp_scale_x,
+                vp_scale_y,
+                vp_scale_z,
+                vp_translation,
+                model_view_proj,
+            );
+        }
 
-                character.update_camera_target(actual_scale);
-                let model_uniform = ene_vrm::ModelUniform::from_mat4(
-                    character.model_matrix(cs.character_position, actual_scale),
+        let cs = &settings.character_state;
+        let actual_scale = character.auto_fit_scale(0.9) * cs.model_scale;
+        character.update_camera_target(actual_scale);
+        let model_uniform = ene_vrm::ModelUniform::from_mat4(
+            character.model_matrix(cs.character_position, actual_scale),
+        );
+
+        let now = Instant::now();
+        let dt_secs = self
+            .last_frame_instant
+            .map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32())
+            .clamp(0.0, 0.1);
+        self.last_frame_instant = Some(now);
+
+        if let Some(palette) = character.update_motion(dt_secs) {
+            character.update_skin_palette_gpu(queue, &palette);
+        }
+
+        if let Some(cursor) = self.last_cursor_physical {
+            let viewport: (u32, u32) =
+                (cw.window.inner_size().width, cw.window.inner_size().height);
+            let _smoothed = character.update_look_at(
+                glam::Vec2::new(cursor.x as f32, cursor.y as f32),
+                viewport,
+                cs.character_position,
+                actual_scale,
+                cs.look_at_strength,
+                dt_secs,
+            );
+        }
+
+        let result = cw.with_surface_view(|view| {
+            // A.7: pass the swapchain size + format + AA mode
+            // to the renderer. The post-processor is rebuilt
+            // lazily inside `character.render` when the AA
+            // mode, swapchain size, or format changes; the
+            // runtime does not need to track those.
+            let swapchain_size = (cw.config.width, cw.config.height);
+            let aa_mode = settings.graphics.antialiasing_mode;
+            character.render(
+                device,
+                queue,
+                view,
+                transparent,
+                &model_uniform,
+                swapchain_size,
+                cw.config.format,
+                aa_mode,
+            );
+            if show_collider_debug && let Some(depth_view) = character.depth_view() {
+                let mut lines = Vec::new();
+                let (hit_collider, hit_point) = match last_raycast_hit {
+                    Some(h) if h.entity == character_entity => (Some(h.collider), Some(h.point)),
+                    _ => (None, None),
+                };
+                crate::raycast_debug::build_collider_lines(
+                    &mut lines,
+                    physics,
+                    character_entity,
+                    hit_collider,
+                    hit_point,
+                    true,
                 );
+                if let Some(model) = character.model() {
+                    let center = glam::Vec3::from(model.center());
+                    let normalize_scale = model.normalize_scale();
+                    let auto_scale = character.auto_fit_scale(0.9);
+                    let actual_scale = auto_scale * cs.model_scale;
 
-                // PR4.2: advance the cursor-driven head-look-at
-                // state. The smoothed target is stored on the
-                // renderer; PR4.5+ skinning will read it. Until
-                // then the value is observable via the debug
-                // `look_at_target` accessor and via
-                // `body_tracking(strength)`.
-                let now = Instant::now();
-                let dt_secs = self
-                    .last_frame_instant
-                    .map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32())
-                    .clamp(0.0, 0.1);
-                self.last_frame_instant = Some(now);
+                    for (bone_name, entry) in model.humanoid.iter() {
+                        let parent_pos_raw = model.nodes.world_positions[entry.node];
+                        let parent_world = cs.character_position
+                            + (parent_pos_raw - center) * normalize_scale * actual_scale;
 
-                // PR4.16: advance the VRMA playback clock,
-                // evaluate the active clip, push expression
-                // weights into the morph layer, and write
-                // the new skin palette to the GPU. The
-                // returned `Vec<Mat4>` is forwarded to
-                // `VrmRenderer::update_skin_palette` so the
-                // bones move before the next render pass.
-                // No-op when no motion is loaded, the
-                // player is paused, or the model has no
-                // joints.
-                if let Some(palette) = character.update_motion(dt_secs) {
-                    character.update_skin_palette_gpu(queue, &palette);
-                }
+                        if let Some(child_node) =
+                            crate::character::collider::get_humanoid_child_node(
+                                bone_name.as_str(),
+                                &model.humanoid,
+                            )
+                        {
+                            let child_pos_raw = model.nodes.world_positions[child_node];
+                            let child_world = cs.character_position
+                                + (child_pos_raw - center) * normalize_scale * actual_scale;
 
-                if let Some(cursor) = self.last_cursor_physical {
-                    // PR4.8: the renderer reads the humanoid
-                    // registry's `head` bone (when present) to
-                    // derive the head world position. The
-                    // runtime no longer pre-computes
-                    // `head_world_for(...)` — that helper
-                    // stayed as the fallback for models
-                    // without humanoid metadata. We pass the
-                    // model pivot + scale instead so the
-                    // renderer can scale the bone's rest
-                    // translation by `model_scale` and add
-                    // the character position.
-                    //
-                    // PR-fix: the look-at must use the same
-                    // `actual_scale` as the draw (auto-fit *
-                    // user slider) so the head's world
-                    // position lines up with what the user
-                    // sees. Otherwise the head appears to
-                    // track the cursor from a different point
-                    // than the rendered model.
-                    let viewport: (u32, u32) =
-                        (cw.window.inner_size().width, cw.window.inner_size().height);
-                    let _smoothed = character.update_look_at(
-                        glam::Vec2::new(cursor.x as f32, cursor.y as f32),
-                        viewport,
-                        cs.character_position,
-                        actual_scale,
-                        cs.look_at_strength,
-                        dt_secs,
-                    );
-                }
-
-                let result = cw.with_surface_view(|view| {
-                    character.render(device, queue, view, transparent, &model_uniform);
-                });
-                if let Err(err) = result {
-                    match err {
-                        AcquireError::Reconfigure => {
-                            tracing::warn!(
-                                "Character Surface acquire Outdated/Lost; reconfiguring"
-                            );
-                            cw.reconfigure(&self.state.gpu.device, cw.window.inner_size());
-                            cw.window.request_redraw();
+                            lines.push(ene_vrm::DebugLine {
+                                a: parent_world,
+                                b: child_world,
+                                color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
+                            });
+                        } else {
+                            let ext = 0.01 * actual_scale;
+                            lines.push(ene_vrm::DebugLine {
+                                a: parent_world - glam::Vec3::X * ext,
+                                b: parent_world + glam::Vec3::X * ext,
+                                color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
+                            });
+                            lines.push(ene_vrm::DebugLine {
+                                a: parent_world - glam::Vec3::Y * ext,
+                                b: parent_world + glam::Vec3::Y * ext,
+                                color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
+                            });
+                            lines.push(ene_vrm::DebugLine {
+                                a: parent_world - glam::Vec3::Z * ext,
+                                b: parent_world + glam::Vec3::Z * ext,
+                                color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
+                            });
                         }
-                        AcquireError::Timeout => cw.window.request_redraw(),
-                        AcquireError::Fatal => {
-                            tracing::error!("Character Surface acquire failed fatally; exiting");
-                            event_loop.exit();
+                    }
+
+                    if let Some(spring_bones) = &model.spring_bones {
+                        for chain in &spring_bones.springs {
+                            for i in 0..chain.joints.len() - 1 {
+                                let parent_node = chain.joints[i].node;
+                                let child_node = chain.joints[i + 1].node;
+                                let parent_pos_raw = model.nodes.world_positions[parent_node];
+                                let child_pos_raw = model.nodes.world_positions[child_node];
+                                let parent_world = cs.character_position
+                                    + (parent_pos_raw - center) * normalize_scale * actual_scale;
+                                let child_world = cs.character_position
+                                    + (child_pos_raw - center) * normalize_scale * actual_scale;
+                                lines.push(ene_vrm::DebugLine {
+                                    a: parent_world,
+                                    b: child_world,
+                                    color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
+                                });
+                            }
                         }
                     }
                 }
+                if !lines.is_empty() {
+                    if debug_renderer.is_none() {
+                        *debug_renderer =
+                            Some(ene_vrm::DebugRenderer::new(device, cw.config.format));
+                    }
+                    if let Some(debug) = debug_renderer.as_mut() {
+                        for line in &lines {
+                            debug.push_line(*line);
+                        }
+                        let camera_uniform = character
+                            .camera_uniform_dbg()
+                            .expect("orthographic camera uniform is infallible");
+                        let mut encoder =
+                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("debug.encoder"),
+                            });
+                        debug.render(
+                            device,
+                            queue,
+                            &mut encoder,
+                            view,
+                            depth_view,
+                            &camera_uniform,
+                        );
+                        queue.submit(std::iter::once(encoder.finish()));
+                    }
+                }
             }
-            _ => {}
+        });
+        match result {
+            Ok(()) => Ok(()),
+            Err(AcquireError::Reconfigure) => {
+                tracing::warn!("Character Surface acquire Outdated/Lost; reconfiguring");
+                cw.reconfigure(device, cw.window.inner_size());
+                Ok(())
+            }
+            Err(AcquireError::Timeout) => {
+                // The surface was unavailable this frame
+                // (e.g. minimised, occluded). The next
+                // about_to_wait will retry automatically —
+                // nothing to do.
+                Ok(())
+            }
+            Err(AcquireError::Fatal) => {
+                tracing::error!("Character Surface acquire failed fatally; exiting");
+                // Mark the fatal so the pacer calls
+                // `event_loop.exit()` once instead of
+                // logging on every frame. The user gets one
+                // error message and the process exits.
+                self.char_surface_fatal = true;
+                Ok(())
+            }
         }
     }
 
@@ -947,6 +1159,26 @@ impl Runtime {
             world,
             ui_entity,
         );
+        // PR9: when the WASD hotkey actually switched the
+        // character, push the new character's default
+        // expression into the renderer's EmotionQueue. The
+        // WASD path is gated on the Character page (the early
+        // `return` above) so the queue is always present.
+        if matches!(
+            action,
+            SettingsAction::PrevCharacter | SettingsAction::NextCharacter
+        ) {
+            let now_secs = uw.settings_ui.started_at.elapsed().as_secs_f64();
+            let default_expression = settings.character_state.default_expression.clone();
+            uw.settings_ui
+                .emotion_queue
+                .push(crate::character_state::EmotionCommand {
+                    emotion: default_expression,
+                    target_time: now_secs,
+                    hold_secs: 4.0,
+                    weight: 1.0,
+                });
+        }
     }
 }
 
@@ -994,6 +1226,13 @@ fn cursor_world_2d_for_char_window(
 /// winit's `set_cursor_hittest` so the rest of the desktop
 /// receives the click when the cursor is not on the silhouette.
 ///
+/// Returns the latest `RaycastHit` (or `None` on a clean miss /
+/// off-window cursor) so the runtime can stash it in
+/// [`crate::state::AppState::last_raycast_hit`] for the PR5.6
+/// debug overlay. The cursor position is also stored in
+/// `last_cursor` for the press / drag state machine fed by
+/// winit's `CursorMoved` / `MouseInput` events.
+///
 /// This is called every `about_to_wait`, including while the
 /// window is in the click-through state, so the OS is not
 /// delivering `CursorMoved` to it and the runtime must rely on
@@ -1005,7 +1244,7 @@ fn update_char_window_cursor_and_hittest(
     transparent: bool,
     drag_is_dragging: bool,
     last_cursor: &mut Option<winit::dpi::PhysicalPosition<f64>>,
-) {
+) -> Option<crate::physics::RaycastHit> {
     // 1. Global cursor in screen pixels.
     let mouse = device_state.get_mouse();
     let (gx, gy) = (mouse.coords.0, mouse.coords.1);
@@ -1017,7 +1256,7 @@ fn update_char_window_cursor_and_hittest(
     //    decide.
     let outer = match cw.window.outer_position() {
         Ok(p) => p,
-        Err(_) => return,
+        Err(_) => return None,
     };
     let local_physical_x = gx as f64 - outer.x as f64;
     let local_physical_y = gy as f64 - outer.y as f64;
@@ -1037,7 +1276,7 @@ fn update_char_window_cursor_and_hittest(
     // window is click-through anyway.
     let inside_window = ndc_x.abs() <= 1.0 && ndc_y.abs() <= 1.0;
 
-    let cursor_over = if inside_window {
+    let hit = if inside_window {
         let eye: [f32; 3] = state.character.camera_eye();
         let target: [f32; 3] = state.character.camera_target();
         let aspect = (logical_w / logical_h) as f32;
@@ -1057,13 +1296,12 @@ fn update_char_window_cursor_and_hittest(
             target[1] - eye[1],
             target[2] - eye[2],
         );
-        state
-            .physics
-            .cast_ray(ray_origin, ray_dir, 100.0)
-            .is_some_and(|(entity, _)| entity == state.character_entity)
+        state.physics.cast_ray(ray_origin, ray_dir, 100.0)
     } else {
-        false
+        None
     };
+
+    let cursor_over = hit.is_some_and(|h| h.entity == state.character_entity);
 
     let allows_input = !transparent || cursor_over || drag_is_dragging;
 
@@ -1080,13 +1318,11 @@ fn update_char_window_cursor_and_hittest(
     //    Windows and the platform equivalent elsewhere, so the
     //    click goes to the window underneath.
     let _ = cw.window.set_cursor_hittest(allows_input);
+
+    hit
 }
 
-fn char_settings_hotkey_from_event(
-    event: &WindowEvent,
-    has_focus: bool,
-) -> Option<crate::settings_ui::widgets::SettingsAction> {
-    use crate::settings_ui::widgets::SettingsAction;
+fn char_settings_hotkey_from_event(event: &WindowEvent, has_focus: bool) -> Option<SettingsAction> {
     if !has_focus {
         return None;
     }
@@ -1124,6 +1360,25 @@ fn key_pressed(event: &WindowEvent) -> Option<NamedKey> {
     } = event
     {
         Some(*named)
+    } else {
+        None
+    }
+}
+
+/// Like [`key_pressed`] but for the raw physical key code.
+/// Used for F3, which has no `NamedKey` variant in winit 0.30.
+fn key_code_pressed(event: &WindowEvent) -> Option<winit::keyboard::KeyCode> {
+    if let WindowEvent::KeyboardInput {
+        event:
+            KeyEvent {
+                physical_key: winit::keyboard::PhysicalKey::Code(code),
+                state: ElementState::Pressed,
+                ..
+            },
+        ..
+    } = event
+    {
+        Some(*code)
     } else {
         None
     }

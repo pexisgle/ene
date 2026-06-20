@@ -570,3 +570,11 @@ fn auto_save(store: Res<ConfigStore>, character: Res<CharacterName>) {
 3. **Run `cargo run -p ene-cli`** once to regenerate `assets/schema/settings.schema.json`.
 4. **Document** the new section in `docs/configuration/settings.md` and `docs/ja/configuration/settings.md`.
 5. **Access** via `config.get_section::<MyConfig>()` or `store.get_section::<MyConfig>()`.
+
+## Debug Overlays (per-session, not persisted)
+
+The following overlays are **not** part of the persisted configuration — they reset to their default (off) on every launch. They live on the runtime `UiState` (in `apps/ene-desktop-v2/src/settings.rs`) and are toggled from the Character settings page or a hotkey on the character window.
+
+| Overlay | Default | Hotkey | Settings control | Effect |
+|---------|---------|--------|------------------|--------|
+| **Raycast Colliders (Debug)** | `false` (off) | `F3` | "Raycast Colliders (Debug)" checkbox on the Character page | Draws a wireframe sphere per PR5.2 bone collider (cyan when idle, yellow for the collider under the cursor) and a 3-axis cross at the raycast hit point (red). Built on the new `ene_vrm::DebugRenderer` (line-list, 3D depth-tested). |

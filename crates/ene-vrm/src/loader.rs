@@ -586,6 +586,14 @@ fn load_all_meshes(
                 vertex_count: vertices.len() as u32,
                 index_buf,
                 index_count: indices.len() as u32,
+                // PR5.x: keep the CPU-side vertex mirror so the
+                // collider builder can walk `joints` / `weights`
+                // / `position` per-primitive without a GPU
+                // readback. The buffer was already moved into the
+                // upload closure, so this clone is cheap relative
+                // to the bytewise `bytemuck::cast_slice` copy in
+                // `MeshVertex::as_bytes`.
+                vertices: vertices.clone(),
                 base_color,
                 alpha_mode,
                 unlit,

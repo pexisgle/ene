@@ -52,6 +52,7 @@
 
 pub mod animation;
 pub mod camera;
+pub mod debug_renderer;
 pub mod error;
 pub mod expression;
 pub mod expression_override;
@@ -61,6 +62,7 @@ pub mod look_at;
 pub mod model;
 pub mod mtoon;
 pub mod node_constraint;
+pub mod post_process;
 pub mod renderer;
 pub mod spring_bone;
 
@@ -70,6 +72,10 @@ pub use animation::{
     retarget_hips_translation, retarget_rotation,
 };
 pub use camera::{ModelUniform, OrthographicCamera};
+pub use debug_renderer::{
+    CROSS_HALF_EXTENT, DEFAULT_LINE_CAPACITY, DebugLine, DebugRenderer, DebugVertex,
+    SPHERE_LATITUDES, SPHERE_LONGITUDES, cross_lines, sphere_wireframe_lines_into,
+};
 pub use error::{VrmError, VrmResult};
 pub use expression::{
     ExpressionLayer, ExpressionName, MAX_MORPH_TARGETS_PER_PRIMITIVE, PrimitiveMorphMeta,
@@ -89,7 +95,7 @@ pub use look_at::{
     LookAtBoneDelta, LookAtBoneOutput, LookAtDirection, LookAtEvaluator, LookAtExpressionOutput,
     LookAtOutput, LookAtProperties, LookAtRangeMap, LookAtRangeMapSet, LookAtType, load_look_at,
 };
-pub use model::{AlphaMode, NodeHierarchy, Skeleton, VrmMesh, VrmModel, VrmTexture};
+pub use model::{AlphaMode, MeshVertex, NodeHierarchy, Skeleton, VrmMesh, VrmModel, VrmTexture};
 pub use mtoon::{
     MToonGpuTextures, MToonMaterial, MToonTextureRef, MToonUniform, OutlineWidthMode, flags,
     load_mtoon_materials, texture_flags,

@@ -1,25 +1,84 @@
-use super::{SettingsButtonAction, SettingsValueKind};
-use crate::app_config::CharacterSettings;
-use crate::character::CharacterAnimationControl;
-use bevy::prelude::MessageWriter;
-use bevy_egui::egui;
+//! Shared row widgets and action dispatcher for the settings UI.
+//!
+//! Mirrors the legacy `apps/ene-desktop/src/settings_ui/widgets.rs`
+//! shape 1:1. The action enum and `apply_action` dispatcher are the
+//! single funnel through which buttons, hotkeys, and direct egui
+//! field changes mutate [`CharacterSettings`].
+use crate::ai_bridge::AiBridge;
+use crate::character_state::AnimationControl;
+#[cfg(target_os = "linux")]
+use crate::settings::cycle_mask_render_downsample;
+use crate::settings::{
+    AntialiasingMode, CharacterSettings, ShadowQuality, cycle_antialiasing_mode,
+    cycle_shadow_quality, cycle_target_fps, target_fps_label,
+};
+use std::sync::Arc;
+
+/// Single action enum shared by every page widget. Hotkeys and
+/// buttons both translate into one of these before mutating state.
+#[allow(dead_code)] // Every variant is dispatched by `apply_action`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsAction {
+    PrevCharacter,
+    NextCharacter,
+    PrevMotion,
+    NextMotion,
+    TogglePlay,
+    #[cfg(target_os = "linux")]
+    ToggleDebugOverlay,
+    #[cfg(target_os = "linux")]
+    MaskDownsampleDown,
+    #[cfg(target_os = "linux")]
+    MaskDownsampleUp,
+    TargetFpsDown,
+    TargetFpsUp,
+    ShadowQualityDown,
+    ShadowQualityUp,
+    AntialiasingModeDown,
+    AntialiasingModeUp,
+    LookAtStrengthDown,
+    LookAtStrengthUp,
+    ModelScaleDown,
+    ModelScaleUp,
+    CharacterPosXDown,
+    CharacterPosXUp,
+    CharacterPosYDown,
+    CharacterPosYUp,
+    CharacterPosZDown,
+    CharacterPosZUp,
+    /// PR5.6: toggle the per-bone collider wireframe +
+    /// raycast hit-point overlay. Available on every
+    /// platform; bound to the F3 hotkey and the
+    /// "Show raycast colliders (debug)" checkbox on the
+    /// Character page.
+    ToggleColliderDebug,
+    SendAiChat,
+}
 
 pub fn apply_action(
-    action: SettingsButtonAction,
+    action: SettingsAction,
     settings: &mut CharacterSettings,
-    animation_control: &mut CharacterAnimationControl,
-    ai_request_writer: &mut MessageWriter<crate::ai_bridge::EneRequestEvent>,
+    animation: &mut AnimationControl,
+    ai: &Arc<AiBridge>,
+    world: &mut hecs::World,
+    ui_entity: hecs::Entity,
 ) {
     match action {
-        SettingsButtonAction::PrevCharacter => {
+        SettingsAction::PrevCharacter => {
             let idx = cycle_index(
                 settings.character_state.selected_character,
                 settings.characters.len(),
                 -1,
             );
+            // PR9: select_character now returns the per-character
+            // default expression so the caller can push it into
+            // the renderer's EmotionQueue. The dispatcher itself
+            // doesn't own the queue (it lives on SettingsUi) so
+            // we just return the value; the page_character / WASD
+            // hotkey paths handle the push.
             settings.select_character(idx);
         }
-        SettingsButtonAction::NextCharacter => {
+        SettingsAction::NextCharacter => {
             let idx = cycle_index(
                 settings.character_state.selected_character,
                 settings.characters.len(),
@@ -27,7 +86,7 @@ pub fn apply_action(
             );
             settings.select_character(idx);
         }
-        SettingsButtonAction::PrevMotion => {
+        SettingsAction::PrevMotion => {
             settings.character_state.selected_motion = cycle_index(
                 settings.character_state.selected_motion,
                 settings.current_entry().motion_names.len(),
@@ -37,7 +96,7 @@ pub fn apply_action(
             settings.character_state.needs_respawn = true;
             settings.mark_dirty();
         }
-        SettingsButtonAction::NextMotion => {
+        SettingsAction::NextMotion => {
             settings.character_state.selected_motion = cycle_index(
                 settings.character_state.selected_motion,
                 settings.current_entry().motion_names.len(),
@@ -47,77 +106,96 @@ pub fn apply_action(
             settings.character_state.needs_respawn = true;
             settings.mark_dirty();
         }
-        SettingsButtonAction::TogglePlay => {
-            animation_control.toggle_playing();
+        SettingsAction::TogglePlay => {
+            animation.toggle_playing();
         }
         #[cfg(target_os = "linux")]
-        SettingsButtonAction::ToggleDebugOverlay => {
-            settings.ui.debug_overlay_visible = !settings.ui.debug_overlay_visible;
+        SettingsAction::ToggleDebugOverlay => {
+            if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
+                ui_state.debug_overlay_visible = !ui_state.debug_overlay_visible;
+            }
+            settings.mark_dirty();
         }
         #[cfg(target_os = "linux")]
-        SettingsButtonAction::MaskDownsampleDown => {
+        SettingsAction::MaskDownsampleDown => {
             settings.graphics.mask_render_downsample =
                 cycle_mask_render_downsample(settings.graphics.mask_render_downsample, -1);
+            settings.mark_dirty();
         }
         #[cfg(target_os = "linux")]
-        SettingsButtonAction::MaskDownsampleUp => {
+        SettingsAction::MaskDownsampleUp => {
             settings.graphics.mask_render_downsample =
                 cycle_mask_render_downsample(settings.graphics.mask_render_downsample, 1);
+            settings.mark_dirty();
         }
-        SettingsButtonAction::TargetFpsDown => {
+        SettingsAction::TargetFpsDown => {
             settings.graphics.target_fps = cycle_target_fps(settings.graphics.target_fps, -1);
+            settings.mark_dirty();
         }
-        SettingsButtonAction::TargetFpsUp => {
+        SettingsAction::TargetFpsUp => {
             settings.graphics.target_fps = cycle_target_fps(settings.graphics.target_fps, 1);
+            settings.mark_dirty();
         }
-        SettingsButtonAction::ShadowQualityDown => {
+        SettingsAction::ShadowQualityDown => {
             settings.graphics.shadow_quality =
                 cycle_shadow_quality(settings.graphics.shadow_quality, -1);
+            settings.mark_dirty();
         }
-        SettingsButtonAction::ShadowQualityUp => {
+        SettingsAction::ShadowQualityUp => {
             settings.graphics.shadow_quality =
                 cycle_shadow_quality(settings.graphics.shadow_quality, 1);
+            settings.mark_dirty();
         }
-        SettingsButtonAction::AntialiasingModeDown => {
+        SettingsAction::AntialiasingModeDown => {
             settings.graphics.antialiasing_mode =
                 cycle_antialiasing_mode(settings.graphics.antialiasing_mode, -1);
+            settings.mark_dirty();
         }
-        SettingsButtonAction::AntialiasingModeUp => {
+        SettingsAction::AntialiasingModeUp => {
             settings.graphics.antialiasing_mode =
                 cycle_antialiasing_mode(settings.graphics.antialiasing_mode, 1);
+            settings.mark_dirty();
         }
-        SettingsButtonAction::LookAtStrengthDown => {
+        SettingsAction::LookAtStrengthDown => {
             adjust_f32(&mut settings.character_state.look_at_strength, -0.05);
         }
-        SettingsButtonAction::LookAtStrengthUp => {
+        SettingsAction::LookAtStrengthUp => {
             adjust_f32(&mut settings.character_state.look_at_strength, 0.05);
         }
-        SettingsButtonAction::ModelScaleDown => {
+        SettingsAction::ModelScaleDown => {
             adjust_f32(&mut settings.character_state.model_scale, -0.05);
         }
-        SettingsButtonAction::ModelScaleUp => {
+        SettingsAction::ModelScaleUp => {
             adjust_f32(&mut settings.character_state.model_scale, 0.05);
         }
-        SettingsButtonAction::CharacterPosXDown => {
+        SettingsAction::CharacterPosXDown => {
             adjust_f32(&mut settings.character_state.character_position.x, -0.05);
         }
-        SettingsButtonAction::CharacterPosXUp => {
+        SettingsAction::CharacterPosXUp => {
             adjust_f32(&mut settings.character_state.character_position.x, 0.05);
         }
-        SettingsButtonAction::CharacterPosYDown => {
+        SettingsAction::CharacterPosYDown => {
             adjust_f32(&mut settings.character_state.character_position.y, -0.05);
         }
-        SettingsButtonAction::CharacterPosYUp => {
+        SettingsAction::CharacterPosYUp => {
             adjust_f32(&mut settings.character_state.character_position.y, 0.05);
         }
-        SettingsButtonAction::CharacterPosZDown => {
+        SettingsAction::CharacterPosZDown => {
             adjust_f32(&mut settings.character_state.character_position.z, -0.05);
         }
-        SettingsButtonAction::CharacterPosZUp => {
+        SettingsAction::CharacterPosZUp => {
             adjust_f32(&mut settings.character_state.character_position.z, 0.05);
         }
-        SettingsButtonAction::SendAiChat => {
-            send_ai_request(settings, ai_request_writer);
+        SettingsAction::ToggleColliderDebug => {
+            // PR5.6: flip the collider debug overlay
+            // flag. Not persisted — defaults to `false`
+            // on every launch.
+            if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
+                ui_state.show_collider_debug = !ui_state.show_collider_debug;
+            }
+        }
+        SettingsAction::SendAiChat => {
+            send_ai_chat(settings, ai, world, ui_entity);
         }
     }
 
@@ -125,84 +203,10 @@ pub fn apply_action(
     settings.mark_dirty();
 }
 
-pub fn render_cycle_row(
-    ui: &mut egui::Ui,
-    label: &str,
-    value_kind: SettingsValueKind,
-    settings: &CharacterSettings,
-    animation_control: &CharacterAnimationControl,
-    down_action: SettingsButtonAction,
-    up_action: SettingsButtonAction,
-) -> Option<SettingsButtonAction> {
-    let mut action = None;
-    ui.horizontal(|ui| {
-        ui.label(label);
-        if ui.button("<").clicked() {
-            action = Some(down_action);
-        }
-        ui.add_sized(
-            [220.0, 0.0],
-            egui::Label::new(value_kind.current_text(settings, animation_control)),
-        );
-        if ui.button(">").clicked() {
-            action = Some(up_action);
-        }
-    });
-    action
-}
-
-pub fn render_toggle_row(
-    ui: &mut egui::Ui,
-    label: &str,
-    value_kind: SettingsValueKind,
-    settings: &CharacterSettings,
-    animation_control: &CharacterAnimationControl,
-    toggle_action: SettingsButtonAction,
-) -> Option<SettingsButtonAction> {
-    let mut action = None;
-    ui.horizontal(|ui| {
-        ui.label(label);
-        if ui.button("Toggle").clicked() {
-            action = Some(toggle_action);
-        }
-        ui.add_sized(
-            [220.0, 0.0],
-            egui::Label::new(value_kind.current_text(settings, animation_control)),
-        );
-    });
-    action
-}
-
-pub fn render_numeric_row(
-    ui: &mut egui::Ui,
-    label: &str,
-    text_buffer: &mut String,
-    value_kind: SettingsValueKind,
-    settings: &mut CharacterSettings,
-    down_action: SettingsButtonAction,
-    up_action: SettingsButtonAction,
-) -> Option<SettingsButtonAction> {
-    let mut action = None;
-    ui.horizontal(|ui| {
-        ui.label(label);
-        if ui.button("-").clicked() {
-            action = Some(down_action);
-        }
-        let response = ui.add(egui::TextEdit::singleline(text_buffer).desired_width(220.0));
-        let commit = response.changed()
-            || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-        if commit && value_kind.apply_input(text_buffer.trim(), settings).is_ok() {
-            settings.clamp_runtime_values();
-            settings.mark_dirty();
-        }
-        if ui.button("+").clicked() {
-            action = Some(up_action);
-        }
-    });
-    action
-}
-
 fn cycle_index(index: usize, len: usize, step: isize) -> usize {
+    if len == 0 {
+        return 0;
+    }
     ((index as isize + step).rem_euclid(len as isize)) as usize
 }
 
@@ -210,41 +214,43 @@ fn adjust_f32(value: &mut f32, delta: f32) {
     *value += delta;
 }
 
-fn send_ai_request(
-    settings: &mut CharacterSettings,
-    ai_request_writer: &mut MessageWriter<crate::ai_bridge::EneRequestEvent>,
+fn send_ai_chat(
+    _settings: &mut CharacterSettings,
+    ai: &Arc<AiBridge>,
+    world: &mut hecs::World,
+    ui_entity: hecs::Entity,
 ) {
-    let user_input = settings.ui.ai_chat_input.trim();
-    if user_input.is_empty() {
-        return;
+    if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
+        let user_input = ui_state.ai_chat_input.trim().to_string();
+        if user_input.is_empty() {
+            return;
+        }
+        ai.run(user_input);
+        ui_state.ai_chat_input.clear();
+        ui_state.ai_latest_response.clear();
     }
-
-    ai_request_writer.write(crate::ai_bridge::EneRequestEvent {
-        user_input: user_input.to_string(),
-    });
-    settings.ui.ai_chat_input.clear();
-    settings.ui.ai_latest_response.clear();
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn cycle_mask_render_downsample(current: u32, step: isize) -> u32 {
-    crate::app_config::cycle_mask_render_downsample(current, step)
+#[allow(dead_code)] // `format` is used by the public `cycle_label` family below.
+pub fn format_fps_label(fps: u32) -> String {
+    target_fps_label(fps)
 }
 
-fn cycle_target_fps(current: u32, step: isize) -> u32 {
-    crate::app_config::cycle_target_fps(current, step)
+#[allow(dead_code)] // `format` is used by the public `cycle_label` family below.
+pub fn format_shadow_label(quality: ShadowQuality) -> &'static str {
+    match quality {
+        ShadowQuality::Low => "Low",
+        ShadowQuality::Medium => "Medium",
+        ShadowQuality::High => "High",
+    }
 }
 
-fn cycle_shadow_quality(
-    current: crate::app_config::ShadowQuality,
-    step: isize,
-) -> crate::app_config::ShadowQuality {
-    crate::app_config::cycle_shadow_quality(current, step)
-}
-
-fn cycle_antialiasing_mode(
-    current: crate::app_config::AntialiasingMode,
-    step: isize,
-) -> crate::app_config::AntialiasingMode {
-    crate::app_config::cycle_antialiasing_mode(current, step)
+#[allow(dead_code)] // `format` is used by the public `cycle_label` family below.
+pub fn format_aa_label(mode: AntialiasingMode) -> &'static str {
+    match mode {
+        AntialiasingMode::Off => "Off",
+        AntialiasingMode::Fxaa => "Fxaa",
+        AntialiasingMode::Smaa => "Smaa",
+        AntialiasingMode::Taa => "Taa",
+    }
 }

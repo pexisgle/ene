@@ -35,6 +35,20 @@ pub struct VrmPrimitive {
     pub index_buf: wgpu::Buffer,
     /// Number of indices to draw.
     pub index_count: u32,
+    /// CPU-side mirror of the vertex data, kept after the GPU
+    /// upload so CPU consumers (PR5.x collider builder, future
+    /// baking passes) can read positions, joints, and weights
+    /// without a GPU readback. Typical VRM 1.0 models weigh
+    /// in at ~30k vertices × 64 bytes = ~2 MB; the convenience
+    /// is worth the resident cost.
+    ///
+    /// `vertices[i].position` is in raw glTF space (the same
+    /// frame the `vertex_buf` uses); consumers that want the
+    /// normalised frame must apply `T(-center) * S(normalize_scale)`
+    /// themselves, exactly like the per-frame `model.model` matrix
+    /// does. The collider builder in `ene-desktop-v2` does this
+    /// fold before computing per-bone sizes.
+    pub vertices: Vec<MeshVertex>,
     /// Base-color texture for this primitive, if its material has
     /// one. `None` falls back to a flat color in the shader.
     pub base_color: Option<std::sync::Arc<VrmTexture>>,

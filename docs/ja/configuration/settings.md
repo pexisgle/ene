@@ -571,3 +571,11 @@ fn auto_save(store: Res<ConfigStore>, character: Res<CharacterName>) {
 3. **`cargo run -p ene-cli`** を1回実行し、`assets/schema/settings.schema.json` を再生成する。
 4. `docs/configuration/settings.md` と `docs/ja/configuration/settings.md` に新しいセクションをドキュメントする。
 5. `config.get_section::<MyConfig>()` または `store.get_section::<MyConfig>()` でアクセスする。
+
+## デバッグオーバーレイ (セッション毎、永続化なし)
+
+以下のオーバーレイは永続化される設定には含まれず、起動ごとにデフォルト (オフ) に戻ります。`UiState` (`apps/ene-desktop-v2/src/settings.rs` 内のランタイム状態) に保持され、Character 設定ページまたは character ウィンドウのホットキーで切り替えます。
+
+| オーバーレイ | デフォルト | ホットキー | 設定 UI | 効果 |
+|------------|-----------|-----------|---------|------|
+| **Raycast Colliders (Debug)** | `false` (オフ) | `F3` | Character ページの「Raycast Colliders (Debug)」チェックボックス | PR5.2 のボーンコライダーごとにワイヤーフレームの球体 (アイドル時はシアン、カーソル下のコライダーは黄) とレイキャストヒット地点の 3 軸クロス (赤) を描画する。新しい `ene_vrm::DebugRenderer` (line-list、3D 深度テスト有効) で構築。 |
