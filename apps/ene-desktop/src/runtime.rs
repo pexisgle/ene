@@ -218,6 +218,29 @@ impl ApplicationHandler for Runtime {
                     );
                 }
 
+                // PR-LX.5: open the X11 connection (if any)
+                // for the click-through fallback. The probe
+                // is cheap; on Wayland-only builds the
+                // `RawDisplayHandle::X11` variant does not
+                // match and `try_new` returns `None`. EWMH
+                // `_NET_WM_STATE_SKIP_TASKBAR` +
+                // `_NET_WM_STATE_SKIP_PAGER` are applied
+                // once on construction so the character
+                // window does not appear in the task
+                // switcher.
+                #[cfg(target_os = "linux")]
+                if self.state.x11_ctx.is_none()
+                    && let Some(ctx) =
+                        crate::platform::x11_taskbar::X11Context::try_new(cw.window.as_ref())
+                {
+                    self.state.x11_ctx = Some(ctx);
+                    tracing::info!(
+                        target: "ene.linux.x11",
+                        connected = true,
+                        "X11 probe"
+                    );
+                }
+
                 let actual_scale = self.state.character.auto_fit_scale(0.9)
                     * self.state.settings.character_state.model_scale;
                 let specs = self
