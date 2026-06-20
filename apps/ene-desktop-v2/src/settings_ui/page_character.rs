@@ -163,6 +163,7 @@ pub fn render(
             SettingsAction::LookAtStrengthDown,
             SettingsAction::LookAtStrengthUp,
             |s, buf| *buf = format!("{:.2}", s.character_state.look_at_strength),
+            |s, v| s.character_state.look_at_strength = v,
             world,
             ui_entity,
         );
@@ -176,6 +177,7 @@ pub fn render(
             SettingsAction::ModelScaleDown,
             SettingsAction::ModelScaleUp,
             |s, buf| *buf = format!("{:.2}", s.character_state.model_scale),
+            |s, v| s.character_state.model_scale = v,
             world,
             ui_entity,
         );
@@ -189,6 +191,7 @@ pub fn render(
             SettingsAction::CharacterPosXDown,
             SettingsAction::CharacterPosXUp,
             |s, buf| *buf = format!("{:+.2}", s.character_state.character_position.x),
+            |s, v| s.character_state.character_position.x = v,
             world,
             ui_entity,
         );
@@ -202,6 +205,7 @@ pub fn render(
             SettingsAction::CharacterPosYDown,
             SettingsAction::CharacterPosYUp,
             |s, buf| *buf = format!("{:+.2}", s.character_state.character_position.y),
+            |s, v| s.character_state.character_position.y = v,
             world,
             ui_entity,
         );
@@ -215,6 +219,7 @@ pub fn render(
             SettingsAction::CharacterPosZDown,
             SettingsAction::CharacterPosZUp,
             |s, buf| *buf = format!("{:+.2}", s.character_state.character_position.z),
+            |s, v| s.character_state.character_position.z = v,
             world,
             ui_entity,
         );
@@ -237,7 +242,7 @@ pub fn render(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_numeric_row<F>(
+fn render_numeric_row<F, C>(
     ui: &mut egui::Ui,
     label: &str,
     buffer: &mut String,
@@ -247,10 +252,12 @@ fn render_numeric_row<F>(
     down: SettingsAction,
     up: SettingsAction,
     refresh: F,
+    commit: C,
     world: &mut hecs::World,
     ui_entity: hecs::Entity,
 ) where
     F: Fn(&CharacterSettings, &mut String),
+    C: Fn(&mut CharacterSettings, f32),
 {
     ui.horizontal(|ui| {
         ui.label(label);
@@ -262,7 +269,35 @@ fn render_numeric_row<F>(
             // code did the same re-format on every dispatch.
             refresh(settings, buffer);
         }
-        let _response = ui.add(egui::TextEdit::singleline(buffer).desired_width(220.0));
+        let response = ui.add(egui::TextEdit::singleline(buffer).desired_width(220.0));
+        // PR2.1: keyboard re-parse on Enter / focus loss.
+        // The legacy Bevy code re-parsed `TextEdit::singleline`
+        // on Enter and on focus loss. The +/- buttons are still
+        // the primary input (the buffer is auto-refreshed from
+        // the settings on every +/- click) but typing a value
+        // and pressing Enter (or tabbing out) now commits.
+        let enter_pressed = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if enter_pressed {
+            if let Ok(value) = buffer.trim().parse::<f32>() {
+                commit(settings, value);
+                settings.mark_dirty();
+                settings.clamp_runtime_values();
+                refresh(settings, buffer);
+            } else {
+                // Reject: revert the buffer to the live value.
+                refresh(settings, buffer);
+            }
+        } else if response.lost_focus() {
+            // Tab/click-away without Enter: also commit (parses
+            // whatever the user typed), then re-format from
+            // the settings so the displayed text is canonical.
+            if let Ok(value) = buffer.trim().parse::<f32>() {
+                commit(settings, value);
+                settings.mark_dirty();
+                settings.clamp_runtime_values();
+            }
+            refresh(settings, buffer);
+        }
         if ui.button("+").clicked() {
             apply_action(up, settings, animation, ai, world, ui_entity);
             refresh(settings, buffer);
