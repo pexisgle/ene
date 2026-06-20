@@ -24,7 +24,7 @@ use ene_vrm::{
     LookAtProperties, ModelUniform, OrthographicCamera, VrmModel, VrmRenderer, evaluate_clip,
     load_vrm, load_vrma,
 };
-use ene_vrm::{VrmaAsset, VrmaPlayer};
+use ene_vrm::{SpringBoneProperties, SpringBoneSimulator, VrmaAsset, VrmaPlayer};
 use glam::{Mat4, Quat, Vec3};
 
 use crate::character_state::{ActiveEmotion, EmotionQueue, transition_emotions};
@@ -100,6 +100,20 @@ pub struct CharacterRenderer {
     vrma_path: Option<PathBuf>,
     /// Node indices of bones that have active colliders
     active_bone_nodes: Vec<usize>,
+    /// A.6: spring-bone simulator (PR6). `None` for models
+    /// without `VRMC_springBone` or when the parser rejects
+    /// the extension. The simulator is built once on model
+    /// load and stepped per-frame inside `update_motion`;
+    /// the resulting per-node local rotations are written
+    /// back into `model.nodes.local_rotations` so the next
+    /// `update_skin_palette` picks them up.
+    spring_bone_sim: Option<SpringBoneSimulator>,
+    /// A.6: a clone of the parsed `VRMC_springBone` properties
+    /// (colliders, collider groups, spring chains). The
+    /// simulator's `step` borrows this every frame; keeping
+    /// a clone on the renderer avoids a borrow fight with
+    /// `&mut VrmModel` in the per-frame update.
+    spring_bone_props: Option<SpringBoneProperties>,
 }
 
 impl CharacterRenderer {
@@ -118,6 +132,8 @@ impl CharacterRenderer {
             look_at_bone_output: None,
             active_emotion: None,
             drag: CharacterDragState::default(),
+            spring_bone_sim: None,
+            spring_bone_props: None,
             vrma: None,
             vrma_player: VrmaPlayer::default(),
             vrma_path: None,
@@ -133,6 +149,13 @@ impl CharacterRenderer {
     /// so it is only visible from sibling test modules.
     #[cfg(test)]
     pub(crate) fn set_model_for_test(&mut self, model: VrmModel) {
+        if let Some(props) = model.spring_bones.clone() {
+            self.spring_bone_sim = build_spring_bone_simulator(&model, &props);
+            self.spring_bone_props = Some(props);
+        } else {
+            self.spring_bone_sim = None;
+            self.spring_bone_props = None;
+        }
         self.model = Some(model);
     }
 
@@ -180,6 +203,19 @@ impl CharacterRenderer {
                     model.joint_count(),
                 );
                 let renderer = VrmRenderer::new(device, queue, surface_format, &model);
+                // A.6: build the spring-bone simulator (if the
+                // model has VRMC_springBone) BEFORE moving the
+                // model into `self.model`, so the borrow on
+                // `model.nodes.*` is clean. The simulator is
+                // stepped per-frame in `update_motion`.
+                if let Some(props) = model.spring_bones.clone() {
+                    let sim = build_spring_bone_simulator(&model, &props);
+                    self.spring_bone_sim = sim;
+                    self.spring_bone_props = Some(props);
+                } else {
+                    self.spring_bone_sim = None;
+                    self.spring_bone_props = None;
+                }
                 self.model = Some(model);
                 self.renderer = Some(renderer);
             }
@@ -306,7 +342,70 @@ impl CharacterRenderer {
         // eyes track the cursor. `None` for `"expression"`-
         // type models, where the LookAt signal routes into
         // morph weights via `apply_emotions` instead.
+        // Skin palette. PR4.16: the LookAt bone output (set
+        // by `update_look_at` for `"bone"`-type models) is
+        // composed on top of the VRMA pose so the head and
+        // eyes track the cursor. `None` for `"expression"`-
+        // type models, where the LookAt signal routes into
+        // morph weights via `apply_emotions` instead.
         let palette = model.update_skin_palette(&frame, self.look_at_bone_output.as_ref());
+
+        // A.6: step the spring-bone simulator. The simulator
+        // reads the per-node world transforms the palette
+        // update just produced and writes the updated local
+        // rotations for the affected joints back into
+        // `model.nodes.local_rotations`. The next
+        // `update_skin_palette` call (next frame) picks them
+        // up, so the simulator's effect on the silhouette
+        // lags one frame — a single-frame delay is
+        // imperceptible at 60 Hz and is the standard pattern
+        // for VRMC_springBone in v1 / v0 reference impls.
+        if let (Some(sim), Some(props)) = (
+            self.spring_bone_sim.as_mut(),
+            self.spring_bone_props.as_ref(),
+        ) {
+            let n = model.nodes.len();
+            let mut world_positions = std::collections::HashMap::with_capacity(n);
+            let mut world_rotations = std::collections::HashMap::with_capacity(n);
+            let mut parent_world_rotations = std::collections::HashMap::with_capacity(n);
+            let mut collider_positions = std::collections::HashMap::new();
+            let mut collider_rotations = std::collections::HashMap::new();
+            for i in 0..n {
+                world_positions.insert(i, model.nodes.world_positions[i]);
+                world_rotations.insert(i, model.nodes.world_rotations[i]);
+                let p = model.nodes.parents[i];
+                parent_world_rotations.insert(
+                    i,
+                    if p < 0 {
+                        Quat::IDENTITY
+                    } else {
+                        model.nodes.world_rotations[p as usize]
+                    },
+                );
+            }
+            for collider in &props.colliders {
+                let node = collider.node;
+                if node < n {
+                    collider_positions.insert(node, model.nodes.world_positions[node]);
+                    collider_rotations.insert(node, model.nodes.world_rotations[node]);
+                }
+            }
+            let updated = sim.step(
+                dt_secs,
+                props,
+                &world_positions,
+                &world_rotations,
+                &parent_world_rotations,
+                &collider_positions,
+                &collider_rotations,
+            );
+            for (node, rotation) in updated {
+                if node < n {
+                    model.nodes.local_rotations[node] = rotation;
+                }
+            }
+        }
+
         if palette.is_empty() {
             None
         } else {
@@ -1057,6 +1156,88 @@ impl CharacterRenderer {
 /// without constructing a full `VrmModel`.
 fn bone_world_rest_position(model: &VrmModel, bone: &HumanoidBoneEntry) -> Vec3 {
     crate::character::collider::compute_rest_world_positions(model)[bone.node]
+}
+
+/// A.6: build a `SpringBoneSimulator` from the loaded model
+/// and the parsed `VRMC_springBone` extension. Reads the
+/// model-wide world transforms (positions / rotations) and
+/// the rest local rotations; the simulator's `step` later
+/// needs the live transforms every frame, so a clone of the
+/// rest positions + rest local rotations is enough to
+/// initialise the per-joint state.
+fn build_spring_bone_simulator(
+    model: &VrmModel,
+    props: &SpringBoneProperties,
+) -> Option<SpringBoneSimulator> {
+    if props.springs.is_empty() {
+        return None;
+    }
+    let world_positions_vec = crate::character::collider::compute_rest_world_positions(model);
+    let world_rotations = collect_world_rest_rotations(model);
+    let parent_world_rotations = collect_parent_world_rest_rotations(model);
+    let world_positions: std::collections::HashMap<usize, Vec3> = (0..world_positions_vec.len())
+        .map(|i| (i, world_positions_vec[i]))
+        .collect();
+    let local_rotations: std::collections::HashMap<usize, Quat> = model
+        .nodes
+        .rest_local_rotations
+        .iter()
+        .enumerate()
+        .map(|(i, q)| (i, *q))
+        .collect();
+    let sim = SpringBoneSimulator::new(
+        props,
+        &world_positions,
+        &world_rotations,
+        &parent_world_rotations,
+        &local_rotations,
+    );
+    Some(sim)
+}
+
+/// A.6: walk the parent chain from the rest-pose world
+/// transforms. The `SpringBoneSimulator::new` constructor
+/// expects a per-node world rotation, but the rest-pose
+/// values are stored on the `Node::transform()` of the
+/// glTF source. The loader leaves the `world_rotations`
+/// vec at identity until `update_skin_palette` fills it,
+/// so we accumulate the rest local rotations up the
+/// parent chain to produce the rest world rotations.
+fn collect_world_rest_rotations(model: &VrmModel) -> std::collections::HashMap<usize, Quat> {
+    let n = model.nodes.len();
+    let mut out = std::collections::HashMap::with_capacity(n);
+    for i in 0..n {
+        let mut q = Quat::IDENTITY;
+        let mut cur = i as i32;
+        // Walk to the root, accumulating rotations.
+        while cur >= 0 {
+            q = model.nodes.rest_local_rotations[cur as usize] * q;
+            cur = model.nodes.parents[cur as usize];
+        }
+        out.insert(i, q);
+    }
+    out
+}
+
+/// A.6: same as `collect_world_rest_rotations` but stops one
+/// step short of each node so the per-bone parent
+/// rotations are available to the simulator.
+fn collect_parent_world_rest_rotations(model: &VrmModel) -> std::collections::HashMap<usize, Quat> {
+    let n = model.nodes.len();
+    let mut out = std::collections::HashMap::with_capacity(n);
+    for i in 0..n {
+        let parent = model.nodes.parents[i];
+        if parent < 0 {
+            out.insert(i, Quat::IDENTITY);
+        } else {
+            out.insert(
+                i,
+                *out.get(&(parent as usize)).unwrap_or(&Quat::IDENTITY)
+                    * model.nodes.rest_local_rotations[parent as usize],
+            );
+        }
+    }
+    out
 }
 
 fn bone_world_position(
