@@ -621,7 +621,19 @@ impl Runtime {
                 if let Some(delta) =
                     crate::character::drag::tick(&mut character.drag, cursor_world_2d)
                 {
+                    // A.8: round the integrated position to
+                    // 0.01 world units (1 cm at the default
+                    // ortho viewport). The legacy Bevy code
+                    // had no rounding; on a high-resolution
+                    // mouse this produced single-pixel
+                    // sub-pixel jitter because the world
+                    // coordinates stored more precision than
+                    // the renderer can actually draw.
                     settings.character_state.character_position += delta;
+                    settings.character_state.character_position.x =
+                        (settings.character_state.character_position.x * 100.0).round() / 100.0;
+                    settings.character_state.character_position.y =
+                        (settings.character_state.character_position.y * 100.0).round() / 100.0;
                 }
             }
             WindowEvent::MouseInput {
