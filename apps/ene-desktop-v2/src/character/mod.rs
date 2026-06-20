@@ -30,8 +30,10 @@ use glam::{Mat4, Quat, Vec3};
 use crate::character_state::{ActiveEmotion, EmotionQueue, transition_emotions};
 use crate::look_at::{LookAtState, compute_world_target, head_world_for};
 
+pub mod collider;
 pub mod drag;
 
+pub use collider::{BonePose, BoneShapeSpec};
 pub use drag::CharacterDragState;
 
 /// Weight below which an active emotion is considered fully
@@ -96,78 +98,8 @@ pub struct CharacterRenderer {
     /// re-reading the asset. `None` when no motion is
     /// loaded.
     vrma_path: Option<PathBuf>,
-}
-
-/// PR5.2: minimum bone radius (in world units). Bones whose
-/// computed radius falls below this — typically finger segments,
-/// which are characteristically short — are filtered out so the
-/// per-character collider count stays small and the per-frame
-/// `update_character_bone_positions` call stays cheap.
-const MIN_BONE_RADIUS: f32 = 0.025;
-
-/// PR5.2: name-based default radius (in model-local units,
-/// before `actual_scale`) for the major humanoid bones. The
-/// values are intentionally generous — the chest, hips, head,
-/// hand, and foot all need a sphere that covers the whole
-/// trunk/extremity, not just half the distance to the next
-/// child (which would be far too small for a 30 cm wide chest).
-/// The user accepted a slightly loose collider, so the values
-/// err on the side of "everything inside the body is hittable".
-const HEAD_BONE_RADIUS: f32 = 0.15;
-const NECK_BONE_RADIUS: f32 = 0.04;
-const CHEST_BONE_RADIUS: f32 = 0.15;
-const UPPER_CHEST_BONE_RADIUS: f32 = 0.12;
-const SPINE_BONE_RADIUS: f32 = 0.08;
-const HIPS_BONE_RADIUS: f32 = 0.12;
-const SHOULDER_BONE_RADIUS: f32 = 0.05;
-const UPPER_ARM_BONE_RADIUS: f32 = 0.07;
-const LOWER_ARM_BONE_RADIUS: f32 = 0.06;
-const HAND_BONE_RADIUS: f32 = 0.08;
-const UPPER_LEG_BONE_RADIUS: f32 = 0.08;
-const LOWER_LEG_BONE_RADIUS: f32 = 0.07;
-const FOOT_BONE_RADIUS: f32 = 0.10;
-const TOES_BONE_RADIUS: f32 = 0.05;
-const JAW_BONE_RADIUS: f32 = 0.04;
-const EYE_BONE_RADIUS: f32 = 0.03;
-/// Fallback for any other bone (typically a finger segment).
-/// Below `MIN_BONE_RADIUS` after `actual_scale` is applied, so
-/// the per-finger colliders are filtered out — the parent
-/// `hand` collider already covers the fingertips.
-const GENERIC_BONE_RADIUS: f32 = 0.02;
-
-/// PR5.2: pick a name-based default radius (in model-local
-/// units) for one humanoid bone.
-///
-/// The humanoid registry stores canonical names with the
-/// `left` / `right` prefix glued on (e.g. `leftfoot`, `rightfoot`,
-/// `leftupperarm`), so we strip the prefix before the lookup —
-/// the central bone (`head`, `chest`, `hips`, ...) and its
-/// left/right siblings land on the same match arm.
-fn name_radius(canonical_name: Option<&str>) -> f32 {
-    let suffix = canonical_name.map(|n| {
-        n.strip_prefix("left")
-            .or_else(|| n.strip_prefix("right"))
-            .unwrap_or(n)
-    });
-    match suffix {
-        Some("head") => HEAD_BONE_RADIUS,
-        Some("neck") => NECK_BONE_RADIUS,
-        Some("chest") => CHEST_BONE_RADIUS,
-        Some("upperchest") => UPPER_CHEST_BONE_RADIUS,
-        Some("spine") => SPINE_BONE_RADIUS,
-        Some("hips") => HIPS_BONE_RADIUS,
-        Some("shoulder") => SHOULDER_BONE_RADIUS,
-        Some("upperarm") => UPPER_ARM_BONE_RADIUS,
-        Some("lowerarm") => LOWER_ARM_BONE_RADIUS,
-        Some("hand") => HAND_BONE_RADIUS,
-        Some("upperleg") => UPPER_LEG_BONE_RADIUS,
-        Some("lowerleg") => LOWER_LEG_BONE_RADIUS,
-        Some("foot") => FOOT_BONE_RADIUS,
-        Some("toes") => TOES_BONE_RADIUS,
-        Some("jaw") => JAW_BONE_RADIUS,
-        Some("eye") => EYE_BONE_RADIUS,
-        _ => GENERIC_BONE_RADIUS,
-    }
+    /// Node indices of bones that have active colliders
+    active_bone_nodes: Vec<usize>,
 }
 
 impl CharacterRenderer {
@@ -189,6 +121,7 @@ impl CharacterRenderer {
             vrma: None,
             vrma_player: VrmaPlayer::default(),
             vrma_path: None,
+            active_bone_nodes: Vec::new(),
         }
     }
 
@@ -792,6 +725,16 @@ impl CharacterRenderer {
         self.camera.target()
     }
 
+    /// PR5.6: build the per-frame camera uniform for the
+    /// debug overlay so its `view_proj` matches what the
+    /// main VRM pass used. The orthographic camera's
+    /// `uniform()` is infallible in practice, so this
+    /// returns `Option` for API symmetry with the debug
+    /// pipeline's own fallible future.
+    pub fn camera_uniform_dbg(&self) -> Option<ene_vrm::camera::CameraUniform> {
+        self.camera.uniform().ok()
+    }
+
     /// PR4.8: latest per-bone output for `"bone"`-type
     /// models. `None` for `"expression"`-type models or
     /// before the first frame. Consumed by
@@ -887,6 +830,18 @@ impl CharacterRenderer {
     #[allow(dead_code)] // One-shot diagnostic log only.
     pub fn depth_size_dbg(&self) -> (u32, u32) {
         self.depth_size
+    }
+
+    /// PR5.6: hand the depth attachment to the debug
+    /// overlay so it can `LoadOp::Load` the depth the main
+    /// VRM pass wrote. Returns `None` before `init` /
+    /// `resize` produces a depth texture.
+    pub fn depth_view(&self) -> Option<&wgpu::TextureView> {
+        self.depth_view.as_ref()
+    }
+
+    pub fn model(&self) -> Option<&VrmModel> {
+        self.model.as_ref()
     }
 
     /// PR4.2 follow-up diagnostic: AABB of the loaded vertex data
@@ -1012,150 +967,79 @@ impl CharacterRenderer {
     ///
     /// `actual_scale` is `auto_fit_scale * model_scale`. The
     /// returned **radius** is in world units: leaf bones use a
-    /// name-based default (head/foot/hand) that covers the whole
-    /// body part including the tips; non-leaf bones use half the
-    /// distance to the farthest child. Both are scaled by
-    /// `actual_scale` so the collider matches the rendered mesh
-    /// even when the user has not set `model_scale = 1.0`.
-    pub fn build_character_bone_data(&self, actual_scale: f32) -> Vec<(Vec3, f32)> {
+    /// PR5.4: build the per-bone [`BoneShapeSpec`] list that the
+    /// runtime hands to
+    /// [`crate::physics::PhysicsWorld::add_character_bone_colliders`].
+    /// The shape category (sphere / capsule / capsule_y) and
+    /// the dimensions come from the per-vertex skinning
+    /// weights of the loaded mesh (see
+    /// [`crate::character::collider::compute_bone_specs`]);
+    /// finger segments and other bones whose computed radius
+    /// falls below [`MIN_BONE_RADIUS`] are dropped.
+    ///
+    /// `actual_scale = auto_fit_scale × model_scale`. The
+    /// returned dimensions are already in world units so the
+    /// colliders match the rendered mesh even when the user
+    /// has not set `model_scale = 1.0`.
+    pub fn build_character_bone_specs(&mut self, actual_scale: f32) -> Vec<BoneShapeSpec> {
         let Some(model) = self.model.as_ref() else {
             return Vec::new();
         };
-        let center = Vec3::from(model.center());
-        let normalize_scale = model.normalize_scale();
-        // Cache the rest-pose world positions once for the whole
-        // model; `compute_bone_radius` walks the hierarchy for
-        // every bone and would otherwise re-walk the same chain
-        // ~50 times per call.
-        let rest_world = compute_rest_world_positions(model);
-
-        let mut out = Vec::new();
-
-        for (bone, entry) in model.humanoid.iter() {
-            let pos_raw = rest_world[entry.node];
-            let pos_local = (pos_raw - center) * normalize_scale;
-            let radius = compute_bone_radius(
-                &rest_world,
-                model,
-                entry.node,
-                Some(bone.as_str()),
-                normalize_scale,
-                actual_scale,
-            );
-            if radius < MIN_BONE_RADIUS {
-                continue;
-            }
-            out.push((pos_local, radius));
-        }
-        out
+        let specs = crate::character::collider::compute_bone_specs(model, actual_scale);
+        self.active_bone_nodes = specs.iter().map(|spec| spec.bone_node).collect();
+        specs
     }
 
-    /// PR5.2: read the **current** (animated) local-frame
-    /// positions of the humanoid bones, in the same order as
-    /// [`Self::build_character_bone_data`]. The animation
+    /// PR5.4: read the **current** (animated) world-space
+    /// translation and rotation of active humanoid bones, in
+    /// the same order as
+    /// [`Self::build_character_bone_specs`]. The animation
     /// system (`update_skin_palette` inside `update_motion`)
-    /// updates `model.nodes.world_positions` every frame, so
-    /// reading it here gives the live post-animation position
+    /// updates `model.nodes.world_positions` and
+    /// `model.nodes.world_rotations` every frame, so reading
+    /// them here gives the live post-animation transforms
     /// without any per-frame GPU readback.
-    pub fn current_bone_local_positions(&self) -> Vec<Vec3> {
+    pub fn current_bone_poses(&self) -> Vec<BonePose> {
         let Some(model) = self.model.as_ref() else {
             return Vec::new();
         };
         let center = Vec3::from(model.center());
         let normalize_scale = model.normalize_scale();
         let mut out = Vec::new();
-        for (_bone, entry) in model.humanoid.iter() {
-            let pos_raw = model.nodes.world_positions[entry.node];
+        for &node_idx in &self.active_bone_nodes {
+            let pos_raw = model.nodes.world_positions[node_idx];
             let pos_local = (pos_raw - center) * normalize_scale;
-            out.push(pos_local);
+            let rot = model.nodes.world_rotations[node_idx];
+            out.push(BonePose {
+                translation: pos_local,
+                rotation: rot,
+            });
         }
         out
     }
-}
 
-/// PR5.2: walk the parent chain once and return the rest-pose
-/// world position of every node. The character has ~30-50
-/// humanoid bones; calling this once at model-load time and
-/// re-using the result for every `compute_bone_radius` call is
-/// far cheaper than re-walking the chain per bone.
-fn compute_rest_world_positions(model: &VrmModel) -> Vec<Vec3> {
-    let mut world_positions = model.nodes.rest_local_positions.clone();
-    let n = model.nodes.len();
-    for i in 0..n {
-        if let Some(&p) = model.nodes.parents.get(i)
-            && p >= 0
+    /// Retrieve the humanoid bone name for an active collider index.
+    pub fn get_active_bone_name(&self, idx: usize) -> Option<String> {
+        let node_idx = *self.active_bone_nodes.get(idx)?;
+        let model = self.model.as_ref()?;
+        if let Some((name, _)) = model
+            .humanoid
+            .iter()
+            .find(|(_, entry)| entry.node == node_idx)
         {
-            let p = p as usize;
-            if i > p {
-                let rot_p = model.nodes.rest_local_rotations[p];
-                let pos_p = world_positions[p];
-                world_positions[i] = rot_p * model.nodes.rest_local_positions[i] + pos_p;
+            return Some(name.to_string());
+        }
+        if let Some(spring_bones) = &model.spring_bones {
+            for chain in &spring_bones.springs {
+                if chain.joints.iter().any(|j| j.node == node_idx) {
+                    let category =
+                        crate::character::collider::classify_spring_chain(chain.name.as_deref());
+                    return Some(category.to_string());
+                }
             }
         }
+        None
     }
-    world_positions
-}
-
-/// PR5.2: compute a sensible sphere radius for one bone, in
-/// **world units** (after `actual_scale`).
-///
-/// Two complementary estimates are taken and the larger wins:
-///
-/// - **Name-based default** (in model-local units, then scaled by
-///   `actual_scale`): the per-bone name table in [`name_radius`]
-///   picks generous values for `head` / `chest` / `hips` / etc.
-///   that cover the whole trunk or extremity, not just half the
-///   distance to the next child (which would be far too small
-///   for a 30 cm wide chest).
-/// - **Auto-computed**: `0.5 × (max distance to any child bone)`,
-///   in model-local units, then scaled. Half the gap to the
-///   farthest child is enough to cover the child region's
-///   halfway point; this estimate is usually larger than the
-///   name default for long limb segments (e.g. `upperArm` →
-///   `lowerArm`).
-///
-/// Taking the max means the chest is covered by its generous
-/// name default (the children `neck` / `shoulder` are too
-/// close for `0.5 × max_dist` to cover the whole trunk), while
-/// `upperArm` is covered by the auto-computed estimate (which
-/// sees the long reach to `lowerArm`).
-///
-/// The `MIN_BONE_RADIUS` filter (in `build_character_bone_data`)
-/// drops very small radii afterwards — typically finger
-/// segments, which are filtered out at this stage so the hand
-/// bone (with a generous radius) ends up covering the
-/// fingertips instead.
-fn compute_bone_radius(
-    rest_world: &[Vec3],
-    model: &VrmModel,
-    bone_node: usize,
-    bone_name: Option<&str>,
-    normalize_scale: f32,
-    actual_scale: f32,
-) -> f32 {
-    let bone_pos = rest_world[bone_node];
-    let mut max_child_dist_local = 0.0f32;
-    let mut has_children = false;
-    for (i, &parent) in model.nodes.parents.iter().enumerate() {
-        if parent >= 0 && parent as usize == bone_node {
-            has_children = true;
-            let child_pos = rest_world[i];
-            let dist = (child_pos - bone_pos).length() * normalize_scale;
-            if dist > max_child_dist_local {
-                max_child_dist_local = dist;
-            }
-        }
-    }
-    // Both estimates are in model-local units; take the larger
-    // then scale to world units.
-    let name_default = name_radius(bone_name);
-    let auto_radius = if has_children {
-        max_child_dist_local * 0.5
-    } else {
-        0.0
-    };
-    let base_radius = name_default.max(auto_radius);
-    base_radius * actual_scale
 }
 
 /// Compute the world-space position of a humanoid bone. Mirrors
@@ -1172,7 +1056,7 @@ fn compute_bone_radius(
 /// are taken as primitives so the helper can be unit-tested
 /// without constructing a full `VrmModel`.
 fn bone_world_rest_position(model: &VrmModel, bone: &HumanoidBoneEntry) -> Vec3 {
-    compute_rest_world_positions(model)[bone.node]
+    crate::character::collider::compute_rest_world_positions(model)[bone.node]
 }
 
 fn bone_world_position(
