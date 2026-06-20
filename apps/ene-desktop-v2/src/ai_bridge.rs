@@ -16,7 +16,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use ene_core::{EneEvent, EneEventReceiver, EneHandle};
+use ene_core::{EneEvent, EneEventReceiver, EneHandle, PermissionDecision, UserInputResponse};
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
@@ -124,6 +124,39 @@ impl AiBridge {
     /// the background `pump_events` task.
     pub fn is_processing(&self) -> bool {
         self.processing.load(Ordering::Relaxed)
+    }
+
+    /// A.5: forward a `PermissionDecision` for the request
+    /// currently sitting in `UiState::pending_permission`.
+    /// Called by the AI page's Yes / No / Always buttons. The
+    /// legacy Bevy path used `MessageWriter<EneRequestEvent>`
+    /// for the same; v2 forwards through the
+    /// `EneHandle::decide_permission` oneshot-style send.
+    /// `RequestId` is re-exported by `ene_core`; we accept the
+    /// public `String`-backed form to avoid pulling the actor's
+    /// private types into the v2 UI layer.
+    pub fn answer_permission(
+        &self,
+        request_id: impl Into<ene_core::RequestId>,
+        decision: PermissionDecision,
+    ) -> Result<(), String> {
+        self.handle
+            .decide_permission(request_id, decision)
+            .map_err(|e| e.to_string())
+    }
+
+    /// A.5: forward a `UserInputResponse` for the request
+    /// currently sitting in `UiState::pending_user_input`. The
+    /// response carries one `MultiAnswer` per sub-question in
+    /// the original prompt, in the same order.
+    pub fn answer_user_input(
+        &self,
+        request_id: impl Into<ene_core::RequestId>,
+        response: UserInputResponse,
+    ) -> Result<(), String> {
+        self.handle
+            .submit_user_input(request_id, response)
+            .map_err(|e| e.to_string())
     }
 
     /// Pull every AI event currently sitting in the bus into the

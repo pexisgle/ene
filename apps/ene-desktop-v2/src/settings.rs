@@ -233,20 +233,16 @@ pub struct UiState {
     pub show_collider_debug: bool,
     /// PR5.6: the name of the bone collider currently hovered, if any.
     pub hovered_bone_name: Option<String>,
-    #[allow(dead_code)] // PR2 will bind this to the AI page chat input.
     pub ai_chat_input: String,
-    #[allow(dead_code)] // PR2 will display this in the AI page "Latest Response" panel.
     pub ai_latest_response: String,
     /// A pending permission request (Yes / No / Always) from the AI
     /// bridge. Populated when the runtime observes
     /// `AiStreamUpdate::PermissionRequired`. The settings UI is
     /// auto-shown when this transitions from `None` → `Some(_)`.
-    #[allow(dead_code)] // PR2 will render a permission dialog.
     pub pending_permission: Option<PendingPermission>,
     /// A pending interactive question (multi-select + free-text)
     /// from the AI bridge. Mirrors
     /// `EneStreamEvent::UserInputRequired`.
-    #[allow(dead_code)] // PR2 will render a questions dialog.
     pub pending_user_input: Option<PendingUserInput>,
     /// One per [`UserInputPrompt::items`] entry, used as scratch
     /// state for the question dialog.
@@ -255,7 +251,6 @@ pub struct UiState {
 }
 
 #[derive(Clone, Debug)]
-#[expect(dead_code)] // PR2 populates via AI bridge; the dialog renderer (PR2+) reads.
 pub struct PendingPermission {
     pub request_id: ene_core::RequestId,
     pub action: String,
@@ -264,14 +259,12 @@ pub struct PendingPermission {
 }
 
 #[derive(Clone, Debug)]
-#[expect(dead_code)] // PR2 populates via AI bridge; the dialog renderer (PR2+) reads.
 pub struct PendingUserInput {
     pub request_id: ene_core::RequestId,
     pub prompt: ene_tool_proto::UserInputPrompt,
 }
 
 #[derive(Clone, Debug, Default)]
-#[expect(dead_code)] // Per-question scratch state; the dialog renderer (PR2+) reads.
 pub struct QuestionDraft {
     pub text: String,
     pub selected: Option<String>,
@@ -758,5 +751,29 @@ mod tests {
         let raw = "";
         let resolved = if raw.is_empty() { "neutral" } else { raw };
         assert_eq!(resolved, "neutral");
+    }
+
+    /// A.5: the `PendingPermission` / `PendingUserInput` /
+    /// `QuestionDraft` types are now consumed by the dialog
+    /// renderer in `page_ai.rs`. A future refactor that
+    /// accidentally drops one of the fields would lose the
+    /// dialog data, so this test pins the public surface.
+    #[test]
+    fn pending_dialog_types_constructible() {
+        let _perm = PendingPermission {
+            request_id: ene_core::RequestId::new("test"),
+            action: "fs.write".to_string(),
+            target: "/tmp/example.txt".to_string(),
+            description: "Write a 4 KB file".to_string(),
+        };
+        let _draft = QuestionDraft {
+            text: "alice".to_string(),
+            selected: Some("yes".to_string()),
+            skipped: false,
+        };
+        // The `UserInputPrompt` constructor is enforced by
+        // `QuestionItem` so we don't try to construct it here
+        // — we just need the compiler to know the types are
+        // usable.
     }
 }
