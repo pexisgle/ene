@@ -59,8 +59,10 @@ impl SettingsUi {
         }
     }
 
-    /// Switch the visible page.
-    #[expect(dead_code)] // Hotkey-driven page switcher; not wired in PR2 yet.
+    /// Switch the visible page. Used by the runtime to jump to the
+    /// AI page when a `PermissionRequired` or `UserInputRequired`
+    /// event arrives (A.2 follow-up: settings tray menu opens to a
+    /// specific page).
     pub fn show(&mut self, page: PageKind) {
         self.current_page = page;
     }

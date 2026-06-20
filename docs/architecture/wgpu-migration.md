@@ -1296,6 +1296,6 @@ apps/ene-desktop-v2/src/
 - The "pending permission / question" dialogs are not rendered yet; the data path is wired. The next PR that touches this area will add the dialogs.
 - Numeric row `TextEdit` fields are display-only; the +/- buttons are the primary input. The legacy had re-parse-on-Enter.
 - `AiBridge::processing` (the legacy's `ene.processing` flag) does not yet gate the chat input. Will land with PR3.
-- The "Settings" tray menu still toggles visibility only; opening it to a specific page (e.g. AI when a permission arrives) is a small follow-up.
+- The "Settings" tray menu now carries an optional page focus: `TrayAction::OpenSettings { page: Option<PageKind> }`. The tray click / menu paths still pass `None` (legacy behavior), but the runtime can also push `Some(PageKind::Ai)` when a `PermissionRequired` or `UserInputRequired` event arrives, so the AI page (and the dialogs A.5 will render) is on screen by the time the user reaches for the keyboard.
 
 
