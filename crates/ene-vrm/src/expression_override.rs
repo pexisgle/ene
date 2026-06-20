@@ -625,6 +625,78 @@ mod tests {
         assert_eq!(w.get(&mk("blink")), Some(&0.0));
     }
 
+    // ---- PR4.5+ blend-shape graph (v1-aligned) ----
+
+    /// v1-aligned test: an emotion that sets `overrideBlink = block`
+    /// must zero **every** blink-family expression — the synthetic
+    /// `blink` and the per-side `blinkLeft` / `blinkRight`. The
+    /// spec describes the blink family as a single overridable
+    /// target group; missing a side blink would let a
+    /// `happy`-suppressed character's left eye still blink.
+    #[test]
+    fn block_zeros_all_blink_family_members() {
+        let mut w = mk_map(&[
+            ("happy", 0.8),
+            ("blink", 0.6),
+            ("blinkLeft", 0.4),
+            ("blinkRight", 0.4),
+        ]);
+        let defs = vec![
+            def(
+                "happy",
+                false,
+                Default::default(),
+                ExpressionOverrideType::Block,
+                Default::default(),
+            ),
+            def_none("blink"),
+            def_none("blinkLeft"),
+            def_none("blinkRight"),
+        ];
+        apply_overrides(&mut w, &defs);
+        // happy is not a blink family member — stays.
+        assert_eq!(w.get(&mk("happy")), Some(&0.8));
+        // All three blink-family members are zeroed by
+        // happy.overrideBlink = block.
+        assert_eq!(w.get(&mk("blink")), Some(&0.0));
+        assert_eq!(w.get(&mk("blinkLeft")), Some(&0.0));
+        assert_eq!(w.get(&mk("blinkRight")), Some(&0.0));
+    }
+
+    /// v1-aligned test: a `block` on the look-at family zeros
+    /// `lookUp` / `lookDown` / `lookLeft` / `lookRight` together.
+    /// The same-family block covers the whole `GAZE_TARGET_NAMES`
+    /// set.
+    #[test]
+    fn block_zeros_all_gaze_family_members() {
+        let mut w = mk_map(&[
+            ("happy", 0.7),
+            ("lookUp", 0.5),
+            ("lookDown", 0.4),
+            ("lookLeft", 0.3),
+            ("lookRight", 0.2),
+        ]);
+        let defs = vec![
+            def(
+                "happy",
+                false,
+                Default::default(),
+                Default::default(),
+                ExpressionOverrideType::Block,
+            ),
+            def_none("lookUp"),
+            def_none("lookDown"),
+            def_none("lookLeft"),
+            def_none("lookRight"),
+        ];
+        apply_overrides(&mut w, &defs);
+        assert_eq!(w.get(&mk("happy")), Some(&0.7));
+        assert_eq!(w.get(&mk("lookUp")), Some(&0.0));
+        assert_eq!(w.get(&mk("lookDown")), Some(&0.0));
+        assert_eq!(w.get(&mk("lookLeft")), Some(&0.0));
+        assert_eq!(w.get(&mk("lookRight")), Some(&0.0));
+    }
+
     // ---- same-kind skip ----
 
     #[test]
