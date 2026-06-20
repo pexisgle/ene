@@ -238,6 +238,19 @@ impl ApplicationHandler for Runtime {
                     }
                 }
 
+                // PR-LX.7: build the mask render pass against
+                // the same `Rgba8Unorm` target format the
+                // capture camera uses. The pipeline is
+                // small + uniform; one-time cost at
+                // `resumed`.
+                #[cfg(target_os = "linux")]
+                if self.state.mask_renderer.is_none() {
+                    self.state.mask_renderer = Some(ene_vrm::MaskRenderer::new(
+                        &self.state.gpu.device,
+                        crate::platform::wayland_mask_capture::MASK_TARGET_FORMAT,
+                    ));
+                }
+
                 // PR-LX.5: open the X11 connection (if any)
                 // for the click-through fallback. The probe
                 // is cheap; on Wayland-only builds the
@@ -356,6 +369,18 @@ impl ApplicationHandler for Runtime {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // PR-LX.7: block briefly on the mask readback so the
+        // silhouette read on this frame is consumed by the
+        // click-through dispatcher below. One-frame latency
+        // is acceptable; the readback is ~3.4 KB at
+        // downsample=8 and the `MapAsync` wait is the only
+        // stall.
+        #[cfg(target_os = "linux")]
+        if let Some(mask) = self.state.mask_capture.as_ref() {
+            let mut guard = mask.lock();
+            guard.read_back(&self.state.gpu.device, &self.state.gpu.queue);
+        }
+
         // 1. Drain the cross-subsystem bus. Tray actions update UI
         //    state; AI events drive the latest-response buffer and
         //    auto-popup. `Quit` exits.
@@ -1218,6 +1243,40 @@ impl Runtime {
                 }
             }
         });
+
+        // PR-LX.7: mask render pass. The mask shader writes
+        // a solid `(1, 1, 1, 1)` triangle list for every
+        // primitive into the offscreen `Rgba8Unorm` target.
+        // `extract_rectangles` consumes the red channel of
+        // that target on the next `about_to_wait` (one frame
+        // of latency) and feeds the result into
+        // `apply_linux_click_through`. The pass runs in a
+        // separate encoder because the mask target is a
+        // texture, not the swapchain.
+        #[cfg(target_os = "linux")]
+        if let Some(mask) = self.state.mask_capture.as_ref()
+            && let Some(mask_renderer) = self.state.mask_renderer.as_ref()
+            && let Some(model) = character.model()
+        {
+            let camera_uniform = character
+                .camera_uniform_dbg()
+                .expect("orthographic camera uniform is infallible");
+            let mask_guard = mask.lock();
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("mask.encoder"),
+            });
+            mask_renderer.render(
+                queue,
+                &mut encoder,
+                mask_guard.target_view(),
+                model,
+                &camera_uniform,
+                &model_uniform,
+            );
+            mask_guard.encode_readback(&mut encoder);
+            drop(mask_guard);
+            queue.submit(std::iter::once(encoder.finish()));
+        }
         match result {
             Ok(()) => Ok(()),
             Err(AcquireError::Reconfigure) => {
