@@ -1,54 +1,107 @@
-use super::{
-    SettingsButtonAction, SettingsValueKind,
-    widgets::{apply_action, render_cycle_row},
+//! Graphics settings page.
+//!
+//! Three cycle rows (target FPS, shadow quality, antialiasing) that
+//! drive the same [`crate::settings::GraphicsSettings`] fields the
+//! legacy Bevy `page_graphics.rs` exposed.
+use super::widgets::{
+    SettingsAction, apply_action, format_aa_label, format_fps_label, format_shadow_label,
 };
-use crate::ai_bridge::EneRequestEvent;
-use crate::app_config::CharacterSettings;
-use crate::character::CharacterAnimationControl;
-use bevy::prelude::*;
-use bevy_egui::egui;
+use crate::ai_bridge::AiBridge;
+use crate::character_state::AnimationControl;
+use crate::settings::CharacterSettings;
+use std::sync::Arc;
 
-pub fn render_graphics_page(
+pub fn render(
     ui: &mut egui::Ui,
     settings: &mut CharacterSettings,
-    animation_control: &mut CharacterAnimationControl,
-    ai_request_writer: &mut MessageWriter<EneRequestEvent>,
+    animation: &mut AnimationControl,
+    ai: &Arc<AiBridge>,
+    world: &mut hecs::World,
+    ui_entity: hecs::Entity,
 ) {
     ui.vertical(|ui| {
-        if let Some(action) = render_cycle_row(
-            ui,
-            "Target FPS",
-            SettingsValueKind::TargetFps,
-            settings,
-            animation_control,
-            SettingsButtonAction::TargetFpsDown,
-            SettingsButtonAction::TargetFpsUp,
-        ) {
-            apply_action(action, settings, animation_control, ai_request_writer);
-        }
+        ui.horizontal(|ui| {
+            ui.label("Target FPS");
+            if ui.button("<").clicked() {
+                apply_action(
+                    SettingsAction::TargetFpsDown,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                );
+            }
+            ui.add_sized(
+                [220.0, 0.0],
+                egui::Label::new(format_fps_label(settings.graphics.target_fps)),
+            );
+            if ui.button(">").clicked() {
+                apply_action(
+                    SettingsAction::TargetFpsUp,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                );
+            }
+        });
 
-        if let Some(action) = render_cycle_row(
-            ui,
-            "Shadow Quality",
-            SettingsValueKind::ShadowQuality,
-            settings,
-            animation_control,
-            SettingsButtonAction::ShadowQualityDown,
-            SettingsButtonAction::ShadowQualityUp,
-        ) {
-            apply_action(action, settings, animation_control, ai_request_writer);
-        }
+        ui.horizontal(|ui| {
+            ui.label("Shadow Quality");
+            if ui.button("<").clicked() {
+                apply_action(
+                    SettingsAction::ShadowQualityDown,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                );
+            }
+            ui.add_sized(
+                [220.0, 0.0],
+                egui::Label::new(format_shadow_label(settings.graphics.shadow_quality)),
+            );
+            if ui.button(">").clicked() {
+                apply_action(
+                    SettingsAction::ShadowQualityUp,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                );
+            }
+        });
 
-        if let Some(action) = render_cycle_row(
-            ui,
-            "Antialiasing",
-            SettingsValueKind::AntialiasingMode,
-            settings,
-            animation_control,
-            SettingsButtonAction::AntialiasingModeDown,
-            SettingsButtonAction::AntialiasingModeUp,
-        ) {
-            apply_action(action, settings, animation_control, ai_request_writer);
-        }
+        ui.horizontal(|ui| {
+            ui.label("Antialiasing");
+            if ui.button("<").clicked() {
+                apply_action(
+                    SettingsAction::AntialiasingModeDown,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                );
+            }
+            ui.add_sized(
+                [220.0, 0.0],
+                egui::Label::new(format_aa_label(settings.graphics.antialiasing_mode)),
+            );
+            if ui.button(">").clicked() {
+                apply_action(
+                    SettingsAction::AntialiasingModeUp,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                );
+            }
+        });
     });
 }

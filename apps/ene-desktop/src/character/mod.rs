@@ -19,19 +19,24 @@
 //!   `FADE_FLOOR`, then forgets it.
 use std::path::PathBuf;
 
+use crate::settings::AntialiasingMode;
 use ene_vrm::{
     ExpressionName, HumanoidBoneEntry, LookAtBoneOutput, LookAtEvaluator, LookAtOutput,
     LookAtProperties, ModelUniform, OrthographicCamera, VrmModel, VrmRenderer, evaluate_clip,
     load_vrm, load_vrma,
 };
-use ene_vrm::{VrmaAsset, VrmaPlayer};
+use ene_vrm::{
+    SpringBoneProperties, SpringBoneSimulator, VrmaAsset, VrmaPlayer, post_process::PostProcessor,
+};
 use glam::{Mat4, Quat, Vec3};
 
 use crate::character_state::{ActiveEmotion, EmotionQueue, transition_emotions};
 use crate::look_at::{LookAtState, compute_world_target, head_world_for};
 
+pub mod collider;
 pub mod drag;
 
+pub use collider::{BonePose, BoneShapeSpec};
 pub use drag::CharacterDragState;
 
 /// Weight below which an active emotion is considered fully
@@ -96,78 +101,37 @@ pub struct CharacterRenderer {
     /// re-reading the asset. `None` when no motion is
     /// loaded.
     vrma_path: Option<PathBuf>,
-}
-
-/// PR5.2: minimum bone radius (in world units). Bones whose
-/// computed radius falls below this — typically finger segments,
-/// which are characteristically short — are filtered out so the
-/// per-character collider count stays small and the per-frame
-/// `update_character_bone_positions` call stays cheap.
-const MIN_BONE_RADIUS: f32 = 0.025;
-
-/// PR5.2: name-based default radius (in model-local units,
-/// before `actual_scale`) for the major humanoid bones. The
-/// values are intentionally generous — the chest, hips, head,
-/// hand, and foot all need a sphere that covers the whole
-/// trunk/extremity, not just half the distance to the next
-/// child (which would be far too small for a 30 cm wide chest).
-/// The user accepted a slightly loose collider, so the values
-/// err on the side of "everything inside the body is hittable".
-const HEAD_BONE_RADIUS: f32 = 0.15;
-const NECK_BONE_RADIUS: f32 = 0.04;
-const CHEST_BONE_RADIUS: f32 = 0.15;
-const UPPER_CHEST_BONE_RADIUS: f32 = 0.12;
-const SPINE_BONE_RADIUS: f32 = 0.08;
-const HIPS_BONE_RADIUS: f32 = 0.12;
-const SHOULDER_BONE_RADIUS: f32 = 0.05;
-const UPPER_ARM_BONE_RADIUS: f32 = 0.07;
-const LOWER_ARM_BONE_RADIUS: f32 = 0.06;
-const HAND_BONE_RADIUS: f32 = 0.08;
-const UPPER_LEG_BONE_RADIUS: f32 = 0.08;
-const LOWER_LEG_BONE_RADIUS: f32 = 0.07;
-const FOOT_BONE_RADIUS: f32 = 0.10;
-const TOES_BONE_RADIUS: f32 = 0.05;
-const JAW_BONE_RADIUS: f32 = 0.04;
-const EYE_BONE_RADIUS: f32 = 0.03;
-/// Fallback for any other bone (typically a finger segment).
-/// Below `MIN_BONE_RADIUS` after `actual_scale` is applied, so
-/// the per-finger colliders are filtered out — the parent
-/// `hand` collider already covers the fingertips.
-const GENERIC_BONE_RADIUS: f32 = 0.02;
-
-/// PR5.2: pick a name-based default radius (in model-local
-/// units) for one humanoid bone.
-///
-/// The humanoid registry stores canonical names with the
-/// `left` / `right` prefix glued on (e.g. `leftfoot`, `rightfoot`,
-/// `leftupperarm`), so we strip the prefix before the lookup —
-/// the central bone (`head`, `chest`, `hips`, ...) and its
-/// left/right siblings land on the same match arm.
-fn name_radius(canonical_name: Option<&str>) -> f32 {
-    let suffix = canonical_name.map(|n| {
-        n.strip_prefix("left")
-            .or_else(|| n.strip_prefix("right"))
-            .unwrap_or(n)
-    });
-    match suffix {
-        Some("head") => HEAD_BONE_RADIUS,
-        Some("neck") => NECK_BONE_RADIUS,
-        Some("chest") => CHEST_BONE_RADIUS,
-        Some("upperchest") => UPPER_CHEST_BONE_RADIUS,
-        Some("spine") => SPINE_BONE_RADIUS,
-        Some("hips") => HIPS_BONE_RADIUS,
-        Some("shoulder") => SHOULDER_BONE_RADIUS,
-        Some("upperarm") => UPPER_ARM_BONE_RADIUS,
-        Some("lowerarm") => LOWER_ARM_BONE_RADIUS,
-        Some("hand") => HAND_BONE_RADIUS,
-        Some("upperleg") => UPPER_LEG_BONE_RADIUS,
-        Some("lowerleg") => LOWER_LEG_BONE_RADIUS,
-        Some("foot") => FOOT_BONE_RADIUS,
-        Some("toes") => TOES_BONE_RADIUS,
-        Some("jaw") => JAW_BONE_RADIUS,
-        Some("eye") => EYE_BONE_RADIUS,
-        _ => GENERIC_BONE_RADIUS,
-    }
+    /// Node indices of bones that have active colliders
+    active_bone_nodes: Vec<usize>,
+    /// A.6: spring-bone simulator (PR6). `None` for models
+    /// without `VRMC_springBone` or when the parser rejects
+    /// the extension. The simulator is built once on model
+    /// load and stepped per-frame inside `update_motion`;
+    /// the resulting per-node local rotations are written
+    /// back into `model.nodes.local_rotations` so the next
+    /// `update_skin_palette` picks them up.
+    spring_bone_sim: Option<SpringBoneSimulator>,
+    /// A.6: a clone of the parsed `VRMC_springBone` properties
+    /// (colliders, collider groups, spring chains). The
+    /// simulator's `step` borrows this every frame; keeping
+    /// a clone on the renderer avoids a borrow fight with
+    /// `&mut VrmModel` in the per-frame update.
+    spring_bone_props: Option<SpringBoneProperties>,
+    /// A.7: FXAA post-processor. `Some` when the AA mode is
+    /// `Fxaa`; `None` for `Off` (the model is rendered
+    /// straight into the swapchain) or before the post-
+    /// processor can be built (no model, no device). The
+    /// `set_antialiasing_mode` method rebuilds the field.
+    post_processor: Option<PostProcessor>,
+    /// A.7: cached FXAA shader module. Re-used by every
+    /// `post_processor` rebuild (the wgpu pipeline state
+    /// objects are the per-rebuild, the shader is shared).
+    fxaa_shader: Option<wgpu::ShaderModule>,
+    /// A.7: the swapchain format the post-processor was
+    /// built against. Rebuilt on a surface-format change
+    /// (the runtime already recreates the depth view in the
+    /// same path).
+    fxaa_format: Option<wgpu::TextureFormat>,
 }
 
 impl CharacterRenderer {
@@ -186,9 +150,15 @@ impl CharacterRenderer {
             look_at_bone_output: None,
             active_emotion: None,
             drag: CharacterDragState::default(),
+            spring_bone_sim: None,
+            spring_bone_props: None,
+            post_processor: None,
+            fxaa_shader: None,
+            fxaa_format: None,
             vrma: None,
             vrma_player: VrmaPlayer::default(),
             vrma_path: None,
+            active_bone_nodes: Vec::new(),
         }
     }
 
@@ -200,6 +170,13 @@ impl CharacterRenderer {
     /// so it is only visible from sibling test modules.
     #[cfg(test)]
     pub(crate) fn set_model_for_test(&mut self, model: VrmModel) {
+        if let Some(props) = model.spring_bones.clone() {
+            self.spring_bone_sim = build_spring_bone_simulator(&model, &props);
+            self.spring_bone_props = Some(props);
+        } else {
+            self.spring_bone_sim = None;
+            self.spring_bone_props = None;
+        }
         self.model = Some(model);
     }
 
@@ -247,6 +224,19 @@ impl CharacterRenderer {
                     model.joint_count(),
                 );
                 let renderer = VrmRenderer::new(device, queue, surface_format, &model);
+                // A.6: build the spring-bone simulator (if the
+                // model has VRMC_springBone) BEFORE moving the
+                // model into `self.model`, so the borrow on
+                // `model.nodes.*` is clean. The simulator is
+                // stepped per-frame in `update_motion`.
+                if let Some(props) = model.spring_bones.clone() {
+                    let sim = build_spring_bone_simulator(&model, &props);
+                    self.spring_bone_sim = sim;
+                    self.spring_bone_props = Some(props);
+                } else {
+                    self.spring_bone_sim = None;
+                    self.spring_bone_props = None;
+                }
                 self.model = Some(model);
                 self.renderer = Some(renderer);
             }
@@ -373,7 +363,70 @@ impl CharacterRenderer {
         // eyes track the cursor. `None` for `"expression"`-
         // type models, where the LookAt signal routes into
         // morph weights via `apply_emotions` instead.
+        // Skin palette. PR4.16: the LookAt bone output (set
+        // by `update_look_at` for `"bone"`-type models) is
+        // composed on top of the VRMA pose so the head and
+        // eyes track the cursor. `None` for `"expression"`-
+        // type models, where the LookAt signal routes into
+        // morph weights via `apply_emotions` instead.
         let palette = model.update_skin_palette(&frame, self.look_at_bone_output.as_ref());
+
+        // A.6: step the spring-bone simulator. The simulator
+        // reads the per-node world transforms the palette
+        // update just produced and writes the updated local
+        // rotations for the affected joints back into
+        // `model.nodes.local_rotations`. The next
+        // `update_skin_palette` call (next frame) picks them
+        // up, so the simulator's effect on the silhouette
+        // lags one frame — a single-frame delay is
+        // imperceptible at 60 Hz and is the standard pattern
+        // for VRMC_springBone in v1 / v0 reference impls.
+        if let (Some(sim), Some(props)) = (
+            self.spring_bone_sim.as_mut(),
+            self.spring_bone_props.as_ref(),
+        ) {
+            let n = model.nodes.len();
+            let mut world_positions = std::collections::HashMap::with_capacity(n);
+            let mut world_rotations = std::collections::HashMap::with_capacity(n);
+            let mut parent_world_rotations = std::collections::HashMap::with_capacity(n);
+            let mut collider_positions = std::collections::HashMap::new();
+            let mut collider_rotations = std::collections::HashMap::new();
+            for i in 0..n {
+                world_positions.insert(i, model.nodes.world_positions[i]);
+                world_rotations.insert(i, model.nodes.world_rotations[i]);
+                let p = model.nodes.parents[i];
+                parent_world_rotations.insert(
+                    i,
+                    if p < 0 {
+                        Quat::IDENTITY
+                    } else {
+                        model.nodes.world_rotations[p as usize]
+                    },
+                );
+            }
+            for collider in &props.colliders {
+                let node = collider.node;
+                if node < n {
+                    collider_positions.insert(node, model.nodes.world_positions[node]);
+                    collider_rotations.insert(node, model.nodes.world_rotations[node]);
+                }
+            }
+            let updated = sim.step(
+                dt_secs,
+                props,
+                &world_positions,
+                &world_rotations,
+                &parent_world_rotations,
+                &collider_positions,
+                &collider_rotations,
+            );
+            for (node, rotation) in updated {
+                if node < n {
+                    model.nodes.local_rotations[node] = rotation;
+                }
+            }
+        }
+
         if palette.is_empty() {
             None
         } else {
@@ -483,14 +536,39 @@ impl CharacterRenderer {
     /// `model_uniform` is composed by the runtime every frame from
     /// `CharacterState` (position + scale) and applied between
     /// view-proj and the vertex position in the shader.
+    ///
+    /// A.7: when the AA mode is `Fxaa` and the post-processor is
+    /// built, the model is drawn into the post-processor's
+    /// intermediate texture first; the post-processor then
+    /// samples that texture and writes the smoothed output to
+    /// `view`. For `Off` (or a missing post-processor) the
+    /// model is drawn straight into `view`, matching the
+    /// pre-A.7 behaviour.
     pub fn render(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         view: &wgpu::TextureView,
         transparent: bool,
         model_uniform: &ModelUniform,
+        swapchain_size: (u32, u32),
+        swapchain_format: wgpu::TextureFormat,
+        aa_mode: AntialiasingMode,
     ) {
+        // A.7: lazily rebuild the post-processor BEFORE the
+        // model borrow. The post-processor only touches
+        // `self.post_processor` / `self.fxaa_shader` /
+        // `self.fxaa_format`; the model / renderer / depth
+        // view are read in the second half. Splitting the
+        // two phases avoids a borrow conflict.
+        if self.model.is_some() {
+            if aa_mode == AntialiasingMode::Fxaa && self.post_processor.is_none() {
+                self.try_build_post_processor(device, queue, swapchain_format, swapchain_size);
+            } else if aa_mode != AntialiasingMode::Fxaa {
+                self.post_processor = None;
+            }
+        }
+
         let (Some(model), Some(renderer), Some(depth_view)) =
             (&self.model, &self.renderer, &self.depth_view)
         else {
@@ -502,17 +580,100 @@ impl CharacterRenderer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("character.encoder"),
         });
-        renderer.render(
-            queue,
-            &mut encoder,
-            view,
-            depth_view,
-            model,
-            &self.camera,
-            model_uniform,
-            transparent,
-        );
+        if let Some(post) = self.post_processor.as_mut() {
+            // FXAA path: render the model into the post-
+            // processor's intermediate texture, then run
+            // the post-processor into the swapchain view.
+            // `renderer.render` is a `&self` method so the
+            // borrow of `post.intermediate_view()` and the
+            // borrow of `model`/`renderer` do not conflict.
+            let intermediate = post.intermediate_view();
+            renderer.render(
+                queue,
+                &mut encoder,
+                intermediate,
+                depth_view,
+                model,
+                &self.camera,
+                model_uniform,
+                transparent,
+            );
+            post.render(device, queue, &mut encoder, view);
+        } else {
+            // Direct path: no post-process, render straight
+            // into the swapchain.
+            renderer.render(
+                queue,
+                &mut encoder,
+                view,
+                depth_view,
+                model,
+                &self.camera,
+                model_uniform,
+                transparent,
+            );
+        }
         queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// A.7: lazily build the FXAA post-processor. Loads the
+    /// FXAA shader (idempotent) and constructs a new
+    /// `PostProcessor` for the given swapchain size and
+    /// format. The runtime always passes a fresh
+    /// `swapchain_format` (it knows the surface format from
+    /// the wgpu device), so this never has to guess.
+    fn try_build_post_processor(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        swapchain_size: (u32, u32),
+    ) {
+        if swapchain_size.0 == 0 || swapchain_size.1 == 0 {
+            return;
+        }
+        // The shader module is built once and re-used.
+        if self.fxaa_shader.is_none() {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("fxaa.shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("../../../../crates/ene-vrm/src/shaders/fxaa.wgsl").into(),
+                ),
+            });
+            self.fxaa_shader = Some(shader);
+        }
+        // Re-build when the swapchain format or size changes.
+        let needs_rebuild = self.fxaa_format.map(|f| f != format).unwrap_or(true)
+            || self
+                .post_processor
+                .as_ref()
+                .map(|p| p.size() != swapchain_size)
+                .unwrap_or(true);
+        if !needs_rebuild {
+            return;
+        }
+        if let Some(shader) = self.fxaa_shader.as_ref()
+            && let Some(post) = PostProcessor::new(device, queue, format, swapchain_size, shader)
+        {
+            self.post_processor = Some(post);
+            self.fxaa_format = Some(format);
+        }
+    }
+
+    /// A.7: rebuild the post-processor at a new swapchain
+    /// size. The runtime calls this on `WindowEvent::Resized`
+    /// in lock-step with the depth-texture resize.
+    pub fn resize_post_processor(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        swapchain_size: (u32, u32),
+    ) {
+        if let (Some(shader), Some(post)) =
+            (self.fxaa_shader.as_ref(), self.post_processor.as_mut())
+        {
+            post.resize(device, queue, shader, swapchain_size);
+        }
     }
 
     /// Clear-only path used when the model failed to load.
@@ -792,6 +953,16 @@ impl CharacterRenderer {
         self.camera.target()
     }
 
+    /// PR5.6: build the per-frame camera uniform for the
+    /// debug overlay so its `view_proj` matches what the
+    /// main VRM pass used. The orthographic camera's
+    /// `uniform()` is infallible in practice, so this
+    /// returns `Option` for API symmetry with the debug
+    /// pipeline's own fallible future.
+    pub fn camera_uniform_dbg(&self) -> Option<ene_vrm::camera::CameraUniform> {
+        self.camera.uniform().ok()
+    }
+
     /// PR4.8: latest per-bone output for `"bone"`-type
     /// models. `None` for `"expression"`-type models or
     /// before the first frame. Consumed by
@@ -887,6 +1058,18 @@ impl CharacterRenderer {
     #[allow(dead_code)] // One-shot diagnostic log only.
     pub fn depth_size_dbg(&self) -> (u32, u32) {
         self.depth_size
+    }
+
+    /// PR5.6: hand the depth attachment to the debug
+    /// overlay so it can `LoadOp::Load` the depth the main
+    /// VRM pass wrote. Returns `None` before `init` /
+    /// `resize` produces a depth texture.
+    pub fn depth_view(&self) -> Option<&wgpu::TextureView> {
+        self.depth_view.as_ref()
+    }
+
+    pub fn model(&self) -> Option<&VrmModel> {
+        self.model.as_ref()
     }
 
     /// PR4.2 follow-up diagnostic: AABB of the loaded vertex data
@@ -1012,150 +1195,79 @@ impl CharacterRenderer {
     ///
     /// `actual_scale` is `auto_fit_scale * model_scale`. The
     /// returned **radius** is in world units: leaf bones use a
-    /// name-based default (head/foot/hand) that covers the whole
-    /// body part including the tips; non-leaf bones use half the
-    /// distance to the farthest child. Both are scaled by
-    /// `actual_scale` so the collider matches the rendered mesh
-    /// even when the user has not set `model_scale = 1.0`.
-    pub fn build_character_bone_data(&self, actual_scale: f32) -> Vec<(Vec3, f32)> {
+    /// PR5.4: build the per-bone [`BoneShapeSpec`] list that the
+    /// runtime hands to
+    /// [`crate::physics::PhysicsWorld::add_character_bone_colliders`].
+    /// The shape category (sphere / capsule / capsule_y) and
+    /// the dimensions come from the per-vertex skinning
+    /// weights of the loaded mesh (see
+    /// [`crate::character::collider::compute_bone_specs`]);
+    /// finger segments and other bones whose computed radius
+    /// falls below [`MIN_BONE_RADIUS`] are dropped.
+    ///
+    /// `actual_scale = auto_fit_scale × model_scale`. The
+    /// returned dimensions are already in world units so the
+    /// colliders match the rendered mesh even when the user
+    /// has not set `model_scale = 1.0`.
+    pub fn build_character_bone_specs(&mut self, actual_scale: f32) -> Vec<BoneShapeSpec> {
         let Some(model) = self.model.as_ref() else {
             return Vec::new();
         };
-        let center = Vec3::from(model.center());
-        let normalize_scale = model.normalize_scale();
-        // Cache the rest-pose world positions once for the whole
-        // model; `compute_bone_radius` walks the hierarchy for
-        // every bone and would otherwise re-walk the same chain
-        // ~50 times per call.
-        let rest_world = compute_rest_world_positions(model);
-
-        let mut out = Vec::new();
-
-        for (bone, entry) in model.humanoid.iter() {
-            let pos_raw = rest_world[entry.node];
-            let pos_local = (pos_raw - center) * normalize_scale;
-            let radius = compute_bone_radius(
-                &rest_world,
-                model,
-                entry.node,
-                Some(bone.as_str()),
-                normalize_scale,
-                actual_scale,
-            );
-            if radius < MIN_BONE_RADIUS {
-                continue;
-            }
-            out.push((pos_local, radius));
-        }
-        out
+        let specs = crate::character::collider::compute_bone_specs(model, actual_scale);
+        self.active_bone_nodes = specs.iter().map(|spec| spec.bone_node).collect();
+        specs
     }
 
-    /// PR5.2: read the **current** (animated) local-frame
-    /// positions of the humanoid bones, in the same order as
-    /// [`Self::build_character_bone_data`]. The animation
+    /// PR5.4: read the **current** (animated) world-space
+    /// translation and rotation of active humanoid bones, in
+    /// the same order as
+    /// [`Self::build_character_bone_specs`]. The animation
     /// system (`update_skin_palette` inside `update_motion`)
-    /// updates `model.nodes.world_positions` every frame, so
-    /// reading it here gives the live post-animation position
+    /// updates `model.nodes.world_positions` and
+    /// `model.nodes.world_rotations` every frame, so reading
+    /// them here gives the live post-animation transforms
     /// without any per-frame GPU readback.
-    pub fn current_bone_local_positions(&self) -> Vec<Vec3> {
+    pub fn current_bone_poses(&self) -> Vec<BonePose> {
         let Some(model) = self.model.as_ref() else {
             return Vec::new();
         };
         let center = Vec3::from(model.center());
         let normalize_scale = model.normalize_scale();
         let mut out = Vec::new();
-        for (_bone, entry) in model.humanoid.iter() {
-            let pos_raw = model.nodes.world_positions[entry.node];
+        for &node_idx in &self.active_bone_nodes {
+            let pos_raw = model.nodes.world_positions[node_idx];
             let pos_local = (pos_raw - center) * normalize_scale;
-            out.push(pos_local);
+            let rot = model.nodes.world_rotations[node_idx];
+            out.push(BonePose {
+                translation: pos_local,
+                rotation: rot,
+            });
         }
         out
     }
-}
 
-/// PR5.2: walk the parent chain once and return the rest-pose
-/// world position of every node. The character has ~30-50
-/// humanoid bones; calling this once at model-load time and
-/// re-using the result for every `compute_bone_radius` call is
-/// far cheaper than re-walking the chain per bone.
-fn compute_rest_world_positions(model: &VrmModel) -> Vec<Vec3> {
-    let mut world_positions = model.nodes.rest_local_positions.clone();
-    let n = model.nodes.len();
-    for i in 0..n {
-        if let Some(&p) = model.nodes.parents.get(i)
-            && p >= 0
+    /// Retrieve the humanoid bone name for an active collider index.
+    pub fn get_active_bone_name(&self, idx: usize) -> Option<String> {
+        let node_idx = *self.active_bone_nodes.get(idx)?;
+        let model = self.model.as_ref()?;
+        if let Some((name, _)) = model
+            .humanoid
+            .iter()
+            .find(|(_, entry)| entry.node == node_idx)
         {
-            let p = p as usize;
-            if i > p {
-                let rot_p = model.nodes.rest_local_rotations[p];
-                let pos_p = world_positions[p];
-                world_positions[i] = rot_p * model.nodes.rest_local_positions[i] + pos_p;
+            return Some(name.to_string());
+        }
+        if let Some(spring_bones) = &model.spring_bones {
+            for chain in &spring_bones.springs {
+                if chain.joints.iter().any(|j| j.node == node_idx) {
+                    let category =
+                        crate::character::collider::classify_spring_chain(chain.name.as_deref());
+                    return Some(category.to_string());
+                }
             }
         }
+        None
     }
-    world_positions
-}
-
-/// PR5.2: compute a sensible sphere radius for one bone, in
-/// **world units** (after `actual_scale`).
-///
-/// Two complementary estimates are taken and the larger wins:
-///
-/// - **Name-based default** (in model-local units, then scaled by
-///   `actual_scale`): the per-bone name table in [`name_radius`]
-///   picks generous values for `head` / `chest` / `hips` / etc.
-///   that cover the whole trunk or extremity, not just half the
-///   distance to the next child (which would be far too small
-///   for a 30 cm wide chest).
-/// - **Auto-computed**: `0.5 × (max distance to any child bone)`,
-///   in model-local units, then scaled. Half the gap to the
-///   farthest child is enough to cover the child region's
-///   halfway point; this estimate is usually larger than the
-///   name default for long limb segments (e.g. `upperArm` →
-///   `lowerArm`).
-///
-/// Taking the max means the chest is covered by its generous
-/// name default (the children `neck` / `shoulder` are too
-/// close for `0.5 × max_dist` to cover the whole trunk), while
-/// `upperArm` is covered by the auto-computed estimate (which
-/// sees the long reach to `lowerArm`).
-///
-/// The `MIN_BONE_RADIUS` filter (in `build_character_bone_data`)
-/// drops very small radii afterwards — typically finger
-/// segments, which are filtered out at this stage so the hand
-/// bone (with a generous radius) ends up covering the
-/// fingertips instead.
-fn compute_bone_radius(
-    rest_world: &[Vec3],
-    model: &VrmModel,
-    bone_node: usize,
-    bone_name: Option<&str>,
-    normalize_scale: f32,
-    actual_scale: f32,
-) -> f32 {
-    let bone_pos = rest_world[bone_node];
-    let mut max_child_dist_local = 0.0f32;
-    let mut has_children = false;
-    for (i, &parent) in model.nodes.parents.iter().enumerate() {
-        if parent >= 0 && parent as usize == bone_node {
-            has_children = true;
-            let child_pos = rest_world[i];
-            let dist = (child_pos - bone_pos).length() * normalize_scale;
-            if dist > max_child_dist_local {
-                max_child_dist_local = dist;
-            }
-        }
-    }
-    // Both estimates are in model-local units; take the larger
-    // then scale to world units.
-    let name_default = name_radius(bone_name);
-    let auto_radius = if has_children {
-        max_child_dist_local * 0.5
-    } else {
-        0.0
-    };
-    let base_radius = name_default.max(auto_radius);
-    base_radius * actual_scale
 }
 
 /// Compute the world-space position of a humanoid bone. Mirrors
@@ -1172,7 +1284,89 @@ fn compute_bone_radius(
 /// are taken as primitives so the helper can be unit-tested
 /// without constructing a full `VrmModel`.
 fn bone_world_rest_position(model: &VrmModel, bone: &HumanoidBoneEntry) -> Vec3 {
-    compute_rest_world_positions(model)[bone.node]
+    crate::character::collider::compute_rest_world_positions(model)[bone.node]
+}
+
+/// A.6: build a `SpringBoneSimulator` from the loaded model
+/// and the parsed `VRMC_springBone` extension. Reads the
+/// model-wide world transforms (positions / rotations) and
+/// the rest local rotations; the simulator's `step` later
+/// needs the live transforms every frame, so a clone of the
+/// rest positions + rest local rotations is enough to
+/// initialise the per-joint state.
+fn build_spring_bone_simulator(
+    model: &VrmModel,
+    props: &SpringBoneProperties,
+) -> Option<SpringBoneSimulator> {
+    if props.springs.is_empty() {
+        return None;
+    }
+    let world_positions_vec = crate::character::collider::compute_rest_world_positions(model);
+    let world_rotations = collect_world_rest_rotations(model);
+    let parent_world_rotations = collect_parent_world_rest_rotations(model);
+    let world_positions: std::collections::HashMap<usize, Vec3> = (0..world_positions_vec.len())
+        .map(|i| (i, world_positions_vec[i]))
+        .collect();
+    let local_rotations: std::collections::HashMap<usize, Quat> = model
+        .nodes
+        .rest_local_rotations
+        .iter()
+        .enumerate()
+        .map(|(i, q)| (i, *q))
+        .collect();
+    let sim = SpringBoneSimulator::new(
+        props,
+        &world_positions,
+        &world_rotations,
+        &parent_world_rotations,
+        &local_rotations,
+    );
+    Some(sim)
+}
+
+/// A.6: walk the parent chain from the rest-pose world
+/// transforms. The `SpringBoneSimulator::new` constructor
+/// expects a per-node world rotation, but the rest-pose
+/// values are stored on the `Node::transform()` of the
+/// glTF source. The loader leaves the `world_rotations`
+/// vec at identity until `update_skin_palette` fills it,
+/// so we accumulate the rest local rotations up the
+/// parent chain to produce the rest world rotations.
+fn collect_world_rest_rotations(model: &VrmModel) -> std::collections::HashMap<usize, Quat> {
+    let n = model.nodes.len();
+    let mut out = std::collections::HashMap::with_capacity(n);
+    for i in 0..n {
+        let mut q = Quat::IDENTITY;
+        let mut cur = i as i32;
+        // Walk to the root, accumulating rotations.
+        while cur >= 0 {
+            q = model.nodes.rest_local_rotations[cur as usize] * q;
+            cur = model.nodes.parents[cur as usize];
+        }
+        out.insert(i, q);
+    }
+    out
+}
+
+/// A.6: same as `collect_world_rest_rotations` but stops one
+/// step short of each node so the per-bone parent
+/// rotations are available to the simulator.
+fn collect_parent_world_rest_rotations(model: &VrmModel) -> std::collections::HashMap<usize, Quat> {
+    let n = model.nodes.len();
+    let mut out = std::collections::HashMap::with_capacity(n);
+    for i in 0..n {
+        let parent = model.nodes.parents[i];
+        if parent < 0 {
+            out.insert(i, Quat::IDENTITY);
+        } else {
+            out.insert(
+                i,
+                *out.get(&(parent as usize)).unwrap_or(&Quat::IDENTITY)
+                    * model.nodes.rest_local_rotations[parent as usize],
+            );
+        }
+    }
+    out
 }
 
 fn bone_world_position(
