@@ -195,6 +195,29 @@ impl ApplicationHandler for Runtime {
                     self.state.wayland_region = Some(ctx);
                 }
 
+                // PR-LX.4: initialise the layer-shell detection
+                // context. The actual probe runs lazily on the
+                // first click-through dispatch (see
+                // `apply_linux_click_through`).
+                #[cfg(target_os = "linux")]
+                if self.state.layer_shell.is_none() {
+                    self.state.layer_shell =
+                        Some(crate::platform::wayland_layer_shell::new_layer_shell_state());
+                    // Run the probe eagerly so the first
+                    // `apply_linux_click_through` log can carry
+                    // the result. The probe is cheap (one
+                    // registry round-trip) and cached.
+                    let status = crate::platform::detect_layer_shell(&self.state);
+                    tracing::info!(
+                        target: "ene.linux.layer_shell",
+                        available = matches!(
+                            status,
+                            crate::platform::wayland_layer_shell::LayerShellStatus::Available(_)
+                        ),
+                        "zwlr_layer_shell_v1 detection"
+                    );
+                }
+
                 let actual_scale = self.state.character.auto_fit_scale(0.9)
                     * self.state.settings.character_state.model_scale;
                 let specs = self
@@ -751,6 +774,23 @@ impl Runtime {
                         // launches (no persistence).
                         let mut ui_state = self.state.ui_state_mut();
                         ui_state.show_collider_debug = !ui_state.show_collider_debug;
+                        cw.window.request_redraw();
+                    } else if key_code_pressed(&event) == Some(winit::keyboard::KeyCode::F8) {
+                        // PR-LX.4: F8 toggles the "freeze
+                        // character window" flag. The xdg-shell
+                        // fallback uses this to force the
+                        // character window to receive all input
+                        // regardless of the cursor position. On
+                        // Windows / X11 the flag is a no-op.
+                        #[cfg(target_os = "linux")]
+                        {
+                            self.state.layer_shell_freeze = !self.state.layer_shell_freeze;
+                            tracing::info!(
+                                target: "ene.linux.layer_shell",
+                                freeze = self.state.layer_shell_freeze,
+                                "char window freeze toggled"
+                            );
+                        }
                         cw.window.request_redraw();
                     } else {
                         // Character-window WASD / Space shortcuts
@@ -1342,7 +1382,12 @@ fn update_char_window_cursor_and_hittest(
     }
     #[cfg(target_os = "linux")]
     {
-        crate::platform::apply_linux_click_through(state, allows_input, cursor_over);
+        crate::platform::apply_linux_click_through(
+            state,
+            allows_input,
+            cursor_over,
+            state.layer_shell_freeze,
+        );
     }
 
     hit
