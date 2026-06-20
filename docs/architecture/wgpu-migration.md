@@ -229,7 +229,7 @@ We deliver the migration as a series of small, individually reviewable PRs. Each
 
 - The "pending permission / question" dialogs are not yet rendered; the data path is wired so PR2's `app_event` plumbing can be verified without the dialog UI. The dialog will be a follow-up PR (no separate PR-number; folded into the next PR that touches this area).
 - The "Send" button does not yet re-enable / disable based on `ene.processing` (the legacy Bevy code had the same gap — `EneRequestEvent` was emitted unconditionally). A `processing` flag will land with PR3.
-- Numeric row text fields (`LookAt Strength` etc.) are display-only: the +/- buttons are the primary input. The legacy had `TextEdit::singleline` with a re-parse on Enter; v2's port does not yet re-parse the text. PR2.1 will close this gap.
+- Numeric row text fields (`LookAt Strength` etc.) now re-parse the buffer on Enter / focus loss (PR2.1); the +/- buttons are still the primary input but typing a value and pressing Enter (or tabbing out) now commits. A failed `f32::parse` reverts the buffer to the live setting, so out-of-range / non-numeric input cannot poison the model.
 
 ### PR3 — v2: orthographic 3D camera + `ene-vrm` static rendering (MToon + skinning)
 
