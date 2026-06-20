@@ -88,6 +88,19 @@ pub struct AppState {
     /// The flag is **not** persisted across launches.
     #[cfg(target_os = "linux")]
     pub layer_shell_freeze: bool,
+    /// PR-LX.6: offscreen `Rgba8Unorm` mask capture target.
+    /// Created in [`crate::runtime::Runtime::resumed`] once
+    /// the GPU device is alive, sized in
+    /// [`crate::runtime::Runtime::window_event`] on
+    /// `Resized` / `ScaleFactorChanged`, and drained by
+    /// [`crate::platform::platform_runtime::apply_linux_click_through`]
+    /// each `about_to_wait` to feed silhouette rectangles into
+    /// the Wayland input-region and X11 shape extension. The
+    /// actual render pass that writes into the target view is
+    /// wired in PR-LX.7; this field is initialised to `None`
+    /// and populated by the runtime.
+    #[cfg(target_os = "linux")]
+    pub mask_capture: Option<crate::platform::wayland_mask_capture::MaskCaptureState>,
 }
 
 impl AppState {
@@ -140,6 +153,8 @@ impl AppState {
                 layer_shell: None,
                 #[cfg(target_os = "linux")]
                 layer_shell_freeze: false,
+                #[cfg(target_os = "linux")]
+                mask_capture: None,
             },
             tx,
         )

@@ -23,6 +23,8 @@ mod character_state;
 mod events;
 mod gpu;
 mod look_at;
+#[cfg(target_os = "linux")]
+mod mask_gizmo;
 mod physics;
 #[cfg(target_os = "linux")]
 mod platform;

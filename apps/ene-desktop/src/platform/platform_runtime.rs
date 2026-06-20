@@ -92,30 +92,65 @@ pub fn apply_linux_click_through(
         }
     }
 
+    // PR-LX.6: derive the per-frame rectangle set from the
+    // offscreen mask capture. The mask is a single
+    // `Rgba8Unorm` target rendered to from the
+    // PR-LX.7 mask shader; this function consumes its
+    // `extract_rectangles` output and pushes the result to
+    // both the Wayland input-region and the X11 shape
+    // extension.
+    let rects: Vec<super::wayland_region::Rect> = if freeze_forced {
+        // Bypass: accept all input on the whole window.
+        vec![(0, 0, i32::from(i16::MAX), i32::from(i16::MAX))]
+    } else if allows_input && cursor_on_silhouette {
+        // The per-bone Rapier raycast said "yes"; accept all
+        // input so the drag state machine receives the
+        // events. The mask readback may be a frame behind
+        // (one-frame latency) and at downsample=8 the
+        // silhouette is only an approximation; falling back
+        // to the rapier hit-test is more responsive.
+        vec![(0, 0, i32::from(i16::MAX), i32::from(i16::MAX))]
+    } else {
+        // Try to read the latest mask readback. If the
+        // camera is uninitialised or the readback is empty
+        // (e.g. the mask shader has not produced any pixels
+        // yet), fall back to an empty region so the desktop
+        // receives all clicks.
+        if let Some(mask) = state.mask_capture.as_ref() {
+            let guard = mask.lock();
+            let extracted = guard.extract_rectangles();
+            if extracted.is_empty() {
+                Vec::new()
+            } else {
+                extracted
+            }
+        } else {
+            Vec::new()
+        }
+    };
+
     // PR-LX.5: X11 fallback. The shape extension input region
     // is the X11 analog of Wayland's `set_input_region`. The
-    // full-window rectangle set is the "accept all input" state
-    // and an empty set is "pass through to the desktop". A
-    // future PR-LX.7 will derive the rectangle set from
-    // `MaskCaptureCamera::extract_rectangles` so the cursor only
-    // receives input when it sits over the silhouette.
+    // rectangle set comes from the mask capture (above); the
+    // empty set is "pass through to the desktop".
     if let Some(ctx) = state.x11_ctx.as_ref() {
-        let path =
-            super::x11_taskbar::X11Path::decide(allows_input, cursor_on_silhouette, freeze_forced);
         let mut guard = ctx.lock();
-        match path {
-            super::x11_taskbar::X11Path::Full | super::x11_taskbar::X11Path::Frozen => {
-                // Full window rect: the shape input region
-                // accepts all input. We use `i16::MAX` as the
-                // width / height (the rectangles helper
-                // saturates to `u16::MAX`); the X server clamps
-                // the rect to the window extent.
-                guard.set_input_rects(&[(0, 0, i32::from(i16::MAX), i32::from(i16::MAX))]);
-            }
-            super::x11_taskbar::X11Path::Empty => {
-                guard.clear_input();
-            }
+        if rects.is_empty() {
+            guard.clear_input();
+        } else {
+            guard.set_input_rects(&rects);
         }
+    }
+
+    // PR-LX.6: forward the same rectangle set to the Wayland
+    // input-region context (overrides LX.5's full-window
+    // placeholder when the mask has data). The set_rects
+    // policy caches the rectangles; `apply_to_surface` is
+    // still invoked further up so the `wl_surface::set_input_region`
+    // request actually reaches the compositor.
+    if let Some(ctx) = state.wayland_region.as_ref() {
+        let mut guard = ctx.lock();
+        guard.set_rects(rects.clone());
     }
 
     if !FIRST_DISPATCH_LOGGED.swap(true, Ordering::Relaxed) {
