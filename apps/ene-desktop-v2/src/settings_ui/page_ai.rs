@@ -8,6 +8,8 @@ use super::widgets::SettingsAction;
 use crate::ai_bridge::AiBridge;
 use crate::character_state::AnimationControl;
 use crate::settings::CharacterSettings;
+use ene_core::UserInputResponse;
+use ene_tool_proto::{MultiAnswer, QuestionItem};
 use std::sync::Arc;
 
 pub fn render(
@@ -290,7 +292,229 @@ pub fn render(
                     ui.label(ai_latest_response);
                 }
             });
+
+        // A.5: the permission / user-input dialogs. Rendered as
+        // top-level egui `Window`s so they pop over the rest
+        // of the AI page; both clear their `pending_*` state
+        // on every button click (any answer, including Cancel,
+        // is the end of the in-flight request). The data path
+        // is wired in `runtime.rs::about_to_wait`; A.5 finishes
+        // it by drawing the dialogs.
+        render_permission_dialog(ui, world, ui_entity, ai);
+        render_user_input_dialog(ui, world, ui_entity, ai);
     });
+}
+
+/// A.5: render the permission-request dialog when
+/// `UiState::pending_permission` is `Some`. Yes / No /
+/// Always each call `AiBridge::answer_permission` with the
+/// matching `PermissionDecision` and clear the in-flight
+/// state. The dialog always renders at the top of the
+/// settings window — the runtime already forced the
+/// settings window visible on `PermissionRequired`.
+fn render_permission_dialog(
+    ui: &mut egui::Ui,
+    world: &mut hecs::World,
+    ui_entity: hecs::Entity,
+    ai: &Arc<AiBridge>,
+) {
+    let pending = world
+        .get::<&crate::settings::UiState>(ui_entity)
+        .ok()
+        .and_then(|s| s.pending_permission.clone());
+    let Some(pending) = pending else {
+        return;
+    };
+    // Clone the request_id up front so the window-close
+    // handler can forward a "Deny" decision even if the
+    // buttons already moved it.
+    let request_id = pending.request_id;
+    let mut open = true;
+    egui::Window::new("Permission Requested")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ui.ctx(), |ui| {
+            ui.vertical(|ui| {
+                ui.label(format!("Action: {}", pending.action));
+                ui.label(format!("Target: {}", pending.target));
+                if !pending.description.is_empty() {
+                    ui.label(format!("Description: {}", pending.description));
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Yes").clicked() {
+                        let _ = ai.answer_permission(
+                            request_id.clone(),
+                            ene_core::PermissionDecision::AllowOnce,
+                        );
+                        clear_pending_permission(world, ui_entity);
+                    }
+                    if ui.button("No").clicked() {
+                        let _ = ai.answer_permission(
+                            request_id.clone(),
+                            ene_core::PermissionDecision::Deny,
+                        );
+                        clear_pending_permission(world, ui_entity);
+                    }
+                    if ui.button("Always").clicked() {
+                        let _ = ai.answer_permission(
+                            request_id.clone(),
+                            ene_core::PermissionDecision::AllowSession,
+                        );
+                        clear_pending_permission(world, ui_entity);
+                    }
+                });
+            });
+        });
+    if !open {
+        // Treat window-close as "Deny" so a dismissed dialog
+        // does not stall the actor waiting on the oneshot.
+        let _ = ai.answer_permission(request_id, ene_core::PermissionDecision::Deny);
+        clear_pending_permission(world, ui_entity);
+    }
+}
+
+fn clear_pending_permission(world: &mut hecs::World, ui_entity: hecs::Entity) {
+    if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
+        ui_state.pending_permission = None;
+    }
+}
+
+/// A.5: render the user-input dialog when
+/// `UiState::pending_user_input` is `Some`. One row per
+/// sub-question in the original prompt; each row carries the
+/// predefined options as buttons + a free-text `TextEdit` +
+/// a Skip checkbox. Submit packs the answers into a
+/// `Vec<MultiAnswer>` in the same order as the prompt and
+/// calls `AiBridge::answer_user_input` with
+/// `UserInputResponse::Multi(..)`. Cancel submits
+/// `UserInputResponse::Cancel`.
+fn render_user_input_dialog(
+    ui: &mut egui::Ui,
+    world: &mut hecs::World,
+    ui_entity: hecs::Entity,
+    ai: &Arc<AiBridge>,
+) {
+    let snapshot = world
+        .get::<&crate::settings::UiState>(ui_entity)
+        .ok()
+        .map(|s| (s.pending_user_input.clone(), s.user_input_drafts.clone()));
+    let Some((Some(prompt_snapshot), drafts)) = snapshot else {
+        return;
+    };
+    if prompt_snapshot.prompt.items.len() != drafts.len() {
+        // Defensive: the runtime only writes `user_input_drafts`
+        // when the prompt is Some, and the lengths must match.
+        // If they don't, bail out (the next event will
+        // re-populate correctly).
+        return;
+    }
+    // The closure body needs `&mut Vec<QuestionDraft>` for the
+    // row widgets, so we move the cloned drafts into a
+    // local mutable variable. The Submit handler re-reads the
+    // mutated values back out of it.
+    let mut drafts = drafts;
+    let request_id = prompt_snapshot.request_id;
+    let items = prompt_snapshot.prompt.items.clone();
+    let mut open = true;
+    egui::Window::new("User Input Requested")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_size([420.0, 280.0])
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ui.ctx(), |ui| {
+            ui.vertical(|ui| {
+                ui.label("Answer each question, then Submit.");
+                ui.separator();
+                for (i, (item, draft)) in items.iter().zip(drafts.iter_mut()).enumerate() {
+                    render_user_input_row(ui, i, item, draft);
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Submit").clicked() {
+                        let answers: Vec<MultiAnswer> = drafts
+                            .iter()
+                            .map(|d| {
+                                if d.skipped {
+                                    MultiAnswer::Skip
+                                } else if let Some(option) = &d.selected {
+                                    MultiAnswer::Selected {
+                                        option: option.clone(),
+                                    }
+                                } else {
+                                    MultiAnswer::Answer {
+                                        text: d.text.clone(),
+                                    }
+                                }
+                            })
+                            .collect();
+                        let _ = ai.answer_user_input(
+                            request_id.clone(),
+                            UserInputResponse::Multi(answers),
+                        );
+                        clear_pending_user_input(world, ui_entity);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        let _ = ai.answer_user_input(request_id.clone(), UserInputResponse::Cancel);
+                        clear_pending_user_input(world, ui_entity);
+                    }
+                });
+            });
+        });
+    if !open {
+        // Window close = Cancel.
+        let _ = ai.answer_user_input(request_id, UserInputResponse::Cancel);
+        clear_pending_user_input(world, ui_entity);
+    }
+}
+
+fn render_user_input_row(
+    ui: &mut egui::Ui,
+    index: usize,
+    item: &QuestionItem,
+    draft: &mut crate::settings::QuestionDraft,
+) {
+    ui.collapsing(format!("{}. {}", index + 1, item.question), |ui| {
+        if !item.options.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                for option in &item.options {
+                    let selected = draft.selected.as_deref() == Some(option.as_str());
+                    if ui.selectable_label(selected, option).clicked() {
+                        draft.selected = Some(option.clone());
+                        // Picking an option clears a Skip
+                        // (the user is engaging again).
+                        draft.skipped = false;
+                    }
+                }
+            });
+        }
+        if item.allow_free_text {
+            let response =
+                ui.add(egui::TextEdit::singleline(&mut draft.text).desired_width(f32::INFINITY));
+            if response.changed() && !draft.text.is_empty() {
+                // Typing in the free-text field counts as
+                // engagement; clear any selected option so
+                // Submit packs an `Answer` rather than a
+                // `Selected`.
+                draft.selected = None;
+                draft.skipped = false;
+            }
+        }
+        let mut skipped = draft.skipped;
+        if ui.checkbox(&mut skipped, "Skip this question").changed() {
+            draft.skipped = skipped;
+        }
+    });
+}
+
+fn clear_pending_user_input(world: &mut hecs::World, ui_entity: hecs::Entity) {
+    if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
+        ui_state.pending_user_input = None;
+        ui_state.user_input_drafts.clear();
+    }
 }
 
 fn send_chat(
