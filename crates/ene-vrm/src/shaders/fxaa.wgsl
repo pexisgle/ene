@@ -35,7 +35,17 @@ struct PostUniforms {
 fn vs_main(@location(0) position: vec2<f32>, @location(1) uv: vec2<f32>) -> VsOut {
     var out: VsOut;
     out.position = vec4<f32>(position, 0.0, 1.0);
-    out.uv = uv;
+    // The model is drawn into the intermediate texture with NDC
+    // Y-up; wgpu rasterises that into a Y-down (top-left
+    // origin) texture, so the model's top ends up on the
+    // bottom row of the intermediate. Flipping V here aligns
+    // the post-process sampling with the screen's Y-up
+    // convention; without the flip, the screen Y axis is
+    // inverted relative to the model. The swapchain is
+    // presented with the OS's implicit Y-flip, so this V
+    // flip is the missing link between the intermediate
+    // texture's data layout and the screen's pixel layout.
+    out.uv = vec2<f32>(uv.x, 1.0 - uv.y);
     return out;
 }
 
