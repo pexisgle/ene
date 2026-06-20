@@ -92,16 +92,57 @@ pub fn apply_linux_click_through(
         }
     }
 
+    // PR-LX.5: X11 fallback. The shape extension input region
+    // is the X11 analog of Wayland's `set_input_region`. The
+    // full-window rectangle set is the "accept all input" state
+    // and an empty set is "pass through to the desktop". A
+    // future PR-LX.7 will derive the rectangle set from
+    // `MaskCaptureCamera::extract_rectangles` so the cursor only
+    // receives input when it sits over the silhouette.
+    if let Some(ctx) = state.x11_ctx.as_ref() {
+        let path =
+            super::x11_taskbar::X11Path::decide(allows_input, cursor_on_silhouette, freeze_forced);
+        let mut guard = ctx.lock();
+        match path {
+            super::x11_taskbar::X11Path::Full | super::x11_taskbar::X11Path::Frozen => {
+                // Full window rect: the shape input region
+                // accepts all input. We use `i16::MAX` as the
+                // width / height (the rectangles helper
+                // saturates to `u16::MAX`); the X server clamps
+                // the rect to the window extent.
+                guard.set_input_rects(&[(0, 0, i32::from(i16::MAX), i32::from(i16::MAX))]);
+            }
+            super::x11_taskbar::X11Path::Empty => {
+                guard.clear_input();
+            }
+        }
+    }
+
     if !FIRST_DISPATCH_LOGGED.swap(true, Ordering::Relaxed) {
         // PR-LX.4: report layer-shell probe presence on the
         // first dispatch so the log carries the result. The
         // detection itself runs eagerly in `Runtime::resumed`;
         // this branch only reports whether the cache has
         // been populated.
+        // PR-LX.5: report the X11 path taken on the first
+        // dispatch so the log carries the result. The
+        // connection itself is opened in `Runtime::resumed`;
+        // this branch only reports which display-server path
+        // the dispatcher took.
         let layer_shell_cached = state
             .layer_shell
             .as_ref()
             .is_some_and(|ctx| ctx.lock().cached().is_some());
+        let x11_path = if state.x11_ctx.is_some() {
+            let path = super::x11_taskbar::X11Path::decide(
+                allows_input,
+                cursor_on_silhouette,
+                freeze_forced,
+            );
+            Some(path)
+        } else {
+            None
+        };
 
         tracing::trace!(
             target: "ene.linux.hit_test",
@@ -110,6 +151,7 @@ pub fn apply_linux_click_through(
             freeze_forced,
             wayland = state.wayland_region.is_some(),
             x11 = state.x11_ctx.is_some(),
+            x11_path = ?x11_path,
             layer_shell_cached,
             "char window hit test (linux) — first dispatch per process"
         );

@@ -108,6 +108,7 @@ bitflags = "2"
 wayland-client = { version = "0.31", default-features = false }
 wayland-protocols = { version = "0.31", default-features = false, features = ["staging", "client"] }
 wayland-protocols-wlr = { version = "0.3", default-features = false, features = ["client"] }
+x11rb = { version = "0.13", default-features = false }
 
 # Git hooks installed by `cargo-husky` on the first `cargo build`.
 # Hooks live under `.cargo-husky/hooks/` and are auto-installed for the
