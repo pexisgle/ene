@@ -303,30 +303,28 @@ impl X11Context {
     }
 }
 
-/// Returns `true` if the winit window's raw display handle
-/// resolves to X11. Pure, side-effect-free probe; used as the
-/// first guard in [`X11Context::try_new`].
 #[cfg(target_os = "linux")]
 #[allow(dead_code)] // `is_x11_window` is consumed by the runtime's Linux dispatch.
 pub fn is_x11_window<W: HasWindowHandle + HasDisplayHandle>(window: &W) -> bool {
     let Ok(display) = window.display_handle() else {
         return false;
     };
-    matches!(display.as_raw(), RawDisplayHandle::Xcb(_))
+    matches!(
+        display.as_raw(),
+        RawDisplayHandle::Xlib(_) | RawDisplayHandle::Xcb(_)
+    )
 }
 
 /// Returns the X11 window id (XID) from the winit raw window
-/// handle, or `None` if the window is not X11. The XID is the
-/// `window` field of the `X11WindowHandle` struct cast to
-/// `u32` (the X protocol type for window ids).
+/// handle, or `None` if the window is not X11.
 #[cfg(target_os = "linux")]
 #[allow(dead_code)] // `x11_window_id` is consumed by the runtime's Linux dispatch.
 pub fn x11_window_id<W: HasWindowHandle + HasDisplayHandle>(window: &W) -> Option<Window> {
     let win = window.window_handle().ok()?.as_raw();
-    if let RawWindowHandle::Xcb(handle) = win {
-        Some(handle.window.get())
-    } else {
-        None
+    match win {
+        RawWindowHandle::Xcb(handle) => Some(handle.window.get()),
+        RawWindowHandle::Xlib(handle) => Some(handle.window as u32),
+        _ => None,
     }
 }
 

@@ -101,6 +101,9 @@ pub struct MaskCaptureCamera {
     /// `extract_rectangles` returns the previous frame's
     /// rectangles (or an empty vec on the very first frame).
     readback_fresh: bool,
+    /// True if the buffer is currently mapped (via `map_async`).
+    /// `encode_readback` skips the copy to prevent wgpu validation errors.
+    pub is_mapped: bool,
 }
 
 #[allow(dead_code)] // PR-LX.7 wires the mask render pass; the public API is fixed here.
@@ -178,6 +181,7 @@ impl MaskCaptureCamera {
             // `extract_rectangles`.
             last_readback: vec![0u8; readback_size as usize],
             readback_fresh: false,
+            is_mapped: false,
         })
     }
 
@@ -226,6 +230,15 @@ impl MaskCaptureCamera {
         self.height
     }
 
+    /// Downsample factor (`window_pixels / target_pixels`).
+    /// `extract_rectangles` returns rectangles in
+    /// **target** pixel space; the runtime scales them by
+    /// this factor to convert back to window-pixel space
+    /// before pushing to Wayland / X11.
+    pub fn downsample(&self) -> u32 {
+        self.downsample
+    }
+
     /// Append a `copy_texture_to_buffer` command to the
     /// encoder. The runtime calls this *after* the mask
     /// render pass and *before* `queue.submit`. The matching
@@ -234,6 +247,9 @@ impl MaskCaptureCamera {
     /// than 60 Hz but the silhouette changes on the
     /// sub-second timescale of the animation).
     pub fn encode_readback(&self, encoder: &mut wgpu::CommandEncoder) {
+        if self.is_mapped {
+            return;
+        }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.target,
@@ -270,26 +286,59 @@ impl MaskCaptureCamera {
     /// used the same pattern in `apps/ene-desktop/src/
     /// character_drag/linux/capture.rs::read_mask`
     /// (PR5.3 plan, §10.3).
+    ///
+    /// **LX.9 deprecation note:** the production runtime
+    /// no longer calls `read_back` on the winit main thread
+    /// (a blocking `mpsc::recv` froze the window — see
+    /// `mask_readback` module for the off-thread worker).
+    /// The method is retained under `#[cfg(test)]` so the
+    /// GPU writeback logic still has a one-call entry point
+    /// for synthetic tests.
+    #[cfg(test)]
     pub fn read_back(&mut self, _device: &wgpu::Device, _queue: &wgpu::Queue) {
-        let slice = self.readback.slice(..);
+        let slice = self.readback_slice();
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
-            // Receiver dropping is the error path; we
-            // don't care about the `Result` contents at
-            // this layer.
             let _ = tx.send(r);
         });
-        // Block the winit main thread until the GPU
-        // signals the readback completion. The buffer is
-        // mapped by the time `recv` returns.
         let _ = rx.recv();
-        {
-            let mapped = self.readback.slice(..).get_mapped_range();
-            self.last_readback.resize(mapped.len(), 0u8);
-            self.last_readback.copy_from_slice(&mapped);
+        let mapped_len = self.copy_mapped_into_last_readback();
+        let _ = mapped_len;
+        self.unmap_readback();
+    }
+
+    /// Returns a `BufferSlice` over the readback staging
+    /// buffer. The mask readback worker uses this in
+    /// `map_async`; the slice is `wgpu::Buffer::slice` is
+    /// `&self` so no mutability is required.
+    pub fn readback_slice(&mut self) -> wgpu::BufferSlice<'_> {
+        self.is_mapped = true;
+        self.readback.slice(..)
+    }
+
+    /// Copy the bytes currently mapped by the GPU into
+    /// `self.last_readback` and refresh `readback_fresh`.
+    /// Returns the number of bytes copied, or `0` if the
+    /// buffer is not currently mapped.
+    pub fn copy_mapped_into_last_readback(&mut self) -> usize {
+        let mapped = self.readback.slice(..).get_mapped_range();
+        let len = mapped.len();
+        if len == 0 {
+            return 0;
         }
-        self.readback.unmap();
+        self.last_readback.resize(len, 0u8);
+        self.last_readback.copy_from_slice(&mapped);
         self.readback_fresh = true;
+        len
+    }
+
+    /// Unmap the readback staging buffer. No-op if the
+    /// buffer is not currently mapped.
+    pub fn unmap_readback(&mut self) {
+        if self.is_mapped {
+            self.readback.unmap();
+            self.is_mapped = false;
+        }
     }
 
     /// Decompose the most recent readback into a list of
@@ -298,32 +347,49 @@ impl MaskCaptureCamera {
     /// the previous frame if no new readback is available
     /// yet (or an empty vec on the very first frame).
     pub fn extract_rectangles(&self) -> Vec<(i32, i32, i32, i32)> {
-        if !self.readback_fresh {
-            return Vec::new();
-        }
-        let mut rects = Vec::new();
-        let stride = self.width as usize * BYTES_PER_PIXEL as usize;
-        let buf = &self.last_readback;
-        for y in 0..self.height as usize {
-            let row_start = y * stride;
-            let row = &buf[row_start..row_start + stride];
-            let mut x: usize = 0;
-            while x < self.width as usize {
-                let r = row[x * BYTES_PER_PIXEL as usize];
-                if r <= PIXEL_THRESHOLD {
-                    x += 1;
-                    continue;
-                }
-                let start = x;
-                while x < self.width as usize && row[x * BYTES_PER_PIXEL as usize] > PIXEL_THRESHOLD
-                {
-                    x += 1;
-                }
-                rects.push((start as i32, y as i32, (x - start) as i32, 1));
-            }
-        }
-        rects
+        extract_rectangles_impl(
+            self.width,
+            self.height,
+            self.bytes_per_row,
+            &self.last_readback,
+            self.readback_fresh,
+        )
     }
+}
+
+fn extract_rectangles_impl(
+    width: u32,
+    height: u32,
+    bytes_per_row: u32,
+    last_readback: &[u8],
+    readback_fresh: bool,
+) -> Vec<(i32, i32, i32, i32)> {
+    if !readback_fresh {
+        return Vec::new();
+    }
+    let mut rects = Vec::new();
+    let stride = width as usize * BYTES_PER_PIXEL as usize;
+    for y in 0..height as usize {
+        let row_start = y * bytes_per_row as usize;
+        if row_start + stride > last_readback.len() {
+            break;
+        }
+        let row = &last_readback[row_start..row_start + stride];
+        let mut x: usize = 0;
+        while x < width as usize {
+            let r = row[x * BYTES_PER_PIXEL as usize];
+            if r <= PIXEL_THRESHOLD {
+                x += 1;
+                continue;
+            }
+            let start = x;
+            while x < width as usize && row[x * BYTES_PER_PIXEL as usize] > PIXEL_THRESHOLD {
+                x += 1;
+            }
+            rects.push((start as i32, y as i32, (x - start) as i32, 1));
+        }
+    }
+    rects
 }
 
 /// Build a mask capture camera in an `Arc<Mutex<…>>` so the
@@ -434,5 +500,25 @@ mod tests {
         assert_eq!(aligned_bytes_per_row(71), 512);
         // 64 * 4 = 256, exact.
         assert_eq!(aligned_bytes_per_row(64), 256);
+    }
+
+    #[test]
+    fn extract_rectangles_respects_row_stride_alignment() {
+        let width = 70;
+        let height = 2;
+        let bytes_per_row = aligned_bytes_per_row(width); // 512
+        assert_eq!(bytes_per_row, 512);
+
+        let mut data = vec![0u8; (bytes_per_row * height) as usize];
+
+        // Row 0, pixel index 10 (offset 10 * 4 = 40)
+        data[40] = 255;
+        // Row 1, pixel index 20 (offset 512 + 20 * 4 = 592)
+        data[(bytes_per_row as usize) + 80] = 255;
+
+        let rects = extract_rectangles_impl(width, height, bytes_per_row, &data, true);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0], (10, 0, 1, 1));
+        assert_eq!(rects[1], (20, 1, 1, 1));
     }
 }

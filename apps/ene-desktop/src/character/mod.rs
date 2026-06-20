@@ -188,6 +188,7 @@ impl CharacterRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
+        mask_format: Option<wgpu::TextureFormat>,
     ) {
         let Some(default_vrm) = self.default_vrm.clone() else {
             return;
@@ -223,7 +224,7 @@ impl CharacterRenderer {
                     textured,
                     model.joint_count(),
                 );
-                let renderer = VrmRenderer::new(device, queue, surface_format, &model);
+                let renderer = VrmRenderer::new(device, queue, surface_format, mask_format, &model);
                 // A.6: build the spring-bone simulator (if the
                 // model has VRMC_springBone) BEFORE moving the
                 // model into `self.model`, so the borrow on
@@ -614,6 +615,30 @@ impl CharacterRenderer {
             );
         }
         queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Forward to the internal VRM renderer's `render_mask`.
+    /// No-op if the renderer is uninitialised or was built without
+    /// a `mask_format`.
+    pub fn render_mask(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        model_uniform: &ModelUniform,
+    ) {
+        if let Some(r) = self.renderer.as_ref()
+            && let Some(m) = self.model.as_ref()
+        {
+            r.render_mask(
+                queue,
+                encoder,
+                view,
+                m,
+                &self.camera.uniform().unwrap(),
+                model_uniform,
+            );
+        }
     }
 
     /// A.7: lazily build the FXAA post-processor. Loads the

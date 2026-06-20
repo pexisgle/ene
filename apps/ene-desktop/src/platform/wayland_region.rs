@@ -56,7 +56,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use wayland_client::{
-    Connection, Dispatch, EventQueue, QueueHandle,
+    Connection, Dispatch, EventQueue, Proxy, QueueHandle,
     protocol::{
         wl_compositor::{self, WlCompositor},
         wl_region::{self, WlRegion},
@@ -115,6 +115,8 @@ pub struct WaylandInputRegionContext {
     /// it and dispatches the right `wl_surface::set_input_region`
     /// call.
     state: InputRegionState,
+    /// Winit window's own wl_surface proxy object, wrapped from the raw pointer.
+    winit_surface: Option<WlSurface>,
 }
 
 impl std::fmt::Debug for WaylandInputRegionContext {
@@ -123,6 +125,7 @@ impl std::fmt::Debug for WaylandInputRegionContext {
             .field("state", &self.state)
             .field("compositor_bound", &self.compositor.is_some())
             .field("connection_alive", &self.connection.is_some())
+            .field("winit_surface_bound", &self.winit_surface.is_some())
             .finish()
     }
 }
@@ -160,12 +163,20 @@ impl WaylandInputRegionContext {
             return None;
         }
 
-        let connection = match Connection::connect_to_env() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::debug!(?e, "WAYLAND_DISPLAY connect failed");
-                return None;
-            }
+        let RawDisplayHandle::Wayland(wl_display_handle) = display_handle else {
+            return None;
+        };
+        let RawWindowHandle::Wayland(wl_window_handle) = window_handle else {
+            return None;
+        };
+
+        // Wrap winit's display pointer as a Connection.
+        // Operating in guest mode means we don't close the display when connection is dropped.
+        let connection = unsafe {
+            let backend = wayland_client::backend::Backend::from_foreign_display(
+                wl_display_handle.display.as_ptr() as *mut _,
+            );
+            Connection::from_backend(backend)
         };
 
         let mut event_queue: EventQueue<AppData> = connection.new_event_queue();
@@ -187,12 +198,24 @@ impl WaylandInputRegionContext {
             return None;
         }
 
+        // Recover the winit window's wl_surface proxy.
+        let raw_surface_ptr = wl_window_handle.surface.as_ptr();
+        let object_id = unsafe {
+            wayland_client::backend::ObjectId::from_ptr(
+                <WlSurface as Proxy>::interface(),
+                raw_surface_ptr as *mut _,
+            )
+        }
+        .ok()?;
+        let winit_surface = Proxy::from_id(&connection, object_id).ok()?;
+
         Some(Arc::new(Mutex::new(Self {
             connection: Some(connection),
             event_queue: Some(event_queue),
             compositor,
             queue_handle: Some(qh),
             state: InputRegionState::Full,
+            winit_surface: Some(winit_surface),
         })))
     }
 
@@ -218,6 +241,7 @@ impl WaylandInputRegionContext {
 
     /// Empty the input region: the whole surface is
     /// click-through.
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.state = InputRegionState::Rectangles(Vec::new());
     }
@@ -277,13 +301,8 @@ impl WaylandInputRegionContext {
 
         match &self.state {
             InputRegionState::Full => {
-                // An empty `wl_region` (one with no `add` calls)
-                // signals "input on the whole surface". Per the
-                // protocol we must still call set_input_region
-                // with the empty region; otherwise the previous
-                // region would persist.
-                let region = compositor.create_region(qh, ());
-                surface.set_input_region(Some(&region));
+                // A null input region sets the input region to the entire surface (Full input).
+                surface.set_input_region(None);
             }
             InputRegionState::Rectangles(rects) => {
                 if rects.is_empty() {
@@ -301,6 +320,18 @@ impl WaylandInputRegionContext {
                 }
             }
         }
+
+        surface.commit();
+        if let Some(conn) = self.connection.as_ref() {
+            let _ = conn.flush();
+        }
+    }
+
+    /// Apply the cached policy to the winit window's wl_surface.
+    pub fn apply_to_winit_surface(&mut self) {
+        if let Some(surface) = self.winit_surface.clone() {
+            self.apply_to_surface(&surface);
+        }
     }
 
     /// Create a stand-alone `wl_surface` via the bound
@@ -310,6 +341,7 @@ impl WaylandInputRegionContext {
     /// winit's own surface.
     ///
     /// Returns `None` if the compositor is not bound.
+    #[allow(dead_code)]
     pub fn create_stand_alone_surface(&self) -> Option<WlSurface> {
         let (compositor, qh) = (self.compositor.as_ref()?, self.queue_handle.as_ref()?);
         Some(compositor.create_surface(qh, ()))
@@ -400,6 +432,7 @@ mod tests {
             compositor: None,
             queue_handle: None,
             state: InputRegionState::Full,
+            winit_surface: None,
         }
     }
 
