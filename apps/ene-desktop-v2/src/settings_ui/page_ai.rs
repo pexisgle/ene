@@ -149,29 +149,47 @@ pub fn render(
 
         ui.horizontal(|ui| {
             ui.label("Chat Input");
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut input.ai_chat_input)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("message to AI"),
-            );
-            let send_clicked = ui.button("Send").clicked();
-            if response.changed() {
-                if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
-                    ui_state.ai_chat_input = input.ai_chat_input.clone();
+            // A.4: gate the chat input + Send button on the
+            // processing flag. While a request is in flight the
+            // widget is greyed out, so the user cannot
+            // double-fire a Run before the actor reports Done /
+            // Failed. The flag is lock-free; a relaxed load
+            // once per frame is enough.
+            let processing = ai.is_processing();
+            ui.add_enabled_ui(!processing, |ui| {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut input.ai_chat_input)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(if processing {
+                            "waiting for AI…"
+                        } else {
+                            "message to AI"
+                        }),
+                );
+                let send_clicked = ui
+                    .add_enabled(!processing, egui::Button::new("Send"))
+                    .clicked();
+                if response.changed() {
+                    if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity)
+                    {
+                        ui_state.ai_chat_input = input.ai_chat_input.clone();
+                    }
+                    settings.mark_dirty();
                 }
-                settings.mark_dirty();
-            }
-            let send_with_enter =
-                response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if send_clicked || send_with_enter {
-                // Sync the in-memory text buffer, then send.
-                if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
-                    ui_state.ai_chat_input = input.ai_chat_input.clone();
+                let send_with_enter = !processing
+                    && response.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if send_clicked || send_with_enter {
+                    // Sync the in-memory text buffer, then send.
+                    if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity)
+                    {
+                        ui_state.ai_chat_input = input.ai_chat_input.clone();
+                    }
+                    let _ = SettingsAction::SendAiChat; // silence unused import in narrow builds
+                    send_chat(settings, ai, world, ui_entity);
+                    input.ai_chat_input.clear();
                 }
-                let _ = SettingsAction::SendAiChat; // silence unused import in narrow builds
-                send_chat(settings, ai, world, ui_entity);
-                input.ai_chat_input.clear();
-            }
+            });
         });
 
         ui.separator();
