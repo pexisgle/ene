@@ -28,28 +28,45 @@ pub fn render(
         ui.horizontal(|ui| {
             ui.label("Character");
             if ui.button("<").clicked() {
-                apply_action(
-                    SettingsAction::PrevCharacter,
-                    settings,
-                    animation,
-                    ai,
-                    world,
-                    ui_entity,
-                );
+                // PR9: cycle to the previous character and
+                // push the new character's per-character
+                // default expression so the renderer
+                // immediately picks it up. The
+                // `select_character` dispatch is a no-op when
+                // the cycle is a same-character request, so
+                // we only push on an actual switch.
+                let len = settings.characters.len();
+                if len > 0 {
+                    let idx = ((settings.character_state.selected_character as isize - 1)
+                        .rem_euclid(len as isize)) as usize;
+                    if let Some(default_expression) = settings.select_character(idx) {
+                        emotion_queue.push(EmotionCommand {
+                            emotion: default_expression,
+                            target_time: now_secs,
+                            hold_secs: 4.0,
+                            weight: 1.0,
+                        });
+                    }
+                }
             }
             ui.add_sized(
                 [220.0, 0.0],
                 egui::Label::new(format_character_label(settings)),
             );
             if ui.button(">").clicked() {
-                apply_action(
-                    SettingsAction::NextCharacter,
-                    settings,
-                    animation,
-                    ai,
-                    world,
-                    ui_entity,
-                );
+                let len = settings.characters.len();
+                if len > 0 {
+                    let idx = ((settings.character_state.selected_character as isize + 1)
+                        .rem_euclid(len as isize)) as usize;
+                    if let Some(default_expression) = settings.select_character(idx) {
+                        emotion_queue.push(EmotionCommand {
+                            emotion: default_expression,
+                            target_time: now_secs,
+                            hold_secs: 4.0,
+                            weight: 1.0,
+                        });
+                    }
+                }
             }
         });
 

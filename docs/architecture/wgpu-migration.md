@@ -481,7 +481,7 @@ A drive-by cleanup also lives in the same commit: `Runtime::last_cursor_logical`
 - **PR6** — Spring-bone (cloth / hair) — full port of `bevy_vrm1::vrm::spring_bone`. Lands in `crates/ene-vrm/src/spring_bone.rs` and is consumed by `apps/ene-desktop-v2::character`.
 - **PR7** — Shadow quality switching (FXAA / SMAA / TAA). The settings UI row ships in PR2 (`page_graphics.rs`); the actual wgpu pipeline variants land in PR7. The legacy app had this; v2 defers it because (per N2 in §2.2) the migration keeps a single default until the full stack is on v2.
 - **PR8** — Drag-while-clicked polish (smoother multi-monitor handling, sub-pixel position rounding).
-- **PR9** — Per-character `default_expression` actually applied (the legacy code persists it to JSON but never reads it back; the field stays neutral on character respawn).
+- **PR9** — Per-character `default_expression` now flows end-to-end. `CharacterState` carries the in-memory value (defaulted to `"neutral"` on a fresh install), `sync_to_store` writes it into the per-character `CharacterConfig` on disk, and `load_per_character_settings` reads it back. The cycle buttons on the Character page (and the runtime WASD hotkey) push the new character's default expression into the renderer's `EmotionQueue` on every actual character switch. The legacy Bevy code persisted the field but always wrote the empty string (a known bug); the migration path treats an empty on-disk value as `"neutral"`.
 
 Each PR is its own design doc snippet; we add a `## Open Follow-ups` block at the end of this file when PR3 lands.
 
