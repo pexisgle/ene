@@ -221,7 +221,17 @@ impl Default for CharacterState {
 #[derive(Clone, Debug, Default)]
 pub struct UiState {
     pub settings_window_visible: bool,
-    #[allow(dead_code)] // PR5 will toggle the Linux-only Wayland mask debug overlay.
+    /// PR-LX.6: toggle the Linux-only Wayland / X11 mask
+    /// capture rectangle overlay. When `true` and
+    /// [`Self::show_collider_debug`] is also `true`, the
+    /// character window's debug overlay draws the
+    /// downsampled mask rectangles as purple wireframes
+    /// (matching the legacy Bevy
+    /// `apps/ene-desktop/src/character_drag/linux/
+    /// capture.rs::draw_visible_rect_gizmos` recipe).
+    /// Defaults to `false`; toggled by the
+    /// "Linux mask overlay (debug)" checkbox on the
+    /// Character settings page.
     pub debug_overlay_visible: bool,
     /// PR5.6: toggle the per-bone collider wireframe +
     /// raycast hit-point overlay on the character window.

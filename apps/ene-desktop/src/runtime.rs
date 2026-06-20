@@ -218,6 +218,26 @@ impl ApplicationHandler for Runtime {
                     );
                 }
 
+                // PR-LX.6: build the offscreen mask capture
+                // target. The actual render pass that fills
+                // the texture is wired in PR-LX.7; the
+                // runtime's Linux click-through dispatcher
+                // (LX.5) consumes `extract_rectangles` to
+                // push the silhouette into the Wayland
+                // input-region and X11 shape extension.
+                #[cfg(target_os = "linux")]
+                if self.state.mask_capture.is_none() {
+                    let downsample = self.state.settings.graphics.mask_render_downsample;
+                    if let Some(cam) = crate::platform::wayland_mask_capture::new_mask_capture_state(
+                        &self.state.gpu.device,
+                        char_size.width,
+                        char_size.height,
+                        downsample,
+                    ) {
+                        self.state.mask_capture = Some(cam);
+                    }
+                }
+
                 // PR-LX.5: open the X11 connection (if any)
                 // for the click-through fallback. The probe
                 // is cheap; on Wayland-only builds the
@@ -660,6 +680,17 @@ impl Runtime {
                     &gpu.queue,
                     (new_size.width, new_size.height),
                 );
+                // PR-LX.6: resize the mask capture target to
+                // the new window dimensions. The downsampled
+                // texture + readback buffer are re-allocated;
+                // the next `about_to_wait` drains the new
+                // geometry.
+                #[cfg(target_os = "linux")]
+                if let Some(mask) = self.state.mask_capture.as_ref() {
+                    let downsample = self.state.settings.graphics.mask_render_downsample;
+                    let mut guard = mask.lock();
+                    let _ = guard.resize(&gpu.device, new_size.width, new_size.height, downsample);
+                }
                 cw.window.request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -874,6 +905,14 @@ impl Runtime {
         // `&mut character` borrow would otherwise conflict
         // with the `ui_state()` borrow).
         let show_collider_debug = self.state.ui_state().show_collider_debug;
+        // PR-LX.6: the mask gizmo follows the same F3 toggle
+        // (`show_collider_debug`) and the Character settings
+        // page "Linux mask overlay (debug)" checkbox
+        // (`debug_overlay_visible`). Showing the gizmo
+        // requires either of them to be on; the mask shader
+        // itself is the consumer (PR-LX.7) but the gizmo is
+        // pure-CPU and safe to run on every frame.
+        let show_mask_gizmo = show_collider_debug || self.state.ui_state().debug_overlay_visible;
         let last_raycast_hit = self.state.last_raycast_hit;
         let character_entity = self.state.character_entity;
         let AppState {
@@ -1127,6 +1166,29 @@ impl Runtime {
                         }
                     }
                 }
+                // PR-LX.6: append the mask-capture wireframe
+                // rectangles (Linux only) to the same line
+                // list so the gizmo is drawn on the same
+                // overlay pass as the collider wires. The
+                // gizmo is a thin wrapper around
+                // `MaskCaptureCamera::extract_rectangles` and
+                // is a no-op when the mask is empty (e.g.
+                // before the first readback completes, or
+                // when running on Windows / macOS).
+                if show_mask_gizmo {
+                    #[cfg(target_os = "linux")]
+                    if let Some(mask) = self.state.mask_capture.as_ref() {
+                        let downsample = settings.graphics.mask_render_downsample;
+                        crate::mask_gizmo::build_mask_rect_lines(
+                            &mut lines,
+                            mask,
+                            cw.config.width,
+                            cw.config.height,
+                            downsample,
+                        );
+                    }
+                }
+
                 if !lines.is_empty() {
                     if debug_renderer.is_none() {
                         *debug_renderer =
