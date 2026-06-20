@@ -128,6 +128,23 @@ impl std::fmt::Debug for WaylandInputRegionContext {
 }
 
 impl WaylandInputRegionContext {
+    /// Take a clone of the stand-alone Wayland [`Connection`]
+    /// if the context was constructed successfully. Returns
+    /// `None` when the connection has been dropped (process
+    /// shutdown) or was never established (X11 / Windows
+    /// builds, or a probe that failed at construction time).
+    ///
+    /// Used by the PR-LX.4 layer-shell detection probe to
+    /// share the same connection across the input-region and
+    /// layer-shell modules. A fresh connection is opened as
+    /// a fallback when this returns `None`.
+    #[allow(dead_code)] // PR-LX.4 wiring lands in a follow-up.
+    pub fn clone_connection(&self) -> Option<Connection> {
+        self.connection.clone()
+    }
+}
+
+impl WaylandInputRegionContext {
     /// Probe the winit window's raw handles. Returns `None` on
     /// non-Wayland displays (X11 / macOS / Windows) and on
     /// Wayland connections where `wl_compositor` could not be

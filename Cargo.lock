@@ -2364,6 +2364,7 @@ dependencies = [
  "tray-icon",
  "wayland-client",
  "wayland-protocols 0.31.2",
+ "wayland-protocols-wlr",
  "wgpu",
  "windows-sys 0.61.2",
  "winit",

@@ -20,6 +20,8 @@
 #[cfg(target_os = "linux")]
 pub mod platform_runtime;
 #[cfg(target_os = "linux")]
+pub mod wayland_layer_shell;
+#[cfg(target_os = "linux")]
 pub mod wayland_mask_capture;
 #[cfg(target_os = "linux")]
 pub mod wayland_region;
@@ -27,4 +29,4 @@ pub mod wayland_region;
 pub mod x11_taskbar;
 
 #[cfg(target_os = "linux")]
-pub use platform_runtime::apply_linux_click_through;
+pub use platform_runtime::{apply_linux_click_through, detect_layer_shell};

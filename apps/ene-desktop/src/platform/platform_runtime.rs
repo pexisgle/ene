@@ -16,6 +16,13 @@
 //! event queue here so the compositor `bind` callback lands
 //! promptly after construction.
 //!
+//! [`LayerShellContext`](super::wayland_layer_shell::LayerShellContext)
+//! is consulted once on the first dispatch to detect
+//! `zwlr_layer_shell_v1`; the cached status is logged for
+//! diagnostics. A follow-up PR uses the status to promote the
+//! character window to a `Layer::Overlay` surface when the
+//! compositor supports it.
+//!
 //! # X11
 //!
 //! The X11 `shape` extension is wired in PR5.4.1. Until then the
@@ -45,8 +52,20 @@ static FIRST_DISPATCH_LOGGED: AtomicBool = AtomicBool::new(false);
 /// the click. `cursor_on_silhouette` is the coarse "is the cursor
 /// over the model?" signal; on Wayland it is used to drive
 /// `set_input_region`; on X11 it controls the shape mask.
+///
+/// `freeze_forced` is `true` while the user is holding the
+/// `F8` "freeze character window" hotkey. When set, the click
+/// through policy is bypassed: the character window receives
+/// all input regardless of the cursor position so the user
+/// can interact with the model on xdg-shell compositors that
+/// do not advertise `zwlr_layer_shell_v1`.
 #[cfg(target_os = "linux")]
-pub fn apply_linux_click_through(state: &AppState, allows_input: bool, cursor_on_silhouette: bool) {
+pub fn apply_linux_click_through(
+    state: &AppState,
+    allows_input: bool,
+    cursor_on_silhouette: bool,
+    freeze_forced: bool,
+) {
     if let Some(ctx) = state.wayland_region.as_ref() {
         let mut guard = ctx.lock();
 
@@ -56,7 +75,7 @@ pub fn apply_linux_click_through(state: &AppState, allows_input: bool, cursor_on
         // has no events.
         guard.pump();
 
-        if allows_input && cursor_on_silhouette {
+        if freeze_forced || (allows_input && cursor_on_silhouette) {
             guard.set_full_input();
         } else {
             guard.clear();
@@ -74,13 +93,51 @@ pub fn apply_linux_click_through(state: &AppState, allows_input: bool, cursor_on
     }
 
     if !FIRST_DISPATCH_LOGGED.swap(true, Ordering::Relaxed) {
+        // PR-LX.4: report layer-shell probe presence on the
+        // first dispatch so the log carries the result. The
+        // detection itself runs eagerly in `Runtime::resumed`;
+        // this branch only reports whether the cache has
+        // been populated.
+        let layer_shell_cached = state
+            .layer_shell
+            .as_ref()
+            .is_some_and(|ctx| ctx.lock().cached().is_some());
+
         tracing::trace!(
             target: "ene.linux.hit_test",
             allows_input,
             cursor_on_silhouette,
+            freeze_forced,
             wayland = state.wayland_region.is_some(),
             x11 = state.x11_ctx.is_some(),
+            layer_shell_cached,
             "char window hit test (linux) — first dispatch per process"
         );
     }
+}
+
+/// Run the layer-shell detection probe against the stand-alone
+/// Wayland connection (if any) and update the cached status.
+/// Called once by the runtime after `resumed` so the first
+/// `apply_linux_click_through` log can carry the result.
+///
+/// Returns the resolved [`LayerShellStatus`](super::wayland_layer_shell::LayerShellStatus)
+/// so the caller can stash it for follow-up work.
+#[cfg(target_os = "linux")]
+pub fn detect_layer_shell(state: &AppState) -> super::wayland_layer_shell::LayerShellStatus {
+    use super::wayland_layer_shell::LayerShellStatus;
+    let Some(layer_shell) = state.layer_shell.as_ref() else {
+        return LayerShellStatus::Unavailable;
+    };
+    // Clone the `Connection` out of the wayland_region
+    // guard so the resulting `&Connection` outlives the
+    // guard and can be passed across the layer-shell lock
+    // acquisition.
+    let connection_owned: Option<wayland_client::Connection> = state
+        .wayland_region
+        .as_ref()
+        .and_then(|region| region.lock().clone_connection());
+    let connection_ref: Option<&wayland_client::Connection> = connection_owned.as_ref();
+    let mut ctx = layer_shell.lock();
+    ctx.status(connection_ref)
 }

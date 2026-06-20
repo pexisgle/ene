@@ -36,6 +36,7 @@ gtk = "0.18.2"
 tray-icon = { workspace = true, default-features = false, features = ["gtk"] }
 wayland-client = { workspace = true }
 wayland-protocols = { workspace = true }
+wayland-protocols-wlr = { workspace = true }
 bitflags = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]

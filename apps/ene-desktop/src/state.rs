@@ -72,6 +72,22 @@ pub struct AppState {
     /// PR5.4 ships.
     #[cfg(target_os = "linux")]
     pub x11_ctx: Option<Arc<parking_lot::Mutex<crate::platform::x11_taskbar::X11Context>>>,
+    /// PR5.4 / PR-LX.4: Wayland `zwlr_layer_shell_v1`
+    /// detection context. `None` on non-Linux builds. The
+    /// runtime initialises this alongside
+    /// [`Self::wayland_region`] in
+    /// [`crate::runtime::Runtime::resumed`] so the click-through
+    /// dispatcher can branch on layer-shell availability.
+    #[cfg(target_os = "linux")]
+    pub layer_shell: Option<crate::platform::wayland_layer_shell::LayerShellState>,
+    /// PR5.4 / PR-LX.4: `true` while the user is holding the
+    /// "freeze character window" hotkey (`F8` by default). The
+    /// xdg-shell fallback forces the window to receive all
+    /// input when this is set, so the user can reach through to
+    /// the character even on compositors without layer-shell.
+    /// The flag is **not** persisted across launches.
+    #[cfg(target_os = "linux")]
+    pub layer_shell_freeze: bool,
 }
 
 impl AppState {
@@ -120,6 +136,10 @@ impl AppState {
                 wayland_region: None,
                 #[cfg(target_os = "linux")]
                 x11_ctx: None,
+                #[cfg(target_os = "linux")]
+                layer_shell: None,
+                #[cfg(target_os = "linux")]
+                layer_shell_freeze: false,
             },
             tx,
         )
