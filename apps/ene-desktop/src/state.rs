@@ -88,6 +88,13 @@ pub struct AppState {
     /// The flag is **not** persisted across launches.
     #[cfg(target_os = "linux")]
     pub layer_shell_freeze: bool,
+    /// PR-LX.7: solid-color mask render pass. Built once
+    /// lazily in [`crate::runtime::Runtime::resumed`] after
+    /// [`Self::mask_capture`] is constructed, against
+    /// [`crate::MaskRenderer`]'s `Rgba8Unorm` target format.
+    /// `None` on non-Linux builds.
+    #[cfg(target_os = "linux")]
+    pub mask_renderer: Option<ene_vrm::MaskRenderer>,
     /// PR-LX.6: offscreen `Rgba8Unorm` mask capture target.
     /// Created in [`crate::runtime::Runtime::resumed`] once
     /// the GPU device is alive, sized in
@@ -155,6 +162,8 @@ impl AppState {
                 layer_shell_freeze: false,
                 #[cfg(target_os = "linux")]
                 mask_capture: None,
+                #[cfg(target_os = "linux")]
+                mask_renderer: None,
             },
             tx,
         )
