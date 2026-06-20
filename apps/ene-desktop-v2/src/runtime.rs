@@ -585,6 +585,17 @@ impl Runtime {
                 let new_size = cw.window.inner_size();
                 cw.reconfigure(&gpu.device, new_size);
                 character.resize(&gpu.device, (new_size.width, new_size.height));
+                // A.7: rebuild the FXAA post-processor to
+                // match the new swapchain size. The lazy
+                // build in `character.render` is also keyed
+                // on the size, but rebuilding here avoids
+                // a single-frame miss when the user resizes
+                // the character window while FXAA is on.
+                character.resize_post_processor(
+                    &gpu.device,
+                    &gpu.queue,
+                    (new_size.width, new_size.height),
+                );
                 cw.window.request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -926,7 +937,23 @@ impl Runtime {
         }
 
         let result = cw.with_surface_view(|view| {
-            character.render(device, queue, view, transparent, &model_uniform);
+            // A.7: pass the swapchain size + format + AA mode
+            // to the renderer. The post-processor is rebuilt
+            // lazily inside `character.render` when the AA
+            // mode, swapchain size, or format changes; the
+            // runtime does not need to track those.
+            let swapchain_size = (cw.config.width, cw.config.height);
+            let aa_mode = settings.graphics.antialiasing_mode;
+            character.render(
+                device,
+                queue,
+                view,
+                transparent,
+                &model_uniform,
+                swapchain_size,
+                cw.config.format,
+                aa_mode,
+            );
             if show_collider_debug && let Some(depth_view) = character.depth_view() {
                 let mut lines = Vec::new();
                 let (hit_collider, hit_point) = match last_raycast_hit {
