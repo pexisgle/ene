@@ -369,12 +369,26 @@ impl ApplicationHandler for Runtime {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // PR-LX.7: block briefly on the mask readback so the
-        // silhouette read on this frame is consumed by the
-        // click-through dispatcher below. One-frame latency
-        // is acceptable; the readback is ~3.4 KB at
-        // downsample=8 and the `MapAsync` wait is the only
-        // stall.
+        // PR-LX.7 (disabled): block briefly on the mask
+        // readback so the silhouette read on this frame is
+        // consumed by the click-through dispatcher below.
+        //
+        // **DO NOT** enable this branch on the winit main
+        // thread. `MaskCaptureCamera::read_back` calls
+        // `mpsc::channel::recv()` and blocks until the GPU
+        // signals the `MapAsync` completion. winit 0.30
+        // requires the event loop callback to return
+        // promptly; blocking here freezes the window and
+        // starves the platform's input + redraw pipeline.
+        // The proper fix is to read the buffer on a
+        // dedicated thread (or to use `wgpu::Maintain::Wait`
+        // — removed in wgpu 29 — ported to a `block_on`
+        // helper) and consume the result on a later frame.
+        // Until that lands, the click-through dispatcher
+        // sees an empty rectangle set and falls back to the
+        // full-window accept policy, which is the pre-LX.7
+        // behaviour and therefore safe.
+        #[cfg(any())]
         #[cfg(target_os = "linux")]
         if let Some(mask) = self.state.mask_capture.as_ref() {
             let mut guard = mask.lock();

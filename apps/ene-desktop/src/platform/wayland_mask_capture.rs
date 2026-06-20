@@ -43,6 +43,21 @@ pub const MASK_TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Un
 /// readback buffer.
 const BYTES_PER_PIXEL: u64 = 4;
 
+/// Round `width * BYTES_PER_PIXEL` up to the next multiple of
+/// [`wgpu::COPY_BYTES_PER_ROW_ALIGNMENT`] (256 in wgpu 29).
+/// wgpu validation requires `TexelCopyBufferInfo::bytes_per_row`
+/// to be a multiple of that constant for any `copy_texture_to_buffer`
+/// that crosses a row boundary.
+///
+/// The matching staging buffer must be sized at
+/// `bytes_per_row * height`; the trailing per-row padding bytes
+/// are unread by the CPU (`extract_rectangles` walks per-pixel
+/// using `width`, not the stride).
+pub(crate) const fn aligned_bytes_per_row(width: u32) -> u32 {
+    (width as u64 * BYTES_PER_PIXEL).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as u64)
+        as u32
+}
+
 /// Threshold above which a pixel is considered "inside the
 /// silhouette" (we use the red channel of the captured
 /// `Rgba8Unorm` target). The mask shader writes
@@ -68,6 +83,14 @@ pub struct MaskCaptureCamera {
     width: u32,
     /// `height / mask_render_downsample` (post-clamp).
     height: u32,
+    /// Cached `bytes_per_row` for the readback. This is
+    /// `aligned_bytes_per_row(width)`: the unpadded
+    /// `width * BYTES_PER_PIXEL` rounded up to a multiple of
+    /// [`wgpu::COPY_BYTES_PER_ROW_ALIGNMENT`] (256 in wgpu 29).
+    /// The CPU walk in `extract_rectangles` indexes per-pixel
+    /// using `width`, so the trailing per-row padding bytes
+    /// are unread.
+    bytes_per_row: u32,
     /// Cached downsample so we can detect size changes.
     downsample: u32,
     /// Cached readback bytes; populated by
@@ -127,9 +150,15 @@ impl MaskCaptureCamera {
 
         let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // wgpu 29 requires `TexelCopyBufferInfo::bytes_per_row`
+        // to be a multiple of `wgpu::COPY_BYTES_PER_ROW_ALIGNMENT`.
+        // Round `width * BYTES_PER_PIXEL` up to the next
+        // multiple and size the staging buffer accordingly.
+        let bytes_per_row = aligned_bytes_per_row(width);
+        let readback_size = (bytes_per_row as u64) * (height as u64);
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mask.readback"),
-            size: (width as u64) * (height as u64) * BYTES_PER_PIXEL,
+            size: readback_size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -140,8 +169,14 @@ impl MaskCaptureCamera {
             readback,
             width,
             height,
+            bytes_per_row,
             downsample,
-            last_readback: vec![0u8; (width * height) as usize * BYTES_PER_PIXEL as usize],
+            // The CPU cache matches the staging buffer so
+            // `read_back`'s `copy_from_slice` is a 1:1 copy.
+            // The trailing per-row padding bytes (if any) are
+            // stored but never inspected by
+            // `extract_rectangles`.
+            last_readback: vec![0u8; readback_size as usize],
             readback_fresh: false,
         })
     }
@@ -210,7 +245,7 @@ impl MaskCaptureCamera {
                 buffer: &self.readback,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(self.width * BYTES_PER_PIXEL as u32),
+                    bytes_per_row: Some(self.bytes_per_row),
                     rows_per_image: Some(self.height),
                 },
             },
@@ -371,5 +406,33 @@ mod tests {
         // without the other.
         assert_eq!(MASK_TARGET_FORMAT, wgpu::TextureFormat::Rgba8Unorm);
         assert_eq!(BYTES_PER_PIXEL, 4);
+    }
+
+    #[test]
+    fn bytes_per_row_is_aligned_to_256() {
+        // wgpu 29 validation: `bytes_per_row` must be a
+        // multiple of `COPY_BYTES_PER_ROW_ALIGNMENT` (256).
+        // The 4bpp mask is small so the unpadded
+        // `width * 4` is often not a multiple of 256.
+        assert_eq!(aligned_bytes_per_row(70) % 256, 0);
+        assert_eq!(aligned_bytes_per_row(71) % 256, 0);
+        assert_eq!(aligned_bytes_per_row(1) % 256, 0);
+        // Sanity: the rounded value is at least the
+        // unpadded width.
+        assert!(aligned_bytes_per_row(70) >= 70 * 4);
+    }
+
+    #[test]
+    fn bytes_per_row_alignment_typical_window() {
+        // 560 / 8 = 70, the typical legacy default window
+        // size at downsample 8 → 70 px wide mask. 70 * 4
+        // = 280 is already a multiple of 256 (next
+        // multiple: 512). The helper must still return
+        // 512.
+        assert_eq!(aligned_bytes_per_row(70), 512);
+        // 71 * 4 = 284, next multiple of 256 = 512.
+        assert_eq!(aligned_bytes_per_row(71), 512);
+        // 64 * 4 = 256, exact.
+        assert_eq!(aligned_bytes_per_row(64), 256);
     }
 }

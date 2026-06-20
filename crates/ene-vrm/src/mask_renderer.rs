@@ -68,7 +68,7 @@ impl MaskRenderer {
         let model_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mask.model_bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 1,
+                binding: 0, // matches `@group(1) @binding(0)` in mask.wgsl
                 visibility: wgpu::ShaderStages::VERTEX,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
@@ -150,7 +150,7 @@ impl MaskRenderer {
             label: Some("mask.model_bg"),
             layout: &model_bgl,
             entries: &[wgpu::BindGroupEntry {
-                binding: 1, // matches `model_bgl` binding index above
+                binding: 0, // matches `@group(1) @binding(0)` in mask.wgsl
                 resource: model_buf.as_entire_binding(),
             }],
         });
