@@ -32,7 +32,7 @@ use crate::ai_bridge::AiBridge;
 use crate::events::{AppEvent, AppEventSender, TrayAction};
 use crate::gpu::pick_format_and_alpha;
 use crate::settings::{CharacterSettings, PendingPermission, PendingUserInput, QuestionDraft};
-use crate::settings_ui::{PageKind, SettingsUi};
+use crate::settings_ui::{PageKind, SettingsUi, widgets::SettingsAction};
 use crate::state::AppState;
 use device_query::DeviceQuery;
 
@@ -1120,6 +1120,26 @@ impl Runtime {
             world,
             ui_entity,
         );
+        // PR9: when the WASD hotkey actually switched the
+        // character, push the new character's default
+        // expression into the renderer's EmotionQueue. The
+        // WASD path is gated on the Character page (the early
+        // `return` above) so the queue is always present.
+        if matches!(
+            action,
+            SettingsAction::PrevCharacter | SettingsAction::NextCharacter
+        ) {
+            let now_secs = uw.settings_ui.started_at.elapsed().as_secs_f64();
+            let default_expression = settings.character_state.default_expression.clone();
+            uw.settings_ui
+                .emotion_queue
+                .push(crate::character_state::EmotionCommand {
+                    emotion: default_expression,
+                    target_time: now_secs,
+                    hold_secs: 4.0,
+                    weight: 1.0,
+                });
+        }
     }
 }
 
@@ -1263,11 +1283,7 @@ fn update_char_window_cursor_and_hittest(
     hit
 }
 
-fn char_settings_hotkey_from_event(
-    event: &WindowEvent,
-    has_focus: bool,
-) -> Option<crate::settings_ui::widgets::SettingsAction> {
-    use crate::settings_ui::widgets::SettingsAction;
+fn char_settings_hotkey_from_event(event: &WindowEvent, has_focus: bool) -> Option<SettingsAction> {
     if !has_focus {
         return None;
     }

@@ -70,6 +70,12 @@ pub fn apply_action(
                 settings.characters.len(),
                 -1,
             );
+            // PR9: select_character now returns the per-character
+            // default expression so the caller can push it into
+            // the renderer's EmotionQueue. The dispatcher itself
+            // doesn't own the queue (it lives on SettingsUi) so
+            // we just return the value; the page_character / WASD
+            // hotkey paths handle the push.
             settings.select_character(idx);
         }
         SettingsAction::NextCharacter => {
