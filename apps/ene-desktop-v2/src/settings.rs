@@ -211,6 +211,16 @@ pub struct UiState {
     pub settings_window_visible: bool,
     #[allow(dead_code)] // PR5 will toggle the Linux-only Wayland mask debug overlay.
     pub debug_overlay_visible: bool,
+    /// PR5.6: toggle the per-bone collider wireframe +
+    /// raycast hit-point overlay on the character window.
+    /// Bound to the F3 hotkey and the "Show raycast
+    /// colliders (debug)" checkbox on the Character
+    /// settings page. Not persisted — defaults to `false`
+    /// on every launch so the user starts with a clean
+    /// view.
+    pub show_collider_debug: bool,
+    /// PR5.6: the name of the bone collider currently hovered, if any.
+    pub hovered_bone_name: Option<String>,
     #[allow(dead_code)] // PR2 will bind this to the AI page chat input.
     pub ai_chat_input: String,
     #[allow(dead_code)] // PR2 will display this in the AI page "Latest Response" panel.

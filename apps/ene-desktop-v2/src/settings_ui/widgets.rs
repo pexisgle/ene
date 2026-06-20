@@ -46,6 +46,12 @@ pub enum SettingsAction {
     CharacterPosYUp,
     CharacterPosZDown,
     CharacterPosZUp,
+    /// PR5.6: toggle the per-bone collider wireframe +
+    /// raycast hit-point overlay. Available on every
+    /// platform; bound to the F3 hotkey and the
+    /// "Show raycast colliders (debug)" checkbox on the
+    /// Character page.
+    ToggleColliderDebug,
     SendAiChat,
 }
 
@@ -173,6 +179,14 @@ pub fn apply_action(
         }
         SettingsAction::CharacterPosZUp => {
             adjust_f32(&mut settings.character_state.character_position.z, 0.05);
+        }
+        SettingsAction::ToggleColliderDebug => {
+            // PR5.6: flip the collider debug overlay
+            // flag. Not persisted — defaults to `false`
+            // on every launch.
+            if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
+                ui_state.show_collider_debug = !ui_state.show_collider_debug;
+            }
         }
         SettingsAction::SendAiChat => {
             send_ai_chat(settings, ai, world, ui_entity);

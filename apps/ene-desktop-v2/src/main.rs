@@ -24,6 +24,7 @@ mod events;
 mod gpu;
 mod look_at;
 mod physics;
+mod raycast_debug;
 mod runtime;
 mod settings;
 mod settings_ui;

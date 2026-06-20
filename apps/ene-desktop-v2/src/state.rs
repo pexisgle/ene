@@ -47,6 +47,18 @@ pub struct AppState {
     pub ui_entity: hecs::Entity,
     /// Rapier physics state
     pub physics: crate::physics::PhysicsWorld,
+    /// PR5.6: latest raycast hit from the click-through test,
+    /// refreshed every `about_to_wait` from
+    /// [`crate::runtime::update_char_window_cursor_and_hittest`].
+    /// The character-window debug overlay reads this to
+    /// highlight the hit collider and draw the hit-point
+    /// cross.
+    pub last_raycast_hit: Option<crate::physics::RaycastHit>,
+    /// PR5.6: line-list overlay renderer, lazily created
+    /// the first time the F3 toggle is on (and the
+    /// `surface_format` is final). `None` until then so
+    /// the first frame is a clean redraw.
+    pub debug_renderer: Option<ene_vrm::DebugRenderer>,
 }
 
 impl AppState {
@@ -89,6 +101,8 @@ impl AppState {
                 character_entity,
                 ui_entity,
                 physics: crate::physics::PhysicsWorld::new(),
+                last_raycast_hit: None,
+                debug_renderer: None,
             },
             tx,
         )

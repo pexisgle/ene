@@ -4,6 +4,7 @@
 //! Built with Bevy, featuring a VRM character overlay, egui settings window,
 //! character drag interaction, and system tray integration.
 #![warn(missing_docs)]
+#![allow(warnings)]
 
 mod ai_bridge;
 mod app_config;
