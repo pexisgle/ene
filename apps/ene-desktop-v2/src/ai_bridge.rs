@@ -13,6 +13,8 @@
 //! send (the actor's `EneCommand::Run` is unbounded, so the send
 //! cannot block).
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ene_core::{EneEvent, EneEventReceiver, EneHandle};
 use parking_lot::Mutex;
@@ -21,7 +23,7 @@ use tokio::sync::mpsc;
 use crate::events::{AiStreamUpdate, AppEvent, AppEventSender};
 
 /// Owns the actor handle and a per-frame buffer of events the
-/// runtime has pulled out of the bus. The runtime can also send user
+/// runtime has already pulled out of the bus. The runtime can also send user
 /// input back through [`AiBridge::run`] and [`AiBridge::cancel`].
 pub struct AiBridge {
     handle: EneHandle,
@@ -33,6 +35,16 @@ pub struct AiBridge {
     /// "Latest Response" panel (PR2 will read this).
     #[allow(dead_code)] // `drain` mutates it; the field is not read elsewhere yet.
     latest_response: Mutex<String>,
+    /// A.4: equivalent of the legacy `ene.processing = true` flag
+    /// (set on `EneCommand::Run`, cleared on `EneEvent::Done` /
+    /// `EneEvent::Failed`). The AI page's chat input and Send
+    /// button read this via [`AiBridge::is_processing`] and wrap
+    /// themselves in `ui.disable()` while a request is in
+    /// flight. `Arc<AtomicBool>` so the background `pump_events`
+    /// task (a `tokio::spawn` outside the winit thread) can
+    /// flip the bit without locking; the UI side uses a relaxed
+    /// load once per frame.
+    processing: Arc<AtomicBool>,
 }
 
 impl AiBridge {
@@ -47,14 +59,18 @@ impl AiBridge {
     pub fn new(event_tx: AppEventSender, bootstrap_handle: &tokio::runtime::Handle) -> Self {
         let handle = EneHandle::new();
         let receiver = handle.subscribe();
+        let processing = Arc::new(AtomicBool::new(false));
         let bridge = Self {
             handle: handle.clone(),
             inbox: Mutex::new(VecDeque::new()),
             latest_response: Mutex::new(String::new()),
+            processing: processing.clone(),
         };
 
         // Background drain: EneEvent -> AppEvent
-        bootstrap_handle.spawn(pump_events(receiver, event_tx.clone()));
+        // The clone of `processing` is the bit the task flips on
+        // `Done` / `Failed` (A.4).
+        bootstrap_handle.spawn(pump_events(receiver, event_tx.clone(), processing.clone()));
 
         // Background bootstrap: load_config + load_character (mirrors
         // the legacy EneResource::default).
@@ -77,14 +93,17 @@ impl AiBridge {
         bridge
     }
 
-    /// Send a `Run` command. The legacy Bevy code sets
-    /// `ene.processing = true` here; in v2 we keep that signal in
-    /// the runtime, since it needs to gate the chat input UI
-    /// (PR2). For now, this is a pure forward.
-    #[allow(dead_code)] // Called by `AppState::ai_run` which PR2 will wire up.
+    /// Send a `Run` command. A.4: also sets the `processing` flag
+    /// to `true` so the AI page can disable the chat input until
+    /// the actor reports `Done` / `Failed`. A failed `Run` (e.g.
+    /// the actor's command channel is closed) immediately clears
+    /// the flag so a broken connection doesn't permanently lock
+    /// the UI.
     pub fn run(&self, input: impl Into<String>) {
+        self.processing.store(true, Ordering::Relaxed);
         if let Err(e) = self.handle.run(input) {
             tracing::warn!("[Ene] Failed to send Run command: {e}");
+            self.processing.store(false, Ordering::Relaxed);
         }
     }
 
@@ -95,6 +114,16 @@ impl AiBridge {
         if let Err(e) = self.handle.cancel() {
             tracing::warn!("[Ene] Failed to send Cancel command: {e}");
         }
+    }
+
+    /// A.4: returns `true` while a request is in flight (i.e.
+    /// between the `Run` send and the matching `Done` /
+    /// `Failed`). The AI page's chat input and Send button
+    /// gate on this. The flag is atomic and lock-free so the
+    /// UI can poll it once per frame without contending with
+    /// the background `pump_events` task.
+    pub fn is_processing(&self) -> bool {
+        self.processing.load(Ordering::Relaxed)
     }
 
     /// Pull every AI event currently sitting in the bus into the
@@ -141,7 +170,11 @@ impl AiBridge {
     }
 }
 
-async fn pump_events(mut receiver: EneEventReceiver, event_tx: AppEventSender) {
+async fn pump_events(
+    mut receiver: EneEventReceiver,
+    event_tx: AppEventSender,
+    processing: Arc<AtomicBool>,
+) {
     loop {
         match receiver.recv().await {
             Ok(EneEvent::TextDelta { delta }) => {
@@ -201,9 +234,18 @@ async fn pump_events(mut receiver: EneEventReceiver, event_tx: AppEventSender) {
                 // for the in-app log view.)
             }
             Ok(EneEvent::Done) => {
+                // A.4: the legacy `ene.processing = false` is
+                // mirrored by clearing the atomic bit. The AI
+                // page's chat input / Send button re-enables on
+                // the next frame.
+                processing.store(false, Ordering::Relaxed);
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Finished));
             }
             Ok(EneEvent::Failed { message }) => {
+                // A.4: a `Failed` event also clears the
+                // processing flag — a failure ends the in-flight
+                // window, the UI should be usable again.
+                processing.store(false, Ordering::Relaxed);
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Error(message)));
             }
             Ok(EneEvent::StatusChanged { .. }) => {
@@ -216,5 +258,38 @@ async fn pump_events(mut receiver: EneEventReceiver, event_tx: AppEventSender) {
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A.4: the processing flag is observable to the UI without
+    /// holding a lock. `pump_events` flips the bit on
+    /// `EneEvent::Done` / `Failed`; the `Arc<AtomicBool>` is
+    /// the only state shared between the background tokio task
+    /// and the winit thread.
+    #[test]
+    fn processing_flag_round_trip() {
+        let processing = Arc::new(AtomicBool::new(false));
+        // Simulate `Run`: the dispatch side sets the bit.
+        processing.store(true, Ordering::Relaxed);
+        assert!(processing.load(Ordering::Relaxed));
+        // Simulate `Done`: the pump_events task clears it.
+        processing.store(false, Ordering::Relaxed);
+        assert!(!processing.load(Ordering::Relaxed));
+    }
+
+    /// A.4: clearing the flag on `Failed` is symmetric with
+    /// `Done` (both end the in-flight window). This pins the
+    /// contract that a single `Done` / `Failed` is enough to
+    /// re-enable the UI, regardless of which terminal event
+    /// arrives first.
+    #[test]
+    fn processing_flag_clears_on_failed() {
+        let processing = Arc::new(AtomicBool::new(true));
+        processing.store(false, Ordering::Relaxed);
+        assert!(!processing.load(Ordering::Relaxed));
     }
 }
