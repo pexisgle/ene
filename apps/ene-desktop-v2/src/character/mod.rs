@@ -19,12 +19,15 @@
 //!   `FADE_FLOOR`, then forgets it.
 use std::path::PathBuf;
 
+use crate::settings::AntialiasingMode;
 use ene_vrm::{
     ExpressionName, HumanoidBoneEntry, LookAtBoneOutput, LookAtEvaluator, LookAtOutput,
     LookAtProperties, ModelUniform, OrthographicCamera, VrmModel, VrmRenderer, evaluate_clip,
     load_vrm, load_vrma,
 };
-use ene_vrm::{SpringBoneProperties, SpringBoneSimulator, VrmaAsset, VrmaPlayer};
+use ene_vrm::{
+    SpringBoneProperties, SpringBoneSimulator, VrmaAsset, VrmaPlayer, post_process::PostProcessor,
+};
 use glam::{Mat4, Quat, Vec3};
 
 use crate::character_state::{ActiveEmotion, EmotionQueue, transition_emotions};
@@ -114,6 +117,21 @@ pub struct CharacterRenderer {
     /// a clone on the renderer avoids a borrow fight with
     /// `&mut VrmModel` in the per-frame update.
     spring_bone_props: Option<SpringBoneProperties>,
+    /// A.7: FXAA post-processor. `Some` when the AA mode is
+    /// `Fxaa`; `None` for `Off` (the model is rendered
+    /// straight into the swapchain) or before the post-
+    /// processor can be built (no model, no device). The
+    /// `set_antialiasing_mode` method rebuilds the field.
+    post_processor: Option<PostProcessor>,
+    /// A.7: cached FXAA shader module. Re-used by every
+    /// `post_processor` rebuild (the wgpu pipeline state
+    /// objects are the per-rebuild, the shader is shared).
+    fxaa_shader: Option<wgpu::ShaderModule>,
+    /// A.7: the swapchain format the post-processor was
+    /// built against. Rebuilt on a surface-format change
+    /// (the runtime already recreates the depth view in the
+    /// same path).
+    fxaa_format: Option<wgpu::TextureFormat>,
 }
 
 impl CharacterRenderer {
@@ -134,6 +152,9 @@ impl CharacterRenderer {
             drag: CharacterDragState::default(),
             spring_bone_sim: None,
             spring_bone_props: None,
+            post_processor: None,
+            fxaa_shader: None,
+            fxaa_format: None,
             vrma: None,
             vrma_player: VrmaPlayer::default(),
             vrma_path: None,
@@ -515,14 +536,39 @@ impl CharacterRenderer {
     /// `model_uniform` is composed by the runtime every frame from
     /// `CharacterState` (position + scale) and applied between
     /// view-proj and the vertex position in the shader.
+    ///
+    /// A.7: when the AA mode is `Fxaa` and the post-processor is
+    /// built, the model is drawn into the post-processor's
+    /// intermediate texture first; the post-processor then
+    /// samples that texture and writes the smoothed output to
+    /// `view`. For `Off` (or a missing post-processor) the
+    /// model is drawn straight into `view`, matching the
+    /// pre-A.7 behaviour.
     pub fn render(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         view: &wgpu::TextureView,
         transparent: bool,
         model_uniform: &ModelUniform,
+        swapchain_size: (u32, u32),
+        swapchain_format: wgpu::TextureFormat,
+        aa_mode: AntialiasingMode,
     ) {
+        // A.7: lazily rebuild the post-processor BEFORE the
+        // model borrow. The post-processor only touches
+        // `self.post_processor` / `self.fxaa_shader` /
+        // `self.fxaa_format`; the model / renderer / depth
+        // view are read in the second half. Splitting the
+        // two phases avoids a borrow conflict.
+        if self.model.is_some() {
+            if aa_mode == AntialiasingMode::Fxaa && self.post_processor.is_none() {
+                self.try_build_post_processor(device, queue, swapchain_format, swapchain_size);
+            } else if aa_mode != AntialiasingMode::Fxaa {
+                self.post_processor = None;
+            }
+        }
+
         let (Some(model), Some(renderer), Some(depth_view)) =
             (&self.model, &self.renderer, &self.depth_view)
         else {
@@ -534,17 +580,100 @@ impl CharacterRenderer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("character.encoder"),
         });
-        renderer.render(
-            queue,
-            &mut encoder,
-            view,
-            depth_view,
-            model,
-            &self.camera,
-            model_uniform,
-            transparent,
-        );
+        if let Some(post) = self.post_processor.as_mut() {
+            // FXAA path: render the model into the post-
+            // processor's intermediate texture, then run
+            // the post-processor into the swapchain view.
+            // `renderer.render` is a `&self` method so the
+            // borrow of `post.intermediate_view()` and the
+            // borrow of `model`/`renderer` do not conflict.
+            let intermediate = post.intermediate_view();
+            renderer.render(
+                queue,
+                &mut encoder,
+                intermediate,
+                depth_view,
+                model,
+                &self.camera,
+                model_uniform,
+                transparent,
+            );
+            post.render(device, queue, &mut encoder, view);
+        } else {
+            // Direct path: no post-process, render straight
+            // into the swapchain.
+            renderer.render(
+                queue,
+                &mut encoder,
+                view,
+                depth_view,
+                model,
+                &self.camera,
+                model_uniform,
+                transparent,
+            );
+        }
         queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// A.7: lazily build the FXAA post-processor. Loads the
+    /// FXAA shader (idempotent) and constructs a new
+    /// `PostProcessor` for the given swapchain size and
+    /// format. The runtime always passes a fresh
+    /// `swapchain_format` (it knows the surface format from
+    /// the wgpu device), so this never has to guess.
+    fn try_build_post_processor(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        swapchain_size: (u32, u32),
+    ) {
+        if swapchain_size.0 == 0 || swapchain_size.1 == 0 {
+            return;
+        }
+        // The shader module is built once and re-used.
+        if self.fxaa_shader.is_none() {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("fxaa.shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("../../../../crates/ene-vrm/src/shaders/fxaa.wgsl").into(),
+                ),
+            });
+            self.fxaa_shader = Some(shader);
+        }
+        // Re-build when the swapchain format or size changes.
+        let needs_rebuild = self.fxaa_format.map(|f| f != format).unwrap_or(true)
+            || self
+                .post_processor
+                .as_ref()
+                .map(|p| p.size() != swapchain_size)
+                .unwrap_or(true);
+        if !needs_rebuild {
+            return;
+        }
+        if let Some(shader) = self.fxaa_shader.as_ref()
+            && let Some(post) = PostProcessor::new(device, queue, format, swapchain_size, shader)
+        {
+            self.post_processor = Some(post);
+            self.fxaa_format = Some(format);
+        }
+    }
+
+    /// A.7: rebuild the post-processor at a new swapchain
+    /// size. The runtime calls this on `WindowEvent::Resized`
+    /// in lock-step with the depth-texture resize.
+    pub fn resize_post_processor(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        swapchain_size: (u32, u32),
+    ) {
+        if let (Some(shader), Some(post)) =
+            (self.fxaa_shader.as_ref(), self.post_processor.as_mut())
+        {
+            post.resize(device, queue, shader, swapchain_size);
+        }
     }
 
     /// Clear-only path used when the model failed to load.

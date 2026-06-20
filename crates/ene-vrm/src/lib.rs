@@ -62,6 +62,7 @@ pub mod look_at;
 pub mod model;
 pub mod mtoon;
 pub mod node_constraint;
+pub mod post_process;
 pub mod renderer;
 pub mod spring_bone;
 
