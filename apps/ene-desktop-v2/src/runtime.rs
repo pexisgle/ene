@@ -279,8 +279,18 @@ impl ApplicationHandler for Runtime {
         let mut pending_user_input: Option<PendingUserInput> = None;
         while let Ok(event) = self.state.event_rx.try_recv() {
             match event {
-                AppEvent::Tray(TrayAction::OpenSettings) => {
+                AppEvent::Tray(TrayAction::OpenSettings { page }) => {
                     self.show_settings_window();
+                    // A.2: when the runtime triggers the open (e.g. on a
+                    // `PermissionRequired` event), it can pass `Some(page)` to
+                    // jump the tab strip straight to the AI page. The tray
+                    // menu and click handlers always pass `None` (default =
+                    // current page, falling back to Character on first show).
+                    if let Some(page) = page
+                        && let Some(uw) = self.ui_window.as_mut()
+                    {
+                        uw.settings_ui.show(page);
+                    }
                 }
                 AppEvent::Tray(TrayAction::Quit) => {
                     self.state.save();
@@ -315,10 +325,23 @@ impl ApplicationHandler for Runtime {
                             description,
                         });
                         self.state.ui_state_mut().settings_window_visible = true;
+                        // A.2: jump to the AI page so the user
+                        // immediately sees the permission dialog
+                        // (data path wired in PR2; dialog rendering
+                        // lands in A.5).
+                        if let Some(uw) = self.ui_window.as_mut() {
+                            uw.settings_ui.show(crate::settings_ui::PageKind::Ai);
+                        }
                     }
                     crate::events::AiStreamUpdate::UserInputRequired { request_id, prompt } => {
                         pending_user_input = Some(PendingUserInput { request_id, prompt });
                         self.state.ui_state_mut().settings_window_visible = true;
+                        // A.2: same as above — open to the AI page
+                        // so the user sees the question dialog
+                        // (rendering in A.5).
+                        if let Some(uw) = self.ui_window.as_mut() {
+                            uw.settings_ui.show(crate::settings_ui::PageKind::Ai);
+                        }
                     }
                     _ => {}
                 },

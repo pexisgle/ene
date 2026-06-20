@@ -37,7 +37,14 @@ pub enum AppEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayAction {
-    OpenSettings,
+    /// Open the settings window. `page = None` keeps the
+    /// previously-focused page (defaults to Character on first
+    /// show); `page = Some(_)` jumps the tab strip to that page
+    /// — used by the runtime to focus the AI page when a
+    /// `PermissionRequired` or `UserInputRequired` event arrives.
+    OpenSettings {
+        page: Option<crate::settings_ui::PageKind>,
+    },
     Quit,
 }
 

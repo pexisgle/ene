@@ -261,12 +261,12 @@ fn pump_tray_events(event_tx: &AppEventSender) {
                 ..
             } = event
             {
-                let _ = event_tx.send(AppEvent::Tray(TrayAction::OpenSettings));
+                let _ = event_tx.send(AppEvent::Tray(TrayAction::OpenSettings { page: None }));
             }
         }
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             let action = match event.id.as_ref() {
-                SETTINGS_MENU_ID => Some(TrayAction::OpenSettings),
+                SETTINGS_MENU_ID => Some(TrayAction::OpenSettings { page: None }),
                 QUIT_MENU_ID => Some(TrayAction::Quit),
                 _ => None,
             };
