@@ -59,6 +59,19 @@ pub struct AppState {
     /// `surface_format` is final). `None` until then so
     /// the first frame is a clean redraw.
     pub debug_renderer: Option<ene_vrm::DebugRenderer>,
+    /// PR5.3: Wayland input-region context for the character
+    /// window. `None` when the underlying display is not
+    /// Wayland (X11, macOS, Windows). Populated lazily in
+    /// [`crate::runtime::Runtime::resumed`] once the winit
+    /// window's raw handles resolve to a Wayland connection.
+    #[cfg(target_os = "linux")]
+    pub wayland_region:
+        Option<Arc<parking_lot::Mutex<crate::platform::wayland_region::WaylandInputRegionContext>>>,
+    /// PR5.4: X11 context for `_NET_WM_STATE_SKIP_TASKBAR`
+    /// and the shape extension click-through. `None` until
+    /// PR5.4 ships.
+    #[cfg(target_os = "linux")]
+    pub x11_ctx: Option<Arc<parking_lot::Mutex<crate::platform::x11_taskbar::X11Context>>>,
 }
 
 impl AppState {
@@ -103,6 +116,10 @@ impl AppState {
                 physics: crate::physics::PhysicsWorld::new(),
                 last_raycast_hit: None,
                 debug_renderer: None,
+                #[cfg(target_os = "linux")]
+                wayland_region: None,
+                #[cfg(target_os = "linux")]
+                x11_ctx: None,
             },
             tx,
         )

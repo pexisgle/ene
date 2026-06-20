@@ -24,6 +24,8 @@ mod events;
 mod gpu;
 mod look_at;
 mod physics;
+#[cfg(target_os = "linux")]
+mod platform;
 mod raycast_debug;
 mod runtime;
 mod settings;

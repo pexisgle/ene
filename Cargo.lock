@@ -2337,6 +2337,7 @@ dependencies = [
 name = "ene-desktop"
 version = "0.1.0"
 dependencies = [
+ "bitflags 2.13.0",
  "bytemuck",
  "ctor",
  "device_query",
@@ -2361,6 +2362,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tray-icon",
+ "wayland-client",
+ "wayland-protocols 0.31.2",
  "wgpu",
  "windows-sys 0.61.2",
  "winit",
@@ -4770,7 +4773,7 @@ dependencies = [
  "tracing",
  "wayland-backend",
  "wayland-client",
- "wayland-protocols",
+ "wayland-protocols 0.32.13",
  "wayland-protocols-wlr",
 ]
 
@@ -8441,7 +8444,7 @@ dependencies = [
  "wayland-client",
  "wayland-csd-frame",
  "wayland-cursor",
- "wayland-protocols",
+ "wayland-protocols 0.32.13",
  "wayland-protocols-wlr",
  "wayland-scanner",
  "xkeysym",
@@ -8466,7 +8469,7 @@ dependencies = [
  "wayland-client",
  "wayland-csd-frame",
  "wayland-cursor",
- "wayland-protocols",
+ "wayland-protocols 0.32.13",
  "wayland-protocols-experimental",
  "wayland-protocols-misc",
  "wayland-protocols-wlr",
@@ -10097,6 +10100,18 @@ dependencies = [
 
 [[package]]
 name = "wayland-protocols"
+version = "0.31.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f81f365b8b4a97f422ac0e8737c438024b5951734506b0e1d775c73030561f4"
+dependencies = [
+ "bitflags 2.13.0",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-scanner",
+]
+
+[[package]]
+name = "wayland-protocols"
 version = "0.32.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23d0c813de3daa2ed6520af85a3bd49b0e722a3078506899aa9686fea58dc4b6"
@@ -10116,7 +10131,7 @@ dependencies = [
  "bitflags 2.13.0",
  "wayland-backend",
  "wayland-client",
- "wayland-protocols",
+ "wayland-protocols 0.32.13",
  "wayland-scanner",
 ]
 
@@ -10129,7 +10144,7 @@ dependencies = [
  "bitflags 2.13.0",
  "wayland-backend",
  "wayland-client",
- "wayland-protocols",
+ "wayland-protocols 0.32.13",
  "wayland-scanner",
 ]
 
@@ -10142,7 +10157,7 @@ dependencies = [
  "bitflags 2.13.0",
  "wayland-backend",
  "wayland-client",
- "wayland-protocols",
+ "wayland-protocols 0.32.13",
  "wayland-scanner",
 ]
 
@@ -10155,7 +10170,7 @@ dependencies = [
  "bitflags 2.13.0",
  "wayland-backend",
  "wayland-client",
- "wayland-protocols",
+ "wayland-protocols 0.32.13",
  "wayland-scanner",
 ]
 
@@ -11055,7 +11070,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wayland-backend",
  "wayland-client",
- "wayland-protocols",
+ "wayland-protocols 0.32.13",
  "wayland-protocols-plasma",
  "web-sys",
  "web-time",
@@ -11113,7 +11128,7 @@ dependencies = [
  "tree_magic_mini",
  "wayland-backend",
  "wayland-client",
- "wayland-protocols",
+ "wayland-protocols 0.32.13",
  "wayland-protocols-wlr",
 ]
 

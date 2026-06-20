@@ -177,6 +177,24 @@ impl ApplicationHandler for Runtime {
                 // pre-scaled by `actual_scale` so the
                 // collider matches the rendered mesh; one-time
                 // cost at model load.
+                // PR-LX.2: wire the stand-alone Wayland input
+                // region context. The winit window's raw display
+                // / window handles resolve to a Wayland
+                // connection only when the underlying compositor
+                // is Wayland; on X11 / Windows this `try_new` is
+                // a no-op and `state.wayland_region` stays
+                // `None` (the dispatcher falls through to the
+                // X11 / Windows path).
+                #[cfg(target_os = "linux")]
+                if self.state.wayland_region.is_none()
+                    && let Some(ctx) =
+                        crate::platform::wayland_region::WaylandInputRegionContext::try_new(
+                            cw.window.as_ref(),
+                        )
+                {
+                    self.state.wayland_region = Some(ctx);
+                }
+
                 let actual_scale = self.state.character.auto_fit_scale(0.9)
                     * self.state.settings.character_state.model_scale;
                 let specs = self
@@ -1313,11 +1331,19 @@ fn update_char_window_cursor_and_hittest(
         local_physical_y,
     ));
 
-    // 4. winit handles the OS-level click-through for us.
-    //    `allows_input == false` toggles `WS_EX_TRANSPARENT` on
-    //    Windows and the platform equivalent elsewhere, so the
-    //    click goes to the window underneath.
-    let _ = cw.window.set_cursor_hittest(allows_input);
+    // 4. OS-level click-through.
+    //    Windows: winit toggles `WS_EX_TRANSPARENT` for us.
+    //    Linux: `set_cursor_hittest` is a no-op; the display-server-
+    //           specific dispatcher (Wayland `set_input_region` or
+    //           X11 shape) lives in `platform::platform_runtime`.
+    #[cfg(target_os = "windows")]
+    {
+        let _ = cw.window.set_cursor_hittest(allows_input);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        crate::platform::apply_linux_click_through(state, allows_input, cursor_over);
+    }
 
     hit
 }
