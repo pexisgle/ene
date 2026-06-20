@@ -158,11 +158,20 @@ impl ApplicationHandler for Runtime {
         ) {
             Ok(cw) => {
                 let format = cw.config.format;
+
+                #[cfg(target_os = "linux")]
+                let mask_format = Some(crate::platform::wayland_mask_capture::MASK_TARGET_FORMAT);
+                #[cfg(not(target_os = "linux"))]
+                let mask_format = None;
+
                 // PR3: load the default VRM and build the
                 // render pipeline.
-                self.state
-                    .character
-                    .init(&self.state.gpu.device, &self.state.gpu.queue, format);
+                self.state.character.init(
+                    &self.state.gpu.device,
+                    &self.state.gpu.queue,
+                    format,
+                    mask_format,
+                );
                 self.state
                     .character
                     .resize(&self.state.gpu.device, (char_size.width, char_size.height));
@@ -234,21 +243,25 @@ impl ApplicationHandler for Runtime {
                         char_size.height,
                         downsample,
                     ) {
+                        // PR-LX.9: spawn the off-thread mask
+                        // readback worker now that the
+                        // capture camera exists. The worker
+                        // owns clones of the device + queue
+                        // (cheap Arc internals) and shares
+                        // the camera via `Arc<Mutex<…>>` so
+                        // `apply_linux_click_through` sees
+                        // the latest `last_readback` on the
+                        // next dispatch.
+                        let device = Arc::new(self.state.gpu.device.clone());
+                        let queue = Arc::new(self.state.gpu.queue.clone());
+                        let worker = crate::platform::mask_readback::MaskReadbackWorker::spawn(
+                            Arc::clone(&cam),
+                            device,
+                            queue,
+                        );
+                        self.state.mask_readback_worker = Some(worker);
                         self.state.mask_capture = Some(cam);
                     }
-                }
-
-                // PR-LX.7: build the mask render pass against
-                // the same `Rgba8Unorm` target format the
-                // capture camera uses. The pipeline is
-                // small + uniform; one-time cost at
-                // `resumed`.
-                #[cfg(target_os = "linux")]
-                if self.state.mask_renderer.is_none() {
-                    self.state.mask_renderer = Some(ene_vrm::MaskRenderer::new(
-                        &self.state.gpu.device,
-                        crate::platform::wayland_mask_capture::MASK_TARGET_FORMAT,
-                    ));
                 }
 
                 // PR-LX.5: open the X11 connection (if any)
@@ -369,32 +382,14 @@ impl ApplicationHandler for Runtime {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // PR-LX.7 (disabled): block briefly on the mask
-        // readback so the silhouette read on this frame is
-        // consumed by the click-through dispatcher below.
+        // PR-LX.9: the mask readback now happens off-thread
+        // (see `crate::platform::mask_readback::MaskReadbackWorker`).
+        // The winit main thread never blocks on a GPU
+        // `MapAsync` completion; it simply reads
+        // `MaskCaptureCamera::extract_rectangles` (which the
+        // worker has refreshed) on the next click-through
+        // dispatch.
         //
-        // **DO NOT** enable this branch on the winit main
-        // thread. `MaskCaptureCamera::read_back` calls
-        // `mpsc::channel::recv()` and blocks until the GPU
-        // signals the `MapAsync` completion. winit 0.30
-        // requires the event loop callback to return
-        // promptly; blocking here freezes the window and
-        // starves the platform's input + redraw pipeline.
-        // The proper fix is to read the buffer on a
-        // dedicated thread (or to use `wgpu::Maintain::Wait`
-        // — removed in wgpu 29 — ported to a `block_on`
-        // helper) and consume the result on a later frame.
-        // Until that lands, the click-through dispatcher
-        // sees an empty rectangle set and falls back to the
-        // full-window accept policy, which is the pre-LX.7
-        // behaviour and therefore safe.
-        #[cfg(any())]
-        #[cfg(target_os = "linux")]
-        if let Some(mask) = self.state.mask_capture.as_ref() {
-            let mut guard = mask.lock();
-            guard.read_back(&self.state.gpu.device, &self.state.gpu.queue);
-        }
-
         // 1. Drain the cross-subsystem bus. Tray actions update UI
         //    state; AI events drive the latest-response buffer and
         //    auto-popup. `Quit` exits.
@@ -573,12 +568,13 @@ impl ApplicationHandler for Runtime {
         // highlight the hit collider and draw the hit-point
         // cross.
         if let Some(cw) = self.char_window.as_ref() {
+            let drag_is_dragging = self.state.character.drag.is_dragging();
             self.state.last_raycast_hit = update_char_window_cursor_and_hittest(
-                &self.state,
+                &mut self.state,
                 &self.device_state,
                 cw,
                 self.transparent,
-                self.state.character.drag.is_dragging(),
+                drag_is_dragging,
                 &mut self.last_cursor_physical,
             );
 
@@ -885,6 +881,26 @@ impl Runtime {
                             );
                         }
                         cw.window.request_redraw();
+                    } else if key_code_pressed(&event) == Some(winit::keyboard::KeyCode::F9) {
+                        // PR-LX.8: F9 toggles the input-region
+                        // debug overlay. The overlay renders
+                        // the rectangle set that
+                        // `apply_linux_click_through` just
+                        // pushed to the Wayland / X11
+                        // display server so we can verify the
+                        // input region matches the visual
+                        // silhouette.
+                        #[cfg(target_os = "linux")]
+                        {
+                            self.state.show_input_region_debug =
+                                !self.state.show_input_region_debug;
+                            tracing::info!(
+                                target: "ene.linux.input_region",
+                                show = self.state.show_input_region_debug,
+                                "input-region debug overlay toggled"
+                            );
+                        }
+                        cw.window.request_redraw();
                     } else {
                         // Character-window WASD / Space shortcuts
                         // when the settings window is open on the
@@ -1125,82 +1141,100 @@ impl Runtime {
                 cw.config.format,
                 aa_mode,
             );
-            if show_collider_debug && let Some(depth_view) = character.depth_view() {
-                let mut lines = Vec::new();
-                let (hit_collider, hit_point) = match last_raycast_hit {
-                    Some(h) if h.entity == character_entity => (Some(h.collider), Some(h.point)),
-                    _ => (None, None),
-                };
-                crate::raycast_debug::build_collider_lines(
-                    &mut lines,
-                    physics,
-                    character_entity,
-                    hit_collider,
-                    hit_point,
-                    true,
+            let show_any_debug =
+                show_collider_debug || show_mask_gizmo || self.state.show_input_region_debug;
+            if show_any_debug && let Some(depth_view) = character.depth_view() {
+                let camera_eye = glam::Vec3::from(character.camera_eye());
+                let camera_target = glam::Vec3::from(character.camera_target());
+                let camera_distance = (camera_eye - camera_target).length();
+                let view_z = -camera_distance;
+                let cam_view = glam::Mat4::look_at_rh(
+                    camera_eye,
+                    camera_target,
+                    ene_vrm::camera::DEFAULT_UP.into(),
                 );
-                if let Some(model) = character.model() {
-                    let center = glam::Vec3::from(model.center());
-                    let normalize_scale = model.normalize_scale();
-                    let auto_scale = character.auto_fit_scale(0.9);
-                    let actual_scale = auto_scale * cs.model_scale;
-
-                    for (bone_name, entry) in model.humanoid.iter() {
-                        let parent_pos_raw = model.nodes.world_positions[entry.node];
-                        let parent_world = cs.character_position
-                            + (parent_pos_raw - center) * normalize_scale * actual_scale;
-
-                        if let Some(child_node) =
-                            crate::character::collider::get_humanoid_child_node(
-                                bone_name.as_str(),
-                                &model.humanoid,
-                            )
-                        {
-                            let child_pos_raw = model.nodes.world_positions[child_node];
-                            let child_world = cs.character_position
-                                + (child_pos_raw - center) * normalize_scale * actual_scale;
-
-                            lines.push(ene_vrm::DebugLine {
-                                a: parent_world,
-                                b: child_world,
-                                color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
-                            });
-                        } else {
-                            let ext = 0.01 * actual_scale;
-                            lines.push(ene_vrm::DebugLine {
-                                a: parent_world - glam::Vec3::X * ext,
-                                b: parent_world + glam::Vec3::X * ext,
-                                color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
-                            });
-                            lines.push(ene_vrm::DebugLine {
-                                a: parent_world - glam::Vec3::Y * ext,
-                                b: parent_world + glam::Vec3::Y * ext,
-                                color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
-                            });
-                            lines.push(ene_vrm::DebugLine {
-                                a: parent_world - glam::Vec3::Z * ext,
-                                b: parent_world + glam::Vec3::Z * ext,
-                                color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
-                            });
+                let view_inverse = cam_view.inverse();
+                let mut lines = Vec::new();
+                if show_collider_debug {
+                    let (hit_collider, hit_point) = match last_raycast_hit {
+                        Some(h) if h.entity == character_entity => {
+                            (Some(h.collider), Some(h.point))
                         }
-                    }
+                        _ => (None, None),
+                    };
+                    crate::raycast_debug::build_collider_lines(
+                        &mut lines,
+                        physics,
+                        character_entity,
+                        hit_collider,
+                        hit_point,
+                        true,
+                    );
+                    if let Some(model) = character.model() {
+                        let center = glam::Vec3::from(model.center());
+                        let normalize_scale = model.normalize_scale();
+                        let auto_scale = character.auto_fit_scale(0.9);
+                        let actual_scale = auto_scale * cs.model_scale;
 
-                    if let Some(spring_bones) = &model.spring_bones {
-                        for chain in &spring_bones.springs {
-                            for i in 0..chain.joints.len() - 1 {
-                                let parent_node = chain.joints[i].node;
-                                let child_node = chain.joints[i + 1].node;
-                                let parent_pos_raw = model.nodes.world_positions[parent_node];
+                        for (bone_name, entry) in model.humanoid.iter() {
+                            let parent_pos_raw = model.nodes.world_positions[entry.node];
+                            let parent_world = cs.character_position
+                                + (parent_pos_raw - center) * normalize_scale * actual_scale;
+
+                            if let Some(child_node) =
+                                crate::character::collider::get_humanoid_child_node(
+                                    bone_name.as_str(),
+                                    &model.humanoid,
+                                )
+                            {
                                 let child_pos_raw = model.nodes.world_positions[child_node];
-                                let parent_world = cs.character_position
-                                    + (parent_pos_raw - center) * normalize_scale * actual_scale;
                                 let child_world = cs.character_position
                                     + (child_pos_raw - center) * normalize_scale * actual_scale;
+
                                 lines.push(ene_vrm::DebugLine {
                                     a: parent_world,
                                     b: child_world,
                                     color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
                                 });
+                            } else {
+                                let ext = 0.01 * actual_scale;
+                                lines.push(ene_vrm::DebugLine {
+                                    a: parent_world - glam::Vec3::X * ext,
+                                    b: parent_world + glam::Vec3::X * ext,
+                                    color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
+                                });
+                                lines.push(ene_vrm::DebugLine {
+                                    a: parent_world - glam::Vec3::Y * ext,
+                                    b: parent_world + glam::Vec3::Y * ext,
+                                    color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
+                                });
+                                lines.push(ene_vrm::DebugLine {
+                                    a: parent_world - glam::Vec3::Z * ext,
+                                    b: parent_world + glam::Vec3::Z * ext,
+                                    color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
+                                });
+                            }
+                        }
+
+                        if let Some(spring_bones) = &model.spring_bones {
+                            for chain in &spring_bones.springs {
+                                for i in 0..chain.joints.len() - 1 {
+                                    let parent_node = chain.joints[i].node;
+                                    let child_node = chain.joints[i + 1].node;
+                                    let parent_pos_raw = model.nodes.world_positions[parent_node];
+                                    let child_pos_raw = model.nodes.world_positions[child_node];
+                                    let parent_world = cs.character_position
+                                        + (parent_pos_raw - center)
+                                            * normalize_scale
+                                            * actual_scale;
+                                    let child_world = cs.character_position
+                                        + (child_pos_raw - center) * normalize_scale * actual_scale;
+                                    lines.push(ene_vrm::DebugLine {
+                                        a: parent_world,
+                                        b: child_world,
+                                        color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
+                                    });
+                                }
                             }
                         }
                     }
@@ -1224,8 +1258,29 @@ impl Runtime {
                             cw.config.width,
                             cw.config.height,
                             downsample,
+                            view_inverse,
+                            view_z,
                         );
                     }
+                }
+
+                // PR-LX.8: append the input-region debug
+                // overlay lines so the user can verify
+                // (visually) the rectangle set the runtime
+                // just pushed to the Wayland / X11 display
+                // server. Gated on `show_input_region_debug`
+                // (F9) and the Linux-only state fields.
+                if self.state.show_input_region_debug {
+                    #[cfg(target_os = "linux")]
+                    crate::input_region_debug::build_input_region_debug_lines(
+                        &mut lines,
+                        &self.state.last_applied_input_rects,
+                        self.state.last_input_source,
+                        cw.config.width,
+                        cw.config.height,
+                        view_inverse,
+                        view_z,
+                    );
                 }
 
                 if !lines.is_empty() {
@@ -1268,28 +1323,31 @@ impl Runtime {
         // separate encoder because the mask target is a
         // texture, not the swapchain.
         #[cfg(target_os = "linux")]
-        if let Some(mask) = self.state.mask_capture.as_ref()
-            && let Some(mask_renderer) = self.state.mask_renderer.as_ref()
-            && let Some(model) = character.model()
-        {
-            let camera_uniform = character
-                .camera_uniform_dbg()
-                .expect("orthographic camera uniform is infallible");
+        if let Some(mask) = self.state.mask_capture.as_ref() {
             let mask_guard = mask.lock();
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("mask.encoder"),
             });
-            mask_renderer.render(
+            character.render_mask(
                 queue,
                 &mut encoder,
                 mask_guard.target_view(),
-                model,
-                &camera_uniform,
                 &model_uniform,
             );
             mask_guard.encode_readback(&mut encoder);
             drop(mask_guard);
             queue.submit(std::iter::once(encoder.finish()));
+            // PR-LX.9: schedule the off-thread readback
+            // pump. The winit main thread returns
+            // immediately; the worker blocks on
+            // `MapAsync` in the background and refreshes
+            // `MaskCaptureCamera::last_readback` before the
+            // next `about_to_wait` consumes it via
+            // `extract_rectangles`.
+            #[cfg(target_os = "linux")]
+            if let Some(worker) = self.state.mask_readback_worker.as_ref() {
+                worker.request_readback();
+            }
         }
         match result {
             Ok(()) => Ok(()),
@@ -1454,7 +1512,7 @@ fn cursor_world_2d_for_char_window(
 /// delivering `CursorMoved` to it and the runtime must rely on
 /// `device_query` for the global position.
 fn update_char_window_cursor_and_hittest(
-    state: &AppState,
+    state: &mut AppState,
     device_state: &device_query::DeviceState,
     cw: &CharacterWindow,
     transparent: bool,
@@ -1465,54 +1523,51 @@ fn update_char_window_cursor_and_hittest(
     let mouse = device_state.get_mouse();
     let (gx, gy) = (mouse.coords.0, mouse.coords.1);
 
-    // 2. Window's top-left in screen pixels (physical).
-    //    `outer_position` returns `Result` because some Wayland
-    //    compositors can't report it; we treat the failure as
-    //    "cursor is outside the window" and let the NDC clip
-    //    decide.
-    let outer = match cw.window.outer_position() {
-        Ok(p) => p,
-        Err(_) => return None,
-    };
-    let local_physical_x = gx as f64 - outer.x as f64;
-    let local_physical_y = gy as f64 - outer.y as f64;
+    let mut local_cursor = None;
+    let hit = if let Ok(outer) = cw.window.outer_position() {
+        let local_physical_x = gx as f64 - outer.x as f64;
+        let local_physical_y = gy as f64 - outer.y as f64;
 
-    // 3. Convert to logical pixels and NDC. The NDC is what the
-    //    orthographic camera math consumes.
-    let scale = cw.window.scale_factor();
-    let logical_x = local_physical_x / scale;
-    let logical_y = local_physical_y / scale;
-    let inner = cw.window.inner_size();
-    let logical_w = (inner.width as f64 / scale).max(1.0);
-    let logical_h = (inner.height as f64 / scale).max(1.0);
-    let ndc_x = (logical_x / logical_w) * 2.0 - 1.0;
-    let ndc_y = -((logical_y / logical_h) * 2.0 - 1.0);
+        local_cursor = Some(winit::dpi::PhysicalPosition::new(
+            local_physical_x,
+            local_physical_y,
+        ));
 
-    // Outside the window's NDC rect? Skip the BVH raycast — the
-    // window is click-through anyway.
-    let inside_window = ndc_x.abs() <= 1.0 && ndc_y.abs() <= 1.0;
+        let scale = cw.window.scale_factor();
+        let logical_x = local_physical_x / scale;
+        let logical_y = local_physical_y / scale;
+        let inner = cw.window.inner_size();
+        let logical_w = (inner.width as f64 / scale).max(1.0);
+        let logical_h = (inner.height as f64 / scale).max(1.0);
+        let ndc_x = (logical_x / logical_w) * 2.0 - 1.0;
+        let ndc_y = -((logical_y / logical_h) * 2.0 - 1.0);
 
-    let hit = if inside_window {
-        let eye: [f32; 3] = state.character.camera_eye();
-        let target: [f32; 3] = state.character.camera_target();
-        let aspect = (logical_w / logical_h) as f32;
-        let half_h = ene_vrm::camera::VIEWPORT_HEIGHT * 0.5;
-        let half_w = half_h * aspect.max(0.0001);
-        let ndc = glam::Vec2::new(ndc_x as f32, ndc_y as f32);
-        let view = glam::Mat4::look_at_rh(
-            eye.into(),
-            target.into(),
-            ene_vrm::camera::DEFAULT_UP.into(),
-        );
-        let view_pos = glam::Vec3::new(ndc.x * half_w, ndc.y * half_h, 0.0);
-        let world_3d = view.inverse().transform_point3(view_pos);
-        let ray_origin = rapier3d::prelude::Point::new(world_3d.x, world_3d.y, world_3d.z);
-        let ray_dir = rapier3d::prelude::Vector::new(
-            target[0] - eye[0],
-            target[1] - eye[1],
-            target[2] - eye[2],
-        );
-        state.physics.cast_ray(ray_origin, ray_dir, 100.0)
+        let inside_window = ndc_x.abs() <= 1.0 && ndc_y.abs() <= 1.0;
+
+        if inside_window {
+            let eye: [f32; 3] = state.character.camera_eye();
+            let target: [f32; 3] = state.character.camera_target();
+            let aspect = (logical_w / logical_h) as f32;
+            let half_h = ene_vrm::camera::VIEWPORT_HEIGHT * 0.5;
+            let half_w = half_h * aspect.max(0.0001);
+            let ndc = glam::Vec2::new(ndc_x as f32, ndc_y as f32);
+            let view = glam::Mat4::look_at_rh(
+                eye.into(),
+                target.into(),
+                ene_vrm::camera::DEFAULT_UP.into(),
+            );
+            let view_pos = glam::Vec3::new(ndc.x * half_w, ndc.y * half_h, 0.0);
+            let world_3d = view.inverse().transform_point3(view_pos);
+            let ray_origin = rapier3d::prelude::Point::new(world_3d.x, world_3d.y, world_3d.z);
+            let ray_dir = rapier3d::prelude::Vector::new(
+                target[0] - eye[0],
+                target[1] - eye[1],
+                target[2] - eye[2],
+            );
+            state.physics.cast_ray(ray_origin, ray_dir, 100.0)
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -1521,19 +1576,10 @@ fn update_char_window_cursor_and_hittest(
 
     let allows_input = !transparent || cursor_over || drag_is_dragging;
 
-    // Stash the latest window-local cursor for the press / drag
-    // state machine (which is fed by winit's `CursorMoved` /
-    // `MouseInput` events).
-    *last_cursor = Some(winit::dpi::PhysicalPosition::new(
-        local_physical_x,
-        local_physical_y,
-    ));
+    if let Some(lc) = local_cursor {
+        *last_cursor = Some(lc);
+    }
 
-    // 4. OS-level click-through.
-    //    Windows: winit toggles `WS_EX_TRANSPARENT` for us.
-    //    Linux: `set_cursor_hittest` is a no-op; the display-server-
-    //           specific dispatcher (Wayland `set_input_region` or
-    //           X11 shape) lives in `platform::platform_runtime`.
     #[cfg(target_os = "windows")]
     {
         let _ = cw.window.set_cursor_hittest(allows_input);

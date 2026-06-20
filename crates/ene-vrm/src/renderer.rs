@@ -170,6 +170,9 @@ pub struct VrmRenderer {
     pipeline_mtoon_opaque: wgpu::RenderPipeline,
     /// PR4.15: MToon transparent pipeline.
     pipeline_mtoon_transparent: wgpu::RenderPipeline,
+    /// Mask render pipeline. Compiles against `mask_format` if provided,
+    /// otherwise `None`.
+    pipeline_mask: Option<wgpu::RenderPipeline>,
 }
 
 impl VrmRenderer {
@@ -181,6 +184,7 @@ impl VrmRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
+        mask_format: Option<wgpu::TextureFormat>,
         model: &VrmModel,
     ) -> Self {
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -791,6 +795,54 @@ impl VrmRenderer {
                 }
             }
         }
+        let pipeline_mask = mask_format.map(|fmt| {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("vrm.mask_shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/mask.wgsl").into()),
+            });
+            // The mask pipeline uses the exact same bind groups as MToon/Unlit,
+            // but we bind a dummy texture at group 2 to satisfy wgpu layout requirements.
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("vrm.mask_pipeline_layout"),
+                bind_group_layouts: &[
+                    Some(&camera_bgl),
+                    Some(&model_bgl),
+                    None,
+                    Some(&morph_bgl),
+                    Some(&skin_bgl),
+                ],
+                immediate_size: 0,
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("vrm.pipeline_mask"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[crate::model::MeshVertex::LAYOUT],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: fmt,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        });
 
         Self {
             camera_buf,
@@ -808,6 +860,7 @@ impl VrmRenderer {
             mtoon_uniforms,
             pipeline_mtoon_opaque,
             pipeline_mtoon_transparent,
+            pipeline_mask,
         }
     }
 
@@ -947,6 +1000,77 @@ impl VrmRenderer {
                 rp.set_pipeline(&self.pipeline_transparent);
             }
             self.draw_primitive(&mut rp, queue, model, prim, item.linear_index);
+        }
+    }
+
+    /// Renders the mask into the provided `target_view` using the
+    /// internal `pipeline_mask`. If the renderer was built without
+    /// `mask_format`, this is a no-op.
+    pub fn render_mask(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        model: &VrmModel,
+        camera_uniform: &CameraUniform,
+        model_uniform: &ModelUniform,
+    ) {
+        let pipeline = match &self.pipeline_mask {
+            Some(p) => p,
+            None => return,
+        };
+
+        // We can overwrite the camera and model uniforms here because
+        // `render_mask` is called sequentially with `render`.
+        queue.write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(camera_uniform));
+        queue.write_buffer(&self.model_buf, 0, bytemuck::bytes_of(model_uniform));
+
+        let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("vrm.mask_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        rp.set_pipeline(pipeline);
+        rp.set_bind_group(0, &self.camera_bind_group, &[]);
+        rp.set_bind_group(1, &self.model_bind_group, &[]);
+        rp.set_bind_group(4, &self.skin.bind_group, &[]);
+
+        let all_prims: Vec<&_> = model
+            .meshes
+            .iter()
+            .flat_map(|m| m.primitives.iter())
+            .collect();
+
+        for (idx, prim) in all_prims.into_iter().enumerate() {
+            if let Some(morph) = self.morph_gpu.get(idx).and_then(Option::as_ref) {
+                if let Some(prim_morphs) = model
+                    .expressions()
+                    .per_primitive
+                    .get(idx)
+                    .and_then(Option::as_ref)
+                {
+                    self.upload_morph_meta(queue, morph, prim_morphs, model);
+                }
+                rp.set_bind_group(3, &morph.bind_group, &[]);
+            } else {
+                rp.set_bind_group(3, &self.dummy_morph.bind_group, &[]);
+            }
+
+            rp.set_vertex_buffer(0, prim.vertex_buf.slice(..));
+            rp.set_index_buffer(prim.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..prim.index_count, 0, 0..1);
         }
     }
 

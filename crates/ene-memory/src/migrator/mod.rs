@@ -67,6 +67,7 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
+                    .if_not_exists()
                     .name("idx_summary_card")
                     .table(ConversationSummaries::Table)
                     .col(ConversationSummaries::CardName)
@@ -77,6 +78,7 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
+                    .if_not_exists()
                     .name("idx_summary_created")
                     .table(ConversationSummaries::Table)
                     .col((ConversationSummaries::CreatedAt, IndexOrder::Desc))
@@ -129,6 +131,7 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
+                    .if_not_exists()
                     .name("idx_keyfacts_card")
                     .table(ConversationKeyFacts::Table)
                     .col(ConversationKeyFacts::CardName)
@@ -139,6 +142,7 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
+                    .if_not_exists()
                     .name("idx_keyfacts_key")
                     .table(ConversationKeyFacts::Table)
                     .col(ConversationKeyFacts::CardName)
@@ -188,6 +192,7 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
+                    .if_not_exists()
                     .name("idx_log_session")
                     .table(ConversationLogs::Table)
                     .col(ConversationLogs::SessionId)
@@ -265,6 +270,7 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
+                    .if_not_exists()
                     .unique()
                     .name("uniq_tool_embedding")
                     .table(ToolEmbeddingIndex::Table)
@@ -279,6 +285,7 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
+                    .if_not_exists()
                     .name("idx_tei_lookup")
                     .table(ToolEmbeddingIndex::Table)
                     .col(ToolEmbeddingIndex::ToolName)
@@ -290,6 +297,7 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
+                    .if_not_exists()
                     .name("idx_tei_version")
                     .table(ToolEmbeddingIndex::Table)
                     .col(ToolEmbeddingIndex::ToolName)

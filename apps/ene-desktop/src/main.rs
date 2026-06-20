@@ -22,6 +22,8 @@ mod character;
 mod character_state;
 mod events;
 mod gpu;
+#[cfg(target_os = "linux")]
+mod input_region_debug;
 mod look_at;
 #[cfg(target_os = "linux")]
 mod mask_gizmo;

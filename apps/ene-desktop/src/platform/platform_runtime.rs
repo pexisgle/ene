@@ -61,11 +61,81 @@ static FIRST_DISPATCH_LOGGED: AtomicBool = AtomicBool::new(false);
 /// do not advertise `zwlr_layer_shell_v1`.
 #[cfg(target_os = "linux")]
 pub fn apply_linux_click_through(
-    state: &AppState,
+    state: &mut AppState,
     allows_input: bool,
     cursor_on_silhouette: bool,
     freeze_forced: bool,
 ) {
+    // 1. Calculate the actual rectangles + source first so all display server
+    //    backends (Wayland and X11) and the debug overlay receive the same data.
+    let (rects, source) = if freeze_forced {
+        (
+            vec![(0_i32, 0_i32, i32::from(i16::MAX), i32::from(i16::MAX))],
+            super::super::input_region_debug::InputRegionSource::Freeze,
+        )
+    } else if allows_input && cursor_on_silhouette {
+        // The per-bone Rapier raycast said "yes"; accept
+        // all input so the drag state machine receives the
+        // events. The mask readback may be a frame behind
+        // (one-frame latency) and at downsample=8 the
+        // silhouette is only an approximation; falling back
+        // to the rapier hit-test is more responsive.
+        (
+            vec![(0_i32, 0_i32, i32::from(i16::MAX), i32::from(i16::MAX))],
+            super::super::input_region_debug::InputRegionSource::FullWindow,
+        )
+    } else if let Some(mask) = state.mask_capture.as_ref() {
+        let guard = mask.lock();
+        let extracted = guard.extract_rectangles();
+        if extracted.is_empty() {
+            (
+                Vec::new(),
+                super::super::input_region_debug::InputRegionSource::Empty,
+            )
+        } else {
+            // PR-LX.8: scale downsampled-space rects to
+            // window-pixel space before sending them to
+            // the OS. `downsample` is always >= 1 (clamped
+            // at construction), and we use saturating math
+            // so an out-of-range downsampled rect cannot
+            // overflow when multiplied.
+            let factor = guard.downsample() as i64;
+            let scaled: Vec<super::wayland_region::Rect> = extracted
+                .into_iter()
+                .map(|(x, y, w, h)| {
+                    (
+                        (i64::from(x) * factor).min(i64::from(i32::MAX)) as i32,
+                        (i64::from(y) * factor).min(i64::from(i32::MAX)) as i32,
+                        (i64::from(w) * factor).min(i64::from(i32::MAX)) as i32,
+                        (i64::from(h) * factor).min(i64::from(i32::MAX)) as i32,
+                    )
+                })
+                .collect();
+            drop(guard);
+            (
+                scaled,
+                super::super::input_region_debug::InputRegionSource::Mask,
+            )
+        }
+    } else {
+        (
+            Vec::new(),
+            super::super::input_region_debug::InputRegionSource::Empty,
+        )
+    };
+
+    tracing::info!(
+        "Input region update: count={}, source={:?}",
+        rects.len(),
+        source
+    );
+    if !rects.is_empty() && rects.len() < 10 {
+        tracing::info!("Input region rects: {:?}", rects);
+    }
+
+    // 2. Set the rectangles on the Wayland context and apply to the surface.
+    //    This must happen AFTER rects calculation so we do not overwrite the
+    //    cached rectangles before they reach the compositor.
     if let Some(ctx) = state.wayland_region.as_ref() {
         let mut guard = ctx.lock();
 
@@ -78,56 +148,12 @@ pub fn apply_linux_click_through(
         if freeze_forced || (allows_input && cursor_on_silhouette) {
             guard.set_full_input();
         } else {
-            guard.clear();
+            guard.set_rects(rects.clone());
         }
 
-        // LX.2: also push the policy to a stand-alone
-        // `wl_surface` so the `set_input_region` call is
-        // exercised end-to-end. A follow-up will swap the
-        // stand-alone surface for winit's own surface once
-        // winit 0.30 exposes a way to recover the
-        // `wl_surface` from the raw handle.
-        if let Some(surface) = guard.create_stand_alone_surface() {
-            guard.apply_to_surface(&surface);
-        }
+        // Apply directly to winit's adopted wl_surface!
+        guard.apply_to_winit_surface();
     }
-
-    // PR-LX.6: derive the per-frame rectangle set from the
-    // offscreen mask capture. The mask is a single
-    // `Rgba8Unorm` target rendered to from the
-    // PR-LX.7 mask shader; this function consumes its
-    // `extract_rectangles` output and pushes the result to
-    // both the Wayland input-region and the X11 shape
-    // extension.
-    let rects: Vec<super::wayland_region::Rect> = if freeze_forced {
-        // Bypass: accept all input on the whole window.
-        vec![(0, 0, i32::from(i16::MAX), i32::from(i16::MAX))]
-    } else if allows_input && cursor_on_silhouette {
-        // The per-bone Rapier raycast said "yes"; accept all
-        // input so the drag state machine receives the
-        // events. The mask readback may be a frame behind
-        // (one-frame latency) and at downsample=8 the
-        // silhouette is only an approximation; falling back
-        // to the rapier hit-test is more responsive.
-        vec![(0, 0, i32::from(i16::MAX), i32::from(i16::MAX))]
-    } else {
-        // Try to read the latest mask readback. If the
-        // camera is uninitialised or the readback is empty
-        // (e.g. the mask shader has not produced any pixels
-        // yet), fall back to an empty region so the desktop
-        // receives all clicks.
-        if let Some(mask) = state.mask_capture.as_ref() {
-            let guard = mask.lock();
-            let extracted = guard.extract_rectangles();
-            if extracted.is_empty() {
-                Vec::new()
-            } else {
-                extracted
-            }
-        } else {
-            Vec::new()
-        }
-    };
 
     // PR-LX.5: X11 fallback. The shape extension input region
     // is the X11 analog of Wayland's `set_input_region`. The
@@ -140,17 +166,6 @@ pub fn apply_linux_click_through(
         } else {
             guard.set_input_rects(&rects);
         }
-    }
-
-    // PR-LX.6: forward the same rectangle set to the Wayland
-    // input-region context (overrides LX.5's full-window
-    // placeholder when the mask has data). The set_rects
-    // policy caches the rectangles; `apply_to_surface` is
-    // still invoked further up so the `wl_surface::set_input_region`
-    // request actually reaches the compositor.
-    if let Some(ctx) = state.wayland_region.as_ref() {
-        let mut guard = ctx.lock();
-        guard.set_rects(rects.clone());
     }
 
     if !FIRST_DISPATCH_LOGGED.swap(true, Ordering::Relaxed) {
@@ -191,6 +206,14 @@ pub fn apply_linux_click_through(
             "char window hit test (linux) — first dispatch per process"
         );
     }
+
+    // PR-LX.8: stash the final rectangle set + source on
+    // the state so the F9 debug overlay can render them.
+    // Done at the very end of the dispatcher (after all
+    // OS-side pushes succeed) so the debug view mirrors
+    // what was actually pushed to the display server.
+    state.last_applied_input_rects = rects.clone();
+    state.last_input_source = source;
 }
 
 /// Run the layer-shell detection probe against the stand-alone

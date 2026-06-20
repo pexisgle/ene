@@ -18,6 +18,8 @@
 //! Wayland (e.g. a CI runner without X11) can still be exercised.
 //! The Windows build does not link any of these modules.
 #[cfg(target_os = "linux")]
+pub mod mask_readback;
+#[cfg(target_os = "linux")]
 pub mod platform_runtime;
 #[cfg(target_os = "linux")]
 pub mod wayland_layer_shell;

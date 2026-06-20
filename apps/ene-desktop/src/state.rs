@@ -88,13 +88,26 @@ pub struct AppState {
     /// The flag is **not** persisted across launches.
     #[cfg(target_os = "linux")]
     pub layer_shell_freeze: bool,
-    /// PR-LX.7: solid-color mask render pass. Built once
-    /// lazily in [`crate::runtime::Runtime::resumed`] after
-    /// [`Self::mask_capture`] is constructed, against
-    /// [`crate::MaskRenderer`]'s `Rgba8Unorm` target format.
-    /// `None` on non-Linux builds.
+    /// PR-LX.8: the rectangle set the runtime most recently
+    /// pushed to the Wayland `wl_surface::set_input_region`
+    /// and X11 `shape::rectangles` calls, in **window-pixel**
+    /// space. Refreshed every `about_to_wait` by
+    /// [`crate::platform::platform_runtime::apply_linux_click_through`].
+    /// The debug overlay (F9) reads this to draw a
+    /// colour-coded wireframe of the live input region.
     #[cfg(target_os = "linux")]
-    pub mask_renderer: Option<ene_vrm::MaskRenderer>,
+    pub last_applied_input_rects: Vec<crate::platform::wayland_region::Rect>,
+    /// PR-LX.8: which branch produced the rects
+    /// ([`crate::input_region_debug::InputRegionSource`]).
+    /// `Empty` when no rects were pushed (full pass-through).
+    #[cfg(target_os = "linux")]
+    pub last_input_source: crate::input_region_debug::InputRegionSource,
+    /// PR-LX.8: F9 toggles this. When `true`, the
+    /// `input_region_debug` overlay is drawn on the
+    /// character window alongside the collider / mask
+    /// overlays. Not persisted.
+    #[cfg(target_os = "linux")]
+    pub show_input_region_debug: bool,
     /// PR-LX.6: offscreen `Rgba8Unorm` mask capture target.
     /// Created in [`crate::runtime::Runtime::resumed`] once
     /// the GPU device is alive, sized in
@@ -108,6 +121,15 @@ pub struct AppState {
     /// and populated by the runtime.
     #[cfg(target_os = "linux")]
     pub mask_capture: Option<crate::platform::wayland_mask_capture::MaskCaptureState>,
+    /// PR-LX.9: off-thread worker that drains the mask target
+    /// without blocking the winit main thread. Spawned in
+    /// [`crate::runtime::Runtime::resumed`] alongside
+    /// [`Self::mask_capture`]; [`Self::request_mask_readback`]
+    /// is called every `render_char_frame` and bumps an internal
+    /// generation counter so any stale completion is discarded
+    /// if the window is resized or a frame is dropped.
+    #[cfg(target_os = "linux")]
+    pub mask_readback_worker: Option<crate::platform::mask_readback::MaskReadbackWorker>,
 }
 
 impl AppState {
@@ -163,7 +185,13 @@ impl AppState {
                 #[cfg(target_os = "linux")]
                 mask_capture: None,
                 #[cfg(target_os = "linux")]
-                mask_renderer: None,
+                mask_readback_worker: None,
+                #[cfg(target_os = "linux")]
+                last_applied_input_rects: Vec::new(),
+                #[cfg(target_os = "linux")]
+                last_input_source: crate::input_region_debug::InputRegionSource::Empty,
+                #[cfg(target_os = "linux")]
+                show_input_region_debug: false,
             },
             tx,
         )

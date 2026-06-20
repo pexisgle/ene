@@ -59,7 +59,7 @@ pub mod expression_override;
 pub mod humanoid;
 pub mod loader;
 pub mod look_at;
-pub mod mask_renderer;
+
 pub mod model;
 pub mod mtoon;
 pub mod node_constraint;
@@ -96,7 +96,7 @@ pub use look_at::{
     LookAtBoneDelta, LookAtBoneOutput, LookAtDirection, LookAtEvaluator, LookAtExpressionOutput,
     LookAtOutput, LookAtProperties, LookAtRangeMap, LookAtRangeMapSet, LookAtType, load_look_at,
 };
-pub use mask_renderer::MaskRenderer;
+
 pub use model::{AlphaMode, MeshVertex, NodeHierarchy, Skeleton, VrmMesh, VrmModel, VrmTexture};
 pub use mtoon::{
     MToonGpuTextures, MToonMaterial, MToonTextureRef, MToonUniform, OutlineWidthMode, flags,
