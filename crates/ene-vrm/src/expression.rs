@@ -1,6 +1,6 @@
 //! VRM 1.0 expression (blend shape) layer.
 //!
-//! PR4.4 ships a minimal but functional expression pipeline:
+//! a minimal but functional expression pipeline:
 //!
 //! - Each `VrmPrimitive` that carries morph targets in the glTF
 //!   document is paired with a [`PrimitiveMorphs`] record that
@@ -11,7 +11,7 @@
 //!   without re-allocating.
 //! - A global [`BTreeMap<ExpressionName, f32>`] of weights
 //!   describes the current facial state. The runtime writes into
-//!   it from the `EmotionQueue` (PR4.4) and the renderer reads it
+//!   it from the `EmotionQueue` (this struct) and the renderer reads it
 //!   when it builds the per-primitive `weights` uniform each
 //!   frame.
 //! - All expressions across the whole model are flattened into a
@@ -20,16 +20,16 @@
 //!   stores them lower-case) but kept as the raw string for
 //!   round-trip with the AI bridge (`happy`, `sad`, …).
 //!
-//! PR4.4 deliberately leaves the following to follow-up PRs:
+//! Deliberately leaves the following to follow-up PRs:
 //!
 //! - Normal / tangent morph displacements (position only).
 //! - Multi-target blend shapes (e.g. `blink_l` + `blink_r` driven
 //!   by a single `blink` expression) are flattened to a 1:1
 //!   name-to-target map. The legacy `bevy_vrm1` extends the same
 //!   shape; layering the multiplier graph on top of this storage
-//!   layout is a PR4.5+ task.
+//!   layout is a task.
 //! - Mouth-shape / look-at expression mode: the look-at cursor
-//!   projection (PR4.2) writes the four lookLeft / lookRight /
+//!   projection (this struct) writes the four lookLeft / lookRight /
 //!   lookUp / lookDown expressions directly into the weights map.
 //!   This PR only writes `set_expression` from
 //!   `CharacterRenderer::apply_emotions`.
@@ -52,7 +52,7 @@
 use std::collections::BTreeMap;
 
 /// Maximum number of morph-target weight slots packed per
-/// primitive. 16 vec4s = 64 slots. PR4.4 ships a uniform buffer
+/// primitive. 16 vec4s = 64 slots. ships a uniform buffer
 /// of this size; bump it in lock-step with the WGSL declaration
 /// in `shaders/mtoon_lite.wgsl` if a model exceeds it.
 pub const MAX_WEIGHT_SLOTS: usize = 16;
@@ -280,7 +280,7 @@ impl ExpressionLayer {
     /// exist on at least one primitive return `true` and have
     /// the clamped weight inserted.
     ///
-    /// Issue #7: the previous implementation stored the weight
+    /// the previous implementation stored the weight
     /// regardless, which let a misspelled AI token like `joy`
     /// (vs. the model's `happy`) silently accumulate in the
     /// weight map and never be cleared.
@@ -318,21 +318,14 @@ impl ExpressionLayer {
 
 use bytemuck::{Pod, Zeroable};
 
-// Issue #17: the host-side `morph_offsets` storage buffer is
-// indexed by the WGSL shader as `array<vec3<f32>>`. WGSL
-// requires the array element stride to be **16 bytes** (a
-// `vec3` of `f32` is 12 bytes but the array element is padded
-// to a 16-byte boundary). The host side mirrors that with
-// `Vec<[f32; 4]>` (one `vec4` per `vec3` entry, with `.w`
-// reserved as 0). If the host side ever regresses to
-// `Vec<[f32; 3]>` the buffer would be 12-byte aligned and the
-// shader's `morph_offsets[i]` would read the wrong rows.
-//
-// Pin the size of the host element to 16 bytes at compile
-// time so the bug fails the build, not the render. The
-// `[f32; 4]` shape is also the per-entry type the WGSL
-// pipeline uses to upload the data, so the contract is
-// self-consistent.
+// The host-side `morph_offsets` storage buffer is indexed by
+// the WGSL shader as `array<vec3<f32>>`. WGSL requires the
+// array element stride to be 16 bytes (a `vec3` of `f32` is 12
+// bytes but the array element is padded to a 16-byte boundary).
+// The host side mirrors that with `Vec<[f32; 4]>` (one `vec4`
+// per `vec3` entry, with `.w` reserved as 0). A 12-byte host
+// element would misalign the buffer and the shader's
+// `morph_offsets[i]` would read the wrong rows.
 const _: () = {
     const HOST_MORPH_OFFSET_STRIDE: usize = std::mem::size_of::<[f32; 4]>();
     assert!(
@@ -388,13 +381,10 @@ mod tests {
         let mut layer = ExpressionLayer::new(vec![], Some(&defs));
         let applied = layer.set_expression(&"joy".into(), 0.5);
         assert!(!applied);
-        // Issue #7: a misspelled / unknown expression name must
-        // NOT be inserted into the weight map. An earlier
-        // implementation kept the weight around for round-trip
-        // with the UI, but the leftover entry silently
-        // accumulated across frames and never reached the GPU
-        //  Ethe model just never animates the intended
-        // expression.
+        // A misspelled / unknown expression name must NOT be
+        // inserted into the weight map (the leftover entry would
+        // silently accumulate across frames and never reach the
+        // GPU).
         assert!(!layer.weights.contains_key(&"joy".into()));
         // The known expression still works.
         assert!(layer.set_expression(&"happy".into(), 0.5));
@@ -414,7 +404,7 @@ mod tests {
         assert_eq!(layer.weights.get(&"happy".into()), Some(&0.7));
     }
 
-    /// Issue #7: `apply_weights` must drop entries whose name
+    /// `apply_weights` must drop entries whose name
     /// is not in the model's expression list. A misshaped
     /// `BTreeMap` from the AI bridge should not pollute the
     /// renderer's weight map.
@@ -450,7 +440,7 @@ mod tests {
         assert_eq!(layer.morphic_primitive_count(), 0);
     }
 
-    /// Issue #6: the per-primitive morph cap is the contract the
+    /// the per-primitive morph cap is the contract the
     /// loader enforces (`load_primitive_morph_targets` warns
     /// and `take(MAX_MORPH_TARGETS_PER_PRIMITIVE)` truncates
     /// the input). The cap must match the uniform size:
@@ -481,7 +471,7 @@ mod tests {
         );
     }
 
-    /// Issue #17: the host-side morph offset storage element
+    /// the host-side morph offset storage element
     /// is `[f32; 4]` so its byte size is 16 — the WGSL
     /// `array<vec3<f32>>` element stride. This test pins the
     /// size at runtime (the build also pins it via the

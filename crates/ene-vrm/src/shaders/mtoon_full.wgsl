@@ -1,4 +1,4 @@
-// PR4.15: Full VRMC_materials_mtoon-1.0 shader.
+// Full VRMC_materials_mtoon-1.0 shader.
 //
 // Implements the complete MToon material model:
 // - Toon shading (shade color + shift + toony)

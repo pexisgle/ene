@@ -1,7 +1,7 @@
 //! Orthographic camera and per-frame [`CameraUniform`].
 //!
-//! PR3 ships only an orthographic projection, mirroring the legacy
-//! Bevy `MainViewCamera` in `apps/ene-desktop/src/scene.rs`:
+//! Mirrors the legacy Bevy `MainViewCamera` in
+//! `apps/ene-desktop/src/scene.rs`:
 //! `ScalingMode::FixedVertical { viewport_height: 2.6 }`,
 //! position `(0, 1, 3)` looking at `(0, 1, 0)`.
 //!
@@ -58,8 +58,9 @@ impl OrthographicCamera {
         self.aspect = aspect.max(0.0001);
     }
 
-    /// Update the camera eye / target (PR4 will wire these to the
-    /// `CharacterState::character_position` and the LookAt target).
+    /// Update the camera eye and target. The runtime wires
+    /// these to `CharacterState::character_position` and the
+    /// LookAt target.
     pub fn look_at(&mut self, eye: [f32; 3], target: [f32; 3]) {
         self.eye = eye;
         self.target = target;
@@ -75,7 +76,7 @@ impl OrthographicCamera {
         self.target
     }
 
-    /// PR4.2 follow-up diagnostic: returns `(eye, target, viewport_height, aspect)`.
+    /// Diagnostic: returns `(eye, target, viewport_height, aspect)`.
     #[allow(dead_code)] // One-shot diagnostic log only.
     pub fn debug(&self) -> ([f32; 3], [f32; 3], f32, f32) {
         (self.eye, self.target, self.viewport_height, self.aspect)
@@ -87,10 +88,10 @@ impl OrthographicCamera {
     /// side. `margin = 0.9` is a sensible default (5 % padding on
     /// each side).
     ///
-    /// Used by `ene-desktop-v2` to keep user-supplied
+    /// Used by `ene-desktop` to keep user-supplied
     /// `model_scale` values from rendering the model larger than
     /// the viewport. The runtime multiplies the returned scale by
-    /// the user's slider value, so `model_scale = 1.0` is now "the
+    /// the user's slider value, so `model_scale = 1.0` is "the
     /// model fits the viewport" rather than "1× whatever the
     /// loader happened to normalise to".
     pub fn compute_auto_fit_scale(
@@ -114,10 +115,9 @@ impl OrthographicCamera {
         let half_w = half_h * self.aspect;
         // glam's `orthographic_rh` expects `near` and `far` to be
         // **positive** distances from the camera plane. A negative
-        // `near` (the previous value was `-10.0`) shifts the depth
-        // range so that geometry between the camera and the
-        // original near plane is clipped — which is exactly what
-        // was making the model look like a tiny silhouette.
+        // `near` shifts the depth range so that geometry between
+        // the camera and the original near plane is clipped —
+        // making the model look like a tiny silhouette.
         let proj = Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, 0.1, 100.0);
         Ok(CameraUniform {
             view_proj: (proj * view).to_cols_array_2d(),
@@ -125,7 +125,7 @@ impl OrthographicCamera {
         })
     }
 
-    /// PR4.19 diagnostic: just the view matrix (the look_at
+    /// Diagnostic: just the view matrix (the look_at
     /// rotation+translation). Exposed so the runtime can dump
     /// it without having to plumb the private eye/target/up
     /// fields out to the desktop app.
@@ -133,9 +133,9 @@ impl OrthographicCamera {
         Mat4::look_at_rh(self.eye.into(), self.target.into(), self.up.into())
     }
 
-    /// PR4.19 diagnostic: just the orthographic projection
+    /// Diagnostic: just the orthographic projection
     /// matrix. Used by `runtime.rs` to verify the projection
-    /// side isn't the source of the "5x taller" mystery.
+    /// side isn't the source of a height-related bug.
     pub fn debug_proj(&self) -> Mat4 {
         let half_h = self.viewport_height * 0.5;
         let half_w = half_h * self.aspect;
@@ -160,12 +160,12 @@ pub struct CameraUniform {
     pub camera_pos: [f32; 4],
 }
 
-/// Per-frame model transform uniform. PR4.1: the runtime
-/// composes a translation (`position`) and uniform scale from
-/// `CharacterState` and uploads it as a single `mat4x4`. The
-/// vertex shader applies `view_proj * model * pos`. PR4.x will
-/// add a per-joint palette on top of this (skin) and a humanoid
-/// root rotation (model rotation).
+/// Per-frame model transform uniform. The runtime composes a
+/// translation and uniform scale from `CharacterState` and
+/// uploads it as a single `mat4x4`. The vertex shader applies
+/// `view_proj * model * pos`; a per-joint palette is multiplied
+/// on top of this (skin) and a humanoid root rotation (model
+/// rotation).
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct ModelUniform {
@@ -318,9 +318,9 @@ mod tests {
         assert!((s - 2.6).abs() < 1e-4, "expected 2.6, got {s}");
     }
 
-    /// PR4.20 diagnostic: confirm what glam's
+    /// diagnostic: confirm what glam's
     /// `orthographic_rh(-half_w, half_w, -half_h, half_h, 0.1, 100.0)`
-    /// actually produces, so the PR4.19-diag log can be
+    /// actually produces, so the-diag log can be
     /// interpreted correctly. Just prints the matrix.
     #[test]
     fn orthographic_rh_diag_640x480() {

@@ -1,4 +1,4 @@
-// PR5.6: line-list debug overlay shader.
+// Line-list debug overlay shader.
 //
 // Pairs of `(pos, color)` vertices form a single line
 // segment. The vertex shader transforms `pos` by the

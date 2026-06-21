@@ -4,41 +4,41 @@
 //! every primitive of **every** glTF `Mesh` uploaded to the GPU
 //! (vertex / index buffers + each primitive's own base-color
 //! texture) and the first skin's inverse-bind matrices preserved
-//! for PR4's skinning pass.
+//! for's skinning pass.
 //!
-//! ## Multi-mesh scope (PR3.3)
+//! ## Multi-mesh scope (this struct)
 //!
 //! A VRM 1.0 file such as `AliciaSolid.vrm` contains ~12 separate
 //! glTF `Mesh` objects (body, hair, face, clothes, accessories,
-//! …), not one mesh with many primitives. PR3.0/3.1/3.2 only
+//! …), not one mesh with many primitives./3.1/3.2 only
 //! loaded `meshes[0]` (the head/face area) and therefore rendered
-//! only the skin. PR3.3 walks the entire `gltf.meshes()` iterator,
+//! only the skin. walks the entire `gltf.meshes()` iterator,
 //! computing one global AABB across all primitive positions so the
 //! per-vertex normalization (`TARGET_MODEL_SIZE = 1.5` m) is
 //! applied uniformly across the whole body.
 //!
-//! ## PR3.x deliberately does **not** support
+//! ##.x deliberately does **not** support
 //!
 //! - MToon's full PBR parameters (rim / matcap / outline /
 //!   emission). The shader applies a simple diffuse + lit + base
 //!   color. The MToon-flavored `KHR_materials_unlit` flag is
 //!   *read* so the loader can log a warning if it is set, but
 //!   does not yet alter rendering.
-//! - Per-mesh glTF node transforms. The PR3.3 loader uses raw
+//! - Per-mesh glTF node transforms. The loader uses raw
 //!   vertex positions from each mesh without applying the glTF
 //!   node hierarchy's world transforms. For VRoid-exported models
 //!   this is fine because the body parts are already in
 //!   world-space positions in their local vertex buffers. The
-//!   humanoid bone system (PR4) will eventually apply the
+//!   humanoid bone system (this struct) will eventually apply the
 //!   per-joint skinning matrices on top of this.
 //! - Animation, expressions, morph targets, spring bone.
 //! - `.gltf` (non-binary) VRM files. Only `.glb` (binary) is
-//!   supported in PR3.x; the glTF binary payload (`BIN` chunk)
+//!   supported in.x; the glTF binary payload (`BIN` chunk)
 //!   holds all the meshes / textures. External `.bin` files
 //!   require the `gltf` crate's `import` feature and ship as a
 //!   follow-up PR.
 //!
-//! See `docs/architecture/wgpu-migration.md` §22.6 for the PR3
+//! See `docs/architecture/wgpu-migration.md` §22.6 for the
 //! status.
 
 use std::path::Path;
@@ -63,7 +63,7 @@ use crate::node_constraint;
 use crate::spring_bone;
 
 /// Target world-space size of the model along its longest axis
-/// after PR3.1's per-vertex normalization. The legacy Bevy
+/// after's per-vertex normalization. The legacy Bevy
 /// `bevy_vrm1` bakes the same scale into its world transform;
 /// v2 applies it at load time.
 const TARGET_MODEL_SIZE: f32 = 1.5;
@@ -92,7 +92,7 @@ pub fn load_vrm(
     }
 
     let mtoon_materials = mtoon::load_mtoon_materials(&gltf);
-    // PR4.19: walk every skin (not just the first) and
+    // walk every skin (not just the first) and
     // build a merged skeleton + per-primitive JOINTS_0
     // remap. The remap is applied inside `load_all_meshes`
     // so each vertex's `JOINTS_0` is translated from its
@@ -115,7 +115,7 @@ pub fn load_vrm(
     )?;
     let nodes = load_node_hierarchy(&gltf);
 
-    // Issue #8: a model that defines no skin but whose
+    // a model that defines no skin but whose
     // primitives carry non-trivial `JOINTS_0` data is
     // malformed (most likely a VRM 0.x file that lost its
     // skin during export, or a hand-rolled glTF whose exporter
@@ -125,7 +125,7 @@ pub fn load_vrm(
     // which is a silent no-op: the per-vertex weighting looks
     // like identity, but the model really wants
     // skinning. Warn here so the user can re-export the model;
-    // PR5+ will promote this to a load-time error once the
+    // will promote this to a load-time error once the
     // refactor lands a proper "load is malformed" channel.
     if skeleton.joint_count() == 0 && has_nonzero_joints {
         tracing::warn!(
@@ -175,7 +175,7 @@ pub fn load_vrm(
         );
     }
 
-    // PR4.7: Build the humanoid bone registry from the
+    // Build the humanoid bone registry from the
     // `VRMC_vrm.humanoid.humanBones` block. The loader
     // walks every entry, canonicalises the bone name,
     // resolves the glTF node + rest transform + Skeleton
@@ -184,7 +184,7 @@ pub fn load_vrm(
     // module logs per-entry warnings itself.
     let humanoid = humanoid::load_humanoid_bones(&gltf, &skeleton);
 
-    // PR4.8: parse the `VRMC_vrm.lookAt` block.
+    // parse the `VRMC_vrm.lookAt` block.
     // `None` for models without the block (legacy VRM
     // 0.x, hand-rolled test fixtures) — the runtime falls
     // back to `LookAtProperties::default()` in that case.
@@ -198,16 +198,16 @@ pub fn load_vrm(
         );
     }
 
-    // PR4.9: parse per-expression override settings from the
+    // parse per-expression override settings from the
     // `VRMC_vrm.expressions.{preset,custom}.<name>` tree.
     // Empty for models without the block, in which case the
     // per-frame override pass is a no-op.
 
-    // Issue #15: parse `VRMC_node_constraint` from every glTF
+    // parse `VRMC_node_constraint` from every glTF
     // node. Empty for models without the extension.
     let node_constraints = node_constraint::load_node_constraints(&gltf);
 
-    // Issue #13: parse `VRMC_springBone` from the glTF root
+    // parse `VRMC_springBone` from the glTF root
     // extensions. `None` for models without the extension.
     let spring_bones = spring_bone::load_spring_bones(&gltf);
     if let Some(ref sb) = spring_bones {
@@ -244,7 +244,7 @@ pub fn load_vrm(
 /// clothes, face, hair, and accessories all render.
 ///
 /// The third return value is the per-primitive morph-target data
-/// (PR4.4), aligned 1:1 with the linearized primitive list
+/// (this struct), aligned 1:1 with the linearized primitive list
 /// `(mesh_idx, prim_idx)`. The fourth and fifth are the
 /// post-normalize AABB `(min, max)`.
 ///
@@ -347,7 +347,7 @@ fn load_all_meshes(
     // transform is applied to every vertex so the whole body
     // ends up centered on origin and bounded by the target size.
     //
-    // PR4.4: also extract morph targets per primitive (position
+    // also extract morph targets per primitive (position
     // displacements only, normalised by `(center, scale)` so the
     // GPU matches the vertex buffer's scale). The per-primitive
     // morph data is stored in a parallel `Vec<Option<PrimitiveMorphs>>`
@@ -355,7 +355,7 @@ fn load_all_meshes(
     // primitives are recorded as `None` so the indices stay
     // stable).
     //
-    // Issue #8: we also track whether any primitive carries a
+    // we also track whether any primitive carries a
     // non-trivial `JOINTS_0` (i.e. any index > 0). When
     // combined with a missing skin (decided by the caller
     // after `load_first_skeleton` runs) this signals a
@@ -402,40 +402,18 @@ fn load_all_meshes(
                 .read_tex_coords(0)
                 .map(|tc| tc.into_f32().collect())
                 .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
-            // PR4.5: per-vertex joints / weights. glTF stores
-            // `JOINTS_0` as a u8/u16 accessor and `WEIGHTS_0` as
-            // f32. When the primitive does not carry skinning
-            // data the defaults `[joints = [0,0,0,0],
-            // weights = [1,0,0,0]]` make the skinned shader
-            // reduce to `weights[0] * skin[0] * pos` and the
-            // renderer uploads a one-element `skin[]` of
-            // `Mat4::IDENTITY`.
-            //
-            // The gltf 1.4 `ReadJoints` enum exposes `into_u16`
-            // (which handles both u8 and u16 accessors uniformly
-            // via a `CastingIter`) — we promote the joint index
-            // to `u32` so 256+-joint humanoid models (per-finger
-            // bones, etc.) can address every joint. An earlier
-            // `[u8; 4]` representation silently aliased every
-            // joint >= 255 onto `skin_matrices[255]`, which
+            // `JOINTS_0` is a u8/u16 accessor; the gltf 1.4
+            // `ReadJoints` enum exposes `into_u16` (handles both
+            // uniformly via a `CastingIter`). Promote to `u32` so
+            // 256+-joint humanoid models (per-finger bones)
+            // address every joint. A previous `[u8; 4]` aliased
+            // every joint >= 255 onto `skin_matrices[255]`, which
             // stuck finger / wrist skinning to the same matrix.
-            // PR4.19: apply the per-primitive `JOINTS_0`
-            // remap. The accessor gives us indices into the
-            // primitive's own skin's joint list (e.g. the
-            // body's vertices reference body-skin indices
-            // 0..14); the merged skeleton unifies every
-            // unique joint, so we have to translate each
-            // slot through the per-primitive remap table
-            // built by `load_merged_skeleton_and_remaps`
-            // before uploading the vertex buffer. A missing
-            // remap entry (e.g. the primitive's skin was
-            // missing) yields 0 — the renderer's
-            // `VrmModel::update_skin_palette` then maps
-            // `joint 0` of the merged skeleton to the first
-            // joint, which is the humanoid `upperChest` for
-            // Alicia, so the affected vertices are at least
-            // visibly bound to a real joint instead of being
-            // a hard panic.
+            // The remap translates each vertex's per-skin index
+            // into the merged-skeleton index; a missing remap
+            // entry yields 0 (the renderer's `update_skin_palette`
+            // maps that to the merged skeleton's first joint
+            // instead of panicking).
             let remap_for_this_prim: &[u32] = primitive_joint_remap
                 .get(mesh_idx)
                 .and_then(|m| m.get(prim_idx))
@@ -458,12 +436,10 @@ fn load_all_meshes(
                         .collect()
                 })
                 .unwrap_or_else(|| vec![[0, 0, 0, 0]; positions.len()]);
-            // Issue #8: detect malformed models that carry
-            // `JOINTS_0` indices without an accompanying skin.
-            // We only need one primitive with a non-zero index
-            // to flag the model — once a real skin lands the
-            // indices will be honoured and the warning will
-            // disappear.
+            // A primitive carrying `JOINTS_0` without a skin
+            // means a malformed model (most likely a VRM 0.x file
+            // that lost its skin during export). Flag it once
+            // and warn in the caller.
             if !has_nonzero_joints && joints.iter().any(|j| j.iter().any(|x| *x != 0)) {
                 has_nonzero_joints = true;
             }
@@ -491,18 +467,11 @@ fn load_all_meshes(
                 .zip(uvs.iter())
                 .zip(joints.iter().zip(weights.iter()))
             {
-                // Vertices stay in raw glTF space; the loader
-                // records `(center, scale)` separately on the
-                // model and the runtime folds them into the
-                // `model.model` matrix at draw time. Mutating
-                // vertex positions would also force the bind
-                // matrices (which were computed against the
-                // raw positions) to be recomputed — keeping the
-                // mesh in its authored space means
-                // `inverse_bind` lines up with the vertex
-                // buffer and the standard glTF skinning
-                // identity `joint_world * inverse_bind` stays
-                // valid as-is.
+                // Vertices stay in raw glTF space; the runtime
+                // folds `(center, scale)` into the model matrix
+                // at draw time. Mutating positions would force
+                // the bind matrices (computed against the raw
+                // positions) to be recomputed.
                 vertices.push(MeshVertex {
                     position: *pos,
                     uv: *uv,
@@ -512,13 +481,9 @@ fn load_all_meshes(
                 });
             }
 
-            // PR5.1: include `COPY_SRC` on both buffers so the
-            // runtime can read them back at model-load time to
-            // build a Rapier trimesh collider (which owns the
-            // BVH used by the per-frame hit test). The readback
-            // itself goes through a `MAP_READ | COPY_DST`
-            // staging buffer; the source only needs to be a
-            // valid copy source.
+            // Include `COPY_SRC` so the runtime can read the
+            // buffers back at model-load time to build a Rapier
+            // trimesh collider.
             let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(&format!("vrm.mesh{mesh_idx}.prim{prim_idx}.vertex_buf")),
                 contents: MeshVertex::as_bytes(&vertices),
@@ -546,13 +511,10 @@ fn load_all_meshes(
                 }
             };
 
-            // PR4.4: extract morph targets BEFORE pushing the
-            // primitive, so the index lines up. The resolver from
+            // Extract morph targets BEFORE pushing the primitive,
+            // so the index lines up.
             let node_idx = mesh_to_node.get(&mesh_idx).copied().unwrap_or(0);
 
-            // `resolve_expression_names` is used to map the
-            // synthetic slot index to the real VRMC_vrm
-            // expression name (e.g. `happy`, `sad`).
             let morphs = load_primitive_morph_targets(
                 &primitive,
                 gltf,
@@ -570,11 +532,10 @@ fn load_all_meshes(
 
             let unlit = primitive.material().unlit();
 
-            // PR4.15: attach MToon material if present.
+            // Attach MToon material if present.
             let mat_idx = primitive.material().index();
             let mtoon_mat = mat_idx.and_then(|i| mtoon_materials.get(i).cloned().flatten());
 
-            // PR4.15: load MToon textures if the material has them.
             let mtoon_textures = mtoon_mat.as_ref().zip(mat_idx).and_then(|(m, i)| {
                 load_mtoon_gpu_textures(i, m, gltf, device, queue, &mut mtoon_textures_cache)
                     .ok()
@@ -586,13 +547,10 @@ fn load_all_meshes(
                 vertex_count: vertices.len() as u32,
                 index_buf,
                 index_count: indices.len() as u32,
-                // PR5.x: keep the CPU-side vertex mirror so the
+                // Keep the CPU-side vertex mirror so the
                 // collider builder can walk `joints` / `weights`
                 // / `position` per-primitive without a GPU
-                // readback. The buffer was already moved into the
-                // upload closure, so this clone is cheap relative
-                // to the bytewise `bytemuck::cast_slice` copy in
-                // `MeshVertex::as_bytes`.
+                // readback.
                 vertices: vertices.clone(),
                 base_color,
                 alpha_mode,
@@ -600,11 +558,9 @@ fn load_all_meshes(
                 mtoon: mtoon_mat,
                 mtoon_textures,
             });
-            // Allocate a stable PrimitiveId based on the running
-            // count of successfully-loaded primitives. The
-            // renderer's draw loop will use the same ordering
-            // (mesh-major, primitive-within-mesh) to look up the
-            // matching morph data.
+            // Stable PrimitiveId: aligned 1:1 with the matching
+            // morph entry. The draw loop uses the same mesh-major
+            // ordering.
             let pid = PrimitiveId(morph_per_primitive.len());
             morph_per_primitive.push(morphs.map(|raw| {
                 PrimitiveMorphs::from_targets(pid, node_idx, vertices.len() as u32, raw)
@@ -613,10 +569,8 @@ fn load_all_meshes(
         if primitives.is_empty() {
             tracing::debug!("VRM mesh[{mesh_idx}] has no renderable primitives; skipping");
             // Drop the morph records we pushed for this empty
-            // mesh so the indices stay aligned with `VrmPrimitive`
-            // in `meshes`. PR3.x already had a
-            // `meshes.push(VrmMesh { ... })` only on the
-            // non-empty branch, so this matches that.
+            // mesh so the morph indices stay aligned with
+            // `VrmPrimitive` in `meshes`.
             let dropped = mesh.primitives().count();
             let new_len = morph_per_primitive.len().saturating_sub(dropped);
             morph_per_primitive.truncate(new_len);
@@ -629,15 +583,6 @@ fn load_all_meshes(
         return Err(VrmError::NoMeshes);
     }
 
-    // PR4.18: the vertex buffer now holds the raw glTF
-    // positions — we no longer recenter / scale vertices
-    // during the load. The raw AABB is what the GPU sees
-    // (and what `inverse_bind` was computed against), so
-    // we hand that back to the runtime unchanged. The
-    // `center` and `normalize_scale` pair travels alongside
-    // the AABB so the runtime can fold `T(-center) *
-    // S(normalize_scale) * T(position)` into the model
-    // matrix.
     Ok((
         meshes,
         morph_per_primitive,
@@ -674,13 +619,9 @@ fn load_primitive_morph_targets(
     if target_count == 0 {
         return None;
     }
-    // Issue #6: enforce the per-primitive cap that the GPU
-    // uniform reserves (`MAX_WEIGHT_SLOTS * 4` = 64 weight
-    // slots). A model that ships more morph targets than the
-    // cap would silently overflow the `weights: array<vec4, 16>`
-    // uniform and the extras would never reach the GPU; we
-    // warn and truncate here so the user can see the issue and
-    // the bound uniform stays consistent.
+    // Cap at the per-primitive limit; extras would silently
+    // overflow the `weights: array<vec4, 16>` uniform and never
+    // reach the GPU.
     if target_count > MAX_MORPH_TARGETS_PER_PRIMITIVE {
         tracing::warn!(
             "VRM mesh[{mesh_idx}].primitive[{prim_idx}] has {target_count} morph targets, \
@@ -689,13 +630,6 @@ fn load_primitive_morph_targets(
         );
     }
     let mut out = Vec::with_capacity(target_count);
-    // Read all displacement data once. The `Reader` type is
-    // bound to the `gltf` lifetime so we cannot return it from
-    // this helper — instead we walk the iterator here. The
-    // `take` cap mirrors the warning above: any extras are
-    // dropped at both the storage-collection and the name-pair
-    // pass so the `out` vec never exceeds
-    // `MAX_MORPH_TARGETS_PER_PRIMITIVE`.
     let mut all_displacements: Vec<Vec<[f32; 3]>> = Vec::with_capacity(target_count);
     for (positions, _normals, _tangents) in primitive
         .reader(|_buffer| gltf.blob.as_deref())
@@ -708,16 +642,12 @@ fn load_primitive_morph_targets(
                 if i >= expected_vertex_count {
                     break;
                 }
-                // Morph target POSITION is a per-vertex *delta*
-                // (not an absolute position), so it must be
-                // normalised by `scale` only — NOT by
-                // `(p - center) * scale` like the base positions
-                // are. Translating by `-center` adds a spurious
-                // shift equal to the model's centre, which makes
-                // weighted morphs drag the mesh toward the
-                // origin. Verified against the PR4.4 visual
-                // regression where "happy" slid the face down by
-                // ~0.9 normalised units.
+                // Morph target POSITION is a per-vertex *delta*,
+                // not an absolute position — normalize by `scale`
+                // only. Translating by `-center` would add a
+                // spurious shift that drags weighted morphs toward
+                // the origin (e.g. "happy" slid the face down by
+                // ~0.9 normalised units before this was fixed).
                 offsets.push(normalize_morph_offset(p, scale));
             }
         }
@@ -725,7 +655,6 @@ fn load_primitive_morph_targets(
         offsets.resize(expected_vertex_count, [0.0; 3]);
         all_displacements.push(offsets);
     }
-    // The target index is stored in `target_index` directly.
     for (target_index, _json_target) in primitive
         .morph_targets()
         .enumerate()
@@ -743,25 +672,14 @@ fn load_primitive_morph_targets(
     Some(out)
 }
 
-/// Walk `document.skins().next().joints()` and return the
-/// `(joint_index) -> glTF node_index` map the renderer will need
-/// to look up the humanoid bone per joint in Phase 2. Returns an
-/// empty vec for models with no skin.
-///
-/// **PR4.19**: the previous single-skin assumption was wrong —
-/// a VRM model like `AliciaSolid.vrm` ships **12 separate
-/// skins** (one per body part), and the `Mesh` that a primitive
-/// belongs to is referenced by a `Node` whose `skin` property
-/// points to the right skin. The new pipeline loads every
-/// skin, builds a **merged skeleton** whose `joint_to_node`
-/// is the union of all unique joint nodes, and pre-computes a
-/// per-primitive remap table so each vertex's `JOINTS_0` (an
-/// index into its own skin's joint list) is translated into
-/// the merged-skeleton index. The renderer keeps using a
-/// single `Skeleton`; the per-primitive remap is a one-time
-/// preprocessing step at load time.
+/// Walk every glTF skin, build a **merged skeleton** whose
+/// `joint_to_node` is the union of all unique joint nodes, and
+/// pre-compute a per-primitive remap table so each vertex's
+/// `JOINTS_0` (an index into its own skin's joint list) is
+/// translated into the merged-skeleton index. The renderer keeps
+/// using a single `Skeleton`; the per-primitive remap is a
+/// one-time preprocessing step at load time.
 fn load_merged_skeleton_and_remaps(gltf: &gltf::Gltf) -> (Skeleton, Vec<Vec<Vec<u32>>>) {
-    // 1. Walk every skin and collect (joint_node_indices, ibms).
     let mut per_skin: Vec<(Vec<usize>, Vec<glam::Mat4>)> = Vec::new();
     for skin in gltf.document.skins() {
         let joints: Vec<usize> = skin.joints().map(|n| n.index()).collect();
@@ -773,12 +691,9 @@ fn load_merged_skeleton_and_remaps(gltf: &gltf::Gltf) -> (Skeleton, Vec<Vec<Vec<
         per_skin.push((joints, ibms));
     }
 
-    // 2. Build the merged skeleton: union of all unique
-    //    joint nodes across every skin. The IBM for each
-    //    merged joint is the IBM from the first skin that
-    //    declared it (in practice all skins share the same
-    //    bind pose, so the values match for every joint
-    //    that appears in more than one skin).
+    // Union of all unique joint nodes across every skin. The IBM
+    // for each merged joint is the IBM from the first skin that
+    // declared it; in practice all skins share the same bind pose.
     let mut merged_joints: Vec<usize> = Vec::new();
     let mut merged_ibms: Vec<glam::Mat4> = Vec::new();
     let mut node_to_merged: std::collections::HashMap<usize, usize> =
@@ -793,31 +708,27 @@ fn load_merged_skeleton_and_remaps(gltf: &gltf::Gltf) -> (Skeleton, Vec<Vec<Vec<
             });
         }
     }
-    // `Skeleton.inverse_bind` is the **inverse-bind matrix** (IBM)
-    // read from `skin.inverse_bind_matrices`; the per-frame palette
-    // is `joint_world * inverse_bind[i]` (the standard glTF
-    // identity, which collapses to the bind matrix at rest). The
-    // accompanying `bind_matrices` field is the bind matrix itself
-    // (`inverse_bind[i].inverse()`), pre-baked for the renderer's
-    // initial rest-pose upload.
+    // `inverse_bind` is the IBM read from
+    // `skin.inverse_bind_matrices`; the per-frame palette is
+    // `joint_world * inverse_bind[i]` (the standard glTF
+    // identity, which collapses to the bind matrix at rest).
+    // `bind_matrices` is the inverse, pre-baked for the
+    // renderer's initial rest-pose upload.
     //
     // The previous build was assigning the two fields in the
-    // opposite order, which produced `palette[j] = joint_world *
-    // bind_matrix ≈ bind_matrix²` for a T-pose humanoid. Because
-    // most joint bind matrices are pure translations, that doubled
-    // the joint's rest position and stretched the model ~5x
-    // vertically — the "5x taller" symptom in the screenshot.
+    // opposite order, producing `palette[j] = joint_world *
+    // bind_matrix ≈ bind_matrix²` for a T-pose humanoid. That
+    // doubled every joint's rest position and stretched the
+    // model ~5x vertically.
     let skel = Skeleton {
         inverse_bind: merged_ibms.clone(),
         bind_matrices: merged_ibms.iter().map(|m| m.inverse()).collect(),
         joint_to_node: merged_joints,
     };
 
-    // 3. Build a `mesh_idx -> skin_idx` map by walking every
-    //    node — the skin reference is on the node, not the
-    //    primitive, so a mesh attached to a node with no
-    //    skin property falls back to skin 0 (the glTF
-    //    default).
+    // The skin reference lives on the node, not the primitive; a
+    // mesh attached to a node with no `skin` property falls back
+    // to skin 0 (glTF default).
     let mut mesh_to_skin: std::collections::HashMap<usize, usize> =
         std::collections::HashMap::new();
     for node in gltf.document.nodes() {
@@ -827,23 +738,15 @@ fn load_merged_skeleton_and_remaps(gltf: &gltf::Gltf) -> (Skeleton, Vec<Vec<Vec<
         }
     }
 
-    // 4. Build the per-primitive remap table. The table is
-    //    indexed `[mesh_idx][prim_idx][old_joint_idx]` and
-    //    yields the merged-skeleton joint index. If a
-    //    primitive references a joint that's not in the
-    //    merged skeleton (shouldn't happen for a
-    //    well-formed model), the remap falls back to 0.
+    // Per-primitive remap table indexed
+    // `[mesh_idx][prim_idx][old_joint_idx] -> merged_joint_idx`.
+    // A missing entry falls back to 0 (the renderer's
+    // `update_skin_palette` reduces that to identity).
     let mut primitive_remap: Vec<Vec<Vec<u32>>> = Vec::new();
     for (mesh_idx, mesh) in gltf.document.meshes().enumerate() {
         let mut prim_remaps: Vec<Vec<u32>> = Vec::new();
         let skin_idx = mesh_to_skin.get(&mesh_idx).copied().unwrap_or(0);
         let Some((skin_joints, _)) = per_skin.get(skin_idx) else {
-            // No matching skin (malformed model) — leave the
-            // remap empty so the vertex loader keeps the
-            // original JOINTS_0 (which the renderer's
-            // `usize::MAX` sentinel handling in
-            // `VrmModel::update_skin_palette` will treat as
-            // "out of range" and reduce to identity).
             for _ in 0..mesh.primitives().count() {
                 prim_remaps.push(Vec::new());
             }
@@ -863,22 +766,12 @@ fn load_merged_skeleton_and_remaps(gltf: &gltf::Gltf) -> (Skeleton, Vec<Vec<Vec<
     (skel, primitive_remap)
 }
 
-/// Walk every glTF `Node` and capture the local
-/// rotation / position, the parent index, and the world
-/// rest-pose transform. The result feeds
-/// [`VrmModel::update_skin_palette`] for the per-frame
-/// VRMA playback pass (PR4.16).
-///
-/// The glTF spec only mandates the local transform
-/// (`translation`, `rotation`, `scale`); the world
-/// transform is computed here by walking the parent
-/// chain. Valid glTF is topologically ordered
-/// (parents appear before children in
-/// `document.nodes()`), which is the assumption the
-/// single-pass cascade makes. A malformed file with
-/// out-of-order nodes would produce a wrong world
-/// transform; the loader logs a warning when that
-/// happens.
+/// Walk every glTF `Node` and capture the local rotation /
+/// position, the parent index, and the world rest-pose
+/// transform. The world transform is computed in a single
+/// topologically-ordered cascade (glTF requires parents to
+/// appear before children; we fall back to root for any
+/// out-of-order node and log a warning).
 fn load_node_hierarchy(gltf: &gltf::Gltf) -> NodeHierarchy {
     use crate::model::NodeHierarchy;
 
@@ -901,11 +794,6 @@ fn load_node_hierarchy(gltf: &gltf::Gltf) -> NodeHierarchy {
         }
     }
 
-    // Single-pass cascade. The `gl` crate yields nodes in
-    // declaration order, which is topologically sorted for
-    // well-formed glTF — the same assumption the
-    // `compute_node_rest_transforms` helper in
-    // `animation.rs` relies on.
     let mut out_of_order = 0usize;
     for i in 0..node_count {
         let p = parents[i];
@@ -914,8 +802,7 @@ fn load_node_hierarchy(gltf: &gltf::Gltf) -> NodeHierarchy {
             world_positions[i] = rest_local_positions[i];
         } else {
             let p = p as usize;
-            // If `i < p` the assumption is violated; fall
-            // back to treating the node as a root so the
+            // Out-of-order node: treat as root for itself so the
             // cascade stays sound for its descendants.
             if i < p {
                 out_of_order += 1;
@@ -935,16 +822,9 @@ fn load_node_hierarchy(gltf: &gltf::Gltf) -> NodeHierarchy {
         );
     }
 
-    // The local_* buffers start as a copy of the rest pose
-    // and get mutated by `update_skin_palette` every frame.
-    // Resetting to `rest_local_*` at the top of every call
-    // keeps the rest pose authoritative.
-    let local_rotations = rest_local_rotations.clone();
-    let local_positions = rest_local_positions.clone();
-
     NodeHierarchy {
-        local_rotations,
-        local_positions,
+        local_rotations: rest_local_rotations.clone(),
+        local_positions: rest_local_positions.clone(),
         rest_local_rotations,
         rest_local_positions,
         parents,
@@ -1129,7 +1009,7 @@ fn load_image_data(
 /// Map a raw glTF morph-target POSITION displacement into the
 /// vertex buffer's coordinate space.
 ///
-/// As of the PR4.18 mesh-unnormalisation pass, the vertex
+/// As of the mesh-unnormalisation pass, the vertex
 /// buffer is now in raw glTF space (we no longer recenter or
 /// scale vertices on load — the model matrix folds those in
 /// at draw time). Morph target POSITION is a per-vertex
@@ -1144,7 +1024,7 @@ fn normalize_morph_offset(raw: [f32; 3], _scale: f32) -> [f32; 3] {
     raw
 }
 
-/// PR4.15: load all MToon textures referenced by a material and
+/// Load all MToon textures referenced by a material and
 /// create the combined GPU bind group. Returns `Ok(None)` if the
 /// material has no MToon textures at all.
 fn load_mtoon_gpu_textures(
@@ -1562,7 +1442,7 @@ fn upload_mtoon_texture(
 mod tests {
     use super::normalize_morph_offset;
 
-    /// PR4.18: as of the mesh-unnormalisation pass the vertex
+    /// as of the mesh-unnormalisation pass the vertex
     /// buffer is in raw glTF space; the morph offset is
     /// already in the same raw space, so
     /// `normalize_morph_offset` is the identity. The helper
@@ -1579,7 +1459,7 @@ mod tests {
         // corner. With the raw-space pass-through the
         // helper must return the raw delta untouched,
         // regardless of `center` / `scale`. The earlier
-        // PR4.4 assertion (`raw * scale`) is now obsolete:
+        // assertion (`raw * scale`) is now obsolete:
         // the per-vertex `scale` lives in the model matrix,
         // not in the morph offset buffer.
         let raw = [0.0, 0.02, 0.01];
@@ -1605,7 +1485,7 @@ mod tests {
         }
     }
 
-    /// PR4.5: when the loader computes `bind_matrices` from
+    /// when the loader computes `bind_matrices` from
     /// `inverse_bind`, the identity `bind * inverse_bind`
     /// must hold at every joint (modulo float round-off).
     /// This is the algebraic invariant the skinned shader
@@ -1636,7 +1516,7 @@ mod tests {
         }
     }
 
-    /// Issue #5: humanoid models with 256+ joints (e.g. every
+    /// humanoid models with 256+ joints (e.g. every
     /// per-finger bone) used to clamp `JOINTS_0` to `[u8; 4]`
     /// and silently aliased every joint >= 255 onto
     /// `skin_matrices[255]`, gluing finger / wrist skinning to
@@ -1653,14 +1533,14 @@ mod tests {
         let joints: [u32; 4] = [high_index as u32, 0, 0, 0];
         // The WGSL palette index is `u32` so a `Uint32x4`
         // attribute is the only correct upload format. The
-        // `[u8; 4]` packing (PR4.5) would have saturated
+        // `[u8; 4]` packing (this struct) would have saturated
         // `511` to `255`.
         assert_eq!(joints[0], 511);
         // The cast path must not produce 0 / 255 by truncation.
         assert_ne!(joints[0] as u8 as u32, 511);
     }
 
-    /// Issue #8: the loader flags a malformed model as
+    /// the loader flags a malformed model as
     /// "has_nonzero_joints" when any primitive carries a
     /// non-trivial `JOINTS_0` accessor. The predicate is the
     /// one the `load_all_meshes` body uses inline (it is not

@@ -1,4 +1,4 @@
-//! PR-LX.7: Solid-color mask shader for the offscreen Wayland/X11
+//! Solid-color mask shader for the offscreen Wayland/X11
 //! silhouette capture.
 //!
 //! Mirrors the character camera (`view_proj` + `model`) but writes
