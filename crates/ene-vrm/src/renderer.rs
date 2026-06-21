@@ -1,7 +1,7 @@
 //! VRM renderer — wgpu render pipeline + bind group layouts that
 //! can draw a [`VrmModel`] into a `wgpu::TextureView`.
 //!
-//! PR3 ships a **basic PBR-lite** shader (`lit + base color`):
+//! ships a **basic PBR-lite** shader (`lit + base color`):
 //!
 //! - Lit lambertian + half-Lambert blend on the base-color texture.
 //! - Single directional light from `(0.3, 0.8, 0.5)` in world
@@ -9,12 +9,12 @@
 //!   light direction is now sourced from `world_pos`).
 //! - Alpha-blend output (pre-multiplied) so transparent textures
 //!   (e.g. MToon's outline-transparent pass) composite correctly.
-//! - **PR4.1**: per-frame `ModelUniform` (bind group 1) is applied
+//! - ****: per-frame `ModelUniform` (bind group 1) is applied
 //!   between view-proj and the vertex position. The runtime
 //!   composes it from `CharacterState::character_position` +
 //!   `model_scale`, so the Character settings page X/Y/Z sliders
 //!   now move the model in world space.
-//! - **PR4.4**: bind group `(3)` carries the morph-target data
+//! - ****: bind group `(3)` carries the morph-target data
 //!   (storage + uniform). Primitives that define morph targets
 //!   get a per-primitive storage buffer (the position
 //!   displacements, already normalized by the loader) and a
@@ -42,7 +42,7 @@ const SHADER_SOURCE: &str = include_str!("shaders/mtoon_skinned.wgsl");
 const UNLIT_SHADER_SOURCE: &str = include_str!("shaders/unlit_skinned.wgsl");
 const MTOON_SHADER_SOURCE: &str = include_str!("shaders/mtoon_full.wgsl");
 
-/// PR4.5: number of skin-matrix palette slots to allocate when the
+// number of skin-matrix palette slots to allocate when the
 /// loaded model has no skin at all. A one-element palette of
 /// `Mat4::IDENTITY` is enough because the default `MeshVertex`
 /// falls back to `joints = [0, 0, 0, 0]` and `weights = [1, 0, 0, 0]`.
@@ -93,7 +93,7 @@ struct DummyMorphGpu {
     bind_group: wgpu::BindGroup,
 }
 
-/// PR4.5: per-model skin-matrix palette. One `mat4x4<f32>` per
+// per-model skin-matrix palette. One `mat4x4<f32>` per
 /// joint, uploaded once at construction time with the
 /// pre-baked `bind_matrices` (i.e. `inverse_bind[i].inverse()`).
 /// Phase 2 will overwrite the buffer every frame with
@@ -109,7 +109,7 @@ struct SkinGpu {
     joint_count: u32,
 }
 
-/// PR4.15: per-primitive MToon uniform buffer (group 5).
+// per-primitive MToon uniform buffer (group 5).
 struct MToonUniformGpu {
     bind_group: wgpu::BindGroup,
 }
@@ -138,10 +138,10 @@ pub struct VrmRenderer {
     /// populated and transparent surfaces are correctly
     /// occluded by opaque geometry.
     pipeline_transparent: wgpu::RenderPipeline,
-    /// Issue #19: unlit opaque pipeline. Same depth state as
+    /// unlit opaque pipeline. Same depth state as
     /// `pipeline_opaque` but uses the unlit shader (no lighting).
     pipeline_unlit_opaque: wgpu::RenderPipeline,
-    /// Issue #19: unlit transparent pipeline. Same blend state
+    /// unlit transparent pipeline. Same blend state
     /// as `pipeline_transparent` but uses the unlit shader.
     pipeline_unlit_transparent: wgpu::RenderPipeline,
     /// Dummy morph resources, bound for primitives that have no
@@ -157,18 +157,18 @@ pub struct VrmRenderer {
     /// avoid a per-draw allocation. Default-initialised to
     /// all zeros.
     meta_scratch: PrimitiveMorphMeta,
-    /// PR4.5: skin-matrix palette (group 4). Uploaded once
+    /// skin-matrix palette (group 4). Uploaded once
     /// with the model's `bind_matrices` (rest pose). Phase 2
     /// will rewrite this every frame to drive look-at
     /// rotations.
     skin: SkinGpu,
-    /// PR4.15: MToon per-material uniform buffer (group 5).
+    /// MToon per-material uniform buffer (group 5).
     /// One buffer per primitive that has MToon; `None` for
     /// primitives that use the lite shader.
     mtoon_uniforms: Vec<Option<MToonUniformGpu>>,
-    /// PR4.15: MToon opaque pipeline.
+    /// MToon opaque pipeline.
     pipeline_mtoon_opaque: wgpu::RenderPipeline,
-    /// PR4.15: MToon transparent pipeline.
+    /// MToon transparent pipeline.
     pipeline_mtoon_transparent: wgpu::RenderPipeline,
     /// Mask render pipeline. Compiles against `mask_format` if provided,
     /// otherwise `None`.
@@ -217,7 +217,7 @@ impl VrmRenderer {
             }],
         });
 
-        // Bind group `(1)` — model transform uniform (PR4.1).
+        // Bind group `(1)` — model transform uniform (this struct).
         let model_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vrm.model_buf"),
             size: std::mem::size_of::<ModelUniform>() as wgpu::BufferAddress,
@@ -269,9 +269,8 @@ impl VrmRenderer {
                 })
             });
 
-        // PR4.4: group `(3)` — morph targets. The layout is
-        // shared by every per-primitive bind group and the
-        // dummy group.
+        // Bind group (3): morph targets. The layout is shared by
+        // every per-primitive bind group and the dummy group.
         let morph_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("vrm.morph_bgl"),
             entries: &[
@@ -298,7 +297,7 @@ impl VrmRenderer {
             ],
         });
 
-        // PR4.5: group `(4)` — skin-matrix palette. The
+        // Bind group (4): — skin-matrix palette. The
         // renderer uploads one `mat4x4<f32>` per joint, or a
         // single `Mat4::IDENTITY` for models without a skin
         // (the default MeshVertex falls back to
@@ -318,7 +317,7 @@ impl VrmRenderer {
             }],
         });
 
-        // PR4.15: group `(5)` — MToon per-material uniform.
+        // Bind group (5): — MToon per-material uniform.
         let mtoon_uniform_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("vrm.mtoon_uniform_bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -335,7 +334,7 @@ impl VrmRenderer {
             }],
         });
 
-        // PR4.15: group `(6)` — MToon textures (14 bindings: 7 tex + 7 smp).
+        // Bind group (6): — MToon textures (14 bindings: 7 tex + 7 smp).
         let mtoon_textures_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("vrm.mtoon_textures_bgl"),
@@ -467,7 +466,7 @@ impl VrmRenderer {
             immediate_size: 0,
         });
 
-        // PR4.15: MToon pipeline layout (7 bind groups).
+        // MToon pipeline layout (7 bind groups).
         let mtoon_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("vrm.mtoon_pipeline_layout"),
@@ -493,7 +492,7 @@ impl VrmRenderer {
             source: wgpu::ShaderSource::Wgsl(UNLIT_SHADER_SOURCE.into()),
         });
 
-        // PR4.15: MToon full shader.
+        // MToon full shader.
         let mtoon_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vrm.mtoon_shader"),
             source: wgpu::ShaderSource::Wgsl(MTOON_SHADER_SOURCE.into()),
@@ -573,7 +572,7 @@ impl VrmRenderer {
             cache: None,
         });
 
-        // Issue #19: unlit opaque pipeline. Same layout and
+        // Unlit opaque pipeline. Same layout and
         // depth state as the lit opaque pipeline, but the
         // fragment shader outputs base color directly without
         // any half-Lambert lighting term.
@@ -615,7 +614,7 @@ impl VrmRenderer {
                 cache: None,
             });
 
-        // Issue #19: unlit transparent pipeline. Same blend
+        // Unlit transparent pipeline. Same blend
         // state as the lit transparent pipeline but without
         // lighting.
         let pipeline_unlit_transparent =
@@ -656,7 +655,7 @@ impl VrmRenderer {
                 cache: None,
             });
 
-        // PR4.15: MToon opaque pipeline. Uses the full MToon
+        // MToon opaque pipeline. Uses the full MToon
         // shader with 7 bind groups.
         let pipeline_mtoon_opaque =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -696,7 +695,7 @@ impl VrmRenderer {
                 cache: None,
             });
 
-        // PR4.15: MToon transparent pipeline.
+        // MToon transparent pipeline.
         let pipeline_mtoon_transparent =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("vrm.pipeline_mtoon_transparent"),
@@ -735,7 +734,7 @@ impl VrmRenderer {
                 cache: None,
             });
 
-        // PR4.4: build the per-primitive morph GPU resources.
+        // Build the per-primitive morph GPU resources.
         // The linear order matches the renderer's draw loop:
         // mesh-major, then primitive-within-mesh, skipping any
         // primitives that the loader dropped (e.g. non-triangle
@@ -755,7 +754,7 @@ impl VrmRenderer {
         // has `target_count = 0`.
         let dummy_morph = build_dummy_morph_gpu(device, queue, &morph_bgl);
 
-        // PR4.5: build the skin-matrix palette. For models with
+        // Build the skin-matrix palette. For models with
         // a populated `Skeleton` we upload every
         // `bind_matrices[i]` once (rest pose). For models
         // without a skin we upload a single `Mat4::IDENTITY`
@@ -764,7 +763,7 @@ impl VrmRenderer {
         // `pos`.
         let skin = build_skin_gpu(device, queue, &skin_bgl, model);
 
-        // PR4.15: build per-primitive MToon uniform buffers.
+        // Build per-primitive MToon uniform buffers.
         // Primitives without MToon get `None` slots.
         let mut mtoon_uniforms: Vec<Option<MToonUniformGpu>> = Vec::new();
         for mesh in &model.meshes {
@@ -900,9 +899,9 @@ impl VrmRenderer {
             }
         };
 
-        // PR4.4: each morph-capable primitive is rendered with
-        // its own pre-built bind group (group 3). The slot index
-        // used to look up weights is the **per-primitive local**
+        // Each morph-capable primitive is rendered with its own
+        // pre-built bind group (group 3). The slot index used to
+        // look up weights is the per-primitive local
         // index — see `upload_morph_meta` for the rationale.
 
         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1099,7 +1098,7 @@ impl VrmRenderer {
         } else {
             rp.set_bind_group(3, &self.dummy_morph.bind_group, &[]);
         }
-        // PR4.15: bind MToon uniform + textures if present.
+        // Bind MToon uniform + textures if present.
         if let Some(mtoon) = self
             .mtoon_uniforms
             .get(linear_index)
@@ -1161,7 +1160,7 @@ impl VrmRenderer {
         queue.write_buffer(&morph.meta_buf, 0, bytemuck::bytes_of(&meta));
     }
 
-    /// PR4.16: overwrite the skin-palette storage buffer with
+    /// overwrite the skin-palette storage buffer with
     /// the joint world transforms returned by
     /// [`VrmModel::update_skin_palette`].
     ///
@@ -1189,7 +1188,7 @@ impl VrmRenderer {
         queue.write_buffer(&self.skin.matrices_buf, 0, bytemuck::cast_slice(palette));
     }
 
-    /// PR4.16: the joint count of the renderer's skin
+    /// the joint count of the renderer's skin
     /// palette. Zero for models built with the identity
     /// one-element palette (no skin).
     #[allow(dead_code)]
@@ -1307,7 +1306,7 @@ fn build_dummy_morph_gpu(
     }
 }
 
-/// PR4.5: build the per-model skin-matrix palette. For models
+// build the per-model skin-matrix palette. For models
 /// with a populated `Skeleton` the palette is the pre-baked
 /// `bind_matrices` (i.e. `inverse_bind[i].inverse()`). For
 /// models with no skin a one-element `Mat4::IDENTITY` palette

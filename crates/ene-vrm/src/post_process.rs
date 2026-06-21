@@ -1,22 +1,11 @@
-//! FXAA post-process pass (A.7 / PR7).
+//! FXAA post-process pass.
 //!
-//! The v2 character window currently renders the model directly
-//! into the swapchain texture. To apply FXAA, the model must
-//! first be drawn into an intermediate texture; the post-process
-//! pass then samples that texture and writes the smoothed
-//! output to the swapchain.
-//!
-//! The intermediate texture is sized to match the swapchain
-//! view; rebuilds happen when the surface size changes (the
-//! runtime resizes the character window on every `WindowEvent
-//! ::Resized`, so the depth-texture resize is the canonical
-//! trigger here too).
-//!
-//! The pipeline layout is a fullscreen triangle: position is
-//! `vec2<f32> ∈ {(-1,-1), (3,-1), (-1,3)}` and UV is
-//! `vec2<f32> ∈ {(0,0), (2,0), (0,2)}`. The vertex shader is
-//! a passthrough; the fragment shader is the FXAA Quality
-//! preset.
+//! The model is first drawn into an intermediate texture sized
+//! to match the swapchain; the post-process pass then samples
+//! that texture and writes the smoothed output to the
+//! swapchain. The pipeline is a fullscreen triangle with
+//! `vec2<f32> ∈ {(-1,-1), (3,-1), (-1,3)}` positions and
+//! corresponding UVs in `{(0,0), (2,0), (0,2)}`.
 use glam::Vec2;
 use wgpu::util::DeviceExt;
 

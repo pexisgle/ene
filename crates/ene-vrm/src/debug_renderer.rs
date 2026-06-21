@@ -1,6 +1,6 @@
-//! PR5.6: raycast / collider debug renderer.
+//! Raycast / collider debug renderer.
 //!
-//! A minimal wgpu line-list renderer for the PR5.2 per-bone
+//! A minimal wgpu line-list renderer for the per-bone
 //! sphere colliders. The runtime collects one `DebugLine` per
 //! collider sphere edge and one `DebugLine` per hit-point
 //! cross segment, then calls [`DebugRenderer::render`] after

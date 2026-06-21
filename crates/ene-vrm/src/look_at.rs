@@ -1,6 +1,6 @@
 //! VRMC_vrm-1.0 look-at properties and per-frame evaluator.
 //!
-//! PR4.8: parses the `VRMC_vrm.lookAt` extension object (the
+//! parses the `VRMC_vrm.lookAt` extension object (the
 //! `offsetFromHeadBone`, four `rangeMap*` fields, and the
 //! `type` discriminator) and turns the per-frame
 //! `(head_world, target_world)` pair into either per-bone
@@ -183,13 +183,13 @@ pub enum LookAtType {
     /// morph-target weights. This is what the legacy
     /// `bevy_vrm1` silently no-op'd: the cursor followed the
     /// camera pan, but the expressions were never written, so
-    /// the face never moved. PR4.8 fixes the silent no-op.
+    /// the face never moved. fixes the silent no-op.
     Expression,
 }
 
 /// The full `VRMC_vrm.lookAt` block. The spec considers every
 /// field optional and applies the defaults above when a field
-/// is missing. PR4.8 preserves the same defaults.
+/// is missing. preserves the same defaults.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LookAtProperties {
     /// Offset from the head bone to the look-at origin (in
@@ -217,7 +217,7 @@ impl LookAtProperties {
     /// Default smoothing speed (in 1/seconds) for the
     /// cursor → world target projection. The spec doesn't
     /// declare a smoothing value; the legacy `bevy_vrm1`
-    /// hard-coded `7.0` and PR4.2 carried that forward. Models
+    /// hard-coded `7.0` and carried that forward. Models
     /// that want a slower / faster follow can override this
     /// with a future spec extension; today the value is the
     /// single source of truth.

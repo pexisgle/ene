@@ -1,14 +1,14 @@
-// PR3 lit-lite shader. Vertex transforms the position by the
+// Lit-lite shader. Vertex transforms the position by the
 // camera's view-projection matrix and forwards the UV / normal to
 // the fragment stage. Fragment samples the base-color texture (if
 // present in bind group `(2)`) and applies a half-Lambert diffuse
 // term against a single fixed directional light.
 //
-// PR4.1: the per-frame `model` uniform (bind group 1) is applied
+// The per-frame `model` uniform (bind group 1) is applied
 // between view-proj and the vertex position. The runtime composes
 // it from `CharacterState::character_position` + `model_scale`.
 //
-// PR4.4: bind group `(3)` carries the morph-target data for
+// Bind group `(3)` carries the morph-target data for
 // primitives that have blend shapes. `morph_offsets` is a
 // `storage<read>` array of `vec3<f32>` laid out
 // `[target_idx * vertex_count + vertex_idx]`; `morph_meta` is
@@ -72,7 +72,7 @@ fn vs_main(in: VsIn, @builtin(vertex_index) vidx: u32) -> VsOut {
     var out: VsOut;
     var world_pos = model.model * vec4<f32>(in.position, 1.0);
 
-    // PR4.4: accumulate morph-target offsets. The `target_count`
+    // Accumulate morph-target offsets. The `target_count`
     // gate keeps the cost near zero on primitives that do not
     // define morph targets (their bind group uses a dummy layout
     // with `target_count = 0u`). The bound storage buffer is
@@ -95,11 +95,11 @@ fn vs_main(in: VsIn, @builtin(vertex_index) vidx: u32) -> VsOut {
     out.clip_pos = camera.view_proj * world_pos;
     out.uv = in.uv;
     out.world_pos = world_pos.xyz;
-    // PR4.x will switch the lighting term to use `world_pos` so
-    // the half-Lambert light direction stays fixed in world space
-    // even when the model translates. For now we just transform the
-    // normal through the (rotation-only) model matrix; scale
-    // uniform so no inverse-transpose is required.
+    // The lighting term uses `world_pos` once the model translates,
+    // so the half-Lambert light direction stays fixed in world space.
+    // For now we just transform the normal through the
+    // (rotation-only) model matrix; scale uniform so no
+    // inverse-transpose is required.
     out.normal = (model.model * vec4<f32>(in.normal, 0.0)).xyz;
     return out;
 }
@@ -107,10 +107,9 @@ fn vs_main(in: VsIn, @builtin(vertex_index) vidx: u32) -> VsOut {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let base = textureSample(base_color_tex, base_color_smp, in.uv);
-    // PR3 lit model: a single directional light from the +Y +X
+    // Lit model: a single directional light from the +Y +X
     // direction, half-Lambert wrap so the back of the model is not
-    // pitch black. MToon's "shading shift" knob ships in a follow-up
-    // PR.
+    // pitch black. MToon's "shading shift" knob ships in a follow-up.
     let light_dir = normalize(vec3<f32>(0.3, 0.8, 0.5));
     let n = normalize(in.normal);
     let ndotl = clamp(dot(n, light_dir), 0.0, 1.0);

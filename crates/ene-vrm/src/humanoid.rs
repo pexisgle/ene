@@ -1,6 +1,6 @@
 //! VRMC_vrm-1.0 humanoid bone registry.
 //!
-//! PR4.7: parses the `VRMC_vrm.humanoid.humanBones` extension
+//! parses the `VRMC_vrm.humanoid.humanBones` extension
 //! object, resolves each named bone to a glTF `Node` index,
 //! captures the rest-pose local transform, and exposes the
 //! result as a typed lookup table.
@@ -48,7 +48,7 @@
 //! - #15 (`VRMC_node_constraint`) — bone-name lookup for
 //!   constraint sources / destinations.
 //!
-//! PR4.7 itself only **builds the registry**; none of the
+//! itself only **builds the registry**; none of the
 //! per-frame consumers land in this commit.
 use std::collections::BTreeMap;
 
@@ -458,7 +458,7 @@ mod tests {
 
     /// The 55-bone set is the canonical contract. A
     /// regression (a bone dropped, a duplicate added) would
-    /// silently break PR4.7's foundation.
+    /// silently break's foundation.
     #[test]
     fn bone_name_set_has_55_unique_entries() {
         assert_eq!(HUMANOID_BONE_NAMES.len(), 55);

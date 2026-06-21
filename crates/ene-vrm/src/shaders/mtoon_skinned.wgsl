@@ -1,4 +1,4 @@
-// PR4.5 skinned variant of `mtoon_lite.wgsl`.
+// Skinned variant of `mtoon_lite.wgsl`.
 //
 // The vertex layout grows by two attributes (joints + weights) and
 // a new bind group `(4)` carries the per-joint `skin_matrices`
@@ -14,7 +14,7 @@
 // inverse_bind[i].inverse()`. The standard glTF skinning identity
 // is then `weights[0] * bind_matrices[joints[0]] * inverse_bind[joints[0]] * pos
 // = pos`, so a model with no animation is rendered unchanged
-// from the PR3 / PR4.4 un-skinned path. Models that don't define
+// from the un-skinned path. Models that don't define
 // `JOINTS_0` / `WEIGHTS_0` fall back to `joints = [0,0,0,0]` and
 // `weights = [1,0,0,0]`; the renderer then uploads a
 // one-element `skin[]` of `Mat4::IDENTITY` and the math
@@ -23,7 +23,7 @@
 // The fragment stage is identical to `mtoon_lite.wgsl` (lit
 // half-Lambert + base-color sample); skinning is purely a
 // vertex-stage transform. The full MToon material model (rim /
-// matcap / outline / emission) ships in a follow-up PR.
+// matcap / outline / emission) ships in a follow-up.
 
 struct VsIn {
     @location(0) position: vec3<f32>,
@@ -75,7 +75,7 @@ var<storage, read> morph_offsets: array<vec3<f32>>;
 @group(3) @binding(1)
 var<uniform> morph_meta: MorphMeta;
 
-// PR4.5: per-joint skin matrix palette. The renderer uploads
+// Per-joint skin matrix palette. The renderer uploads
 // `bind_matrices[i] = inverse_bind[i].inverse()` as the rest-pose
 // initial value; Phase 2 will overwrite it every frame with
 // `current_joint_world[i] * bind_matrices[i]`.
@@ -86,11 +86,11 @@ var<storage, read> skin_matrices: array<mat4x4<f32>>;
 fn vs_main(in: VsIn, @builtin(vertex_index) vidx: u32) -> VsOut {
     var out: VsOut;
 
-    // PR4.5: GPU skinning. Iterate the four (joint, weight) pairs
+    // GPU skinning. Iterate the four (joint, weight) pairs
     // and accumulate the weighted skin-matrix product. The
     // `weights[0] == 1.0 && rest == 0.0` case collapses to
     // `skin_matrices[joints[0]] * pos` (the standard "single joint
-    // influences this vertex" form). PR4.5 ships a rest-pose
+    // influences this vertex" form). The renderer ships a rest-pose
     // palette only — Phase 2 will drive the matrices from the
     // cursor look-at target.
     var skinned_pos = vec4<f32>(0.0, 0.0, 0.0, 0.0);
@@ -101,7 +101,7 @@ fn vs_main(in: VsIn, @builtin(vertex_index) vidx: u32) -> VsOut {
 
     var world_pos = model.model * skinned_pos;
 
-    // PR4.4: accumulate morph-target offsets. The `target_count`
+    // Accumulate morph-target offsets. The `target_count`
     // gate keeps the cost near zero on primitives that do not
     // define morph targets (their bind group uses a dummy layout
     // with `target_count = 0u`). The bound storage buffer is

@@ -1,11 +1,11 @@
 //! GPU-side data types produced by [`crate::loader::load_vrm`].
 //!
-//! PR3.3 loads **every primitive of every mesh** in the glTF
+//! loads **every primitive of every mesh** in the glTF
 //! document. A VRM 1.0 model like AliciaSolid.vrm has 12 separate
 //! glTF Mesh objects (body, clothes, hair, face, accessories,
 //! etc.) — not one mesh with 12 primitives. Iterating only
-//! `meshes[0]` (PR3.0/3.1/3.2) rendered the head/face area only;
-//! PR3.3 fixes this by walking every `Mesh` and every `Primitive`.
+//! `meshes[0]` (this struct) rendered the head/face area only;
+//! fixes this by walking every `Mesh` and every `Primitive`.
 use std::num::NonZeroU64;
 
 use bytemuck::{Pod, Zeroable};
@@ -20,7 +20,7 @@ use crate::mtoon::{MToonGpuTextures, MToonMaterial};
 use crate::node_constraint::NodeConstraintRegistry;
 use crate::spring_bone::SpringBoneProperties;
 
-/// A single mesh primitive loaded from the VRM. The PR3.1 loader
+/// A single mesh primitive loaded from the VRM. The loader
 /// extracts every primitive of the first mesh, so the body, the
 /// clothes, the face, etc. all end up here as separate
 /// `VrmPrimitive` entries.
@@ -36,7 +36,7 @@ pub struct VrmPrimitive {
     /// Number of indices to draw.
     pub index_count: u32,
     /// CPU-side mirror of the vertex data, kept after the GPU
-    /// upload so CPU consumers (PR5.x collider builder, future
+    /// upload so CPU consumers ( collider builder, future
     /// baking passes) can read positions, joints, and weights
     /// without a GPU readback. Typical VRM 1.0 models weigh
     /// in at ~30k vertices × 64 bytes = ~2 MB; the convenience
@@ -56,15 +56,15 @@ pub struct VrmPrimitive {
     /// `alphaMode`. Controls draw order and pipeline selection
     /// in the renderer.
     pub alpha_mode: AlphaMode,
-    /// Issue #19: whether this primitive's material declares
+    /// whether this primitive's material declares
     /// `KHR_materials_unlit`. Unlit primitives skip all lighting
     /// in the fragment shader and output the base color directly.
     pub unlit: bool,
-    /// PR4.15: parsed `VRMC_materials_mtoon` parameters. `None`
+    /// parsed `VRMC_materials_mtoon` parameters. `None`
     /// for materials without the extension (the renderer falls
     /// back to the half-Lambert lite shader in that case).
     pub mtoon: Option<MToonMaterial>,
-    /// PR4.15: GPU textures for MToon (shade multiply, shading
+    /// GPU textures for MToon (shade multiply, shading
     /// shift, emissive, matcap, rim multiply, outline width,
     /// UV animation mask). `None` when the material has no MToon
     /// extension or no MToon textures.
@@ -104,7 +104,7 @@ impl AlphaMode {
     }
 }
 
-/// A single glTF mesh object, as a list of primitives. PR3.3 loads
+/// A single glTF mesh object, as a list of primitives. loads
 /// every `Mesh` in the glTF document — a VRM 1.0 has ~12 of these
 /// (body, hair_front, hair_back, face, clothes_top, clothes_bottom,
 /// etc.), one per body part. Earlier PRs that only loaded
@@ -131,8 +131,8 @@ pub struct VrmTexture {
     pub bind_group: wgpu::BindGroup,
 }
 
-/// Skeleton metadata loaded from the first skin in the glTF. PR3
-/// rendered with **identity** skinning; PR4.5+ exposes the full
+/// Skeleton metadata loaded from the first skin in the glTF.
+/// rendered with **identity** skinning; exposes the full
 /// joint list plus the per-joint `inverse_bind` so the runtime
 /// can build the `mat4x4[]` skin palette via the standard glTF
 /// formula `joint_world * inverse_bind`. The pre-baked
@@ -177,7 +177,7 @@ impl Skeleton {
 ///
 /// The data is computed once from the glTF `Node` transforms
 /// (local rotations / positions + parent indices) and the
-/// resulting world-space values. PR4.16+ (this struct) is
+/// resulting world-space values. (this struct) is
 /// the bridge between `VrmaFrame::bone_rotations` (keyed by
 /// canonical bone name) and the skin palette the GPU reads
 /// every frame.
@@ -283,12 +283,12 @@ impl NodeHierarchy {
 /// the VRM once.
 #[derive(Debug)]
 pub struct VrmModel {
-    /// All glTF meshes in the file. PR3.3 iterates every `Mesh`
-    /// (PR3.0–3.2 only loaded `meshes[0]`, which is why most of
+    /// All glTF meshes in the file. iterates every `Mesh`
+    /// (–3.2 only loaded `meshes[0]`, which is why most of
     /// the model was missing — VRM 1.0 uses one glTF Mesh per body
     /// part rather than one Mesh with many primitives).
     pub meshes: Vec<VrmMesh>,
-    /// Skeleton metadata. Not consumed by the renderer in PR3.
+    /// Skeleton metadata. Not consumed by the renderer in.
     pub skeleton: Skeleton,
     /// Raw glTF AABB `(min, max)` of every vertex, in model-local
     /// space (i.e. the same space the vertex buffer and the bind
@@ -310,23 +310,23 @@ pub struct VrmModel {
     /// vertex buffer, so `inverse_bind` (which was computed
     /// against the raw positions) lines up with the GPU data.
     normalize_scale: f32,
-    /// Expression / blend-shape layer (PR4.4). `Default` for
+    /// Expression / blend-shape layer (this struct). `Default` for
     /// models without morph targets; the renderer treats the
     /// empty layer as a no-op.
     pub expressions: ExpressionLayer,
-    /// Humanoid bone registry (PR4.7). Built from the
+    /// Humanoid bone registry (this struct). Built from the
     /// `VRMC_vrm.humanoid.humanBones` block — empty for
     /// models without humanoid metadata (e.g. legacy
     /// VRM 0.x). Consumers (#11 LookAt, #13 SpringBone,
     /// #14 VRMA, #15 NodeConstraint) use this to map bone
     /// names to glTF node / Skeleton joint indices.
     pub humanoid: HumanoidBoneRegistry,
-    /// Full glTF node hierarchy (PR4.16). Captured at
+    /// Full glTF node hierarchy (this struct). Captured at
     /// load time so the runtime can recompute per-joint
     /// world transforms when a VRMA bone rotation lands.
     /// Empty for models without glTF nodes (malformed).
     pub nodes: NodeHierarchy,
-    /// Look-at properties (PR4.8). Parsed from the
+    /// Look-at properties (this struct). Parsed from the
     /// `VRMC_vrm.lookAt` block — `None` for models
     /// without the block (e.g. legacy VRM 0.x). The
     /// runtime falls back to [`LookAtProperties::default`]
@@ -334,7 +334,7 @@ pub struct VrmModel {
     /// still gets the spec-default 90→10 range map and
     /// `"bone"` consumer type.
     pub look_at: Option<LookAtProperties>,
-    /// Per-expression override definitions (PR4.9).
+    /// Per-expression override definitions (this struct).
     /// Parsed from the `VRMC_vrm.expressions.{preset,custom}.<name>`
     /// tree — `isBinary`, `overrideMouth`, `overrideBlink`,
     /// `overrideLookAt`. Empty for models without the
@@ -478,7 +478,7 @@ impl VrmModel {
     ///    local rotation of `nodes.local_rotations[entry.node]`
     ///    with the VRMA's bone rotation. Bones that aren't
     ///    in the humanoid registry are silently dropped.
-    /// 2. **Apply LookAt bone deltas** (PR4.16): for the
+    /// 2. **Apply LookAt bone deltas** (this struct): for the
     ///    `head` / `leftEye` / `rightEye` humanoid bones
     ///    whose [`LookAtBoneOutput`] carries a non-identity
     ///    delta, overwrite the local rotation with
@@ -524,7 +524,7 @@ impl VrmModel {
     /// helper is re-exported so the runtime can use it once
     /// the per-frame rest-pose comparison is available.
     ///
-    /// **LookAt semantics** (PR4.16): `look_at` is the
+    /// **LookAt semantics** (this struct): `look_at` is the
     /// [`LookAtBoneOutput`] of the current frame, or `None`
     /// when the model is `"expression"`-type (the LookAt
     /// signal then routes into morph weights via
@@ -576,7 +576,7 @@ impl VrmModel {
             self.nodes.local_rotations[entry.node] = *rot;
         }
 
-        // 2.5 PR4.16: apply the LookAt cursor-tracking deltas
+        // 2.5 apply the LookAt cursor-tracking deltas
         //    on top of the VRMA pose. The spec defines the
         //    delta as a rotation applied to the bone's *rest*
         //    rotation (not a delta on top of the current
@@ -700,17 +700,12 @@ pub const MAX_JOINTS_PER_VERTEX: usize = 4;
 
 /// Per-vertex layout used by the loader and the shader.
 ///
-/// PR4.5: the vertex layout grew by two attributes — `joints`
-/// (`vec4<u32>`) and `weights` (`vec4<f32>`) — to support real
-/// GPU skinning. The vertex buffer is now 60 bytes (12 floats +
-/// 16 bytes for `vec4<u32>` + 16 bytes for `vec4<f32>`), up
-/// from 32 bytes in PR3/PR4.4. Models that don't define
-/// `JOINTS_0` / `WEIGHTS_0` fall back to `joints = [0, 0, 0, 0]`,
-/// `weights = [1, 0, 0, 0]` and the renderer uploads a
-/// one-element `skin[]` buffer containing `Mat4::IDENTITY` so the
-/// per-vertex math reduces to
-/// `weights[0] * skin[0] * pos = pos` and the model looks
-/// identical to PR3.
+/// 60 bytes (pos vec3 + uv vec2 + normal vec3 + joints vec4 + weights vec4).
+/// Models that don't define `JOINTS_0` / `WEIGHTS_0` fall back to
+/// `joints = [0, 0, 0, 0]`, `weights = [1, 0, 0, 0]` and the
+/// renderer uploads a one-element `skin[]` containing
+/// `Mat4::IDENTITY`, so the per-vertex math reduces to
+/// `weights[0] * skin[0] * pos = pos`.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct MeshVertex {
@@ -724,7 +719,7 @@ pub struct MeshVertex {
     /// Stored as `u32` so 256+-joint humanoid models (e.g. models
     /// with per-finger bones) can address every joint without
     /// silent aliasing onto `skin_matrices[255]`. The vertex
-    /// buffer grew by 12 bytes per vertex (from PR4.5's `[u8; 4]`
+    /// buffer grew by 12 bytes per vertex (from's `[u8; 4]`
     /// → `[u32; 4]`); the `LAYOUT` attribute 3 is
     /// `Float32x4 → Uint32x4` and the WGSL `vec4<u32>` is
     /// unchanged.
@@ -761,10 +756,8 @@ impl MeshVertex {
     }
 }
 
-/// Issue #5: guard against accidentally reintroducing a `[u8; 4]`
-/// `joints` field (which would silently alias every joint >= 255
-/// onto `skin_matrices[255]`). The compile-time check keeps the
-/// vertex layout honest; a runtime test covers the semantic.
+// Compile-time guard: a `[u8; 4]` `joints` field would silently
+// alias every joint >= 255 onto `skin_matrices[255]`.
 const _: () = {
     const JOINTS_SIZE: usize = std::mem::size_of::<[u32; MAX_JOINTS_PER_VERTEX]>();
     assert!(
@@ -772,9 +765,6 @@ const _: () = {
         "MeshVertex::joints must be a 16-byte `vec4<u32>` attribute; check MAX_JOINTS_PER_VERTEX and the field type"
     );
     const VERTEX_SIZE: usize = std::mem::size_of::<MeshVertex>();
-    // pos(12) + uv(8) + normal(12) + joints(16) + weights(16) = 64
-    // (or 60 if `wgpu` packs without `vec4` padding; both are
-    // host-side valid; we only fail on a clear regression).
     assert!(
         VERTEX_SIZE == 60 || VERTEX_SIZE == 64,
         "MeshVertex size drifted; the LAYOUT attribute stride will be wrong"
@@ -860,7 +850,7 @@ mod tests {
         )
     }
 
-    /// Issue #5: the `joints` attribute must be `Uint32x4` and
+    /// the `joints` attribute must be `Uint32x4` and
     /// `joints` field must be `[u32; 4]`. A regression to `[u8; 4]`
     /// would (a) pass the build thanks to the `Pod` / `Zeroable`
     /// blanket impls and (b) silently break 256+ joint models.
@@ -1269,7 +1259,7 @@ mod tests {
         assert_eq!(palette[0], bind);
     }
 
-    /// Regression for the PR4.19 "5x taller" bug: the loader was
+    /// Regression for the "5x taller" bug: the loader was
     /// assigning `inverse_bind` and `bind_matrices` in the
     /// opposite order, so `update_skin_palette` computed
     /// `joint_world * bind_matrix ≈ bind_matrix²` at rest (which
@@ -1341,7 +1331,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // VrmModel::update_skin_palette — LookAt composition (PR4.16)
+    // VrmModel::update_skin_palette — LookAt composition (this struct)
     // -----------------------------------------------------------------
 
     /// A LookAt delta on the `head` bone must rotate the
@@ -1511,10 +1501,7 @@ mod tests {
     }
 }
 
-/// One skinning matrix per joint. PR3 uploads a buffer of
-/// `Mat4::IDENTITY` of the same length as the skeleton's
-/// `inverse_bind` count so the bind group layout does not change when
-/// PR4 wires real skinning.
+/// One skinning matrix per joint.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct SkinMatrix(pub [[f32; 4]; 4]);
