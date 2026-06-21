@@ -156,17 +156,17 @@ impl X11Context {
     /// Update the X11 shape extension input region. Empty slice
     /// = pass-through (no pixel receives input).
     #[allow(dead_code)]
-    pub fn set_input_rects(&mut self, rects: &[(i32, i32, i32, i32)]) {
+    pub fn set_input_rects(&mut self, rects: &[super::wayland_region::Rect]) {
         if !self.shape_available {
             return;
         }
         let xrects: Vec<Rectangle> = rects
             .iter()
-            .map(|&(x, y, w, h)| Rectangle {
-                x: i16::try_from(x).unwrap_or(i16::MAX),
-                y: i16::try_from(y).unwrap_or(i16::MAX),
-                width: u16::try_from(w).unwrap_or(u16::MAX),
-                height: u16::try_from(h).unwrap_or(u16::MAX),
+            .map(|r| Rectangle {
+                x: i16::try_from(r.x).unwrap_or(i16::MAX),
+                y: i16::try_from(r.y).unwrap_or(i16::MAX),
+                width: u16::try_from(r.w).unwrap_or(u16::MAX),
+                height: u16::try_from(r.h).unwrap_or(u16::MAX),
             })
             .collect();
         // `shape::rectangles` is fire-and-forget (no reply).
