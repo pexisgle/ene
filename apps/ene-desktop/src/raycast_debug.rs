@@ -55,7 +55,7 @@ pub const HIT_POINT_COLOR: glam::Vec4 = glam::Vec4::new(1.0, 0.3, 0.3, 0.95);
 /// per-frame pipeline. The runtime is responsible for
 /// converting `entity` into a `ColliderHandle` via
 /// [`PhysicsWorld::colliders_for`] and for providing the
-/// latest hit from [`crate::state::AppState::last_raycast_hit`].
+/// latest hit from [`crate::state::DebugState::last_raycast_hit`].
 pub fn build_collider_lines(
     out: &mut Vec<DebugLine>,
     physics: &PhysicsWorld,

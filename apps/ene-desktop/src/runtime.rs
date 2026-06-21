@@ -138,18 +138,18 @@ impl ApplicationHandler for Runtime {
                     .resize(&self.state.gpu.device, (char_size.width, char_size.height));
 
                 #[cfg(target_os = "linux")]
-                if self.state.wayland_region.is_none()
+                if self.state.platform.wayland_region.is_none()
                     && let Some(ctx) =
                         crate::platform::wayland_region::WaylandInputRegionContext::try_new(
                             cw.window.as_ref(),
                         )
                 {
-                    self.state.wayland_region = Some(ctx);
+                    self.state.platform.wayland_region = Some(ctx);
                 }
 
                 #[cfg(target_os = "linux")]
-                if self.state.layer_shell.is_none() {
-                    self.state.layer_shell =
+                if self.state.platform.layer_shell.is_none() {
+                    self.state.platform.layer_shell =
                         Some(crate::platform::wayland_layer_shell::new_layer_shell_state());
                     let status = crate::platform::detect_layer_shell(&self.state);
                     tracing::info!(
@@ -163,7 +163,7 @@ impl ApplicationHandler for Runtime {
                 }
 
                 #[cfg(target_os = "linux")]
-                if self.state.mask_capture.is_none() {
+                if self.state.platform.mask_capture.is_none() {
                     let downsample = self.state.settings.graphics.mask_render_downsample;
                     if let Some(cam) = crate::platform::wayland_mask_capture::new_mask_capture_state(
                         &self.state.gpu.device,
@@ -178,17 +178,17 @@ impl ApplicationHandler for Runtime {
                             device,
                             queue,
                         );
-                        self.state.mask_readback_worker = Some(worker);
-                        self.state.mask_capture = Some(cam);
+                        self.state.platform.mask_readback_worker = Some(worker);
+                        self.state.platform.mask_capture = Some(cam);
                     }
                 }
 
                 #[cfg(target_os = "linux")]
-                if self.state.x11_ctx.is_none()
+                if self.state.platform.x11_ctx.is_none()
                     && let Some(ctx) =
                         crate::platform::x11_taskbar::X11Context::try_new(cw.window.as_ref())
                 {
-                    self.state.x11_ctx = Some(ctx);
+                    self.state.platform.x11_ctx = Some(ctx);
                     tracing::info!(
                         target: "ene.linux.x11",
                         connected = true,
@@ -442,7 +442,7 @@ impl ApplicationHandler for Runtime {
             };
 
             if should_update {
-                self.state.last_raycast_hit = update_char_window_cursor_and_hittest(
+                self.state.debug.last_raycast_hit = update_char_window_cursor_and_hittest(
                     &mut self.state,
                     &self.device_state,
                     cw,
@@ -452,7 +452,7 @@ impl ApplicationHandler for Runtime {
                 );
 
                 #[cfg(target_os = "windows")]
-                let hovered_name = if let Some(hit) = self.state.last_raycast_hit
+                let hovered_name = if let Some(hit) = self.state.debug.last_raycast_hit
                     && hit.entity == self.state.character_entity
                 {
                     let colliders = self
@@ -545,7 +545,7 @@ impl Runtime {
                     (new_size.width, new_size.height),
                 );
                 #[cfg(target_os = "linux")]
-                if let Some(mask) = self.state.mask_capture.as_ref() {
+                if let Some(mask) = self.state.platform.mask_capture.as_ref() {
                     let downsample = self.state.settings.graphics.mask_render_downsample;
                     let mut guard = mask.lock();
                     let _ = guard.resize(&gpu.device, new_size.width, new_size.height, downsample);
@@ -668,10 +668,11 @@ impl Runtime {
                     } else if key_code_pressed(&event) == Some(winit::keyboard::KeyCode::F8) {
                         #[cfg(target_os = "linux")]
                         {
-                            self.state.layer_shell_freeze = !self.state.layer_shell_freeze;
+                            self.state.platform.layer_shell_freeze =
+                                !self.state.platform.layer_shell_freeze;
                             tracing::info!(
                                 target: "ene.linux.layer_shell",
-                                freeze = self.state.layer_shell_freeze,
+                                freeze = self.state.platform.layer_shell_freeze,
                                 "char window freeze toggled"
                             );
                         }
@@ -727,16 +728,17 @@ impl Runtime {
                 ui_state.show_input_region_debug,
             )
         };
-        let last_raycast_hit = self.state.last_raycast_hit;
+        let last_raycast_hit = self.state.debug.last_raycast_hit;
         let character_entity = self.state.character_entity;
         let AppState {
             ref mut character,
             ref mut physics,
-            ref mut debug_renderer,
+            ref mut debug,
             ref gpu,
             ref settings,
             ..
         } = self.state;
+        let debug_renderer = &mut debug.debug_renderer;
         let (device, queue) = (&gpu.device, &gpu.queue);
 
         let cs = &settings.character_state;
@@ -882,7 +884,7 @@ impl Runtime {
                 }
                 if show_mask_gizmo {
                     #[cfg(target_os = "linux")]
-                    if let Some(mask) = self.state.mask_capture.as_ref() {
+                    if let Some(mask) = self.state.platform.mask_capture.as_ref() {
                         crate::mask_gizmo::build_mask_rect_lines(
                             &mut lines,
                             mask,
@@ -898,8 +900,8 @@ impl Runtime {
                     #[cfg(target_os = "linux")]
                     crate::input_region_debug::build_input_region_debug_lines(
                         &mut lines,
-                        &self.state.last_applied_input_rects,
-                        self.state.last_input_source,
+                        &self.state.platform.last_applied_input_rects,
+                        self.state.platform.last_input_source,
                         cw.config.width,
                         cw.config.height,
                         view_inverse,
@@ -938,7 +940,7 @@ impl Runtime {
         });
 
         #[cfg(target_os = "linux")]
-        if let Some(mask) = self.state.mask_capture.as_ref() {
+        if let Some(mask) = self.state.platform.mask_capture.as_ref() {
             let mut mask_guard = mask.lock();
             let downsample = settings.graphics.mask_render_downsample;
             let _ = mask_guard.resize(device, cw.config.width, cw.config.height, downsample);
@@ -955,7 +957,7 @@ impl Runtime {
             drop(mask_guard);
             queue.submit(std::iter::once(encoder.finish()));
             #[cfg(target_os = "linux")]
-            if let Some(worker) = self.state.mask_readback_worker.as_ref() {
+            if let Some(worker) = self.state.platform.mask_readback_worker.as_ref() {
                 worker.request_readback();
             }
         }
@@ -1157,7 +1159,7 @@ fn update_char_window_cursor_and_hittest(
             state,
             allows_input,
             cursor_over,
-            state.layer_shell_freeze,
+            state.platform.layer_shell_freeze,
         );
     }
 

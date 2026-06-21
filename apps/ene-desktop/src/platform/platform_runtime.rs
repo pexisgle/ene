@@ -74,7 +74,7 @@ pub fn apply_linux_click_through(
             vec![(0_i32, 0_i32, i32::from(i16::MAX), i32::from(i16::MAX))],
             super::super::input_region_debug::InputRegionSource::FullWindow,
         )
-    } else if let Some(mask) = state.mask_capture.as_ref() {
+    } else if let Some(mask) = state.platform.mask_capture.as_ref() {
         let guard = mask.lock();
         let extracted = guard.extract_rectangles();
         if extracted.is_empty() {
@@ -108,7 +108,7 @@ pub fn apply_linux_click_through(
         )
     };
 
-    if let Some(ctx) = state.wayland_region.as_ref() {
+    if let Some(ctx) = state.platform.wayland_region.as_ref() {
         let mut guard = ctx.lock();
         guard.pump();
 
@@ -123,7 +123,7 @@ pub fn apply_linux_click_through(
         guard.apply_to_winit_surface();
     }
 
-    if let Some(ctx) = state.x11_ctx.as_ref() {
+    if let Some(ctx) = state.platform.x11_ctx.as_ref() {
         let mut guard = ctx.lock();
         if rects.is_empty() {
             guard.clear_input();
@@ -134,10 +134,11 @@ pub fn apply_linux_click_through(
 
     if !FIRST_DISPATCH_LOGGED.swap(true, Ordering::Relaxed) {
         let layer_shell_cached = state
+            .platform
             .layer_shell
             .as_ref()
             .is_some_and(|ctx| ctx.lock().cached().is_some());
-        let x11_path = if state.x11_ctx.is_some() {
+        let x11_path = if state.platform.x11_ctx.is_some() {
             let path = super::x11_taskbar::X11Path::decide(
                 allows_input,
                 cursor_on_silhouette || state.character.drag.is_dragging(),
@@ -153,16 +154,16 @@ pub fn apply_linux_click_through(
             allows_input,
             cursor_on_silhouette,
             freeze_forced,
-            wayland = state.wayland_region.is_some(),
-            x11 = state.x11_ctx.is_some(),
+            wayland = state.platform.wayland_region.is_some(),
+            x11 = state.platform.x11_ctx.is_some(),
             x11_path = ?x11_path,
             layer_shell_cached,
             "char window hit test (linux) — first dispatch per process"
         );
     }
 
-    state.last_applied_input_rects = rects.clone();
-    state.last_input_source = source;
+    state.platform.last_applied_input_rects = rects.clone();
+    state.platform.last_input_source = source;
 }
 
 /// Run the layer-shell detection probe against the stand-alone
@@ -170,10 +171,11 @@ pub fn apply_linux_click_through(
 #[cfg(target_os = "linux")]
 pub fn detect_layer_shell(state: &AppState) -> super::wayland_layer_shell::LayerShellStatus {
     use super::wayland_layer_shell::LayerShellStatus;
-    let Some(layer_shell) = state.layer_shell.as_ref() else {
+    let Some(layer_shell) = state.platform.layer_shell.as_ref() else {
         return LayerShellStatus::Unavailable;
     };
     let connection_owned: Option<wayland_client::Connection> = state
+        .platform
         .wayland_region
         .as_ref()
         .and_then(|region| region.lock().clone_connection());
