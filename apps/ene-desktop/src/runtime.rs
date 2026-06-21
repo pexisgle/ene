@@ -790,12 +790,14 @@ impl Runtime {
                 let camera_eye = glam::Vec3::from(character.camera_eye());
                 let camera_target = glam::Vec3::from(character.camera_target());
                 let camera_distance = (camera_eye - camera_target).length();
+                #[cfg_attr(target_os = "windows", expect(unused_variables))]
                 let view_z = -camera_distance;
                 let cam_view = glam::Mat4::look_at_rh(
                     camera_eye,
                     camera_target,
                     ene_vrm::camera::DEFAULT_UP.into(),
                 );
+                #[cfg_attr(target_os = "windows", expect(unused_variables))]
                 let view_inverse = cam_view.inverse();
                 let mut lines = Vec::new();
                 if show_collider_debug {

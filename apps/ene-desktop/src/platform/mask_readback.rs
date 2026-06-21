@@ -59,7 +59,7 @@ pub struct MaskReadbackWorker {
     /// `JoinHandle` for the worker thread. Held so the worker
     /// does not exit on the first idle. The runtime never
     /// `join`s it (the worker runs for the lifetime of the
-    /// process); the `#[allow(dead_code)]` is intentional.
+    /// process); the `#[expect(dead_code)]` is intentional.
     _handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -143,7 +143,7 @@ impl MaskReadbackWorker {
     /// the runtime to read `extract_rectangles` /
     /// `target_view` / `encode_readback` / `width` /
     /// `height` / `downsample` on the main thread.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn mask(&self) -> &Arc<Mutex<MaskCaptureCamera>> {
         &self.mask
     }

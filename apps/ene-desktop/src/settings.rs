@@ -75,24 +75,22 @@ pub use GraphicsSection as GraphicsSettings;
 pub const DEFAULT_CHARACTER_NAME: &str = "Alicia";
 pub const DEFAULT_VRM_PATH: &str = "characters/Alicia/AliciaSolid.vrm";
 pub const DEFAULT_VRMA_PATH: &str = "characters/Alicia/motions/VRMA_01.vrma";
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub const APP_ID: &str = "dev.pexisgle.ene";
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub const WINDOW_WIDTH: u32 = 560;
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub const WINDOW_HEIGHT: u32 = 980;
 pub const MASK_RENDER_DOWNSAMPLE_CHOICES: [u32; 3] = [4, 6, 8];
 pub const DEFAULT_MASK_RENDER_DOWNSAMPLE: u32 = 8;
 pub const TARGET_FPS_CHOICES: [u32; 5] = [15, 30, 60, 120, 0];
 pub const DEFAULT_TARGET_FPS: u32 = 60;
-#[allow(dead_code)]
 pub const SHADOW_QUALITY_CHOICES: [ShadowQuality; 3] = [
     ShadowQuality::Low,
     ShadowQuality::Medium,
     ShadowQuality::High,
 ];
 pub const DEFAULT_SHADOW_QUALITY: ShadowQuality = ShadowQuality::Medium;
-#[allow(dead_code)]
 pub const ANTIALIASING_MODE_CHOICES: [AntialiasingMode; 4] = [
     AntialiasingMode::Off,
     AntialiasingMode::Fxaa,
@@ -123,12 +121,10 @@ pub fn debug_fps_label(debug_fps: u32) -> String {
     }
 }
 
-#[allow(dead_code)]
 pub fn cycle_shadow_quality(current: ShadowQuality, step: isize) -> ShadowQuality {
     cycle_choice(&SHADOW_QUALITY_CHOICES, current, step)
 }
 
-#[allow(dead_code)]
 pub fn cycle_antialiasing_mode(current: AntialiasingMode, step: isize) -> AntialiasingMode {
     cycle_choice(&ANTIALIASING_MODE_CHOICES, current, step)
 }
@@ -140,7 +136,6 @@ fn cycle_choice<T: Copy + PartialEq>(choices: &[T], current: T, step: isize) -> 
     choices[next]
 }
 
-#[allow(dead_code)]
 pub fn target_fps_label(target_fps: u32) -> String {
     if target_fps == 0 {
         "Unlimited".to_string()
@@ -168,7 +163,7 @@ pub fn read_cli_paths() -> (String, String) {
 #[derive(Debug, Clone)]
 pub struct CharacterEntry {
     pub name: String,
-    #[allow(dead_code)] // Mirrored from legacy.
+    #[expect(dead_code)]
     pub folder: String,
     pub vrm_paths: Vec<String>,
     pub motion_paths: Vec<String>,
@@ -183,7 +178,6 @@ pub struct CharacterEntry {
 pub struct CharacterState {
     pub selected_character: usize,
     pub selected_motion: usize,
-    #[allow(dead_code)]
     pub needs_respawn: bool,
     pub model_scale: f32,
     pub character_position: Vec3,
@@ -251,7 +245,6 @@ pub struct UiState {
     pub pending_user_input: Option<PendingUserInput>,
     /// One per [`UserInputPrompt::items`] entry, used as scratch
     /// state for the question dialog.
-    #[allow(dead_code)]
     pub user_input_drafts: Vec<QuestionDraft>,
 }
 
@@ -313,7 +306,6 @@ impl std::fmt::Debug for CharacterSettings {
 /// `CharacterSettings` methods are kept identical in shape to the
 /// legacy Bevy `app_config.rs` so the unused methods can be
 /// imported and called.
-#[allow(dead_code)]
 impl CharacterSettings {
     /// Build the initial settings: discover characters on disk,
     /// load the persisted JSON, clamp runtime values.

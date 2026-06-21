@@ -1348,7 +1348,7 @@ fn load_mtoon_gpu_textures(
 
 /// A single GPU texture + sampler for MToon.
 struct MToonGpuTexture {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     sampler: wgpu::Sampler,

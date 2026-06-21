@@ -137,7 +137,6 @@ impl WaylandInputRegionContext {
     /// Clone the stand-alone Wayland [`Connection`], or `None`
     /// if it was never established. Used by the layer-shell probe
     /// to share the connection.
-    #[allow(dead_code)]
     pub fn clone_connection(&self) -> Option<Connection> {
         self.connection.clone()
     }
@@ -213,7 +212,6 @@ impl WaylandInputRegionContext {
     /// list is kept distinct from `Full` so `apply_to_surface` can
     /// choose between the "null region" call and the "empty region"
     /// call.
-    #[allow(dead_code)]
     pub fn set_rects(&mut self, rects: Vec<Rect>) {
         self.state = if rects.is_empty() {
             InputRegionState::Rectangles(Vec::new())
@@ -228,14 +226,14 @@ impl WaylandInputRegionContext {
     }
 
     /// Empty the input region: the whole surface is click-through.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn clear(&mut self) {
         self.state = InputRegionState::Rectangles(Vec::new());
     }
 
     /// Latest cached state. Read by the X11 fallback dispatcher
     /// and the F9 debug overlay.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn state(&self) -> &InputRegionState {
         &self.state
     }
@@ -312,7 +310,7 @@ impl WaylandInputRegionContext {
 
     /// Create a stand-alone `wl_surface` via the bound
     /// `wl_compositor`. Returns `None` if the compositor is not bound.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn create_stand_alone_surface(&self) -> Option<WlSurface> {
         let (compositor, qh) = (self.compositor.as_ref()?, self.queue_handle.as_ref()?);
         Some(compositor.create_surface(qh, ()))

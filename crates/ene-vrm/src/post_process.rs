@@ -319,7 +319,6 @@ impl PostProcessor {
 /// Helper: 1/Vec2 inverse for the `inv_size` uniform. The
 /// shader reads `vec2<f32> inv_size`; a typed accessor keeps
 /// the post-process `init` and `resize` paths symmetric.
-#[allow(dead_code)]
 pub fn inv_size(size: (u32, u32)) -> Vec2 {
     Vec2::new(1.0 / size.0 as f32, 1.0 / size.1 as f32)
 }

@@ -40,7 +40,7 @@ use x11rb::rust_connection::RustConnection;
 /// X11 window id (the 32-bit XID the server hands out when
 /// winit creates the window).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct X11WindowId(pub u32);
 
 /// EWMH atoms interned once on `try_new`.
@@ -76,7 +76,6 @@ impl X11Atoms {
 /// shape extension this frame. Pure enum so the state machine
 /// is testable without a live X server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum X11Path {
     /// The cursor is on the character silhouette, or the
     /// window is opaque — receive input everywhere.
@@ -124,7 +123,6 @@ impl X11Context {
     /// not running under X11, no X server is reachable, or
     /// any of the interned atoms is not provided by the
     /// EWMH-compliant window manager.
-    #[allow(dead_code)]
     pub fn try_new<W: HasWindowHandle + HasDisplayHandle>(window: &W) -> Option<Arc<Mutex<Self>>> {
         if !is_x11_window(window) {
             return None;
@@ -155,7 +153,6 @@ impl X11Context {
 
     /// Update the X11 shape extension input region. Empty slice
     /// = pass-through (no pixel receives input).
-    #[allow(dead_code)]
     pub fn set_input_rects(&mut self, rects: &[super::wayland_region::Rect]) {
         if !self.shape_available {
             return;
@@ -184,7 +181,6 @@ impl X11Context {
 
     /// Clear the shape input region (no input = full
     /// pass-through to the desktop).
-    #[allow(dead_code)]
     pub fn clear_input(&mut self) {
         self.set_input_rects(&[]);
     }
@@ -230,7 +226,6 @@ impl X11Context {
 }
 
 #[cfg(target_os = "linux")]
-#[allow(dead_code)]
 pub fn is_x11_window<W: HasWindowHandle + HasDisplayHandle>(window: &W) -> bool {
     let Ok(display) = window.display_handle() else {
         return false;
@@ -244,7 +239,6 @@ pub fn is_x11_window<W: HasWindowHandle + HasDisplayHandle>(window: &W) -> bool 
 /// X11 window id from the winit raw window handle, or `None`
 /// if the window is not X11.
 #[cfg(target_os = "linux")]
-#[allow(dead_code)]
 pub fn x11_window_id<W: HasWindowHandle + HasDisplayHandle>(window: &W) -> Option<Window> {
     let win = window.window_handle().ok()?.as_raw();
     match win {

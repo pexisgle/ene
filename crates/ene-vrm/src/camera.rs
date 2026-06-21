@@ -77,7 +77,6 @@ impl OrthographicCamera {
     }
 
     /// Diagnostic: returns `(eye, target, viewport_height, aspect)`.
-    #[allow(dead_code)] // One-shot diagnostic log only.
     pub fn debug(&self) -> ([f32; 3], [f32; 3], f32, f32) {
         (self.eye, self.target, self.viewport_height, self.aspect)
     }

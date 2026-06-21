@@ -49,7 +49,6 @@ const PIXEL_THRESHOLD: u8 = 16;
 /// readback buffer for a single, downsampled silhouette read.
 /// The render pass that writes into `target_view()` lives in
 /// the runtime's Linux dispatch.
-#[allow(dead_code)]
 pub struct MaskCaptureCamera {
     target: wgpu::Texture,
     target_view: wgpu::TextureView,
@@ -73,12 +72,10 @@ pub struct MaskCaptureCamera {
     pub is_mapped: bool,
 }
 
-#[allow(dead_code)]
 impl MaskCaptureCamera {
     /// Build a new mask capture target for the given window
     /// size + downsample. `downsample` is clamped to at least
     /// `1`; a `downsample` of `0` would divide by zero.
-    #[allow(dead_code)]
     pub fn try_new(
         device: &wgpu::Device,
         width: u32,
@@ -176,10 +173,12 @@ impl MaskCaptureCamera {
         &self.target_view
     }
 
+    #[expect(dead_code)]
     pub fn width(&self) -> u32 {
         self.width
     }
 
+    #[expect(dead_code)]
     pub fn height(&self) -> u32 {
         self.height
     }
@@ -319,12 +318,10 @@ fn extract_rectangles_impl(
 }
 
 /// Shared `MaskCaptureCamera` for the click-through dispatcher.
-#[allow(dead_code)]
 pub type MaskCaptureState = Arc<parking_lot::Mutex<MaskCaptureCamera>>;
 
 /// Build a fresh `MaskCaptureState` for the given window size and
 /// downsample, returning `None` if the size is zero.
-#[allow(dead_code)]
 pub fn new_mask_capture_state(
     device: &wgpu::Device,
     window_width: u32,
