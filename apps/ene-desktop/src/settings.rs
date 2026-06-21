@@ -104,20 +104,15 @@ pub const DEBUG_FPS_CHOICES: [u32; 4] = [15, 30, 60, 0];
 pub const DEFAULT_DEBUG_FPS: u32 = 30;
 
 pub fn cycle_mask_render_downsample(current: u32, step: isize) -> u32 {
-    cycle_choice(
-        &MASK_RENDER_DOWNSAMPLE_CHOICES,
-        current,
-        step,
-        DEFAULT_MASK_RENDER_DOWNSAMPLE,
-    )
+    cycle_choice(&MASK_RENDER_DOWNSAMPLE_CHOICES, current, step)
 }
 
 pub fn cycle_target_fps(current: u32, step: isize) -> u32 {
-    cycle_choice(&TARGET_FPS_CHOICES, current, step, DEFAULT_TARGET_FPS)
+    cycle_choice(&TARGET_FPS_CHOICES, current, step)
 }
 
 pub fn cycle_debug_fps(current: u32, step: isize) -> u32 {
-    cycle_choice(&DEBUG_FPS_CHOICES, current, step, DEFAULT_DEBUG_FPS)
+    cycle_choice(&DEBUG_FPS_CHOICES, current, step)
 }
 
 pub fn debug_fps_label(debug_fps: u32) -> String {
@@ -130,25 +125,15 @@ pub fn debug_fps_label(debug_fps: u32) -> String {
 
 #[allow(dead_code)]
 pub fn cycle_shadow_quality(current: ShadowQuality, step: isize) -> ShadowQuality {
-    cycle_choice(
-        &SHADOW_QUALITY_CHOICES,
-        current,
-        step,
-        DEFAULT_SHADOW_QUALITY,
-    )
+    cycle_choice(&SHADOW_QUALITY_CHOICES, current, step)
 }
 
 #[allow(dead_code)]
 pub fn cycle_antialiasing_mode(current: AntialiasingMode, step: isize) -> AntialiasingMode {
-    cycle_choice(
-        &ANTIALIASING_MODE_CHOICES,
-        current,
-        step,
-        DEFAULT_ANTIALIASING_MODE,
-    )
+    cycle_choice(&ANTIALIASING_MODE_CHOICES, current, step)
 }
 
-fn cycle_choice<T: Copy + PartialEq>(choices: &[T], current: T, step: isize, _default: T) -> T {
+fn cycle_choice<T: Copy + PartialEq>(choices: &[T], current: T, step: isize) -> T {
     let index = choices.iter().position(|c| *c == current).unwrap_or(1);
     let len = choices.len() as isize;
     let next = (index as isize + step).rem_euclid(len) as usize;
@@ -275,7 +260,10 @@ pub struct PendingPermission {
     pub request_id: ene_core::RequestId,
     pub action: String,
     pub target: String,
-    pub description: String,
+    /// Human-readable rationale shown to the user in the
+    /// permission dialog. `None` means the actor did not supply
+    /// one (the dialog then omits the description row).
+    pub description: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -511,7 +499,9 @@ impl CharacterSettings {
     pub fn flush_if_dirty(&self) {
         let char_name = self.current_entry().name.clone();
         let store = self.store.read();
-        let _ = store.flush_if_dirty(Some(&char_name));
+        if let Err(e) = store.flush_if_dirty(Some(&char_name)) {
+            tracing::warn!("[Config] Failed to flush dirty config: {e}");
+        }
     }
 
     fn sync_to_store(&self) {
@@ -769,7 +759,7 @@ mod tests {
             request_id: ene_core::RequestId::new("test"),
             action: "fs.write".to_string(),
             target: "/tmp/example.txt".to_string(),
-            description: "Write a 4 KB file".to_string(),
+            description: Some("Write a 4 KB file".to_string()),
         };
         let _draft = QuestionDraft {
             text: "alice".to_string(),

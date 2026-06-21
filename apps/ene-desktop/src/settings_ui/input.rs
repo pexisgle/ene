@@ -9,8 +9,6 @@ use crate::settings::CharacterSettings;
 
 #[derive(Debug, Default)]
 pub struct SettingsInputState {
-    #[allow(dead_code)]
-    pub current_page: super::PageKind,
     pub look_at_strength: String,
     pub model_scale: String,
     pub character_pos_x: String,
@@ -33,7 +31,6 @@ pub struct SettingsInputState {
 impl SettingsInputState {
     pub fn new() -> Self {
         Self {
-            current_page: super::PageKind::Character,
             ai_embedding_provider: "cloud".to_string(),
             ai_embedding_model: "jina-embeddings-v5-text-small".to_string(),
             ai_embedding_dimensions: "auto".to_string(),
