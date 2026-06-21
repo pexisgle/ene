@@ -132,60 +132,11 @@ pub fn cursor_logical_to_world_2d(
     if viewport.0 == 0 || viewport.1 == 0 {
         return None;
     }
-    let w = viewport.0 as f32;
-    let h = viewport.1 as f32;
-    let ndc = Vec2::new(
-        (cursor_logical.x / w) * 2.0 - 1.0,
-        -((cursor_logical.y / h) * 2.0 - 1.0),
-    );
-    let aspect = (w / h).max(0.0001);
-    let half_h = ene_vrm::camera::VIEWPORT_HEIGHT * 0.5;
-    let half_w = half_h * aspect;
-    let view_pos = Vec3::new(ndc.x * half_w, ndc.y * half_h, 0.0);
+    let ndc = ene_vrm::pixel_to_ndc(cursor_logical.x, cursor_logical.y, viewport);
+    let view_pos = ene_vrm::ndc_to_view_pos(ndc, viewport, 0.0);
     let view = Mat4::look_at_rh(camera_eye, camera_target, camera_up);
-    let world_3d = view.inverse().transform_point3(view_pos);
+    let world_3d = ene_vrm::view_pos_to_world(view_pos, view);
     Some(Vec2::new(world_3d.x, world_3d.y))
-}
-
-/// Hit-test the cursor against the character's transformed AABB.
-/// `cursor_logical` is the latest winit cursor position in
-/// window-logical pixels. Projects the cursor to a world-space
-/// ray, expands the model AABB through the model matrix, then
-/// runs the slab test.
-///
-/// For an orthographic camera all per-pixel rays are parallel, so
-/// the result is identical to "is the AABB in front of the camera
-/// and within the viewport rect".
-#[allow(dead_code)]
-pub fn cursor_over_character(
-    cursor_logical: Vec2,
-    viewport: (u32, u32),
-    camera_eye: Vec3,
-    camera_target: Vec3,
-    camera_up: Vec3,
-    aabb_min: [f32; 3],
-    aabb_max: [f32; 3],
-    model_mat: Mat4,
-) -> bool {
-    let (world_min, world_max) = transformed_aabb_bounds(aabb_min, aabb_max, model_mat);
-    let w = viewport.0.max(1) as f32;
-    let h = viewport.1.max(1) as f32;
-    if w <= 0.0 || h <= 0.0 {
-        return false;
-    }
-    let ndc = Vec2::new(
-        (cursor_logical.x / w) * 2.0 - 1.0,
-        -((cursor_logical.y / h) * 2.0 - 1.0),
-    );
-    let aspect = (w / h).max(0.0001);
-    let half_h = ene_vrm::camera::VIEWPORT_HEIGHT * 0.5;
-    let half_w = half_h * aspect;
-    let view_pos = Vec3::new(ndc.x * half_w, ndc.y * half_h, 0.0);
-    let view = Mat4::look_at_rh(camera_eye, camera_target, camera_up);
-    let world_3d = view.inverse().transform_point3(view_pos);
-    let ray_origin = world_3d;
-    let ray_dir = (camera_target - camera_eye).normalize_or_zero();
-    ray_intersects_aabb(ray_origin, ray_dir, world_min, world_max)
 }
 
 /// Process a press / release event. Mirrors

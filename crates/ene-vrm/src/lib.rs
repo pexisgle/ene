@@ -72,7 +72,10 @@ pub use animation::{
     VrmaClip, VrmaFrame, VrmaPlayer, VrmaProperties, evaluate_clip, load_vrma, quat_to_yaw_pitch,
     retarget_hips_translation, retarget_rotation,
 };
-pub use camera::{ModelUniform, OrthographicCamera};
+pub use camera::{
+    ModelUniform, OrthographicCamera, ndc_to_view_pos, ndc_to_view_pos_with_aspect, pixel_to_ndc,
+    view_pos_to_world,
+};
 pub use debug_renderer::{
     CROSS_HALF_EXTENT, DEFAULT_LINE_CAPACITY, DebugLine, DebugRenderer, DebugVertex,
     SPHERE_LATITUDES, SPHERE_LONGITUDES, cross_lines, sphere_wireframe_lines_into,
