@@ -419,7 +419,7 @@ pub fn compute_rest_world_rotations(model: &VrmModel) -> Vec<Quat> {
 /// registered humanoid bone. Returns the ancestor's node
 /// index, or `None` if the bone is the top of its humanoid
 /// chain (e.g. `hips` → root).
-#[allow(dead_code)]
+#[expect(dead_code)]
 fn humanoid_parent_node(
     bone_node: usize,
     parents: &[i32],
@@ -558,7 +558,7 @@ fn fit_bone_shape(
 
 /// Strip `left` / `right` from the canonical bone name so the
 /// shape table only needs one match arm per central bone.
-#[allow(dead_code)]
+#[expect(dead_code)]
 fn strip_side_prefix(name: &str) -> &str {
     name.strip_prefix("left")
         .or_else(|| name.strip_prefix("right"))
@@ -569,7 +569,6 @@ fn strip_side_prefix(name: &str) -> &str {
 /// bone's rest world position to any weighted vertex, then
 /// scaled. Returns `None` only when the input is empty (the
 /// caller guarantees non-empty by checking earlier).
-#[allow(dead_code)]
 fn fit_sphere(weighted_world: &[Vec3], bone_world: Vec3, scale: f32) -> Option<f32> {
     let mut max_d2 = 0.0f32;
     for &p in weighted_world {
@@ -617,7 +616,7 @@ pub(crate) fn get_humanoid_child_node(
 }
 
 /// Fit a capsule segment between `bone_world` and `child_world`.
-#[allow(dead_code)]
+#[expect(dead_code)]
 fn fit_segment_capsule(
     weighted_world: &[Vec3],
     bone_world: Vec3,
@@ -664,7 +663,7 @@ fn fit_segment_capsule(
 /// collider's local rotation is the bone's rest world
 /// rotation; vertices in the collider-local frame are then
 /// projected onto local +Y to derive the half-height.
-#[allow(dead_code)]
+#[expect(dead_code)]
 fn fit_bone_axis_capsule_y(
     weighted_world: &[Vec3],
     bone_world: Vec3,
@@ -686,7 +685,6 @@ fn fit_bone_axis_capsule_y(
 /// Project a bone-local vertex cloud onto local +Y and
 /// return a `CapsuleY` covering the span (with the max
 /// XZ-distance as the radius).
-#[allow(dead_code)]
 fn fit_y_capsule(local: &[Vec3], scale: f32) -> Option<(BoneShape, Vec3)> {
     if local.is_empty() {
         return None;

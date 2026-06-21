@@ -16,7 +16,6 @@ use std::sync::Arc;
 
 /// Single action enum shared by every page widget. Hotkeys and
 /// buttons both translate into one of these before mutating state.
-#[allow(dead_code)] // Every variant is dispatched by `apply_action`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsAction {
     PrevCharacter,
@@ -247,12 +246,10 @@ fn send_ai_chat(
     }
 }
 
-#[allow(dead_code)]
 pub fn format_fps_label(fps: u32) -> String {
     target_fps_label(fps)
 }
 
-#[allow(dead_code)]
 pub fn format_shadow_label(quality: ShadowQuality) -> &'static str {
     match quality {
         ShadowQuality::Low => "Low",
@@ -261,7 +258,6 @@ pub fn format_shadow_label(quality: ShadowQuality) -> &'static str {
     }
 }
 
-#[allow(dead_code)]
 pub fn format_aa_label(mode: AntialiasingMode) -> &'static str {
     match mode {
         AntialiasingMode::Off => "Off",

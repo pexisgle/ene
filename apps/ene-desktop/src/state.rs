@@ -26,6 +26,7 @@ use crate::tray::TrayHandle;
 /// `#[cfg(target_os = "linux")]`; the struct is empty at compile
 /// time, so the field access sites only need to gate the same way
 /// they did when the fields lived directly on [`AppState`].
+#[derive(Default)]
 pub struct PlatformState {
     /// Wayland input-region context. `None` on non-Wayland displays;
     /// populated lazily in [`crate::runtime::Runtime::resumed`].
@@ -67,29 +68,6 @@ pub struct PlatformState {
     pub mask_readback_worker: Option<crate::platform::mask_readback::MaskReadbackWorker>,
 }
 
-impl Default for PlatformState {
-    fn default() -> Self {
-        Self {
-            #[cfg(target_os = "linux")]
-            wayland_region: None,
-            #[cfg(target_os = "linux")]
-            x11_ctx: None,
-            #[cfg(target_os = "linux")]
-            layer_shell: None,
-            #[cfg(target_os = "linux")]
-            layer_shell_freeze: false,
-            #[cfg(target_os = "linux")]
-            last_applied_input_rects: Vec::new(),
-            #[cfg(target_os = "linux")]
-            last_input_source: crate::input_region_debug::InputRegionSource::Empty,
-            #[cfg(target_os = "linux")]
-            mask_capture: None,
-            #[cfg(target_os = "linux")]
-            mask_readback_worker: None,
-        }
-    }
-}
-
 /// Per-frame diagnostic state consumed by the F3 collider overlay
 /// and the line-list renderer.
 #[derive(Default)]
@@ -123,6 +101,7 @@ pub struct AppState {
     /// Rapier physics state.
     pub physics: crate::physics::PhysicsWorld,
     /// Linux display-server integration state. Empty on non-Linux.
+    #[cfg_attr(target_os = "windows", expect(dead_code))]
     pub platform: PlatformState,
     /// Debug overlay state (raycast hit + line-list renderer).
     pub debug: DebugState,
@@ -188,7 +167,7 @@ impl AppState {
     }
 
     /// Forward a one-shot user input string into the AI bridge.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn ai_run(&self, input: impl Into<String>) {
         self.ai.run(input);
     }
@@ -200,7 +179,7 @@ impl AppState {
 
     /// Forward `Quit` into the bus. The runtime observes the next
     /// `about_to_wait` and calls `event_loop.exit()`.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn request_quit(&self, event_tx: &AppEventSender) {
         let _ = event_tx.send(AppEvent::Quit);
     }
@@ -223,7 +202,7 @@ impl AppState {
 pub enum AppStateError {
     #[error("GPU context failed to initialise: {0}")]
     Gpu(#[from] Box<dyn std::error::Error>),
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     #[error("Failed to resolve assets directory: {0}")]
     AssetsDir(String),
     #[error("Tokio runtime error: {0}")]

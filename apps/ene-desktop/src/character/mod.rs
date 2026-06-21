@@ -475,6 +475,7 @@ impl CharacterRenderer {
     /// Forward to the internal VRM renderer's `render_mask`.
     /// No-op if the renderer is uninitialised or was built without
     /// a `mask_format`.
+    #[cfg_attr(target_os = "windows", expect(dead_code))]
     pub fn render_mask(
         &self,
         queue: &wgpu::Queue,
@@ -693,7 +694,7 @@ impl CharacterRenderer {
     /// bones and falls back to `character_position` for models
     /// without humanoid bones. Used by
     /// [`Self::update_camera_target`].
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn body_center_world(&self, character_position: Vec3, model_scale: f32) -> Vec3 {
         let Some(model) = self.model.as_ref() else {
             return character_position;
@@ -763,7 +764,7 @@ impl CharacterRenderer {
     /// Latest per-bone output for `"bone"`-type models. Consumed
     /// inside [`Self::update_motion`]; the accessor is kept for
     /// diagnostics.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn look_at_bone_output(&self) -> Option<&LookAtBoneOutput> {
         self.look_at_bone_output.as_ref()
     }
@@ -782,7 +783,7 @@ impl CharacterRenderer {
     }
 
     /// Diagnostic: (aspect_ratio, eye, target, viewport_height).
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn camera_dbg(&self) -> (f32, [f32; 3], [f32; 3], f32) {
         let (eye, target, viewport_height, aspect) = self.camera.debug();
         (aspect, eye, target, viewport_height)
@@ -819,7 +820,7 @@ impl CharacterRenderer {
     }
 
     /// Diagnostic: (depth_width, depth_height).
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn depth_size_dbg(&self) -> (u32, u32) {
         self.depth_size
     }
@@ -838,7 +839,7 @@ impl CharacterRenderer {
     /// Diagnostic: AABB of the loaded vertex data (min, max).
     /// The loader's normalize centres the AABB on origin; if
     /// not symmetric, that's a bug.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn model_aabb_dbg(&self) -> Option<([f32; 3], [f32; 3])> {
         self.model.as_ref().map(|m| m.aabb())
     }
@@ -847,7 +848,7 @@ impl CharacterRenderer {
     /// runtime folds `T(-center)` into the model matrix; if the
     /// centre is wildly off (e.g. a hair vertex got included in
     /// the AABB) the model will be shifted out of the viewport.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn model_dbg_center(&self) -> [f32; 3] {
         self.model.as_ref().map(|m| m.center()).unwrap_or([0.0; 3])
     }
@@ -856,7 +857,7 @@ impl CharacterRenderer {
     /// `actual_scale × normalize_scale` should be ~1.42 for
     /// Alicia; if the runtime sees a different value, the loader
     /// computed the wrong AABB.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn model_dbg_normalize_scale(&self) -> f32 {
         self.model
             .as_ref()
@@ -867,14 +868,14 @@ impl CharacterRenderer {
     /// Diagnostic: the merged skeleton joint count after
     /// the multiple-skin merge. Should be the deduplicated total
     /// of every skin's joint list.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn model_dbg_merged_skel_joints(&self) -> Option<usize> {
         self.model.as_ref().map(|m| m.joint_count())
     }
 
     /// Diagnostic: camera `view_proj` matrix in column-major
     /// format.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn camera_view_proj_dbg(&self) -> [[f32; 4]; 4] {
         self.camera
             .uniform()
@@ -883,19 +884,19 @@ impl CharacterRenderer {
     }
 
     /// Diagnostic: just the view matrix.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn camera_view_dbg(&self) -> [[f32; 4]; 4] {
         self.camera.debug_view().to_cols_array_2d()
     }
 
     /// Diagnostic: just the orthographic projection matrix.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn camera_proj_dbg(&self) -> [[f32; 4]; 4] {
         self.camera.debug_proj().to_cols_array_2d()
     }
 
     /// Diagnostic: `view_proj * model` combined matrix.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn model_view_proj_dbg(
         &self,
         character_position: [f32; 3],
@@ -912,7 +913,7 @@ impl CharacterRenderer {
     }
 
     /// Diagnostic: the exact matrix the runtime ships to the GPU.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn model_matrix_runtime_dbg(
         &self,
         character_position: [f32; 3],
@@ -924,7 +925,7 @@ impl CharacterRenderer {
 
     /// World-space AABB `(min, max)` of the loaded model after
     /// the per-frame `ModelUniform` is applied.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn aabb_world(&self, model_uniform: &ModelUniform) -> Option<(Vec3, Vec3)> {
         let model = self.model.as_ref()?;
         let (lo, hi) = model.aabb();
@@ -938,7 +939,7 @@ impl CharacterRenderer {
     /// [`crate::character::collider::compute_bone_specs`]).
     /// `actual_scale = auto_fit_scale × model_scale` and the
     /// returned dimensions are in world units.
-    #[allow(dead_code)]
+    #[cfg_attr(target_os = "linux", expect(dead_code))]
     pub fn build_character_bone_specs(&mut self, actual_scale: f32) -> Vec<BoneShapeSpec> {
         let Some(model) = self.model.as_ref() else {
             return Vec::new();
@@ -954,7 +955,7 @@ impl CharacterRenderer {
     /// inside `update_motion` updates `model.nodes.world_*` every
     /// frame, so reading them here gives the live post-animation
     /// transforms without GPU readback.
-    #[allow(dead_code)]
+    #[cfg_attr(target_os = "linux", expect(dead_code))]
     pub fn current_bone_poses(&self) -> Vec<BonePose> {
         let Some(model) = self.model.as_ref() else {
             return Vec::new();
@@ -975,7 +976,7 @@ impl CharacterRenderer {
     }
 
     /// Retrieve the humanoid bone name for an active collider index.
-    #[allow(dead_code)]
+    #[cfg_attr(target_os = "linux", expect(dead_code))]
     pub fn get_active_bone_name(&self, idx: usize) -> Option<String> {
         let node_idx = *self.active_bone_nodes.get(idx)?;
         let model = self.model.as_ref()?;
@@ -1095,7 +1096,6 @@ fn bone_world_position(
 /// Pick the first available `head` → `chest` → `hips` bone. The
 /// caller is expected to fall back to the AABB center
 /// (= `character_position` in world space) on `None`.
-#[allow(dead_code)]
 fn pick_body_center_bone(humanoid: &ene_vrm::HumanoidBoneRegistry) -> Option<&HumanoidBoneEntry> {
     humanoid
         .head()

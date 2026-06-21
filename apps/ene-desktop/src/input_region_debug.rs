@@ -28,9 +28,10 @@
 use crate::platform::wayland_region::Rect;
 
 /// What the runtime pushed to the OS this frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum InputRegionSource {
     /// Empty rectangle set. All clicks pass through.
+    #[default]
     Empty,
     /// `F8` freeze hotkey is held. All input accepted.
     Freeze,

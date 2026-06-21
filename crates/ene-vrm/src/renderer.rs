@@ -58,7 +58,7 @@ struct MorphGpu {
     /// `(target, vertex)` pair). Uploaded once at
     /// [`VrmRenderer::new`] from the loader's normalized
     /// displacement data.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     offsets_buf: wgpu::Buffer,
     /// Per-frame uniform that the renderer writes from the
     /// model's global weight map. See [`PrimitiveMorphMeta`].
@@ -70,11 +70,9 @@ struct MorphGpu {
     /// Cached copy of the primitive's target count. Used by the
     /// render loop to decide whether to re-pack the meta
     /// uniform.
-    #[allow(dead_code)]
     target_count: u32,
     /// Cached copy of the primitive's vertex count. Same
     /// purpose as `target_count`.
-    #[allow(dead_code)]
     vertex_count: u32,
 }
 
@@ -85,10 +83,10 @@ struct MorphGpu {
 struct DummyMorphGpu {
     /// Single `vec4` storage entry. Never read by the shader
     /// because the bound `meta_buf` has `target_count = 0`.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     offsets_buf: wgpu::Buffer,
     /// Meta uniform with `target_count = 0` and zero weights.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     meta_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
 }
@@ -1191,7 +1189,6 @@ impl VrmRenderer {
     /// the joint count of the renderer's skin
     /// palette. Zero for models built with the identity
     /// one-element palette (no skin).
-    #[allow(dead_code)]
     pub fn skin_joint_count(&self) -> u32 {
         self.skin.joint_count
     }

@@ -113,7 +113,7 @@ impl LayerShellContext {
     /// (e.g. after a `wl_display` disconnect). Not currently
     /// wired up — the connection is a long-lived handle for
     /// the lifetime of the process.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn invalidate(&mut self) {
         self.cached = None;
     }
@@ -133,7 +133,6 @@ impl LayerShellContext {
 /// name. Returns [`LayerShellStatus::Available`] (with the
 /// advertised version) if found, otherwise
 /// [`LayerShellStatus::Unavailable`].
-#[allow(dead_code)]
 pub fn probe_layer_shell(connection: &Connection) -> LayerShellStatus {
     let Ok((globals, mut event_queue)) =
         wayland_client::globals::registry_queue_init::<LayerShellAppData>(connection)
@@ -161,7 +160,6 @@ pub fn probe_layer_shell(connection: &Connection) -> LayerShellStatus {
 
 /// Application data type for the transient event queue used by
 /// the layer-shell detection probe.
-#[allow(dead_code)]
 #[derive(Debug)]
 struct LayerShellAppData;
 

@@ -16,7 +16,6 @@ pub type AppEventReceiver = mpsc::UnboundedReceiver<AppEvent>;
 
 /// Top-level event enum. Variants are split by producer for clarity
 /// but share the same bus.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum AppEvent {
     /// System tray (or future global hotkey) actions.
@@ -44,16 +43,19 @@ pub enum TrayAction {
 
 /// Flattened subset of [`ene_core::EneEvent`] the UI layer cares
 /// about. `StatusChanged` / `SessionSplit` are dropped by the bridge.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum AiStreamUpdate {
     TextDelta(String),
     ToolCallStart {
+        #[expect(dead_code)]
         name: String,
+        #[expect(dead_code)]
         arguments: String,
     },
     ToolCallResult {
+        #[expect(dead_code)]
         name: String,
+        #[expect(dead_code)]
         result: String,
     },
     PermissionRequired {
@@ -67,11 +69,16 @@ pub enum AiStreamUpdate {
         prompt: UserInputPrompt,
     },
     TaskProgress {
+        #[expect(dead_code)]
         task_id: String,
+        #[expect(dead_code)]
         step: usize,
+        #[expect(dead_code)]
         total_steps: Option<usize>,
+        #[expect(dead_code)]
         description: String,
     },
     Finished,
+    #[expect(dead_code)]
     Error(String),
 }
