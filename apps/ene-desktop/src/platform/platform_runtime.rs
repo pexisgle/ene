@@ -1,4 +1,4 @@
-//! Linux click-through dispatcher (wgpu-migration §4 PR5.3 + §5 PR5.4).
+//! Linux click-through dispatcher.
 //!
 //! On Windows the per-frame hit-test result is plumbed through
 //! `winit::window::Window::set_cursor_hittest`, which toggles
@@ -66,20 +66,12 @@ pub fn apply_linux_click_through(
     cursor_on_silhouette: bool,
     freeze_forced: bool,
 ) {
-    // 1. Calculate the actual rectangles + source first so all display server
-    //    backends (Wayland and X11) and the debug overlay receive the same data.
     let (rects, source) = if freeze_forced {
         (
             vec![(0_i32, 0_i32, i32::from(i16::MAX), i32::from(i16::MAX))],
             super::super::input_region_debug::InputRegionSource::Freeze,
         )
     } else if allows_input && (cursor_on_silhouette || state.character.drag.is_dragging()) {
-        // The per-bone Rapier raycast said "yes"; accept
-        // all input so the drag state machine receives the
-        // events. The mask readback may be a frame behind
-        // (one-frame latency) and at downsample=8 the
-        // silhouette is only an approximation; falling back
-        // to the rapier hit-test is more responsive.
         (
             vec![(0_i32, 0_i32, i32::from(i16::MAX), i32::from(i16::MAX))],
             super::super::input_region_debug::InputRegionSource::FullWindow,
@@ -93,12 +85,6 @@ pub fn apply_linux_click_through(
                 super::super::input_region_debug::InputRegionSource::Empty,
             )
         } else {
-            // PR-LX.8: scale downsampled-space rects to
-            // window-pixel space before sending them to
-            // the OS. `downsample` is always >= 1 (clamped
-            // at construction), and we use saturating math
-            // so an out-of-range downsampled rect cannot
-            // overflow when multiplied.
             let factor = guard.downsample() as i64;
             let scaled: Vec<super::wayland_region::Rect> = extracted
                 .into_iter()
@@ -124,16 +110,8 @@ pub fn apply_linux_click_through(
         )
     };
 
-    // 2. Set the rectangles on the Wayland context and apply to the surface.
-    //    This must happen AFTER rects calculation so we do not overwrite the
-    //    cached rectangles before they reach the compositor.
     if let Some(ctx) = state.wayland_region.as_ref() {
         let mut guard = ctx.lock();
-
-        // Drain the stand-alone Wayland connection's event
-        // queue so the `wl_compositor` `bind` callback fires
-        // promptly after construction. Cheap when the socket
-        // has no events.
         guard.pump();
 
         if freeze_forced
@@ -144,14 +122,9 @@ pub fn apply_linux_click_through(
             guard.set_rects(rects.clone());
         }
 
-        // Apply directly to winit's adopted wl_surface!
         guard.apply_to_winit_surface();
     }
 
-    // PR-LX.5: X11 fallback. The shape extension input region
-    // is the X11 analog of Wayland's `set_input_region`. The
-    // rectangle set comes from the mask capture (above); the
-    // empty set is "pass through to the desktop".
     if let Some(ctx) = state.x11_ctx.as_ref() {
         let mut guard = ctx.lock();
         if rects.is_empty() {
@@ -162,16 +135,6 @@ pub fn apply_linux_click_through(
     }
 
     if !FIRST_DISPATCH_LOGGED.swap(true, Ordering::Relaxed) {
-        // PR-LX.4: report layer-shell probe presence on the
-        // first dispatch so the log carries the result. The
-        // detection itself runs eagerly in `Runtime::resumed`;
-        // this branch only reports whether the cache has
-        // been populated.
-        // PR-LX.5: report the X11 path taken on the first
-        // dispatch so the log carries the result. The
-        // connection itself is opened in `Runtime::resumed`;
-        // this branch only reports which display-server path
-        // the dispatcher took.
         let layer_shell_cached = state
             .layer_shell
             .as_ref()
@@ -200,32 +163,18 @@ pub fn apply_linux_click_through(
         );
     }
 
-    // PR-LX.8: stash the final rectangle set + source on
-    // the state so the F9 debug overlay can render them.
-    // Done at the very end of the dispatcher (after all
-    // OS-side pushes succeed) so the debug view mirrors
-    // what was actually pushed to the display server.
     state.last_applied_input_rects = rects.clone();
     state.last_input_source = source;
 }
 
 /// Run the layer-shell detection probe against the stand-alone
 /// Wayland connection (if any) and update the cached status.
-/// Called once by the runtime after `resumed` so the first
-/// `apply_linux_click_through` log can carry the result.
-///
-/// Returns the resolved [`LayerShellStatus`](super::wayland_layer_shell::LayerShellStatus)
-/// so the caller can stash it for follow-up work.
 #[cfg(target_os = "linux")]
 pub fn detect_layer_shell(state: &AppState) -> super::wayland_layer_shell::LayerShellStatus {
     use super::wayland_layer_shell::LayerShellStatus;
     let Some(layer_shell) = state.layer_shell.as_ref() else {
         return LayerShellStatus::Unavailable;
     };
-    // Clone the `Connection` out of the wayland_region
-    // guard so the resulting `&Connection` outlives the
-    // guard and can be passed across the layer-shell lock
-    // acquisition.
     let connection_owned: Option<wayland_client::Connection> = state
         .wayland_region
         .as_ref()
