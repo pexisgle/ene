@@ -28,13 +28,6 @@ pub fn render(
         ui.horizontal(|ui| {
             ui.label("Character");
             if ui.button("<").clicked() {
-                // PR9: cycle to the previous character and
-                // push the new character's per-character
-                // default expression so the renderer
-                // immediately picks it up. The
-                // `select_character` dispatch is a no-op when
-                // the cycle is a same-character request, so
-                // we only push on an actual switch.
                 let len = settings.characters.len();
                 if len > 0 {
                     let idx = ((settings.character_state.selected_character as isize - 1)
@@ -230,11 +223,9 @@ fn render_numeric_row<F, C>(
         ui.label(label);
         if ui.button("-").clicked() {
             apply_action(down, settings, animation, ai, world, ui_entity);
-            // Re-derive buffer from settings to keep in sync.
             refresh(settings, buffer);
         }
         let response = ui.add(egui::TextEdit::singleline(buffer).desired_width(220.0));
-        // Commit when pressing Enter or when focus is lost.
         let enter_pressed = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         if enter_pressed {
             if let Ok(value) = buffer.trim().parse::<f32>() {
@@ -246,7 +237,6 @@ fn render_numeric_row<F, C>(
                 refresh(settings, buffer);
             }
         } else if response.lost_focus() {
-            // Commit and re-format on focus loss.
             if let Ok(value) = buffer.trim().parse::<f32>() {
                 commit(settings, value);
                 settings.mark_dirty();

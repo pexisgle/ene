@@ -18,7 +18,6 @@ pub fn render(
     ui_entity: hecs::Entity,
 ) {
     ui.vertical(|ui| {
-        // Raycast Colliders (Debug) - F3
         ui.horizontal(|ui| {
             ui.label("Raycast Colliders (Debug)");
             let debug_on = if let Ok(ui_state) = world.get::<&crate::settings::UiState>(ui_entity) {
@@ -47,7 +46,6 @@ pub fn render(
             );
         });
 
-        // Hovered Bone display when collider debug is active
         let show_colliders = if let Ok(ui_state) = world.get::<&crate::settings::UiState>(ui_entity)
         {
             ui_state.show_collider_debug
@@ -66,7 +64,6 @@ pub fn render(
             });
         }
 
-        // Input Region (Debug) - F9
         ui.horizontal(|ui| {
             ui.label("Input Region (Debug)");
             let debug_on = if let Ok(ui_state) = world.get::<&crate::settings::UiState>(ui_entity) {
@@ -95,7 +92,6 @@ pub fn render(
             );
         });
 
-        // Debug Update FPS cycle row
         ui.horizontal(|ui| {
             ui.label("Debug Update FPS");
             if ui.button("<").clicked() {
