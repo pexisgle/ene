@@ -470,8 +470,7 @@ impl ApplicationHandler for Runtime {
             }
         }
 
-        if let Err(AcquireError::Fatal) = self.render_char_frame() {
-        }
+        if let Err(AcquireError::Fatal) = self.render_char_frame() {}
         if let Some(uw) = self.ui_window.as_mut() {
             let visible = self.state.ui_state().settings_window_visible;
             if uw.window.is_visible() != Some(visible) {
@@ -963,9 +962,7 @@ impl Runtime {
                 cw.reconfigure(device, cw.window.inner_size());
                 Ok(())
             }
-            Err(AcquireError::Timeout) => {
-                Ok(())
-            }
+            Err(AcquireError::Timeout) => Ok(()),
             Err(AcquireError::Fatal) => {
                 tracing::error!("Character Surface acquire failed fatally; exiting");
                 self.char_surface_fatal = true;

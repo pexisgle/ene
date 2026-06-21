@@ -1,40 +1,29 @@
-//! PR-LX.8: debug visualisation of the Linux input region.
+//! Debug visualisation of the Linux input region.
 //!
 //! The Linux click-through pipeline pushes a set of rectangles
 //! into the Wayland `wl_surface::set_input_region` and the
 //! X11 `shape::rectangles` calls each frame. When the result
-//! does not look right ("the character is click-through, but
-//! the empty area around it is not — or vice versa") the
-//! fastest way to debug it is to overlay the actual
-//! rectangles the runtime just sent. This module owns that
-//! overlay.
-//!
-//! F9 toggles the overlay (Linux only, not persisted). The
-//! overlay reuses the existing collider debug renderer
-//! (`DebugRenderer`) so no new GPU resources are required.
+//! does not look right ("the character is click-through, but the
+//! empty area around it is not — or vice versa") the fastest way
+//! to debug it is to overlay the actual rectangles the runtime
+//! just sent. F9 toggles the overlay (Linux only, not persisted).
 //!
 //! # Colour coding
 //!
-//! - `Empty` (red): the runtime pushed an empty rectangle
-//!   set. The window passes all clicks through to the
-//!   desktop. We draw a single red border around the entire
-//!   window so the user can see at a glance "nothing is
-//!   clickable".
-//! - `Freeze` (green): the user is holding the `F8` "freeze
-//!   character window" hotkey. The window accepts all input
-//!   regardless of cursor position. We draw a green border
-//!   around the entire window.
-//! - `FullWindow` (yellow): the runtime decided the cursor
-//!   is on the silhouette (or the mask has no data) and
-//!   pushed a full-window rectangle. Yellow border.
-//! - `Mask` (orange): the runtime forwarded mask readback
-//!   rectangles to the OS. Each rectangle is drawn as a
-//!   4-segment wireframe in orange.
+//! - `Empty` (red): empty rectangle set — full pass-through.
+//!   Draws a red border around the entire window.
+//! - `Freeze` (green): the `F8` freeze hotkey is held — all
+//!   input accepted. Green border around the window.
+//! - `FullWindow` (yellow): the cursor is on the silhouette
+//!   (or the mask has no data) and a full-window rect was
+//!   pushed. Yellow border.
+//! - `Mask` (orange): mask-readback rectangles forwarded to
+//!   the OS. Each rectangle is drawn as a 4-segment wireframe.
 //!
-//! The colours are deliberately distinct from the existing
-//! collider overlay (cyan + magenta + red hit) and the mask
-//! gizmo (purple), so all four overlays can be on at once
-//! without visual confusion.
+//! The colours are deliberately distinct from the collider
+//! overlay (cyan + magenta + red hit) and the mask gizmo
+//! (purple), so all four overlays can be on at once without
+//! visual confusion.
 
 use crate::platform::wayland_region::Rect;
 
@@ -109,15 +98,13 @@ pub fn build_input_region_debug_lines(
     };
 
     for (x, y, w, h) in rects_to_draw {
-        // Skip empty / zero-area rects (X11 / Wayland
-        // silently drop these, drawing them would be
-        // misleading).
+        // X11 / Wayland silently drop zero-area rects;
+        // drawing them would be misleading.
         if w <= 0 || h <= 0 {
             continue;
         }
-        // Clamp to window. Allow off-screen origins (negative
-        // x/y) so we can still see the part that *is* on
-        // screen.
+        // Clamp to window. Allow off-screen origins so the
+        // visible part still draws.
         let min_x = x.max(0) as f32;
         let min_y = y.max(0) as f32;
         let max_x = (x + w).min(window_w as i32).max(0) as f32;

@@ -64,8 +64,8 @@ impl SettingsUi {
 
     /// Switch the visible page. Used by the runtime to jump to the
     /// AI page when a `PermissionRequired` or `UserInputRequired`
-    /// event arrives (A.2 follow-up: settings tray menu opens to a
-    /// specific page).
+    /// event arrives (the tray menu also calls this to open the
+    /// settings window on a specific page).
     pub fn show(&mut self, page: PageKind) {
         self.current_page = page;
     }
@@ -151,9 +151,9 @@ impl Default for SettingsUi {
     }
 }
 
-/// Apply the legacy dark theme tokens. The legacy Bevy code uses
-/// exactly these RGB values; v2 keeps the visual identity stable so
-/// screenshots / docs that reference the colors remain valid.
+/// Apply the legacy dark theme tokens. The v1 Bevy build uses
+/// these exact RGB values; v2 keeps the visual identity stable so
+/// screenshots and docs that reference the colors stay valid.
 pub fn apply_egui_visuals(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = egui::Color32::from_rgb(26, 28, 33);

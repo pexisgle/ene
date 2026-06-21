@@ -1,42 +1,8 @@
-//! PR4.3: drag-to-move for the v2 character window.
+//! Drag-to-move for the character window.
 //!
-//! 1:1 port of `apps/ene-desktop/src/character_drag/mod.rs::update_character_drag`
-//! (246 lines) adapted to the v2 stack:
-//!
-//! - Bevy `Camera` + `GlobalTransform` (perspective) → v2
-//!   `ene_vrm::OrthographicCamera` (eye, target, up, viewport_height, aspect).
-//!   For an ortho camera the per-pixel rays are parallel — the
-//!   `ray_intersects_aabb` test collapses to a single ray cast along
-//!   the camera forward direction. We still run the generic slab test
-//!   so the algorithm matches the legacy exactly.
-//! - Bevy `MessageReader<MouseButtonInput>` → winit
-//!   `WindowEvent::MouseInput { state, button }` events.
-//! - Bevy `MessageReader<CursorMoved>` → winit
-//!   `WindowEvent::CursorMoved { position }`, already mirrored into
-//!   `Runtime::last_cursor_physical`.
-//! - Bevy `Assets<Mesh>::compute_aabb()` + per-mesh `GlobalTransform`
-//!   → `VrmModel::aabb()` (post-normalize) plus
-//!   `ModelUniform::from_position_scale(position, scale).model`
-//!   to transform the 8 corners to world space.
-//!
-//! Windows click-through (PR5.2) is in place as of 2026-06-19: the
-//! runtime reads the global cursor via `device_query`, projects it
-//! through the orthographic camera, casts a Rapier ray against the
-//! character's per-bone sphere colliders (one auto-sized sphere
-//! per humanoid bone; fingers are filtered out), and toggles
-//! winit's `Window::set_cursor_hittest` so the rest of the desktop
-//! receives the click when the cursor is not on the silhouette.
-//! The `is_dragging` accessor on `CharacterDragState` keeps the
-//! window receiving input while a drag is in progress, so the
-//! user can pull the character off the silhouette mid-drag.
-//! Bone positions are refreshed every frame from
-//! `VrmModel::nodes::world_positions` (which `update_skin_palette`
-//! updates with the current VRMA), so the colliders follow the
-//! animation without any per-frame GPU readback.
-//!
-//! PR5.3+ (Wayland `wl_surface::set_input_region`, X11 shape,
-//! Linux offscreen mask + gizmo, frame pacer) is still pending;
-//! Linux currently has no click-through on the character window.
+//! Coordinates cursor input, projects 2D screen positions into 3D world space,
+//! and updates the character position. Supports click-through logic by integrating
+//! with collision detection.
 use glam::{Mat4, Vec2, Vec3};
 
 /// Per-window drag state. `None` = idle, `Some(_)` = dragging.
@@ -153,12 +119,9 @@ pub fn ray_intersects_aabb(origin: Vec3, direction: Vec3, min: Vec3, max: Vec3) 
 /// position on the camera's look-at plane (z=0 in view space). The
 /// output `Vec2` carries only the X and Y world coordinates — the
 /// drag integrates `(new - last).extend(0.0)` into
-/// `character_position`, matching the legacy's "drag along the
-/// world XY plane" behaviour.
+/// `character_position`.
 ///
-/// Mirrors the `view_pos = Vec3::new(ndc.x * half_w, ndc.y * half_h, 0)`
-/// pattern from `look_at::compute_world_target` (PR4.2). Returns
-/// `None` when the viewport is degenerate.
+/// Returns `None` when the viewport is degenerate.
 pub fn cursor_logical_to_world_2d(
     cursor_logical: Vec2,
     viewport: (u32, u32),
@@ -186,16 +149,13 @@ pub fn cursor_logical_to_world_2d(
 
 /// Hit-test the cursor against the character's transformed AABB.
 /// `cursor_logical` is the latest winit cursor position in
-/// window-logical pixels. The function:
-/// 1. Projects the cursor to a world-space ray (eye → cursor world).
-/// 2. Computes the world AABB from the model's local AABB and the
-///    model matrix.
-/// 3. Runs the slab test.
+/// window-logical pixels. Projects the cursor to a world-space
+/// ray, expands the model AABB through the model matrix, then
+/// runs the slab test.
 ///
 /// For an orthographic camera all per-pixel rays are parallel, so
 /// the result is identical to "is the AABB in front of the camera
-/// and within the viewport rect" — but the algorithm matches the
-/// legacy exactly.
+/// and within the viewport rect".
 #[allow(dead_code)]
 pub fn cursor_over_character(
     cursor_logical: Vec2,
@@ -449,15 +409,7 @@ mod tests {
         let mut s = CharacterDragState {
             last_cursor_world_pos: Some(Vec2::new(0.0, 0.0)),
         };
-        // Mirror the legacy's "cursor world pos lost → end drag"
-        // path: tick returns None and clears the origin so the next
-        // press is treated as a fresh start.
         assert_eq!(tick(&mut s, None), None);
-        // The legacy actually clears the state in this branch. We
-        // keep the origin in v2 (consistent with the legacy's
-        // "end drag, mark dirty" path which the runtime is
-        // responsible for) — but the next tick returns None
-        // because there is no fresh cursor sample.
         let again = tick(&mut s, None);
         assert_eq!(again, None);
     }

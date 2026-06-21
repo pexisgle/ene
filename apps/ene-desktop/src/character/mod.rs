@@ -1,22 +1,7 @@
-//! Character rendering for the v2 desktop app.
-//!
-//! PR3 hosts the [`CharacterRenderer`], which:
-//!
-//! - Loads the default `.vrm` (currently the `AliciaSolid.vrm`
-//!   bundled in `assets/characters/Alicia/`) on first
-//!   initialisation, falling back to a synthetic 1-triangle debug
-//!   model if the file is missing.
-//! - Owns the wgpu depth texture matching the character window's
-//!   surface size.
-//! - Exposes [`CharacterRenderer::render`], which the
-//!   [`Runtime`](crate::runtime::Runtime) calls every frame from
-//!   `RedrawRequested`.
-//! - PR4.4: drains due commands from the settings UI's
-//!   [`EmotionQueue`](crate::character_state::EmotionQueue) and
-//!   pushes the resulting weights into the loaded VRM. After the
-//!   active emotion's `hold_secs` elapses the renderer fades the
-//!   weight multiplicatively each frame until it drops below
-//!   `FADE_FLOOR`, then forgets it.
+//! Character rendering. Owns the loaded VRM, depth texture, the
+//! orthographic camera, and per-frame state (look-at, drag, motion
+//! playback, spring bones, FXAA). The runtime calls
+//! [`CharacterRenderer::render`] every `RedrawRequested`.
 use std::path::PathBuf;
 
 use crate::settings::AntialiasingMode;
@@ -39,106 +24,54 @@ pub mod drag;
 pub use collider::{BonePose, BoneShapeSpec};
 pub use drag::CharacterDragState;
 
-/// Weight below which an active emotion is considered fully
-/// faded and can be discarded.
+/// Weight below which an active emotion is fully faded.
 const FADE_FLOOR: f32 = 0.01;
 
-/// Per-frame fade factor applied to the active emotion's
-/// weight once its `hold_secs` elapses. `0.9` means the weight
-/// decays to 1 % in ~44 frames (≈ 0.7 s at 60 fps).
+/// Per-frame fade factor: `0.9` decays to 1 % in ~44 frames.
 const FADE_RATE: f32 = 0.9;
 
-/// Owns the loaded [`VrmModel`] and its [`VrmRenderer`].
-///
-/// Construction is infallible at the type level — if the default VRM
-/// is missing the renderer produces a synthetic fallback so the
-/// window still clears correctly.
+/// Owns the loaded [`VrmModel`] and its [`VrmRenderer`]. The
+/// renderer is built via [`CharacterRenderer::uninit`] (which
+/// never touches the GPU) and then [`CharacterRenderer::init`]
+/// once the surface format is known. If the default VRM is
+/// missing the renderer is left in the empty state and the
+/// window only clears.
 pub struct CharacterRenderer {
-    /// `None` if loading the default VRM failed; the renderer still
-    /// draws the clear color but no geometry.
     model: Option<VrmModel>,
-    /// `None` if no model loaded (matches `model.is_none()`).
     renderer: Option<VrmRenderer>,
-    /// Orthographic camera (PR3 has a fixed position; PR4 will let
-    /// the user pan).
     camera: OrthographicCamera,
-    /// Depth texture (matches the character window's surface size).
     depth_view: Option<wgpu::TextureView>,
-    /// The depth texture's *current* size, so the renderer can
-    /// rebuild the view when the window resizes.
     depth_size: (u32, u32),
-    /// Default VRM path (resolved at construction time).
     default_vrm: Option<PathBuf>,
-    /// PR4.2: cursor → smoothed world target state.
     look_at: LookAtState,
-    /// PR4.8: latest per-bone output for `"bone"`-type models.
-    /// `None` for `"expression"`-type models (which write into
-    /// [`VrmModel::expressions_mut`] directly) or before the
-    /// first frame. The skinning palette update is the next
-    /// pass — when it lands, this field feeds it.
+    /// Per-bone LookAt output for `"bone"`-type models.
     look_at_bone_output: Option<LookAtBoneOutput>,
-    /// PR4.4: currently-applied emotion, used to fade the weight
-    /// back to zero after the hold elapses. `None` means the
-    /// model is at its neutral state.
+    /// Currently-applied emotion.
     active_emotion: Option<ActiveEmotion>,
-    /// PR4.3: drag state. `last_cursor_world_pos.is_some()` means
-    /// the user is currently dragging the character.
     pub drag: CharacterDragState,
-    /// PR4.16: currently-loaded VRMA asset, or `None` when
-    /// no motion has been bound. The runtime calls
-    /// [`CharacterRenderer::play_motion`] once on startup
-    /// (using the `default_motion` from settings) and may
-    /// call it again when the user picks a different
-    /// motion from the settings UI.
     vrma: Option<VrmaAsset>,
-    /// PR4.16: per-frame VRMA playback state. `time` is
-    /// advanced by [`CharacterRenderer::update_motion`].
     vrma_player: VrmaPlayer,
-    /// PR4.16: resolved on-disk path of the currently-loaded
-    /// VRMA. Tracked alongside `vrma` so the runtime can
-    /// log which motion is active and the settings UI
-    /// can show a "current motion" label without
-    /// re-reading the asset. `None` when no motion is
-    /// loaded.
     vrma_path: Option<PathBuf>,
-    /// Node indices of bones that have active colliders
     #[allow(dead_code)]
     active_bone_nodes: Vec<usize>,
-    /// A.6: spring-bone simulator (PR6). `None` for models
-    /// without `VRMC_springBone` or when the parser rejects
-    /// the extension. The simulator is built once on model
-    /// load and stepped per-frame inside `update_motion`;
-    /// the resulting per-node local rotations are written
-    /// back into `model.nodes.local_rotations` so the next
-    /// `update_skin_palette` picks them up.
+    /// Spring-bone simulator. `None` for models without `VRMC_springBone`.
     spring_bone_sim: Option<SpringBoneSimulator>,
-    /// A.6: a clone of the parsed `VRMC_springBone` properties
-    /// (colliders, collider groups, spring chains). The
-    /// simulator's `step` borrows this every frame; keeping
-    /// a clone on the renderer avoids a borrow fight with
-    /// `&mut VrmModel` in the per-frame update.
+    /// Cached `VRMC_springBone` properties. Cloned to avoid a
+    /// borrow fight with `&mut VrmModel` in the per-frame update.
     spring_bone_props: Option<SpringBoneProperties>,
-    /// A.7: FXAA post-processor. `Some` when the AA mode is
-    /// `Fxaa`; `None` for `Off` (the model is rendered
-    /// straight into the swapchain) or before the post-
-    /// processor can be built (no model, no device). The
-    /// `set_antialiasing_mode` method rebuilds the field.
+    /// FXAA post-processor. Rebuilt by
+    /// [`CharacterRenderer::set_antialiasing_mode`].
     post_processor: Option<PostProcessor>,
-    /// A.7: cached FXAA shader module. Re-used by every
-    /// `post_processor` rebuild (the wgpu pipeline state
-    /// objects are the per-rebuild, the shader is shared).
+    /// Cached FXAA shader module.
     fxaa_shader: Option<wgpu::ShaderModule>,
-    /// A.7: the swapchain format the post-processor was
-    /// built against. Rebuilt on a surface-format change
-    /// (the runtime already recreates the depth view in the
-    /// same path).
+    /// Surface format the post-processor was built against.
     fxaa_format: Option<wgpu::TextureFormat>,
 }
 
 impl CharacterRenderer {
     /// Build an un-initialized renderer. The runtime calls
-    /// [`CharacterRenderer::init`] once it has the actual surface
-    /// format.
+    /// [`CharacterRenderer::init`] once the surface format is
+    /// known.
     pub fn uninit(assets_dir: &std::path::Path, default_vrm: &str) -> Self {
         Self {
             model: None,
@@ -164,11 +97,8 @@ impl CharacterRenderer {
     }
 
     /// Test-only: install a fully-built `VrmModel` directly on
-    /// the renderer. The normal `init` path goes through
-    /// `load_vrm` + a `wgpu` device, which makes pure unit
-    /// tests of the per-frame CPU math (e.g. camera target)
-    /// awkward. The setter is `pub(crate)` + `#[cfg(test)]`
-    /// so it is only visible from sibling test modules.
+    /// the renderer. Bypasses `init`'s `load_vrm` + `wgpu` path
+    /// so per-frame CPU math can be unit-tested without a device.
     #[cfg(test)]
     pub(crate) fn set_model_for_test(&mut self, model: VrmModel) {
         if let Some(props) = model.spring_bones.clone() {
@@ -226,11 +156,9 @@ impl CharacterRenderer {
                     model.joint_count(),
                 );
                 let renderer = VrmRenderer::new(device, queue, surface_format, mask_format, &model);
-                // A.6: build the spring-bone simulator (if the
-                // model has VRMC_springBone) BEFORE moving the
-                // model into `self.model`, so the borrow on
-                // `model.nodes.*` is clean. The simulator is
-                // stepped per-frame in `update_motion`.
+                // Build the spring-bone simulator before moving the
+                // model into `self.model` so the borrow on
+                // `model.nodes.*` is clean.
                 if let Some(props) = model.spring_bones.clone() {
                     let sim = build_spring_bone_simulator(&model, &props);
                     self.spring_bone_sim = sim;
@@ -251,20 +179,9 @@ impl CharacterRenderer {
         }
     }
 
-    /// PR4.16: load a `.vrma` from disk, reset the
-    /// playback clock, and store the asset on the
-    /// renderer. Safe to call before the model is
-    /// loaded (the asset is kept in `self.vrma` and
-    /// applied on the first `update_motion` call
-    /// that finds a model).
-    ///
-    /// The runtime calls this on startup with the
-    /// `default_motion` resolved from the settings.
-    /// Errors are logged and the previous motion is
-    /// kept — the model just stays in its rest pose
-    /// (which is exactly what the user sees when
-    /// `default_motion` is empty or the file is
-    /// missing).
+    /// Load a `.vrma` from disk and store the asset. Safe to call
+    /// before the model is loaded. Errors are logged and the
+    /// previous motion is kept.
     pub fn play_motion(&mut self, vrma_path: &std::path::Path) {
         match load_vrma(vrma_path) {
             Ok(asset) => {
@@ -291,25 +208,12 @@ impl CharacterRenderer {
         }
     }
 
-    /// PR4.16: advance the VrmaPlayer by `dt_secs`,
-    /// evaluate the active clip, push expression
-    /// weights into the morph layer, and recompute
-    /// the skin palette. Returns the new palette
-    /// (length `model.joint_count()`) when the GPU
-    /// needs a write — the runtime forwards the
-    /// returned slice to
-    /// [`VrmRenderer::update_skin_palette`]. Returns
-    /// `None` when there is no motion, no model, or
-    /// the player is paused.
-    ///
-    /// **Borrow-safety note**: this method borrows
-    /// `self` mutably twice (once for the model and
-    /// once for the renderer) which would conflict
-    /// if both were on `self`. The implementation
-    /// only touches the model and avoids the
-    /// renderer here; the runtime calls
-    /// `VrmRenderer::update_skin_palette` separately
-    /// with the returned `Vec<Mat4>`.
+    /// Advance the VrmaPlayer by `dt_secs`, evaluate the active
+    /// clip, push expression weights into the morph layer, step
+    /// the spring-bone simulator, and recompute the skin palette.
+    /// Returns the new palette for the runtime to forward to
+    /// [`VrmRenderer::update_skin_palette`]. `None` when there is
+    /// no motion, no model, or the player is paused.
     pub fn update_motion(&mut self, dt_secs: f32) -> Option<Vec<glam::Mat4>> {
         let model = self.model.as_mut()?;
 
@@ -359,23 +263,17 @@ impl CharacterRenderer {
             layer_mut.apply_overrides(&expressions_meta);
         }
 
-        // Skin palette. PR4.16: the LookAt bone output (set
-        // by `update_look_at` for `"bone"`-type models) is
-        // composed on top of the VRMA pose so the head and
-        // eyes track the cursor. `None` for `"expression"`-
-        // type models, where the LookAt signal routes into
-        // morph weights via `apply_emotions` instead.
-        // Skin palette. PR4.16: the LookAt bone output (set
-        // by `update_look_at` for `"bone"`-type models) is
-        // composed on top of the VRMA pose so the head and
-        // eyes track the cursor. `None` for `"expression"`-
-        // type models, where the LookAt signal routes into
-        // morph weights via `apply_emotions` instead.
+        // Compose the LookAt bone output (set by
+        // `update_look_at` for `"bone"`-type models) on top of
+        // the VRMA pose so the head and eyes track the cursor.
+        // `None` for `"expression"`-type models, where the
+        // LookAt signal routes into morph weights via
+        // `apply_emotions` instead.
         let palette = model.update_skin_palette(&frame, self.look_at_bone_output.as_ref());
 
-        // A.6: step the spring-bone simulator. The simulator
-        // reads the per-node world transforms the palette
-        // update just produced and writes the updated local
+        // Step the spring-bone simulator. The simulator reads
+        // the per-node world transforms the palette update
+        // just produced and writes the updated local
         // rotations for the affected joints back into
         // `model.nodes.local_rotations`. The next
         // `update_skin_palette` call (next frame) picks them
@@ -436,50 +334,24 @@ impl CharacterRenderer {
         }
     }
 
-    /// PR4.16: forward a new skin palette to the GPU.
-    /// The runtime calls this with the
-    /// `Vec<Mat4>` returned by
-    /// [`CharacterRenderer::update_motion`] and the
-    /// per-frame `&wgpu::Queue`. No-op when the
-    /// renderer is missing (model failed to load) or
-    /// the palette is empty.
+    /// Forward a new skin palette to the GPU. No-op when the
+    /// renderer is missing or the palette is empty.
     pub fn update_skin_palette_gpu(&self, queue: &wgpu::Queue, palette: &[glam::Mat4]) {
         if let Some(renderer) = self.renderer.as_ref() {
             renderer.update_skin_palette(queue, palette);
         }
     }
 
-    /// PR4.4: drain every due command from `queue`, push the
+    /// drain every due command from `queue`, push the
     /// resulting weights into the loaded VRM, and fade the
-    /// active emotion back to zero once its `hold_secs` has
-    /// elapsed. Safe to call once per frame from
-    /// `Runtime::about_to_wait`; no-op if the model failed to
-    /// load.
-    ///
-    /// `now_secs` is the same clock used by
-    /// [`SettingsUi::started_at`](crate::settings_ui::SettingsUi::started_at)
-    /// — the runtime passes
-    /// `uw.settings_ui.started_at.elapsed().as_secs_f64()` so
-    /// queue timestamps and the fade clock stay in lock-step.
-    ///
-    /// The renderer's `active_emotion` is overwritten by every
-    /// new command of a different expression (last write wins);
-    /// the same-name case simply refreshes the hold window. This
-    /// matches the legacy `bevy_vrm1` "blend stack = single
-    /// emotion" behaviour and is sufficient for the AI bridge
-    /// and the manual-expression test buttons.
-    ///
-    /// **Important — weight clearing**: when a new emotion is
-    /// drained, the *previous* active emotion's weight is set to
-    /// `0.0` in the model's `ExpressionLayer` *before* the new
-    /// weight is written. Without this clear, a previous "happy"
-    /// weight would survive a click on "neutral" (which is not
-    /// a morph target) and keep squinting the eyes forever.
-    /// This was the source of the "every expression squints the
-    /// eyes" bug reported in the PR4.4 review. The actual
-    /// transition computation lives in
-    /// [`transition_emotions`](crate::character_state::transition_emotions)
-    /// so it can be unit-tested without a live `wgpu` device.
+    /// Apply due emotion commands to the model. Drains the queue
+    /// at `now_secs`, fades the previous active emotion to zero,
+    /// and writes the new weight into the model's
+    /// `ExpressionLayer`. The previous emotion's weight is
+    /// cleared first so a click on "neutral" (not a morph target)
+    /// does not leave a stale `happy` weight squinting the eyes
+    /// — that was the source of the "every expression squints
+    /// the eyes" bug. No-op if the model failed to load.
     pub fn apply_emotions(&mut self, queue: &mut EmotionQueue, now_secs: f64) {
         let Some(model) = self.model.as_mut() else {
             return;
@@ -498,10 +370,6 @@ impl CharacterRenderer {
                 .expressions_mut()
                 .set_expression(&ExpressionName::from(name.as_str()), weight);
         }
-        // PR4.9: evaluate override semantics after writing
-        // the raw per-frame weights. This ensures `happy`
-        // with `overrideBlink=block` suppresses blink, and
-        // `isBinary` expressions are clamped to 0/1.
         {
             let meta = model.expressions_meta.clone();
             model.expressions_mut().apply_overrides(&meta);
@@ -534,18 +402,12 @@ impl CharacterRenderer {
         self.camera.set_aspect(size.0 as f32 / size.1 as f32);
     }
 
-    /// Draw the model into `view`. No-op if the model failed to load.
-    /// `model_uniform` is composed by the runtime every frame from
-    /// `CharacterState` (position + scale) and applied between
-    /// view-proj and the vertex position in the shader.
-    ///
-    /// A.7: when the AA mode is `Fxaa` and the post-processor is
-    /// built, the model is drawn into the post-processor's
-    /// intermediate texture first; the post-processor then
-    /// samples that texture and writes the smoothed output to
-    /// `view`. For `Off` (or a missing post-processor) the
-    /// model is drawn straight into `view`, matching the
-    /// pre-A.7 behaviour.
+    /// Draw the model into `view`. No-op if the model failed to
+    /// load. `model_uniform` is composed by the runtime every
+    /// frame from `CharacterState` (position + scale). When the
+    /// AA mode is `Fxaa` and the post-processor is built, the
+    /// model is drawn into its intermediate texture first, then
+    /// the post-processor samples it into `view`.
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -557,8 +419,8 @@ impl CharacterRenderer {
         swapchain_format: wgpu::TextureFormat,
         aa_mode: AntialiasingMode,
     ) {
-        // A.7: lazily rebuild the post-processor BEFORE the
-        // model borrow. The post-processor only touches
+        // Lazily rebuild the post-processor BEFORE the model
+        // borrow. The post-processor only touches
         // `self.post_processor` / `self.fxaa_shader` /
         // `self.fxaa_format`; the model / renderer / depth
         // view are read in the second half. Splitting the
@@ -583,12 +445,6 @@ impl CharacterRenderer {
             label: Some("character.encoder"),
         });
         if let Some(post) = self.post_processor.as_mut() {
-            // FXAA path: render the model into the post-
-            // processor's intermediate texture, then run
-            // the post-processor into the swapchain view.
-            // `renderer.render` is a `&self` method so the
-            // borrow of `post.intermediate_view()` and the
-            // borrow of `model`/`renderer` do not conflict.
             let intermediate = post.intermediate_view();
             renderer.render(
                 queue,
@@ -602,8 +458,6 @@ impl CharacterRenderer {
             );
             post.render(device, queue, &mut encoder, view);
         } else {
-            // Direct path: no post-process, render straight
-            // into the swapchain.
             renderer.render(
                 queue,
                 &mut encoder,
@@ -642,12 +496,9 @@ impl CharacterRenderer {
         }
     }
 
-    /// A.7: lazily build the FXAA post-processor. Loads the
-    /// FXAA shader (idempotent) and constructs a new
-    /// `PostProcessor` for the given swapchain size and
-    /// format. The runtime always passes a fresh
-    /// `swapchain_format` (it knows the surface format from
-    /// the wgpu device), so this never has to guess.
+    /// Lazily build the FXAA post-processor. Loads the FXAA
+    /// shader (idempotent) and constructs a new `PostProcessor`
+    /// for the given swapchain size and format.
     fn try_build_post_processor(
         &mut self,
         device: &wgpu::Device,
@@ -686,7 +537,7 @@ impl CharacterRenderer {
         }
     }
 
-    /// A.7: rebuild the post-processor at a new swapchain
+    /// rebuild the post-processor at a new swapchain
     /// size. The runtime calls this on `WindowEvent::Resized`
     /// in lock-step with the depth-texture resize.
     pub fn resize_post_processor(
@@ -738,39 +589,20 @@ impl CharacterRenderer {
         queue.submit(std::iter::once(encoder.finish()));
     }
 
-    /// Path to the VRM that was loaded (or attempted). Useful for
-    /// PR4's character-switch logic.
-    #[expect(dead_code)] // PR4 will read this when wiring per-character selection.
+    /// Path to the VRM that was loaded (or attempted).
+    #[expect(dead_code)]
     pub fn default_vrm_path(&self) -> Option<&std::path::Path> {
         self.default_vrm.as_deref()
     }
 
-    /// PR4.2 / PR4.8: update the cursor-driven head-look-at
-    /// state.
-    ///
-    /// `character_position` is the model's pivot in world
-    /// space (the legacy `character_state.character_position`).
-    /// `model_scale` is the per-frame uniform scale (the legacy
-    /// `character_state.model_scale`); both are read by the
-    /// runtime from `CharacterState`. The head world position
-    /// is derived from the humanoid registry's `head` bone
-    /// (when present) so the look-at follows the model's
-    /// actual head geometry, with a fallback to
-    /// [`head_world_for`] (a 1 m Y offset) for models without
-    /// humanoid metadata.
-    ///
-    /// The smoothed world target is stored in [`LookAtState`]
-    /// and returned. PR4.8 also runs the
-    /// [`LookAtEvaluator`] on the result and either:
-    /// - writes `lookUp` / `lookDown` / `lookLeft` / `lookRight`
-    ///   morph weights into the model's
-    ///   [`VrmModel::expressions_mut`] for `"expression"`-type
-    ///   models (the path the legacy `bevy_vrm1` silently
-    ///   no-op'd), or
-    /// - stores the per-bone `Quat` deltas in
-    ///   [`CharacterRenderer::look_at_bone_output`] for
-    ///   `"bone"`-type models. The next skinning palette pass
-    ///   consumes this field; for now it sits in memory.
+    /// Update the cursor-driven head-look-at state. The head
+    /// world position is derived from the humanoid `head` bone
+    /// (when present) so the look-at follows the model's actual
+    /// head geometry, with a fallback to a 1 m Y offset for
+    /// models without humanoid metadata. Writes the result to
+    /// either the `ExpressionLayer` (for `"expression"`-type
+    /// models) or [`CharacterRenderer::look_at_bone_output`]
+    /// (for `"bone"`-type models).
     pub fn update_look_at(
         &mut self,
         cursor_logical: glam::Vec2,
@@ -780,18 +612,8 @@ impl CharacterRenderer {
         strength: f32,
         dt_secs: f32,
     ) -> Vec3 {
-        // 1. Derive the head world position from the
-        //    humanoid registry when possible. PR4.7 ships
-        //    the registry; PR4.8 is the first consumer
-        //    that actually changes the math based on it
-        //    (the previous consumers just read joint
-        //    indices). The fallback keeps models without
-        //    a humanoid head bone (legacy VRM 0.x) on
-        //    the legacy 1 m Y offset.
         let (head_world, head_rest_rotation) = self.head_world_for(character_position, model_scale);
 
-        // 2. Build the look-at properties (model-driven or
-        //    spec default).
         let props = self
             .model
             .as_ref()
@@ -799,7 +621,6 @@ impl CharacterRenderer {
             .unwrap_or_default();
         let smoothing = LookAtProperties::DEFAULT_SMOOTHING;
 
-        // 3. Compute the smoothed world target.
         let eye = self.camera.eye().into();
         let target = self.camera.target().into();
         let up = ene_vrm::camera::DEFAULT_UP.into();
@@ -816,16 +637,10 @@ impl CharacterRenderer {
             smoothing,
         );
 
-        // 4. Run the evaluator. For `"expression"`-type
-        //    models the result is written straight into
-        //    `ExpressionLayer`; for `"bone"`-type models
-        //    it is stashed for the next skinning palette
-        //    pass to consume.
-        //
-        //    Clone the expression metadata before mutating
-        //    `expressions_mut()` so the borrow checker stays
-        //    happy (a typical model has ~30 definitions,
-        //    ~60 bytes each — cheap to clone).
+        // Clone the expression metadata before mutating
+        // `expressions_mut()` so the borrow checker stays
+        // happy. A typical model has ~30 definitions, ~60 bytes
+        // each — cheap to clone.
         let expressions_meta = self
             .model
             .as_ref()
@@ -840,21 +655,8 @@ impl CharacterRenderer {
                     layer.set_expression(&ExpressionName::new("lookDown"), e.look_down);
                     layer.set_expression(&ExpressionName::new("lookLeft"), e.look_left);
                     layer.set_expression(&ExpressionName::new("lookRight"), e.look_right);
-                    // PR4.9: evaluate override semantics
-                    // after writing the gaze weights.
-                    // This ensures `happy` with
-                    // `overrideLookAt=block` suppresses
-                    // the look-at gaze when the model is
-                    // expressing happy. The same
-                    // `expressions_meta` clone is used
-                    // here (the `apply_emotions` call
-                    // earlier in the frame writes emotion
-                    // weights — overrides apply to both).
                     layer.apply_overrides(&expressions_meta);
                 }
-                // Clear any stale bone output (the model
-                // toggled type at runtime, e.g. via a
-                // future settings switch).
                 self.look_at_bone_output = None;
             }
             LookAtOutput::Bone(b) => {
@@ -865,13 +667,10 @@ impl CharacterRenderer {
         smoothed_target
     }
 
-    /// Compute the world-space head position and rest
-    /// rotation. Returns the head's world position and the
-    /// bone's rest rotation in `(world_pos, rest_rotation)`
-    /// form. The rest rotation is `Quat::IDENTITY` when the
-    /// model has no humanoid head bone (the legacy
-    /// behaviour, where the head was implicitly aligned
-    /// with the world frame).
+    /// Compute the world-space head position and rest rotation.
+    /// Returns `(world_pos, rest_rotation)`. The rest rotation
+    /// is `Quat::IDENTITY` when the model has no humanoid head
+    /// bone.
     fn head_world_for(&self, character_position: Vec3, model_scale: f32) -> (Vec3, Quat) {
         let Some(model) = self.model.as_ref() else {
             return (head_world_for(character_position), Quat::IDENTITY);
@@ -889,22 +688,11 @@ impl CharacterRenderer {
         (world, head.rest.rotation)
     }
 
-    /// PR-fix: compute the world-space "body center" for camera
-    /// targeting. Tries the humanoid `head` bone first, then
-    /// `chest`, then `hips`, and falls back to `character_position`
-    /// (the AABB center in world space) when the model has no
-    /// humanoid bones or no model is loaded.
-    ///
-    /// The orthographic camera's default target is the world
-    /// origin, which is also the model's AABB center after the
-    /// `T(-center) * S(normalize_scale)` step. For models whose
-    /// AABB is skewed by hair ornaments, weapons, or pedestals,
-    /// the AABB center can sit well above the body — making the
-    /// character appear pushed to the top of the window. Using a
-    /// humanoid bone as the target pins the camera to the body
-    /// regardless of the AABB shape.
-    ///
-    /// Used by [`Self::update_camera_target`].
+    /// Compute the world-space "body center" for camera
+    /// targeting. Tries the humanoid `head` → `chest` → `hips`
+    /// bones and falls back to `character_position` for models
+    /// without humanoid bones. Used by
+    /// [`Self::update_camera_target`].
     #[allow(dead_code)]
     pub fn body_center_world(&self, character_position: Vec3, model_scale: f32) -> Vec3 {
         let Some(model) = self.model.as_ref() else {
@@ -922,26 +710,12 @@ impl CharacterRenderer {
         }
     }
 
-    /// Update the camera target to perfectly frame the character's AABB
+    /// Update the camera target to frame the character. The
+    /// target is derived from the chest bone's **world rest Y**
+    /// so it stays stable under animation — the animated world
+    /// position would oscillate with an active VRMA motion and
+    /// produce a choppy look-at.
     pub fn update_camera_target(&mut self, model_scale: f32) {
-        // PR-fix: the camera target is read by `look_at::compute_world_target`
-        // (via the orthographic camera's eye / target) which then drives the
-        // head-look-at output every frame. The original implementation read
-        // `model.nodes.world_positions[chest.node][1]` — the **animated**
-        // chest bone world Y from the previous frame. With an active VRMA
-        // motion that oscillated the chest, the camera target oscillated
-        // frame-to-frame, the cursor→world projection oscillated with it,
-        // and the resulting look-at was visibly choppy.
-        //
-        // The fix is to read the chest bone's **world rest Y** (computed by
-        // walking the parent chain through `nodes.parents` +
-        // `nodes.rest_local_positions`). The rest pose is constant for the
-        // lifetime of the model, so the camera target is now stable under
-        // animation. The first fix pass accidentally read
-        // `chest.rest.translation[1]` — the **local** glTF `Node::transform()`
-        // (offset from the parent bone) — which made the camera target
-        // ~7× too low for a humanoid chest deep in the chain and broke the
-        // framing, the look-at, and the drag.
         let mut target = Vec3::ZERO;
 
         if let Some(model) = &self.model {
@@ -979,76 +753,47 @@ impl CharacterRenderer {
         self.camera.target()
     }
 
-    /// PR5.6: build the per-frame camera uniform for the
-    /// debug overlay so its `view_proj` matches what the
-    /// main VRM pass used. The orthographic camera's
-    /// `uniform()` is infallible in practice, so this
-    /// returns `Option` for API symmetry with the debug
-    /// pipeline's own fallible future.
+    /// Per-frame camera uniform for the debug overlay so its
+    /// `view_proj` matches the main VRM pass. Returns `Option`
+    /// for API symmetry with the debug pipeline.
     pub fn camera_uniform_dbg(&self) -> Option<ene_vrm::camera::CameraUniform> {
         self.camera.uniform().ok()
     }
 
-    /// PR4.8: latest per-bone output for `"bone"`-type
-    /// models. `None` for `"expression"`-type models or
-    /// before the first frame. Consumed by
-    /// [`Self::update_motion`] (PR4.16) — the value is
-    /// forwarded into
-    /// [`ene_vrm::VrmModel::update_skin_palette`] every
-    /// frame, so the head and eyes track the cursor. The
-    /// accessor stays for diagnostics and future
-    /// settings-UI work (e.g. an "override LookAt from
-    /// expression" toggle that wants to peek at the
-    /// current value).
-    #[allow(dead_code)] // Diagnostic accessor; the per-frame read happens inside `update_motion`.
+    /// Latest per-bone output for `"bone"`-type models. Consumed
+    /// inside [`Self::update_motion`]; the accessor is kept for
+    /// diagnostics.
+    #[allow(dead_code)]
     pub fn look_at_bone_output(&self) -> Option<&LookAtBoneOutput> {
         self.look_at_bone_output.as_ref()
     }
 
-    /// The most recent smoothed world target (or `None` if no cursor
-    /// sample has been processed yet).
-    #[expect(dead_code)] // PR4.5+ skinning will read this to drive bone rotations.
+    /// The most recent smoothed world target (or `None`).
+    #[expect(dead_code)]
     pub fn look_at_target(&self) -> Option<Vec3> {
         self.look_at.smoothed_world_target
     }
 
-    /// Mutable access to the underlying [`LookAtState`]. Used by the
-    /// runtime to compute `body_tracking_for_strength` for the
-    /// current `look_at_strength` slider value.
-    #[expect(dead_code)] // PR4.5+ will read body-tracking profile.
+    /// Per-bone body-tracking weights for the current
+    /// `look_at_strength` slider value.
+    #[expect(dead_code)]
     pub fn body_tracking(&self, strength: f32) -> crate::look_at::BodyTracking {
         crate::look_at::body_tracking_for_strength(strength)
     }
 
-    /// PR4.2 follow-up diagnostic: (aspect_ratio, eye, target,
-    /// viewport_height).
-    #[allow(dead_code)] // One-shot diagnostic log only.
+    /// Diagnostic: (aspect_ratio, eye, target, viewport_height).
+    #[allow(dead_code)]
     pub fn camera_dbg(&self) -> (f32, [f32; 3], [f32; 3], f32) {
         let (eye, target, viewport_height, aspect) = self.camera.debug();
         (aspect, eye, target, viewport_height)
     }
 
-    /// Compute the per-frame auto-fit scale: the multiplier that
-    /// makes the loaded model's normalised AABB fit the current
-    /// viewport with `margin` of unused space on every side.
-    /// Returns `1.0` if the model is not loaded (e.g. the default
-    /// VRM failed to load and the renderer is only clearing).
-    ///
-    /// The runtime multiplies this by
-    /// `settings.character_state.model_scale` so the user's "zoom"
-    /// slider still works on top of the fit. At the default
-    /// `model_scale = 1.0` the model now hugs the viewport
-    /// (with `margin = 0.9` it occupies 90 % of the viewport
-    /// height and fits horizontally). Larger `model_scale` values
-    /// zoom in past the fit (e.g. `2.0` → 2× the fit size), which
-    /// is what the user wants when they want a close-up.
-    ///
-    /// PR4.18: the vertex buffer is now in raw glTF space; the
-    /// model matrix folds `T(-center) * S(normalize_scale) *
-    /// T(position)` in at draw time. The fit is computed
-    /// against the **normalised** AABB (max extent 1.5) so the
-    /// returned scale is the multiplier on the normalised
-    /// space — not on the raw space.
+    /// Compute the auto-fit scale that makes the loaded model's
+    /// normalised AABB fit the viewport with `margin` of unused
+    /// space on every side. The runtime multiplies this by
+    /// `settings.character_state.model_scale` so the user's zoom
+    /// slider works on top of the fit. Returns `1.0` if no model
+    /// is loaded.
     pub fn auto_fit_scale(&self, margin: f32) -> f32 {
         match self.model.as_ref() {
             None => 1.0,
@@ -1059,16 +804,9 @@ impl CharacterRenderer {
         }
     }
 
-    /// The full per-character model matrix that folds the
-    /// raw-space vertex buffer through the loader's
-    /// `T(-center) * S(normalize_scale)` and the per-character
-    /// translation / scale.
-    ///
-    /// `actual_scale` is the (auto-fit) scale to apply on top
-    /// of the normalised space. The runtime multiplies this by
-    /// the user's `model_scale` setting before calling
-    /// [`Self::model_matrix`], so the helper just receives the
-    /// already-resolved `actual_scale`.
+    /// Full per-character model matrix: folds the raw-space
+    /// vertex buffer through `T(-center) * S(normalize_scale)`
+    /// and the per-character translation / scale.
     pub fn model_matrix(&self, character_position: Vec3, actual_scale: f32) -> Mat4 {
         let (center, normalize_scale) = match self.model.as_ref() {
             None => ([0.0, 0.0, 0.0], 1.0),
@@ -1080,16 +818,15 @@ impl CharacterRenderer {
             * Mat4::from_translation(Vec3::from(center) * -1.0)
     }
 
-    /// PR4.2 follow-up diagnostic: (depth_width, depth_height).
-    #[allow(dead_code)] // One-shot diagnostic log only.
+    /// Diagnostic: (depth_width, depth_height).
+    #[allow(dead_code)]
     pub fn depth_size_dbg(&self) -> (u32, u32) {
         self.depth_size
     }
 
-    /// PR5.6: hand the depth attachment to the debug
-    /// overlay so it can `LoadOp::Load` the depth the main
-    /// VRM pass wrote. Returns `None` before `init` /
-    /// `resize` produces a depth texture.
+    /// Hand the depth attachment to the debug overlay so it can
+    /// `LoadOp::Load` the depth the main VRM pass wrote. Returns
+    /// `None` before `init` / `resize` produces a depth texture.
     pub fn depth_view(&self) -> Option<&wgpu::TextureView> {
         self.depth_view.as_ref()
     }
@@ -1098,16 +835,15 @@ impl CharacterRenderer {
         self.model.as_ref()
     }
 
-    /// PR4.2 follow-up diagnostic: AABB of the loaded vertex data
-    /// (min, max). The loader's normalize centres the AABB on
-    /// origin so both halves should be symmetric; if not, that's
-    /// the bug.
-    #[allow(dead_code)] // One-shot diagnostic log only.
+    /// Diagnostic: AABB of the loaded vertex data (min, max).
+    /// The loader's normalize centres the AABB on origin; if
+    /// not symmetric, that's a bug.
+    #[allow(dead_code)]
     pub fn model_aabb_dbg(&self) -> Option<([f32; 3], [f32; 3])> {
         self.model.as_ref().map(|m| m.aabb())
     }
 
-    /// PR4.19 diagnostic: the loader-captured AABB centre. The
+    /// Diagnostic: the loader-captured AABB centre. The
     /// runtime folds `T(-center)` into the model matrix; if the
     /// centre is wildly off (e.g. a hair vertex got included in
     /// the AABB) the model will be shifted out of the viewport.
@@ -1116,7 +852,7 @@ impl CharacterRenderer {
         self.model.as_ref().map(|m| m.center()).unwrap_or([0.0; 3])
     }
 
-    /// PR4.19 diagnostic: the loader's `1.5 / max_extent` scale.
+    /// Diagnostic: the loader's `1.5 / max_extent` scale.
     /// `actual_scale × normalize_scale` should be ~1.42 for
     /// Alicia; if the runtime sees a different value, the loader
     /// computed the wrong AABB.
@@ -1128,7 +864,7 @@ impl CharacterRenderer {
             .unwrap_or(1.0)
     }
 
-    /// PR4.19 diagnostic: the merged skeleton joint count after
+    /// Diagnostic: the merged skeleton joint count after
     /// the multiple-skin merge. Should be the deduplicated total
     /// of every skin's joint list.
     #[allow(dead_code)]
@@ -1136,9 +872,8 @@ impl CharacterRenderer {
         self.model.as_ref().map(|m| m.joint_count())
     }
 
-    /// PR4.19 diagnostic: the camera's view_proj matrix in
-    /// column-major format. Returned as `[[f32; 4]; 4]` so the
-    /// runtime can read individual cells for the diagnostic log.
+    /// Diagnostic: camera `view_proj` matrix in column-major
+    /// format.
     #[allow(dead_code)]
     pub fn camera_view_proj_dbg(&self) -> [[f32; 4]; 4] {
         self.camera
@@ -1147,25 +882,19 @@ impl CharacterRenderer {
             .unwrap_or([[0.0; 4]; 4])
     }
 
-    /// PR4.19 diagnostic: just the view matrix (proj * view is
-    /// what's actually uploaded, but the view alone tells us if
-    /// `look_at_rh` is producing the expected rotation+translation).
+    /// Diagnostic: just the view matrix.
     #[allow(dead_code)]
     pub fn camera_view_dbg(&self) -> [[f32; 4]; 4] {
         self.camera.debug_view().to_cols_array_2d()
     }
 
-    /// PR4.19 diagnostic: just the orthographic projection
-    /// matrix. Exposed so the runtime can dump it for the
-    /// "5x taller" investigation.
+    /// Diagnostic: just the orthographic projection matrix.
     #[allow(dead_code)]
     pub fn camera_proj_dbg(&self) -> [[f32; 4]; 4] {
         self.camera.debug_proj().to_cols_array_2d()
     }
 
-    /// PR4.19 diagnostic: the full `view_proj * model.model`
-    /// matrix. If this dump shows a 5x Y scale, the bug is in
-    /// the camera/projection, not in the model matrix.
+    /// Diagnostic: `view_proj * model` combined matrix.
     #[allow(dead_code)]
     pub fn model_view_proj_dbg(
         &self,
@@ -1179,15 +908,10 @@ impl CharacterRenderer {
             .map(|u| u.view_proj)
             .unwrap_or([[0.0; 4]; 4]);
         let vp = glam::Mat4::from_cols_array_2d(&view_proj);
-        let combined = vp * model;
-        combined.to_cols_array_2d()
+        (vp * model).to_cols_array_2d()
     }
 
-    /// PR4.19 diagnostic: the **exact** matrix the runtime
-    /// produces and ships to the GPU. Captures any divergence
-    /// between what we compute here and what the runtime
-    /// actually uses (the runtime had been observed to send a
-    /// different `char_pos` than the user configured).
+    /// Diagnostic: the exact matrix the runtime ships to the GPU.
     #[allow(dead_code)]
     pub fn model_matrix_runtime_dbg(
         &self,
@@ -1198,11 +922,8 @@ impl CharacterRenderer {
             .to_cols_array_2d()
     }
 
-    /// PR4.3: world-space AABB `(min, max)` of the loaded model
-    /// after the per-frame `ModelUniform` is applied. `None` if no
-    /// model is loaded. Reserved for the drag hit-test and future
-    /// click-through logic (PR5); the runtime currently computes
-    /// the AABB inline so the helper is not yet plumbed.
+    /// World-space AABB `(min, max)` of the loaded model after
+    /// the per-frame `ModelUniform` is applied.
     #[allow(dead_code)]
     pub fn aabb_world(&self, model_uniform: &ModelUniform) -> Option<(Vec3, Vec3)> {
         let model = self.model.as_ref()?;
@@ -1211,30 +932,12 @@ impl CharacterRenderer {
         Some(drag::transformed_aabb_bounds(lo, hi, model_mat))
     }
 
-    /// PR5.2: build the list of `(local_position, radius)` pairs
-    /// that the runtime hands to
-    /// [`crate::physics::PhysicsWorld::add_character_bone_colliders`].
-    /// Each entry corresponds to one humanoid bone. Bones with
-    /// an auto-computed radius below [`MIN_BONE_RADIUS`] — almost
-    /// always finger segments — are filtered out so the
-    /// collider count stays small.
-    ///
-    /// `actual_scale` is `auto_fit_scale * model_scale`. The
-    /// returned **radius** is in world units: leaf bones use a
-    /// PR5.4: build the per-bone [`BoneShapeSpec`] list that the
-    /// runtime hands to
-    /// [`crate::physics::PhysicsWorld::add_character_bone_colliders`].
-    /// The shape category (sphere / capsule / capsule_y) and
-    /// the dimensions come from the per-vertex skinning
-    /// weights of the loaded mesh (see
-    /// [`crate::character::collider::compute_bone_specs`]);
-    /// finger segments and other bones whose computed radius
-    /// falls below [`MIN_BONE_RADIUS`] are dropped.
-    ///
-    /// `actual_scale = auto_fit_scale × model_scale`. The
-    /// returned dimensions are already in world units so the
-    /// colliders match the rendered mesh even when the user
-    /// has not set `model_scale = 1.0`.
+    /// Build the per-bone [`BoneShapeSpec`] list for the physics
+    /// world. Shape category and dimensions come from the
+    /// per-vertex skinning weights of the loaded mesh (see
+    /// [`crate::character::collider::compute_bone_specs`]).
+    /// `actual_scale = auto_fit_scale × model_scale` and the
+    /// returned dimensions are in world units.
     #[allow(dead_code)]
     pub fn build_character_bone_specs(&mut self, actual_scale: f32) -> Vec<BoneShapeSpec> {
         let Some(model) = self.model.as_ref() else {
@@ -1245,15 +948,12 @@ impl CharacterRenderer {
         specs
     }
 
-    /// PR5.4: read the **current** (animated) world-space
-    /// translation and rotation of active humanoid bones, in
-    /// the same order as
-    /// [`Self::build_character_bone_specs`]. The animation
-    /// system (`update_skin_palette` inside `update_motion`)
-    /// updates `model.nodes.world_positions` and
-    /// `model.nodes.world_rotations` every frame, so reading
-    /// them here gives the live post-animation transforms
-    /// without any per-frame GPU readback.
+    /// Read the current (animated) world-space translation and
+    /// rotation of active humanoid bones, in the same order as
+    /// [`Self::build_character_bone_specs`]. `update_skin_palette`
+    /// inside `update_motion` updates `model.nodes.world_*` every
+    /// frame, so reading them here gives the live post-animation
+    /// transforms without GPU readback.
     #[allow(dead_code)]
     pub fn current_bone_poses(&self) -> Vec<BonePose> {
         let Some(model) = self.model.as_ref() else {
@@ -1299,30 +999,16 @@ impl CharacterRenderer {
     }
 }
 
-/// Compute the world-space position of a humanoid bone. Mirrors
-/// the per-frame model matrix's `T(-center) * S(normalize_scale)`
-/// re-centring step (see
-/// [`CharacterRenderer::model_matrix`]):
-///
-/// ```text
-/// (bone_raw - center) * normalize_scale * model_scale + character_position
-/// ```
-///
-/// `center` and `normalize_scale` come from the loader
-/// ([`VrmModel::center`] / [`VrmModel::normalize_scale`]) and
-/// are taken as primitives so the helper can be unit-tested
-/// without constructing a full `VrmModel`.
+/// Compute the world-space position of a humanoid bone:
+/// `(bone_raw - center) * normalize_scale * model_scale + character_position`.
 fn bone_world_rest_position(model: &VrmModel, bone: &HumanoidBoneEntry) -> Vec3 {
     crate::character::collider::compute_rest_world_positions(model)[bone.node]
 }
 
-/// A.6: build a `SpringBoneSimulator` from the loaded model
-/// and the parsed `VRMC_springBone` extension. Reads the
-/// model-wide world transforms (positions / rotations) and
-/// the rest local rotations; the simulator's `step` later
-/// needs the live transforms every frame, so a clone of the
-/// rest positions + rest local rotations is enough to
-/// initialise the per-joint state.
+/// Build a `SpringBoneSimulator` from the loaded model and the
+/// parsed `VRMC_springBone` extension. Clones the rest positions
+/// and rest local rotations so the simulator can step on its own
+/// schedule without the live model data.
 fn build_spring_bone_simulator(
     model: &VrmModel,
     props: &SpringBoneProperties,
@@ -1353,14 +1039,10 @@ fn build_spring_bone_simulator(
     Some(sim)
 }
 
-/// A.6: walk the parent chain from the rest-pose world
-/// transforms. The `SpringBoneSimulator::new` constructor
-/// expects a per-node world rotation, but the rest-pose
-/// values are stored on the `Node::transform()` of the
-/// glTF source. The loader leaves the `world_rotations`
-/// vec at identity until `update_skin_palette` fills it,
-/// so we accumulate the rest local rotations up the
-/// parent chain to produce the rest world rotations.
+/// Walk the parent chain accumulating rest local rotations to
+/// produce per-node world rest rotations (the loader leaves
+/// `world_rotations` at identity until `update_skin_palette`
+/// fills it).
 fn collect_world_rest_rotations(model: &VrmModel) -> std::collections::HashMap<usize, Quat> {
     let n = model.nodes.len();
     let mut out = std::collections::HashMap::with_capacity(n);
@@ -1377,9 +1059,9 @@ fn collect_world_rest_rotations(model: &VrmModel) -> std::collections::HashMap<u
     out
 }
 
-/// A.6: same as `collect_world_rest_rotations` but stops one
-/// step short of each node so the per-bone parent
-/// rotations are available to the simulator.
+/// Like `collect_world_rest_rotations` but stops one step short
+/// of each node so the simulator has the per-bone parent
+/// rotation available.
 fn collect_parent_world_rest_rotations(model: &VrmModel) -> std::collections::HashMap<usize, Quat> {
     let n = model.nodes.len();
     let mut out = std::collections::HashMap::with_capacity(n);
@@ -1410,11 +1092,9 @@ fn bone_world_position(
     character_position + local * model_scale
 }
 
-/// Pick the first available bone from `head` → `chest` → `hips`
-/// in the humanoid registry. Returns `None` when none of the
-/// three are registered (e.g. legacy VRM 0.x without a humanoid
-/// block). The caller is expected to fall back to the AABB
-/// center (= `character_position` in world space) in that case.
+/// Pick the first available `head` → `chest` → `hips` bone. The
+/// caller is expected to fall back to the AABB center
+/// (= `character_position` in world space) on `None`.
 #[allow(dead_code)]
 fn pick_body_center_bone(humanoid: &ene_vrm::HumanoidBoneRegistry) -> Option<&HumanoidBoneEntry> {
     humanoid
@@ -1423,46 +1103,19 @@ fn pick_body_center_bone(humanoid: &ene_vrm::HumanoidBoneRegistry) -> Option<&Hu
         .or_else(|| humanoid.hips())
 }
 
-/// Compute the chest bone's **world** rest Y position by
-/// walking the parent chain in the rest pose, accumulating
-/// each ancestor's `rest_local_positions` Y. Mirrors the math
-/// the loader's `NodeHierarchy::compute_world_transforms`
-/// does in `loader.rs` (one frame, but for a single bone's Y
-/// axis).
-///
-/// PR-fix follow-up: the first PR-fix pass read
-/// `chest.rest.translation[1]` directly. That field is the
-/// **local** glTF `Node::transform()` (the offset from the
-/// parent bone), not the world position. For a humanoid
-/// chest deep in the chain (hips → spine → chest → …) the
-/// local value is just the offset from the parent (~0.2 m)
-/// while the world value is the sum of all ancestors
-/// (~1.4 m). Using the local value pushed the camera
-/// target ~7× lower than the model, framing the head at the
-/// very top of the viewport and breaking the look-at
-/// (which depends on the camera matrix) and the drag (the
-/// user couldn't see the model well enough to click on it).
+/// Chest bone's **world** rest Y (sum of the parent chain's
+/// `rest_local_positions` Y). Reading `bone.rest.translation[1]`
+/// instead would give the local glTF `Node::transform()` —
+/// ~0.2 m for a chest deep in the hips → spine → chest chain —
+/// and would push the camera target ~7× too low.
 fn chest_world_rest_y(model: &VrmModel, bone: &HumanoidBoneEntry) -> f32 {
     bone_world_rest_position(model, bone).y
 }
 
-/// Compute the Y component of the camera target from the
-/// chest bone's **world** rest Y. Pure rest-pose math: the
-/// function deliberately takes a pre-computed world rest Y
-/// (and not any animated per-frame value) so VRMA /
-/// node-constraint / spring-bone motion cannot make the
-/// camera (and therefore the head look-at output, which
-/// depends on the camera) jitter.
-///
-/// PR-fix: the previous `update_camera_target` read
-/// `model.nodes.world_positions[chest.node][1]` — the
-/// previous frame's animated chest world Y — which made the
-/// look-at visibly choppy when a motion oscillated the
-/// chest. The follow-up replaces that with
-/// [`chest_world_rest_y`], which is the **rest** world Y
-/// (stable) and not the local rest Y (the first fix
-/// accidentally read the local value, which broke the
-/// framing).
+/// Camera target Y. Takes the pre-computed world rest Y (not the
+/// animated per-frame value) so VRMA / node-constraint / spring-
+/// bone motion cannot make the camera (and therefore the head
+/// look-at) jitter.
 fn chest_target_y(
     chest_world_rest_y: f32,
     model_center_y: f32,
@@ -1488,10 +1141,9 @@ mod body_center_tests {
         }
     }
 
-    /// `bone_world_position` must apply the loader's
-    /// `T(-center) * S(normalize_scale)` transform followed by
-    /// the per-frame `S(model_scale) * T(character_position)`.
-    /// Verifies the arithmetic against a hand-computed example.
+    /// `bone_world_position` applies the loader's
+    /// `T(-center) * S(normalize_scale)` and the per-frame
+    /// `S(model_scale) * T(character_position)`.
     #[test]
     fn bone_world_position_applies_loader_and_runtime_transforms() {
         let bone = make_bone(Vec3::new(0.0, 2.0, 0.0));
@@ -1511,10 +1163,8 @@ mod body_center_tests {
         assert_eq!(world, Vec3::new(0.5, 0.75, 0.0));
     }
 
-    /// `bone_world_position` must also respect `model_scale`.
-    /// Doubling `model_scale` doubles the bone's offset from
-    /// the character position, mirroring the model matrix's
-    /// `S(actual_scale) * T(position)` step.
+    /// `bone_world_position` must respect `model_scale`: doubling
+    /// it doubles the bone's offset from the character position.
     #[test]
     fn bone_world_position_scales_offset_by_model_scale() {
         let bone = make_bone(Vec3::new(0.0, 2.0, 0.0));
@@ -1530,9 +1180,7 @@ mod body_center_tests {
     }
 
     /// `pick_body_center_bone` must prefer `head` over `chest`
-    /// and `chest` over `hips`. A registry with all three returns
-    /// the head, exactly as the camera-target fallback chain
-    /// intends.
+    /// and `chest` over `hips`.
     #[test]
     fn pick_body_center_prefers_head_over_chest_and_hips() {
         let mut reg = HumanoidBoneRegistry::new();
@@ -1571,11 +1219,9 @@ mod body_center_tests {
         assert!(pick_body_center_bone(&reg).is_none());
     }
 
-    /// `body_center_world` on an uninitialised renderer (no
-    /// model loaded) must return `character_position`
-    /// unchanged, so the camera does not stare at the world
-    /// origin while the renderer's synthetic fallback is in
-    /// place.
+    /// `body_center_world` with no model loaded must return
+    /// `character_position` unchanged (the camera does not stare
+    /// at the world origin).
     #[test]
     fn body_center_world_no_model_returns_character_position() {
         let renderer = CharacterRenderer::uninit(std::path::Path::new("."), "missing.vrm");
@@ -1586,23 +1232,9 @@ mod body_center_tests {
 
 #[cfg(test)]
 mod camera_target_tests {
-    //! PR-fix regression tests: the camera target must remain
-    //! stable when a VRMA motion oscillates the chest bone,
-    //! and must use the chest's **world** rest Y (not the
-    //! local glTF `Node::transform()`) so a humanoid chest
-    //! deep in the chain (hips → spine → chest → …) frames
-    //! the model correctly.
-    //!
-    //! History:
-    //! - Original code read `nodes.world_positions[chest.node][1]`
-    //!   (animated). Choppy under VRMA.
-    //! - First fix read `chest.rest.translation[1]` (local).
-    //!   Camera ~7× too low; broke framing + look-at + drag.
-    //! - Second fix (this module) walks the parent chain to
-    //!   compute the **world** rest Y, then applies the same
-    //!   Y arithmetic. The tests below pin the parent-chain
-    //!   semantics by building a 2- and a 3-node hierarchy
-    //!   where the local and world values differ.
+    //! Pins the chest world rest Y chain walk so the camera
+    //! target stays stable when a VRMA motion oscillates the
+    //! chest bone.
     use super::*;
     use ene_vrm::{
         BoneRestTransform, ExpressionLayer, HumanoidBoneEntry, HumanoidBoneRegistry,
@@ -1610,17 +1242,10 @@ mod camera_target_tests {
     };
     use glam::Quat;
 
-    /// Build a minimal `VrmModel` with a chain of nodes. The
-    /// chain is `nodes[0]` (root) → `nodes[1]` (child) →
-    /// `nodes[2]` (grandchild) — every `rest_local_position[i]`
-    /// is the Y offset of node `i` relative to its parent.
-    /// The chest bone is registered at the **last** node so
-    /// the world rest Y is the sum of all chain offsets.
-    ///
-    /// `chain_y` carries the per-link Y offsets; the model
-    /// is built with `normalize_scale` (the loader's
-    /// `1.5 / max_extent` — drives how much the camera
-    /// target Y is shrunk by).
+    /// Build a `VrmModel` with a `nodes[0] → nodes[1] → …`
+    /// chain. `chain_y[i]` is the Y offset of node `i` relative
+    /// to its parent. The chest bone is registered at the last
+    /// node so the world rest Y is the sum of all chain offsets.
     fn model_with_chest_chain(
         chain_y: &[f32],
         chest_y_at_last_node: f32,
@@ -1702,15 +1327,9 @@ mod camera_target_tests {
         );
     }
 
-    /// `chest_world_rest_y` must not accidentally sum X or Z
-    /// — only Y. A 2-link chain with non-zero X / Z offsets
-    /// on the parent must still report the world Y as the
-    /// pure Y sum.
+    /// `chest_world_rest_y` must sum only Y, not X or Z.
     #[test]
     fn chest_world_rest_y_sums_only_y_axis() {
-        // Custom builder with mixed-axis offsets so any bug
-        // in the sum (e.g. summing a Vec3 instead of [1]) is
-        // caught immediately.
         let mut humanoid = HumanoidBoneRegistry::new();
         humanoid.insert(
             "chest".into(),
@@ -1761,30 +1380,18 @@ mod camera_target_tests {
         );
     }
 
-    /// PR-fix: the camera target Y must come from the
-    /// chest's **world** rest Y (sum of parent chain), not
-    /// the local glTF `Node::transform()`. With a 2-link
-    /// chain (parent at rest y=1.0, chest at local y=0.2)
-    /// and `center.y=0`, `normalize_scale=0.5`,
-    /// `model_scale=1.0`, the world rest Y is 1.2, so the
-    /// camera target y must be `1.2 * 0.5 = 0.6`.
-    /// Mutating `world_positions` between two
-    /// `update_camera_target` calls must leave the target
-    /// unchanged (chop test).
+    /// Camera target Y must come from the chest's **world** rest Y
+    /// (sum of parent chain), and must stay stable when a VRMA
+    /// motion oscillates the chest bone's animated position.
     #[test]
     fn update_camera_target_is_stable_and_uses_world_rest_y() {
         let mut renderer = CharacterRenderer::uninit(std::path::Path::new("."), "missing.vrm");
-        // 2-link chain: parent (root) at y=1.0, child (chest)
-        // at local y=0.2 → world rest Y = 1.2.
-        // normalize_scale = 0.5 to match Alicia's loaded value.
         renderer.set_model_for_test(model_with_chest_chain(&[1.0, 0.2], 0.2, 0.5));
 
         renderer.update_camera_target(1.0);
         let (_eye1, target1, _vh1, _aspect1) = renderer.camera.debug();
         let y_after_first_call = target1[1];
 
-        // Simulate a VRMA frame that has just pushed the
-        // chest bone up by 1 m (e.g. the model jumping).
         {
             let model = renderer.model.as_mut().expect("model installed");
             model.nodes.world_positions[1] = Vec3::new(0.0, 5.0, 0.0);
@@ -1793,10 +1400,6 @@ mod camera_target_tests {
         let (_eye2, target2, _vh2, _aspect2) = renderer.camera.debug();
         let y_after_animation = target2[1];
 
-        // 1.2 (world rest Y) * 0.5 (normalize_scale) *
-        // 1.0 (model_scale) = 0.6. The first fix returned
-        // 0.1 (local only), the original choppy code
-        // returned 2.5/5.0 after mutation.
         assert!(
             (y_after_first_call - 0.6).abs() < 1e-5,
             "first call must read the world rest Y (1.2) * 0.5 = 0.6, got {y_after_first_call}"
@@ -1807,10 +1410,8 @@ mod camera_target_tests {
         );
     }
 
-    /// `update_camera_target` on a renderer with no model
-    /// must not panic; the camera target stays at the
-    /// orthographic default (Vec3::ZERO) so the cleared
-    /// window continues to render.
+    /// `update_camera_target` with no model must not panic; the
+    /// target stays at the orthographic default.
     #[test]
     fn update_camera_target_without_model_keeps_default_target() {
         let mut renderer = CharacterRenderer::uninit(std::path::Path::new("."), "missing.vrm");

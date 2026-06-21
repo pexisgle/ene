@@ -1,26 +1,16 @@
 //! Cursor → smoothed world target for the head-look-at system.
 //!
-//! PR4.2: port of the legacy
-//! `apps/ene-desktop/src/character.rs::update_cursor_look_target`
-//! (lines 435–478) and `body_tracking_for_strength` (lines 514–537).
 //! The smoothed world target is stored in [`LookAtState`]; the
-//! runtime exposes it to the renderer. PR4.5+ (skinning) will use
-//! it to drive humanoid bone rotations. For now PR4.2 only stores
-//! the value and feeds it to the orthographic camera's eye
-//! position so a subtle pan of the camera tracks the cursor —
-//! the visible "look at" effect itself waits for skinning.
+//! runtime exposes it to the renderer. Skinning (future work) will
+//! use it to drive humanoid bone rotations; for now the value is
+//! fed to the orthographic camera so a subtle pan tracks the cursor.
 //!
-//! All numbers match the legacy exactly so screenshots /
-//! regression tests stay comparable:
-//!
-//! - smoothing speed `7.0` (the spec doesn't declare a
-//!   smoothing value; PR4.8 reads it from
-//!   [`ene_vrm::LookAtProperties::DEFAULT_SMOOTHING`]),
-//! - neutral target `(head_x, head_y, head_z + 1.8)`,
-//! - cursor NDC multiplied by `viewport_height / 2` and
-//!   `viewport_height / 2 * aspect`,
-//! - ray intersected with the plane through the head, normal
-//!   `camera_forward` (world-space).
+//! All numbers match the legacy exactly so screenshots and
+//! regression tests stay comparable: smoothing speed `7.0`,
+//! neutral target `(head_x, head_y, head_z + 1.8)`, cursor NDC
+//! scaled by `viewport_height / 2` and `viewport_height / 2 *
+//! aspect`, ray intersected with the plane through the head with
+//! normal `camera_forward` (world space).
 use glam::{Mat4, Vec2, Vec3};
 
 /// Look-at state. Owned by `CharacterRenderer` so it survives
@@ -36,34 +26,17 @@ pub struct LookAtState {
 }
 
 /// Z offset (in world units) of the neutral "look straight ahead"
-/// target relative to the head. Mirrors the legacy `Vec3::new(0, 0,
-/// 1.8)`.
+/// target relative to the head.
 const NEUTRAL_TARGET_Z: f32 = 1.8;
 
 /// Y offset (in world units) of the head above the character's
-/// origin. The legacy Bevy build hard-coded this as
-/// `glam::Vec3::new(0.0, 1.0, 0.0)` directly in
-/// `Runtime::RedrawRequested`; PR4.2 hoisted the look-at math
-/// into this module but left the magic number inline in the
-/// runtime. Centralising it here makes the value discoverable
-/// and easy to tune alongside [`NEUTRAL_TARGET_Z`].
-///
-/// The 1.0-metre value is an approximation of a humanoid head
-/// position above the model's pivot. PR4.8 keeps the constant
-/// as the **fallback** for models without a humanoid `head`
-/// bone; models that ship a humanoid head bone use the bone's
-/// rest position scaled by `model_scale` instead.
+/// origin. An approximation of a humanoid head position above the
+/// model's pivot. Acts as the fallback for models without a
+/// humanoid `head` bone; those use the bone's rest position scaled
+/// by `model_scale` instead.
 pub const HEAD_OFFSET_Y: f32 = 1.0;
 
 /// Build the world-space head position from a model's pivot.
-/// Mirrors `character_position + Vec3::new(0, HEAD_OFFSET_Y, 0)`
-/// in the runtime, but keeps the magic number in one place.
-///
-/// PR4.8 keeps this helper as the **fallback** path for
-/// models without a humanoid head bone. The
-/// [`CharacterRenderer`](crate::character::CharacterRenderer)
-/// uses the humanoid registry's `head.rest.translation` when
-/// present and falls back to this helper otherwise.
 pub fn head_world_for(pivot: Vec3) -> Vec3 {
     pivot + Vec3::new(0.0, HEAD_OFFSET_Y, 0.0)
 }
@@ -87,11 +60,9 @@ pub fn neutral_target(head_world: Vec3) -> Vec3 {
 /// `state` is updated in place. Returns the new smoothed target.
 ///
 /// `smoothing` is the per-frame exponential-smoothing rate (in
-/// `1/seconds`). The legacy `SMOOTHING_SPEED = 7.0` constant
-/// (PR4.2–PR4.7) is now a parameter — the runtime passes
-/// [`ene_vrm::LookAtProperties::DEFAULT_SMOOTHING`] by default
-/// (the VRM 1.0 spec does not declare a smoothing value, so the
-/// legacy value stands until a future spec extension lands).
+/// `1/seconds`). The VRM 1.0 spec does not declare a smoothing
+/// value, so callers pass
+/// [`ene_vrm::LookAtProperties::DEFAULT_SMOOTHING`] by default.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_world_target(
     cursor_logical: Vec2,
@@ -109,8 +80,6 @@ pub fn compute_world_target(
     let aspect = (viewport_size.0 as f32 / viewport_size.1 as f32).max(0.0001);
     let half_h = ene_vrm::camera::VIEWPORT_HEIGHT * 0.5;
     let half_w = half_h * aspect;
-    // Cursor position in view space, at z=0 (the camera's look-at
-    // plane).
     let view_pos = Vec3::new(ndc.x * half_w, ndc.y * half_h, 0.0);
 
     let view = Mat4::look_at_rh(camera_eye, camera_target, camera_up);
@@ -139,8 +108,7 @@ pub fn compute_world_target(
 }
 
 /// Per-bone body-tracking weights and limits, derived from the
-/// `look_at_strength` slider. Mirrors the legacy
-/// `body_tracking_for_strength` 1:1.
+/// `look_at_strength` slider.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BodyTracking {
     pub head_weight: f32,
@@ -191,11 +159,6 @@ pub fn body_tracking_for_strength(strength: f32) -> BodyTracking {
 mod tests {
     use super::*;
 
-    /// Issue #9: `head_world_for` must offset the pivot by
-    /// exactly `HEAD_OFFSET_Y` on the Y axis and leave X / Z
-    /// untouched. The runtime used to inline
-    /// `character_position + glam::Vec3::new(0.0, 1.0, 0.0)`;
-    /// the helper is the single source of truth now.
     #[test]
     fn head_world_for_offsets_y_only() {
         let pivot = Vec3::new(-1.5, 0.0, 2.25);
@@ -205,11 +168,6 @@ mod tests {
         assert_eq!(head.y, HEAD_OFFSET_Y);
     }
 
-    /// Sanity: the constant is the expected 1.0 m so the
-    /// runtime regression test (which uses a fixed head
-    /// position) keeps producing the same look-at target.
-    /// Bumping this is a deliberate decision; the test
-    /// forces anyone changing it to update the comment.
     #[test]
     fn head_offset_y_constant_is_documented() {
         assert_eq!(HEAD_OFFSET_Y, 1.0);

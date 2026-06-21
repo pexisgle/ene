@@ -4,8 +4,6 @@
 //! for per-pixel alpha. The matching winit side is
 //! `with_no_redirection_bitmap(true)` (set in `runtime::window_attributes`).
 //! On other targets: `PRIMARY` (Vulkan on Linux/BSD, Metal on macOS).
-//!
-//! See `docs/architecture/wgpu-migration.md` §22.3 for context.
 use wgpu::{
     Adapter, BackendOptions, CompositeAlphaMode, Device, Instance, Queue, SurfaceCapabilities,
     TextureFormat,
@@ -51,13 +49,10 @@ impl GpuContext {
             .request_device(&wgpu::DeviceDescriptor {
                 label: None,
                 required_features: wgpu::Features::empty(),
-                // `downlevel_defaults()` is the WebGPU spec
-                // minimum and caps `max_bind_groups` to 4, which
-                // is too low for the VRM renderer (it uses 5
-                // bind groups in the standard pipeline and 7 in
-                // the MToon pipeline). Keep the downlevel base
-                // for portability but raise `max_bind_groups` to
-                // whatever the adapter actually supports.
+                // `downlevel_defaults()` caps `max_bind_groups` to 4,
+                // which is too low for the VRM renderer (5 standard,
+                // 7 MToon). Keep the downlevel base for portability
+                // and raise `max_bind_groups` to the adapter's limit.
                 required_limits: {
                     let mut limits =
                         wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits());

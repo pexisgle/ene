@@ -46,11 +46,9 @@ pub enum SettingsAction {
     CharacterPosYUp,
     CharacterPosZDown,
     CharacterPosZUp,
-    /// PR5.6: toggle the per-bone collider wireframe +
-    /// raycast hit-point overlay. Available on every
-    /// platform; bound to the F3 hotkey and the
-    /// "Show raycast colliders (debug)" checkbox on the
-    /// Character page.
+    /// Toggle the per-bone collider wireframe + raycast hit-point
+    /// overlay. Bound to the F3 hotkey and the "Show raycast
+    /// colliders (debug)" checkbox on the Character page.
     ToggleColliderDebug,
     ToggleInputRegionDebug,
     DebugFpsDown,
@@ -73,12 +71,10 @@ pub fn apply_action(
                 settings.characters.len(),
                 -1,
             );
-            // PR9: select_character now returns the per-character
-            // default expression so the caller can push it into
-            // the renderer's EmotionQueue. The dispatcher itself
-            // doesn't own the queue (it lives on SettingsUi) so
-            // we just return the value; the page_character / WASD
-            // hotkey paths handle the push.
+            // `select_character` returns the per-character
+            // default expression; the page_character / WASD
+            // hotkey paths are responsible for pushing it into
+            // the renderer's `EmotionQueue`.
             settings.select_character(idx);
         }
         SettingsAction::NextCharacter => {
@@ -190,9 +186,7 @@ pub fn apply_action(
             adjust_f32(&mut settings.character_state.character_position.z, 0.05);
         }
         SettingsAction::ToggleColliderDebug => {
-            // PR5.6: flip the collider debug overlay
-            // flag. Not persisted — defaults to `false`
-            // on every launch.
+            // Not persisted — defaults to `false` on every launch.
             if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
                 ui_state.show_collider_debug = !ui_state.show_collider_debug;
             }
@@ -247,12 +241,12 @@ fn send_ai_chat(
     }
 }
 
-#[allow(dead_code)] // `format` is used by the public `cycle_label` family below.
+#[allow(dead_code)]
 pub fn format_fps_label(fps: u32) -> String {
     target_fps_label(fps)
 }
 
-#[allow(dead_code)] // `format` is used by the public `cycle_label` family below.
+#[allow(dead_code)]
 pub fn format_shadow_label(quality: ShadowQuality) -> &'static str {
     match quality {
         ShadowQuality::Low => "Low",
@@ -261,7 +255,7 @@ pub fn format_shadow_label(quality: ShadowQuality) -> &'static str {
     }
 }
 
-#[allow(dead_code)] // `format` is used by the public `cycle_label` family below.
+#[allow(dead_code)]
 pub fn format_aa_label(mode: AntialiasingMode) -> &'static str {
     match mode {
         AntialiasingMode::Off => "Off",

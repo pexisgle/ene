@@ -1,31 +1,16 @@
 //! Per-bone collider specs and per-frame poses.
 //!
-//! PR5.2 shipped per-bone sphere colliders sized by a hand-picked
-//! constant. PR5.4 replaces that with three improvements:
+//! Humanoid bones pick a shape that follows their role (limbs get
+//! capsules along the parent→bone direction, the trunk gets a
+//! vertical capsule, and the head / jaw / eyes / shoulders get
+//! spheres), the dimensions come from the per-vertex skinning
+//! weights of the actual mesh, and limbs are tracked using both
+//! translation and rotation.
 //!
-//! 1. **Per-bone shape.** The sphere is the wrong primitive for
-//!    a humanoid — it inflates the head into the neck, makes the
-//!    forearms balloon over the chest, and pushes the hand
-//!    radius far past the fingertips. Each bone now picks a
-//!    shape that follows its role: limbs get capsules along
-//!    the parent→bone direction, the trunk gets a vertical
-//!    capsule, the head / jaw / eyes / shoulders get spheres.
-//! 2. **Vertex-weight sizing.** The dimensions come from the
-//!    per-vertex skinning weights of the actual mesh, not from
-//!    a name table. The loader now keeps a CPU-side mirror of
-//!    every `MeshVertex` (see `VrmPrimitive::vertices`); the
-//!    helpers below walk it once at model-load time to compute
-//!    a tight bounding primitive for each humanoid bone.
-//! 3. **Per-frame rotation.** Limbs can no longer be tracked
-//!    by translation alone — a swinging arm must rotate the
-//!    capsule. [`BonePose`] carries the bone's current
-//!    world rotation so `PhysicsWorld` can push it into
-//!    `set_rotation_wrt_parent` every `about_to_wait`.
-//!
-//! `BoneShapeSpec` is the static data the collider builder
-//! needs at construction time (local transform + Rapier
-//! shape, already in world units). `BonePose` is the per-frame
-//! delta the runtime pushes into the matching collider.
+//! `BoneShapeSpec` is the static data the collider builder needs
+//! at construction time (local transform + Rapier shape, already
+//! in world units). `BonePose` is the per-frame delta the runtime
+//! pushes into the matching collider.
 #![allow(dead_code)]
 use glam::{Mat4, Quat, Vec3};
 
@@ -47,11 +32,6 @@ pub const MIN_BONE_RADIUS: f32 = 0.025;
 const VERTEX_WEIGHT_THRESHOLD: f32 = 0.25;
 
 /// Shape category picked for a single humanoid bone.
-///
-/// `Sphere` is a round ball; `CapsuleY` is a Y-axis capsule in
-/// the collider's local frame (Rapier's `capsule_y`); `Capsule`
-/// is a capsule with an arbitrary local rotation (Rapier's
-/// generic capsule, axis along +Y before rotation).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BoneShape {
     /// Sphere of `radius` units, centred on the bone's rest
@@ -124,9 +104,7 @@ pub struct BoneShapeSpec {
 pub struct BonePose {
     /// Translation in the model's normalised frame (so
     /// `PhysicsWorld` can multiply by `actual_scale` to land
-    /// in world units). Mirrors the value
-    /// `current_bone_local_positions` used to return before
-    /// PR5.4.
+    /// in world units).
     pub translation: Vec3,
     /// Current world rotation of the bone (from
     /// `model.nodes.world_rotations[bone.node]`). For
@@ -272,16 +250,11 @@ fn compute_bone_spec(
     let world_positions =
         collect_weighted_world_positions(model, joint_idx, &inverse_bind, &joint_world_rest);
 
-    // The collider's local position is the bone's rest
-    // position in the model's normalised frame, then scaled
-    // to world units. `PhysicsWorld` later multiplies by
-    // `actual_scale` again — we therefore divide by
-    // `normalize_scale` so the final product is correct.
-    // Wait, no: `actual_scale` is in the normalised frame
-    // already, and `rest_world` is in raw glTF space. The
-    // collider sits in the body frame, which uses the
-    // normalised frame (matches the rendered model after the
-    // body's translation is set to `character_position`).
+    // `actual_scale` is in the normalised frame; `rest_world` is
+    // in raw glTF space. The collider sits in the body frame,
+    // which uses the normalised frame (matches the rendered
+    // model after the body's translation is set to
+    // `character_position`), so we apply both scales here.
     let bone_raw = rest_world[bone.node];
     let local_position = (bone_raw - center) * normalize_scale * actual_scale;
 
@@ -479,7 +452,6 @@ fn fit_bone_shape(
 ) -> Option<(BoneShape, Quat, Vec3)> {
     let bone_world = rest_world[bone_node];
     match bone_name {
-        // Spheres
         "head" => {
             let mut max_y = bone_world.y;
             for &p in weighted_world {
@@ -516,7 +488,6 @@ fn fit_bone_shape(
             Some((BoneShape::Sphere { radius }, Quat::IDENTITY, Vec3::ZERO))
         }
 
-        // Segment-aligned Capsules
         "hips" | "spine" | "chest" | "upperchest" | "neck" | "leftupperarm" | "leftlowerarm"
         | "rightupperarm" | "rightlowerarm" | "leftupperleg" | "leftlowerleg" | "rightupperleg"
         | "rightlowerleg" | "leftfoot" | "rightfoot" => {
@@ -574,7 +545,6 @@ fn fit_bone_shape(
             Some((BoneShape::Sphere { radius }, Quat::IDENTITY, Vec3::ZERO))
         }
 
-        // Finger segments / anything else: default small sphere covering its cloud if any
         _ => {
             let mut max_r = 0.0f32;
             for &p in weighted_world {
@@ -587,7 +557,7 @@ fn fit_bone_shape(
 }
 
 /// Strip `left` / `right` from the canonical bone name so the
-/// shape table only needs one match arm per central central central bone.
+/// shape table only needs one match arm per central bone.
 #[allow(dead_code)]
 fn strip_side_prefix(name: &str) -> &str {
     name.strip_prefix("left")
@@ -751,18 +721,6 @@ fn fit_y_capsule(local: &[Vec3], scale: f32) -> Option<(BoneShape, Vec3)> {
 
 #[cfg(test)]
 mod tests {
-    //! The collider builder is the bridge between the VRM mesh
-    //! and Rapier; the tests below pin its three properties:
-    //!
-    //! 1. **Vertex-weight filtering.** Vertices whose dominant
-    //!    weight targets a different joint must NOT inflate
-    //!    the target joint's capsule.
-    //! 2. **Per-bone shape selection.** Trunk / limb / round
-    //!    bones must each pick the correct Rapier shape
-    //!    category.
-    //! 3. **Sizing math.** A vertex cloud with a known extent
-    //!    produces a capsule of the expected half-height and
-    //!    radius, scaled by `actual_scale` exactly once.
     use super::*;
     use ene_vrm::{
         BoneRestTransform, ExpressionLayer, HumanoidBoneEntry, HumanoidBoneRegistry,
@@ -842,13 +800,10 @@ mod tests {
         }
     }
 
-    /// Pin the public collector's per-vertex behaviour: a
-    /// vertex with `weight < VERTEX_WEIGHT_THRESHOLD` to
-    /// the target joint must be excluded. This is the
-    /// property the test suite is most likely to regress,
-    /// because the trunk's vertices are lightly weighted
-    /// to nearby bones and would otherwise inflate the
-    /// arm / hand capsules.
+    /// A vertex with `weight < VERTEX_WEIGHT_THRESHOLD` to the
+    /// target joint must be excluded; the trunk's vertices are
+    /// lightly weighted to nearby bones and would otherwise
+    /// inflate the arm / hand capsules.
     #[test]
     fn collect_weighted_world_positions_filters_by_threshold() {
         let vertices = vec![

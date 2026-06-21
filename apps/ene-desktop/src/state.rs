@@ -1,20 +1,13 @@
 //! Per-process application state.
 //!
-//! [`AppState`] is constructed in `main` (where the tokio runtime
-//! is alive) and then handed to the winit [`Runtime`](crate::runtime::Runtime).
-//! It owns:
+//! [`AppState`] is constructed in `main` (where the tokio runtime is
+//! alive) and handed to the winit [`Runtime`](crate::runtime::Runtime).
+//! It owns the GPU context, settings, AI bridge, optional tray, the
+//! event receiver, and the character renderer.
 //!
-//! - the [`GpuContext`](crate::gpu::GpuContext) (instance / adapter / device / queue),
-//! - the [`CharacterSettings`],
-//! - the [`AiBridge`] (the actor handle plus its drain buffer),
-//! - the optional [`TrayHandle`],
-//! - the cross-subsystem [`AppEventReceiver`](crate::events::AppEventReceiver).
-//! - the [`CharacterRenderer`](crate::character::CharacterRenderer) (PR3
-//!   onward; loads the default VRM and owns the depth texture).
-//!
-//! Senders (clones of the [`AppEventSender`](crate::events::AppEventSender))
-//! are passed into the AI bridge and the tray at construction time
-//! so producers can push without holding a reference to the state.
+//! Senders (clones of [`AppEventSender`](crate::events::AppEventSender))
+//! are passed to producers at construction time so they can push
+//! without holding a reference to the state.
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -36,106 +29,72 @@ pub struct AppState {
     /// Receiver end of the cross-subsystem bus. The runtime drains
     /// this in `about_to_wait`.
     pub event_rx: AppEventReceiver,
-    /// PR3 character renderer (loads the default VRM and owns the
-    /// depth texture for the character window).
+    /// Character renderer (depth texture + default VRM).
     pub character: CharacterRenderer,
-    /// ECS World for entities (character, camera, physics, etc).
+    /// ECS world for entities (character, camera, physics, etc).
     pub world: hecs::World,
-    /// The primary character entity ID
+    /// The primary character entity ID.
     pub character_entity: hecs::Entity,
-    /// The UI state entity ID
+    /// The UI state entity ID.
     pub ui_entity: hecs::Entity,
-    /// Rapier physics state
+    /// Rapier physics state.
     pub physics: crate::physics::PhysicsWorld,
-    /// PR5.6: latest raycast hit from the click-through test,
-    /// refreshed every `about_to_wait` from
-    /// [`crate::runtime::update_char_window_cursor_and_hittest`].
-    /// The character-window debug overlay reads this to
-    /// highlight the hit collider and draw the hit-point
-    /// cross.
+    /// Latest raycast hit from the click-through test, refreshed
+    /// every `about_to_wait`. The character-window debug overlay
+    /// reads this to draw the hit collider highlight and hit-point cross.
     pub last_raycast_hit: Option<crate::physics::RaycastHit>,
-    /// PR5.6: line-list overlay renderer, lazily created
-    /// the first time the F3 toggle is on (and the
-    /// `surface_format` is final). `None` until then so
-    /// the first frame is a clean redraw.
+    /// Line-list overlay renderer, lazily created the first time
+    /// the F3 toggle is on.
     pub debug_renderer: Option<ene_vrm::DebugRenderer>,
-    /// PR5.3: Wayland input-region context for the character
-    /// window. `None` when the underlying display is not
-    /// Wayland (X11, macOS, Windows). Populated lazily in
-    /// [`crate::runtime::Runtime::resumed`] once the winit
-    /// window's raw handles resolve to a Wayland connection.
+    /// Wayland input-region context. `None` on non-Wayland displays;
+    /// populated lazily in [`crate::runtime::Runtime::resumed`].
     #[cfg(target_os = "linux")]
     pub wayland_region:
         Option<Arc<parking_lot::Mutex<crate::platform::wayland_region::WaylandInputRegionContext>>>,
-    /// PR5.4: X11 context for `_NET_WM_STATE_SKIP_TASKBAR`
-    /// and the shape extension click-through. `None` until
-    /// PR5.4 ships.
+    /// X11 context for `_NET_WM_STATE_SKIP_TASKBAR` and the shape
+    /// extension click-through.
     #[cfg(target_os = "linux")]
     pub x11_ctx: Option<Arc<parking_lot::Mutex<crate::platform::x11_taskbar::X11Context>>>,
-    /// PR5.4 / PR-LX.4: Wayland `zwlr_layer_shell_v1`
-    /// detection context. `None` on non-Linux builds. The
-    /// runtime initialises this alongside
-    /// [`Self::wayland_region`] in
-    /// [`crate::runtime::Runtime::resumed`] so the click-through
-    /// dispatcher can branch on layer-shell availability.
+    /// Wayland `zwlr_layer_shell_v1` detection context. Initialised
+    /// alongside `wayland_region` so the click-through dispatcher can
+    /// branch on layer-shell availability.
     #[cfg(target_os = "linux")]
     pub layer_shell: Option<crate::platform::wayland_layer_shell::LayerShellState>,
-    /// PR5.4 / PR-LX.4: `true` while the user is holding the
-    /// "freeze character window" hotkey (`F8` by default). The
-    /// xdg-shell fallback forces the window to receive all
-    /// input when this is set, so the user can reach through to
-    /// the character even on compositors without layer-shell.
-    /// The flag is **not** persisted across launches.
+    /// `true` while the user holds the "freeze character window"
+    /// hotkey (`F8`). Forces the xdg-shell fallback to receive all
+    /// input even on compositors without layer-shell. Not persisted.
     #[cfg(target_os = "linux")]
     pub layer_shell_freeze: bool,
-    /// PR-LX.8: the rectangle set the runtime most recently
-    /// pushed to the Wayland `wl_surface::set_input_region`
-    /// and X11 `shape::rectangles` calls, in **window-pixel**
-    /// space. Refreshed every `about_to_wait` by
-    /// [`crate::platform::platform_runtime::apply_linux_click_through`].
-    /// The debug overlay (F9) reads this to draw a
-    /// colour-coded wireframe of the live input region.
+    /// Rectangles most recently pushed to the Wayland
+    /// `wl_surface::set_input_region` and X11 `shape::rectangles`
+    /// calls, in window-pixel space. Read by the F9 debug overlay.
     #[cfg(target_os = "linux")]
     pub last_applied_input_rects: Vec<crate::platform::wayland_region::Rect>,
-    /// PR-LX.8: which branch produced the rects
-    /// ([`crate::input_region_debug::InputRegionSource`]).
-    /// `Empty` when no rects were pushed (full pass-through).
+    /// Which branch produced the rects. `Empty` when none were
+    /// pushed (full pass-through).
     #[cfg(target_os = "linux")]
     pub last_input_source: crate::input_region_debug::InputRegionSource,
 
-    /// PR-LX.6: offscreen `Rgba8Unorm` mask capture target.
-    /// Created in [`crate::runtime::Runtime::resumed`] once
-    /// the GPU device is alive, sized in
-    /// [`crate::runtime::Runtime::window_event`] on
-    /// `Resized` / `ScaleFactorChanged`, and drained by
-    /// [`crate::platform::platform_runtime::apply_linux_click_through`]
-    /// each `about_to_wait` to feed silhouette rectangles into
-    /// the Wayland input-region and X11 shape extension. The
-    /// actual render pass that writes into the target view is
-    /// wired in PR-LX.7; this field is initialised to `None`
-    /// and populated by the runtime.
+    /// Offscreen `Rgba8Unorm` mask capture target, drained each
+    /// `about_to_wait` to feed silhouette rectangles into the
+    /// Wayland input-region and X11 shape extension.
     #[cfg(target_os = "linux")]
     pub mask_capture: Option<crate::platform::wayland_mask_capture::MaskCaptureState>,
-    /// PR-LX.9: off-thread worker that drains the mask target
-    /// without blocking the winit main thread. Spawned in
-    /// [`crate::runtime::Runtime::resumed`] alongside
-    /// [`Self::mask_capture`]; [`Self::request_mask_readback`]
-    /// is called every `render_char_frame` and bumps an internal
-    /// generation counter so any stale completion is discarded
-    /// if the window is resized or a frame is dropped.
+    /// Off-thread worker that drains the mask target without blocking
+    /// the winit main thread.
     #[cfg(target_os = "linux")]
     pub mask_readback_worker: Option<crate::platform::mask_readback::MaskReadbackWorker>,
 }
 
 impl AppState {
-    /// Construct the AppState together with a fresh `AppEvent`
+    /// Construct the `AppState` together with a fresh `AppEvent`
     /// channel. The sender half is returned to the caller for
     /// optional auxiliary producers.
     ///
     /// The character renderer is **deferred** until the runtime
     /// creates the surface — it needs the actual surface format to
-    /// build a compatible render pipeline. `with_channel` produces
-    /// a `CharacterRenderer` that hasn't been `init`-ed yet;
+    /// build a compatible render pipeline. `with_channel` produces a
+    /// `CharacterRenderer` that hasn't been `init`-ed yet;
     /// [`crate::runtime::Runtime::resumed`] calls
     /// [`CharacterRenderer::init`] right after the surface exists.
     pub fn with_channel(
@@ -203,23 +162,19 @@ impl AppState {
     }
 
     /// Forward a one-shot user input string into the AI bridge.
-    /// Mirrors the legacy Bevy `EneRequestEvent { user_input }`
-    /// pathway.
-    #[allow(dead_code)] // PR2 will call this from the AI page chat input.
+    #[allow(dead_code)]
     pub fn ai_run(&self, input: impl Into<String>) {
         self.ai.run(input);
     }
 
-    /// Persist current runtime state. The legacy Bevy code calls
-    /// `settings.save()` on F1-toggle-off, Escape, and
-    /// `WindowCloseRequested`.
+    /// Persist current runtime state.
     pub fn save(&self) {
         self.settings.save();
     }
 
     /// Forward `Quit` into the bus. The runtime observes the next
     /// `about_to_wait` and calls `event_loop.exit()`.
-    #[allow(dead_code)] // PR2 will call this from a "Quit" menu item.
+    #[allow(dead_code)]
     pub fn request_quit(&self, event_tx: &AppEventSender) {
         let _ = event_tx.send(AppEvent::Quit);
     }
@@ -237,14 +192,12 @@ impl AppState {
     }
 }
 
-/// Path resolution + error type for AppState construction. Lives
-/// here because both `main` and the runtime need to report
-/// construction failures uniformly.
+/// Path resolution + error type for `AppState` construction.
 #[derive(Debug, thiserror::Error)]
 pub enum AppStateError {
     #[error("GPU context failed to initialise: {0}")]
     Gpu(#[from] Box<dyn std::error::Error>),
-    #[allow(dead_code)] // Reserved for the PR1→PR2 path-resolution error variants.
+    #[allow(dead_code)]
     #[error("Failed to resolve assets directory: {0}")]
     AssetsDir(String),
     #[error("Tokio runtime error: {0}")]

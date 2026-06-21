@@ -1,24 +1,19 @@
-//! PR5.6: raycast collider debug overlay glue.
+//! Raycast collider debug overlay glue.
 //!
-//! Walks the per-bone collider set owned by the character
-//! entity and pushes a [`DebugLine`] list ready for the
-//! [`DebugRenderer`]:
+//! Walks the per-bone collider set owned by the character entity
+//! and pushes a [`DebugLine`] list ready for the [`DebugRenderer`]:
 //!
 //! - one wireframe per bone collider — a sphere for
-//!   `BoneShape::Sphere` entries (head, jaw, eyes, ...),
-//!   and a Y-axis capsule for `BoneShape::Capsule` /
-//!   `BoneShape::CapsuleY` entries (limbs, trunk, foot).
-//!   The collider's current world rotation is honoured so
-//!   a swinging arm's wireframe follows the bone (cyan
-//!   when idle, yellow when the bone is the raycast hit
-//!   target),
-//! - a 3-segment cross at the raycast hit point (red),
-//!   only when the latest hit was on the character entity.
+//!   `BoneShape::Sphere` entries (head, jaw, eyes, ...) and a
+//!   Y-axis capsule for `BoneShape::Capsule` / `BoneShape::CapsuleY`
+//!   entries (limbs, trunk, foot). The collider's current world
+//!   rotation is honoured so a swinging arm's wireframe follows the
+//!   bone (cyan when idle, yellow when the bone is the raycast hit
+//!   target).
+//! - a 3-segment cross at the raycast hit point (red), only when
+//!   the latest hit was on the character entity.
 //!
-//! The wireframe colours are the constants the user
-//! agreed on (yellow hit, cyan idle, red hit-point cross)
-//! and the cross half-edge is [`CROSS_HALF_EXTENT`] from
-//! the renderer.
+//! The cross half-edge is [`CROSS_HALF_EXTENT`] from the renderer.
 use hecs::Entity;
 use rapier3d::prelude::{ColliderHandle, Point};
 
@@ -100,12 +95,10 @@ pub fn build_collider_lines(
             sphere_wireframe_lines_into(center, ball.radius, color, out);
         } else if let Some(capsule) = collider.shape().as_capsule() {
             // Rapier stores a capsule as `(half_height, radius)`
-            // along its local +Y. The collider-local rotation
-            // (built from the spec's `local_rotation` plus the
-            // per-frame `BonePose::rotation` on PR5.4+) is
-            // already baked in via `ColliderBuilder::rotation`
-            // + `set_rotation_wrt_parent`, so the world
-            // transform `position` is what we want here.
+            // along its local +Y. The collider-local rotation is
+            // already baked in via `ColliderBuilder::rotation` +
+            // `set_rotation_wrt_parent`, so the world transform
+            // `position` is what we want here.
             capsule_wireframe_lines_into(
                 center,
                 capsule.half_height(),
@@ -205,11 +198,9 @@ mod tests {
     }
 
     /// A capsule collider must produce capsule wireframe
-    /// lines (caps + meridians), not zero lines. PR5.4
-    /// retired the sphere-only code path; without this
-    /// regression test, a future refactor that drops
-    /// capsule support would silently leave limbs and
-    /// the trunk invisible in the debug overlay.
+    /// lines (caps + meridians), not zero lines. Guards
+    /// against future refactors that drop capsule support
+    /// and leave limbs / trunk invisible in the overlay.
     #[test]
     fn capsule_collider_produces_wireframe_lines() {
         let (mut physics, _world, entity) = setup();

@@ -2,7 +2,7 @@
 name = "ene-desktop"
 version = "0.1.0"
 edition = "2024"
-description = "ene desktop: winit + wgpu + egui shell, AI bridge, and system tray (post-rename, see wgpu-migration PR5.5)"
+description = "ene desktop: winit + wgpu + egui shell, AI bridge, and system tray"
 
 [dependencies]
 winit = { workspace = true }
