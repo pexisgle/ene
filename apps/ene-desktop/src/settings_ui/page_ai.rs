@@ -334,8 +334,8 @@ fn render_permission_dialog(
             ui.vertical(|ui| {
                 ui.label(format!("Action: {}", pending.action));
                 ui.label(format!("Target: {}", pending.target));
-                if !pending.description.is_empty() {
-                    ui.label(format!("Description: {}", pending.description));
+                if let Some(description) = &pending.description {
+                    ui.label(format!("Description: {}", description));
                 }
                 ui.separator();
                 ui.horizontal(|ui| {

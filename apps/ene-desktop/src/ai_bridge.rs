@@ -12,30 +12,17 @@
 //! delivered via [`AiBridge::run`] which is a fire-and-forget mpsc
 //! send (the actor's `EneCommand::Run` is unbounded, so the send
 //! cannot block).
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ene_core::{EneEvent, EneEventReceiver, EneHandle, PermissionDecision, UserInputResponse};
-use parking_lot::Mutex;
-use tokio::sync::mpsc;
 
 use crate::events::{AiStreamUpdate, AppEvent, AppEventSender};
 
-/// Owns the actor handle and a per-frame buffer of events the
-/// runtime has already pulled out of the bus. The runtime can
-/// also send user input back through [`AiBridge::run`] and
-/// [`AiBridge::cancel`].
+/// Owns the actor handle. The runtime can also send user input
+/// back through [`AiBridge::run`] and [`AiBridge::cancel`].
 pub struct AiBridge {
     handle: EneHandle,
-    /// Queue of events the runtime has already pulled from the
-    /// bus but not yet consumed by a UI pass. The runtime hands
-    /// individual updates to egui from here.
-    inbox: Mutex<VecDeque<AiStreamUpdate>>,
-    /// Most recent text delta, kept for the settings UI's
-    /// "Latest Response" panel.
-    #[allow(dead_code)]
-    latest_response: Mutex<String>,
     /// Set on `EneCommand::Run`, cleared on
     /// `EneEvent::Done` / `EneEvent::Failed`. The AI page's chat
     /// input and Send button read this via
@@ -56,8 +43,6 @@ impl AiBridge {
         let processing = Arc::new(AtomicBool::new(false));
         let bridge = Self {
             handle: handle.clone(),
-            inbox: Mutex::new(VecDeque::new()),
-            latest_response: Mutex::new(String::new()),
             processing: processing.clone(),
         };
 
@@ -136,44 +121,6 @@ impl AiBridge {
         self.handle
             .submit_user_input(request_id, response)
             .map_err(|e| e.to_string())
-    }
-
-    /// Pull every AI event currently sitting in the bus into the
-    /// bridge's inbox. The runtime calls this once per frame from
-    /// `about_to_wait`.
-    #[expect(dead_code)]
-    pub fn drain(&self, rx: &mut mpsc::UnboundedReceiver<AppEvent>) {
-        loop {
-            match rx.try_recv() {
-                Ok(AppEvent::Ai(update)) => {
-                    if let AiStreamUpdate::TextDelta(ref s) = update {
-                        self.latest_response.lock().push_str(s);
-                    }
-                    self.inbox.lock().push_back(update);
-                }
-                Ok(AppEvent::EmoteToken(_token)) => {}
-                Ok(_) => {}
-                Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => break,
-            }
-        }
-    }
-
-    /// Borrow the inbox. Used by the UI pass to read every queued
-    /// update in order.
-    #[expect(dead_code)]
-    pub fn inbox(
-        &self,
-    ) -> parking_lot::lock_api::MutexGuard<'_, parking_lot::RawMutex, VecDeque<AiStreamUpdate>>
-    {
-        self.inbox.lock()
-    }
-
-    /// Take the entire inbox, leaving it empty. The UI pass uses
-    /// this to consume events after each frame.
-    #[expect(dead_code)]
-    pub fn take_inbox(&self) -> VecDeque<AiStreamUpdate> {
-        std::mem::take(&mut *self.inbox.lock())
     }
 }
 

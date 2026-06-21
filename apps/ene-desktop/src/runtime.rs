@@ -322,7 +322,11 @@ impl ApplicationHandler for Runtime {
                             request_id,
                             action,
                             target,
-                            description,
+                            description: if description.is_empty() {
+                                None
+                            } else {
+                                Some(description)
+                            },
                         });
                         self.state.ui_state_mut().settings_window_visible = true;
                         if let Some(uw) = self.ui_window.as_mut() {
