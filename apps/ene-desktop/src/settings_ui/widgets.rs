@@ -5,7 +5,7 @@
 //! single funnel through which buttons, hotkeys, and direct egui
 //! field changes mutate [`CharacterSettings`].
 use crate::ai_bridge::AiBridge;
-use crate::character_state::AnimationControl;
+use crate::character_state::{AnimationControl, EmotionCommand, EmotionQueue};
 #[cfg(target_os = "linux")]
 use crate::settings::cycle_mask_render_downsample;
 use crate::settings::{
@@ -63,6 +63,8 @@ pub fn apply_action(
     ai: &Arc<AiBridge>,
     world: &mut hecs::World,
     ui_entity: hecs::Entity,
+    emotion_queue: Option<&mut EmotionQueue>,
+    now_secs: f64,
 ) {
     match action {
         SettingsAction::PrevCharacter => {
@@ -71,11 +73,7 @@ pub fn apply_action(
                 settings.characters.len(),
                 -1,
             );
-            // `select_character` returns the per-character
-            // default expression; the page_character / WASD
-            // hotkey paths are responsible for pushing it into
-            // the renderer's `EmotionQueue`.
-            settings.select_character(idx);
+            push_default_expression(settings.select_character(idx), emotion_queue, now_secs);
         }
         SettingsAction::NextCharacter => {
             let idx = cycle_index(
@@ -83,7 +81,7 @@ pub fn apply_action(
                 settings.characters.len(),
                 1,
             );
-            settings.select_character(idx);
+            push_default_expression(settings.select_character(idx), emotion_queue, now_secs);
         }
         SettingsAction::PrevMotion => {
             settings.character_state.selected_motion = cycle_index(
@@ -262,5 +260,60 @@ pub fn format_aa_label(mode: AntialiasingMode) -> &'static str {
         AntialiasingMode::Fxaa => "Fxaa",
         AntialiasingMode::Smaa => "Smaa",
         AntialiasingMode::Taa => "Taa",
+    }
+}
+
+/// Push the per-character default expression into the
+/// `EmotionQueue` if both a non-`None` expression and a queue
+/// handle are available. Centralising this branch keeps the
+/// character-cycle arm in [`apply_action`] symmetric for `Prev`
+/// and `Next` and removes the duplicated post-`apply_action`
+/// emotion-push that used to live in `runtime.rs` and
+/// `page_character.rs`.
+fn push_default_expression(
+    default_expression: Option<String>,
+    emotion_queue: Option<&mut EmotionQueue>,
+    now_secs: f64,
+) {
+    if let (Some(expression), Some(queue)) = (default_expression, emotion_queue) {
+        queue.push(EmotionCommand {
+            emotion: expression,
+            target_time: now_secs,
+            hold_secs: 4.0,
+            weight: 1.0,
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_default_expression_drops_on_none_expression() {
+        let mut q = EmotionQueue::default();
+        push_default_expression(None, Some(&mut q), 1.0);
+        assert!(q.commands.is_empty());
+    }
+
+    #[test]
+    fn push_default_expression_drops_on_none_queue() {
+        let mut expression = None;
+        // even with a queue, no queue handle → no push
+        let mut q = EmotionQueue::default();
+        push_default_expression(expression.take(), None, 1.0);
+        assert!(q.commands.is_empty());
+    }
+
+    #[test]
+    fn push_default_expression_pushes_with_both() {
+        let mut q = EmotionQueue::default();
+        push_default_expression(Some("happy".to_string()), Some(&mut q), 7.5);
+        assert_eq!(q.commands.len(), 1);
+        let cmd = &q.commands[0];
+        assert_eq!(cmd.emotion, "happy");
+        assert_eq!(cmd.target_time, 7.5);
+        assert_eq!(cmd.hold_secs, 4.0);
+        assert_eq!(cmd.weight, 1.0);
     }
 }
