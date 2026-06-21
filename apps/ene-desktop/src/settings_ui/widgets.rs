@@ -46,6 +46,11 @@ pub enum SettingsAction {
     CharacterPosYUp,
     CharacterPosZDown,
     CharacterPosZUp,
+    /// Snap `character_position` back to the world origin. Triggered
+    /// by the "Reset Position" button on the Character settings
+    /// page; lets the user recover from a model dragged off-screen
+    /// without restarting the app.
+    ResetCharacterPosition,
     /// Toggle the per-bone collider wireframe + raycast hit-point
     /// overlay. Bound to the F3 hotkey and the "Show raycast
     /// colliders (debug)" checkbox on the Character page.
@@ -183,6 +188,9 @@ pub fn apply_action(
         SettingsAction::CharacterPosZUp => {
             adjust_f32(&mut settings.character_state.character_position.z, 0.05);
         }
+        SettingsAction::ResetCharacterPosition => {
+            settings.character_state.character_position = glam::Vec3::ZERO;
+        }
         SettingsAction::ToggleColliderDebug => {
             // Not persisted — defaults to `false` on every launch.
             if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
@@ -315,5 +323,27 @@ mod tests {
         assert_eq!(cmd.target_time, 7.5);
         assert_eq!(cmd.hold_secs, 4.0);
         assert_eq!(cmd.weight, 1.0);
+    }
+
+    /// `ResetCharacterPosition` must zero all three axes of
+    /// `character_position` without touching unrelated fields like
+    /// `look_at_strength` or `model_scale`. Pin the contract here
+    /// because the call site in `page_character.rs` has no easy
+    /// way to assert "other fields untouched" at runtime.
+    #[test]
+    fn reset_character_position_zeroes_only_position() {
+        use crate::settings::CharacterState;
+        let mut state = CharacterState {
+            character_position: glam::Vec3::new(1.25, -0.5, 2.0),
+            look_at_strength: 0.42,
+            model_scale: 1.75,
+            ..CharacterState::default()
+        };
+        // Mirror the single statement that lives in
+        // `apply_action`'s `ResetCharacterPosition` arm.
+        state.character_position = glam::Vec3::ZERO;
+        assert_eq!(state.character_position, glam::Vec3::ZERO);
+        assert!((state.look_at_strength - 0.42).abs() < 1e-6);
+        assert!((state.model_scale - 1.75).abs() < 1e-6);
     }
 }

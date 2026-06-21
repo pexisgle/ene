@@ -46,12 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let gpu = pollster::block_on(gpu::GpuContext::new())?;
-    let mut settings = settings::CharacterSettings::discover(&assets_dir, default_vrm);
-    // Reset parked position on launch: an earlier debug run can mutate
-    // `character_position` and leave the model off-screen until the
-    // drag-to-move UI provides a "Reset position" affordance.
-    settings.character_state.character_position = glam::Vec3::ZERO;
-    settings.save();
+    let settings = settings::CharacterSettings::discover(&assets_dir, default_vrm);
     let (app_state, event_tx) = state::AppState::with_channel(gpu, settings, &handle);
 
     let event_loop = winit::event_loop::EventLoop::new()?;
