@@ -124,15 +124,6 @@ pub fn apply_linux_click_through(
         )
     };
 
-    tracing::info!(
-        "Input region update: count={}, source={:?}",
-        rects.len(),
-        source
-    );
-    if !rects.is_empty() && rects.len() < 10 {
-        tracing::info!("Input region rects: {:?}", rects);
-    }
-
     // 2. Set the rectangles on the Wayland context and apply to the surface.
     //    This must happen AFTER rects calculation so we do not overwrite the
     //    cached rectangles before they reach the compositor.

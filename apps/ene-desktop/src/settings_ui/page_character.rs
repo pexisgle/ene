@@ -230,19 +230,11 @@ fn render_numeric_row<F, C>(
         ui.label(label);
         if ui.button("-").clicked() {
             apply_action(down, settings, animation, ai, world, ui_entity);
-            // PR4.2 follow-up: re-derive the textbox content from
-            // the new settings value so the displayed number stays
-            // in sync with the +/- button input. The legacy Bevy
-            // code did the same re-format on every dispatch.
+            // Re-derive buffer from settings to keep in sync.
             refresh(settings, buffer);
         }
         let response = ui.add(egui::TextEdit::singleline(buffer).desired_width(220.0));
-        // PR2.1: keyboard re-parse on Enter / focus loss.
-        // The legacy Bevy code re-parsed `TextEdit::singleline`
-        // on Enter and on focus loss. The +/- buttons are still
-        // the primary input (the buffer is auto-refreshed from
-        // the settings on every +/- click) but typing a value
-        // and pressing Enter (or tabbing out) now commits.
+        // Commit when pressing Enter or when focus is lost.
         let enter_pressed = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         if enter_pressed {
             if let Ok(value) = buffer.trim().parse::<f32>() {
@@ -251,13 +243,10 @@ fn render_numeric_row<F, C>(
                 settings.clamp_runtime_values();
                 refresh(settings, buffer);
             } else {
-                // Reject: revert the buffer to the live value.
                 refresh(settings, buffer);
             }
         } else if response.lost_focus() {
-            // Tab/click-away without Enter: also commit (parses
-            // whatever the user typed), then re-format from
-            // the settings so the displayed text is canonical.
+            // Commit and re-format on focus loss.
             if let Ok(value) = buffer.trim().parse::<f32>() {
                 commit(settings, value);
                 settings.mark_dirty();
