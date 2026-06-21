@@ -34,6 +34,8 @@ pub fn render(
                     ai,
                     world,
                     ui_entity,
+                    None,
+                    0.0,
                 );
             }
             ui.add_sized(
@@ -80,6 +82,8 @@ pub fn render(
                     ai,
                     world,
                     ui_entity,
+                    None,
+                    0.0,
                 );
             }
             ui.add_sized(
@@ -102,6 +106,8 @@ pub fn render(
                     ai,
                     world,
                     ui_entity,
+                    None,
+                    0.0,
                 );
             }
             ui.add_sized(
@@ -118,6 +124,8 @@ pub fn render(
                     ai,
                     world,
                     ui_entity,
+                    None,
+                    0.0,
                 );
             }
         });
@@ -152,6 +160,8 @@ fn render_linux_only(
                 ai,
                 world,
                 ui_entity,
+                None,
+                0.0,
             );
         }
         ui.add_sized(
@@ -170,6 +180,8 @@ fn render_linux_only(
                 ai,
                 world,
                 ui_entity,
+                None,
+                0.0,
             );
         }
         ui.add_sized(
@@ -184,6 +196,8 @@ fn render_linux_only(
                 ai,
                 world,
                 ui_entity,
+                None,
+                0.0,
             );
         }
     });

@@ -1014,6 +1014,7 @@ impl Runtime {
             ui_entity,
             ..
         } = self.state;
+        let now_secs = uw.settings_ui.started_at.elapsed().as_secs_f64();
         crate::settings_ui::widgets::apply_action(
             action,
             settings,
@@ -1021,22 +1022,9 @@ impl Runtime {
             ai,
             world,
             ui_entity,
+            Some(&mut uw.settings_ui.emotion_queue),
+            now_secs,
         );
-        if matches!(
-            action,
-            SettingsAction::PrevCharacter | SettingsAction::NextCharacter
-        ) {
-            let now_secs = uw.settings_ui.started_at.elapsed().as_secs_f64();
-            let default_expression = settings.character_state.default_expression.clone();
-            uw.settings_ui
-                .emotion_queue
-                .push(crate::character_state::EmotionCommand {
-                    emotion: default_expression,
-                    target_time: now_secs,
-                    hold_secs: 4.0,
-                    weight: 1.0,
-                });
-        }
     }
 }
 

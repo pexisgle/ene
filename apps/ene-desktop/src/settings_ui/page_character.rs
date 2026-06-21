@@ -28,38 +28,32 @@ pub fn render(
         ui.horizontal(|ui| {
             ui.label("Character");
             if ui.button("<").clicked() {
-                let len = settings.characters.len();
-                if len > 0 {
-                    let idx = ((settings.character_state.selected_character as isize - 1)
-                        .rem_euclid(len as isize)) as usize;
-                    if let Some(default_expression) = settings.select_character(idx) {
-                        emotion_queue.push(EmotionCommand {
-                            emotion: default_expression,
-                            target_time: now_secs,
-                            hold_secs: 4.0,
-                            weight: 1.0,
-                        });
-                    }
-                }
+                apply_action(
+                    SettingsAction::PrevCharacter,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                    Some(emotion_queue),
+                    now_secs,
+                );
             }
             ui.add_sized(
                 [220.0, 0.0],
                 egui::Label::new(format_character_label(settings)),
             );
             if ui.button(">").clicked() {
-                let len = settings.characters.len();
-                if len > 0 {
-                    let idx = ((settings.character_state.selected_character as isize + 1)
-                        .rem_euclid(len as isize)) as usize;
-                    if let Some(default_expression) = settings.select_character(idx) {
-                        emotion_queue.push(EmotionCommand {
-                            emotion: default_expression,
-                            target_time: now_secs,
-                            hold_secs: 4.0,
-                            weight: 1.0,
-                        });
-                    }
-                }
+                apply_action(
+                    SettingsAction::NextCharacter,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                    Some(emotion_queue),
+                    now_secs,
+                );
             }
         });
 
@@ -73,6 +67,8 @@ pub fn render(
                     ai,
                     world,
                     ui_entity,
+                    None,
+                    now_secs,
                 );
             }
             ui.add_sized(
@@ -87,6 +83,8 @@ pub fn render(
                     ai,
                     world,
                     ui_entity,
+                    None,
+                    now_secs,
                 );
             }
         });
@@ -101,6 +99,8 @@ pub fn render(
                     ai,
                     world,
                     ui_entity,
+                    None,
+                    now_secs,
                 );
             }
             ui.add_sized(
@@ -126,6 +126,7 @@ pub fn render(
             |s, v| s.character_state.look_at_strength = v,
             world,
             ui_entity,
+            now_secs,
         );
         render_numeric_row(
             ui,
@@ -140,6 +141,7 @@ pub fn render(
             |s, v| s.character_state.model_scale = v,
             world,
             ui_entity,
+            now_secs,
         );
         render_numeric_row(
             ui,
@@ -154,6 +156,7 @@ pub fn render(
             |s, v| s.character_state.character_position.x = v,
             world,
             ui_entity,
+            now_secs,
         );
         render_numeric_row(
             ui,
@@ -168,6 +171,7 @@ pub fn render(
             |s, v| s.character_state.character_position.y = v,
             world,
             ui_entity,
+            now_secs,
         );
         render_numeric_row(
             ui,
@@ -182,6 +186,7 @@ pub fn render(
             |s, v| s.character_state.character_position.z = v,
             world,
             ui_entity,
+            now_secs,
         );
 
         ui.separator();
@@ -215,6 +220,7 @@ fn render_numeric_row<F, C>(
     commit: C,
     world: &mut hecs::World,
     ui_entity: hecs::Entity,
+    now_secs: f64,
 ) where
     F: Fn(&CharacterSettings, &mut String),
     C: Fn(&mut CharacterSettings, f32),
@@ -222,7 +228,9 @@ fn render_numeric_row<F, C>(
     ui.horizontal(|ui| {
         ui.label(label);
         if ui.button("-").clicked() {
-            apply_action(down, settings, animation, ai, world, ui_entity);
+            apply_action(
+                down, settings, animation, ai, world, ui_entity, None, now_secs,
+            );
             refresh(settings, buffer);
         }
         let response = ui.add(egui::TextEdit::singleline(buffer).desired_width(220.0));
@@ -245,7 +253,9 @@ fn render_numeric_row<F, C>(
             refresh(settings, buffer);
         }
         if ui.button("+").clicked() {
-            apply_action(up, settings, animation, ai, world, ui_entity);
+            apply_action(
+                up, settings, animation, ai, world, ui_entity, None, now_secs,
+            );
             refresh(settings, buffer);
         }
         if !response.has_focus() {
