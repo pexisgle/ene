@@ -26,6 +26,7 @@
 //! needs at construction time (local transform + Rapier
 //! shape, already in world units). `BonePose` is the per-frame
 //! delta the runtime pushes into the matching collider.
+#![allow(dead_code)]
 use glam::{Mat4, Quat, Vec3};
 
 use ene_vrm::{HumanoidBoneEntry, HumanoidBoneRegistry, MeshVertex, VrmModel};

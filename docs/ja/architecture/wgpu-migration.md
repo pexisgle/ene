@@ -27,10 +27,16 @@
 
 PR1 の「スケルトン差し替え」ステップ 3 が完了するまでの間、両バイナリが並行してビルドされる:
 
-- **`apps/ene-desktop`** — 既存 Bevy 0.18 ビルド。依然としてユーザ向けデスクトップアプリ。`bevy`, `bevy_egui`, `bevy_vrm1`、ローカルの `patches/bevy_winit` パッチ、Linux では `tray-icon`, `gtk`, `wayland-client` に依存している。PR1 ステップ 3 まで本移行では **変更しない**。
-- **`apps/ene-desktop-v2`** — 新設クレート、既存のものと並列に配置。`winit` + `wgpu` 27 で単一の透過ウィンドウとハードコード赤矩形を描画する。**`cargo run -p ene-desktop-v2`** で起動。
+- **`apps/ene-desktop`** — レガシー Bevy 0.18 ビルド。依然としてユーザー向けのデスクトップアプリ。依然として `bevy`, `bevy_egui`, `bevy_vrm1`, `tray-icon`, `gtk` (Linux), `wayland-client` (Linux) に依存。ローカルの `patches/bevy_winit` パッチは削除され、レガシービルドは crates.io の upstream `bevy_winit` 0.18 を使用するようになりました。**レガシーバイナリは本移行作業では一切変更されず**、リネームステップまでそのまま残ります。
+- **`apps/ene-desktop-v2`** — 新設クレート、既存のものと並行に配置。`winit` + `wgpu` 29 + `egui` 0.34 の透過ウィンドウ煙幕 (PR0, §22.3) として開始。PR1 で tokio ランタイム駆動の `AppState`、`EneHandle` ラッパー、システムトレイ、および `CharacterSettings` 移植を追加。起動するには **`cargo run -p ene-desktop-v2`** を実行します。
 
-PR1 完了後、`apps/ene-desktop` は削除され、`apps/ene-desktop-v2` のソース群を `apps/ene-desktop` に移動する。移行プラン (§4) では「PR1 が削除ステップ」と明記されている。それまでは両者を並行コードベースとして扱う。
+当初の計画では「PR1 が削除ステップ」であり、`apps/ene-desktop` から Bevy を取り除き、そこに v2 のソースを移動することになっていました。しかし、この計画は**以下の新しいポリシーによって置き換えられ**、一方のバイナリで機能が動き、もう一方では動かないといった中途半半な破損状態を回避します。
+
+#### 新しいポリシー (PR1 以降)
+
+> **v2 は、レガシーの `apps/ene-desktop` (Bevy 0.18) の完全な代替品になるまで、PR1〜PR5+ を通じて段階的に拡張されます。レガシーのクレートは移行中もビルド可能な状態を維持します。`apps/ene-desktop-v2/` から `apps/ene-desktop/` へのリネームと、レガシー Bevy ソースの削除は、PR5 の最後 (PR5.5) に単一のコミットで一括して実行されます (条件として、§0 の PR1〜PR5 がすべて「出荷済み」になっている必要があります)。**
+
+詳細な PR ロードマップは §4 に記載されています。PR5.5 に達するまでは、これら2つのクレートを**並行するコードベース**として扱います。
 
 ### 0.2 レシピの実証場所
 
@@ -1050,4 +1056,106 @@ INFO  SurfaceConfiguration picked: format=Bgra8UnormSrgb, alpha_mode=PreMultipli
 - v2 は単一ウィンドウスロットのみ。 設定ウィンドウ、 トレイ、 AI ブリッジ、 VRM レンダラは PR1+。
 - wgpu 27 のサーフェスフォーマット picker はもう `Opaque` にフォールバック **しない**。 ホストの DXGI が `PreMultiplied` を advertise しない場合、 1 フレーム目の acquire が失敗し、 input ループが `WARN` をログし続けてリグレッションが即座に分かる。
 - `force_layered_window` ヘルパは診断 no-op として残置。 実際の透過有効化は `window_attributes` の `with_no_redirection_bitmap` 呼び出し。
+
+---
+
+## 22.4 PR1 — v2 トレイ + AI ブリッジ + `AppState` + 永続化 + CLI
+
+> **ステータス:** **出荷済み。** v2 は tokio ランタイムを起動し、tokio 駆動の `EneHandle` アクター、システムトレイ (`tray-icon` 0.24)、および `CharacterSettings` スキーマ (レガシーの Bevy `Resource` からプレーンな `Arc<parking_lot::RwLock<…>>` 構造体に移植) を保持するようになりました。レガシーの `apps/ene-desktop` (Bevy 0.18) は、新しい §0.1 / §4 ポリシーに従い、意図的に変更していません。概要については §0 の表を、ステップバイステップの計画については §4 PR1 を参照してください。
+
+### なぜ「v2 が完全な同等機能に成長してから名前を変更する」のか (古い「PR1 は削除ステップ」の代わり)
+
+当初の計画では「PR1 が削除ステップ」であり、`apps/ene-desktop` から Bevy を取り除き、そこに v2 のソースを移動することになっていました。しかし、このポリシーのリスクは、どのコミット時点においても、一方のバイナリで機能が動き、もう一方では動かない、あるいはどちらのバイナリも起動しないという状態が発生し得ることです。新しいポリシー (§0.1 参照) では、**移行全体を通じて両方のバイナリが並行してビルド可能であること**とします。v2 は PR1 から PR5+ にかけて段階的に成長し、レガシーソースの名前変更と削除は PR5 の最後 (PR5.5) に単一のコミットで行われます。この2つのクレートの共存は、移行期の一時的な状態ではなく、プロジェクトのデフォルトモードになります。
+
+これは開発者体験のみの変更です。ユーザーの視点からは、PR5.5 で Bevy バイナリが消え、v2 バイナリが起動するようになるまで、移行は目に見えません。
+
+### モジュールマップ (執筆時点で 8 ファイル、約 1,500 行)
+
+```text
+apps/ene-desktop-v2/src/
+├── main.rs       # tracing 初期化 + tokio ランタイム + AppState::with_channel + EventLoop::run_app
+├── gpu.rs        # GpuContext, pick_format_and_alpha, backend_options (DX12 / DxgiFromVisual)
+├── runtime.rs    # Runtime, CharacterWindow, UiWindow, RectRenderer, ApplicationHandler
+├── state.rs      # AppState (gpu, settings, ai, tray, event_rx), AppStateError, with_channel
+├── events.rs     # AppEvent, AiStreamUpdate, AppEventSender/Receiver (tokio mpsc)
+├── settings.rs   # CharacterSettings (プレーンな構造体、レガシーの app_config.rs から移植)
+├── ai_bridge.rs  # EneHandle をラップする AiBridge, tokio タスク: pump_events, bootstrap
+└── tray.rs       # TrayHandle (Windows: GetMessageW スレッド; Linux: GTK ポンプ + 受信スレッド)
+```
+
+### 主要な設計決定
+
+1. **`CharacterSettings` はプレーンな構造体であり、`Resource` ではありません。** レガシーの Bevy アプリは、自動的な `Arc` ラッピングと `Deref` のエルゴノミクスを提供する `bevy::ecs::resource::Resource` を使用していました。v2 には Bevy がないため、代わりに `Arc<parking_lot::RwLock<CharacterSettings>>` を使用します。この `Arc` は、アクターの再構成を駆動するために `AiBridge` にクローンされ (ブリッジが `ai.ai.character` / `ai.ai.*` を読み取れるようにするため) 、また `Runtime` にもクローンされます (winit イベントループが `Tray::OpenSettings` で `ui.settings_window_visible` を変更できるようにするため)。`std::sync::RwLock` の代わりに `parking_lot` を使用することで、バックグラウンドの書き込みと競合する winit キー押下時のポイズン関連パニックを回避しています。
+
+2. **`AppEvent` は `tokio::sync::mpsc` チャネルであり、`bevy::Message` バスではありません。** レガシーの Bevy アプリは、システム間通信に `bevy::prelude::Messages` を使用していました。v2 には Bevy ECS がないため、プロデューサー・コンシューマーのパターンは、`mpsc::UnboundedSender<AppEvent>` (トレイのスレッドと AI ブリッジの tokio タスクにクローンされる) と、`Runtime` が所有する `UnboundedReceiver<AppEvent>` になります。ドレインは `Runtime::about_to_wait` 内でフレームごとに 1 回発生するため、チャネルは実質的にフレーム境界のイベントバスと同じように機能しますが、Bevy のマクロによるオーバーヘッドはありません。`std::sync::mpsc` ではなく `tokio` の mpsc を選択した理由は、(a) `AiBridge::pump_events` が tokio タスク内で実行され、tokio mpsc がクロス・タスクチャネルとして自然であること、(b) `tokio::sync::mpsc::UnboundedSender` が `Send + Sync` であり、任意の非 GUI スレッド (Windows のトレイスレッドや Linux の GTK スレッドを含む) から `try_send` をサポートしているためです。
+
+3. **トレイは Windows では専用の `GetMessageW` スレッドを使用し、Linux ではメインスレッドでアイコンを構築して別スレッドで `tray-icon` 受信機をポーリングします。** この分割は GTK のスレッドモデルによって強制されています。`gtk` フィーチャーを有効にした `tray-icon` は、`Send` ではない GTK オブジェクト (アイコン、メニュー) を保持するため、メインスレッドに存在する必要があります。Windows にはそのような制約がないため、レガシーコードの「アイコンを所有し、手書きの Win32 メッセージポンプを実行するスレッドを生成する」レシピをそのまま移行しています。Linux スレッドは `TrayIconEvent::receiver()` と `MenuEvent::receiver()` を読み取って、パースしたアクションを `AppEventSender` に転送し、アイコン自体はメインスレッドから外に出ません。
+
+4. **`<|emo:NAME|>` トークンは Bevy の `system` ではなく `AiBridge::pump_events` でパースされます。** レガシーの `character::enqueue_ai_special_tokens` は Bevy のスケジュール上で同じことを行っていました。v2 ではこれをブリッジ内で行います。すべての `EneEvent::SpecialToken` は `ene_core::extract_emotion_from_token(token)` に通され、一致した場合は `AppEvent::EmoteToken(String)` として転送されます。コンシューマー (すなわち `apps/ene-desktop-v2::character::emotion` にある `EmotionQueue`) は PR4 に導入されます。PR1 の役割は単にその経路を配線することです。
+
+5. **フレームごとの `flush_if_dirty` は `Runtime::about_to_wait` に配置されます。** レガシーの `settings_ui::auto_save_config` ran していた処理と同等で、`event_rx` のドレイン後に `state.settings.flush_if_dirty(Some(&char_name))` を 1 回呼び出すことになります。`ConfigStore` は実際の `std::fs::write` をデバウンスし、内部でダーティフラグを追跡するため、毎フレーム呼び出しても安全であり、何か変更がない限りディスクに書き込みません。
+
+6. **CLI は `args[1]=vrm` / `args[2]=vrma` とし、ハードコードされたフォールバックを持ちます。** `AppState::resolve_paths` は `std::env::args().nth(1)` と `.nth(2)` を読み取り、見つからない場合は `DEFAULT_VRM_PATH` / `DEFAULT_VRMA_PATH` にフォールバックします (レガシーと一致)。v2 のみの違いは、2 番目の引数も使用される点です。レガシーの `read_cli_paths` は `(vrm, vrma)` を返していましたが、`main` は `vrm` のみを使用していました (レガシーのコメント：「モーションパスは、検出されたキャラクターの `motion_paths` リストから完全に取得されます」)。v2 はこの動作を踏襲しています。VRM/VRMA のロード機能が実装される PR3 で、明示的な VRMA オーバーライドが追加されます。
+
+### 検証 (PR1 のクローズアウト)
+
+- `cargo build -p ene-desktop-v2` — 成功。
+- `cargo clippy -p ene-desktop-v2 -- -D warnings` — 警告なしで成功。開発中に浮上した 23 件の dead-code エラー (コンシューマーが PR2 で導入されるため、新しい公開 API の大部分に `#[allow(dead_code)]` が付与されています) は範囲が限定されており、PR2〜PR5 の導入に伴い削除されます。
+- `cargo clippy --workspace --exclude ene-desktop -- -D warnings` — 成功。レガシー `apps/ene-desktop` の clippy エラーは**既存のもの**であり、本スコープ外です (レガシーコード内の実動する `render_settings_window` は「テスト」スタブであるため、`page_ai_page` / `page_character_page` / `page_graphics_page` はデッドコードとして報告されますが、レガシーメンテナーのために残されています)。
+- `cargo test --workspace` — 198 パス、6 無視。PR1 では新しいテストは追加されていません (すべての処理は配線であり、最初の動作テストは PR2 の設定 UI とともに導入されます)。
+- Windows での手動スモーク: `cargo run -p ene-desktop-v2` を実行するとシステムトレイアイコン「ene」が表示され、左クリックすると UI ウィンドウ (PR0 + PR2 デモ) が開き、トレイメニュー「Settings」が `ui.settings_window_visible` を設定します (PR2 でページが配線されるまでは表示のみのモック)。トレイメニュー「Quit」で正常に終了します。キャラクターウィンドウは依然として PR0 の赤色クアッドを表示します。レガシーの `cargo run -p ene-desktop` は変更されず、Bevy 0.18 ビルドを起動します。
+- Linux での手動スモーク (開発機): `Runtime::about_to_wait` 内で GTK ポンプを実行することを除き、同じ動作を示します (フレームごとに 1 回 `gtk::main_iteration_do(false)` を呼び出すだけで、トレイの応答性を維持できます。アイコン自体はメインスレッドを離れません)。
+
+### 既知の制限事項 (PR2+ への持ち越し)
+
+- `AiBridge::run`、`AppEvent::Quit`、`AppEvent::EmoteToken`、および大部分 of `AiStreamUpdate` バリアントには `#[allow(dead_code)]` が設定されています。コンシューマー (設定ページ、ホットキー、ドラッグなど) は PR2〜PR4 で導入されます。
+- 設定 UI はまだ PR0 + PR2 のデモ (「Hello from separate egui window!」とクリックカウンター) です。実際の 3 ページ構成の設定 UI は PR2 です。
+- システムトレイの「Settings」メニューは `ui.settings_window_visible = true` を設定しますが、PR2 まではそれをレンダリングするものがありません。
+- ドラッグ移動とクリックスルーは PR4 / PR5 で導入され、PR1 の v2 キャラクターウィンドウは完全にクリック可能です。
+- VRM / VRMA / LookAt / 表情 / スプリングボーンはすべてレガシーの Bevy ビルドに依存しており、v2 のキャラクターウィンドウは赤色クアッドのみを表示します。これらの機能の移行は PR3 / PR4 / PR6 で行われます。
+
+---
+
+## 22.5 PR2 — v2 設定 UI (3 ページ) + ホットキー + キャラクターごとの設定
+
+### モジュールマップ
+
+```
+apps/ene-desktop-v2/src/
+├── character_state.rs   (新規; 38 行)     AnimationControl, EmotionCommand, EmotionQueue
+├── settings.rs          (変更)            +PendingPermission, +PendingUserInput, +QuestionDraft
+├── settings_ui/         (新規; 5 ファイル, ~750 行)
+│   ├── mod.rs           (PageKind, SettingsUi, apply_egui_visuals)
+│   ├── input.rs         (SettingsInputState + sync_from_settings)
+│   ├── widgets.rs       (SettingsAction 列挙型, apply_action ディスパッチャ)
+│   ├── page_ai.rs       (プロバイダ / キー / 埋め込み / メモリ / チャット / 最新の応答)
+│   ├── page_character.rs (キャラクター / モーション / 再生・一時停止 / LookAt / スケール / 位置 / 6つの表情ボタン; Linux: デバッグオーバーレイ、マスクダウンサンプル)
+│   └── page_graphics.rs (目標 FPS / シャドウ / AA サイクル行)
+├── runtime.rs           (変更)            F1 / WASD / Space / Esc; 表示/非表示; about_to_wait での自動ポップアップ
+└── main.rs              (変更)            +mod character_state; +mod settings_ui;
+```
+
+### 主要な設計決定
+
+- **Bevy の `Resource` / `Message` / `System` はありません。** ページの描画関数は `(&mut egui::Ui, &mut CharacterSettings, &mut AnimationControl, &Arc<AiBridge>, &mut SettingsInputState, &mut EmotionQueue, f64)` を引数に取ります。これらはランタイムの `about_to_wait` から渡されます。`Arc<AiBridge>` を使用することで、AI ページから直接 `ai.run(&input)` を呼び出すことができます。レガシーの Bevy コードでは、Bevy の `EventWriter` 制約のため `MessageWriter<EneRequestEvent>` を使用していました。
+- **F1 is a character-window key, not an egui key.** キャラクターウィンドウの `KeyboardInput` ハンドラが `NamedKey::F1` を検知し、`ui.settings_window_visible` をトグルします。これは UI ウィンドウが開いているか非表示になっているかに関わらず動作し、レガシーのグローバルな `ButtonInput<KeyCode>::just_pressed(KeyCode::F1)` の動作と一致します。
+- **WASD ホットキーは `logical_key` (`Key::Character`) ではなく `physical_key` (`KeyCode`) を使用します。** これにより、レガシーの `KeyCode::KeyW` ファミリが持っていた QWERTY → AZERTY のエルゴノミクスが維持されます。ホットキーの割り当ては `cw_char_window_has_focus(cw) && current_page == PageKind::Character` の場合に制限されます。
+- **自動ポップアップは2段階で行われます。** `about_to_wait` は、チャネルから保留中の権限/ユーザー入力イベントをローカル of `Option<…>` 累積変数にまず収集し、ループ終了後にそれらを `UiState` に書き込みます。これにより、`self.state.event_rx` を反復処理しながら `self.state.settings.ui.pending_user_input` を可変参照として借用することを回避しています。
+- **`EmotionQueue` は `AppState` ではなく `SettingsUi` に保持されます。** キューは UI 側の状態です (ボタンがプッシュし、レンダラがポップします)。ランタイムは単に `UiWindow` の `SettingsUi` から `now_secs = started_at.elapsed().as_secs_f64()` を読み取ります。
+- **6 つの表情ボタンは、あえて固定値 `hold_secs: 4.0` を使用しています。** レガシーコードには `character.rs:71` に「将来の拡張機能: `<|DELAY:n|>` トークンで `hold_secs = n` を設定できるようにする」というコメントがありました。v2 でもこの定数を維持し、コメントを `character_state.rs` に移動しています。
+
+### 検証
+
+- `cargo build -p ene-desktop-v2` — 成功。
+- `cargo clippy -p ene-desktop-v2 -- -D warnings` — 警告なしで成功。
+- `cargo clippy --workspace --exclude ene-desktop -- -D warnings` — 警告なしで成功.
+- `cargo test --workspace` — 198 パス、6 無視 (37 スイート)。新しいテストは追加されていません (設定のラウンドトリップテストは、PR3 で VRM フィクスチャとともに導入されます)。
+- レガシーの `apps/ene-desktop` (Bevy 0.18) は依然としてビルド可能です (`cargo build -p ene-desktop` — エラーなし、デッドテストスタブ `render_settings_window` による既存の警告が 31 件)。
+
+### 既知の制限事項 (保留)
+
+- 「保留中の権限/質問」ダイアログはまだレンダリングされていませんが、データパスは配線済みです。この領域を処理する次の PR でダイアログが追加されます。
+- 数値入力行の `TextEdit` フィールドは表示のみであり、主な入力手段は +/- ボタンです。レガシーコードには Enter キーでの再パース処理がありました。
+- `AiBridge::processing` (レガシーの `ene.processing` flag) は、チャット入力をまだ制限していません。PR3 で実装されます。
+- システムトレイの「Settings」メニューに、任意のページのフォーカスを渡せるようになりました: `TrayAction::OpenSettings { page: Option<PageKind> }`。トレイのクリックやメニューのパスは依然として `None` を渡しますが (レガシーの動作)、`PermissionRequired` または `UserInputRequired` イベントが到着したときにランタイムが `Some(PageKind::Ai)` をプッシュできるため、ユーザーが操作する前に AI ページ (およびダイアログ) を表示させることができます。
 

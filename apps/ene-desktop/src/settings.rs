@@ -47,6 +47,7 @@ pub struct GraphicsSection {
     pub target_fps: u32,
     pub shadow_quality: ShadowQuality,
     pub antialiasing_mode: AntialiasingMode,
+    pub debug_fps: u32,
 }
 
 impl Default for GraphicsSection {
@@ -56,6 +57,7 @@ impl Default for GraphicsSection {
             target_fps: DEFAULT_TARGET_FPS,
             shadow_quality: DEFAULT_SHADOW_QUALITY,
             antialiasing_mode: DEFAULT_ANTIALIASING_MODE,
+            debug_fps: DEFAULT_DEBUG_FPS,
         }
     }
 }
@@ -100,6 +102,8 @@ pub const ANTIALIASING_MODE_CHOICES: [AntialiasingMode; 4] = [
     AntialiasingMode::Taa,
 ];
 pub const DEFAULT_ANTIALIASING_MODE: AntialiasingMode = AntialiasingMode::Fxaa;
+pub const DEBUG_FPS_CHOICES: [u32; 4] = [15, 30, 60, 0];
+pub const DEFAULT_DEBUG_FPS: u32 = 30;
 
 pub fn cycle_mask_render_downsample(current: u32, step: isize) -> u32 {
     cycle_choice(
@@ -112,6 +116,18 @@ pub fn cycle_mask_render_downsample(current: u32, step: isize) -> u32 {
 
 pub fn cycle_target_fps(current: u32, step: isize) -> u32 {
     cycle_choice(&TARGET_FPS_CHOICES, current, step, DEFAULT_TARGET_FPS)
+}
+
+pub fn cycle_debug_fps(current: u32, step: isize) -> u32 {
+    cycle_choice(&DEBUG_FPS_CHOICES, current, step, DEFAULT_DEBUG_FPS)
+}
+
+pub fn debug_fps_label(debug_fps: u32) -> String {
+    if debug_fps == 0 {
+        "Match Window".to_string()
+    } else {
+        format!("{debug_fps} FPS")
+    }
 }
 
 #[allow(dead_code)] // PR3 will call this from the Graphics settings page.
@@ -241,6 +257,8 @@ pub struct UiState {
     /// on every launch so the user starts with a clean
     /// view.
     pub show_collider_debug: bool,
+    /// Toggle the input-region debug overlay (F9).
+    pub show_input_region_debug: bool,
     /// PR5.6: the name of the bone collider currently hovered, if any.
     pub hovered_bone_name: Option<String>,
     pub ai_chat_input: String,
@@ -418,6 +436,7 @@ impl CharacterSettings {
         self.graphics.mask_render_downsample =
             cycle_mask_render_downsample(self.graphics.mask_render_downsample, 0);
         self.graphics.target_fps = cycle_target_fps(self.graphics.target_fps, 0);
+        self.graphics.debug_fps = cycle_debug_fps(self.graphics.debug_fps, 0);
     }
 
     pub fn save_per_character_settings(&self) {

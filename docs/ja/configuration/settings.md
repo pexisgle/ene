@@ -331,7 +331,8 @@ pub struct EneConfig {
       "mask_render_downsample": 1,
       "target_fps": 60,
       "shadow_quality": "medium",
-      "antialiasing_mode": "msaa_4x"
+      "antialiasing_mode": "msaa_4x",
+      "debug_fps": 30
     }
   }
 }
@@ -343,6 +344,7 @@ pub struct EneConfig {
 | `graphics.target_fps` | int | `60` | 目標フレームレート |
 | `graphics.shadow_quality` | string | `"medium"` | シャドウ品質レベル |
 | `graphics.antialiasing_mode` | string | `"fxaa"` | アンチエイリアシングモード |
+| `graphics.debug_fps` | int | `30` | デバッグ描画更新レート（FPS、0は制限なし） |
 
 ## ツール固有の設定
 
@@ -574,8 +576,10 @@ fn auto_save(store: Res<ConfigStore>, character: Res<CharacterName>) {
 
 ## デバッグオーバーレイ (セッション毎、永続化なし)
 
-以下のオーバーレイは永続化される設定には含まれず、起動ごとにデフォルト (オフ) に戻ります。`UiState` (`apps/ene-desktop-v2/src/settings.rs` 内のランタイム状態) に保持され、Character 設定ページまたは character ウィンドウのホットキーで切り替えます。
+以下のオーバーレイは永続化される設定には含まれず、起動ごとにデフォルト (オフ) に戻ります。`UiState` (`apps/ene-desktop-v2/src/settings.rs` 内のランタイム状態) に保持され、Debug 設定ページまたは character ウィンドウのホットキーで切り替えます。
 
 | オーバーレイ | デフォルト | ホットキー | 設定 UI | 効果 |
 |------------|-----------|-----------|---------|------|
-| **Raycast Colliders (Debug)** | `false` (オフ) | `F3` | Character ページの「Raycast Colliders (Debug)」チェックボックス | PR5.2 のボーンコライダーごとにワイヤーフレームの球体 (アイドル時はシアン、カーソル下のコライダーは黄) とレイキャストヒット地点の 3 軸クロス (赤) を描画する。新しい `ene_vrm::DebugRenderer` (line-list、3D 深度テスト有効) で構築。 |
+| **Raycast Colliders (Debug)** | `false` (オフ) | `F3` | Debug ページの「Raycast Colliders (Debug)」チェックボックス | PR5.2 のボーンコライダーごとにワイヤーフレームの球体 (アイドル時はシアン、カーソル下のコライダーは黄) とレイキャストヒット地点の 3 軸クロス (赤) を描画する。`ene_vrm::DebugRenderer` (line-list、3D 深度テスト有効) で構築。 |
+| **Input Region (Debug)** | `false` (オフ) | `F9` | Debug ページの「Input Region (Debug)」チェックボックス | OS のディスプレイサーバー (Wayland/X11) に送信された実際の入力領域の矩形をオレンジのワイヤーフレームとして描画する (空/固定/ウィンドウ全域などの特殊モード時は赤/緑/黄の枠線を表示)。 |
+| **Mask Overlay (Debug)** | `false` (オフ) | なし | Debug ページの「Mask Overlay (Debug)」チェックボックス (Linux のみ) | オフスクリーンマスクキャプチャのワイヤーフレーム矩形を紫色の線で描画する (Linux のみ)。 |

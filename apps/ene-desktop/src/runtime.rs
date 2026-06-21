@@ -26,7 +26,7 @@ use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
+use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel};
 
 use crate::ai_bridge::AiBridge;
 use crate::events::{AppEvent, AppEventSender, TrayAction};
@@ -70,6 +70,8 @@ pub struct Runtime {
     /// `RedrawRequested`, so we can't `event_loop.exit()`
     /// inline).
     char_surface_fatal: bool,
+    /// Throttler state for debug/input region updates.
+    last_debug_update: Option<Instant>,
 }
 
 impl Runtime {
@@ -90,6 +92,7 @@ impl Runtime {
             diagnostics_logged: false,
             device_state: device_query::DeviceState::new(),
             char_surface_fatal: false,
+            last_debug_update: None,
         }
     }
 
@@ -139,7 +142,8 @@ impl ApplicationHandler for Runtime {
         }
 
         // Create the character window
-        let char_attrs = window_attributes(self.transparent);
+        let fullscreen = Some(Fullscreen::Borderless(None));
+        let char_attrs = window_attributes(self.transparent, fullscreen);
         let char_w = match event_loop.create_window(char_attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -287,16 +291,19 @@ impl ApplicationHandler for Runtime {
                     );
                 }
 
-                let actual_scale = self.state.character.auto_fit_scale(0.9)
-                    * self.state.settings.character_state.model_scale;
-                let specs = self
-                    .state
-                    .character
-                    .build_character_bone_specs(actual_scale);
-                if !specs.is_empty() {
-                    self.state
-                        .physics
-                        .add_character_bone_colliders(self.state.character_entity, &specs);
+                #[cfg(target_os = "windows")]
+                {
+                    let actual_scale = self.state.character.auto_fit_scale(0.9)
+                        * self.state.settings.character_state.model_scale;
+                    let specs = self
+                        .state
+                        .character
+                        .build_character_bone_specs(actual_scale);
+                    if !specs.is_empty() {
+                        self.state
+                            .physics
+                            .add_character_bone_colliders(self.state.character_entity, &specs);
+                    }
                 }
                 // PR4.16: load the default VRMA motion. The
                 // resolved path comes from
@@ -542,16 +549,19 @@ impl ApplicationHandler for Runtime {
         // current because `update_skin_palette` (called from
         // `update_motion` in the `RedrawRequested` handler of
         // the previous iteration) writes them every frame.
-        let bone_poses = self.state.character.current_bone_poses();
-        if !bone_poses.is_empty() {
-            self.state.physics.update_character_bone_positions(
-                self.state.character_entity,
-                &bone_poses,
-                cs.character_position,
-                actual_scale,
-            );
+        #[cfg(target_os = "windows")]
+        {
+            let bone_poses = self.state.character.current_bone_poses();
+            if !bone_poses.is_empty() {
+                self.state.physics.update_character_bone_positions(
+                    self.state.character_entity,
+                    &bone_poses,
+                    cs.character_position,
+                    actual_scale,
+                );
+            }
+            self.state.physics.step();
         }
-        self.state.physics.step();
 
         // PR5.1: per-frame click-through. `device_query` gives us
         // the global cursor in screen pixels regardless of which
@@ -569,31 +579,63 @@ impl ApplicationHandler for Runtime {
         // cross.
         if let Some(cw) = self.char_window.as_ref() {
             let drag_is_dragging = self.state.character.drag.is_dragging();
-            self.state.last_raycast_hit = update_char_window_cursor_and_hittest(
-                &mut self.state,
-                &self.device_state,
-                cw,
-                self.transparent,
-                drag_is_dragging,
-                &mut self.last_cursor_physical,
-            );
+            let debug_fps = self.state.settings.graphics.debug_fps;
 
-            let hovered_name = if let Some(hit) = self.state.last_raycast_hit
-                && hit.entity == self.state.character_entity
-            {
-                let colliders = self
-                    .state
-                    .physics
-                    .colliders_for(self.state.character_entity);
-                if let Some(idx) = colliders.iter().position(|&h| h == hit.collider) {
-                    self.state.character.get_active_bone_name(idx)
+            let should_update = if drag_is_dragging {
+                self.last_debug_update = None;
+                true
+            } else if debug_fps == 0 {
+                true
+            } else {
+                let now = Instant::now();
+                match self.last_debug_update {
+                    Some(last) => {
+                        let interval = std::time::Duration::from_secs_f64(1.0 / debug_fps as f64);
+                        if now.duration_since(last) >= interval {
+                            self.last_debug_update = Some(now);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    None => {
+                        self.last_debug_update = Some(now);
+                        true
+                    }
+                }
+            };
+
+            if should_update {
+                self.state.last_raycast_hit = update_char_window_cursor_and_hittest(
+                    &mut self.state,
+                    &self.device_state,
+                    cw,
+                    self.transparent,
+                    drag_is_dragging,
+                    &mut self.last_cursor_physical,
+                );
+
+                #[cfg(target_os = "windows")]
+                let hovered_name = if let Some(hit) = self.state.last_raycast_hit
+                    && hit.entity == self.state.character_entity
+                {
+                    let colliders = self
+                        .state
+                        .physics
+                        .colliders_for(self.state.character_entity);
+                    if let Some(idx) = colliders.iter().position(|&h| h == hit.collider) {
+                        self.state.character.get_active_bone_name(idx)
+                    } else {
+                        None
+                    }
                 } else {
                     None
-                }
-            } else {
-                None
-            };
-            self.state.ui_state_mut().hovered_bone_name = hovered_name;
+                };
+                #[cfg(not(target_os = "windows"))]
+                let hovered_name = None;
+
+                self.state.ui_state_mut().hovered_bone_name = hovered_name;
+            }
         }
 
         // 4. Render both windows directly. Driving the
@@ -760,10 +802,16 @@ impl Runtime {
                     // coordinates stored more precision than
                     // the renderer can actually draw.
                     settings.character_state.character_position += delta;
-                    settings.character_state.character_position.x =
-                        (settings.character_state.character_position.x * 100.0).round() / 100.0;
-                    settings.character_state.character_position.y =
-                        (settings.character_state.character_position.y * 100.0).round() / 100.0;
+                    let height = cw.window.inner_size().height as f32;
+                    if height > 0.0 {
+                        let pixel_size = ene_vrm::camera::VIEWPORT_HEIGHT / height;
+                        settings.character_state.character_position.x =
+                            (settings.character_state.character_position.x / pixel_size).round()
+                                * pixel_size;
+                        settings.character_state.character_position.y =
+                            (settings.character_state.character_position.y / pixel_size).round()
+                                * pixel_size;
+                    }
                 }
             }
             WindowEvent::MouseInput {
@@ -794,32 +842,38 @@ impl Runtime {
                 // fires; running it again here keeps the press
                 // predicate synchronised with the actual click
                 // coordinates.
-                let scale = cw.window.scale_factor();
-                let logical_size = cw.window.inner_size().to_logical::<f64>(scale);
-                let logical = cursor_phys.to_logical::<f64>(scale);
-                let ndc_x = (logical.x / logical_size.width.max(1.0)) * 2.0 - 1.0;
-                let ndc_y = -((logical.y / logical_size.height.max(1.0)) * 2.0 - 1.0);
-                let aspect = (logical_size.width / logical_size.height.max(0.0001)) as f32;
-                let half_h = ene_vrm::camera::VIEWPORT_HEIGHT * 0.5;
-                let half_w = half_h * aspect;
-                let view = glam::Mat4::look_at_rh(
-                    eye.into(),
-                    target.into(),
-                    ene_vrm::camera::DEFAULT_UP.into(),
-                );
-                let view_pos = glam::Vec3::new(ndc_x as f32 * half_w, ndc_y as f32 * half_h, 0.0);
-                let world_3d = view.inverse().transform_point3(view_pos);
-                let ray_origin = rapier3d::prelude::Point::new(world_3d.x, world_3d.y, world_3d.z);
-                let ray_dir = rapier3d::prelude::Vector::new(
-                    target[0] - eye[0],
-                    target[1] - eye[1],
-                    target[2] - eye[2],
-                );
-                let cursor_over = self
-                    .state
-                    .physics
-                    .cast_ray(ray_origin, ray_dir, 100.0)
-                    .is_some_and(|hit| hit.entity == self.state.character_entity);
+                #[cfg(target_os = "windows")]
+                let cursor_over = {
+                    let scale = cw.window.scale_factor();
+                    let logical_size = cw.window.inner_size().to_logical::<f64>(scale);
+                    let logical = cursor_phys.to_logical::<f64>(scale);
+                    let ndc_x = (logical.x / logical_size.width.max(1.0)) * 2.0 - 1.0;
+                    let ndc_y = -((logical.y / logical_size.height.max(1.0)) * 2.0 - 1.0);
+                    let aspect = (logical_size.width / logical_size.height.max(0.0001)) as f32;
+                    let half_h = ene_vrm::camera::VIEWPORT_HEIGHT * 0.5;
+                    let half_w = half_h * aspect;
+                    let view = glam::Mat4::look_at_rh(
+                        eye.into(),
+                        target.into(),
+                        ene_vrm::camera::DEFAULT_UP.into(),
+                    );
+                    let view_pos =
+                        glam::Vec3::new(ndc_x as f32 * half_w, ndc_y as f32 * half_h, 0.0);
+                    let world_3d = view.inverse().transform_point3(view_pos);
+                    let ray_origin =
+                        rapier3d::prelude::Point::new(world_3d.x, world_3d.y, world_3d.z);
+                    let ray_dir = rapier3d::prelude::Vector::new(
+                        target[0] - eye[0],
+                        target[1] - eye[1],
+                        target[2] - eye[2],
+                    );
+                    self.state
+                        .physics
+                        .cast_ray(ray_origin, ray_dir, 100.0)
+                        .is_some_and(|hit| hit.entity == self.state.character_entity)
+                };
+                #[cfg(not(target_os = "windows"))]
+                let cursor_over = true;
                 let action = crate::character::drag::on_press_or_release(
                     &mut character.drag,
                     event,
@@ -890,13 +944,16 @@ impl Runtime {
                         // display server so we can verify the
                         // input region matches the visual
                         // silhouette.
-                        #[cfg(target_os = "linux")]
                         {
-                            self.state.show_input_region_debug =
-                                !self.state.show_input_region_debug;
+                            let next_val = {
+                                let mut ui_state = self.state.ui_state_mut();
+                                ui_state.show_input_region_debug =
+                                    !ui_state.show_input_region_debug;
+                                ui_state.show_input_region_debug
+                            };
                             tracing::info!(
                                 target: "ene.linux.input_region",
-                                show = self.state.show_input_region_debug,
+                                show = next_val,
                                 "input-region debug overlay toggled"
                             );
                         }
@@ -959,15 +1016,14 @@ impl Runtime {
         // needs before we destructure `self.state` (the
         // `&mut character` borrow would otherwise conflict
         // with the `ui_state()` borrow).
-        let show_collider_debug = self.state.ui_state().show_collider_debug;
-        // PR-LX.6: the mask gizmo follows the same F3 toggle
-        // (`show_collider_debug`) and the Character settings
-        // page "Linux mask overlay (debug)" checkbox
-        // (`debug_overlay_visible`). Showing the gizmo
-        // requires either of them to be on; the mask shader
-        // itself is the consumer (PR-LX.7) but the gizmo is
-        // pure-CPU and safe to run on every frame.
-        let show_mask_gizmo = show_collider_debug || self.state.ui_state().debug_overlay_visible;
+        let (show_collider_debug, show_mask_gizmo, show_input_region_debug) = {
+            let ui_state = self.state.ui_state();
+            (
+                ui_state.show_collider_debug,
+                ui_state.debug_overlay_visible,
+                ui_state.show_input_region_debug,
+            )
+        };
         let last_raycast_hit = self.state.last_raycast_hit;
         let character_entity = self.state.character_entity;
         let AppState {
@@ -1141,8 +1197,7 @@ impl Runtime {
                 cw.config.format,
                 aa_mode,
             );
-            let show_any_debug =
-                show_collider_debug || show_mask_gizmo || self.state.show_input_region_debug;
+            let show_any_debug = show_collider_debug || show_mask_gizmo || show_input_region_debug;
             if show_any_debug && let Some(depth_view) = character.depth_view() {
                 let camera_eye = glam::Vec3::from(character.camera_eye());
                 let camera_target = glam::Vec3::from(character.camera_target());
@@ -1251,13 +1306,11 @@ impl Runtime {
                 if show_mask_gizmo {
                     #[cfg(target_os = "linux")]
                     if let Some(mask) = self.state.mask_capture.as_ref() {
-                        let downsample = settings.graphics.mask_render_downsample;
                         crate::mask_gizmo::build_mask_rect_lines(
                             &mut lines,
                             mask,
                             cw.config.width,
                             cw.config.height,
-                            downsample,
                             view_inverse,
                             view_z,
                         );
@@ -1270,7 +1323,7 @@ impl Runtime {
                 // just pushed to the Wayland / X11 display
                 // server. Gated on `show_input_region_debug`
                 // (F9) and the Linux-only state fields.
-                if self.state.show_input_region_debug {
+                if show_input_region_debug {
                     #[cfg(target_os = "linux")]
                     crate::input_region_debug::build_input_region_debug_lines(
                         &mut lines,
@@ -1324,7 +1377,9 @@ impl Runtime {
         // texture, not the swapchain.
         #[cfg(target_os = "linux")]
         if let Some(mask) = self.state.mask_capture.as_ref() {
-            let mask_guard = mask.lock();
+            let mut mask_guard = mask.lock();
+            let downsample = settings.graphics.mask_render_downsample;
+            let _ = mask_guard.resize(device, cw.config.width, cw.config.height, downsample);
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("mask.encoder"),
             });
@@ -1533,18 +1588,28 @@ fn update_char_window_cursor_and_hittest(
             local_physical_y,
         ));
 
+        #[cfg(target_os = "windows")]
         let scale = cw.window.scale_factor();
+        #[cfg(target_os = "windows")]
         let logical_x = local_physical_x / scale;
+        #[cfg(target_os = "windows")]
         let logical_y = local_physical_y / scale;
+        #[cfg(target_os = "windows")]
         let inner = cw.window.inner_size();
+        #[cfg(target_os = "windows")]
         let logical_w = (inner.width as f64 / scale).max(1.0);
+        #[cfg(target_os = "windows")]
         let logical_h = (inner.height as f64 / scale).max(1.0);
+        #[cfg(target_os = "windows")]
         let ndc_x = (logical_x / logical_w) * 2.0 - 1.0;
+        #[cfg(target_os = "windows")]
         let ndc_y = -((logical_y / logical_h) * 2.0 - 1.0);
 
+        #[cfg(target_os = "windows")]
         let inside_window = ndc_x.abs() <= 1.0 && ndc_y.abs() <= 1.0;
 
-        if inside_window {
+        #[cfg(target_os = "windows")]
+        let hit = if inside_window {
             let eye: [f32; 3] = state.character.camera_eye();
             let target: [f32; 3] = state.character.camera_target();
             let aspect = (logical_w / logical_h) as f32;
@@ -1567,7 +1632,11 @@ fn update_char_window_cursor_and_hittest(
             state.physics.cast_ray(ray_origin, ray_dir, 100.0)
         } else {
             None
-        }
+        };
+        #[cfg(not(target_os = "windows"))]
+        let hit: Option<crate::physics::RaycastHit> = None;
+
+        hit
     } else {
         None
     };
@@ -1659,14 +1728,19 @@ fn key_code_pressed(event: &WindowEvent) -> Option<winit::keyboard::KeyCode> {
     }
 }
 
-fn window_attributes(transparent: bool) -> WindowAttributes {
-    let attrs = WindowAttributes::default()
+fn window_attributes(transparent: bool, fullscreen: Option<Fullscreen>) -> WindowAttributes {
+    let mut attrs = WindowAttributes::default()
         .with_title("ene v2 (tw-test wgpu port)")
-        .with_inner_size(LogicalSize::new(640.0, 480.0))
         .with_resizable(true)
         .with_decorations(!transparent)
         .with_transparent(transparent)
         .with_window_level(WindowLevel::AlwaysOnTop);
+
+    if let Some(fs) = fullscreen {
+        attrs = attrs.with_fullscreen(Some(fs));
+    } else {
+        attrs = attrs.with_inner_size(LogicalSize::new(640.0, 480.0));
+    }
 
     #[cfg(target_os = "windows")]
     {

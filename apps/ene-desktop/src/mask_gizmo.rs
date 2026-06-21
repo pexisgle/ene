@@ -90,12 +90,12 @@ pub fn build_mask_rect_lines(
     mask: &MaskCaptureState,
     window_w: u32,
     window_h: u32,
-    downsample: u32,
     view_inverse: glam::Mat4,
     view_z: f32,
 ) {
     let guard = mask.lock();
     let rects = guard.extract_rectangles();
+    let downsample = guard.downsample();
     drop(guard);
     if rects.is_empty() || downsample == 0 || window_w == 0 || window_h == 0 {
         return;

@@ -331,7 +331,8 @@ GUI-specific settings for the desktop application. Only available when running `
       "mask_render_downsample": 1,
       "target_fps": 60,
       "shadow_quality": "medium",
-      "antialiasing_mode": "msaa_4x"
+      "antialiasing_mode": "msaa_4x",
+      "debug_fps": 30
     }
   }
 }
@@ -343,6 +344,7 @@ GUI-specific settings for the desktop application. Only available when running `
 | `graphics.target_fps` | int | `60` | Target frames per second |
 | `graphics.shadow_quality` | string | `"medium"` | Shadow quality level |
 | `graphics.antialiasing_mode` | string | `"fxaa"` | Antialiasing mode |
+| `graphics.debug_fps` | int | `30` | Debug update throttle rate (FPS; 0 = no throttle) |
 
 ## Tool-Specific Configuration
 
@@ -573,8 +575,10 @@ fn auto_save(store: Res<ConfigStore>, character: Res<CharacterName>) {
 
 ## Debug Overlays (per-session, not persisted)
 
-The following overlays are **not** part of the persisted configuration — they reset to their default (off) on every launch. They live on the runtime `UiState` (in `apps/ene-desktop-v2/src/settings.rs`) and are toggled from the Character settings page or a hotkey on the character window.
+The following overlays are **not** part of the persisted configuration — they reset to their default (off) on every launch. They live on the runtime `UiState` (in `apps/ene-desktop-v2/src/settings.rs`) and are toggled from the Debug settings page or a hotkey on the character window.
 
 | Overlay | Default | Hotkey | Settings control | Effect |
 |---------|---------|--------|------------------|--------|
-| **Raycast Colliders (Debug)** | `false` (off) | `F3` | "Raycast Colliders (Debug)" checkbox on the Character page | Draws a wireframe sphere per PR5.2 bone collider (cyan when idle, yellow for the collider under the cursor) and a 3-axis cross at the raycast hit point (red). Built on the new `ene_vrm::DebugRenderer` (line-list, 3D depth-tested). |
+| **Raycast Colliders (Debug)** | `false` (off) | `F3` | "Raycast Colliders (Debug)" checkbox on the Debug page | Draws a wireframe sphere per PR5.2 bone collider (cyan when idle, yellow for the collider under the cursor) and a 3-axis cross at the raycast hit point (red). Built on `ene_vrm::DebugRenderer` (line-list, 3D depth-tested). |
+| **Input Region (Debug)** | `false` (off) | `F9` | "Input Region (Debug)" checkbox on the Debug page | Draws the actual input region rectangles pushed to the OS display server (Wayland/X11) as orange wireframes (or red/green/yellow borders for special modes like empty/freeze/full-window). |
+| **Mask Overlay (Debug)** | `false` (off) | None | "Mask Overlay (Debug)" checkbox on the Debug page (Linux-only) | Draws the offscreen mask capture wireframe rectangles in purple (Linux-only). |
