@@ -9,7 +9,7 @@
 //! public API; only the [`CameraUniform::view_proj`] matrix needs to
 //! change.
 use bytemuck::{Pod, Zeroable};
-use glam::Mat4;
+use glam::{Mat4, Vec2, Vec3};
 
 use crate::error::VrmResult;
 
@@ -222,6 +222,51 @@ impl ModelUniform {
     }
 }
 
+/// Minimum `aspect` value used to avoid a divide-by-zero when the
+/// viewport collapses to a single axis. Matches the
+/// `aspect.max(0.0001)` guard used by every caller of the
+/// `ndc_to_view_pos*` helpers.
+const MIN_ASPECT: f32 = 0.0001;
+
+/// Convert a window-pixel coordinate to normalised device
+/// coordinates (Y flipped to match the NDC convention, since
+/// winit's cursor origin is top-left and NDC's is bottom-left).
+pub fn pixel_to_ndc(px: f32, py: f32, viewport: (u32, u32)) -> Vec2 {
+    let w = viewport.0.max(1) as f32;
+    let h = viewport.1.max(1) as f32;
+    Vec2::new((px / w) * 2.0 - 1.0, -((py / h) * 2.0 - 1.0))
+}
+
+/// Convert NDC to a view-space position on the orthographic
+/// camera's near plane, deriving the aspect from `viewport`.
+/// Use this overload when you have the viewport but not the
+/// aspect pre-computed.
+pub fn ndc_to_view_pos(ndc: Vec2, viewport: (u32, u32), view_z: f32) -> Vec3 {
+    let aspect = (viewport.0.max(1) as f32 / viewport.1.max(1) as f32).max(MIN_ASPECT);
+    ndc_to_view_pos_with_aspect(ndc, aspect, view_z)
+}
+
+/// Convert NDC to a view-space position on the orthographic
+/// camera's near plane, using a pre-computed `aspect`. The
+/// `view_z` parameter lets the caller choose where along the
+/// view axis to land (drag uses `0.0`, look-at uses
+/// `head_view.z + NEUTRAL_TARGET_Z`, debug overlays use a
+/// fixed `-3.0` so the wireframe sits in front of the model).
+pub fn ndc_to_view_pos_with_aspect(ndc: Vec2, aspect: f32, view_z: f32) -> Vec3 {
+    let aspect = aspect.max(MIN_ASPECT);
+    let half_h = VIEWPORT_HEIGHT * 0.5;
+    let half_w = half_h * aspect;
+    Vec3::new(ndc.x * half_w, ndc.y * half_h, view_z)
+}
+
+/// Inverse-transform a view-space point back to world space
+/// using the camera's `view` matrix. Convenience wrapper around
+/// `view.inverse().transform_point3(p)` so callers do not have
+/// to think about the inverse.
+pub fn view_pos_to_world(view_pos: Vec3, view: Mat4) -> Vec3 {
+    view.inverse().transform_point3(view_pos)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,5 +328,55 @@ mod tests {
         let half_w = half_h * 1.3333333;
         let p = Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, 0.1, 100.0);
         println!("P = {p:?}");
+    }
+
+    /// `pixel_to_ndc` centres NDC around the window and flips Y
+    /// (winit's cursor origin is top-left, NDC's is bottom-left).
+    #[test]
+    fn pixel_to_ndc_centres_and_flips_y() {
+        let ndc = pixel_to_ndc(320.0, 240.0, (640, 480));
+        assert!((ndc.x - 0.0).abs() < 1e-6);
+        assert!((ndc.y - 0.0).abs() < 1e-6);
+        let ndc_corner = pixel_to_ndc(0.0, 0.0, (640, 480));
+        assert!((ndc_corner.x - -1.0).abs() < 1e-6);
+        assert!((ndc_corner.y - 1.0).abs() < 1e-6);
+    }
+
+    /// `ndc_to_view_pos_with_aspect` scales NDC by half the
+    /// viewport extents and lands at the requested view_z.
+    #[test]
+    fn ndc_to_view_pos_scales_by_viewport_extents() {
+        let v = ndc_to_view_pos_with_aspect(Vec2::new(1.0, 1.0), 1.5, -3.0);
+        let half_h = VIEWPORT_HEIGHT * 0.5;
+        let half_w = half_h * 1.5;
+        assert!((v.x - half_w).abs() < 1e-6);
+        assert!((v.y - half_h).abs() < 1e-6);
+        assert!((v.z - -3.0).abs() < 1e-6);
+    }
+
+    /// `ndc_to_view_pos` (viewport-based) must agree with the
+    /// aspect-based variant.
+    #[test]
+    fn ndc_to_view_pos_viewport_agrees_with_aspect() {
+        let v_via_viewport = ndc_to_view_pos(Vec2::new(0.5, -0.5), (800, 400), 0.0);
+        let v_via_aspect = ndc_to_view_pos_with_aspect(Vec2::new(0.5, -0.5), 2.0, 0.0);
+        assert!((v_via_viewport.x - v_via_aspect.x).abs() < 1e-6);
+        assert!((v_via_viewport.y - v_via_aspect.y).abs() < 1e-6);
+        assert!((v_via_viewport.z - 0.0).abs() < 1e-6);
+    }
+
+    /// `view_pos_to_world` is the inverse of `view.transform_point3`.
+    #[test]
+    fn view_pos_to_world_round_trips_through_view() {
+        let eye = Vec3::new(0.0, 0.3, 3.0);
+        let target = Vec3::new(0.0, 0.0, 0.0);
+        let up = Vec3::new(0.0, 1.0, 0.0);
+        let view = Mat4::look_at_rh(eye, target, up);
+        let world_point = Vec3::new(1.2, 0.5, -0.4);
+        let view_point = view.transform_point3(world_point);
+        let back = view_pos_to_world(view_point, view);
+        assert!((back.x - world_point.x).abs() < 1e-5);
+        assert!((back.y - world_point.y).abs() < 1e-5);
+        assert!((back.z - world_point.z).abs() < 1e-5);
     }
 }

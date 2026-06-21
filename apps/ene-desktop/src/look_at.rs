@@ -43,11 +43,11 @@ pub fn head_world_for(pivot: Vec3) -> Vec3 {
 
 /// Convert a cursor position in window-logical pixels to normalized
 /// device coordinates, with the Y axis flipped (winit's origin is
-/// top-left, NDC's origin is bottom-left).
+/// top-left, NDC's origin is bottom-left). Thin re-export of
+/// [`ene_vrm::pixel_to_ndc`] so internal callers can keep using the
+/// `cursor_logical_to_ndc` name.
 pub fn cursor_logical_to_ndc(cursor: Vec2, viewport: (u32, u32)) -> Vec2 {
-    let w = viewport.0.max(1) as f32;
-    let h = viewport.1.max(1) as f32;
-    Vec2::new((cursor.x / w) * 2.0 - 1.0, -((cursor.y / h) * 2.0 - 1.0))
+    ene_vrm::pixel_to_ndc(cursor.x, cursor.y, viewport)
 }
 
 /// Neutral head-look target (straight ahead of the head).
@@ -77,18 +77,12 @@ pub fn compute_world_target(
     smoothing: f32,
 ) -> Vec3 {
     let ndc = cursor_logical_to_ndc(cursor_logical, viewport_size);
-    let aspect = (viewport_size.0 as f32 / viewport_size.1 as f32).max(0.0001);
-    let half_h = ene_vrm::camera::VIEWPORT_HEIGHT * 0.5;
-    let half_w = half_h * aspect;
-    let view_pos = Vec3::new(ndc.x * half_w, ndc.y * half_h, 0.0);
-
     let view = Mat4::look_at_rh(camera_eye, camera_target, camera_up);
     let head_view = view.transform_point3(head_world);
-    let cursor_world = view.inverse().transform_point3(Vec3::new(
-        view_pos.x,
-        view_pos.y,
-        head_view.z + NEUTRAL_TARGET_Z,
-    ));
+    let aspect = (viewport_size.0 as f32 / viewport_size.1 as f32).max(0.0001);
+    let view_pos =
+        ene_vrm::ndc_to_view_pos_with_aspect(ndc, aspect, head_view.z + NEUTRAL_TARGET_Z);
+    let cursor_world = ene_vrm::view_pos_to_world(view_pos, view);
 
     let strength = strength.clamp(0.0, 1.0);
     let neutral = neutral_target(head_world);

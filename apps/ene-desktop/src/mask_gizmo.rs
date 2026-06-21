@@ -12,13 +12,10 @@ fn pixel_to_world(
     view_inverse: glam::Mat4,
     view_z: f32,
 ) -> glam::Vec3 {
-    let ndc_x = (px / window_w) * 2.0 - 1.0;
-    let ndc_y = -((py / window_h) * 2.0 - 1.0);
-    let aspect = (window_w / window_h).max(0.0001);
-    let half_h = ene_vrm::camera::VIEWPORT_HEIGHT * 0.5;
-    let half_w = half_h * aspect;
-    let view_pos = glam::Vec3::new(ndc_x * half_w, ndc_y * half_h, view_z);
-    view_inverse.transform_point3(view_pos)
+    let viewport = (window_w as u32, window_h as u32);
+    let ndc = ene_vrm::pixel_to_ndc(px, py, viewport);
+    let view_pos = ene_vrm::ndc_to_view_pos(ndc, viewport, view_z);
+    ene_vrm::view_pos_to_world(view_pos, view_inverse)
 }
 
 /// Build the line list for the mask-capture debug overlay.
