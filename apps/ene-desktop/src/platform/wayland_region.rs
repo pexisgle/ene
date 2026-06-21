@@ -35,10 +35,59 @@ use winit::raw_window_handle::{
     HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
 };
 
-/// Pixel rectangle in surface-local coordinates (x, y, width, height).
-/// Top-left origin; bottom / right edges are exclusive per the
-/// Wayland protocol. Negative coordinates are valid.
-pub type Rect = (i32, i32, i32, i32);
+/// Pixel rectangle in surface-local coordinates. Top-left origin;
+/// bottom / right edges are exclusive per the Wayland protocol.
+/// Negative coordinates are valid; `w` or `h` ≤ 0 marks an
+/// empty (click-through) rectangle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+impl Rect {
+    pub const fn new(x: i32, y: i32, w: i32, h: i32) -> Self {
+        Self { x, y, w, h }
+    }
+
+    /// Zero-area rectangles are click-through per the Wayland
+    /// protocol; the X11 shape extension drops them silently too.
+    pub const fn is_empty(&self) -> bool {
+        self.w <= 0 || self.h <= 0
+    }
+
+    /// Clamp a rectangle to fit within a `window_w` × `window_h`
+    /// box. Origins are clipped to `(0, 0)`; the rectangle keeps
+    /// whatever size remains. Used by the F9 debug overlay to keep
+    /// the wireframe inside the window even when the OS input
+    /// region overflows.
+    pub fn clamp_to(&self, window_w: i32, window_h: i32) -> Rect {
+        let min_x = self.x.max(0);
+        let min_y = self.y.max(0);
+        let max_x = (self.x + self.w).min(window_w).max(min_x);
+        let max_y = (self.y + self.h).min(window_h).max(min_y);
+        Rect {
+            x: min_x,
+            y: min_y,
+            w: max_x - min_x,
+            h: max_y - min_y,
+        }
+    }
+}
+
+impl From<(i32, i32, i32, i32)> for Rect {
+    fn from((x, y, w, h): (i32, i32, i32, i32)) -> Self {
+        Self { x, y, w, h }
+    }
+}
+
+impl From<Rect> for (i32, i32, i32, i32) {
+    fn from(r: Rect) -> Self {
+        (r.x, r.y, r.w, r.h)
+    }
+}
 
 /// Cached click-through policy.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -240,8 +289,8 @@ impl WaylandInputRegionContext {
                     surface.set_input_region(Some(&region));
                 } else {
                     let region = compositor.create_region(qh, ());
-                    for (x, y, w, h) in rects {
-                        region.add(*x, *y, *w, *h);
+                    for r in rects {
+                        region.add(r.x, r.y, r.w, r.h);
                     }
                     surface.set_input_region(Some(&region));
                 }
@@ -385,12 +434,12 @@ mod tests {
     #[test]
     fn set_rects_non_empty_stores_list() {
         let mut ctx = make_ctx();
-        ctx.set_rects(vec![(0, 0, 100, 100), (50, 50, 25, 25)]);
+        ctx.set_rects(vec![Rect::new(0, 0, 100, 100), Rect::new(50, 50, 25, 25)]);
         match ctx.state() {
             InputRegionState::Rectangles(rs) => {
                 assert_eq!(rs.len(), 2);
-                assert_eq!(rs[0], (0, 0, 100, 100));
-                assert_eq!(rs[1], (50, 50, 25, 25));
+                assert_eq!(rs[0], Rect::new(0, 0, 100, 100));
+                assert_eq!(rs[1], Rect::new(50, 50, 25, 25));
             }
             other => panic!("expected Rectangles, got {other:?}"),
         }
@@ -399,7 +448,7 @@ mod tests {
     #[test]
     fn clear_collapses_to_empty_rectangles() {
         let mut ctx = make_ctx();
-        ctx.state = InputRegionState::Rectangles(vec![(10, 10, 5, 5)]);
+        ctx.state = InputRegionState::Rectangles(vec![Rect::new(10, 10, 5, 5)]);
         ctx.clear();
         assert_eq!(
             ctx.state(),
@@ -426,5 +475,47 @@ mod tests {
             matches!(handle, RawDisplayHandle::Wayland(_))
         }
         let _ = is_wayland_discriminant_dispatch as fn(RawDisplayHandle) -> bool;
+    }
+}
+
+#[cfg(test)]
+mod rect_tests {
+    use super::Rect;
+
+    #[test]
+    fn from_tuple_round_trips_to_tuple() {
+        let r: Rect = (3, -2, 10, 20).into();
+        assert_eq!(r, Rect::new(3, -2, 10, 20));
+        let back: (i32, i32, i32, i32) = r.into();
+        assert_eq!(back, (3, -2, 10, 20));
+    }
+
+    #[test]
+    fn is_empty_when_w_or_h_is_non_positive() {
+        assert!(Rect::new(0, 0, 0, 10).is_empty());
+        assert!(Rect::new(0, 0, 10, 0).is_empty());
+        assert!(Rect::new(0, 0, -1, 10).is_empty());
+        assert!(!Rect::new(0, 0, 1, 1).is_empty());
+    }
+
+    #[test]
+    fn clamp_to_crops_origin_and_caps_size() {
+        let r = Rect::new(-5, -5, 100, 100);
+        let c = r.clamp_to(50, 40);
+        assert_eq!(c, Rect::new(0, 0, 50, 40));
+    }
+
+    #[test]
+    fn clamp_to_with_fully_inside_rect_is_identity() {
+        let r = Rect::new(5, 5, 10, 10);
+        let c = r.clamp_to(100, 100);
+        assert_eq!(c, r);
+    }
+
+    #[test]
+    fn clamp_to_with_window_smaller_than_origin_returns_empty() {
+        let r = Rect::new(200, 200, 10, 10);
+        let c = r.clamp_to(100, 100);
+        assert!(c.is_empty());
     }
 }

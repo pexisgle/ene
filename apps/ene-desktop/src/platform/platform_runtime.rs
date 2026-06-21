@@ -66,12 +66,22 @@ pub fn apply_linux_click_through(
 ) {
     let (rects, source) = if freeze_forced {
         (
-            vec![(0_i32, 0_i32, i32::from(i16::MAX), i32::from(i16::MAX))],
+            vec![super::wayland_region::Rect::new(
+                0,
+                0,
+                i32::from(i16::MAX),
+                i32::from(i16::MAX),
+            )],
             super::super::input_region_debug::InputRegionSource::Freeze,
         )
     } else if allows_input && (cursor_on_silhouette || state.character.drag.is_dragging()) {
         (
-            vec![(0_i32, 0_i32, i32::from(i16::MAX), i32::from(i16::MAX))],
+            vec![super::wayland_region::Rect::new(
+                0,
+                0,
+                i32::from(i16::MAX),
+                i32::from(i16::MAX),
+            )],
             super::super::input_region_debug::InputRegionSource::FullWindow,
         )
     } else if let Some(mask) = state.platform.mask_capture.as_ref() {
@@ -86,13 +96,11 @@ pub fn apply_linux_click_through(
             let factor = guard.downsample() as i64;
             let scaled: Vec<super::wayland_region::Rect> = extracted
                 .into_iter()
-                .map(|(x, y, w, h)| {
-                    (
-                        (i64::from(x) * factor).min(i64::from(i32::MAX)) as i32,
-                        (i64::from(y) * factor).min(i64::from(i32::MAX)) as i32,
-                        (i64::from(w) * factor).min(i64::from(i32::MAX)) as i32,
-                        (i64::from(h) * factor).min(i64::from(i32::MAX)) as i32,
-                    )
+                .map(|(x, y, w, h)| super::wayland_region::Rect {
+                    x: (i64::from(x) * factor).min(i64::from(i32::MAX)) as i32,
+                    y: (i64::from(y) * factor).min(i64::from(i32::MAX)) as i32,
+                    w: (i64::from(w) * factor).min(i64::from(i32::MAX)) as i32,
+                    h: (i64::from(h) * factor).min(i64::from(i32::MAX)) as i32,
                 })
                 .collect();
             drop(guard);

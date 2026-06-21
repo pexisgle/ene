@@ -80,35 +80,36 @@ pub fn build_input_region_debug_lines(
 ) {
     let (rects_to_draw, color) = match source {
         InputRegionSource::Empty => (
-            vec![(0_i32, 0_i32, window_w as i32, window_h as i32)],
+            vec![Rect::new(0, 0, window_w as i32, window_h as i32)],
             COLOR_EMPTY,
         ),
         InputRegionSource::Freeze => (
-            vec![(0_i32, 0_i32, window_w as i32, window_h as i32)],
+            vec![Rect::new(0, 0, window_w as i32, window_h as i32)],
             COLOR_FREEZE,
         ),
         InputRegionSource::FullWindow => (
-            vec![(0_i32, 0_i32, window_w as i32, window_h as i32)],
+            vec![Rect::new(0, 0, window_w as i32, window_h as i32)],
             COLOR_FULL,
         ),
         InputRegionSource::Mask => (rects.to_vec(), COLOR_MASK),
     };
 
-    for (x, y, w, h) in rects_to_draw {
+    for r in rects_to_draw {
         // X11 / Wayland silently drop zero-area rects;
         // drawing them would be misleading.
-        if w <= 0 || h <= 0 {
+        if r.is_empty() {
             continue;
         }
         // Clamp to window. Allow off-screen origins so the
         // visible part still draws.
-        let min_x = x.max(0) as f32;
-        let min_y = y.max(0) as f32;
-        let max_x = (x + w).min(window_w as i32).max(0) as f32;
-        let max_y = (y + h).min(window_h as i32).max(0) as f32;
-        if max_x <= min_x || max_y <= min_y {
+        let clamped = r.clamp_to(window_w as i32, window_h as i32);
+        if clamped.is_empty() {
             continue;
         }
+        let min_x = clamped.x as f32;
+        let min_y = clamped.y as f32;
+        let max_x = (clamped.x + clamped.w) as f32;
+        let max_y = (clamped.y + clamped.h) as f32;
 
         let p0 = pixel_to_world(
             min_x,
@@ -209,7 +210,7 @@ mod tests {
 
     #[test]
     fn mask_source_emits_four_segments_per_rect() {
-        let rects = vec![(10_i32, 20_i32, 30_i32, 40_i32), (100, 100, 50, 50)];
+        let rects = vec![Rect::new(10, 20, 30, 40), Rect::new(100, 100, 50, 50)];
         let mut out = Vec::new();
         build_input_region_debug_lines(
             &mut out,
@@ -229,7 +230,7 @@ mod tests {
 
     #[test]
     fn out_of_window_rect_is_clamped() {
-        let rects = vec![(-50_i32, -50_i32, 1_000_i32, 1_000_i32)];
+        let rects = vec![Rect::new(-50, -50, 1_000, 1_000)];
         let mut out = Vec::new();
         build_input_region_debug_lines(
             &mut out,
