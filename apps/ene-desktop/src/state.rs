@@ -20,32 +20,13 @@ use crate::gpu::GpuContext;
 use crate::settings::CharacterSettings;
 use crate::tray::TrayHandle;
 
-/// Container for the winit runtime.
-pub struct AppState {
-    pub gpu: GpuContext,
-    pub settings: CharacterSettings,
-    pub ai: Arc<AiBridge>,
-    pub tray: Option<TrayHandle>,
-    /// Receiver end of the cross-subsystem bus. The runtime drains
-    /// this in `about_to_wait`.
-    pub event_rx: AppEventReceiver,
-    /// Character renderer (depth texture + default VRM).
-    pub character: CharacterRenderer,
-    /// ECS world for entities (character, camera, physics, etc).
-    pub world: hecs::World,
-    /// The primary character entity ID.
-    pub character_entity: hecs::Entity,
-    /// The UI state entity ID.
-    pub ui_entity: hecs::Entity,
-    /// Rapier physics state.
-    pub physics: crate::physics::PhysicsWorld,
-    /// Latest raycast hit from the click-through test, refreshed
-    /// every `about_to_wait`. The character-window debug overlay
-    /// reads this to draw the hit collider highlight and hit-point cross.
-    pub last_raycast_hit: Option<crate::physics::RaycastHit>,
-    /// Line-list overlay renderer, lazily created the first time
-    /// the F3 toggle is on.
-    pub debug_renderer: Option<ene_vrm::DebugRenderer>,
+/// Linux-only display-server integration state.
+///
+/// On non-Linux targets every field is hidden behind
+/// `#[cfg(target_os = "linux")]`; the struct is empty at compile
+/// time, so the field access sites only need to gate the same way
+/// they did when the fields lived directly on [`AppState`].
+pub struct PlatformState {
     /// Wayland input-region context. `None` on non-Wayland displays;
     /// populated lazily in [`crate::runtime::Runtime::resumed`].
     #[cfg(target_os = "linux")]
@@ -84,6 +65,67 @@ pub struct AppState {
     /// the winit main thread.
     #[cfg(target_os = "linux")]
     pub mask_readback_worker: Option<crate::platform::mask_readback::MaskReadbackWorker>,
+}
+
+impl Default for PlatformState {
+    fn default() -> Self {
+        Self {
+            #[cfg(target_os = "linux")]
+            wayland_region: None,
+            #[cfg(target_os = "linux")]
+            x11_ctx: None,
+            #[cfg(target_os = "linux")]
+            layer_shell: None,
+            #[cfg(target_os = "linux")]
+            layer_shell_freeze: false,
+            #[cfg(target_os = "linux")]
+            last_applied_input_rects: Vec::new(),
+            #[cfg(target_os = "linux")]
+            last_input_source: crate::input_region_debug::InputRegionSource::Empty,
+            #[cfg(target_os = "linux")]
+            mask_capture: None,
+            #[cfg(target_os = "linux")]
+            mask_readback_worker: None,
+        }
+    }
+}
+
+/// Per-frame diagnostic state consumed by the F3 collider overlay
+/// and the line-list renderer.
+#[derive(Default)]
+pub struct DebugState {
+    /// Latest raycast hit from the click-through test, refreshed
+    /// every `about_to_wait`. The character-window debug overlay
+    /// reads this to draw the hit collider highlight and hit-point cross.
+    pub last_raycast_hit: Option<crate::physics::RaycastHit>,
+    /// Line-list overlay renderer, lazily created the first time
+    /// the F3 toggle is on.
+    pub debug_renderer: Option<ene_vrm::DebugRenderer>,
+}
+
+/// Container for the winit runtime.
+pub struct AppState {
+    pub gpu: GpuContext,
+    pub settings: CharacterSettings,
+    pub ai: Arc<AiBridge>,
+    pub tray: Option<TrayHandle>,
+    /// Receiver end of the cross-subsystem bus. The runtime drains
+    /// this in `about_to_wait`.
+    pub event_rx: AppEventReceiver,
+    /// Character renderer (depth texture + default VRM).
+    pub character: CharacterRenderer,
+    /// ECS world for entities (character, camera, physics, etc).
+    pub world: hecs::World,
+    /// The primary character entity ID.
+    pub character_entity: hecs::Entity,
+    /// The UI state entity ID.
+    pub ui_entity: hecs::Entity,
+    /// Rapier physics state.
+    pub physics: crate::physics::PhysicsWorld,
+    /// Linux display-server integration state. Empty on non-Linux.
+    pub platform: PlatformState,
+    /// Debug overlay state (raycast hit + line-list renderer).
+    pub debug: DebugState,
 }
 
 impl AppState {
@@ -126,24 +168,8 @@ impl AppState {
                 character_entity,
                 ui_entity,
                 physics: crate::physics::PhysicsWorld::new(),
-                last_raycast_hit: None,
-                debug_renderer: None,
-                #[cfg(target_os = "linux")]
-                wayland_region: None,
-                #[cfg(target_os = "linux")]
-                x11_ctx: None,
-                #[cfg(target_os = "linux")]
-                layer_shell: None,
-                #[cfg(target_os = "linux")]
-                layer_shell_freeze: false,
-                #[cfg(target_os = "linux")]
-                mask_capture: None,
-                #[cfg(target_os = "linux")]
-                mask_readback_worker: None,
-                #[cfg(target_os = "linux")]
-                last_applied_input_rects: Vec::new(),
-                #[cfg(target_os = "linux")]
-                last_input_source: crate::input_region_debug::InputRegionSource::Empty,
+                platform: PlatformState::default(),
+                debug: DebugState::default(),
             },
             tx,
         )

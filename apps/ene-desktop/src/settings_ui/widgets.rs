@@ -300,7 +300,7 @@ mod tests {
     fn push_default_expression_drops_on_none_queue() {
         let mut expression = None;
         // even with a queue, no queue handle → no push
-        let mut q = EmotionQueue::default();
+        let q = EmotionQueue::default();
         push_default_expression(expression.take(), None, 1.0);
         assert!(q.commands.is_empty());
     }

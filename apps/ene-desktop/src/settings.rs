@@ -734,7 +734,7 @@ mod tests {
         let current = 0_usize;
         let step = 1_isize;
         let idx = ((current as isize + step).rem_euclid(len.max(1) as isize)) as usize;
-        assert_eq!(idx, 1 % 1);
+        assert_eq!(idx, 0);
     }
 
     /// An empty `default_expression` on disk is treated as
