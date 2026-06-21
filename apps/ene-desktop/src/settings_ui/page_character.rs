@@ -189,6 +189,29 @@ pub fn render(
             now_secs,
         );
 
+        ui.horizontal(|ui| {
+            if ui.button("Reset Position").clicked() {
+                apply_action(
+                    SettingsAction::ResetCharacterPosition,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                    None,
+                    now_secs,
+                );
+                // Mirror the reset into the editable buffers so the
+                // X/Y/Z text fields immediately show "+0.00".
+                input.character_pos_x =
+                    format!("{:+.2}", settings.character_state.character_position.x);
+                input.character_pos_y =
+                    format!("{:+.2}", settings.character_state.character_position.y);
+                input.character_pos_z =
+                    format!("{:+.2}", settings.character_state.character_position.z);
+            }
+        });
+
         ui.separator();
         ui.label("Manual Expressions (Test)");
         ui.horizontal(|ui| {
