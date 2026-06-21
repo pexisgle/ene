@@ -52,10 +52,6 @@ pub struct Runtime {
     last_cursor_physical: Option<PhysicalPosition<f64>>,
     /// PR4.2: monotonic clock for `dt_secs` smoothing.
     last_frame_instant: Option<Instant>,
-    /// PR4.2 follow-up: one-shot diagnostic log on the very
-    /// first `RedrawRequested` so we can verify surface / depth /
-    /// camera-aspect / model-uniform are in sync.
-    diagnostics_logged: bool,
     /// PR5.1: global mouse position poll, refreshed every frame in
     /// `about_to_wait` regardless of whether the character window
     /// is currently receiving events (so the click-through hit test
@@ -89,7 +85,6 @@ impl Runtime {
             ui_window: None,
             last_cursor_physical: None,
             last_frame_instant: None,
-            diagnostics_logged: false,
             device_state: device_query::DeviceState::new(),
             char_surface_fatal: false,
             last_debug_update: None,
@@ -1036,117 +1031,7 @@ impl Runtime {
         } = self.state;
         let (device, queue) = (&gpu.device, &gpu.queue);
 
-        // PR4.2 follow-up: one-shot diagnostic so we can
-        // see whether the char window size / surface config
-        // / depth texture / camera aspect / model uniform
-        // are all in agreement. Logs on the very first
-        // rendered frame only.
-        if !self.diagnostics_logged {
-            self.diagnostics_logged = true;
-            let phys = cw.window.inner_size();
-            let surface_w = cw.config.width;
-            let surface_h = cw.config.height;
-            let cs = &settings.character_state;
-            let auto_fit = character.auto_fit_scale(0.9);
-            let actual_scale_dbg = auto_fit * cs.model_scale;
-            let model_uniform_dbg = ene_vrm::ModelUniform::from_mat4(
-                character.model_matrix(cs.character_position, actual_scale_dbg),
-            );
-            let cam = character.camera_dbg();
-            let depth = character.depth_size_dbg();
-            let loaded = character.model_aabb_dbg();
-            let model_scale_x = (model_uniform_dbg.model[0][0].powi(2)
-                + model_uniform_dbg.model[1][0].powi(2)
-                + model_uniform_dbg.model[2][0].powi(2))
-            .sqrt();
-            let model_scale_y = (model_uniform_dbg.model[0][1].powi(2)
-                + model_uniform_dbg.model[1][1].powi(2)
-                + model_uniform_dbg.model[2][1].powi(2))
-            .sqrt();
-            let model_scale_z = (model_uniform_dbg.model[0][2].powi(2)
-                + model_uniform_dbg.model[1][2].powi(2)
-                + model_uniform_dbg.model[2][2].powi(2))
-            .sqrt();
-            let model_translation = [
-                model_uniform_dbg.model[0][3],
-                model_uniform_dbg.model[1][3],
-                model_uniform_dbg.model[2][3],
-            ];
-            let merged_skel_joints = character.model_dbg_merged_skel_joints().unwrap_or(0);
-            let loader_center = character.model_dbg_center();
-            let loader_norm = character.model_dbg_normalize_scale();
-            let view_proj = character.camera_view_proj_dbg();
-            let vp_scale_x =
-                (view_proj[0][0].powi(2) + view_proj[1][0].powi(2) + view_proj[2][0].powi(2))
-                    .sqrt();
-            let vp_scale_y =
-                (view_proj[0][1].powi(2) + view_proj[1][1].powi(2) + view_proj[2][1].powi(2))
-                    .sqrt();
-            let vp_scale_z =
-                (view_proj[0][2].powi(2) + view_proj[1][2].powi(2) + view_proj[2][2].powi(2))
-                    .sqrt();
-            let vp_translation = [view_proj[0][3], view_proj[1][3], view_proj[2][3]];
-            let model_view_proj = character.model_view_proj_dbg(
-                [
-                    cs.character_position.x,
-                    cs.character_position.y,
-                    cs.character_position.z,
-                ],
-                actual_scale_dbg,
-            );
-            let model_matrix_runtime = character.model_matrix_runtime_dbg(
-                [
-                    cs.character_position.x,
-                    cs.character_position.y,
-                    cs.character_position.z,
-                ],
-                actual_scale_dbg,
-            );
-            let view_only = character.camera_view_dbg();
-            let proj_only = character.camera_proj_dbg();
-            tracing::info!(
-                "PR4.19-diag: model_view_proj={:?} model_matrix_runtime={:?} view_only={:?} proj_only={:?}",
-                model_view_proj,
-                model_matrix_runtime,
-                view_only,
-                proj_only,
-            );
-            tracing::info!(
-                "PR4.2-diag: char_win={}x{} scale_factor={:.3} surface_config={}x{} depth_texture={}x{} camera_aspect={:.3} char_pos={:?} user_model_scale={:.3} auto_fit_scale={:.3} actual_scale={:.3} model_uniform={:?} cam_eye={:?} cam_target={:?} cam_viewport_h={:.3} loaded_aabb={:?}",
-                phys.width,
-                phys.height,
-                cw.window.scale_factor(),
-                surface_w,
-                surface_h,
-                depth.0,
-                depth.1,
-                cam.0,
-                cs.character_position,
-                cs.model_scale,
-                auto_fit,
-                actual_scale_dbg,
-                model_uniform_dbg.model,
-                cam.1,
-                cam.2,
-                cam.3,
-                loaded,
-            );
-            tracing::info!(
-                "PR4.19-diag: loader_center={:?} loader_normalize_scale={:.4} merged_skel_joints={} model_scale=({:.4}, {:.4}, {:.4}) model_translation={:?} view_proj_scale=({:.4}, {:.4}, {:.4}) view_proj_translation={:?} model_view_proj={:?}",
-                loader_center,
-                loader_norm,
-                merged_skel_joints,
-                model_scale_x,
-                model_scale_y,
-                model_scale_z,
-                model_translation,
-                vp_scale_x,
-                vp_scale_y,
-                vp_scale_z,
-                vp_translation,
-                model_view_proj,
-            );
-        }
+
 
         let cs = &settings.character_state;
         let actual_scale = character.auto_fit_scale(0.9) * cs.model_scale;
