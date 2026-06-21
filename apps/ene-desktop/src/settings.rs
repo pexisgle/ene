@@ -6,9 +6,7 @@
 //! lock around the outer struct. The only field that is shared
 //! across threads (`store`) sits behind a [`parking_lot::RwLock`].
 //!
-//! Methods mirror the legacy `app_config.rs` shape 1:1 so the
-//! eventual port of the settings UI (PR2) is a straight
-//! import-and-call exercise.
+//! Methods mirror the legacy `app_config.rs` shape 1:1.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -77,24 +75,24 @@ pub use GraphicsSection as GraphicsSettings;
 pub const DEFAULT_CHARACTER_NAME: &str = "Alicia";
 pub const DEFAULT_VRM_PATH: &str = "characters/Alicia/AliciaSolid.vrm";
 pub const DEFAULT_VRMA_PATH: &str = "characters/Alicia/motions/VRMA_01.vrma";
-#[allow(dead_code)] // PR3 will use it for the primary window's app-id.
+#[allow(dead_code)]
 pub const APP_ID: &str = "dev.pexisgle.ene";
-#[allow(dead_code)] // PR3 will use it for the primary window's initial size.
+#[allow(dead_code)]
 pub const WINDOW_WIDTH: u32 = 560;
-#[allow(dead_code)] // PR3 will use it for the primary window's initial size.
+#[allow(dead_code)]
 pub const WINDOW_HEIGHT: u32 = 980;
 pub const MASK_RENDER_DOWNSAMPLE_CHOICES: [u32; 3] = [4, 6, 8];
 pub const DEFAULT_MASK_RENDER_DOWNSAMPLE: u32 = 8;
 pub const TARGET_FPS_CHOICES: [u32; 5] = [15, 30, 60, 120, 0];
 pub const DEFAULT_TARGET_FPS: u32 = 60;
-#[allow(dead_code)] // PR3 will cycle the shadow quality from the settings UI.
+#[allow(dead_code)]
 pub const SHADOW_QUALITY_CHOICES: [ShadowQuality; 3] = [
     ShadowQuality::Low,
     ShadowQuality::Medium,
     ShadowQuality::High,
 ];
 pub const DEFAULT_SHADOW_QUALITY: ShadowQuality = ShadowQuality::Medium;
-#[allow(dead_code)] // PR3 will cycle the AA mode from the settings UI.
+#[allow(dead_code)]
 pub const ANTIALIASING_MODE_CHOICES: [AntialiasingMode; 4] = [
     AntialiasingMode::Off,
     AntialiasingMode::Fxaa,
@@ -130,7 +128,7 @@ pub fn debug_fps_label(debug_fps: u32) -> String {
     }
 }
 
-#[allow(dead_code)] // PR3 will call this from the Graphics settings page.
+#[allow(dead_code)]
 pub fn cycle_shadow_quality(current: ShadowQuality, step: isize) -> ShadowQuality {
     cycle_choice(
         &SHADOW_QUALITY_CHOICES,
@@ -140,7 +138,7 @@ pub fn cycle_shadow_quality(current: ShadowQuality, step: isize) -> ShadowQualit
     )
 }
 
-#[allow(dead_code)] // PR3 will call this from the Graphics settings page.
+#[allow(dead_code)]
 pub fn cycle_antialiasing_mode(current: AntialiasingMode, step: isize) -> AntialiasingMode {
     cycle_choice(
         &ANTIALIASING_MODE_CHOICES,
@@ -157,7 +155,7 @@ fn cycle_choice<T: Copy + PartialEq>(choices: &[T], current: T, step: isize, _de
     choices[next]
 }
 
-#[allow(dead_code)] // PR3 will call this from the Graphics settings page.
+#[allow(dead_code)]
 pub fn target_fps_label(target_fps: u32) -> String {
     if target_fps == 0 {
         "Unlimited".to_string()
@@ -185,7 +183,7 @@ pub fn read_cli_paths() -> (String, String) {
 #[derive(Debug, Clone)]
 pub struct CharacterEntry {
     pub name: String,
-    #[allow(dead_code)] // Mirrored from legacy; PR3 will use it for the character folder.
+    #[allow(dead_code)] // Mirrored from legacy.
     pub folder: String,
     pub vrm_paths: Vec<String>,
     pub motion_paths: Vec<String>,
@@ -200,17 +198,17 @@ pub struct CharacterEntry {
 pub struct CharacterState {
     pub selected_character: usize,
     pub selected_motion: usize,
-    #[allow(dead_code)] // PR3 will set this when the user picks a new character.
+    #[allow(dead_code)]
     pub needs_respawn: bool,
     pub model_scale: f32,
     pub character_position: Vec3,
     pub look_at_strength: f32,
     pub motion_override: Option<String>,
-    /// PR9: the expression the renderer should apply when this
+    /// The expression the renderer should apply when this
     /// character is selected / respawned. Per-character on disk
     /// (each entry in `CharacterConfig.default_expression`); in
     /// memory it lives on `CharacterState` so the cycle buttons
-    /// (and the runtime's respawn path) can push the matching
+    /// and the runtime's respawn path can push the matching
     /// `EmotionCommand` into the renderer's `EmotionQueue`.
     pub default_expression: String,
 }
@@ -225,7 +223,7 @@ impl Default for CharacterState {
             character_position: Vec3::ZERO,
             look_at_strength: 0.60,
             motion_override: None,
-            // PR9: default to "neutral" so a fresh install doesn't
+            // Default to "neutral" so a fresh install doesn't
             // surprise the user. Per-character overrides are
             // loaded by `load_per_character_settings` once a
             // character is selected.
@@ -237,29 +235,23 @@ impl Default for CharacterState {
 #[derive(Clone, Debug, Default)]
 pub struct UiState {
     pub settings_window_visible: bool,
-    /// PR-LX.6: toggle the Linux-only Wayland / X11 mask
-    /// capture rectangle overlay. When `true` and
-    /// [`Self::show_collider_debug`] is also `true`, the
-    /// character window's debug overlay draws the
-    /// downsampled mask rectangles as purple wireframes
-    /// (matching the legacy Bevy
-    /// `apps/ene-desktop/src/character_drag/linux/
-    /// capture.rs::draw_visible_rect_gizmos` recipe).
-    /// Defaults to `false`; toggled by the
-    /// "Linux mask overlay (debug)" checkbox on the
-    /// Character settings page.
+    /// Toggle the Linux-only Wayland / X11 mask capture rectangle
+    /// overlay. When `true` and [`Self::show_collider_debug`] is
+    /// also `true`, the character window's debug overlay draws the
+    /// downsampled mask rectangles as purple wireframes. Defaults
+    /// to `false`; toggled by the "Linux mask overlay (debug)"
+    /// checkbox on the Character settings page.
     pub debug_overlay_visible: bool,
-    /// PR5.6: toggle the per-bone collider wireframe +
-    /// raycast hit-point overlay on the character window.
-    /// Bound to the F3 hotkey and the "Show raycast
-    /// colliders (debug)" checkbox on the Character
-    /// settings page. Not persisted — defaults to `false`
-    /// on every launch so the user starts with a clean
+    /// Toggle the per-bone collider wireframe + raycast hit-point
+    /// overlay on the character window. Bound to the F3 hotkey
+    /// and the "Show raycast colliders (debug)" checkbox on the
+    /// Character settings page. Not persisted — defaults to
+    /// `false` on every launch so the user starts with a clean
     /// view.
     pub show_collider_debug: bool,
     /// Toggle the input-region debug overlay (F9).
     pub show_input_region_debug: bool,
-    /// PR5.6: the name of the bone collider currently hovered, if any.
+    /// The name of the bone collider currently hovered, if any.
     pub hovered_bone_name: Option<String>,
     pub ai_chat_input: String,
     pub ai_latest_response: String,
@@ -274,7 +266,7 @@ pub struct UiState {
     pub pending_user_input: Option<PendingUserInput>,
     /// One per [`UserInputPrompt::items`] entry, used as scratch
     /// state for the question dialog.
-    #[allow(dead_code)] // PR2 will render a questions dialog.
+    #[allow(dead_code)]
     pub user_input_drafts: Vec<QuestionDraft>,
 }
 
@@ -330,10 +322,9 @@ impl std::fmt::Debug for CharacterSettings {
     }
 }
 
-/// All `CharacterSettings` methods are kept identical in shape to
-/// the legacy Bevy `app_config.rs` so PR2 can import-and-call them.
-/// PR1 only uses a subset; the unused methods are expected to be
-/// wired up by the upcoming PRs (PR2 = settings UI, PR3 = character).
+/// `CharacterSettings` methods are kept identical in shape to the
+/// legacy Bevy `app_config.rs` so the unused methods can be
+/// imported and called.
 #[allow(dead_code)]
 impl CharacterSettings {
     /// Build the initial settings: discover characters on disk,
@@ -461,10 +452,9 @@ impl CharacterSettings {
         );
         self.character_state.model_scale = per.model_scale;
         self.character_state.look_at_strength = per.look_at_strength;
-        // PR9: read the per-character default expression. An
-        // empty string on disk (the legacy Bevy 0.18 default)
-        // is treated as "neutral" so a model that has never
-        // been customized gets a sane starting pose.
+        // An empty string on disk (the legacy Bevy 0.18 default)
+        // is treated as "neutral" so a model that has never been
+        // customized gets a sane starting pose.
         self.character_state.default_expression = if per.default_expression.is_empty() {
             "neutral".to_string()
         } else {
@@ -484,7 +474,7 @@ impl CharacterSettings {
     /// Switch to character `idx`. Returns the default expression
     /// to push into the renderer's `EmotionQueue` so the new
     /// character enters the scene with its per-character default
-    /// face (PR9). `None` is returned when the switch is a no-op
+    /// face. `None` is returned when the switch is a no-op
     /// (out-of-range or same character), in which case the caller
     /// should not touch the emotion queue.
     pub fn select_character(&mut self, idx: usize) -> Option<String> {
@@ -497,10 +487,8 @@ impl CharacterSettings {
         self.sync_card_path();
         self.load_per_character_settings();
         self.character_state.needs_respawn = true;
-        // PR9: return the per-character default expression so
-        // the caller can push an `EmotionCommand` into the
-        // renderer's `EmotionQueue`. Cloned to avoid handing out
-        // a borrow of `self` while the caller still holds it.
+        // Cloned to avoid handing out a borrow of `self` while the
+        // caller still holds it.
         Some(self.character_state.default_expression.clone())
     }
 
@@ -554,13 +542,11 @@ impl CharacterSettings {
             model_scale: self.character_state.model_scale,
             look_at_strength: self.character_state.look_at_strength,
             default_motion: default_motion_name,
-            // PR9: persist the per-character default expression
-            // (the legacy code wrote a hardcoded "neutral" here,
-            // which is why the field was effectively never read
-            // back). The in-memory source of truth is
-            // `self.character_state.default_expression`; the on-
-            // disk value is a per-character `CharacterConfig` so
-            // two different models can have two different defaults.
+            // The in-memory source of truth is
+            // `self.character_state.default_expression`; the
+            // on-disk value lives in a per-character
+            // `CharacterConfig` so two different models can have
+            // two different defaults.
             default_expression: self.character_state.default_expression.clone(),
             extra: existing_extra,
         };
@@ -574,8 +560,8 @@ impl CharacterSettings {
         self.ai.ai = full.clone();
         *self.store.write() = ene_config::ConfigStore::from_config(full.clone());
 
-        // Character selection: derive from `full.character` (a
-        // card name or full path).
+        // Resolve `full.character` (a card name or full path) to
+        // a card path on disk.
         let card_path = ene_config::resolve_character_path(&full.character);
         if !card_path.is_empty() {
             let path = Path::new(&card_path);
@@ -735,54 +721,44 @@ fn read_character_json_meta(
 mod tests {
     use super::*;
 
-    /// PR9: `CharacterState` defaults to `"neutral"`. A fresh
-    /// install must not surprise the user with an arbitrary
-    /// expression.
+    /// `CharacterState` defaults to `"neutral"`. A fresh install
+    /// must not surprise the user with an arbitrary expression.
     #[test]
     fn character_state_defaults_to_neutral_expression() {
         let s = CharacterState::default();
         assert_eq!(s.default_expression, "neutral");
     }
 
-    /// PR9: when `select_character` is called with an out-of-
-    /// range or same-character index, it returns `None` and
-    /// does not push a default expression. The contract is
-    /// "no switch → no expression", so the renderer's
-    /// `EmotionQueue` stays untouched. We can't construct a
-    /// `CharacterSettings` without its on-disk store, so the
-    /// test is the no-op branch only — the runtime paths
-    /// (`page_character::render` and the WASD hotkey) are
-    /// the integration tests.
+    /// When `select_character` is called with an out-of-range or
+    /// same-character index, it returns `None` and does not push
+    /// a default expression — "no switch → no expression" so the
+    /// renderer's `EmotionQueue` stays untouched. The runtime
+    /// paths in `page_character::render` and the WASD hotkey
+    /// are the integration tests; this test pins the
+    /// out-of-range branch via the cycle_index math used at
+    /// call sites (the runtime guards on `len > 0` before
+    /// calling `select_character`).
     #[test]
     fn select_character_no_op_returns_none() {
-        // The empty `characters` vec means any call is out of
-        // range. The CharacterSettings::discover constructor
-        // would write to a real config store, so we instead
-        // verify the resolution rules of the cycle_index math
-        // used at the call sites (the runtime guards on
-        // `len > 0` before calling `select_character`).
         let len = 0_usize;
         let current = 0_usize;
         let step = 1_isize;
         let idx = ((current as isize + step).rem_euclid(len.max(1) as isize)) as usize;
-        assert_eq!(idx, 1 % 1); // degenerate empty case
+        assert_eq!(idx, 1 % 1);
     }
 
-    /// PR9: an empty `default_expression` on disk is treated as
+    /// An empty `default_expression` on disk is treated as
     /// `"neutral"`. The legacy Bevy 0.18 default wrote the empty
     /// string, so this branch covers the migration path for
-    /// users upgrading from a pre-PR9 build.
+    /// users upgrading from a pre-release build.
     #[test]
     fn load_per_character_settings_treats_empty_as_neutral() {
-        // We don't have a writable CharacterSettings without
-        // its on-disk store, so we test the resolution rule
-        // directly: empty string → "neutral".
         let raw = "";
         let resolved = if raw.is_empty() { "neutral" } else { raw };
         assert_eq!(resolved, "neutral");
     }
 
-    /// A.5: the `PendingPermission` / `PendingUserInput` /
+    /// The `PendingPermission` / `PendingUserInput` /
     /// `QuestionDraft` types are now consumed by the dialog
     /// renderer in `page_ai.rs`. A future refactor that
     /// accidentally drops one of the fields would lose the
@@ -800,9 +776,5 @@ mod tests {
             selected: Some("yes".to_string()),
             skipped: false,
         };
-        // The `UserInputPrompt` constructor is enforced by
-        // `QuestionItem` so we don't try to construct it here
-        // — we just need the compiler to know the types are
-        // usable.
     }
 }

@@ -19,22 +19,20 @@
 //! [`LayerShellContext`](super::wayland_layer_shell::LayerShellContext)
 //! is consulted once on the first dispatch to detect
 //! `zwlr_layer_shell_v1`; the cached status is logged for
-//! diagnostics. A follow-up PR uses the status to promote the
-//! character window to a `Layer::Overlay` surface when the
-//! compositor supports it.
+//! diagnostics.
 //!
 //! # X11
 //!
-//! The X11 `shape` extension is wired in PR5.4.1. Until then the
-//! `x11_ctx` field is `None` and the dispatch is a no-op.
+//! The X11 `shape` extension sets the input mask; the runtime
+//! also drives `_NET_WM_STATE_SKIP_TASKBAR` via
+//! [`super::x11_taskbar::X11Context`].
 //!
 //! # Cadence
 //!
 //! The function is called every `about_to_wait`, mirroring the
 //! Windows `set_cursor_hittest` cadence. A `trace` log is emitted
-//! only on the **first** dispatch per process so the silent
-//! no-op we used to see is no longer silent but the log does
-//! not flood the trace output.
+//! only on the first dispatch per process so the no-op path is
+//! observable without flooding the trace output.
 
 #[cfg(target_os = "linux")]
 use crate::state::AppState;

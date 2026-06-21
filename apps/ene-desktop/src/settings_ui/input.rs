@@ -10,7 +10,6 @@ use crate::settings::CharacterSettings;
 #[derive(Debug, Default)]
 pub struct SettingsInputState {
     #[allow(dead_code)]
-    // `SettingsUi` reads it; the standalone struct keeps it for future direct access.
     pub current_page: super::PageKind,
     pub look_at_strength: String,
     pub model_scale: String,

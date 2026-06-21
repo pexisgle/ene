@@ -48,17 +48,13 @@ impl TrayHandle {
     /// (e.g. on a headless build); the runtime should treat that as
     /// a soft failure.
     pub fn new(event_tx: AppEventSender) -> Option<Self> {
-        // Forward click + menu events from the (potentially
-        // different-thread) tray-icon global receivers into the bus.
-        // The channel is unbounded so `send` is non-blocking.
-        //
-        // IMPORTANT: on Windows the icon must be built **on the same
-        // thread** that runs the Win32 message pump — building it on
-        // the calling (main) thread and then calling
-        // `mem::forget` creates a second, orphaned icon in the
-        // notification area. So the Windows path builds the icon
-        // inside the spawned thread; the Linux path builds it on the
-        // main thread because the GTK backend requires it there.
+        // On Windows the icon must be built on the same thread
+        // that runs the Win32 message pump — building it on the
+        // calling (main) thread and then `mem::forget`-ing it
+        // creates a second, orphaned icon in the notification
+        // area. So the Windows path builds the icon inside the
+        // spawned thread; the Linux path builds it on the main
+        // thread because the GTK backend requires it there.
         install_event_pump(event_tx);
 
         #[cfg(target_os = "linux")]
@@ -198,15 +194,13 @@ fn synthetic_icon() -> Icon {
 fn install_event_pump(event_tx: AppEventSender) {
     #[cfg(target_os = "windows")]
     {
-        // The Win32 message pump must run on the same thread that
-        // owns the icon (the tray-icon backend stores the icon
-        // HWND in thread-local state). It also blocks in
-        // `GetMessageW` for the lifetime of the process, so we
-        // run the `tray-icon` event poll on a **second** thread
-        // that just forwards `TrayIconEvent::Click` and
-        // `MenuEvent`s into the cross-subsystem bus. Forgetting
-        // the icon at the end of the message pump keeps the
-        // notification-area entry alive after the function returns.
+        // The Win32 message pump blocks in `GetMessageW` for the
+        // lifetime of the process, so the `tray-icon` event poll
+        // runs on a second thread that forwards
+        // `TrayIconEvent::Click` and `MenuEvent`s into the bus.
+        // The icon HWND is owned by the message-pump thread;
+        // forgetting it at the end of the pump keeps the
+        // notification-area entry alive.
         std::thread::spawn(move || {
             let _tray_icon = TrayIconBuilder::new()
                 .with_menu(Box::new(build_menu()))
@@ -225,9 +219,8 @@ fn install_event_pump(event_tx: AppEventSender) {
     #[cfg(target_os = "linux")]
     {
         // On Linux the icon is owned by the runtime (in
-        // `TrayHandle::_icon`). The pump just polls the global
-        // receivers — `tray-icon` is single-threaded but the
-        // receivers are `Send`.
+        // `TrayHandle::_icon`); the pump just polls the global
+        // receivers.
         std::thread::spawn(move || {
             pump_tray_events(&event_tx);
         });

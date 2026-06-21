@@ -1,22 +1,8 @@
-//! # ene-desktop-v2
+//! # ene-desktop
 //!
-//! Winit + wgpu shell for the ene AI character platform.
-//!
-//! PR0 (shipped) wired the transparent-window recipe and a
-//! single-window red-rect smoke test.
-//!
-//! PR1 (this revision) layers on the runtime skeleton needed for
-//! the rest of the migration:
-//!
-//! - tokio multi-thread runtime (for [`EneHandle`](ene_core::EneHandle))
-//! - [`AiBridge`] forwarding AI events into the cross-subsystem bus
-//! - [`TrayHandle`] for the system tray (Win32 message thread / GTK pump)
-//! - [`CharacterSettings`] plain-struct analog of the legacy Bevy resource
-//! - CLI argument parsing for VRM/VRMA overrides
-//! - cross-subsystem [`AppEvent`] bus drained by the winit runtime
-//!
-//! See `docs/architecture/wgpu-migration.md` §22.3 (PR0) and §22
-//! (full roadmap) for context.
+//! Winit + wgpu shell for the ene AI character platform. Owns the
+//! `AiBridge`, system tray, character renderer, and the cross-subsystem
+//! [`AppEvent`] bus.
 mod ai_bridge;
 mod character;
 mod character_state;
@@ -43,35 +29,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| EnvFilter::new("info,wgpu_core=warn,wgpu_hal=warn,naga=warn"));
     fmt().with_env_filter(filter).init();
 
-    // Build the tokio multi-thread runtime; keep its `enter()` guard
-    // alive for the lifetime of `main` so that `AiBridge::new` (and
-    // any other subsystem) can `tokio::spawn` from synchronous
-    // contexts.
+    // The enter guard must live for the rest of `main` so that
+    // `AiBridge::new` (and any other subsystem) can `tokio::spawn`
+    // from synchronous contexts.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     let handle = runtime.handle().clone();
     let _guard = runtime.enter();
 
-    // Resolve assets + CLI overrides, then build the GpuContext and
-    // the cross-subsystem AppState.
     let (assets_dir, default_vrm, _default_vrma) = state::resolve_paths()?;
     tracing::info!(
-        "ene-desktop-v2 starting: assets={}, default_vrm={}",
+        "ene-desktop starting: assets={}, default_vrm={}",
         assets_dir.display(),
         default_vrm
     );
 
     let gpu = pollster::block_on(gpu::GpuContext::new())?;
     let mut settings = settings::CharacterSettings::discover(&assets_dir, default_vrm);
-    // PR4.2 follow-up: the per-character `CharacterConfig::character_position`
-    // round-trip in `load_per_character_settings` can leave the model
-    // parked off-screen (1.72 m to the right is what the user
-    // observed) when the position was mutated by an earlier debug
-    // run before drag-to-move (PR4.3) shipped a real UI. Reset to
-    // origin on every launch until PR4.3 wires a "Reset position"
-    // button. The reset is saved immediately so subsequent launches
-    // start at origin too.
+    // Reset parked position on launch: an earlier debug run can mutate
+    // `character_position` and leave the model off-screen until the
+    // drag-to-move UI provides a "Reset position" affordance.
     settings.character_state.character_position = glam::Vec3::ZERO;
     settings.save();
     let (app_state, event_tx) = state::AppState::with_channel(gpu, settings, &handle);
@@ -84,16 +62,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run_app(&mut app)
         .expect("winit event loop failed");
 
-    // PR4.2 fix: shut the tokio runtime down gracefully so the
-    // AI-bridge background tasks (`pump_events` + the bootstrap
-    // `load_config` / `load_character` task) get a chance to exit
-    // cleanly. Without this, `runtime` is dropped at the end of
-    // `main`, the runtime cancels in-flight tasks, and any
-    // `tokio::time::Timeout` future inside `EneHandle::load_config`
-    // panics on drop with "A Tokio 1.x context was found, but it
-    // is being shutdown." A 500 ms budget is enough for the actor
-    // to drain its broadcast receiver and the bootstrap task to
-    // finish / log its warn.
+    // Shut the tokio runtime down gracefully so background tasks
+    // (AI bridge pump, bootstrap load) can exit cleanly. Dropping
+    // `runtime` outright cancels them and any pending
+    // `tokio::time::Timeout` future panics on drop.
     drop(_guard);
     runtime.shutdown_timeout(std::time::Duration::from_millis(500));
 

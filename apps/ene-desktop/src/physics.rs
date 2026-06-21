@@ -13,29 +13,16 @@ pub struct Transform {
     pub scale: f32,
 }
 
-/// One hit of a [`PhysicsWorld::cast_ray`]. Returned as
-/// `Some(RaycastHit)` on the first intersection, or `None`
-/// on a clean miss. The struct is small and `Copy` so the
-/// runtime can stash the latest hit in `AppState` and
-/// hand it to the debug overlay every frame.
+/// One hit of a [`PhysicsWorld::cast_ray`].
 #[derive(Clone, Copy, Debug)]
 pub struct RaycastHit {
     /// The hecs `Entity` that owns the hit collider.
     pub entity: Entity,
-    /// Distance along the ray, in world units, from
-    /// `origin` to the closest point on the collider.
-    /// Exposed for future consumers (e.g. an HUD
-    /// distance readout); the PR5.6 debug overlay
-    /// currently only reads [`Self::point`] and
-    /// [`Self::collider`].
-    #[allow(dead_code)]
+    /// Distance along the ray, in world units.
     pub toi: f32,
-    /// World-space point of the hit (the exact surface
-    /// point, computed as `origin + dir * toi`).
+    /// World-space point of the hit (`origin + dir * toi`).
     pub point: Point<f32>,
-    /// The Rapier `ColliderHandle` that was hit. Used by
-    /// the debug overlay to highlight the collider in
-    /// yellow.
+    /// The Rapier `ColliderHandle` that was hit.
     pub collider: ColliderHandle,
 }
 
@@ -53,11 +40,9 @@ pub struct PhysicsWorld {
     pub multibody_joint_set: MultibodyJointSet,
     pub ccd_solver: CCDSolver,
     pub query_pipeline: QueryPipeline,
-    /// Maps hecs Entity to Rapier RigidBodyHandle
+    /// Maps hecs Entity to Rapier RigidBodyHandle.
     pub entity_to_body: HashMap<Entity, RigidBodyHandle>,
-    /// Maps hecs Entity to its Rapier `ColliderHandle`s. One entity
-    /// can own multiple colliders — the character, for example,
-    /// owns one sphere per humanoid bone.
+    /// Maps hecs Entity to its Rapier `ColliderHandle`s (one per bone).
     pub entity_to_colliders: HashMap<Entity, Vec<ColliderHandle>>,
     pub entity_to_collider_static_offsets: HashMap<Entity, Vec<Vec3>>,
     pub entity_to_collider_static_rotations: HashMap<Entity, Vec<Quat>>,
@@ -107,14 +92,9 @@ impl PhysicsWorld {
         self.query_pipeline.update(&self.collider_set);
     }
 
-    /// Cast a ray against every collider in the world. Returns
-    /// the first hit (by `toi`) as a [`RaycastHit`], or `None` on
-    /// a clean miss. The hit test is BVH-accelerated internally
-    /// by Rapier — no extra caching on our side.
-    ///
-    /// `origin` and `dir` are the world-space ray; `dir` does not
-    /// need to be normalised (Rapier handles that internally) but
-    /// the caller is responsible for a sane `max_toi`.
+    /// Cast a ray against every collider. Returns the closest hit
+    /// as a [`RaycastHit`], or `None` on a clean miss. BVH-accelerated
+    /// by Rapier; `dir` need not be normalised.
     pub fn cast_ray(
         &self,
         origin: Point<f32>,
@@ -131,9 +111,8 @@ impl PhysicsWorld {
             true,
             filter,
         )?;
-        // Find which entity owns the hit collider. One entity can
-        // own multiple colliders (the character has one sphere per
-        // bone), so we scan all of them.
+        // One entity can own multiple colliders (one per bone), so
+        // we scan all of them to find the owning entity.
         let entity = self
             .entity_to_colliders
             .iter()
@@ -151,12 +130,7 @@ impl PhysicsWorld {
         })
     }
 
-    /// PR5.6: return the list of collider handles owned by
-    /// `entity`. Returns an empty slice when the entity was
-    /// never registered (e.g. before
-    /// [`Self::add_character_bone_colliders`] runs) or after
-    /// [`Self::remove_character_colliders`]. Used by the
-    /// debug overlay to draw a wireframe sphere per bone.
+    /// Return the collider handles owned by `entity`.
     pub fn colliders_for(&self, entity: Entity) -> &[ColliderHandle] {
         self.entity_to_colliders
             .get(&entity)
@@ -164,34 +138,11 @@ impl PhysicsWorld {
             .unwrap_or(&[])
     }
 
-    /// PR5.2: add (or replace) the character's per-bone sphere
-    /// colliders. Each entry is `(world_position, radius)`. All
-    /// colliders share a single kinematic rigid body parked at
-    /// the world origin; the per-frame
-    /// [`Self::update_character_bone_positions`] only moves the
-    /// colliders (not the body), which is the cheap path —
-    /// Rapier doesn't rebuild any acceleration structure for a
-    /// collider translation.
-    ///
-    /// `world_position` is the bone's location in the model's
-    /// local frame (after `T(-center) * S(normalize_scale)`).
-    /// PR5.4: build a Rapier collider for every entry in
-    /// `specs` and attach them to a single kinematic body
-    /// parked at the world origin. Each spec carries its own
-    /// shape category (sphere / capsule / capsule_y) and
-    /// collider-local rotation picked by
-    /// [`crate::character::collider::compute_bone_specs`], so
-    /// a swinging arm gets a properly-oriented capsule rather
-    /// than a sphere that bleeds into the chest.
-    ///
-    /// The body's local position is set to `spec.local_position`
-    /// and its local rotation to `spec.local_rotation`; the
-    /// per-frame [`Self::update_character_bone_positions`]
-    /// updates both every `about_to_wait` so the colliders
-    /// follow the rendered mesh (and the animation).
+    /// Build a Rapier collider for every entry in `specs` and attach
+    /// them to a single kinematic body at the world origin. Per-frame
+    /// [`Self::update_character_bone_positions`] moves each collider
+    /// to follow the rendered mesh.
     pub fn add_character_bone_colliders(&mut self, entity: Entity, specs: &[BoneShapeSpec]) {
-        // Drop any prior body / colliders for this entity so the
-        // new bone set replaces the old one instead of stacking.
         self.remove_character_colliders(entity);
 
         let body = RigidBodyBuilder::kinematic_position_based().build();
@@ -224,46 +175,20 @@ impl PhysicsWorld {
             .insert(entity, rest_rotations);
     }
 
-    /// PR5.4: move every bone collider to the matching entry
-    /// in `poses` (translation **and** rotation, the latter
-    /// new in PR5.4 so limb capsules follow the animation)
-    /// and slide the underlying body to `character_position`
-    /// so the whole rig follows the character (drag,
-    /// animation, anything that mutates
-    /// `settings.character_state.character_position`).
+    /// Move every bone collider to the matching entry in `poses` and
+    /// slide the underlying body to `character_position`.
     ///
-    /// `poses[i].translation` is in the model's local frame
-    /// (after `T(-center) * S(normalize_scale)`); it is
-    /// multiplied by `actual_scale` to land in the same world
-    /// frame the per-frame model matrix produces. The body
-    /// itself is then translated to `character_position` so
-    /// the colliders' world positions become
-    /// `character_position + pose.translation * actual_scale`,
-    /// which matches the rendered mesh.
+    /// `poses[i].translation` is in the model's local frame; it is
+    /// multiplied by `actual_scale` to land in the world frame the
+    /// per-frame model matrix produces. `poses[i].rotation` is the
+    /// bone's current world rotation — for limbs this lets the
+    /// capsule swing with the animation, for the trunk the rotation
+    /// is mostly identity and the update is a no-op.
     ///
-    /// `poses[i].rotation` is the bone's **current** world
-    /// rotation (read from `model.nodes.world_rotations`).
-    /// For limbs (upperarm / lowerarm / upperleg / lowerleg
-    /// / hand) the collider's static local rotation is the
-    /// "toward-child" alignment built by the collider
-    /// builder; pushing the bone's animated rotation into
-    /// `set_rotation_wrt_parent` lets the capsule swing with
-    /// the limb. For the trunk (chest / hips / ...) the
-    /// static rotation is already the bone's rest rotation;
-    /// the runtime's per-frame `pose.rotation` is mostly
-    /// identical to the rest rotation, so the update is a
-    /// cheap no-op.
-    ///
-    /// Uses [`Collider::set_translation_wrt_parent`] /
-    /// [`Collider::set_rotation_wrt_parent`] (not the
-    /// non-`wrt_parent` variants) because Rapier recomputes
-    /// the world position from `body * local` each step. The
-    /// shape dimensions are set once at construction time and
-    /// are **not** scaled by `actual_scale` here — the
-    /// runtime passes the spec list with the scale already
-    /// baked in, so the values stay constant. If
-    /// `model_scale` drifts far from the value at
-    /// construction time, rebuild the colliders.
+    /// Uses the `*_wrt_parent` variants because Rapier recomputes
+    /// the world position from `body * local` each step. Shape
+    /// dimensions are set once at construction; if `model_scale`
+    /// drifts far from that value, rebuild the colliders.
     pub fn update_character_bone_positions(
         &mut self,
         entity: Entity,
@@ -313,10 +238,8 @@ impl PhysicsWorld {
         }
     }
 
-    /// PR5.2: detach and free every collider (and the body they
-    /// were attached to) for `entity`. Used by the per-character
-    /// rebuild path in `add_character_bone_colliders`, and useful
-    /// from tests.
+    /// Detach and free every collider (and the body they were
+    /// attached to) for `entity`.
     pub fn remove_character_colliders(&mut self, entity: Entity) {
         if let Some(body_handle) = self.entity_to_body.remove(&entity) {
             self.rigid_body_set.remove(
@@ -335,12 +258,7 @@ impl PhysicsWorld {
     }
 }
 
-/// Build the Rapier [`ColliderBuilder`] for one
-/// [`BoneShapeSpec`]. Picks the right shape constructor
-/// (sphere / capsule_y / generic capsule) and bakes the
-/// collider-local translation and rotation in. The collider
-/// is later attached to the kinematic body via
-/// `insert_with_parent`.
+/// Build the Rapier [`ColliderBuilder`] for one [`BoneShapeSpec`].
 fn build_collider_for_shape(spec: &BoneShapeSpec) -> ColliderBuilder {
     let mut builder = match spec.shape {
         BoneShape::Sphere { radius } => ColliderBuilder::ball(radius),
@@ -358,36 +276,17 @@ fn build_collider_for_shape(spec: &BoneShapeSpec) -> ColliderBuilder {
         spec.local_position.y,
         spec.local_position.z
     ]);
-    // Bake the static local rotation. For limbs this is
-    // the rest-pose "toward-child" direction; the runtime
-    // will *add* the bone's animated rotation on top via
-    // `set_rotation_wrt_parent`, so the capsule follows the
-    // swing. For spheres the rotation is `IDENTITY`.
+    // Static local rotation: for limbs this is the rest-pose
+    // "toward-child" direction; `update_character_bone_positions`
+    // adds the bone's animated rotation on top via
+    // `set_rotation_wrt_parent`, so the capsule follows the swing.
     let (axis, angle) = spec.local_rotation.to_axis_angle();
     builder = builder.rotation(vector![axis.x * angle, axis.y * angle, axis.z * angle]);
     builder
 }
 
-/// A bone collider whose shape is a generic [`BoneShape::Capsule`]
-/// is built as a [`BoneShape::CapsuleY`] collider plus a
-/// `local_rotation` that aligns the capsule's +Y axis with
-/// the bone's "toward-child" direction. Rapier does not have
-/// a `capsule_from_direction` constructor, so this is the
-/// canonical way to express a capsule with an arbitrary
-/// orientation.
-#[allow(dead_code)]
-const _: () = ();
-
 #[cfg(test)]
 mod tests {
-    //! PR5.2 / PR5.4 regression tests: the character's per-
-    //! bone colliders are the source of truth for the
-    //! click-through hit test. The bones are placed in the
-    //! model's local frame (after
-    //! `T(-center) * S(normalize_scale)`); the rigid body
-    //! sits at the world origin and the colliders follow the
-    //! bone positions every frame via
-    //! [`PhysicsWorld::update_character_bone_positions`].
     use super::*;
     use glam::Vec3;
     use hecs::{Entity, World};
@@ -399,15 +298,8 @@ mod tests {
         (physics, world, entity)
     }
 
-    /// Two bones: a "chest" at (0, 0, 0) and a "head" at (0, 0.5, 0).
-    /// The colliders land at those local-frame positions; the body
-    /// itself stays at the world origin.
-    /// Two bone specs: a "chest" at the origin (sphere of
-    /// radius 0.2) and a "head" at (0, 0.5, 0) (sphere of
-    /// radius 0.1). PR5.4 dropped the old `(Vec3, f32)`
-    /// fixture; the tests below drive the per-bone
-    /// `BoneShapeSpec` / `BonePose` API directly so they
-    /// don't depend on the vertex-weight builder.
+    /// Two bone specs: a "chest" sphere at the origin and a
+    /// "head" sphere at (0, 0.5, 0).
     fn two_bone_specs() -> Vec<BoneShapeSpec> {
         vec![
             BoneShapeSpec {
@@ -442,9 +334,6 @@ mod tests {
         ]
     }
 
-    /// `add_character_bone_colliders` must create a single body
-    /// (parked at the origin) and one collider per spec,
-    /// picking the right Rapier shape for each entry.
     #[test]
     fn add_character_bone_colliders_creates_body_and_mixed_shapes() {
         let (mut physics, _world, entity) = setup();
@@ -490,17 +379,12 @@ mod tests {
         );
     }
 
-    /// `add_character_bone_colliders` must register the
-    /// collider's static local rotation. A sphere with
-    /// `Quat::IDENTITY` is the easy case; a capsule whose
-    /// local rotation is the bone's "toward-child" direction
-    /// must be baked in so the capsule's axis points along
-    /// the limb rather than world up.
+    /// A capsule whose local rotation is the bone's "toward-child"
+    /// direction must be baked in so the capsule's axis points
+    /// along the limb rather than world up.
     #[test]
     fn add_character_bone_colliders_bakes_local_rotation() {
         let (mut physics, _world, entity) = setup();
-        // Limb-direction rotation: align the collider's +Y
-        // with world +X (a 90° yaw about world Z).
         let rotation = Quat::from_rotation_arc(Vec3::Y, Vec3::X);
         let specs = vec![BoneShapeSpec {
             bone_node: 0,
@@ -518,15 +402,9 @@ mod tests {
             .collider_set
             .get(physics.entity_to_colliders[&entity][0])
             .unwrap();
-        // The collider's local rotation must map the
-        // capsule's local +Y (its long axis) to the same
-        // world direction the spec's rotation does.
-        // Rapier's `collider.rotation()` returns a
-        // nalgebra `UnitQuaternion`; applying it to
-        // `(0, 1, 0)` and comparing the result to the spec
-        // rotation's output is a clean equivalence test
-        // that doesn't depend on quaternion sign
-        // conventions.
+        // The collider's local rotation must map the capsule's
+        // local +Y (its long axis) to the same world direction
+        // the spec's rotation does.
         let collider_rot = collider.rotation();
         let rapier_y: glam::Vec3 = {
             let v = collider_rot * nalgebra::Vector3::new(0.0, 1.0, 0.0);
@@ -540,16 +418,14 @@ mod tests {
         );
     }
 
-    /// A ray through the centre of a bone collider must hit
-    /// the character's entity. A ray past the collider must
-    /// miss.
+    /// A ray through the centre of a bone collider must hit the
+    /// character's entity. A ray past the collider must miss.
     #[test]
     fn cast_ray_finds_bone_collider_via_entity() {
         let (mut physics, _world, entity) = setup();
         physics.add_character_bone_colliders(entity, &two_bone_specs());
         physics.step();
 
-        // Through bone 0 (chest sphere) at (0, 0, 0) with radius 0.2.
         let hit = physics.cast_ray(Point::new(0.0, 0.0, 3.0), vector![0.0, 0.0, -1.0], 100.0);
         assert!(hit.is_some(), "ray through chest must hit");
         assert_eq!(
@@ -558,19 +434,17 @@ mod tests {
             "hit must be the character entity"
         );
 
-        // Through bone 1 (head sphere) at (0, 0.5, 0) with radius 0.1.
         let hit = physics.cast_ray(Point::new(0.0, 0.5, 3.0), vector![0.0, 0.0, -1.0], 100.0);
         assert!(hit.is_some(), "ray through head must hit");
 
-        // Above the head: y = 0.7 is outside both spheres.
         let hit = physics.cast_ray(Point::new(0.0, 0.7, 3.0), vector![0.0, 0.0, -1.0], 100.0);
         assert!(hit.is_none(), "ray above head must miss all bone colliders");
     }
 
     /// `cast_ray` must also return the world-space hit point
     /// (`origin + dir * toi`) and the collider handle so the
-    /// debug overlay can highlight the exact collider that
-    /// was hit.
+    /// debug overlay can highlight the exact collider that was
+    /// hit.
     #[test]
     fn cast_ray_returns_point_and_collider() {
         let (mut physics, _world, entity) = setup();
@@ -612,7 +486,6 @@ mod tests {
         physics.add_character_bone_colliders(entity, &two_bone_specs());
         physics.step();
 
-        // Move the rig +5 along X (body translation), scale by 1.5.
         physics.update_character_bone_positions(
             entity,
             &two_bone_poses(),
@@ -621,42 +494,29 @@ mod tests {
         );
         physics.step();
 
-        // A ray through the old chest position (0, 0, 0) must miss
-        // — the rig is now centred at (5, 0, 0).
         let hit = physics.cast_ray(Point::new(0.0, 0.0, 3.0), vector![0.0, 0.0, -1.0], 100.0);
         assert!(
             hit.is_none(),
             "ray at the old chest position must miss after move"
         );
 
-        // A ray through the new chest position (5, 0, 0) — at the
-        // collider's local (0, 0, 0) plus the body translation —
-        // must hit.
         let hit = physics.cast_ray(Point::new(5.0, 0.0, 3.0), vector![0.0, 0.0, -1.0], 100.0);
         assert!(
             hit.is_some(),
             "ray at the new chest position must hit after move"
         );
 
-        // A ray through the new head position. The collider's
-        // local (0, 0.5, 0) is scaled to (0, 0.75, 0) by actual_scale=1.5
-        // and the body sits at (5, 0, 0), so the world centre is
-        // (5, 0.75, 0).
         let hit = physics.cast_ray(Point::new(5.0, 0.75, 3.0), vector![0.0, 0.0, -1.0], 100.0);
         assert!(hit.is_some(), "ray at the scaled head position must hit");
     }
 
-    /// `update_character_bone_positions` must also rotate
-    /// each collider to match `pose.rotation`. New in
-    /// PR5.4 — without this, a swinging arm's collider
-    /// stays aligned with the rest pose and clicks land
-    /// on the wrong body part.
+    /// `update_character_bone_positions` must also rotate each
+    /// collider to match `pose.rotation` — without this, a
+    /// swinging arm's collider stays aligned with the rest pose
+    /// and clicks land on the wrong body part.
     #[test]
     fn update_character_bone_positions_rotates_colliders() {
         let (mut physics, _world, entity) = setup();
-        // Capsule whose rest-pose +Y is world +Y (identity
-        // local rotation). A 90° yaw about world Z makes
-        // the bone's world rotation point along world +X.
         let specs = vec![BoneShapeSpec {
             bone_node: 0,
             local_position: Vec3::ZERO,
@@ -671,21 +531,9 @@ mod tests {
         physics.add_character_bone_colliders(entity, &specs);
         physics.step();
 
-        // The capsule spans world Y = [-0.5, +0.5] at
-        // rest. A ray from (0, 0, 3) toward (0, 0, 0)
-        // enters the side of the capsule (passes through
-        // its diameter at y=0).
         let pre_hit = physics.cast_ray(Point::new(0.0, 0.0, 3.0), vector![0.0, 0.0, -1.0], 100.0);
         assert!(pre_hit.is_some(), "ray must hit the rest capsule");
 
-        // Rotate the bone 90° about Z. The capsule now
-        // spans world X = [-0.5, +0.5] at the origin; a
-        // ray at (0, 0, 3) → (0, 0, 0) no longer hits
-        // (the capsule's extent in the +Y direction is
-        // just 2×radius = 0.1 m around y=0, but the
-        // capsule is now lying along X). A ray from
-        // (0.5, 0, 3) toward the bone's rest position
-        // (0, 0, 0) must now hit.
         let poses = vec![BonePose {
             translation: Vec3::ZERO,
             rotation: Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
@@ -701,7 +549,8 @@ mod tests {
     }
 
     /// `remove_character_colliders` must free the body and drop
-    /// the entity mapping, so a subsequent cast_ray no longer hits.
+    /// the entity mapping, so a subsequent cast_ray no longer
+    /// hits.
     #[test]
     fn remove_character_colliders_drops_body() {
         let (mut physics, _world, entity) = setup();
@@ -719,12 +568,6 @@ mod tests {
         assert!(!physics.entity_to_colliders.contains_key(&entity));
     }
 
-    /// `colliders_for` returns one handle per bone after
-    /// `add_character_bone_colliders`, an empty slice for an
-    /// entity that was never registered, and an empty slice
-    /// after `remove_character_colliders`. Used by the PR5.6
-    /// debug overlay to enumerate the colliders it has to
-    /// draw.
     #[test]
     fn colliders_for_returns_registered_handles() {
         let (mut physics, _world, entity) = setup();
@@ -737,8 +580,6 @@ mod tests {
         assert!(unknown.is_empty(), "unknown entity returns an empty slice");
     }
 
-    /// `colliders_for` becomes empty after the entity's
-    /// colliders are removed.
     #[test]
     fn colliders_for_empty_after_removal() {
         let (mut physics, _world, entity) = setup();

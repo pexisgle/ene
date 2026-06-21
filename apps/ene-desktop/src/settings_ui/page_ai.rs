@@ -151,12 +151,9 @@ pub fn render(
 
         ui.horizontal(|ui| {
             ui.label("Chat Input");
-            // A.4: gate the chat input + Send button on the
-            // processing flag. While a request is in flight the
-            // widget is greyed out, so the user cannot
-            // double-fire a Run before the actor reports Done /
-            // Failed. The flag is lock-free; a relaxed load
-            // once per frame is enough.
+            // Grey out the chat input + Send button while a
+            // request is in flight, so the user cannot double-fire
+            // a Run before the actor reports Done / Failed.
             let processing = ai.is_processing();
             ui.add_enabled_ui(!processing, |ui| {
                 let response = ui.add(
@@ -187,7 +184,7 @@ pub fn render(
                     {
                         ui_state.ai_chat_input = input.ai_chat_input.clone();
                     }
-                    let _ = SettingsAction::SendAiChat; // silence unused import in narrow builds
+                    let _ = SettingsAction::SendAiChat;
                     send_chat(settings, ai, world, ui_entity);
                     input.ai_chat_input.clear();
                 }
@@ -293,19 +290,17 @@ pub fn render(
                 }
             });
 
-        // A.5: the permission / user-input dialogs. Rendered as
-        // top-level egui `Window`s so they pop over the rest
-        // of the AI page; both clear their `pending_*` state
+        // Top-level egui `Window`s so the dialogs pop over the
+        // rest of the AI page. Both clear their `pending_*` state
         // on every button click (any answer, including Cancel,
-        // is the end of the in-flight request). The data path
-        // is wired in `runtime.rs::about_to_wait`; A.5 finishes
-        // it by drawing the dialogs.
+        // ends the in-flight request). The data path is wired in
+        // `runtime.rs::about_to_wait`.
         render_permission_dialog(ui, world, ui_entity, ai);
         render_user_input_dialog(ui, world, ui_entity, ai);
     });
 }
 
-/// A.5: render the permission-request dialog when
+/// Render the permission-request dialog when
 /// `UiState::pending_permission` is `Some`. Yes / No /
 /// Always each call `AiBridge::answer_permission` with the
 /// matching `PermissionDecision` and clear the in-flight
@@ -382,13 +377,12 @@ fn clear_pending_permission(world: &mut hecs::World, ui_entity: hecs::Entity) {
     }
 }
 
-/// A.5: render the user-input dialog when
-/// `UiState::pending_user_input` is `Some`. One row per
-/// sub-question in the original prompt; each row carries the
-/// predefined options as buttons + a free-text `TextEdit` +
-/// a Skip checkbox. Submit packs the answers into a
-/// `Vec<MultiAnswer>` in the same order as the prompt and
-/// calls `AiBridge::answer_user_input` with
+/// Render the user-input dialog when `UiState::pending_user_input`
+/// is `Some`. One row per sub-question in the original prompt;
+/// each row carries the predefined options as buttons + a
+/// free-text `TextEdit` + a Skip checkbox. Submit packs the
+/// answers into a `Vec<MultiAnswer>` in the same order as the
+/// prompt and calls `AiBridge::answer_user_input` with
 /// `UserInputResponse::Multi(..)`. Cancel submits
 /// `UserInputResponse::Cancel`.
 fn render_user_input_dialog(
@@ -405,10 +399,7 @@ fn render_user_input_dialog(
         return;
     };
     if prompt_snapshot.prompt.items.len() != drafts.len() {
-        // Defensive: the runtime only writes `user_input_drafts`
-        // when the prompt is Some, and the lengths must match.
-        // If they don't, bail out (the next event will
-        // re-populate correctly).
+        // Defensive: bail out and let the next event re-populate.
         return;
     }
     // The closure body needs `&mut Vec<QuestionDraft>` for the
@@ -484,8 +475,6 @@ fn render_user_input_row(
                     let selected = draft.selected.as_deref() == Some(option.as_str());
                     if ui.selectable_label(selected, option).clicked() {
                         draft.selected = Some(option.clone());
-                        // Picking an option clears a Skip
-                        // (the user is engaging again).
                         draft.skipped = false;
                     }
                 }
@@ -496,9 +485,8 @@ fn render_user_input_row(
                 ui.add(egui::TextEdit::singleline(&mut draft.text).desired_width(f32::INFINITY));
             if response.changed() && !draft.text.is_empty() {
                 // Typing in the free-text field counts as
-                // engagement; clear any selected option so
-                // Submit packs an `Answer` rather than a
-                // `Selected`.
+                // engagement: clear any selected option so Submit
+                // packs an `Answer` rather than a `Selected`.
                 draft.selected = None;
                 draft.skipped = false;
             }

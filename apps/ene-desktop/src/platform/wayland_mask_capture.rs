@@ -1,42 +1,23 @@
-//! PR-LX.3: Wayland mask capture (offscreen R8 + readback).
+//! Wayland mask capture (offscreen `Rgba8` + readback).
 //!
-//! The Linux click-through story on Wayland needs the *visible
-//! silhouette* of the character as a set of rectangles, so the
-//! runtime can push them into
-//! [`crate::platform::wayland_region::WaylandInputRegionContext`]
-//! via `wl_region::add` and `wl_surface::set_input_region`. We
-//! can't read the actual winit swapchain (winit owns the surface
-//! and does not expose it for readback from a stand-alone
-//! connection), so we render a separate, low-resolution copy of
-//! the model into an offscreen `Rgba8Unorm` texture and read it
-//! back once per frame.
+//! The Linux click-through story on Wayland needs the visible
+//! silhouette as a set of rectangles to push into
+//! `wl_surface::set_input_region`. We can't read the actual
+//! winit swapchain, so we render a separate, low-resolution
+//! copy of the model into an offscreen `Rgba8Unorm` texture and
+//! read it back once per frame.
 //!
-//! The target texture is sized at
-//! `(width / mask_render_downsample, height / mask_render_downsample)`
-//! — the `mask_render_downsample` value comes from
-//! `CharacterSettings::graphics::mask_render_downsample` and
-//! defaults to `8` (matching the legacy `apps/ene-desktop`.
-//! `cycle_mask_render_downsample` UI row). At 560×980 with
-//! downsample=8 the texture is 70×122, which is small enough for
-//! the readback to cost ~3.4 KB and the rectangle extractor to run
-//! in a single pass over the buffer.
-//!
-//! The actual render pass that writes into this target is wired
-//! up in PR-LX.7 (the runtime's Linux dispatch). This module
-//! owns the GPU resources + the CPU-side rectangle extractor
-//! and is `cfg(target_os = "linux")`-only.
+//! The target is sized `(w / downsample, h / downsample)` — at
+//! 560×980 with downsample=8 the texture is 70×122, a ~3.4 KB
+//! readback.
 
 use std::sync::Arc;
 
 /// Format used for the mask capture target. `Rgba8Unorm` is the
-/// lowest-bandwidth format the wgpu spec mandates for
-/// `RENDER_ATTACHMENT | COPY_SRC`, and our rectangle extractor
-/// only reads the red channel anyway. The four-channel layout is
-/// a wgpu-validation convenience: a pure `R8Unorm` target works
-/// too, but wgpu's strictest validation rules occasionally
-/// complain when COPY_SRC / RENDER_ATTACHMENT are combined on
-/// the single-channel formats; the bandwidth difference is
-/// negligible at downsample=8.
+/// lowest-bandwidth format wgpu mandates for
+/// `RENDER_ATTACHMENT | COPY_SRC`. `R8Unorm` would work in
+/// principle but trips wgpu's strictest validation when the two
+/// usages are combined.
 pub const MASK_TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// Bytes per pixel of [`MASK_TARGET_FORMAT`]. Used to slice the
@@ -59,59 +40,45 @@ pub(crate) const fn aligned_bytes_per_row(width: u32) -> u32 {
 }
 
 /// Threshold above which a pixel is considered "inside the
-/// silhouette" (we use the red channel of the captured
-/// `Rgba8Unorm` target). The mask shader writes
-/// `(1.0, 1.0, 1.0, 1.0)` for any fragment covered by a mesh
-/// triangle, so 16/255 = 6% is plenty of headroom against
-/// edge-fuzz from the wgpu primitive rasteriser.
+/// silhouette" (red channel of the captured `Rgba8Unorm`
+/// target). 16/255 = 6% is plenty of headroom against edge-fuzz
+/// from the wgpu primitive rasteriser.
 const PIXEL_THRESHOLD: u8 = 16;
 
 /// Offscreen mask capture target. Holds the texture, view, and
 /// readback buffer for a single, downsampled silhouette read.
-///
-/// Construction is cheap: two GPU resources + a single 4 KB
-/// staging buffer at default downsample=8. The actual render
-/// pass that writes into `target_view()` lives in PR-LX.7 (the
-/// runtime's Linux dispatch); this module only allocates the
-/// target and exposes the rectangle-extraction readback.
-#[allow(dead_code)] // PR-LX.7 wires the mask render pass; the public API is fixed here.
+/// The render pass that writes into `target_view()` lives in
+/// the runtime's Linux dispatch.
+#[allow(dead_code)]
 pub struct MaskCaptureCamera {
     target: wgpu::Texture,
     target_view: wgpu::TextureView,
     readback: wgpu::Buffer,
-    /// `width / mask_render_downsample` (post-clamp).
     width: u32,
-    /// `height / mask_render_downsample` (post-clamp).
     height: u32,
-    /// Cached `bytes_per_row` for the readback. This is
-    /// `aligned_bytes_per_row(width)`: the unpadded
-    /// `width * BYTES_PER_PIXEL` rounded up to a multiple of
-    /// [`wgpu::COPY_BYTES_PER_ROW_ALIGNMENT`] (256 in wgpu 29).
-    /// The CPU walk in `extract_rectangles` indexes per-pixel
-    /// using `width`, so the trailing per-row padding bytes
-    /// are unread.
+    /// Cached `bytes_per_row` for the readback: `width *
+    /// BYTES_PER_PIXEL` rounded up to
+    /// [`wgpu::COPY_BYTES_PER_ROW_ALIGNMENT`]. The CPU walk
+    /// indexes per-pixel using `width`, so the trailing per-row
+    /// padding is unread.
     bytes_per_row: u32,
-    /// Cached downsample so we can detect size changes.
     downsample: u32,
-    /// Cached readback bytes; populated by
-    /// `read_back` and consumed by `extract_rectangles`.
     last_readback: Vec<u8>,
-    /// `true` once `read_back` has been called at least once for
-    /// the current texture contents. Until then
-    /// `extract_rectangles` returns the previous frame's
-    /// rectangles (or an empty vec on the very first frame).
+    /// `true` once `read_back` has run for the current texture
+    /// contents. Until then `extract_rectangles` returns the
+    /// previous frame's rectangles (or empty on first frame).
     readback_fresh: bool,
-    /// True if the buffer is currently mapped (via `map_async`).
-    /// `encode_readback` skips the copy to prevent wgpu validation errors.
+    /// `true` while the readback buffer is mapped. `encode_readback`
+    /// skips the copy to avoid wgpu validation errors.
     pub is_mapped: bool,
 }
 
-#[allow(dead_code)] // PR-LX.7 wires the mask render pass; the public API is fixed here.
+#[allow(dead_code)]
 impl MaskCaptureCamera {
     /// Build a new mask capture target for the given window
     /// size + downsample. `downsample` is clamped to at least
     /// `1`; a `downsample` of `0` would divide by zero.
-    #[allow(dead_code)] // PR-LX.7 wires the mask render pass; the public API is fixed here.
+    #[allow(dead_code)]
     pub fn try_new(
         device: &wgpu::Device,
         width: u32,
@@ -124,8 +91,7 @@ impl MaskCaptureCamera {
     }
 
     /// Build a new mask capture target with explicit
-    /// (downsampled) dimensions. `downsample` is stored for
-    /// [`Self::resize`] comparisons.
+    /// (downsampled) dimensions.
     fn try_new_sized(
         device: &wgpu::Device,
         width: u32,
@@ -174,22 +140,14 @@ impl MaskCaptureCamera {
             height,
             bytes_per_row,
             downsample,
-            // The CPU cache matches the staging buffer so
-            // `read_back`'s `copy_from_slice` is a 1:1 copy.
-            // The trailing per-row padding bytes (if any) are
-            // stored but never inspected by
-            // `extract_rectangles`.
             last_readback: vec![0u8; readback_size as usize],
             readback_fresh: false,
             is_mapped: false,
         })
     }
 
-    /// Resize the target to match a new window size /
-    /// `mask_render_downsample`. Re-creates the texture +
-    /// readback buffer. Returns `true` if anything changed
-    /// (texture, buffer, or cached dimensions) and `false` if
-    /// the new size is identical.
+    /// Resize the target to match a new window size / downsample.
+    /// Returns `true` if anything changed.
     pub fn resize(
         &mut self,
         device: &wgpu::Device,
@@ -207,45 +165,35 @@ impl MaskCaptureCamera {
             true
         } else {
             // Zero / negative size — leave the camera at its
-            // previous dimensions; the runtime will skip
-            // capture this frame.
+            // previous dimensions; the runtime will skip capture.
             false
         }
     }
 
-    /// View into which the mask shader should write. The
-    /// runtime (PR-LX.7) renders the model into this view once
-    /// per frame.
+    /// View into which the mask shader writes. The runtime
+    /// renders the model into this view once per frame.
     pub fn target_view(&self) -> &wgpu::TextureView {
         &self.target_view
     }
 
-    /// Width of the mask target in pixels.
     pub fn width(&self) -> u32 {
         self.width
     }
 
-    /// Height of the mask target in pixels.
     pub fn height(&self) -> u32 {
         self.height
     }
 
-    /// Downsample factor (`window_pixels / target_pixels`).
-    /// `extract_rectangles` returns rectangles in
-    /// **target** pixel space; the runtime scales them by
-    /// this factor to convert back to window-pixel space
-    /// before pushing to Wayland / X11.
+    /// `extract_rectangles` returns rectangles in target pixel
+    /// space; the runtime scales them by this factor to convert
+    /// back to window-pixel space.
     pub fn downsample(&self) -> u32 {
         self.downsample
     }
 
-    /// Append a `copy_texture_to_buffer` command to the
-    /// encoder. The runtime calls this *after* the mask
-    /// render pass and *before* `queue.submit`. The matching
-    /// `read_back` happens at the start of the next frame
-    /// (one-frame latency is fine; the cursor moves faster
-    /// than 60 Hz but the silhouette changes on the
-    /// sub-second timescale of the animation).
+    /// Append a `copy_texture_to_buffer` to the encoder. The
+    /// matching `readback_slice` happens at the start of the
+    /// next frame (one-frame latency is fine).
     pub fn encode_readback(&self, encoder: &mut wgpu::CommandEncoder) {
         if self.is_mapped {
             return;
@@ -273,27 +221,11 @@ impl MaskCaptureCamera {
         );
     }
 
-    /// Block on the GPU's readback of the most recently
-    /// submitted encoder and refresh `last_readback`. The
-    /// runtime calls this once per frame, after
-    /// `queue.submit` and before the rectangle extractor
-    /// runs.
-    ///
-    /// We use a blocking `mpsc::recv` because the mask
-    /// readback is a tiny, single-frame job — the wait is
-    /// bounded by the swapchain interval and the typical
-    /// latency is sub-millisecond. The legacy Bevy app
-    /// used the same pattern in `apps/ene-desktop/src/
-    /// character_drag/linux/capture.rs::read_mask`
-    /// (PR5.3 plan, §10.3).
-    ///
-    /// **LX.9 deprecation note:** the production runtime
-    /// no longer calls `read_back` on the winit main thread
-    /// (a blocking `mpsc::recv` froze the window — see
-    /// `mask_readback` module for the off-thread worker).
-    /// The method is retained under `#[cfg(test)]` so the
-    /// GPU writeback logic still has a one-call entry point
-    /// for synthetic tests.
+    /// Test-only: block on the GPU's readback of the most
+    /// recently submitted encoder. The production runtime does
+    /// not call this on the winit main thread (a blocking
+    /// `mpsc::recv` froze the window) — see `mask_readback` for
+    /// the off-thread worker.
     #[cfg(test)]
     pub fn read_back(&mut self, _device: &wgpu::Device, _queue: &wgpu::Queue) {
         let slice = self.readback_slice();
@@ -307,19 +239,16 @@ impl MaskCaptureCamera {
         self.unmap_readback();
     }
 
-    /// Returns a `BufferSlice` over the readback staging
-    /// buffer. The mask readback worker uses this in
-    /// `map_async`; the slice is `wgpu::Buffer::slice` is
-    /// `&self` so no mutability is required.
+    /// Returns a `BufferSlice` over the readback staging buffer
+    /// for the off-thread worker to `map_async`.
     pub fn readback_slice(&mut self) -> wgpu::BufferSlice<'_> {
         self.is_mapped = true;
         self.readback.slice(..)
     }
 
     /// Copy the bytes currently mapped by the GPU into
-    /// `self.last_readback` and refresh `readback_fresh`.
-    /// Returns the number of bytes copied, or `0` if the
-    /// buffer is not currently mapped.
+    /// `self.last_readback`. Returns the number of bytes copied,
+    /// or `0` if the buffer is not currently mapped.
     pub fn copy_mapped_into_last_readback(&mut self) -> usize {
         let mapped = self.readback.slice(..).get_mapped_range();
         let len = mapped.len();
@@ -332,8 +261,7 @@ impl MaskCaptureCamera {
         len
     }
 
-    /// Unmap the readback staging buffer. No-op if the
-    /// buffer is not currently mapped.
+    /// Unmap the readback staging buffer.
     pub fn unmap_readback(&mut self) {
         if self.is_mapped {
             self.readback.unmap();
@@ -342,10 +270,8 @@ impl MaskCaptureCamera {
     }
 
     /// Decompose the most recent readback into a list of
-    /// `(x, y, w, h)` rectangles in the **downsampled**
-    /// coordinate space. Returns the cached rectangles from
-    /// the previous frame if no new readback is available
-    /// yet (or an empty vec on the very first frame).
+    /// `(x, y, w, h)` rectangles in the downsampled coordinate
+    /// space.
     pub fn extract_rectangles(&self) -> Vec<(i32, i32, i32, i32)> {
         extract_rectangles_impl(
             self.width,
@@ -392,19 +318,13 @@ fn extract_rectangles_impl(
     rects
 }
 
-/// Build a mask capture camera in an `Arc<Mutex<…>>` so the
-/// runtime can hand a clone to the click-through dispatcher
-/// while still keeping the `read_back` / `extract_rectangles`
-/// path single-threaded. The legacy Bevy app used the same
-/// pattern in `apps/ene-desktop/src/character_drag/linux/
-/// capture.rs::MaskCaptureState` (PR5.3 plan, §13.2).
-#[allow(dead_code)] // PR-LX.7 wires the mask render pass; the public API is fixed here.
+/// Shared `MaskCaptureCamera` for the click-through dispatcher.
+#[allow(dead_code)]
 pub type MaskCaptureState = Arc<parking_lot::Mutex<MaskCaptureCamera>>;
 
-/// Build a fresh `MaskCaptureState` for the given window size
-/// and downsample, returning `None` if the size is zero (e.g.
-/// during early startup).
-#[allow(dead_code)] // PR-LX.7 wires the mask render pass; the public API is fixed here.
+/// Build a fresh `MaskCaptureState` for the given window size and
+/// downsample, returning `None` if the size is zero.
+#[allow(dead_code)]
 pub fn new_mask_capture_state(
     device: &wgpu::Device,
     window_width: u32,
@@ -415,9 +335,7 @@ pub fn new_mask_capture_state(
         .map(|c| Arc::new(parking_lot::Mutex::new(c)))
 }
 
-/// Compute the downsampled (width, height) pair. Clamps to a
-/// minimum of 1×1 so the texture descriptor is always valid
-/// even when the window is briefly zero-sized during resize.
+/// Compute the downsampled (width, height) pair, clamped to 1×1.
 fn downsample_dims(width: u32, height: u32, downsample: u32) -> (u32, u32) {
     let d = downsample.max(1);
     let w = (width / d).max(1);
@@ -454,10 +372,6 @@ mod tests {
     #[test]
     #[allow(clippy::assertions_on_constants)]
     fn threshold_filters_low_alpha() {
-        // 17 → inside (>, strict), 15 → outside (≤).
-        // The extractor uses `r > PIXEL_THRESHOLD` to
-        // flag a pixel as inside the silhouette, with
-        // `PIXEL_THRESHOLD = 16`.
         assert!(PIXEL_THRESHOLD > 0);
         assert!(17 > PIXEL_THRESHOLD);
         assert!(15 <= PIXEL_THRESHOLD);
@@ -466,39 +380,22 @@ mod tests {
     #[test]
     #[allow(clippy::assertions_on_constants)]
     fn mask_target_format_is_rgba8unorm() {
-        // Pin the format choice: changing it requires
-        // changing `BYTES_PER_PIXEL` too, and we want the
-        // compiler to fail loudly if someone updates one
-        // without the other.
         assert_eq!(MASK_TARGET_FORMAT, wgpu::TextureFormat::Rgba8Unorm);
         assert_eq!(BYTES_PER_PIXEL, 4);
     }
 
     #[test]
     fn bytes_per_row_is_aligned_to_256() {
-        // wgpu 29 validation: `bytes_per_row` must be a
-        // multiple of `COPY_BYTES_PER_ROW_ALIGNMENT` (256).
-        // The 4bpp mask is small so the unpadded
-        // `width * 4` is often not a multiple of 256.
         assert_eq!(aligned_bytes_per_row(70) % 256, 0);
         assert_eq!(aligned_bytes_per_row(71) % 256, 0);
         assert_eq!(aligned_bytes_per_row(1) % 256, 0);
-        // Sanity: the rounded value is at least the
-        // unpadded width.
         assert!(aligned_bytes_per_row(70) >= 70 * 4);
     }
 
     #[test]
     fn bytes_per_row_alignment_typical_window() {
-        // 560 / 8 = 70, the typical legacy default window
-        // size at downsample 8 → 70 px wide mask. 70 * 4
-        // = 280 is already a multiple of 256 (next
-        // multiple: 512). The helper must still return
-        // 512.
         assert_eq!(aligned_bytes_per_row(70), 512);
-        // 71 * 4 = 284, next multiple of 256 = 512.
         assert_eq!(aligned_bytes_per_row(71), 512);
-        // 64 * 4 = 256, exact.
         assert_eq!(aligned_bytes_per_row(64), 256);
     }
 

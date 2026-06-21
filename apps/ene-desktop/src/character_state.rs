@@ -1,20 +1,6 @@
-//! PR2 stubs for character-state holders that the v2 settings UI
-//! (PR2) writes into and the real character renderer (PR3/PR4)
-//! consumes.
-//!
-//! What lives here:
-//!
-//! - [`AnimationControl`] — play/pause toggle for the currently-loaded
-//!   VRMA. The legacy Bevy equivalent lives in `character.rs`; the v2
-//!   renderer reads this struct every frame.
-//! - [`EmotionCommand`] / [`EmotionQueue`] — pending expression
-//!   changes. The AI bridge (PR1) and the manual-expression test
-//!   buttons in `settings_ui::page_character` push commands; the
-//!   v2 renderer (PR4.4) drains due commands once per frame and
-//!   pushes the resulting weights into the loaded VRM model.
-//! - [`ActiveEmotion`] — the most recently applied emotion, kept by
-//!   [`CharacterRenderer`](crate::character::CharacterRenderer) so
-//!   it can fade the weight back to neutral after the hold elapses.
+//! State holders that the v2 settings UI writes into and the
+//! character renderer consumes. Provides [`AnimationControl`],
+//! [`EmotionCommand`] / [`EmotionQueue`], and [`ActiveEmotion`].
 use std::collections::VecDeque;
 
 #[derive(Clone, Debug, Default)]
@@ -32,28 +18,20 @@ impl AnimationControl {
     }
 }
 
-/// One pending expression change pushed by either the AI bridge
-/// (`AppEvent::EmoteToken`) or the settings UI's "Manual
-/// Expressions" buttons. Commands that are not yet due
-/// (`target_time > now_secs`) are kept in the queue and drained
-/// the next time the renderer ticks.
+/// One pending expression change pushed by the AI bridge or the
+/// settings UI's manual-expression buttons. Commands with a
+/// future `target_time` are kept in the queue and drained on the
+/// next tick.
 #[derive(Clone, Debug)]
 pub struct EmotionCommand {
     /// Expression name (e.g. `"happy"`, `"sad"`, `"blink_l"`).
-    /// Matches the keys of the `VRMC_vrm.expressions.preset` /
-    /// `custom` object in the source VRM.
     pub emotion: String,
-    /// Absolute time (seconds since
-    /// [`SettingsUi::started_at`](crate::settings_ui::SettingsUi::started_at))
-    /// at which this command becomes active. Commands with a
-    /// future `target_time` are re-queued.
+    /// Absolute time at which this command becomes active.
     pub target_time: f64,
-    /// How long the weight should stay at `weight` before
-    /// fading back to zero.
+    /// How long the weight should stay at `weight` before fading
+    /// back to zero.
     pub hold_secs: f64,
-    /// Target weight in `[0, 1]`. The AI bridge always pushes
-    /// `1.0`; the manual-expression buttons also push `1.0`
-    /// for now. A future `expression` slider can override it.
+    /// Target weight in `[0, 1]`.
     pub weight: f32,
 }
 
@@ -63,17 +41,13 @@ pub struct EmotionQueue {
 }
 
 impl EmotionQueue {
-    /// Append a command to the back of the queue. The runtime
-    /// calls this from `AppEvent::EmoteToken` and from the
-    /// settings UI.
+    /// Append a command to the back of the queue.
     pub fn push(&mut self, command: EmotionCommand) {
         self.commands.push_back(command);
     }
 
-    /// Pop all commands whose `target_time` is at or before
-    /// `now_secs`. Commands scheduled for the future are kept
-    /// in the queue in their original order. Used by the
-    /// renderer once per frame.
+    /// Pop all commands whose `target_time <= now_secs`. Future
+    /// commands are re-queued in their original order.
     pub fn drain_due(&mut self, now_secs: f64) -> Vec<EmotionCommand> {
         let pending = std::mem::take(&mut self.commands);
         let mut due = Vec::new();
@@ -91,15 +65,12 @@ impl EmotionQueue {
 }
 
 /// Currently-applied emotion tracked by the renderer. The
-/// renderer reads `hold_until_secs` to know when to start
-/// fading the weight back to zero, and it overwrites
-/// `name`/`weight` whenever a new command of a different
-/// expression arrives.
+/// renderer reads `hold_until_secs` to know when to start fading
+/// the weight back to zero, and overwrites `name`/`weight`
+/// whenever a new command of a different expression arrives.
 ///
-/// PR4.4 only tracks **one** active emotion at a time (last
-/// write wins on a name change). The legacy `bevy_vrm1`
-/// supports blended stacks; layering that on top of the
-/// `ExpressionLayer::apply_weights` API is a PR4.5+ task.
+/// Only one active emotion is tracked at a time (last write
+/// wins on a name change).
 #[derive(Clone, Debug)]
 pub struct ActiveEmotion {
     pub name: String,
@@ -109,36 +80,11 @@ pub struct ActiveEmotion {
 
 /// Pure transition logic used by
 /// [`CharacterRenderer::apply_emotions`](crate::character::CharacterRenderer::apply_emotions).
-/// Split out from the renderer so the weight-clearing
-/// behaviour is unit-testable without a live `wgpu` device.
-///
-/// Given the commands that were just drained from the queue
-/// (`drained`), the currently active emotion (`current`), and
-/// the current time (`now_secs`), return:
-///
-/// - `new_active` — the renderer's next `active_emotion`
-///   field. `None` means "no active emotion; nothing to fade".
-/// - `updates` — a list of `(name, weight)` pairs that the
-///   caller must apply to the model's `ExpressionLayer` via
-///   [`ExpressionLayer::set_expression`](ene_vrm::ExpressionLayer::set_expression).
-///   Order matters: when an old emotion is replaced, the
-///   `(prev.name, 0.0)` update is emitted *before* the new
-///   `(cmd.name, cmd.weight)` update so the renderer never
-///   sees both at non-zero weight in the same frame.
-///
-/// **Why the explicit clear**: in PR4.4, `ExpressionLayer`
-/// stores all emotion weights in a single `BTreeMap`. The
-/// AI bridge and the manual-expression buttons push
-/// `EmotionCommand { emotion, weight: 1.0, .. }`. If the
-/// caller wrote the new weight without first zeroing the old
-/// one, the old weight would persist — and since the
-/// `ExpressionLayer::weights` map is the single source of
-/// truth read by the GPU upload, the previous expression
-/// would keep affecting the model until the fade logic
-/// eventually brought it below `FADE_FLOOR`. Clicking
-/// "happy" then "neutral" left "happy" at weight 1.0 and
-/// produced the "every expression squints the eyes" bug
-/// reported in the PR4.4 review.
+/// Returns `new_active` and the `(name, weight)` pairs the caller
+/// must apply to the model's `ExpressionLayer`. When an old
+/// emotion is replaced the `(prev.name, 0.0)` update is emitted
+/// before the new one so the renderer never sees both at
+/// non-zero weight in the same frame.
 pub fn transition_emotions(
     drained: &[EmotionCommand],
     current: Option<&ActiveEmotion>,
@@ -150,10 +96,12 @@ pub fn transition_emotions(
     let mut new_active: Option<ActiveEmotion> = current.cloned();
 
     if let Some(cmd) = drained.last() {
-        // Clear the previous active emotion's weight so the
-        // new one starts at full strength. Look-at expressions
-        // (PR4.5+) are not in `active_emotion` and therefore
-        // are preserved.
+        // Clear the previous weight before writing the new one:
+        // `ExpressionLayer` is a single map read by the GPU
+        // upload, so the old weight would otherwise persist
+        // until the fade brought it below `fade_floor`. Look-at
+        // expressions are not in `active_emotion` and are
+        // preserved.
         if let Some(prev) = new_active.take() {
             updates.push((prev.name, 0.0));
         }
@@ -256,14 +204,9 @@ mod tests {
         );
     }
 
-    /// Regression test for the PR4.4 review bug: clicking
-    /// "happy" then "neutral" left the "happy" weight at
-    /// `1.0` in the model's `ExpressionLayer`, so the GPU
-    /// kept squinting the eyes even though the active
-    /// emotion was now "neutral". The fix is for
-    /// `transition_emotions` to emit a `(prev.name, 0.0)`
-    /// update *before* the `(new.name, weight)` update when a
-    /// drained command of a different expression arrives.
+    /// Regression: clicking "happy" then "neutral" must zero
+    /// the "happy" weight before applying "neutral", otherwise
+    /// the GPU keeps squinting the eyes.
     #[test]
     fn transition_emotions_clears_previous_when_switching() {
         let mut q = EmotionQueue::default();
@@ -277,9 +220,8 @@ mod tests {
         assert_eq!(updates1, vec![("happy".to_string(), 1.0)]);
 
         // Second transition: drained = [neutral], previous
-        // active = "happy". The bug was that `updates` only
-        // contained ("neutral", 1.0); the explicit clear of
-        // ("happy", 0.0) is the fix.
+        // active = "happy". The clear ("happy", 0.0) must
+        // come before the new ("neutral", 1.0).
         let (active2, updates2) =
             transition_emotions(&drained[1..], active1.as_ref(), 1.0, 0.9, 0.01);
         assert_eq!(active2.as_ref().map(|a| a.name.as_str()), Some("neutral"));
@@ -304,8 +246,8 @@ mod tests {
         assert_eq!(updates[0].0, "sad");
         assert!((updates[0].1 - 0.9).abs() < 1e-6);
 
-        // Keep fading — the exact float values drift due to
-        // rounding, so compare with epsilon instead of `==`.
+        // Keep fading — exact float values drift, so compare
+        // with epsilon rather than `==`.
         let mut cur = active2.unwrap();
         for _ in 0..40 {
             if cur.weight < 0.01 {
@@ -323,9 +265,9 @@ mod tests {
             });
         }
 
-        // Final fade drops below 0.01 → active becomes None and
-        // the last update zeroes the weight. `0.011 * 0.9 =
-        // 0.0099 < 0.01`.
+        // Final fade drops below 0.01 → active becomes None
+        // and the last update zeroes the weight.
+        // `0.011 * 0.9 = 0.0099 < 0.01`.
         let tiny = ActiveEmotion {
             name: "sad".to_string(),
             weight: 0.011,

@@ -1,63 +1,22 @@
-//! PR5.4 / PR-LX.5: X11 fallback for the click-through story.
+//! X11 fallback for the click-through story.
 //!
-//! Winit 0.30's `Window::set_cursor_hittest` is a Windows-only
-//! no-op, so the click-through story that PR5.2 shipped for
-//! the Windows desktop (via `WS_EX_TRANSPARENT`) needs a
-//! per-display-server implementation on Linux. Wayland uses
-//! `wl_surface::set_input_region` (PR5.3 / LX.2). On X11 the
-//! equivalent primitives are:
+//! Winit 0.30's `Window::set_cursor_hittest` is Windows-only, so
+//! the click-through story needs a per-display-server
+//! implementation on Linux. Wayland uses
+//! `wl_surface::set_input_region`; X11 uses the shape extension
+//! (`shape::rectangles(SK::Input, SO::Set, …)` — empty list =
+//! pass-through) plus the EWMH `_NET_WM_STATE_SKIP_TASKBAR |
+//! _SKIP_PAGER` ClientMessage so the character never steals
+//! focus on alt-tab.
 //!
-//! - **shape extension input region** — an X11 `Rectangle` set
-//!   per window that tells the X server which pixels receive
-//!   pointer events. `shape::rectangles(SK::Input, SO::Set, …)`
-//!   replaces the silhouette. Empty = no input (full
-//!   pass-through).
-//! - **`_NET_WM_STATE_SKIP_TASKBAR` / `_SKIP_PAGER`** (EWMH) —
-//!   ClientMessage on the window that hides it from the
-//!   taskbar / pager so the character never steals focus when
-//!   the user alt-tabs.
+//! The winit raw handles are only used to **detect** X11; the
+//! actual socket is opened from `$DISPLAY` because winit's
+//! `X11DisplayHandle::display` is a `NonNull<c_void>` opaque
+//! pointer x11rb 0.13 cannot accept.
 //!
-//! The connection is established via [`x11rb::connect`], the
-//! pure-Rust X11 client. The winit window's raw handles are
-//! only inspected to **detect** the X11 display server
-//! (`RawDisplayHandle::X11`); the actual socket is opened
-//! from `$DISPLAY` because winit's `X11DisplayHandle::display`
-//! is a `NonNull<c_void>` opaque pointer that x11rb 0.13 does
-//! not accept.
-//!
-//! # LX.5 scope
-//!
-//! This module provides:
-//!
-//! - `X11Context::try_new<W>` — open a connection, intern the
-//!   five EWMH atoms, and apply `_NET_WM_STATE_SKIP_TASKBAR |
-//!   _SKIP_PAGER` once on construction.
-//! - `set_input_rects(&[Rect])` — push a rectangle set to the
-//!   shape extension. Empty list = pass-through.
-//! - `clear_input()` — pass-through shorthand.
-//! - `X11Path::decide(allows_input, cursor_on_silhouette, freeze_forced)`
-//!   — pure helper used by the runtime to decide between
-//!   `Full` / `Empty` / `Frozen`, unit-tested without an
-//!   X server.
-//!
-//! # Failure modes
-//!
-//! - `DISPLAY` not set / no X server — `try_new` returns `None`
-//!   and the runtime silently falls back to the
-//!   no-click-through-on-Linux path.
-//! - shape extension not present — `set_input_rects` is a
-//!   no-op (logged once via `Once`).
-//! - atom intern fails — `try_new` returns `None`.
-//!
-//! # Architecture
-//!
-//! The X11 connection lives behind a `parking_lot::Mutex` in
-//! an `Arc`; the runtime holds the `Arc` on
-//! `AppState::x11_ctx`. `RustConnection` is `Send + Sync`, so
-//! the `Arc<Mutex<…>>` pattern is sound. The runtime calls
-//! [`crate::platform::apply_linux_click_through`] every
-//! `about_to_wait`; that function acquires the X11 lock and
-//! pushes the current policy.
+//! Failure modes: `DISPLAY` unset / no server — `try_new` returns
+//! `None`; shape extension absent — `set_input_rects` is a no-op
+//! (logged once); atom intern fails — `try_new` returns `None`.
 
 #[cfg(target_os = "linux")]
 use std::sync::{Arc, Once};
@@ -81,11 +40,10 @@ use x11rb::rust_connection::RustConnection;
 /// X11 window id (the 32-bit XID the server hands out when
 /// winit creates the window).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // PR-LX.5: the public API is fixed here; consumers land in PR-LX.7.
+#[allow(dead_code)]
 pub struct X11WindowId(pub u32);
 
-/// EWMH atoms interned once on `try_new`. Stored on the
-/// context so we don't re-intern on every message.
+/// EWMH atoms interned once on `try_new`.
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy)]
 struct X11Atoms {
@@ -115,11 +73,10 @@ impl X11Atoms {
 }
 
 /// What the click-through dispatcher should send to the X11
-/// shape extension this frame. A pure enum so the
-/// `apply_linux_click_through` state machine is testable
-/// without a live X server.
+/// shape extension this frame. Pure enum so the state machine
+/// is testable without a live X server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // PR-LX.5: the public API is fixed here; consumers land in PR-LX.7.
+#[allow(dead_code)]
 pub enum X11Path {
     /// The cursor is on the character silhouette, or the
     /// window is opaque — receive input everywhere.
@@ -154,9 +111,8 @@ pub struct X11Context {
     conn: RustConnection,
     window: Window,
     atoms: X11Atoms,
-    /// `true` once `shape::query_version` has succeeded on
-    /// this connection. The shape extension is not guaranteed
-    /// to exist (very old X servers, headless Xvfb in some
+    /// `true` once `shape::query_version` has succeeded. The
+    /// extension is not guaranteed (very old X servers, some Xvfb
     /// configurations).
     shape_available: bool,
 }
@@ -168,63 +124,38 @@ impl X11Context {
     /// not running under X11, no X server is reachable, or
     /// any of the interned atoms is not provided by the
     /// EWMH-compliant window manager.
-    #[allow(dead_code)] // `try_new` is consumed by the runtime in `Runtime::resumed`.
+    #[allow(dead_code)]
     pub fn try_new<W: HasWindowHandle + HasDisplayHandle>(window: &W) -> Option<Arc<Mutex<Self>>> {
-        // 1. Probe the raw display handle for the X11
-        //    flavor. On Wayland / Windows this is a no-op and
-        //    we return `None`.
         if !is_x11_window(window) {
             return None;
         }
-
-        // 2. Open the connection. `x11rb::connect(None)`
-        //    reads the `$DISPLAY` env var. A missing server
-        //    is a clean error path.
         let (conn, _screen_num) = x11rb::connect(None).ok()?;
-
-        // 3. Recover the X11 window id from the winit raw
-        //    handle. winit sets the `.window` field of
-        //    `X11WindowHandle` to the XID the server
-        //    assigned when the HWND-equivalent was created.
         let window_id = x11_window_id(window)?;
-
-        // 4. Intern the EWMH atoms. If the WM doesn't
-        //    support EWMH at all, the intern returns atom 0
-        //    and we refuse to construct the context (the
-        //    taskbar path is harmless but useless without a
-        //    WM that reads it).
         let atoms = X11Atoms::intern(&conn).ok()?;
         if atoms.net_wm_state == 0 || atoms.skip_taskbar == 0 || atoms.skip_pager == 0 {
             return None;
         }
-
-        // 5. Probe the shape extension. `query_version` is
-        //    the canonical presence check; if the X server
-        //    returns an error the extension is not
-        //    advertised.
         let shape_available = shape::query_version(&conn)
             .ok()
             .and_then(|cookie| cookie.reply().ok())
             .is_some();
-
         let ctx = Self {
             conn,
             window: window_id,
             atoms,
             shape_available,
         };
-
-        // 6. Apply `_NET_WM_STATE_SKIP_TASKBAR | _SKIP_PAGER`
-        //    on construction so the window never shows up
-        //    in the taskbar / pager from the first frame.
+        // Apply `_NET_WM_STATE_SKIP_TASKBAR | _SKIP_PAGER` on
+        // construction so the window never shows up in the
+        // taskbar / pager from the first frame.
         let arc = Arc::new(Mutex::new(ctx));
         arc.lock().set_skip_taskbar(true);
         Some(arc)
     }
 
-    /// Update the X11 shape extension input region. Empty
-    /// slice = pass-through (no pixel receives input).
-    #[allow(dead_code)] // `set_input_rects` is consumed by the runtime's Linux dispatch.
+    /// Update the X11 shape extension input region. Empty slice
+    /// = pass-through (no pixel receives input).
+    #[allow(dead_code)]
     pub fn set_input_rects(&mut self, rects: &[(i32, i32, i32, i32)]) {
         if !self.shape_available {
             return;
@@ -238,8 +169,7 @@ impl X11Context {
                 height: u16::try_from(h).unwrap_or(u16::MAX),
             })
             .collect();
-        // `shape::rectangles` is fire-and-forget on the X
-        // server side (no reply); we ignore the cookie.
+        // `shape::rectangles` is fire-and-forget (no reply).
         let _ = shape::rectangles(
             &self.conn,
             ShapeOp::SET,
@@ -254,17 +184,13 @@ impl X11Context {
 
     /// Clear the shape input region (no input = full
     /// pass-through to the desktop).
-    #[allow(dead_code)] // `clear_input` is consumed by the runtime's Linux dispatch.
+    #[allow(dead_code)]
     pub fn clear_input(&mut self) {
         self.set_input_rects(&[]);
     }
 
     /// Apply or revoke `_NET_WM_STATE_SKIP_TASKBAR |
-    /// _NET_WM_STATE_SKIP_PAGER`. The message is a
-    /// ClientMessage on the window with `data.l[0] = 1
-    /// (add) | 0 (remove)`, `data.l[1] = skip_taskbar`,
-    /// `data.l[2] = skip_pager`, `data.l[3] = 1 (source
-    /// indication)`, `data.l[4] = 0`.
+    /// _NET_WM_STATE_SKIP_PAGER`.
     fn set_skip_taskbar(&mut self, skip: bool) {
         static LOGGED_NOOP: Once = Once::new();
         if self.atoms.net_wm_state == 0 {
@@ -304,7 +230,7 @@ impl X11Context {
 }
 
 #[cfg(target_os = "linux")]
-#[allow(dead_code)] // `is_x11_window` is consumed by the runtime's Linux dispatch.
+#[allow(dead_code)]
 pub fn is_x11_window<W: HasWindowHandle + HasDisplayHandle>(window: &W) -> bool {
     let Ok(display) = window.display_handle() else {
         return false;
@@ -315,10 +241,10 @@ pub fn is_x11_window<W: HasWindowHandle + HasDisplayHandle>(window: &W) -> bool 
     )
 }
 
-/// Returns the X11 window id (XID) from the winit raw window
-/// handle, or `None` if the window is not X11.
+/// X11 window id from the winit raw window handle, or `None`
+/// if the window is not X11.
 #[cfg(target_os = "linux")]
-#[allow(dead_code)] // `x11_window_id` is consumed by the runtime's Linux dispatch.
+#[allow(dead_code)]
 pub fn x11_window_id<W: HasWindowHandle + HasDisplayHandle>(window: &W) -> Option<Window> {
     let win = window.window_handle().ok()?.as_raw();
     match win {
@@ -393,11 +319,6 @@ mod tests {
 
     #[test]
     fn x11_atoms_struct_is_send_and_sync() {
-        // Compile-time assertion: the `X11Atoms` field bag
-        // must remain `Send + Sync` so the parent
-        // `X11Context` can live behind a `parking_lot::Mutex`
-        // and be shared across the winit thread and any
-        // future background pump.
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<X11Atoms>();
     }

@@ -1,56 +1,23 @@
-//! PR5.3 / PR-LX.2: Wayland `wl_surface::set_input_region` click-through.
+//! Wayland `wl_surface::set_input_region` click-through.
 //!
-//! Winit 0.30's `Window::set_cursor_hittest` is a Windows-only
-//! no-op. On Wayland the OS-level input region is the
-//! `wl_surface::set_input_region` call. An empty input region
-//! means "the whole surface is click-through"; a non-empty region
-//! restricts pointer events to the listed rectangles (in
-//! surface-local pixel coordinates, top-left origin, exclusive of
-//! the bottom / right edges).
+//! Winit 0.30's `Window::set_cursor_hittest` is Windows-only; on
+//! Wayland the OS-level input region is the
+//! `wl_surface::set_input_region` call. An empty region means
+//! "the whole surface is click-through"; a non-empty region
+//! restricts pointer events to the listed rectangles (surface-local
+//! pixels, top-left origin, bottom / right exclusive).
 //!
-//! Reference: <https://wayland.freedesktop.org/docs/html/apa.html#protocol-spec-wl_surface>
+//! We open a stand-alone `wayland_client::Connection` and bind
+//! the `wl_compositor` global; [`WaylandInputRegionContext`]
+//! reuses the compositor for every `wl_region` allocation. The
+//! runtime passes the winit surface's `WlSurface` in to
+//! `apply_to_surface` (winit does not yet expose it from
+//! `raw_window_handle`).
 //!
-//! # Architecture (LX.2)
-//!
-//! We open a stand-alone `wayland_client::Connection` via
-//! [`Connection::connect_to_env`] and bind the `wl_compositor`
-//! global. The compositor is held inside the
-//! [`WaylandInputRegionContext`] and is re-used for every
-//! `wl_region` allocation. Each call to
-//! [`WaylandInputRegionContext::apply_to_surface`] creates a fresh
-//! `wl_region`, fills it via `wl_region::add`, calls
-//! `wl_surface::set_input_region`, and then drops the region
-//! proxy (the server-side region is replaced by the next call).
-//!
-//! The actual `wl_surface` belongs to winit 0.30. Winit does
-//! not (yet) expose a way to recover the `wl_surface` from
-//! `raw_window_handle::WaylandWindowHandle`, so the
-//! `apply_to_surface` method takes a `WlSurface` borrowed from
-//! the caller. In LX.2 the runtime constructs a stand-alone
-//! `wl_surface` via `wl_compositor::create_surface` for the
-//! "policy side" of the click-through, and the winit surface
-//! adoption is left for a follow-up that hooks into winit's
-//! own wayland backend. The architecture is laid out so the
-//! follow-up is a one-line swap from
-//! `apply_to_surface(stand_alone_surf)` to
-//! `apply_to_surface(winit_surf)`.
-//!
-//! # Event queue
-//!
-//! The connection's event queue is drained on every animation
-//! frame so the `wl_compositor` `bind` callback fires promptly
-//! after construction. [`WaylandInputRegionContext::pump`] does
-//! a non-blocking read via the connection's read guard.
-//!
-//! # Failure modes
-//!
-//! - `WAYLAND_DISPLAY` not set / socket missing —
-//   [`WaylandInputRegionContext::try_new`] returns `None`.
-//! - `wl_compositor` global absent — same, the compositor is
-//!   required to create surfaces.
-//! - Connection closed mid-process — every `apply_to_surface` /
-//!   `pump` call is a no-op (the `WlCompositor` is checked out)
-//!   and a `trace!` log is emitted so the failure is not silent.
+//! Failure modes: `WAYLAND_DISPLAY` unset or socket missing,
+//! `wl_compositor` global absent, or connection closed mid-process
+//! — `try_new` returns `None` and `apply_to_surface` / `pump`
+//! become silent no-ops.
 
 use std::sync::Arc;
 
@@ -69,7 +36,6 @@ use winit::raw_window_handle::{
 };
 
 /// Pixel rectangle in surface-local coordinates (x, y, width, height).
-///
 /// Top-left origin; bottom / right edges are exclusive per the
 /// Wayland protocol. Negative coordinates are valid.
 pub type Rect = (i32, i32, i32, i32);
@@ -86,36 +52,24 @@ pub enum InputRegionState {
     /// — the whole surface is transparent to input.
     Rectangles(Vec<Rect>),
 }
-/// winit window is first available; dropped together with the
-/// window.
-///
-/// The struct is `Send + Sync` (the only state shared across
-/// threads is the `WlCompositor` proxy and the cached policy) and
-/// is therefore wrapped in an `Arc<Mutex<…>>` by the runtime.
+
+/// Owned stand-alone Wayland connection + cached click-through
+/// policy. `Send + Sync` (only the `WlCompositor` proxy and cached
+/// state cross threads) so the runtime wraps it in `Arc<Mutex<…>>`.
 pub struct WaylandInputRegionContext {
     /// Owned connection to the Wayland display. Separate from
-    /// winit's internal connection; LX.2 only uses it to bind
-    /// `wl_compositor` and to create `wl_region` objects.
+    /// winit's; used to bind `wl_compositor` and create `wl_region`
+    /// objects.
     connection: Option<Connection>,
-    /// `EventQueue` used for the initial registry round-trip.
-    /// Held (not dropped) so the compositor proxy stays alive
-    /// after construction; the queue is dropped together with
-    /// the context.
+    /// Held so the compositor proxy stays alive after construction.
     event_queue: Option<EventQueue<AppData>>,
-    /// `wl_compositor` global. Required to create `wl_region`
-    /// objects (no `wl_region` global exists; regions are
-    /// manufactured per-compositor).
     compositor: Option<WlCompositor>,
-    /// Queue handle from `event_queue`. Stored so `apply_to_surface`
-    /// can pass it to `compositor.create_region(qh, ())` without
-    /// re-deriving it.
     queue_handle: Option<QueueHandle<AppData>>,
-    /// Cached click-through policy. The runtime pushes the
-    /// per-frame state into the struct; `apply_to_surface` reads
-    /// it and dispatches the right `wl_surface::set_input_region`
-    /// call.
+    /// Cached click-through policy. The runtime pushes per-frame;
+    /// `apply_to_surface` reads it.
     state: InputRegionState,
-    /// Winit window's own wl_surface proxy object, wrapped from the raw pointer.
+    /// Winit window's own `WlSurface` proxy, wrapped from the
+    /// raw pointer.
     winit_surface: Option<WlSurface>,
 }
 
@@ -131,17 +85,10 @@ impl std::fmt::Debug for WaylandInputRegionContext {
 }
 
 impl WaylandInputRegionContext {
-    /// Take a clone of the stand-alone Wayland [`Connection`]
-    /// if the context was constructed successfully. Returns
-    /// `None` when the connection has been dropped (process
-    /// shutdown) or was never established (X11 / Windows
-    /// builds, or a probe that failed at construction time).
-    ///
-    /// Used by the PR-LX.4 layer-shell detection probe to
-    /// share the same connection across the input-region and
-    /// layer-shell modules. A fresh connection is opened as
-    /// a fallback when this returns `None`.
-    #[allow(dead_code)] // PR-LX.4 wiring lands in a follow-up.
+    /// Clone the stand-alone Wayland [`Connection`], or `None`
+    /// if it was never established. Used by the layer-shell probe
+    /// to share the connection.
+    #[allow(dead_code)]
     pub fn clone_connection(&self) -> Option<Connection> {
         self.connection.clone()
     }
@@ -149,13 +96,7 @@ impl WaylandInputRegionContext {
 
 impl WaylandInputRegionContext {
     /// Probe the winit window's raw handles. Returns `None` on
-    /// non-Wayland displays (X11 / macOS / Windows) and on
-    /// Wayland connections where `wl_compositor` could not be
-    /// bound (e.g. a headless test environment).
-    ///
-    /// On success the returned context holds an open
-    /// `Connection`, a bound `wl_compositor` proxy, and a
-    /// `QueueHandle` for further compositor requests.
+    /// non-Wayland displays and when `wl_compositor` cannot be bound.
     pub fn try_new<W: HasWindowHandle + HasDisplayHandle>(window: &W) -> Option<Arc<Mutex<Self>>> {
         let display_handle = window.display_handle().ok()?.as_raw();
         let window_handle = window.window_handle().ok()?.as_raw();
@@ -219,15 +160,13 @@ impl WaylandInputRegionContext {
         })))
     }
 
-    /// Replace the cached policy with a rectangle list.
-    #[allow(dead_code)] // Consumed by the LX.3 mask-capture consumer.
+    /// Replace the cached policy with a rectangle list. An empty
+    /// list is kept distinct from `Full` so `apply_to_surface` can
+    /// choose between the "null region" call and the "empty region"
+    /// call.
+    #[allow(dead_code)]
     pub fn set_rects(&mut self, rects: Vec<Rect>) {
         self.state = if rects.is_empty() {
-            // The protocol-level "click-through everywhere"
-            // signal is an empty region (set on the surface as
-            // `set_input_region(empty_wl_region)`). Internally
-            // we keep the empty list distinct from `Full` so
-            // `apply_to_surface` can choose the right call.
             InputRegionState::Rectangles(Vec::new())
         } else {
             InputRegionState::Rectangles(rects)
@@ -239,25 +178,21 @@ impl WaylandInputRegionContext {
         self.state = InputRegionState::Full;
     }
 
-    /// Empty the input region: the whole surface is
-    /// click-through.
+    /// Empty the input region: the whole surface is click-through.
     #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.state = InputRegionState::Rectangles(Vec::new());
     }
 
-    /// Returns the latest cached state. Used by the dispatcher
-    /// in `platform_runtime` for diagnostics and by the X11
-    /// fallback path to mirror the same policy.
-    #[allow(dead_code)] // Consumed by the X11 fallback dispatcher (PR5.4).
+    /// Latest cached state. Read by the X11 fallback dispatcher
+    /// and the F9 debug overlay.
+    #[allow(dead_code)]
     pub fn state(&self) -> &InputRegionState {
         &self.state
     }
 
-    /// Drain pending events on the stand-alone Wayland
-    /// connection. Non-blocking. Called once per `about_to_wait`
-    /// by the runtime so the `wl_compositor` `bind` callback
-    /// lands in a timely fashion after construction.
+    /// Drain pending events on the stand-alone Wayland connection.
+    /// Non-blocking; called once per `about_to_wait`.
     pub fn pump(&mut self) {
         let Some(_connection) = self.connection.as_ref() else {
             return;
@@ -279,19 +214,11 @@ impl WaylandInputRegionContext {
         }
     }
 
-    /// Apply the cached policy to a `wl_surface`.
-    ///
-    /// `surface` is the Wayland surface that should receive the
-    /// input region. In LX.2 the runtime passes a stand-alone
-    /// surface created via `wl_compositor::create_surface`; a
-    /// follow-up will route this to winit's own surface.
-    ///
-    /// Per the Wayland protocol, a fresh `wl_region` is
-    /// allocated for every call, filled, attached via
-    /// `wl_surface::set_input_region`, then dropped. The
-    /// composited input region is the union of all added
-    /// rectangles (with the Wayland-mandated inclusive
-    /// top-left / exclusive bottom-right semantics).
+    /// Apply the cached policy to a `wl_surface`. Per the Wayland
+    /// protocol a fresh `wl_region` is allocated for every call,
+    /// filled, attached via `wl_surface::set_input_region`, then
+    /// dropped. The composited input region is the union of all
+    /// added rectangles.
     pub fn apply_to_surface(&mut self, surface: &WlSurface) {
         let (Some(compositor), Some(qh)) = (self.compositor.as_ref(), self.queue_handle.as_ref())
         else {
@@ -335,12 +262,7 @@ impl WaylandInputRegionContext {
     }
 
     /// Create a stand-alone `wl_surface` via the bound
-    /// `wl_compositor`. LX.2 uses this to construct the
-    /// "policy side" surface that receives
-    /// `set_input_region`; a follow-up will replace it with
-    /// winit's own surface.
-    ///
-    /// Returns `None` if the compositor is not bound.
+    /// `wl_compositor`. Returns `None` if the compositor is not bound.
     #[allow(dead_code)]
     pub fn create_stand_alone_surface(&self) -> Option<WlSurface> {
         let (compositor, qh) = (self.compositor.as_ref()?, self.queue_handle.as_ref()?);
@@ -495,25 +417,14 @@ mod tests {
 
     #[test]
     fn raw_handle_probes_distinguish_wayland() {
-        // The classifier functions are private; we exercise
-        // them indirectly by relying on the matches! pattern
-        // matching the enum discriminants. A live Wayland
-        // handle is not constructible in unit tests (the
-        // inner `NonNull<c_void>` is non-zero by trait
-        // contract), so we use the public `Debug` output
-        // through `std::any::type_name_of_val` as a
-        // structural confirmation that `matches!` only fires
-        // for the `Wayland` variants. The compile-time
-        // discriminant guarantee is sufficient — runtime
-        // false-positives are impossible by construction.
+        // The classifier functions are private; compile-time
+        // discriminant match on the `RawDisplayHandle` / `RawWindowHandle`
+        // enum is the structural guarantee. A live Wayland handle is
+        // not constructible in unit tests, so the runtime path is
+        // covered by integration tests on a real display.
         fn is_wayland_discriminant_dispatch(handle: RawDisplayHandle) -> bool {
             matches!(handle, RawDisplayHandle::Wayland(_))
         }
-        // The dispatch function must compile and the type
-        // signature must be stable. The actual `true` /
-        // `false` runtime path is exercised by integration
-        // tests on a real Wayland display (not part of
-        // LX.2's unit-test scope).
         let _ = is_wayland_discriminant_dispatch as fn(RawDisplayHandle) -> bool;
     }
 }

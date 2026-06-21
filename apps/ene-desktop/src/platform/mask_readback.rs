@@ -1,13 +1,10 @@
-//! PR-LX.9: Off-thread mask readback pump.
+//! Off-thread mask readback pump.
 //!
 //! The winit main thread cannot block on a GPU `MapAsync`
 //! completion (`mpsc::recv`) without freezing the window — the
 //! callback only fires when the GPU finishes the
 //! `copy_texture_to_buffer` work, which in turn is paced by
-//! the swapchain interval. PR-LX.7 originally called
-//! `MaskCaptureCamera::read_back` from `Runtime::about_to_wait`
-//! and had to gate it with `#[cfg(any())]` to keep the window
-//! responsive. This module provides the fix: a dedicated
+//! the swapchain interval. This module provides a dedicated
 //! background thread that owns a clone of the
 //! [`MaskCaptureCamera`] handle, the `wgpu::Device`, and the
 //! `wgpu::Queue`, and on every `request_readback` does the
