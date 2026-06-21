@@ -120,56 +120,6 @@ pub fn render(
             );
         });
 
-        render_linux_only(ui, settings, animation, ai, world, ui_entity);
-
-        // PR5.6: per-bone collider wireframe + raycast
-        // hit-point overlay toggle. The F3 hotkey is the
-        // keyboard equivalent.
-        ui.horizontal(|ui| {
-            ui.label("Raycast Colliders (Debug)");
-            let debug_on = if let Ok(ui_state) = world.get::<&crate::settings::UiState>(ui_entity) {
-                ui_state.show_collider_debug
-            } else {
-                false
-            };
-            let mut checkbox = debug_on;
-            if ui.checkbox(&mut checkbox, "").changed() && checkbox != debug_on {
-                apply_action(
-                    SettingsAction::ToggleColliderDebug,
-                    settings,
-                    animation,
-                    ai,
-                    world,
-                    ui_entity,
-                );
-            }
-            ui.add_sized(
-                [220.0, 0.0],
-                egui::Label::new(if checkbox {
-                    "Visible (F3)"
-                } else {
-                    "Hidden (F3)"
-                }),
-            );
-        });
-
-        let debug_on = if let Ok(ui_state) = world.get::<&crate::settings::UiState>(ui_entity) {
-            ui_state.show_collider_debug
-        } else {
-            false
-        };
-        if debug_on {
-            ui.horizontal(|ui| {
-                ui.label("Hovered Bone");
-                let name = if let Ok(ui_state) = world.get::<&crate::settings::UiState>(ui_entity) {
-                    ui_state.hovered_bone_name.clone()
-                } else {
-                    None
-                };
-                ui.label(name.as_deref().unwrap_or("None"));
-            });
-        }
-
         render_numeric_row(
             ui,
             "LookAt Strength",
@@ -319,6 +269,9 @@ fn render_numeric_row<F, C>(
             apply_action(up, settings, animation, ai, world, ui_entity);
             refresh(settings, buffer);
         }
+        if !response.has_focus() {
+            refresh(settings, buffer);
+        }
     });
 }
 
@@ -351,81 +304,4 @@ fn compact_asset_name(path: &str) -> String {
         return path.to_string();
     }
     format!("...{}", &path[path.len() - 27..])
-}
-
-#[cfg(target_os = "linux")]
-fn render_linux_only(
-    ui: &mut egui::Ui,
-    settings: &mut CharacterSettings,
-    animation: &mut AnimationControl,
-    ai: &Arc<AiBridge>,
-    world: &mut hecs::World,
-    ui_entity: hecs::Entity,
-) {
-    ui.horizontal(|ui| {
-        ui.label("Debug Overlay");
-        if ui.button("Toggle").clicked() {
-            apply_action(
-                SettingsAction::ToggleDebugOverlay,
-                settings,
-                animation,
-                ai,
-                world,
-                ui_entity,
-            );
-        }
-        let debug_overlay_visible =
-            if let Ok(ui_state) = world.get::<&crate::settings::UiState>(ui_entity) {
-                ui_state.debug_overlay_visible
-            } else {
-                false
-            };
-        ui.add_sized(
-            [220.0, 0.0],
-            egui::Label::new(if debug_overlay_visible {
-                "Visible"
-            } else {
-                "Hidden"
-            }),
-        );
-    });
-
-    ui.horizontal(|ui| {
-        ui.label("Mask Downsample");
-        if ui.button("<").clicked() {
-            apply_action(
-                SettingsAction::MaskDownsampleDown,
-                settings,
-                animation,
-                ai,
-                world,
-                ui_entity,
-            );
-        }
-        ui.add_sized(
-            [220.0, 0.0],
-            egui::Label::new(format!("{}x", settings.graphics.mask_render_downsample)),
-        );
-        if ui.button(">").clicked() {
-            apply_action(
-                SettingsAction::MaskDownsampleUp,
-                settings,
-                animation,
-                ai,
-                world,
-                ui_entity,
-            );
-        }
-    });
-}
-
-#[cfg(not(target_os = "linux"))]
-fn render_linux_only(
-    _ui: &mut egui::Ui,
-    _settings: &mut CharacterSettings,
-    _animation: &mut AnimationControl,
-    _ai: &Arc<AiBridge>,
-    _world: &mut hecs::World,
-    _ui_entity: hecs::Entity,
-) {
 }

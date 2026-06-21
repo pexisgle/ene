@@ -9,7 +9,8 @@
       "mask_render_downsample": 8,
       "target_fps": 60,
       "shadow_quality": "medium",
-      "antialiasing_mode": "fxaa"
+      "antialiasing_mode": "fxaa",
+      "debug_fps": 30
     }
   },
   "memory": {

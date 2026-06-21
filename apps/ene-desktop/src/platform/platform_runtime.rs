@@ -73,7 +73,7 @@ pub fn apply_linux_click_through(
             vec![(0_i32, 0_i32, i32::from(i16::MAX), i32::from(i16::MAX))],
             super::super::input_region_debug::InputRegionSource::Freeze,
         )
-    } else if allows_input && cursor_on_silhouette {
+    } else if allows_input && (cursor_on_silhouette || state.character.drag.is_dragging()) {
         // The per-bone Rapier raycast said "yes"; accept
         // all input so the drag state machine receives the
         // events. The mask readback may be a frame behind
@@ -145,7 +145,9 @@ pub fn apply_linux_click_through(
         // has no events.
         guard.pump();
 
-        if freeze_forced || (allows_input && cursor_on_silhouette) {
+        if freeze_forced
+            || (allows_input && (cursor_on_silhouette || state.character.drag.is_dragging()))
+        {
             guard.set_full_input();
         } else {
             guard.set_rects(rects.clone());
@@ -186,7 +188,7 @@ pub fn apply_linux_click_through(
         let x11_path = if state.x11_ctx.is_some() {
             let path = super::x11_taskbar::X11Path::decide(
                 allows_input,
-                cursor_on_silhouette,
+                cursor_on_silhouette || state.character.drag.is_dragging(),
                 freeze_forced,
             );
             Some(path)

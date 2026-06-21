@@ -102,6 +102,7 @@ pub struct CharacterRenderer {
     /// loaded.
     vrma_path: Option<PathBuf>,
     /// Node indices of bones that have active colliders
+    #[allow(dead_code)]
     active_bone_nodes: Vec<usize>,
     /// A.6: spring-bone simulator (PR6). `None` for models
     /// without `VRMC_springBone` or when the parser rejects
@@ -1234,6 +1235,7 @@ impl CharacterRenderer {
     /// returned dimensions are already in world units so the
     /// colliders match the rendered mesh even when the user
     /// has not set `model_scale = 1.0`.
+    #[allow(dead_code)]
     pub fn build_character_bone_specs(&mut self, actual_scale: f32) -> Vec<BoneShapeSpec> {
         let Some(model) = self.model.as_ref() else {
             return Vec::new();
@@ -1252,6 +1254,7 @@ impl CharacterRenderer {
     /// `model.nodes.world_rotations` every frame, so reading
     /// them here gives the live post-animation transforms
     /// without any per-frame GPU readback.
+    #[allow(dead_code)]
     pub fn current_bone_poses(&self) -> Vec<BonePose> {
         let Some(model) = self.model.as_ref() else {
             return Vec::new();
@@ -1272,6 +1275,7 @@ impl CharacterRenderer {
     }
 
     /// Retrieve the humanoid bone name for an active collider index.
+    #[allow(dead_code)]
     pub fn get_active_bone_name(&self, idx: usize) -> Option<String> {
         let node_idx = *self.active_bone_nodes.get(idx)?;
         let model = self.model.as_ref()?;

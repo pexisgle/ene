@@ -9,7 +9,7 @@ use crate::character_state::AnimationControl;
 #[cfg(target_os = "linux")]
 use crate::settings::cycle_mask_render_downsample;
 use crate::settings::{
-    AntialiasingMode, CharacterSettings, ShadowQuality, cycle_antialiasing_mode,
+    AntialiasingMode, CharacterSettings, ShadowQuality, cycle_antialiasing_mode, cycle_debug_fps,
     cycle_shadow_quality, cycle_target_fps, target_fps_label,
 };
 use std::sync::Arc;
@@ -52,6 +52,9 @@ pub enum SettingsAction {
     /// "Show raycast colliders (debug)" checkbox on the
     /// Character page.
     ToggleColliderDebug,
+    ToggleInputRegionDebug,
+    DebugFpsDown,
+    DebugFpsUp,
     SendAiChat,
 }
 
@@ -193,6 +196,19 @@ pub fn apply_action(
             if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
                 ui_state.show_collider_debug = !ui_state.show_collider_debug;
             }
+        }
+        SettingsAction::ToggleInputRegionDebug => {
+            if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
+                ui_state.show_input_region_debug = !ui_state.show_input_region_debug;
+            }
+        }
+        SettingsAction::DebugFpsDown => {
+            settings.graphics.debug_fps = cycle_debug_fps(settings.graphics.debug_fps, -1);
+            settings.mark_dirty();
+        }
+        SettingsAction::DebugFpsUp => {
+            settings.graphics.debug_fps = cycle_debug_fps(settings.graphics.debug_fps, 1);
+            settings.mark_dirty();
         }
         SettingsAction::SendAiChat => {
             send_ai_chat(settings, ai, world, ui_entity);

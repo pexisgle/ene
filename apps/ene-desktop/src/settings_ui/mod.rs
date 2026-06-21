@@ -7,6 +7,7 @@
 pub mod input;
 pub mod page_ai;
 pub mod page_character;
+pub mod page_debug;
 pub mod page_graphics;
 pub mod widgets;
 
@@ -25,6 +26,7 @@ pub enum PageKind {
     Character,
     Graphics,
     Ai,
+    Debug,
 }
 
 impl PageKind {
@@ -33,6 +35,7 @@ impl PageKind {
             PageKind::Character => "Character",
             PageKind::Graphics => "Graphics",
             PageKind::Ai => "AI",
+            PageKind::Debug => "Debug",
         }
     }
 }
@@ -93,7 +96,12 @@ impl SettingsUi {
 
         // Top-level page tab strip.
         ui.horizontal(|ui| {
-            for page in [PageKind::Character, PageKind::Graphics, PageKind::Ai] {
+            for page in [
+                PageKind::Character,
+                PageKind::Graphics,
+                PageKind::Ai,
+                PageKind::Debug,
+            ] {
                 let label = page.label();
                 if ui
                     .selectable_label(self.current_page == page, label)
@@ -130,6 +138,9 @@ impl SettingsUi {
                 world,
                 ui_entity,
             ),
+            PageKind::Debug => {
+                page_debug::render(ui, settings, &mut self.animation, ai, world, ui_entity)
+            }
         }
     }
 }

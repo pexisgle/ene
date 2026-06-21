@@ -102,12 +102,7 @@ pub struct AppState {
     /// `Empty` when no rects were pushed (full pass-through).
     #[cfg(target_os = "linux")]
     pub last_input_source: crate::input_region_debug::InputRegionSource,
-    /// PR-LX.8: F9 toggles this. When `true`, the
-    /// `input_region_debug` overlay is drawn on the
-    /// character window alongside the collider / mask
-    /// overlays. Not persisted.
-    #[cfg(target_os = "linux")]
-    pub show_input_region_debug: bool,
+
     /// PR-LX.6: offscreen `Rgba8Unorm` mask capture target.
     /// Created in [`crate::runtime::Runtime::resumed`] once
     /// the GPU device is alive, sized in
@@ -190,8 +185,6 @@ impl AppState {
                 last_applied_input_rects: Vec::new(),
                 #[cfg(target_os = "linux")]
                 last_input_source: crate::input_region_debug::InputRegionSource::Empty,
-                #[cfg(target_os = "linux")]
-                show_input_region_debug: false,
             },
             tx,
         )

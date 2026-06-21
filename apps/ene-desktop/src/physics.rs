@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use glam::{Quat, Vec3};
 use hecs::Entity;
 use rapier3d::prelude::*;
