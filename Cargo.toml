@@ -99,7 +99,6 @@ encase = "0.12"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 raw-window-handle = "0.6"
-hecs = "0.10"
 rapier3d = "0.22"
 
 # --- bevy_ecs (scheduler-only; no bevy_engine rendering/winit) ---

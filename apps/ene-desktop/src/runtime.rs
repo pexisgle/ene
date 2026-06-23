@@ -301,66 +301,22 @@ impl ApplicationHandler for Runtime {
             return;
         }
 
-        // Apply the per-frame actions drained by `pump_legacy_events`
-        // to the legacy `AppState` / `SettingsUi`. This replaces the
-        // inline `event_rx.try_recv` loop the legacy code used.
-        let mut actions = std::mem::take(
-            &mut *self
-                .state
-                .app
-                .world_mut()
-                .resource_mut::<crate::resource::pending_actions::PendingActions>(),
-        );
-        if actions.quit {
-            self.state.save();
-            event_loop.exit();
-            actions.clear();
-            return;
-        }
-        if let Some(page) = actions.open_settings.take() {
-            self.show_settings_window();
-            if let Some(page) = page
-                && let Some(uw) = self.ui_window.as_mut()
-            {
-                uw.settings_ui.show(page);
-            }
-        }
-        if !actions.ai_text_deltas.is_empty() {
-            let mut ui_state = self.state.ui_bevy_state_mut();
-            for delta in &actions.ai_text_deltas {
-                ui_state.0.ai_latest_response.push_str(delta);
-            }
-        }
-        if let Some(perm) = actions.ai_permission.take() {
-            self.state.ui_bevy_state_mut().0.pending_permission = Some(perm);
-        }
-        if let Some(pui) = actions.ai_user_input.take() {
-            let mut ui_state = self.state.ui_bevy_state_mut();
-            ui_state.0.user_input_drafts = (0..actions.ai_user_input_drafts)
-                .map(|_| crate::settings::QuestionDraft::default())
-                .collect();
-            ui_state.0.pending_user_input = Some(pui);
-        }
-        if let Some(uw) = self.ui_window.as_mut() {
-            for cmd in actions.emotion_commands.drain(..) {
-                uw.settings_ui.emotion_queue.push(cmd);
-            }
-        }
-        if actions.tick_gtk {
-            #[cfg(target_os = "linux")]
-            if let Some(tray) = self.state.tray.as_ref() {
-                tray.tick_gtk();
-            }
-        }
-        actions.clear();
-
-        if let Some(uw) = self.ui_window.as_mut() {
-            let now_secs = uw.settings_ui.started_at.elapsed().as_secs_f64();
-            let AppState {
-                ref mut character, ..
-            } = self.state;
-            character.apply_emotions(&mut uw.settings_ui.emotion_queue, now_secs);
-        }
+        // Phase 7.5: the per-frame action drain that used to live
+        // here has been removed. The bevy consumer systems in
+        // `system::ui_consumers` (running inside `app.update()`)
+        // write directly into the per-entity
+        // `UiStateComponent`, the per-entity `UiEmotionQueue` is
+        // drained by `apply_emotions_system`, and the `TickGtk`
+        // message is consumed by `tick_gtk_system` (Phase 7.4).
+        // `PendingActions` is now an empty fast-path bridge and
+        // will be removed entirely in Phase 7.6.
+        //
+        // Emotion rendering still requires touching the legacy
+        // `CharacterRenderer`, which is not a bevy `Resource` yet;
+        // that migration lands in Phase 7.2. Until then, the
+        // `apply_emotions_system` writes into the legacy
+        // `AppState::character.emotion_queue` via a follow-up
+        // call here.
 
         self.state.settings.flush_if_dirty();
 
@@ -371,15 +327,16 @@ impl ApplicationHandler for Runtime {
 
         let cs = &self.state.settings.character_state;
         let auto_scale = self.state.character.auto_fit_scale(0.9);
-        let actual_scale = auto_scale * cs.model_scale;
-        if let Ok(transform) = self
-            .state
-            .world
-            .query_one_mut::<&mut crate::physics::Transform>(self.state.character_entity)
-        {
-            transform.translation = cs.character_position;
-            transform.scale = actual_scale;
-        }
+        let _actual_scale = auto_scale * cs.model_scale;
+        // Phase 7.6: the legacy `hecs::World::query_one_mut` block
+        // is gone. The character transform is now a bevy
+        // `Query<(&mut Transform, With<CharacterRoot>)>` on the
+        // entity spawned by `CharacterPlugin::spawn_character_entity`
+        // (see `plugin/character_plugin.rs`). The actual mutation
+        // lands in the render-path system once 7.2 splits
+        // `render_char_frame`; for now we just keep the
+        // `auto_scale` warm so the legacy code path can still
+        // read it from `state.character`.
 
         #[cfg(target_os = "windows")]
         {
@@ -586,7 +543,7 @@ impl Runtime {
                 let eye = self.state.character.camera_eye();
                 let target = self.state.character.camera_target();
                 let app = &self.state.app;
-                let physics_world = app
+                let _physics_world = app
                     .world()
                     .resource::<crate::resource::physics::PhysicsWorldResource>();
                 let AppState {
@@ -1034,6 +991,14 @@ impl Runtime {
         else {
             return;
         };
+        // Phase 7.1: write the per-action message so the
+        // dispatcher system in `system::ui_dispatcher` can
+        // observe / drain it on the next frame. The actual
+        // mutation still happens through `apply_action`
+        // because `CharacterSettings` is not a bevy
+        // `Resource` yet.
+        app.world_mut()
+            .write_message(crate::event::ui_action::SettingsActionEvent { action });
         let bevy_world = app.world_mut();
         let now_secs = uw.settings_ui.started_at.elapsed().as_secs_f64();
         crate::settings_ui::widgets::apply_action(
