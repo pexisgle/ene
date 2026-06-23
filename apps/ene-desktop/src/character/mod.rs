@@ -52,7 +52,6 @@ pub struct CharacterRenderer {
     vrma: Option<VrmaAsset>,
     vrma_player: VrmaPlayer,
     vrma_path: Option<PathBuf>,
-    #[allow(dead_code)]
     active_bone_nodes: Vec<usize>,
     /// Spring-bone simulator. `None` for models without `VRMC_springBone`.
     spring_bone_sim: Option<SpringBoneSimulator>,
