@@ -29,6 +29,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 hecs = { workspace = true }
 rapier3d = { workspace = true }
+bevy_ecs = { workspace = true }
+bevy_app = { workspace = true }
 device_query = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
