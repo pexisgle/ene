@@ -6,7 +6,10 @@
 use super::widgets::{SettingsAction, apply_action};
 use crate::ai_bridge::AiBridge;
 use crate::character_state::AnimationControl;
+use crate::component::ui::UiStateComponent;
 use crate::settings::CharacterSettings;
+use bevy_ecs::entity::Entity;
+use bevy_ecs::world::World;
 use std::sync::Arc;
 
 pub fn render(
@@ -14,14 +17,14 @@ pub fn render(
     settings: &mut CharacterSettings,
     animation: &mut AnimationControl,
     ai: &Arc<AiBridge>,
-    world: &mut hecs::World,
-    ui_entity: hecs::Entity,
+    world: &mut World,
+    ui_entity: Entity,
 ) {
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
             ui.label("Raycast Colliders (Debug)");
-            let debug_on = if let Ok(ui_state) = world.get::<&crate::settings::UiState>(ui_entity) {
-                ui_state.show_collider_debug
+            let debug_on = if let Some(ui_state) = world.get::<UiStateComponent>(ui_entity) {
+                ui_state.0.show_collider_debug
             } else {
                 false
             };
@@ -48,17 +51,16 @@ pub fn render(
             );
         });
 
-        let show_colliders = if let Ok(ui_state) = world.get::<&crate::settings::UiState>(ui_entity)
-        {
-            ui_state.show_collider_debug
+        let show_colliders = if let Some(ui_state) = world.get::<UiStateComponent>(ui_entity) {
+            ui_state.0.show_collider_debug
         } else {
             false
         };
         if show_colliders {
             ui.horizontal(|ui| {
                 ui.label("Hovered Bone");
-                let name = if let Ok(ui_state) = world.get::<&crate::settings::UiState>(ui_entity) {
-                    ui_state.hovered_bone_name.clone()
+                let name = if let Some(ui_state) = world.get::<UiStateComponent>(ui_entity) {
+                    ui_state.0.hovered_bone_name.clone()
                 } else {
                     None
                 };
@@ -68,8 +70,8 @@ pub fn render(
 
         ui.horizontal(|ui| {
             ui.label("Input Region (Debug)");
-            let debug_on = if let Ok(ui_state) = world.get::<&crate::settings::UiState>(ui_entity) {
-                ui_state.show_input_region_debug
+            let debug_on = if let Some(ui_state) = world.get::<UiStateComponent>(ui_entity) {
+                ui_state.0.show_input_region_debug
             } else {
                 false
             };
@@ -140,17 +142,17 @@ fn render_linux_only(
     settings: &mut CharacterSettings,
     animation: &mut AnimationControl,
     ai: &Arc<AiBridge>,
-    world: &mut hecs::World,
-    ui_entity: hecs::Entity,
+    world: &mut World,
+    ui_entity: Entity,
 ) {
     ui.horizontal(|ui| {
         ui.label("Mask Overlay (Debug)");
-        let debug_overlay_visible =
-            if let Ok(ui_state) = world.get::<&crate::settings::UiState>(ui_entity) {
-                ui_state.debug_overlay_visible
-            } else {
-                false
-            };
+        let debug_overlay_visible = if let Some(ui_state) = world.get::<UiStateComponent>(ui_entity)
+        {
+            ui_state.0.debug_overlay_visible
+        } else {
+            false
+        };
         let mut checkbox = debug_overlay_visible;
         if ui.checkbox(&mut checkbox, "").changed() && checkbox != debug_overlay_visible {
             apply_action(
@@ -209,7 +211,7 @@ fn render_linux_only(
     _settings: &mut CharacterSettings,
     _animation: &mut AnimationControl,
     _ai: &Arc<AiBridge>,
-    _world: &mut hecs::World,
-    _ui_entity: hecs::Entity,
+    _world: &mut World,
+    _ui_entity: Entity,
 ) {
 }

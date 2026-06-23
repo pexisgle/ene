@@ -11,11 +11,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use bevy_app::App;
 use tokio::sync::mpsc;
 
 use crate::ai_bridge::AiBridge;
+use crate::app::build_app;
 use crate::character::CharacterRenderer;
-use crate::events::{AppEvent, AppEventReceiver, AppEventSender};
+use crate::events::{AppEvent, AppEventSender};
 use crate::gpu::GpuContext;
 use crate::settings::CharacterSettings;
 use crate::tray::TrayHandle;
@@ -75,7 +77,7 @@ pub struct DebugState {
     /// Latest raycast hit from the click-through test, refreshed
     /// every `about_to_wait`. The character-window debug overlay
     /// reads this to draw the hit collider highlight and hit-point cross.
-    pub last_raycast_hit: Option<crate::physics::RaycastHit>,
+    pub last_raycast_hit: Option<crate::physics::RayHit>,
     /// Line-list overlay renderer, lazily created the first time
     /// the F3 toggle is on.
     pub debug_renderer: Option<ene_vrm::DebugRenderer>,
@@ -87,24 +89,27 @@ pub struct AppState {
     pub settings: CharacterSettings,
     pub ai: Arc<AiBridge>,
     pub tray: Option<TrayHandle>,
-    /// Receiver end of the cross-subsystem bus. The runtime drains
-    /// this in `about_to_wait`.
-    pub event_rx: AppEventReceiver,
     /// Character renderer (depth texture + default VRM).
     pub character: CharacterRenderer,
     /// ECS world for entities (character, camera, physics, etc).
     pub world: hecs::World,
     /// The primary character entity ID.
     pub character_entity: hecs::Entity,
-    /// The UI state entity ID.
-    pub ui_entity: hecs::Entity,
-    /// Rapier physics state.
-    pub physics: crate::physics::PhysicsWorld,
+    /// Rapier collider registration produced by
+    /// [`crate::physics::PhysicsWorld::register_character_colliders`]
+    /// during `Runtime::resumed`. Held in legacy `AppState` so the
+    /// per-frame `update_character_bone_positions` and the cast-ray
+    /// reverse-lookup can use it without going through the bevy
+    /// `World`. `None` until `resumed` runs.
+    pub character_physics_registration: Option<crate::physics::CharacterColliderRegistration>,
     /// Linux display-server integration state. Empty on non-Linux.
     #[cfg_attr(target_os = "windows", expect(dead_code))]
     pub platform: PlatformState,
     /// Debug overlay state (raycast hit + line-list renderer).
     pub debug: DebugState,
+    /// The new `bevy_ecs` [`App`]. Its schedule is run by
+    /// [`crate::runtime::Runtime::about_to_wait`] on every frame.
+    pub app: App,
 }
 
 impl AppState {
@@ -133,7 +138,8 @@ impl AppState {
             translation: glam::Vec3::ZERO,
             scale: 1.0,
         },));
-        let ui_entity = world.spawn((crate::settings::UiState::default(),));
+
+        let app = build_app(bootstrap_handle.clone(), rx, tx.clone());
 
         (
             Self {
@@ -141,14 +147,13 @@ impl AppState {
                 settings,
                 ai,
                 tray: None,
-                event_rx: rx,
                 character,
                 world,
                 character_entity,
-                ui_entity,
-                physics: crate::physics::PhysicsWorld::new(),
+                character_physics_registration: None,
                 platform: PlatformState::default(),
                 debug: DebugState::default(),
+                app,
             },
             tx,
         )
@@ -184,16 +189,71 @@ impl AppState {
         let _ = event_tx.send(AppEvent::Quit);
     }
 
-    pub fn ui_state(&self) -> hecs::Ref<'_, crate::settings::UiState> {
-        self.world
-            .get::<&crate::settings::UiState>(self.ui_entity)
-            .expect("UI entity not found")
+    /// Borrow the bevy UI entity (the entity spawned by
+    /// `UiPlugin::spawn_settings_ui_window`).
+    /// `None` until `app.update()` has been called once.
+    pub fn ui_bevy_entity(&mut self) -> Option<bevy_ecs::entity::Entity> {
+        let mut q = self
+            .app
+            .world_mut()
+            .query_filtered::<bevy_ecs::entity::Entity, bevy_ecs::prelude::With<crate::component::ui::UiWindow>>();
+        q.iter(self.app.world()).next()
     }
 
-    pub fn ui_state_mut(&self) -> hecs::RefMut<'_, crate::settings::UiState> {
-        self.world
-            .get::<&mut crate::settings::UiState>(self.ui_entity)
-            .expect("UI entity not found")
+    /// Borrow the bevy `World` mutably for UI render / action
+    /// dispatch sites. Phase 5+ reads / writes UI components
+    /// through this handle.
+    #[expect(dead_code, reason = "Inline-resolved in runtime.rs")]
+    pub fn ui_bevy_world(&mut self) -> &mut bevy_ecs::world::World {
+        self.app.world_mut()
+    }
+
+    /// Borrow the per-UI-entity [`UiStateComponent`](crate::component::ui::UiStateComponent)
+    /// mutably. Replaces the legacy
+    /// `hecs`-based `ui_state_mut()` helper. The first call to
+    /// `app.update()` must have happened for the entity to exist.
+    pub fn ui_bevy_state_mut(
+        &mut self,
+    ) -> bevy_ecs::change_detection::Mut<'_, crate::component::ui::UiStateComponent> {
+        let entity = self
+            .ui_bevy_entity()
+            .expect("UI bevy entity not spawned; call app.update() first");
+        self.app
+            .world_mut()
+            .get_mut::<crate::component::ui::UiStateComponent>(entity)
+            .expect("UiStateComponent not on UI entity")
+    }
+
+    /// Borrow the per-UI-entity [`UiStateComponent`](crate::component::ui::UiStateComponent)
+    /// immutably.
+    pub fn ui_bevy_state(&mut self) -> &crate::component::ui::UiStateComponent {
+        let entity = self
+            .ui_bevy_entity()
+            .expect("UI bevy entity not spawned; call app.update() first");
+        self.app
+            .world()
+            .get::<crate::component::ui::UiStateComponent>(entity)
+            .expect("UiStateComponent not on UI entity")
+    }
+
+    /// Borrow the Rapier physics world (read-only) for legacy
+    /// call sites. Phase 4+ removes this in favour of bevy
+    /// systems.
+    pub fn physics_world(&self) -> &crate::resource::physics::PhysicsWorldResource {
+        self.app
+            .world()
+            .resource::<crate::resource::physics::PhysicsWorldResource>()
+    }
+
+    /// Borrow the Rapier physics world mutably for legacy
+    /// call sites. Phase 4+ removes this in favour of bevy
+    /// systems.
+    pub fn physics_world_mut(
+        &mut self,
+    ) -> bevy_ecs::change_detection::Mut<'_, crate::resource::physics::PhysicsWorldResource> {
+        self.app
+            .world_mut()
+            .resource_mut::<crate::resource::physics::PhysicsWorldResource>()
     }
 }
 

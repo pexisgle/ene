@@ -14,8 +14,7 @@
 //!   the latest hit was on the character entity.
 //!
 //! The cross half-edge is [`CROSS_HALF_EXTENT`] from the renderer.
-use hecs::Entity;
-use rapier3d::prelude::{ColliderHandle, Point};
+use rapier3d::prelude::{ColliderHandle, ColliderSet, Point};
 
 use crate::physics::PhysicsWorld;
 use ene_vrm::debug_renderer::{
@@ -39,33 +38,48 @@ pub const HIT_POINT_COLOR: glam::Vec4 = glam::Vec4::new(1.0, 0.3, 0.3, 0.95);
 /// Build the line list for the character-window debug
 /// overlay.
 ///
-/// - For every collider registered on `entity`, push a
-///   wireframe sphere (or Y-axis capsule) of the
-///   collider's radius / half-height at the collider's
-///   current world position, rotated to match the
-///   collider's current orientation.
-/// - The collider whose handle matches `hit_collider` (if
-///   any) is coloured yellow; the rest are cyan.
+/// - For every collider in `colliders`, push a wireframe sphere
+///   (or Y-axis capsule) of the collider's radius / half-height
+///   at the collider's current world position, rotated to match
+///   the collider's current orientation.
+/// - The collider whose handle matches `hit_collider` (if any)
+///   is coloured yellow; the rest are cyan.
 /// - When `hit_collider` is `Some`, push a 3-axis cross at
-///   `hit_point` so the precise impact location is
-///   obvious.
+///   `hit_point` so the precise impact location is obvious.
 ///
 /// The function never reads the GPU or the surface — it
 /// is pure CPU and is safe to call from anywhere in the
-/// per-frame pipeline. The runtime is responsible for
-/// converting `entity` into a `ColliderHandle` via
-/// [`PhysicsWorld::colliders_for`] and for providing the
-/// latest hit from [`crate::state::DebugState::last_raycast_hit`].
+/// per-frame pipeline. The runtime is responsible for passing
+/// the per-entity collider list (read from the
+/// [`crate::component::physics::PhysicsColliders`] component)
+/// and the latest hit from
+/// [`crate::state::DebugState::last_raycast_hit`].
 pub fn build_collider_lines(
     out: &mut Vec<DebugLine>,
     physics: &PhysicsWorld,
-    entity: Entity,
+    colliders: &[ColliderHandle],
     hit_collider: Option<ColliderHandle>,
     hit_point: Option<Point<f32>>,
     show_all: bool,
 ) {
     out.clear();
-    let colliders = physics.colliders_for(entity);
+    push_lines(out, physics, colliders, hit_collider, show_all);
+    if let Some(point) = hit_point {
+        let center = glam::Vec3::new(point.x, point.y, point.z);
+        cross_lines(center, CROSS_HALF_EXTENT, HIT_POINT_COLOR, out);
+    }
+}
+
+/// Pure version of [`build_collider_lines`] that doesn't draw
+/// the hit cross; useful for tests and for callers that need
+/// the wireframe only.
+pub(crate) fn push_lines(
+    out: &mut Vec<DebugLine>,
+    physics: &PhysicsWorld,
+    colliders: &[ColliderHandle],
+    hit_collider: Option<ColliderHandle>,
+    show_all: bool,
+) {
     for handle in colliders {
         let Some(collider) = physics.collider_set.get(*handle) else {
             continue;
@@ -109,11 +123,10 @@ pub fn build_collider_lines(
             );
         }
     }
-    if let Some(point) = hit_point {
-        let center = glam::Vec3::new(point.x, point.y, point.z);
-        cross_lines(center, CROSS_HALF_EXTENT, HIT_POINT_COLOR, out);
-    }
 }
+
+#[allow(dead_code)]
+pub(crate) fn unused_collider_set_marker(_cs: &ColliderSet) {}
 
 #[cfg(test)]
 mod tests {
@@ -122,30 +135,9 @@ mod tests {
     use crate::character::collider::BoneShape;
     use crate::physics::PhysicsWorld;
     use glam::{Quat, Vec3};
-    use hecs::World;
 
-    fn setup() -> (PhysicsWorld, World, Entity) {
-        let mut world = World::new();
-        let entity = world.spawn(());
-        (PhysicsWorld::new(), world, entity)
-    }
-
-    /// With no colliders registered for the entity, the
-    /// output is empty (no spheres, no cross).
-    #[test]
-    fn empty_when_no_colliders() {
-        let (physics, _world, entity) = setup();
-        let mut out = Vec::new();
-        build_collider_lines(&mut out, &physics, entity, None, None, true);
-        assert!(out.is_empty(), "no colliders => no lines");
-    }
-
-    /// Two bone colliders must produce the expected number
-    /// of lines: `2 * (longitudes² + (latitudes + 1) * longitudes)`.
-    /// No hit => no cross.
-    #[test]
-    fn two_colliders_produces_expected_line_count() {
-        let (mut physics, _world, entity) = setup();
+    fn setup() -> (PhysicsWorld, Vec<ColliderHandle>) {
+        let mut physics = PhysicsWorld::new();
         let specs = vec![
             BoneShapeSpec {
                 bone_node: 0,
@@ -164,10 +156,28 @@ mod tests {
                 rest_rotation: Quat::IDENTITY,
             },
         ];
-        physics.add_character_bone_colliders(entity, &specs);
-        physics.step();
+        let reg = physics.register_character_colliders(&specs);
+        (physics, reg.colliders)
+    }
+
+    /// With no colliders, the output is empty (no spheres, no
+    /// cross).
+    #[test]
+    fn empty_when_no_colliders() {
+        let (physics, _) = setup();
         let mut out = Vec::new();
-        build_collider_lines(&mut out, &physics, entity, None, None, true);
+        build_collider_lines(&mut out, &physics, &[], None, None, true);
+        assert!(out.is_empty(), "no colliders => no lines");
+    }
+
+    /// Two bone colliders must produce the expected number
+    /// of lines: `2 * (longitudes² + (latitudes + 1) * longitudes)`.
+    /// No hit => no cross.
+    #[test]
+    fn two_colliders_produces_expected_line_count() {
+        let (physics, colliders) = setup();
+        let mut out = Vec::new();
+        build_collider_lines(&mut out, &physics, &colliders, None, None, true);
         let per_sphere = ene_vrm::SPHERE_LONGITUDES * ene_vrm::SPHERE_LONGITUDES
             + (ene_vrm::SPHERE_LATITUDES + 1) * ene_vrm::SPHERE_LONGITUDES;
         assert_eq!(out.len(), 2 * per_sphere);
@@ -178,7 +188,7 @@ mod tests {
     /// colliders are registered.
     #[test]
     fn hit_point_adds_three_cross_segments() {
-        let (mut physics, _world, entity) = setup();
+        let mut physics = PhysicsWorld::new();
         let specs = vec![BoneShapeSpec {
             bone_node: 0,
             local_position: Vec3::ZERO,
@@ -187,11 +197,18 @@ mod tests {
             static_offset: Vec3::ZERO,
             rest_rotation: Quat::IDENTITY,
         }];
-        physics.add_character_bone_colliders(entity, &specs);
+        let reg = physics.register_character_colliders(&specs);
         physics.step();
         let hit_point = Point::new(0.0, 0.0, 0.2);
         let mut out = Vec::new();
-        build_collider_lines(&mut out, &physics, entity, None, Some(hit_point), true);
+        build_collider_lines(
+            &mut out,
+            &physics,
+            &reg.colliders,
+            None,
+            Some(hit_point),
+            true,
+        );
         let per_sphere = ene_vrm::SPHERE_LONGITUDES * ene_vrm::SPHERE_LONGITUDES
             + (ene_vrm::SPHERE_LATITUDES + 1) * ene_vrm::SPHERE_LONGITUDES;
         assert_eq!(out.len(), per_sphere + 3);
@@ -203,7 +220,7 @@ mod tests {
     /// and leave limbs / trunk invisible in the overlay.
     #[test]
     fn capsule_collider_produces_wireframe_lines() {
-        let (mut physics, _world, entity) = setup();
+        let mut physics = PhysicsWorld::new();
         let specs = vec![BoneShapeSpec {
             bone_node: 0,
             local_position: Vec3::ZERO,
@@ -215,10 +232,10 @@ mod tests {
             static_offset: Vec3::ZERO,
             rest_rotation: Quat::IDENTITY,
         }];
-        physics.add_character_bone_colliders(entity, &specs);
+        let reg = physics.register_character_colliders(&specs);
         physics.step();
         let mut out = Vec::new();
-        build_collider_lines(&mut out, &physics, entity, None, None, true);
+        build_collider_lines(&mut out, &physics, &reg.colliders, None, None, true);
         // capsule_wireframe_lines_into emits
         // 2 * SPHERE_LONGITUDES (caps) + SPHERE_LONGITUDES
         // (meridians) = 3 * SPHERE_LONGITUDES segments.

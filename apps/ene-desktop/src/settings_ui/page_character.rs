@@ -9,6 +9,8 @@ use super::widgets::{SettingsAction, apply_action};
 use crate::ai_bridge::AiBridge;
 use crate::character_state::{AnimationControl, EmotionCommand, EmotionQueue};
 use crate::settings::CharacterSettings;
+use bevy_ecs::entity::Entity;
+use bevy_ecs::world::World;
 use std::sync::Arc;
 
 const EXPRESSIONS: [&str; 6] = ["happy", "sad", "angry", "relaxed", "surprised", "neutral"];
@@ -21,8 +23,8 @@ pub fn render(
     input: &mut SettingsInputState,
     emotion_queue: &mut EmotionQueue,
     now_secs: f64,
-    world: &mut hecs::World,
-    ui_entity: hecs::Entity,
+    world: &mut World,
+    ui_entity: Entity,
 ) {
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
@@ -241,8 +243,8 @@ fn render_numeric_row<F, C>(
     up: SettingsAction,
     refresh: F,
     commit: C,
-    world: &mut hecs::World,
-    ui_entity: hecs::Entity,
+    world: &mut World,
+    ui_entity: Entity,
     now_secs: f64,
 ) where
     F: Fn(&CharacterSettings, &mut String),

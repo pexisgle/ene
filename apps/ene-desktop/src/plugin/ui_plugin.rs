@@ -1,0 +1,80 @@
+//! # Settings UI plugin
+//!
+//! Phase 5 lifts the legacy
+//! `apps/ene-desktop/src/settings_ui::SettingsUi` struct into bevy
+//! components. The `SettingsAction` dispatcher in
+//! [`crate::settings_ui::widgets`] is refactored to read / write
+//! bevy components, but stays as a single function — Phase 6+
+//! splits the 40+ variants into per-action systems.
+//!
+//! This plugin is responsible for:
+//!
+//! 1. Adding the [`SettingsActionEvent`](crate::event::ui_action::SettingsActionEvent)
+//!    message queue to the [`App`].
+//! 2. Spawning the single
+//!    [`SettingsUiBundle`](crate::component::ui::SettingsUiBundle)
+//!    entity during `Startup` so the page render functions can
+//!    read / write components through `World::get` and
+//!    `World::get_mut`.
+//! 3. Providing the empty `apply_settings_action_system` as a
+//!    placeholder for Phase 6+ when the per-action systems land.
+use bevy_app::{App, Plugin, Startup};
+use bevy_ecs::prelude::*;
+
+use crate::component::ui::{SettingsUiBundle, UiStartedAt};
+use crate::event::ui_action::SettingsActionEvent;
+use std::time::Instant;
+
+pub struct UiPlugin;
+
+impl Plugin for UiPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_message::<SettingsActionEvent>();
+        app.add_systems(Startup, spawn_settings_ui_window);
+    }
+}
+
+/// Spawn the single settings-window entity. The entity is queried
+/// by the legacy `SettingsUi::render` function (still in
+/// `runtime.rs`) and by the `apply_settings_action_system` that
+/// consumes `SettingsActionEvent` messages.
+fn spawn_settings_ui_window(mut commands: Commands) {
+    commands.spawn(SettingsUiBundle {
+        started_at: UiStartedAt(Instant::now()),
+        ..SettingsUiBundle::default()
+    });
+}
+
+/// Phase 5 placeholder system. Phase 6+ converts the
+/// `SettingsAction` variants into individual systems that mutate
+/// components on the UI entity.
+#[expect(dead_code, reason = "Wired into the schedule in Phase 6+")]
+pub fn apply_settings_action_system(
+    _events: MessageReader<SettingsActionEvent>,
+    _ui_query: Query<Entity, With<crate::component::ui::UiWindow>>,
+) {
+    // No-op for now; the page render functions call
+    // `apply_action` directly. This system is reserved for
+    // Phase 6+ when the per-action systems land.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_can_be_added() {
+        let mut app = App::new();
+        app.add_plugins(UiPlugin);
+        // Trigger the Startup schedule so `spawn_settings_ui_window`
+        // runs; the bevy App otherwise defers `Startup` until
+        // the first `update`.
+        app.world_mut().run_schedule(bevy_app::Startup);
+        let count = app
+            .world_mut()
+            .query_filtered::<Entity, With<crate::component::ui::UiWindow>>()
+            .iter(app.world())
+            .count();
+        assert_eq!(count, 1);
+    }
+}

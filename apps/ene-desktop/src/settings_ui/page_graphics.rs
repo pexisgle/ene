@@ -9,6 +9,8 @@ use super::widgets::{
 use crate::ai_bridge::AiBridge;
 use crate::character_state::AnimationControl;
 use crate::settings::CharacterSettings;
+use bevy_ecs::entity::Entity;
+use bevy_ecs::world::World;
 use std::sync::Arc;
 
 pub fn render(
@@ -16,8 +18,8 @@ pub fn render(
     settings: &mut CharacterSettings,
     animation: &mut AnimationControl,
     ai: &Arc<AiBridge>,
-    world: &mut hecs::World,
-    ui_entity: hecs::Entity,
+    world: &mut World,
+    ui_entity: Entity,
 ) {
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
