@@ -8,7 +8,6 @@ use bevy_ecs::prelude::*;
 /// Logical pointer move inside the character window's coordinate
 /// space. `logical` is the post-DPI position passed to winit.
 #[derive(Message, Debug, Clone, Copy)]
-#[expect(dead_code, reason = "Consumed by input systems in Phase 3+")]
 pub struct PointerMoved {
     pub logical_x: f32,
     pub logical_y: f32,

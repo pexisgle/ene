@@ -14,3 +14,12 @@ pub struct WindowResized {
 /// this event.
 #[derive(Message, Debug, Clone, Copy)]
 pub struct WindowCloseRequested;
+
+/// Phase 7.4: write once per frame from the tray subsystem
+/// when the GTK main loop integration has pending events.
+/// The `tick_gtk_system` (in `PlatformPlugin`) drains the
+/// message and pumps the GTK queue. Phase 7.5 actually
+/// published from `system::event_pump::pump_legacy_events`
+/// on Linux, so the `dead_code` lint is now satisfied.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct TickGtk;

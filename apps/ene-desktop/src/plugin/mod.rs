@@ -4,19 +4,24 @@
 //! systems for one slice of the application. They are added to the
 //! `App` in [`crate::app::CorePlugin::build`].
 //!
-//! ## Phase 5 status
+//! ## Phase 6 status
 //!
-//! [`CharacterPlugin`], [`PhysicsPlugin`], and [`UiPlugin`] are
-//! registered; the other plugins are placeholders for later
-//! phases:
+//! [`CharacterPlugin`], [`PhysicsPlugin`], [`UiPlugin`],
+//! [`PlatformPlugin`], [`TrayPlugin`], and [`AiPlugin`] are
+//! registered. The render path itself stays in the runtime:
+//! `CharacterRenderer` and `wgpu::Device` / `wgpu::Queue` are
+//! `!Send + !Sync`, so the per-frame `character.update_*` /
+//! `character.render` / `cw.with_surface_view` calls cannot
+//! live in bevy systems. See the migration plan
+//! (`docs/architecture/ene-desktop-ecs-migration.md`) for the
+//! full rationale.
 //!
-//! - `WindowPlugin` (Phase 7)
-//! - `RenderPlugin` (Phase 7)
-//! - `SettingsPlugin` (Phase 5+)
-//! - `TrayPlugin` (Phase 6)
-//! - `PlatformPlugin` (Phase 6)
-//! - `AiPlugin` (Phase 6)
-//! - `DebugPlugin` (Phase 8)
+//! - `WindowPlugin` (deferred — see plan)
+//! - `RenderPlugin` (cancelled — see plan)
+//! - `DebugPlugin` (deferred — see plan)
+pub mod ai_plugin;
 pub mod character_plugin;
 pub mod physics_plugin;
+pub mod platform_plugin;
+pub mod tray_plugin;
 pub mod ui_plugin;

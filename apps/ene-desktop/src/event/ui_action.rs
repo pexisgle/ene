@@ -14,7 +14,7 @@ use bevy_ecs::prelude::*;
 /// the [`SettingsBundle`](crate::component::ui::SettingsUiBundle)'s
 /// components in place.
 #[derive(Message, Debug, Clone, Copy)]
-#[expect(dead_code, reason = "Consumed by Phase 5 consumer system")]
 pub struct SettingsActionEvent {
+    #[expect(dead_code, reason = "Read by Phase 6 per-action consumer systems")]
     pub action: crate::settings_ui::widgets::SettingsAction,
 }

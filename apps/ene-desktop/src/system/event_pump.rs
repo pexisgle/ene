@@ -10,23 +10,25 @@ use std::time::Instant;
 
 use bevy_ecs::prelude::*;
 
-use crate::character_state::EmotionCommand;
 use crate::event::ai::{
     AiPermissionRequested, AiStreamFinished, AiTextDelta, AiUserInputRequested, EmoteToken,
 };
+use crate::event::lifecycle::TickGtk;
 use crate::event::settings::OpenSettings;
 use crate::events::{AiStreamUpdate, AppEvent};
-use crate::resource::{
-    event_channels::EventChannels, exit::ExitRequested, pending_actions::PendingActions,
-};
-use crate::settings::{PendingPermission, PendingUserInput};
+use crate::resource::{event_channels::EventChannels, exit::ExitRequested};
 
-/// Drains the legacy `AppEvent` bus, writes typed [`Message`]s, and
-/// populates [`PendingActions`]. Runs in the `First` stage so any
-/// `Update` systems see fresh events.
+/// Drains the legacy `AppEvent` bus and writes typed [`Message`]s.
+/// Runs in the `First` stage so any `Update` systems see fresh
+/// events.
+///
+/// Phase 7.5: this pump is the single producer of every typed
+/// `Message` the desktop runtime consumes; the legacy
+/// `PendingActions` mirror has been removed. Per-frame actions
+/// are now handled by the consumer systems in
+/// `system::ui_consumers.rs` reading the `Message` queue.
 pub fn pump_legacy_events(
     mut channels: ResMut<EventChannels>,
-    mut pending: ResMut<PendingActions>,
     mut exit: ResMut<ExitRequested>,
     mut text_delta: MessageWriter<AiTextDelta>,
     mut permission: MessageWriter<AiPermissionRequested>,
@@ -34,11 +36,11 @@ pub fn pump_legacy_events(
     mut finished: MessageWriter<AiStreamFinished>,
     mut emote: MessageWriter<EmoteToken>,
     mut open_settings: MessageWriter<OpenSettings>,
+    #[cfg(target_os = "linux")] mut tick_gtk: MessageWriter<TickGtk>,
 ) {
     while let Ok(event) = channels.rx.try_recv() {
         translate_event(
             event,
-            &mut pending,
             &mut exit,
             &mut text_delta,
             &mut permission,
@@ -46,15 +48,19 @@ pub fn pump_legacy_events(
             &mut finished,
             &mut emote,
             &mut open_settings,
-            None,
         );
     }
+    // Phase 7.5: publish a `TickGtk` every frame on Linux so the
+    // tray icon library makes progress. The actual `tick_gtk()`
+    // call still lives in `Runtime::about_to_wait` because the
+    // `Rc<RefCell<TrayHandle>>` is not `Send + Sync`.
+    #[cfg(target_os = "linux")]
+    tick_gtk.write(TickGtk);
 }
 
 #[allow(clippy::too_many_arguments)]
 fn translate_event(
     event: AppEvent,
-    pending: &mut PendingActions,
     exit: &mut ExitRequested,
     text_delta: &mut MessageWriter<AiTextDelta>,
     permission: &mut MessageWriter<AiPermissionRequested>,
@@ -62,23 +68,18 @@ fn translate_event(
     finished: &mut MessageWriter<AiStreamFinished>,
     emote: &mut MessageWriter<EmoteToken>,
     open_settings: &mut MessageWriter<OpenSettings>,
-    now_secs: Option<f64>,
 ) {
     match event {
         AppEvent::Quit => {
-            pending.quit = true;
             exit.0 = true;
         }
         AppEvent::Tray(crate::events::TrayAction::Quit) => {
-            pending.quit = true;
             exit.0 = true;
         }
         AppEvent::Tray(crate::events::TrayAction::OpenSettings { page }) => {
-            pending.open_settings = Some(page);
             open_settings.write(OpenSettings { page });
         }
         AppEvent::Ai(AiStreamUpdate::TextDelta(text)) => {
-            pending.ai_text_deltas.push(text.clone());
             text_delta.write(AiTextDelta(text));
         }
         AppEvent::Ai(AiStreamUpdate::Finished | AiStreamUpdate::Error(_)) => {
@@ -90,17 +91,6 @@ fn translate_event(
             target,
             description,
         }) => {
-            pending.ai_permission = Some(PendingPermission {
-                request_id: request_id.clone(),
-                action: action.clone(),
-                target: target.clone(),
-                description: if description.is_empty() {
-                    None
-                } else {
-                    Some(description.clone())
-                },
-            });
-            pending.open_settings = Some(Some(crate::settings_ui::PageKind::Ai));
             permission.write(AiPermissionRequested {
                 request_id,
                 action,
@@ -109,22 +99,9 @@ fn translate_event(
             });
         }
         AppEvent::Ai(AiStreamUpdate::UserInputRequired { request_id, prompt }) => {
-            pending.ai_user_input = Some(PendingUserInput {
-                request_id: request_id.clone(),
-                prompt: prompt.clone(),
-            });
-            pending.ai_user_input_drafts = prompt.items.len();
-            pending.open_settings = Some(Some(crate::settings_ui::PageKind::Ai));
             user_input.write(AiUserInputRequested { request_id, prompt });
         }
         AppEvent::EmoteToken(name) => {
-            let target_time = now_secs.unwrap_or(0.0);
-            pending.emotion_commands.push_back(EmotionCommand {
-                emotion: name.clone(),
-                target_time,
-                hold_secs: 4.0,
-                weight: 1.0,
-            });
             emote.write(EmoteToken(name));
         }
         _ => {}
@@ -132,11 +109,14 @@ fn translate_event(
 }
 
 /// Helper used by `pump_legacy_events` to indicate the GTK pump
-/// should run this frame. Mirrors the legacy behaviour.
-#[expect(dead_code, reason = "Used by tray plugin in Phase 6")]
-pub fn mark_gtk_tick(pending: &mut PendingActions) {
-    pending.tick_gtk = true;
-}
+/// should run this frame. Phase 7.5: replaced by the
+/// `Messages<TickGtk>` queue; the consumer system
+/// `tick_gtk_system` (Phase 7.4) handles the tick.
+#[allow(
+    dead_code,
+    reason = "Replaced by Messages<TickGtk>; kept for API symmetry"
+)]
+pub fn mark_gtk_tick() {}
 
 /// Suppress unused-imports for the `Instant` import in non-tray builds.
 fn _force_link(_: Instant) {}
@@ -146,6 +126,7 @@ mod tests {
     use super::*;
     use crate::events::TrayAction;
     use crate::settings_ui::PageKind;
+    use bevy_ecs::message::MessageReader;
     use bevy_ecs::prelude::*;
     use ene_core::RequestId;
     use tokio::sync::mpsc;
@@ -154,7 +135,6 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
         let mut world = World::new();
         world.insert_resource(EventChannels { tx: tx.clone(), rx });
-        world.insert_resource(PendingActions::default());
         world.insert_resource(ExitRequested::default());
         world.init_resource::<Messages<AiTextDelta>>();
         world.init_resource::<Messages<AiStreamFinished>>();
@@ -162,6 +142,8 @@ mod tests {
         world.init_resource::<Messages<AiUserInputRequested>>();
         world.init_resource::<Messages<EmoteToken>>();
         world.init_resource::<Messages<OpenSettings>>();
+        #[cfg(target_os = "linux")]
+        world.init_resource::<Messages<crate::event::lifecycle::TickGtk>>();
         (world, tx)
     }
 
@@ -172,12 +154,11 @@ mod tests {
     }
 
     #[test]
-    fn quit_event_sets_exit_and_pending() {
+    fn quit_event_sets_exit() {
         let (mut world, tx) = build_world();
         tx.send(AppEvent::Quit).unwrap();
         run_pump(&mut world);
         assert!(world.resource::<ExitRequested>().0);
-        assert!(world.resource::<PendingActions>().quit);
     }
 
     #[test]
@@ -186,23 +167,25 @@ mod tests {
         tx.send(AppEvent::Tray(TrayAction::Quit)).unwrap();
         run_pump(&mut world);
         assert!(world.resource::<ExitRequested>().0);
-        assert!(world.resource::<PendingActions>().quit);
     }
 
     #[test]
-    fn open_settings_sets_page() {
+    fn open_settings_emits_typed_message() {
         let (mut world, tx) = build_world();
         tx.send(AppEvent::Tray(TrayAction::OpenSettings {
             page: Some(PageKind::Ai),
         }))
         .unwrap();
         run_pump(&mut world);
-        let pending = world.resource::<PendingActions>();
-        assert_eq!(pending.open_settings, Some(Some(PageKind::Ai)));
+        let mut messages = world.resource_mut::<Messages<OpenSettings>>();
+        let mut cursor = messages.get_cursor();
+        let events: Vec<_> = cursor.read(&mut *messages).collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].page, Some(PageKind::Ai));
     }
 
     #[test]
-    fn permission_required_sets_pending() {
+    fn permission_required_emits_typed_message() {
         let (mut world, tx) = build_world();
         tx.send(AppEvent::Ai(AiStreamUpdate::PermissionRequired {
             request_id: RequestId::new("req-1"),
@@ -212,16 +195,17 @@ mod tests {
         }))
         .unwrap();
         run_pump(&mut world);
-        let pending = world.resource::<PendingActions>();
-        let perm = pending.ai_permission.as_ref().expect("permission");
-        assert_eq!(perm.action, "read");
-        assert_eq!(perm.target, "file.txt");
-        assert_eq!(perm.description.as_deref(), Some("needs approval"));
-        assert_eq!(pending.open_settings, Some(Some(PageKind::Ai)));
+        let mut messages = world.resource_mut::<Messages<AiPermissionRequested>>();
+        let mut cursor = messages.get_cursor();
+        let events: Vec<_> = cursor.read(&mut *messages).collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "read");
+        assert_eq!(events[0].target, "file.txt");
+        assert_eq!(events[0].description, "needs approval");
     }
 
     #[test]
-    fn text_delta_appends_to_buffer() {
+    fn text_delta_emits_typed_messages() {
         let (mut world, tx) = build_world();
         tx.send(AppEvent::Ai(AiStreamUpdate::TextDelta(
             "hello ".to_string(),
@@ -230,18 +214,24 @@ mod tests {
         tx.send(AppEvent::Ai(AiStreamUpdate::TextDelta("world".to_string())))
             .unwrap();
         run_pump(&mut world);
-        let pending = world.resource::<PendingActions>();
-        assert_eq!(pending.ai_text_deltas, vec!["hello ", "world"]);
+        let mut messages = world.resource_mut::<Messages<AiTextDelta>>();
+        let mut cursor = messages.get_cursor();
+        let events: Vec<_> = cursor.read(&mut *messages).collect();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0, "hello ");
+        assert_eq!(events[1].0, "world");
     }
 
     #[test]
-    fn emote_token_enqueues_command() {
+    fn emote_token_emits_typed_message() {
         let (mut world, tx) = build_world();
         tx.send(AppEvent::EmoteToken("happy".to_string())).unwrap();
         run_pump(&mut world);
-        let pending = world.resource::<PendingActions>();
-        assert_eq!(pending.emotion_commands.len(), 1);
-        assert_eq!(pending.emotion_commands[0].emotion, "happy");
+        let mut messages = world.resource_mut::<Messages<EmoteToken>>();
+        let mut cursor = messages.get_cursor();
+        let events: Vec<_> = cursor.read(&mut *messages).collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "happy");
     }
 
     #[test]

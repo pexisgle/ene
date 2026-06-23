@@ -18,11 +18,14 @@
 //!    `World::get_mut`.
 //! 3. Providing the empty `apply_settings_action_system` as a
 //!    placeholder for Phase 6+ when the per-action systems land.
-use bevy_app::{App, Plugin, Startup};
+use bevy_app::{App, Plugin, Startup, Update};
 use bevy_ecs::prelude::*;
+use bevy_ecs::schedule::IntoScheduleConfigs;
 
 use crate::component::ui::{SettingsUiBundle, UiStartedAt};
 use crate::event::ui_action::SettingsActionEvent;
+use crate::schedule::AppSet;
+use crate::system::ui_dispatcher::apply_settings_action_system;
 use std::time::Instant;
 
 pub struct UiPlugin;
@@ -31,6 +34,10 @@ impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<SettingsActionEvent>();
         app.add_systems(Startup, spawn_settings_ui_window);
+        app.add_systems(
+            Update,
+            apply_settings_action_system.in_set(AppSet::Settings),
+        );
     }
 }
 
@@ -43,19 +50,6 @@ fn spawn_settings_ui_window(mut commands: Commands) {
         started_at: UiStartedAt(Instant::now()),
         ..SettingsUiBundle::default()
     });
-}
-
-/// Phase 5 placeholder system. Phase 6+ converts the
-/// `SettingsAction` variants into individual systems that mutate
-/// components on the UI entity.
-#[expect(dead_code, reason = "Wired into the schedule in Phase 6+")]
-pub fn apply_settings_action_system(
-    _events: MessageReader<SettingsActionEvent>,
-    _ui_query: Query<Entity, With<crate::component::ui::UiWindow>>,
-) {
-    // No-op for now; the page render functions call
-    // `apply_action` directly. This system is reserved for
-    // Phase 6+ when the per-action systems land.
 }
 
 #[cfg(test)]

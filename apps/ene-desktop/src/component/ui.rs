@@ -50,9 +50,10 @@ pub struct UiAnimation(pub AnimationControl);
 
 /// Pending emotion commands emitted by the AI bridge or the
 /// settings UI's manual-expression buttons. Mirrors the legacy
-/// `SettingsUi::emotion_queue` field.
+/// `SettingsUi::emotion_queue` field; the
+/// `apply_emotions_system` (in `AiPlugin`) drains this queue
+/// into the legacy per-frame buffer.
 #[derive(Component, Default)]
-#[expect(dead_code, reason = "Mirror of legacy SettingsUi.emotion_queue")]
 pub struct UiEmotionQueue(pub EmotionQueue);
 
 /// Runtime-startup `Instant` so that `now_secs` used by
@@ -70,7 +71,7 @@ impl Default for UiStartedAt {
 
 /// Persistent UI state (visibility, debug toggles, AI chat
 /// scratch). Mirrors `SettingsUi::UiState` field but lifted from
-/// the legacy `hecs` world into the bevy world. The runtime reads
+/// lifted from the legacy `AppState` field into the bevy world. The runtime reads
 /// / writes this via `Mut<UiStateComponent>`.
 #[derive(Component, Default)]
 pub struct UiStateComponent(pub UiState);
