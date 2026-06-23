@@ -6,12 +6,15 @@
 //! field changes mutate [`CharacterSettings`].
 use crate::ai_bridge::AiBridge;
 use crate::character_state::{AnimationControl, EmotionCommand, EmotionQueue};
+use crate::component::ui::UiStateComponent;
 #[cfg(target_os = "linux")]
 use crate::settings::cycle_mask_render_downsample;
 use crate::settings::{
     AntialiasingMode, CharacterSettings, ShadowQuality, cycle_antialiasing_mode, cycle_debug_fps,
     cycle_shadow_quality, cycle_target_fps, target_fps_label,
 };
+use bevy_ecs::entity::Entity;
+use bevy_ecs::world::World;
 use std::sync::Arc;
 
 /// Single action enum shared by every page widget. Hotkeys and
@@ -65,8 +68,8 @@ pub fn apply_action(
     settings: &mut CharacterSettings,
     animation: &mut AnimationControl,
     ai: &Arc<AiBridge>,
-    world: &mut hecs::World,
-    ui_entity: hecs::Entity,
+    world: &mut World,
+    ui_entity: Entity,
     emotion_queue: Option<&mut EmotionQueue>,
     now_secs: f64,
 ) {
@@ -112,8 +115,8 @@ pub fn apply_action(
         }
         #[cfg(target_os = "linux")]
         SettingsAction::ToggleDebugOverlay => {
-            if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
-                ui_state.debug_overlay_visible = !ui_state.debug_overlay_visible;
+            if let Some(mut ui_state) = world.get_mut::<UiStateComponent>(ui_entity) {
+                ui_state.0.debug_overlay_visible = !ui_state.0.debug_overlay_visible;
             }
             settings.mark_dirty();
         }
@@ -192,13 +195,13 @@ pub fn apply_action(
         }
         SettingsAction::ToggleColliderDebug => {
             // Not persisted — defaults to `false` on every launch.
-            if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
-                ui_state.show_collider_debug = !ui_state.show_collider_debug;
+            if let Some(mut ui_state) = world.get_mut::<UiStateComponent>(ui_entity) {
+                ui_state.0.show_collider_debug = !ui_state.0.show_collider_debug;
             }
         }
         SettingsAction::ToggleInputRegionDebug => {
-            if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
-                ui_state.show_input_region_debug = !ui_state.show_input_region_debug;
+            if let Some(mut ui_state) = world.get_mut::<UiStateComponent>(ui_entity) {
+                ui_state.0.show_input_region_debug = !ui_state.0.show_input_region_debug;
             }
         }
         SettingsAction::DebugFpsDown => {
@@ -232,17 +235,17 @@ fn adjust_f32(value: &mut f32, delta: f32) {
 fn send_ai_chat(
     _settings: &mut CharacterSettings,
     ai: &Arc<AiBridge>,
-    world: &mut hecs::World,
-    ui_entity: hecs::Entity,
+    world: &mut World,
+    ui_entity: Entity,
 ) {
-    if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
-        let user_input = ui_state.ai_chat_input.trim().to_string();
+    if let Some(mut ui_state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        let user_input = ui_state.0.ai_chat_input.trim().to_string();
         if user_input.is_empty() {
             return;
         }
         ai.run(user_input);
-        ui_state.ai_chat_input.clear();
-        ui_state.ai_latest_response.clear();
+        ui_state.0.ai_chat_input.clear();
+        ui_state.0.ai_latest_response.clear();
     }
 }
 

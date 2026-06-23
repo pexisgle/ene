@@ -7,7 +7,10 @@ use super::input::SettingsInputState;
 use super::widgets::SettingsAction;
 use crate::ai_bridge::AiBridge;
 use crate::character_state::AnimationControl;
+use crate::component::ui::UiStateComponent;
 use crate::settings::CharacterSettings;
+use bevy_ecs::entity::Entity;
+use bevy_ecs::world::World;
 use ene_core::UserInputResponse;
 use ene_tool_proto::{MultiAnswer, QuestionItem};
 use std::sync::Arc;
@@ -18,8 +21,8 @@ pub fn render(
     _animation: &mut AnimationControl,
     ai: &Arc<AiBridge>,
     input: &mut SettingsInputState,
-    world: &mut hecs::World,
-    ui_entity: hecs::Entity,
+    world: &mut World,
+    ui_entity: Entity,
 ) {
     let mut provider = settings
         .ai
@@ -169,9 +172,8 @@ pub fn render(
                     .add_enabled(!processing, egui::Button::new("Send"))
                     .clicked();
                 if response.changed() {
-                    if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity)
-                    {
-                        ui_state.ai_chat_input = input.ai_chat_input.clone();
+                    if let Some(mut ui_state) = world.get_mut::<UiStateComponent>(ui_entity) {
+                        ui_state.0.ai_chat_input = input.ai_chat_input.clone();
                     }
                     settings.mark_dirty();
                 }
@@ -180,9 +182,8 @@ pub fn render(
                     && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if send_clicked || send_with_enter {
                     // Sync the in-memory text buffer, then send.
-                    if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity)
-                    {
-                        ui_state.ai_chat_input = input.ai_chat_input.clone();
+                    if let Some(mut ui_state) = world.get_mut::<UiStateComponent>(ui_entity) {
+                        ui_state.0.ai_chat_input = input.ai_chat_input.clone();
                     }
                     let _ = SettingsAction::SendAiChat;
                     send_chat(settings, ai, world, ui_entity);
@@ -273,12 +274,11 @@ pub fn render(
 
         ui.separator();
         ui.label("Latest Response");
-        let ai_latest_response =
-            if let Ok(ui_state) = world.get::<&crate::settings::UiState>(ui_entity) {
-                ui_state.ai_latest_response.clone()
-            } else {
-                String::new()
-            };
+        let ai_latest_response = if let Some(ui_state) = world.get::<UiStateComponent>(ui_entity) {
+            ui_state.0.ai_latest_response.clone()
+        } else {
+            String::new()
+        };
         egui::ScrollArea::vertical()
             .max_height(180.0)
             .auto_shrink([false, true])
@@ -309,14 +309,13 @@ pub fn render(
 /// settings window visible on `PermissionRequired`.
 fn render_permission_dialog(
     ui: &mut egui::Ui,
-    world: &mut hecs::World,
-    ui_entity: hecs::Entity,
+    world: &mut World,
+    ui_entity: Entity,
     ai: &Arc<AiBridge>,
 ) {
     let pending = world
-        .get::<&crate::settings::UiState>(ui_entity)
-        .ok()
-        .and_then(|s| s.pending_permission.clone());
+        .get::<UiStateComponent>(ui_entity)
+        .and_then(|s| s.0.pending_permission.clone());
     let Some(pending) = pending else {
         return;
     };
@@ -371,9 +370,9 @@ fn render_permission_dialog(
     }
 }
 
-fn clear_pending_permission(world: &mut hecs::World, ui_entity: hecs::Entity) {
-    if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
-        ui_state.pending_permission = None;
+fn clear_pending_permission(world: &mut World, ui_entity: Entity) {
+    if let Some(mut ui_state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        ui_state.0.pending_permission = None;
     }
 }
 
@@ -387,14 +386,16 @@ fn clear_pending_permission(world: &mut hecs::World, ui_entity: hecs::Entity) {
 /// `UserInputResponse::Cancel`.
 fn render_user_input_dialog(
     ui: &mut egui::Ui,
-    world: &mut hecs::World,
-    ui_entity: hecs::Entity,
+    world: &mut World,
+    ui_entity: Entity,
     ai: &Arc<AiBridge>,
 ) {
-    let snapshot = world
-        .get::<&crate::settings::UiState>(ui_entity)
-        .ok()
-        .map(|s| (s.pending_user_input.clone(), s.user_input_drafts.clone()));
+    let snapshot = world.get::<UiStateComponent>(ui_entity).map(|s| {
+        (
+            s.0.pending_user_input.clone(),
+            s.0.user_input_drafts.clone(),
+        )
+    });
     let Some((Some(prompt_snapshot), drafts)) = snapshot else {
         return;
     };
@@ -498,26 +499,26 @@ fn render_user_input_row(
     });
 }
 
-fn clear_pending_user_input(world: &mut hecs::World, ui_entity: hecs::Entity) {
-    if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
-        ui_state.pending_user_input = None;
-        ui_state.user_input_drafts.clear();
+fn clear_pending_user_input(world: &mut World, ui_entity: Entity) {
+    if let Some(mut ui_state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        ui_state.0.pending_user_input = None;
+        ui_state.0.user_input_drafts.clear();
     }
 }
 
 fn send_chat(
     _settings: &mut CharacterSettings,
     ai: &Arc<AiBridge>,
-    world: &mut hecs::World,
-    ui_entity: hecs::Entity,
+    world: &mut World,
+    ui_entity: Entity,
 ) {
-    if let Ok(mut ui_state) = world.get::<&mut crate::settings::UiState>(ui_entity) {
-        let trimmed = ui_state.ai_chat_input.trim().to_string();
+    if let Some(mut ui_state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        let trimmed = ui_state.0.ai_chat_input.trim().to_string();
         if trimmed.is_empty() {
             return;
         }
         ai.run(trimmed);
-        ui_state.ai_chat_input.clear();
-        ui_state.ai_latest_response.clear();
+        ui_state.0.ai_chat_input.clear();
+        ui_state.0.ai_latest_response.clear();
     }
 }

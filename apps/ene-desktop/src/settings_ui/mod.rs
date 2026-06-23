@@ -19,6 +19,8 @@ use std::time::Instant;
 use crate::ai_bridge::AiBridge;
 use crate::character_state::{AnimationControl, EmotionQueue};
 use crate::settings::CharacterSettings;
+use bevy_ecs::entity::Entity;
+use bevy_ecs::world::World;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PageKind {
@@ -89,8 +91,8 @@ impl SettingsUi {
         ui: &mut egui::Ui,
         settings: &mut CharacterSettings,
         ai: &Arc<AiBridge>,
-        world: &mut hecs::World,
-        ui_entity: hecs::Entity,
+        world: &mut World,
+        ui_entity: Entity,
     ) {
         apply_egui_visuals(ui.ctx());
 

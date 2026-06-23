@@ -29,9 +29,9 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel};
 
 use crate::ai_bridge::AiBridge;
-use crate::events::{AppEvent, AppEventSender, TrayAction};
+use crate::events::AppEventSender;
 use crate::gpu::pick_format_and_alpha;
-use crate::settings::{CharacterSettings, PendingPermission, PendingUserInput, QuestionDraft};
+use crate::settings::CharacterSettings;
 use crate::settings_ui::{PageKind, SettingsUi, widgets::SettingsAction};
 use crate::state::AppState;
 use device_query::DeviceQuery;
@@ -68,11 +68,12 @@ impl Runtime {
 
     fn show_settings_window(&mut self) {
         if let Some(uw) = self.ui_window.as_mut() {
-            let mut ui_state = self.state.ui_state_mut();
-            if !ui_state.settings_window_visible {
-                ui_state.settings_window_visible = true;
+            let visible = self.state.ui_bevy_state().0.settings_window_visible;
+            if !visible {
+                self.state.ui_bevy_state_mut().0.settings_window_visible = true;
+                let ui_state_snapshot = self.state.ui_bevy_state().0.clone();
                 uw.settings_ui
-                    .sync_from_settings(&self.state.settings, &ui_state);
+                    .sync_from_settings(&self.state.settings, &ui_state_snapshot);
                 uw.window.set_visible(true);
                 uw.window.request_redraw();
             }
@@ -80,10 +81,10 @@ impl Runtime {
     }
 
     fn hide_settings_window(&mut self) {
-        let mut ui_state = self.state.ui_state_mut();
-        if ui_state.settings_window_visible {
+        let visible = self.state.ui_bevy_state().0.settings_window_visible;
+        if visible {
             self.state.save();
-            ui_state.settings_window_visible = false;
+            self.state.ui_bevy_state_mut().0.settings_window_visible = false;
             if let Some(uw) = self.ui_window.as_mut() {
                 uw.window.set_visible(false);
             }
@@ -205,9 +206,9 @@ impl ApplicationHandler for Runtime {
                         .character
                         .build_character_bone_specs(actual_scale);
                     if !specs.is_empty() {
-                        self.state
-                            .physics
-                            .add_character_bone_colliders(self.state.character_entity, &specs);
+                        let mut physics = self.state.physics_world_mut();
+                        let registration = physics.world.register_character_colliders(&specs);
+                        self.state.character_physics_registration = Some(registration);
                     }
                 }
 
@@ -245,7 +246,7 @@ impl ApplicationHandler for Runtime {
             ui_size,
         ) {
             Ok(uw) => {
-                let visible = self.state.ui_state().settings_window_visible;
+                let visible = self.state.ui_bevy_state().0.settings_window_visible;
                 uw.window.set_visible(visible);
                 if visible {
                     uw.window.request_redraw();
@@ -284,93 +285,74 @@ impl ApplicationHandler for Runtime {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let mut pending_permission: Option<PendingPermission> = None;
-        let mut pending_user_input: Option<PendingUserInput> = None;
-        while let Ok(event) = self.state.event_rx.try_recv() {
-            match event {
-                AppEvent::Tray(TrayAction::OpenSettings { page }) => {
-                    self.show_settings_window();
-                    if let Some(page) = page
-                        && let Some(uw) = self.ui_window.as_mut()
-                    {
-                        uw.settings_ui.show(page);
-                    }
-                }
-                AppEvent::Tray(TrayAction::Quit) => {
-                    self.state.save();
-                    event_loop.exit();
-                    return;
-                }
-                AppEvent::Quit => {
-                    self.state.save();
-                    event_loop.exit();
-                    return;
-                }
-                AppEvent::Ai(update) => match update {
-                    crate::events::AiStreamUpdate::TextDelta(text) => {
-                        self.state.ui_state_mut().ai_latest_response.push_str(&text);
-                    }
-                    crate::events::AiStreamUpdate::Finished
-                    | crate::events::AiStreamUpdate::Error(_) => {}
-                    crate::events::AiStreamUpdate::PermissionRequired {
-                        request_id,
-                        action,
-                        target,
-                        description,
-                    } => {
-                        pending_permission = Some(PendingPermission {
-                            request_id,
-                            action,
-                            target,
-                            description: if description.is_empty() {
-                                None
-                            } else {
-                                Some(description)
-                            },
-                        });
-                        self.state.ui_state_mut().settings_window_visible = true;
-                        if let Some(uw) = self.ui_window.as_mut() {
-                            uw.settings_ui.show(crate::settings_ui::PageKind::Ai);
-                        }
-                    }
-                    crate::events::AiStreamUpdate::UserInputRequired { request_id, prompt } => {
-                        pending_user_input = Some(PendingUserInput { request_id, prompt });
-                        self.state.ui_state_mut().settings_window_visible = true;
-                        if let Some(uw) = self.ui_window.as_mut() {
-                            uw.settings_ui.show(crate::settings_ui::PageKind::Ai);
-                        }
-                    }
-                    _ => {}
-                },
-                AppEvent::EmoteToken(name) => {
-                    let now_secs = self
-                        .ui_window
-                        .as_ref()
-                        .map(|uw| uw.settings_ui.started_at.elapsed().as_secs_f64())
-                        .unwrap_or(0.0);
-                    if let Some(uw) = self.ui_window.as_mut() {
-                        uw.settings_ui
-                            .emotion_queue
-                            .push(crate::character_state::EmotionCommand {
-                                emotion: name,
-                                target_time: now_secs,
-                                hold_secs: 4.0,
-                                weight: 1.0,
-                            });
-                    }
-                }
+        // Run the new `bevy_ecs` schedule first. Phase 1 only ticks
+        // the frame counter; later phases migrate the per-frame
+        // logic into systems.
+        self.state.app.update();
+        if self
+            .state
+            .app
+            .world()
+            .resource::<crate::resource::exit::ExitRequested>()
+            .0
+        {
+            self.state.save();
+            event_loop.exit();
+            return;
+        }
+
+        // Apply the per-frame actions drained by `pump_legacy_events`
+        // to the legacy `AppState` / `SettingsUi`. This replaces the
+        // inline `event_rx.try_recv` loop the legacy code used.
+        let mut actions = std::mem::take(
+            &mut *self
+                .state
+                .app
+                .world_mut()
+                .resource_mut::<crate::resource::pending_actions::PendingActions>(),
+        );
+        if actions.quit {
+            self.state.save();
+            event_loop.exit();
+            actions.clear();
+            return;
+        }
+        if let Some(page) = actions.open_settings.take() {
+            self.show_settings_window();
+            if let Some(page) = page
+                && let Some(uw) = self.ui_window.as_mut()
+            {
+                uw.settings_ui.show(page);
             }
         }
-        if let Some(perm) = pending_permission {
-            self.state.ui_state_mut().pending_permission = Some(perm);
+        if !actions.ai_text_deltas.is_empty() {
+            let mut ui_state = self.state.ui_bevy_state_mut();
+            for delta in &actions.ai_text_deltas {
+                ui_state.0.ai_latest_response.push_str(delta);
+            }
         }
-        if let Some(pui) = pending_user_input {
-            let mut ui_state = self.state.ui_state_mut();
-            ui_state.user_input_drafts = (0..pui.prompt.items.len())
-                .map(|_| QuestionDraft::default())
+        if let Some(perm) = actions.ai_permission.take() {
+            self.state.ui_bevy_state_mut().0.pending_permission = Some(perm);
+        }
+        if let Some(pui) = actions.ai_user_input.take() {
+            let mut ui_state = self.state.ui_bevy_state_mut();
+            ui_state.0.user_input_drafts = (0..actions.ai_user_input_drafts)
+                .map(|_| crate::settings::QuestionDraft::default())
                 .collect();
-            ui_state.pending_user_input = Some(pui);
+            ui_state.0.pending_user_input = Some(pui);
         }
+        if let Some(uw) = self.ui_window.as_mut() {
+            for cmd in actions.emotion_commands.drain(..) {
+                uw.settings_ui.emotion_queue.push(cmd);
+            }
+        }
+        if actions.tick_gtk {
+            #[cfg(target_os = "linux")]
+            if let Some(tray) = self.state.tray.as_ref() {
+                tray.tick_gtk();
+            }
+        }
+        actions.clear();
 
         if let Some(uw) = self.ui_window.as_mut() {
             let now_secs = uw.settings_ui.started_at.elapsed().as_secs_f64();
@@ -402,15 +384,20 @@ impl ApplicationHandler for Runtime {
         #[cfg(target_os = "windows")]
         {
             let bone_poses = self.state.character.current_bone_poses();
-            if !bone_poses.is_empty() {
-                self.state.physics.update_character_bone_positions(
-                    self.state.character_entity,
+            if !bone_poses.is_empty()
+                && let Some(reg) = self.state.character_physics_registration.as_ref()
+            {
+                let character_position = cs.character_position;
+                let reg = reg.clone();
+                let mut physics = self.state.physics_world_mut();
+                physics.world.update_character_bone_positions(
+                    &reg,
                     &bone_poses,
-                    cs.character_position,
+                    character_position,
                     actual_scale,
                 );
             }
-            self.state.physics.step();
+            self.state.physics_world_mut().world.step();
         }
 
         if let Some(cw) = self.char_window.as_ref() {
@@ -452,14 +439,15 @@ impl ApplicationHandler for Runtime {
                 );
 
                 #[cfg(target_os = "windows")]
-                let hovered_name = if let Some(hit) = self.state.debug.last_raycast_hit
-                    && hit.entity == self.state.character_entity
-                {
+                let hovered_name = if let Some(hit) = self.state.debug.last_raycast_hit {
                     let colliders = self
                         .state
-                        .physics
-                        .colliders_for(self.state.character_entity);
-                    if let Some(idx) = colliders.iter().position(|&h| h == hit.collider) {
+                        .character_physics_registration
+                        .as_ref()
+                        .map(|r| r.colliders.as_slice());
+                    if let Some(colliders) = colliders
+                        && let Some(idx) = colliders.iter().position(|&h| h == hit.collider)
+                    {
                         self.state.character.get_active_bone_name(idx)
                     } else {
                         None
@@ -470,26 +458,32 @@ impl ApplicationHandler for Runtime {
                 #[cfg(not(target_os = "windows"))]
                 let hovered_name = None;
 
-                self.state.ui_state_mut().hovered_bone_name = hovered_name;
+                self.state.ui_bevy_state_mut().0.hovered_bone_name = hovered_name;
             }
         }
 
         if let Err(AcquireError::Fatal) = self.render_char_frame() {}
         if let Some(uw) = self.ui_window.as_mut() {
-            let visible = self.state.ui_state().settings_window_visible;
+            let visible = self.state.ui_bevy_state().0.settings_window_visible;
             if uw.window.is_visible() != Some(visible) {
                 uw.window.set_visible(visible);
             }
             if visible {
                 uw.window.request_redraw();
-                match uw.render_frame(
-                    &self.state.gpu.device,
-                    &self.state.gpu.queue,
-                    &mut self.state.settings,
-                    &self.state.ai,
-                    &mut self.state.world,
-                    self.state.ui_entity,
-                ) {
+                let ui_entity = match self.state.ui_bevy_entity() {
+                    Some(e) => e,
+                    None => return,
+                };
+                let AppState {
+                    ref gpu,
+                    ref mut settings,
+                    ref ai,
+                    ref mut app,
+                    ..
+                } = self.state;
+                let bevy_world = app.world_mut();
+                match uw.render_frame(&gpu.device, &gpu.queue, settings, ai, bevy_world, ui_entity)
+                {
                     Ok(_) => {}
                     Err(e) => match e {
                         AcquireError::Reconfigure => {
@@ -589,6 +583,12 @@ impl Runtime {
                 let Some(cursor_phys) = self.last_cursor_physical else {
                     return;
                 };
+                let eye = self.state.character.camera_eye();
+                let target = self.state.character.camera_target();
+                let app = &self.state.app;
+                let physics_world = app
+                    .world()
+                    .resource::<crate::resource::physics::PhysicsWorldResource>();
                 let AppState {
                     ref mut character, ..
                 } = self.state;
@@ -596,8 +596,6 @@ impl Runtime {
                     ElementState::Pressed => DragButtonEvent::Pressed,
                     ElementState::Released => DragButtonEvent::Released,
                 };
-                let eye = character.camera_eye();
-                let target = character.camera_target();
                 let cursor_world_2d = cursor_world_2d_for_char_window(cw, eye, target, cursor_phys);
                 #[cfg(target_os = "windows")]
                 let cursor_over = {
@@ -624,10 +622,8 @@ impl Runtime {
                         target[1] - eye[1],
                         target[2] - eye[2],
                     );
-                    self.state
-                        .physics
-                        .cast_ray(ray_origin, ray_dir, 100.0)
-                        .is_some_and(|hit| hit.entity == self.state.character_entity)
+                    let physics = &physics_world;
+                    physics.world.cast_ray(ray_origin, ray_dir, 100.0).is_some()
                 };
                 #[cfg(not(target_os = "windows"))]
                 let cursor_over = true;
@@ -655,15 +651,15 @@ impl Runtime {
                         self.state.save();
                         event_loop.exit();
                     } else if matches!(named, NamedKey::F1) {
-                        let visible = self.state.ui_state().settings_window_visible;
+                        let visible = self.state.ui_bevy_state().0.settings_window_visible;
                         if visible {
                             self.hide_settings_window();
                         } else {
                             self.show_settings_window();
                         }
                     } else if key_code_pressed(&event) == Some(winit::keyboard::KeyCode::F3) {
-                        let mut ui_state = self.state.ui_state_mut();
-                        ui_state.show_collider_debug = !ui_state.show_collider_debug;
+                        let mut ui_state = self.state.ui_bevy_state_mut();
+                        ui_state.0.show_collider_debug = !ui_state.0.show_collider_debug;
                         cw.window.request_redraw();
                     } else if key_code_pressed(&event) == Some(winit::keyboard::KeyCode::F8) {
                         #[cfg(target_os = "linux")]
@@ -680,10 +676,10 @@ impl Runtime {
                     } else if key_code_pressed(&event) == Some(winit::keyboard::KeyCode::F9) {
                         {
                             let next_val = {
-                                let mut ui_state = self.state.ui_state_mut();
-                                ui_state.show_input_region_debug =
-                                    !ui_state.show_input_region_debug;
-                                ui_state.show_input_region_debug
+                                let mut ui_state = self.state.ui_bevy_state_mut();
+                                ui_state.0.show_input_region_debug =
+                                    !ui_state.0.show_input_region_debug;
+                                ui_state.0.show_input_region_debug
                             };
                             tracing::info!(
                                 target: "ene.linux.input_region",
@@ -693,7 +689,7 @@ impl Runtime {
                         }
                         cw.window.request_redraw();
                     } else {
-                        let visible = self.state.ui_state().settings_window_visible;
+                        let visible = self.state.ui_bevy_state().0.settings_window_visible;
                         if visible
                             && let Some(action) = char_settings_hotkey_from_event(
                                 &event,
@@ -721,19 +717,18 @@ impl Runtime {
         };
         let transparent = self.transparent;
         let (show_collider_debug, show_mask_gizmo, show_input_region_debug) = {
-            let ui_state = self.state.ui_state();
+            let ui_state = self.state.ui_bevy_state();
             (
-                ui_state.show_collider_debug,
-                ui_state.debug_overlay_visible,
-                ui_state.show_input_region_debug,
+                ui_state.0.show_collider_debug,
+                ui_state.0.debug_overlay_visible,
+                ui_state.0.show_input_region_debug,
             )
         };
         let last_raycast_hit = self.state.debug.last_raycast_hit;
-        let character_entity = self.state.character_entity;
         let AppState {
             ref mut character,
-            ref mut physics,
             ref mut debug,
+            ref character_physics_registration,
             ref gpu,
             ref settings,
             ..
@@ -802,19 +797,26 @@ impl Runtime {
                 let mut lines = Vec::new();
                 if show_collider_debug {
                     let (hit_collider, hit_point) = match last_raycast_hit {
-                        Some(h) if h.entity == character_entity => {
-                            (Some(h.collider), Some(h.point))
-                        }
-                        _ => (None, None),
+                        Some(h) => (Some(h.collider), Some(h.point)),
+                        None => (None, None),
                     };
-                    crate::raycast_debug::build_collider_lines(
-                        &mut lines,
-                        physics,
-                        character_entity,
-                        hit_collider,
-                        hit_point,
-                        true,
-                    );
+                    if let Some(colliders) = character_physics_registration
+                        .as_ref()
+                        .map(|r| r.colliders.as_slice())
+                    {
+                        let app = &self.state.app;
+                        let physics_world =
+                            app.world()
+                                .resource::<crate::resource::physics::PhysicsWorldResource>();
+                        crate::raycast_debug::build_collider_lines(
+                            &mut lines,
+                            &physics_world.world,
+                            colliders,
+                            hit_collider,
+                            hit_point,
+                            true,
+                        );
+                    }
                     if let Some(model) = character.model() {
                         let center = glam::Vec3::from(model.center());
                         let normalize_scale = model.normalize_scale();
@@ -991,7 +993,7 @@ impl Runtime {
         match event {
             WindowEvent::CloseRequested => {
                 self.state.save();
-                self.state.ui_state_mut().settings_window_visible = false;
+                self.state.ui_bevy_state_mut().0.settings_window_visible = false;
             }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                 uw.reconfigure(&self.state.gpu.device, uw.window.inner_size());
@@ -1000,7 +1002,7 @@ impl Runtime {
             WindowEvent::KeyboardInput { .. } => {
                 if let Some(NamedKey::Escape) = key_pressed(&event) {
                     self.state.save();
-                    self.state.ui_state_mut().settings_window_visible = false;
+                    self.state.ui_bevy_state_mut().0.settings_window_visible = false;
                 }
             }
             WindowEvent::RedrawRequested => {}
@@ -1018,17 +1020,28 @@ impl Runtime {
         let AppState {
             ref mut settings,
             ref ai,
-            ref mut world,
-            ui_entity,
+            ref mut app,
             ..
         } = self.state;
+        let Some(ui_entity) = app
+            .world_mut()
+            .query_filtered::<
+                bevy_ecs::entity::Entity,
+                bevy_ecs::prelude::With<crate::component::ui::UiWindow>,
+            >()
+            .iter(app.world())
+            .next()
+        else {
+            return;
+        };
+        let bevy_world = app.world_mut();
         let now_secs = uw.settings_ui.started_at.elapsed().as_secs_f64();
         crate::settings_ui::widgets::apply_action(
             action,
             settings,
             &mut uw.settings_ui.animation,
             ai,
-            world,
+            bevy_world,
             ui_entity,
             Some(&mut uw.settings_ui.emotion_queue),
             now_secs,
@@ -1076,7 +1089,7 @@ fn update_char_window_cursor_and_hittest(
     transparent: bool,
     drag_is_dragging: bool,
     last_cursor: &mut Option<winit::dpi::PhysicalPosition<f64>>,
-) -> Option<crate::physics::RaycastHit> {
+) -> Option<crate::physics::RayHit> {
     let mouse = device_state.get_mouse();
     let (gx, gy) = (mouse.coords.0, mouse.coords.1);
 
@@ -1131,19 +1144,22 @@ fn update_char_window_cursor_and_hittest(
                 target[1] - eye[1],
                 target[2] - eye[2],
             );
-            state.physics.cast_ray(ray_origin, ray_dir, 100.0)
+            state
+                .physics_world()
+                .world
+                .cast_ray(ray_origin, ray_dir, 100.0)
         } else {
             None
         };
         #[cfg(not(target_os = "windows"))]
-        let hit: Option<crate::physics::RaycastHit> = None;
+        let hit: Option<crate::physics::RayHit> = None;
 
         hit
     } else {
         None
     };
 
-    let cursor_over = hit.is_some_and(|h| h.entity == state.character_entity);
+    let cursor_over = hit.is_some();
 
     let allows_input = !transparent || cursor_over || drag_is_dragging;
 
@@ -1411,8 +1427,8 @@ impl UiWindow {
         queue: &wgpu::Queue,
         settings: &mut CharacterSettings,
         ai: &Arc<AiBridge>,
-        world: &mut hecs::World,
-        ui_entity: hecs::Entity,
+        world: &mut bevy_ecs::world::World,
+        ui_entity: bevy_ecs::entity::Entity,
     ) -> Result<(), AcquireError> {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
