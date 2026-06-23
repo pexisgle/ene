@@ -4,8 +4,11 @@
 //! `AiBridge`, system tray, character renderer, and the cross-subsystem
 //! [`AppEvent`] bus.
 mod ai_bridge;
+mod app;
 mod character;
 mod character_state;
+mod component;
+mod event;
 mod events;
 mod gpu;
 #[cfg(target_os = "linux")]
@@ -16,11 +19,15 @@ mod mask_gizmo;
 mod physics;
 #[cfg(target_os = "linux")]
 mod platform;
+mod plugin;
 mod raycast_debug;
+mod resource;
 mod runtime;
+mod schedule;
 mod settings;
 mod settings_ui;
 mod state;
+mod system;
 mod tray;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
