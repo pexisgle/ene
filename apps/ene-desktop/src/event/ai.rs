@@ -9,14 +9,12 @@ use ene_core::RequestId;
 use ene_tool_proto::UserInputPrompt;
 
 #[derive(Message, Debug, Clone)]
-#[expect(dead_code, reason = "Consumed by Phase 2 consumer systems")]
 pub struct AiTextDelta(pub String);
 
 #[derive(Message, Debug, Clone, Copy)]
 pub struct AiStreamFinished;
 
 #[derive(Message, Debug, Clone)]
-#[expect(dead_code, reason = "Consumed by Phase 2 consumer systems")]
 pub struct AiPermissionRequested {
     pub request_id: RequestId,
     pub action: String,
@@ -25,12 +23,11 @@ pub struct AiPermissionRequested {
 }
 
 #[derive(Message, Debug, Clone)]
-#[expect(dead_code, reason = "Consumed by Phase 2 consumer systems")]
 pub struct AiUserInputRequested {
     pub request_id: RequestId,
     pub prompt: UserInputPrompt,
 }
 
 #[derive(Message, Debug, Clone)]
-#[expect(dead_code, reason = "Consumed by Phase 2 consumer systems")]
+#[expect(dead_code, reason = "Emote consumer lands in Phase 7")]
 pub struct EmoteToken(pub String);

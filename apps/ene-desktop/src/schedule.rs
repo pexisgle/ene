@@ -6,7 +6,7 @@
 //! initialization), giving us a deterministic and idiomatic execution order
 //! for every frame of the runtime.
 //!
-//! ## Why `bevy_ecs` instead of `hecs`
+//! ## Why `bevy_ecs`
 //!
 //! The codebase previously embedded a single `hecs::World` to hold a
 //! [`Transform`](crate::character::Transform) and a

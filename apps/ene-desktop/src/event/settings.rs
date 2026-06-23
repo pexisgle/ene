@@ -8,7 +8,6 @@ use bevy_ecs::prelude::*;
 use crate::settings_ui::PageKind;
 
 #[derive(Message, Debug, Clone, Copy)]
-#[expect(dead_code, reason = "Consumed by Phase 2 consumer systems")]
 pub struct OpenSettings {
     pub page: Option<PageKind>,
 }

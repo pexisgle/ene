@@ -214,6 +214,12 @@ impl Default for CharacterState {
 #[derive(Clone, Debug, Default)]
 pub struct UiState {
     pub settings_window_visible: bool,
+    /// Page the settings window should jump to when it next
+    /// becomes visible. `Some(_)` is set by the per-action
+    /// consumer systems (Phase 6) and consumed by the runtime
+    /// on the next `show_settings_window` call. `None` keeps
+    /// the currently-focused page.
+    pub focused_page: Option<crate::settings_ui::PageKind>,
     /// Toggle the Linux-only Wayland / X11 mask capture rectangle
     /// overlay. When `true` and [`Self::show_collider_debug`] is
     /// also `true`, the character window's debug overlay draws the
@@ -224,7 +230,7 @@ pub struct UiState {
     /// Toggle the per-bone collider wireframe + raycast hit-point
     /// overlay on the character window. Bound to the F3 hotkey
     /// and the "Show raycast colliders (debug)" checkbox on the
-    /// Character settings page. Not persisted — defaults to
+    /// Character page. Not persisted — defaults to
     /// `false` on every launch so the user starts with a clean
     /// view.
     pub show_collider_debug: bool,

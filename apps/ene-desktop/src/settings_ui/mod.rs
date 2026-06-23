@@ -64,14 +64,6 @@ impl SettingsUi {
         }
     }
 
-    /// Switch the visible page. Used by the runtime to jump to the
-    /// AI page when a `PermissionRequired` or `UserInputRequired`
-    /// event arrives (the tray menu also calls this to open the
-    /// settings window on a specific page).
-    pub fn show(&mut self, page: PageKind) {
-        self.current_page = page;
-    }
-
     /// Mirror the on-disk `CharacterSettings` into the editable text
     /// buffers. The runtime calls this when the settings window
     /// transitions from hidden → visible.
