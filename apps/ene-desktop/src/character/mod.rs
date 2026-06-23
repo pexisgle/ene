@@ -15,7 +15,6 @@ use ene_vrm::{
 };
 use glam::{Mat4, Quat, Vec3};
 
-use crate::character_state::{ActiveEmotion, EmotionQueue, transition_emotions};
 use crate::look_at::{LookAtState, compute_world_target, head_world_for};
 
 pub mod collider;
@@ -23,12 +22,6 @@ pub mod drag;
 
 pub use collider::{BonePose, BoneShapeSpec};
 pub use drag::CharacterDragState;
-
-/// Weight below which an active emotion is fully faded.
-const FADE_FLOOR: f32 = 0.01;
-
-/// Per-frame fade factor: `0.9` decays to 1 % in ~44 frames.
-const FADE_RATE: f32 = 0.9;
 
 /// Owns the loaded [`VrmModel`] and its [`VrmRenderer`]. The
 /// renderer is built via [`CharacterRenderer::uninit`] (which
@@ -46,8 +39,6 @@ pub struct CharacterRenderer {
     look_at: LookAtState,
     /// Per-bone LookAt output for `"bone"`-type models.
     look_at_bone_output: Option<LookAtBoneOutput>,
-    /// Currently-applied emotion.
-    active_emotion: Option<ActiveEmotion>,
     pub drag: CharacterDragState,
     vrma: Option<VrmaAsset>,
     vrma_player: VrmaPlayer,
@@ -81,7 +72,6 @@ impl CharacterRenderer {
             default_vrm: Some(assets_dir.join(default_vrm)),
             look_at: LookAtState::default(),
             look_at_bone_output: None,
-            active_emotion: None,
             drag: CharacterDragState::default(),
             spring_bone_sim: None,
             spring_bone_props: None,
@@ -339,41 +329,6 @@ impl CharacterRenderer {
         if let Some(renderer) = self.renderer.as_ref() {
             renderer.update_skin_palette(queue, palette);
         }
-    }
-
-    /// drain every due command from `queue`, push the
-    /// resulting weights into the loaded VRM, and fade the
-    /// Apply due emotion commands to the model. Drains the queue
-    /// at `now_secs`, fades the previous active emotion to zero,
-    /// and writes the new weight into the model's
-    /// `ExpressionLayer`. The previous emotion's weight is
-    /// cleared first so a click on "neutral" (not a morph target)
-    /// does not leave a stale `happy` weight squinting the eyes
-    /// — that was the source of the "every expression squints
-    /// the eyes" bug. No-op if the model failed to load.
-    pub fn apply_emotions(&mut self, queue: &mut EmotionQueue, now_secs: f64) {
-        let Some(model) = self.model.as_mut() else {
-            return;
-        };
-
-        let drained = queue.drain_due(now_secs);
-        let (new_active, updates) = transition_emotions(
-            &drained,
-            self.active_emotion.as_ref(),
-            now_secs,
-            FADE_RATE,
-            FADE_FLOOR,
-        );
-        for (name, weight) in updates {
-            model
-                .expressions_mut()
-                .set_expression(&ExpressionName::from(name.as_str()), weight);
-        }
-        {
-            let meta = model.expressions_meta.clone();
-            model.expressions_mut().apply_overrides(&meta);
-        }
-        self.active_emotion = new_active;
     }
 
     /// Update the depth texture to match the surface size. Call this

@@ -7,7 +7,7 @@
 //!
 //! ## Phased migration
 //!
-//! During the refactor the legacy `hecs`-based `AppState` and the new
+//! During the refactor the legacy `AppState` and the new
 //! `bevy_ecs` `World` coexist. Each plugin below is added once the
 //! corresponding legacy code has been retired; the placeholder comments
 //! inside [`CorePlugin`] reserve a slot in the plugin set so the
@@ -17,17 +17,20 @@ use bevy_app::{App, Plugin, PluginGroup, PluginGroupBuilder};
 use crate::event::{
     ai::{AiPermissionRequested, AiStreamFinished, AiTextDelta, AiUserInputRequested, EmoteToken},
     input::{KeyboardKey, PointerButton, PointerMoved},
-    lifecycle::{WindowCloseRequested, WindowResized},
+    lifecycle::{TickGtk, WindowCloseRequested, WindowResized},
     settings::OpenSettings,
     ui_action::SettingsActionEvent,
 };
 use crate::events::AppEventReceiver;
+use crate::plugin::ai_plugin::AiPlugin;
 use crate::plugin::character_plugin::CharacterPlugin;
 use crate::plugin::physics_plugin::PhysicsPlugin;
+use crate::plugin::platform_plugin::PlatformPlugin;
+use crate::plugin::tray_plugin::TrayPlugin;
 use crate::plugin::ui_plugin::UiPlugin;
 use crate::resource::{
-    event_channels::EventChannels, exit::ExitRequested, frame_state::FrameState,
-    pending_actions::PendingActions, tokio::TokioHandle,
+    emotion_pipeline::EmotionPipelineState, event_channels::EventChannels, exit::ExitRequested,
+    frame_state::FrameState, tokio::TokioHandle,
 };
 use crate::schedule::{configure_schedule, configure_startup};
 
@@ -46,6 +49,9 @@ impl PluginGroup for DesktopPlugins {
             .add(CharacterPlugin)
             .add(PhysicsPlugin)
             .add(UiPlugin)
+            .add(PlatformPlugin)
+            .add(TrayPlugin)
+            .add(AiPlugin)
     }
 }
 
@@ -78,7 +84,7 @@ pub fn build_app(
     app.insert_resource(FrameState::default());
     app.insert_resource(ExitRequested::default());
     app.insert_resource(TokioHandle(tokio));
-    app.insert_resource(PendingActions::default());
+    app.insert_resource(EmotionPipelineState::default());
     app.insert_resource(EventChannels {
         tx: event_tx,
         rx: event_rx,
@@ -95,5 +101,6 @@ pub fn build_app(
     app.add_message::<EmoteToken>();
     app.add_message::<OpenSettings>();
     app.add_message::<SettingsActionEvent>();
+    app.add_message::<TickGtk>();
     app
 }
