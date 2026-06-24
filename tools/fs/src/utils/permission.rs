@@ -49,9 +49,24 @@ impl PermissionGate {
         Self { auto_approve }
     }
 
-    pub fn default_with_sandbox(sandbox: &SandboxConfig) -> Self {
+    /// Build a `PermissionGate` whose behavior reflects the sandbox state.
+    ///
+    /// Fail-closed: when the sandbox is disabled, destructive operations
+    /// still require explicit approval. The previous behavior was
+    /// `auto_approve = !sandbox.enabled`, which made a disabled sandbox
+    /// silently auto-approve shell, file delete, and similar destructive
+    /// actions — i.e. fail-open. The whole point of a permission gate is
+    /// to ask the human when the sandbox is *not* there to enforce
+    /// boundaries, so the disabled-sandbox branch now keeps
+    /// `auto_approve = false`.
+    ///
+    /// The `_sandbox` argument is intentionally unused: keeping it in the
+    /// signature preserves the call sites that pass a sandbox handle
+    /// (so a future change can re-introduce sandbox-aware policy without
+    /// touching every caller) and documents intent.
+    pub fn default_with_sandbox(_sandbox: &SandboxConfig) -> Self {
         Self {
-            auto_approve: !sandbox.enabled,
+            auto_approve: false,
         }
     }
 
@@ -85,7 +100,14 @@ impl PermissionGate {
 }
 
 impl Default for PermissionGate {
+    /// Fail-closed default: a `PermissionGate::default()` requires approval
+    /// for destructive ops. Callers that intentionally want auto-approval
+    /// must opt in via [`PermissionGate::new`] with `true` or
+    /// [`PermissionGate::default_with_sandbox`] (which is now also
+    /// fail-closed — see its rustdoc for rationale).
     fn default() -> Self {
-        Self { auto_approve: true }
+        Self {
+            auto_approve: false,
+        }
     }
 }
