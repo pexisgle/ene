@@ -47,11 +47,21 @@ pub struct Runtime {
     last_frame_instant: Option<Instant>,
     device_state: device_query::DeviceState,
     char_surface_fatal: bool,
-    last_debug_update: Option<Instant>,
 }
 
 impl Runtime {
     pub fn new(state: AppState, event_tx: AppEventSender) -> Self {
+        let mut state = state;
+        // Run the bevy schedule once eagerly so the `Startup`
+        // systems (notably `UiPlugin::spawn_settings_ui_window`)
+        // can spawn the UI entity before any winit callback
+        // tries to read `UiStateComponent`. Without this, the
+        // first `resumed` panics on
+        // `state.ui_bevy_state()` because the entity hasn't
+        // been spawned yet — `app.update()` in `about_to_wait`
+        // runs strictly *after* the first `resumed`.
+        state.app.update();
+
         Self {
             state,
             event_tx,
@@ -62,7 +72,6 @@ impl Runtime {
             last_frame_instant: None,
             device_state: device_query::DeviceState::new(),
             char_surface_fatal: false,
-            last_debug_update: None,
         }
     }
 
@@ -139,62 +148,71 @@ impl ApplicationHandler for Runtime {
                     .resize(&self.state.gpu.device, (char_size.width, char_size.height));
 
                 #[cfg(target_os = "linux")]
-                if self.state.platform.wayland_region.is_none()
-                    && let Some(ctx) =
-                        crate::platform::wayland_region::WaylandInputRegionContext::try_new(
-                            cw.window.as_ref(),
-                        )
                 {
-                    self.state.platform.wayland_region = Some(ctx);
-                }
-
-                #[cfg(target_os = "linux")]
-                if self.state.platform.layer_shell.is_none() {
-                    self.state.platform.layer_shell =
-                        Some(crate::platform::wayland_layer_shell::new_layer_shell_state());
-                    let status = crate::platform::detect_layer_shell(&self.state);
-                    tracing::info!(
-                        target: "ene.linux.layer_shell",
-                        available = matches!(
-                            status,
-                            crate::platform::wayland_layer_shell::LayerShellStatus::Available(_)
-                        ),
-                        "zwlr_layer_shell_v1 detection"
-                    );
-                }
-
-                #[cfg(target_os = "linux")]
-                if self.state.platform.mask_capture.is_none() {
-                    let downsample = self.state.settings.graphics.mask_render_downsample;
-                    if let Some(cam) = crate::platform::wayland_mask_capture::new_mask_capture_state(
-                        &self.state.gpu.device,
-                        char_size.width,
-                        char_size.height,
-                        downsample,
-                    ) {
-                        let device = Arc::new(self.state.gpu.device.clone());
-                        let queue = Arc::new(self.state.gpu.queue.clone());
-                        let worker = crate::platform::mask_readback::MaskReadbackWorker::spawn(
-                            Arc::clone(&cam),
-                            device,
-                            queue,
-                        );
-                        self.state.platform.mask_readback_worker = Some(worker);
-                        self.state.platform.mask_capture = Some(cam);
+                    use crate::resource::platform_state::resources::{
+                        LayerShell, LayerShellFreeze, MaskCapture, MaskReadbackWorkerRes,
+                        WaylandInputRegion, X11ContextRes,
+                    };
+                    let world = self.state.app.world_mut();
+                    if world.resource::<WaylandInputRegion>().0.is_none()
+                        && let Some(ctx) =
+                            crate::platform::wayland_region::WaylandInputRegionContext::try_new(
+                                cw.window.as_ref(),
+                            )
+                    {
+                        world.insert_resource(WaylandInputRegion(Some(ctx)));
                     }
-                }
-
-                #[cfg(target_os = "linux")]
-                if self.state.platform.x11_ctx.is_none()
-                    && let Some(ctx) =
-                        crate::platform::x11_taskbar::X11Context::try_new(cw.window.as_ref())
-                {
-                    self.state.platform.x11_ctx = Some(ctx);
-                    tracing::info!(
-                        target: "ene.linux.x11",
-                        connected = true,
-                        "X11 probe"
-                    );
+                    if world.resource::<LayerShell>().0.is_none() {
+                        let ls = crate::platform::wayland_layer_shell::new_layer_shell_state();
+                        let status = crate::platform::detect_layer_shell(
+                            Some(&ls),
+                            world.resource::<WaylandInputRegion>().0.as_ref(),
+                        );
+                        world.insert_resource(LayerShell(Some(ls)));
+                        tracing::info!(
+                            target: "ene.linux.layer_shell",
+                            available = matches!(
+                                status,
+                                crate::platform::wayland_layer_shell::LayerShellStatus::Available(_)
+                            ),
+                            "zwlr_layer_shell_v1 detection"
+                        );
+                    }
+                    if world.resource::<MaskCapture>().0.is_none() {
+                        let downsample = self.state.settings.graphics.mask_render_downsample;
+                        if let Some(cam) =
+                            crate::platform::wayland_mask_capture::new_mask_capture_state(
+                                &self.state.gpu.device,
+                                char_size.width,
+                                char_size.height,
+                                downsample,
+                            )
+                        {
+                            let device = Arc::new(self.state.gpu.device.clone());
+                            let queue = Arc::new(self.state.gpu.queue.clone());
+                            let worker = crate::platform::mask_readback::MaskReadbackWorker::spawn(
+                                Arc::clone(&cam),
+                                device,
+                                queue,
+                            );
+                            world.insert_resource(MaskReadbackWorkerRes(Some(worker)));
+                            world.insert_resource(MaskCapture(Some(cam)));
+                        }
+                    }
+                    if !world.resource::<LayerShellFreeze>().0 {
+                        world.insert_resource(LayerShellFreeze(false));
+                    }
+                    if world.resource::<X11ContextRes>().0.is_none()
+                        && let Some(ctx) =
+                            crate::platform::x11_taskbar::X11Context::try_new(cw.window.as_ref())
+                    {
+                        world.insert_resource(X11ContextRes(Some(ctx)));
+                        tracing::info!(
+                            target: "ene.linux.x11",
+                            connected = true,
+                            "X11 probe"
+                        );
+                    }
                 }
 
                 #[cfg(target_os = "windows")]
@@ -206,8 +224,9 @@ impl ApplicationHandler for Runtime {
                         .character
                         .build_character_bone_specs(actual_scale);
                     if !specs.is_empty() {
-                        let mut physics = self.state.physics_world_mut();
-                        let registration = physics.world.register_character_colliders(&specs);
+                        let registration = self.state.with_physics_world_mut(|physics| {
+                            physics.register_character_colliders(&specs)
+                        });
                         self.state.character_physics_registration = Some(registration);
                     }
                 }
@@ -285,189 +304,163 @@ impl ApplicationHandler for Runtime {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Run the new `bevy_ecs` schedule first. Phase 1 only ticks
-        // the frame counter; later phases migrate the per-frame
-        // logic into systems.
+        self.sync_runtime_to_bevy();
         self.state.app.update();
-        if self
+        if self.handle_exit(event_loop) {
+            return;
+        }
+        self.run_debug_pipeline();
+        self.render_per_frame(event_loop);
+        self.set_frame_deadline(event_loop);
+    }
+}
+
+impl Runtime {
+    /// Push the per-frame runtime state into bevy resources
+    /// before `app.update()` runs. Phase 8 lifts the cross-
+    /// platform debug gate inputs (`DragActive`, `DebugFps`,
+    /// `TransparentWindow`) into bevy `Resource`s so the
+    /// `should_render_debug_system` and the Linux-only
+    /// `apply_linux_click_through_system` can read them.
+    fn sync_runtime_to_bevy(&mut self) {
+        let drag_active = self.state.character.drag.is_dragging();
+        let debug_fps = self.state.settings.graphics.debug_fps;
+        let transparent = self.transparent;
+        self.state.app.world_mut().insert_resource(
+            crate::system::platform::should_render_debug::DragActive(drag_active),
+        );
+        self.state.app.world_mut().insert_resource(
+            crate::system::platform::should_render_debug::DebugFps(debug_fps),
+        );
+        self.state.app.world_mut().insert_resource(
+            crate::system::platform::should_render_debug::TransparentWindow(transparent),
+        );
+        self.state.settings.flush_if_dirty();
+    }
+
+    /// Check the `ExitRequested` bevy resource. Returns `true`
+    /// and exits the event loop when the resource is set;
+    /// otherwise `false`.
+    fn handle_exit(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        let exit = self
             .state
             .app
             .world()
             .resource::<crate::resource::exit::ExitRequested>()
-            .0
-        {
-            self.state.save();
-            event_loop.exit();
+            .0;
+        if !exit {
+            return false;
+        }
+        self.state.save();
+        event_loop.exit();
+        true
+    }
+
+    /// Run the per-frame debug pipeline (raycast, hover lookup)
+    /// when the bevy `ShouldRenderDebug` resource permits.
+    /// Skipped on non-Linux / non-Windows builds the body of
+    /// `update_char_window_cursor_and_hittest` itself no-ops.
+    fn run_debug_pipeline(&mut self) {
+        let Some(cw) = self.char_window.as_ref() else {
+            return;
+        };
+        let should_update = self
+            .state
+            .app
+            .world()
+            .resource::<crate::system::platform::should_render_debug::ShouldRenderDebug>()
+            .0;
+        if !should_update {
             return;
         }
-
-        // Phase 7.5: the per-frame action drain that used to live
-        // here has been removed. The bevy consumer systems in
-        // `system::ui_consumers` (running inside `app.update()`)
-        // write directly into the per-entity
-        // `UiStateComponent`, the per-entity `UiEmotionQueue` is
-        // drained by `apply_emotions_system`, and the `TickGtk`
-        // message is consumed by `tick_gtk_system` (Phase 7.4).
-        // `PendingActions` is now an empty fast-path bridge and
-        // will be removed entirely in Phase 7.6.
-        //
-        // Emotion rendering still requires touching the legacy
-        // `CharacterRenderer`, which is not a bevy `Resource` yet;
-        // that migration lands in Phase 7.2. Until then, the
-        // `apply_emotions_system` writes into the legacy
-        // `AppState::character.emotion_queue` via a follow-up
-        // call here.
-
-        self.state.settings.flush_if_dirty();
-
-        if let Some(_tray) = self.state.tray.as_ref() {
-            #[cfg(target_os = "linux")]
-            _tray.tick_gtk();
-        }
-
-        let cs = &self.state.settings.character_state;
-        let auto_scale = self.state.character.auto_fit_scale(0.9);
-        let _actual_scale = auto_scale * cs.model_scale;
-        // Phase 7.6: the legacy `hecs::World::query_one_mut` block
-        // is gone. The character transform is now a bevy
-        // `Query<(&mut Transform, With<CharacterRoot>)>` on the
-        // entity spawned by `CharacterPlugin::spawn_character_entity`
-        // (see `plugin/character_plugin.rs`). The actual mutation
-        // lands in the render-path system once 7.2 splits
-        // `render_char_frame`; for now we just keep the
-        // `auto_scale` warm so the legacy code path can still
-        // read it from `state.character`.
-
+        let drag_is_dragging = self.state.character.drag.is_dragging();
+        self.state.debug.last_raycast_hit = update_char_window_cursor_and_hittest(
+            &mut self.state,
+            &self.device_state,
+            cw,
+            self.transparent,
+            drag_is_dragging,
+            &mut self.last_cursor_physical,
+        );
         #[cfg(target_os = "windows")]
-        {
-            let bone_poses = self.state.character.current_bone_poses();
-            if !bone_poses.is_empty()
-                && let Some(reg) = self.state.character_physics_registration.as_ref()
+        let hovered_name = if let Some(hit) = self.state.debug.last_raycast_hit {
+            let colliders = self
+                .state
+                .character_physics_registration
+                .as_ref()
+                .map(|r| r.colliders.as_slice());
+            if let Some(colliders) = colliders
+                && let Some(idx) = colliders.iter().position(|&h| h == hit.collider)
             {
-                let character_position = cs.character_position;
-                let reg = reg.clone();
-                let mut physics = self.state.physics_world_mut();
-                physics.world.update_character_bone_positions(
-                    &reg,
-                    &bone_poses,
-                    character_position,
-                    actual_scale,
-                );
-            }
-            self.state.physics_world_mut().world.step();
-        }
-
-        if let Some(cw) = self.char_window.as_ref() {
-            let drag_is_dragging = self.state.character.drag.is_dragging();
-            let debug_fps = self.state.settings.graphics.debug_fps;
-
-            let should_update = if drag_is_dragging {
-                self.last_debug_update = None;
-                true
-            } else if debug_fps == 0 {
-                true
+                self.state.character.get_active_bone_name(idx)
             } else {
-                let now = Instant::now();
-                match self.last_debug_update {
-                    Some(last) => {
-                        let interval = std::time::Duration::from_secs_f64(1.0 / debug_fps as f64);
-                        if now.duration_since(last) >= interval {
-                            self.last_debug_update = Some(now);
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                    None => {
-                        self.last_debug_update = Some(now);
-                        true
-                    }
-                }
-            };
-
-            if should_update {
-                self.state.debug.last_raycast_hit = update_char_window_cursor_and_hittest(
-                    &mut self.state,
-                    &self.device_state,
-                    cw,
-                    self.transparent,
-                    drag_is_dragging,
-                    &mut self.last_cursor_physical,
-                );
-
-                #[cfg(target_os = "windows")]
-                let hovered_name = if let Some(hit) = self.state.debug.last_raycast_hit {
-                    let colliders = self
-                        .state
-                        .character_physics_registration
-                        .as_ref()
-                        .map(|r| r.colliders.as_slice());
-                    if let Some(colliders) = colliders
-                        && let Some(idx) = colliders.iter().position(|&h| h == hit.collider)
-                    {
-                        self.state.character.get_active_bone_name(idx)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                #[cfg(not(target_os = "windows"))]
-                let hovered_name = None;
-
-                self.state.ui_bevy_state_mut().0.hovered_bone_name = hovered_name;
+                None
             }
-        }
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "windows"))]
+        let hovered_name = None;
+        self.state.ui_bevy_state_mut().0.hovered_bone_name = hovered_name;
+    }
 
+    /// Render the character window and the settings UI window
+    /// in sequence. The character window renders first; the
+    /// egui UI window only renders when `settings_window_visible`
+    /// is true.
+    fn render_per_frame(&mut self, event_loop: &ActiveEventLoop) {
         if let Err(AcquireError::Fatal) = self.render_char_frame() {}
         if let Some(uw) = self.ui_window.as_mut() {
             let visible = self.state.ui_bevy_state().0.settings_window_visible;
             if uw.window.is_visible() != Some(visible) {
                 uw.window.set_visible(visible);
             }
-            if visible {
-                uw.window.request_redraw();
-                let ui_entity = match self.state.ui_bevy_entity() {
-                    Some(e) => e,
-                    None => return,
-                };
-                let AppState {
-                    ref gpu,
-                    ref mut settings,
-                    ref ai,
-                    ref mut app,
-                    ..
-                } = self.state;
-                let bevy_world = app.world_mut();
-                match uw.render_frame(&gpu.device, &gpu.queue, settings, ai, bevy_world, ui_entity)
-                {
-                    Ok(_) => {}
-                    Err(e) => match e {
-                        AcquireError::Reconfigure => {
-                            uw.reconfigure(&self.state.gpu.device, uw.window.inner_size());
-                        }
-                        AcquireError::Timeout => {}
-                        AcquireError::Fatal => {
-                            event_loop.exit();
-                        }
-                    },
-                }
+            if !visible {
+                return;
+            }
+            uw.window.request_redraw();
+            let Some(ui_entity) = self.state.ui_bevy_entity() else {
+                return;
+            };
+            let AppState {
+                ref gpu,
+                ref mut settings,
+                ref ai,
+                ref mut app,
+                ..
+            } = self.state;
+            let bevy_world = app.world_mut();
+            match uw.render_frame(&gpu.device, &gpu.queue, settings, ai, bevy_world, ui_entity) {
+                Ok(_) => {}
+                Err(e) => match e {
+                    AcquireError::Reconfigure => {
+                        uw.reconfigure(&self.state.gpu.device, uw.window.inner_size());
+                    }
+                    AcquireError::Timeout => {}
+                    AcquireError::Fatal => {
+                        event_loop.exit();
+                    }
+                },
             }
         }
-
         if self.char_surface_fatal {
             event_loop.exit();
-            return;
         }
+    }
+
+    /// Schedule the next winit wake-up based on
+    /// `settings.graphics.target_fps`. `0` means "poll
+    /// continuously".
+    fn set_frame_deadline(&mut self, event_loop: &ActiveEventLoop) {
         let target_fps = self.state.settings.graphics.target_fps;
         if target_fps == 0 {
             event_loop.set_control_flow(ControlFlow::Poll);
-        } else {
-            let frame_interval = Duration::from_secs_f64(f64::from(target_fps).recip());
-            let last = self.last_frame_instant.unwrap_or_else(Instant::now);
-            let next_deadline = last + frame_interval;
-            event_loop.set_control_flow(ControlFlow::WaitUntil(next_deadline));
+            return;
         }
+        let frame_interval = Duration::from_secs_f64(f64::from(target_fps).recip());
+        let last = self.last_frame_instant.unwrap_or_else(Instant::now);
+        let next_deadline = last + frame_interval;
+        event_loop.set_control_flow(ControlFlow::WaitUntil(next_deadline));
     }
 }
 
@@ -496,10 +489,15 @@ impl Runtime {
                     (new_size.width, new_size.height),
                 );
                 #[cfg(target_os = "linux")]
-                if let Some(mask) = self.state.platform.mask_capture.as_ref() {
-                    let downsample = self.state.settings.graphics.mask_render_downsample;
-                    let mut guard = mask.lock();
-                    let _ = guard.resize(&gpu.device, new_size.width, new_size.height, downsample);
+                {
+                    use crate::resource::platform_state::resources::MaskCapture;
+                    let world = self.state.app.world();
+                    if let Some(mask) = world.resource::<MaskCapture>().0.as_ref() {
+                        let downsample = self.state.settings.graphics.mask_render_downsample;
+                        let mut guard = mask.lock();
+                        let _ =
+                            guard.resize(&gpu.device, new_size.width, new_size.height, downsample);
+                    }
                 }
                 cw.window.request_redraw();
             }
@@ -621,11 +619,16 @@ impl Runtime {
                     } else if key_code_pressed(&event) == Some(winit::keyboard::KeyCode::F8) {
                         #[cfg(target_os = "linux")]
                         {
-                            self.state.platform.layer_shell_freeze =
-                                !self.state.platform.layer_shell_freeze;
+                            use crate::resource::platform_state::resources::LayerShellFreeze;
+                            let new_val = {
+                                let world = self.state.app.world_mut();
+                                let mut freeze = world.resource_mut::<LayerShellFreeze>();
+                                freeze.0 = !freeze.0;
+                                freeze.0
+                            };
                             tracing::info!(
                                 target: "ene.linux.layer_shell",
-                                freeze = self.state.platform.layer_shell_freeze,
+                                freeze = new_val,
                                 "char window freeze toggled"
                             );
                         }
@@ -845,29 +848,39 @@ impl Runtime {
                 }
                 if show_mask_gizmo {
                     #[cfg(target_os = "linux")]
-                    if let Some(mask) = self.state.platform.mask_capture.as_ref() {
-                        crate::mask_gizmo::build_mask_rect_lines(
+                    {
+                        use crate::resource::platform_state::resources::MaskCapture;
+                        let world = self.state.app.world();
+                        if let Some(mask) = world.resource::<MaskCapture>().0.as_ref() {
+                            crate::mask_gizmo::build_mask_rect_lines(
+                                &mut lines,
+                                mask,
+                                cw.config.width,
+                                cw.config.height,
+                                view_inverse,
+                                view_z,
+                            );
+                        }
+                    }
+                }
+
+                if show_input_region_debug {
+                    #[cfg(target_os = "linux")]
+                    {
+                        use crate::resource::platform_state::resources::{
+                            LastAppliedInputRects, LastInputSource,
+                        };
+                        let world = self.state.app.world();
+                        crate::input_region_debug::build_input_region_debug_lines(
                             &mut lines,
-                            mask,
+                            &world.resource::<LastAppliedInputRects>().0,
+                            world.resource::<LastInputSource>().0,
                             cw.config.width,
                             cw.config.height,
                             view_inverse,
                             view_z,
                         );
                     }
-                }
-
-                if show_input_region_debug {
-                    #[cfg(target_os = "linux")]
-                    crate::input_region_debug::build_input_region_debug_lines(
-                        &mut lines,
-                        &self.state.platform.last_applied_input_rects,
-                        self.state.platform.last_input_source,
-                        cw.config.width,
-                        cw.config.height,
-                        view_inverse,
-                        view_z,
-                    );
                 }
 
                 if !lines.is_empty() {
@@ -901,25 +914,28 @@ impl Runtime {
         });
 
         #[cfg(target_os = "linux")]
-        if let Some(mask) = self.state.platform.mask_capture.as_ref() {
-            let mut mask_guard = mask.lock();
-            let downsample = settings.graphics.mask_render_downsample;
-            let _ = mask_guard.resize(device, cw.config.width, cw.config.height, downsample);
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("mask.encoder"),
-            });
-            character.render_mask(
-                queue,
-                &mut encoder,
-                mask_guard.target_view(),
-                &model_uniform,
-            );
-            mask_guard.encode_readback(&mut encoder);
-            drop(mask_guard);
-            queue.submit(std::iter::once(encoder.finish()));
-            #[cfg(target_os = "linux")]
-            if let Some(worker) = self.state.platform.mask_readback_worker.as_ref() {
-                worker.request_readback();
+        {
+            use crate::resource::platform_state::resources::{MaskCapture, MaskReadbackWorkerRes};
+            let world = self.state.app.world();
+            if let Some(mask) = world.resource::<MaskCapture>().0.as_ref() {
+                let mut mask_guard = mask.lock();
+                let downsample = settings.graphics.mask_render_downsample;
+                let _ = mask_guard.resize(device, cw.config.width, cw.config.height, downsample);
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mask.encoder"),
+                });
+                character.render_mask(
+                    queue,
+                    &mut encoder,
+                    mask_guard.target_view(),
+                    &model_uniform,
+                );
+                mask_guard.encode_readback(&mut encoder);
+                drop(mask_guard);
+                queue.submit(std::iter::once(encoder.finish()));
+                if let Some(worker) = world.resource::<MaskReadbackWorkerRes>().0.as_ref() {
+                    worker.request_readback();
+                }
             }
         }
         match result {
@@ -1047,6 +1063,7 @@ fn cursor_world_2d_for_char_window(
 }
 
 /// Per-frame click-through update for the character window.
+#[allow(clippy::too_many_arguments)]
 fn update_char_window_cursor_and_hittest(
     state: &mut AppState,
     device_state: &device_query::DeviceState,
@@ -1130,6 +1147,11 @@ fn update_char_window_cursor_and_hittest(
 
     if let Some(lc) = local_cursor {
         *last_cursor = Some(lc);
+        #[cfg(target_os = "linux")]
+        {
+            use crate::resource::cursor_state::CursorState;
+            state.app.world_mut().resource_mut::<CursorState>().physical = Some(lc);
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -1138,12 +1160,32 @@ fn update_char_window_cursor_and_hittest(
     }
     #[cfg(target_os = "linux")]
     {
-        crate::platform::apply_linux_click_through(
-            state,
+        use crate::resource::platform_state::resources::{
+            LayerShell, LayerShellFreeze, MaskCapture, WaylandInputRegion, X11ContextRes,
+        };
+        let world = state.app.world();
+        let wayland = world.resource::<WaylandInputRegion>().0.as_ref();
+        let x11 = world.resource::<X11ContextRes>().0.as_ref();
+        let layer_shell = world.resource::<LayerShell>().0.as_ref();
+        let layer_shell_freeze = world.resource::<LayerShellFreeze>().0;
+        let mask = world.resource::<MaskCapture>().0.as_ref();
+        let (rects, source) = crate::platform::apply_linux_click_through(
+            crate::platform::ClickThroughInputs {
+                wayland,
+                x11,
+                layer_shell,
+                layer_shell_freeze,
+                mask_capture: mask,
+                drag_is_dragging,
+            },
             allows_input,
             cursor_over,
-            state.platform.layer_shell_freeze,
+            layer_shell_freeze,
         );
+        use crate::resource::platform_state::resources::{LastAppliedInputRects, LastInputSource};
+        let world_mut = state.app.world_mut();
+        world_mut.resource_mut::<LastAppliedInputRects>().0 = rects;
+        world_mut.resource_mut::<LastInputSource>().0 = source;
     }
 
     hit

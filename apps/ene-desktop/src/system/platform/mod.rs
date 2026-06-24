@@ -10,3 +10,4 @@ pub mod click_through;
 pub mod cursor;
 pub mod gtk_pump;
 pub mod input_region;
+pub mod should_render_debug;

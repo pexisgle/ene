@@ -90,14 +90,6 @@ impl TrayHandle {
             None
         }
     }
-
-    /// Pump pending GTK events. No-op on Windows.
-    #[cfg(target_os = "linux")]
-    pub fn tick_gtk(&self) {
-        while gtk::events_pending() {
-            gtk::main_iteration_do(false);
-        }
-    }
 }
 
 fn build_menu() -> Menu {

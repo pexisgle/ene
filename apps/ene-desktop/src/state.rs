@@ -22,54 +22,6 @@ use crate::gpu::GpuContext;
 use crate::settings::CharacterSettings;
 use crate::tray::TrayHandle;
 
-/// Linux-only display-server integration state.
-///
-/// On non-Linux targets every field is hidden behind
-/// `#[cfg(target_os = "linux")]`; the struct is empty at compile
-/// time, so the field access sites only need to gate the same way
-/// they did when the fields lived directly on [`AppState`].
-#[derive(Default)]
-pub struct PlatformState {
-    /// Wayland input-region context. `None` on non-Wayland displays;
-    /// populated lazily in [`crate::runtime::Runtime::resumed`].
-    #[cfg(target_os = "linux")]
-    pub wayland_region:
-        Option<Arc<parking_lot::Mutex<crate::platform::wayland_region::WaylandInputRegionContext>>>,
-    /// X11 context for `_NET_WM_STATE_SKIP_TASKBAR` and the shape
-    /// extension click-through.
-    #[cfg(target_os = "linux")]
-    pub x11_ctx: Option<Arc<parking_lot::Mutex<crate::platform::x11_taskbar::X11Context>>>,
-    /// Wayland `zwlr_layer_shell_v1` detection context. Initialised
-    /// alongside `wayland_region` so the click-through dispatcher can
-    /// branch on layer-shell availability.
-    #[cfg(target_os = "linux")]
-    pub layer_shell: Option<crate::platform::wayland_layer_shell::LayerShellState>,
-    /// `true` while the user holds the "freeze character window"
-    /// hotkey (`F8`). Forces the xdg-shell fallback to receive all
-    /// input even on compositors without layer-shell. Not persisted.
-    #[cfg(target_os = "linux")]
-    pub layer_shell_freeze: bool,
-    /// Rectangles most recently pushed to the Wayland
-    /// `wl_surface::set_input_region` and X11 `shape::rectangles`
-    /// calls, in window-pixel space. Read by the F9 debug overlay.
-    #[cfg(target_os = "linux")]
-    pub last_applied_input_rects: Vec<crate::platform::wayland_region::Rect>,
-    /// Which branch produced the rects. `Empty` when none were
-    /// pushed (full pass-through).
-    #[cfg(target_os = "linux")]
-    pub last_input_source: crate::input_region_debug::InputRegionSource,
-
-    /// Offscreen `Rgba8Unorm` mask capture target, drained each
-    /// `about_to_wait` to feed silhouette rectangles into the
-    /// Wayland input-region and X11 shape extension.
-    #[cfg(target_os = "linux")]
-    pub mask_capture: Option<crate::platform::wayland_mask_capture::MaskCaptureState>,
-    /// Off-thread worker that drains the mask target without blocking
-    /// the winit main thread.
-    #[cfg(target_os = "linux")]
-    pub mask_readback_worker: Option<crate::platform::mask_readback::MaskReadbackWorker>,
-}
-
 /// Per-frame diagnostic state consumed by the F3 collider overlay
 /// and the line-list renderer.
 #[derive(Default)]
@@ -98,9 +50,6 @@ pub struct AppState {
     /// reverse-lookup can use it without going through the bevy
     /// `World`. `None` until `resumed` runs.
     pub character_physics_registration: Option<crate::physics::CharacterColliderRegistration>,
-    /// Linux display-server integration state. Empty on non-Linux.
-    #[cfg_attr(target_os = "windows", expect(dead_code))]
-    pub platform: PlatformState,
     /// Debug overlay state (raycast hit + line-list renderer).
     pub debug: DebugState,
     /// The new `bevy_ecs` [`App`]. Its schedule is run by
@@ -139,7 +88,6 @@ impl AppState {
                 tray: None,
                 character,
                 character_physics_registration: None,
-                platform: PlatformState::default(),
                 debug: DebugState::default(),
                 app,
             },
@@ -154,7 +102,22 @@ impl AppState {
             return;
         }
         match TrayHandle::new(event_tx.clone()) {
-            Some(handle) => self.tray = Some(handle),
+            Some(handle) => {
+                self.tray = Some(handle);
+                // Flip the `GtkReady` bevy resource so the GTK pump
+                // systems in `Update` / `Last` stop early-returning.
+                // `TrayHandle::new` calls `gtk::init` on Linux, so
+                // pumping before this point would panic with
+                // `"GTK has not been initialized. Call gtk::init first."`
+                #[cfg(target_os = "linux")]
+                {
+                    let mut ready = self
+                        .app
+                        .world_mut()
+                        .resource_mut::<crate::resource::tray::GtkReady>();
+                    ready.0 = true;
+                }
+            }
             None => tracing::warn!("System tray failed to initialise; running headless"),
         }
     }
@@ -212,6 +175,45 @@ impl AppState {
             .expect("UiStateComponent not on UI entity")
     }
 
+    /// Borrow the Rapier [`PhysicsWorld`](crate::physics::PhysicsWorld)
+    /// immutably from the bevy [`PhysicsWorldResource`].
+    ///
+    /// Returns a `&PhysicsWorld` with a lifetime tied to `&self` —
+    /// the call sites in `Runtime::resumed` /
+    /// `Runtime::about_to_wait` were the only consumers and are
+    /// replaced by the Phase 8.3 `step_physics_windows_system`
+    /// which takes `ResMut<PhysicsWorldResource>` directly. This
+    /// helper is kept for the small amount of Windows-specific
+    /// registration code that still runs once in `resumed`.
+    #[cfg(target_os = "windows")]
+    pub fn physics_world(&self) -> &crate::physics::PhysicsWorld {
+        &self
+            .app
+            .world()
+            .resource::<crate::resource::physics::PhysicsWorldResource>()
+            .world
+    }
+
+    /// Run `f` with a `&mut PhysicsWorld` view obtained from the
+    /// bevy [`PhysicsWorldResource`].
+    ///
+    /// `self.app.world_mut()` holds the exclusive borrow of the
+    /// bevy `World` for the duration of `f`; the closure-based
+    /// pattern keeps the call sites readable without exposing a
+    /// raw `&mut PhysicsWorld` that would clash with the
+    /// `World` borrow.
+    #[cfg(target_os = "windows")]
+    pub fn with_physics_world_mut<R>(
+        &mut self,
+        f: impl FnOnce(&mut crate::physics::PhysicsWorld) -> R,
+    ) -> R {
+        let mut res = self
+            .app
+            .world_mut()
+            .resource_mut::<crate::resource::physics::PhysicsWorldResource>();
+        f(&mut res.world)
+    }
+
     /// Borrow the per-UI-entity [`UiStateComponent`](crate::component::ui::UiStateComponent)
     /// immutably.
     pub fn ui_bevy_state(&mut self) -> &crate::component::ui::UiStateComponent {
@@ -230,7 +232,13 @@ impl AppState {
 pub enum AppStateError {
     #[error("GPU context failed to initialise: {0}")]
     Gpu(#[from] Box<dyn std::error::Error>),
-    #[expect(dead_code)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Reserved for the future `with_channel` asset resolution path"
+        )
+    )]
     #[error("Failed to resolve assets directory: {0}")]
     AssetsDir(String),
     #[error("Tokio runtime error: {0}")]
@@ -245,4 +253,19 @@ pub fn resolve_paths() -> Result<(PathBuf, String, String), AppStateError> {
     let assets_dir = ene_config::ensure_resource_dirs();
     let (default_vrm, default_vrma) = crate::settings::read_cli_paths();
     Ok((assets_dir, default_vrm, default_vrma))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `AppStateError` must implement `std::error::Error`. The
+    /// transitive dependencies (e.g. `diesel`, `tokio`) provide
+    /// `From<...>` impls but it is worth a smoke test to confirm
+    /// the wrapper itself conforms to the trait.
+    #[test]
+    fn app_state_error_implements_error_trait() {
+        let err = AppStateError::AssetsDir("missing".to_string());
+        let _: &dyn std::error::Error = &err;
+    }
 }

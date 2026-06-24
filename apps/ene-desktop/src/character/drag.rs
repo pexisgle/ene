@@ -88,7 +88,7 @@ pub fn transformed_aabb_bounds(
 
 /// Fast slab test against an axis-aligned bounding box. 1:1 with
 /// `legacy::ray_intersects_aabb`.
-#[expect(dead_code)]
+#[cfg_attr(not(test), expect(dead_code, reason = "Test-only helper"))]
 pub fn ray_intersects_aabb(origin: Vec3, direction: Vec3, min: Vec3, max: Vec3) -> bool {
     let eps = 1e-6;
     let mut t_min = f32::NEG_INFINITY;

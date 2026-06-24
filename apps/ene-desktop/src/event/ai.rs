@@ -29,5 +29,8 @@ pub struct AiUserInputRequested {
 }
 
 #[derive(Message, Debug, Clone)]
-#[expect(dead_code, reason = "Emote consumer lands in Phase 7")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Emote consumer lands in Phase 7")
+)]
 pub struct EmoteToken(pub String);

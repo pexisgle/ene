@@ -226,6 +226,10 @@ impl MaskCaptureCamera {
     /// `mpsc::recv` froze the window) — see `mask_readback` for
     /// the off-thread worker.
     #[cfg(test)]
+    #[expect(
+        dead_code,
+        reason = "Test-only helper kept for future GPU readback tests; Phase 8 GTK-pump dedup removed its sole runtime caller"
+    )]
     pub fn read_back(&mut self, _device: &wgpu::Device, _queue: &wgpu::Queue) {
         let slice = self.readback_slice();
         let (tx, rx) = std::sync::mpsc::channel();

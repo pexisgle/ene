@@ -1,6 +1,9 @@
 # Desktop Application (`ene-desktop`)
 
-VRM character rendering with always-on-top overlay, powered by Bevy ECS.
+VRM character rendering with always-on-top overlay, winit + `wgpu`
++ `bevy_ecs 0.19` + `bevy_app 0.19`. The per-frame logic is owned
+by a `bevy_app::App`; the winit `Runtime` is a thin driver that
+calls `app.update()` every frame.
 
 ## Startup
 
@@ -12,113 +15,152 @@ cargo run -p ene-desktop -- /path/to/character.vrm
 cargo run -p ene-desktop -- /path/to/character.vrm /path/to/animation.vrma
 ```
 
-## Bevy Plugins
+## Architecture
 
-### Core Plugins
+The winit `Runtime` (`apps/ene-desktop/src/runtime.rs`) is an
+`ApplicationHandler` that owns two winit windows (character +
+settings) and their `wgpu::Surface`s. On every `about_to_wait` it
+runs the full bevy schedule:
 
-| Plugin | Role |
-|--------|------|
-| `DefaultPlugins` | Window, assets, input, rendering |
-| `EguiPlugin` | Settings UI (immediate mode) |
-| `VrmPlugin` | VRM 3D model loading |
-| `VrmaPlugin` | VRMA animation loading and playback |
+```rust
+fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+    self.sync_runtime_to_bevy();
+    self.state.app.update();
+    if self.handle_exit(event_loop) { return; }
+    self.run_debug_pipeline();
+    self.render_per_frame(event_loop);
+    self.set_frame_deadline(event_loop);
+}
+```
 
-### Custom Plugins
+`app.update()` runs `First` / `PreUpdate` / `Update` / `PostUpdate`
+/ `Last` (and `Startup` on the first call). After the schedule
+returns the runtime:
+
+* checks the `ExitRequested` resource and exits the loop if set;
+* runs the per-frame cursor / hit-test pipeline (Linux: input
+  region + click-through, Windows: `set_cursor_hittest`). The
+  cursor source of truth is `device_query`, read in
+  `update_char_window_cursor_and_hittest`; the bevy-side
+  `update_cursor_state_system` is a no-op kept as a slot for
+  a future `PointerMoved`-based migration;
+* acquires + encodes + presents the character frame and the
+  egui settings frame;
+* schedules the next winit wake-up via
+  `set_control_flow(WaitUntil(...))` based on
+  `settings.graphics.target_fps`.
+
+The bevy `App` is configured by `DesktopPlugins` in
+`apps/ene-desktop/src/app.rs`:
 
 | Plugin | Source | Role |
 |--------|--------|------|
-| `ScenePlugin` | `scene.rs` | Camera, lighting, environment, frame limits |
-| `EnePlugin` | `ai_bridge.rs` | Actor-based AI streaming bridge (EneHandle + Bevy events) |
-| `CharacterPlugin` | `character.rs` | Character spawn, expression blending, animation, head tracking |
-| `TrayPlugin` | `tray.rs` | System tray icon and menu (Linux/Windows) |
-| `SettingsUiPlugin` | `settings_ui/` | egui-based settings panel (AI, character, graphics) |
-| `CharacterDragPlugin` | `character_drag/` | Click-and-drag window movement, transparent hit testing |
+| `CorePlugin` | `app.rs` | `FrameState`, `ExitRequested`, `TokioHandle`, `EventChannels` (legacy bridge), the 13 `Message` types. |
+| `CharacterPlugin` | `plugin/character_plugin.rs` | Spawns the `CharacterBundle` entity in `Startup`. |
+| `PhysicsPlugin` | `plugin/physics_plugin.rs` | `attach_bone_colliders_system` in `Startup`; `step_physics_system` in `Update`. |
+| `UiPlugin` | `plugin/ui_plugin.rs` | Spawns the `SettingsUiBundle` entity in `Startup`. |
+| `PlatformPlugin` | `plugin/platform_plugin.rs` | Per-frame cursor state, input-region refresh, click-through. |
+| `TrayPlugin` | `plugin/tray_plugin.rs` | Linux-only `tick_gtk_system` in `Last` (drain-only, no actual icon logic). |
+| `AiPlugin` | `plugin/ai_plugin.rs` | Adds the `system::ui_consumers` systems in `Update`. |
 
-## AI Bridge (`EnePlugin`)
+The schedule (`apps/ene-desktop/src/schedule.rs`) has six sets:
 
-Connects Bevy's synchronous ECS world with the asynchronous actor-based `ene-core`:
+* `EventDispatch` (in `First`) — `pump_legacy_events` drains the
+  legacy `AppEvent` receiver into typed bevy `Message`s.
+* `Input` — `should_render_debug_system` (drag / debug-FPS
+  gate). `update_cursor_state_system` is also in `Input` but
+  is intentionally a no-op slot reserved for a future
+  `PointerMoved`-based cursor source.
+* `Settings` — `apply_linux_click_through_system`,
+  `refresh_input_region_system`, `open_settings_system`,
+  `apply_ai_text_deltas_system`, `apply_ai_permission_system`,
+  `apply_ai_user_input_system`, `apply_emotions_system`,
+  `apply_settings_action_system`.
+* `Animation` — `step_physics_system`.
+* `Render` / `Present` — placeholder sets; the actual GPU
+  submission runs in `Runtime::render_per_frame` because
+  `CharacterRenderer` is `!Send + !Sync`.
 
-```
-Bevy ECS (synchronous)
-  → EneHandle::run() (fire-and-forget via mpsc)
-    → EneActor (background tokio task)
-      → EneEvent (broadcast channel)
-        → poll_ene_events → EneStreamEvent (Bevy message)
-          → UI / character systems
-```
+## AI Bridge
 
-### Resources
+The desktop app uses the upstream `ene-core` actor (`EneHandle` /
+`EneEvent`) through a thin `AiBridge` shim
+(`apps/ene-desktop/src/ai_bridge.rs`). The bridge:
 
-```rust
-#[derive(Resource)]
-pub struct EneResource {
-    pub handle: EneHandle,    // Actor handle
-    pub receiver: EneEventReceiver,  // Broadcast receiver for events
-    pub processing: bool,     // Whether AI is streaming
-}
-```
+1. Spawns an `EneHandle` on the current tokio runtime and
+   subscribes to its broadcast `EneEvent` stream.
+2. Spawns a background drain task that maps `EneEvent` →
+   `AppEvent` (`AiStreamUpdate`, `EmoteToken`, `SessionSplit`,
+   `StatusChanged`, etc.) and pushes them into the cross-subsystem
+   `AppEventSender`.
+3. Owns a `processing: Arc<AtomicBool>` flag, set on
+   `EneCommand::Run` and cleared on `Done` / `Failed`.
 
-### System Chain
+User input flows back through `AiBridge::run` /
+`AiBridge::cancel` (fire-and-forget mpsc sends).
 
-1. `enqueue_ai_requests` — Receives `EneRequestEvent` → calls `handle.run()`
-2. `poll_ene_events` — Calls `receiver.try_recv()` in a loop → dispatches to `EneStreamEvent`
-
-**Key design:** Uses `receiver.try_recv()` directly (not `handle.subscribe()`) to avoid creating a new broadcast receiver every frame. Cloning would cause event loss because each new receiver only sees events from the point of subscription.
-
-### Events
-
-```rust
-pub enum EneStreamEvent {
-    TextDelta(String),
-    SpecialToken(String),
-    ToolCallStart { name: String, arguments: String },
-    ToolCallResult { name: String, result: String },
-    PermissionRequired { request_id: RequestId, action: String, target: String, description: String },
-    UserInputRequired { request_id: RequestId, prompt: UserInputPrompt },
-    TaskProgress { task_id: String, step: usize, total_steps: Option<usize>, description: String },
-    Finished,
-    Error(String),
-}
-```
-
-## VRM Character Pipeline
-
-### Expression System
+`EventChannels` (a bevy `Resource`) holds the receiver half of
+the `AppEvent` bus. `system::event_pump::pump_legacy_events`
+drains it in `First` / `EventDispatch` and writes the typed
+`Message`s (`AiTextDelta`, `AiPermissionRequested`,
+`AiUserInputRequested`, `AiStreamFinished`, `EmoteToken`, …)
+that the per-frame `system::ui_consumers` systems then read.
 
 ```
-EneEvent::SpecialToken
-  → poll_ene_events → EneStreamEvent::SpecialToken
-  → EmotionQueue (enqueue)
-  → process_emotion_queue (4s hold → fade-out)
-  → SetExpressions trigger
-  → VRM blendshape value update
+tokio EneActor (ene-core)
+  → EneEvent (broadcast)
+    → AiBridge background task
+      → AppEvent (mpsc)
+        → EventChannels.rx
+          → pump_legacy_events (First/EventDispatch)
+            → Messages<AiTextDelta> / Messages<AiPermissionRequested> / …
+              → apply_ai_text_deltas_system / apply_ai_permission_system / … (Update)
+                → UiStateComponent / CharacterSettings
 ```
 
-### Animation Playback
+### Message types
 
-VRMA files provide pre-made animations. `CharacterPlugin` manages playback state between idle, talking, and emotion-driven animations.
+The 13 messages registered by `CorePlugin`:
 
-### Head Tracking
-
-`CharacterDragPlugin` enables the character to follow the mouse cursor position for an interactive "look at cursor" effect.
+| Message | Source | Consumer |
+|---------|--------|----------|
+| `AiTextDelta` | `pump_legacy_events` | `apply_ai_text_deltas_system` |
+| `AiStreamFinished` | `pump_legacy_events` | (consumed by the AI page itself) |
+| `AiPermissionRequested` | `pump_legacy_events` | `apply_ai_permission_system` |
+| `AiUserInputRequested` | `pump_legacy_events` | `apply_ai_user_input_system` |
+| `EmoteToken` | `pump_legacy_events` | `apply_emotions_system` |
+| `PointerMoved` | `pump_window_events` | `update_cursor_state_system` (no-op; `device_query` is the cursor source of truth) |
+| `PointerButton` | `pump_window_events` | (drag / future systems) |
+| `KeyboardKey` | `pump_window_events` | (settings hotkey future) |
+| `WindowResized` | `pump_window_events` | (resize handler) |
+| `WindowCloseRequested` | `pump_window_events` | (exits the loop) |
+| `OpenSettings` | `system::ui_dispatcher` | `open_settings_system` |
+| `SettingsActionEvent` | `system::ui_dispatcher` | `apply_settings_action_system` (drain-only placeholder) |
+| `TickGtk` | `pump_legacy_events` (Linux) | `tray_tick::tick_gtk_system` (drain-only) |
 
 ## Window Properties
 
 | Property | Value |
 |----------|-------|
-| Size | 560 × 980 (Windows) |
-| Style | Windowed (Windows), Borderless Fullscreen (macOS, Linux) |
+| Character size | driven by `settings.graphics.character_size` |
+| UI size | 460 × 620 (settings window) |
 | Z-order | Always on top |
 | Transparency | Composite alpha (OS-dependent) |
-| Hit test | Transparent areas are click-through (Linux: Wayland layer shell) |
+| Hit test | Transparent areas are click-through (Linux: Wayland `set_input_region` + X11 `shape::rectangles`; Windows: `WS_EX_TRANSPARENT`) |
 
 ## Platform Support
 
 | Feature | Linux (X11) | Linux (Wayland) | Windows |
 |---------|:---:|:---:|:---:|
-| VRM rendering | Yes (Bevy) | Yes (Bevy) | Yes (Bevy) |
+| VRM rendering | Yes (wgpu) | Yes (wgpu) | Yes (wgpu) |
 | Always-on-top | Yes | Yes (layer shell) | Yes |
 | System tray | Yes (gtk) | Yes (gtk) | Yes |
-| Click-through | Yes | Yes (input region) | Yes |
-| Drag movement | Yes | Yes (gtk overlay) | Yes |
+| Click-through | Yes (`shape` ext) | Yes (`set_input_region`) | Yes (`WS_EX_TRANSPARENT`) |
+| Drag movement | Yes | Yes | Yes |
 | Screenshot | Yes | Via portal | Yes |
+
+## File layout
+
+See `docs/architecture/ene-desktop-ecs-migration.md` for the
+full layout, plugin ordering, and the 9-line `about_to_wait`
+target.

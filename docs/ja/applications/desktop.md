@@ -1,6 +1,9 @@
 # デスクトップアプリケーション (`ene-desktop`)
 
-VRM キャラクターレンダリングと常時最前面オーバーレイを備えた Bevy ECS ベース GUI アプリ。
+VRM キャラクターレンダリングと常時最前面オーバーレイを備えた
+winit + `wgpu` + `bevy_ecs 0.19` + `bevy_app 0.19` アプリ。
+毎フレームのロジックは `bevy_app::App` が所有し、winit
+`Runtime` はそのスケジュールを駆動するだけの薄いレイヤーです。
 
 ## 起動
 
@@ -12,113 +15,156 @@ cargo run -p ene-desktop -- /path/to/character.vrm
 cargo run -p ene-desktop -- /path/to/character.vrm /path/to/animation.vrma
 ```
 
-## Bevy プラグイン
+## アーキテクチャ
 
-### コアプラグイン
+winit `Runtime` (`apps/ene-desktop/src/runtime.rs`) は
+`ApplicationHandler` 実装で、キャラクター / 設定の 2 つの
+winit ウィンドウとそれぞれの `wgpu::Surface` を所有します。
+`about_to_wait` で毎フレーム bevy スケジュールを実行します:
 
-| プラグイン | 役割 |
-|-----------|------|
-| `DefaultPlugins` | ウィンドウ、アセット、入力、レンダリング |
-| `EguiPlugin` | 設定用イミディエイトモード GUI |
-| `VrmPlugin` | VRM 3D モデル読み込み |
-| `VrmaPlugin` | VRMA アニメーション読み込みと再生 |
+```rust
+fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+    self.sync_runtime_to_bevy();
+    self.state.app.update();
+    if self.handle_exit(event_loop) { return; }
+    self.run_debug_pipeline();
+    self.render_per_frame(event_loop);
+    self.set_frame_deadline(event_loop);
+}
+```
 
-### カスタムプラグイン
+`app.update()` は `First` / `PreUpdate` / `Update` /
+`PostUpdate` / `Last` (初回のみ `Startup` 追加) を実行します。
+スケジュール完了後、ランタイムは:
+
+* `ExitRequested` リソースを確認しセットされていればループを
+  抜ける
+* フレーム毎のカーソル / ヒットテストパイプラインを実行
+  (Linux: 入力領域 + クリックスルー、Windows:
+  `set_cursor_hittest`)。カーソルのソース・オブ・トゥルースは
+  `device_query` で、`update_char_window_cursor_and_hittest` 内で
+  読み込まれる。bevy 側 `update_cursor_state_system` は no-op
+  スロットで、将来の `PointerMoved` ベース移行用に予約されている
+* キャラクターフレームと egui 設定フレームを取得 + エンコード +
+  提出 + 表示
+* `settings.graphics.target_fps` に基づき
+  `set_control_flow(WaitUntil(...))` で次回 winit 起床を予約
+
+`bevy_app::App` は `apps/ene-desktop/src/app.rs` の
+`DesktopPlugins` で構成されます:
 
 | プラグイン | ソース | 役割 |
 |-----------|--------|------|
-| `ScenePlugin` | `scene.rs` | カメラ、照明、環境、フレーム制限 |
-| `EnePlugin` | `ai_bridge.rs` | アクターベース AI ストリーミングブリッジ (EneHandle + Bevy イベント) |
-| `CharacterPlugin` | `character.rs` | キャラクター生成、表情ブレンド、アニメーション、ヘッドトラッキング |
-| `TrayPlugin` | `tray.rs` | システムトレイアイコンとメニュー (Linux/Windows) |
-| `SettingsUiPlugin` | `settings_ui/` | egui ベース設定パネル (AI, キャラクター, グラフィック) |
-| `CharacterDragPlugin` | `character_drag/` | クリック＆ドラッグウィンドウ移動、透明ヒットテスト |
+| `CorePlugin` | `app.rs` | `FrameState`, `ExitRequested`, `TokioHandle`, `EventChannels` (レガシーブリッジ)、13 種類の `Message` 型を登録。 |
+| `CharacterPlugin` | `plugin/character_plugin.rs` | `Startup` で `CharacterBundle` エンティティを生成。 |
+| `PhysicsPlugin` | `plugin/physics_plugin.rs` | `Startup` で `attach_bone_colliders_system`、`Update` で `step_physics_system`。 |
+| `UiPlugin` | `plugin/ui_plugin.rs` | `Startup` で `SettingsUiBundle` エンティティを生成。 |
+| `PlatformPlugin` | `plugin/platform_plugin.rs` | フレーム毎のカーソル状態、入力領域更新、クリックスルー。 |
+| `TrayPlugin` | `plugin/tray_plugin.rs` | Linux 限定の `tick_gtk_system` を `Last` に追加 (drain 専用、アイコンロジックなし)。 |
+| `AiPlugin` | `plugin/ai_plugin.rs` | `system::ui_consumers` 5 つのシステムを `Update` に追加。 |
 
-## AI ブリッジ (`EnePlugin`)
+スケジュール (`apps/ene-desktop/src/schedule.rs`) は 6 つの
+セットから成ります:
 
-Bevy の同期 ECS ワールドと非同期アクターベースの `ene-core` を接続:
+* `EventDispatch` (`First` 内) — `pump_legacy_events` が
+  レガシー `AppEvent` レシーバーを型付き bevy `Message` に
+  ドレイン。
+* `Input` — `should_render_debug_system` (ドラッグ / デバッグ
+  FPS ゲート)。`update_cursor_state_system` も `Input` 内に登録
+  されているが、意図的に no-op スロットとして将来の
+  `PointerMoved` ベースカーソルソース移行用に予約されている。
+* `Settings` — `apply_linux_click_through_system`,
+  `refresh_input_region_system`, `open_settings_system`,
+  `apply_ai_text_deltas_system`, `apply_ai_permission_system`,
+  `apply_ai_user_input_system`, `apply_emotions_system`,
+  `apply_settings_action_system`。
+* `Animation` — `step_physics_system`。
+* `Render` / `Present` — プレースホルダ (実際の GPU 提出は
+  `CharacterRenderer` が `!Send + !Sync` であるため
+  `Runtime::render_per_frame` 側で実行)。
 
-```
-Bevy ECS (同期)
-  → EneHandle::run() (mpsc 経由ファイア＆フォーゲット)
-    → EneActor (バックグラウンド tokio タスク)
-      → EneEvent (broadcast チャンネル)
-        → poll_ene_events → EneStreamEvent (Bevy メッセージ)
-          → UI / キャラクターシステム
-```
+## AI ブリッジ
 
-### リソース
+デスクトップアプリは upstream の `ene-core` アクター
+(`EneHandle` / `EneEvent`) を薄い `AiBridge` シム
+(`apps/ene-desktop/src/ai_bridge.rs`) 経由で使います。
+ブリッジは:
 
-```rust
-#[derive(Resource)]
-pub struct EneResource {
-    pub handle: EneHandle,    // アクターハンドル
-    pub receiver: EneEventReceiver,  // ブロードキャスト受信機 — イベント受信
-    pub processing: bool,     // AI がストリーミング中かどうか
-}
-```
+1. 現在の tokio ランタイム上で `EneHandle` を spawn し、
+   ブロードキャスト `EneEvent` ストリームを購読。
+2. `EneEvent` → `AppEvent` (`AiStreamUpdate`, `EmoteToken`,
+   `SessionSplit`, `StatusChanged`, …) にマップして
+   クロスサブシステム `AppEventSender` に push するバックグラ
+   ウンドドレインタスクを spawn。
+3. `processing: Arc<AtomicBool>` フラグを所有
+   (`EneCommand::Run` でセット、`Done` / `Failed` でクリア)。
 
-### システムチェーン
+ユーザー入力は `AiBridge::run` / `AiBridge::cancel` 経由で
+返送されます (fire-and-forget mpsc 送信)。
 
-1. `enqueue_ai_requests` — `EneRequestEvent` を受信 → `handle.run()` を呼び出し
-2. `poll_ene_events` — `receiver.try_recv()` をループ → `EneStreamEvent` にディスパッチ
-
-**重要な設計:** `receiver.try_recv()` を直接使用（`handle.subscribe()` しない）。毎フレーム `subscribe()` で broadcast 受信機を再生成すると、新しい受信機は購読時以降のイベントのみ受信するため、イベントがロストする。
-
-### イベント
-
-```rust
-pub enum EneStreamEvent {
-    TextDelta(String),
-    SpecialToken(String),
-    ToolCallStart { name: String, arguments: String },
-    ToolCallResult { name: String, result: String },
-    PermissionRequired { request_id: RequestId, action: String, target: String, description: String },
-    UserInputRequired { request_id: RequestId, prompt: UserInputPrompt },
-    TaskProgress { task_id: String, step: usize, total_steps: Option<usize>, description: String },
-    Finished,
-    Error(String),
-}
-```
-
-## VRM キャラクターパイプライン
-
-### 表情システム
+`EventChannels` (bevy `Resource`) は `AppEvent` バスの
+レシーバー側を保持します。`system::event_pump::pump_legacy_events`
+が `First` / `EventDispatch` でドレインし、型付き
+`Message` (`AiTextDelta`, `AiPermissionRequested`,
+`AiUserInputRequested`, `AiStreamFinished`, `EmoteToken`, …)
+に書き込みます。それらを `system::ui_consumers` 配下の
+システムが読みます。
 
 ```
-EneEvent::SpecialToken
-  → poll_ene_events → EneStreamEvent::SpecialToken
-  → EmotionQueue (エンキュー)
-  → process_emotion_queue (4秒ホールド → フェードアウト)
-  → SetExpressions トリガー
-  → VRM ブレンドシェイプ値更新
+tokio EneActor (ene-core)
+  → EneEvent (broadcast)
+    → AiBridge バックグラウンドタスク
+      → AppEvent (mpsc)
+        → EventChannels.rx
+          → pump_legacy_events (First/EventDispatch)
+            → Messages<AiTextDelta> / Messages<AiPermissionRequested> / …
+              → apply_ai_text_deltas_system / apply_ai_permission_system / … (Update)
+                → UiStateComponent / CharacterSettings
 ```
 
-### アニメーション再生
+### メッセージ型
 
-VRMA ファイルは事前作成されたアニメーションを提供します。`CharacterPlugin` がアイドル、会話中、感情駆動アニメーション間の再生状態を管理します。
+`CorePlugin` が登録する 13 種類のメッセージ:
 
-### ヘッドトラッキング
-
-`CharacterDragPlugin` により、キャラクターがマウスカーソル位置を追跡するインタラクティブな「カーソルを見る」効果を実現します。
+| メッセージ | 生成元 | 消費側 |
+|-----------|--------|--------|
+| `AiTextDelta` | `pump_legacy_events` | `apply_ai_text_deltas_system` |
+| `AiStreamFinished` | `pump_legacy_events` | (AI ページ自身が消費) |
+| `AiPermissionRequested` | `pump_legacy_events` | `apply_ai_permission_system` |
+| `AiUserInputRequested` | `pump_legacy_events` | `apply_ai_user_input_system` |
+| `EmoteToken` | `pump_legacy_events` | `apply_emotions_system` |
+| `PointerMoved` | `pump_window_events` | `update_cursor_state_system` (no-op; `device_query` がカーソルのソース・オブ・トゥルース) |
+| `PointerButton` | `pump_window_events` | (ドラッグ / 将来のシステム) |
+| `KeyboardKey` | `pump_window_events` | (設定ホットキー 将来用) |
+| `WindowResized` | `pump_window_events` | (リサイズハンドラ) |
+| `WindowCloseRequested` | `pump_window_events` | (ループ終了) |
+| `OpenSettings` | `system::ui_dispatcher` | `open_settings_system` |
+| `SettingsActionEvent` | `system::ui_dispatcher` | `apply_settings_action_system` (drain 専用プレースホルダ) |
+| `TickGtk` | `pump_legacy_events` (Linux) | `tray_tick::tick_gtk_system` (drain 専用) |
 
 ## ウィンドウプロパティ
 
 | プロパティ | 値 |
 |-----------|-----|
-| サイズ | 560 × 980 (Windows) |
-| スタイル | Windowed (Windows), Borderless Fullscreen (macOS, Linux) |
+| キャラクターサイズ | `settings.graphics.character_size` に追従 |
+| UI サイズ | 460 × 620 (設定ウィンドウ) |
 | Z-order | 常時最前面 |
 | 透明度 | コンポジットアルファ (OS 依存) |
-| ヒットテスト | 透明領域はクリックスルー (Linux: Wayland layer shell) |
+| ヒットテスト | 透明領域はクリックスルー (Linux: Wayland `set_input_region` + X11 `shape::rectangles`; Windows: `WS_EX_TRANSPARENT`) |
 
 ## プラットフォーム対応
 
 | 機能 | Linux (X11) | Linux (Wayland) | Windows |
 |------|:---:|:---:|:---:|
-| VRM レンダリング | はい (Bevy) | はい (Bevy) | はい (Bevy) |
+| VRM レンダリング | はい (wgpu) | はい (wgpu) | はい (wgpu) |
 | 常時最前面 | はい | はい (layer shell) | はい |
 | システムトレイ | はい (gtk) | はい (gtk) | はい |
-| クリックスルー | はい | はい (input region) | はい |
-| ドラッグ移動 | はい | はい (gtk overlay) | はい |
+| クリックスルー | はい (`shape` ext) | はい (`set_input_region`) | はい (`WS_EX_TRANSPARENT`) |
+| ドラッグ移動 | はい | はい | はい |
 | スクリーンショット | はい | ポータル経由 | はい |
+
+## ファイル構成
+
+プラグインの順序、システム境界、9 行版 `about_to_wait` ターゲッ
+トの全容は `docs/architecture/ene-desktop-ecs-migration.md` を
+参照してください。

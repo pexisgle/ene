@@ -29,7 +29,6 @@ use crate::resource::cursor_state::CursorState;
 use crate::resource::emotion_pipeline::EmotionPipelineState;
 use crate::resource::event_channels::EventChannels;
 use crate::resource::exit::ExitRequested;
-use crate::resource::frame_state::FrameState;
 use crate::settings::QuestionDraft;
 use crate::settings_ui::PageKind;
 use crate::system::event_pump::pump_legacy_events;
@@ -222,15 +221,15 @@ fn emote_token_emits_message_via_pump() {
     schedule.add_systems(pump_legacy_events);
     schedule.run(&mut world);
 
-    let mut messages = world.resource_mut::<Messages<EmoteToken>>();
+    let messages = world.resource_mut::<Messages<EmoteToken>>();
     let mut cursor = messages.get_cursor();
-    let events: Vec<_> = cursor.read(&mut *messages).collect();
+    let events: Vec<_> = cursor.read(&*messages).collect();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].0, "happy");
 }
 
 #[test]
-fn platform_plugin_provides_cursor_state_and_consumes_pointer_moved() {
+fn platform_plugin_provides_cursor_state_and_pointer_moved_is_reserved() {
     let mut app = App::new();
     app.add_plugins(PlatformPlugin);
     app.init_resource::<Messages<PointerMoved>>();
@@ -244,10 +243,14 @@ fn platform_plugin_provides_cursor_state_and_consumes_pointer_moved() {
     schedule.add_systems(update_cursor_state_system);
     schedule.run(app.world_mut());
 
-    let cursor = app.world().resource::<CursorState>();
-    let pos = cursor.physical.expect("cursor recorded");
-    assert!((pos.x - 120.0).abs() < 1e-6);
-    assert!((pos.y - 240.0).abs() < 1e-6);
+    // Phase 8: device_query is the source of truth for the
+    // per-frame click-through test. `update_cursor_state_system`
+    // is intentionally a no-op — PointerMoved is reserved for
+    // a future migration that routes cursor state through
+    // bevy end-to-end. The message must not leak into
+    // `CursorState`.
+    assert!(app.world().resource::<CursorState>().physical.is_none());
+    assert!(app.world().resource::<Messages<PointerMoved>>().len() == 1);
 }
 
 #[test]

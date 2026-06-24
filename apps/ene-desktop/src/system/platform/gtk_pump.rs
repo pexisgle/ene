@@ -10,7 +10,12 @@
 //! to enqueue per-frame work before the GTK pump clears the
 //! queue.
 #[cfg(target_os = "linux")]
-pub fn tick_gtk_system() {
+use bevy_ecs::prelude::Res;
+#[cfg(target_os = "linux")]
+pub fn tick_gtk_system(ready: Option<Res<crate::resource::tray::GtkReady>>) {
+    if !ready.is_some_and(|r| r.0) {
+        return;
+    }
     while gtk::events_pending() {
         gtk::main_iteration_do(false);
     }

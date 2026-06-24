@@ -40,7 +40,7 @@ use x11rb::rust_connection::RustConnection;
 /// X11 window id (the 32-bit XID the server hands out when
 /// winit creates the window).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(dead_code)]
+#[cfg_attr(not(test), expect(dead_code, reason = "Test-only helper"))]
 pub struct X11WindowId(pub u32);
 
 /// EWMH atoms interned once on `try_new`.

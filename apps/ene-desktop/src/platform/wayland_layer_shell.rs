@@ -113,7 +113,7 @@ impl LayerShellContext {
     /// (e.g. after a `wl_display` disconnect). Not currently
     /// wired up — the connection is a long-lived handle for
     /// the lifetime of the process.
-    #[expect(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code, reason = "Test-only helper"))]
     pub fn invalidate(&mut self) {
         self.cached = None;
     }
