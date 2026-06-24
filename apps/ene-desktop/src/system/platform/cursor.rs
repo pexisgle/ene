@@ -28,7 +28,7 @@ use crate::resource::cursor_state::CursorState;
 /// without changing the plugin wiring.
 #[cfg_attr(
     not(test),
-    expect(
+    allow(
         dead_code,
         reason = "Slot reserved for the future PointerMoved-based cursor source; Phase 8 uses device_query"
     )

@@ -85,10 +85,9 @@ pub async fn execute_shell_command(
             {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Command output exceeded {MAX_OUTPUT_BYTES} bytes; killed"),
-                ));
+                return Err(std::io::Error::other(format!(
+                    "Command output exceeded {MAX_OUTPUT_BYTES} bytes; killed"
+                )));
             }
             result
         }
