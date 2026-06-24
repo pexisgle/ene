@@ -41,6 +41,13 @@ pub enum DbError {
 /// Client for communicating with the per-tool DB IPC server.
 pub struct DbClient {
     stream: IpcStream,
+    /// Socket path captured at connect-time so the client can be
+    /// [`reconnect`](Self::reconnect)ed after the server restarts.
+    socket_path: std::path::PathBuf,
+    /// Optional auth token captured at connect-time. `Some` for
+    /// `connect_with_token` clients, `None` for the unauthenticated
+    /// `connect` variant.
+    auth_token: Option<String>,
 }
 
 impl DbClient {
@@ -50,7 +57,11 @@ impl DbClient {
     /// when an auth token is available.
     pub async fn connect(socket_path: &Path) -> Result<Self, DbError> {
         let stream = IpcStream::connect(socket_path).await?;
-        Ok(Self { stream })
+        Ok(Self {
+            stream,
+            socket_path: socket_path.to_path_buf(),
+            auth_token: None,
+        })
     }
 
     /// Connects to the DB IPC server and immediately presents the
@@ -70,6 +81,37 @@ impl DbClient {
                 std::io::ErrorKind::InvalidData,
                 format!("unexpected handshake response: {other:?}"),
             ))),
+        }
+    }
+
+    /// Returns the socket path this client was connected to.
+    #[must_use]
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    /// Re-establishes the IPC connection after the server has restarted.
+    ///
+    /// The previous behavior had no way to recover from a `ConnectionClosed`
+    /// error: callers had to drop the client and rebuild it from scratch,
+    /// which meant every cached `schema`/`rowid` state was lost. With
+    /// `socket_path` and `auth_token` captured at connect-time, the same
+    /// client can be brought back online here.
+    pub async fn reconnect(&mut self) -> Result<(), DbError> {
+        let stream = IpcStream::connect(&self.socket_path).await?;
+        self.stream = stream;
+        if let Some(token) = self.auth_token.clone() {
+            let resp = self.send_request(&DbRequest::Handshake { token }).await?;
+            match resp {
+                DbResponse::HandshakeAck => Ok(()),
+                DbResponse::Error { code, message } => Err(DbError::Auth { code, message }),
+                other => Err(DbError::Transport(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unexpected handshake response: {other:?}"),
+                ))),
+            }
+        } else {
+            Ok(())
         }
     }
 
@@ -283,8 +325,18 @@ impl DbClient {
     }
 
     /// Requests a graceful shutdown of the DB server.
+    ///
+    /// Returns the server's response. The previous implementation
+    /// ignored the response with `let _ = ...;`, which made it
+    /// impossible to detect a server that had already died (the call
+    /// would return `Ok(())` even when the connection was closed).
     pub async fn shutdown(&mut self) -> Result<(), DbError> {
-        let _ = self.send_request(&DbRequest::Shutdown).await;
-        Ok(())
+        let resp = Self::check_error(self.send_request(&DbRequest::Shutdown).await?)?;
+        match resp {
+            DbResponse::Ack => Ok(()),
+            other => Err(DbError::UnexpectedResponse(format!(
+                "expected Ack, got {other:?}"
+            ))),
+        }
     }
 }
