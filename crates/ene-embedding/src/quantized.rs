@@ -100,7 +100,18 @@ impl GgufEmbeddingProvider {
         let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&x| i64::from(x)).collect();
 
         if input_ids.is_empty() {
-            return Ok(vec![0.0; self.dims]);
+            // Tokenization succeeded but yielded no
+            // input ids (e.g. input was whitespace-only
+            // or contained no in-vocab tokens). Returning
+            // a zero vector is unsafe: sqlite-vec's
+            // vec_distance_cosine is undefined for the
+            // zero vector, and downstream
+            // `vec![0.0; dims]`-normalized outputs
+            // contaminate every recall scan. Surface a
+            // typed error instead.
+            return Err(EmbeddingError::Provider(
+                ene_provider::EmbeddingError::EmptyInput,
+            ));
         }
 
         let input_tensor = Tensor::from_vec(
@@ -128,7 +139,7 @@ impl ene_provider::EmbeddingProvider for GgufEmbeddingProvider {
         kind: ene_provider::EmbeddingKind,
     ) -> Result<Vec<f32>, ene_provider::EmbeddingError> {
         if text.trim().is_empty() {
-            return Ok(vec![0.0; self.dims]);
+            return Err(ene_provider::EmbeddingError::EmptyInput);
         }
         let owned = text.to_string();
         let model = self.model_name.clone();
@@ -154,7 +165,7 @@ impl ene_provider::EmbeddingProvider for GgufEmbeddingProvider {
 
     async fn embed_query(&self, text: &str) -> Result<Vec<f32>, ene_provider::EmbeddingError> {
         if text.trim().is_empty() {
-            return Ok(vec![0.0; self.dims]);
+            return Err(ene_provider::EmbeddingError::EmptyInput);
         }
         let owned = text.to_string();
         let model = self.model_name.clone();
@@ -192,7 +203,7 @@ impl ene_provider::EmbeddingProvider for GgufEmbeddingProvider {
             let mut out = Vec::with_capacity(owned.len());
             for (text, kind) in &owned {
                 if text.trim().is_empty() {
-                    out.push(vec![0.0; self.dims]);
+                    return Err(ene_provider::EmbeddingError::EmptyInput);
                 } else {
                     out.push(
                         self.embed_internal(text, *kind)
