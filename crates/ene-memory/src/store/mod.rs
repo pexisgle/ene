@@ -123,8 +123,17 @@ pub struct MemoryStore {
     embedding_dim: usize,
 }
 
-fn parse_dt(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s).map_or_else(|_| Utc::now(), |dt| dt.with_timezone(&Utc))
+/// Parses an RFC3339 timestamp string into a `DateTime<Utc>`.
+///
+/// Returns an `InvalidTimestamp` error if `s` is not valid RFC3339.
+/// We deliberately do **not** fall back to `Utc::now()` on parse
+/// failure — silently substituting the current time would corrupt
+/// stored conversation history with the wrong `created_at` /
+/// `ended_at` and make the database impossible to reason about.
+fn parse_dt(s: &str) -> Result<DateTime<Utc>, MemoryError> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| MemoryError::Config(format!("invalid RFC3339 timestamp {s:?}: {e}")))
 }
 
 /// Applies the SQLite PRAGMAs the store depends on to the
@@ -193,15 +202,11 @@ impl MemoryStore {
             .ok_or_else(|| MemoryError::MemoryStoreConnectionError("Invalid path".to_string()))?;
         init_sqlite_vec();
         let opt = ConnectOptions::new(format!("sqlite:{path_str}"));
-        let db = Database::connect(opt)
-            .await
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+        let db = Database::connect(opt).await?;
 
         apply_pragmas(&db).await?;
 
-        Migrator::up(&db, None)
-            .await
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+        Migrator::up(&db, None).await?;
 
         Ok(Self::init(db, embedding_dim))
     }
@@ -218,15 +223,11 @@ impl MemoryStore {
         init_sqlite_vec();
         let mut opt = ConnectOptions::new("sqlite::memory:");
         opt.max_connections(1);
-        let db = Database::connect(opt)
-            .await
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+        let db = Database::connect(opt).await?;
 
         apply_pragmas(&db).await?;
 
-        Migrator::up(&db, None)
-            .await
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+        Migrator::up(&db, None).await?;
 
         Ok(Self::init(db, embedding_dim))
     }
@@ -274,10 +275,7 @@ impl MemoryStore {
                         ..Default::default()
                     };
 
-                    let res = new_summary
-                        .insert(txn)
-                        .await
-                        .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+                    let res = new_summary.insert(txn).await?;
                     let summary_id = res.id;
 
                     for fact in key_facts {
@@ -289,10 +287,7 @@ impl MemoryStore {
                                 )
                                 .filter(entities::conversation_keyfacts::Column::Key.eq(&fact.key))
                                 .exec(txn)
-                                .await
-                                .map_err(|e| {
-                                    MemoryError::MemoryStoreConnectionError(e.to_string())
-                                })?;
+                                .await?;
                         } else {
                             let new_fact = entities::conversation_keyfacts::ActiveModel {
                                 card_name: Set(card_name.clone()),
@@ -302,9 +297,7 @@ impl MemoryStore {
                                 created_at: Set(now.clone()),
                                 ..Default::default()
                             };
-                            new_fact.insert(txn).await.map_err(|e| {
-                                MemoryError::MemoryStoreConnectionError(e.to_string())
-                            })?;
+                            new_fact.insert(txn).await?;
                         }
                     }
 
@@ -373,24 +366,25 @@ impl MemoryStore {
         let results = select
             .into_model::<SearchSummaryResultRow>()
             .all(&self.db)
-            .await
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+            .await?;
 
-        Ok(results
+        results
             .into_iter()
-            .map(|row| RecalledSummary {
-                entry: ConversationSummary {
-                    id: row.id,
-                    session_id: row.session_id,
-                    card_name: row.card_name,
-                    summary: row.summary,
-                    embedding: bytes_to_embedding(&row.embedding),
-                    created_at: parse_dt(&row.created_at),
-                    ended_at: parse_dt(&row.ended_at),
-                },
-                similarity: row.similarity as f32,
+            .map(|row| {
+                Ok(RecalledSummary {
+                    entry: ConversationSummary {
+                        id: row.id,
+                        session_id: row.session_id,
+                        card_name: row.card_name,
+                        summary: row.summary,
+                        embedding: bytes_to_embedding(&row.embedding),
+                        created_at: parse_dt(&row.created_at)?,
+                        ended_at: parse_dt(&row.ended_at)?,
+                    },
+                    similarity: row.similarity as f32,
+                })
             })
-            .collect())
+            .collect()
     }
 
     /// Lists the most recent conversation summaries for a card.
@@ -404,21 +398,21 @@ impl MemoryStore {
             .order_by_desc(entities::conversation_summaries::Column::CreatedAt)
             .limit(limit as u64)
             .all(&self.db)
-            .await
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+            .await?;
 
-        Ok(rows
-            .into_iter()
-            .map(|row| ConversationSummary {
-                id: row.id,
-                session_id: row.session_id,
-                card_name: row.card_name,
-                summary: row.summary,
-                embedding: bytes_to_embedding(&row.embedding),
-                created_at: parse_dt(&row.created_at),
-                ended_at: parse_dt(&row.ended_at),
+        rows.into_iter()
+            .map(|row| {
+                Ok(ConversationSummary {
+                    id: row.id,
+                    session_id: row.session_id,
+                    card_name: row.card_name,
+                    summary: row.summary,
+                    embedding: bytes_to_embedding(&row.embedding),
+                    created_at: parse_dt(&row.created_at)?,
+                    ended_at: parse_dt(&row.ended_at)?,
+                })
             })
-            .collect())
+            .collect()
     }
 
     /// Counts the number of summaries for a card.
@@ -426,8 +420,7 @@ impl MemoryStore {
         let count = entities::conversation_summaries::Entity::find()
             .filter(entities::conversation_summaries::Column::CardName.eq(card_name))
             .count(&self.db)
-            .await
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+            .await?;
         Ok(count as i64)
     }
 
@@ -439,13 +432,11 @@ impl MemoryStore {
                 entities::conversation_keyfacts::Entity::delete_many()
                     .filter(entities::conversation_keyfacts::Column::SummaryId.eq(id))
                     .exec(txn)
-                    .await
-                    .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+                    .await?;
 
                 let res = entities::conversation_summaries::Entity::delete_by_id(id)
                     .exec(txn)
-                    .await
-                    .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+                    .await?;
 
                 Ok(res.rows_affected as usize)
             })
@@ -472,20 +463,12 @@ impl MemoryStore {
             vec![card_name.into()],
         );
 
-        let rows = self
-            .db
-            .query_all(stmt)
-            .await
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+        let rows = self.db.query_all(stmt).await?;
 
         rows.into_iter()
             .map(|row| {
-                let key: String = row
-                    .try_get("", "key")
-                    .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
-                let value: String = row
-                    .try_get("", "value")
-                    .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+                let key: String = row.try_get("", "key")?;
+                let value: String = row.try_get("", "value")?;
                 Ok(KeyFact { key, value })
             })
             .collect()
@@ -511,10 +494,7 @@ impl MemoryStore {
             ..Default::default()
         };
 
-        new_fact
-            .insert(&self.db)
-            .await
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+        new_fact.insert(&self.db).await?;
 
         Ok(())
     }
@@ -525,8 +505,7 @@ impl MemoryStore {
             .filter(entities::conversation_keyfacts::Column::CardName.eq(card_name))
             .filter(entities::conversation_keyfacts::Column::Key.eq(key))
             .exec(&self.db)
-            .await
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+            .await?;
         Ok(res.rows_affected as usize)
     }
 
@@ -538,8 +517,7 @@ impl MemoryStore {
             .column(entities::conversation_keyfacts::Column::Key)
             .distinct()
             .count(&self.db)
-            .await
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+            .await?;
         Ok(count as i64)
     }
 
@@ -566,10 +544,7 @@ impl MemoryStore {
             ..Default::default()
         };
 
-        let res = new_log
-            .insert(&self.db)
-            .await
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+        let res = new_log.insert(&self.db).await?;
 
         Ok(res.id)
     }
@@ -609,8 +584,7 @@ impl MemoryStore {
             .filter(entities::conversation_logs::Column::SessionId.eq(session_id))
             .order_by_asc(entities::conversation_logs::Column::CreatedAt)
             .all(&self.db)
-            .await
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+            .await?;
 
         Ok(rows
             .into_iter()
@@ -672,8 +646,7 @@ impl MemoryStore {
                 .to_owned(),
             )
             .exec(&self.db)
-            .await
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+            .await?;
 
         Ok(())
     }
@@ -684,8 +657,7 @@ impl MemoryStore {
     ) -> Result<Vec<ToolEmbeddingFieldRow>, MemoryError> {
         let rows = entities::tool_embedding_index::Entity::find()
             .all(&self.db)
-            .await
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+            .await?;
 
         Ok(rows
             .into_iter()
@@ -715,8 +687,7 @@ impl MemoryStore {
     ) -> Result<Vec<(String, String, String, String, String)>, MemoryError> {
         let rows = entities::tool_embedding_index::Entity::find()
             .all(&self.db)
-            .await
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+            .await?;
 
         Ok(rows
             .into_iter()
@@ -737,8 +708,7 @@ impl MemoryStore {
         let res = entities::tool_embedding_index::Entity::delete_many()
             .filter(entities::tool_embedding_index::Column::ToolName.eq(tool_name))
             .exec(&self.db)
-            .await
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+            .await?;
         Ok(res.rows_affected as usize)
     }
 
@@ -781,11 +751,7 @@ impl MemoryStore {
             .order_by_desc(Expr::col("similarity"))
             .limit(row_cap);
 
-        let rows = select
-            .into_model::<SearchToolRow>()
-            .all(&self.db)
-            .await
-            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+        let rows = select.into_model::<SearchToolRow>().all(&self.db).await?;
 
         use std::collections::HashMap;
         let mut by_tool: HashMap<String, f32> = HashMap::new();
@@ -818,7 +784,7 @@ impl MemoryStore {
         let summaries = self
             .search_summaries(query_embedding, card_name, limit, similarity_threshold)
             .await?;
-        let key_facts = self.get_all_keyfacts(card_name).await.unwrap_or_default();
+        let key_facts = self.get_all_keyfacts(card_name).await?;
         Ok((summaries, key_facts))
     }
 }

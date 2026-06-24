@@ -53,7 +53,15 @@ pub async fn summarize_conversation(
             ene_provider::LlmMessage::System { content } => {
                 conversation_text.push_str(&format!("System: {content}\n"));
             }
-            _ => {}
+            // Tool responses are intentionally excluded from the
+            // summary: their content was already attributed to the
+            // assistant turn that produced the corresponding tool
+            // call, and re-quoting the raw result would inflate
+            // the summary with data that does not reflect the
+            // dialogue. Match explicitly so future enum additions
+            // (e.g. Developer, Function) become compile errors
+            // rather than silently dropped.
+            ene_provider::LlmMessage::Tool { .. } => {}
         }
     }
 
@@ -157,10 +165,17 @@ pub async fn summarize_conversation(
         },
     ];
 
-    let content = provider
-        .chat_completion(&messages, Some(schema))
-        .await
-        .map_err(|e| MemoryError::ApiRequestError(format!("summarization: {e}")))?;
+    let content = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        provider.chat_completion(&messages, Some(schema)),
+    )
+    .await
+    .map_err(|_| {
+        MemoryError::ApiRequestError(
+            "summarization: chat completion timed out after 120s".to_string(),
+        )
+    })?
+    .map_err(|e| MemoryError::ApiRequestError(format!("summarization: {e}")))?;
 
     parse_summary_json(&content)
 }
