@@ -543,7 +543,13 @@ impl CharacterSettings {
 
     pub fn load_from_file(&mut self) {
         let path = ene_config::config_file_path();
-        let full = ene_config::load_config_from(&self.assets_dir, &path);
+        let full = match ene_config::load_config_from(&self.assets_dir, &path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("[Settings] Failed to load config: {e}, falling back to defaults");
+                ene_config::EneConfig::default()
+            }
+        };
 
         self.ai.ai = full.clone();
         *self.store.write() = ene_config::ConfigStore::from_config(full.clone());

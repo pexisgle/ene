@@ -423,30 +423,52 @@ pub fn resolve_character_path(name: &str) -> String {
 }
 
 /// Reads the asset directory and settings.json, resolves `character_card_path`, etc., and returns `EneConfig`.
-#[must_use]
-pub fn load_config() -> EneConfig {
+///
+/// Returns [`EneConfigError`] if the on-disk `settings.json` is malformed,
+/// env-var parsing fails, or required fields cannot be deserialised. This
+/// is a breaking change from the previous behavior, which silently
+/// reset the entire config to defaults on any extract failure.
+pub fn load_config() -> Result<EneConfig, EneConfigError> {
     let assets_dir = crate::paths::assets_dir();
     let config_path = crate::paths::config_file_path();
     load_config_from(&assets_dir, &config_path)
 }
 
-/// Loads config from the specified asset directory and config file path
-#[must_use]
-pub fn load_config_from(assets_dir: &Path, config_path: &Path) -> EneConfig {
+/// Loads config from the specified asset directory and config file path.
+///
+/// Returns [`EneConfigError`] on any extract failure. See [`load_config`].
+pub fn load_config_from(
+    assets_dir: &Path,
+    config_path: &Path,
+) -> Result<EneConfig, EneConfigError> {
     load_full_config_from(assets_dir, config_path)
 }
 
-/// Fully loads the config file. Also auto-updates the schema file on startup
-#[must_use]
-pub fn load_full_config() -> EneConfig {
+/// Fully loads the config file. Also auto-updates the schema file on startup.
+///
+/// Returns [`EneConfigError`] on any extract failure. See [`load_config`].
+pub fn load_full_config() -> Result<EneConfig, EneConfigError> {
     let assets_dir = crate::paths::assets_dir();
     let config_path = crate::paths::config_file_path();
     load_full_config_from(&assets_dir, &config_path)
 }
 
-/// Fully loads `EneConfig` from the specified asset directory and config file path
-#[must_use]
-pub fn load_full_config_from(assets_dir: &Path, config_path: &Path) -> EneConfig {
+/// Fully loads `EneConfig` from the specified asset directory and config file path.
+///
+/// Returns [`EneConfigError`] on any extract failure. See [`load_config`].
+///
+/// # Env-var case folding
+///
+/// The `ENE_` env provider applies `.map(|k| k.to_lowercase())` so that
+/// `ENE_PROVIDER__API_KEY` resolves to the `provider.api_key` field on
+/// [`EneConfig`] (lowercase). Without the case-folding, Figment stored
+/// the path as `PROVIDER.api_key` and the value was silently dropped
+/// because `get_section::<ProviderConfig>()` looks up `T::path() =
+/// ["provider"]` (lowercase).
+pub fn load_full_config_from(
+    assets_dir: &Path,
+    config_path: &Path,
+) -> Result<EneConfig, EneConfigError> {
     use figment::{
         Figment,
         providers::{Env, Format, Json, Serialized},
@@ -454,12 +476,18 @@ pub fn load_full_config_from(assets_dir: &Path, config_path: &Path) -> EneConfig
 
     let figment = Figment::from(Serialized::defaults(EneConfig::default()))
         .merge(Json::file(config_path))
-        .merge(Env::prefixed("ENE_").split("__"));
+        // `.map(...)` makes env vars case-insensitive against the
+        // lowercase config keys, matching the documented
+        // `ENE_PROVIDER__API_KEY` examples.
+        .merge(
+            Env::prefixed("ENE_")
+                .split("__")
+                .map(|k| k.as_str().to_lowercase().into()),
+        );
 
-    let config: EneConfig = figment.extract().unwrap_or_else(|e| {
-        tracing::error!("Failed to load configuration: {e}, using default");
-        EneConfig::default()
-    });
+    let config: EneConfig = figment.extract().map_err(|e| {
+        EneConfigError::GenericConfigError(format!("configuration extract failed: {e}"))
+    })?;
 
     // Ensure schema directory exists
     let schema_dir = assets_dir.join("schema");
@@ -468,7 +496,7 @@ pub fn load_full_config_from(assets_dir: &Path, config_path: &Path) -> EneConfig
     write_schemas(assets_dir);
 
     update_global_config(config.clone());
-    config
+    Ok(config)
 }
 
 /// Auto-generates and writes out settings and character schemas under the assets schema directory.
@@ -512,7 +540,139 @@ pub fn update_section<T>(value: &T) -> Result<(), EneConfigError>
 where
     T: serde::Serialize + serde::de::DeserializeOwned + HasConfigKey,
 {
-    let mut config = load_config();
+    let mut config = load_config()?;
     config.set_section(value)?;
     save_full_config(&config).map_err(|e| EneConfigError::GenericConfigError(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use figment::{
+        Figment,
+        providers::{Env, Format, Json, Serialized},
+    };
+    use std::sync::Mutex;
+
+    /// env-var tests in this module call `set_var`, which is process-global
+    /// and panics if invoked concurrently from multiple threads. A static
+    /// mutex serializes them.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Direct re-implementation of the `load_full_config_from` env-var
+    /// merging logic, but with `assets_dir` and `config_path` injected
+    /// rather than read from the global paths, so we can test the
+    /// env-var folding in isolation.
+    fn figment_with_settings_json(config_path: &Path) -> Figment {
+        Figment::from(Serialized::defaults(EneConfig::default()))
+            .merge(Json::file(config_path))
+            .merge(
+                Env::prefixed("ENE_TEST_")
+                    .split("__")
+                    .map(|k| k.as_str().to_lowercase().into()),
+            )
+    }
+
+    /// Inspect the env-var-derived `extra` map directly, instead of
+    /// going through `get_section::<T>()`. This avoids the dual-crate
+    /// problem (`ene_provider` is not a dev-dep of `ene_config`, so its
+    /// `define_config!`-generated impls of `HasConfigKey` are for a
+    /// different copy of the trait). The `extra` map is what
+    /// `get_section` reads from, so checking it is equivalent to
+    /// checking the env-var folding.
+    fn extra_keys(cfg: &EneConfig) -> Vec<String> {
+        cfg.extra.keys().cloned().collect()
+    }
+
+    /// Regression for #40: the case-folding `.map(|k| k.to_lowercase())`
+    /// must turn `ENE_TEST_PROVIDER__API_KEY` into the lowercase
+    /// `provider.api_key` path. Pre-fix, the path was stored as
+    /// `PROVIDER.api_key` and `get_section::<ProviderConfig>()` looked
+    /// it up under `provider` (lowercase) and silently got nothing.
+    #[test]
+    fn env_uppercase_folds_to_lowercase_path() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
+        unsafe {
+            std::env::set_var("ENE_TEST_PROVIDER__API_KEY", "sk-test-1234");
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("settings.json");
+        std::fs::write(&path, "{}").expect("write settings");
+
+        let fig = figment_with_settings_json(&path);
+        let cfg: EneConfig = fig.extract().expect("extract");
+
+        unsafe {
+            std::env::remove_var("ENE_TEST_PROVIDER__API_KEY");
+        }
+
+        let keys = extra_keys(&cfg);
+        assert!(
+            keys.contains(&"provider".to_string()),
+            "expected lowercase 'provider' key in extra, got {keys:?}"
+        );
+        assert!(
+            !keys.contains(&"PROVIDER".to_string()),
+            "uppercase 'PROVIDER' key should have been folded to lowercase, got {keys:?}"
+        );
+    }
+
+    /// Lowercase env vars must also work — case-folding is
+    /// idempotent for already-lowercase input.
+    #[test]
+    fn env_lowercase_works() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("ENE_TEST_provider__api_key", "sk-lowercase");
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("settings.json");
+        std::fs::write(&path, "{}").expect("write settings");
+
+        let fig = figment_with_settings_json(&path);
+        let cfg: EneConfig = fig.extract().expect("extract");
+
+        unsafe {
+            std::env::remove_var("ENE_TEST_provider__api_key");
+        }
+
+        let keys = extra_keys(&cfg);
+        assert!(
+            keys.contains(&"provider".to_string()),
+            "expected lowercase 'provider' key, got {keys:?}"
+        );
+    }
+
+    /// Regression for #40: pre-fix, `load_full_config_from` called
+    /// `figment.extract().unwrap_or_else(|e| { ... EneConfig::default() })`
+    /// which silently reset the entire config to defaults on any
+    /// extract failure. After the fix, the function returns
+    /// `EneConfigError::GenericConfigError` instead.
+    #[test]
+    fn malformed_settings_json_returns_error_not_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("settings.json");
+        // Not valid JSON for an EneConfig.
+        std::fs::write(&path, "{ this is not valid json }").expect("write");
+
+        let result = load_full_config_from(tmp.path(), &path);
+        assert!(
+            result.is_err(),
+            "expected Err on malformed settings.json, got Ok"
+        );
+    }
+
+    /// Empty `settings.json` is still acceptable because Figment
+    /// falls back to `Serialized::defaults`. Ensure the success path
+    /// stays green after the new `?` propagation.
+    #[test]
+    fn empty_settings_json_extracts_defaults() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("settings.json");
+        std::fs::write(&path, "{}").expect("write");
+
+        let result = load_full_config_from(tmp.path(), &path);
+        assert!(result.is_ok(), "empty settings.json should extract ok");
+    }
 }

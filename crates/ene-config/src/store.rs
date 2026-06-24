@@ -36,14 +36,39 @@ impl ConfigStore {
     /// Creates a new store by loading the global config from disk.
     ///
     /// Uses the standard figment pipeline (defaults → `settings.json` → `ENE_` env vars).
+    /// On any extract failure, falls back to `EneConfig::default()` and
+    /// logs the error. This is the only call site that preserves the
+    /// pre-#40 silent-default behavior, because the desktop / cli host
+    /// must be able to construct a store before the user can fix the
+    /// config file. Use [`Self::try_load`] to surface the error.
     pub fn load() -> Self {
-        let config = crate::load_config();
+        let config = match crate::load_config() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("[ene-config] Failed to load configuration: {e}, using defaults");
+                EneConfig::default()
+            }
+        };
         Self {
             config: RwLock::new(config),
             character_config: RwLock::new(CharacterConfig::default()),
             global_dirty: AtomicBool::new(false),
             character_dirty: AtomicBool::new(false),
         }
+    }
+
+    /// Like [`Self::load`] but propagates the load error. Use this when
+    /// the caller wants the user to see the error directly (e.g. CLI
+    /// startup, where failing fast is preferable to silently starting
+    /// with an empty config).
+    pub fn try_load() -> Result<Self, crate::EneConfigError> {
+        let config = crate::load_config()?;
+        Ok(Self {
+            config: RwLock::new(config),
+            character_config: RwLock::new(CharacterConfig::default()),
+            global_dirty: AtomicBool::new(false),
+            character_dirty: AtomicBool::new(false),
+        })
     }
 
     /// Creates a store from an already-loaded [`EneConfig`].

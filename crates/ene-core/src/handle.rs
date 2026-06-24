@@ -462,7 +462,7 @@ impl EneHandle {
     /// This is a convenience wrapper around [`ene_config::load_config`] and [`EneHandle::reconfigure`].
     /// Returns a clone of the loaded [`EneConfig`].
     pub async fn load_config(&self) -> Result<EneConfig, EneCoreError> {
-        let config = ene_config::load_config();
+        let config = ene_config::load_config()?;
         self.reconfigure(config.clone()).await?;
         Ok(config)
     }
@@ -476,7 +476,7 @@ impl EneHandle {
         assets_dir: &std::path::Path,
         config_path: &std::path::Path,
     ) -> Result<EneConfig, EneCoreError> {
-        let config = ene_config::load_config_from(assets_dir, config_path);
+        let config = ene_config::load_config_from(assets_dir, config_path)?;
         self.reconfigure(config.clone()).await?;
         Ok(config)
     }
