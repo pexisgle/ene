@@ -18,19 +18,20 @@
 中心となる抽象インターフェースです。ホストマネージャーと各個別レジストリの両方がこのトレイトを実装しており、コンポジションが可能です。
 
 ```rust
+#[async_trait::async_trait]
 pub trait ToolRegistry: Send + Sync {
     fn list_tools(&self) -> Vec<ToolSpec>;
-    fn call_tool(
+    async fn call_tool(
         &self,
         name: &str,
         arguments: &str,
     ) -> Result<String, ToolError>;
 
-    // オプションのフック — デフォルト実装は何もしない (no-op)
-    fn set_session_id(&self, session_id: &str) {}
-    fn approve_permission(&self, request_id: &str) {}
-    fn allow_pattern(&self, action: &str, target_pattern: &str) {}
-    fn config_schema(&self) -> Option<serde_json::Value> { None }
+    // 任意のフック — デフォルト実装は no-op
+    async fn set_session_id(&self, _session_id: &str) {}
+    async fn approve_permission(&self, _request_id: &str) {}
+    async fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
+    async fn config_schema(&self) -> Option<serde_json::Value> { None }
 }
 ```
 
@@ -110,16 +111,15 @@ ListTools  → Vec<ToolSpec> をキャッシュ
 CallTool / SetSessionId / … を受け付ける状態へ
 ```
 
-接続が切断された場合、`IpcToolRegistry` は指数バックオフで**自動再接続**を試みます：
+接続が切断された場合、`IpcToolRegistry` は指数バックオフで**自動再接続**を試みます（`RECONNECT_BASE_DELAY_MS = 200`、`RECONNECT_MAX_DELAY_MS = 10_000`、`RECONNECT_MAX_RETRIES = 5`）：
 
-| 試行回数 | 待機時間 |
+| 試行回数 | 次回試行までの待機 |
 |---|---|
 | 1 回目 | 200 ms |
 | 2 回目 | 400 ms |
 | 3 回目 | 800 ms |
-| 4 回目 | 2 s |
-| 5 回目 | 10 s |
-| 6 回目以降 | `ToolError::IpcTransport` を返す |
+| 4 回目 | 1.6 s |
+| 5 回目 | (あきらめて `ToolError::IpcClient` を返す) |
 
 ### 主要メソッド
 
@@ -135,14 +135,18 @@ CallTool / SetSessionId / … を受け付ける状態へ
 
 **プロセスレベルの監視**機能で `IpcToolRegistry` をラップします。子プロセスがクラッシュした場合、`SupervisedIpcRegistry` が自動的に再起動します。
 
-| 試行回数 | 待機時間 |
+再起動間の待機は指数バックオフです（`BASE_DELAY_MS = 500`、`2^attempt` 倍、`MAX_DELAY_MS = 30_000` でクランプ）：
+
+| 再起動 # | 次回再試行までの待機 |
 |---|---|
 | 1 回目 | 500 ms |
 | 2 回目 | 1 s |
 | 3 回目 | 2 s |
-| 4 回目 | 10 s |
-| 5 回目 | 30 s |
-| 6 回目以降 | 諦めてエラーを返す |
+| 4 回目 | 4 s |
+| 5 回目 | 8 s |
+| 5 回超 | あきらめて `ToolError::ExecutionFailed` を返す |
+
+再起動後の再接続 (`IpcToolRegistry` 内部) は**一定 50 ms 間隔、最大 50 回リトライ**を使用します（`tool_host_manager.rs` の `CONNECT_DELAY_MS = 50`、`CONNECT_RETRIES = 50`）。
 
 `ToolHostManager` がスポーンするすべてのツールプロセスには、これが自動的に使用されます。
 

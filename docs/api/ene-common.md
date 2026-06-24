@@ -95,7 +95,7 @@ Truncates to at most `n` bytes, snapping back to the nearest valid UTF-8 charact
 ### Basic usage
 
 ```rust
-use ene_common::truncate::Truncate;
+use ene_common::Truncate;
 
 let text = "This is a long piece of text that we want to truncate.";
 
@@ -111,7 +111,7 @@ assert_eq!(short.truncated, "Hello");
 ### Truncating multi-line output
 
 ```rust
-use ene_common::truncate::Truncate;
+use ene_common::Truncate;
 
 let output = "line 1\nline 2\nline 3\nline 4\nline 5";
 let result = output.truncate_lines(3);
@@ -123,7 +123,7 @@ assert!(result.was_truncated);
 ### Byte-safe truncation for buffer limits
 
 ```rust
-use ene_common::truncate::Truncate;
+use ene_common::Truncate;
 
 // Useful when interfacing with APIs that have byte-length limits
 let user_input = get_user_input();
@@ -139,11 +139,14 @@ send_to_api(&safe_input.truncated);
 
 ## Re-exports in Other Crates
 
-`ene-session` re-exports `Truncate` for convenience, so consumers of `ene-session` do not need to depend on `ene-common` directly:
+`ene-common::Truncate` is re-exported at the top of the crate, and
+`ene-core` re-exports it again under its own name. Consumers of
+`ene-core` do not need to depend on `ene-common` directly:
 
 ```rust
-// In ene-session:
-pub use ene_common::truncate::Truncate;
+// In ene-core/src/lib.rs:
+#[doc(no_inline)]
+pub use ene_common::Truncate;
 ```
 
 ---

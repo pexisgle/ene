@@ -221,19 +221,21 @@ impl ToolProvider for CalculatorProvider {
 ```rust
 #[async_trait]
 pub trait ToolProvider: Send + Sync {
-    /// このプロバイダが公開するツール一覧を返す
+    /// このプロバイダが公開するツール一覧を返す。
+    /// メガツールはアクションごとに 1 スペック返す (例: `filesystem.read`, ...)。
     fn list_specs(&self) -> Vec<ToolSpec>;
 
-    /// メガツール用のアクションごとのメタデータを返す (デフォルト: 空)
-    fn list_action_specs(&self) -> Vec<ActionSpec> { vec![] }
+    /// アクションごとのメタデータを返す (Tool RAG 埋め込み用)。
+    /// 個別ツールは空ベクタを返す。
+    fn list_action_specs(&self) -> Vec<ActionSpec> { Vec::new() }
 
     /// ツール名と JSON 引数でツールを実行
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>;
 
-    /// セッション ID が変更されたときに呼び出される (セッション状態用)
+    /// 現在のセッション ID を設定 (Undo 追跡やセッションスコープ状態用)
     fn set_session_id(&self, session_id: &str);
 
-    /// サンドボックス設定を受信 (ファイルシステムツール用)
+    /// サンドボックス設定を受信 (ファイルシステムツール用; デフォルト: no-op)
     fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
 
     /// ペンディング中の破壊的操作の権限リクエストを承認
@@ -242,8 +244,11 @@ pub trait ToolProvider: Send + Sync {
     /// セッション全体の権限許可パターンを追加 (アクション + ターゲットグロブ)
     fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
 
-    /// settings.json からツール固有設定を受信
+    /// ツール固有設定を受信 (Initialize 時に 1 回呼び出される)
     fn set_config(&self, _config: &serde_json::Value) {}
+
+    /// ツールの現在の設定を返す
+    fn get_config(&self) -> serde_json::Value { serde_json::Value::Null }
 
     /// このツールが受け付ける設定の JSON Schema を返す
     fn config_schema(&self) -> Option<serde_json::Value> { None }

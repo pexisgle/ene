@@ -11,7 +11,7 @@ See also: [`ene-tool-host`](ene-tool-host.md) for the host-side connection manag
 ## Protocol Version
 
 ```rust
-pub const IPC_PROTOCOL_VERSION: u32 = /* current */;
+pub const IPC_PROTOCOL_VERSION: u32 = 1;
 ```
 
 Both parties send their version in the `Handshake` / `HandshakeAck` messages. A mismatch causes the connection to be terminated. Bump this constant only when the wire format changes in a backward-incompatible way (see [AGENTS.md §4 R3](../../AGENTS.md)).
@@ -146,16 +146,20 @@ Messages sent from the **host** (`ene-tool-host`) **to** the tool binary.
 
 ```rust
 pub enum IpcRequest {
-    /// Open the connection. Must be the first message.
+    /// Handshake to negotiate protocol version. Must be the first message.
     Handshake { version: u32 },
     /// Provide sandbox policy and per-tool config.
     Initialize {
         sandbox: SandboxConfigData,
-        tool_config: serde_json::Value,
+        tool_config: Option<serde_json::Value>,
     },
-    /// Request the tool's metadata list.
+    /// Request the tool's full metadata list.
     ListTools,
-    /// Invoke a tool.
+    /// Request per-action metadata (for mega-tool embedding).
+    ListActionSpecs,
+    /// Request the tool's configuration JSON Schema.
+    GetConfigSchema,
+    /// Invoke a tool by name with JSON arguments.
     CallTool { name: String, arguments: String },
     /// Propagate the active session ID.
     SetSessionId { session_id: String },
@@ -163,8 +167,14 @@ pub enum IpcRequest {
     ApprovePermission { request_id: String },
     /// Add a pattern to the sandbox allow-list.
     AllowPattern { action: String, target_pattern: String },
-    /// Request the tool's configuration JSON Schema.
-    GetConfigSchema,
+    /// Get the tool's configuration.
+    GetMyConfig,
+    /// Replace the tool's configuration.
+    SetMyConfig(serde_json::Value),
+    /// Health-check ping.
+    Ping,
+    /// Graceful shutdown.
+    Shutdown,
 }
 ```
 
@@ -176,18 +186,24 @@ Messages sent from the **tool binary** back to the host.
 
 ```rust
 pub enum IpcResponse {
-    /// Acknowledge the Handshake.
+    /// Acknowledge the Handshake with the negotiated version.
     HandshakeAck { version: u32 },
-    /// Generic acknowledgment (for Initialize, SetSessionId, etc.).
+    /// Generic acknowledgment (for Initialize, `SetSessionId`, etc.).
     Ack,
     /// Response to ListTools.
     Tools { tools: Vec<ToolSpec> },
-    /// Response to CallTool.
-    CallResult { result: Result<String, ToolError> },
-    /// Unrecoverable tool-side error (outside a specific call).
-    Error { message: String },
+    /// Response to ListActionSpecs. For mega-tools, one entry per action.
+    ActionSpecs { specs: Vec<ActionSpec> },
     /// Response to GetConfigSchema.
     ConfigSchema { schema: Option<serde_json::Value> },
+    /// Response to CallTool.
+    CallResult { result: Result<String, ToolError> },
+    /// Response to GetMyConfig.
+    MyConfig(serde_json::Value),
+    /// Pong response to Ping.
+    Pong,
+    /// Unrecoverable tool-side error (outside a specific call).
+    Error { message: String },
 }
 ```
 
@@ -268,20 +284,21 @@ A cross-platform, framed byte stream:
 ### Wire helpers
 
 ```rust
-/// Write a length-prefixed, bincode-encoded IpcRequest to the stream.
+/// Write a length-prefixed, JSON-encoded IpcRequest to the stream.
 pub async fn write_ipc_request(
     stream: &mut IpcStream,
     req: &IpcRequest,
-) -> Result<(), io::Error>;
+) -> Result<(), ToolError>;
 
 /// Read and decode the next IpcResponse from the stream.
 /// Returns None on clean EOF.
 pub async fn read_ipc_response(
     stream: &mut IpcStream,
-) -> Result<Option<IpcResponse>, io::Error>;
+) -> Result<Option<IpcResponse>, ToolError>;
 ```
 
-Framing format: `[u32 little-endian length][bincode payload]`.
+Framing format: `[u32 little-endian length][JSON payload]`. Maximum
+message size is 64 MB (`MAX_MESSAGE_SIZE` in `ene_tool_proto::ipc`).
 
 ### `SandboxConfigData`
 

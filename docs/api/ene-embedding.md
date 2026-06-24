@@ -26,21 +26,22 @@ flowchart LR
 pub struct GgufEmbeddingProvider { /* opaque */ }
 ```
 
-Implements `EmbeddingProvider`. Loads a GGUF model and its accompanying `tokenizer.json` at construction time. Inference runs synchronously on CPU (or accelerated hardware, if available via candle features).
+Implements `EmbeddingProvider`. Loads a GGUF model and its accompanying
+`tokenizer.json` at construction time. Inference runs synchronously on
+CPU (or accelerated hardware, if available via candle features).
 
-This type is not typically constructed directly — use [`create_local_provider`](#create_local_provider) instead.
+This type is not typically constructed directly — use
+[`create_local_provider`](#create_local_provider) instead.
 
 **Implemented trait methods:**
 
 | Method | Notes |
 |--------|-------|
-| `embed(text, kind)` | Embeds with an optional kind-specific prefix (model-dependent). |
+| `embed(text, kind)` | Embeds with an optional kind-specific prefix (model-dependent). The `Query` and `Hyde` kinds use a `"Query: "` prefix; other kinds use `"Document: "`. |
 | `embed_query(text)` | Shorthand for `embed(text, EmbeddingKind::Query)`. |
-| `embed_batch(items)` | Embeds all items sequentially (batched into single inference calls where possible). |
-| `hyde(query)` | Not directly inferred; falls back to embedding the query directly when HyDE is not supported by the loaded model. |
-| `rerank(query, candidates)` | Scores each candidate's text fields against the query using cosine similarity of their embeddings. |
+| `embed_batch(items)` | Embeds all items sequentially (currently one inference call per item, with parallel decode for HyDE). |
 | `dimensions()` | Returns the output vector size (set from model metadata). |
-| `model_name()` | Returns the GGUF filename stem as the model identifier. |
+| `model_name()` | Returns `"{model}@{quantization}"` (e.g. `nomic-embed-text-v1.5@Q4_K_M`). |
 
 ---
 
@@ -52,11 +53,13 @@ This type is not typically constructed directly — use [`create_local_provider`
 pub fn resolve_gguf_paths(
     model: &str,
     quantization: &str,
-    model_dir: &Path,
+    model_dir: PathBuf,
 ) -> Result<(PathBuf, PathBuf), EneEmbeddingError>
 ```
 
-Resolves the paths to a GGUF model file and its tokenizer given a model name, quantization suffix, and search directory.
+Resolves the paths to a GGUF model file and its tokenizer given a
+model name, quantization suffix, and search directory. Note that
+`model_dir` is consumed by value.
 
 **Returns:** `(model_path, tokenizer_path)` on success.
 
@@ -76,11 +79,13 @@ Call with `model = "nomic-embed-text-v1.5"`, `quantization = "Q4_K_M"`.
 pub fn create_local_provider(
     model: &str,
     quantization: &str,
-    model_dir: &Path,
-) -> Result<Box<dyn EmbeddingProvider>, EneEmbeddingError>
+    model_dir: PathBuf,
+) -> Result<Box<dyn ene_provider::EmbeddingProvider>, EneEmbeddingError>
 ```
 
-The primary entry point. Resolves paths via `resolve_gguf_paths`, loads the GGUF model and tokenizer, and returns a boxed `EmbeddingProvider`.
+The primary entry point. Resolves paths via `resolve_gguf_paths`, loads
+the GGUF model and tokenizer, and returns a boxed `EmbeddingProvider`.
+Note that `model_dir` is consumed by value (`PathBuf`).
 
 **Fixed parameters:**
 - `max_length = 8192` — maximum token sequence length.
@@ -89,12 +94,12 @@ The primary entry point. Resolves paths via `resolve_gguf_paths`, loads the GGUF
 
 ```rust
 use ene_embedding::create_local_provider;
-use std::path::Path;
+use std::path::PathBuf;
 
 let provider = create_local_provider(
     "nomic-embed-text-v1.5",
     "Q4_K_M",
-    Path::new("/models"),
+    PathBuf::from("/models"),
 )?;
 
 println!("Dimensions: {}", provider.dimensions());
@@ -109,19 +114,21 @@ println!("Model: {}", provider.model_name());
 
 ```rust
 pub enum EneEmbeddingError {
-    /// Model or tokenizer file not found or could not be opened.
-    ModelNotFound { path: PathBuf },
+    /// General embedding error (load, inference, etc.).
+    #[error("Embedding error: {0}")]
+    EmbeddingError(String),
 
-    /// Failed to load the GGUF model (format error, corruption, etc.)
-    LoadFailed(String),
-
-    /// Inference failed.
-    InferenceFailed(String),
-
-    /// The tokenizer file could not be parsed.
-    TokenizerError(String),
+    /// Error from the Candle ML inference engine.
+    #[error("Candle ML error: {0}")]
+    CandleError(String),
 }
+
+/// Type alias for internal module usages.
+pub type EmbeddingError = EneEmbeddingError;
 ```
+
+`EneEmbeddingError` automatically converts into
+`ene_provider::EmbeddingError::Provider(String)` via `From`.
 
 ---
 

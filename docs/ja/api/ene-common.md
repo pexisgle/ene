@@ -95,7 +95,7 @@ fn truncate_bytes(&self, n: usize) -> TruncateResult
 ### 基本的な使い方
 
 ```rust
-use ene_common::truncate::Truncate;
+use ene_common::Truncate;
 
 let text = "これは切り詰めたい長いテキストです。";
 
@@ -111,7 +111,7 @@ assert_eq!(short.truncated, "Hello");
 ### 複数行出力の切り詰め
 
 ```rust
-use ene_common::truncate::Truncate;
+use ene_common::Truncate;
 
 let output = "1行目\n2行目\n3行目\n4行目\n5行目";
 let result = output.truncate_lines(3);
@@ -123,7 +123,7 @@ assert!(result.was_truncated);
 ### バッファ制限のための安全なバイトトランケーション
 
 ```rust
-use ene_common::truncate::Truncate;
+use ene_common::Truncate;
 
 // バイト長制限のあるAPIを呼び出す際に便利
 let user_input = get_user_input();
@@ -139,10 +139,16 @@ send_to_api(&safe_input.truncated);
 
 ## 他のクレートからの再エクスポート
 
-`ene-session` は利便性のために `Truncate` を再エクスポートしているため、`ene-session` の利用者は `ene-common` に直接依存する必要はありません：
+`ene-common::Truncate` はクレートトップで再エクスポートされており、
+`ene-session` と `ene-core` もさらに再エクスポートしています。
+`ene-core` の利用者は `ene-common` を直接依存させる必要がありません：
 
 ```rust
-// ene-session 内：
+// ene-core/src/lib.rs:
+#[doc(no_inline)]
+pub use ene_common::Truncate;
+
+// ene-session/src/lib.rs:
 pub use ene_common::truncate::Truncate;
 ```
 
