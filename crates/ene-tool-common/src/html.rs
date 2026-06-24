@@ -1,5 +1,6 @@
 use ego_tree::NodeId;
 use scraper::{ElementRef, Html, Node, Selector};
+use std::sync::OnceLock;
 
 const SKIP_TAGS: &[&str] = &[
     "script", "style", "noscript", "iframe", "svg", "nav", "header", "footer", "aside", "template",
@@ -7,9 +8,15 @@ const SKIP_TAGS: &[&str] = &[
 ];
 
 /// Converts raw HTML to Markdown text.
+///
+/// If the underlying `htmd` converter fails (e.g. on severely malformed
+/// input), the original HTML is returned as plain text so the caller still
+/// gets a non-empty result instead of an empty string. The previous
+/// `unwrap_or_default()` returned an empty string on every failure, which
+/// silently dropped the page content.
 #[must_use]
 pub fn html_to_markdown(html: &str) -> String {
-    htmd::convert(html).unwrap_or_default()
+    htmd::convert(html).unwrap_or_else(|_| html.to_string())
 }
 
 /// Extracts a specific region from HTML and returns it as HTML.
@@ -40,7 +47,7 @@ pub fn extract_markdown(html: &str, extract: &str, trim: bool) -> String {
         html.to_string()
     };
 
-    let md = htmd::convert(&html_input).unwrap_or_default();
+    let md = htmd::convert(&html_input).unwrap_or_else(|_| html_input.clone());
     normalize_text(&md)
 }
 
@@ -87,9 +94,15 @@ fn strip_subtrees(tree: &mut ego_tree::Tree<Node>, root_id: NodeId, skip_tags: &
 }
 
 fn normalize_text(text: &str) -> String {
-    let re_multispace = regex::Regex::new(r"[ \t]+").unwrap();
-    let re_multiline = regex::Regex::new(r"\n[ \t]*\n[ \t\n]*").unwrap();
-    let re_leading_space = regex::Regex::new(r"[ \t]*\n[ \t]*").unwrap();
+    static RE_MULTISPACE: OnceLock<regex::Regex> = OnceLock::new();
+    static RE_MULTILINE: OnceLock<regex::Regex> = OnceLock::new();
+    static RE_LEADING_SPACE: OnceLock<regex::Regex> = OnceLock::new();
+
+    let re_multispace = RE_MULTISPACE.get_or_init(|| regex::Regex::new(r"[ \t]+").unwrap());
+    let re_multiline =
+        RE_MULTILINE.get_or_init(|| regex::Regex::new(r"\n[ \t]*\n[ \t\n]*").unwrap());
+    let re_leading_space =
+        RE_LEADING_SPACE.get_or_init(|| regex::Regex::new(r"[ \t]*\n[ \t]*").unwrap());
 
     let step1 = re_multispace.replace_all(text, " ");
     let step2 = re_multiline.replace_all(&step1, "\n\n");
