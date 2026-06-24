@@ -21,16 +21,6 @@ pub async fn write(path: &Path, content: &str, sandbox: &Sandbox) -> Result<Stri
     };
 
     let content_bytes = content.as_bytes();
-    if content_bytes.len() > sandbox.config().max_write_bytes {
-        return Err(ToolError::ExecutionFailed {
-            message: format!(
-                "File too large: {} bytes exceeds maximum of {} bytes",
-                content_bytes.len(),
-                sandbox.config().max_write_bytes
-            ),
-        });
-    }
-
     let has_bom = original
         .as_ref()
         .is_some_and(|b| b.starts_with(&[0xEF, 0xBB, 0xBF]));
@@ -41,6 +31,19 @@ pub async fn write(path: &Path, content: &str, sandbox: &Sandbox) -> Result<Stri
     } else {
         content_bytes.to_vec()
     };
+
+    // Check the size after BOM prepending — a 3-byte BOM added on top of
+    // a content that's already at the limit used to push the write 3
+    // bytes over the configured max_write_bytes.
+    if output.len() > sandbox.config().max_write_bytes {
+        return Err(ToolError::ExecutionFailed {
+            message: format!(
+                "File too large: {} bytes exceeds maximum of {} bytes",
+                output.len(),
+                sandbox.config().max_write_bytes
+            ),
+        });
+    }
 
     tokio::fs::write(&resolved, output)
         .await
