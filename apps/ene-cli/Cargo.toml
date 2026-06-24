@@ -9,7 +9,7 @@ ene-core = { workspace = true }
 ene-config = { workspace = true }
 ene-memory = { workspace = true }
 ene-tool-host = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["signal"] }
 tokio-stream = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
