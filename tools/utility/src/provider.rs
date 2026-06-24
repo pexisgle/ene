@@ -45,15 +45,22 @@ impl UtilityState {
     }
 
     /// Sets the DB IPC socket path and resets the todo store.
+    ///
+    /// The previous implementation wrote the new socket path first and
+    /// then spawned a `tokio::spawn` task to clear the todo store, which
+    /// created a window where a concurrent `ensure_todo_store` could
+    /// either see the new socket with the *old* store, or clear the
+    /// store after a fresh `ensure_todo_store` had already populated it.
+    /// Use `blocking_lock` on the todo-store mutex to make the reset
+    /// happen atomically with the socket update from the caller's
+    /// perspective: the socket write is visible to subsequent readers
+    /// only after the old store has been dropped.
     pub fn set_db_socket(&self, socket: String) {
+        *self.todo_store.blocking_lock() = None;
         *self
             .db_socket
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(socket);
-        let store = self.todo_store.clone();
-        tokio::spawn(async move {
-            *store.lock().await = None;
-        });
     }
 
     /// Sets the DB IPC auth token used to authenticate the connection.
