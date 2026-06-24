@@ -24,14 +24,25 @@ pub struct IpcToolRegistry {
     tool_config: Option<serde_json::Value>,
     stream: TokioMutex<Option<IpcStream>>,
     tools: Mutex<Vec<ToolSpec>>,
+    /// Per-call timeout applied to every request sent to the tool
+    /// binary. Sourced from `ToolConfig::timeout_ms` (default 60s).
+    /// Without this, a tool that hangs inside `execute()` blocks
+    /// the host's call indefinitely, and because calls to one tool
+    /// are serialized through the `TokioMutex`, all subsequent
+    /// calls to that tool binary also block.
+    timeout_ms: u64,
 }
 
 impl IpcToolRegistry {
     /// Creates a new IPC tool registry client, connecting to the tool binary at the given socket path.
+    ///
+    /// `timeout_ms` is the per-call request timeout; pass 0 to use
+    /// the default of 60 seconds.
     pub async fn new(
         socket_path: PathBuf,
         sandbox: SandboxConfigData,
         tool_config: Option<serde_json::Value>,
+        timeout_ms: u64,
     ) -> Result<Self, ToolError> {
         let mut stream = Self::connect_with_retry(&socket_path, RECONNECT_MAX_RETRIES).await?;
 
@@ -101,6 +112,7 @@ impl IpcToolRegistry {
             tool_config,
             stream: TokioMutex::new(Some(stream)),
             tools: Mutex::new(Vec::new()),
+            timeout_ms: if timeout_ms == 0 { 60_000 } else { timeout_ms },
         };
 
         registry.do_refresh_tools().await?;
@@ -136,7 +148,14 @@ impl IpcToolRegistry {
         }
     }
 
-    /// Sends an IpcRequest and receives an IpcResponse. Retries connection once on disconnect
+    /// Sends an IpcRequest and receives an IpcResponse. Retries connection once on disconnect.
+    ///
+    /// The response read is bounded by `self.timeout_ms`. A hung
+    /// tool binary (deadlock / infinite loop in `execute()`) will
+    /// trip the timeout, the connection is closed, and subsequent
+    /// `call_tool` invocations fall through to the supervised
+    /// restart path in `SupervisedIpcRegistry` instead of blocking
+    /// forever behind the still-locked stream mutex.
     async fn do_request(&self, req: IpcRequest) -> Result<IpcResponse, ToolError> {
         let result = {
             let mut guard = self.stream.lock().await;
@@ -156,13 +175,17 @@ impl IpcToolRegistry {
                 });
             }
 
-            match read_ipc_response(stream).await {
-                Ok(Some(resp)) => Ok(resp),
-                Ok(None) => Err(ToolError::IpcClient {
+            let read_fut = read_ipc_response(stream);
+            match tokio::time::timeout(Duration::from_millis(self.timeout_ms), read_fut).await {
+                Ok(Ok(Some(resp))) => Ok(resp),
+                Ok(Ok(None)) => Err(ToolError::IpcClient {
                     message: "Connection closed by tool host".to_string(),
                 }),
-                Err(e) => Err(ToolError::IpcClient {
+                Ok(Err(e)) => Err(ToolError::IpcClient {
                     message: format!("Failed to read response: {e}"),
+                }),
+                Err(_elapsed) => Err(ToolError::IpcClient {
+                    message: format!("Tool call timed out after {} ms", self.timeout_ms),
                 }),
             }
         };
