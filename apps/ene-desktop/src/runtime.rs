@@ -427,7 +427,29 @@ impl Runtime {
     /// egui UI window only renders when `settings_window_visible`
     /// is true.
     fn render_per_frame(&mut self, event_loop: &ActiveEventLoop) {
-        if let Err(AcquireError::Fatal) = self.render_char_frame() {}
+        // The previous form was
+        // `if let Err(AcquireError::Fatal) = ... {}` —
+        // an empty body that never fired because
+        // `render_char_frame` is the only place that
+        // would have returned Fatal, and the actual
+        // Fatal arm of the inner match (render_per_frame's
+        // UI path below) is the one that needs to act.
+        // Drive the char window and, on Fatal, exit the
+        // event loop so the app does not silently loop
+        // on a dead surface.
+        match self.render_char_frame() {
+            Ok(()) => {}
+            Err(AcquireError::Fatal) => {
+                tracing::error!("[ene-desktop] char surface hit a fatal error; exiting event loop");
+                event_loop.exit();
+            }
+            // `Reconfigure` and `Timeout` are already
+            // handled inline inside render_char_frame
+            // and surface as Ok(()); the variants are
+            // only listed for completeness and not
+            // expected to reach this match.
+            Err(AcquireError::Reconfigure | AcquireError::Timeout) => {}
+        }
         if let Some(uw) = self.ui_window.as_mut() {
             let visible = self.state.ui_bevy_state().0.settings_window_visible;
             if uw.window.is_visible() != Some(visible) {
@@ -1016,7 +1038,16 @@ impl Runtime {
     }
 
     fn handle_ui_window_event(&mut self, _event_loop: &ActiveEventLoop, event: WindowEvent) {
-        let uw = self.ui_window.as_mut().unwrap();
+        // Safe-by-construction today (the caller
+        // dispatches via `is_ui` which is true only
+        // when ui_window is Some), but using
+        // `if let Some` makes a future regression
+        // (a window id mistakenly routed here before
+        // ui_window is set) a silent no-op rather than
+        // a panic that kills the event loop.
+        let Some(uw) = self.ui_window.as_mut() else {
+            return;
+        };
         let response = uw.egui_state.on_window_event(&uw.window, &event);
         if response.repaint {
             uw.window.request_redraw();
