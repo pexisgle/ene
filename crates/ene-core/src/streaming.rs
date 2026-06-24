@@ -444,81 +444,99 @@ async fn perform_tool_executions(
                 }),
             };
 
-        if let Err(ToolError::PermissionRequired {
-            request_id,
-            action,
-            target,
-            description,
-        }) = &result
-        {
-            let req_id = RequestId::from(request_id.clone());
+        // A tool may chain a permission prompt followed by a
+        // user-input prompt (or vice-versa) on a single call.
+        // Resolve pending requests in a loop with a hard cap
+        // so a buggy tool that ping-pongs between the two
+        // does not lock up the stream.
+        const MAX_PENDING_ROUNDS: usize = 8;
+        for _ in 0..MAX_PENDING_ROUNDS {
+            match &result {
+                Err(ToolError::PermissionRequired {
+                    request_id,
+                    action,
+                    target,
+                    description,
+                }) => {
+                    let req_id = RequestId::from(request_id.clone());
 
-            // Register the oneshot::Sender BEFORE emitting
-            // EneEvent::PermissionRequired. A consumer that
-            // synchronously replies to the event (e.g. an
-            // automated/headless test) can otherwise race ahead of
-            // this task, send EneCommand::PermissionDecision, and
-            // hit the lookup in handle.rs:669-678 when the map is
-            // still empty — the decision would then be silently
-            // dropped and the stream would await forever below.
-            let (decide_tx, decide_rx) = oneshot::channel::<PermissionDecision>();
-            {
-                let mut guard = pending_permissions.lock().await;
-                guard.insert(req_id.clone(), decide_tx);
-            }
+                    // Register the oneshot::Sender BEFORE
+                    // emitting EneEvent::PermissionRequired. A
+                    // consumer that synchronously replies to
+                    // the event (e.g. an automated/headless
+                    // test) can otherwise race ahead of this
+                    // task, send EneCommand::PermissionDecision,
+                    // and hit the lookup in handle.rs when the
+                    // map is still empty — the decision would
+                    // then be silently dropped and the stream
+                    // would await forever below.
+                    let (decide_tx, decide_rx) = oneshot::channel::<PermissionDecision>();
+                    {
+                        let mut guard = pending_permissions.lock().await;
+                        guard.insert(req_id.clone(), decide_tx);
+                    }
 
-            let _ = event_tx.send(EneEvent::PermissionRequired {
-                request_id: req_id.clone(),
-                action: action.clone(),
-                target: target.clone(),
-                description: description.clone(),
-            });
-
-            match decide_rx.await {
-                Ok(PermissionDecision::AllowOnce) => {
-                    registry.approve_permission(req_id.as_str()).await;
-                    result = registry.call_tool(&name, &args).await;
-                }
-                Ok(PermissionDecision::AllowSession) => {
-                    registry.allow_pattern(action, target).await;
-                    registry.approve_permission(req_id.as_str()).await;
-                    result = registry.call_tool(&name, &args).await;
-                }
-                _ => {
-                    result = Err(ToolError::PermissionDenied {
-                        message: "Permission denied by user".to_string(),
+                    let _ = event_tx.send(EneEvent::PermissionRequired {
+                        request_id: req_id.clone(),
+                        action: action.clone(),
+                        target: target.clone(),
+                        description: description.clone(),
                     });
+
+                    match decide_rx.await {
+                        Ok(PermissionDecision::AllowOnce) => {
+                            registry.approve_permission(req_id.as_str()).await;
+                            result = registry.call_tool(&name, &args).await;
+                        }
+                        Ok(PermissionDecision::AllowSession) => {
+                            registry.allow_pattern(action, target).await;
+                            registry.approve_permission(req_id.as_str()).await;
+                            result = registry.call_tool(&name, &args).await;
+                        }
+                        _ => {
+                            result = Err(ToolError::PermissionDenied {
+                                message: "Permission denied by user".to_string(),
+                            });
+                            // Decision resolved; no further
+                            // pending rounds needed.
+                            break;
+                        }
+                    }
                 }
-            }
-        }
+                Err(ToolError::UserInputRequired { request_id, prompt }) => {
+                    let req_id = RequestId::from(request_id.clone());
 
-        if let Err(ToolError::UserInputRequired { request_id, prompt }) = &result {
-            let req_id = RequestId::from(request_id.clone());
+                    // Register the oneshot::Sender BEFORE
+                    // emitting EneEvent::UserInputRequired for
+                    // the same race reason as the permission
+                    // branch above.
+                    let (resp_tx, resp_rx) = oneshot::channel::<UserInputResponse>();
+                    {
+                        let mut guard = pending_user_inputs.lock().await;
+                        guard.insert(req_id.clone(), resp_tx);
+                    }
 
-            // Register the oneshot::Sender BEFORE emitting
-            // EneEvent::UserInputRequired for the same race reason
-            // as the permission branch above.
-            let (resp_tx, resp_rx) = oneshot::channel::<UserInputResponse>();
-            {
-                let mut guard = pending_user_inputs.lock().await;
-                guard.insert(req_id.clone(), resp_tx);
-            }
-
-            let _ = event_tx.send(EneEvent::UserInputRequired {
-                request_id: req_id.clone(),
-                prompt: prompt.clone(),
-            });
-
-            match resp_rx.await {
-                Ok(UserInputResponse::Multi(answers)) => {
-                    let new_args = inject_user_answers(&args, &answers);
-                    result = registry.call_tool(&name, &new_args).await;
-                }
-                Ok(UserInputResponse::Cancel) | Err(_) => {
-                    result = Err(ToolError::ExecutionFailed {
-                        message: "User cancelled the question".to_string(),
+                    let _ = event_tx.send(EneEvent::UserInputRequired {
+                        request_id: req_id.clone(),
+                        prompt: prompt.clone(),
                     });
+
+                    match resp_rx.await {
+                        Ok(UserInputResponse::Multi(answers)) => {
+                            let new_args = inject_user_answers(&args, &answers);
+                            result = registry.call_tool(&name, &new_args).await;
+                        }
+                        Ok(UserInputResponse::Cancel) | Err(_) => {
+                            result = Err(ToolError::ExecutionFailed {
+                                message: "User cancelled the question".to_string(),
+                            });
+                            // Decision resolved; no further
+                            // pending rounds needed.
+                            break;
+                        }
+                    }
                 }
+                _ => break, // Ok or other Err; stop resolving.
             }
         }
 
@@ -800,6 +818,137 @@ mod tests {
         let messages = result.expect("executor returned error");
         assert_eq!(messages.len(), 2);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// Regression test for #39: a tool that returns
+    /// `PermissionRequired` on the first call and then
+    /// `UserInputRequired` on the second call must have
+    /// both pending requests resolved in sequence. Before
+    /// the fix the second error was silently treated as a
+    /// terminal tool result, so a chained prompt would be
+    /// reported as a `Error executing tool:` line in the
+    /// final history instead of being resolved.
+    #[tokio::test]
+    async fn chained_permission_then_user_input_is_resolved() {
+        use ene_provider::LlmToolCall;
+        use ene_tool_host::ToolRegistry;
+        use ene_tool_proto::ToolError;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Chained {
+            perm_id: String,
+            input_id: String,
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl ToolRegistry for Chained {
+            fn list_tools(&self) -> Vec<ene_tool_proto::ToolSpec> {
+                Vec::new()
+            }
+            async fn call_tool(&self, _name: &str, _arguments: &str) -> Result<String, ToolError> {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                match n {
+                    0 => Err(ToolError::PermissionRequired {
+                        request_id: self.perm_id.clone(),
+                        action: "fs.write".to_string(),
+                        target: "/tmp/x".to_string(),
+                        description: "write file".to_string(),
+                    }),
+                    1 => Err(ToolError::UserInputRequired {
+                        request_id: self.input_id.clone(),
+                        prompt: ene_tool_proto::UserInputPrompt {
+                            items: vec![ene_tool_proto::QuestionItem {
+                                question: "Pick a value".to_string(),
+                                options: Vec::new(),
+                                allow_free_text: true,
+                            }],
+                        },
+                    }),
+                    _ => Ok("ok".to_string()),
+                }
+            }
+            async fn approve_permission(&self, _request_id: &str) {}
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registry = Chained {
+            perm_id: "perm-1".to_string(),
+            input_id: "input-1".to_string(),
+            calls: calls.clone(),
+        };
+
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<EneEvent>(16);
+        let pending_permissions: Arc<
+            Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>,
+        > = Arc::new(Mutex::new(HashMap::new()));
+        let pending_user_inputs: Arc<
+            Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>,
+        > = Arc::new(Mutex::new(HashMap::new()));
+
+        let tool_calls = vec![LlmToolCall {
+            id: "call-1".to_string(),
+            name: "fs.write".to_string(),
+            arguments: "{}".to_string(),
+        }];
+
+        // Fast consumer: reply to permission, then user input.
+        let consumer_event_rx = event_tx.subscribe();
+        let consumer_perms = pending_permissions.clone();
+        let consumer_inputs = pending_user_inputs.clone();
+        let consumer = tokio::spawn(async move {
+            let mut rx = consumer_event_rx;
+            let mut answered_perm = false;
+            let mut answered_input = false;
+            while let Ok(ev) = rx.recv().await {
+                match ev {
+                    EneEvent::PermissionRequired { request_id, .. } => {
+                        let mut guard = consumer_perms.lock().await;
+                        if let Some(tx) = guard.remove(&request_id) {
+                            let _ = tx.send(PermissionDecision::AllowOnce);
+                        }
+                        answered_perm = true;
+                    }
+                    EneEvent::UserInputRequired {
+                        request_id,
+                        prompt: _,
+                    } => {
+                        let mut guard = consumer_inputs.lock().await;
+                        if let Some(tx) = guard.remove(&request_id) {
+                            let _ = tx.send(UserInputResponse::Multi(vec![MultiAnswer::Answer {
+                                text: "hello".to_string(),
+                            }]));
+                        }
+                        answered_input = true;
+                    }
+                    _ => {}
+                }
+                if answered_perm && answered_input {
+                    return;
+                }
+            }
+        });
+
+        let exec = perform_tool_executions(
+            &registry,
+            "session-1",
+            tool_calls,
+            "",
+            &event_tx,
+            &pending_permissions,
+            &pending_user_inputs,
+            5_000,
+        );
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), exec).await;
+        let _ = consumer.await;
+
+        let messages = result
+            .expect("executor hung: pending request not resolved")
+            .expect("executor returned error");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
     /// Regression test for #32: the terminal guard must guarantee

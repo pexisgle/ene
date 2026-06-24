@@ -629,6 +629,11 @@ struct EneActor {
     pending_permissions: Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
     pending_user_inputs: Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
     pending_split: Option<PendingSplitTask>,
+    /// Background tasks spawned for direct `EneCommand::CallTool`
+    /// invocations. Tracked so we can abort them cleanly on
+    /// shutdown and detect the completion of an in-flight call
+    /// without leaking a detached future.
+    call_tool_tasks: tokio::task::JoinSet<()>,
     /// Shared with the running stream task; the first party to
     /// transition this from `false` to `true` is the one that emits
     /// [`EneEvent::Terminal`] for the current run, guaranteeing
@@ -655,13 +660,33 @@ impl EneActor {
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
             pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
             pending_split: None,
+            call_tool_tasks: tokio::task::JoinSet::new(),
             terminal_emitted: Arc::new(AtomicBool::new(false)),
         }
     }
 
     async fn run(mut self) {
         loop {
-            if self.stream_session_rx.is_some() {
+            // Reap completed CallTool tasks so the JoinSet
+            // does not grow without bound. Bounded by the
+            // call rate from `EneCommand::CallTool`, which
+            // is interactive.
+            while let Some(_joined) = self.call_tool_tasks.try_join_next() {
+                // The reply oneshot is sent from inside the
+                // task itself; we just drop the JoinError
+                // here (it's already been logged by Tokio).
+            }
+
+            if let Some(rx) = self.stream_session_rx.as_mut() {
+                // Poll the stream-completion receiver directly
+                // alongside the command channel so we react to
+                // a finished stream within the same event-loop
+                // tick (< 10 ms) instead of waking every 100 ms
+                // to re-check. The `oneshot::Receiver` is
+                // `Unpin`, so a `&mut` borrow is enough to
+                // keep it alive across `select!` arms; if the
+                // command branch fires, the receiver is
+                // re-polled on the next iteration.
                 tokio::select! {
                     cmd = self.cmd_rx.recv() => {
                         match cmd {
@@ -673,10 +698,25 @@ impl EneActor {
                             None => break, // All senders dropped
                         }
                     }
-                    // Regularly check stream completion while active,
-                    // so sessions update promptly even without new commands.
-                    () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                        self.check_stream_completion();
+                    res = &mut *rx => {
+                        // The stream task has finished (or the
+                        // sender was dropped). Mirror the
+                        // completion bookkeeping that used to
+                        // live in `check_stream_completion`.
+                        match res {
+                            Ok(updated_session) => {
+                                self.session = updated_session;
+                            }
+                            Err(_) => {
+                                // Sender dropped without sending;
+                                // keep the previous session.
+                            }
+                        }
+                        self.stream_handle = None;
+                        self.stream_session_rx = None;
+                        let _ = self.event_tx.send(EneEvent::StatusChanged {
+                            status: EneStatus::Idle,
+                        });
                     }
                 }
             } else {
@@ -695,32 +735,24 @@ impl EneActor {
         if let Some(handle) = self.stream_handle.take() {
             handle.abort();
         }
+        // Abort any in-flight direct CallTool tasks and clear
+        // any pending prompt oneshot senders.
+        self.call_tool_tasks.abort_all();
+        self.drain_pending().await;
     }
 
-    fn check_stream_completion(&mut self) {
-        let rx = match self.stream_session_rx.as_mut() {
-            Some(rx) => rx,
-            None => return,
-        };
-
-        match rx.try_recv() {
-            Ok(updated_session) => {
-                self.session = updated_session;
-                self.stream_handle = None;
-                self.stream_session_rx = None;
-                let _ = self.event_tx.send(EneEvent::StatusChanged {
-                    status: EneStatus::Idle,
-                });
-            }
-            Err(oneshot::error::TryRecvError::Empty) => {}
-            Err(oneshot::error::TryRecvError::Closed) => {
-                self.stream_handle = None;
-                self.stream_session_rx = None;
-                let _ = self.event_tx.send(EneEvent::StatusChanged {
-                    status: EneStatus::Idle,
-                });
-            }
-        }
+    /// Drops every pending permission and user-input
+    /// oneshot::Sender, releasing the receiver futures that
+    /// were awaiting them. Called on `Run` (to clear entries
+    /// left by the previous run after a cancel), `Cancel`,
+    /// and `Shutdown` so the maps do not grow unboundedly
+    /// across cancel-during-prompt cycles.
+    async fn drain_pending(&self) {
+        let mut guard = self.pending_permissions.lock().await;
+        guard.clear();
+        drop(guard);
+        let mut guard = self.pending_user_inputs.lock().await;
+        guard.clear();
     }
 
     async fn handle_command(&mut self, cmd: EneCommand) -> bool {
@@ -729,6 +761,11 @@ impl EneActor {
                 if let Some(handle) = self.stream_handle.take() {
                     handle.abort();
                 }
+                // Drop any oneshot::Sender left over from the
+                // previous run. The previous stream task is
+                // already aborted above; this releases the
+                // receivers that were awaiting decisions.
+                self.drain_pending().await;
                 self.cancel_token = CancellationToken::new();
                 // Fresh terminal guard for the new run.
                 self.terminal_emitted = Arc::new(AtomicBool::new(false));
@@ -744,6 +781,7 @@ impl EneActor {
                     handle.abort();
                 }
                 self.stream_session_rx = None;
+                self.drain_pending().await;
                 self.cancel_token = CancellationToken::new();
                 // Emit Terminal(Cancelled) unless the stream task has
                 // already terminated (e.g. it emitted Done/Failed
@@ -769,7 +807,13 @@ impl EneActor {
                 });
                 true
             }
-            EneCommand::Shutdown => false,
+            EneCommand::Shutdown => {
+                // Abort any in-flight direct CallTool tasks so
+                // they do not outlive the actor.
+                self.call_tool_tasks.abort_all();
+                self.drain_pending().await;
+                false
+            }
             EneCommand::Reconfigure { config, reply } => {
                 let result = self.reconfigure(config).await;
                 let _ = reply.send(result);
@@ -842,7 +886,14 @@ impl EneActor {
                 reply,
             } => {
                 let registry = self.registry.clone();
-                tokio::spawn(async move {
+                // Track the spawned task in `call_tool_tasks`
+                // so it can be aborted on `Shutdown` and
+                // reaped on completion. The reply oneshot
+                // send is no longer silent on send-failure:
+                // the task is dropped alongside the JoinSet
+                // entry, so the caller is implicitly notified
+                // (the receiver sees `Closed`).
+                self.call_tool_tasks.spawn(async move {
                     let result = registry
                         .call_tool(&name, &arguments)
                         .await
