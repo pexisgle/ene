@@ -260,7 +260,7 @@ mod tests {
     use super::*;
 
     /// `AppStateError` must implement `std::error::Error`. The
-    /// transitive dependencies (e.g. `diesel`, `tokio`) provide
+    /// transitive dependencies (e.g. `sea-orm`, `tokio`) provide
     /// `From<...>` impls but it is worth a smoke test to confirm
     /// the wrapper itself conforms to the trait.
     #[test]

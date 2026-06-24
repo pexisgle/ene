@@ -15,7 +15,7 @@ ene-cli ──────┘       │           │     │     │          �
                 ene-core internal deps:
                   ├── ene-config    (settings, paths, schema generation)
                   ├── ene-embedding (local GGUF + cloud embedding)
-                  ├── ene-memory    (long-term memory store, diesel/sqlite-vec)
+                  ├── ene-memory    (long-term memory store, sea-orm/sqlite-vec)
                   ├── ene-session   (conversation history, auto-split)
                   ├── ene-provider  (LLM + embedding traits, OpenAI impl)
                   ├── ene-tool-host (tool process management, MCP, Tool RAG)

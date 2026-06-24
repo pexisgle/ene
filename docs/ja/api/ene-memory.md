@@ -211,14 +211,14 @@ pub struct ConversationSummaryResult {
 
 | レイヤー | 技術 |
 |--------|------|
-| SQL ORM | [`diesel`](https://diesel.rs) |
-| コネクションプーリング | [`r2d2`](https://docs.rs/r2d2) |
+| SQL ORM | [`sea-orm`](https://www.sea-ql.org/SeaORM)（`sqlx-sqlite` フィーチャ） |
+| コネクションプーリング | [`sqlx::Pool`](https://docs.rs/sqlx)（`sqlx-sqlite` バックエンドに組み込み） |
 | ベクトル検索 | [`sqlite-vec`](https://github.com/asg017/sqlite-vec)（SQLite拡張として読み込む） |
 | ストレージバックエンド | SQLite（ユーザープロファイルごとに1ファイル） |
 
-> **ルール:** このクレートのすべてのSQLには `diesel` を使用してください。`rusqlite` の導入は**禁止**です（AGENTS.md §7.3の制約事項）。
+> **ルール:** このクレートのすべてのSQLには `sea-orm`（および `sea-orm-migration`）を使用してください。`rusqlite` や `diesel` の導入は**禁止**です（AGENTS.md §7.3の制約事項）。
 
-マイグレーションは `diesel migration generate <name>` で生成し、`diesel_migrations::embed_migrations!` で埋め込みます。
+マイグレーションは `crates/ene-memory/src/migrator/src/m{YYYYMMDD}_{name}/` 配下の Rust モジュールとして定義し（`sea-orm-migration` CLI でスキャフォールド）、`Migrator` の re-export 経由で埋め込みます。
 
 ---
 

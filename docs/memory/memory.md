@@ -17,12 +17,12 @@ Memory is also available in snapshots (`EneStateSnapshot`) for CLI commands like
 
 ```rust
 pub struct MemoryStore {
-    pool: SqlitePool,       // private; SqlitePool = diesel::r2d2::Pool<ConnectionManager<SqliteConnection>>
+    db: DatabaseConnection, // private; sea-orm connection (sqlx-backed SQLite pool)
     embedding_dim: usize,   // private; use embedding_dim() getter
 }
 ```
 
-Uses `r2d2` connection pooling. Each operation acquires a connection from the pool.
+Uses `sea-orm` (backed by `sqlx`'s built-in connection pool) for async database access. Each operation acquires a connection from the pool.
 
 ### Database Tables
 
@@ -132,7 +132,7 @@ Core (ene-core)                     Tool binary (e.g. ene-tool-fs)
 │  - enforces schema  │             └──────────────────────┘
 │  - dispatches to    │
 │    memory.db via    │
-│    diesel           │
+│    sea-orm          │
 └─────────────────────┘
 ```
 
