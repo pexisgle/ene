@@ -111,7 +111,9 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
     let pipeline_start = std::time::Instant::now();
     let mut timings = std::collections::HashMap::new();
 
-    let _ = event_tx.send(EneEvent::PipelinePhase { phase: "ベクトル化 (Embedding)".to_string() });
+    let _ = event_tx.send(EneEvent::PipelinePhase {
+        phase: "ベクトル化 (Embedding)".to_string(),
+    });
     let emb_start = std::time::Instant::now();
 
     // 1. Embed user input ONCE (asynchronously)
@@ -136,26 +138,49 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
     } else {
         None
     };
-    timings.insert("Embedding".to_string(), emb_start.elapsed().as_millis() as u64);
+    timings.insert(
+        "Embedding".to_string(),
+        emb_start.elapsed().as_millis() as u64,
+    );
 
-    let _ = event_tx.send(EneEvent::PipelinePhase { phase: "コンテキスト検索 (Memory & Tools)".to_string() });
+    let _ = event_tx.send(EneEvent::PipelinePhase {
+        phase: "コンテキスト検索 (Memory & Tools)".to_string(),
+    });
     let ctx_start = std::time::Instant::now();
 
     // 2. Fetch memory context AND select relevant tools IN PARALLEL
-    let (memory_result, tools) = tokio::join!(
-        fetch_memory_context(&session, &config, query_embedding.as_deref()),
-        select_relevant_tools(
-            registry.as_ref(),
-            tool_rag.as_deref(),
-            &user_input,
-            query_embedding.as_deref(),
-            tool_calling_enabled,
-        ),
+    let (memory_result, tools_result) = tokio::join!(
+        async {
+            let start = std::time::Instant::now();
+            let res = fetch_memory_context(&session, &config, query_embedding.as_deref()).await;
+            (res, start.elapsed().as_millis() as u64)
+        },
+        async {
+            let start = std::time::Instant::now();
+            let res = select_relevant_tools(
+                registry.as_ref(),
+                tool_rag.as_deref(),
+                &user_input,
+                query_embedding.as_deref(),
+                tool_calling_enabled,
+            )
+            .await;
+            (res, start.elapsed().as_millis() as u64)
+        }
     );
+    let (memory_result, memory_time) = memory_result;
+    let (tools, tools_time) = tools_result;
     let (recalled_summaries, key_facts) = memory_result;
-    timings.insert("Context Search".to_string(), ctx_start.elapsed().as_millis() as u64);
+    timings.insert(
+        "Context Search (Total)".to_string(),
+        ctx_start.elapsed().as_millis() as u64,
+    );
+    timings.insert("Context Search (Memory DB)".to_string(), memory_time);
+    timings.insert("Context Search (Tool RAG)".to_string(), tools_time);
 
-    let _ = event_tx.send(EneEvent::PipelinePhase { phase: "メッセージ構築 (Prompt Building)".to_string() });
+    let _ = event_tx.send(EneEvent::PipelinePhase {
+        phase: "メッセージ構築 (Prompt Building)".to_string(),
+    });
     let prompt_start = std::time::Instant::now();
 
     // 3. Insert user log if memory enabled
@@ -205,9 +230,15 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
     let max_rounds = tool_config.max_rounds;
     let session_id_for_tools = session.memory.session_id.clone();
 
-    timings.insert("Prompt Building".to_string(), prompt_start.elapsed().as_millis() as u64);
-    timings.insert("Total Pre-generation".to_string(), pipeline_start.elapsed().as_millis() as u64);
-    
+    timings.insert(
+        "Prompt Building".to_string(),
+        prompt_start.elapsed().as_millis() as u64,
+    );
+    timings.insert(
+        "Total Pre-generation".to_string(),
+        pipeline_start.elapsed().as_millis() as u64,
+    );
+
     let _ = event_tx.send(EneEvent::PipelineMetrics { timings });
 
     let mut round = 0usize;
@@ -360,11 +391,12 @@ pub(crate) async fn select_relevant_tools(
         }
 
         // Select relevant tools via the RAG pipeline.
-        if let Some(emb) = query_embedding {
-            return rag.select_with_embedding(user_input, emb).await;
+        let res = if let Some(emb) = query_embedding {
+            rag.select_with_embedding(user_input, emb).await
         } else {
-            return rag.select(user_input).await;
-        }
+            rag.select(user_input).await
+        };
+        return res;
     }
 
     // Fallback: no ToolRag, return all tools from the registry.

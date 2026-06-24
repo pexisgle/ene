@@ -8,8 +8,8 @@ use ene_memory::MemoryStore;
 use ene_provider::{EmbeddingError, EmbeddingProvider, cosine_similarity};
 use ene_tool_proto::{EmbeddingField, ToolName, ToolSpec};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 
 // ── Per-field similarity weights ──────────────────────────────────────────
 
@@ -212,7 +212,10 @@ impl ToolRag {
         let specs_hash = compute_specs_hash(specs);
         let prev_hash = self.last_specs_hash.load(Ordering::Acquire);
         {
-            let cache = self.cached_field_rows.read().unwrap_or_else(|e| e.into_inner());
+            let cache = self
+                .cached_field_rows
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
             if prev_hash == specs_hash && !cache.is_empty() {
                 let mut map = self.specs.write().unwrap_or_else(|e| e.into_inner());
                 map.clear();
@@ -258,8 +261,6 @@ impl ToolRag {
         };
 
         let model_name = self.embedder.model_name().to_string();
-        let mut indexed = 0usize;
-        let mut reused = 0usize;
 
         // ── Embed ToolSpec fields ──────────────────────────────────────
         for spec in specs {
@@ -288,9 +289,6 @@ impl ToolRag {
                         &summary_text,
                     )
                     .await?;
-                    indexed += 1;
-                } else {
-                    reused += 1;
                 }
             }
 
@@ -319,9 +317,6 @@ impl ToolRag {
                         &desc_text,
                     )
                     .await?;
-                    indexed += 1;
-                } else {
-                    reused += 1;
                 }
             }
 
@@ -350,9 +345,6 @@ impl ToolRag {
                         &neg_text,
                     )
                     .await?;
-                    indexed += 1;
-                } else {
-                    reused += 1;
                 }
             }
 
@@ -382,9 +374,6 @@ impl ToolRag {
                         &ex_text,
                     )
                     .await?;
-                    indexed += 1;
-                } else {
-                    reused += 1;
                 }
             }
         }
@@ -405,17 +394,22 @@ impl ToolRag {
                     .into_iter()
                     .map(|(name, field, fkey, _hash, _model, emb, _src)| (name, field, fkey, emb))
                     .collect();
-                let mut cache_write = self.cached_field_rows.write().unwrap_or_else(|e| e.into_inner());
+                let mut cache_write = self
+                    .cached_field_rows
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
                 *cache_write = mapped;
             }
             Err(e) => {
-                tracing::warn!("[ToolRag] Failed to cache tool embeddings after index build: {}", e);
+                tracing::warn!(
+                    "[ToolRag] Failed to cache tool embeddings after index build: {}",
+                    e
+                );
             }
         }
 
         self.last_specs_hash.store(specs_hash, Ordering::Release);
 
-        tracing::debug!("[ToolRag] Indexed {} fields, {} reused", indexed, reused);
         Ok(())
     }
 
@@ -439,7 +433,12 @@ impl ToolRag {
     }
 
     /// Select the most relevant tools using a pre-computed query embedding.
-    pub async fn select_with_embedding(&self, query: &str, query_embedding: &[f32]) -> Vec<ToolSpec> {
+    pub async fn select_with_embedding(
+        &self,
+        query: &str,
+        query_embedding: &[f32],
+    ) -> Vec<ToolSpec> {
+        let t_start = std::time::Instant::now();
         let store = match &self.store {
             Some(s) => s,
             None => {
@@ -472,10 +471,14 @@ impl ToolRag {
         } else {
             None
         };
+        let t_hyde = t_start.elapsed();
 
         // 3. Load all tool embeddings (from cache if available)
         let cached_rows = {
-            let cache = self.cached_field_rows.read().unwrap_or_else(|e| e.into_inner());
+            let cache = self
+                .cached_field_rows
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
             if !cache.is_empty() {
                 Some(cache.clone())
             } else {
@@ -485,24 +488,28 @@ impl ToolRag {
 
         let field_rows: Vec<(String, String, String, Vec<f32>)> = match cached_rows {
             Some(rows) => rows,
-            None => {
-                match store.list_tool_embedding_fields().await {
-                    Ok(rows) => {
-                        let mapped: Vec<(String, String, String, Vec<f32>)> = rows
-                            .into_iter()
-                            .map(|(name, field, fkey, _hash, _model, emb, _src)| (name, field, fkey, emb))
-                            .collect();
-                        let mut cache_write = self.cached_field_rows.write().unwrap_or_else(|e| e.into_inner());
-                        *cache_write = mapped.clone();
-                        mapped
-                    }
-                    Err(e) => {
-                        tracing::warn!("[ToolRag] Could not load embeddings: {}", e);
-                        Vec::new()
-                    }
+            None => match store.list_tool_embedding_fields().await {
+                Ok(rows) => {
+                    let mapped: Vec<(String, String, String, Vec<f32>)> = rows
+                        .into_iter()
+                        .map(|(name, field, fkey, _hash, _model, emb, _src)| {
+                            (name, field, fkey, emb)
+                        })
+                        .collect();
+                    let mut cache_write = self
+                        .cached_field_rows
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner());
+                    *cache_write = mapped.clone();
+                    mapped
                 }
-            }
+                Err(e) => {
+                    tracing::warn!("[ToolRag] Could not load embeddings: {}", e);
+                    Vec::new()
+                }
+            },
         };
+        let t_load = t_start.elapsed();
 
         // 4. Group by tool, compute weighted similarity.
         let w = &self.opts.weights;
@@ -578,6 +585,7 @@ impl ToolRag {
                 Err(e) => tracing::warn!("[ToolRag] Skipping invalid tool name in RAG index: {e}"),
             }
         }
+        let t_score = t_start.elapsed();
 
         // 6. Optional rerank.
         if self.opts.use_rerank && self.embedder.has_reranker() && candidates.len() > 1 {
@@ -611,6 +619,15 @@ impl ToolRag {
             }
             result.push(spec.clone());
         }
+
+        let t_rerank = t_start.elapsed();
+        println!(
+            "\n[ToolRag Debug] Timings: hyde={:?}, load={:?}, score={:?}, rerank={:?}",
+            t_hyde,
+            t_load - t_hyde,
+            t_score - t_load,
+            t_rerank - t_score
+        );
 
         // 8. Union with forced_tools (no duplicates, prepended).
         {
