@@ -1,5 +1,5 @@
 use ene_tool_common::prelude::*;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, RwLock};
 
 use crate::provider::WebSearchConfig;
 use websearch::providers::{
@@ -7,8 +7,8 @@ use websearch::providers::{
 };
 use websearch::{SearchOptions, SearchProvider, web_search};
 
-fn default_config() -> Arc<OnceLock<WebSearchConfig>> {
-    Arc::new(OnceLock::new())
+fn default_config() -> Arc<RwLock<WebSearchConfig>> {
+    Arc::new(RwLock::new(WebSearchConfig::default()))
 }
 
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
@@ -24,7 +24,7 @@ fn default_config() -> Arc<OnceLock<WebSearchConfig>> {
 pub struct WebSearchAction {
     #[tool(skip)]
     #[serde(skip, default = "default_config")]
-    config: Arc<OnceLock<WebSearchConfig>>,
+    config: Arc<RwLock<WebSearchConfig>>,
     /// The search query.
     query: String,
     /// Search backend to use. Defaults to duckduckgo.
@@ -41,7 +41,7 @@ pub struct WebSearchAction {
 }
 
 impl WebSearchAction {
-    pub fn new(config: Arc<OnceLock<WebSearchConfig>>) -> Self {
+    pub fn new(config: Arc<RwLock<WebSearchConfig>>) -> Self {
         Self {
             config,
             query: String::new(),
@@ -53,13 +53,19 @@ impl WebSearchAction {
     async fn run(&self) -> Result<String, ToolError> {
         let backend_name = self.backend.as_deref().unwrap_or("duckduckgo");
         let limit = self.limit.unwrap_or(5).min(10);
-        let config = self.config.get();
+        // Snapshot the current config under a read lock so
+        // a hot-reload from a reconfigure (which takes the
+        // write lock) does not block the search. The
+        // previous `OnceLock::get()` pattern only ever
+        // returned the value set on the first call, so
+        // updating an API key required a process restart.
+        let config = self.config.read().ok().map(|g| g.clone());
 
         let provider: Box<dyn SearchProvider> = match backend_name {
             "arxiv" => Box::new(ArxivProvider::new()),
             "duckduckgo" => Box::new(DuckDuckGoProvider::new()),
             "tavily" => {
-                let api_key = resolve_api_key(config, "tavily", "TAVILY_API_KEY")?;
+                let api_key = resolve_api_key(config.as_ref(), "tavily", "TAVILY_API_KEY")?;
                 Box::new(
                     TavilyProvider::new(&api_key).map_err(|e| ToolError::ExecutionFailed {
                         message: format!("Tavily provider init failed: {e}"),
@@ -67,7 +73,7 @@ impl WebSearchAction {
                 )
             }
             "brave" => {
-                let api_key = resolve_api_key(config, "brave", "BRAVE_API_KEY")?;
+                let api_key = resolve_api_key(config.as_ref(), "brave", "BRAVE_API_KEY")?;
                 Box::new(
                     BraveProvider::new(&api_key).map_err(|e| ToolError::ExecutionFailed {
                         message: format!("Brave provider init failed: {e}"),
@@ -75,7 +81,7 @@ impl WebSearchAction {
                 )
             }
             "exa" => {
-                let api_key = resolve_api_key(config, "exa", "EXA_API_KEY")?;
+                let api_key = resolve_api_key(config.as_ref(), "exa", "EXA_API_KEY")?;
                 Box::new(
                     ExaProvider::new(&api_key).map_err(|e| ToolError::ExecutionFailed {
                         message: format!("Exa provider init failed: {e}"),

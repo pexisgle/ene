@@ -3,7 +3,7 @@ use ene_tool_common::ToolAction;
 use ene_tool_proto::{ToolError, ToolProvider, ToolSpec};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, RwLock};
 
 /// Configuration for web search providers (Tavily, Brave, Exa).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -29,7 +29,7 @@ fn generate_web_search_schema() -> serde_json::Value {
 /// Internally uses a dynamic list of actions implementing `ToolAction`.
 pub struct WebToolProvider {
     actions: Vec<Box<dyn ToolAction>>,
-    config: Arc<OnceLock<WebSearchConfig>>,
+    config: Arc<RwLock<WebSearchConfig>>,
 }
 
 impl WebToolProvider {
@@ -51,7 +51,14 @@ impl WebToolProvider {
             .build()
             .unwrap_or_default();
 
-        let config = Arc::new(OnceLock::new());
+        // RwLock so the API key can be hot-reloaded by a
+        // reconfigure without restarting the tool
+        // binary. The previous `OnceLock` only allowed
+        // the first `set_config` to take effect; a
+        // user updating their search API key in
+        // settings would have to bounce the entire
+        // process for the new key to be picked up.
+        let config = Arc::new(RwLock::new(WebSearchConfig::default()));
 
         let actions: Vec<Box<dyn ToolAction>> = vec![
             Box::new(crate::action::WebFetchAction::new(client)),
@@ -85,8 +92,10 @@ impl ToolProvider for WebToolProvider {
     }
 
     fn set_config(&self, config: &serde_json::Value) {
-        if let Ok(cfg) = serde_json::from_value::<WebSearchConfig>(config.clone()) {
-            let _ = self.config.set(cfg);
+        if let Ok(cfg) = serde_json::from_value::<WebSearchConfig>(config.clone())
+            && let Ok(mut guard) = self.config.write()
+        {
+            *guard = cfg;
         }
     }
 
