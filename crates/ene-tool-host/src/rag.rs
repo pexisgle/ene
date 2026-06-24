@@ -580,7 +580,7 @@ impl ToolRag {
         }
 
         // 6. Optional rerank.
-        if self.opts.use_rerank && candidates.len() > 1 {
+        if self.opts.use_rerank && self.embedder.has_reranker() && candidates.len() > 1 {
             let rerank_specs: Vec<ToolSpec> = candidates.iter().map(|(s, _)| s.clone()).collect();
             match self.embedder.rerank(query, &rerank_specs).await {
                 Ok(rerank_scores) => {
