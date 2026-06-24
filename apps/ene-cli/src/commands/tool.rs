@@ -29,8 +29,20 @@ impl CliCommand for ToolCommand {
                     } else {
                         println!("{}", style::success("Available tools:"));
                         for tool in tools {
-                            let desc = if tool.description.len() > 60 {
-                                format!("{}...", &tool.description[..57])
+                            // Truncate at a UTF-8 char
+                            // boundary. The previous form
+                            // used a byte-index slice
+                            // (`&tool.description[..57]`)
+                            // which panics if offset 57
+                            // falls inside a multi-byte
+                            // UTF-8 character. Tool
+                            // descriptions are external
+                            // and routinely non-ASCII
+                            // (the `cl100k_base` tokenizer
+                            // happily encodes CJK).
+                            let desc = if tool.description.chars().count() > 60 {
+                                let truncated: String = tool.description.chars().take(57).collect();
+                                format!("{truncated}...")
                             } else {
                                 tool.description.clone()
                             };

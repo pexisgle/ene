@@ -46,7 +46,7 @@ Commands are entered with `/` prefix:
 | Command | Action |
 |---------|--------|
 | `/quit` | Exit REPL |
-| `/clear` | Clear conversation history |
+| `/clear` | Note that conversation history will be refreshed on next run (manual clear is a no-op in this release) |
 | `/history` | Show conversation history |
 | `/prompt` | Show current system prompt (system, examples, memory, expression protocol) |
 

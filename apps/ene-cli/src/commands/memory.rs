@@ -61,7 +61,17 @@ async fn handle_search(query: &str, snapshot: &ene_core::EneStateSnapshot) {
     match snapshot.memory.embed_query(query).await {
         Ok(embedding) => {
             let card_name = snapshot.card_name.as_str();
-            let threshold = 0.0f32;
+            // Honor the configured `similarity_threshold`
+            // from the memory section of settings.json.
+            // The previous form hardcoded 0.0, so every
+            // recalled summary (no matter how unrelated)
+            // would pass the threshold and surface to the
+            // user, contradicting what `/config` displays.
+            let threshold = snapshot
+                .config
+                .get_section::<ene_memory::MemoryConfig>()
+                .map(|c| c.similarity_threshold)
+                .unwrap_or(0.5);
             match snapshot
                 .memory
                 .search_summaries(&embedding, card_name, 10, threshold)
