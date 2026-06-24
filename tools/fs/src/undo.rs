@@ -165,7 +165,21 @@ impl UndoManager {
         }
     }
 
-    pub async fn pop(&self) -> Result<Option<UndoEntry>, Box<dyn std::error::Error>> {
+    /// Returns the most recent undo entry **without**
+    /// removing it from the database. Callers should
+    /// apply the operations and, only on success, call
+    /// [`discard`](Self::discard) with the returned
+    /// entry's `id` to remove it. The previous
+    /// pop-then-apply ordering lost the entry on
+    /// apply failure, making a retry impossible.
+    ///
+    /// Tiebreaking: when two entries share a timestamp
+    /// the sort is nondeterministic (RFC3339 string
+    /// comparison is the only distinguishing key). We
+    /// add `id` as a secondary `DESC` order so the
+    /// "most recent" entry is always the same one for
+    /// a given `(timestamp, id)` pair.
+    pub async fn peek(&self) -> Result<Option<UndoEntry>, Box<dyn std::error::Error>> {
         let mut client = self.client.lock().await;
 
         let filter = DbFilter::eq("session_id", self.session_id.clone());
@@ -175,7 +189,7 @@ impl UndoManager {
                 "fs_undo_entries",
                 &["id", "tool_name", "timestamp"],
                 filter,
-                vec![DbOrderBy::desc("timestamp")],
+                vec![DbOrderBy::desc("timestamp"), DbOrderBy::desc("id")],
                 Some(1),
             )
             .await?;
@@ -231,17 +245,6 @@ impl UndoManager {
             undo_ops.push(op);
         }
 
-        client
-            .delete(
-                "fs_undo_operations",
-                DbFilter::eq("entry_id", entry_id.clone()),
-            )
-            .await?;
-
-        client
-            .delete("fs_undo_entries", DbFilter::eq("id", entry_id.clone()))
-            .await?;
-
         let tool_name = match entry_row.get("tool_name") {
             Some(DbValue::Text(t)) => t.clone(),
             _ => "unknown".to_string(),
@@ -259,6 +262,30 @@ impl UndoManager {
             timestamp,
             operations: undo_ops,
         }))
+    }
+
+    /// Removes the entry with the given `id` and its
+    /// associated operations from the database. Called
+    /// after a successful [`peek`](Self::peek) + apply
+    /// round-trip. If the entry has already been
+    /// discarded (e.g. by a duplicate call after a
+    /// retry), the operation is a no-op and returns
+    /// `Ok(())`.
+    pub async fn discard(&self, entry_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let mut client = self.client.lock().await;
+
+        client
+            .delete(
+                "fs_undo_operations",
+                DbFilter::eq("entry_id", entry_id.to_string()),
+            )
+            .await?;
+
+        client
+            .delete("fs_undo_entries", DbFilter::eq("id", entry_id.to_string()))
+            .await?;
+
+        Ok(())
     }
 
     pub async fn clear(&self) -> Result<(), Box<dyn std::error::Error>> {
