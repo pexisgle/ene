@@ -1,0 +1,47 @@
+name: dependencies
+permissions:
+  contents: write
+  pull-requests: write
+
+on:
+  schedule:
+    - cron: "0 0 5,25 * *"
+  workflow_dispatch:
+
+jobs:
+  update-flake-lock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Generate branch date
+        run: echo "CURRENT_DATE=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
+      - uses: DeterminateSystems/update-flake-lock@main
+        with:
+          pr-title: "Update flake.lock"
+          pr-labels: |
+            dependencies
+          pr-reviewers: ${{ github.actor }}
+          branch: "deps/update-flake-lock-${{ env.CURRENT_DATE }}"
+          commit-msg: "deps: Update flake.lock"
+          path-to-flake-dir: ./
+
+  update-cargo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Generate branch date
+        run: echo "CURRENT_DATE=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
+      - name: Run cargo update
+        run: nix develop --command cargo update
+      - name: Create PR
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "deps: Update Cargo.lock"
+          branch: "deps/update-cargo-${{ env.CURRENT_DATE }}"
+          title: "Update Cargo.lock"
+          labels: dependencies
