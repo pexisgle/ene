@@ -781,10 +781,12 @@ impl MemoryStore {
         limit: usize,
         similarity_threshold: f32,
     ) -> Result<(Vec<RecalledSummary>, Vec<KeyFact>), MemoryError> {
-        let summaries = self
-            .search_summaries(query_embedding, card_name, limit, similarity_threshold)
-            .await?;
-        let key_facts = self.get_all_keyfacts(card_name).await?;
+        let (summaries_result, key_facts_result) = tokio::join!(
+            self.search_summaries(query_embedding, card_name, limit, similarity_threshold),
+            self.get_all_keyfacts(card_name),
+        );
+        let summaries = summaries_result?;
+        let key_facts = key_facts_result?;
         Ok((summaries, key_facts))
     }
 }

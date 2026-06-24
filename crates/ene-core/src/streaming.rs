@@ -62,6 +62,7 @@ pub(crate) struct StreamContext {
     pub(crate) config: EneConfig,
     pub(crate) session: ConversationSession,
     pub(crate) user_input: String,
+    pub(crate) embedder: Option<Arc<dyn ene_provider::EmbeddingProvider>>,
     pub(crate) registry: Arc<dyn ene_tool_host::ToolRegistry>,
     pub(crate) tool_rag: Option<Arc<ene_tool_host::ToolRag>>,
     pub(crate) provider: Arc<dyn ene_provider::LlmProvider>,
@@ -86,6 +87,7 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
         config,
         mut session,
         user_input,
+        embedder,
         registry,
         tool_rag,
         provider,
@@ -101,10 +103,48 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
         .get_section::<ene_memory::MemoryConfig>()
         .unwrap_or_default();
 
-    // 1. Fetch memory context
-    let (recalled_summaries, key_facts) = fetch_memory_context(&session, &config).await;
+    let tool_config = config
+        .get_section::<ene_tool_host::ToolConfig>()
+        .unwrap_or_default();
+    let tool_calling_enabled = tool_config.enabled;
 
-    // 2. Insert user log if memory enabled
+    // 1. Embed user input ONCE (asynchronously)
+    let query_embedding = if let Some(emb_prov) = &embedder {
+        match emb_prov.embed_query(&user_input).await {
+            Ok(emb) => {
+                session.set_pending_embedding(emb.clone());
+                session.set_last_input_embedding(emb.clone());
+                Some(emb)
+            }
+            Err(e) => {
+                emit_terminal(
+                    &event_tx,
+                    &terminal_emitted,
+                    TerminalReason::Failed {
+                        message: format!("Embedding failed: {}", e),
+                    },
+                );
+                return session;
+            }
+        }
+    } else {
+        None
+    };
+
+    // 2. Fetch memory context AND select relevant tools IN PARALLEL
+    let (memory_result, tools) = tokio::join!(
+        fetch_memory_context(&session, &config, query_embedding.as_deref()),
+        select_relevant_tools(
+            registry.as_ref(),
+            tool_rag.as_deref(),
+            &user_input,
+            query_embedding.as_deref(),
+            tool_calling_enabled,
+        ),
+    );
+    let (recalled_summaries, key_facts) = memory_result;
+
+    // 3. Insert user log if memory enabled
     if mem_config.enabled
         && let Some(store) = &session.memory.memory_store
     {
@@ -119,7 +159,7 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
         );
     }
 
-    // 3. Build initial messages
+    // 4. Build initial messages
     let mut messages = match build_chat_messages_list(
         &session,
         &config,
@@ -148,21 +188,8 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
     };
     let card_name = session.card_name().to_string();
     let session_id = session.memory.session_id.clone();
-    let tool_config = config
-        .get_section::<ene_tool_host::ToolConfig>()
-        .unwrap_or_default();
-    let tool_calling_enabled = tool_config.enabled;
     let max_rounds = tool_config.max_rounds;
     let session_id_for_tools = session.memory.session_id.clone();
-
-    // 4. Select relevant tools
-    let tools = select_relevant_tools(
-        registry.as_ref(),
-        tool_rag.as_deref(),
-        &user_input,
-        tool_calling_enabled,
-    )
-    .await;
 
     let mut round = 0usize;
 
@@ -296,6 +323,7 @@ pub(crate) async fn select_relevant_tools(
     registry: &dyn ene_tool_host::ToolRegistry,
     tool_rag: Option<&ene_tool_host::ToolRag>,
     user_input: &str,
+    query_embedding: Option<&[f32]>,
     tool_calling_enabled: bool,
 ) -> Vec<ene_tool_proto::ToolSpec> {
     if !tool_calling_enabled {
@@ -313,7 +341,11 @@ pub(crate) async fn select_relevant_tools(
         }
 
         // Select relevant tools via the RAG pipeline.
-        return rag.select(user_input).await;
+        if let Some(emb) = query_embedding {
+            return rag.select_with_embedding(user_input, emb).await;
+        } else {
+            return rag.select(user_input).await;
+        }
     }
 
     // Fallback: no ToolRag, return all tools from the registry.
@@ -325,6 +357,7 @@ pub(crate) async fn select_relevant_tools(
 pub(crate) async fn fetch_memory_context(
     session: &ConversationSession,
     config: &EneConfig,
+    query_embedding: Option<&[f32]>,
 ) -> (Vec<RecalledSummary>, Vec<ene_memory::KeyFact>) {
     let mem_config = config
         .get_section::<ene_memory::MemoryConfig>()
@@ -341,18 +374,18 @@ pub(crate) async fn fetch_memory_context(
         return (vec![], vec![]);
     };
 
-    let Some(pending_embedding) = &session.memory.pending_embedding else {
+    let Some(embedding) = query_embedding else {
         return (vec![], vec![]);
     };
 
     let store = Arc::clone(store);
     let card_name = session.card_name().to_string();
-    let pending_embedding = pending_embedding.clone();
+    let embedding = embedding.to_vec();
 
     store
         .recall_context(
             &card_name,
-            &pending_embedding,
+            &embedding,
             session_config.recall_limit,
             mem_config.similarity_threshold,
         )
