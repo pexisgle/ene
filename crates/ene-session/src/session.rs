@@ -64,6 +64,12 @@ pub struct SessionState {
     pub last_message_time: Option<DateTime<Utc>>,
     /// The current conversation turn count.
     pub current_turn_count: usize,
+    /// When a session split is in flight, the length of `conversation_history`
+    /// at the moment the snapshot was taken. The actor uses this to apply the
+    /// split result: it drains everything before the last snapshot entry so
+    /// that the triggering turn and any subsequent user/assistant messages
+    /// added while the split was running are preserved.
+    pub pending_split_snapshot_len: Option<usize>,
 }
 
 /// Central session container holding conversation history, display state, memory context,
@@ -130,6 +136,7 @@ impl ConversationSession {
                 last_input_embedding: None,
                 last_message_time: None,
                 current_turn_count: 0,
+                pending_split_snapshot_len: None,
             },
             character_card: None,
             current_card_path: String::new(),
@@ -173,19 +180,73 @@ impl ConversationSession {
     }
 
     /// Appends a user message and trims history if it exceeds `max_history_turns * 2`.
+    ///
+    /// Trimming is suspended while a session split is pending (see
+    /// [`Self::mark_split_pending`]) so the snapshot boundary recorded for the
+    /// split remains valid until the split is applied.
     pub fn add_user_message(&mut self, input: &str) {
         self.history
             .conversation_history
             .push((Role::User, input.to_string()));
-        self.history.trim_history();
+        if self.state.pending_split_snapshot_len.is_none() {
+            self.history.trim_history();
+        }
     }
 
     /// Appends an assistant message and trims history if it exceeds `max_history_turns * 2`.
+    ///
+    /// Trimming is suspended while a session split is pending — see
+    /// [`Self::add_user_message`].
     pub fn add_assistant_message(&mut self, text: &str) {
         self.history
             .conversation_history
             .push((Role::Assistant, text.to_string()));
-        self.history.trim_history();
+        if self.state.pending_split_snapshot_len.is_none() {
+            self.history.trim_history();
+        }
+    }
+
+    /// Records the current history length as the snapshot boundary for a
+    /// pending session split. The boundary is used by
+    /// [`Self::apply_split_result`] to discard only the entries that were in
+    /// the split snapshot, keeping the triggering turn and any messages
+    /// added while the split was in flight.
+    pub fn mark_split_pending(&mut self) {
+        self.state.pending_split_snapshot_len = Some(self.history.conversation_history.len());
+    }
+
+    /// Returns `true` if a session split is currently in flight.
+    #[must_use]
+    pub fn is_split_pending(&self) -> bool {
+        self.state.pending_split_snapshot_len.is_some()
+    }
+
+    /// Clears the split-pending marker without applying a result. Used when
+    /// the split task reports a non-fatal error (e.g. `SplitNotNeeded`) so
+    /// history trimming can resume.
+    pub fn clear_split_pending(&mut self) {
+        self.state.pending_split_snapshot_len = None;
+    }
+
+    /// Applies a completed split result to the session.
+    ///
+    /// The conversation history is truncated to drop everything *before* the
+    /// last entry of the snapshot that was taken in [`Self::mark_split_pending`]
+    /// (and recorded in `split.snapshot_len`). The last snapshot entry — the
+    /// triggering user turn — and any messages appended to the history while
+    /// the split was running are preserved in the live history. The session
+    /// ID is rotated to the split's `new_session_id` and the split-pending
+    /// marker is cleared.
+    pub fn apply_split_result(&mut self, split: &SplitResult) {
+        let effective = split
+            .snapshot_len
+            .min(self.history.conversation_history.len());
+        if effective > 0 {
+            self.history.conversation_history.drain(0..(effective - 1));
+        }
+        self.memory.session_id = split.new_session_id.clone();
+        self.memory.session_started_at = Utc::now();
+        self.state.pending_split_snapshot_len = None;
     }
 
     /// Processes a streaming text chunk, splitting it into text deltas and special tokens
@@ -350,5 +411,77 @@ impl ConversationSession {
             store,
             embedder,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn split_with_len(new_id: &str, snapshot_len: usize) -> SplitResult {
+        SplitResult {
+            reason: crate::session_split::SplitReason::Manual,
+            summary: String::new(),
+            key_facts: Vec::new(),
+            new_session_id: SessionId::from(new_id.to_string()),
+            snapshot_len,
+        }
+    }
+
+    #[test]
+    fn apply_split_keeps_triggering_and_subsequent_turns() {
+        let mut s = ConversationSession::default();
+
+        for t in ["turn 1", "turn 2", "turn 3"] {
+            s.add_user_message(t);
+        }
+        s.mark_split_pending();
+
+        // Two more user turns arrive while the split is in flight.
+        s.add_user_message("turn 4");
+        s.add_user_message("turn 5");
+
+        // Sanity: trim is suspended while a split is pending, so the snapshot
+        // boundary is preserved.
+        assert_eq!(s.history().len(), 5);
+
+        s.apply_split_result(&split_with_len("session_new", 3));
+
+        // Triggering turn 3 plus turns 4 and 5 are retained; turns 1 and 2
+        // are dropped.
+        let kept: Vec<&str> = s.history().iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(kept, vec!["turn 3", "turn 4", "turn 5"]);
+        assert_eq!(s.session_id().as_str(), "session_new");
+        assert!(!s.is_split_pending());
+    }
+
+    #[test]
+    fn apply_split_with_no_extra_turns_keeps_triggering_turn() {
+        let mut s = ConversationSession::default();
+        s.add_user_message("turn 1");
+        s.add_user_message("turn 2");
+        s.mark_split_pending();
+
+        s.apply_split_result(&split_with_len("session_new", 2));
+
+        let kept: Vec<&str> = s.history().iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(kept, vec!["turn 2"]);
+    }
+
+    #[test]
+    fn clear_split_pending_resumes_trimming() {
+        let mut s = ConversationSession::default();
+        s.history.max_history_turns = 1;
+        s.add_user_message("turn 1");
+        s.add_user_message("turn 2");
+        s.mark_split_pending();
+        s.add_user_message("turn 3");
+        s.add_user_message("turn 4");
+        // No trim while pending; all 4 entries present.
+        assert_eq!(s.history().len(), 4);
+        s.clear_split_pending();
+        s.add_user_message("turn 5");
+        // Trim resumed: cap is max_history_turns * 2 = 2 entries.
+        assert_eq!(s.history().len(), 2);
     }
 }
