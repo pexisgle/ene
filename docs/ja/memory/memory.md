@@ -175,7 +175,15 @@ pub trait EmbeddingProvider: Send + Sync {
 
 pub enum EmbeddingKind { Summary, Description, Capability, Example, Negative, Query, Hyde }
 
-pub enum EmbeddingError { Provider(String), Timeout(Duration) }
+/// 埋め込み操作のエラー。
+pub enum EmbeddingError {
+    /// プロバイダーの初期化に失敗 (モデルファイル欠落、API キー不正など)。
+    Init(String),
+    /// プロバイダーがエラーを返した。
+    Provider(String),
+    /// 入力が空または空白のみ。
+    EmptyInput,
+}
 ```
 
 実装:
