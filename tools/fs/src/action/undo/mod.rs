@@ -19,7 +19,7 @@ fn default_sandbox() -> SandboxRef {
 
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[tool(
-    namespace = "filesystem",
+    namespace = "utility",
     name = "undo",
     summary = "Reverts the most recent file operation.",
     description = "Reverts the most recent file operation (write, edit, delete, patch). Can be called multiple times to undo multiple operations. Shell operations cannot be undone.",
