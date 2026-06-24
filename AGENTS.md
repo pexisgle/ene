@@ -19,7 +19,7 @@ This file is the source of truth for **project-specific conventions** in the `en
 | Add / modify a tool, config, or character | §4 Common Tasks |
 | Build, test, or lint | §5 Build / Test / Lint |
 | Understand crate layout or architecture | §6 Workspace, §7 Architecture |
-| Follow memory system rules (diesel / sqlite-vec) | §7.3 Memory System Rules |
+| Follow memory system rules (sea-orm / sqlite-vec) | §7.3 Memory System Rules |
 | Match project style or rustdoc rules | §9 Code Style & rustdoc |
 | Submit a PR / Git Workflow | §10 Git & PR Policy |
 
@@ -122,9 +122,9 @@ sequenceDiagram
 
 ### 7.3 Memory System Rules (STRICT)
 
-* **Database:** SQLite + `sqlite-vec` + `diesel`. `r2d2` for connection pooling.
-* **Constraint:** **Always** use `diesel` for all SQL. **Do NOT** introduce `rusqlite`.
-* **Migrations:** Generate via `diesel migration generate <name>`. Apply via `diesel_migrations::embed_migrations!`.
+* **Database:** SQLite + `sqlite-vec` + `sea-orm` (with `sqlx-sqlite` feature). Connection pooling is provided by `sqlx`'s built-in `Pool` (configured in `crates/ene-memory/src/store/mod.rs`).
+* **Constraint:** **Always** use `sea-orm` (and `sea-orm-migration`) for all SQL. **Do NOT** introduce `rusqlite` or `diesel`.
+* **Migrations:** Defined as Rust modules under `crates/ene-memory/src/migrator/src/m{YYYYMMDD}_{name}/` (use `sea-orm-migration` CLI to scaffold). Apply via `sea_orm_migration::MigratorTrait::up` at startup, embedded through `Migrator` re-exports.
 * **Tool DB Access:** Tool binaries (e.g. `ene-tool-fs`, `ene-tool-utility`) must NOT link `ene-memory` directly. Instead, they access the database through the per-tool DB IPC server (`DbIpcServer` in `ene-core`, client in `ene-tool-db`). Each tool declares its schema with a tool-name prefix (e.g. `fs_`, `utility_`), and the server enforces prefix-based access control.
 
 ## 8. Configuration

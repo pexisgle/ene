@@ -16,7 +16,7 @@ ene-cli ──────┘       │           │     │     │          �
                 ene-core 内部依存:
                   ├── ene-config    (設定, パス, スキーマ生成)
                   ├── ene-embedding (ローカル GGUF + クラウド埋め込み)
-                  ├── ene-memory    (長期記憶ストア, diesel/sqlite-vec)
+                  ├── ene-memory    (長期記憶ストア, sea-orm/sqlite-vec)
                   ├── ene-session   (会話履歴, 自動分割)
                   ├── ene-provider  (LLM + 埋め込みトレイト, OpenAI 実装)
                   ├── ene-tool-host (ツールプロセス管理, MCP, Tool RAG)

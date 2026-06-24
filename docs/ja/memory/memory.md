@@ -17,12 +17,12 @@ SQLite + sqlite-vec + Diesel ベースのエピソディック記憶。ベクト
 
 ```rust
 pub struct MemoryStore {
-    pool: SqlitePool,       // プライベート; SqlitePool = diesel::r2d2::Pool<ConnectionManager<SqliteConnection>>
+    db: DatabaseConnection, // プライベート; sea-orm 接続 (sqlx バックエンドの SQLite プール)
     embedding_dim: usize,   // プライベート; embedding_dim() ゲッターを使用
 }
 ```
 
-`r2d2` 接続プーリングを使用。各操作はプールから接続を取得。
+`sea-orm` を使用 (内部で `sqlx` の組み込み接続プールを利用)。各操作はプールから非同期に接続を取得。
 
 ### データベーステーブル
 
@@ -131,7 +131,7 @@ Core (ene-core)                     ツールバイナリ (例: ene-tool-fs)
 │  - プレフィックス   │             │  - insert/select/... │
 │    検証             │             └──────────────────────┘
 │  - スキーマ強制     │
-│  - diesel 経由で    │
+│  - sea-orm 経由で   │
 │    memory.db に     │
 │    ディスパッチ     │
 └─────────────────────┘

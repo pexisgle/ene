@@ -211,14 +211,14 @@ pub struct ConversationSummaryResult {
 
 | Layer | Technology |
 |-------|------------|
-| SQL ORM | [`diesel`](https://diesel.rs) |
-| Connection pooling | [`r2d2`](https://docs.rs/r2d2) |
+| SQL ORM | [`sea-orm`](https://www.sea-ql.org/SeaORM) (with `sqlx-sqlite` feature) |
+| Connection pooling | [`sqlx::Pool`](https://docs.rs/sqlx) (built into the `sqlx-sqlite` backend) |
 | Vector search | [`sqlite-vec`](https://github.com/asg017/sqlite-vec) (loaded as SQLite extension) |
 | Storage backend | SQLite (single file per user profile) |
 
-> **Rule:** Always use `diesel` for all SQL in this crate. Do **not** introduce `rusqlite` — this violates the project constraint (§7.3 of AGENTS.md).
+> **Rule:** Always use `sea-orm` (and `sea-orm-migration`) for all SQL in this crate. Do **not** introduce `rusqlite` or `diesel` — this violates the project constraint (§7.3 of AGENTS.md).
 
-Migrations are generated with `diesel migration generate <name>` and embedded with `diesel_migrations::embed_migrations!`.
+Migrations are defined as Rust modules under `crates/ene-memory/src/migrator/src/m{YYYYMMDD}_{name}/` (scaffold via the `sea-orm-migration` CLI) and embedded through `Migrator` re-exports.
 
 ---
 
