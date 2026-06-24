@@ -446,6 +446,32 @@ impl DbIpcServer {
                     table.name, prefix
                 )));
             }
+            Self::validate_identifier(&table.name)?;
+            for col in &table.columns {
+                Self::validate_identifier(&col.name)?;
+            }
+        }
+
+        let known_table_names: HashSet<&str> =
+            schema.tables.iter().map(|t| t.name.as_str()).collect();
+        for index in &schema.indexes {
+            Self::validate_identifier(&index.name)?;
+            Self::validate_identifier(&index.table)?;
+            if !index.table.starts_with(prefix) {
+                return Err(DbServerError::PermissionDenied(format!(
+                    "Index '{}' references table '{}' outside prefix '{}'",
+                    index.name, index.table, prefix
+                )));
+            }
+            if !known_table_names.contains(index.table.as_str()) {
+                return Err(DbServerError::UnknownTable(format!(
+                    "Index '{}' references undeclared table '{}'",
+                    index.name, index.table
+                )));
+            }
+            for col in &index.columns {
+                Self::validate_identifier(col)?;
+            }
         }
 
         let schema_json = serde_json::to_string(&schema)
@@ -514,6 +540,39 @@ impl DbIpcServer {
             tables: schema.tables.iter().map(|t| t.name.clone()).collect(),
             indexes: created_indexes,
         })
+    }
+
+    /// Validates a SQL identifier (table, column, or index name).
+    ///
+    /// Rejects empty strings, names longer than 64 characters, and any
+    /// character outside `[A-Za-z0-9_]` with the first character in
+    /// `[A-Za-z_]`. This prevents SQL injection through identifier
+    /// interpolation in DDL construction.
+    fn validate_identifier(name: &str) -> Result<(), DbServerError> {
+        if name.is_empty() {
+            return Err(DbServerError::PermissionDenied(
+                "Identifier must not be empty".to_string(),
+            ));
+        }
+        if name.len() > 64 {
+            return Err(DbServerError::PermissionDenied(format!(
+                "Identifier '{name}' exceeds 64-character limit"
+            )));
+        }
+        let bytes = name.as_bytes();
+        if !matches!(bytes[0], b'A'..=b'Z' | b'a'..=b'z' | b'_') {
+            return Err(DbServerError::PermissionDenied(format!(
+                "Identifier '{name}' must start with a letter or underscore"
+            )));
+        }
+        for &b in &bytes[1..] {
+            if !matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_') {
+                return Err(DbServerError::PermissionDenied(format!(
+                    "Identifier '{name}' contains invalid character"
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn build_create_table_sql(table: &DbTable) -> String {
@@ -936,5 +995,84 @@ impl DbIpcServer {
                 Ok(Condition::all().add(Expr::col(Alias::new(column)).is_not_null()))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_identifier_accepts_valid_names() {
+        for name in [
+            "fs_data",
+            "_internal",
+            "Table1",
+            "a",
+            "A_B_C_123",
+            "x_1234567890_1234567890_1234567890_1234567890_1234567890_abcdefg",
+        ] {
+            assert!(
+                DbIpcServer::validate_identifier(name).is_ok(),
+                "expected '{name}' to be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_identifier_rejects_injection_payloads() {
+        // Each of these would be a valid SQL injection vector if interpolated
+        // unescaped into a CREATE TABLE / CREATE INDEX statement.
+        let bad_inputs = [
+            "x) ; DROP TABLE fs_data; --",
+            "evil\" TEXT --",
+            "x'; DROP TABLE foo; --",
+            "a; DROP TABLE users",
+            "1col",          // starts with digit
+            "with space",    // contains space
+            "with-dash",     // contains dash
+            "with`backtick", // contains backtick
+            "",              // empty
+            "table.name",    // contains dot
+            "(select 1)",    // contains parens
+            "x_1234567890_1234567890_1234567890_1234567890_1234567890_abcdefX1", // > 64
+        ];
+        for bad in bad_inputs {
+            assert!(
+                DbIpcServer::validate_identifier(bad).is_err(),
+                "expected '{bad}' to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn build_create_table_sql_emits_valid_ddl() {
+        let table = ene_tool_db::DbTable {
+            name: "fs_notes".to_string(),
+            columns: vec![
+                ene_tool_db::DbColumn {
+                    name: "id".to_string(),
+                    ty: ene_tool_db::DbType::Integer,
+                    nullable: false,
+                    primary_key: true,
+                    auto_increment: true,
+                    unique: false,
+                    default: None,
+                },
+                ene_tool_db::DbColumn {
+                    name: "body".to_string(),
+                    ty: ene_tool_db::DbType::Text,
+                    nullable: true,
+                    primary_key: false,
+                    auto_increment: false,
+                    unique: false,
+                    default: None,
+                },
+            ],
+        };
+        let sql = DbIpcServer::build_create_table_sql(&table);
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS fs_notes ("));
+        assert!(sql.contains("id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT"));
+        assert!(sql.contains("body TEXT"));
     }
 }
