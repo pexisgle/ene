@@ -279,13 +279,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 // Generation successfully completed
-                EneEvent::Done => {
+                EneEvent::Terminal(ene_core::TerminalReason::Done) => {
                     println!("\n");
                     break 'stream;
                 }
 
+                // Generation cancelled by the user
+                EneEvent::Terminal(ene_core::TerminalReason::Cancelled) => {
+                    println!("\n  [Cancelled]\n");
+                    break 'stream;
+                }
+
                 // Error occurred during generation
-                EneEvent::Failed { message } => {
+                EneEvent::Terminal(ene_core::TerminalReason::Failed { message }) => {
                     eprintln!("\n  [Error] {message}\n");
                     break 'stream;
                 }

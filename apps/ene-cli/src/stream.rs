@@ -41,8 +41,12 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
                     ))
                 );
             }
-            Ok(EneEvent::Done) => {
-                println!();
+            Ok(EneEvent::Terminal(reason)) => {
+                if let ene_core::TerminalReason::Failed { message } = &reason {
+                    eprintln!("\n[Error] {message}");
+                } else {
+                    println!();
+                }
                 break;
             }
             Ok(EneEvent::PermissionRequired {
@@ -169,10 +173,6 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
                         "[Task {task_id}] Step {steps_display}: {description}"
                     ))
                 );
-            }
-            Ok(EneEvent::Failed { message }) => {
-                eprintln!("\n[Error] {message}");
-                break;
             }
             Ok(EneEvent::StatusChanged { .. }) => {}
             Err(e) => {

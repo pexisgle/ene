@@ -46,7 +46,7 @@ sequenceDiagram
         T-->>A: CallResult
         A->>L: continue stream
     end
-    A-->>H: broadcast EneEvent::Done
+    A-->>H: broadcast EneEvent::Terminal(TerminalReason::Done)
 ```
 
 ---
@@ -90,14 +90,15 @@ pub struct EneHandle { /* opaque */ }
 | `get_snapshot` | `fn get_snapshot(&self) -> Result<EneStateSnapshot, EneCoreError>` | Returns a point-in-time snapshot of actor state. |
 | `manual_split` | `fn manual_split(&self) -> Result<SplitResult, EneCoreError>` | Forces a session split (creates a memory summary). |
 | `list_tools` | `fn list_tools(&self) -> Result<Vec<ToolSpec>, EneCoreError>` | Returns the registered tool specifications. |
-| `call_tool` | `fn call_tool(&self, name: &str, arguments: serde_json::Value) -> Result<String, EneCoreError>` | Directly invokes a tool by name. |
+| `call_tool` | `fn call_tool(&self, name: String, arguments: String) -> Result<String, EneCoreError>` | Directly invokes a tool by name with JSON-encoded arguments. |
+| `invalidate_tool_index` | `fn invalidate_tool_index(&self) -> Result<(), ActorDeadError>` | Drops the cached Tool RAG index so it is rebuilt on the next query. |
 
 ### Interactive Flow
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `decide_permission` | `fn decide_permission(&self, request_id: u64, decision: PermissionDecision) -> Result<(), ActorDeadError>` | Responds to a `PermissionRequired` event. |
-| `submit_user_input` | `fn submit_user_input(&self, request_id: u64, response: UserInputResponse) -> Result<(), ActorDeadError>` | Responds to a `UserInputRequired` event. |
+| `decide_permission` | `fn decide_permission(&self, request_id: impl Into<RequestId>, decision: PermissionDecision) -> Result<(), ActorDeadError>` | Responds to a `PermissionRequired` event. |
+| `submit_user_input` | `fn submit_user_input(&self, request_id: impl Into<RequestId>, response: UserInputResponse) -> Result<(), ActorDeadError>` | Responds to a `UserInputRequired` event. |
 
 ---
 
@@ -123,22 +124,22 @@ pub enum EneCommand {
     LoadCharacter { path: String, reply: oneshot::Sender<Result<(), EneCoreError>> },
 
     /// Get a point-in-time state snapshot.
-    GetSnapshot { reply: oneshot::Sender<Result<EneStateSnapshot, EneCoreError>> },
+    GetSnapshot { reply: oneshot::Sender<EneStateSnapshot> },
 
     /// Force a session memory split.
     ManualSplit { reply: oneshot::Sender<Result<SplitResult, EneCoreError>> },
 
     /// List available tool specs.
-    ListTools { reply: oneshot::Sender<Result<Vec<ToolSpec>, EneCoreError>> },
+    ListTools { reply: oneshot::Sender<Vec<ToolSpec>> },
 
     /// Directly call a named tool.
-    CallTool { name: String, arguments: serde_json::Value, reply: oneshot::Sender<Result<String, EneCoreError>> },
+    CallTool { name: String, arguments: String, reply: oneshot::Sender<Result<String, EneCoreError>> },
 
     /// User decision for a permission prompt.
-    PermissionDecision { request_id: u64, decision: PermissionDecision },
+    PermissionDecision { request_id: RequestId, decision: PermissionDecision },
 
     /// User response for an input prompt.
-    UserInputResponse { request_id: u64, response: UserInputResponse },
+    UserInputResponse { request_id: RequestId, response: UserInputResponse },
 
     /// Signal that the tool index should be rebuilt.
     InvalidateToolIndex,
@@ -167,25 +168,28 @@ pub enum EneEvent {
 
     /// The actor requires user permission before proceeding.
     PermissionRequired {
-        request_id: u64,
+        request_id: RequestId,
         action: String,
         target: String,
         description: String,
     },
 
     /// The actor requires user text input before proceeding.
-    UserInputRequired { request_id: u64, prompt: String },
+    UserInputRequired {
+        request_id: RequestId,
+        prompt: UserInputPrompt,
+    },
 
     /// Progress update for a multi-step background task.
     TaskProgress {
         task_id: String,
-        step: u32,
-        total_steps: u32,
+        step: usize,
+        total_steps: Option<usize>,
         description: String,
     },
 
     /// The session was split and a memory summary was created.
-    SessionSplit { summary: String, reason: String },
+    SessionSplit { summary: String, reason: SplitReason },
 
     /// The current turn has completed successfully.
     Done,
@@ -259,7 +263,7 @@ Provides read access to the memory subsystem from outside the actor. Obtained fr
 |--------|-----------|-------------|
 | `is_enabled` | `fn is_enabled(&self) -> bool` | Whether the memory subsystem is active. |
 | `embed_query` | `fn embed_query(&self, text: &str) -> Result<Vec<f32>, EneCoreError>` | Embeds a text query using the configured embedding provider. |
-| `search_summaries` | `fn search_summaries(&self, query_embedding: Vec<f32>, card_name: &str, limit: usize, threshold: f32) -> Result<Vec<RecalledSummary>, EneCoreError>` | Searches memory summaries by vector similarity. |
+| `search_summaries` | `fn search_summaries(&self, query_embedding: &[f32], card_name: &str, limit: usize, threshold: f32) -> Result<Vec<RecalledSummary>, EneCoreError>` | Searches memory summaries by vector similarity. |
 | `list_recent_summaries` | `fn list_recent_summaries(&self, card_name: &str, limit: usize) -> Result<Vec<ConversationSummary>, EneCoreError>` | Lists the most recent summaries in recency order. |
 | `get_all_keyfacts` | `fn get_all_keyfacts(&self, card_name: &str) -> Result<Vec<KeyFact>, EneCoreError>` | Returns all key-facts stored for a character. |
 
@@ -380,8 +384,8 @@ async fn main() -> anyhow::Result<()> {
                 eprintln!("Permission requested: {} on {}", action, target);
                 handle.decide_permission(request_id, ene_core::PermissionDecision::AllowOnce)?;
             }
-            EneEvent::Done => break,
-            EneEvent::Failed { message } => {
+            EneEvent::Terminal(ene_core::TerminalReason::Done) => break,
+            EneEvent::Terminal(ene_core::TerminalReason::Failed { message }) => {
                 eprintln!("Error: {}", message);
                 break;
             }

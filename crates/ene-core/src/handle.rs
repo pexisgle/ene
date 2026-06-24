@@ -18,6 +18,7 @@ use ene_tool_proto::ToolSpec;
 use std::collections::HashMap;
 static DB_TOKEN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -160,19 +161,37 @@ pub enum EneEvent {
         /// Why the split was triggered.
         reason: SplitReason,
     },
-    /// The AI stream has completed normally. This is always the final event
-    /// for a given run — consumers should break their event loop on this.
-    Done,
-    /// The AI stream terminated due to an error.
-    Failed {
-        /// Human-readable error description.
-        message: String,
-    },
+    /// Terminal event for a run: emitted exactly once at the end of every
+    /// `EneCommand::Run`, whether the stream finished normally, errored out,
+    /// or was cancelled by the user. Consumers should break their event
+    /// loop on this variant.
+    Terminal(
+        /// Why the run terminated.
+        TerminalReason,
+    ),
     /// The actor's status changed.
     StatusChanged {
         /// New status value.
         status: EneStatus,
     },
+}
+
+/// Reason a single run terminated.
+///
+/// Used in [`EneEvent::Terminal`]. Exactly one of these is emitted per
+/// `EneCommand::Run`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalReason {
+    /// The LLM stream completed normally (no more tool calls and the
+    /// provider finished the response).
+    Done,
+    /// The run terminated due to an error.
+    Failed {
+        /// Human-readable error description.
+        message: String,
+    },
+    /// The run was cancelled by the user via `EneCommand::Cancel`.
+    Cancelled,
 }
 
 /// A read-only handle for querying the memory subsystem.
@@ -542,6 +561,11 @@ struct EneActor {
     pending_permissions: Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
     pending_user_inputs: Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
     pending_split: Option<PendingSplitTask>,
+    /// Shared with the running stream task; the first party to
+    /// transition this from `false` to `true` is the one that emits
+    /// [`EneEvent::Terminal`] for the current run, guaranteeing
+    /// exactly one terminal event per `EneCommand::Run`.
+    terminal_emitted: Arc<AtomicBool>,
 }
 
 impl EneActor {
@@ -563,6 +587,7 @@ impl EneActor {
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
             pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
             pending_split: None,
+            terminal_emitted: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -637,6 +662,8 @@ impl EneActor {
                     handle.abort();
                 }
                 self.cancel_token = CancellationToken::new();
+                // Fresh terminal guard for the new run.
+                self.terminal_emitted = Arc::new(AtomicBool::new(false));
                 let _ = self.event_tx.send(EneEvent::StatusChanged {
                     status: EneStatus::Running,
                 });
@@ -650,6 +677,25 @@ impl EneActor {
                 }
                 self.stream_session_rx = None;
                 self.cancel_token = CancellationToken::new();
+                // Emit Terminal(Cancelled) unless the stream task has
+                // already terminated (e.g. it emitted Done/Failed
+                // before this cancel landed, or the abort was clean
+                // and the task already sent a terminal before
+                // checking the token).
+                if self
+                    .terminal_emitted
+                    .compare_exchange(
+                        false,
+                        true,
+                        std::sync::atomic::Ordering::AcqRel,
+                        std::sync::atomic::Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    let _ = self
+                        .event_tx
+                        .send(EneEvent::Terminal(TerminalReason::Cancelled));
+                }
                 let _ = self.event_tx.send(EneEvent::StatusChanged {
                     status: EneStatus::Idle,
                 });
@@ -753,9 +799,22 @@ impl EneActor {
 
         // 3. Embed the input
         if let Err(e) = self.embed_input(&user_input).await {
-            let _ = self.event_tx.send(EneEvent::Failed {
-                message: e.to_string(),
-            });
+            if self
+                .terminal_emitted
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                let _ = self
+                    .event_tx
+                    .send(EneEvent::Terminal(TerminalReason::Failed {
+                        message: e.to_string(),
+                    }));
+            }
             return;
         }
 
@@ -767,9 +826,22 @@ impl EneActor {
         let provider = match self.create_provider() {
             Ok(p) => p,
             Err(e) => {
-                let _ = self.event_tx.send(EneEvent::Failed {
-                    message: e.to_string(),
-                });
+                if self
+                    .terminal_emitted
+                    .compare_exchange(
+                        false,
+                        true,
+                        std::sync::atomic::Ordering::AcqRel,
+                        std::sync::atomic::Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    let _ = self
+                        .event_tx
+                        .send(EneEvent::Terminal(TerminalReason::Failed {
+                            message: e.to_string(),
+                        }));
+                }
                 return;
             }
         };
@@ -783,6 +855,7 @@ impl EneActor {
         let cancel_token = self.cancel_token.clone();
         let pending_permissions = self.pending_permissions.clone();
         let pending_user_inputs = self.pending_user_inputs.clone();
+        let terminal_emitted = self.terminal_emitted.clone();
 
         // 7. Spawn the stream task
         let (session_tx, session_rx) = oneshot::channel();
@@ -800,6 +873,7 @@ impl EneActor {
                 cancel_token,
                 pending_permissions,
                 pending_user_inputs,
+                terminal_emitted,
             })
             .await;
             let _ = session_tx.send(updated_session);

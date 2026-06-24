@@ -198,13 +198,19 @@ Run { input }
 
 | エラーソース | 処理 |
 |-------------|------|
-| LLM API エラー | `EneEvent::Failed` + `Done`、ストリームが返す |
+| LLM API エラー | `EneEvent::Terminal(TerminalReason::Failed { message })`、ストリームが返す |
 | ツールタイムアウト (60秒) | ツールエラーメッセージを LLM に送信 |
 | 権限拒否 | ツールエラーを LLM に送信 |
 | ユーザー入力キャンセル | ツールエラーを LLM に送信 |
-| 最大ラウンド超過 | `EneEvent::Failed` + `Done` |
-| 埋め込みエラー | `EneEvent::Failed` + `Done` |
+| 最大ラウンド超過 | `EneEvent::Terminal(TerminalReason::Failed { message })` |
+| 埋め込みエラー | `EneEvent::Terminal(TerminalReason::Failed { message })` |
+| `EneCommand::Cancel` (ストリーム中) | `EneEvent::Terminal(TerminalReason::Cancelled)` |
+| `EneCommand::Cancel` (`Done`/`Failed` 後) | 追加の終端イベントは送られない (ガードが既に発火済み) |
 | Broadcast Lagged | コンシューマーが警告をログし、残りのイベントを継続読み込み |
+
+## 終端イベント
+
+すべての `EneCommand::Run` は、正常完了・エラー・キャンセルを問わず、[`EneEvent::Terminal`] を **ちょうど 1 回** 生成します。コンシューマはこのバリアントを受け取ったらイベントループを抜けて構いません。これはその実行の最後のイベントであることが保証されています。終端イベントは `Arc<AtomicBool>` の共有ガードを通じて送出されます: ストリームタスク側とキャンセルコマンド側のうち `compare_exchange` に敗れた方は送出しないため、同じ実行で 2 つの終端が送出されることはありません。
 
 ## ツール呼び出しの蓄積
 

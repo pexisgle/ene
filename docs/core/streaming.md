@@ -198,13 +198,19 @@ The cancel token is checked inside `while let Some(chunk) = stream.next().await`
 
 | Error Source | Handling |
 |-------------|----------|
-| LLM API error | `EneEvent::Failed` + `Done`, stream returns |
+| LLM API error | `EneEvent::Terminal(TerminalReason::Failed { message })`, stream returns |
 | Tool timeout (60s) | Tool error message sent back to LLM |
 | Permission denied | Tool error sent back to LLM |
 | User input cancelled | Tool error sent back to LLM |
-| Max rounds exceeded | `EneEvent::Failed` + `Done` |
-| Embedding error | `EneEvent::Failed` + `Done` |
+| Max rounds exceeded | `EneEvent::Terminal(TerminalReason::Failed { message })` |
+| Embedding error | `EneEvent::Terminal(TerminalReason::Failed { message })` |
+| `EneCommand::Cancel` (mid-stream) | `EneEvent::Terminal(TerminalReason::Cancelled)` |
+| `EneCommand::Cancel` after `Done`/`Failed` | No additional terminal event (guard already fired) |
 | Broadcast Lagged | Consumer logs warning, continues reading |
+
+## Terminal Events
+
+Every `EneCommand::Run` produces exactly one [`EneEvent::Terminal`] variant, regardless of whether the stream completed normally, errored, or was cancelled. Consumers should break their event loop on this variant; it is guaranteed to be the final event for the run. The terminal is delivered through a shared `Arc<AtomicBool>` guard: whichever site (stream task or cancel command) loses the `compare_exchange` race stays silent, so the same run cannot emit two terminals.
 
 ## Tool Call Accumulation
 
