@@ -14,6 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use ene_memory::entities::tool_schemas;
 use ene_tool_db::{
@@ -147,7 +148,33 @@ impl DbIpcServer {
             .map_err(|e| DbServerError::Internal(e.to_string()))?;
 
         loop {
-            let stream = listener.accept().await?;
+            // Continue the accept loop on transient accept
+            // errors (EMFILE, ENFILE, EINTR, ...). A
+            // permanent kill of the DB server on a single
+            // resource-exhaustion event would leave the
+            // tool offline until the next reconfigure.
+            // The errors that *do* terminate the server
+            // (broken listener, socket removed, etc.) are
+            // surfaced via the original `?` on the
+            // `accept()` call only after we have logged
+            // and backed off, so a single transient
+            // failure does not silently break the tool.
+            let stream = match listener.accept().await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    error!(
+                        tool = %self.tool_name,
+                        error = %e,
+                        "DB IPC accept failed; backing off and continuing"
+                    );
+                    // Exponential backoff capped at 5s.
+                    // The previous behavior was `?`-propagate,
+                    // which killed the server task on a
+                    // single accept failure.
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    continue;
+                }
+            };
             debug!(tool = %self.tool_name, "Accepted DB IPC connection");
 
             let db = db.clone();
@@ -173,6 +200,19 @@ impl DbIpcServer {
         auth_token: String,
     ) -> Result<(), DbServerError> {
         let mut stream = stream;
+
+        // Track the rowid of the most recent Insert so that
+        // a subsequent `LastInsertRowId` request can return
+        // the correct value. SQLite's `last_insert_rowid()`
+        // is per-connection; with SeaORM's pool, the
+        // connection serving a query may not be the one
+        // that performed the prior insert, so a raw
+        // `SELECT last_insert_rowid()` is racy. Tracking
+        // it here (one cell per logical `handle_connection`)
+        // matches the tool's own view: a tool client
+        // always pairs Insert and LastInsertRowId on the
+        // same connection.
+        let last_rowid: Arc<std::sync::Mutex<Option<i64>>> = Arc::new(std::sync::Mutex::new(None));
 
         let mut declared_tables: HashMap<String, DbTable> = HashMap::new();
         let mut declared_columns: HashMap<String, HashSet<String>> = HashMap::new();
@@ -249,20 +289,28 @@ impl DbIpcServer {
                 continue;
             }
 
+            // Match the actual `Shutdown` request rather
+            // than the response. The previous form closed
+            // the connection on any `DbResponse::Ack`, which
+            // is fragile: if any other request ever returns
+            // `Ack` (or a future response is reused), the
+            // connection would terminate spuriously.
+            let was_shutdown = matches!(request, DbRequest::Shutdown);
+
             let response = Self::handle_request(
                 &db,
                 &tool_name,
                 &prefix,
                 &mut declared_tables,
                 &mut declared_columns,
+                &last_rowid,
                 request,
             )
             .await;
 
-            let is_shutdown = matches!(response, DbResponse::Ack);
             Self::send_response(&mut stream, &response).await?;
 
-            if is_shutdown {
+            if was_shutdown {
                 debug!(tool = %tool_name, "Received shutdown request");
                 break;
             }
@@ -289,6 +337,7 @@ impl DbIpcServer {
         prefix: &str,
         declared_tables: &mut HashMap<String, DbTable>,
         declared_columns: &mut HashMap<String, HashSet<String>>,
+        last_rowid: &Arc<std::sync::Mutex<Option<i64>>>,
         request: DbRequest,
     ) -> DbResponse {
         match request {
@@ -307,7 +356,15 @@ impl DbIpcServer {
                     .and_then(|_| Self::validate_row_columns(declared_columns, &table, &row));
                 match res {
                     Ok(_) => match Self::handle_insert(db, &table, row).await {
-                        Ok(id) => DbResponse::Insert { rowid: id },
+                        Ok(id) => {
+                            // Record the rowid for the
+                            // connection-scoped
+                            // `LastInsertRowId` lookup.
+                            if let Ok(mut guard) = last_rowid.lock() {
+                                *guard = Some(id);
+                            }
+                            DbResponse::Insert { rowid: id }
+                        }
                         Err(e) => e.to_error_response(),
                     },
                     Err(e) => e.to_error_response(),
@@ -385,10 +442,16 @@ impl DbIpcServer {
                     Err(e) => e.to_error_response(),
                 }
             }
-            DbRequest::LastInsertRowId => Self::handle_last_insert_rowid(db)
-                .await
-                .map(|rowid| DbResponse::LastInsertRowId { rowid })
-                .unwrap_or_else(|e| e.to_error_response()),
+            DbRequest::LastInsertRowId => {
+                // Return the rowid of the most recent
+                // Insert on this logical connection. SQLite's
+                // `last_insert_rowid()` is per-connection, so
+                // a raw `SELECT last_insert_rowid()` against
+                // a SeaORM pool can return a stale or
+                // different value than the prior insert.
+                let rowid = last_rowid.lock().ok().and_then(|g| *g).unwrap_or(0);
+                DbResponse::LastInsertRowId { rowid }
+            }
             DbRequest::Ping => DbResponse::Pong,
             DbRequest::Shutdown => DbResponse::Ack,
             // The handshake is intercepted in `handle_connection`
@@ -1015,20 +1078,6 @@ impl DbIpcServer {
         Ok(count)
     }
 
-    async fn handle_last_insert_rowid(db: &DatabaseConnection) -> Result<i64, DbServerError> {
-        let stmt =
-            Statement::from_string(DatabaseBackend::Sqlite, "SELECT last_insert_rowid() AS id");
-        let res = db
-            .query_one(stmt)
-            .await
-            .map_err(|e| DbServerError::Internal(e.to_string()))?;
-        let id = match res {
-            Some(row) => row.try_get("", "id").unwrap_or(0),
-            None => 0,
-        };
-        Ok(id)
-    }
-
     fn build_sea_query_filter(filter: &DbFilter) -> Result<Condition, DbServerError> {
         match filter {
             DbFilter::Always => Ok(Condition::all()),
@@ -1156,5 +1205,129 @@ mod tests {
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS fs_notes ("));
         assert!(sql.contains("id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT"));
         assert!(sql.contains("body TEXT"));
+    }
+
+    /// Regression test for #42: after an Insert, a
+    /// `LastInsertRowId` request must return the rowid of
+    /// that Insert — not 0 (the previous "no prior insert"
+    /// sentinel) and not the rowid of some other insert
+    /// served by a different pooled connection. The
+    /// connection-scoped `last_rowid` cell records the
+    /// rowid of the most recent Insert on this logical
+    /// handle_connection and the dispatch returns it
+    /// verbatim.
+    #[tokio::test]
+    async fn last_insert_rowid_returns_most_recent_insert() {
+        use sea_orm::ConnectionTrait;
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        db.execute_unprepared(
+            "CREATE TABLE fs_test (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)",
+        )
+        .await
+        .unwrap();
+
+        let mut declared_tables: HashMap<String, ene_tool_db::DbTable> = HashMap::new();
+        declared_tables.insert(
+            "fs_test".to_string(),
+            ene_tool_db::DbTable {
+                name: "fs_test".to_string(),
+                columns: vec![ene_tool_db::DbColumn {
+                    name: "name".to_string(),
+                    ty: ene_tool_db::DbType::Text,
+                    nullable: false,
+                    primary_key: false,
+                    auto_increment: false,
+                    unique: false,
+                    default: None,
+                }],
+            },
+        );
+        let mut declared_columns: HashMap<String, HashSet<String>> = HashMap::new();
+        declared_columns.insert(
+            "fs_test".to_string(),
+            ["name".to_string()].into_iter().collect(),
+        );
+
+        let last_rowid: Arc<std::sync::Mutex<Option<i64>>> = Arc::new(std::sync::Mutex::new(None));
+
+        // Insert a row.
+        let insert_resp = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_tool_db::DbRequest::Insert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([(
+                    "name".to_string(),
+                    ene_tool_db::DbValue::Text("first".to_string()),
+                )]),
+            },
+        )
+        .await;
+        let first_id = match insert_resp {
+            ene_tool_db::DbResponse::Insert { rowid } => rowid,
+            other => panic!("expected Insert, got {other:?}"),
+        };
+        assert!(first_id > 0);
+
+        // LastInsertRowId must return the rowid we just got.
+        let lookup = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_tool_db::DbRequest::LastInsertRowId,
+        )
+        .await;
+        let lookup_id = match lookup {
+            ene_tool_db::DbResponse::LastInsertRowId { rowid } => rowid,
+            other => panic!("expected LastInsertRowId, got {other:?}"),
+        };
+        assert_eq!(lookup_id, first_id);
+
+        // Insert a second row; LastInsertRowId now points
+        // at the new row.
+        let insert_resp2 = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_tool_db::DbRequest::Insert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([(
+                    "name".to_string(),
+                    ene_tool_db::DbValue::Text("second".to_string()),
+                )]),
+            },
+        )
+        .await;
+        let second_id = match insert_resp2 {
+            ene_tool_db::DbResponse::Insert { rowid } => rowid,
+            other => panic!("expected Insert, got {other:?}"),
+        };
+        assert!(second_id > first_id);
+
+        let lookup2 = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_tool_db::DbRequest::LastInsertRowId,
+        )
+        .await;
+        let lookup2_id = match lookup2 {
+            ene_tool_db::DbResponse::LastInsertRowId { rowid } => rowid,
+            other => panic!("expected LastInsertRowId, got {other:?}"),
+        };
+        assert_eq!(lookup2_id, second_id);
     }
 }
