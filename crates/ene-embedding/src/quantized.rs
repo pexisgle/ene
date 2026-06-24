@@ -85,6 +85,7 @@ impl GgufEmbeddingProvider {
         text: &str,
         kind: ene_provider::EmbeddingKind,
     ) -> Result<Vec<f32>, EmbeddingError> {
+        let t_start = Instant::now();
         let prefix = match kind {
             ene_provider::EmbeddingKind::Query | ene_provider::EmbeddingKind::Hyde => "Query: ",
             _ => "Document: ",
@@ -98,6 +99,7 @@ impl GgufEmbeddingProvider {
             .encode(prefixed.as_str(), true)
             .map_err(|e| EneEmbeddingError::CandleError(format!("Tokenization failed: {e}")))?;
         let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&x| i64::from(x)).collect();
+        let t_tokenize = t_start.elapsed();
 
         if input_ids.is_empty() {
             // Tokenization succeeded but yielded no
@@ -114,6 +116,7 @@ impl GgufEmbeddingProvider {
             ));
         }
 
+        let t_tensor_start = Instant::now();
         let input_tensor = Tensor::from_vec(
             input_ids.iter().map(|&x| x as u32).collect::<Vec<_>>(),
             (1, input_ids.len()),
@@ -122,12 +125,25 @@ impl GgufEmbeddingProvider {
         .map_err(|e| {
             EneEmbeddingError::CandleError(format!("Failed to create input tensor: {e}"))
         })?;
+        let t_tensor = t_tensor_start.elapsed();
 
+        let t_forward_start = Instant::now();
         let model = self
             .model
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        model.forward(&input_tensor)
+        let result = model.forward(&input_tensor);
+        let t_forward = t_forward_start.elapsed();
+
+        println!(
+            "\n[Embedding Debug] {} tokens | tokenize: {:.2}ms, tensor: {:.2}ms, forward: {:.2}ms",
+            input_ids.len(),
+            t_tokenize.as_secs_f64() * 1000.0,
+            t_tensor.as_secs_f64() * 1000.0,
+            t_forward.as_secs_f64() * 1000.0
+        );
+
+        result
     }
 }
 

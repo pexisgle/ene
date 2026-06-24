@@ -15,6 +15,7 @@ pub struct EmbeddingModel {
 
 impl EmbeddingModel {
     pub fn forward(&self, input_ids: &Tensor) -> Result<Vec<f32>, EmbeddingError> {
+        let t_start = std::time::Instant::now();
         let (_b, _l) = input_ids
             .dims2()
             .map_err(super::candle_err("model dims2"))?;
@@ -23,11 +24,15 @@ impl EmbeddingModel {
             .embed_tokens
             .forward(input_ids)
             .map_err(super::candle_err("model embed"))?;
+        let t_embed = t_start.elapsed();
 
+        let t_layers_start = std::time::Instant::now();
         for layer in &self.layers {
             h = layer.forward(&h)?;
         }
+        let t_layers = t_layers_start.elapsed();
 
+        let t_norm_start = std::time::Instant::now();
         let h = ops::rms_norm(&h, &self.norm_weight, self.norm_eps)
             .map_err(super::candle_err("model final norm"))?;
 
@@ -45,6 +50,14 @@ impl EmbeddingModel {
                 *x /= norm_val;
             }
         }
+        let t_norm = t_norm_start.elapsed();
+
+        println!(
+            "[Model Forward Debug] embed: {:.2}ms, layers: {:.2}ms, norm_pool: {:.2}ms",
+            t_embed.as_secs_f64() * 1000.0,
+            t_layers.as_secs_f64() * 1000.0,
+            t_norm.as_secs_f64() * 1000.0
+        );
 
         Ok(vec)
     }
