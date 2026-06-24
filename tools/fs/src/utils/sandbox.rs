@@ -427,52 +427,98 @@ impl Sandbox {
     }
 
     /// Undoes the most recent operation
+    ///
+    /// The previous implementation called `pop` (which
+    /// removed the entry from the DB) and then applied
+    /// the operations. A failure in the apply step left
+    /// the entry permanently lost, so the next
+    /// `undo_last` would skip it. The new flow uses
+    /// `peek` + apply + `discard`: the entry is only
+    /// removed from the DB after every operation has
+    /// been applied successfully. A failed apply
+    /// surfaces the error to the caller with the entry
+    /// intact and retryable.
     pub async fn undo_last(&self) -> Result<String, ToolError> {
         let mgr = self.ensure_undo_manager().await?;
-        let entry = mgr.pop().await.map_err(|e| ToolError::ExecutionFailed {
+        let entry = mgr.peek().await.map_err(|e| ToolError::ExecutionFailed {
             message: format!("Undo failed: {e}"),
         })?;
 
-        match entry {
-            Some(entry) => {
-                let mut logs = Vec::new();
-                for op in &entry.operations {
-                    match op {
-                        crate::undo::UndoOperation::RestoreFile {
-                            path,
-                            original_content,
-                        } => {
-                            if let Some(content) = original_content {
-                                tokio::fs::write(path, content).await.map_err(|e| {
-                                    ToolError::ExecutionFailed {
-                                        message: format!("Failed to restore file {path}: {e}"),
-                                    }
-                                })?;
+        let entry = match entry {
+            Some(e) => e,
+            None => {
+                return Err(ToolError::ExecutionFailed {
+                    message: "No operations to undo".to_string(),
+                });
+            }
+        };
+
+        // Apply every operation before touching the DB.
+        // We collect into a Result so a mid-loop failure
+        // returns the error and the entry is preserved.
+        let mut logs: Vec<String> = Vec::new();
+        let mut apply_error: Option<ToolError> = None;
+        for op in &entry.operations {
+            match op {
+                crate::undo::UndoOperation::RestoreFile {
+                    path,
+                    original_content,
+                } => {
+                    let result = if let Some(content) = original_content {
+                        match tokio::fs::write(path, content).await {
+                            Ok(()) => {
                                 logs.push(format!("Restored: {path}"));
-                            } else {
-                                tokio::fs::remove_file(path).await.map_err(|e| {
-                                    ToolError::ExecutionFailed {
-                                        message: format!("Failed to remove file {path}: {e}"),
-                                    }
-                                })?;
-                                logs.push(format!("Removed (was not tracked): {path}"));
+                                Ok(())
                             }
+                            Err(e) => Err(ToolError::ExecutionFailed {
+                                message: format!("Failed to restore file {path}: {e}"),
+                            }),
                         }
-                        crate::undo::UndoOperation::DeleteCreatedFile { path } => {
-                            tokio::fs::remove_file(path).await.map_err(|e| {
-                                ToolError::ExecutionFailed {
-                                    message: format!("Failed to delete created file {path}: {e}"),
-                                }
-                            })?;
-                            logs.push(format!("Deleted: {path}"));
+                    } else {
+                        match tokio::fs::remove_file(path).await {
+                            Ok(()) => {
+                                logs.push(format!("Removed (was not tracked): {path}"));
+                                Ok(())
+                            }
+                            Err(e) => Err(ToolError::ExecutionFailed {
+                                message: format!("Failed to remove file {path}: {e}"),
+                            }),
+                        }
+                    };
+                    if let Err(e) = result {
+                        apply_error = Some(e);
+                        break;
+                    }
+                }
+                crate::undo::UndoOperation::DeleteCreatedFile { path } => {
+                    match tokio::fs::remove_file(path).await {
+                        Ok(()) => logs.push(format!("Deleted: {path}")),
+                        Err(e) => {
+                            apply_error = Some(ToolError::ExecutionFailed {
+                                message: format!("Failed to delete created file {path}: {e}"),
+                            });
+                            break;
                         }
                     }
                 }
-                Ok(logs.join("\n"))
             }
-            None => Err(ToolError::ExecutionFailed {
-                message: "No operations to undo".to_string(),
-            }),
         }
+
+        if let Some(e) = apply_error {
+            // Leave the entry in the DB so the user can
+            // retry the undo once the underlying issue
+            // (e.g. permission denied) is resolved.
+            return Err(e);
+        }
+
+        // All operations applied; only now is it safe
+        // to discard the entry.
+        mgr.discard(&entry.id)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed {
+                message: format!("Undo applied but failed to discard entry: {e}"),
+            })?;
+
+        Ok(logs.join("\n"))
     }
 }
