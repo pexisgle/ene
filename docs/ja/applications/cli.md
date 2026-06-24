@@ -46,7 +46,7 @@ pub trait CliCommand: Send + Sync {
 | コマンド | 動作 |
 |---------|------|
 | `/quit` | REPL を終了 |
-| `/clear` | 会話履歴をクリア |
+| `/clear` | 次回実行時に会話履歴がリフレッシュされることを示す (このリリースでは手動クリアは no-op) |
 | `/history` | 会話履歴を表示 |
 | `/prompt` | 現在のシステムプロンプトを表示 (system, examples, memory, expression protocol) |
 

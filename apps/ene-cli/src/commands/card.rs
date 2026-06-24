@@ -23,15 +23,20 @@ impl CliCommand for CardCommand {
             return Err("Usage: /card <name>".to_string());
         }
 
+        // Await the character load before returning
+        // so the prompt does not reappear mid-swap and
+        // a subsequent message cannot race the reload.
+        // The previous form spawned a detached
+        // tokio::task, returned Ok(()) immediately, and
+        // let the next user input run on the old
+        // character.
         let name = arg.to_string();
-        let handle = ctx.handle.clone();
-        tokio::spawn(async move {
-            match handle.load_character(&name).await {
-                Ok(()) => println!("Character card loaded: {name}"),
-                Err(e) => eprintln!("Failed to load character card: {e}"),
+        match ctx.handle.load_character(&name).await {
+            Ok(()) => {
+                println!("Character card loaded: {name}");
+                Ok(())
             }
-        });
-
-        Ok(())
+            Err(e) => Err(format!("Failed to load character card: {e}")),
+        }
     }
 }

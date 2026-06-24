@@ -232,7 +232,7 @@ This ensures no events are lost between the `run()` call and the first `recv()`.
 | Command | Action |
 |---------|--------|
 | `/quit` | Exit |
-| `/clear` | Clear history |
+| `/clear` | Note: history will be refreshed on next run (manual clear is a no-op) |
 | `/prompt` | Show system prompt |
 | `/card <path>` | Switch character card (async load) |
 | `/config` | Show current settings |

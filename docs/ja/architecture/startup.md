@@ -240,7 +240,7 @@ stream::process_stream(&mut rx, &ctx.handle).await;  // イベントを処理
 | コマンド | 動作 |
 |---------|------|
 | `/quit` | REPL を終了 |
-| `/clear` | 履歴クリア |
+| `/clear` | 次回実行時に履歴がリフレッシュされることを示す (手動クリアは no-op) |
 | `/prompt` | システムプロンプト表示 |
 | `/card <path>` | キャラクターカード変更 (非同期) |
 | `/config` | 設定表示 |
