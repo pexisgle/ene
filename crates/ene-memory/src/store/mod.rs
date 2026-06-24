@@ -102,7 +102,6 @@ fn parse_dt(s: &str) -> DateTime<Utc> {
 
 impl MemoryStore {
     fn init(db: DatabaseConnection, embedding_dim: usize) -> Self {
-        init_sqlite_vec();
         Self { db, embedding_dim }
     }
 
@@ -120,12 +119,15 @@ impl MemoryStore {
 
     /// Opens a persistent memory store at the given file path.
     ///
-    /// Creates the database file if it doesn't exist. Runs database migrations
-    /// and registers the `sqlite-vec` extension automatically.
+    /// Creates the database file if it doesn't exist. Registers the
+    /// `sqlite-vec` extension process-globally *before* opening the connection
+    /// (required because `sqlite3_auto_extension` only affects connections
+    /// opened after the call), then runs database migrations.
     pub async fn open(path: &Path, embedding_dim: usize) -> Result<Self, MemoryError> {
         let path_str = path
             .to_str()
             .ok_or_else(|| MemoryError::MemoryStoreConnectionError("Invalid path".to_string()))?;
+        init_sqlite_vec();
         let opt = ConnectOptions::new(format!("sqlite:{path_str}"));
         let db = Database::connect(opt)
             .await
@@ -140,8 +142,12 @@ impl MemoryStore {
 
     /// Opens an in-memory memory store (useful for testing).
     ///
-    /// Uses `"sqlite::memory:"` as the database path with a pool limited to one connection.
+    /// Registers the `sqlite-vec` extension process-globally *before* opening
+    /// the connection, since `:memory:` reuses a single persistent connection
+    /// for the life of the store. Uses `"sqlite::memory:"` as the database
+    /// path with a pool limited to one connection.
     pub async fn open_in_memory(embedding_dim: usize) -> Result<Self, MemoryError> {
+        init_sqlite_vec();
         let mut opt = ConnectOptions::new("sqlite::memory:");
         opt.max_connections(1);
         let db = Database::connect(opt)
@@ -723,7 +729,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "sqlite-vec extension not available for in-memory DB in test environment"]
     async fn test_insert_and_search_summaries() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let emb_a = vec![1.0_f32, 0.0, 0.0, 0.0];
