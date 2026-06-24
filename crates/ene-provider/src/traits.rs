@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio_stream::Stream;
 
+use crate::error::LlmProviderError;
 use crate::message::{LlmMessage, LlmResponseChunk};
 
 /// Trait implemented by LLM providers to interface with Ene.
@@ -18,14 +19,17 @@ pub trait LlmProvider: Send + Sync {
         &self,
         messages: &[LlmMessage],
         tools: &[ene_tool_proto::ToolSpec],
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, String>> + Send>>, String>;
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
+        LlmProviderError,
+    >;
 
     /// Executes a non-streaming chat completion with optional JSON schema response.
     async fn chat_completion(
         &self,
         messages: &[LlmMessage],
         json_schema: Option<serde_json::Value>,
-    ) -> Result<String, String>;
+    ) -> Result<String, LlmProviderError>;
 }
 
 /// Distinguishes embedding use cases. Providers may apply different prefixes
@@ -48,16 +52,20 @@ pub enum EmbeddingKind {
     Hyde,
 }
 
-/// Errors raised by embedding providers. Wraps transport and provider errors
-/// in a single enum so call sites can use a typed error instead of `String`.
+/// Errors raised by embedding providers. Wraps transport, provider, and
+/// local-init errors in a single enum so call sites can use a typed error
+/// instead of `String`. Consumers should match on the variant rather than
+/// parsing the message.
 #[derive(Debug, thiserror::Error)]
 pub enum EmbeddingError {
-    /// The provider returned a malformed or empty response.
+    /// The embedding model failed to initialize (e.g. GGUF load error).
+    /// Distinct from `Provider`, which is for transport / API errors.
+    #[error("embedding init error: {0}")]
+    Init(String),
+    /// The provider returned a malformed or empty response, or a transport
+    /// error (HTTP 4xx/5xx, network failure) prevented the request.
     #[error("embedding provider error: {0}")]
     Provider(String),
-    /// A batch or single request timed out.
-    #[error("embedding timeout after {0:?}")]
-    Timeout(std::time::Duration),
 }
 
 /// Trait for generating vector embeddings from text (used by memory search and Tool RAG).
@@ -151,7 +159,7 @@ pub trait LlmProviderFactory: Send + Sync {
     fn create_provider(
         &self,
         config: &ene_config::EneConfig,
-    ) -> Result<Box<dyn LlmProvider>, String>;
+    ) -> Result<Box<dyn LlmProvider>, LlmProviderError>;
 }
 
 /// Global registry of `LlmProviderFactory` implementations.
@@ -180,7 +188,7 @@ impl LlmProviderRegistry {
     pub fn create_provider(
         name: &str,
         config: &ene_config::EneConfig,
-    ) -> Result<Box<dyn LlmProvider>, String> {
+    ) -> Result<Box<dyn LlmProvider>, LlmProviderError> {
         let factory = {
             if let Ok(guard) = Self::global().factories.lock() {
                 guard.get(name).cloned()
@@ -191,9 +199,9 @@ impl LlmProviderRegistry {
 
         match factory {
             Some(f) => f.create_provider(config),
-            None => Err(format!(
+            None => Err(LlmProviderError::Provider(format!(
                 "No LlmProviderFactory registered for provider name: '{name}'"
-            )),
+            ))),
         }
     }
 }

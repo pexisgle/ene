@@ -189,7 +189,9 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
                 emit_terminal(
                     &event_tx,
                     &terminal_emitted,
-                    TerminalReason::Failed { message: e.clone() },
+                    TerminalReason::Failed {
+                        message: e.to_string(),
+                    },
                 );
                 return session;
             }
@@ -225,7 +227,9 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
                     emit_terminal(
                         &event_tx,
                         &terminal_emitted,
-                        TerminalReason::Failed { message: e.clone() },
+                        TerminalReason::Failed {
+                            message: e.to_string(),
+                        },
                     );
                     return session;
                 }

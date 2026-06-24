@@ -84,7 +84,7 @@ impl EmbeddingProvider for HybridRerankProvider {
 
         llm.chat_completion(&messages, None)
             .await
-            .map_err(EmbeddingError::Provider)
+            .map_err(|e| EmbeddingError::Provider(e.to_string()))
     }
 
     async fn rerank(
@@ -154,7 +154,7 @@ impl EmbeddingProvider for HybridRerankProvider {
         let raw = llm
             .chat_completion(&messages, Some(schema))
             .await
-            .map_err(EmbeddingError::Provider)?;
+            .map_err(|e| EmbeddingError::Provider(e.to_string()))?;
 
         // Parse JSON response.
         let parsed: serde_json::Value = serde_json::from_str(&raw)

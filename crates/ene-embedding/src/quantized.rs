@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use candle_core::{Device, Tensor};
 use tokenizers::Tokenizer;
 
-use crate::error::EmbeddingError;
+use crate::error::{EmbeddingError, EneEmbeddingError};
 
 pub use loader::resolve_gguf_paths;
 
@@ -20,7 +20,7 @@ use loader::load_model;
 use model::EmbeddingModel;
 
 pub(crate) fn candle_err<E: std::fmt::Display>(msg: &str) -> impl FnOnce(E) -> EmbeddingError + '_ {
-    move |e| EmbeddingError::EmbeddingError(format!("{msg}: {e}"))
+    move |e| EneEmbeddingError::CandleError(format!("{msg}: {e}"))
 }
 
 /// A local GPU-free embedding provider using GGUF-quantized models via Candle.
@@ -53,7 +53,7 @@ impl GgufEmbeddingProvider {
         let (model, _metadata) = load_model(gguf_path, &device)?;
 
         let mut tokenizer = Tokenizer::from_file(tokenizer_path).map_err(|e| {
-            EmbeddingError::EmbeddingError(format!("Failed to load tokenizer: {e}"))
+            EneEmbeddingError::CandleError(format!("Failed to load tokenizer: {e}"))
         })?;
         tokenizer
             .with_truncation(Some(tokenizers::TruncationParams {
@@ -61,7 +61,7 @@ impl GgufEmbeddingProvider {
                 ..Default::default()
             }))
             .map_err(|e| {
-                EmbeddingError::EmbeddingError(format!("Failed to set truncation: {e}"))
+                EneEmbeddingError::CandleError(format!("Failed to set truncation: {e}"))
             })?;
 
         let dims = model.hidden_size;
@@ -96,7 +96,7 @@ impl GgufEmbeddingProvider {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let encoding = tokenizer
             .encode(prefixed.as_str(), true)
-            .map_err(|e| EmbeddingError::EmbeddingError(format!("Tokenization failed: {e}")))?;
+            .map_err(|e| EneEmbeddingError::CandleError(format!("Tokenization failed: {e}")))?;
         let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&x| i64::from(x)).collect();
 
         if input_ids.is_empty() {
@@ -109,7 +109,7 @@ impl GgufEmbeddingProvider {
             &Device::Cpu,
         )
         .map_err(|e| {
-            EmbeddingError::EmbeddingError(format!("Failed to create input tensor: {e}"))
+            EneEmbeddingError::CandleError(format!("Failed to create input tensor: {e}"))
         })?;
 
         let model = self

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use candle_core::Device;
 use candle_core::quantized::gguf_file;
 
-use crate::error::EmbeddingError;
+use crate::error::{EmbeddingError, EneEmbeddingError};
 
 use super::attention::AttentionBlock;
 use super::layer::LayerBlock;
@@ -41,7 +41,7 @@ pub fn load_model(
     let md_get = |s: &str| -> Result<&gguf_file::Value, EmbeddingError> {
         metadata
             .get(s)
-            .ok_or_else(|| EmbeddingError::EmbeddingError(format!("Missing metadata: {s}")))
+            .ok_or_else(|| EneEmbeddingError::CandleError(format!("Missing metadata: {s}")))
     };
 
     let num_heads = md_get("qwen3.attention.head_count")?
@@ -212,7 +212,7 @@ pub fn resolve_gguf_paths(
                 "jina-embeddings-v5-text-nano" => "jinaai/jina-embeddings-v5-text-nano-retrieval",
                 "jina-embeddings-v5-text-small" => "jinaai/jina-embeddings-v5-text-small-retrieval",
                 _ => {
-                    return Err(EmbeddingError::EmbeddingError(format!(
+                    return Err(EneEmbeddingError::CandleError(format!(
                         "Unknown model: {model_name_owned}"
                     )));
                 }

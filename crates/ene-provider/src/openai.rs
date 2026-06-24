@@ -4,6 +4,7 @@ use std::pin::Pin;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::config::ProviderConfig;
+use crate::error::{LlmProviderError, map_openai_error};
 use crate::message::{LlmMessage, LlmResponseChunk, LlmToolCallChunk, UserMessagePart};
 use crate::traits::{
     EmbeddingError, EmbeddingKind, EmbeddingProvider, LlmProvider, LlmProviderFactory,
@@ -35,13 +36,13 @@ use async_openai::types::chat::{
     ChatCompletionRequestToolMessageArgs, ChatCompletionRequestUserMessageArgs, FunctionCall,
 };
 
-fn convert_message(msg: &LlmMessage) -> Result<ChatCompletionRequestMessage, String> {
+fn convert_message(msg: &LlmMessage) -> Result<ChatCompletionRequestMessage, LlmProviderError> {
     match msg {
         LlmMessage::System { content } => {
             let m = ChatCompletionRequestSystemMessageArgs::default()
                 .content(content.clone())
                 .build()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| LlmProviderError::Provider(e.to_string()))?;
             Ok(m.into())
         }
         LlmMessage::User { parts } => {
@@ -56,7 +57,7 @@ fn convert_message(msg: &LlmMessage) -> Result<ChatCompletionRequestMessage, Str
                 let m = ChatCompletionRequestUserMessageArgs::default()
                     .content(text.clone())
                     .build()
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| LlmProviderError::Provider(e.to_string()))?;
                 return Ok(m.into());
             }
 
@@ -67,18 +68,18 @@ fn convert_message(msg: &LlmMessage) -> Result<ChatCompletionRequestMessage, Str
                         let p = ChatCompletionRequestMessageContentPartTextArgs::default()
                             .text(text.clone())
                             .build()
-                            .map_err(|e| e.to_string())?;
+                            .map_err(|e| LlmProviderError::Provider(e.to_string()))?;
                         oa_parts.push(p.into());
                     }
                     UserMessagePart::Image { base64_image_data } => {
                         let img_url = ImageUrlArgs::default()
                             .url(base64_image_data.clone())
                             .build()
-                            .map_err(|e| e.to_string())?;
+                            .map_err(|e| LlmProviderError::Provider(e.to_string()))?;
                         let p = ChatCompletionRequestMessageContentPartImageArgs::default()
                             .image_url(img_url)
                             .build()
-                            .map_err(|e| e.to_string())?;
+                            .map_err(|e| LlmProviderError::Provider(e.to_string()))?;
                         oa_parts.push(p.into());
                     }
                 }
@@ -87,7 +88,7 @@ fn convert_message(msg: &LlmMessage) -> Result<ChatCompletionRequestMessage, Str
             let m = ChatCompletionRequestUserMessageArgs::default()
                 .content(oa_parts)
                 .build()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| LlmProviderError::Provider(e.to_string()))?;
             Ok(m.into())
         }
         LlmMessage::Assistant {
@@ -115,7 +116,9 @@ fn convert_message(msg: &LlmMessage) -> Result<ChatCompletionRequestMessage, Str
                 }
                 builder.tool_calls(oa_calls);
             }
-            let m = builder.build().map_err(|e| e.to_string())?;
+            let m = builder
+                .build()
+                .map_err(|e| LlmProviderError::Provider(e.to_string()))?;
             Ok(m.into())
         }
         LlmMessage::Tool {
@@ -126,7 +129,7 @@ fn convert_message(msg: &LlmMessage) -> Result<ChatCompletionRequestMessage, Str
                 .tool_call_id(tool_call_id.clone())
                 .content(content.clone())
                 .build()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| LlmProviderError::Provider(e.to_string()))?;
             Ok(m.into())
         }
     }
@@ -177,7 +180,10 @@ impl LlmProvider for OpenAiProvider {
         &self,
         messages: &[LlmMessage],
         tools: &[ene_tool_proto::ToolSpec],
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, String>> + Send>>, String> {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
+        LlmProviderError,
+    > {
         let oa_messages: Vec<ChatCompletionRequestMessage> = messages
             .iter()
             .map(convert_message)
@@ -195,13 +201,15 @@ impl LlmProvider for OpenAiProvider {
             req_builder.tools(t);
         }
 
-        let request = req_builder.build().map_err(|e| e.to_string())?;
+        let request = req_builder
+            .build()
+            .map_err(|e| LlmProviderError::Provider(e.to_string()))?;
         let stream = self
             .client
             .chat()
             .create_stream(request)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| map_openai_error(&e))?;
 
         let mapped_stream = stream.map(|chunk_res| match chunk_res {
             Ok(chunk) => {
@@ -242,12 +250,12 @@ impl LlmProvider for OpenAiProvider {
                     tool_calls_delta,
                 })
             }
-            Err(e) => Err(e.to_string()),
+            Err(e) => Err(map_openai_error(&e)),
         });
 
         Ok(Box::pin(mapped_stream)
             as Pin<
-                Box<dyn Stream<Item = Result<LlmResponseChunk, String>> + Send>,
+                Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>,
             >)
     }
 
@@ -255,7 +263,7 @@ impl LlmProvider for OpenAiProvider {
         &self,
         messages: &[LlmMessage],
         json_schema: Option<serde_json::Value>,
-    ) -> Result<String, String> {
+    ) -> Result<String, LlmProviderError> {
         use async_openai::types::chat::FinishReason;
 
         let oa_messages: Vec<ChatCompletionRequestMessage> = messages
@@ -277,32 +285,36 @@ impl LlmProvider for OpenAiProvider {
             });
         }
 
-        let request = req_builder.build().map_err(|e| e.to_string())?;
+        let request = req_builder
+            .build()
+            .map_err(|e| LlmProviderError::Provider(e.to_string()))?;
         let response = self
             .client
             .chat()
             .create(request)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| map_openai_error(&e))?;
 
         let choice = response.choices.first().ok_or_else(|| {
             tracing::warn!("[openai] chat completion returned no choices");
-            "OpenAI returned no choices".to_string()
+            LlmProviderError::Provider("OpenAI returned no choices".to_string())
         })?;
+
+        let partial_chars = choice.message.content.as_deref().map_or(0, str::len);
 
         if let Some(reason) = choice.finish_reason {
             match reason {
                 FinishReason::Stop | FinishReason::ToolCalls | FinishReason::FunctionCall => {}
                 FinishReason::Length => {
-                    return Err(format!(
-                        "OpenAI truncated the response (finish_reason=length); partial content was {} chars",
-                        choice.message.content.as_deref().map_or(0, str::len)
-                    ));
+                    return Err(LlmProviderError::Truncated {
+                        reason: "finish_reason=length: configured token limit reached".to_string(),
+                        partial_chars,
+                    });
                 }
                 FinishReason::ContentFilter => {
-                    return Err(
-                        "OpenAI blocked the response (finish_reason=content_filter)".to_string()
-                    );
+                    return Err(LlmProviderError::ContentFilter(
+                        "finish_reason=content_filter: provider blocked the response".to_string(),
+                    ));
                 }
             }
         }
@@ -324,14 +336,14 @@ impl LlmProviderFactory for OpenAiProviderFactory {
     fn create_provider(
         &self,
         config: &ene_config::EneConfig,
-    ) -> Result<Box<dyn LlmProvider>, String> {
-        let provider_config = config
-            .get_section::<ProviderConfig>()
-            .map_err(|e| format!("Failed to parse provider config: {e}"))?;
+    ) -> Result<Box<dyn LlmProvider>, LlmProviderError> {
+        let provider_config = config.get_section::<ProviderConfig>().map_err(|e| {
+            LlmProviderError::Provider(format!("Failed to parse provider config: {e}"))
+        })?;
 
         let base_url = provider_config
             .resolve_base_url()
-            .map_err(|e| format!("Failed to resolve base URL: {e}"))?;
+            .map_err(|e| LlmProviderError::Provider(format!("Failed to resolve base URL: {e}")))?;
 
         let api_key = provider_config.resolve_api_key();
 
@@ -479,7 +491,8 @@ impl EmbeddingProvider for CloudEmbeddingProvider {
         use async_openai::types::chat::CreateChatCompletionRequestArgs;
 
         let openai_messages: Result<Vec<_>, _> = messages.iter().map(convert_message).collect();
-        let openai_messages = openai_messages.map_err(EmbeddingError::Provider)?;
+        let openai_messages =
+            openai_messages.map_err(|e| EmbeddingError::Provider(e.to_string()))?;
 
         let request = CreateChatCompletionRequestArgs::default()
             .model(&model)
