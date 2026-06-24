@@ -6,6 +6,15 @@
 //! Requires a GGUF model file in the `models/` directory.
 //! Download from `HuggingFace`:
 //!   huggingface-cli download jinaai/jina-embeddings-v5-text-small
+//!
+//! Requires a multi-thread tokio runtime. The GGUF forward
+//! pass uses `tokio::task::block_in_place`, which panics on
+//! a `current_thread` runtime (or outside any runtime). The
+//! `#[tokio::main]` macro below uses the default
+//! multi-thread flavor, so this example is correct as
+//! written; consumers porting the example to their own
+//! `Runtime::new()` must pass an explicit
+//! `Builder::new_multi_thread()`.
 
 use ene_embedding::{GgufEmbeddingProvider, resolve_gguf_paths};
 use ene_provider::EmbeddingProvider;
@@ -21,7 +30,8 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model_name = "jina-embeddings-v5-text-small";
     let quantization = "F16";
     let model_dir = std::path::PathBuf::from("./models");
@@ -46,25 +56,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Model dimensions: {}", provider.dimensions());
     println!("Model name: {}", provider.model_name());
 
-    // Compute embeddings for two sentences
+    // Compute embeddings for three sentences. We
+    // reuse the same provider and the same tokio
+    // runtime (the one #[tokio::main] installed)
+    // across all three calls; the previous form
+    // constructed a fresh `Runtime::new()` per
+    // embed_query, which is wasteful and would
+    // panic on a `block_in_place` call from a
+    // current_thread flavor.
     let text1 = "The cat sat on the mat.";
     let text2 = "A feline rested on a rug.";
+    let text3 = "The stock market crashed today.";
 
-    let emb1 = tokio::runtime::Runtime::new()?.block_on(provider.embed_query(text1))?;
-
-    let emb2 = tokio::runtime::Runtime::new()?.block_on(provider.embed_query(text2))?;
+    let emb1 = provider.embed_query(text1).await?;
+    let emb2 = provider.embed_query(text2).await?;
+    let emb3 = provider.embed_query(text3).await?;
 
     let similarity = cosine_similarity(&emb1, &emb2);
+    let similarity_unrelated = cosine_similarity(&emb1, &emb3);
 
     println!("\nText 1: \"{text1}\"");
     println!("Text 2: \"{text2}\"");
     println!("Cosine similarity: {similarity:.4}");
-
-    // Compare with unrelated text
-    let text3 = "The stock market crashed today.";
-    let emb3 = tokio::runtime::Runtime::new()?.block_on(provider.embed_query(text3))?;
-
-    let similarity_unrelated = cosine_similarity(&emb1, &emb3);
     println!("\nText 3: \"{text3}\"");
     println!("Cosine similarity (cat vs stocks): {similarity_unrelated:.4}");
 
