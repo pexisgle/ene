@@ -151,6 +151,13 @@ impl TodoStore {
     }
 
     /// Updates fields of an existing todo.
+    ///
+    /// Rejects a reparenting (`parent_id`) that would
+    /// create a cycle in the parent chain. The action's
+    /// public contract ("Repurposing cannot create a
+    /// cycle") is enforced here: walking the proposed
+    /// parent's ancestors must not reach the todo being
+    /// updated.
     pub async fn update(
         &self,
         session_id: &str,
@@ -169,6 +176,21 @@ impl TodoStore {
             && !matches!(p, "high" | "medium" | "low")
         {
             return Err(format!("invalid priority: {p}").into());
+        }
+
+        // Cycle check before the update. We walk up the
+        // chain of the proposed new parent; if we ever
+        // encounter the todo being updated, the
+        // reparenting would create a cycle. We also bound
+        // the walk at `MAX_ANCESTOR_DEPTH` so a
+        // pre-existing corruption cannot cause this
+        // method to hang.
+        if let Some(Some(new_parent)) = parent_id {
+            if new_parent == id {
+                return Err(format!("cannot reparent todo {id} under itself").into());
+            }
+            let mut client = self.client.lock().await;
+            Self::check_ancestor_chain(&mut client, session_id, id, new_parent).await?;
         }
 
         let now = chrono::Utc::now().to_rfc3339();
@@ -214,8 +236,13 @@ impl TodoStore {
         id: i64,
     ) -> Result<Vec<TodoItem>, Box<dyn Error>> {
         let mut client = self.client.lock().await;
+        // The visited-set guard makes
+        // `collect_descendants` safe even if the parent
+        // chain is corrupt. Without it, a cycle in the
+        // data would cause `todo_complete` to hang.
+        let mut visited: std::collections::HashSet<i64> = std::collections::HashSet::new();
         let descendants = self
-            .collect_descendants(&mut client, session_id, id)
+            .collect_descendants(&mut client, session_id, id, &mut visited)
             .await?;
 
         let mut ids_to_complete = vec![id];
@@ -274,12 +301,89 @@ impl TodoStore {
             .ok_or_else(|| "deleted row not found".into())
     }
 
+    /// Maximum length of the parent chain we will walk
+    /// when checking a reparenting for cycles. Set to
+    /// 1000 — a chain longer than that is treated as
+    /// corruption rather than a valid user state.
+    const MAX_ANCESTOR_DEPTH: usize = 1000;
+
+    /// Verifies that reparenting `id` under `new_parent`
+    /// would not create a cycle. Returns an error if
+    /// the proposed `new_parent`'s ancestor chain
+    /// includes `id` (the cycle case) or if the chain
+    /// exceeds [`MAX_ANCESTOR_DEPTH`].
+    async fn check_ancestor_chain(
+        client: &mut DbClient,
+        session_id: &str,
+        id: i64,
+        new_parent: i64,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut current = new_parent;
+        let mut visited: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        for _ in 0..Self::MAX_ANCESTOR_DEPTH {
+            if current == id {
+                return Err(format!(
+                    "reparenting todo {id} under {new_parent} would create a cycle"
+                )
+                .into());
+            }
+            if !visited.insert(current) {
+                // Pre-existing cycle in the data; treat
+                // as corruption and refuse the new edge
+                // rather than hang.
+                return Err(format!("pre-existing cycle in parent chain at id {current}").into());
+            }
+            let filter = DbFilter::And(vec![
+                DbFilter::eq("id", DbValue::Int(current)),
+                DbFilter::eq("session_id", DbValue::Text(session_id.to_string())),
+            ]);
+            let rows = client
+                .select(
+                    "utility_todo_items",
+                    &["parent_id"],
+                    filter,
+                    vec![],
+                    Some(1),
+                )
+                .await?;
+            let Some(row) = rows.first() else {
+                // The proposed parent does not exist.
+                return Err(format!("parent todo {new_parent} does not exist").into());
+            };
+            match row.get("parent_id") {
+                Some(DbValue::Int(p)) => current = *p,
+                Some(DbValue::Null) | None => return Ok(()),
+                _ => return Ok(()),
+            }
+        }
+        Err(format!(
+            "parent chain exceeds MAX_ANCESTOR_DEPTH ({}); refusing to reparent",
+            Self::MAX_ANCESTOR_DEPTH
+        )
+        .into())
+    }
+
+    /// Recursively collects every descendant of
+    /// `parent_id`. Cycle-robust via a visited-set guard:
+    /// even if the underlying data is corrupt and a
+    /// parent loop exists, the recursion terminates
+    /// rather than hanging the caller's task. The visited
+    /// set is keyed on todo id and shared across all
+    /// recursive calls in one top-level invocation.
     async fn collect_descendants(
         &self,
         client: &mut DbClient,
         session_id: &str,
         parent_id: i64,
+        visited: &mut std::collections::HashSet<i64>,
     ) -> Result<Vec<TodoItem>, Box<dyn Error>> {
+        // Cycle guard: if we have already visited this
+        // node on the current DFS path (or in the
+        // general visited set), do not recurse further.
+        if !visited.insert(parent_id) {
+            return Ok(Vec::new());
+        }
+
         let filter = DbFilter::And(vec![
             DbFilter::eq("parent_id", DbValue::Int(parent_id)),
             DbFilter::eq("session_id", DbValue::Text(session_id.to_string())),
@@ -297,7 +401,8 @@ impl TodoStore {
         let mut result: Vec<TodoItem> = children.iter().map(TodoItem::from_row).collect();
         for child in &children {
             let child_id = child.get("id").and_then(DbValue::as_i64).unwrap_or(0);
-            let mut sub = Box::pin(self.collect_descendants(client, session_id, child_id)).await?;
+            let mut sub =
+                Box::pin(self.collect_descendants(client, session_id, child_id, visited)).await?;
             result.append(&mut sub);
         }
         Ok(result)
