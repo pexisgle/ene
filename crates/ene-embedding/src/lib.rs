@@ -54,12 +54,19 @@ pub fn create_local_provider(
 ) -> Result<Box<dyn ene_provider::EmbeddingProvider>, EneEmbeddingError> {
     let (gguf_path, tokenizer_path) = resolve_gguf_paths(model, quantization, model_dir)?;
     let max_length = 8192;
-    let provider = GgufEmbeddingProvider::load(
-        model,
-        gguf_path.to_str().unwrap_or(""),
-        tokenizer_path.to_str().unwrap_or(""),
-        max_length,
-        quantization,
-    )?;
+    let gguf_str = gguf_path.to_str().ok_or_else(|| {
+        EneEmbeddingError::CandleError(format!(
+            "GGUF path is not valid UTF-8: {}",
+            gguf_path.display()
+        ))
+    })?;
+    let tokenizer_str = tokenizer_path.to_str().ok_or_else(|| {
+        EneEmbeddingError::CandleError(format!(
+            "tokenizer path is not valid UTF-8: {}",
+            tokenizer_path.display()
+        ))
+    })?;
+    let provider =
+        GgufEmbeddingProvider::load(model, gguf_str, tokenizer_str, max_length, quantization)?;
     Ok(Box::new(provider))
 }

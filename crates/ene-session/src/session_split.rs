@@ -4,23 +4,9 @@ use chrono::{DateTime, Utc};
 use ene_memory as summarizer;
 use ene_memory::{KeyFact, MemoryStore};
 use ene_provider::EmbeddingProvider;
-use ene_provider::{EmbeddingKind, Role};
+use ene_provider::{EmbeddingKind, Role, cosine_similarity};
 use std::sync::Arc;
 use tokio::sync::oneshot;
-
-/// Compute cosine similarity between two vectors.
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return 0.0;
-    }
-    (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
-}
 
 /// Represents whether a session should continue or split.
 #[derive(Debug)]
