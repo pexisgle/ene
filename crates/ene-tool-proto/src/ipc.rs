@@ -127,9 +127,18 @@ impl ToolConfigAccessor {
     }
 
     /// Gets the tool configuration.
-    pub async fn get<T: serde::de::DeserializeOwned + Default>(&self) -> T {
+    ///
+    /// Returns a [`ToolError::InvalidArguments`] when the stored JSON
+    /// does not deserialize into `T` — the previous implementation
+    /// returned `T::default()` on a deserialize failure, which silently
+    /// masked config corruption and confused callers into thinking the
+    /// default was a real value. A typed error gives the host a chance
+    /// to log the bad payload and fail the request.
+    pub async fn get<T: serde::de::DeserializeOwned>(&self) -> Result<T, ToolError> {
         let guard = self.config.read().await;
-        serde_json::from_value(guard.clone()).unwrap_or_default()
+        serde_json::from_value(guard.clone()).map_err(|e| ToolError::InvalidArguments {
+            message: format!("Stored tool config does not match expected type: {e}"),
+        })
     }
 
     /// Sets the tool configuration.
