@@ -12,6 +12,15 @@ mod undo;
 use crate::context::AppContext;
 use async_trait::async_trait;
 
+/// The return value of a CLI command run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandOutcome {
+    /// The REPL should continue to the next prompt.
+    Continue,
+    /// The REPL should shut down the actor and exit with the given code.
+    Exit(i32),
+}
+
 /// Trait that represents an individual CLI command.
 #[async_trait]
 pub trait CliCommand: Send + Sync {
@@ -42,16 +51,34 @@ pub static COMMANDS: &[&dyn CliCommand] = &[
     &session::SessionCommand as &dyn CliCommand,
 ];
 
+/// Maximum time the REPL will wait for the actor to drain on shutdown.
+pub const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Global command execution entrypoint.
 /// Dispatches the input string to the appropriate command handler.
-pub async fn execute(input: &str, ctx: &mut AppContext) {
+pub async fn execute(input: &str, ctx: &mut AppContext) -> CommandOutcome {
     let parts: Vec<&str> = input.splitn(2, ' ').collect();
     let cmd = parts[0];
     let arg = parts.get(1).copied().unwrap_or("");
 
     // The user requested a dedicated early exit branch specifically for quit
     if cmd == "/quit" {
-        std::process::exit(0);
+        // Send a clean shutdown command and await the actor's drain
+        // so that pending memory writes, session splits, and tool
+        // processes finish (or are killed) before we return to main.
+        match ctx.handle.shutdown(SHUTDOWN_TIMEOUT).await {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    crate::style::error(format!(
+                        "Actor did not shut down within {:?}: {e}",
+                        SHUTDOWN_TIMEOUT
+                    ))
+                );
+            }
+        }
+        return CommandOutcome::Exit(0);
     }
 
     if let Some(command) = COMMANDS.iter().find(|c| c.name() == cmd) {
@@ -61,4 +88,5 @@ pub async fn execute(input: &str, ctx: &mut AppContext) {
     } else {
         eprintln!("{}", crate::style::error(format!("Unknown command: {cmd}")));
     }
+    CommandOutcome::Continue
 }
