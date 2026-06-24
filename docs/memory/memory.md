@@ -183,7 +183,14 @@ pub trait EmbeddingProvider: Send + Sync {
 pub enum EmbeddingKind { Summary, Description, Capability, Example, Negative, Query, Hyde }
 
 /// Errors from embedding operations.
-pub enum EmbeddingError { Provider(String), Timeout(Duration) }
+pub enum EmbeddingError {
+    /// Provider initialization failed (missing model file, bad API key, etc.).
+    Init(String),
+    /// The provider returned an error.
+    Provider(String),
+    /// Input was empty or whitespace-only.
+    EmptyInput,
+}
 ```
 
 Implementations:
