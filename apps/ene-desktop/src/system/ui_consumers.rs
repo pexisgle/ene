@@ -14,9 +14,11 @@
 //! *before* the render path picks up the new state.
 use bevy_ecs::prelude::*;
 
+use crate::character_state::EmotionCommand;
 use crate::component::ui::{UiStateComponent, UiWindow};
-use crate::event::ai::{AiPermissionRequested, AiTextDelta, AiUserInputRequested};
+use crate::event::ai::{AiPermissionRequested, AiTextDelta, AiUserInputRequested, EmoteToken};
 use crate::event::settings::OpenSettings;
+use crate::resource::emotion_pipeline::EmotionPipelineState;
 use crate::settings::QuestionDraft;
 use crate::settings_ui::PageKind;
 
@@ -109,6 +111,33 @@ pub fn apply_emotions_system(
     };
     while let Some(cmd) = queue.0.commands.pop_front() {
         pipeline.pending.push_back(cmd);
+    }
+}
+
+/// Translates `EmoteToken` AI events (e.g. `<|emo:happy|>`) into
+/// `EmotionCommand`s and pushes them onto the
+/// [`EmotionPipelineState::pending`] queue.
+///
+/// `target_time` is set to `0.0` so the next call to
+/// [`crate::resource::emotion_pipeline::tick_emotions`] (made by
+/// the winit driver on every redraw) immediately pops the
+/// command and applies the new expression. The command's
+/// `hold_secs` is `4.0` to match the documentation in
+/// `docs/applications/desktop.md` and `docs/architecture/startup.md`.
+pub fn apply_emote_tokens_system(
+    mut events: MessageReader<EmoteToken>,
+    mut pipeline: ResMut<EmotionPipelineState>,
+) {
+    for token in events.read() {
+        pipeline.pending.push_back(EmotionCommand {
+            emotion: token.0.clone(),
+            // 0.0 means "ready immediately": `tick_emotions`
+            // pops this command the next time it is called and
+            // starts the 4s hold + 0.3s fade.
+            target_time: 0.0,
+            hold_secs: 4.0,
+            weight: 1.0,
+        });
     }
 }
 
