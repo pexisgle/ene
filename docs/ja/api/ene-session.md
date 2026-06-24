@@ -49,7 +49,7 @@ pub struct ConversationSession { /* 非公開 */ }
 
 | メソッド | シグネチャ | 説明 |
 |---------|-----------|------|
-| `reset_session` | `fn reset_session(&mut self) -> SessionId` | 履歴をリセットして新しい `SessionId` を生成します。古いIDを返します。 |
+| `reset_session` | `fn reset_session(&mut self) -> SessionId` | 履歴をリセットして新しい `SessionId` を生成します。新しいIDを返します。 |
 | `session_id` | `fn session_id(&self) -> &SessionId` | 現在のセッションの一意なID。 |
 | `session_started_at` | `fn session_started_at(&self) -> DateTime<Utc>` | 現在のセッションの開始日時。 |
 | `session_elapsed_minutes` | `fn session_elapsed_minutes(&self) -> i64` | セッション開始からの経過分数。 |
@@ -140,7 +140,7 @@ pub enum SessionBoundary {
 ```rust
 pub enum SplitReason {
     /// セッションが長時間アイドル状態だった。
-    Timeout { elapsed_minutes: i64 },
+    Timeout { elapsed_minutes: u64 },
 
     /// 埋め込みの類似度が低く、トピックが大きく変化した。
     TopicChange { similarity: f32 },
@@ -238,7 +238,7 @@ pub async fn embed_session_messages(
 ) -> Result<Vec<f32>, EneSessionError>
 ```
 
-履歴からアシスタントのメッセージを連結して1つのベクトルとして埋め込みます。セッションのセマンティックな内容を境界検出のために表現します。
+履歴から User と Assistant のメッセージを個別に埋め込み、そのベクトル平均を 1 つのサマリー埋め込みとして返します。テキスト以外・空・非 User/Assistant のメッセージは除外されます。結果は境界検出のためのセッションのセマンティックな内容を表現します。
 
 ---
 

@@ -67,24 +67,24 @@ pub trait LlmProvider: Send + Sync {
 ```rust
 pub trait EmbeddingProvider: Send + Sync {
     /// 用途ヒントを指定してテキストを埋め込む。
-    fn embed(&self, text: &str, kind: EmbeddingKind) -> Result<Vec<f32>, EmbeddingError>;
+    async fn embed(&self, text: &str, kind: EmbeddingKind) -> Result<Vec<f32>, EmbeddingError>;
 
     /// クエリ文字列を埋め込む便利ラッパー（`EmbeddingKind::Query`）。
-    fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbeddingError>;
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbeddingError>;
 
     /// 複数のテキストをまとめて埋め込む。
-    fn embed_batch(
+    async fn embed_batch(
         &self,
         items: &[(&str, EmbeddingKind)],
     ) -> Result<Vec<Vec<f32>>, EmbeddingError>;
 
     /// HyDE: クエリに対する仮想的な回答ドキュメントを生成して埋め込む。
     /// 仮想ドキュメントの埋め込みベクトルを返す。
-    fn hyde(&self, query: &str) -> Result<String, EmbeddingError>;
+    async fn hyde(&self, query: &str) -> Result<String, EmbeddingError>;
 
     /// `candidates`（ツール仕様）を `query` に対してスコアリングする。
     /// 入力と同じ順序でスコアを返す。
-    fn rerank(
+    async fn rerank(
         &self,
         query: &str,
         candidates: &[ToolSpec],
@@ -235,11 +235,19 @@ pub enum Role {
 
 ```rust
 pub enum EmbeddingError {
-    /// プロバイダーがエラーメッセージを返した。
+    /// 埋め込みモデルの初期化に失敗した（例：GGUF 読み込みエラー）。
+    /// トランスポート/API エラー用の `Provider` とは区別される。
+    Init(String),
+    /// プロバイダーが不正なレスポンスまたは空のレスポンスを返したか、
+    /// トランスポートエラー（HTTP 4xx/5xx、ネットワーク障害）で
+    /// リクエストが失敗した。
     Provider(String),
-
-    /// 指定した時間内に操作が完了しなかった。
-    Timeout(Duration),
+    /// 入力テキストが空または空白のみ。すべての実装が
+    /// ゼロベクトル（コサイン類似度が未定義で、ストアを
+    /// 静かに汚染する）を返すか、入力を表さない
+    /// プレースホルダーにフォールバックするため、
+    /// 埋め込みの生成を拒否する。
+    EmptyInput,
 }
 ```
 

@@ -41,7 +41,7 @@ This type is not typically constructed directly — use
 | `embed_query(text)` | Shorthand for `embed(text, EmbeddingKind::Query)`. |
 | `embed_batch(items)` | Embeds all items sequentially (currently one inference call per item, with parallel decode for HyDE). |
 | `dimensions()` | Returns the output vector size (set from model metadata). |
-| `model_name()` | Returns `"{model}@{quantization}"` (e.g. `nomic-embed-text-v1.5@Q4_K_M`). |
+| `model_name()` | Returns `"{model}@{quantization}"` (e.g. `Qwen3-Embedding-0.6B@Q4_K_M`). |
 
 ---
 
@@ -67,11 +67,17 @@ model name, quantization suffix, and search directory. Note that
 
 ```
 model_dir/
-├── nomic-embed-text-v1.5.Q4_K_M.gguf   ← model file
+├── Qwen3-Embedding-0.6B.Q4_K_M.gguf   ← model file
 └── tokenizer.json                        ← tokenizer
 ```
 
-Call with `model = "nomic-embed-text-v1.5"`, `quantization = "Q4_K_M"`.
+Call with `model = "Qwen3-Embedding-0.6B"`, `quantization = "Q4_K_M"`.
+
+> **Note:** The local loader is currently hardcoded for the
+> `Qwen3-Embedding` family (see `crates/ene-embedding/src/quantized/loader.rs`,
+> which reads `qwen3.*` GGUF metadata keys). Other architectures
+> (e.g. Nomic, BGE) are not supported by the local provider; use
+> `CloudEmbeddingProvider` from `ene-provider` for those.
 
 ### `create_local_provider`
 
@@ -90,6 +96,14 @@ Note that `model_dir` is consumed by value (`PathBuf`).
 **Fixed parameters:**
 - `max_length = 8192` — maximum token sequence length.
 
+**Runtime requirement:** the returned provider's forward pass uses
+`tokio::task::block_in_place` to call into Candle (synchronous and
+CPU-bound). `block_in_place` requires a **multi-thread tokio runtime**;
+it panics on a `current_thread` runtime. Plain `#[tokio::main] async fn main()`
+uses the multi-thread flavor by default, so it is the simplest correct
+setup. If you build a runtime explicitly, use
+`tokio::runtime::Builder::new_multi_thread().enable_all().build()`.
+
 **Example:**
 
 ```rust
@@ -97,7 +111,7 @@ use ene_embedding::create_local_provider;
 use std::path::PathBuf;
 
 let provider = create_local_provider(
-    "nomic-embed-text-v1.5",
+    "Qwen3-Embedding-0.6B",
     "Q4_K_M",
     PathBuf::from("/models"),
 )?;
@@ -140,7 +154,7 @@ To use the local provider via configuration, set the `[embedding]` section in `s
 {
   "embedding": {
     "backend": "local",
-    "model": "nomic-embed-text-v1.5",
+    "model": "Qwen3-Embedding-0.6B",
     "quantization": "Q4_K_M",
     "model_dir": "/path/to/models"
   }
@@ -151,7 +165,7 @@ Or via environment variable:
 
 ```sh
 ENE_EMBEDDING__BACKEND=local
-ENE_EMBEDDING__MODEL=nomic-embed-text-v1.5
+ENE_EMBEDDING__MODEL=Qwen3-Embedding-0.6B
 ENE_EMBEDDING__QUANTIZATION=Q4_K_M
 ENE_EMBEDDING__MODEL_DIR=/path/to/models
 ```

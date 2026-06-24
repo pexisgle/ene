@@ -66,24 +66,24 @@ Interface for text embedding and semantic utility operations.
 ```rust
 pub trait EmbeddingProvider: Send + Sync {
     /// Embed a single text string with the given purpose hint.
-    fn embed(&self, text: &str, kind: EmbeddingKind) -> Result<Vec<f32>, EmbeddingError>;
+    async fn embed(&self, text: &str, kind: EmbeddingKind) -> Result<Vec<f32>, EmbeddingError>;
 
     /// Convenience wrapper: embed a query string (`EmbeddingKind::Query`).
-    fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbeddingError>;
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbeddingError>;
 
     /// Embed multiple texts in a single batched call.
-    fn embed_batch(
+    async fn embed_batch(
         &self,
         items: &[(&str, EmbeddingKind)],
     ) -> Result<Vec<Vec<f32>>, EmbeddingError>;
 
     /// HyDE: generate a hypothetical answer document for the given query,
     /// then embed it. Returns the embedded vector of the hypothetical document.
-    fn hyde(&self, query: &str) -> Result<String, EmbeddingError>;
+    async fn hyde(&self, query: &str) -> Result<String, EmbeddingError>;
 
     /// Score `candidates` (tool specs) against `query` for re-ranking.
     /// Returns a score per candidate in the same order.
-    fn rerank(
+    async fn rerank(
         &self,
         query: &str,
         candidates: &[ToolSpec],
@@ -234,11 +234,19 @@ pub enum Role {
 
 ```rust
 pub enum EmbeddingError {
-    /// The provider returned an error message.
+    /// The embedding model failed to initialize (e.g. GGUF load error).
+    /// Distinct from `Provider`, which is for transport / API errors.
+    Init(String),
+    /// The provider returned a malformed or empty response, or a
+    /// transport error (HTTP 4xx/5xx, network failure) prevented the
+    /// request.
     Provider(String),
-
-    /// The operation timed out after the given duration.
-    Timeout(Duration),
+    /// The supplied text is empty or whitespace-only. The provider
+    /// refused to produce an embedding for it because every
+    /// implementation would either return the zero vector (undefined
+    /// cosine similarity; silently pollutes the store) or fall back to
+    /// a placeholder that does not represent the input.
+    EmptyInput,
 }
 ```
 

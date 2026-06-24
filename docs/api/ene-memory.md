@@ -71,7 +71,7 @@ The conversation log is an append-only record of every user/assistant message.
 |--------|-----------|-------------|
 | `insert_log` | `fn insert_log(&self, session_id: &str, card_name: &str, role: &str, content: &str) -> Result<i64, MemoryError>` | Inserts a log entry. Returns the row ID. |
 | `spawn_insert_log` | `fn spawn_insert_log(store: &Arc<Self>, session_id: &str, card_name: &str, role: &str, content: &str)` | Fire-and-forget log insert. Spawns a Tokio task; errors are logged but not propagated. |
-| `get_logs_by_session` | `fn get_logs_by_session(&self, session_id: &str) -> Result<Vec<(String, String, DateTime<Utc>)>, MemoryError>` | Returns all log entries for a session as `(role, content, created_at)` tuples. |
+| `get_logs_by_session` | `fn get_logs_by_session(&self, session_id: &str) -> Result<Vec<(String, String, String)>, MemoryError>` | Returns all log entries for a session as `(role, content, created_at)` tuples (RFC3339 strings). |
 
 ---
 
@@ -129,7 +129,7 @@ Formats a slice of recalled summaries into a human-readable text block suitable 
 ```rust
 pub async fn summarize_conversation(
     provider: &dyn LlmProvider,
-    messages: &[(Role, String)],
+    history: &[LlmMessage],
     card_name: &str,
     user_name: &str,
     existing_facts: &[KeyFact],
@@ -176,7 +176,8 @@ pub struct RecalledSummary {
     /// The underlying summary entry.
     pub entry: ConversationSummary,
 
-    /// Cosine similarity score against the query (0.0–1.0).
+    /// Cosine similarity score against the query. Range: `[-1.0, 1.0]`
+    /// (a pure angular distance, not a normalized `[0, 1]` score).
     pub similarity: f32,
 }
 ```

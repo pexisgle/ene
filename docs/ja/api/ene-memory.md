@@ -71,7 +71,7 @@ pub struct MemoryStore { /* 非公開 */ }
 |---------|-----------|------|
 | `insert_log` | `fn insert_log(&self, session_id: &str, card_name: &str, role: &str, content: &str) -> Result<i64, MemoryError>` | ログエントリを挿入する。行IDを返す。 |
 | `spawn_insert_log` | `fn spawn_insert_log(store: &Arc<Self>, session_id: &str, card_name: &str, role: &str, content: &str)` | ファイア・アンド・フォーゲットのログ挿入。Tokioタスクを起動し、エラーはログに記録されるが伝播しない。 |
-| `get_logs_by_session` | `fn get_logs_by_session(&self, session_id: &str) -> Result<Vec<(String, String, DateTime<Utc>)>, MemoryError>` | セッションの全ログエントリを `(ロール, 内容, created_at)` タプルで返す。 |
+| `get_logs_by_session` | `fn get_logs_by_session(&self, session_id: &str) -> Result<Vec<(String, String, String)>, MemoryError>` | セッションの全ログエントリを `(ロール, 内容, created_at)` タプル（RFC3339 文字列）で返す。 |
 
 ---
 
@@ -129,7 +129,7 @@ pub fn format_summaries_for_prompt(summaries: &[RecalledSummary]) -> String
 ```rust
 pub async fn summarize_conversation(
     provider: &dyn LlmProvider,
-    messages: &[(Role, String)],
+    history: &[LlmMessage],
     card_name: &str,
     user_name: &str,
     existing_facts: &[KeyFact],
@@ -176,7 +176,8 @@ pub struct RecalledSummary {
     /// 基となるサマリーエントリ。
     pub entry: ConversationSummary,
 
-    /// クエリに対するコサイン類似度スコア（0.0〜1.0）。
+    /// クエリに対するコサイン類似度スコア。範囲: `[-1.0, 1.0]`
+    /// （正規化された `[0, 1]` スコアではなく、純粋な角度距離）。
     pub similarity: f32,
 }
 ```

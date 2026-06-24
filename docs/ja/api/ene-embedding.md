@@ -38,7 +38,7 @@ pub struct GgufEmbeddingProvider { /* 非公開 */ }
 | `embed_query(text)` | `embed(text, EmbeddingKind::Query)` の短縮形。 |
 | `embed_batch(items)` | 全アイテムを逐次埋め込む（現在 1 アイテム = 1 推論呼び出し、HyDE はパラレルデコード）。 |
 | `dimensions()` | 出力ベクトルサイズを返す（モデルメタデータから設定）。 |
-| `model_name()` | `"{model}@{quantization}"` を返す（例: `nomic-embed-text-v1.5@Q4_K_M`）。 |
+| `model_name()` | `"{model}@{quantization}"` を返す（例: `Qwen3-Embedding-0.6B@Q4_K_M`）。 |
 
 ---
 
@@ -64,11 +64,18 @@ pub fn resolve_gguf_paths(
 
 ```
 model_dir/
-├── nomic-embed-text-v1.5.Q4_K_M.gguf   ← モデルファイル
+├── Qwen3-Embedding-0.6B.Q4_K_M.gguf   ← モデルファイル
 └── tokenizer.json                        ← トークナイザー
 ```
 
-`model = "nomic-embed-text-v1.5"`、`quantization = "Q4_K_M"` で呼び出します。
+`model = "Qwen3-Embedding-0.6B"`、`quantization = "Q4_K_M"` で呼び出します。
+
+> **注:** ローカルローダーは現在 `Qwen3-Embedding` 系にハードコード
+> されています（`crates/ene-embedding/src/quantized/loader.rs` を参照。
+> `qwen3.*` の GGUF メタデータキーを読み込みます）。Nomic や BGE
+> など他のアーキテクチャはローカルプロバイダーではサポートされません。
+> これらを使用する場合は `ene-provider` の `CloudEmbeddingProvider`
+> を利用してください。
 
 ### `create_local_provider`
 
@@ -88,6 +95,16 @@ GGUF モデルとトークナイザーを読み込み、ボックス化された
 **固定パラメータ：**
 - `max_length = 8192` — 最大トークンシーケンス長。
 
+**ランタイム要件:** 返されるプロバイダーのフォワードパスは
+`tokio::task::block_in_place` を使って Candle を呼び出します
+（同期かつ CPU バウンド）。`block_in_place` は **マルチスレッド tokio
+ランタイム** を必要とし、`current_thread` ランタイムではパニック
+します。プレーンな `#[tokio::main] async fn main()` はデフォルトで
+マルチスレッドフレーバーを使用するため、最もシンプルな正しい
+セットアップです。明示的にランタイムを構築する場合は
+`tokio::runtime::Builder::new_multi_thread().enable_all().build()` を
+使用してください。
+
 **使用例：**
 
 ```rust
@@ -95,7 +112,7 @@ use ene_embedding::create_local_provider;
 use std::path::PathBuf;
 
 let provider = create_local_provider(
-    "nomic-embed-text-v1.5",
+    "Qwen3-Embedding-0.6B",
     "Q4_K_M",
     PathBuf::from("/models"),
 )?;
@@ -138,7 +155,7 @@ pub type EmbeddingError = EneEmbeddingError;
 {
   "embedding": {
     "backend": "local",
-    "model": "nomic-embed-text-v1.5",
+    "model": "Qwen3-Embedding-0.6B",
     "quantization": "Q4_K_M",
     "model_dir": "/path/to/models"
   }
@@ -149,7 +166,7 @@ pub type EmbeddingError = EneEmbeddingError;
 
 ```sh
 ENE_EMBEDDING__BACKEND=local
-ENE_EMBEDDING__MODEL=nomic-embed-text-v1.5
+ENE_EMBEDDING__MODEL=Qwen3-Embedding-0.6B
 ENE_EMBEDDING__QUANTIZATION=Q4_K_M
 ENE_EMBEDDING__MODEL_DIR=/path/to/models
 ```
