@@ -9,6 +9,8 @@
 
 /// Configuration types for providers and embedding.
 pub mod config;
+/// Typed `LlmProviderError` enum returned at the library boundary.
+pub mod error;
 /// Hybrid rerank provider (primary embedder + optional LLM for `HyDE` / rerank).
 pub mod hybrid;
 /// Unified chat message and streaming types.
@@ -23,6 +25,7 @@ pub mod role;
 pub use config::{
     ApiKeyConfig, CloudEmbeddingConfig, EmbeddingConfig, LocalEmbeddingConfig, ProviderConfig,
 };
+pub use error::LlmProviderError;
 pub use hybrid::HybridRerankProvider;
 pub use message::{LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart};
 pub use openai::{CloudEmbeddingProvider, OpenAiProvider, OpenAiProviderFactory};

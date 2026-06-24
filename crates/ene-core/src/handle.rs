@@ -222,12 +222,11 @@ impl MemoryQueryHandle {
     /// Embed a text query for similarity search.
     pub async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EneCoreError> {
         let embedder = self.embedder.as_ref().ok_or_else(|| {
-            EneCoreError::EmbeddingError("Embedding provider not available".into())
+            EneCoreError::Embedding(ene_provider::EmbeddingError::Init(
+                "Embedding provider not available".into(),
+            ))
         })?;
-        embedder
-            .embed_query(text)
-            .await
-            .map_err(|e| EneCoreError::EmbeddingError(format!("Embedding failed: {e}")))
+        embedder.embed_query(text).await.map_err(EneCoreError::from)
     }
 
     /// Search conversation summaries by embedding similarity.
@@ -238,10 +237,11 @@ impl MemoryQueryHandle {
         limit: usize,
         threshold: f32,
     ) -> Result<Vec<ene_memory::RecalledSummary>, EneCoreError> {
-        let store = self
-            .store
-            .as_ref()
-            .ok_or_else(|| EneCoreError::EmbeddingError("Memory store not available".into()))?;
+        let store = self.store.as_ref().ok_or_else(|| {
+            EneCoreError::Memory(ene_memory::MemoryError::MemoryStoreConnectionError(
+                "Memory store not available".into(),
+            ))
+        })?;
         store
             .search_summaries(query_embedding, card_name, limit, threshold)
             .await
@@ -254,10 +254,11 @@ impl MemoryQueryHandle {
         card_name: &str,
         limit: usize,
     ) -> Result<Vec<ene_memory::ConversationSummary>, EneCoreError> {
-        let store = self
-            .store
-            .as_ref()
-            .ok_or_else(|| EneCoreError::EmbeddingError("Memory store not available".into()))?;
+        let store = self.store.as_ref().ok_or_else(|| {
+            EneCoreError::Memory(ene_memory::MemoryError::MemoryStoreConnectionError(
+                "Memory store not available".into(),
+            ))
+        })?;
         store
             .list_recent_summaries(card_name, limit)
             .await
@@ -269,10 +270,11 @@ impl MemoryQueryHandle {
         &self,
         card_name: &str,
     ) -> Result<Vec<ene_memory::KeyFact>, EneCoreError> {
-        let store = self
-            .store
-            .as_ref()
-            .ok_or_else(|| EneCoreError::EmbeddingError("Memory store not available".into()))?;
+        let store = self.store.as_ref().ok_or_else(|| {
+            EneCoreError::Memory(ene_memory::MemoryError::MemoryStoreConnectionError(
+                "Memory store not available".into(),
+            ))
+        })?;
         store
             .get_all_keyfacts(card_name)
             .await
@@ -888,7 +890,7 @@ impl EneActor {
         let provider_config = self.config.get_section::<ene_provider::ProviderConfig>()?;
         LlmProviderRegistry::create_provider(&provider_config.name, &self.config)
             .map(Arc::from)
-            .map_err(EneCoreError::Provider)
+            .map_err(EneCoreError::from)
     }
 
     // ── Split management ──
@@ -997,13 +999,15 @@ impl EneActor {
             .embedding_provider
             .clone()
             .ok_or_else(|| {
-                EneCoreError::EmbeddingError("No embedding provider initialized".to_string())
+                EneCoreError::Embedding(ene_provider::EmbeddingError::Init(
+                    "No embedding provider initialized".to_string(),
+                ))
             })?;
 
         let embedding = embedder
             .embed_query(input)
             .await
-            .map_err(|e| EneCoreError::EmbeddingError(format!("Failed to embed: {e}")))?;
+            .map_err(EneCoreError::from)?;
 
         self.session.set_pending_embedding(embedding.clone());
         self.session.set_last_input_embedding(embedding.clone());
@@ -1015,7 +1019,7 @@ impl EneActor {
     async fn reconfigure(&mut self, config: EneConfig) -> Result<(), EneCoreError> {
         self.config = config;
 
-        let embedder = init_embedding(&self.config).map_err(EneCoreError::EmbeddingError)?;
+        let embedder = init_embedding(&self.config)?;
         self.session.memory.embedding_provider = Some(embedder.clone());
 
         let mem_config = self.config.get_section::<ene_memory::MemoryConfig>()?;
@@ -1135,10 +1139,14 @@ async fn build_tool_registry(
         .map_err(EneCoreError::Tool)
 }
 
-fn init_embedding(config: &EneConfig) -> Result<Arc<dyn ene_provider::EmbeddingProvider>, String> {
+fn init_embedding(
+    config: &EneConfig,
+) -> Result<Arc<dyn ene_provider::EmbeddingProvider>, ene_provider::EmbeddingError> {
     let provider_config = config
         .get_section::<ene_provider::ProviderConfig>()
-        .map_err(|e| format!("Failed to load provider config: {e}"))?;
+        .map_err(|e| {
+            ene_provider::EmbeddingError::Init(format!("Failed to load provider config: {e}"))
+        })?;
 
     if provider_config.embedding.backend.as_str() == "local" {
         let local_cfg = &provider_config.embedding.local;
@@ -1147,13 +1155,14 @@ fn init_embedding(config: &EneConfig) -> Result<Arc<dyn ene_provider::EmbeddingP
             &local_cfg.model,
             &local_cfg.quantization,
             model_dir,
-        )
-        .map_err(|e| format!("Failed to create local embedding provider: {e}"))?;
+        )?;
         Ok(Arc::from(provider))
     } else {
-        let base_url = provider_config
-            .resolve_base_url()
-            .map_err(|e| format!("Failed to resolve base URL for cloud embedding: {e}"))?;
+        let base_url = provider_config.resolve_base_url().map_err(|e| {
+            ene_provider::EmbeddingError::Init(format!(
+                "Failed to resolve base URL for cloud embedding: {e}"
+            ))
+        })?;
         let api_key = provider_config.resolve_api_key();
         let query_prefix = provider_config.embedding.query_prefix.clone();
         Ok(Arc::new(ene_provider::CloudEmbeddingProvider::new(

@@ -6,9 +6,11 @@ pub enum EneCoreError {
     /// No character card has been loaded.
     #[error("Character card not loaded")]
     NoCharacterCard,
-    /// LLM provider creation or initialization failed.
-    #[error("Provider error: {0}")]
-    Provider(String),
+    /// LLM provider creation or initialization failed. Callers can
+    /// downcast to `LlmProviderError` to dispatch on the underlying cause
+    /// (auth, rate limit, network, truncated, content filter, provider).
+    #[error(transparent)]
+    Provider(#[from] ene_provider::LlmProviderError),
     /// Configuration error.
     #[error(transparent)]
     Config(#[from] ene_config::EneConfigError),
@@ -21,9 +23,10 @@ pub enum EneCoreError {
     /// Tool host error.
     #[error(transparent)]
     Tool(#[from] ene_tool_proto::EneToolProtoError),
-    /// Embedding error.
-    #[error("Embedding error: {0}")]
-    EmbeddingError(String),
+    /// Embedding error (init or transport). Callers can downcast to
+    /// `EmbeddingError` to dispatch on the variant.
+    #[error(transparent)]
+    Embedding(#[from] ene_provider::EmbeddingError),
     /// Task channel closed.
     #[error("Task channel closed")]
     ChannelClosed,
