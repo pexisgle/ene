@@ -401,18 +401,27 @@ async fn perform_tool_executions(
         }) = &result
         {
             let req_id = RequestId::from(request_id.clone());
+
+            // Register the oneshot::Sender BEFORE emitting
+            // EneEvent::PermissionRequired. A consumer that
+            // synchronously replies to the event (e.g. an
+            // automated/headless test) can otherwise race ahead of
+            // this task, send EneCommand::PermissionDecision, and
+            // hit the lookup in handle.rs:669-678 when the map is
+            // still empty — the decision would then be silently
+            // dropped and the stream would await forever below.
+            let (decide_tx, decide_rx) = oneshot::channel::<PermissionDecision>();
+            {
+                let mut guard = pending_permissions.lock().await;
+                guard.insert(req_id.clone(), decide_tx);
+            }
+
             let _ = event_tx.send(EneEvent::PermissionRequired {
                 request_id: req_id.clone(),
                 action: action.clone(),
                 target: target.clone(),
                 description: description.clone(),
             });
-
-            let (decide_tx, decide_rx) = oneshot::channel::<PermissionDecision>();
-            {
-                let mut guard = pending_permissions.lock().await;
-                guard.insert(req_id.clone(), decide_tx);
-            }
 
             match decide_rx.await {
                 Ok(PermissionDecision::AllowOnce) => {
@@ -434,16 +443,20 @@ async fn perform_tool_executions(
 
         if let Err(ToolError::UserInputRequired { request_id, prompt }) = &result {
             let req_id = RequestId::from(request_id.clone());
-            let _ = event_tx.send(EneEvent::UserInputRequired {
-                request_id: req_id.clone(),
-                prompt: prompt.clone(),
-            });
 
+            // Register the oneshot::Sender BEFORE emitting
+            // EneEvent::UserInputRequired for the same race reason
+            // as the permission branch above.
             let (resp_tx, resp_rx) = oneshot::channel::<UserInputResponse>();
             {
                 let mut guard = pending_user_inputs.lock().await;
                 guard.insert(req_id.clone(), resp_tx);
             }
+
+            let _ = event_tx.send(EneEvent::UserInputRequired {
+                request_id: req_id.clone(),
+                prompt: prompt.clone(),
+            });
 
             match resp_rx.await {
                 Ok(UserInputResponse::Multi(answers)) => {
@@ -632,5 +645,109 @@ mod tests {
         let json = serde_json::to_string(&answers).unwrap();
         let de: Vec<MultiAnswer> = serde_json::from_str(&json).unwrap();
         assert_eq!(de, answers);
+    }
+
+    /// Regression test for #35: a fast consumer that receives
+    /// `EneEvent::PermissionRequired` and immediately sends a
+    /// `PermissionDecision` must never race ahead of the executor's
+    /// insert into `pending_permissions`. Before the fix the
+    /// executor emitted the event before registering the oneshot,
+    /// so a synchronous consumer's decision was dropped at the
+    /// actor and the executor then awaited forever.
+    #[tokio::test]
+    async fn fast_consumer_does_not_lose_permission_decision() {
+        use ene_provider::LlmToolCall;
+        use ene_tool_host::ToolRegistry;
+        use ene_tool_proto::ToolError;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct PermissionThenOk {
+            request_id: String,
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl ToolRegistry for PermissionThenOk {
+            fn list_tools(&self) -> Vec<ene_tool_proto::ToolSpec> {
+                Vec::new()
+            }
+            async fn call_tool(&self, _name: &str, _arguments: &str) -> Result<String, ToolError> {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    Err(ToolError::PermissionRequired {
+                        request_id: self.request_id.clone(),
+                        action: "fs.delete".to_string(),
+                        target: "/tmp/x".to_string(),
+                        description: "delete file".to_string(),
+                    })
+                } else {
+                    Ok("ok".to_string())
+                }
+            }
+            async fn approve_permission(&self, _request_id: &str) {}
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registry = PermissionThenOk {
+            request_id: "req-1".to_string(),
+            calls: calls.clone(),
+        };
+
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<EneEvent>(16);
+        let pending_permissions: Arc<
+            Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>,
+        > = Arc::new(Mutex::new(HashMap::new()));
+        let pending_user_inputs: Arc<
+            Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>,
+        > = Arc::new(Mutex::new(HashMap::new()));
+
+        let tool_calls = vec![LlmToolCall {
+            id: "call-1".to_string(),
+            name: "fs.delete".to_string(),
+            arguments: "{}".to_string(),
+        }];
+
+        // Start a fast consumer that subscribes to the event stream
+        // and replies with a decision as soon as the event is seen.
+        // The decision path here mirrors the actor in
+        // `ene-core::handle::EneActor::run`: remove the entry from
+        // the shared map and send on the oneshot.
+        let consumer_event_rx = event_tx.subscribe();
+        let consumer_perms = pending_permissions.clone();
+        let consumer = tokio::spawn(async move {
+            let mut rx = consumer_event_rx;
+            while let Ok(ev) = rx.recv().await {
+                if let EneEvent::PermissionRequired { request_id, .. } = ev {
+                    let mut guard = consumer_perms.lock().await;
+                    if let Some(tx) = guard.remove(&request_id) {
+                        let _ = tx.send(PermissionDecision::AllowOnce);
+                    }
+                    return;
+                }
+            }
+        });
+
+        let exec = perform_tool_executions(
+            &registry,
+            "session-1",
+            tool_calls,
+            "",
+            &event_tx,
+            &pending_permissions,
+            &pending_user_inputs,
+            5_000,
+        );
+
+        // Bound the test: if the fix regresses, the executor would
+        // await forever on the dropped decision and this would
+        // time out rather than hang the suite.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), exec).await;
+        let _ = consumer.await;
+
+        let result = result.expect("executor hung: decision was dropped");
+        let messages = result.expect("executor returned error");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

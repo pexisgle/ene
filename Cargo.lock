@@ -2467,6 +2467,7 @@ dependencies = [
 name = "ene-core"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "blake3",
  "cargo-husky",
  "chrono",
