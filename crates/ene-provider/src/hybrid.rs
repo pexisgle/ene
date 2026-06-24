@@ -229,4 +229,8 @@ impl EmbeddingProvider for HybridRerankProvider {
     fn model_name(&self) -> &str {
         self.embedder.model_name()
     }
+
+    fn has_reranker(&self) -> bool {
+        self.rerank_llm.is_some()
+    }
 }

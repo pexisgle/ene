@@ -111,6 +111,12 @@ pub trait EmbeddingProvider: Send + Sync {
         Ok(query.to_string())
     }
 
+    /// Returns true if this provider implements a native reranker (e.g. an LLM or cross-encoder).
+    /// If false, callers may opt to skip `rerank()` and rely on retrieval scores.
+    fn has_reranker(&self) -> bool {
+        false
+    }
+
     /// Rerank candidates by relevance to the query. The default uses
     /// embedding cosine similarity against `embed_query`; LLM-backed impls
     /// call a cheap model to score each (query, candidate) pair on a 0..1
