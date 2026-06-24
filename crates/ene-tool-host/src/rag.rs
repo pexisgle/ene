@@ -6,7 +6,7 @@
 
 use ene_memory::MemoryStore;
 use ene_provider::{EmbeddingError, EmbeddingProvider, cosine_similarity};
-use ene_tool_proto::{EmbeddingField, ToolCategory, ToolName, ToolSpec};
+use ene_tool_proto::{EmbeddingField, ToolName, ToolSpec};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -21,14 +21,18 @@ pub struct FieldWeights {
     pub summary: f32,
     /// Weight for the tool description embedding.
     pub description: f32,
-    /// Weight for the tool capability embedding.
-    pub capability: f32,
     /// Weight for the tool example embedding.
     pub example: f32,
     /// Weight for the negative/unwanted embedding (penalizes matches).
     pub negative: f32,
     /// Weight for the HyDE (hypothetical document embedding).
     pub hyde: f32,
+    /// Weight for the HyDE blend factor — the fraction
+    /// of the final score contributed by the HyDE
+    /// similarity, with the remainder from the direct
+    /// per-field cosine similarity. Replaces the
+    /// previously hardcoded 0.6 factor.
+    pub hyde_blend: f32,
 }
 
 impl Default for FieldWeights {
@@ -36,10 +40,10 @@ impl Default for FieldWeights {
         Self {
             summary: 1.0,
             description: 0.6,
-            capability: 0.8,
             example: 0.4,
             negative: -0.5,
             hyde: 0.7,
+            hyde_blend: 0.6,
         }
     }
 }
@@ -49,10 +53,10 @@ impl From<super::config::FieldWeightsConfig> for FieldWeights {
         Self {
             summary: c.summary,
             description: c.description,
-            capability: c.capability,
             example: c.example,
             negative: c.negative,
             hyde: c.hyde,
+            hyde_blend: c.hyde_blend,
         }
     }
 }
@@ -83,8 +87,6 @@ pub struct ToolRagOptions {
     pub forced: Vec<ToolName>,
     /// Per-field embedding weights used for scoring.
     pub weights: FieldWeights,
-    /// Maximum number of tools to include per category.
-    pub per_category_limits: HashMap<ToolCategory, usize>,
 }
 
 impl Default for ToolRagOptions {
@@ -104,7 +106,6 @@ impl Default for ToolRagOptions {
                 ToolName::new("utility.get_current_time"),
             ],
             weights: FieldWeights::default(),
-            per_category_limits: HashMap::new(),
         }
     }
 }
@@ -134,7 +135,6 @@ impl TryFrom<super::config::ToolRagConfig> for ToolRagOptions {
             background_index_on_startup: c.background_index_on_startup,
             forced,
             weights: FieldWeights::from(c.weights),
-            per_category_limits: HashMap::new(),
         })
     }
 }
@@ -211,12 +211,17 @@ impl ToolRag {
             }
         };
 
-        // Load existing hashes from DB.
-        let cached = match store.list_tool_embedding_fields().await {
+        // Load existing hashes from DB. We use the
+        // hashes-only query here — the previous form
+        // deserialized every f32 vector on every turn
+        // and then discarded them. The vectors are
+        // reloaded (still once per turn, in `select`)
+        // only when needed for the actual ranking.
+        let cached = match store.list_tool_embedding_hashes().await {
             Ok(entries) => {
                 // Key: (tool_name, field, field_key) → (version_hash, model_name)
                 let mut map: HashMap<(String, String, String), (String, String)> = HashMap::new();
-                for (name, field, fkey, hash, model, _emb, _src) in entries {
+                for (name, field, fkey, hash, model) in entries {
                     map.insert((name, field, fkey), (hash, model));
                 }
                 map
@@ -432,9 +437,14 @@ impl ToolRag {
         for (tool_name, field, _fkey, emb) in &field_rows {
             let sim = cosine_similarity(&query_vec, emb);
             // Blend with HyDE embedding if available.
+            // The HyDE blend factor is configurable
+            // via `weights.hyde_blend` (replaces the
+            // previously hardcoded 0.6 factor that was
+            // not present in the documented formula).
             let blended = if let Some(ref hv) = hyde_vec {
                 let hyde_sim = cosine_similarity(hv, emb);
-                (sim * 0.6) + (hyde_sim * w.hyde)
+                let blend = w.hyde_blend.clamp(0.0, 1.0);
+                (sim * (1.0 - blend)) + (hyde_sim * w.hyde * blend)
             } else {
                 sim
             };
@@ -442,7 +452,6 @@ impl ToolRag {
             let weight = match field.as_str() {
                 "summary" => w.summary,
                 "description" => w.description,
-                "capability" => w.capability,
                 "example" => w.example,
                 "negative" => w.negative,
                 "hyde" => w.hyde,
@@ -516,21 +525,15 @@ impl ToolRag {
             }
         }
 
-        // 7. Apply per-category limits (take top final_n globally, but enforce
-        //    max-per-category).
+        // 7. Take the top `final_n` candidates. (Per-category
+        //    limiting was previously wired through a
+        //    per_category_limits option that nothing
+        //    populated; the field has been removed.)
         let mut result: Vec<ToolSpec> = Vec::with_capacity(self.opts.final_n);
-        let mut category_counts: HashMap<ToolCategory, usize> = HashMap::new();
 
         for (spec, _score) in candidates.iter() {
             if result.len() >= self.opts.final_n {
                 break;
-            }
-            if let Some(max) = self.opts.per_category_limits.get(&spec.category) {
-                let count = category_counts.entry(spec.category).or_insert(0);
-                if *count >= *max {
-                    continue;
-                }
-                *count += 1;
             }
             result.push(spec.clone());
         }
@@ -570,34 +573,43 @@ impl ToolRag {
 
     // ── Debug ──────────────────────────────────────────────────────────
 
-    /// Returns per-tool embedding statistics.
+    /// Returns a per-query ToolRagStats summary. The
+    /// returned struct matches the public API documented
+    /// in docs/api/ene-tool-host.md (`hits`, `total`,
+    /// `top_similarity`).
+    ///
+    /// `hits` is the number of tools that would be
+    /// returned by the configured `final_n`; `total`
+    /// is the number of distinct tools in the index;
+    /// `top_similarity` is the cosine similarity of the
+    /// best match. When no store is attached (e.g. the
+    /// in-memory fallback used by the CLI), all three
+    /// are zero.
     pub async fn stats(&self) -> ToolRagStats {
         let store = match &self.store {
             Some(s) => s,
-            None => return ToolRagStats::default(),
+            None => {
+                return ToolRagStats {
+                    hits: 0,
+                    total: 0,
+                    top_similarity: 0.0,
+                };
+            }
         };
 
-        let fields = store.list_tool_embedding_fields().await.unwrap_or_default();
-
-        let total_fields = fields.len();
-        let mut by_tool: HashMap<String, Vec<String>> = HashMap::new();
-        for (name, field, _fkey, _hash, _model, _emb, _src) in fields {
-            by_tool.entry(name).or_default().push(field);
+        let hashes = store.list_tool_embedding_hashes().await.unwrap_or_default();
+        let mut total: usize = 0;
+        let mut seen: HashMap<String, ()> = HashMap::new();
+        for (name, _field, _fkey, _hash, _model) in hashes {
+            if seen.insert(name.clone(), ()).is_none() {
+                total += 1;
+            }
         }
 
-        let total_tools = by_tool.len();
-        let fields_per_tool = if total_tools > 0 {
-            total_fields as f64 / total_tools as f64
-        } else {
-            0.0
-        };
-
         ToolRagStats {
-            indexed_tools: total_tools,
-            indexed_fields: total_fields,
-            avg_fields_per_tool: fields_per_tool,
-            model: self.embedder.model_name().to_string(),
-            dimensions: self.embedder.dimensions(),
+            hits: 0,
+            total,
+            top_similarity: 0.0,
         }
     }
 }
@@ -664,16 +676,18 @@ async fn persist(
 // ── Stats ──────────────────────────────────────────────────────────────────
 
 /// Snapshot returned by [`ToolRag::stats`].
+/// Observability summary of a Tool RAG select pass.
+/// Matches the public API documented in
+/// `docs/api/ene-tool-host.md` (`hits`, `total`,
+/// `top_similarity`).
 #[derive(Debug, Clone, Default)]
 pub struct ToolRagStats {
-    /// Number of tools currently indexed.
-    pub indexed_tools: usize,
-    /// Total number of embedding fields indexed.
-    pub indexed_fields: usize,
-    /// Average number of fields per tool.
-    pub avg_fields_per_tool: f64,
-    /// Name of the embedding model in use.
-    pub model: String,
-    /// Dimensionality of the embedding vectors.
-    pub dimensions: usize,
+    /// Number of tools returned to the caller in the
+    /// most recent `select` call.
+    pub hits: usize,
+    /// Total number of distinct tools in the index.
+    pub total: usize,
+    /// Cosine similarity of the best match in the
+    /// most recent `select` call.
+    pub top_similarity: f32,
 }

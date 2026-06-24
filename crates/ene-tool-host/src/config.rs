@@ -87,14 +87,25 @@ pub struct FieldWeightsConfig {
     pub summary: f32,
     /// Weight for the tool description embedding.
     pub description: f32,
-    /// Weight for the tool capability embedding.
-    pub capability: f32,
     /// Weight for the tool example embedding.
     pub example: f32,
     /// Weight for the negative/unwanted embedding (penalizes matches).
     pub negative: f32,
     /// Weight for the HyDE (hypothetical document embedding).
     pub hyde: f32,
+    /// Weight for the HyDE blend factor — the fraction
+    /// of the final score contributed by the HyDE
+    /// similarity, with the remainder from the direct
+    /// per-field cosine similarity. Range `[0.0, 1.0]`;
+    /// 0.0 disables HyDE blending, 1.0 uses only the
+    /// HyDE similarity. Replaces the previously
+    /// hardcoded 0.6 factor.
+    #[serde(default = "default_hyde_blend")]
+    pub hyde_blend: f32,
+}
+
+fn default_hyde_blend() -> f32 {
+    0.6
 }
 
 impl Default for FieldWeightsConfig {
@@ -102,10 +113,10 @@ impl Default for FieldWeightsConfig {
         Self {
             summary: 1.0,
             description: 0.6,
-            capability: 0.8,
             example: 0.4,
             negative: -0.5,
             hyde: 0.7,
+            hyde_blend: default_hyde_blend(),
         }
     }
 }
