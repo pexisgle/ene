@@ -84,6 +84,9 @@ impl Drop for ToolProcess {
 struct SupervisedIpcRegistry {
     process: Arc<Mutex<ToolProcess>>,
     registry: std::sync::RwLock<Arc<IpcToolRegistry>>,
+    /// Per-call timeout, forwarded to `IpcToolRegistry::new` on
+    /// every (re)connect.
+    timeout_ms: u64,
 }
 
 #[async_trait::async_trait]
@@ -135,6 +138,7 @@ impl ToolRegistry for SupervisedIpcRegistry {
             tool_config,
             CONNECT_RETRIES,
             CONNECT_DELAY_MS,
+            self.timeout_ms,
         )
         .await?;
 
@@ -256,6 +260,7 @@ impl ToolHostManager {
         let tool_config = config
             .get_section::<crate::config::ToolConfig>()
             .unwrap_or_default();
+        let timeout_ms = tool_config.timeout_ms;
         for (name, entry) in &tool_config.list {
             if !entry.enable {
                 continue;
@@ -264,7 +269,7 @@ impl ToolHostManager {
                 serde_json::Value::Object(m) if m.is_empty() => None,
                 _ => Some(entry.config.clone()),
             };
-            match Self::start_tool(name, &sandbox, tool_config).await {
+            match Self::start_tool(name, &sandbox, tool_config, timeout_ms).await {
                 Ok(supervised_entry) => {
                     // Collect config schema and register it in the runtime registry
                     if let Some(schema) = supervised_entry.config_schema().await {
@@ -366,6 +371,7 @@ impl ToolHostManager {
         name: &str,
         sandbox: &ene_tool_proto::SandboxConfigData,
         tool_config: Option<serde_json::Value>,
+        timeout_ms: u64,
     ) -> Result<Arc<dyn ToolRegistry>, ToolError> {
         let binary_path =
             Self::find_tool_binary(name).ok_or_else(|| ToolError::ExecutionFailed {
@@ -432,12 +438,14 @@ impl ToolHostManager {
             tool_config,
             CONNECT_RETRIES,
             CONNECT_DELAY_MS,
+            timeout_ms,
         )
         .await?;
 
         Ok(Arc::new(SupervisedIpcRegistry {
             process,
             registry: std::sync::RwLock::new(Arc::new(registry)),
+            timeout_ms,
         }))
     }
 
@@ -470,6 +478,7 @@ impl ToolHostManager {
         tool_config: Option<serde_json::Value>,
         max_retries: u32,
         delay_ms: u64,
+        timeout_ms: u64,
     ) -> Result<IpcToolRegistry, ToolError> {
         let mut attempts = 0;
         loop {
@@ -477,6 +486,7 @@ impl ToolHostManager {
                 socket_path.to_path_buf(),
                 sandbox.clone(),
                 tool_config.clone(),
+                timeout_ms,
             )
             .await
             {

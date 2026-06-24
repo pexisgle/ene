@@ -141,7 +141,7 @@ async fn test_ipc_list_tools_and_call_tool() {
         db_auth_token: None,
     };
 
-    let registry = ene_tool_host::IpcToolRegistry::new(socket_path, sandbox, None)
+    let registry = ene_tool_host::IpcToolRegistry::new(socket_path, sandbox, None, 60_000)
         .await
         .expect("Failed to create IpcToolRegistry");
 
@@ -221,7 +221,7 @@ async fn test_ipc_with_real_host() {
         db_auth_token: None,
     };
 
-    let registry = ene_tool_host::IpcToolRegistry::new(socket_path, sandbox, None)
+    let registry = ene_tool_host::IpcToolRegistry::new(socket_path, sandbox, None, 60_000)
         .await
         .expect("Failed to connect to real tool host");
 
