@@ -169,34 +169,70 @@ impl EneConfig {
     /// Deserialise a sub-section from the `extra` map using the type's associated path.
     ///
     /// Returns `Ok(T::default())` when the key/path is absent.
+    ///
+    /// Refuses types whose `TARGET` is `Character`; those
+    /// sections live in `CharacterConfig::extra` and must
+    /// go through [`CharacterConfig::get_section`]. The
+    /// previous debug_assert silently read from the wrong
+    /// map in release builds.
     pub fn get_section<T>(&self) -> Result<T, EneConfigError>
     where
         T: serde::de::DeserializeOwned + Default + HasConfigKey,
     {
-        debug_assert_eq!(T::TARGET, ConfigTarget::Settings);
-        let mut cur = serde_json::Value::Object(
-            self.extra
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        );
-        for key in T::path() {
-            match cur.get(key).cloned() {
-                Some(v) => cur = v,
+        if T::TARGET != ConfigTarget::Settings {
+            return Err(EneConfigError::GenericConfigError(format!(
+                "`{}` is a Character-target section; use CharacterConfig::get_section instead",
+                T::KEY
+            )));
+        }
+        // Walk the path directly through the
+        // BTreeMap, descending into nested objects one
+        // level at a time. The previous form rebuilt
+        // the entire `extra` map into a JSON object
+        // on every call (O(n) per read) and required
+        // cloning every value.
+        let mut current: Option<&serde_json::Value> = None;
+        for (i, key) in T::path().iter().enumerate() {
+            if i == 0 {
+                match self.extra.get(*key) {
+                    Some(v) => current = Some(v),
+                    None => return Ok(T::default()),
+                }
+                continue;
+            }
+            let Some(cur_val) = current else {
+                return Ok(T::default());
+            };
+            match cur_val.as_object().and_then(|o| o.get(*key)) {
+                Some(v) => current = Some(v),
                 None => return Ok(T::default()),
             }
         }
-        serde_json::from_value(cur).map_err(|e| {
+        let Some(final_val) = current else {
+            return Ok(T::default());
+        };
+        serde_json::from_value(final_val.clone()).map_err(|e| {
             EneConfigError::GenericConfigError(format!("Failed to deserialize nested section: {e}"))
         })
     }
 
     /// Serialise and insert a sub-section into the `extra` map using the type's associated path.
+    ///
+    /// Refuses types whose `TARGET` is `Character`; those
+    /// sections live in `CharacterConfig::extra` and must
+    /// go through [`CharacterConfig::set_section`]. The
+    /// previous debug_assert silently wrote to the wrong
+    /// map in release builds.
     pub fn set_section<T>(&mut self, section: &T) -> Result<(), EneConfigError>
     where
         T: serde::Serialize + HasConfigKey,
     {
-        debug_assert_eq!(T::TARGET, ConfigTarget::Settings);
+        if T::TARGET != ConfigTarget::Settings {
+            return Err(EneConfigError::GenericConfigError(format!(
+                "`{}` is a Character-target section; use CharacterConfig::set_section instead",
+                T::KEY
+            )));
+        }
         let val = serde_json::to_value(section).map_err(|e| {
             EneConfigError::GenericConfigError(format!("Failed to serialize section: {e}"))
         })?;
@@ -216,29 +252,72 @@ fn set_nested(
         ));
     }
 
-    let mut root =
-        serde_json::Value::Object(extra.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+    // Descend through the BTreeMap, mutating the path
+    // in place. The previous form rebuilt the entire
+    // `extra` map into a JSON object (O(n) on every
+    // write) and silently dropped the write if `cur`
+    // ever landed on a non-object leaf.
+    let (head, rest) = path.split_first().expect("non-empty by guard above");
+    let mut current: &mut serde_json::Value = extra
+        .entry((*head).to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
 
-    let mut cur = &mut root;
-    for (i, &key) in path.iter().enumerate() {
-        if i == path.len() - 1 {
-            if let Some(obj) = cur.as_object_mut() {
-                obj.insert(key.to_string(), value);
+    for (i, key) in rest.iter().enumerate() {
+        let is_last = i + 1 == rest.len();
+        if is_last {
+            // The final key may either replace an
+            // existing value or be inserted as a new
+            // entry. If the existing value at this path
+            // is a non-object leaf (e.g. a string),
+            // surface a typed error rather than
+            // silently overwriting it with a nested
+            // structure.
+            if let Some(existing) = current.as_object().and_then(|o| o.get(*key)) {
+                if !existing.is_object() && !value.is_object() {
+                    // Both leaves: replace is fine.
+                } else if !existing.is_object() {
+                    return Err(EneConfigError::GenericConfigError(format!(
+                        "set_nested: cannot insert nested value at path \
+                         `{}`; existing value is a non-object leaf ({})",
+                        path.join("."),
+                        existing
+                    )));
+                }
             }
-            break;
-        } else {
-            if !cur.is_object() {
-                *cur = serde_json::Value::Object(serde_json::Map::new());
-            }
-            let obj = cur.as_object_mut().unwrap();
-            cur = obj
-                .entry(key.to_string())
-                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            let obj = current.as_object_mut().ok_or_else(|| {
+                EneConfigError::GenericConfigError(format!(
+                    "set_nested: cannot descend into non-object at path `{}`",
+                    path.join(".")
+                ))
+            })?;
+            obj.insert((*key).to_string(), value);
+            return Ok(());
         }
-    }
 
-    if let serde_json::Value::Object(obj) = root {
-        *extra = obj.into_iter().collect();
+        // Intermediate key: ensure the value is an
+        // object so we can descend. If a non-object
+        // leaf sits in the middle of the path, surface
+        // a typed error rather than silently replacing
+        // it with a fresh object.
+        if let Some(existing) = current.as_object().and_then(|o| o.get(*key))
+            && !existing.is_object()
+        {
+            return Err(EneConfigError::GenericConfigError(format!(
+                "set_nested: cannot descend through non-object leaf at \
+                 path `{}` (existing: {})",
+                path.join("."),
+                existing
+            )));
+        }
+        let obj = current.as_object_mut().ok_or_else(|| {
+            EneConfigError::GenericConfigError(format!(
+                "set_nested: cannot descend into non-object at path `{}`",
+                path.join(".")
+            ))
+        })?;
+        current = obj
+            .entry((*key).to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     }
 
     Ok(())
@@ -674,5 +753,38 @@ mod tests {
 
         let result = load_full_config_from(tmp.path(), &path);
         assert!(result.is_ok(), "empty settings.json should extract ok");
+    }
+
+    /// Regression for #47 (bug 3): set_nested used to
+    /// silently drop the write when the path crossed
+    /// a non-object leaf (e.g. a user's settings.json
+    /// has `"provider": "some string"` and the
+    /// set_section path is `["provider", "api_key"]`).
+    /// Now the write returns a typed error.
+    #[test]
+    fn set_nested_through_non_object_leaf_errors() {
+        let mut extra: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        // Pre-populate a leaf where the path expects an
+        // object.
+        extra.insert(
+            "provider".to_string(),
+            serde_json::Value::String("some string".to_string()),
+        );
+
+        let result = set_nested(
+            &mut extra,
+            &["provider", "api_key"],
+            serde_json::Value::String("sk-test".to_string()),
+        );
+        assert!(
+            result.is_err(),
+            "expected error on non-object leaf, got Ok with extra={extra:?}"
+        );
+        // The original leaf must not be silently clobbered.
+        assert_eq!(
+            extra.get("provider"),
+            Some(&serde_json::Value::String("some string".to_string())),
+            "non-object leaf should not be replaced with a fresh object"
+        );
     }
 }
