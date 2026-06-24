@@ -20,6 +20,33 @@ pub use quantized::{GgufEmbeddingProvider, resolve_gguf_paths};
 /// * `model` — Model name (e.g., `"jina-embeddings-v5-text-small"`)
 /// * `quantization` — Quantization format (e.g., `"F16"`, `"Q4_K_M"`)
 /// * `model_dir` — Directory where GGUF models are stored
+///
+/// # Runtime requirement
+///
+/// The returned provider's forward pass uses
+/// `tokio::task::block_in_place` to call into Candle, which
+/// is synchronous and CPU-bound. `block_in_place` requires
+/// a **multi-thread tokio runtime**; it panics on a
+/// `current_thread` runtime or outside any runtime.
+///
+/// Pass a `multi_thread` runtime when constructing your own
+/// `Runtime::new()`:
+///
+/// ```ignore
+/// // CORRECT
+/// let rt = tokio::runtime::Builder::new_multi_thread()
+///     .enable_all()
+///     .build()?;
+/// // INCORRECT — panics inside `embed_query`:
+/// let rt = tokio::runtime::Builder::new_current_thread()
+///     .enable_all()
+///     .build()?;
+/// ```
+///
+/// The `#[tokio::main]` macro on a `fn main()` uses the
+/// multi-thread flavor by default, so plain
+/// `#[tokio::main] async fn main()` is the simplest
+/// correct setup.
 pub fn create_local_provider(
     model: &str,
     quantization: &str,
