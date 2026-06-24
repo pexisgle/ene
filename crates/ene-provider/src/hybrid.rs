@@ -8,39 +8,51 @@ use crate::traits::{
 
 /// Wraps a primary embedder with optional LLM-backed `HyDE` and rerank.
 ///
-/// When `llm` is set, `hyde()` delegates to the LLM to produce a hypothetical
-/// tool-invocation document and `rerank()` uses LLM scoring. Otherwise both
-/// fall back to the default cosine-similarity paths.
+/// When an LLM is set, `hyde()` delegates to it to produce a
+/// hypothetical tool-invocation document and `rerank()`
+/// uses LLM scoring. Otherwise both fall back to the default
+/// cosine-similarity paths.
+///
+/// The per-task LLM is a separate `Arc<dyn LlmProvider>`
+/// rather than a `(provider, model_name)` pair: a model name
+/// alone would not actually override the model on the wire,
+/// because the underlying provider's `chat_completion` is
+/// configured at construction. Separate provider instances
+/// guarantee the model is honored.
 pub struct HybridRerankProvider {
     embedder: Arc<dyn EmbeddingProvider>,
-    llm: Option<Arc<dyn LlmProvider>>,
-    hyde_model: Option<String>,
-    rerank_model: Option<String>,
+    /// LLM used for `HyDE` document generation. When `None`,
+    /// `hyde()` returns the query unchanged.
+    hyde_llm: Option<Arc<dyn LlmProvider>>,
+    /// LLM used for `rerank()`. When `None`, falls back to
+    /// cosine-similarity scoring against the embedder.
+    rerank_llm: Option<Arc<dyn LlmProvider>>,
 }
 
 impl HybridRerankProvider {
     /// Creates a wrapper that uses `embedder` for all embedding operations.
     /// `HyDE` and rerank use default cosine-similarity fallbacks unless
-    /// LLM models are set.
+    /// LLM providers are set.
     pub fn new(embedder: Arc<dyn EmbeddingProvider>) -> Self {
         Self {
             embedder,
-            llm: None,
-            hyde_model: None,
-            rerank_model: None,
+            hyde_llm: None,
+            rerank_llm: None,
         }
     }
 
-    /// Attaches an LLM provider and optional model overrides for `HyDE` / rerank.
+    /// Attaches LLM providers for `HyDE` and rerank. Pass `None`
+    /// for either to keep the default fallback path for that
+    /// task. The two providers are separate so a builder can
+    /// route `HyDE` to a small fast model and rerank to a
+    /// larger / more accurate one.
     pub fn with_llm(
         mut self,
-        llm: Arc<dyn LlmProvider>,
-        hyde_model: Option<String>,
-        rerank_model: Option<String>,
+        hyde_llm: Option<Arc<dyn LlmProvider>>,
+        rerank_llm: Option<Arc<dyn LlmProvider>>,
     ) -> Self {
-        self.llm = Some(llm);
-        self.hyde_model = hyde_model;
-        self.rerank_model = rerank_model;
+        self.hyde_llm = hyde_llm;
+        self.rerank_llm = rerank_llm;
         self
     }
 }
@@ -63,7 +75,7 @@ impl EmbeddingProvider for HybridRerankProvider {
     }
 
     async fn hyde(&self, query: &str) -> Result<String, EmbeddingError> {
-        let llm = match &self.llm {
+        let llm = match &self.hyde_llm {
             Some(llm) => llm,
             None => return Ok(query.to_string()),
         };
@@ -92,7 +104,7 @@ impl EmbeddingProvider for HybridRerankProvider {
         query: &str,
         candidates: &[ene_tool_proto::ToolSpec],
     ) -> Result<Vec<f32>, EmbeddingError> {
-        let llm = if let Some(llm) = &self.llm {
+        let llm = if let Some(llm) = &self.rerank_llm {
             llm
         } else {
             // Fall back to default cosine-similarity rerank.
@@ -156,17 +168,45 @@ impl EmbeddingProvider for HybridRerankProvider {
             .await
             .map_err(|e| EmbeddingError::Provider(e.to_string()))?;
 
-        // Parse JSON response.
-        let parsed: serde_json::Value = serde_json::from_str(&raw)
-            .map_err(|e| EmbeddingError::Provider(format!("rerank JSON parse: {e}")))?;
-        let scores: Vec<f32> = parsed["scores"].as_array().map_or_else(
-            || vec![0.0; candidates.len()],
-            |arr| {
-                arr.iter()
-                    .map(|v| v.as_f64().unwrap_or(0.0) as f32)
-                    .collect()
-            },
-        );
+        // Parse the response. The previous implementation
+        // silently returned `vec![0.0; candidates.len()]`
+        // when the LLM produced a bare array (no `scores`
+        // object) or a malformed object, which would have
+        // the caller rank every candidate at exactly zero
+        // — an indistinguishable "all-irrelevant" answer.
+        // Surface a typed error instead.
+        let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+            EmbeddingError::Provider(format!(
+                "rerank response was not valid JSON: {e}; raw response: {raw}"
+            ))
+        })?;
+        let arr = parsed
+            .get("scores")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                EmbeddingError::Provider(format!(
+                    "rerank response missing `scores` array; got: {parsed}"
+                ))
+            })?;
+        if arr.len() != candidates.len() {
+            return Err(EmbeddingError::Provider(format!(
+                "rerank response had {} scores, expected {} (one per candidate)",
+                arr.len(),
+                candidates.len()
+            )));
+        }
+        let scores: Vec<f32> = arr
+            .iter()
+            .map(|v| {
+                v.as_f64()
+                    .ok_or_else(|| {
+                        EmbeddingError::Provider(format!(
+                            "rerank response contained a non-numeric score: {v}"
+                        ))
+                    })
+                    .map(|f| f as f32)
+            })
+            .collect::<Result<Vec<f32>, _>>()?;
         Ok(scores)
     }
 
