@@ -790,6 +790,15 @@ impl CharacterRenderer {
         self.model.as_ref()
     }
 
+    /// Mutable accessor for the loaded [`VrmModel`]. Used by the
+    /// render-side emotion pipeline to apply expression weights
+    /// (`expressions_mut().set_expression`) after
+    /// `app.update()` has drained the `EmotionPipelineState`
+    /// queue.
+    pub fn model_mut(&mut self) -> Option<&mut VrmModel> {
+        self.model.as_mut()
+    }
+
     /// Diagnostic: AABB of the loaded vertex data (min, max).
     /// The loader's normalize centres the AABB on origin; if
     /// not symmetric, that's a bug.

@@ -28,37 +28,13 @@ impl AnimationControl {
 #[derive(Clone, Debug)]
 pub struct EmotionCommand {
     /// Expression name (e.g. `"happy"`, `"sad"`, `"blink_l"`).
-    /// Phase 7.2 skeleton: read by the upcoming render-side
-    /// `apply_emotions_render_system` body-migration pass.
-    #[allow(
-        dead_code,
-        reason = "Phase 7.2 skeleton: consumed by the upcoming body-migration pass."
-    )]
     pub emotion: String,
     /// Absolute time at which this command becomes active.
-    /// Phase 7.2 skeleton: read by the upcoming render-side
-    /// `apply_emotions_render_system` body-migration pass.
-    #[allow(
-        dead_code,
-        reason = "Phase 7.2 skeleton: consumed by the upcoming body-migration pass."
-    )]
     pub target_time: f64,
     /// How long the weight should stay at `weight` before fading
     /// back to zero.
-    /// Phase 7.2 skeleton: read by the upcoming render-side
-    /// `apply_emotions_render_system` body-migration pass.
-    #[allow(
-        dead_code,
-        reason = "Phase 7.2 skeleton: consumed by the upcoming body-migration pass."
-    )]
     pub hold_secs: f64,
     /// Target weight in `[0, 1]`.
-    /// Phase 7.2 skeleton: read by the upcoming render-side
-    /// `apply_emotions_render_system` body-migration pass.
-    #[allow(
-        dead_code,
-        reason = "Phase 7.2 skeleton: consumed by the upcoming body-migration pass."
-    )]
     pub weight: f32,
 }
 
@@ -83,25 +59,11 @@ impl EmotionQueue {
 /// wins on a name change).
 #[derive(Clone, Debug)]
 pub struct ActiveEmotion {
-    /// Phase 7.2 skeleton: read by the upcoming render-side
-    /// `apply_emotions_render_system` body-migration pass.
-    #[allow(
-        dead_code,
-        reason = "Phase 7.2 skeleton: consumed by the upcoming body-migration pass."
-    )]
+    /// Expression name of the active emotion.
     pub name: String,
-    /// Phase 7.2 skeleton: read by the upcoming render-side
-    /// `apply_emotions_render_system` body-migration pass.
-    #[allow(
-        dead_code,
-        reason = "Phase 7.2 skeleton: consumed by the upcoming body-migration pass."
-    )]
+    /// Target weight while in the hold window.
     pub weight: f32,
-    /// Phase 7.2 skeleton: read by the upcoming render-side
-    /// `apply_emotions_render_system` body-migration pass.
-    #[allow(
-        dead_code,
-        reason = "Phase 7.2 skeleton: consumed by the upcoming body-migration pass."
-    )]
+    /// Wall-clock seconds at which the hold window ends and the
+    /// fade-out begins.
     pub hold_until_secs: f64,
 }

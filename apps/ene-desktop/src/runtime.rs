@@ -45,6 +45,23 @@ pub struct Runtime {
     ui_window: Option<UiWindow>,
     last_cursor_physical: Option<PhysicalPosition<f64>>,
     last_frame_instant: Option<Instant>,
+    /// Lazily-initialized clock for the emotion pipeline. The
+    /// `now_secs` passed to `tick_emotions` is
+    /// `emotion_clock.unwrap().elapsed().as_secs_f64()`. The AI
+    /// bridge's commands are pushed with `target_time = 0.0`, so
+    /// once the clock is set, every tick has monotonically
+    /// increasing `now_secs` and commands pop immediately.
+    /// Settings-UI commands use their own
+    /// `started_at.elapsed()` clock and are pushed at
+    /// `target_time = now_secs` *at scheduling time*, so a
+    /// command scheduled when the UI's clock was at 4.0 will
+    /// pop on the next tick (whose `now_secs >= 0` after
+    /// initialization). The two clocks do not need to agree
+    /// because the settings UI drains through the bevy
+    /// `UiEmotionQueue` resource and the AI bridge drains
+    /// through `EmoteToken` messages; both ultimately push
+    /// into `EmotionPipelineState::pending`.
+    emotion_clock: Option<Instant>,
     device_state: device_query::DeviceState,
     char_surface_fatal: bool,
 }
@@ -70,6 +87,7 @@ impl Runtime {
             ui_window: None,
             last_cursor_physical: None,
             last_frame_instant: None,
+            emotion_clock: None,
             device_state: device_query::DeviceState::new(),
             char_surface_fatal: false,
         }
@@ -691,10 +709,53 @@ impl Runtime {
             ref character_physics_registration,
             ref gpu,
             ref settings,
+            ref mut app,
             ..
         } = self.state;
         let debug_renderer = &mut debug.debug_renderer;
         let (device, queue) = (&gpu.device, &gpu.queue);
+
+        // Apply pending emotion commands (e.g. from the AI's
+        // `<|emo:happy|>` tokens) to the VRM model. The bevy
+        // `apply_emote_tokens_system` ran during `app.update()`;
+        // here we drain the resulting queue and call
+        // `expressions_mut().set_expression()` with the
+        // computed (name, weight).
+        {
+            let world = app.world_mut();
+            let pipeline =
+                world.get_resource_mut::<crate::resource::emotion_pipeline::EmotionPipelineState>();
+            if let Some(mut pipeline) = pipeline {
+                // The producers record `target_time` in their
+                // own clock (settings UI uses
+                // `started_at.elapsed()`). For the AI path the
+                // command's `target_time` is `0.0`, so any
+                // monotonically increasing `now_secs` works.
+                // We use the same clock as the producers: an
+                // f64 of "monotonic seconds since the bevy app
+                // started". `Instant::now()` against a per-app
+                // start time is the cheapest correct option.
+                let now_secs = self
+                    .emotion_clock
+                    .map_or(0.0, |t| t.elapsed().as_secs_f64());
+                let applied =
+                    crate::resource::emotion_pipeline::tick_emotions(&mut pipeline, now_secs);
+                if !applied.name.is_empty()
+                    && let Some(model) = character.model_mut()
+                {
+                    let name = ene_vrm::ExpressionName::new(applied.name);
+                    let layer = model.expressions_mut();
+                    // `set_expression` is a no-op if the
+                    // model does not have this expression
+                    // in its expression map (returns false),
+                    // which is the right behavior for AI
+                    // tokens that don't match the loaded
+                    // VRM's expression set.
+                    layer.set_expression(&name, applied.weight);
+                }
+            }
+        }
+        self.emotion_clock = self.emotion_clock.or(Some(Instant::now()));
 
         let cs = &settings.character_state;
         let actual_scale = character.auto_fit_scale(0.9) * cs.model_scale;
