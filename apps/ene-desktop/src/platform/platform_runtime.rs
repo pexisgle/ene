@@ -35,13 +35,44 @@
 //! observable without flooding the trace output.
 
 #[cfg(target_os = "linux")]
-use crate::state::AppState;
+use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "linux")]
+use parking_lot::Mutex;
+
+#[cfg(target_os = "linux")]
+use crate::input_region_debug::InputRegionSource;
+#[cfg(target_os = "linux")]
+use crate::platform::wayland_region::Rect;
+#[cfg(target_os = "linux")]
+use crate::platform::{
+    wayland_layer_shell::LayerShellState, wayland_mask_capture::MaskCaptureState,
+    wayland_region::WaylandInputRegionContext, x11_taskbar::X11Context,
+};
+
+#[cfg(target_os = "linux")]
 static FIRST_DISPATCH_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// Inputs to [`apply_linux_click_through`].
+///
+/// Phase 8 lifts every field out of the legacy `state::PlatformState`
+/// (which is now removed) and the `&mut AppState` borrow that
+/// used to be required to read them. Callers either pass
+/// `bevy_ecs::Res<…>` references or, in the non-bevy runtime
+/// path, raw `&Option<Arc<Mutex<…>>>` references.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+pub struct ClickThroughInputs<'a> {
+    pub wayland: Option<&'a Arc<Mutex<WaylandInputRegionContext>>>,
+    pub x11: Option<&'a Arc<Mutex<X11Context>>>,
+    pub layer_shell: Option<&'a LayerShellState>,
+    pub layer_shell_freeze: bool,
+    pub mask_capture: Option<&'a MaskCaptureState>,
+    pub drag_is_dragging: bool,
+}
 
 /// Per-frame click-through update on Linux.
 ///
@@ -57,46 +88,46 @@ static FIRST_DISPATCH_LOGGED: AtomicBool = AtomicBool::new(false);
 /// all input regardless of the cursor position so the user
 /// can interact with the model on xdg-shell compositors that
 /// do not advertise `zwlr_layer_shell_v1`.
+///
+/// Returns the `(rects, source)` pair that the caller should
+/// publish into the `LastAppliedInputRects` / `LastInputSource`
+/// bevy `Resource`s for the F9 debug overlay.
 #[cfg(target_os = "linux")]
 pub fn apply_linux_click_through(
-    state: &mut AppState,
+    inputs: ClickThroughInputs<'_>,
     allows_input: bool,
     cursor_on_silhouette: bool,
     freeze_forced: bool,
-) {
+) -> (Vec<Rect>, InputRegionSource) {
+    let ClickThroughInputs {
+        wayland,
+        x11,
+        layer_shell: _layer_shell,
+        layer_shell_freeze: _layer_shell_freeze,
+        mask_capture,
+        drag_is_dragging,
+    } = inputs;
+
     let (rects, source) = if freeze_forced {
         (
-            vec![super::wayland_region::Rect::new(
-                0,
-                0,
-                i32::from(i16::MAX),
-                i32::from(i16::MAX),
-            )],
-            super::super::input_region_debug::InputRegionSource::Freeze,
+            vec![Rect::new(0, 0, i32::from(i16::MAX), i32::from(i16::MAX))],
+            InputRegionSource::Freeze,
         )
-    } else if allows_input && (cursor_on_silhouette || state.character.drag.is_dragging()) {
+    } else if allows_input && (cursor_on_silhouette || drag_is_dragging) {
         (
-            vec![super::wayland_region::Rect::new(
-                0,
-                0,
-                i32::from(i16::MAX),
-                i32::from(i16::MAX),
-            )],
-            super::super::input_region_debug::InputRegionSource::FullWindow,
+            vec![Rect::new(0, 0, i32::from(i16::MAX), i32::from(i16::MAX))],
+            InputRegionSource::FullWindow,
         )
-    } else if let Some(mask) = state.platform.mask_capture.as_ref() {
+    } else if let Some(mask) = mask_capture {
         let guard = mask.lock();
         let extracted = guard.extract_rectangles();
         if extracted.is_empty() {
-            (
-                Vec::new(),
-                super::super::input_region_debug::InputRegionSource::Empty,
-            )
+            (Vec::new(), InputRegionSource::Empty)
         } else {
             let factor = guard.downsample() as i64;
-            let scaled: Vec<super::wayland_region::Rect> = extracted
+            let scaled: Vec<Rect> = extracted
                 .into_iter()
-                .map(|(x, y, w, h)| super::wayland_region::Rect {
+                .map(|(x, y, w, h)| Rect {
                     x: (i64::from(x) * factor).min(i64::from(i32::MAX)) as i32,
                     y: (i64::from(y) * factor).min(i64::from(i32::MAX)) as i32,
                     w: (i64::from(w) * factor).min(i64::from(i32::MAX)) as i32,
@@ -104,25 +135,17 @@ pub fn apply_linux_click_through(
                 })
                 .collect();
             drop(guard);
-            (
-                scaled,
-                super::super::input_region_debug::InputRegionSource::Mask,
-            )
+            (scaled, InputRegionSource::Mask)
         }
     } else {
-        (
-            Vec::new(),
-            super::super::input_region_debug::InputRegionSource::Empty,
-        )
+        (Vec::new(), InputRegionSource::Empty)
     };
 
-    if let Some(ctx) = state.platform.wayland_region.as_ref() {
+    if let Some(ctx) = wayland {
         let mut guard = ctx.lock();
         guard.pump();
 
-        if freeze_forced
-            || (allows_input && (cursor_on_silhouette || state.character.drag.is_dragging()))
-        {
+        if freeze_forced || (allows_input && (cursor_on_silhouette || drag_is_dragging)) {
             guard.set_full_input();
         } else {
             guard.set_rects(rects.clone());
@@ -131,7 +154,7 @@ pub fn apply_linux_click_through(
         guard.apply_to_winit_surface();
     }
 
-    if let Some(ctx) = state.platform.x11_ctx.as_ref() {
+    if let Some(ctx) = x11 {
         let mut guard = ctx.lock();
         if rects.is_empty() {
             guard.clear_input();
@@ -141,18 +164,13 @@ pub fn apply_linux_click_through(
     }
 
     if !FIRST_DISPATCH_LOGGED.swap(true, Ordering::Relaxed) {
-        let layer_shell_cached = state
-            .platform
-            .layer_shell
-            .as_ref()
-            .is_some_and(|ctx| ctx.lock().cached().is_some());
-        let x11_path = if state.platform.x11_ctx.is_some() {
-            let path = super::x11_taskbar::X11Path::decide(
+        let layer_shell_cached = _layer_shell.is_some_and(|ctx| ctx.lock().cached().is_some());
+        let x11_path = if x11.is_some() {
+            Some(super::x11_taskbar::X11Path::decide(
                 allows_input,
-                cursor_on_silhouette || state.character.drag.is_dragging(),
+                cursor_on_silhouette || drag_is_dragging,
                 freeze_forced,
-            );
-            Some(path)
+            ))
         } else {
             None
         };
@@ -162,31 +180,30 @@ pub fn apply_linux_click_through(
             allows_input,
             cursor_on_silhouette,
             freeze_forced,
-            wayland = state.platform.wayland_region.is_some(),
-            x11 = state.platform.x11_ctx.is_some(),
+            wayland = wayland.is_some(),
+            x11 = x11.is_some(),
             x11_path = ?x11_path,
             layer_shell_cached,
             "char window hit test (linux) — first dispatch per process"
         );
     }
 
-    state.platform.last_applied_input_rects = rects.clone();
-    state.platform.last_input_source = source;
+    (rects, source)
 }
 
 /// Run the layer-shell detection probe against the stand-alone
 /// Wayland connection (if any) and update the cached status.
 #[cfg(target_os = "linux")]
-pub fn detect_layer_shell(state: &AppState) -> super::wayland_layer_shell::LayerShellStatus {
+pub fn detect_layer_shell(
+    layer_shell: Option<&LayerShellState>,
+    wayland: Option<&Arc<Mutex<WaylandInputRegionContext>>>,
+) -> super::wayland_layer_shell::LayerShellStatus {
     use super::wayland_layer_shell::LayerShellStatus;
-    let Some(layer_shell) = state.platform.layer_shell.as_ref() else {
+    let Some(layer_shell) = layer_shell else {
         return LayerShellStatus::Unavailable;
     };
-    let connection_owned: Option<wayland_client::Connection> = state
-        .platform
-        .wayland_region
-        .as_ref()
-        .and_then(|region| region.lock().clone_connection());
+    let connection_owned: Option<wayland_client::Connection> =
+        wayland.and_then(|region| region.lock().clone_connection());
     let connection_ref: Option<&wayland_client::Connection> = connection_owned.as_ref();
     let mut ctx = layer_shell.lock();
     ctx.status(connection_ref)

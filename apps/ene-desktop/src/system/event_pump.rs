@@ -127,7 +127,6 @@ mod tests {
     use crate::events::TrayAction;
     use crate::settings_ui::PageKind;
     use bevy_ecs::message::MessageReader;
-    use bevy_ecs::prelude::*;
     use ene_core::RequestId;
     use tokio::sync::mpsc;
 
@@ -177,9 +176,9 @@ mod tests {
         }))
         .unwrap();
         run_pump(&mut world);
-        let mut messages = world.resource_mut::<Messages<OpenSettings>>();
+        let messages = world.resource_mut::<Messages<OpenSettings>>();
         let mut cursor = messages.get_cursor();
-        let events: Vec<_> = cursor.read(&mut *messages).collect();
+        let events: Vec<_> = cursor.read(&*messages).collect();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].page, Some(PageKind::Ai));
     }
@@ -195,9 +194,9 @@ mod tests {
         }))
         .unwrap();
         run_pump(&mut world);
-        let mut messages = world.resource_mut::<Messages<AiPermissionRequested>>();
+        let messages = world.resource_mut::<Messages<AiPermissionRequested>>();
         let mut cursor = messages.get_cursor();
-        let events: Vec<_> = cursor.read(&mut *messages).collect();
+        let events: Vec<_> = cursor.read(&*messages).collect();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].action, "read");
         assert_eq!(events[0].target, "file.txt");
@@ -214,9 +213,9 @@ mod tests {
         tx.send(AppEvent::Ai(AiStreamUpdate::TextDelta("world".to_string())))
             .unwrap();
         run_pump(&mut world);
-        let mut messages = world.resource_mut::<Messages<AiTextDelta>>();
+        let messages = world.resource_mut::<Messages<AiTextDelta>>();
         let mut cursor = messages.get_cursor();
-        let events: Vec<_> = cursor.read(&mut *messages).collect();
+        let events: Vec<_> = cursor.read(&*messages).collect();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].0, "hello ");
         assert_eq!(events[1].0, "world");
@@ -227,9 +226,9 @@ mod tests {
         let (mut world, tx) = build_world();
         tx.send(AppEvent::EmoteToken("happy".to_string())).unwrap();
         run_pump(&mut world);
-        let mut messages = world.resource_mut::<Messages<EmoteToken>>();
+        let messages = world.resource_mut::<Messages<EmoteToken>>();
         let mut cursor = messages.get_cursor();
-        let events: Vec<_> = cursor.read(&mut *messages).collect();
+        let events: Vec<_> = cursor.read(&*messages).collect();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, "happy");
     }

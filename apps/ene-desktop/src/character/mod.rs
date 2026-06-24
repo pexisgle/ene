@@ -648,7 +648,7 @@ impl CharacterRenderer {
     /// bones and falls back to `character_position` for models
     /// without humanoid bones. Used by
     /// [`Self::update_camera_target`].
-    #[expect(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code, reason = "Test-only helper"))]
     pub fn body_center_world(&self, character_position: Vec3, model_scale: f32) -> Vec3 {
         let Some(model) = self.model.as_ref() else {
             return character_position;

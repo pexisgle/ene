@@ -12,7 +12,10 @@ use crate::events::{AppEventReceiver, AppEventSender};
 #[derive(Resource)]
 pub struct EventChannels {
     /// Sender half. Cloned by the AI bridge and tray.
-    #[expect(dead_code, reason = "Used by Phase 3+ to push events from systems")]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Used by Phase 3+ to push events from systems")
+    )]
     pub tx: AppEventSender,
     /// Receiver half. Drained by `pump_legacy_events`.
     pub rx: AppEventReceiver,

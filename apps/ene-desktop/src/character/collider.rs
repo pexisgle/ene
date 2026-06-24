@@ -419,7 +419,7 @@ pub fn compute_rest_world_rotations(model: &VrmModel) -> Vec<Quat> {
 /// registered humanoid bone. Returns the ancestor's node
 /// index, or `None` if the bone is the top of its humanoid
 /// chain (e.g. `hips` → root).
-#[expect(dead_code)]
+#[cfg_attr(not(test), expect(dead_code, reason = "Test-only helper"))]
 fn humanoid_parent_node(
     bone_node: usize,
     parents: &[i32],

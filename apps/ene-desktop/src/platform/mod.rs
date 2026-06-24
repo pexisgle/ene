@@ -30,4 +30,4 @@ pub mod wayland_region;
 pub mod x11_taskbar;
 
 #[cfg(target_os = "linux")]
-pub use platform_runtime::{apply_linux_click_through, detect_layer_shell};
+pub use platform_runtime::{ClickThroughInputs, apply_linux_click_through, detect_layer_shell};

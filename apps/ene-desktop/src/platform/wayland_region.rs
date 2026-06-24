@@ -226,14 +226,14 @@ impl WaylandInputRegionContext {
     }
 
     /// Empty the input region: the whole surface is click-through.
-    #[expect(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code, reason = "Test-only helper"))]
     pub fn clear(&mut self) {
         self.state = InputRegionState::Rectangles(Vec::new());
     }
 
     /// Latest cached state. Read by the X11 fallback dispatcher
     /// and the F9 debug overlay.
-    #[expect(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code, reason = "Test-only helper"))]
     pub fn state(&self) -> &InputRegionState {
         &self.state
     }

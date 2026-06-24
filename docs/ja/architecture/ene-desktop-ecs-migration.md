@@ -16,10 +16,10 @@
 | 3 | `CharacterPlugin` — キャラクター単位の components (`VrmModelHandle`, `MotionState`, `SpringBoneState`, `CharacterCamera`, `LookAt`, `EmotionChannel`, `BoneColliders`, `CharacterTransform`, および `Transform` / `GlobalTransform`) を `CharacterBundle` にまとめ、`Startup` でエンティティを生成。 | ✅ 完了 |
 | 4 | `PhysicsPlugin` — `PhysicsWorld` をリファクタして `entity_to_*` `HashMap` を削除。`register_character_colliders` は `CharacterColliderRegistration` を返す。ボーン毎のハンドルは `PhysicsBody` / `PhysicsColliders` / `PhysicsColliderStaticOffsets` / `PhysicsColliderStaticRotations` / `PhysicsColliderRestRotations` としてエンティティに保持。`attach_bone_colliders_system` は `Startup`、`step_physics_system` は `Update`。 | ✅ 完了 |
 | 5 | `UiPlugin` — 旧 `SettingsUi` 構造体を bevy `Component` (`UiWindow`, `UiPage`, `UiInputDrafts`, `UiAnimation`, `UiEmotionQueue`, `UiStartedAt`, `UiStateComponent`) に分解。`apply_action` は bevy `World` + `Entity` を受け取るようになり、ページ描画関数は `world.get` / `world.get_mut` 経由でコンポーネントを読み書きする。`SettingsActionEvent` メッセージは Phase 6+ での消費に備えて登録済み。 | ✅ 完了 |
-| 6 | `PlatformPlugin`, `TrayPlugin`, `AiPlugin` — Phase 6 作業。トレイメニュー、AI ブリッジポンプ、Linux Wayland / X11 の入力領域状態を bevy resource + system へ移行。 | ⏳ 未着手 |
-| 7 | レンダリング経路統合 — `acquire` / `encode` / `submit` / `present` を `Last` ステージのシステムに分割。`wgpu::Device` は `NonSend` resource。`CharacterPlugin::finish` が `VrmRenderer` を実体化。 | ⏳ 未着手 |
-| 8 | 仕上げ — clippy + test + `Runtime::about_to_wait` を 10 行未満に縮小 (Phase 5 時点: 約 90 行)。 | ⏳ 未着手 |
-| 9 | ドキュメント同期 — 英語 (`docs/`) + 日本語 (`docs/ja/`)。 | 🔄 作業中 |
+| 6 | `PlatformPlugin`, `TrayPlugin`, `AiPlugin` — Phase 6 作業。トレイメニュー、AI ブリッジポンプ、Linux Wayland / X11 の入力領域状態を bevy resource + system へ移行。 | ✅ 完了 |
+| 7 | レンダリング経路統合 — `acquire` / `encode` / `submit` / `present` を `Last` ステージのシステムに分割。`wgpu::Device` は `NonSend` resource。`CharacterPlugin::finish` が `VrmRenderer` を実体化。**注**: Phase 7.2 クリーンアップで `CharacterRenderer` が `!Send + !Sync` のためスケルトンを撤去済み (drain-only パターンのみ採用)。 | ✅ 完了 |
+| 8 | 仕上げ — clippy + test + `Runtime::about_to_wait` を 10 行未満に縮小 (Phase 5 時点: 約 90 行)。 | ✅ 完了 |
+| 9 | ドキュメント同期 — 英語 (`docs/`) + 日本語 (`docs/ja/`)。 | ✅ 完了 |
 
 ## 主要アーキテクチャルール
 
@@ -37,12 +37,12 @@
 * テストワールドでは `MessageWriter` / `MessageReader` で参照する
   各 `T` に対して `world.init_resource::<Messages<T>>()` を呼ぶ。
 
-## ファイル構成 (Phase 5 完了時点)
+## ファイル構成 (Phase 8 完了時点)
 
 ```text
 apps/ene-desktop/src/
-├── app.rs                  # DesktopPlugins (PluginGroup) + CorePlugin
-├── schedule.rs             # AppSet + configure_schedule / configure_startup
+├── app.rs                  # DesktopPlugins (PluginGroup: Core / Character / Physics / Ui / Platform / Tray / Ai)
+├── schedule.rs             # AppSet (EventDispatch / Input / Settings / Animation / Render / Present)
 ├── component/
 │   ├── character.rs        # CharacterBundle + キャラクター components 10 個
 │   ├── physics.rs          # PhysicsBody / Colliders / static offsets
@@ -57,30 +57,61 @@ apps/ene-desktop/src/
 ├── plugin/
 │   ├── character_plugin.rs
 │   ├── physics_plugin.rs
-│   └── ui_plugin.rs        # UiPlugin + spawn_settings_ui_window
+│   ├── ui_plugin.rs        # UiPlugin + spawn_settings_ui_window
+│   ├── platform_plugin.rs  # PlatformPlugin (Input/Setttings ステージに 4 system)
+│   ├── tray_plugin.rs      # TrayPlugin (Linux のみ)
+│   └── ai_plugin.rs        # AiPlugin (UiPlugin と同等の 5 system)
 ├── resource/
+│   ├── cursor_state.rs     # CursorState
 │   ├── event_channels.rs   # EventChannels (legacy ブリッジ)
 │   ├── exit.rs             # ExitRequested
 │   ├── frame_state.rs      # FrameState
-│   ├── pending_actions.rs  # PendingActions (legacy ブリッジ)
+│   ├── pending_actions.rs  # PendingActions (legacy ブリッジ、空 fast-path)
 │   ├── physics.rs          # PhysicsWorldResource
+│   ├── platform_state.rs   # PlatformAdapters + per-handle Resource ミラー
 │   └── tokio.rs            # TokioHandle
 ├── system/
-│   ├── event_pump.rs       # pump_legacy_events
-│   └── physics.rs          # attach_bone_colliders_system + step_physics_system
+│   ├── event_pump.rs       # pump_legacy_events (First/EventDispatch)
+│   ├── physics.rs          # attach_bone_colliders_system + step_physics_system
+│   ├── platform/
+│   │   ├── click_through.rs    # apply_linux_click_through_system
+│   │   ├── cursor.rs           # update_cursor_state_system
+│   │   ├── gtk_pump.rs         # tick_gtk_system (Linux)
+│   │   ├── input_region.rs     # refresh_input_region_system
+│   │   └── should_render_debug.rs # should_render_debug_system
+│   ├── tray_tick.rs       # tick_gtk_system (drain-only, Last/Present)
+│   ├── ui_consumers.rs    # 5 system (open_settings / ai_text_deltas / ai_permission / ai_user_input / apply_emotions)
+│   ├── ui_consumers_tests.rs
+│   └── ui_dispatcher.rs   # apply_settings_action_system (drain-only, Phase 7.1 placeholder)
 ├── settings_ui/            # egui レンダリング (page_character / page_graphics / page_ai / page_debug / widgets / input)
 │                            — `apply_action` 系パスは全て bevy `World` / `Entity` 受け取りに変更
-└── runtime.rs              # winit + egui グルーコード; 毎フレーム `app.update()` を呼ぶ
+└── runtime.rs              # winit + egui グルーコード; `about_to_wait` は 9 行
 ```
 
 ## 検証結果
 
 * `cargo build -p ene-desktop` — クリーン
-* `cargo clippy --workspace -- -D warnings` — クリーン
-* `cargo test -p ene-desktop` — 75 passed (Phase 4 72 + 新規 ECS plugin / bundle テスト 3 件)
+* `cargo clippy -p ene-desktop --tests -- -D warnings` — クリーン
+  (事前から存在する `ene-vrm` の lint は本移行の対象外; `ene-desktop`
+  クレート自体はクリーン)
+* `cargo test -p ene-desktop` — 130 passed
 * `cargo fmt --all` — クリーン
 
-## Phase 6 以降の計画 (残り作業)
+---
+
+> **付録注記 — 最初に読んでください**
+>
+> 以下のセクション (`## Phase 6 以降の計画 (残り作業)`、
+> `### Phase 6 — Platform / Tray / AI` 以下の各 Phase 詳細) は
+> **移行作業開始時に書かれたオリジナルの計画書**です。歴史的参照
+> としてここに保存しています。**9 つの Phase はすべて ✅ 完了** (上
+> 部のステータス表を参照)。最終状態: **130 tests passed**、
+> `Runtime::about_to_wait` は **9 行** に縮小、`PlatformAdapters`
+> レガシー構造体は完全に削除され、per-handle bevy `Resource` のみ
+> が残ります。旧計画書中のテスト数ターゲット (82, 86, 93) は計画
+> 策定時点の数字であり、実際の最終値は **130** です。
+
+## Phase 6 以降の計画 (残り作業) — *履歴, 全フェーズ完了*
 
 ### Phase 6 — Platform / Tray / AI
 

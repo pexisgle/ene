@@ -31,7 +31,10 @@ pub struct UiWindow;
 /// Currently-visible page. Mirrors the legacy
 /// `SettingsUi::current_page` field.
 #[derive(Component, Default)]
-#[expect(dead_code, reason = "Mirror of legacy SettingsUi.current_page")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Mirror of legacy SettingsUi.current_page")
+)]
 pub struct UiPage(pub PageKind);
 
 /// Editable text-field buffers. Mirrors the legacy
@@ -39,7 +42,10 @@ pub struct UiPage(pub PageKind);
 /// `CharacterSettings` via `sync_from_settings` when the window
 /// transitions hidden → visible.
 #[derive(Component, Default)]
-#[expect(dead_code, reason = "Mirror of legacy SettingsUi.input")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Mirror of legacy SettingsUi.input")
+)]
 pub struct UiInputDrafts(pub SettingsInputState);
 
 /// Animation play / pause toggle. Mirrors the legacy
@@ -60,7 +66,10 @@ pub struct UiEmotionQueue(pub EmotionQueue);
 /// `apply_action` is consistent across systems. Mirrors the legacy
 /// `SettingsUi::started_at` field.
 #[derive(Component)]
-#[expect(dead_code, reason = "Mirror of legacy SettingsUi.started_at")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Mirror of legacy SettingsUi.started_at")
+)]
 pub struct UiStartedAt(pub Instant);
 
 impl Default for UiStartedAt {
