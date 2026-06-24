@@ -158,6 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         print!(" [{emotion}]");
                     }
                 }
+                EneEvent::PipelinePhase { .. } | EneEvent::PipelineMetrics { .. } => {}
 
                 // Tool call requested by the LLM
                 EneEvent::ToolCallStart { name, arguments } => {

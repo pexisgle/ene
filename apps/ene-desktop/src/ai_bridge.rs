@@ -193,7 +193,9 @@ async fn pump_events(
                 processing.store(false, Ordering::Relaxed);
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Error(message)));
             }
-            Ok(EneEvent::StatusChanged { .. }) => {}
+            Ok(EneEvent::StatusChanged { .. }) 
+            | Ok(EneEvent::PipelinePhase { .. })
+            | Ok(EneEvent::PipelineMetrics { .. }) => {}
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                 tracing::warn!("[Ene] Dropped {n} events (broadcast lag)");
             }

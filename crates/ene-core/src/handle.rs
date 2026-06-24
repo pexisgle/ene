@@ -154,6 +154,16 @@ pub enum EneEvent {
         /// Description of the current step.
         description: String,
     },
+    /// Status update indicating the current pipeline phase.
+    PipelinePhase {
+        /// Short description of the current phase.
+        phase: String,
+    },
+    /// Emitted just before the first TextDelta, summarizing the execution time of pre-generation phases.
+    PipelineMetrics {
+        /// Map of phase names to elapsed time in milliseconds.
+        timings: std::collections::HashMap<String, u64>,
+    },
     /// The conversation session has been split (timeout, topic change, or manual).
     SessionSplit {
         /// Generated summary of the conversation segment.

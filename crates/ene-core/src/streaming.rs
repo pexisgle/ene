@@ -108,6 +108,12 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
         .unwrap_or_default();
     let tool_calling_enabled = tool_config.enabled;
 
+    let pipeline_start = std::time::Instant::now();
+    let mut timings = std::collections::HashMap::new();
+
+    let _ = event_tx.send(EneEvent::PipelinePhase { phase: "ベクトル化 (Embedding)".to_string() });
+    let emb_start = std::time::Instant::now();
+
     // 1. Embed user input ONCE (asynchronously)
     let query_embedding = if let Some(emb_prov) = &embedder {
         match emb_prov.embed_query(&user_input).await {
@@ -130,6 +136,10 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
     } else {
         None
     };
+    timings.insert("Embedding".to_string(), emb_start.elapsed().as_millis() as u64);
+
+    let _ = event_tx.send(EneEvent::PipelinePhase { phase: "コンテキスト検索 (Memory & Tools)".to_string() });
+    let ctx_start = std::time::Instant::now();
 
     // 2. Fetch memory context AND select relevant tools IN PARALLEL
     let (memory_result, tools) = tokio::join!(
@@ -143,6 +153,10 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
         ),
     );
     let (recalled_summaries, key_facts) = memory_result;
+    timings.insert("Context Search".to_string(), ctx_start.elapsed().as_millis() as u64);
+
+    let _ = event_tx.send(EneEvent::PipelinePhase { phase: "メッセージ構築 (Prompt Building)".to_string() });
+    let prompt_start = std::time::Instant::now();
 
     // 3. Insert user log if memory enabled
     if mem_config.enabled
@@ -190,6 +204,11 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
     let session_id = session.memory.session_id.clone();
     let max_rounds = tool_config.max_rounds;
     let session_id_for_tools = session.memory.session_id.clone();
+
+    timings.insert("Prompt Building".to_string(), prompt_start.elapsed().as_millis() as u64);
+    timings.insert("Total Pre-generation".to_string(), pipeline_start.elapsed().as_millis() as u64);
+    
+    let _ = event_tx.send(EneEvent::PipelineMetrics { timings });
 
     let mut round = 0usize;
 

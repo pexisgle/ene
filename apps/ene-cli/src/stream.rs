@@ -174,6 +174,25 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
                     ))
                 );
             }
+            Ok(EneEvent::PipelinePhase { phase }) => {
+                print!("\x1b[2K\r{}", style::dim(format!("    {phase}...")));
+                let _ = io::stdout().flush();
+            }
+            Ok(EneEvent::PipelineMetrics { timings }) => {
+                let emb_ms = timings.get("Embedding").copied().unwrap_or(0);
+                let ctx_ms = timings.get("Context Search").copied().unwrap_or(0);
+                let prompt_ms = timings.get("Prompt Building").copied().unwrap_or(0);
+                let total_ms = timings.get("Total Pre-generation").copied().unwrap_or(0);
+                
+                print!("\x1b[2K\r"); // clear the phase line
+                println!(
+                    "{}",
+                    style::dim(format!(
+                        "[Timings] Embedding: {}ms | Context: {}ms | Prompt: {}ms | Total: {}ms",
+                        emb_ms, ctx_ms, prompt_ms, total_ms
+                    ))
+                );
+            }
             Ok(EneEvent::StatusChanged { .. }) => {}
             Err(e) => {
                 eprintln!("\n[Warning] Event receive error: {e:?}");
