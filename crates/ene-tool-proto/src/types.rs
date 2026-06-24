@@ -9,9 +9,14 @@ use serde::{Deserialize, Serialize};
 /// Format:
 /// - Mega-tools: `"<namespace>.<action>"` (e.g. `"filesystem.read"`)
 /// - Individual tools: `"<name>"` (e.g. `"utility.get_current_time"`)
+///
+/// Use [`ToolName::try_new`] to validate untrusted input (IPC, MCP,
+/// config, DB rows). The panicking constructors
+/// ([`ToolName::new`], [`From<&str>`], [`From<String>`]) are intended
+/// for compile-time-validated string literals only.
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct ToolName(pub String);
+pub struct ToolName(pub(crate) String);
 
 impl JsonSchema for ToolName {
     fn schema_name() -> std::borrow::Cow<'static, str> {
@@ -44,6 +49,11 @@ impl ToolName {
     /// # Panics
     /// Panics if the name is empty or contains invalid characters.
     /// Accepts alphanumeric, `_`, and `.` (no leading/trailing dots).
+    ///
+    /// Only use for trusted compile-time-validated inputs (e.g.
+    /// string literals, `#[tool]` attribute names). For untrusted
+    /// input from IPC, MCP, config, or DB rows, use
+    /// [`ToolName::try_new`] and propagate the error.
     pub fn new(name: impl Into<String>) -> Self {
         let s = name.into();
         assert!(
@@ -54,6 +64,14 @@ impl ToolName {
     }
 
     /// Construct a new `ToolName` from a string, returning an error on invalid input.
+    ///
+    /// Use this for all input that crosses a trust boundary:
+    /// - IPC tool names (`HostRegistry::call_tool`)
+    /// - MCP server tool names
+    /// - Names loaded from the config file or env vars
+    /// - Names loaded from the DB (`tool_*` rows)
+    /// - Any other source that does not come from a string literal
+    ///   in this crate's own source.
     pub fn try_new(name: impl Into<String>) -> Result<Self, String> {
         let s = name.into();
         if Self::is_valid(&s) {
@@ -78,10 +96,18 @@ impl ToolName {
         self.0.rsplit_once('.').map_or(&self.0, |(_, a)| a)
     }
 
-    /// Returns the inner string.
+    /// Returns the inner string as a borrowed `&str`.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Consumes the `ToolName` and returns the inner `String`.
+    /// Use when handing the name to a non-`ToolName` consumer
+    /// (e.g. an IPC error payload, a log line, a DB row key).
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
     }
 }
 

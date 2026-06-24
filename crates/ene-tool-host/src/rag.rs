@@ -109,9 +109,21 @@ impl Default for ToolRagOptions {
     }
 }
 
-impl From<super::config::ToolRagConfig> for ToolRagOptions {
-    fn from(c: super::config::ToolRagConfig) -> Self {
-        Self {
+impl TryFrom<super::config::ToolRagConfig> for ToolRagOptions {
+    type Error = String;
+
+    fn try_from(c: super::config::ToolRagConfig) -> Result<Self, Self::Error> {
+        let mut forced = Vec::with_capacity(c.forced.len());
+        for name in c.forced {
+            // `forced` is config-driven (settings.json /
+            // ENE_TOOL_RAG__FORCED__...) and therefore
+            // untrusted. Reject invalid names with a
+            // structured error so a typo / hostile config
+            // entry surfaces as `Err`, not `panic!` during
+            // startup.
+            forced.push(ToolName::try_new(name)?);
+        }
+        Ok(Self {
             enabled: c.enabled,
             top_k: c.top_k,
             final_n: c.final_n,
@@ -120,10 +132,10 @@ impl From<super::config::ToolRagConfig> for ToolRagOptions {
             rerank_candidates: c.rerank_candidates,
             min_similarity: c.min_similarity,
             background_index_on_startup: c.background_index_on_startup,
-            forced: c.forced.into_iter().map(ToolName::new).collect(),
+            forced,
             weights: FieldWeights::from(c.weights),
             per_category_limits: HashMap::new(),
-        }
+        })
     }
 }
 
@@ -155,12 +167,18 @@ impl ToolRag {
     }
 
     /// Construct from a config-level `ToolRagConfig`.
+    ///
+    /// Returns an error if `config.forced` contains a tool
+    /// name that does not satisfy [`ToolName::is_valid`]. The
+    /// error originates from the untrusted config file, not
+    /// from this crate.
     pub fn from_config(
         embedder: Arc<dyn EmbeddingProvider>,
         store: Option<Arc<MemoryStore>>,
         config: super::config::ToolRagConfig,
-    ) -> Self {
-        Self::new(embedder, store, ToolRagOptions::from(config))
+    ) -> Result<Self, String> {
+        let opts = ToolRagOptions::try_from(config)?;
+        Ok(Self::new(embedder, store, opts))
     }
 
     /// Returns a reference to the runtime options.
@@ -218,7 +236,11 @@ impl ToolRag {
             // (1) Summary
             let summary_text = spec.embedding_text(EmbeddingField::Summary);
             if !summary_text.is_empty() {
-                let key = (spec.name.0.clone(), "summary".into(), String::new());
+                let key = (
+                    spec.name.as_str().to_string(),
+                    "summary".into(),
+                    String::new(),
+                );
                 let hash = field_version_hash("summary", &summary_text);
                 if !is_cached(&cached, &key, &hash, &model_name) {
                     let emb = self
@@ -227,7 +249,7 @@ impl ToolRag {
                         .await?;
                     persist(
                         &store,
-                        &spec.name.0,
+                        spec.name.as_str(),
                         "summary",
                         "",
                         &hash,
@@ -245,7 +267,11 @@ impl ToolRag {
             // (2) Description
             let desc_text = spec.embedding_text(EmbeddingField::Description);
             if !desc_text.is_empty() {
-                let key = (spec.name.0.clone(), "description".into(), String::new());
+                let key = (
+                    spec.name.as_str().to_string(),
+                    "description".into(),
+                    String::new(),
+                );
                 let hash = field_version_hash("description", &desc_text);
                 if !is_cached(&cached, &key, &hash, &model_name) {
                     let emb = self
@@ -254,7 +280,7 @@ impl ToolRag {
                         .await?;
                     persist(
                         &store,
-                        &spec.name.0,
+                        spec.name.as_str(),
                         "description",
                         "",
                         &hash,
@@ -272,7 +298,11 @@ impl ToolRag {
             // (3) Negative
             let neg_text = spec.embedding_text(EmbeddingField::Negative);
             if !neg_text.is_empty() {
-                let key = (spec.name.0.clone(), "negative".into(), String::new());
+                let key = (
+                    spec.name.as_str().to_string(),
+                    "negative".into(),
+                    String::new(),
+                );
                 let hash = field_version_hash("negative", &neg_text);
                 if !is_cached(&cached, &key, &hash, &model_name) {
                     let emb = self
@@ -281,7 +311,7 @@ impl ToolRag {
                         .await?;
                     persist(
                         &store,
-                        &spec.name.0,
+                        spec.name.as_str(),
                         "negative",
                         "",
                         &hash,
@@ -300,7 +330,11 @@ impl ToolRag {
             for (i, example) in spec.examples.iter().enumerate() {
                 let ex_text = format!("{}: {}", example.description, example.input);
                 let field_key = format!("ex_{}", i);
-                let key = (spec.name.0.clone(), "example".into(), field_key.clone());
+                let key = (
+                    spec.name.as_str().to_string(),
+                    "example".into(),
+                    field_key.clone(),
+                );
                 let hash = field_version_hash("example", &ex_text);
                 if !is_cached(&cached, &key, &hash, &model_name) {
                     let emb = self
@@ -309,7 +343,7 @@ impl ToolRag {
                         .await?;
                     persist(
                         &store,
-                        &spec.name.0,
+                        spec.name.as_str(),
                         "example",
                         &field_key,
                         &hash,
@@ -445,8 +479,20 @@ impl ToolRag {
         let mut candidates: Vec<(ToolSpec, f32)> =
             Vec::with_capacity(scored.len().min(self.opts.rerank_candidates));
         for (name, score, _fields) in scored.iter().take(self.opts.rerank_candidates) {
-            if let Some(spec) = all_specs.get(&ToolName::new(name.clone())) {
-                candidates.push((spec.clone(), *score));
+            // `name` comes from the local RAG index, which
+            // is populated only from validated `ToolSpec::name`
+            // values. `try_new` here is a defensive belt-
+            // and-suspenders check that surfaces a malformed
+            // entry (e.g. a future DB row that was inserted
+            // without validation) as a logged warning rather
+            // than a panic.
+            match ToolName::try_new(name.clone()) {
+                Ok(tn) => {
+                    if let Some(spec) = all_specs.get(&tn) {
+                        candidates.push((spec.clone(), *score));
+                    }
+                }
+                Err(e) => tracing::warn!("[ToolRag] Skipping invalid tool name in RAG index: {e}"),
             }
         }
 

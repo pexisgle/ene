@@ -60,8 +60,15 @@ impl McpToolRegistry {
                     _ => SideEffects::System { privileged: false },
                 },
             };
+            // MCP tool names are untrusted (they come from a
+            // child process's JSON response). Reject invalid
+            // names with a structured error rather than
+            // panicking, so a hostile MCP server cannot crash
+            // the host.
+            let name = ToolName::try_new(t.name.to_string())
+                .map_err(|e| format!("MCP server advertised an invalid tool name: {e}"))?;
             tools.push(ToolSpec {
-                name: ToolName::new(t.name.to_string()),
+                name,
                 version: ToolVersion::default(),
                 display_name: desc.clone(),
                 summary: desc.clone(),

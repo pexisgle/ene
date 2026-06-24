@@ -23,7 +23,15 @@ impl HostRegistry {
     pub fn add_provider(&mut self, provider: Box<dyn ToolProvider>) {
         let idx = self.providers.len();
         for spec in provider.list_specs() {
-            self.tool_index.entry(spec.name.0).or_insert(idx);
+            // `spec.name` was built by the provider via
+            // `ToolName::new` (compile-time-validated string
+            // literal from the `#[tool]` macro), so the inner
+            // string is guaranteed valid; access via `as_str`
+            // is a borrow, not a clone, so the registry stays
+            // O(1) on add.
+            self.tool_index
+                .entry(spec.name.as_str().to_string())
+                .or_insert(idx);
         }
         self.providers.push(provider);
     }
@@ -47,7 +55,7 @@ impl HostRegistry {
                     .await
             }
             None => Err(ToolError::NotFound {
-                tool_name: name.0.clone(),
+                tool_name: name.as_str().to_string(),
             }),
         }
     }
@@ -74,7 +82,12 @@ impl ToolProvider for HostRegistry {
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
-        let n = ToolName::new(name);
+        // IPC tool names come off the wire — they are
+        // untrusted. Use `try_new` and return a typed
+        // `InvalidName` error rather than panicking, so a
+        // hostile or malformed tool binary cannot crash the
+        // host with an `assert`.
+        let n = ToolName::try_new(name).map_err(|e| ToolError::InvalidName { reason: e })?;
         self.call_tool(&n, arguments).await
     }
 
