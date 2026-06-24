@@ -469,9 +469,8 @@ mod tests {
         let mut seen: Vec<&str> = Vec::with_capacity(HUMANOID_BONE_NAMES.len());
         for name in HUMANOID_BONE_NAMES.iter() {
             assert!(!seen.contains(name), "duplicate bone name {name}");
-            assert_eq!(
+            assert!(
                 name.chars().all(|c| c.is_ascii_lowercase()),
-                true,
                 "bone name {name} is not lower-case ASCII"
             );
             assert!(

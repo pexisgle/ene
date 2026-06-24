@@ -915,8 +915,10 @@ mod tests {
 
     #[test]
     fn player_advance_once_stops_at_end() {
-        let mut p = VrmaPlayer::default();
-        p.repeat = RepeatMode::Once;
+        let mut p = VrmaPlayer {
+            repeat: RepeatMode::Once,
+            ..Default::default()
+        };
         p.play();
         p.advance(2.0, 1.0);
         assert!((p.time - 1.0).abs() < 1e-6);
@@ -942,8 +944,10 @@ mod tests {
 
     #[test]
     fn player_speed_multiplier() {
-        let mut p = VrmaPlayer::default();
-        p.speed = 2.0;
+        let mut p = VrmaPlayer {
+            speed: 2.0,
+            ..Default::default()
+        };
         p.play();
         p.advance(0.5, 10.0);
         assert!((p.time - 1.0).abs() < 1e-6);
@@ -1140,7 +1144,7 @@ mod tests {
         };
         let frame = evaluate_clip(&clip, 0.5);
         let w = frame.expression_weights["happy"];
-        assert!(w >= 0.0 && w <= 1.0, "weight {w} not clamped to [0,1]");
+        assert!((0.0..=1.0).contains(&w), "weight {w} not clamped to [0,1]");
     }
 
     #[test]

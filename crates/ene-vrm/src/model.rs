@@ -1157,8 +1157,10 @@ mod tests {
             NodeConstraintRegistry::default(),
             None,
         );
-        let mut frame = VrmaFrame::default();
-        frame.hips_translation = Some(Vec3::new(0.0, 1.0, 0.0));
+        let frame = VrmaFrame {
+            hips_translation: Some(Vec3::new(0.0, 1.0, 0.0)),
+            ..Default::default()
+        };
         let (owned, palette) = model_palette(model, &frame);
         assert_eq!(palette.len(), 2);
         // Joint 0 (hips): world position (0, 1, 0).
