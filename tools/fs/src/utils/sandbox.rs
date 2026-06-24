@@ -285,10 +285,15 @@ impl Sandbox {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = id.to_string();
 
-        // Reset undo manager so it reconnects with new session_id
-        if let Ok(mut guard) = self.undo_manager.try_lock() {
-            *guard = None;
-        }
+        // Reset undo manager so it reconnects with new session_id.
+        // Use blocking_lock() (not try_lock) so the reset is never
+        // silently skipped when another request is mid-flight holding
+        // the mutex — a stale undo manager would keep the previous
+        // session_id and apply undos to the wrong session. The
+        // `tokio::sync::Mutex::blocking_lock` variant is safe to call
+        // from a sync context.
+        let mut guard = self.undo_manager.blocking_lock();
+        *guard = None;
     }
 
     /// Adds an approved request ID
