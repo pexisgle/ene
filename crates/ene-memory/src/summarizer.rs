@@ -12,15 +12,14 @@ use serde::{Deserialize, Serialize};
 pub struct ConversationSummaryResult {
     /// Natural-language conversation summary
     pub summary: String,
-    /// Extracted topic keywords
-    pub topics: Vec<String>,
     /// Important facts about the user (key-value format)
     pub key_facts: Vec<KeyFact>,
 }
 
-/// Summarizes a conversation history using an LLM, returning a structured summary
-/// with topics and key facts. The prompt includes existing keyfacts for comparison,
-/// allowing updates, deletions, and retentions via the `key_facts` output.
+/// Summarizes a conversation history using an LLM, returning a structured
+/// summary and key facts. The prompt includes existing keyfacts for
+/// comparison, allowing updates, deletions, and retentions via the
+/// `key_facts` output.
 pub async fn summarize_conversation(
     provider: &dyn ene_provider::LlmProvider,
     history: &[ene_provider::LlmMessage],
@@ -31,7 +30,6 @@ pub async fn summarize_conversation(
     if history.is_empty() {
         return Ok(ConversationSummaryResult {
             summary: String::new(),
-            topics: vec![],
             key_facts: vec![],
         });
     }
@@ -167,7 +165,13 @@ pub async fn summarize_conversation(
     parse_summary_json(&content)
 }
 
-/// Extracts and parses JSON from the LLM response
+/// Extracts and parses JSON from the LLM response.
+///
+/// Returns a structured [`MemoryError::ApiRequestError`] when the response
+/// cannot be parsed. The previous implementation silently stored the raw
+/// LLM text as the summary when JSON parsing failed, which meant a
+/// markdown-wrapped or prose response would be persisted as a "summary" and
+/// surface later in the recalled context as noise.
 fn parse_summary_json(raw: &str) -> Result<ConversationSummaryResult, MemoryError> {
     let cleaned = raw
         .trim()
@@ -189,12 +193,11 @@ fn parse_summary_json(raw: &str) -> Result<ConversationSummaryResult, MemoryErro
         }
     }
 
-    tracing::warn!("[Summarizer] Failed to parse JSON response, using raw text as summary");
-    Ok(ConversationSummaryResult {
-        summary: raw.to_string(),
-        topics: vec![],
-        key_facts: vec![],
-    })
+    Err(MemoryError::ApiRequestError(format!(
+        "[Summarizer] LLM response was not valid JSON for the expected summary schema; \
+         refusing to persist raw prose as a summary. First 200 chars: {}",
+        raw.chars().take(200).collect::<String>()
+    )))
 }
 
 #[cfg(test)]
@@ -203,10 +206,9 @@ mod tests {
 
     #[test]
     fn test_parse_summary_json() {
-        let json = r#"{"summary": "テスト要約", "topics": ["topic1"], "key_facts": [{"key": "job", "value": "fact1"}]}"#;
+        let json = r#"{"summary": "テスト要約", "key_facts": [{"key": "job", "value": "fact1"}]}"#;
         let result = parse_summary_json(json).unwrap();
         assert_eq!(result.summary, "テスト要約");
-        assert_eq!(result.topics, vec!["topic1"]);
         assert_eq!(result.key_facts.len(), 1);
         assert_eq!(result.key_facts[0].key, "job");
         assert_eq!(result.key_facts[0].value, "fact1");
@@ -214,16 +216,25 @@ mod tests {
 
     #[test]
     fn test_parse_summary_json_with_code_block() {
-        let json = "```json\n{\"summary\": \"test\", \"topics\": [], \"key_facts\": []}\n```";
+        let json = "```json\n{\"summary\": \"test\", \"key_facts\": []}\n```";
         let result = parse_summary_json(json).unwrap();
         assert_eq!(result.summary, "test");
     }
 
+    /// Regression test for #41 (bug 7): the parser must NOT
+    /// silently fall back to the raw LLM prose as a
+    /// "summary". A non-JSON response is a structured
+    /// error, not a partial success.
     #[test]
-    fn test_parse_summary_json_fallback() {
+    fn test_parse_summary_json_non_json_returns_error() {
         let raw = "This is not valid JSON at all";
-        let result = parse_summary_json(raw).unwrap();
-        assert_eq!(result.summary, raw);
-        assert!(result.topics.is_empty());
+        let result = parse_summary_json(raw);
+        assert!(result.is_err(), "expected an error, got {result:?}");
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not valid JSON") || msg.contains("API request failed"),
+            "unexpected error: {msg}"
+        );
     }
 }

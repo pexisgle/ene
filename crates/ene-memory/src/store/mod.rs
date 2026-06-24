@@ -51,6 +51,33 @@ fn bytes_to_embedding(b: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+/// Validates an embedding vector before it is persisted.
+///
+/// Returns an [`MemoryError::InvalidEmbedding`] if the
+/// vector's length does not match the store's configured
+/// `embedding_dim`, or if it contains any `NaN` or
+/// infinite component. Both conditions are fatal for
+/// cosine similarity — a single `NaN` poisons the entire
+/// `vec_distance_cosine` evaluation at query time, and a
+/// length mismatch would silently skew scores against any
+/// vector produced by the configured embedder.
+fn validate_embedding(embedding: &[f32], expected_dim: usize) -> Result<(), MemoryError> {
+    if embedding.len() != expected_dim {
+        return Err(MemoryError::InvalidEmbedding(format!(
+            "length {} does not match expected {expected_dim}",
+            embedding.len()
+        )));
+    }
+    for (i, &v) in embedding.iter().enumerate() {
+        if !v.is_finite() {
+            return Err(MemoryError::InvalidEmbedding(format!(
+                "component {i} is not finite (NaN or Infinity)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// A key-value fact about the user.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyFact {
@@ -100,6 +127,36 @@ fn parse_dt(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s).map_or_else(|_| Utc::now(), |dt| dt.with_timezone(&Utc))
 }
 
+/// Applies the SQLite PRAGMAs the store depends on to the
+/// given connection. Idempotent and safe to call from both
+/// `open` and `open_in_memory`.
+///
+/// * `journal_mode=WAL` lets readers proceed concurrently
+///   with a writer. WAL is a no-op for in-memory databases
+///   (SQLite returns `memory`), so it is safe to issue
+///   unconditionally.
+/// * `busy_timeout=5000` (5 seconds) makes concurrent
+///   writers wait for the lock instead of failing with
+///   `database is locked` immediately.
+/// * `foreign_keys=ON` enables enforcement of foreign-key
+///   constraints, in particular
+///   `conversation_keyfacts.summary_id` →
+///   `conversation_summaries.id`.
+async fn apply_pragmas(db: &DatabaseConnection) -> Result<(), MemoryError> {
+    const STATEMENTS: &[&str] = &[
+        "PRAGMA journal_mode = WAL",
+        "PRAGMA busy_timeout = 5000",
+        "PRAGMA foreign_keys = ON",
+        "PRAGMA synchronous = NORMAL",
+    ];
+    for stmt in STATEMENTS {
+        db.execute_unprepared(stmt).await.map_err(|e| {
+            MemoryError::MemoryStoreConnectionError(format!("failed to apply `{stmt}`: {e}"))
+        })?;
+    }
+    Ok(())
+}
+
 impl MemoryStore {
     fn init(db: DatabaseConnection, embedding_dim: usize) -> Self {
         Self { db, embedding_dim }
@@ -123,6 +180,13 @@ impl MemoryStore {
     /// `sqlite-vec` extension process-globally *before* opening the connection
     /// (required because `sqlite3_auto_extension` only affects connections
     /// opened after the call), then runs database migrations.
+    ///
+    /// The connection has `journal_mode=WAL`, `busy_timeout=5000`, and
+    /// `foreign_keys=ON` set on every pooled connection. WAL lets readers
+    /// proceed concurrently with a writer; the busy timeout avoids
+    /// spurious `database is locked` errors under contention; and the FK
+    /// pragma makes the `conversation_keyfacts.summary_id` reference
+    /// actually enforced.
     pub async fn open(path: &Path, embedding_dim: usize) -> Result<Self, MemoryError> {
         let path_str = path
             .to_str()
@@ -132,6 +196,8 @@ impl MemoryStore {
         let db = Database::connect(opt)
             .await
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+
+        apply_pragmas(&db).await?;
 
         Migrator::up(&db, None)
             .await
@@ -145,7 +211,9 @@ impl MemoryStore {
     /// Registers the `sqlite-vec` extension process-globally *before* opening
     /// the connection, since `:memory:` reuses a single persistent connection
     /// for the life of the store. Uses `"sqlite::memory:"` as the database
-    /// path with a pool limited to one connection.
+    /// path with a pool limited to one connection. The same PRAGMAs as
+    /// [`open`](Self::open) are applied so behavior matches the file-backed
+    /// path.
     pub async fn open_in_memory(embedding_dim: usize) -> Result<Self, MemoryError> {
         init_sqlite_vec();
         let mut opt = ConnectOptions::new("sqlite::memory:");
@@ -153,6 +221,8 @@ impl MemoryStore {
         let db = Database::connect(opt)
             .await
             .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+
+        apply_pragmas(&db).await?;
 
         Migrator::up(&db, None)
             .await
@@ -178,6 +248,8 @@ impl MemoryStore {
     ) -> Result<i64, MemoryError> {
         use sea_orm::ActiveModelTrait;
         use sea_orm::ActiveValue::Set;
+
+        validate_embedding(embedding, self.embedding_dim)?;
 
         let now = Utc::now().to_rfc3339();
         let ended_str = ended_at.to_rfc3339();
@@ -279,6 +351,12 @@ impl MemoryStore {
             vec![query_bytes.clone()],
         );
 
+        // TODO: refactor the threshold filter to reference
+        // the projected `similarity` column once the
+        // SeaORM `expr_as` / `Expr::col` API supports an
+        // `IdenStatic` alias. Today, sea-orm's
+        // `SimpleExpr` lacks a `gte` method, so the
+        // filter has to re-evaluate the expression.
         let select = entities::conversation_summaries::Entity::find()
             .filter(entities::conversation_summaries::Column::CardName.eq(card_name))
             .expr_as(similarity_expr, "similarity")
@@ -559,6 +637,8 @@ impl MemoryStore {
         source_text: &str,
     ) -> Result<(), MemoryError> {
         use sea_orm::ActiveValue::Set;
+
+        validate_embedding(embedding, self.embedding_dim)?;
 
         let now = Utc::now().to_rfc3339();
         let embedding_bytes = embedding_to_bytes(embedding);
@@ -1002,5 +1082,87 @@ mod tests {
         let deleted = store.delete_tool_embeddings("web_search").await.unwrap();
         assert_eq!(deleted, 3);
         assert_eq!(store.list_tool_embedding_fields().await.unwrap().len(), 1);
+    }
+
+    /// Regression test for #41 (bug 4): embedding insert
+    /// must reject vectors whose length does not match
+    /// `embedding_dim` and vectors containing NaN /
+    /// Infinity, returning a typed `InvalidEmbedding`
+    /// error rather than letting the row be silently
+    /// persisted and poisoning later cosine queries.
+    #[tokio::test]
+    async fn insert_summary_rejects_bad_embedding() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let now = Utc::now();
+        let facts: Vec<KeyFact> = vec![];
+
+        // Length mismatch.
+        let wrong_len = vec![0.1, 0.2, 0.3];
+        let err = store
+            .insert_summary("s", "c", "summary", &facts, &wrong_len, now)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::InvalidEmbedding(_)),
+            "expected InvalidEmbedding, got {err:?}"
+        );
+
+        // NaN.
+        let with_nan = vec![0.1, f32::NAN, 0.3, 0.4];
+        let err = store
+            .insert_summary("s", "c", "summary", &facts, &with_nan, now)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::InvalidEmbedding(_)),
+            "expected InvalidEmbedding, got {err:?}"
+        );
+
+        // Infinity.
+        let with_inf = vec![0.1, 0.2, f32::INFINITY, 0.4];
+        let err = store
+            .insert_summary("s", "c", "summary", &facts, &with_inf, now)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::InvalidEmbedding(_)),
+            "expected InvalidEmbedding, got {err:?}"
+        );
+
+        // Valid embedding still works.
+        let ok = vec![0.1, 0.2, 0.3, 0.4];
+        store
+            .insert_summary("s", "c", "summary", &facts, &ok, now)
+            .await
+            .unwrap();
+    }
+
+    /// Regression test for #41 (bug 1): the memory store
+    /// must apply `foreign_keys=ON` (and the other
+    /// safety PRAGMAs) on every connection it opens. For
+    /// an in-memory store `journal_mode=WAL` is a no-op
+    /// (SQLite returns `memory`), but `foreign_keys` and
+    /// `busy_timeout` are still meaningful.
+    #[tokio::test]
+    async fn pragmas_are_applied_on_open() {
+        use sea_orm::ConnectionTrait;
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        // `execute_unprepared` returns a `ExecResult`
+        // whose `rows_affected` field is populated for
+        // some statements; for `PRAGMA foreign_keys` it
+        // returns the current value of the pragma (0 or
+        // 1) as `rows_affected`. This is a pragmatic
+        // way to assert the PRAGMA took effect without
+        // pulling in a full query API.
+        let res = store
+            .connection()
+            .execute_unprepared("PRAGMA foreign_keys")
+            .await
+            .unwrap();
+        assert_eq!(
+            res.rows_affected(),
+            1,
+            "foreign_keys PRAGMA should report 1 (ON)"
+        );
     }
 }
