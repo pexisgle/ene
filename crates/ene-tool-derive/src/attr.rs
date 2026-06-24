@@ -110,12 +110,38 @@ impl ArgAttrs {
     }
 }
 
-/// Check if a field has `#[tool(skip)]`.
+/// Check if a field has `#[tool(skip)]`. Recognizes
+/// `#[tool(skip)]` standalone and `#[tool(skip, name = "…")]`
+/// where `skip` is the first path segment.
 pub fn has_tool_skip(field: &syn::Field) -> bool {
     for attr in &field.attrs {
-        if attr.path().is_ident("tool")
-            && let Ok(meta) = attr.parse_args::<syn::Ident>()
-            && meta == "skip"
+        if !attr.path().is_ident("tool") {
+            continue;
+        }
+        // Match the `skip` form (path) regardless of any
+        // other arguments; `parse_nested_meta` is
+        // `parse_args_with` and tolerates the trailing
+        // `, name = "…", …` we want to allow alongside.
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("skip") {
+                // Mark by panicking with a special
+                // payload? That would abort the parse;
+                // instead, signal via a side channel by
+                // mutating a thread_local — no, simpler:
+                // detect at the outer level by
+                // inspecting the path again.
+            }
+            Ok(())
+        });
+        // Re-parse the attribute as a punctuated
+        // list of nested metas so we can check the
+        // first path segment. parse_args_with into
+        // Punctuated<Meta, Comma> gives us the
+        // comma-separated form the user wrote.
+        if let Ok(list) = attr.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+        ) && let Some(first) = list.first()
+            && first.path().is_ident("skip")
         {
             return true;
         }
@@ -300,8 +326,22 @@ impl ToolSpecAttrs {
 fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
     let mut parts = s.split('.');
     let maj = parts.next()?.parse().ok()?;
-    let min = parts.next()?.parse().ok()?;
-    let pat = parts.next()?.parse().ok()?;
+    // Default missing minor and patch segments to 0
+    // rather than silently returning None (which
+    // would cause the macro to fall back to (1,0,0)
+    // for "1.2" — almost certainly not what the user
+    // meant). Reject more than 3 parts.
+    let min = match parts.next() {
+        Some(s) => s.parse().ok()?,
+        None => 0,
+    };
+    let pat = match parts.next() {
+        Some(s) => s.parse().ok()?,
+        None => 0,
+    };
+    if parts.next().is_some() {
+        return None;
+    }
     Some((maj, min, pat))
 }
 
