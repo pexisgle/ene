@@ -1,17 +1,12 @@
-mod cli;
 mod commands;
 mod config;
 mod context;
 mod repl;
 mod stream;
 mod style;
-use clap::Parser;
-use cli::Args;
 
 #[tokio::main]
 async fn main() {
-    let _args = Args::parse();
-
     let handle = match config::init().await {
         Ok(h) => h,
         Err(e) => {

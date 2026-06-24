@@ -15,5 +15,4 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 dialoguer = "0.12"
 console = "0.16.3"
-clap = { version = "4", features = ["derive"] }
 futures-core = "0.3"
