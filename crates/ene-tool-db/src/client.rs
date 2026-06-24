@@ -28,6 +28,14 @@ pub enum DbError {
     /// The connection was closed by the server.
     #[error("connection closed")]
     ConnectionClosed,
+    /// The server rejected the auth token presented on Handshake.
+    #[error("auth rejected [{code}]: {message}")]
+    Auth {
+        /// The error code from the server.
+        code: DbErrorCode,
+        /// Human-readable error message.
+        message: String,
+    },
 }
 
 /// Client for communicating with the per-tool DB IPC server.
@@ -36,10 +44,33 @@ pub struct DbClient {
 }
 
 impl DbClient {
-    /// Connects to the DB IPC server at the given socket path.
+    /// Connects to the DB IPC server at the given socket path without
+    /// authenticating. The server will close the connection on the
+    /// first non-Handshake request. Prefer [`connect_with_token`]
+    /// when an auth token is available.
     pub async fn connect(socket_path: &Path) -> Result<Self, DbError> {
         let stream = IpcStream::connect(socket_path).await?;
         Ok(Self { stream })
+    }
+
+    /// Connects to the DB IPC server and immediately presents the
+    /// pre-shared auth token. Returns an error if the server rejects
+    /// the token.
+    pub async fn connect_with_token(socket_path: &Path, token: &str) -> Result<Self, DbError> {
+        let mut client = Self::connect(socket_path).await?;
+        let resp = client
+            .send_request(&DbRequest::Handshake {
+                token: token.to_string(),
+            })
+            .await?;
+        match resp {
+            DbResponse::HandshakeAck => Ok(client),
+            DbResponse::Error { code, message } => Err(DbError::Auth { code, message }),
+            other => Err(DbError::Transport(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unexpected handshake response: {other:?}"),
+            ))),
+        }
     }
 
     async fn send_request(&mut self, req: &DbRequest) -> Result<DbResponse, DbError> {

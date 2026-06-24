@@ -16,6 +16,7 @@ use ene_session::{
 use ene_tool_host::{CompositeToolRegistry, ToolHostManager, ToolRegistry};
 use ene_tool_proto::ToolSpec;
 use std::collections::HashMap;
+static DB_TOKEN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -1004,8 +1005,42 @@ async fn build_tool_registry(
                 let prefix = format!("{name}_");
                 let socket_path = socket_dir.join(format!("ene-db-{name}.sock"));
 
-                let server =
-                    DbIpcServer::new(db_path.clone(), socket_path, tool_name.clone(), prefix);
+                // Generate a 128-bit pre-shared token for this tool's
+                // DB IPC connection. The token is handed to the tool
+                // binary via SandboxConfigData::db_auth_token so only
+                // the legitimate child process can authenticate.
+                // Generate a 128-bit pre-shared token for this tool's
+                // DB IPC connection. We use a 256-bit keystream from
+                // blake3 (already a dep) keyed by the current nanosecond
+                // timestamp + a monotonic counter. blake3 is a CSPRNG
+                // and the counter guarantees uniqueness across calls in
+                // the same nanosecond.
+                let counter = DB_TOKEN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut hasher = blake3::Hasher::new();
+                hasher.update(
+                    &chrono::Utc::now()
+                        .timestamp_nanos_opt()
+                        .unwrap_or(0)
+                        .to_le_bytes(),
+                );
+                hasher.update(&counter.to_le_bytes());
+                let mut token_out = [0u8; 16];
+                let mut reader = hasher.finalize_xof();
+                use std::io::Read;
+                let _ = reader.read_exact(&mut token_out);
+                let auth_token = format!("ene-db-{:x}", u128::from_le_bytes(token_out));
+
+                // Record the token so ToolHostManager can hand it to
+                // the corresponding tool binary on Initialize.
+                ene_tool_proto::register_db_auth_token(name, auth_token.clone());
+
+                let server = DbIpcServer::new(
+                    db_path.clone(),
+                    socket_path,
+                    tool_name.clone(),
+                    prefix,
+                    auth_token,
+                );
 
                 tokio::spawn(async move {
                     if let Err(e) = server.run().await {

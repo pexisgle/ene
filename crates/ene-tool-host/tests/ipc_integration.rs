@@ -138,6 +138,7 @@ async fn test_ipc_list_tools_and_call_tool() {
         max_shell_output_bytes: 50 * 1024,
         max_shell_output_lines: 2000,
         db_socket: None,
+        db_auth_token: None,
     };
 
     let registry = ene_tool_host::IpcToolRegistry::new(socket_path, sandbox, None)
@@ -217,6 +218,7 @@ async fn test_ipc_with_real_host() {
         max_shell_output_bytes: 50 * 1024,
         max_shell_output_lines: 2000,
         db_socket: None,
+        db_auth_token: None,
     };
 
     let registry = ene_tool_host::IpcToolRegistry::new(socket_path, sandbox, None)

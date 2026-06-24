@@ -73,8 +73,18 @@ pub struct TodoStore {
 
 impl TodoStore {
     /// Connects to the DB socket and declares the schema.
-    pub async fn new(socket_path: &Path) -> Result<Self, Box<dyn Error>> {
-        let mut client = DbClient::connect(socket_path).await?;
+    ///
+    /// `db_auth_token` is the pre-shared auth token presented on the
+    /// DB IPC handshake; pass `None` to use the unauthenticated
+    /// connect path (which the server will reject for the DB server).
+    pub async fn new(
+        socket_path: &Path,
+        db_auth_token: Option<&str>,
+    ) -> Result<Self, Box<dyn Error>> {
+        let mut client = match db_auth_token {
+            Some(t) => DbClient::connect_with_token(socket_path, t).await?,
+            None => DbClient::connect(socket_path).await?,
+        };
         client.declare_schema(utility_db_schema()).await?;
         Ok(Self {
             client: Arc::new(Mutex::new(client)),

@@ -66,8 +66,12 @@ impl UndoManager {
     pub async fn new(
         socket_path: &Path,
         session_id: String,
+        db_auth_token: Option<&str>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut client = DbClient::connect(socket_path).await?;
+        let mut client = match db_auth_token {
+            Some(t) => DbClient::connect_with_token(socket_path, t).await?,
+            None => DbClient::connect(socket_path).await?,
+        };
         client.declare_schema(fs_db_schema()).await?;
 
         Ok(Self {
