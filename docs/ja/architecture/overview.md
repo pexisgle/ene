@@ -6,19 +6,29 @@ LLM 統合、ツール呼び出し、長期記憶、セッション管理を**�
 ## クレート依存関係グラフ
 
 ```
-ene-desktop ──┐
-ene-cli ──┼── ene-core ──── ene-tool-host ──── ene-tool-proto
-            │                    │                 │
-            │               ene-tools/*            ene-tool-derive
-            │          (IPC 子プロセス)       (proc-macro)
-            │
-      ene-core 内部依存:
-        ├── ene-config    (設定, パス, スキーマ生成)
-        ├── ene-embedding (ベクトル埋め込み)
-        ├── ene-memory    (長期記憶ストア)
-        ├── ene-session   (会話履歴, 自動分割)
-        ├── ene-provider  (LLM + 埋め込みトレイト, OpenAI 実装)
-        └── ene-tool-host (ツールプロセス管理, MCP, Tool RAG)
+ene-desktop ──┬── ene-core ──── ene-tool-host ──── ene-tool-proto
+ene-cli ──────┘       │           │     │     │          │
+                      │           │     │     │          └── ene-tool-derive
+                      │     ene-tool-utility, ene-tool-fs, ene-tool-web,
+                      │     ene-tool-app, ene-tool-browser  (proc-macro)
+                      │     (IPC 子プロセス)
+                      │
+                ene-core 内部依存:
+                  ├── ene-config    (設定, パス, スキーマ生成)
+                  ├── ene-embedding (ローカル GGUF + クラウド埋め込み)
+                  ├── ene-memory    (長期記憶ストア, diesel/sqlite-vec)
+                  ├── ene-session   (会話履歴, 自動分割)
+                  ├── ene-provider  (LLM + 埋め込みトレイト, OpenAI 実装)
+                  ├── ene-tool-host (ツールプロセス管理, MCP, Tool RAG)
+                  ├── ene-tool-common  (共通ツールユーティリティ, ToolAction)
+                  └── ene-tool-db   (ツール別 DB IPC クライアント)
+
+ene-desktop のみ:
+  ├── ene-vrm    (VRM 1.0 ローダー + MToon レンダラー)
+  ├── winit      (ウィンドウ / イベントループ)
+  ├── wgpu       (GPU レンダリング)
+  ├── egui       (設定 UI)
+  └── bevy_ecs / bevy_app 0.19 (ECS スケジューラのみ。 Bevy プラグインは不使用)
 ```
 
 ## レイヤー説明
@@ -35,10 +45,12 @@ ene-cli ──┼── ene-core ──── ene-tool-host ──── ene-too
 - **`ene-session`** — 会話履歴バッファ、`CharacterCardV3` 読み込み、感情トークン解析 (`<|emo:name|>`)、およびタイムアウトと話題変化に基づく自動セッション分割。
 
 ### ツール基盤レイヤー
-- **`ene-tool-proto`** — プロトコル契約。`ToolProvider` トレイト、`ToolSpec`/`ToolError` 型、`IpcRequest`/`IpcResponse` ワイヤ形式 (v2)、`SandboxConfigData`、`run_tool_server()` ヘルパーを定義。
+- **`ene-tool-proto`** — プロトコル契約。`ToolProvider` トレイト、`ToolSpec`/`ToolError` 型、`IpcRequest`/`IpcResponse` ワイヤ形式 (現在の `IPC_PROTOCOL_VERSION = 1`)、`SandboxConfigData`、`run_tool_server()` ヘルパーを定義。
 - **`ene-tool-derive`** — Proc-macro クレート。`#[derive(ToolSpec)]` が引数構造体の宣言的属性から `ToolSpec` 実装を生成。
-- **`ene-tool-host`** — ツールライフサイクル管理。ツールバイナリを子プロセスとして起動 (Unix ドメインソケット / Windows 名前付きパイプ)、クラッシュ耐性 (指数バックオフ、最大 5 回再起動) でラップ、MCP サーバー対応、`ToolRag` 構造体を介した Tool RAG フィルタリング (HyDE、LLM リランキング、カテゴリ別制限) を提供。
+- **`ene-tool-host`** — ツールライフサイクル管理。ツールバイナリを子プロセスとして起動 (Unix ドメインソケット / Windows 名前付きパイプ)、クラッシュ耐性 (指数バックオフ、最大 5 回再起動) でラップ、MCP サーバー対応、`ToolRag` 構造体を介した Tool RAG フィルタリング (HyDE、LLM リランキング、カテゴリ別制限) を提供。また、ツール別 SQLite アクセスを仲介する `DbIpcServer` (Unix) をホスト。
+- **`ene-tool-db`** — ツール別 DB IPC クライアントライブラリ。ツールバイナリは `ene-memory` の代わりにこれをリンクし、ホストの `DbIpcServer` に対して Unix ソケットで SQL を実行する (プレフィックスベースのアクセス制御)。
 - **`ene-tool-common`** — ツールクレートが消費する共通ユーティリティ (`ToolAction` トレイト、HTML→Markdown 抽出)。
+- **`ene-vrm`** — `ene-desktop` が使用する VRM 1.0 モデルローダーと MToon レンダラー。`ene-core` に依存しないスタンドアロンライブラリ。
 - **`ene-provider`** — LLM・埋め込みプロバイダトレイト (`LlmProvider`, `EmbeddingProvider`)、OpenAI 互換実装、HyDE/リランキング用 `HybridRerankProvider`。
 
 ### ツールプロバイダ (IPC 子プロセス)
@@ -50,7 +62,7 @@ ene-cli ──┼── ene-core ──── ene-tool-host ──── ene-too
 
 ### アプリケーション
 - **`ene-cli`** — 対話型ターミナル REPL。`/` コマンドでセッションとメモリを管理。
-- **`ene-desktop`** — Bevy ベース GUI。VRM キャラクターレンダリング、常時最前面の透明オーバーレイ、システムトレイ、egui 設定 UI。
+- **`ene-desktop`** — `winit` + `wgpu` + `egui` シェル。VRM キャラクター (`ene-vrm` 経由) を常時最前面透明オーバーレイでレンダリングし、システムトレイと egui 設定 UI を提供。フレーム単位のロジックは `bevy_app::App` が所有し、winit イベントループがスケジューラを駆動する。Bevy プラグインや Bevy レンダラーは使用しない。
 
 ## データフロー
 
@@ -93,5 +105,5 @@ EneEvent パイプライン (broadcast チャンネル):
 利点:
 - **グローバル状態なし** — 全状態はアクターが所有
 - **スレッドセーフ** — チャネルベース通信、ホットパスでのミューテックス競合なし
-- **Bevy 対応** — `try_recv()` でノンブロッキング ECS ポーリング、`subscribe()` で複数コンシューマー対応
+- **サブスクライバー対応** — `try_recv()` でノンブロッキングポーリング (`ene-desktop` の `AiBridge` ドレインタスクが使用)、`subscribe()` で複数コンシューマー対応
 - **ライフサイクル管理** — 全ハンドルがドロップされるとアクターが終了

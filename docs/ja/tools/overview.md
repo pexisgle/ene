@@ -8,16 +8,21 @@
 ToolHostManager (バイナリ発見、起動、監視)
   ├── SupervisedIpcRegistry × N (IPC + 再起動)
   │   └── IpcToolRegistry (再接続)
-  │       └── ene-tool-proto プロトコル (v2)
+  │       └── ene-tool-proto プロトコル (v1)
   ├── extra_registries × N (MCP 等)
   │   └── McpToolRegistry
   └── CompositeToolRegistry
        └── 先勝ち重複排除
 
-ToolRag (レジストリとは別)
+ToolRag (レジストリとは別、EneActor が所有)
   ├── EmbeddingProvider (クエリ + HyDE + リランキング)
   ├── MemoryStore (tool_embedding_index)
   └── 重み付きマルチフィールドコサイン類似度
+
+DbIpcServer × N (ツール別 DB、Unix のみ)
+  ├── ene-tool-fs  → ene-db-fs.sock   (プレフィックス: fs_)
+  ├── ene-tool-utility → ene-db-utility.sock (プレフィックス: utility_)
+  └── …
 ```
 
 ## ツール命名規則
@@ -46,6 +51,8 @@ pub enum IpcRequest {
     SetSessionId { session_id: String },
     ApprovePermission { request_id: String },
     AllowPattern { action: String, target_pattern: String },
+    GetMyConfig,
+    SetMyConfig(Value),
     Ping,
     Shutdown,
 }
@@ -57,12 +64,15 @@ pub enum IpcResponse {
     ActionSpecs { specs: Vec<ActionSpec> },
     ConfigSchema { schema: Option<Value> },
     CallResult { result: Result<String, ToolError> },
+    MyConfig(Value),
     Pong,
     Error { message: String },
 }
 ```
 
-ワイヤ形式: 4 バイトリトルエンディアン長さプレフィックス + JSON ペイロード。最大メッセージサイズ: 64 MB。プロトコルバージョン: 2。
+ワイヤ形式: 4 バイトリトルエンディアン長さプレフィックス + JSON ペイロード。
+最大メッセージサイズ: 64 MB。プロトコルバージョン:
+`IPC_PROTOCOL_VERSION = 1` (`crates/ene-tool-proto/src/ipc.rs` を参照)。
 
 ## ToolHostManager
 
@@ -70,11 +80,15 @@ pub enum IpcResponse {
 
 | メソッド | 説明 |
 |---------|------|
-| `start(config)` | ソケットディレクトリ作成、有効なツールバイナリを起動、`ToolHostManager` を返す |
-| `start_full(config)` | `start()` + MCP サーバー接続 → `Arc<dyn ToolRegistry>` を返す（失敗時はフォールバック） |
+| `start(config: &EneConfig)` | ソケットディレクトリ作成、有効なツールバイナリを起動、`ToolHostManager` を返す |
+| `start_full(config: &EneConfig)` | `start()` + MCP サーバー接続 → `Arc<dyn ToolRegistry>` を返す（失敗時はフォールバック） |
 | `add_registry(registry)` | 外部レジストリを登録 (例: MCP) |
-| `with_store(store)` | Tool RAG 用に MemoryStore をアタッチ |
 | `into_registry()` | マネージャーを消費し `Arc<dyn ToolRegistry>` を返す |
+
+> **注意:** 旧版ドキュメントにあった `with_store(store)` メソッドは
+> 現在の `ToolHostManager` には存在しません。Tool RAG のワイヤリングは
+> `EneActor::reconfigure` 内の `init_tool_rag(config, embedder, session)`
+> が担当します (`crates/ene-core/src/handle.rs` を参照)。
 
 ### バイナリ発見
 
@@ -86,8 +100,9 @@ pub enum IpcResponse {
 
 | レイヤー | 動作 |
 |---------|------|
-| ToolHostManager | プロセス死 → 指数バックオフ再起動 (最大 5 回、500ms → 30s) |
-| IpcToolRegistry | 接続断 → 指数バックオフ再接続 (ベース 200ms、最大 10s、5 リトライ)、Handshake + Initialize 再送 |
+| `SupervisedIpcRegistry` (プロセス) | プロセス死 → 指数バックオフ再起動 (最大 5 回: 500ms → 8s) |
+| `IpcToolRegistry` (接続) | 接続断 → 指数バックオフ再接続 (ベース 200ms 倍増、上限 10s、5 リトライ)、Handshake + Initialize 再送 |
+| `ToolHostManager::connect_with_retry` (初回) | 一定 50ms 間隔、50 リトライ (`CONNECT_RETRIES = 50`、`CONNECT_DELAY_MS = 50`) |
 
 ## ToolAction トレイト
 
@@ -106,7 +121,7 @@ pub trait ToolAction: Send + Sync {
 
 ## ToolProvider トレイト
 
-ツールバイナリ側で実装。`ToolSpec` (v2 構造化型) を返します:
+ツールバイナリ側で実装。構造化された `ToolSpec` 型を返します:
 
 ```rust
 #[async_trait]
@@ -139,7 +154,7 @@ pub trait ToolRegistry: Send + Sync {
 }
 ```
 
-Tool RAG はレジストリではなく、`ene-tool-host` の `ToolRag` 構造体が個別に処理します。
+Tool RAG はレジストリではなく、`EneActor` が所有する `ToolRag` 構造体が個別に処理します。
 
 ## CompositeToolRegistry
 

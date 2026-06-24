@@ -222,18 +222,20 @@ impl ToolProvider for CalculatorProvider {
 #[async_trait]
 pub trait ToolProvider: Send + Sync {
     /// Returns the list of tool specs this provider exposes.
+    /// Mega-tools return N specs, one per action (e.g. `filesystem.read`, ...).
     fn list_specs(&self) -> Vec<ToolSpec>;
 
-    /// Returns per-action metadata for mega-tools (default: empty).
-    fn list_action_specs(&self) -> Vec<ActionSpec> { vec![] }
+    /// Returns per-action metadata (used for Tool RAG embedding).
+    /// For individual tools, this returns an empty vec.
+    fn list_action_specs(&self) -> Vec<ActionSpec> { Vec::new() }
 
     /// Executes a tool by name with the given JSON arguments.
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>;
 
-    /// Called when the session ID changes (for session-scoped state).
+    /// Sets the current session ID (for undo tracking, session-scoped state, etc.).
     fn set_session_id(&self, session_id: &str);
 
-    /// Receives sandbox configuration (for filesystem tools).
+    /// Receives sandbox configuration (for filesystem tools; default: no-op).
     fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
 
     /// Approves a pending destructive-operation permission request by ID.
@@ -242,10 +244,13 @@ pub trait ToolProvider: Send + Sync {
     /// Adds a session-wide permission allow pattern (action + target glob).
     fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
 
-    /// Receives tool-specific config from settings.json.
+    /// Receives tool-specific configuration (called once during Initialize).
     fn set_config(&self, _config: &serde_json::Value) {}
 
-    /// Returns JSON Schema for the config this tool accepts.
+    /// Returns the tool's current configuration.
+    fn get_config(&self) -> serde_json::Value { serde_json::Value::Null }
+
+    /// Returns the JSON Schema for the configuration this tool accepts.
     fn config_schema(&self) -> Option<serde_json::Value> { None }
 }
 ```

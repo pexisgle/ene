@@ -11,7 +11,7 @@
 ## プロトコルバージョン
 
 ```rust
-pub const IPC_PROTOCOL_VERSION: u32 = /* 現在の値 */;
+pub const IPC_PROTOCOL_VERSION: u32 = 1;
 ```
 
 双方が `Handshake` / `HandshakeAck` メッセージで自分のバージョンを送信します。バージョンが一致しない場合、接続は切断されます。この定数は、ワイヤーフォーマットが後方互換性のない形で変更された場合にのみバンプしてください（[AGENTS.md §4 R3](../../AGENTS.md) を参照）。
@@ -146,16 +146,20 @@ pub enum ToolError {
 
 ```rust
 pub enum IpcRequest {
-    /// 接続を開きます。必ず最初のメッセージとして送ります。
+    /// プロトコルバージョンを交渉します。必ず最初のメッセージとして送ります。
     Handshake { version: u32 },
     /// サンドボックスポリシーとツールごとの設定を提供します。
     Initialize {
         sandbox: SandboxConfigData,
-        tool_config: serde_json::Value,
+        tool_config: Option<serde_json::Value>,
     },
-    /// ツールのメタデータリストをリクエストします。
+    /// ツールの完全なメタデータリストをリクエストします。
     ListTools,
-    /// ツールを起動します。
+    /// アクション単位のメタデータをリクエストします（メガツール埋め込み用）。
+    ListActionSpecs,
+    /// ツールの設定 JSON スキーマをリクエストします。
+    GetConfigSchema,
+    /// 名前と JSON 引数でツールを起動します。
     CallTool { name: String, arguments: String },
     /// アクティブなセッション ID を伝播します。
     SetSessionId { session_id: String },
@@ -163,8 +167,14 @@ pub enum IpcRequest {
     ApprovePermission { request_id: String },
     /// サンドボックスの許可リストにパターンを追加します。
     AllowPattern { action: String, target_pattern: String },
-    /// ツールの設定 JSON スキーマをリクエストします。
-    GetConfigSchema,
+    /// ツールの設定を取得します。
+    GetMyConfig,
+    /// ツールの設定を置き換えます。
+    SetMyConfig(serde_json::Value),
+    /// ヘルスチェック ping。
+    Ping,
+    /// グレースフルシャットダウン。
+    Shutdown,
 }
 ```
 
@@ -176,18 +186,24 @@ pub enum IpcRequest {
 
 ```rust
 pub enum IpcResponse {
-    /// Handshake を受理します。
+    /// Handshake を受理し、交渉後のバージョンを返します。
     HandshakeAck { version: u32 },
-    /// 汎用の確認応答（Initialize、SetSessionId などへの応答）。
+    /// 汎用の確認応答（Initialize、`SetSessionId` などへの応答）。
     Ack,
     /// ListTools への応答。
     Tools { tools: Vec<ToolSpec> },
-    /// CallTool への応答。
-    CallResult { result: Result<String, ToolError> },
-    /// 特定の呼び出し外で発生したツール側の回復不能エラー。
-    Error { message: String },
+    /// ListActionSpecs への応答。メガツールの場合はアクションごとに 1 エントリ。
+    ActionSpecs { specs: Vec<ActionSpec> },
     /// GetConfigSchema への応答。
     ConfigSchema { schema: Option<serde_json::Value> },
+    /// CallTool への応答。
+    CallResult { result: Result<String, ToolError> },
+    /// GetMyConfig への応答。
+    MyConfig(serde_json::Value),
+    /// Ping への Pong 応答。
+    Pong,
+    /// 特定の呼び出し外で発生したツール側の回復不能エラー。
+    Error { message: String },
 }
 ```
 
@@ -269,7 +285,7 @@ pub enum MultiAnswer {
 ### ワイヤーヘルパー
 
 ```rust
-/// 長さプレフィックス付きの bincode エンコードされた IpcRequest をストリームに書き込む。
+/// 長さプレフィックス付きの JSON エンコードされた IpcRequest をストリームに書き込む。
 pub async fn write_ipc_request(
     stream: &mut IpcStream,
     req: &IpcRequest,
@@ -282,7 +298,8 @@ pub async fn read_ipc_response(
 ) -> Result<Option<IpcResponse>, io::Error>;
 ```
 
-フレーミング形式：`[u32 リトルエンディアン長][bincode ペイロード]`
+フレーミング形式：`[u32 リトルエンディアン長][JSON ペイロード]`。
+最大メッセージサイズは 64 MB（`ene_tool_proto::ipc` の `MAX_MESSAGE_SIZE`）。
 
 ### `SandboxConfigData`
 

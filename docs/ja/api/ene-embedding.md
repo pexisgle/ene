@@ -34,13 +34,11 @@ pub struct GgufEmbeddingProvider { /* 非公開 */ }
 
 | メソッド | 補足 |
 |---------|------|
-| `embed(text, kind)` | モデル依存のkind固有プレフィックスを付けて埋め込む。 |
+| `embed(text, kind)` | モデル依存の kind 固有プレフィックスを付けて埋め込む。`Query` と `Hyde` kind は `"Query: "` プレフィックス、それ以外は `"Document: "` プレフィックスを使う。 |
 | `embed_query(text)` | `embed(text, EmbeddingKind::Query)` の短縮形。 |
-| `embed_batch(items)` | 可能な場合は1回の推論呼び出しにまとめて全アイテムを埋め込む。 |
-| `hyde(query)` | ロードされたモデルがHyDEをサポートしない場合はクエリをそのまま埋め込む。 |
-| `rerank(query, candidates)` | 各候補のテキストフィールドを埋め込み、クエリとのコサイン類似度でスコアリングする。 |
+| `embed_batch(items)` | 全アイテムを逐次埋め込む（現在 1 アイテム = 1 推論呼び出し、HyDE はパラレルデコード）。 |
 | `dimensions()` | 出力ベクトルサイズを返す（モデルメタデータから設定）。 |
-| `model_name()` | GGUFファイルのステム部分をモデル識別子として返す。 |
+| `model_name()` | `"{model}@{quantization}"` を返す（例: `nomic-embed-text-v1.5@Q4_K_M`）。 |
 
 ---
 
@@ -52,11 +50,13 @@ pub struct GgufEmbeddingProvider { /* 非公開 */ }
 pub fn resolve_gguf_paths(
     model: &str,
     quantization: &str,
-    model_dir: &Path,
+    model_dir: PathBuf,
 ) -> Result<(PathBuf, PathBuf), EneEmbeddingError>
 ```
 
-モデル名、量子化サフィックス、検索ディレクトリを元に、GGUFモデルファイルとトークナイザーのパスを解決します。
+モデル名、量子化サフィックス、検索ディレクトリを元に、GGUF モデル
+ファイルとトークナイザーのパスを解決します。`model_dir` は値消費
+される点に注意してください。
 
 **返り値:** 成功時は `(モデルパス, トークナイザーパス)`。
 
@@ -76,11 +76,14 @@ model_dir/
 pub fn create_local_provider(
     model: &str,
     quantization: &str,
-    model_dir: &Path,
-) -> Result<Box<dyn EmbeddingProvider>, EneEmbeddingError>
+    model_dir: PathBuf,
+) -> Result<Box<dyn ene_provider::EmbeddingProvider>, EneEmbeddingError>
 ```
 
-主要なエントリーポイントです。`resolve_gguf_paths` でパスを解決し、GGUFモデルとトークナイザーを読み込み、ボックス化された `EmbeddingProvider` を返します。
+主要なエントリーポイントです。`resolve_gguf_paths` でパスを解決し、
+GGUF モデルとトークナイザーを読み込み、ボックス化された
+`EmbeddingProvider` を返します。`model_dir` は値消費されます
+(`PathBuf`)。
 
 **固定パラメータ：**
 - `max_length = 8192` — 最大トークンシーケンス長。
@@ -89,12 +92,12 @@ pub fn create_local_provider(
 
 ```rust
 use ene_embedding::create_local_provider;
-use std::path::Path;
+use std::path::PathBuf;
 
 let provider = create_local_provider(
     "nomic-embed-text-v1.5",
     "Q4_K_M",
-    Path::new("/models"),
+    PathBuf::from("/models"),
 )?;
 
 println!("次元数: {}", provider.dimensions());
@@ -109,19 +112,21 @@ println!("モデル: {}", provider.model_name());
 
 ```rust
 pub enum EneEmbeddingError {
-    /// モデルまたはトークナイザーファイルが見つからない、または開けない。
-    ModelNotFound { path: PathBuf },
+    /// 一般的な埋め込みエラー（読み込み、推論など）。
+    #[error("Embedding error: {0}")]
+    EmbeddingError(String),
 
-    /// GGUFモデルの読み込みに失敗した（フォーマットエラー、破損など）。
-    LoadFailed(String),
-
-    /// 推論が失敗した。
-    InferenceFailed(String),
-
-    /// トークナイザーファイルを解析できなかった。
-    TokenizerError(String),
+    /// Candle ML 推論エンジンからのエラー。
+    #[error("Candle ML error: {0}")]
+    CandleError(String),
 }
+
+/// 内部モジュール用の型エイリアス。
+pub type EmbeddingError = EneEmbeddingError;
 ```
+
+`EneEmbeddingError` は `From` を介して
+`ene_provider::EmbeddingError::Provider(String)` に自動変換されます。
 
 ---
 

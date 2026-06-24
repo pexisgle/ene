@@ -8,16 +8,21 @@ Each tool runs as an independent binary process, communicating with core over IP
 ToolHostManager (binary discovery, spawning, supervision)
   ├── SupervisedIpcRegistry × N (IPC + restart)
   │   └── IpcToolRegistry (reconnect)
-  │       └── ene-tool-proto protocol (v2)
+  │       └── ene-tool-proto protocol (v1)
   ├── extra_registries × N (MCP, etc.)
   │   └── McpToolRegistry
   └── CompositeToolRegistry
        └── First-wins dedup
 
-ToolRag (separate from registry)
+ToolRag (separate from registry, owned by EneActor)
   ├── EmbeddingProvider (query + HyDE + rerank)
   ├── MemoryStore (tool_embedding_index)
   └── Weighted multi-field cosine similarity
+
+DbIpcServer × N (per-tool database, Unix only)
+  ├── ene-tool-fs  → ene-db-fs.sock   (prefix: fs_)
+  ├── ene-tool-utility → ene-db-utility.sock (prefix: utility_)
+  └── …
 ```
 
 ## Tool Naming Convention
@@ -46,6 +51,8 @@ pub enum IpcRequest {
     SetSessionId { session_id: String },
     ApprovePermission { request_id: String },
     AllowPattern { action: String, target_pattern: String },
+    GetMyConfig,
+    SetMyConfig(Value),
     Ping,
     Shutdown,
 }
@@ -57,12 +64,15 @@ pub enum IpcResponse {
     ActionSpecs { specs: Vec<ActionSpec> },
     ConfigSchema { schema: Option<Value> },
     CallResult { result: Result<String, ToolError> },
+    MyConfig(Value),
     Pong,
     Error { message: String },
 }
 ```
 
-Wire format: 4-byte little-endian length prefix + JSON payload. Max message size: 64 MB. Protocol version: 2.
+Wire format: 4-byte little-endian length prefix + JSON payload. Max
+message size: 64 MB. Protocol version: `IPC_PROTOCOL_VERSION = 1` (see
+`crates/ene-tool-proto/src/ipc.rs`).
 
 ## ToolHostManager
 
@@ -70,11 +80,15 @@ Wire format: 4-byte little-endian length prefix + JSON payload. Max message size
 
 | Method | Description |
 |--------|-------------|
-| `start(config)` | Creates socket dir, spawns enabled tool binaries, returns `ToolHostManager` |
-| `start_full(config)` | Calls `start()` + connects MCP servers → returns `Arc<dyn ToolRegistry>` (with fallback on failure) |
+| `start(config: &EneConfig)` | Creates socket dir, spawns enabled tool binaries, returns `ToolHostManager` |
+| `start_full(config: &EneConfig)` | Calls `start()` + connects MCP servers → returns `Arc<dyn ToolRegistry>` (with fallback on failure) |
 | `add_registry(registry)` | Registers external registries (e.g., MCP) |
-| `with_store(store)` | Attaches MemoryStore for Tool RAG |
 | `into_registry()` | Consumes manager, returns `Arc<dyn ToolRegistry>` |
+
+> **Note:** The `with_store(store)` method shown in earlier drafts of
+> this doc no longer exists on `ToolHostManager`. Tool RAG wiring is
+> performed by `EneActor::reconfigure` via `init_tool_rag(config,
+> embedder, session)` (see `crates/ene-core/src/handle.rs`).
 
 ### Binary Discovery
 
@@ -86,8 +100,9 @@ Wire format: 4-byte little-endian length prefix + JSON payload. Max message size
 
 | Layer | Behavior |
 |-------|----------|
-| ToolHostManager | Process death detection → exponential backoff restart (max 5, 500ms → 30s) |
-| IpcToolRegistry | Connection loss → exponential backoff reconnect (base 200ms, max 10s, 5 retries), re-sends Handshake + Initialize |
+| `SupervisedIpcRegistry` (process) | Process death detection → exponential backoff restart (max 5: 500ms → 8s) |
+| `IpcToolRegistry` (connection) | Connection loss → exponential backoff reconnect (base 200ms doubling, cap 10s, 5 retries), re-sends Handshake + Initialize |
+| `ToolHostManager::connect_with_retry` (initial) | Constant 50ms delay, 50 retries (`CONNECT_RETRIES = 50`, `CONNECT_DELAY_MS = 50`) |
 
 ## ToolAction Trait
 
@@ -106,7 +121,7 @@ Each tool binary has a provider struct that owns shared state and dispatches to 
 
 ## ToolProvider Trait
 
-Implemented by tool binaries. Returns `ToolSpec` (the v2 structured type):
+Implemented by tool binaries. Returns the structured `ToolSpec` type:
 
 ```rust
 #[async_trait]
@@ -139,7 +154,8 @@ pub trait ToolRegistry: Send + Sync {
 }
 ```
 
-Tool RAG is handled separately by the `ToolRag` struct in `ene-tool-host`, not by the registry.
+Tool RAG is handled separately by the `ToolRag` struct (owned by
+`EneActor`), not by the registry.
 
 ## CompositeToolRegistry
 

@@ -5,7 +5,7 @@ ene is a local AI character platform implemented as a Rust workspace. It provide
 ## Getting Started
 
 - [Architecture Overview](architecture/overview.md) — Crate map and dependency graph
-- [Startup Flow](architecture/startup.md) — Desktop (Bevy) and CLI boot sequences
+- [Startup Flow](architecture/startup.md) — Desktop (winit+wgpu+egui) and CLI boot sequences
 - [Configuration](configuration/settings.md) — Full settings.json schema reference
 
 ## Core Engine
@@ -38,7 +38,7 @@ ene is a local AI character platform implemented as a Rust workspace. It provide
 ## Applications
 
 - [CLI Reference](applications/cli.md) — REPL commands, flags, keyboard shortcuts
-- [Desktop App](applications/desktop.md) — Bevy plugins, VRM pipeline, overlay behavior
+- [Desktop App](applications/desktop.md) — winit+wgpu+egui shell, VRM pipeline, overlay behavior
 
 ## Crate Index
 
@@ -53,11 +53,13 @@ ene is a local AI character platform implemented as a Rust workspace. It provide
 | `ene-tool-proto` | Library | IPC protocol, `ToolProvider` trait, `ToolSpec`, `ToolError` |
 | `ene-tool-derive` | Proc-macro | `#[derive(ToolSpec)]` for auto-generated tool specs |
 | `ene-tool-host` | Library | Tool process manager, MCP support, Tool RAG |
+| `ene-tool-db` | Library | Per-tool DB IPC client (used by tool binaries) |
 | `ene-tool-common` | Library | Shared utilities (`ToolAction` trait, HTML extraction) |
+| `ene-vrm` | Library | VRM 1.0 model loader and MToon renderer (used by `ene-desktop`) |
 | `ene-tool-utility` | Binary | Utility tools (question, todo, time, system info) |
 | `ene-tool-fs` | Binary | Filesystem tools (read, write, edit, shell, undo) |
 | `ene-tool-web` | Binary | Web tools (fetch, search) |
 | `ene-tool-app` | Binary | GUI automation (keyboard, mouse, screenshot) |
 | `ene-tool-browser` | Binary | Browser automation (Chromium CDP) |
 | `ene-cli` | Binary | Interactive CLI REPL |
-| `ene-desktop` | Binary | Bevy-based desktop GUI |
+| `ene-desktop` | Binary | winit + wgpu + egui desktop shell with VRM rendering |

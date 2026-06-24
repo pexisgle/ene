@@ -18,19 +18,20 @@ See also: [`ene-tool-proto`](ene-tool-proto.md) for the wire types, [`ene-tool-c
 The central abstraction. Both the host manager and individual registries implement this trait, enabling composition.
 
 ```rust
+#[async_trait::async_trait]
 pub trait ToolRegistry: Send + Sync {
     fn list_tools(&self) -> Vec<ToolSpec>;
-    fn call_tool(
+    async fn call_tool(
         &self,
         name: &str,
         arguments: &str,
     ) -> Result<String, ToolError>;
 
     // Optional hooks — default implementations are no-ops.
-    fn set_session_id(&self, session_id: &str) {}
-    fn approve_permission(&self, request_id: &str) {}
-    fn allow_pattern(&self, action: &str, target_pattern: &str) {}
-    fn config_schema(&self) -> Option<serde_json::Value> { None }
+    async fn set_session_id(&self, _session_id: &str) {}
+    async fn approve_permission(&self, _request_id: &str) {}
+    async fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
+    async fn config_schema(&self) -> Option<serde_json::Value> { None }
 }
 ```
 
@@ -110,16 +111,15 @@ ListTools  → caches Vec<ToolSpec>
 Ready for CallTool / SetSessionId / …
 ```
 
-If the connection drops, `IpcToolRegistry` performs **automatic reconnection** with exponential backoff:
+If the connection drops, `IpcToolRegistry` performs **automatic reconnection** with exponential backoff (`RECONNECT_BASE_DELAY_MS = 200`, `RECONNECT_MAX_DELAY_MS = 10_000`, `RECONNECT_MAX_RETRIES = 5`):
 
-| Attempt | Delay |
+| Attempt | Delay before next try |
 |---|---|
 | 1 | 200 ms |
 | 2 | 400 ms |
 | 3 | 800 ms |
-| 4 | 2 s |
-| 5 | 10 s |
-| > 5 | Returns `ToolError::IpcTransport` |
+| 4 | 1.6 s |
+| 5 | (gives up — returns `ToolError::IpcClient`) |
 
 ### Key methods
 
@@ -135,14 +135,18 @@ If the connection drops, `IpcToolRegistry` performs **automatic reconnection** w
 
 Wraps an `IpcToolRegistry` with **process-level supervision**. If the child process crashes, `SupervisedIpcRegistry` restarts it.
 
-| Attempt | Delay |
+The delay between restarts is exponential (`BASE_DELAY_MS = 500`, doubling `2^attempt`, capped at `MAX_DELAY_MS = 30_000`):
+
+| Restart # | Delay before next try |
 |---|---|
 | 1 | 500 ms |
 | 2 | 1 s |
 | 3 | 2 s |
-| 4 | 10 s |
-| 5 | 30 s |
-| > 5 | Gives up, returns error |
+| 4 | 4 s |
+| 5 | 8 s |
+| > 5 | Gives up, returns `ToolError::ExecutionFailed` |
+
+The post-restart reconnection (handled inside `IpcToolRegistry`) uses a **constant 50 ms delay with up to 50 retries** (`CONNECT_DELAY_MS = 50`, `CONNECT_RETRIES = 50` in `tool_host_manager.rs`).
 
 This is used automatically by `ToolHostManager` for all spawned tool processes.
 
