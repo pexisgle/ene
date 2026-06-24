@@ -216,7 +216,7 @@ impl From<ene_tool_proto::SandboxConfigData> for SandboxConfig {
 /// operation tracking (`track_xxx`) and Undo execution are bundled together.
 pub struct Sandbox {
     config: SandboxConfig,
-    undo_manager: tokio::sync::Mutex<Option<Arc<UndoManager>>>,
+    undo_manager: std::sync::Mutex<Option<Arc<UndoManager>>>,
     session_id: std::sync::RwLock<String>,
     approved_requests: std::sync::Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
     allowed_patterns:
@@ -227,7 +227,7 @@ impl Sandbox {
     pub fn new(config: SandboxConfig) -> Self {
         Self {
             config,
-            undo_manager: tokio::sync::Mutex::new(None),
+            undo_manager: std::sync::Mutex::new(None),
             session_id: std::sync::RwLock::new(String::new()),
             approved_requests: std::sync::Arc::new(std::sync::RwLock::new(
                 std::collections::HashSet::new(),
@@ -239,9 +239,11 @@ impl Sandbox {
     }
 
     async fn ensure_undo_manager(&self) -> Result<Arc<UndoManager>, ToolError> {
-        let mut guard = self.undo_manager.lock().await;
-        if let Some(mgr) = guard.as_ref() {
-            return Ok(mgr.clone());
+        {
+            let guard = self.undo_manager.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(mgr) = guard.as_ref() {
+                return Ok(mgr.clone());
+            }
         }
 
         let socket_path = self
@@ -264,8 +266,13 @@ impl Sandbox {
         })?;
 
         let mgr = Arc::new(mgr);
-        *guard = Some(mgr.clone());
-        Ok(mgr)
+        let mut guard = self.undo_manager.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = guard.as_ref() {
+            Ok(existing.clone())
+        } else {
+            *guard = Some(mgr.clone());
+            Ok(mgr)
+        }
     }
 
     pub fn config(&self) -> &SandboxConfig {
@@ -286,13 +293,9 @@ impl Sandbox {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = id.to_string();
 
         // Reset undo manager so it reconnects with new session_id.
-        // Use blocking_lock() (not try_lock) so the reset is never
-        // silently skipped when another request is mid-flight holding
-        // the mutex — a stale undo manager would keep the previous
-        // session_id and apply undos to the wrong session. The
-        // `tokio::sync::Mutex::blocking_lock` variant is safe to call
-        // from a sync context.
-        let mut guard = self.undo_manager.blocking_lock();
+        // Use standard sync Mutex lock so we can block safely from
+        // both sync and async contexts without panicking the Tokio runtime.
+        let mut guard = self.undo_manager.lock().unwrap_or_else(|e| e.into_inner());
         *guard = None;
     }
 

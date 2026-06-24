@@ -3,8 +3,8 @@ use crate::todo_store::TodoStore;
 use async_trait::async_trait;
 use ene_tool_common::ToolAction;
 use ene_tool_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec};
+use std::sync::Mutex;
 use std::sync::{Arc, RwLock};
-use tokio::sync::Mutex;
 
 /// Shared state for the todo actions.
 #[derive(Clone)]
@@ -56,7 +56,7 @@ impl UtilityState {
     /// perspective: the socket write is visible to subsequent readers
     /// only after the old store has been dropped.
     pub fn set_db_socket(&self, socket: String) {
-        *self.todo_store.blocking_lock() = None;
+        *self.todo_store.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self
             .db_socket
             .write()
@@ -74,15 +74,10 @@ impl UtilityState {
     /// Lazily connects to the DB IPC server and returns the `TodoStore`.
     pub async fn ensure_todo_store(&self) -> Result<Arc<TodoStore>, ToolError> {
         {
-            let guard = self.todo_store.lock().await;
-            if let Some(store) = guard.clone() {
-                return Ok(store);
+            let guard = self.todo_store.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(store) = guard.as_ref() {
+                return Ok(store.clone());
             }
-        }
-
-        let mut guard = self.todo_store.lock().await;
-        if let Some(store) = guard.clone() {
-            return Ok(store);
         }
 
         let socket = self
@@ -112,8 +107,14 @@ impl UtilityState {
                 message: format!("Failed to connect to DB: {e}"),
             })?;
         let store = Arc::new(store);
-        *guard = Some(store.clone());
-        Ok(store)
+
+        let mut guard = self.todo_store.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = guard.as_ref() {
+            Ok(existing.clone())
+        } else {
+            *guard = Some(store.clone());
+            Ok(store)
+        }
     }
 }
 
