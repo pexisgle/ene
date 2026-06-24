@@ -454,11 +454,19 @@ impl ToolRag {
         // 2. Optional HyDE — generate a hypothetical document embedding.
         let hyde_vec = if self.opts.use_hyde {
             match self.embedder.hyde(query).await {
-                Ok(hyde_text) => self
-                    .embedder
-                    .embed(&hyde_text, ene_provider::EmbeddingKind::Hyde)
-                    .await
-                    .ok(),
+                Ok(hyde_text) => {
+                    // Fast path: if the provider's hyde implementation just echoes the query
+                    // (e.g. the default local embedding provider), we can reuse the existing
+                    // query_embedding rather than running a second expensive inference pass.
+                    if hyde_text == query {
+                        Some(query_vec.clone())
+                    } else {
+                        self.embedder
+                            .embed(&hyde_text, ene_provider::EmbeddingKind::Hyde)
+                            .await
+                            .ok()
+                    }
+                }
                 Err(_) => None,
             }
         } else {
