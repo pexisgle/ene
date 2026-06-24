@@ -703,6 +703,35 @@ impl MemoryStore {
             .collect())
     }
 
+    /// Returns `(tool_name, field, field_key, version_hash, model_name)`
+    /// for every cached tool embedding row, **without**
+    /// deserializing the vector or fetching the source
+    /// text. Used by Tool RAG's `ensure_index` to decide
+    /// which fields are up-to-date; the previous form
+    /// deserialized every f32 vector on every turn and
+    /// then discarded them.
+    pub async fn list_tool_embedding_hashes(
+        &self,
+    ) -> Result<Vec<(String, String, String, String, String)>, MemoryError> {
+        let rows = entities::tool_embedding_index::Entity::find()
+            .all(&self.db)
+            .await
+            .map_err(|e| MemoryError::MemoryStoreConnectionError(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.tool_name,
+                    row.field,
+                    row.field_key,
+                    row.version_hash,
+                    row.model_name,
+                )
+            })
+            .collect())
+    }
+
     /// Deletes all field embeddings for a tool (cascades across all fields).
     pub async fn delete_tool_embeddings(&self, tool_name: &str) -> Result<usize, MemoryError> {
         let res = entities::tool_embedding_index::Entity::delete_many()
