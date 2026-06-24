@@ -18,6 +18,12 @@ pub struct SandboxConfig {
     pub max_shell_output_lines: usize,
     pub db_socket: Option<PathBuf>,
     pub db_auth_token: Option<String>,
+    /// Cache of pre-compiled `blocked_commands` regexes. The struct
+    /// is `Clone`d, so the cache is held in an `Arc` to keep the
+    /// cached regexes shared across clones. Not part of the
+    /// `SandboxConfigData` wire format; populated by `Default` and
+    /// the `From<SandboxConfigData>` impl.
+    pub compiled_blocklist: std::sync::Arc<std::sync::OnceLock<Vec<regex::Regex>>>,
 }
 
 impl Default for SandboxConfig {
@@ -46,6 +52,7 @@ impl Default for SandboxConfig {
             max_shell_output_lines: 2000,
             db_socket: None,
             db_auth_token: None,
+            compiled_blocklist: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 }
@@ -114,15 +121,28 @@ impl SandboxConfig {
         })
     }
 
-    /// Checks whether a command matches the blocklist
+    /// Checks whether a command matches the blocklist.
+    ///
+    /// The blocklist regexes are compiled once on first call and
+    /// cached in an `Arc<OnceLock>` so the compiled set is shared
+    /// across `Clone`s of this `SandboxConfig`. After the first
+    /// call this is an O(n) scan over pre-compiled regexes rather
+    /// than a recompile of every pattern on every invocation.
     pub fn is_command_blocked(&self, command: &str) -> Result<(), ToolError> {
-        for pattern in &self.blocked_commands {
-            let re = regex::Regex::new(pattern).map_err(|e| ToolError::Internal {
-                message: format!("Invalid blocked command pattern: {e}"),
-            })?;
+        let compiled = self.compiled_blocklist.get_or_init(|| {
+            self.blocked_commands
+                .iter()
+                .filter_map(|p| regex::Regex::new(p).ok())
+                .collect()
+        });
+
+        for (idx, re) in compiled.iter().enumerate() {
             if re.is_match(command) {
                 return Err(ToolError::SandboxViolation {
-                    message: format!("Command matches blocked pattern: {pattern}"),
+                    message: format!(
+                        "Command matches blocked pattern: {}",
+                        self.blocked_commands[idx]
+                    ),
                 });
             }
         }
@@ -184,6 +204,7 @@ impl From<ene_tool_proto::SandboxConfigData> for SandboxConfig {
             max_shell_output_lines: data.max_shell_output_lines,
             db_socket: data.db_socket.map(PathBuf::from),
             db_auth_token: data.db_auth_token,
+            compiled_blocklist: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 }
@@ -293,10 +314,18 @@ impl Sandbox {
     ) -> Result<(), ToolError> {
         let action_str = format!("{action:?}");
 
-        // 1. Session-level allow pattern check
+        // 1. Session-level allow pattern check. The target is
+        //    matched against the allowed pattern as a *path prefix*,
+        //    not a substring, so an allow pattern of `/tmp/foo` no
+        //    longer matches `/tmp/foobar` or `/etc/tmp/foo`.
         if let Ok(guard) = self.allowed_patterns.read() {
             for (allowed_action, allowed_target) in guard.iter() {
-                if allowed_action == &action_str && target.contains(allowed_target) {
+                if allowed_action != &action_str {
+                    continue;
+                }
+                let path = std::path::Path::new(target);
+                let prefix = std::path::Path::new(allowed_target);
+                if path.starts_with(prefix) {
                     return Ok(());
                 }
             }
