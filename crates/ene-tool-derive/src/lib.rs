@@ -476,6 +476,12 @@ fn emit_field(instr: &FieldInstr) -> TokenStream2 {
         let parsed = default.trim();
         let value_expr: TokenStream2 = if let Ok(n) = parsed.parse::<i64>() {
             quote! { ::serde_json::json!(#n) }
+        } else if let Ok(f) = parsed.parse::<f64>() {
+            // Parse floats before the string fallback
+            // so a #[arg(default = "1.5")] on an f64
+            // produces a number 1.5 in the JSON
+            // schema, not the string "1.5".
+            quote! { ::serde_json::json!(#f) }
         } else if parsed == "true" {
             quote! { ::serde_json::json!(true) }
         } else if parsed == "false" {
