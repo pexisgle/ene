@@ -23,7 +23,7 @@ pub mod types;
 /// Actor handle, events, status, and state snapshot.
 pub use handle::{
     ActorDeadError, ConversationEntry, EneEvent, EneEventReceiver, EneHandle, EneStateSnapshot,
-    EneStatus, MemoryQueryHandle,
+    EneStatus, MemoryQueryHandle, TerminalReason,
 };
 
 // ── Config types ──

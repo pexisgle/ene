@@ -46,7 +46,7 @@ sequenceDiagram
         T-->>A: CallResult
         A->>L: ストリーム継続
     end
-    A-->>H: broadcast EneEvent::Done
+    A-->>H: broadcast EneEvent::Terminal(TerminalReason::Done)
 ```
 
 ---
@@ -90,14 +90,15 @@ pub struct EneHandle { /* 非公開 */ }
 | `get_snapshot` | `fn get_snapshot(&self) -> Result<EneStateSnapshot, EneCoreError>` | アクター状態のスナップショットを返します。 |
 | `manual_split` | `fn manual_split(&self) -> Result<SplitResult, EneCoreError>` | セッションの強制スプリット（メモリサマリーの作成）を実行します。 |
 | `list_tools` | `fn list_tools(&self) -> Result<Vec<ToolSpec>, EneCoreError>` | 登録済みのツール仕様一覧を返します。 |
-| `call_tool` | `fn call_tool(&self, name: &str, arguments: serde_json::Value) -> Result<String, EneCoreError>` | ツールを名前で直接呼び出します。 |
+| `call_tool` | `fn call_tool(&self, name: String, arguments: String) -> Result<String, EneCoreError>` | JSON エンコード済み引数でツールを名前で直接呼び出します。 |
+| `invalidate_tool_index` | `fn invalidate_tool_index(&self) -> Result<(), ActorDeadError>` | キャッシュされた Tool RAG インデックスを破棄し、次のクエリで再構築されるようにします。 |
 
 ### インタラクティブフロー
 
 | メソッド | シグネチャ | 説明 |
 |---------|-----------|------|
-| `decide_permission` | `fn decide_permission(&self, request_id: u64, decision: PermissionDecision) -> Result<(), ActorDeadError>` | `PermissionRequired` イベントへの応答を送信します。 |
-| `submit_user_input` | `fn submit_user_input(&self, request_id: u64, response: UserInputResponse) -> Result<(), ActorDeadError>` | `UserInputRequired` イベントへの応答を送信します。 |
+| `decide_permission` | `fn decide_permission(&self, request_id: impl Into<RequestId>, decision: PermissionDecision) -> Result<(), ActorDeadError>` | `PermissionRequired` イベントへの応答を送信します。 |
+| `submit_user_input` | `fn submit_user_input(&self, request_id: impl Into<RequestId>, response: UserInputResponse) -> Result<(), ActorDeadError>` | `UserInputRequired` イベントへの応答を送信します。 |
 
 ---
 
@@ -123,22 +124,22 @@ pub enum EneCommand {
     LoadCharacter { path: String, reply: oneshot::Sender<Result<(), EneCoreError>> },
 
     /// 状態スナップショットを取得する。
-    GetSnapshot { reply: oneshot::Sender<Result<EneStateSnapshot, EneCoreError>> },
+    GetSnapshot { reply: oneshot::Sender<EneStateSnapshot> },
 
     /// セッションメモリのスプリットを強制実行する。
     ManualSplit { reply: oneshot::Sender<Result<SplitResult, EneCoreError>> },
 
     /// 利用可能なツール仕様の一覧を取得する。
-    ListTools { reply: oneshot::Sender<Result<Vec<ToolSpec>, EneCoreError>> },
+    ListTools { reply: oneshot::Sender<Vec<ToolSpec>> },
 
     /// 名前を指定してツールを直接呼び出す。
-    CallTool { name: String, arguments: serde_json::Value, reply: oneshot::Sender<Result<String, EneCoreError>> },
+    CallTool { name: String, arguments: String, reply: oneshot::Sender<Result<String, EneCoreError>> },
 
     /// パーミッションプロンプトへのユーザー判断を送信する。
-    PermissionDecision { request_id: u64, decision: PermissionDecision },
+    PermissionDecision { request_id: RequestId, decision: PermissionDecision },
 
     /// 入力プロンプトへのユーザー応答を送信する。
-    UserInputResponse { request_id: u64, response: UserInputResponse },
+    UserInputResponse { request_id: RequestId, response: UserInputResponse },
 
     /// ツールインデックスの再構築を指示する。
     InvalidateToolIndex,
@@ -167,25 +168,28 @@ pub enum EneEvent {
 
     /// 処理続行前にユーザーのパーミッション確認が必要。
     PermissionRequired {
-        request_id: u64,
+        request_id: RequestId,
         action: String,
         target: String,
         description: String,
     },
 
     /// 処理続行前にユーザーのテキスト入力が必要。
-    UserInputRequired { request_id: u64, prompt: String },
+    UserInputRequired {
+        request_id: RequestId,
+        prompt: UserInputPrompt,
+    },
 
     /// マルチステップバックグラウンドタスクの進捗更新。
     TaskProgress {
         task_id: String,
-        step: u32,
-        total_steps: u32,
+        step: usize,
+        total_steps: Option<usize>,
         description: String,
     },
 
     /// セッションがスプリットされ、メモリサマリーが作成された。
-    SessionSplit { summary: String, reason: String },
+    SessionSplit { summary: String, reason: SplitReason },
 
     /// 現在のターンが正常に完了した。
     Done,
@@ -259,7 +263,7 @@ pub enum EneStatus {
 |---------|-----------|------|
 | `is_enabled` | `fn is_enabled(&self) -> bool` | メモリサブシステムが有効かどうかを返します。 |
 | `embed_query` | `fn embed_query(&self, text: &str) -> Result<Vec<f32>, EneCoreError>` | 設定済みの埋め込みプロバイダーを使ってテキストを埋め込みます。 |
-| `search_summaries` | `fn search_summaries(&self, query_embedding: Vec<f32>, card_name: &str, limit: usize, threshold: f32) -> Result<Vec<RecalledSummary>, EneCoreError>` | ベクトル類似度でメモリサマリーを検索します。 |
+| `search_summaries` | `fn search_summaries(&self, query_embedding: &[f32], card_name: &str, limit: usize, threshold: f32) -> Result<Vec<RecalledSummary>, EneCoreError>` | ベクトル類似度でメモリサマリーを検索します。 |
 | `list_recent_summaries` | `fn list_recent_summaries(&self, card_name: &str, limit: usize) -> Result<Vec<ConversationSummary>, EneCoreError>` | 最近のサマリーを新しい順で返します。 |
 | `get_all_keyfacts` | `fn get_all_keyfacts(&self, card_name: &str) -> Result<Vec<KeyFact>, EneCoreError>` | キャラクターに保存されている全キーファクトを返します。 |
 
@@ -380,8 +384,8 @@ async fn main() -> anyhow::Result<()> {
                 eprintln!("パーミッション要求: {} on {}", action, target);
                 handle.decide_permission(request_id, ene_core::PermissionDecision::AllowOnce)?;
             }
-            EneEvent::Done => break,
-            EneEvent::Failed { message } => {
+            EneEvent::Terminal(ene_core::TerminalReason::Done) => break,
+            EneEvent::Terminal(ene_core::TerminalReason::Failed { message }) => {
                 eprintln!("エラー: {}", message);
                 break;
             }

@@ -1,4 +1,4 @@
-use crate::handle::{ConversationEntry, EneEvent};
+use crate::handle::{ConversationEntry, EneEvent, TerminalReason};
 use crate::message_builder::{MessageBuildContext, build_messages};
 use crate::types::RequestId;
 use ene_config::EneConfig;
@@ -8,6 +8,7 @@ use ene_session::ConversationSession;
 use ene_tool_proto::ToolError;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, broadcast, oneshot};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -38,6 +39,24 @@ pub enum UserInputResponse {
     Cancel,
 }
 
+/// Atomically claim the right to emit the terminal event for the
+/// current run, and emit [`EneEvent::Terminal`] if the claim
+/// succeeds. If the cancel command (or another emit site) has
+/// already emitted a terminal, this is a no-op so exactly one
+/// terminal event is delivered per run.
+fn emit_terminal(
+    event_tx: &broadcast::Sender<EneEvent>,
+    guard: &AtomicBool,
+    reason: TerminalReason,
+) {
+    if guard
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        let _ = event_tx.send(EneEvent::Terminal(reason));
+    }
+}
+
 /// Configuration for a single AI streaming run.
 pub(crate) struct StreamContext {
     pub(crate) config: EneConfig,
@@ -52,6 +71,12 @@ pub(crate) struct StreamContext {
         Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
     pub(crate) pending_user_inputs:
         Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
+    /// Shared with [`crate::EneActor`]. The first side to flip this
+    /// from `false` to `true` via `compare_exchange` is the one
+    /// that emits [`EneEvent::Terminal`] for the current run, so
+    /// exactly one terminal event is sent even if both the stream
+    /// task and the cancel command race.
+    pub(crate) terminal_emitted: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Runs the full AI streaming completion loop with tool calling, memory
@@ -68,6 +93,7 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
         cancel_token,
         pending_permissions,
         pending_user_inputs,
+        terminal_emitted,
     } = ctx;
     session.reset_display_buffer();
 
@@ -103,9 +129,13 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
     ) {
         Ok(msgs) => msgs,
         Err(e) => {
-            let _ = event_tx.send(EneEvent::Failed {
-                message: e.to_string(),
-            });
+            emit_terminal(
+                &event_tx,
+                &terminal_emitted,
+                TerminalReason::Failed {
+                    message: e.to_string(),
+                },
+            );
             return session;
         }
     };
@@ -138,20 +168,29 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
 
     loop {
         if cancel_token.is_cancelled() {
+            emit_terminal(&event_tx, &terminal_emitted, TerminalReason::Cancelled);
             return session;
         }
 
         if round >= max_rounds {
-            let _ = event_tx.send(EneEvent::Failed {
-                message: "Max tool call rounds exceeded".to_string(),
-            });
+            emit_terminal(
+                &event_tx,
+                &terminal_emitted,
+                TerminalReason::Failed {
+                    message: "Max tool call rounds exceeded".to_string(),
+                },
+            );
             return session;
         }
 
         let mut stream = match provider.create_chat_stream(&messages, &tools).await {
             Ok(s) => s,
             Err(e) => {
-                let _ = event_tx.send(EneEvent::Failed { message: e.clone() });
+                emit_terminal(
+                    &event_tx,
+                    &terminal_emitted,
+                    TerminalReason::Failed { message: e.clone() },
+                );
                 return session;
             }
         };
@@ -161,7 +200,7 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
 
         while let Some(chunk_res) = stream.next().await {
             if cancel_token.is_cancelled() {
-                let _ = event_tx.send(EneEvent::Done);
+                emit_terminal(&event_tx, &terminal_emitted, TerminalReason::Cancelled);
                 return session;
             }
 
@@ -183,7 +222,11 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
                     }
                 }
                 Err(e) => {
-                    let _ = event_tx.send(EneEvent::Failed { message: e.clone() });
+                    emit_terminal(
+                        &event_tx,
+                        &terminal_emitted,
+                        TerminalReason::Failed { message: e.clone() },
+                    );
                     return session;
                 }
             }
@@ -205,7 +248,7 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
 
             session.finalize_response();
             session.record_assistant_response();
-            let _ = event_tx.send(EneEvent::Done);
+            emit_terminal(&event_tx, &terminal_emitted, TerminalReason::Done);
             return session;
         }
 
@@ -230,9 +273,13 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
                 round += 1;
             }
             Err(e) => {
-                let _ = event_tx.send(EneEvent::Failed {
-                    message: e.to_string(),
-                });
+                emit_terminal(
+                    &event_tx,
+                    &terminal_emitted,
+                    TerminalReason::Failed {
+                        message: e.to_string(),
+                    },
+                );
                 return session;
             }
         }
@@ -749,5 +796,36 @@ mod tests {
         let messages = result.expect("executor returned error");
         assert_eq!(messages.len(), 2);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// Regression test for #32: the terminal guard must guarantee
+    /// exactly one [`EneEvent::Terminal`] per run, even when the
+    /// cancel command and the stream task both reach a terminal
+    /// emit site (which is the common race when the user cancels
+    /// mid-stream).
+    #[tokio::test]
+    async fn terminal_guard_emits_exactly_once() {
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel::<EneEvent>(8);
+        let guard = Arc::new(AtomicBool::new(false));
+
+        // Both the cancel-side and the stream-side try to emit a
+        // terminal; the guard must let only the first one through.
+        emit_terminal(&event_tx, &guard, TerminalReason::Cancelled);
+        emit_terminal(&event_tx, &guard, TerminalReason::Done);
+        emit_terminal(
+            &event_tx,
+            &guard,
+            TerminalReason::Failed {
+                message: "late".to_string(),
+            },
+        );
+
+        let mut got = 0usize;
+        while let Ok(ev) = event_rx.try_recv() {
+            if matches!(ev, EneEvent::Terminal(_)) {
+                got += 1;
+            }
+        }
+        assert_eq!(got, 1, "expected exactly one Terminal event");
     }
 }

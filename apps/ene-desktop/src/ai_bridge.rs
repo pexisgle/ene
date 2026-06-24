@@ -184,11 +184,12 @@ async fn pump_events(
                 }));
             }
             Ok(EneEvent::SessionSplit { .. }) => {}
-            Ok(EneEvent::Done) => {
+            Ok(EneEvent::Terminal(ene_core::TerminalReason::Done))
+            | Ok(EneEvent::Terminal(ene_core::TerminalReason::Cancelled)) => {
                 processing.store(false, Ordering::Relaxed);
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Finished));
             }
-            Ok(EneEvent::Failed { message }) => {
+            Ok(EneEvent::Terminal(ene_core::TerminalReason::Failed { message })) => {
                 processing.store(false, Ordering::Relaxed);
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Error(message)));
             }
