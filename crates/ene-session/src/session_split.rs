@@ -22,8 +22,6 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     (dot / (norm_a * norm_b)).clamp(-1.0, 1.0)
 }
 
-// ... rest of file unchanged ...
-
 /// Represents whether a session should continue or split.
 #[derive(Debug)]
 pub enum SessionBoundary {
