@@ -339,6 +339,7 @@ const _: () = {
 mod tests {
     use super::*;
 
+    #[allow(dead_code)]
     fn prim(id: usize) -> PrimitiveId {
         PrimitiveId(id)
     }
