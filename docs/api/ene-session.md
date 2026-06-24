@@ -49,7 +49,7 @@ pub struct ConversationSession { /* opaque */ }
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `reset_session` | `fn reset_session(&mut self) -> SessionId` | Resets history and generates a new `SessionId`. Returns the old ID. |
+| `reset_session` | `fn reset_session(&mut self) -> SessionId` | Resets history and generates a new `SessionId`. Returns the new ID. |
 | `session_id` | `fn session_id(&self) -> &SessionId` | The current session's unique ID. |
 | `session_started_at` | `fn session_started_at(&self) -> DateTime<Utc>` | When the current session began. |
 | `session_elapsed_minutes` | `fn session_elapsed_minutes(&self) -> i64` | Minutes elapsed since session start. |
@@ -140,7 +140,7 @@ pub enum SessionBoundary {
 ```rust
 pub enum SplitReason {
     /// The session has been inactive for too long.
-    Timeout { elapsed_minutes: i64 },
+    Timeout { elapsed_minutes: u64 },
 
     /// The topic has shifted significantly (low embedding similarity).
     TopicChange { similarity: f32 },
@@ -238,7 +238,7 @@ pub async fn embed_session_messages(
 ) -> Result<Vec<f32>, EneSessionError>
 ```
 
-Concatenates assistant messages from history and embeds them as a single vector, representing the session's semantic content for boundary detection.
+Embeds the User and Assistant messages from history individually, then averages the per-message vectors to produce one summary vector. Non-text, empty, and non-User/Assistant messages are filtered out. The result represents the session's semantic content for boundary detection.
 
 ---
 
