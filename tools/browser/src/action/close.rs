@@ -11,7 +11,8 @@ fn default_store() -> Arc<crate::utils::session::BrowserSessionStore> {
     name = "close",
     summary = "Closes the browser session.",
     category = "Browser",
-    keywords_primary = "close, session"
+    keywords_primary = "close, session",
+    side_effects = "Browser { mutates_dom: true }"
 )]
 pub struct CloseAction {
     #[tool(skip)]

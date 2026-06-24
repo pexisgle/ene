@@ -21,7 +21,8 @@ fn default_state() -> Arc<UtilityState> {
     summary = "List all todos in the current session.",
     description = "Returns the full todo tree for the current session, including each item's id, content, status, priority, parent relationship, and a summary of active vs total items.",
     category = "Utility",
-    keywords_primary = "todo, task, track, plan, checklist"
+    keywords_primary = "todo, task, track, plan, checklist",
+    side_effects = "Idempotent"
 )]
 /// Action to list all todos in the current session.
 pub struct TodoListAction {
@@ -71,7 +72,8 @@ impl TodoListAction {
     summary = "Add a new todo.",
     description = "Adds a new todo. Set `parent_id` to make this a sub-task of an existing todo; this lets you break a large task into smaller sub-tasks at any depth. New todos start with status='pending'.",
     category = "Utility",
-    keywords_primary = "todo, task, track, plan, checklist"
+    keywords_primary = "todo, task, track, plan, checklist",
+    side_effects = "Idempotent"
 )]
 /// Action to add a new todo.
 pub struct TodoAddAction {
@@ -122,7 +124,8 @@ impl TodoAddAction {
     summary = "Update an existing todo's fields.",
     description = "Updates fields of an existing todo. Any field omitted is left unchanged. To reparent a todo, set parent_id to a new integer id; to detach it (make it a top-level todo), set parent_id to null. Repurposing cannot create a cycle (a todo cannot become a descendant of itself).",
     category = "Utility",
-    keywords_primary = "todo, task, track, plan, checklist"
+    keywords_primary = "todo, task, track, plan, checklist",
+    side_effects = "Idempotent"
 )]
 /// Action to update an existing todo's fields.
 pub struct TodoUpdateAction {
@@ -205,7 +208,8 @@ impl TodoUpdateAction {
     summary = "Mark a todo and all its sub-tasks as completed.",
     description = "Marks a todo (and all of its descendants) as completed. Use this when a large task and all of its sub-tasks are finished.",
     category = "Utility",
-    keywords_primary = "todo, task, track, plan, checklist"
+    keywords_primary = "todo, task, track, plan, checklist",
+    side_effects = "Idempotent"
 )]
 /// Action to mark a todo and all its sub-tasks as completed.
 pub struct TodoCompleteAction {
@@ -249,7 +253,8 @@ impl TodoCompleteAction {
     summary = "Soft-delete a todo by marking it as cancelled.",
     description = "Soft-deletes a todo by setting status='cancelled'. The row is kept for history. Descendants are NOT cascaded — to cancel a whole sub-tree, delete each item individually.",
     category = "Utility",
-    keywords_primary = "todo, task, track, plan, checklist"
+    keywords_primary = "todo, task, track, plan, checklist",
+    side_effects = "Idempotent"
 )]
 /// Action to soft-delete a todo by marking it as cancelled.
 pub struct TodoDeleteAction {

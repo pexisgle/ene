@@ -11,7 +11,8 @@ fn default_store() -> Arc<crate::utils::session::BrowserSessionStore> {
     name = "navigate",
     summary = "Navigates to a URL",
     category = "Browser",
-    keywords_primary = "navigate, url, goto"
+    keywords_primary = "navigate, url, goto",
+    side_effects = "Browser { mutates_dom: true }"
 )]
 pub struct NavigateAction {
     /// URL to navigate to. Prefer navigate+URL over clicking links whenever possible.

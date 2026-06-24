@@ -103,7 +103,8 @@ fn default_client() -> reqwest::Client {
     summary = "Fetch a URL and return its content as text or markdown.",
     description = "Fetches content from a URL and returns it in the requested format (markdown, text, or html). Supports configurable timeout and automatically converts HTML to readable markdown.",
     category = "WebFetch",
-    keywords_primary = "fetch, url, web, download, html"
+    keywords_primary = "fetch, url, web, download, html",
+    side_effects = "Network { external: true }"
 )]
 pub struct WebFetchAction {
     #[tool(skip)]

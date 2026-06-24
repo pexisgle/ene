@@ -10,7 +10,8 @@ mod wayland;
     summary = "Brings a window to the foreground by title substring match.",
     description = "Brings a window to the foreground by title substring match.",
     category = "App",
-    keywords_primary = "window, focus, foreground, activate"
+    keywords_primary = "window, focus, foreground, activate",
+    side_effects = "System { privileged: true }"
 )]
 pub struct FocusWindowAction {
     /// Substring of window title or app name to focus.

@@ -67,7 +67,8 @@ fn default_sandbox() -> SandboxRef {
     summary = "Write or create a file at the given path.",
     description = "Write or create a file at the given path with the specified content.",
     category = "Filesystem",
-    keywords_primary = "write, create, save, file"
+    keywords_primary = "write, create, save, file",
+    side_effects = "FileSystem { mutates: true }"
 )]
 pub struct FsWriteAction {
     /// Absolute path to the file to write.

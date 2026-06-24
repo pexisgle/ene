@@ -270,7 +270,8 @@ fn default_sandbox() -> SandboxRef {
     summary = "Targeted in-place edit: find oldString and replace with newString.",
     description = "Targeted in-place edit: find oldString and replace with newString. Uses a chain of matching strategies (exact, trimmed, block anchor, whitespace-normalized, etc.) for robust matching.",
     category = "Filesystem",
-    keywords_primary = "edit, replace, modify, change, substitute"
+    keywords_primary = "edit, replace, modify, change, substitute",
+    side_effects = "FileSystem { mutates: true }"
 )]
 pub struct FsEditAction {
     /// Absolute path to the file to edit.

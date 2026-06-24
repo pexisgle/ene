@@ -7,7 +7,8 @@ use ene_tool_common::prelude::*;
     summary = "Writes text to the system clipboard.",
     description = "Writes text to the system clipboard.",
     category = "App",
-    keywords_primary = "clipboard, write, copy"
+    keywords_primary = "clipboard, write, copy",
+    side_effects = "System { privileged: true }"
 )]
 pub struct ClipboardWriteAction {
     /// Text to write to clipboard.

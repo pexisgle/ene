@@ -11,7 +11,8 @@ fn default_store() -> Arc<crate::utils::session::BrowserSessionStore> {
     name = "scroll",
     summary = "Scrolls the page by specified pixels",
     category = "Browser",
-    keywords_primary = "scroll, page"
+    keywords_primary = "scroll, page",
+    side_effects = "Browser { mutates_dom: true }"
 )]
 pub struct ScrollAction {
     /// Horizontal scroll amount in pixels (default: 0).

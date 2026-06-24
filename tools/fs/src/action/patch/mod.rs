@@ -238,7 +238,8 @@ fn default_sandbox() -> SandboxRef {
     summary = "Apply a multi-file patch in custom format.",
     description = "Apply a multi-file patch in custom format. Supports Update, Add, and Delete file directives between *** Begin Patch / *** End Patch markers.",
     category = "Filesystem",
-    keywords_primary = "patch, apply, diff, update, multi-file"
+    keywords_primary = "patch, apply, diff, update, multi-file",
+    side_effects = "FileSystem { mutates: true }"
 )]
 pub struct FsPatchAction {
     /// Full patch text in the custom patch format.

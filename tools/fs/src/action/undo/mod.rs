@@ -24,7 +24,8 @@ fn default_sandbox() -> SandboxRef {
     summary = "Reverts the most recent file operation.",
     description = "Reverts the most recent file operation (write, edit, delete, patch). Can be called multiple times to undo multiple operations. Shell operations cannot be undone.",
     category = "Utility",
-    keywords_primary = "undo, revert, rollback"
+    keywords_primary = "undo, revert, rollback",
+    side_effects = "FileSystem { mutates: true }"
 )]
 pub struct UndoAction {
     #[tool(skip)]

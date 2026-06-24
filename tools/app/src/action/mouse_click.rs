@@ -8,7 +8,8 @@ use enigo::{Button, Direction, Mouse};
     summary = "Simulates mouse click at the current cursor position.",
     description = "Simulates mouse click at the current cursor position.",
     category = "App",
-    keywords_primary = "mouse, click, button"
+    keywords_primary = "mouse, click, button",
+    side_effects = "System { privileged: true }"
 )]
 pub struct MouseClickAction {
     /// Mouse button to click (default: left).
