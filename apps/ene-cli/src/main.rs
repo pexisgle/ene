@@ -27,5 +27,6 @@ async fn main() {
     println!("Type '/help' for a list of commands.");
 
     let mut ctx = context::AppContext::new(handle);
-    repl::run(&mut ctx).await;
+    let code = repl::run(&mut ctx).await;
+    std::process::exit(code);
 }

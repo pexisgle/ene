@@ -319,6 +319,12 @@ pub enum EneStatus {
 #[error("Actor is no longer running")]
 pub struct ActorDeadError;
 
+/// Error returned by [`EneHandle::shutdown`] when the actor's drain
+/// takes longer than the supplied timeout.
+#[derive(Debug, thiserror::Error)]
+#[error("Actor did not shut down within {0:?}")]
+pub struct ShutdownTimeout(pub std::time::Duration);
+
 /// A single entry in the conversation history.
 #[derive(Debug, Clone)]
 pub struct ConversationEntry {
@@ -359,6 +365,11 @@ impl EneEventReceiver {
 pub struct EneHandle {
     cmd_tx: Arc<mpsc::UnboundedSender<EneCommand>>,
     event_tx: broadcast::Sender<EneEvent>,
+    /// `JoinHandle` for the actor task. Used by [`EneHandle::shutdown`]
+    /// to await the actor's drain after sending `EneCommand::Shutdown`.
+    /// Wrapped in a `tokio::sync::Mutex` because `JoinHandle` is `!Sync`
+    /// and `EneHandle` must be `Clone` (and therefore `Sync`).
+    actor_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl std::fmt::Debug for EneHandle {
@@ -372,6 +383,7 @@ impl Clone for EneHandle {
         Self {
             cmd_tx: Arc::clone(&self.cmd_tx),
             event_tx: self.event_tx.clone(),
+            actor_handle: Arc::clone(&self.actor_handle),
         }
     }
 }
@@ -388,9 +400,13 @@ impl EneHandle {
         let (event_tx, _event_rx) = broadcast::channel(1024);
 
         let actor = EneActor::new(cmd_rx, event_tx.clone());
-        tokio::spawn(actor.run());
+        let join = tokio::spawn(actor.run());
 
-        Self { cmd_tx, event_tx }
+        Self {
+            cmd_tx,
+            event_tx,
+            actor_handle: Arc::new(tokio::sync::Mutex::new(Some(join))),
+        }
     }
 
     /// Subscribe to the event stream. Returns a receiver that will see
@@ -418,6 +434,56 @@ impl EneHandle {
         self.cmd_tx
             .send(EneCommand::Cancel)
             .map_err(|_| ActorDeadError)
+    }
+
+    /// Send a `Shutdown` command and await the actor's drain.
+    ///
+    /// The actor's command loop returns `false` for `Shutdown`, exits,
+    /// and drops its tool registry / memory store / tool RAG handles.
+    /// Tool processes get killed via the registry's `Drop` impl, and
+    /// the memory store's pending inserts (see `spawn_insert_log`)
+    /// finish in their own `tokio::spawn`'d tasks.
+    ///
+    /// Returns `Ok(())` if the actor finished within the timeout, or
+    /// `Err(ShutdownTimeout(Duration))` if it took longer. The actor
+    /// task is detached in that case (we cannot cancel it from the
+    /// other side), so the process exit that follows still aborts
+    /// it; the timeout is purely to bound the wait.
+    ///
+    /// `Drop` already sends `Shutdown` when the last handle is dropped,
+    /// so calling this method is only needed when the caller wants to
+    /// observe the actor's drain (e.g. `/quit` in the CLI).
+    pub async fn shutdown(&self, timeout: std::time::Duration) -> Result<(), ShutdownTimeout> {
+        if self.cmd_tx.send(EneCommand::Shutdown).is_err() {
+            // Actor already gone (channel closed). Drain whatever
+            // JoinHandle is still around so we don't leak.
+            let mut guard = self.actor_handle.lock().await;
+            if let Some(join) = guard.take() {
+                let _ = join.await;
+            }
+            return Ok(());
+        }
+
+        let mut guard = self.actor_handle.lock().await;
+        let Some(join) = guard.as_mut() else {
+            return Ok(());
+        };
+        match tokio::time::timeout(timeout, &mut *join).await {
+            Ok(Ok(())) => {
+                // Drop the JoinHandle from the Option so a second
+                // shutdown call becomes a no-op.
+                guard.take();
+                Ok(())
+            }
+            Ok(Err(join_err)) => {
+                // Tokio task was cancelled or panicked. Treat as
+                // completed: the actor is gone either way.
+                tracing::warn!("[EneHandle] actor task ended with error: {join_err}");
+                guard.take();
+                Ok(())
+            }
+            Err(_elapsed) => Err(ShutdownTimeout(timeout)),
+        }
     }
 
     /// Send a permission decision for a pending destructive operation.
@@ -1221,4 +1287,28 @@ fn init_tool_rag(
         store,
         opts,
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for #38: `EneHandle::shutdown` must send the
+    /// shutdown command, wait for the actor task to finish, and
+    /// return Ok(()). The Drop impl already does the no-wait
+    /// version; the test pins the awaiting behavior that `/quit`
+    /// and Ctrl-C now depend on.
+    #[tokio::test]
+    async fn shutdown_awaits_actor_drain() {
+        let handle = EneHandle::new();
+        // The actor's run() starts immediately and just loops on
+        // cmd_rx.recv(). Shutdown should make it exit promptly.
+        let result = handle.shutdown(std::time::Duration::from_secs(2)).await;
+        assert!(result.is_ok(), "shutdown returned: {result:?}");
+
+        // After shutdown, the actor's task is consumed from the
+        // JoinHandle slot. A second shutdown is a no-op.
+        let result2 = handle.shutdown(std::time::Duration::from_secs(2)).await;
+        assert!(result2.is_ok(), "second shutdown returned: {result2:?}");
+    }
 }
