@@ -794,10 +794,17 @@ impl EneActor {
         // 1. Apply any pending split result from the previous run
         self.apply_pending_split();
 
-        // 2. Check and spawn a split task for this input
+        // 2. Record the triggering user message *before* taking the split
+        //    snapshot so the summary includes this turn, and so the snapshot
+        //    boundary points at it. apply_split_result will keep this entry
+        //    and any messages added after the snapshot.
+        self.session.record_user_input();
+        self.session.add_user_message(&user_input);
+
+        // 3. Check and spawn a split task for this input
         self.check_and_perform_split(&user_input);
 
-        // 3. Embed the input
+        // 4. Embed the input
         if let Err(e) = self.embed_input(&user_input).await {
             if self
                 .terminal_emitted
@@ -817,10 +824,6 @@ impl EneActor {
             }
             return;
         }
-
-        // 4. Record user input in session
-        self.session.record_user_input();
-        self.session.add_user_message(&user_input);
 
         // 5. Create provider
         let provider = match self.create_provider() {
@@ -921,8 +924,7 @@ impl EneActor {
             summary: result.summary.clone(),
             reason: result.reason.clone(),
         });
-        self.session.reset_session();
-        self.session.memory.session_id = result.new_session_id.clone();
+        self.session.apply_split_result(&result);
 
         Ok(result)
     }
@@ -932,16 +934,18 @@ impl EneActor {
             match result {
                 Ok(split) => {
                     let _ = self.event_tx.send(EneEvent::SessionSplit {
-                        summary: split.summary,
-                        reason: split.reason,
+                        summary: split.summary.clone(),
+                        reason: split.reason.clone(),
                     });
-                    self.session.reset_session();
-                    self.session.memory.session_id = split.new_session_id;
+                    self.session.apply_split_result(&split);
                 }
                 Err(e) => {
                     if !matches!(e, ene_session::EneSessionError::SplitNotNeeded) {
                         tracing::error!("[Session] Summary generation error: {}", e);
                     }
+                    // Split failed or wasn't needed: clear the marker so
+                    // history trimming resumes.
+                    self.session.clear_split_pending();
                 }
             }
         }
@@ -978,6 +982,7 @@ impl EneActor {
                 &self.config.user_name.clone(),
                 provider,
             ) {
+                self.session.mark_split_pending();
                 ene_session::spawn_split_task(&mut self.pending_split, input);
             }
         }

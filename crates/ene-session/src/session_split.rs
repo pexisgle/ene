@@ -77,6 +77,13 @@ pub struct SplitResult {
     pub key_facts: Vec<KeyFact>,
     /// The ID of the new session.
     pub new_session_id: SessionId,
+    /// Number of conversation-history entries that were in the snapshot
+    /// passed to the summarizer. The actor uses this as a boundary when
+    /// applying the split: history entries before index `snapshot_len - 1`
+    /// are discarded, and entries at and after that index are retained so
+    /// any user/assistant messages that arrived while the split was
+    /// running are preserved in the live history.
+    pub snapshot_len: usize,
 }
 
 /// Handle to a pending split task running in the background.
@@ -298,12 +305,14 @@ pub async fn execute_split(
         .await?;
 
     let new_session_id = generate_session_id();
+    let snapshot_len = history.len();
 
     Ok(SplitResult {
         reason,
         summary: summary_result.summary,
         key_facts: summary_result.key_facts,
         new_session_id,
+        snapshot_len,
     })
 }
 
