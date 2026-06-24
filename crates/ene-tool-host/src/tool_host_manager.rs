@@ -68,9 +68,17 @@ impl ToolProcess {
     }
 
     fn delay_for_restart(&self) -> Duration {
-        let delay_ms = BASE_DELAY_MS * 2u64.saturating_pow(self.restart_count as u32);
-        Duration::from_millis(delay_ms.min(MAX_DELAY_MS))
+        delay_for_restart(self.restart_count)
     }
+}
+
+/// Pure-function form of the per-restart backoff delay.
+/// Exposed at module scope so unit tests can verify the
+/// schedule without having to construct a `ToolProcess`
+/// (which owns an unconstructible-by-mem-zero `Child`).
+fn delay_for_restart(restart_count: usize) -> Duration {
+    let delay_ms = BASE_DELAY_MS * 2u64.saturating_pow(restart_count as u32);
+    Duration::from_millis(delay_ms.min(MAX_DELAY_MS))
 }
 
 impl Drop for ToolProcess {
@@ -101,21 +109,43 @@ impl ToolRegistry for SupervisedIpcRegistry {
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
+        // Fast path: a successful call also clears the
+        // per-process restart counter so a tool that crashes
+        // occasionally but is otherwise healthy does not
+        // accumulate lifetime crashes against the MAX_RESTARTS
+        // budget.
         let reg = self
             .registry
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let result = reg.call_tool(name, arguments).await;
-
-        if result.is_ok() {
-            return result;
+        let first_result = reg.call_tool(name, arguments).await;
+        if first_result.is_ok() {
+            let mut guard = self.process.lock().await;
+            if guard.restart_count != 0 {
+                tracing::info!(
+                    "[SupervisedIpcRegistry] Tool '{}' call succeeded; resetting restart counter (was {})",
+                    guard.name,
+                    guard.restart_count
+                );
+                guard.restart_count = 0;
+            }
+            return first_result;
         }
 
+        // Supervision path: the call failed. Hold the
+        // process lock for the entire check-restart-retry
+        // sequence so a second concurrent caller cannot
+        // trigger a duplicate restart, and so the retry
+        // below uses the freshly installed registry (no
+        // TOCTOU window).
         let mut guard = self.process.lock().await;
 
         if guard.is_alive() {
-            return result;
+            // Process is alive; the failure was the tool's
+            // own response (e.g. a permission denial).
+            // Surface the original error to the caller.
+            return first_result;
         }
 
         tracing::warn!(
@@ -148,8 +178,11 @@ impl ToolRegistry for SupervisedIpcRegistry {
             *reg_guard = Arc::clone(&new_reg_arc);
         }
 
-        drop(guard);
-
+        // Retry the original call while we still hold the
+        // process lock. The new registry has just been
+        // installed under the same lock, so the retry is
+        // guaranteed to use the freshly restarted binary
+        // without any other caller racing in between.
         new_reg_arc.call_tool(name, arguments).await
     }
 
@@ -507,5 +540,25 @@ impl ToolHostManager {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies that the exponential-backoff delay used
+    /// between restart attempts grows geometrically up to
+    /// the `MAX_DELAY_MS` ceiling, so a flaky tool does not
+    /// spin-restart at full CPU.
+    #[test]
+    fn delay_for_restart_grows_then_caps() {
+        assert_eq!(delay_for_restart(0), Duration::from_millis(500));
+        assert_eq!(delay_for_restart(1), Duration::from_millis(1_000));
+        assert_eq!(delay_for_restart(2), Duration::from_millis(2_000));
+        assert_eq!(delay_for_restart(3), Duration::from_millis(4_000));
+        assert_eq!(delay_for_restart(4), Duration::from_millis(8_000));
+        // Saturates at MAX_DELAY_MS for very high counts.
+        assert_eq!(delay_for_restart(30), Duration::from_millis(MAX_DELAY_MS));
     }
 }
