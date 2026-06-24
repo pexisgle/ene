@@ -25,7 +25,6 @@ use sea_orm::{
     Statement,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info, warn};
 
 /// Errors from the DB IPC server.
@@ -109,17 +108,22 @@ impl DbIpcServer {
 
     /// Runs the server, listening for connections and handling requests.
     pub async fn run(self) -> Result<(), DbServerError> {
+        // On Unix, remove any stale socket file from a previous run
+        // before binding. Named pipes are kernel objects, not
+        // filesystem objects, so this step is a no-op on Windows.
+        #[cfg(unix)]
         if self.socket_path.exists() {
             tokio::fs::remove_file(&self.socket_path).await?;
         }
 
-        let listener = UnixListener::bind(&self.socket_path)?;
+        let mut listener = ene_tool_proto::transport::IpcListener::bind(&self.socket_path)?;
 
         // Restrict the unix socket to the owning user. Without this
         // chmod the socket in /tmp is world-connectable, allowing any
         // local process to connect and issue DeclareSchema on the tool's
         // behalf (combined with the SQL-injection vector fixed in
-        // #23 this is a privilege escalation).
+        // #23 this is a privilege escalation). Named pipes use a
+        // per-handle ACL instead, which the kernel sets when we bind.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -143,7 +147,7 @@ impl DbIpcServer {
             .map_err(|e| DbServerError::Internal(e.to_string()))?;
 
         loop {
-            let (stream, _) = listener.accept().await?;
+            let stream = listener.accept().await?;
             debug!(tool = %self.tool_name, "Accepted DB IPC connection");
 
             let db = db.clone();
@@ -162,13 +166,13 @@ impl DbIpcServer {
     }
 
     async fn handle_connection(
-        stream: UnixStream,
+        stream: ene_tool_proto::transport::IpcStream,
         db: DatabaseConnection,
         tool_name: String,
         prefix: String,
         auth_token: String,
     ) -> Result<(), DbServerError> {
-        let (mut reader, mut writer) = stream.into_split();
+        let mut stream = stream;
 
         let mut declared_tables: HashMap<String, DbTable> = HashMap::new();
         let mut declared_columns: HashMap<String, HashSet<String>> = HashMap::new();
@@ -177,7 +181,7 @@ impl DbIpcServer {
 
         loop {
             let mut len_buf = [0u8; 4];
-            match reader.read_exact(&mut len_buf).await {
+            match stream.read_exact(&mut len_buf).await {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     debug!(tool = %tool_name, "DB IPC connection closed");
@@ -193,7 +197,7 @@ impl DbIpcServer {
             }
 
             let mut msg_buf = vec![0u8; msg_len];
-            reader.read_exact(&mut msg_buf).await?;
+            stream.read_exact(&mut msg_buf).await?;
 
             let request: DbRequest = match serde_json::from_slice(&msg_buf) {
                 Ok(req) => req,
@@ -203,7 +207,7 @@ impl DbIpcServer {
                         code: DbErrorCode::Internal,
                         message: format!("Invalid JSON: {e}"),
                     };
-                    Self::send_response(&mut writer, &response).await?;
+                    Self::send_response(&mut stream, &response).await?;
                     continue;
                 }
             };
@@ -238,7 +242,7 @@ impl DbIpcServer {
                         }
                     }
                 };
-                Self::send_response(&mut writer, &response).await?;
+                Self::send_response(&mut stream, &response).await?;
                 if !authenticated {
                     break;
                 }
@@ -256,7 +260,7 @@ impl DbIpcServer {
             .await;
 
             let is_shutdown = matches!(response, DbResponse::Ack);
-            Self::send_response(&mut writer, &response).await?;
+            Self::send_response(&mut stream, &response).await?;
 
             if is_shutdown {
                 debug!(tool = %tool_name, "Received shutdown request");
@@ -268,14 +272,14 @@ impl DbIpcServer {
     }
 
     async fn send_response(
-        writer: &mut tokio::net::unix::OwnedWriteHalf,
+        stream: &mut ene_tool_proto::transport::IpcStream,
         response: &DbResponse,
     ) -> Result<(), DbServerError> {
         let json = serde_json::to_vec(response)?;
         let len = json.len() as u32;
-        writer.write_all(&len.to_le_bytes()).await?;
-        writer.write_all(&json).await?;
-        writer.flush().await?;
+        stream.write_all(&len.to_le_bytes()).await?;
+        stream.write_all(&json).await?;
+        stream.flush().await?;
         Ok(())
     }
 
