@@ -24,7 +24,14 @@ impl DbClient {
     ///
     /// ソケットパスは、プロセスがスポーンされる際に
     /// `ene-tool-host` が環境変数として提供します。
-    pub fn connect(socket_path: &Path) -> Result<Self, DbError>;
+    pub async fn connect(socket_path: &Path) -> Result<Self, DbError>;
+
+    /// 明示的な認証トークン付きで接続する
+    /// （デフォルトの `ENE_DB_AUTH_TOKEN` 環境変数を上書き）。
+    pub async fn connect_with_token(
+        socket_path: &Path,
+        token: &str,
+    ) -> Result<Self, DbError>;
 }
 ```
 
@@ -37,7 +44,7 @@ impl DbClient {
     ///
     /// サーバーはまだ存在しないテーブルとインデックスを作成します。
     /// (created_tables, created_indexes) を返します。
-    pub fn declare_schema(
+    pub async fn declare_schema(
         &self,
         schema: DbSchema,
     ) -> Result<(Vec<String>, Vec<String>), DbError>;
@@ -58,13 +65,15 @@ impl DbClient {
 | `ping` | `() -> Result<(), DbError>` | 接続のヘルスチェックを行います。 |
 | `shutdown` | `() -> Result<(), DbError>` | クライアント接続を正常に閉じます。 |
 
+すべての CRUD メソッドは `async` です。
+
 ### 使用例
 
 ```rust
 use ene_tool_db::{DbClient, DbSchema, DbTable, DbColumn, DbType, DbFilter, DbValue, Row};
 use std::path::Path;
 
-let client = DbClient::connect(Path::new("/run/ene/db.sock"))?;
+let client = DbClient::connect(Path::new("/run/ene/db.sock")).await?;
 
 client.declare_schema(DbSchema {
     prefix: "fs".to_string(),
@@ -93,28 +102,34 @@ client.declare_schema(DbSchema {
         },
     ],
     indexes: vec![],
-})?;
+}).await?;
 
 // 挿入
 let mut row = Row::new();
 row.insert("path".into(), DbValue::Text("/home/user/notes.md".into()));
-row.insert("visited_at".into(), DbValue::Integer(1_700_000_000));
-let rowid = client.insert("fs_visited", row)?;
+row.insert("visited_at".into(), DbValue::Int(1_700_000_000));
+let rowid = client.insert("fs_visited", row).await?;
 
 // 検索
 let rows = client.select(
     "fs_visited",
     None,  // SELECT *
-    DbFilter::Eq { col: "path".into(), val: DbValue::Text("/home/user/notes.md".into()) },
+    DbFilter::Eq {
+        column: "path".into(),
+        value: DbValue::Text("/home/user/notes.md".into()),
+    },
     None,  // ORDER BY なし
     Some(10),
-)?;
+).await?;
 
 // 削除
 let deleted = client.delete(
     "fs_visited",
-    DbFilter::Eq { col: "id".into(), val: DbValue::Integer(rowid) },
-)?;
+    DbFilter::Eq {
+        column: "id".into(),
+        value: DbValue::Int(rowid),
+    },
+).await?;
 println!("{deleted} 行を削除しました");
 ```
 
@@ -139,11 +154,18 @@ pub enum DbError {
 
 ```rust
 pub enum DbErrorCode {
-    AccessDenied,       // このツールではテーブルのプレフィックスが許可されていない
-    TableNotFound,
-    ConstraintViolation,
-    InvalidSchema,
-    QueryError,
+    /// ツールが要求されたリソースへのアクセス権を持たない
+    /// （例：宣言されたプレフィックス外のテーブルへアクセスしようとした）。
+    PermissionDenied,
+    /// 指定されたテーブルが存在しないか、宣言されていない。
+    UnknownTable,
+    /// 指定されたカラムがテーブルに存在しない。
+    UnknownColumn,
+    /// 値の型がカラムの宣言された型と一致しない。
+    TypeMismatch,
+    /// フィルター式が無効。
+    InvalidFilter,
+    /// サーバー内部エラーが発生した。
     Internal,
 }
 ```
@@ -179,13 +201,18 @@ pub struct DbTable {
 ```rust
 pub struct DbColumn {
     pub name: String,
+    /// カラム型。デフォルトは `DbType::Text`。
     pub ty: DbType,
+    /// NULL を許容するかどうか。デフォルトは `false`。
+    pub nullable: bool,
+    /// 主キーかどうか。デフォルトは `false`。
     pub primary_key: bool,
+    /// 自動増分するかどうか。デフォルトは `false`。
     pub auto_increment: bool,
-    pub not_null: bool,
+    /// UNIQUE 制約を持つかどうか。デフォルトは `false`。
     pub unique: bool,
-    /// SQLite の DEFAULT 式（存在する場合）。
-    pub default: Option<String>,
+    /// デフォルト値（型付き）。デフォルトは `None`。
+    pub default: Option<DbValue>,
 }
 ```
 
@@ -208,10 +235,16 @@ pub struct DbIndex {
 
 ```rust
 pub enum DbType {
+    /// 64-bit 符号付き整数。
     Integer,
+    /// 64-bit IEEE 浮動小数点。
     Real,
+    /// UTF-8 テキスト文字列。（デフォルト）
     Text,
+    /// バイナリブロブ。
     Blob,
+    /// 真偽値（INTEGER の 0/1 として保存）。
+    Boolean,
 }
 ```
 
@@ -219,11 +252,18 @@ pub enum DbType {
 
 ```rust
 pub enum DbValue {
-    Integer(i64),
-    Real(f64),
-    Text(String),
-    Blob(Vec<u8>),
+    /// SQL NULL。
     Null,
+    /// 真偽値。
+    Bool(bool),
+    /// 64-bit 符号付き整数。
+    Int(i64),
+    /// 64-bit 浮動小数点。
+    Float(f64),
+    /// UTF-8 テキスト文字列。
+    Text(String),
+    /// バイナリブロブ。
+    Blob(Vec<u8>),
 }
 ```
 
@@ -243,27 +283,28 @@ pub type Row = BTreeMap<String, DbValue>;
 
 ```rust
 pub enum DbFilter {
-    /// すべての行にマッチする（WHERE 句なし）。
-    All,
+    /// すべての行にマッチする。
+    Always,
 
     // 論理演算
     And(Vec<DbFilter>),
     Or(Vec<DbFilter>),
+    Not(Box<DbFilter>),
 
     // 比較演算
-    Eq  { col: String, val: DbValue },
-    Ne  { col: String, val: DbValue },
-    Gt  { col: String, val: DbValue },
-    Lt  { col: String, val: DbValue },
-    Ge  { col: String, val: DbValue },
-    Le  { col: String, val: DbValue },
+    Eq  { column: String, value: DbValue },
+    Ne  { column: String, value: DbValue },
+    Gt  { column: String, value: DbValue },
+    Lt  { column: String, value: DbValue },
+    Ge  { column: String, value: DbValue },
+    Le  { column: String, value: DbValue },
 
     // 文字列
-    Like { col: String, pattern: String },
+    Like { column: String, pattern: String },
 
     // NULL チェック
-    IsNull    { col: String },
-    IsNotNull { col: String },
+    IsNull    { column: String },
+    IsNotNull { column: String },
 }
 ```
 
@@ -272,15 +313,23 @@ pub enum DbFilter {
 ```rust
 // WHERE path LIKE '/home/%' AND visited_at > 1700000000
 let filter = DbFilter::And(vec![
-    DbFilter::Like { col: "path".into(), pattern: "/home/%".into() },
-    DbFilter::Gt   { col: "visited_at".into(), val: DbValue::Integer(1_700_000_000) },
+    DbFilter::Like {
+        column: "path".into(),
+        pattern: "/home/%".into(),
+    },
+    DbFilter::Gt {
+        column: "visited_at".into(),
+        value: DbValue::Int(1_700_000_000),
+    },
 ]);
 
 // WHERE id IS NOT NULL
-let filter = DbFilter::IsNotNull { col: "id".into() };
+let filter = DbFilter::IsNotNull {
+    column: "id".into(),
+};
 
 // フィルターなし（全行 SELECT）
-let filter = DbFilter::All;
+let filter = DbFilter::Always;
 ```
 
 ---
@@ -291,7 +340,7 @@ let filter = DbFilter::All;
 
 > ツールは `<tool_prefix>_` で始まる名前のテーブルのみアクセスできます。
 
-ツールが自分のプレフィックス外のテーブルへの読み書きを試みた場合、サーバーは `DbError::Server { code: DbErrorCode::AccessDenied, … }` を返します。
+ツールが自分のプレフィックス外のテーブルへの読み書きを試みた場合、サーバーは `DbError::Server { code: DbErrorCode::PermissionDenied, … }` を返します。
 
 この分離は意図的なものです：ツールは別々の信頼されていないプロセスであり、互いの状態を読んだり破損させたりできないようにする必要があります。
 
@@ -300,5 +349,5 @@ let filter = DbFilter::All;
 ## 関連ページ
 
 - [`ene-tool-host`](ene-tool-host.md) — ツールプロセスをスポーンし、DB IPC ソケットパスを提供
-- [メモリシステムルール](../../AGENTS.md#73-memory-system-rules-strict) — コアクレートの Diesel / sqlite-vec の制約
+- [メモリシステムルール](../../AGENTS.md#73-memory-system-rules-strict) — コアクレートの sea-orm / sqlite-vec の制約
 - [ツールシステム概要](../tools/overview.md)

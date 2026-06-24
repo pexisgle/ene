@@ -32,7 +32,7 @@ pub struct ToolSpec {
     pub category: ToolCategory,
     pub keywords: KeywordSet,
     pub parameters: serde_json::Value,  // JSON Schema オブジェクト
-    pub examples: serde_json::Value,
+    pub examples: Vec<ToolExample>,
     pub caveats: Vec<String>,
     pub side_effects: SideEffects,
     pub preconditions: Vec<String>,
@@ -63,11 +63,20 @@ pub struct KeywordSet {
 
 ```rust
 pub enum SideEffects {
-    None,
+    /// 読み取り専用: 観測可能な副作用なし。
     ReadOnly,
-    Writes,
-    Network,
+    /// ファイルシステム操作。書き込む場合は `mutates: true`。
+    FileSystem { mutates: bool },
+    /// ネットワークアクセス。ループバック外に出る場合は `external: true`。
+    Network { external: bool },
+    /// システムレベルアクセス(プロセス生成, シグナル等)。
+    System { privileged: bool },
+    /// ブラウザ自動化。
+    Browser { mutates_dom: bool },
+    /// 破壊的: データ損失の可能性があり、ロールバックは保証されない。
     Destructive,
+    /// 冪等: 同じ引数で2回呼び出しても同じ効果。
+    Idempotent,
 }
 ```
 
@@ -121,7 +130,7 @@ pub enum ToolError {
     IoError { message: String },
     FileNotFound { path: String },
     FileTooLarge { path: String, size: u64, limit: u64 },
-    ShellOutputTooLarge { size: usize, limit: usize },
+    ShellOutputTooLarge { size: u64, limit: u64 },
 
     // ── ドメイン固有 ────────────────────────────────────────
     BrowserError { message: String },
@@ -142,7 +151,7 @@ pub enum ToolError {
 
 ## `IpcRequest`
 
-**ホスト**（`ene-tool-host`）からツールバイナリへ送信されるメッセージです。
+**コア**（`ene-core` / `ene-tool-host`）からツールバイナリへ送信されるメッセージです。
 
 ```rust
 pub enum IpcRequest {
@@ -182,7 +191,7 @@ pub enum IpcRequest {
 
 ## `IpcResponse`
 
-ツールバイナリからホストへ返送されるメッセージです。
+ツールバイナリから**コア**（`ene-core` / `ene-tool-host`）へ返送されるメッセージです。
 
 ```rust
 pub enum IpcResponse {

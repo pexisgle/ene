@@ -32,7 +32,7 @@ pub struct ToolSpec {
     pub category: ToolCategory,
     pub keywords: KeywordSet,
     pub parameters: serde_json::Value,  // JSON Schema object
-    pub examples: serde_json::Value,
+    pub examples: Vec<ToolExample>,
     pub caveats: Vec<String>,
     pub side_effects: SideEffects,
     pub preconditions: Vec<String>,
@@ -63,11 +63,20 @@ The `negative` set is used by the RAG pipeline to down-rank tools when query ter
 
 ```rust
 pub enum SideEffects {
-    None,
+    /// Read-only: no observable side effects.
     ReadOnly,
-    Writes,
-    Network,
+    /// File-system interaction. `mutates: true` if it writes.
+    FileSystem { mutates: bool },
+    /// Network access. `external: true` if it goes outside the loopback.
+    Network { external: bool },
+    /// System-level access (process spawn, signals, etc.).
+    System { privileged: bool },
+    /// Browser automation.
+    Browser { mutates_dom: bool },
+    /// Destructive: data loss is possible and rollback is not guaranteed.
     Destructive,
+    /// Idempotent: calling twice with the same args yields the same effect.
+    Idempotent,
 }
 ```
 
@@ -121,7 +130,7 @@ pub enum ToolError {
     IoError { message: String },
     FileNotFound { path: String },
     FileTooLarge { path: String, size: u64, limit: u64 },
-    ShellOutputTooLarge { size: usize, limit: usize },
+    ShellOutputTooLarge { size: u64, limit: u64 },
 
     // ── Domain-specific ────────────────────────────────────────
     BrowserError { message: String },
@@ -142,7 +151,7 @@ When a tool returns `PermissionRequired` or `UserInputRequired`, the host must:
 
 ## `IpcRequest`
 
-Messages sent from the **host** (`ene-tool-host`) **to** the tool binary.
+Messages sent from the **core** (`ene-core` / `ene-tool-host`) **to** the tool binary.
 
 ```rust
 pub enum IpcRequest {
@@ -182,7 +191,7 @@ pub enum IpcRequest {
 
 ## `IpcResponse`
 
-Messages sent from the **tool binary** back to the host.
+Messages sent from the **tool binary** back to the **core** (`ene-core` / `ene-tool-host`).
 
 ```rust
 pub enum IpcResponse {

@@ -24,7 +24,14 @@ impl DbClient {
     ///
     /// The socket path is provided to tool binaries via an environment variable
     /// set by `ene-tool-host` when the process is spawned.
-    pub fn connect(socket_path: &Path) -> Result<Self, DbError>;
+    pub async fn connect(socket_path: &Path) -> Result<Self, DbError>;
+
+    /// Connect with an explicit auth token (overrides the
+    /// `ENE_DB_AUTH_TOKEN` env var, which is the default source).
+    pub async fn connect_with_token(
+        socket_path: &Path,
+        token: &str,
+    ) -> Result<Self, DbError>;
 }
 ```
 
@@ -37,7 +44,7 @@ impl DbClient {
     ///
     /// The server creates any tables and indexes that do not yet exist.
     /// Returns `(created_tables, created_indexes)`.
-    pub fn declare_schema(
+    pub async fn declare_schema(
         &self,
         schema: DbSchema,
     ) -> Result<(Vec<String>, Vec<String>), DbError>;
@@ -58,13 +65,15 @@ impl DbClient {
 | `ping` | `() -> Result<(), DbError>` | Health-check the connection. |
 | `shutdown` | `() -> Result<(), DbError>` | Gracefully close the client connection. |
 
+All CRUD methods are `async`.
+
 ### Example
 
 ```rust
 use ene_tool_db::{DbClient, DbSchema, DbTable, DbColumn, DbType, DbFilter, DbValue, Row};
 use std::path::Path;
 
-let client = DbClient::connect(Path::new("/run/ene/db.sock"))?;
+let client = DbClient::connect(Path::new("/run/ene/db.sock")).await?;
 
 client.declare_schema(DbSchema {
     prefix: "fs".to_string(),
@@ -93,28 +102,34 @@ client.declare_schema(DbSchema {
         },
     ],
     indexes: vec![],
-})?;
+}).await?;
 
 // Insert
 let mut row = Row::new();
 row.insert("path".into(), DbValue::Text("/home/user/notes.md".into()));
-row.insert("visited_at".into(), DbValue::Integer(1_700_000_000));
-let rowid = client.insert("fs_visited", row)?;
+row.insert("visited_at".into(), DbValue::Int(1_700_000_000));
+let rowid = client.insert("fs_visited", row).await?;
 
 // Select
 let rows = client.select(
     "fs_visited",
     None,  // SELECT *
-    DbFilter::Eq { col: "path".into(), val: DbValue::Text("/home/user/notes.md".into()) },
+    DbFilter::Eq {
+        column: "path".into(),
+        value: DbValue::Text("/home/user/notes.md".into()),
+    },
     None,  // no ORDER BY
     Some(10),
-)?;
+).await?;
 
 // Delete
 let deleted = client.delete(
     "fs_visited",
-    DbFilter::Eq { col: "id".into(), val: DbValue::Integer(rowid) },
-)?;
+    DbFilter::Eq {
+        column: "id".into(),
+        value: DbValue::Int(rowid),
+    },
+).await?;
 println!("Deleted {deleted} rows");
 ```
 
@@ -139,11 +154,18 @@ pub enum DbError {
 
 ```rust
 pub enum DbErrorCode {
-    AccessDenied,       // table prefix not allowed for this tool
-    TableNotFound,
-    ConstraintViolation,
-    InvalidSchema,
-    QueryError,
+    /// The tool does not have permission to access the requested resource
+    /// (e.g. attempted to read or write a table outside its declared prefix).
+    PermissionDenied,
+    /// The specified table does not exist or is not declared.
+    UnknownTable,
+    /// The specified column does not exist in the table.
+    UnknownColumn,
+    /// A value's type does not match the column's declared type.
+    TypeMismatch,
+    /// The filter expression is invalid.
+    InvalidFilter,
+    /// An internal server error occurred.
     Internal,
 }
 ```
@@ -178,13 +200,18 @@ pub struct DbTable {
 ```rust
 pub struct DbColumn {
     pub name: String,
+    /// Column type. Defaults to `DbType::Text`.
     pub ty: DbType,
+    /// Whether the column allows NULL. Defaults to `false`.
+    pub nullable: bool,
+    /// Whether this column is a primary key. Defaults to `false`.
     pub primary_key: bool,
+    /// Whether this column auto-increments. Defaults to `false`.
     pub auto_increment: bool,
-    pub not_null: bool,
+    /// Whether this column has a UNIQUE constraint. Defaults to `false`.
     pub unique: bool,
-    /// SQLite DEFAULT expression, if any.
-    pub default: Option<String>,
+    /// Default value (typed). Defaults to `None`.
+    pub default: Option<DbValue>,
 }
 ```
 
@@ -207,10 +234,16 @@ pub struct DbIndex {
 
 ```rust
 pub enum DbType {
+    /// 64-bit signed integer.
     Integer,
+    /// 64-bit IEEE floating point.
     Real,
+    /// UTF-8 text string. (default)
     Text,
+    /// Binary blob.
     Blob,
+    /// Boolean (stored as INTEGER 0/1).
+    Boolean,
 }
 ```
 
@@ -218,11 +251,18 @@ pub enum DbType {
 
 ```rust
 pub enum DbValue {
-    Integer(i64),
-    Real(f64),
-    Text(String),
-    Blob(Vec<u8>),
+    /// SQL NULL.
     Null,
+    /// Boolean value.
+    Bool(bool),
+    /// 64-bit signed integer.
+    Int(i64),
+    /// 64-bit floating point.
+    Float(f64),
+    /// UTF-8 text string.
+    Text(String),
+    /// Binary blob.
+    Blob(Vec<u8>),
 }
 ```
 
@@ -242,27 +282,28 @@ A `Row` is an ordered map from column name to value. Using `BTreeMap` ensures de
 
 ```rust
 pub enum DbFilter {
-    /// Match all rows (no WHERE clause).
-    All,
+    /// Matches all rows.
+    Always,
 
     // Logical
     And(Vec<DbFilter>),
     Or(Vec<DbFilter>),
+    Not(Box<DbFilter>),
 
     // Comparisons
-    Eq  { col: String, val: DbValue },
-    Ne  { col: String, val: DbValue },
-    Gt  { col: String, val: DbValue },
-    Lt  { col: String, val: DbValue },
-    Ge  { col: String, val: DbValue },
-    Le  { col: String, val: DbValue },
+    Eq  { column: String, value: DbValue },
+    Ne  { column: String, value: DbValue },
+    Gt  { column: String, value: DbValue },
+    Lt  { column: String, value: DbValue },
+    Ge  { column: String, value: DbValue },
+    Le  { column: String, value: DbValue },
 
     // String
-    Like { col: String, pattern: String },
+    Like { column: String, pattern: String },
 
     // Null checks
-    IsNull    { col: String },
-    IsNotNull { col: String },
+    IsNull    { column: String },
+    IsNotNull { column: String },
 }
 ```
 
@@ -271,15 +312,23 @@ pub enum DbFilter {
 ```rust
 // WHERE path LIKE '/home/%' AND visited_at > 1700000000
 let filter = DbFilter::And(vec![
-    DbFilter::Like { col: "path".into(), pattern: "/home/%".into() },
-    DbFilter::Gt   { col: "visited_at".into(), val: DbValue::Integer(1_700_000_000) },
+    DbFilter::Like {
+        column: "path".into(),
+        pattern: "/home/%".into(),
+    },
+    DbFilter::Gt {
+        column: "visited_at".into(),
+        value: DbValue::Int(1_700_000_000),
+    },
 ]);
 
 // WHERE id IS NOT NULL
-let filter = DbFilter::IsNotNull { col: "id".into() };
+let filter = DbFilter::IsNotNull {
+    column: "id".into(),
+};
 
 // No filter (SELECT all rows)
-let filter = DbFilter::All;
+let filter = DbFilter::Always;
 ```
 
 ---
@@ -290,14 +339,10 @@ The `DbIpcServer` in `ene-core` enforces the following rule for every request:
 
 > A tool may only access tables whose name begins with `<tool_prefix>_`.
 
-If a tool attempts to read or write a table outside its prefix, the server returns `DbError::Server { code: DbErrorCode::AccessDenied, … }`.
+If a tool attempts to read or write a table outside its prefix, the server returns `DbError::Server { code: DbErrorCode::PermissionDenied, … }`.
 
 This isolation is intentional: tools are separate, untrusted processes and must not be able to read or corrupt each other's state.
 
 ---
 
 ## Related Pages
-
-- [`ene-tool-host`](ene-tool-host.md) — Spawns tool processes and provides the DB IPC socket path
-- [Memory System Rules](../../AGENTS.md#73-memory-system-rules-strict) — Diesel / sqlite-vec constraints for core crates
-- [Tool System Overview](../tools/overview.md)
