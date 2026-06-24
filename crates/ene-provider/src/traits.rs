@@ -66,6 +66,15 @@ pub enum EmbeddingError {
     /// error (HTTP 4xx/5xx, network failure) prevented the request.
     #[error("embedding provider error: {0}")]
     Provider(String),
+    /// The supplied text is empty or whitespace-only. We
+    /// refuse to produce an embedding for it because
+    /// every implementation would either return the
+    /// zero vector (which has undefined cosine
+    /// similarity and silently pollutes the store) or
+    /// fall back to a placeholder that does not
+    /// represent the input.
+    #[error("empty or whitespace-only input; cannot produce a meaningful embedding")]
+    EmptyInput,
 }
 
 /// Trait for generating vector embeddings from text (used by memory search and Tool RAG).
