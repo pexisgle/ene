@@ -933,8 +933,6 @@ impl EneActor {
         // 3. Check and spawn a split task for this input
         self.check_and_perform_split(&user_input);
 
-
-
         // 5. Create provider
         let provider = match self.create_provider() {
             Ok(p) => p,
@@ -1099,8 +1097,6 @@ impl EneActor {
             }
         }
     }
-
-
 
     // ── Config / Character ──
 

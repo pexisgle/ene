@@ -112,7 +112,7 @@ impl EmbeddingProvider for HybridRerankProvider {
             if candidates.is_empty() {
                 return Ok(Vec::new());
             }
-            
+
             let mut batch_items = Vec::with_capacity(candidates.len());
             let texts: Vec<String> = candidates
                 .iter()
