@@ -270,18 +270,30 @@ impl ToolHostManager {
     /// Also registers each tool's config schema in the global runtime registry
     /// and regenerates `settings.schema.json`.
     pub async fn start(config: &EneConfig) -> Result<Self, ToolError> {
+        // Read ToolConfig once. The previous form
+        // called `get_section::<ToolConfig>()` twice
+        // (the first read was a leftover), which
+        // re-deserialized the same JSON subtree on
+        // every `start` and made the per-tool sandbox
+        // lookup ambiguous with the later
+        // per-tool `entry.config` read.
         let tool_config = config
             .get_section::<crate::config::ToolConfig>()
             .unwrap_or_default();
 
-        let sandbox = tool_config
-            .list
-            .get("fs")
-            .map(|entry| {
-                serde_json::from_value::<ene_tool_proto::SandboxConfigData>(entry.config.clone())
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default();
+        // Per-tool sandbox config. Each tool binary now
+        // receives the sandbox from its own
+        // `settings.tools.list.<name>.config`
+        // entry. The previous behavior read the `"fs"`
+        // entry's config and broadcast that sandbox to
+        // *every* tool binary, which is surprising
+        // coupling: a non-fs tool would receive an
+        // fs-shaped sandbox and ignore it via its
+        // default `set_sandbox` no-op, but the wire
+        // contract made it look like sandbox is
+        // process-global. Tools that want a process-
+        // global sandbox should configure it in their
+        // own section.
         let mut supervised_registries = Vec::new();
 
         std::fs::create_dir_all(paths::tool_socket_dir()).map_err(|e| {
@@ -290,9 +302,6 @@ impl ToolHostManager {
             }
         })?;
 
-        let tool_config = config
-            .get_section::<crate::config::ToolConfig>()
-            .unwrap_or_default();
         let timeout_ms = tool_config.timeout_ms;
         for (name, entry) in &tool_config.list {
             if !entry.enable {
@@ -302,6 +311,19 @@ impl ToolHostManager {
                 serde_json::Value::Object(m) if m.is_empty() => None,
                 _ => Some(entry.config.clone()),
             };
+            // Derive a per-tool sandbox from this
+            // entry's own config, falling back to the
+            // default when the entry is missing or
+            // malformed. The fs-shaped default
+            // (`enabled: true, allowed_directories:
+            // ["."]`) is only relevant for the fs tool;
+            // other tools that use it get the same
+            // default. Tools that need a different
+            // sandbox must deserialize it from their own
+            // entry's config.
+            let sandbox =
+                serde_json::from_value::<ene_tool_proto::SandboxConfigData>(entry.config.clone())
+                    .unwrap_or_default();
             match Self::start_tool(name, &sandbox, tool_config, timeout_ms).await {
                 Ok(supervised_entry) => {
                     // Collect config schema and register it in the runtime registry
