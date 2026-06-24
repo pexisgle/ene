@@ -1,4 +1,4 @@
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::db_server::DbIpcServer;
 use crate::error::EneCoreError;
 use crate::streaming::{self, PermissionDecision, UserInputResponse};
@@ -976,18 +976,18 @@ async fn build_tool_registry(
     memory_store: Option<Arc<ene_memory::MemoryStore>>,
 ) -> Result<Arc<dyn ToolRegistry>, EneCoreError> {
     if memory_store.is_some() {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let tool_config = config
             .get_section::<ene_tool_host::ToolConfig>()
             .unwrap_or_default();
 
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let db_path = config
             .get_section::<ene_memory::MemoryConfig>()
             .unwrap_or_default()
             .resolve_memory_db_path(&config.character);
 
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let socket_dir = ene_config::paths::tool_socket_dir();
             std::fs::create_dir_all(&socket_dir).map_err(|e| {
