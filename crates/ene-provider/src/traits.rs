@@ -121,10 +121,22 @@ pub trait EmbeddingProvider: Send + Sync {
         candidates: &[ene_tool_proto::ToolSpec],
     ) -> Result<Vec<f32>, EmbeddingError> {
         let query_emb = self.embed_query(query).await?;
-        let mut scores = Vec::with_capacity(candidates.len());
-        for spec in candidates {
-            let text = format!("{} {}", spec.summary, spec.description);
-            let emb = self.embed(&text, EmbeddingKind::Description).await?;
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut batch_items = Vec::with_capacity(candidates.len());
+        let texts: Vec<String> = candidates
+            .iter()
+            .map(|spec| format!("{} {}", spec.summary, spec.description))
+            .collect();
+        for text in &texts {
+            batch_items.push((text.as_str(), EmbeddingKind::Description));
+        }
+
+        let embeddings = self.embed_batch(&batch_items).await?;
+        let mut scores = Vec::with_capacity(embeddings.len());
+        for emb in embeddings {
             scores.push(cosine_similarity(&query_emb, &emb));
         }
         Ok(scores)
