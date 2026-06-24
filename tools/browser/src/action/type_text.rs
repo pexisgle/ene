@@ -11,7 +11,8 @@ fn default_store() -> Arc<crate::utils::session::BrowserSessionStore> {
     name = "type",
     summary = "Types text into a form element matching the selector.",
     category = "Browser",
-    keywords_primary = "type, input, text"
+    keywords_primary = "type, input, text",
+    side_effects = "Browser { mutates_dom: true }"
 )]
 pub struct TypeAction {
     /// CSS selector for the target input/textarea element.

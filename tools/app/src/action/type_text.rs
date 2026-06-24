@@ -8,7 +8,8 @@ use enigo::Keyboard;
     summary = "Simulates keyboard typing of a string character by character.",
     description = "Simulates keyboard typing of a string character by character.",
     category = "App",
-    keywords_primary = "keyboard, type, input, text"
+    keywords_primary = "keyboard, type, input, text",
+    side_effects = "System { privileged: true }"
 )]
 pub struct TypeTextAction {
     /// Text to type.

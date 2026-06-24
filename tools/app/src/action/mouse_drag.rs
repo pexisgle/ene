@@ -8,7 +8,8 @@ use enigo::{Button, Coordinate, Direction, Mouse};
     summary = "Drags the mouse from one coordinate to another.",
     description = "Drags the mouse from one coordinate to another.",
     category = "App",
-    keywords_primary = "mouse, drag, drop"
+    keywords_primary = "mouse, drag, drop",
+    side_effects = "System { privileged: true }"
 )]
 pub struct MouseDragAction {
     /// Start X coordinate.

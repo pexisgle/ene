@@ -11,7 +11,8 @@ fn default_store() -> Arc<crate::utils::session::BrowserSessionStore> {
     name = "click",
     summary = "Clicks a page element matching the selector",
     category = "Browser",
-    keywords_primary = "click, element"
+    keywords_primary = "click, element",
+    side_effects = "Browser { mutates_dom: true }"
 )]
 pub struct ClickAction {
     /// CSS selector for the element to click. Use only when navigate cannot reach the target.

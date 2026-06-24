@@ -8,7 +8,8 @@ use enigo::{Key, Keyboard};
     summary = "Simulates a key combination with '+' separator (e.g., 'ctrl+c', 'alt+f4').",
     description = "Simulates a key combination with '+' separator (e.g., 'ctrl+c', 'alt+f4').",
     category = "App",
-    keywords_primary = "keyboard, combo, shortcut, hotkey"
+    keywords_primary = "keyboard, combo, shortcut, hotkey",
+    side_effects = "System { privileged: true }"
 )]
 pub struct KeyComboAction {
     /// Key combination with '+' separator (e.g., 'ctrl+shift+s', 'ctrl+c').

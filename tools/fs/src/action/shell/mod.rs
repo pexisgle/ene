@@ -104,7 +104,8 @@ fn default_sandbox() -> SandboxRef {
     summary = "Executes a shell command with optional timeout and security measures.",
     description = "Executes a given shell command with optional timeout, ensuring proper handling and security measures. All commands run in the current working directory by default. Use the workdir parameter if you need to run a command in a different directory. AVOID using 'cd <directory> && <command>' patterns - use workdir instead. Clear, concise description of what this command does in 5-10 words is required.",
     category = "Shell",
-    keywords_primary = "shell, command, execute, terminal, bash"
+    keywords_primary = "shell, command, execute, terminal, bash",
+    side_effects = "System { privileged: true }"
 )]
 pub struct ShellAction {
     /// The command to execute.

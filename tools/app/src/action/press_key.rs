@@ -8,7 +8,8 @@ use enigo::Keyboard;
     summary = "Simulates pressing and releasing a single key.",
     description = "Simulates pressing and releasing a single key.",
     category = "App",
-    keywords_primary = "keyboard, press, key"
+    keywords_primary = "keyboard, press, key",
+    side_effects = "System { privileged: true }"
 )]
 pub struct PressKeyAction {
     /// Key name (e.g., 'return', 'escape', 'tab', 'space', 'up', 'down',

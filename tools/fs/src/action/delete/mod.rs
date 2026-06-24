@@ -62,7 +62,8 @@ fn default_sandbox() -> SandboxRef {
     summary = "Delete a file or directory.",
     description = "Delete a file or directory. Directories require recursive=true.",
     category = "Filesystem",
-    keywords_primary = "delete, remove, rm, unlink"
+    keywords_primary = "delete, remove, rm, unlink",
+    side_effects = "Destructive"
 )]
 pub struct FsDeleteAction {
     /// Absolute path to delete.

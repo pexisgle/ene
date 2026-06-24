@@ -8,7 +8,8 @@ use enigo::{Coordinate, Mouse};
     summary = "Moves the mouse cursor to absolute or relative coordinates.",
     description = "Moves the mouse cursor to absolute or relative coordinates.",
     category = "App",
-    keywords_primary = "mouse, move, cursor"
+    keywords_primary = "mouse, move, cursor",
+    side_effects = "System { privileged: true }"
 )]
 pub struct MouseMoveAction {
     /// X coordinate.

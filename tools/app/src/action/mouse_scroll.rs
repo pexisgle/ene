@@ -8,7 +8,8 @@ use enigo::{Axis, Mouse};
     summary = "Simulates mouse scrolling in a given direction.",
     description = "Simulates mouse scrolling in a given direction.",
     category = "App",
-    keywords_primary = "mouse, scroll, wheel"
+    keywords_primary = "mouse, scroll, wheel",
+    side_effects = "System { privileged: true }"
 )]
 pub struct MouseScrollAction {
     /// Number of scroll steps.

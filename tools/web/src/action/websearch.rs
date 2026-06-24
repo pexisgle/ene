@@ -18,7 +18,8 @@ fn default_config() -> Arc<OnceLock<WebSearchConfig>> {
     summary = "Search the web for the latest information.",
     description = "Searches the web using the configured backend (duckduckgo, tavily, brave, exa, or arxiv) and returns a list of relevant results with titles, URLs, and snippets.",
     category = "WebSearch",
-    keywords_primary = "search, web, google, internet, lookup"
+    keywords_primary = "search, web, google, internet, lookup",
+    side_effects = "Network { external: true }"
 )]
 pub struct WebSearchAction {
     #[tool(skip)]
