@@ -101,8 +101,27 @@ pub async fn run_tool_server(
 async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse {
     match req {
         IpcRequest::Handshake { version } => {
-            let agreed = (*version).min(IPC_PROTOCOL_VERSION);
-            IpcResponse::HandshakeAck { version: agreed }
+            // Strict version match. The previous form
+            // silently downgraded to
+            // version.min(IPC_PROTOCOL_VERSION), which
+            // would have accepted a tool reporting
+            // version 0 (or 99) with no complaint and
+            // no record of the negotiated version. The
+            // docs and the client both expect a hard
+            // reject on mismatch.
+            if *version != IPC_PROTOCOL_VERSION {
+                tracing::error!(
+                    "[tool-server] Handshake version mismatch: client sent {version}, server requires {IPC_PROTOCOL_VERSION}"
+                );
+                return IpcResponse::Error {
+                    message: format!(
+                        "protocol version mismatch: client sent {version}, server requires {IPC_PROTOCOL_VERSION}"
+                    ),
+                };
+            }
+            IpcResponse::HandshakeAck {
+                version: IPC_PROTOCOL_VERSION,
+            }
         }
         IpcRequest::Initialize {
             sandbox,

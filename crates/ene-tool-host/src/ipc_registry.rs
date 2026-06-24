@@ -65,7 +65,25 @@ impl IpcToolRegistry {
             })?;
 
         match resp {
-            Some(IpcResponse::HandshakeAck { .. }) => {}
+            Some(IpcResponse::HandshakeAck { version }) => {
+                // The previous match arm destructured
+                // HandshakeAck with `..` and ignored the
+                // version field, so a server claiming
+                // any version (including 0) was accepted.
+                // Verify the acked version matches what
+                // we sent. A mismatch indicates either
+                // a stale binary, a malicious server, or
+                // a network MITM, and must terminate the
+                // connection rather than silently
+                // continuing on an unsupported protocol.
+                if version != IPC_PROTOCOL_VERSION {
+                    return Err(ToolError::IpcClient {
+                        message: format!(
+                            "Handshake version mismatch: server acked {version}, client requires {IPC_PROTOCOL_VERSION}"
+                        ),
+                    });
+                }
+            }
             Some(IpcResponse::Error { message }) => {
                 return Err(ToolError::IpcClient { message });
             }
