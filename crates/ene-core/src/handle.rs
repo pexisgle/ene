@@ -1266,6 +1266,13 @@ async fn init_memory_store(
 }
 
 /// Builds the `ToolRag` pipeline from the current config, embedder, and session state.
+///
+/// Returns `None` when the pipeline is disabled. Logs an error
+/// and returns `None` when the config has an invalid `forced`
+/// tool name (the malformed entry is dropped so a single bad
+/// name does not prevent the rest of the tool RAG from
+/// working — but the error is surfaced via `tracing` so the
+/// operator can see it in the logs).
 fn init_tool_rag(
     config: &EneConfig,
     embedder: &Arc<dyn ene_provider::EmbeddingProvider>,
@@ -1281,7 +1288,18 @@ fn init_tool_rag(
     }
 
     let store = session.memory.memory_store.clone();
-    let opts = ene_tool_host::ToolRagOptions::from(rag_config);
+    let opts = match ene_tool_host::ToolRagOptions::try_from(rag_config) {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::error!(
+                "[ToolRag] Invalid tool name in rag.forced config: {e}; building pipeline without forced tools"
+            );
+            // Build with the default options (which has a
+            // sane `forced` set compiled in). The bad name
+            // is logged but does not block the pipeline.
+            ene_tool_host::ToolRagOptions::default()
+        }
+    };
     Some(Arc::new(ene_tool_host::ToolRag::new(
         embedder.clone(),
         store,

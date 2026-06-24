@@ -80,6 +80,14 @@ pub enum EneToolProtoError {
         /// Name of the tool that was not found.
         tool_name: String,
     },
+    /// The tool name supplied by the caller was invalid (empty,
+    /// contained illegal characters, or had leading/trailing
+    /// dots). Returned by `HostRegistry::call_tool` and other
+    /// IPC entry points instead of panicking on malformed input.
+    InvalidName {
+        /// Why the name was rejected.
+        reason: String,
+    },
     /// Invalid arguments were passed to a tool call.
     InvalidArguments {
         /// Description of what was invalid.
@@ -205,6 +213,9 @@ impl std::fmt::Display for EneToolProtoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EneToolProtoError::NotFound { tool_name } => write!(f, "Tool not found: {tool_name}"),
+            EneToolProtoError::InvalidName { reason } => {
+                write!(f, "Invalid tool name: {reason}")
+            }
             EneToolProtoError::InvalidArguments { message } => {
                 write!(f, "Invalid arguments: {message}")
             }
