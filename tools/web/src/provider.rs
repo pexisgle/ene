@@ -44,6 +44,10 @@ impl WebToolProvider {
                 headers.insert(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.5".parse().unwrap());
                 headers
             })
+            // Limit the redirect chain so an SSRF-by-redirect (target
+            // is a public host that 30x's to a private one) cannot
+            // smuggle a fetch past the per-host SSRF check.
+            .redirect(reqwest::redirect::Policy::limited(5))
             .build()
             .unwrap_or_default();
 
