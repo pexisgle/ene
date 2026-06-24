@@ -120,3 +120,9 @@ x11rb = { version = "0.13", default-features = false }
 # workspace manifests cannot carry `[dev-dependencies]`.
 [workspace.metadata.cargo-husky]
 run-for-all = true
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev.package.ene-embedding]
+opt-level = 3
