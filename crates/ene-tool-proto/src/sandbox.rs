@@ -30,6 +30,11 @@ ene_config::define_tool_config!(
         /// Path to the per-tool DB socket. Tool binaries connect to this
         /// Unix socket to access the core DB server for typed CRUD operations.
         pub db_socket: Option<String> = None,
+        /// Pre-shared auth token for the per-tool DB IPC server. The
+        /// tool binary must present this token in a [`ene_tool_db::DbRequest::Handshake`]
+        /// before any other request. `None` disables DB access for
+        /// this tool.
+        pub db_auth_token: Option<String> = None,
     }
 );
 
@@ -50,6 +55,7 @@ mod tests {
             max_shell_output_bytes: 1_000_000,
             max_shell_output_lines: 5000,
             db_socket: Some("/tmp/db.sock".into()),
+            db_auth_token: Some("ene-db-deadbeef".into()),
         };
         let json = serde_json::to_string(&config).unwrap();
         let deser: SandboxConfigData = serde_json::from_str(&json).unwrap();

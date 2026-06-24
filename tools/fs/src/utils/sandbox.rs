@@ -17,6 +17,7 @@ pub struct SandboxConfig {
     pub max_shell_output_bytes: usize,
     pub max_shell_output_lines: usize,
     pub db_socket: Option<PathBuf>,
+    pub db_auth_token: Option<String>,
 }
 
 impl Default for SandboxConfig {
@@ -44,6 +45,7 @@ impl Default for SandboxConfig {
             max_shell_output_bytes: 50 * 1024,
             max_shell_output_lines: 2000,
             db_socket: None,
+            db_auth_token: None,
         }
     }
 }
@@ -181,6 +183,7 @@ impl From<ene_tool_proto::SandboxConfigData> for SandboxConfig {
             max_shell_output_bytes: data.max_shell_output_bytes,
             max_shell_output_lines: data.max_shell_output_lines,
             db_socket: data.db_socket.map(PathBuf::from),
+            db_auth_token: data.db_auth_token,
         }
     }
 }
@@ -229,11 +232,15 @@ impl Sandbox {
             })?;
 
         let session_id = self.session_id();
-        let mgr = UndoManager::new(socket_path, session_id)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Failed to connect to DB: {e}"),
-            })?;
+        let mgr = UndoManager::new(
+            socket_path,
+            session_id,
+            self.config.db_auth_token.as_deref(),
+        )
+        .await
+        .map_err(|e| ToolError::ExecutionFailed {
+            message: format!("Failed to connect to DB: {e}"),
+        })?;
 
         let mgr = Arc::new(mgr);
         *guard = Some(mgr.clone());

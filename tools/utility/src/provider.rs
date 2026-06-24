@@ -12,6 +12,7 @@ pub struct UtilityState {
     todo_store: Arc<Mutex<Option<Arc<TodoStore>>>>,
     session_id: Arc<RwLock<String>>,
     db_socket: Arc<RwLock<Option<String>>>,
+    db_auth_token: Arc<RwLock<Option<String>>>,
 }
 
 impl UtilityState {
@@ -22,6 +23,7 @@ impl UtilityState {
             todo_store: Arc::new(Mutex::new(None)),
             session_id: Arc::new(RwLock::new(String::new())),
             db_socket: Arc::new(RwLock::new(None)),
+            db_auth_token: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -54,6 +56,14 @@ impl UtilityState {
         });
     }
 
+    /// Sets the DB IPC auth token used to authenticate the connection.
+    pub fn set_db_auth_token(&self, token: Option<String>) {
+        *self
+            .db_auth_token
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = token;
+    }
+
     /// Lazily connects to the DB IPC server and returns the `TodoStore`.
     pub async fn ensure_todo_store(&self) -> Result<Arc<TodoStore>, ToolError> {
         {
@@ -83,7 +93,13 @@ impl UtilityState {
             }
         };
 
-        let store = TodoStore::new(&socket_path)
+        let token = self
+            .db_auth_token
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+
+        let store = TodoStore::new(&socket_path, token.as_deref())
             .await
             .map_err(|e| ToolError::Internal {
                 message: format!("Failed to connect to DB: {e}"),
@@ -158,5 +174,6 @@ impl ToolProvider for UtilityToolProvider {
         if let Some(socket) = &sandbox.db_socket {
             self.state.set_db_socket(socket.clone());
         }
+        self.state.set_db_auth_token(sandbox.db_auth_token.clone());
     }
 }

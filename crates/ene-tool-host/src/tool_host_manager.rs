@@ -401,6 +401,12 @@ impl ToolHostManager {
         let mut tool_sandbox = sandbox.clone();
         tool_sandbox.db_socket = Some(db_socket_path.to_string_lossy().to_string());
 
+        // Pick up the auth token generated for this tool by
+        // ene-core's build_tool_registry so the tool can present it
+        // on the DB IPC Handshake. On Windows (or in tests where the
+        // map is empty) this is a no-op — DB is currently Unix-only.
+        tool_sandbox.db_auth_token = ene_tool_proto::take_db_auth_token(name);
+
         let child = std::process::Command::new(&binary_path)
             .env("ENE_TOOL_SOCKET", &socket_path)
             .spawn()

@@ -272,6 +272,7 @@ mod tests {
             max_shell_output_bytes: 0,
             max_shell_output_lines: 0,
             db_socket: None,
+            db_auth_token: None,
         };
         let req = IpcRequest::Initialize {
             sandbox: sandbox.clone(),
