@@ -27,6 +27,12 @@ pub enum EneMemoryError {
     /// Embedding error.
     #[error("Embedding error: {0}")]
     Embedding(String),
+    /// Embedding failed structural validation: wrong length
+    /// vs. the store's `embedding_dim`, contains a NaN or
+    /// Infinity, or is otherwise unusable for cosine
+    /// similarity.
+    #[error("Invalid embedding: {0}")]
+    InvalidEmbedding(String),
 
     /// Catch-all error variant.
     #[error("Other error: {0}")]
