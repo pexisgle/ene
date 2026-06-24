@@ -36,16 +36,24 @@ pub fn find_chrome_executable() -> Option<PathBuf> {
         }
     }
 
-    let common_paths = &[
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable",
-        "/usr/bin/chromium",
-        "/usr/bin/chromium-browser",
-        "/usr/local/bin/google-chrome",
-        "/usr/local/bin/chromium",
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    ];
+    let common_paths: &[&str] = if cfg!(target_os = "macos") {
+        // macOS is not a supported target (AGENTS.md §3).
+        // The lookup falls through to the `PATH` scan
+        // above, which already covers the standard
+        // `/usr/bin/` and `/usr/local/bin/` installs.
+        // Listed explicitly here would falsely advertise
+        // support for the platform.
+        &[]
+    } else {
+        &[
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/usr/local/bin/google-chrome",
+            "/usr/local/bin/chromium",
+        ]
+    };
     for path in common_paths {
         let p = PathBuf::from(path);
         if p.is_file() {
