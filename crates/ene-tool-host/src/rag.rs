@@ -9,6 +9,7 @@ use ene_provider::{EmbeddingError, EmbeddingProvider, cosine_similarity};
 use ene_tool_proto::{EmbeddingField, ToolName, ToolSpec};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // ── Per-field similarity weights ──────────────────────────────────────────
 
@@ -149,6 +150,14 @@ pub struct ToolRag {
     opts: ToolRagOptions,
     /// Last-known ToolSpecs, used when returning results from [`select`].
     specs: RwLock<HashMap<ToolName, ToolSpec>>,
+    /// Blake3 hash of the last indexed specs set.
+    /// Used to fast-path ensure_index when specs haven't changed.
+    last_specs_hash: AtomicU64,
+    /// In-memory cache of tool embedding vectors.
+    /// Populated by ensure_index, used by select. Avoids
+    /// deserializing all f32 vecs from SQLite every turn.
+    #[allow(clippy::type_complexity)]
+    cached_field_rows: RwLock<Vec<(String, String, String, Vec<f32>)>>,
 }
 
 impl ToolRag {
@@ -163,6 +172,8 @@ impl ToolRag {
             store,
             opts,
             specs: RwLock::new(HashMap::new()),
+            last_specs_hash: AtomicU64::new(0),
+            cached_field_rows: RwLock::new(Vec::new()),
         }
     }
 
@@ -198,6 +209,20 @@ impl ToolRag {
     /// Only re-embeds fields whose text-derived version hash has changed.
     /// Called by the streaming engine before each [`select`](Self::select).
     pub async fn ensure_index(&self, specs: &[ToolSpec]) -> Result<(), EmbeddingError> {
+        let specs_hash = compute_specs_hash(specs);
+        let prev_hash = self.last_specs_hash.load(Ordering::Acquire);
+        {
+            let cache = self.cached_field_rows.read().unwrap_or_else(|e| e.into_inner());
+            if prev_hash == specs_hash && !cache.is_empty() {
+                let mut map = self.specs.write().unwrap_or_else(|e| e.into_inner());
+                map.clear();
+                for spec in specs {
+                    map.insert(spec.name.clone(), spec.clone());
+                }
+                return Ok(());
+            }
+        }
+
         let store = match &self.store {
             Some(s) => Arc::clone(s),
             None => {
@@ -373,6 +398,23 @@ impl ToolRag {
             }
         }
 
+        // Cache all tool embeddings in memory
+        match store.list_tool_embedding_fields().await {
+            Ok(rows) => {
+                let mapped: Vec<(String, String, String, Vec<f32>)> = rows
+                    .into_iter()
+                    .map(|(name, field, fkey, _hash, _model, emb, _src)| (name, field, fkey, emb))
+                    .collect();
+                let mut cache_write = self.cached_field_rows.write().unwrap_or_else(|e| e.into_inner());
+                *cache_write = mapped;
+            }
+            Err(e) => {
+                tracing::warn!("[ToolRag] Failed to cache tool embeddings after index build: {}", e);
+            }
+        }
+
+        self.last_specs_hash.store(specs_hash, Ordering::Release);
+
         tracing::debug!("[ToolRag] Indexed {} fields, {} reused", indexed, reused);
         Ok(())
     }
@@ -384,6 +426,20 @@ impl ToolRag {
     /// Pipeline: embed query → optional HyDE → per-tool weighted field
     /// similarity → hard filters → optional rerank → top-N + forced tools.
     pub async fn select(&self, query: &str) -> Vec<ToolSpec> {
+        let query_vec = match self.embedder.embed_query(query).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("[ToolRag] Query embedding failed: {}", e);
+                let map = self.specs.read().unwrap_or_else(|e| e.into_inner());
+                return map.values().cloned().collect();
+            }
+        };
+
+        self.select_with_embedding(query, &query_vec).await
+    }
+
+    /// Select the most relevant tools using a pre-computed query embedding.
+    pub async fn select_with_embedding(&self, query: &str, query_embedding: &[f32]) -> Vec<ToolSpec> {
         let store = match &self.store {
             Some(s) => s,
             None => {
@@ -393,15 +449,7 @@ impl ToolRag {
             }
         };
 
-        // 1. Embed the user query.
-        let query_vec = match self.embedder.embed_query(query).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("[ToolRag] Query embedding failed: {}", e);
-                let map = self.specs.read().unwrap_or_else(|e| e.into_inner());
-                return map.values().cloned().collect();
-            }
-        };
+        let query_vec = query_embedding.to_vec();
 
         // 2. Optional HyDE — generate a hypothetical document embedding.
         let hyde_vec = if self.opts.use_hyde {
@@ -417,18 +465,36 @@ impl ToolRag {
             None
         };
 
-        // 3. Load all tool embeddings from the store.
-        let field_rows: Vec<(String, String, String, Vec<f32>)> =
-            match store.list_tool_embedding_fields().await {
-                Ok(rows) => rows
-                    .into_iter()
-                    .map(|(name, field, fkey, _hash, _model, emb, _src)| (name, field, fkey, emb))
-                    .collect(),
-                Err(e) => {
-                    tracing::warn!("[ToolRag] Could not load embeddings: {}", e);
-                    Vec::new()
+        // 3. Load all tool embeddings (from cache if available)
+        let cached_rows = {
+            let cache = self.cached_field_rows.read().unwrap_or_else(|e| e.into_inner());
+            if !cache.is_empty() {
+                Some(cache.clone())
+            } else {
+                None
+            }
+        };
+
+        let field_rows: Vec<(String, String, String, Vec<f32>)> = match cached_rows {
+            Some(rows) => rows,
+            None => {
+                match store.list_tool_embedding_fields().await {
+                    Ok(rows) => {
+                        let mapped: Vec<(String, String, String, Vec<f32>)> = rows
+                            .into_iter()
+                            .map(|(name, field, fkey, _hash, _model, emb, _src)| (name, field, fkey, emb))
+                            .collect();
+                        let mut cache_write = self.cached_field_rows.write().unwrap_or_else(|e| e.into_inner());
+                        *cache_write = mapped.clone();
+                        mapped
+                    }
+                    Err(e) => {
+                        tracing::warn!("[ToolRag] Could not load embeddings: {}", e);
+                        Vec::new()
+                    }
                 }
-            };
+            }
+        };
 
         // 4. Group by tool, compute weighted similarity.
         let w = &self.opts.weights;
@@ -690,4 +756,18 @@ pub struct ToolRagStats {
     /// Cosine similarity of the best match in the
     /// most recent `select` call.
     pub top_similarity: f32,
+}
+
+fn compute_specs_hash(specs: &[ToolSpec]) -> u64 {
+    let mut hasher = blake3::Hasher::new();
+    for spec in specs {
+        if let Ok(bytes) = serde_json::to_vec(spec) {
+            hasher.update(&bytes);
+        } else {
+            hasher.update(spec.name.as_str().as_bytes());
+        }
+    }
+    let hash = hasher.finalize();
+    let bytes = hash.as_bytes();
+    u64::from_le_bytes(bytes[0..8].try_into().unwrap())
 }

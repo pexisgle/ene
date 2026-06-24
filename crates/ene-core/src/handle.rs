@@ -923,26 +923,7 @@ impl EneActor {
         // 3. Check and spawn a split task for this input
         self.check_and_perform_split(&user_input);
 
-        // 4. Embed the input
-        if let Err(e) = self.embed_input(&user_input).await {
-            if self
-                .terminal_emitted
-                .compare_exchange(
-                    false,
-                    true,
-                    std::sync::atomic::Ordering::AcqRel,
-                    std::sync::atomic::Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                let _ = self
-                    .event_tx
-                    .send(EneEvent::Terminal(TerminalReason::Failed {
-                        message: e.to_string(),
-                    }));
-            }
-            return;
-        }
+
 
         // 5. Create provider
         let provider = match self.create_provider() {
@@ -971,6 +952,7 @@ impl EneActor {
         // 6. Clone state for the stream task
         let config = self.config.clone();
         let session = self.session.clone();
+        let embedder = self.session.memory.embedding_provider.clone();
         let registry = self.registry.clone();
         let tool_rag = self.tool_rag.clone();
         let event_tx = self.event_tx.clone();
@@ -988,6 +970,7 @@ impl EneActor {
                 config,
                 session,
                 user_input,
+                embedder,
                 registry,
                 tool_rag,
                 provider,
@@ -1107,29 +1090,7 @@ impl EneActor {
         }
     }
 
-    // ── Embedding ──
 
-    async fn embed_input(&mut self, input: &str) -> Result<Vec<f32>, EneCoreError> {
-        let embedder = self
-            .session
-            .memory
-            .embedding_provider
-            .clone()
-            .ok_or_else(|| {
-                EneCoreError::Embedding(ene_provider::EmbeddingError::Init(
-                    "No embedding provider initialized".to_string(),
-                ))
-            })?;
-
-        let embedding = embedder
-            .embed_query(input)
-            .await
-            .map_err(EneCoreError::from)?;
-
-        self.session.set_pending_embedding(embedding.clone());
-        self.session.set_last_input_embedding(embedding.clone());
-        Ok(embedding)
-    }
 
     // ── Config / Character ──
 
