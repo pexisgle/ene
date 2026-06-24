@@ -213,7 +213,13 @@ pub fn resolve_gguf_paths(
                 "jina-embeddings-v5-text-small" => "jinaai/jina-embeddings-v5-text-small-retrieval",
                 _ => {
                     return Err(EneEmbeddingError::CandleError(format!(
-                        "Unknown model: {model_name_owned}"
+                        "Unknown model: {model_name_owned}. Supported models: \
+                         jina-embeddings-v5-text-nano, jina-embeddings-v5-text-small. \
+                         Note: the local GGUF loader is qwen3-metadata-keyed (qwen3.attention.head_count, \
+                         qwen3.embedding_length, ...), so other architectures cannot be loaded via \
+                         create_local_provider even if their weights are present in model_dir. \
+                         For Qwen3-Embedding-0.6B or other architectures, load the GgufEmbeddingProvider \
+                         directly with a pre-existing local path."
                     )));
                 }
             };
@@ -240,7 +246,12 @@ pub fn resolve_gguf_paths(
                 "jina-embeddings-v5-text-nano" => {
                     format!("v5-nano-retrieval-{quant_owned}.gguf")
                 }
-                _ => unreachable!(),
+                other => {
+                    return Err(EneEmbeddingError::CandleError(format!(
+                        "Internal: model {other:?} passed the repo_id match but not the \
+                         filename match. This should be unreachable; please file a bug."
+                    )));
+                }
             };
 
             let gguf_path = repo
