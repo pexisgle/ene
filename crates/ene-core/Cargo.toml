@@ -40,4 +40,5 @@ ene-tool-proto = { workspace = true }
 cargo-husky = { workspace = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 tracing-subscriber = { workspace = true }
