@@ -296,7 +296,7 @@ impl LlmProvider for OpenAiProvider {
             .map_err(|e| map_openai_error(&e))?;
 
         let choice = response.choices.first().ok_or_else(|| {
-            tracing::warn!("[openai] chat completion returned no choices");
+            tracing::warn!(component = "OpenAI", "Chat completion returned no choices");
             LlmProviderError::Provider("OpenAI returned no choices".to_string())
         })?;
 

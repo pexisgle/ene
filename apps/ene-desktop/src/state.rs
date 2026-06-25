@@ -250,7 +250,8 @@ pub enum AppStateError {
 /// [`ene_config::ensure_resource_dirs`], which also creates the
 /// directory if missing.
 pub fn resolve_paths() -> Result<(PathBuf, String, String), AppStateError> {
-    let assets_dir = ene_config::ensure_resource_dirs();
+    let assets_dir =
+        ene_config::ensure_resource_dirs().map_err(|e| AppStateError::AssetsDir(e.to_string()))?;
     let (default_vrm, default_vrma) = crate::settings::read_cli_paths();
     Ok((assets_dir, default_vrm, default_vrma))
 }

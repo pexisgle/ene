@@ -570,7 +570,7 @@ impl MemoryStore {
                 .insert_log(&session_id, &card_name, &role, &content)
                 .await
             {
-                tracing::error!("[Memory] Failed to save {} log: {}", role, e);
+                tracing::error!(component = "Memory", role = ?role, error = %e, "Failed to save log");
             }
         });
     }

@@ -62,7 +62,7 @@ pub async fn execute(input: &str, ctx: &mut AppContext) -> CommandOutcome {
     let arg = parts.get(1).copied().unwrap_or("");
 
     // The user requested a dedicated early exit branch specifically for quit
-    if cmd == "/quit" {
+    if cmd == "/quit" || cmd == "/exit" {
         // Send a clean shutdown command and await the actor's drain
         // so that pending memory writes, session splits, and tool
         // processes finish (or are killed) before we return to main.

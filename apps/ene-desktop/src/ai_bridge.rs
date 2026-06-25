@@ -55,6 +55,9 @@ impl AiBridge {
             async move {
                 match handle.load_config().await {
                     Ok(config) => {
+                        // Write configuration schemas after runtime initialization
+                        ene_config::write_schemas(&ene_config::paths::assets_dir());
+
                         if let Err(e) = handle.load_character(&config.character).await {
                             tracing::warn!("[Ene] Failed to load character: {e}");
                         }

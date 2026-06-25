@@ -38,5 +38,8 @@ pub async fn init() -> Result<EneHandle, EneCoreError> {
         );
     }
 
+    // Write configuration schemas after runtime initialization (which registers dynamic tool schemas).
+    ene_config::write_schemas(&ene_config::paths::assets_dir());
+
     Ok(handle)
 }
