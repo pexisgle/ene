@@ -20,3 +20,6 @@ ene-tool-proto = { workspace = true }
 ene-tool-common = { workspace = true }
 serde = { workspace = true }
 schemars = { workspace = true }
+
+[lints]
+workspace = true

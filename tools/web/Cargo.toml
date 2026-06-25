@@ -24,3 +24,6 @@ reqwest = { version = "0.13", default-features = false, features = ["native-tls"
 [[bin]]
 name = "ene-tool-web"
 path = "src/main.rs"
+
+[lints]
+workspace = true

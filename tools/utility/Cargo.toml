@@ -21,3 +21,6 @@ uuid = { workspace = true }
 [[bin]]
 name = "ene-tool-utility"
 path = "src/main.rs"
+
+[lints]
+workspace = true

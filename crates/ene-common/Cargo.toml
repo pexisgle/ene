@@ -8,3 +8,6 @@ description = "Shared utilities, error types, and ID newtypes for the ene worksp
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[lints]
+workspace = true

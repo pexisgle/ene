@@ -51,3 +51,6 @@ serde_json = { workspace = true }
 # VRM 1.0 zip archive. Pulled in as a dev-dep so the lib
 # itself stays slim.
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[lints]
+workspace = true

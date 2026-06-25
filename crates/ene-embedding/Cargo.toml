@@ -24,3 +24,6 @@ hf-hub = { workspace = true, features = ["rustls-tls", "tokio"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 hf-hub = { workspace = true, features = ["default-tls", "tokio"] }
 
+
+[lints]
+workspace = true

@@ -126,3 +126,6 @@ opt-level = 3
 
 [profile.dev.package.ene-embedding]
 opt-level = 3
+
+[workspace.lints.clippy]
+unwrap_used = "warn"

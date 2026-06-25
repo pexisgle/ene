@@ -11,3 +11,6 @@ tokio = { workspace = true, features = ["io-util", "net"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 ene-tool-proto = { workspace = true }
+
+[lints]
+workspace = true

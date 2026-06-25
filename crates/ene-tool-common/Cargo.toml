@@ -16,3 +16,6 @@ schemars = { workspace = true }
 ene-tool-proto = { workspace = true }
 ene-tool-derive = { workspace = true }
 ene-common = { workspace = true }
+
+[lints]
+workspace = true

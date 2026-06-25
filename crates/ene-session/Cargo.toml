@@ -23,3 +23,6 @@ ene-common = { workspace = true }
 ene-memory = { workspace = true }
 ene-config = { workspace = true }
 ctor = { workspace = true }
+
+[lints]
+workspace = true

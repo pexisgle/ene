@@ -23,3 +23,6 @@ regex = { workspace = true }
 [[bin]]
 name = "ene-tool-browser"
 path = "src/main.rs"
+
+[lints]
+workspace = true

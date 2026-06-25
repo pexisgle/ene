@@ -28,3 +28,6 @@ path = "src/main.rs"
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "screenshot", "screencast", "pipewire"] }
 pipewire = "0.9"
+
+[lints]
+workspace = true
