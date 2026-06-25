@@ -41,18 +41,28 @@ impl std::fmt::Display for SplitReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SplitReason::Timeout { elapsed_minutes } => {
-                write!(f, "Split after {elapsed_minutes} min inactive")
+                write!(
+                    f,
+                    "Session split due to {elapsed_minutes} minutes of inactivity"
+                )
             }
             SplitReason::TopicChange { similarity } => {
-                write!(f, "Topic shift (similarity: {similarity:.2})")
+                write!(
+                    f,
+                    "Session split due to topic change (similarity: {similarity:.2})"
+                )
             }
             SplitReason::ContextPressure { context_ratio } => {
-                write!(f, "Context pressure ({:.0}% full)", context_ratio * 100.0)
+                write!(
+                    f,
+                    "Session split due to context pressure ({:.0}% full)",
+                    context_ratio * 100.0
+                )
             }
             SplitReason::Composite { score } => {
-                write!(f, "Composite split score {score:.2}")
+                write!(f, "Session split with composite score {score:.2}")
             }
-            SplitReason::Manual => write!(f, "Manual split"),
+            SplitReason::Manual => write!(f, "Session split manually"),
         }
     }
 }
@@ -174,7 +184,7 @@ pub async fn check_boundary(
         match embedder.embed_query(user_input).await {
             Ok(current_embedding) => Some(cosine_similarity(prev_embedding, &current_embedding)),
             Err(e) => {
-                tracing::warn!("[Session] Embedding error during boundary check: {}", e);
+                tracing::warn!(component = "Session", error = %e, "Embedding error during boundary check");
                 None
             }
         }
@@ -281,7 +291,7 @@ pub async fn embed_session_messages(
         match embedder.embed(content, EmbeddingKind::Summary).await {
             Ok(emb) => all_embeddings.push(emb),
             Err(e) => {
-                tracing::warn!("[Session] Failed to embed message (skipping): {}", e);
+                tracing::warn!(component = "Session", error = %e, "Failed to embed message (skipping)");
             }
         }
     }
@@ -397,7 +407,7 @@ pub async fn execute_split(
             .insert_log(&session_id_clone, &card_name_clone, role_str, content)
             .await
         {
-            tracing::error!("[Session] Failed to save log: {}", e);
+            tracing::error!(component = "Session", error = %e, "Failed to save log");
         }
     }
     if let Ok(facts) = store.get_all_keyfacts(&card_name_clone).await {

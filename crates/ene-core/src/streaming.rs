@@ -5,6 +5,7 @@ use ene_config::{EneConfig, PromptLibrary};
 use ene_memory::RecalledSummary;
 use ene_provider::{LlmMessage, LlmToolCall, LlmToolCallChunk, UserMessagePart};
 use ene_session::ConversationSession;
+use ene_tool_host::ToolHostError;
 use ene_tool_proto::ToolError;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,6 +13,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, broadcast, oneshot};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
+
+/// Phase name for vectorization (embedding generation).
+pub const PHASE_EMBEDDING: &str = "Embedding";
+/// Phase name for context search (memory and tools retrieval).
+pub const PHASE_CONTEXT_SEARCH: &str = "Context Search";
+/// Phase name for prompt building.
+pub const PHASE_PROMPT_BUILDING: &str = "Prompt Building";
 
 /// Represents a user's permission decision for a destructive operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,7 +120,7 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
     let mut timings = std::collections::HashMap::new();
 
     let _ = event_tx.send(EneEvent::PipelinePhase {
-        phase: "ベクトル化 (Embedding)".to_string(),
+        phase: PHASE_EMBEDDING.to_string(),
     });
     let emb_start = std::time::Instant::now();
 
@@ -144,7 +152,7 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
     );
 
     let _ = event_tx.send(EneEvent::PipelinePhase {
-        phase: "コンテキスト検索 (Memory & Tools)".to_string(),
+        phase: PHASE_CONTEXT_SEARCH.to_string(),
     });
     let ctx_start = std::time::Instant::now();
 
@@ -179,7 +187,7 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
     timings.insert("Context Search (Tool RAG)".to_string(), tools_time);
 
     let _ = event_tx.send(EneEvent::PipelinePhase {
-        phase: "メッセージ構築 (Prompt Building)".to_string(),
+        phase: PHASE_PROMPT_BUILDING.to_string(),
     });
     let prompt_start = std::time::Instant::now();
 
@@ -387,7 +395,7 @@ pub(crate) async fn select_relevant_tools(
 
         // Ensure the index is up-to-date (no-op for already-indexed fields).
         if let Err(e) = rag.ensure_index(&all_tools).await {
-            tracing::warn!("[ToolRag] ensure_index failed: {}", e);
+            tracing::warn!(component = "ToolRag", error = %e, "ensure_index failed");
         }
 
         // Select relevant tools via the RAG pipeline.
@@ -442,7 +450,7 @@ pub(crate) async fn fetch_memory_context(
         )
         .await
         .unwrap_or_else(|e| {
-            tracing::error!("[Memory] Context recall error: {}", e);
+            tracing::error!(component = "Memory", error = %e, "Context recall error");
             (vec![], vec![])
         })
 }
@@ -523,7 +531,7 @@ async fn perform_tool_executions(
             match tokio::time::timeout(tool_timeout, registry.call_tool(&name, &args)).await {
                 Ok(Ok(res)) => Ok(res),
                 Ok(Err(e)) => Err(e),
-                Err(_) => Err(ToolError::Other {
+                Err(_) => Err(ToolHostError::ExecutionFailed {
                     message: format!(
                         "Tool '{}' timed out after {:.2} seconds",
                         name,
@@ -540,12 +548,12 @@ async fn perform_tool_executions(
         const MAX_PENDING_ROUNDS: usize = 8;
         for _ in 0..MAX_PENDING_ROUNDS {
             match &result {
-                Err(ToolError::PermissionRequired {
+                Err(ToolHostError::Protocol(ToolError::PermissionRequired {
                     request_id,
                     action,
                     target,
                     description,
-                }) => {
+                })) => {
                     let req_id = RequestId::from(request_id.clone());
 
                     // Register the oneshot::Sender BEFORE
@@ -582,16 +590,19 @@ async fn perform_tool_executions(
                             result = registry.call_tool(&name, &args).await;
                         }
                         _ => {
-                            result = Err(ToolError::PermissionDenied {
+                            result = Err(ToolHostError::Protocol(ToolError::PermissionDenied {
                                 message: "Permission denied by user".to_string(),
-                            });
+                            }));
                             // Decision resolved; no further
                             // pending rounds needed.
                             break;
                         }
                     }
                 }
-                Err(ToolError::UserInputRequired { request_id, prompt }) => {
+                Err(ToolHostError::Protocol(ToolError::UserInputRequired {
+                    request_id,
+                    prompt,
+                })) => {
                     let req_id = RequestId::from(request_id.clone());
 
                     // Register the oneshot::Sender BEFORE
@@ -615,7 +626,7 @@ async fn perform_tool_executions(
                             result = registry.call_tool(&name, &new_args).await;
                         }
                         Ok(UserInputResponse::Cancel) | Err(_) => {
-                            result = Err(ToolError::ExecutionFailed {
+                            result = Err(ToolHostError::ExecutionFailed {
                                 message: "User cancelled the question".to_string(),
                             });
                             // Decision resolved; no further
@@ -829,15 +840,19 @@ mod tests {
             fn list_tools(&self) -> Vec<ene_tool_proto::ToolSpec> {
                 Vec::new()
             }
-            async fn call_tool(&self, _name: &str, _arguments: &str) -> Result<String, ToolError> {
+            async fn call_tool(
+                &self,
+                _name: &str,
+                _arguments: &str,
+            ) -> Result<String, ToolHostError> {
                 let n = self.calls.fetch_add(1, Ordering::SeqCst);
                 if n == 0 {
-                    Err(ToolError::PermissionRequired {
+                    Err(ToolHostError::Protocol(ToolError::PermissionRequired {
                         request_id: self.request_id.clone(),
                         action: "fs.delete".to_string(),
                         target: "/tmp/x".to_string(),
                         description: "delete file".to_string(),
-                    })
+                    }))
                 } else {
                     Ok("ok".to_string())
                 }
@@ -935,16 +950,20 @@ mod tests {
             fn list_tools(&self) -> Vec<ene_tool_proto::ToolSpec> {
                 Vec::new()
             }
-            async fn call_tool(&self, _name: &str, _arguments: &str) -> Result<String, ToolError> {
+            async fn call_tool(
+                &self,
+                _name: &str,
+                _arguments: &str,
+            ) -> Result<String, ToolHostError> {
                 let n = self.calls.fetch_add(1, Ordering::SeqCst);
                 match n {
-                    0 => Err(ToolError::PermissionRequired {
+                    0 => Err(ToolHostError::Protocol(ToolError::PermissionRequired {
                         request_id: self.perm_id.clone(),
                         action: "fs.write".to_string(),
                         target: "/tmp/x".to_string(),
                         description: "write file".to_string(),
-                    }),
-                    1 => Err(ToolError::UserInputRequired {
+                    })),
+                    1 => Err(ToolHostError::Protocol(ToolError::UserInputRequired {
                         request_id: self.input_id.clone(),
                         prompt: ene_tool_proto::UserInputPrompt {
                             items: vec![ene_tool_proto::QuestionItem {
@@ -953,7 +972,7 @@ mod tests {
                                 allow_free_text: true,
                             }],
                         },
-                    }),
+                    })),
                     _ => Ok("ok".to_string()),
                 }
             }

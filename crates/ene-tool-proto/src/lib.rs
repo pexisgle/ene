@@ -158,30 +158,3 @@ pub trait ToolProvider: Send + Sync {
 // The map is process-global because the producer (ene-core's actor
 // thread) and the consumer (ene-tool-host's startup path) are
 // independent threads spawned at slightly different times.
-
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
-
-static DB_AUTH_TOKENS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-
-/// Record a freshly generated DB auth token for a tool. Called by
-/// `ene-core` when it spawns a `DbIpcServer` for the tool.
-pub fn register_db_auth_token(tool_name: &str, token: String) {
-    if let Ok(mut map) = DB_AUTH_TOKENS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-    {
-        map.insert(tool_name.to_string(), token);
-    }
-}
-
-/// Take (remove) the recorded DB auth token for a tool, returning
-/// `None` if no token was registered (e.g. on non-Unix targets, or
-/// in tests). Called by `ToolHostManager` when spawning the tool
-/// binary.
-pub fn take_db_auth_token(tool_name: &str) -> Option<String> {
-    DB_AUTH_TOKENS
-        .get()
-        .and_then(|m| m.lock().ok())
-        .and_then(|mut g| g.remove(tool_name))
-}

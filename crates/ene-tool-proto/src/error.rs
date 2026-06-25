@@ -181,21 +181,7 @@ pub enum EneToolProtoError {
         /// Configured limit in bytes.
         limit: u64,
     },
-    /// A browser automation error occurred.
-    BrowserError {
-        /// Error details.
-        message: String,
-    },
-    /// An app/GUI automation error occurred.
-    AppError {
-        /// Error details.
-        message: String,
-    },
-    /// A web search error occurred.
-    WebSearchError {
-        /// Error details.
-        message: String,
-    },
+
     /// An IPC client (host-side) error.
     IpcClient {
         /// Error details.
@@ -277,15 +263,7 @@ impl std::fmt::Display for EneToolProtoError {
                     "Shell output exceeded max size ({size} bytes, limit: {limit})"
                 )
             }
-            EneToolProtoError::BrowserError { message } => {
-                write!(f, "Browser automation error: {message}")
-            }
-            EneToolProtoError::AppError { message } => {
-                write!(f, "App/GUI automation error: {message}")
-            }
-            EneToolProtoError::WebSearchError { message } => {
-                write!(f, "Web search error: {message}")
-            }
+
             EneToolProtoError::IpcClient { message } => {
                 write!(f, "IPC client error: {message}")
             }

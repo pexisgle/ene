@@ -47,7 +47,7 @@ pub async fn run_tool_server(
         std::fs::set_permissions(&socket_path, perms)?;
     }
 
-    tracing::info!("[tool-server] Listening on {}", socket_path.display());
+    tracing::info!(component = "ToolServer", socket = %socket_path.display(), "Listening");
 
     let provider: Arc<dyn ToolProvider> = provider.into();
     let shutdown = Arc::new(tokio::sync::Notify::new());
@@ -66,7 +66,7 @@ pub async fn run_tool_server(
                                 let is_shutdown = matches!(req, IpcRequest::Shutdown);
                                 let resp = dispatch(provider.as_ref(), &req).await;
                                 if let Err(e) = write_ipc_response(&mut stream, &resp).await {
-                                    tracing::error!("[tool-server] Failed to write response: {e}");
+                                    tracing::error!(component = "ToolServer", error = %e, "Failed to write response");
                                     break;
                                 }
                                 if is_shutdown {
@@ -75,7 +75,7 @@ pub async fn run_tool_server(
                                 }
                             }
                             Err(e) => {
-                                tracing::error!("[tool-server] IPC read error: {e}");
+                                tracing::error!(component = "ToolServer", error = %e, "IPC read error");
                                 let _ = write_ipc_response(
                                     &mut stream,
                                     &IpcResponse::Error { message: e.to_string() },
@@ -94,7 +94,7 @@ pub async fn run_tool_server(
     }
 
     cleanup_path(&socket_path);
-    tracing::info!("[tool-server] Shutting down");
+    tracing::info!(component = "ToolServer", "Shutting down");
     Ok(())
 }
 

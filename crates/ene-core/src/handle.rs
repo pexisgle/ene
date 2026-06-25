@@ -488,7 +488,7 @@ impl EneHandle {
             Ok(Err(join_err)) => {
                 // Tokio task was cancelled or panicked. Treat as
                 // completed: the actor is gone either way.
-                tracing::warn!("[EneHandle] actor task ended with error: {join_err}");
+                tracing::warn!(component = "EneHandle", error = %join_err, "Actor task ended with error");
                 guard.take();
                 Ok(())
             }
@@ -1051,7 +1051,7 @@ impl EneActor {
                 }
                 Err(e) => {
                     if !matches!(e, ene_session::EneSessionError::SplitNotNeeded) {
-                        tracing::error!("[Session] Summary generation error: {}", e);
+                        tracing::error!(component = "Session", error = %e, "Summary generation error");
                     }
                     // Split failed or wasn't needed: clear the marker so
                     // history trimming resumes.
@@ -1142,6 +1142,7 @@ async fn build_tool_registry(
     config: &EneConfig,
     memory_store: Option<Arc<ene_memory::MemoryStore>>,
 ) -> Result<Arc<dyn ToolRegistry>, EneCoreError> {
+    let mut db_tokens = std::collections::HashMap::new();
     if memory_store.is_some() {
         #[cfg(any(unix, windows))]
         let tool_config = config
@@ -1158,7 +1159,7 @@ async fn build_tool_registry(
         {
             let socket_dir = ene_config::paths::tool_socket_dir();
             std::fs::create_dir_all(&socket_dir).map_err(|e| {
-                EneCoreError::Tool(ene_tool_proto::ToolError::ExecutionFailed {
+                EneCoreError::Tool(ene_tool_host::ToolHostError::ExecutionFailed {
                     message: format!("Failed to create socket dir: {e}"),
                 })
             })?;
@@ -1197,9 +1198,7 @@ async fn build_tool_registry(
                 let _ = reader.read_exact(&mut token_out);
                 let auth_token = format!("ene-db-{:x}", u128::from_le_bytes(token_out));
 
-                // Record the token so ToolHostManager can hand it to
-                // the corresponding tool binary on Initialize.
-                ene_tool_proto::register_db_auth_token(name, auth_token.clone());
+                db_tokens.insert(name.clone(), auth_token.clone());
 
                 let server = DbIpcServer::new(
                     db_path.clone(),
@@ -1218,7 +1217,7 @@ async fn build_tool_registry(
         }
     }
 
-    ToolHostManager::start_full(config)
+    ToolHostManager::start_full(config, db_tokens)
         .await
         .map_err(EneCoreError::Tool)
 }

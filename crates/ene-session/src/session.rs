@@ -163,10 +163,10 @@ impl ConversationSession {
         }
 
         let file_content =
-            std::fs::read_to_string(path).map_err(crate::error::EneSessionError::CardReadError)?;
+            std::fs::read_to_string(path).map_err(ene_config::EneConfigError::CardReadError)?;
 
         let card = serde_json::from_str::<CharacterCardV3>(&file_content)
-            .map_err(crate::error::EneSessionError::JsonError)?;
+            .map_err(ene_config::EneConfigError::JsonError)?;
 
         self.character_card = Some(card);
         self.current_card_path = path.to_string();
