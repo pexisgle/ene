@@ -6,9 +6,9 @@ This file is the source of truth for **project-specific conventions** in the `en
 
 **For AI Agents (Crucial Behaviors):**
 * **Search First:** Always read the relevant files in `docs/` or `crates/` before proposing large architectural changes.
-* **Verify & Complete:** Before declaring a task finished, automatically run `cargo clippy --workspace` and `cargo test --workspace`. Finally, mentally verify the PR Verification Checklist (§10) and confirm all requirements are met.
+* **Verify & Complete:** Before declaring a task finished, automatically run `cargo clippy --workspace` and `cargo test --workspace`. Finally, mentally verify the PR Verification Checklist (§8) and confirm all requirements are met.
 * **No Hallucinated Fixes:** If a test or build fails, read the compiler errors carefully. Do not blindly guess fixes; ask the user for context if the error is environment-specific.
-* **Follow the Recipes:** When asked to add tools, configs, or IPC messages, strictly follow the steps in **§4 Common Tasks**.
+* **Follow the Recipes:** When asked to add tools, configs, or IPC messages, strictly follow the steps in **§6 Common Tasks**.
 * **Handle Hooks Gracefully:** If a git commit fails due to `cargo-husky` pre-commit hooks, read the hook output, fix the formatting or linting errors, and try committing again before resorting to `--no-verify`.
 
 ## 1. Where to Look
@@ -16,12 +16,10 @@ This file is the source of truth for **project-specific conventions** in the `en
 | You want to… | Go to |
 |---|---|
 | Set up a dev environment | §3 Platform Setup |
-| Add / modify a tool, config, or character | §4 Common Tasks |
-| Build, test, or lint | §5 Build / Test / Lint |
-| Understand crate layout or architecture | §6 Workspace, §7 Architecture |
-| Follow memory system rules (sea-orm / sqlite-vec) | §7.3 Memory System Rules |
-| Match project style or rustdoc rules | §9 Code Style & rustdoc |
-| Submit a PR / Git Workflow | §10 Git & PR Policy |
+| Understand crate layout or architecture | §4 Architecture & Philosophy |
+| Match project style, error handling, or logging | §5 Code Style & Safety |
+| Add / modify a tool, config, or character | §6 Common Tasks |
+| Submit a PR / Git Workflow | §8 Git & PR Policy |
 
 ## 2. AGENTS.md vs Skills vs docs/
 
@@ -36,9 +34,43 @@ This file is the source of truth for **project-specific conventions** in the `en
 
 * **Linux (Recommended):** Uses `direnv` + Nix flake (pins nightly Rust, mold, clang, GTK3, Wayland, Chromium, etc.). Run `direnv allow` followed by `cargo build`.
 * **Windows (Community):** Requires Visual Studio Build Tools, Rust nightly, WebView2, and OpenSSL (or `rustls`). IPC uses Windows Named Pipes.
-* **macOS (Unsupported):** Do not target macOS in new code. Codebase uses `cfg(unix)` but native deps are not provisioned.
 
-## 4. Common Tasks (Recipes)
+## 4. Architecture & Philosophy
+
+### 4.1 Domain-Driven Crate Splits (Strict Boundaries)
+The workspace is highly granular to enforce strict boundaries and prevent circular dependencies.
+* **`ene-tool-proto`**: Defines the IPC ABI (Requests/Responses). *Must never contain business or DB logic.*
+* **`ene-tool-host`**: Orchestrates tools and IPC. Depends on proto.
+* **`ene-core`**: The central facade tying together memory, tools, providers, and embedding.
+* **`ene-memory`**: Exclusive owner of `sea-orm` SQLite operations.
+* **Rule:** Do not merge crates arbitrarily. Tool binaries must remain extremely lightweight and only link what they absolutely need (typically just `ene-tool-proto` and `ene-tool-derive`).
+
+### 4.2 Asset Distribution Strategy
+* **Static Assets** (JSON schemas, default UI assets): Must be embedded into the binary at compile time (e.g., using `include_str!` or `rust-embed`) to ensure distributed binaries are self-contained.
+* **Dynamic Assets** (User databases, character prompts): Managed by `ene-config` and reside in OS-standard data directories (e.g., `%APPDATA%` on Windows, `~/.config` on Linux). 
+* **Rule:** The workspace root `assets/` directory is strictly for local development overrides and source material.
+
+### 4.3 Technology Stack
+* **Backend:** `tokio` (Async), `tracing` (Structured Logging).
+* **GUI (`ene-desktop`):** A custom rendering stack utilizing `winit` (Windowing) + `wgpu` (Graphics) + `egui` (UI). It uniquely relies on `bevy_ecs` purely for state management and scheduling, without the Bevy rendering engine.
+* **Memory System:** `sea-orm` + `sqlite-vec` + `sea-orm-migration`. *Never use diesel or rusqlite directly.*
+* **Tool Sandbox:** Tools run as separate processes communicating via IPC named pipes (Windows) or Unix Domain Sockets (Linux).
+
+## 5. Code Style & Safety Guidelines
+
+* **Async:** `tokio` only. No `async-std` or `smol`.
+* **Error Handling:** 
+  - Use `thiserror` for module-level enums (e.g., `ToolHostError`). No `anyhow` at the library boundary.
+  - **Avoid `unwrap()` and `expect()` outside of tests.** The workspace enforces `#![warn(clippy::unwrap_used)]`. Always propagate errors or handle them gracefully using typed errors.
+* **Logging:** 
+  - Use the `tracing` crate (`info!`, `warn!`, `error!`, `debug!`). **Never use `println!`.**
+  - Always include structured context fields when appropriate to maintain machine-readable logs (e.g., `tracing::error!(component = "ToolHost", error = %e, "Failed to start")`).
+* **Concurrency:** Prefer `parking_lot::RwLock` or `parking_lot::Mutex` over standard library primitives to avoid lock poisoning. Use `std::sync::OnceLock` for lazy static initializations.
+* **Events & i18n:** Backend crates (`ene-core`, `ene-session`) must emit events and status messages in **English** (as static constants or Enums). Localization is exclusively the responsibility of the UI layer (`ene-desktop`).
+* **Visibility:** Default to `pub(crate)`. Only use `pub` when external consumers need it.
+* **Comments:** Write `rustdoc` comments (`///`) for public APIs and complex logic. Re-exports should use `#[doc(no_inline)]`.
+
+## 6. Common Tasks (Recipes)
 
 ### R1. Add a new tool
 1. Create: `cargo new --bin tools/<name>`
@@ -57,89 +89,11 @@ This file is the source of truth for **project-specific conventions** in the `en
 2. Bump `PROTOCOL_VERSION` **only** if the wire format is incompatible.
 3. Handle the variant in `ene-tool-host` and all tool binaries.
 
-## 5. Build / Test / Lint
+## 7. Configuration Data Flow
 
-* **Build:** `cargo build --workspace` (Debug) / `cargo build --workspace --release` (Release)
-* **Run:** `cargo run -p ene-cli` (CLI) / `cargo run -p ene-desktop --release` (GUI)
-* **Test:** `cargo test --workspace` (Use `#[ignore]` for tests hitting real LLM/APIs; requires `API_TOKEN` in `.env`).
-* **Lint & Format:** `cargo clippy --workspace -- -D warnings` / `cargo fmt --all`
+Loaded by `figment` in order: 1. Compile-time defaults -> 2. OS-standard User Config (or local `assets/settings.json`) -> 3. `ENE_` env vars.
 
-## 6. Workspace Layout
-
-* `crates/`: Core libraries (`ene-core`, `ene-memory`, `ene-tool-host`, etc.)
-* `tools/`: Standalone tool binaries (`fs`, `web`, `utility`, `app`, `browser`)
-* `apps/`: User-facing applications (`ene-cli`, `ene-desktop`)
-
-*(All crates must use `edition = "2024"`)*.
-
-## 7. Architecture
-
-### 7.1 Crate dependency graph
-
-```mermaid
-flowchart TD
-  Desktop[ene-desktop] --> Core[ene-core]
-  CLI[ene-cli] --> Core
-  Core --> Common[ene-common]
-  Core --> Provider[ene-provider]
-  Core --> Config[ene-config]
-  Core --> Embed[ene-embedding]
-  Core --> Memory[ene-memory]
-  Core --> Session[ene-session]
-  Core --> ToolHost[ene-tool-host]
-  ToolHost --> Proto[ene-tool-proto]
-  Proto --> Derive[ene-tool-derive]
-  ToolHost -.spawns.-> ToolFs[ene-tool-fs]
-  ToolHost -.spawns.-> ToolWeb[ene-tool-web]
-  ToolHost -.spawns.-> ToolUtil[ene-tool-utility]
-  ToolHost -.spawns.-> ToolApp[ene-tool-app]
-  ToolHost -.spawns.-> ToolBrowser[ene-tool-browser]
-```
-
-### 7.2 Data flow (single turn)
-```mermaid
-sequenceDiagram
-  participant U as User
-  participant H as EneHandle
-  participant A as EneActor
-  participant M as Memory
-  participant L as LLM
-  participant T as Tool
-
-  U->>H: EneCommand::Run
-  H->>A: mpsc send
-  A->>M: search(query)
-  M-->>A: recalled summaries / facts
-  A->>L: stream chat.completion
-  A-->>H: broadcast EneEvent::TextDelta
-  opt tool call
-    A->>T: IPC CallTool
-    T-->>A: CallResult
-    A->>L: continue stream
-  end
-
-```
-
-### 7.3 Memory System Rules (STRICT)
-
-* **Database:** SQLite + `sqlite-vec` + `sea-orm` (with `sqlx-sqlite` feature). Connection pooling is provided by `sqlx`'s built-in `Pool` (configured in `crates/ene-memory/src/store/mod.rs`).
-* **Constraint:** **Always** use `sea-orm` (and `sea-orm-migration`) for all SQL. **Do NOT** introduce `rusqlite` or `diesel`.
-* **Migrations:** Defined as Rust modules under `crates/ene-memory/src/migrator/src/m{YYYYMMDD}_{name}/` (use `sea-orm-migration` CLI to scaffold). Apply via `sea_orm_migration::MigratorTrait::up` at startup, embedded through `Migrator` re-exports.
-* **Tool DB Access:** Tool binaries (e.g. `ene-tool-fs`, `ene-tool-utility`) must NOT link `ene-memory` directly. Instead, they access the database through the per-tool DB IPC server (`DbIpcServer` in `ene-core`, client in `ene-tool-db`). Each tool declares its schema with a tool-name prefix (e.g. `fs_`, `utility_`), and the server enforces prefix-based access control.
-
-## 8. Configuration
-
-Loaded by `figment` in order: 1. Compile-time defaults -> 2. `assets/settings.json` -> 3. `ENE_` env vars.
-
-## 9. Code Style & rustdoc
-
-* **Async:** `tokio` only. No `async-std` or `smol`.
-* **Error Handling:** Use `thiserror` for module-level enums. No `anyhow` at the library boundary.
-* **Visibility:** Default to `pub(crate)`. Only use `pub` when external consumers need it.
-* **Comments & Docs:** Focus on writing clean, self-documenting code. **Do write** `rustdoc` comments (`///`) for public APIs and complex logic. Avoid useless inline comments (`//`) that just repeat what the code does.
-* **Re-exports:** Use `#[doc(no_inline)]` when re-exporting major items from other workspace crates so they link back to the original crate.
-
-## 10. Git & PR Policy
+## 8. Git & PR Policy
 
 > **⚠️ Early Development Phase**
 > The project is currently in the early development stage. **AI agents do not need to create branches or pull requests at this time.** Direct commits to `main` are acceptable while the project is still in this phase. The policies below (branch naming, PR checklist, etc.) will be enforced once the project transitions to a stable release milestone.
@@ -148,11 +102,10 @@ Loaded by `figment` in order: 1. Compile-time defaults -> 2. `assets/settings.js
 * **Commits:** Follow Conventional Commits (`feat: ...`, `fix: ...`).
 * **Documentation:** English and Japanese (`docs/` and `docs/ja/`) must be kept in lock-step within the same PR.
 
-### 10.1 Pre-commit Hooks (cargo-husky)
+### 8.1 Pre-commit Hooks (cargo-husky)
 
 * `cargo-husky` is declared as a regular dep on `ene-core` and auto-installs hooks from `.cargo-husky/hooks/` into `.git/hooks/` on the first `cargo build`.
 * **`pre-commit`** runs `cargo fmt --all` against staged `.rs` files and re-stages the changes. Skip per-commit with `git commit --no-verify`; skip all hooks with `HUSKY=0 cargo build`.
-* To add a new hook, drop an executable file under `.cargo-husky/hooks/<name>` and document it here.
 
 ### PR Verification Checklist
 
@@ -160,12 +113,12 @@ Before submitting a PR or finishing a coding task, verify:
 
 * [ ] `cargo fmt --all` and `cargo clippy --workspace -- -D warnings` are clean.
 * [ ] `cargo test --workspace` passes.
-* [ ] Diesel migrations (`up.sql` / `down.sql`) are present and tested (if schema changed).
+* [ ] `sea-orm` migrations (Rust modules) are present, tested, and registered in the Migrator (if schema changed).
 * [ ] Config-field changes do not require manual schema commits (auto-regenerated, gitignored).
 * [ ] Public API or behavior changes have corresponding updates under `docs/`.
 * [ ] Both English (`docs/`) and Japanese (`docs/ja/`) docs are updated for any user-visible change.
-* [ ] Branch name and commit/PR title follow Conventional Commits (§10).
+* [ ] Branch name and commit/PR title follow Conventional Commits.
 
-## 11. Further Reading
+## 9. Further Reading
 
 See `docs/` for deep-dives into Architecture, Memory, Tools (RAG, SDK, Sandbox), and Core (Streaming, Prompting).
