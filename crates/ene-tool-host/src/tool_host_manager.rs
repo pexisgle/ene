@@ -1,3 +1,4 @@
+use crate::error::ToolHostError;
 use crate::ipc_registry::IpcToolRegistry;
 use crate::tools::CompositeToolRegistry;
 use crate::tools::registry::ToolRegistry;
@@ -33,10 +34,10 @@ impl ToolProcess {
         matches!(self.child.try_wait(), Ok(None))
     }
 
-    fn restart(&mut self) -> Result<(), ToolError> {
+    fn restart(&mut self) -> Result<(), ToolHostError> {
         self.restart_count += 1;
         if self.restart_count > MAX_RESTARTS {
-            return Err(ToolError::ExecutionFailed {
+            return Err(ToolHostError::ExecutionFailed {
                 message: format!(
                     "Tool '{}' exceeded max restarts ({})",
                     self.name, MAX_RESTARTS
@@ -59,7 +60,7 @@ impl ToolProcess {
         let child = std::process::Command::new(&self.binary_path)
             .env("ENE_TOOL_SOCKET", &self.socket_path)
             .spawn()
-            .map_err(|e| ToolError::ExecutionFailed {
+            .map_err(|e| ToolHostError::ExecutionFailed {
                 message: format!("Failed to restart '{}': {}", self.binary_path.display(), e),
             })?;
 
@@ -83,7 +84,7 @@ fn delay_for_restart(restart_count: usize) -> Duration {
 
 impl Drop for ToolProcess {
     fn drop(&mut self) {
-        tracing::info!("[ToolHostManager] Stopping tool '{}'", self.name);
+        tracing::info!(component = "ToolHostManager", tool = %self.name, "Stopping tool");
         let _ = self.child.kill();
         ene_tool_proto::transport::cleanup_path(&self.socket_path);
     }
@@ -108,7 +109,7 @@ impl ToolRegistry for SupervisedIpcRegistry {
         reg.list_tools()
     }
 
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolHostError> {
         // Fast path: a successful call also clears the
         // per-process restart counter so a tool that crashes
         // occasionally but is otherwise healthy does not
@@ -156,7 +157,11 @@ impl ToolRegistry for SupervisedIpcRegistry {
         let delay = guard.delay_for_restart();
         tokio::time::sleep(delay).await;
 
-        guard.restart()?;
+        guard
+            .restart()
+            .map_err(|e| ToolHostError::ExecutionFailed {
+                message: e.to_string(),
+            })?;
 
         let socket_path = guard.socket_path.clone();
         let sandbox = guard.sandbox.clone();
@@ -241,7 +246,7 @@ impl ToolRegistry for ToolHostManager {
         self.composite.list_tools()
     }
 
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolHostError> {
         self.composite.call_tool(name, arguments).await
     }
 
@@ -269,35 +274,18 @@ impl ToolHostManager {
     /// spawns each binary as a child process, and connects to it over IPC.
     /// Also registers each tool's config schema in the global runtime registry
     /// and regenerates `settings.schema.json`.
-    pub async fn start(config: &EneConfig) -> Result<Self, ToolError> {
-        // Read ToolConfig once. The previous form
-        // called `get_section::<ToolConfig>()` twice
-        // (the first read was a leftover), which
-        // re-deserialized the same JSON subtree on
-        // every `start` and made the per-tool sandbox
-        // lookup ambiguous with the later
-        // per-tool `entry.config` read.
+    pub async fn start(
+        config: &EneConfig,
+        mut db_tokens: std::collections::HashMap<String, String>,
+    ) -> Result<Self, ToolHostError> {
         let tool_config = config
             .get_section::<crate::config::ToolConfig>()
             .unwrap_or_default();
 
-        // Per-tool sandbox config. Each tool binary now
-        // receives the sandbox from its own
-        // `settings.tools.list.<name>.config`
-        // entry. The previous behavior read the `"fs"`
-        // entry's config and broadcast that sandbox to
-        // *every* tool binary, which is surprising
-        // coupling: a non-fs tool would receive an
-        // fs-shaped sandbox and ignore it via its
-        // default `set_sandbox` no-op, but the wire
-        // contract made it look like sandbox is
-        // process-global. Tools that want a process-
-        // global sandbox should configure it in their
-        // own section.
         let mut supervised_registries = Vec::new();
 
         std::fs::create_dir_all(paths::tool_socket_dir()).map_err(|e| {
-            ToolError::ExecutionFailed {
+            ToolHostError::ExecutionFailed {
                 message: format!("Failed to create socket dir: {e}"),
             }
         })?;
@@ -311,22 +299,12 @@ impl ToolHostManager {
                 serde_json::Value::Object(m) if m.is_empty() => None,
                 _ => Some(entry.config.clone()),
             };
-            // Derive a per-tool sandbox from this
-            // entry's own config, falling back to the
-            // default when the entry is missing or
-            // malformed. The fs-shaped default
-            // (`enabled: true, allowed_directories:
-            // ["."]`) is only relevant for the fs tool;
-            // other tools that use it get the same
-            // default. Tools that need a different
-            // sandbox must deserialize it from their own
-            // entry's config.
             let sandbox =
                 serde_json::from_value::<ene_tool_proto::SandboxConfigData>(entry.config.clone())
                     .unwrap_or_default();
-            match Self::start_tool(name, &sandbox, tool_config, timeout_ms).await {
+            let db_token = db_tokens.remove(name);
+            match Self::start_tool(name, &sandbox, tool_config, timeout_ms, db_token).await {
                 Ok(supervised_entry) => {
-                    // Collect config schema and register it in the runtime registry
                     if let Some(schema) = supervised_entry.config_schema().await {
                         let schema_key = format!("{}_config", name);
                         register_runtime_schema(&schema_key, schema);
@@ -334,13 +312,10 @@ impl ToolHostManager {
                     supervised_registries.push(supervised_entry);
                 }
                 Err(e) => {
-                    tracing::error!("[ToolHostManager] Failed to start tool '{}': {}", name, e);
+                    tracing::error!(component = "ToolHostManager", tool = %name, error = %e, "Failed to start tool");
                 }
             }
         }
-
-        // Regenerate schema file to include runtime tool schemas
-        paths::write_schemas(&paths::assets_dir());
 
         let composite = Arc::new(CompositeToolRegistry::new(supervised_registries));
 
@@ -352,8 +327,11 @@ impl ToolHostManager {
     /// Combines [`start`](Self::start) (IPC tool spawn), MCP server connection,
     /// and registry aggregation into a single call. Includes automatic fallback
     /// to an empty tool set if the primary startup fails.
-    pub async fn start_full(config: &EneConfig) -> Result<Arc<dyn ToolRegistry>, ToolError> {
-        let mut manager = match Self::start(config).await {
+    pub async fn start_full(
+        config: &EneConfig,
+        db_tokens: std::collections::HashMap<String, String>,
+    ) -> Result<Arc<dyn ToolRegistry>, ToolHostError> {
+        let mut manager = match Self::start(config, db_tokens).await {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!(
@@ -366,9 +344,9 @@ impl ToolHostManager {
                     ..Default::default()
                 };
                 let _ = fallback_config.set_section(&fallback_tools);
-                Self::start(&fallback_config)
+                Self::start(&fallback_config, std::collections::HashMap::new())
                     .await
-                    .map_err(|e2| ToolError::ExecutionFailed {
+                    .map_err(|e2| ToolHostError::ExecutionFailed {
                         message: format!("Fatal: Failed to start fallback ToolHostManager: {e2}"),
                     })?
             }
@@ -411,13 +389,12 @@ impl ToolHostManager {
         Ok(manager.into_registry())
     }
 
-    /// Adds an external registry (e.g., an [`crate::McpToolRegistry`]) to the composite.
+    /// Add a manual registry to the manager. Useful for testing or injecting custom MCP registries.
     pub fn add_registry(&mut self, registry: Arc<dyn ToolRegistry>) {
         self.composite.add_registry(registry);
     }
 
-    /// Consumes the manager and returns an `Arc<dyn ToolRegistry>` suitable for use
-    /// in the streaming engine.
+    /// Consume the manager and return a unified [`CompositeToolRegistry`] containing all added registries.
     pub fn into_registry(self) -> Arc<dyn ToolRegistry> {
         Arc::new(self)
     }
@@ -427,10 +404,11 @@ impl ToolHostManager {
         sandbox: &ene_tool_proto::SandboxConfigData,
         tool_config: Option<serde_json::Value>,
         timeout_ms: u64,
-    ) -> Result<Arc<dyn ToolRegistry>, ToolError> {
+        db_token: Option<String>,
+    ) -> Result<Arc<dyn ToolRegistry>, ToolHostError> {
         let binary_path =
-            Self::find_tool_binary(name).ok_or_else(|| ToolError::ExecutionFailed {
-                message: format!("Tool binary '{name}' not found"),
+            Self::find_tool_binary(name).ok_or_else(|| ToolHostError::ExecutionFailed {
+                message: format!("Tool binary not found for {name}"),
             })?;
 
         let socket_path: PathBuf = {
@@ -462,16 +440,12 @@ impl ToolHostManager {
         let mut tool_sandbox = sandbox.clone();
         tool_sandbox.db_socket = Some(db_socket_path.to_string_lossy().to_string());
 
-        // Pick up the auth token generated for this tool by
-        // ene-core's build_tool_registry so the tool can present it
-        // on the DB IPC Handshake. On Windows (or in tests where the
-        // map is empty) this is a no-op — DB is currently Unix-only.
-        tool_sandbox.db_auth_token = ene_tool_proto::take_db_auth_token(name);
+        tool_sandbox.db_auth_token = db_token;
 
         let child = std::process::Command::new(&binary_path)
             .env("ENE_TOOL_SOCKET", &socket_path)
             .spawn()
-            .map_err(|e| ToolError::ExecutionFailed {
+            .map_err(|e| ToolHostError::ExecutionFailed {
                 message: format!("Failed to spawn '{}': {}", binary_path.display(), e),
             })?;
 

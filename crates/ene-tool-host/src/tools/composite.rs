@@ -1,6 +1,6 @@
 use super::registry::ToolRegistry;
+use crate::ToolHostError;
 use async_trait::async_trait;
-use ene_tool_proto::ToolError;
 use ene_tool_proto::ToolSpec;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -71,15 +71,17 @@ impl ToolRegistry for CompositeToolRegistry {
         tools
     }
 
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolHostError> {
         let registry = {
             let guard = self.state.read().unwrap_or_else(|e| e.into_inner());
             match guard.tool_index.get(name) {
                 Some(&idx) => Arc::clone(&guard.registries[idx]),
                 None => {
-                    return Err(ToolError::NotFound {
-                        tool_name: name.to_string(),
-                    });
+                    return Err(ToolHostError::Protocol(
+                        ene_tool_proto::ToolError::NotFound {
+                            tool_name: name.to_string(),
+                        },
+                    ));
                 }
             }
         };
@@ -146,7 +148,7 @@ mod tests {
             self.tools.clone()
         }
 
-        async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
+        async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolHostError> {
             self.call_log
                 .lock()
                 .unwrap()
@@ -240,7 +242,10 @@ mod tests {
         let composite = CompositeToolRegistry::new(vec![Arc::new(mock)]);
         let result = composite.call_tool("nonexistent", "").await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ToolError::NotFound { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolHostError::Protocol(ene_tool_proto::ToolError::NotFound { .. })
+        ));
     }
 
     #[tokio::test]

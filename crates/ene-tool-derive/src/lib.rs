@@ -362,6 +362,18 @@ struct FieldInstr {
     /// `#[arg(enum_values = "a,b")]`, if any.
     enum_values: Vec<String>,
     /// `#[arg(default = "...")]`, if any.
+    ///
+    /// # Type Inference Ambiguity
+    ///
+    /// The default value is provided as a string in the attribute, and the macro
+    /// attempts to infer its underlying JSON type. If the string parses as an
+    /// integer or float, it is emitted as a JSON number. If it is exactly "true"
+    /// or "false", it is emitted as a JSON boolean. "null" becomes JSON null.
+    ///
+    /// This causes ambiguity when a field is meant to be a string but its default
+    /// value looks like a number (e.g. `#[arg(default = "1.0")]` for a version
+    /// string). To force the value to be emitted as a JSON string, the author
+    /// must include escaped quotes: `#[arg(default = "\"1.0\"")]`.
     default: Option<String>,
     /// Numeric / string / array length constraints.
     minimum: Option<i64>,

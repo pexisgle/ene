@@ -102,9 +102,9 @@ impl Default for ToolRagOptions {
             min_similarity: 0.25,
             background_index_on_startup: false,
             forced: vec![
-                ToolName::new("utility.question"),
-                ToolName::new("utility.todo_add"),
-                ToolName::new("utility.get_current_time"),
+                ToolName::try_new("utility.question").expect("valid tool name"),
+                ToolName::try_new("utility.todo_add").expect("valid tool name"),
+                ToolName::try_new("utility.get_current_time").expect("valid tool name"),
             ],
             weights: FieldWeights::default(),
         }
@@ -112,7 +112,7 @@ impl Default for ToolRagOptions {
 }
 
 impl TryFrom<super::config::ToolRagConfig> for ToolRagOptions {
-    type Error = String;
+    type Error = crate::ToolHostError;
 
     fn try_from(c: super::config::ToolRagConfig) -> Result<Self, Self::Error> {
         let mut forced = Vec::with_capacity(c.forced.len());
@@ -123,7 +123,10 @@ impl TryFrom<super::config::ToolRagConfig> for ToolRagOptions {
             // structured error so a typo / hostile config
             // entry surfaces as `Err`, not `panic!` during
             // startup.
-            forced.push(ToolName::try_new(name)?);
+            forced.push(
+                ToolName::try_new(name)
+                    .map_err(|e| crate::ToolHostError::ExecutionFailed { message: e })?,
+            );
         }
         Ok(Self {
             enabled: c.enabled,
@@ -156,8 +159,7 @@ pub struct ToolRag {
     /// In-memory cache of tool embedding vectors.
     /// Populated by ensure_index, used by select. Avoids
     /// deserializing all f32 vecs from SQLite every turn.
-    #[allow(clippy::type_complexity)]
-    cached_field_rows: RwLock<Vec<(String, String, String, Vec<f32>)>>,
+    cached_field_rows: RwLock<Vec<CachedFieldRow>>,
 }
 
 impl ToolRag {
@@ -187,7 +189,7 @@ impl ToolRag {
         embedder: Arc<dyn EmbeddingProvider>,
         store: Option<Arc<MemoryStore>>,
         config: super::config::ToolRagConfig,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, crate::ToolHostError> {
         let opts = ToolRagOptions::try_from(config)?;
         Ok(Self::new(embedder, store, opts))
     }
@@ -255,7 +257,7 @@ impl ToolRag {
                 map
             }
             Err(e) => {
-                tracing::warn!("[ToolRag] Failed to list cached embeddings: {}", e);
+                tracing::warn!(component = "ToolRag", error = %e, "Failed to list cached embeddings");
                 HashMap::new()
             }
         };
@@ -390,9 +392,18 @@ impl ToolRag {
         // Cache all tool embeddings in memory
         match store.list_tool_embedding_fields().await {
             Ok(rows) => {
-                let mapped: Vec<(String, String, String, Vec<f32>)> = rows
+                let mapped: Vec<CachedFieldRow> = rows
                     .into_iter()
-                    .map(|(name, field, fkey, _hash, _model, emb, _src)| (name, field, fkey, emb))
+                    .map(
+                        |(tool_name, field, field_key, _hash, _model, embedding, _src)| {
+                            CachedFieldRow {
+                                tool_name,
+                                field,
+                                field_key,
+                                embedding,
+                            }
+                        },
+                    )
                     .collect();
                 let mut cache_write = self
                     .cached_field_rows
@@ -423,7 +434,7 @@ impl ToolRag {
         let query_vec = match self.embedder.embed_query(query).await {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!("[ToolRag] Query embedding failed: {}", e);
+                tracing::warn!(component = "ToolRag", error = %e, "Query embedding failed");
                 let map = self.specs.read().unwrap_or_else(|e| e.into_inner());
                 return map.values().cloned().collect();
             }
@@ -486,15 +497,22 @@ impl ToolRag {
             }
         };
 
-        let field_rows: Vec<(String, String, String, Vec<f32>)> = match cached_rows {
+        let field_rows: Vec<CachedFieldRow> = match cached_rows {
             Some(rows) => rows,
             None => match store.list_tool_embedding_fields().await {
                 Ok(rows) => {
-                    let mapped: Vec<(String, String, String, Vec<f32>)> = rows
+                    let mapped: Vec<CachedFieldRow> = rows
                         .into_iter()
-                        .map(|(name, field, fkey, _hash, _model, emb, _src)| {
-                            (name, field, fkey, emb)
-                        })
+                        .map(
+                            |(tool_name, field, field_key, _hash, _model, embedding, _src)| {
+                                CachedFieldRow {
+                                    tool_name,
+                                    field,
+                                    field_key,
+                                    embedding,
+                                }
+                            },
+                        )
                         .collect();
                     let mut cache_write = self
                         .cached_field_rows
@@ -504,7 +522,7 @@ impl ToolRag {
                     mapped
                 }
                 Err(e) => {
-                    tracing::warn!("[ToolRag] Could not load embeddings: {}", e);
+                    tracing::warn!(component = "ToolRag", error = %e, "Could not load embeddings");
                     Vec::new()
                 }
             },
@@ -515,22 +533,22 @@ impl ToolRag {
         let w = &self.opts.weights;
         let mut per_tool: HashMap<String, (f32, Vec<FieldScore>)> = HashMap::new();
 
-        for (tool_name, field, _fkey, emb) in &field_rows {
-            let sim = cosine_similarity(&query_vec, emb);
+        for row in &field_rows {
+            let sim = cosine_similarity(&query_vec, &row.embedding);
             // Blend with HyDE embedding if available.
             // The HyDE blend factor is configurable
             // via `weights.hyde_blend` (replaces the
             // previously hardcoded 0.6 factor that was
             // not present in the documented formula).
             let blended = if let Some(ref hv) = hyde_vec {
-                let hyde_sim = cosine_similarity(hv, emb);
+                let hyde_sim = cosine_similarity(hv, &row.embedding);
                 let blend = w.hyde_blend.clamp(0.0, 1.0);
                 (sim * (1.0 - blend)) + (hyde_sim * w.hyde * blend)
             } else {
                 sim
             };
 
-            let weight = match field.as_str() {
+            let weight = match row.field.as_str() {
                 "summary" => w.summary,
                 "description" => w.description,
                 "example" => w.example,
@@ -541,11 +559,11 @@ impl ToolRag {
 
             let weighted = blended * weight;
             let entry = per_tool
-                .entry(tool_name.clone())
+                .entry(row.tool_name.clone())
                 .or_insert((0.0, Vec::new()));
             entry.0 += weighted;
             entry.1.push(FieldScore {
-                field: field.clone(),
+                field: row.field.clone(),
                 similarity: sim,
                 weighted,
             });
@@ -582,7 +600,9 @@ impl ToolRag {
                         candidates.push((spec.clone(), *score));
                     }
                 }
-                Err(e) => tracing::warn!("[ToolRag] Skipping invalid tool name in RAG index: {e}"),
+                Err(e) => {
+                    tracing::warn!(component = "ToolRag", error = %e, "Skipping invalid tool name in RAG index")
+                }
             }
         }
         let t_score = t_start.elapsed();
@@ -602,7 +622,7 @@ impl ToolRag {
                         .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 }
                 Err(e) => {
-                    tracing::debug!("[ToolRag] Rerank failed, using embedding scores: {}", e);
+                    tracing::debug!(component = "ToolRag", error = %e, "Rerank failed, using embedding scores");
                 }
             }
         }
@@ -657,7 +677,9 @@ impl ToolRag {
                     "[ToolRag] Background indexer completed for {} specs",
                     specs.len()
                 ),
-                Err(e) => tracing::warn!("[ToolRag] Background indexer failed: {}", e),
+                Err(e) => {
+                    tracing::warn!(component = "ToolRag", error = %e, "Background indexer failed")
+                }
             }
         });
     }
@@ -706,6 +728,14 @@ impl ToolRag {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct CachedFieldRow {
+    tool_name: String,
+    field: String,
+    field_key: String,
+    embedding: Vec<f32>,
+}
 
 #[derive(Debug, Clone, Default)]
 #[expect(dead_code)]
