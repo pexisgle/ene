@@ -13,6 +13,7 @@ use bevy_ecs::prelude::*;
 use crate::event::ai::{
     AiPermissionRequested, AiStreamFinished, AiTextDelta, AiUserInputRequested, EmoteToken,
 };
+#[cfg(target_os = "linux")]
 use crate::event::lifecycle::TickGtk;
 use crate::event::settings::OpenSettings;
 use crate::events::{AiStreamUpdate, AppEvent};

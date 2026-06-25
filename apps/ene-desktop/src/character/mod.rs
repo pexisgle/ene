@@ -918,7 +918,7 @@ impl CharacterRenderer {
     /// inside `update_motion` updates `model.nodes.world_*` every
     /// frame, so reading them here gives the live post-animation
     /// transforms without GPU readback.
-    #[cfg_attr(target_os = "linux", expect(dead_code))]
+    #[allow(dead_code)]
     pub fn current_bone_poses(&self) -> Vec<BonePose> {
         let Some(model) = self.model.as_ref() else {
             return Vec::new();

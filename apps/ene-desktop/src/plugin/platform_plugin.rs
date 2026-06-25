@@ -24,6 +24,7 @@ use crate::resource::tray::GtkReady;
 use crate::schedule::AppSet;
 use crate::system::platform::click_through::apply_linux_click_through_system;
 use crate::system::platform::cursor::update_cursor_state_system;
+#[cfg(target_os = "linux")]
 use crate::system::platform::gtk_pump::tick_gtk_system;
 use crate::system::platform::input_region::refresh_input_region_system;
 use crate::system::platform::should_render_debug::{
