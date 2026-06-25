@@ -46,7 +46,7 @@ pub use config::MemoryConfig;
 pub use error::EneMemoryError;
 pub use error::MemoryError;
 /// Formats recalled summaries for prompt injection.
-pub use recall::format_summaries_for_prompt;
+pub use recall::{format_summaries_for_prompt, format_summaries_with_library};
 /// Core memory types.
 pub use store::{ConversationSummary, KeyFact, MemoryStore, RecalledSummary};
 /// LLM summarization result type and entry-point.

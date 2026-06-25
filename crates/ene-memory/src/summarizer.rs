@@ -2,9 +2,13 @@
 //!
 //! Called during session splits to convert raw conversation history into structured summaries
 //! with natural-language descriptions, extracted topics, and user-relevant key facts.
+//!
+//! Prompt templates are loaded from the `PromptLibrary` so all user-facing strings
+//! stay out of compiled code and can be localised without recompilation.
 
 use crate::error::MemoryError;
 use crate::store::KeyFact;
+use ene_config::PromptLibrary;
 use serde::{Deserialize, Serialize};
 
 /// Structured conversation summary returned by the LLM
@@ -20,6 +24,9 @@ pub struct ConversationSummaryResult {
 /// summary and key facts. The prompt includes existing keyfacts for
 /// comparison, allowing updates, deletions, and retentions via the
 /// `key_facts` output.
+///
+/// All prompt strings are sourced from `PromptLibrary::load("en")` so they
+/// can be localised by swapping the locale file.
 pub async fn summarize_conversation(
     provider: &dyn ene_provider::LlmProvider,
     history: &[ene_provider::LlmMessage],
@@ -34,6 +41,10 @@ pub async fn summarize_conversation(
         });
     }
 
+    let prompts = PromptLibrary::load("en");
+
+    // Build conversation text from message history (tool messages excluded —
+    // their content is already attributed to the assistant turn).
     let mut conversation_text = String::new();
     for message in history {
         match message {
@@ -53,20 +64,18 @@ pub async fn summarize_conversation(
             ene_provider::LlmMessage::System { content } => {
                 conversation_text.push_str(&format!("System: {content}\n"));
             }
-            // Tool responses are intentionally excluded from the
-            // summary: their content was already attributed to the
-            // assistant turn that produced the corresponding tool
-            // call, and re-quoting the raw result would inflate
-            // the summary with data that does not reflect the
-            // dialogue. Match explicitly so future enum additions
-            // (e.g. Developer, Function) become compile errors
-            // rather than silently dropped.
+            // Tool responses are intentionally excluded from the summary:
+            // their content was already attributed to the assistant turn that
+            // produced the corresponding tool call, and re-quoting the raw
+            // result would inflate the summary with data that does not reflect
+            // the dialogue.
             ene_provider::LlmMessage::Tool { .. } => {}
         }
     }
 
+    let no_facts_placeholder = prompts.get("summarizer.no_facts_placeholder");
     let existing_facts_str = if existing_facts.is_empty() {
-        "なし".to_string()
+        no_facts_placeholder.to_string()
     } else {
         existing_facts
             .iter()
@@ -75,81 +84,55 @@ pub async fn summarize_conversation(
             .join("\n")
     };
 
-    let system_prompt = format!(
-        r#"あなたは会話分析の専門家です。与えられた会話履歴を分析し、重要な情報のみを抽出して JSON 形式で出力してください。
-
-## 出力形式（純粋な JSON のみを返してください）
-{{
-  "summary": "会話の重要な出来事・結論・決定事項のみを簡潔に要約",
-  "topics": ["トピック1", "トピック2"],
-  "key_facts": [
-    {{ "key": "job", "value": "エンジニア" }}
-  ]
-}}
-
-## summary の書き方
-- 出来事を時系列に羅列しないでください
-- 会話から「重要な結論」「決定事項」「新しい発見」「感情 of 重要な変化」のみを抽出してください
-- 具体的な固有名詞・日付・数値は必ず含めてください
-- 雑談や挨拶、繰り返し確認などの定型文は省略してください
-- 2〜4文で、第三者が読んでも何が重要な会話だったか分かるように書いてください
-- 例（悪い）: 「{user_name}は挨拶をした。そして天気の話になった。{user_name}は明日雨が降ると言った。」
-- 例（良い）: 「{user_name}は明日の外出予定を共有した。午後2時に渋谷で友人と待ち合わせ、映画『オッペンハイマー』を観る計画。」
-
-## topics の書き方
-- 会話で扱われた主なトピックを1〜5個の具体的なキーワードで列挙
-- 例: ×「雑談」→ ○「週末の予定」「映画『オッペンハイマー』」
-
-## key_facts の書き方（重要）
-ユーザー（{user_name}）について判明した・更新された情報をキーバリュー形式で列挙します。
-
-### 既存の事実リストとの比較ルール
-以下の「既存の事実リスト」と比較して、以下のいずれかの操作を行ってください:
-
-1. **更新**: 既存の key と同じ key で新しい値がある場合 → 新しい値で上書き
-   - 例: 既存 `job: "エンジニア"` → 会話で「転職してデザイナーになった」→ `job: "デザイナー"`
-
-2. **削除**: 既存の key の情報が会話で「もう該当しない」「辞めた」「終わった」と言及された場合 → value に空文字 `""` を設定
-   - 例: 既存 `job: "エンジニア"` → 会話で「来月で退職する」→ `job: ""`
-   - 空文字 `""` が設定された key_facts エントリは、保存時に削除されます
-
-3. **過去情報として保持**: 削除するが、過去の文脈として残しておいた方が良い重要な情報の場合 → key に `previous_` プレフィックスを付けて保持
-   - 例: 既存 `job: "エンジニア"` → 会話で「来月デザイナーに転職する」→ `job: "デザイナー"`, `previous_job: "エンジニア"`
-   - 例: 既存 `hobby: "ギター"` → 会話で「ギターはもう辞めてピアノに集中している」→ `hobby: "ピアノ"`, `previous_hobby: "ギター"`
-
-4. **新規追加**: 既存のリストにない新しい事実があれば追加
-
-### 注意事項
-- value は短く端的に（例: ×「Userはエンジニアとして働いている」→ ○「エンジニア」）
-- 会話で言及されなかった既存の事実は、そのままの値で含めてください（維持）
-- キャラクター（{character_name}）についての情報は含めない
-- 該当する事実がなければ空配列 `[]` を返す
-
-## 注意
-- JSON 以外のテキストは絶対に出力しないでください"#
+    let system_prompt = prompts.render(
+        "summarizer.system",
+        &[
+            ("user_name", user_name),
+            ("char_name", character_name),
+            ("existing_facts", &existing_facts_str),
+            ("conversation", &conversation_text),
+        ],
     );
 
-    let user_prompt = format!(
-        "【既存の事実リスト】\n{existing_facts_str}\n\n以下の会話履歴を分析して、指定された JSON 形式で要約と最新の事実リストを作成してください。\n\n---\n{conversation_text}\n---"
+    let user_prompt = prompts.render(
+        "summarizer.user_prompt",
+        &[
+            ("user_name", user_name),
+            ("existing_facts", &existing_facts_str),
+            ("conversation", &conversation_text),
+        ],
     );
 
     let schema = serde_json::json!({
         "type": "object",
         "properties": {
-            "summary": { "type": "string", "description": "会話の重要な出来事・結論・決定事項のみの要約" },
-            "topics": { "type": "array", "items": { "type": "string" }, "description": "トピックのリスト" },
+            "summary": {
+                "type": "string",
+                "description": "2–4 sentence summary of the conversation's key events, decisions, and outcomes"
+            },
+            "topics": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "1–5 specific keyword phrases representing the main topics discussed"
+            },
             "key_facts": {
                 "type": "array",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "key": { "type": "string", "description": "事実のキー。既存のkeyと同じなら更新、削除する場合は空文字\"\"をvalueに設定、過去情報として残す場合はprevious_プレフィックスを付けた新しいkeyを使用" },
-                        "value": { "type": "string", "description": "事実の値。空文字\"\"の場合はその事実の削除を意味する" }
+                        "key": {
+                            "type": "string",
+                            "description": "Fact identifier. Use same key to update, 'previous_<key>' to archive, empty value to delete."
+                        },
+                        "value": {
+                            "type": "string",
+                            "description": "Fact value. Empty string means delete this fact."
+                        }
                     },
                     "required": ["key", "value"],
                     "additionalProperties": false
                 },
-                "description": "ユーザーに関する重要な事実のリスト（既存事実との比較結果）"
+                "description": "Current and updated facts about the user"
             }
         },
         "required": ["summary", "topics", "key_facts"],
@@ -221,9 +204,10 @@ mod tests {
 
     #[test]
     fn test_parse_summary_json() {
-        let json = r#"{"summary": "テスト要約", "key_facts": [{"key": "job", "value": "fact1"}]}"#;
+        let json =
+            r#"{"summary": "Test summary.", "key_facts": [{"key": "job", "value": "fact1"}]}"#;
         let result = parse_summary_json(json).unwrap();
-        assert_eq!(result.summary, "テスト要約");
+        assert_eq!(result.summary, "Test summary.");
         assert_eq!(result.key_facts.len(), 1);
         assert_eq!(result.key_facts[0].key, "job");
         assert_eq!(result.key_facts[0].value, "fact1");
@@ -236,10 +220,8 @@ mod tests {
         assert_eq!(result.summary, "test");
     }
 
-    /// Regression test for #41 (bug 7): the parser must NOT
-    /// silently fall back to the raw LLM prose as a
-    /// "summary". A non-JSON response is a structured
-    /// error, not a partial success.
+    /// Regression test: the parser must NOT silently fall back to the raw LLM
+    /// prose as a "summary". A non-JSON response is a structured error.
     #[test]
     fn test_parse_summary_json_non_json_returns_error() {
         let raw = "This is not valid JSON at all";
@@ -251,5 +233,18 @@ mod tests {
             msg.contains("not valid JSON") || msg.contains("API request failed"),
             "unexpected error: {msg}"
         );
+    }
+
+    #[test]
+    fn prompt_library_summarizer_system_is_non_empty() {
+        let lib = PromptLibrary::built_in_english();
+        let system = lib.get("summarizer.system");
+        assert!(
+            !system.is_empty(),
+            "summarizer.system prompt must not be empty"
+        );
+        // Verify key structural elements are present
+        assert!(system.contains("key_facts"), "should mention key_facts");
+        assert!(system.contains("summary"), "should mention summary");
     }
 }

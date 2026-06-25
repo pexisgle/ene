@@ -100,6 +100,13 @@ pub fn tool_socket_dir() -> PathBuf {
     std::env::temp_dir().join(format!("{APP_ID}.tools"))
 }
 
+/// Returns the path to the prompt template file for the given language code.
+/// The file lives at `assets_dir/prompts/{lang}.json`.
+#[must_use]
+pub fn prompt_file_path(lang: &str) -> PathBuf {
+    assets_dir().join("prompts").join(format!("{lang}.json"))
+}
+
 /// Gets the path to the character-specific settings file
 /// `assets_dir/characters/{name}/character_settings.json`
 #[must_use]

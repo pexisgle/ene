@@ -119,7 +119,7 @@ impl ConversationSession {
         Self {
             history: ConversationHistory {
                 conversation_history: Vec::new(),
-                max_history_turns: 20,
+                max_history_turns: 20, // overridden by SessionConfig on first run
             },
             display: DisplayState {
                 display_buffer: String::new(),
@@ -401,6 +401,7 @@ impl ConversationSession {
             last_input_embedding: self.state.last_input_embedding.clone(),
             last_message_time: self.state.last_message_time,
             current_turn_count: self.state.current_turn_count,
+            history_len: self.history.conversation_history.len(),
             user_input: user_input.to_string(),
             session_config,
             provider,

@@ -10,11 +10,18 @@
 //!
 //! ## Session Splitting
 //!
-//! Sessions are automatically split based on:
-//! 1. **Timeout** — elapsed time exceeds `session_timeout_minutes`
-//! 2. **Topic change** — cosine similarity between consecutive user messages drops below `topic_change_threshold`
+//! Sessions are automatically split using a **composite score function** that
+//! aggregates four normalised signals:
 //!
-//! See [`spawn_split_task`] and [`execute_split`] for the async split lifecycle.
+//! | Factor | 0 = no pressure | 1 = max pressure |
+//! |--------|-----------------|-------------------|
+//! | Time | No time elapsed | `timeout_minutes` elapsed |
+//! | Topic  | Same topic | Completely different topic |
+//! | Context | Empty history | History full |
+//! | Turns | 0 turns | 100+ turns |
+//!
+//! A split is triggered when the weighted score ≥ `split_weights.threshold` (default 0.65).
+//! See [`compute_split_score`] and [`spawn_split_task`] for details.
 //!
 //! ## Emotion Tokens
 //!
@@ -39,7 +46,7 @@ pub mod special_token;
 pub mod types;
 
 /// Session auto-split configuration.
-pub use config::{SessionConfig, SummarizationConfig};
+pub use config::{SessionConfig, SplitScoreWeights, SummarizationConfig};
 /// Truncation utility.
 pub use ene_common::truncate::Truncate;
 /// Character-card types re-exported from `ene-config`.
@@ -57,8 +64,9 @@ pub use error::EneSessionError;
 pub use session::ConversationSession;
 /// Split lifecycle types and entry-points.
 pub use session_split::{
-    PendingSplitTask, SessionBoundary, SplitReason, SplitResult, SplitTaskInput, check_boundary,
-    execute_split, generate_session_id, poll_split_result, spawn_split_task,
+    PendingSplitTask, SessionBoundary, SplitReason, SplitResult, SplitScore, SplitTaskInput,
+    check_boundary, compute_split_score, execute_split, generate_session_id, poll_split_result,
+    spawn_split_task,
 };
 /// Emotion-token parsing utilities.
 pub use special_token::{extract_emotion_from_token, split_text_and_special_tokens};

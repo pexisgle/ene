@@ -8,14 +8,7 @@ use ene_provider::{EmbeddingKind, Role, cosine_similarity};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
-/// Represents whether a session should continue or split.
-#[derive(Debug)]
-pub enum SessionBoundary {
-    /// The session should continue without splitting.
-    Continue,
-    /// The session should be split for the given reason.
-    Split(SplitReason),
-}
+// ── Split detection ──────────────────────────────────────────────────────────
 
 /// Reasons for a session split.
 #[derive(Debug, Clone)]
@@ -30,6 +23,16 @@ pub enum SplitReason {
         /// Cosine similarity between consecutive user message embeddings.
         similarity: f32,
     },
+    /// Split due to context length pressure.
+    ContextPressure {
+        /// Proportion of history used (0.0–1.0).
+        context_ratio: f32,
+    },
+    /// Split due to a high composite score across multiple factors.
+    Composite {
+        /// The computed split score (0.0–1.0+).
+        score: f32,
+    },
     /// Split requested manually by the user.
     Manual,
 }
@@ -38,77 +41,115 @@ impl std::fmt::Display for SplitReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SplitReason::Timeout { elapsed_minutes } => {
-                write!(f, "{elapsed_minutes}分間の無操作により会話を分割")
+                write!(f, "Split after {elapsed_minutes} min inactive")
             }
             SplitReason::TopicChange { similarity } => {
-                write!(f, "トピック変更を検出 (類似度: {similarity:.2})")
+                write!(f, "Topic shift (similarity: {similarity:.2})")
             }
-            SplitReason::Manual => {
-                write!(f, "手動により会話を分割")
+            SplitReason::ContextPressure { context_ratio } => {
+                write!(f, "Context pressure ({:.0}% full)", context_ratio * 100.0)
             }
+            SplitReason::Composite { score } => {
+                write!(f, "Composite split score {score:.2}")
+            }
+            SplitReason::Manual => write!(f, "Manual split"),
         }
     }
 }
 
-/// The result of a session split operation.
+/// Whether a session should continue or split.
+#[derive(Debug)]
+pub enum SessionBoundary {
+    /// The session should continue without splitting.
+    Continue,
+    /// The session should be split for the given reason.
+    Split(SplitReason),
+}
+
+// ── Composite split scoring ──────────────────────────────────────────────────
+
+/// Decomposed components of a split score for diagnostics.
 #[derive(Debug, Clone)]
-pub struct SplitResult {
-    /// The reason the split was triggered.
-    pub reason: SplitReason,
-    /// The generated conversation summary.
-    pub summary: String,
-    /// Extracted key facts from the conversation.
-    pub key_facts: Vec<KeyFact>,
-    /// The ID of the new session.
-    pub new_session_id: SessionId,
-    /// Number of conversation-history entries that were in the snapshot
-    /// passed to the summarizer. The actor uses this as a boundary when
-    /// applying the split: history entries before index `snapshot_len - 1`
-    /// are discarded, and entries at and after that index are retained so
-    /// any user/assistant messages that arrived while the split was
-    /// running are preserved in the live history.
-    pub snapshot_len: usize,
+pub struct SplitScore {
+    /// Combined weighted score (0.0–1.0+). Split triggered when ≥ threshold.
+    pub total: f32,
+    /// Contribution from the time-elapsed factor.
+    pub time_component: f32,
+    /// Contribution from the topic-distance factor (`1 − similarity`).
+    pub topic_component: f32,
+    /// Contribution from context-length pressure.
+    pub context_component: f32,
+    /// Contribution from the turn-count factor.
+    pub turn_component: f32,
 }
 
-/// Handle to a pending split task running in the background.
-pub struct PendingSplitTask {
-    /// Oneshot receiver for the split result.
-    pub(crate) rx: oneshot::Receiver<Result<SplitResult, EneSessionError>>,
+/// Computes a composite split score from several independent signals.
+///
+/// Each factor is normalised to [0, 1] before being weighted:
+///
+/// | Factor | 0 → no pressure | 1 → maximum pressure |
+/// |--------|-----------------|----------------------|
+/// | **Time** | No time has passed | `timeout_minutes` elapsed |
+/// | **Topic** | Identical topic | Completely different topic |
+/// | **Context** | Empty history | History at `max_history_turns` |
+/// | **Turn count** | 0 turns | 100 turns (soft cap) |
+///
+/// When `topic_similarity` is `None` (no embedder), the topic component is 0.
+#[must_use]
+pub fn compute_split_score(
+    time_elapsed_minutes: f64,
+    topic_similarity: Option<f32>,
+    context_ratio: f32,
+    turn_count: usize,
+    config: &crate::SessionConfig,
+) -> SplitScore {
+    let weights = &config.split_weights;
+
+    // Time factor: linearly approaches 1.0 at timeout_minutes; capped at 1.0.
+    let time_factor = if config.timeout_minutes == 0 {
+        0.0f32
+    } else {
+        (time_elapsed_minutes as f32 / config.timeout_minutes as f32).min(1.0)
+    };
+
+    // Topic-distance factor: 1 − cosine_similarity (higher = more different).
+    let topic_factor = match topic_similarity {
+        Some(sim) => (1.0 - sim).clamp(0.0, 1.0),
+        None => 0.0,
+    };
+
+    // Context-pressure factor: proportion of max history used.
+    let context_factor = context_ratio.clamp(0.0, 1.0);
+
+    // Turn-count factor: soft cap at 100 turns (configurable via future field).
+    let turn_factor = (turn_count as f32 / 100.0).min(1.0);
+
+    let time_component = time_factor * weights.time;
+    let topic_component = topic_factor * weights.topic;
+    let context_component = context_factor * weights.context;
+    let turn_component = turn_factor * weights.turn_count;
+
+    SplitScore {
+        total: time_component + topic_component + context_component + turn_component,
+        time_component,
+        topic_component,
+        context_component,
+        turn_component,
+    }
 }
 
-/// Input parameters for a split task.
-pub struct SplitTaskInput {
-    /// The embedding of the previous user input.
-    pub last_input_embedding: Option<Vec<f32>>,
-    /// Timestamp of the last message.
-    pub last_message_time: Option<DateTime<Utc>>,
-    /// Current conversation turn count.
-    pub current_turn_count: usize,
-    /// The current user input.
-    pub user_input: String,
-    /// Session configuration.
-    pub session_config: crate::SessionConfig,
-    /// The provider used for summarization.
-    pub provider: Arc<dyn ene_provider::LlmProvider>,
-    /// Conversation history.
-    pub history: Vec<(Role, String)>,
-    /// Current session ID.
-    pub session_id: SessionId,
-    /// Character card name.
-    pub card_name: CardName,
-    /// User's name.
-    pub user_name: String,
-    /// Memory store for persistence.
-    pub store: Arc<MemoryStore>,
-    /// Embedding provider for vector operations.
-    pub embedder: Arc<dyn EmbeddingProvider>,
-}
-
-/// Checks whether the current session should be split based on timeout or topic change.
+/// Checks whether the current session should be split based on the composite
+/// scoring function and the configured threshold.
+///
+/// Returns `SessionBoundary::Continue` when:
+/// - `auto_split` is disabled, or
+/// - fewer than `min_turns_before_split` turns have occurred, or
+/// - the composite score is below the configured threshold.
 pub async fn check_boundary(
     last_input_embedding: Option<&Vec<f32>>,
     last_message_time: Option<DateTime<Utc>>,
     current_turn_count: usize,
+    history_len: usize,
     settings: &crate::SessionConfig,
     user_input: &str,
     embedder: &dyn EmbeddingProvider,
@@ -117,44 +158,104 @@ pub async fn check_boundary(
         return SessionBoundary::Continue;
     }
 
-    if let Some(last_time) = last_message_time {
-        let elapsed = Utc::now() - last_time;
-        let elapsed_minutes = elapsed.num_minutes().max(0) as u64;
-        if elapsed_minutes >= settings.timeout_minutes
-            && current_turn_count >= settings.min_turns_before_split
-        {
-            return SessionBoundary::Split(SplitReason::Timeout { elapsed_minutes });
-        }
+    // Always require a minimum number of turns to avoid splitting trivially short sessions.
+    if current_turn_count < settings.min_turns_before_split {
+        return SessionBoundary::Continue;
     }
 
-    if let Some(prev_embedding) = last_input_embedding
-        && current_turn_count >= settings.min_turns_before_split
-    {
+    // Time elapsed since the last message (0 if no prior message).
+    let elapsed_minutes = last_message_time
+        .map(|t| (Utc::now() - t).num_minutes().max(0) as f64)
+        .unwrap_or(0.0);
+
+    // Compute topic similarity by embedding the current user input and comparing
+    // with the previous turn's embedding. Skip if no embedder or prior embedding.
+    let topic_similarity: Option<f32> = if let Some(prev_embedding) = last_input_embedding {
         match embedder.embed_query(user_input).await {
-            Ok(current_embedding) => {
-                let similarity = cosine_similarity(prev_embedding, &current_embedding);
-                if similarity < settings.topic_similarity_threshold {
-                    return SessionBoundary::Split(SplitReason::TopicChange { similarity });
-                }
-            }
+            Ok(current_embedding) => Some(cosine_similarity(prev_embedding, &current_embedding)),
             Err(e) => {
-                tracing::error!("[Session] Embedding error for boundary check: {}", e);
+                tracing::warn!("[Session] Embedding error during boundary check: {}", e);
+                None
             }
         }
-    }
+    } else {
+        None
+    };
 
-    SessionBoundary::Continue
+    // Context-pressure ratio: how full is the in-memory history?
+    let max_history = settings.max_history_turns * 2; // each turn = 2 messages
+    let context_ratio = if max_history == 0 {
+        0.0f32
+    } else {
+        (history_len as f32 / max_history as f32).min(1.0)
+    };
+
+    let score = compute_split_score(
+        elapsed_minutes,
+        topic_similarity,
+        context_ratio,
+        current_turn_count,
+        settings,
+    );
+
+    tracing::debug!(
+        "[Session] Split score: {:.3} (time={:.3}, topic={:.3}, ctx={:.3}, turns={:.3}) threshold={:.3}",
+        score.total,
+        score.time_component,
+        score.topic_component,
+        score.context_component,
+        score.turn_component,
+        settings.split_weights.threshold
+    );
+
+    if score.total >= settings.split_weights.threshold {
+        // Choose the most dominant reason for user-facing messaging.
+        let reason = dominant_reason(&score, elapsed_minutes, topic_similarity);
+        SessionBoundary::Split(reason)
+    } else {
+        SessionBoundary::Continue
+    }
 }
 
-/// Embeds all conversation history messages (User + Assistant) individually and merges via max-pooling
+/// Returns the split reason whose component contributed most to the total score.
+fn dominant_reason(
+    score: &SplitScore,
+    elapsed_minutes: f64,
+    topic_similarity: Option<f32>,
+) -> SplitReason {
+    let max_component = score
+        .time_component
+        .max(score.topic_component)
+        .max(score.context_component)
+        .max(score.turn_component);
+
+    if (score.time_component - max_component).abs() < f32::EPSILON {
+        SplitReason::Timeout {
+            elapsed_minutes: elapsed_minutes as u64,
+        }
+    } else if (score.topic_component - max_component).abs() < f32::EPSILON {
+        SplitReason::TopicChange {
+            similarity: topic_similarity.unwrap_or(0.0),
+        }
+    } else if (score.context_component - max_component).abs() < f32::EPSILON {
+        SplitReason::ContextPressure {
+            context_ratio: score.context_component / score.context_component.max(f32::EPSILON),
+        }
+    } else {
+        SplitReason::Composite { score: score.total }
+    }
+}
+
+// ── Session embedding ────────────────────────────────────────────────────────
+
+/// Embeds all conversation history messages (User + Assistant) individually
+/// and merges via max-pooling.
 ///
 /// - Includes Assistant messages: captures new topics/words introduced by the AI,
-///   improving semantic matching accuracy with subsequent search queries
+///   improving semantic matching accuracy with subsequent search queries.
 /// - Max-pooling: adopts the strongest feature per dimension. Prevents dilution
-///   by zero-information messages like greetings. For example, a dimension that
-///   strongly responded to "Python async" will not be overwritten by the low
-///   activation value of "hello."
-/// - Each message is embedded individually, avoiding model `max_length` limits
+///   by zero-information messages like greetings.
+/// - Each message is embedded individually, avoiding model `max_length` limits.
 pub async fn embed_session_messages(
     embedder: &dyn EmbeddingProvider,
     history: &[(Role, String)],
@@ -208,7 +309,66 @@ pub async fn embed_session_messages(
     Ok(max_pooled)
 }
 
-/// Executes a session split: summarizes conversation, saves to memory, and generates a new session ID.
+// ── Split execution ──────────────────────────────────────────────────────────
+
+/// The result of a session split operation.
+#[derive(Debug, Clone)]
+pub struct SplitResult {
+    /// The reason the split was triggered.
+    pub reason: SplitReason,
+    /// The generated conversation summary.
+    pub summary: String,
+    /// Extracted key facts from the conversation.
+    pub key_facts: Vec<KeyFact>,
+    /// The ID of the new session.
+    pub new_session_id: SessionId,
+    /// Number of conversation-history entries that were in the snapshot
+    /// passed to the summarizer. The actor uses this as a boundary when
+    /// applying the split: history entries before index `snapshot_len - 1`
+    /// are discarded, and entries at and after that index are retained so
+    /// any user/assistant messages that arrived while the split was
+    /// running are preserved in the live history.
+    pub snapshot_len: usize,
+}
+
+/// Handle to a pending split task running in the background.
+pub struct PendingSplitTask {
+    /// Oneshot receiver for the split result.
+    pub(crate) rx: oneshot::Receiver<Result<SplitResult, EneSessionError>>,
+}
+
+/// Input parameters for a split task.
+pub struct SplitTaskInput {
+    /// The embedding of the previous user input.
+    pub last_input_embedding: Option<Vec<f32>>,
+    /// Timestamp of the last message.
+    pub last_message_time: Option<DateTime<Utc>>,
+    /// Current conversation turn count.
+    pub current_turn_count: usize,
+    /// Current in-memory history length (number of individual messages, not turns).
+    pub history_len: usize,
+    /// The current user input.
+    pub user_input: String,
+    /// Session configuration.
+    pub session_config: crate::SessionConfig,
+    /// The provider used for summarization.
+    pub provider: Arc<dyn ene_provider::LlmProvider>,
+    /// Conversation history.
+    pub history: Vec<(Role, String)>,
+    /// Current session ID.
+    pub session_id: SessionId,
+    /// Character card name.
+    pub card_name: CardName,
+    /// User's name.
+    pub user_name: String,
+    /// Memory store for persistence.
+    pub store: Arc<MemoryStore>,
+    /// Embedding provider for vector operations.
+    pub embedder: Arc<dyn EmbeddingProvider>,
+}
+
+/// Executes a session split: summarizes conversation, saves to memory, and
+/// generates a new session ID.
 pub async fn execute_split(
     history: &[(Role, String)],
     session_id: &str,
@@ -219,6 +379,7 @@ pub async fn execute_split(
     provider: &dyn ene_provider::LlmProvider,
     reason: SplitReason,
 ) -> Result<SplitResult, EneSessionError> {
+    let prompts = ene_config::PromptLibrary::load("en");
     let ended_at = Utc::now();
 
     let history_clone = history.to_vec();
@@ -274,7 +435,31 @@ pub async fn execute_split(
 
     let session_id_clone = session_id.to_string();
     let card_name_clone = card_name.to_string();
-    let summary = summary_result.summary.clone();
+
+    // Append the split reason to the summary
+    let reason_str = match &reason {
+        SplitReason::Timeout { elapsed_minutes } => prompts.render(
+            "split.reason_timeout",
+            &[("minutes", &elapsed_minutes.to_string())],
+        ),
+        SplitReason::TopicChange { similarity } => prompts.render(
+            "split.reason_topic",
+            &[("similarity", &format!("{similarity:.2}"))],
+        ),
+        SplitReason::ContextPressure { .. } => prompts.get("split.reason_context").to_string(),
+        SplitReason::Composite { score } => prompts.render(
+            "split.reason_composite",
+            &[("score", &format!("{score:.2}"))],
+        ),
+        SplitReason::Manual => prompts.get("split.reason_manual").to_string(),
+    };
+
+    let summary = if reason_str.is_empty() {
+        summary_result.summary.clone()
+    } else {
+        format!("{} {}", summary_result.summary, reason_str)
+    };
+
     let facts = summary_result.key_facts.clone();
 
     store
@@ -313,6 +498,7 @@ pub fn spawn_split_task(pending_split: &mut Option<PendingSplitTask>, input: Spl
             last_input_embedding,
             last_message_time,
             current_turn_count,
+            history_len,
             user_input,
             session_config,
             provider,
@@ -328,6 +514,7 @@ pub fn spawn_split_task(pending_split: &mut Option<PendingSplitTask>, input: Spl
             last_input_embedding.as_ref(),
             last_message_time,
             current_turn_count,
+            history_len,
             &session_config,
             &user_input,
             embedder.as_ref(),
@@ -377,4 +564,110 @@ pub fn poll_split_result(
 #[must_use]
 pub fn generate_session_id() -> SessionId {
     SessionId::from(format!("session_{}", uuid::Uuid::new_v4()))
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{SessionConfig, SplitScoreWeights};
+
+    fn test_config() -> SessionConfig {
+        SessionConfig {
+            auto_split: true,
+            timeout_minutes: 30,
+            max_history_turns: 20,
+            min_turns_before_split: 3,
+            recall_limit: 3,
+            similarity_threshold: 0.5,
+            split_weights: SplitScoreWeights {
+                time: 0.35,
+                topic: 0.40,
+                context: 0.20,
+                turn_count: 0.05,
+                threshold: 0.65,
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn score_zero_for_fresh_session() {
+        let cfg = test_config();
+        let score = compute_split_score(0.0, None, 0.0, 0, &cfg);
+        assert_eq!(score.total, 0.0);
+    }
+
+    #[test]
+    fn score_time_only_reaches_threshold() {
+        let mut cfg = test_config();
+        // With only time weight, to hit 0.65 we need elapsed >= timeout * (0.65 / 0.35) ≈ 55 min.
+        // At exactly timeout (30 min), time_factor = 1.0, time_component = 0.35 < 0.65.
+        cfg.split_weights = SplitScoreWeights {
+            time: 1.0,
+            topic: 0.0,
+            context: 0.0,
+            turn_count: 0.0,
+            threshold: 0.65,
+        };
+        let score = compute_split_score(30.0, None, 0.0, 0, &cfg);
+        assert!(
+            score.total >= cfg.split_weights.threshold,
+            "time_only score {:.3} should be >= threshold {:.3}",
+            score.total,
+            cfg.split_weights.threshold
+        );
+    }
+
+    #[test]
+    fn score_fully_different_topic_contributes() {
+        let cfg = test_config();
+        // similarity = 0.0 → topic_factor = 1.0, topic_component = 0.40
+        let score = compute_split_score(0.0, Some(0.0), 0.0, 0, &cfg);
+        assert!(
+            (score.topic_component - 0.40).abs() < 1e-6,
+            "topic_component should be 0.40 but was {}",
+            score.topic_component
+        );
+    }
+
+    #[test]
+    fn score_full_context_pressure() {
+        let cfg = test_config();
+        let score = compute_split_score(0.0, None, 1.0, 0, &cfg);
+        assert!(
+            (score.context_component - 0.20).abs() < 1e-6,
+            "context_component should be 0.20 but was {}",
+            score.context_component
+        );
+    }
+
+    #[test]
+    fn composite_high_on_all_factors() {
+        let cfg = test_config();
+        // All factors at maximum pressure → score = sum of all weights = 1.0
+        let score = compute_split_score(30.0, Some(0.0), 1.0, 100, &cfg);
+        assert!(
+            score.total >= cfg.split_weights.threshold,
+            "all-max score {:.3} should exceed threshold {:.3}",
+            score.total,
+            cfg.split_weights.threshold
+        );
+    }
+
+    #[test]
+    fn score_capped_at_factor_bounds() {
+        let cfg = test_config();
+        // Elapsed 1000 min, similarity -1 (impossible, clamps to 1 distance),
+        // context > 1 (clamps), turns > 100 (clamps)
+        let score = compute_split_score(1000.0, Some(-1.0), 5.0, 1000, &cfg);
+        // time_factor = 1.0, topic_factor = 1.0, context_factor = 1.0, turn = 1.0
+        let expected = 0.35 + 0.40 + 0.20 + 0.05;
+        assert!(
+            (score.total - expected).abs() < 1e-5,
+            "capped score should be {expected:.3} but was {:.3}",
+            score.total
+        );
+    }
 }

@@ -14,16 +14,19 @@ pub enum SplitReason {
 
 ## Trigger Conditions
 
-`check_boundary()` evaluates two conditions:
+`check_boundary()` computes a **composite split score** based on four normalized factors:
 
-1. **Timeout**
-   - `session_elapsed_minutes() >= session_timeout_minutes`
-   - AND `current_turn_count >= min_turns_before_split`
+1. **Time Elapsed**: `minutes / timeout_minutes`
+2. **Topic Distance**: `1.0 - cosine_similarity` between previous and current user embeddings
+3. **Context Pressure**: `history_len / max_history`
+4. **Turn Count**: `current_turn_count / 100`
 
-2. **Topic Change**
-   - Cosine similarity between previous and current user input embeddings `< topic_change_threshold`
-   - Requires at least 2 user inputs with valid embeddings
-   - AND `current_turn_count >= min_turns_before_split`
+The total score is calculated as:
+`time_component + topic_component + context_component + turn_component`
+
+A split is triggered when the total score exceeds the `threshold` (default `0.65`). The dominant contributing factor determines the `SplitReason`.
+
+*Note: A minimum number of turns (`min_turns_before_split`) is required before any split can occur.*
 
 ## Lifecycle
 

@@ -27,10 +27,12 @@ impl CliCommand for PromptCommand {
             .map_err(|e| format!("Failed to get actor state: {e}"))?;
 
         if let Some(card) = &snapshot.character_card {
+            let prompts = ene_config::PromptLibrary::load("en");
             let sys = ene_core::message_builder::build_system_prompt(
                 card,
                 &snapshot.config.runtime_rules,
                 &snapshot.config.user_name,
+                &prompts,
             );
             if !sys.trim().is_empty() {
                 println!("--- System Prompt ---");
@@ -88,7 +90,7 @@ impl CliCommand for PromptCommand {
                 println!("----------------------------------------");
             }
 
-            if let Some(phi) = ene_core::message_builder::build_expression_phi(card) {
+            if let Some(phi) = ene_core::message_builder::build_expression_phi(card, &prompts) {
                 let phi_expanded = ene_config::expand_cbs_macros(
                     &phi,
                     card.data.get_character_name(),

@@ -33,30 +33,36 @@ MessageBuildContext {
 
 ## `build_system_prompt()`
 
+`PromptLibrary`（`assets/prompts/en.json` 経由）を使用して、デスクトップマスコット向けに最適化されたMarkdownスタイルのプロンプトを構築します：
+
 ```
+[マスコットコンテキストフレーム (You are a desktop AI companion...)]
+
+## Behavior Rules
 {runtime_rules}
 
+## Character
 {card.system_prompt}
 
-Personality:
+### Personality
 {card.personality}
 
-Scenario:
-{card.scenario}
-
-Description:
+### Background
 {card.description}
+
+## Current Scene
+{card.scenario}
 ```
 
-各セクションは 2 つの改行で区切られます。プロンプト全体に `expand_cbs_macros()` が適用されます。
+各セクションはコンテンツが存在する場合にのみ追加されます。プロンプト全体に `expand_cbs_macros()` が適用されます。
 
 ## `build_expression_phi()`
 
-キャラクターカードの `post_history_instructions` と解決された表情定義から感情表現プロトコルブロックを生成します。
+`PromptLibrary` のテンプレートを使用して、感情表現プロトコルブロックを生成します。性能の低いモデルでも `<|emo:name|>` トークンを正しく出力できるように、文頭に配置する具体的な例を提供します。
 
-- 利用可能な `<|emo:name|>` トークンの一覧を提示
-- カード拡張 `expressions` をデフォルト (neutral, happy, sad, angry, relaxed, surprised) とマージ
-- 無効な表情 (`disabled: true`) は除外
+- プロンプトライブラリから `emotion.header` と `emotion.rule` を使用
+- カード拡張 または デフォルト (neutral, happy, sad, angry, relaxed, surprised) から利用可能なトークン一覧を提示
+- 具体的な成功例 (`Example Messages:`) を含める
 
 ## ツール渡し
 

@@ -33,30 +33,36 @@ MessageBuildContext {
 
 ## `build_system_prompt()`
 
+Uses `PromptLibrary` (via `assets/prompts/en.json`) to construct a structured Markdown-style prompt optimized for desktop mascots:
+
 ```
+[Mascot Context Frame (You are a desktop AI companion...)]
+
+## Behavior Rules
 {runtime_rules}
 
+## Character
 {card.system_prompt}
 
-Personality:
+### Personality
 {card.personality}
 
-Scenario:
-{card.scenario}
-
-Description:
+### Background
 {card.description}
+
+## Current Scene
+{card.scenario}
 ```
 
-Sections are separated by two newlines. The entire prompt is processed by `expand_cbs_macros()`.
+Sections are only appended if they contain content. The entire prompt is processed by `expand_cbs_macros()`.
 
 ## `build_expression_phi()`
 
-Generates an Emotion Expression Protocol block from the character card's `post_history_instructions` and resolved expression definitions.
+Generates an Emotion Expression Protocol block using `PromptLibrary` templates. Provides concrete examples of how to format the `<|emo:name|>` tokens at the beginning of sentences to improve lower-capability model compliance.
 
-- Lists available `<|emo:name|>` tokens
-- Merges card extensions `expressions` with defaults (neutral, happy, sad, angry, relaxed, surprised)
-- Disabled expressions (`disabled: true`) are excluded
+- Uses `emotion.header` and `emotion.rule` from the prompt library
+- Lists available tokens from card extensions or defaults (neutral, happy, sad, angry, relaxed, surprised)
+- Includes strict positive examples `Example Messages:`
 
 ## Tool Passing
 

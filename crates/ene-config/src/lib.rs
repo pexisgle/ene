@@ -16,6 +16,8 @@ pub mod config;
 pub mod error;
 /// Platform-aware directory and file path resolution.
 pub mod paths;
+/// Prompt template management with multi-language support.
+pub mod prompts;
 /// First-launch asset deployment and resource directory initialization.
 pub mod resources;
 /// Centralized config store with dirty tracking for auto-save.
@@ -39,8 +41,9 @@ pub use error::EneConfigError;
 pub use paths::{
     IS_DEV_BUILD, app_data_dir, assets_dir, builtin_tools_dir, character_card_schema_file_path,
     character_schema_file_path, character_settings_path, config_file_path, models_dir,
-    schema_file_path, tool_socket_dir, user_tools_dir,
+    prompt_file_path, schema_file_path, tool_socket_dir, user_tools_dir,
 };
+pub use prompts::{PromptLibrary, substitute as substitute_prompt_vars};
 pub use resources::ensure_resource_dirs;
 pub use store::ConfigStore;
 

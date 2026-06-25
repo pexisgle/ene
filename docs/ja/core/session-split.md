@@ -12,18 +12,22 @@ pub enum SplitReason {
 }
 ```
 
-## トリガー条件
+## トリガー条件（複合スコア）
 
-`check_boundary()` が 2 つの条件を評価します:
+`check_boundary()` が4つの要因による複合スコアを評価します。各要因のスコアは `[0.0, 1.0]` の範囲で正規化され、設定された重み（`SplitScoreWeights`）が掛け合わされます。
 
-1. **タイムアウト**
-   - `session_elapsed_minutes() >= session_timeout_minutes`
-   - かつ `current_turn_count >= min_turns_before_split`
+1. **Time Factor (時間)**
+   - `min(elapsed_minutes / timeout_minutes, 1.0)`
+2. **Topic Factor (話題)**
+   - `1.0 - cosine_similarity(current, history_pool)`
+3. **Context Pressure Factor (コンテキスト圧)**
+   - `min(current_turn_count / max_history_turns, 1.0)`
+4. **Turn Count Factor (ターン数)**
+   - 常に定数 1.0 に重み付けされた、ターンごとの基礎スコア（インクリメンタルな増分）
 
-2. **話題変化**
-   - 前回のユーザー入力埋め込みと今回の埋め込みのコサイン類似度 < `topic_change_threshold`
-   - 有効な埋め込みを持つユーザー入力が最低 2 回必要
-   - かつ `current_turn_count >= min_turns_before_split`
+**分割基準:** `総スコア >= 設定された閾値` かつ `current_turn_count >= min_turns_before_split`
+
+最も高い重み付きスコアを出した要因が **Dominant Reason (主要因)** となり、要約テキストの先頭に付加されます（例: `[Session ended due to topic shift (スコア)]`）。
 
 ## ライフサイクル
 

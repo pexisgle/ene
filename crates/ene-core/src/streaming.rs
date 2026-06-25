@@ -1,7 +1,7 @@
 use crate::handle::{ConversationEntry, EneEvent, TerminalReason};
 use crate::message_builder::{MessageBuildContext, build_messages};
 use crate::types::RequestId;
-use ene_config::EneConfig;
+use ene_config::{EneConfig, PromptLibrary};
 use ene_memory::RecalledSummary;
 use ene_provider::{LlmMessage, LlmToolCall, LlmToolCallChunk, UserMessagePart};
 use ene_session::ConversationSession;
@@ -469,6 +469,9 @@ pub(crate) fn build_chat_messages_list(
     let runtime_rules = config.runtime_rules.clone();
     let user_name = config.user_name.clone();
 
+    // Load prompt templates (falls back to built-in English if the file is missing).
+    let prompts = PromptLibrary::load("en");
+
     build_messages(&MessageBuildContext {
         card,
         user_input,
@@ -478,6 +481,7 @@ pub(crate) fn build_chat_messages_list(
         user_name: &user_name,
         recalled_summaries,
         key_facts,
+        prompts: &prompts,
     })
 }
 

@@ -63,8 +63,8 @@ fn handle_info(snapshot: &ene_core::EneStateSnapshot) {
     println!("Auto-split: {}", session_config.auto_split);
     println!("Timeout: {} min", session_config.timeout_minutes);
     println!(
-        "Topic threshold: {}",
-        session_config.topic_similarity_threshold
+        "Split threshold: {} (topic wt: {})",
+        session_config.split_weights.threshold, session_config.split_weights.topic
     );
     println!("--------------------");
 }
