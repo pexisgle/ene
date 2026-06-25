@@ -1,4 +1,4 @@
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{CharacterConfig, EneConfig, save_full_config};
@@ -45,7 +45,7 @@ impl ConfigStore {
         let config = match crate::load_config() {
             Ok(c) => c,
             Err(e) => {
-                tracing::error!("[ene-config] Failed to load configuration: {e}, using defaults");
+                tracing::error!(component = "ConfigStore", error = %e, "Failed to load configuration, using defaults");
                 EneConfig::default()
             }
         };
@@ -85,19 +85,19 @@ impl ConfigStore {
 
     /// Returns a clone of the current global config.
     pub fn config(&self) -> EneConfig {
-        self.config.read().unwrap().clone()
+        self.config.read().clone()
     }
 
     /// Gives mutable access to the global config.
     /// Automatically marks the store as dirty after the closure runs.
     pub fn with_config_mut(&self, f: impl FnOnce(&mut EneConfig)) {
-        f(&mut self.config.write().unwrap());
+        f(&mut self.config.write());
         self.global_dirty.store(true, Ordering::Release);
     }
 
     /// Replaces the entire global config and marks dirty.
     pub fn set_config(&self, config: EneConfig) {
-        *self.config.write().unwrap() = config;
+        *self.config.write() = config;
         self.global_dirty.store(true, Ordering::Release);
     }
 
@@ -106,11 +106,7 @@ impl ConfigStore {
     where
         T: serde::de::DeserializeOwned + Default + crate::HasConfigKey,
     {
-        self.config
-            .read()
-            .unwrap()
-            .get_section::<T>()
-            .unwrap_or_default()
+        self.config.read().get_section::<T>().unwrap_or_default()
     }
 
     /// Writes a typed section into the global config and marks dirty.
@@ -118,7 +114,7 @@ impl ConfigStore {
     where
         T: serde::Serialize + crate::HasConfigKey,
     {
-        self.config.write().unwrap().set_section(section).ok();
+        self.config.write().set_section(section).ok();
         self.global_dirty.store(true, Ordering::Release);
     }
 
@@ -126,13 +122,13 @@ impl ConfigStore {
 
     /// Returns a clone of the current per-character config.
     pub fn character_config(&self) -> CharacterConfig {
-        self.character_config.read().unwrap().clone()
+        self.character_config.read().clone()
     }
 
     /// Gives mutable access to the per-character config.
     /// Automatically marks it as dirty.
     pub fn with_character_config_mut(&self, f: impl FnOnce(&mut CharacterConfig)) {
-        f(&mut self.character_config.write().unwrap());
+        f(&mut self.character_config.write());
         self.character_dirty.store(true, Ordering::Release);
     }
 
@@ -140,7 +136,7 @@ impl ConfigStore {
     pub fn load_character_config(&self, character_name: &str) {
         let path = crate::character_settings_path(character_name);
         let content = std::fs::read_to_string(&path).ok();
-        let mut guard = self.character_config.write().unwrap();
+        let mut guard = self.character_config.write();
         *guard = content
             .and_then(|json| serde_json::from_str::<CharacterConfig>(&json).ok())
             .unwrap_or_default();
@@ -148,7 +144,7 @@ impl ConfigStore {
 
     /// Replaces the per-character config and marks dirty.
     pub fn set_character_config(&self, config: CharacterConfig) {
-        *self.character_config.write().unwrap() = config;
+        *self.character_config.write() = config;
         self.character_dirty.store(true, Ordering::Release);
     }
 
@@ -182,14 +178,14 @@ impl ConfigStore {
         let mut saved = false;
 
         if self.global_dirty.swap(false, Ordering::AcqRel) {
-            let config = self.config.read().unwrap();
+            let config = self.config.read();
             save_full_config(&config)?;
             saved = true;
         }
 
         if self.character_dirty.swap(false, Ordering::AcqRel) {
             if let Some(name) = character_name {
-                let char_config = self.character_config.read().unwrap();
+                let char_config = self.character_config.read();
                 let path = crate::character_settings_path(name);
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;

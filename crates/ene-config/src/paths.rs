@@ -14,12 +14,7 @@ pub fn app_data_dir() -> PathBuf {
     )
 }
 
-/// Returns the assets directory.
-///
-/// In debug builds the source-tree `assets/` is used; in release builds
-/// the app data directory is returned.
-#[must_use]
-pub fn assets_dir() -> PathBuf {
+fn resolve_assets_dir_impl() -> PathBuf {
     if cfg!(debug_assertions)
         && let Some(exe_dir) = std::env::current_exe()
             .ok()
@@ -35,6 +30,16 @@ pub fn assets_dir() -> PathBuf {
         }
     }
     app_data_dir()
+}
+
+/// Returns the assets directory.
+///
+/// In debug builds the source-tree `assets/` is used; in release builds
+/// the app data directory is returned.
+#[must_use]
+pub fn assets_dir() -> PathBuf {
+    static CACHED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    CACHED.get_or_init(resolve_assets_dir_impl).clone()
 }
 
 /// Returns the models directory (`assets/models`).

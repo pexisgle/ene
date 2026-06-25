@@ -29,6 +29,9 @@ pub enum EneConfigError {
     /// Catch-all configuration error with a free-form message.
     #[error("Configuration error: {0}")]
     GenericConfigError(String),
+    /// General I/O error.
+    #[error("I/O error: {0}")]
+    IoError(#[source] std::io::Error),
 }
 
 /// Type alias for internal module usages.

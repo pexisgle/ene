@@ -11,7 +11,7 @@ use std::path::PathBuf;
 /// In debug builds the source-tree `assets/` is used directly. In release
 /// builds, the assets are copied from a location next to the binary into
 /// the OS-standard data directory on first launch.
-pub fn ensure_resource_dirs() -> PathBuf {
+pub fn ensure_resource_dirs() -> Result<PathBuf, crate::EneConfigError> {
     let assets_dir = crate::paths::assets_dir();
 
     #[cfg(debug_assertions)]
@@ -20,7 +20,7 @@ pub fn ensure_resource_dirs() -> PathBuf {
             "[Resources] Dev build: using source assets at {}",
             assets_dir.display()
         );
-        assets_dir
+        Ok(assets_dir)
     }
 
     #[cfg(not(debug_assertions))]
@@ -33,32 +33,35 @@ pub fn ensure_resource_dirs() -> PathBuf {
                     assets_dir.display()
                 );
                 if let Err(e) = fs::create_dir_all(&assets_dir) {
-                    tracing::error!("[Resources] Failed to create assets dir: {e}");
-                    return assets_dir;
+                    tracing::error!(component = "Resources", error = %e, "Failed to create assets dir");
+                    return Err(crate::EneConfigError::IoError(e));
                 }
-                let Ok(entries) = fs::read_dir(&src) else {
-                    return assets_dir;
-                };
+                let entries = fs::read_dir(&src).map_err(crate::EneConfigError::IoError)?;
                 for entry in entries.flatten() {
                     let name = entry.file_name();
                     let dst = assets_dir.join(&name);
                     if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                         if let Err(e) = copy_dir_all(&entry.path(), &dst) {
-                            tracing::error!("[Resources] Failed to copy {:?}: {e}", name);
+                            tracing::error!(component = "Resources", file = ?name, error = %e, "Failed to copy dir");
+                            return Err(crate::EneConfigError::GenericConfigError(e));
                         }
                     } else {
                         if let Err(e) = fs::copy(&entry.path(), &dst) {
-                            tracing::error!("[Resources] Failed to copy {:?}: {e}", name);
+                            tracing::error!(component = "Resources", file = ?name, error = %e, "Failed to copy file");
+                            return Err(crate::EneConfigError::IoError(e));
                         }
                     }
                 }
             } else {
-                tracing::warn!("[Resources] Default assets not found; running without defaults.");
+                tracing::warn!(
+                    component = "Resources",
+                    "Default assets not found; running without defaults."
+                );
                 let _ = fs::create_dir_all(&assets_dir);
             }
         }
 
-        assets_dir
+        Ok(assets_dir)
     }
 }
 
