@@ -197,6 +197,22 @@ returned as-is.
 
 ---
 
+### `ensure_resource_dirs`
+
+```rust
+pub fn ensure_resource_dirs() -> Result<PathBuf, EneConfigError>
+```
+
+Initialises the application data directory. On the first launch, it copies the default assets from the distribution directory into the OS-standard application data directory (e.g., `%APPDATA%` on Windows).
+
+**Distribution Bundle Policy:**
+To keep the binary release package lightweight, do not bundle heavy local assets or temporary development files in the distributed `assets/` directory. The following resources listed in `.gitignore` must be excluded from the release archive:
+* `assets/models/` (Local model caches)
+* Generated schemas under `assets/schema/` (`settings.schema.json`, etc.)
+* Database files (`*.db*`) and dotfiles.
+
+---
+
 ## Global Config Singleton
 
 ```rust

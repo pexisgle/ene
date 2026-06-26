@@ -46,9 +46,9 @@ The workspace is highly granular to enforce strict boundaries and prevent circul
 * **Rule:** Do not merge crates arbitrarily. Tool binaries must remain extremely lightweight and only link what they absolutely need (typically just `ene-tool-proto` and `ene-tool-derive`).
 
 ### 4.2 Asset Distribution Strategy
-* **Static Assets** (JSON schemas, default UI assets): Must be embedded into the binary at compile time (e.g., using `include_str!` or `rust-embed`) to ensure distributed binaries are self-contained.
+* **Static Assets** (Default characters, config templates, UI icons): Distributed alongside the executable. On first launch, `ene-config` copies them to the user data directory. To keep the distribution lightweight, `.gitignore`'d resources (such as `assets/models/` and generated `assets/schema/*.schema.json`) **must not be bundled** in the release package.
 * **Dynamic Assets** (User databases, character prompts): Managed by `ene-config` and reside in OS-standard data directories (e.g., `%APPDATA%` on Windows, `~/.config` on Linux). 
-* **Rule:** The workspace root `assets/` directory is strictly for local development overrides and source material.
+* **Rule:** The workspace root `assets/` directory is for local development and default templates. Heavy binary models or generated schemas must be excluded from distribution.
 
 ### 4.3 Technology Stack
 * **Backend:** `tokio` (Async), `tracing` (Structured Logging).

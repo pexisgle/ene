@@ -200,6 +200,22 @@ pub fn resolve_character_path(name: &str) -> String
 
 ---
 
+### `ensure_resource_dirs`
+
+```rust
+pub fn ensure_resource_dirs() -> Result<PathBuf, EneConfigError>
+```
+
+アプリケーションのデータディレクトリを初期化します。初回起動時に、配布ディレクトリからOS標準のアプリケーションデータディレクトリ（Windowsの場合は `%APPDATA%` など）にデフォルトのアセットをコピーします。
+
+**配布時のアセット同梱ポリシー:**
+リリース用の配布パッケージを軽量に保つため、ローカル開発用や一時的なファイルを配布用の `assets/` ディレクトリに含めないでください。`.gitignore` に登録されている以下のリソースは、リリースアーカイブに**同梱してはいけません**：
+* `assets/models/` （ローカルのモデルキャッシュ）
+* `assets/schema/` 配下に自動生成されるスキーマファイル（`settings.schema.json` など）
+* データベースファイル（`*.db*`）やドットファイル
+
+---
+
 ## グローバル設定シングルトン
 
 ```rust
