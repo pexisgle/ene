@@ -580,10 +580,6 @@ impl Runtime {
                 };
                 let eye = self.state.character.camera_eye();
                 let target = self.state.character.camera_target();
-                let app = &self.state.app;
-                let _physics_world = app
-                    .world()
-                    .resource::<crate::resource::physics::PhysicsWorldResource>();
                 let AppState {
                     ref mut character, ..
                 } = self.state;
@@ -594,6 +590,10 @@ impl Runtime {
                 let cursor_world_2d = cursor_world_2d_for_char_window(cw, eye, target, cursor_phys);
                 #[cfg(target_os = "windows")]
                 let cursor_over = {
+                    let app = &self.state.app;
+                    let physics_world = app
+                        .world()
+                        .resource::<crate::resource::physics::PhysicsWorldResource>();
                     let scale = cw.window.scale_factor();
                     let logical_size = cw.window.inner_size().to_logical::<f64>(scale);
                     let logical = cursor_phys.to_logical::<f64>(scale);
@@ -617,8 +617,10 @@ impl Runtime {
                         target[1] - eye[1],
                         target[2] - eye[2],
                     );
-                    let physics = &physics_world;
-                    physics.world.cast_ray(ray_origin, ray_dir, 100.0).is_some()
+                    physics_world
+                        .world
+                        .cast_ray(ray_origin, ray_dir, 100.0)
+                        .is_some()
                 };
                 #[cfg(not(target_os = "windows"))]
                 let cursor_over = true;
@@ -1218,10 +1220,7 @@ fn update_char_window_cursor_and_hittest(
                 target[1] - eye[1],
                 target[2] - eye[2],
             );
-            state
-                .physics_world()
-                .world
-                .cast_ray(ray_origin, ray_dir, 100.0)
+            state.physics_world().cast_ray(ray_origin, ray_dir, 100.0)
         } else {
             None
         };

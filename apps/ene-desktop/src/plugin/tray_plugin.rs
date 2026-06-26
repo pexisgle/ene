@@ -16,19 +16,18 @@
 //! `Runtime::about_to_wait` because the
 //! `Rc<RefCell<TrayHandle>>` is not `Send + Sync`.
 use bevy_app::{App, Plugin};
-use bevy_ecs::schedule::IntoScheduleConfigs;
-
-use crate::schedule::AppSet;
 
 #[derive(Default)]
 pub struct TrayPlugin;
 
 impl Plugin for TrayPlugin {
-    fn build(&self, app: &mut App) {
+    fn build(&self, _app: &mut App) {
         #[cfg(target_os = "linux")]
         {
+            use crate::schedule::AppSet;
             use crate::system::tray_tick::tick_gtk_system;
-            app.add_systems(bevy_app::Last, tick_gtk_system.in_set(AppSet::Present));
+            use bevy_ecs::schedule::IntoScheduleConfigs;
+            _app.add_systems(bevy_app::Last, tick_gtk_system.in_set(AppSet::Present));
         }
     }
 }

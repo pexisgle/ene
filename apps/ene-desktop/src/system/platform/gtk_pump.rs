@@ -22,4 +22,5 @@ pub fn tick_gtk_system(ready: Option<Res<crate::resource::tray::GtkReady>>) {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 pub fn tick_gtk_system() {}
