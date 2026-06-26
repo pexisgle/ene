@@ -38,7 +38,10 @@ pub fn render(
             }
             ui.add_sized(
                 [220.0, 0.0],
-                egui::Label::new(format_fps_label(settings.graphics.target_fps)),
+                egui::Label::new(format_fps_label(
+                    settings.language,
+                    settings.graphics.target_fps,
+                )),
             );
             if ui.button(">").clicked() {
                 apply_action(
@@ -70,7 +73,10 @@ pub fn render(
             }
             ui.add_sized(
                 [220.0, 0.0],
-                egui::Label::new(format_shadow_label(settings.graphics.shadow_quality)),
+                egui::Label::new(format_shadow_label(
+                    settings.language,
+                    settings.graphics.shadow_quality,
+                )),
             );
             if ui.button(">").clicked() {
                 apply_action(
@@ -102,7 +108,10 @@ pub fn render(
             }
             ui.add_sized(
                 [220.0, 0.0],
-                egui::Label::new(format_aa_label(settings.graphics.antialiasing_mode)),
+                egui::Label::new(format_aa_label(
+                    settings.language,
+                    settings.graphics.antialiasing_mode,
+                )),
             );
             if ui.button(">").clicked() {
                 apply_action(

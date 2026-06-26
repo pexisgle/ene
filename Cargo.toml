@@ -86,6 +86,9 @@ arboard = { version = "3.6", features = ["wayland-data-control"] }
 parking_lot = "0.12"
 png = "0.18"
 tray-icon = { version = "0.24", default-features = false }
+rust-embed = "8.5"
+i18n-embed = { version = "0.15", features = ["fluent-system", "fluent", "desktop-requester"] }
+i18n-embed-fl = "0.9"
 
 # --- Rendering stack (ene-desktop-v2: winit + wgpu + egui) ---
 winit = "0.30"

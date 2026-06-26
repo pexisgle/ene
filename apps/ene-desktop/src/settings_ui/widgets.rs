@@ -249,24 +249,28 @@ fn send_ai_chat(
     }
 }
 
-pub fn format_fps_label(fps: u32) -> String {
-    target_fps_label(fps)
+pub fn format_fps_label(lang: crate::settings::Language, fps: u32) -> String {
+    target_fps_label(lang, fps)
 }
 
-pub fn format_shadow_label(quality: ShadowQuality) -> &'static str {
+pub fn format_shadow_label(lang: crate::settings::Language, quality: ShadowQuality) -> String {
+    let _ = lang;
+    let loader = crate::i18n::loader();
     match quality {
-        ShadowQuality::Low => "Low",
-        ShadowQuality::Medium => "Medium",
-        ShadowQuality::High => "High",
+        ShadowQuality::Low => i18n_embed_fl::fl!(loader, "low"),
+        ShadowQuality::Medium => i18n_embed_fl::fl!(loader, "medium"),
+        ShadowQuality::High => i18n_embed_fl::fl!(loader, "high"),
     }
 }
 
-pub fn format_aa_label(mode: AntialiasingMode) -> &'static str {
+pub fn format_aa_label(lang: crate::settings::Language, mode: AntialiasingMode) -> String {
+    let _ = lang;
+    let loader = crate::i18n::loader();
     match mode {
-        AntialiasingMode::Off => "Off",
-        AntialiasingMode::Fxaa => "Fxaa",
-        AntialiasingMode::Smaa => "Smaa",
-        AntialiasingMode::Taa => "Taa",
+        AntialiasingMode::Off => i18n_embed_fl::fl!(loader, "off"),
+        AntialiasingMode::Fxaa => "FXAA".to_string(),
+        AntialiasingMode::Smaa => "SMAA".to_string(),
+        AntialiasingMode::Taa => "TAA".to_string(),
     }
 }
 

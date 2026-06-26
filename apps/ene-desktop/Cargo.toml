@@ -31,6 +31,9 @@ rapier3d = { workspace = true }
 bevy_ecs = { workspace = true }
 bevy_app = { workspace = true }
 device_query = "2"
+rust-embed = { workspace = true }
+i18n-embed = { workspace = true }
+i18n-embed-fl = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18.2"

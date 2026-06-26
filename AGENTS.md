@@ -66,7 +66,9 @@ The workspace is highly granular to enforce strict boundaries and prevent circul
   - Use the `tracing` crate (`info!`, `warn!`, `error!`, `debug!`). **Never use `println!`.**
   - Always include structured context fields when appropriate to maintain machine-readable logs (e.g., `tracing::error!(component = "ToolHost", error = %e, "Failed to start")`).
 * **Concurrency:** Prefer `parking_lot::RwLock` or `parking_lot::Mutex` over standard library primitives to avoid lock poisoning. Use `std::sync::OnceLock` for lazy static initializations.
-* **Events & i18n:** Backend crates (`ene-core`, `ene-session`) must emit events and status messages in **English** (as static constants or Enums). Localization is exclusively the responsibility of the UI layer (`ene-desktop`).
+* **Events & i18n:** Backend crates (`ene-core`, `ene-session`) must emit events and status messages in **English** (as static constants or Enums). Localization is the responsibility of the frontend/UI layer:
+  - `ene-desktop` translations reside under `apps/ene-desktop/i18n/{lang}/ene_desktop.ftl` as a single translation file.
+  - `ene-cli` translations are managed locally within the CLI under `apps/ene-cli/i18n/`.
 * **Visibility:** Default to `pub(crate)`. Only use `pub` when external consumers need it.
 * **Comments:** Write `rustdoc` comments (`///`) for public APIs and complex logic. Re-exports should use `#[doc(no_inline)]`.
 
@@ -88,6 +90,14 @@ The workspace is highly granular to enforce strict boundaries and prevent circul
 1. Extend `IpcRequest` / `IpcResponse` in `crates/ene-tool-proto/src/ipc.rs`.
 2. Bump `PROTOCOL_VERSION` **only** if the wire format is incompatible.
 3. Handle the variant in `ene-tool-host` and all tool binaries.
+
+### R4. Add or modify localization (i18n) strings
+1. **Desktop (`ene-desktop`)**:
+    - Add or edit keys directly in the translation file located under `apps/ene-desktop/i18n/{lang}/ene_desktop.ftl`.
+   - Use the `i18n_embed_fl::fl!(crate::i18n::loader(), "key-name")` macro to retrieve the localized string in your code.
+2. **CLI (`ene-cli`)**:
+   - Add or edit keys directly in the CLI's local Fluent files under `apps/ene-cli/i18n/{lang}/ene_cli.ftl`.
+   - Use the `i18n_embed_fl::fl!(crate::i18n::loader(), "key-name")` macro inside the CLI code.
 
 ## 7. Configuration Data Flow
 

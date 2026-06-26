@@ -11,6 +11,7 @@ mod component;
 mod event;
 mod events;
 mod gpu;
+mod i18n;
 #[cfg(target_os = "linux")]
 mod input_region_debug;
 mod look_at;

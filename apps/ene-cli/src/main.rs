@@ -1,6 +1,7 @@
 mod commands;
 mod config;
 mod context;
+mod i18n;
 mod repl;
 mod stream;
 mod style;
@@ -21,8 +22,9 @@ async fn main() {
         }
     };
 
-    println!("ene Interactive CLI");
-    println!("Type '/help' for a list of commands.");
+    let loader = i18n::loader();
+    println!("{}", i18n_embed_fl::fl!(loader, "welcome"));
+    println!("{}", i18n_embed_fl::fl!(loader, "help-hint"));
 
     let mut ctx = context::AppContext::new(handle);
     let code = repl::run(&mut ctx).await;

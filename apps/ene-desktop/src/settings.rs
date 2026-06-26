@@ -60,11 +60,33 @@ impl Default for GraphicsSection {
     }
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Serialize,
+    Deserialize,
+    ene_config::schemars::JsonSchema,
+    PartialEq,
+    Eq,
+    Default,
+)]
+#[schemars(crate = "::ene_config::schemars")]
+pub enum Language {
+    #[serde(rename = "en")]
+    #[default]
+    En,
+    #[serde(rename = "ja")]
+    Ja,
+}
+
 ene_config::define_config!(
     settings,
     "desktop",
     pub struct DesktopSection {
         pub graphics: GraphicsSection,
+        #[serde(default)]
+        pub language: Language,
     }
 );
 
@@ -113,9 +135,10 @@ pub fn cycle_debug_fps(current: u32, step: isize) -> u32 {
     cycle_choice(&DEBUG_FPS_CHOICES, current, step)
 }
 
-pub fn debug_fps_label(debug_fps: u32) -> String {
+pub fn debug_fps_label(lang: Language, debug_fps: u32) -> String {
+    let _ = lang;
     if debug_fps == 0 {
-        "Match Window".to_string()
+        i18n_embed_fl::fl!(crate::i18n::loader(), "match-window").to_string()
     } else {
         format!("{debug_fps} FPS")
     }
@@ -136,9 +159,10 @@ fn cycle_choice<T: Copy + PartialEq>(choices: &[T], current: T, step: isize) -> 
     choices[next]
 }
 
-pub fn target_fps_label(target_fps: u32) -> String {
+pub fn target_fps_label(lang: Language, target_fps: u32) -> String {
+    let _ = lang;
     if target_fps == 0 {
-        "Unlimited".to_string()
+        i18n_embed_fl::fl!(crate::i18n::loader(), "unlimited").to_string()
     } else {
         format!("{target_fps} FPS")
     }
@@ -289,6 +313,7 @@ pub struct CharacterSettings {
     pub assets_dir: PathBuf,
     pub characters: Vec<CharacterEntry>,
     pub graphics: GraphicsSettings,
+    pub language: Language,
     pub character_state: CharacterState,
     pub ai: AiConfig,
     /// Shared with the AI bridge bootstrap task: that task loads
@@ -303,6 +328,7 @@ impl std::fmt::Debug for CharacterSettings {
             .field("assets_dir", &self.assets_dir)
             .field("characters", &self.characters)
             .field("graphics", &self.graphics)
+            .field("language", &self.language)
             .field("character_state", &self.character_state)
             .field("ai", &self.ai)
             .finish()
@@ -353,6 +379,7 @@ impl CharacterSettings {
             assets_dir: assets_dir.to_path_buf(),
             characters,
             graphics: GraphicsSettings::default(),
+            language: Language::default(),
             character_state: CharacterState {
                 selected_character,
                 selected_motion,
@@ -507,6 +534,7 @@ impl CharacterSettings {
         config.version = 1;
         let desktop = DesktopSection {
             graphics: self.graphics.clone(),
+            language: self.language,
         };
         if let Err(e) = config.set_section(&desktop) {
             tracing::warn!("[Config] Failed to set desktop section: {e}");
@@ -568,6 +596,13 @@ impl CharacterSettings {
                 }
             }
         }
+
+        if let Ok(desktop) = full.get_section::<DesktopSection>() {
+            self.graphics = desktop.graphics;
+            self.language = desktop.language;
+        }
+
+        crate::i18n::select_language(self.language);
 
         self.clamp_runtime_values();
         self.load_per_character_settings();

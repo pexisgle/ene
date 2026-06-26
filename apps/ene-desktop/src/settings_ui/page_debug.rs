@@ -115,6 +115,7 @@ pub fn render(
             ui.add_sized(
                 [220.0, 0.0],
                 egui::Label::new(crate::settings::debug_fps_label(
+                    settings.language,
                     settings.graphics.debug_fps,
                 )),
             );
