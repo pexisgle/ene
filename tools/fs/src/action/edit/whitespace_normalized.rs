@@ -3,7 +3,8 @@ use std::sync::OnceLock;
 static WHITESPACE_RE: OnceLock<regex::Regex> = OnceLock::new();
 
 fn whitespace_re() -> &'static regex::Regex {
-    WHITESPACE_RE.get_or_init(|| regex::Regex::new(r"\s+").unwrap())
+    WHITESPACE_RE
+        .get_or_init(|| regex::Regex::new(r"\s+").unwrap_or_else(|e| panic!("invalid regex: {e}")))
 }
 
 pub fn whitespace_normalized_replace(

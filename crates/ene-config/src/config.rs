@@ -343,12 +343,11 @@ pub fn generate_schema_json() -> Result<String, serde_json::Error> {
                 .get("definitions")
                 .or_else(|| entry_val.get("$defs"))
                 .and_then(|v| v.as_object())
-            {
-                let root_defs = root_obj
+                && let Some(root_defs) = root_obj
                     .entry("definitions".to_string())
                     .or_insert_with(|| serde_json::json!({}))
                     .as_object_mut()
-                    .unwrap();
+            {
                 for (def_name, def_schema) in definitions {
                     root_defs.insert(def_name.clone(), def_schema.clone());
                 }
@@ -377,14 +376,12 @@ pub fn generate_schema_json() -> Result<String, serde_json::Error> {
                         && let Some(tools_prop) = tool_config_def
                             .get_mut("properties")
                             .and_then(|p| p.get_mut("tools"))
-                    {
-                        let tools_obj = tools_prop.as_object_mut().unwrap();
-                        let properties = tools_obj
+                        && let Some(tools_obj) = tools_prop.as_object_mut()
+                        && let Some(properties) = tools_obj
                             .entry("properties".to_string())
                             .or_insert_with(|| serde_json::json!({}))
                             .as_object_mut()
-                            .unwrap();
-
+                    {
                         let mut clean_entry = entry_val.clone();
                         if let Some(obj) = clean_entry.as_object_mut() {
                             obj.remove("definitions");
@@ -402,17 +399,18 @@ pub fn generate_schema_json() -> Result<String, serde_json::Error> {
                     }
                 }
             } else {
-                let properties = root_obj
+                if let Some(properties) = root_obj
                     .entry("properties".to_string())
                     .or_insert_with(|| serde_json::json!({}))
                     .as_object_mut()
-                    .unwrap();
-                let mut clean_entry = entry_val.clone();
-                if let Some(obj) = clean_entry.as_object_mut() {
-                    obj.remove("definitions");
-                    obj.remove("$schema");
+                {
+                    let mut clean_entry = entry_val.clone();
+                    if let Some(obj) = clean_entry.as_object_mut() {
+                        obj.remove("definitions");
+                        obj.remove("$schema");
+                    }
+                    properties.insert(key.clone(), clean_entry);
                 }
-                properties.insert(key.clone(), clean_entry);
             }
         }
     }
@@ -441,12 +439,11 @@ pub fn generate_character_schema_json() -> Result<String, serde_json::Error> {
                 .get("definitions")
                 .or_else(|| entry_val.get("$defs"))
                 .and_then(|v| v.as_object())
-            {
-                let root_defs = root_obj
+                && let Some(root_defs) = root_obj
                     .entry("definitions".to_string())
                     .or_insert_with(|| serde_json::json!({}))
                     .as_object_mut()
-                    .unwrap();
+            {
                 for (def_name, def_schema) in definitions {
                     root_defs.insert(def_name.clone(), def_schema.clone());
                 }
@@ -459,17 +456,18 @@ pub fn generate_character_schema_json() -> Result<String, serde_json::Error> {
                 continue;
             }
             let entry_val = serde_json::to_value(&entry.schema)?;
-            let properties = root_obj
+            if let Some(properties) = root_obj
                 .entry("properties".to_string())
                 .or_insert_with(|| serde_json::json!({}))
                 .as_object_mut()
-                .unwrap();
-            let mut clean_entry = entry_val.clone();
-            if let Some(obj) = clean_entry.as_object_mut() {
-                obj.remove("definitions");
-                obj.remove("$schema");
+            {
+                let mut clean_entry = entry_val.clone();
+                if let Some(obj) = clean_entry.as_object_mut() {
+                    obj.remove("definitions");
+                    obj.remove("$schema");
+                }
+                properties.insert(key.clone(), clean_entry);
             }
-            properties.insert(key.clone(), clean_entry);
         }
     }
 

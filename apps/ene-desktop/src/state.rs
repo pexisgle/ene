@@ -232,13 +232,6 @@ impl AppState {
 pub enum AppStateError {
     #[error("GPU context failed to initialise: {0}")]
     Gpu(#[from] Box<dyn std::error::Error>),
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Reserved for the future `with_channel` asset resolution path"
-        )
-    )]
     #[error("Failed to resolve assets directory: {0}")]
     AssetsDir(String),
     #[error("Tokio runtime error: {0}")]

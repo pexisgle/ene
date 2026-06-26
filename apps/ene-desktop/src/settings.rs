@@ -587,7 +587,10 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
         if !path.is_dir() {
             continue;
         }
-        let folder = path.file_name().unwrap().to_string_lossy().to_string();
+        let Some(folder_name_os) = path.file_name() else {
+            continue;
+        };
+        let folder = folder_name_os.to_string_lossy().to_string();
         let card_path = path
             .join("character.json")
             .exists()
@@ -611,10 +614,10 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
                 if file_path.is_dir() {
                     continue;
                 }
-                let relative = format!(
-                    "characters/{folder}/{}",
-                    file_path.file_name().unwrap().to_string_lossy()
-                );
+                let Some(file_name_os) = file_path.file_name() else {
+                    continue;
+                };
+                let relative = format!("characters/{folder}/{}", file_name_os.to_string_lossy());
                 if file_path
                     .extension()
                     .is_some_and(|e| e.eq_ignore_ascii_case("vrm"))
@@ -638,9 +641,12 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
                     if file_path.is_dir() {
                         continue;
                     }
+                    let Some(file_name_os) = file_path.file_name() else {
+                        continue;
+                    };
                     let relative = format!(
                         "characters/{folder}/motions/{}",
-                        file_path.file_name().unwrap().to_string_lossy()
+                        file_name_os.to_string_lossy()
                     );
                     if file_path
                         .extension()

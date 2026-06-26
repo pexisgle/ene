@@ -799,6 +799,20 @@ impl Runtime {
             character.update_skin_palette_gpu(queue, &palette);
         }
 
+        #[cfg(target_os = "windows")]
+        if let Some(reg) = &character_physics_registration {
+            let poses = character.current_bone_poses();
+            let mut physics_res = app
+                .world_mut()
+                .resource_mut::<crate::resource::physics::PhysicsWorldResource>();
+            physics_res.world.update_character_bone_positions(
+                reg,
+                &poses,
+                cs.character_position,
+                actual_scale,
+            );
+        }
+
         if let Some(cursor) = self.last_cursor_physical {
             let viewport: (u32, u32) =
                 (cw.window.inner_size().width, cw.window.inner_size().height);

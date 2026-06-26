@@ -439,15 +439,9 @@ impl CharacterRenderer {
     ) {
         if let Some(r) = self.renderer.as_ref()
             && let Some(m) = self.model.as_ref()
+            && let Ok(uniform) = self.camera.uniform()
         {
-            r.render_mask(
-                queue,
-                encoder,
-                view,
-                m,
-                &self.camera.uniform().unwrap(),
-                model_uniform,
-            );
+            r.render_mask(queue, encoder, view, m, &uniform, model_uniform);
         }
     }
 
@@ -918,7 +912,7 @@ impl CharacterRenderer {
     /// inside `update_motion` updates `model.nodes.world_*` every
     /// frame, so reading them here gives the live post-animation
     /// transforms without GPU readback.
-    #[allow(dead_code)]
+    #[cfg_attr(target_os = "linux", expect(dead_code))]
     pub fn current_bone_poses(&self) -> Vec<BonePose> {
         let Some(model) = self.model.as_ref() else {
             return Vec::new();

@@ -241,9 +241,9 @@ pub fn load_mtoon_materials(gltf: &gltf::Gltf) -> Vec<Option<MToonMaterial>> {
         let pbr = material.pbr_metallic_roughness();
         let _ = pbr;
         mat.emissive_factor = material.emissive_factor();
-        if material.emissive_texture().is_some() {
+        if let Some(emissive_tex) = material.emissive_texture() {
             mat.emissive_texture = Some(MToonTextureRef {
-                index: material.emissive_texture().unwrap().texture().index(),
+                index: emissive_tex.texture().index(),
             });
         }
 

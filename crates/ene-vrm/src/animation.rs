@@ -333,8 +333,11 @@ fn sample_quat(sampler: &Sampler<Quat>, t: f32) -> Quat {
 }
 
 fn sample_step<T: Clone>(times: &[f32], values: &[T], t: f32) -> T {
-    if times.is_empty() || values.is_empty() {
-        return values.first().cloned().unwrap();
+    if values.is_empty() {
+        panic!("sample_step called with empty values");
+    }
+    if times.is_empty() {
+        return values[0].clone();
     }
     if t <= times[0] {
         return values[0].clone();
@@ -344,7 +347,7 @@ fn sample_step<T: Clone>(times: &[f32], values: &[T], t: f32) -> T {
             return values[i - 1].clone();
         }
     }
-    values.last().unwrap().clone()
+    values[values.len() - 1].clone()
 }
 
 fn find_keyframe_index(times: &[f32], t: f32) -> usize {
@@ -363,15 +366,18 @@ fn find_keyframe_index(times: &[f32], t: f32) -> usize {
 }
 
 fn sample_keyframes<T: Clone>(sampler: &Sampler<T>, t: f32, lerp: impl Fn(&T, &T, f32) -> T) -> T {
-    if sampler.times.is_empty() || sampler.values.is_empty() {
-        return sampler.values.first().cloned().unwrap();
+    if sampler.values.is_empty() {
+        panic!("sample_keyframes called with empty sampler values");
+    }
+    if sampler.times.is_empty() {
+        return sampler.values[0].clone();
     }
     match sampler.interpolation {
         Interpolation::Step => sample_step(&sampler.times, &sampler.values, t),
         Interpolation::Linear => {
             let idx = find_keyframe_index(&sampler.times, t);
             if idx + 1 >= sampler.times.len() {
-                return sampler.values.last().unwrap().clone();
+                return sampler.values[sampler.values.len() - 1].clone();
             }
             let t0 = sampler.times[idx];
             let t1 = sampler.times[idx + 1];
@@ -394,8 +400,11 @@ fn sample_cubic_spline<T: Clone>(
     t: f32,
     lerp: &impl Fn(&T, &T, f32) -> T,
 ) -> T {
+    if values.is_empty() {
+        panic!("sample_cubic_spline called with empty values");
+    }
     if times.is_empty() {
-        return values.first().cloned().unwrap();
+        return values[0].clone();
     }
     let idx = find_keyframe_index(times, t);
     if idx + 1 >= times.len() {

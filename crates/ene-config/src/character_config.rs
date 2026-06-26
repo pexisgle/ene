@@ -104,7 +104,11 @@ impl CharacterConfig {
                 if !cur.is_object() {
                     *cur = serde_json::Value::Object(serde_json::Map::new());
                 }
-                let obj = cur.as_object_mut().unwrap();
+                let Some(obj) = cur.as_object_mut() else {
+                    return Err(EneConfigError::GenericConfigError(
+                        "Internal error: expected JSON object".to_string(),
+                    ));
+                };
                 cur = obj
                     .entry(key.to_string())
                     .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));

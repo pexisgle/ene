@@ -1171,7 +1171,16 @@ async fn build_tool_registry(
 
                 let tool_name = name.clone();
                 let prefix = format!("{name}_");
-                let socket_path = socket_dir.join(format!("ene-db-{name}.sock"));
+                let socket_path = {
+                    #[cfg(unix)]
+                    {
+                        socket_dir.join(format!("ene-db-{name}.sock"))
+                    }
+                    #[cfg(windows)]
+                    {
+                        std::path::PathBuf::from(format!(r"\\.\pipe\ene-db-{}", name))
+                    }
+                };
 
                 // Generate a 128-bit pre-shared token for this tool's
                 // DB IPC connection. The token is handed to the tool

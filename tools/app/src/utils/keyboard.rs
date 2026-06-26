@@ -35,8 +35,16 @@ pub fn parse_key(name: &str) -> Option<Key> {
         "f10" => Some(Key::F10),
         "f11" => Some(Key::F11),
         "f12" => Some(Key::F12),
-        s if s.chars().count() == 1 => Some(Key::Unicode(s.chars().next().unwrap())),
-        _ => None,
+        s => {
+            let mut chars = s.chars();
+            if let Some(c) = chars.next()
+                && chars.next().is_none()
+            {
+                Some(Key::Unicode(c))
+            } else {
+                None
+            }
+        }
     }
 }
 

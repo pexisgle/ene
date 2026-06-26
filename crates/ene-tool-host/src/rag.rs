@@ -395,11 +395,10 @@ impl ToolRag {
                 let mapped: Vec<CachedFieldRow> = rows
                     .into_iter()
                     .map(
-                        |(tool_name, field, field_key, _hash, _model, embedding, _src)| {
+                        |(tool_name, field, _field_key, _hash, _model, embedding, _src)| {
                             CachedFieldRow {
                                 tool_name,
                                 field,
-                                field_key,
                                 embedding,
                             }
                         },
@@ -504,11 +503,10 @@ impl ToolRag {
                     let mapped: Vec<CachedFieldRow> = rows
                         .into_iter()
                         .map(
-                            |(tool_name, field, field_key, _hash, _model, embedding, _src)| {
+                            |(tool_name, field, _field_key, _hash, _model, embedding, _src)| {
                                 CachedFieldRow {
                                     tool_name,
                                     field,
-                                    field_key,
                                     embedding,
                                 }
                             },
@@ -733,7 +731,6 @@ impl ToolRag {
 struct CachedFieldRow {
     tool_name: String,
     field: String,
-    field_key: String,
     embedding: Vec<f32>,
 }
 
@@ -824,5 +821,7 @@ fn compute_specs_hash(specs: &[ToolSpec]) -> u64 {
     }
     let hash = hasher.finalize();
     let bytes = hash.as_bytes();
-    u64::from_le_bytes(bytes[0..8].try_into().unwrap())
+    let mut array = [0u8; 8];
+    array.copy_from_slice(&bytes[0..8]);
+    u64::from_le_bytes(array)
 }

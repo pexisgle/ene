@@ -40,8 +40,14 @@ impl WebToolProvider {
             .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
             .default_headers({
                 let mut headers = reqwest::header::HeaderMap::new();
-                headers.insert(reqwest::header::ACCEPT, "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8".parse().unwrap());
-                headers.insert(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.5".parse().unwrap());
+                headers.insert(
+                    reqwest::header::ACCEPT,
+                    reqwest::header::HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+                );
+                headers.insert(
+                    reqwest::header::ACCEPT_LANGUAGE,
+                    reqwest::header::HeaderValue::from_static("en-US,en;q=0.5"),
+                );
                 headers
             })
             // Limit the redirect chain so an SSRF-by-redirect (target

@@ -350,9 +350,13 @@ fn title_case(s: &str) -> String {
         .filter(|p| !p.is_empty())
         .map(|p| {
             let mut chars = p.chars();
-            let first = chars.next().unwrap().to_ascii_uppercase();
-            let rest: String = chars.collect();
-            format!("{first}{rest}")
+            if let Some(first_char) = chars.next() {
+                let first = first_char.to_ascii_uppercase();
+                let rest: String = chars.collect();
+                format!("{first}{rest}")
+            } else {
+                String::new()
+            }
         })
         .collect::<Vec<_>>()
         .join(" ")

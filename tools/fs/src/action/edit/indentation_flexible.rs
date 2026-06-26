@@ -3,7 +3,9 @@ use std::sync::OnceLock;
 static INDENT_RE: OnceLock<regex::Regex> = OnceLock::new();
 
 fn indent_re() -> &'static regex::Regex {
-    INDENT_RE.get_or_init(|| regex::Regex::new(r"^(\s*)").unwrap())
+    INDENT_RE.get_or_init(|| {
+        regex::Regex::new(r"^(\s*)").unwrap_or_else(|e| panic!("invalid regex: {e}"))
+    })
 }
 
 pub fn indentation_flexible_replace(

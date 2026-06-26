@@ -32,8 +32,13 @@ pub fn extract_html(html: &str, extract: &str, trim: bool) -> String {
         strip_subtrees(&mut document.tree, target_id, SKIP_TAGS);
     }
 
-    let root = document.tree.get(target_id).unwrap();
-    ElementRef::wrap(root).unwrap().html()
+    if let Some(root) = document.tree.get(target_id)
+        && let Some(el) = ElementRef::wrap(root)
+    {
+        el.html()
+    } else {
+        String::new()
+    }
 }
 
 /// Extracts and converts a specific region of HTML to Markdown.
@@ -54,19 +59,22 @@ pub fn extract_markdown(html: &str, extract: &str, trim: bool) -> String {
 fn select_target_id(html: &Html, extract: &str) -> NodeId {
     match extract {
         "main" => {
-            let sel = Selector::parse("main").unwrap();
-            if let Some(el) = html.select(&sel).next() {
+            if let Ok(sel) = Selector::parse("main")
+                && let Some(el) = html.select(&sel).next()
+            {
                 return el.id();
             }
-            let sel = Selector::parse("body").unwrap();
-            if let Some(el) = html.select(&sel).next() {
+            if let Ok(sel) = Selector::parse("body")
+                && let Some(el) = html.select(&sel).next()
+            {
                 return el.id();
             }
             html.root_element().id()
         }
         "body" => {
-            let sel = Selector::parse("body").unwrap();
-            if let Some(el) = html.select(&sel).next() {
+            if let Ok(sel) = Selector::parse("body")
+                && let Some(el) = html.select(&sel).next()
+            {
                 return el.id();
             }
             html.root_element().id()
@@ -76,9 +84,10 @@ fn select_target_id(html: &Html, extract: &str) -> NodeId {
 }
 
 fn strip_subtrees(tree: &mut ego_tree::Tree<Node>, root_id: NodeId, skip_tags: &[&str]) {
-    let ids: Vec<NodeId> = tree
-        .get(root_id)
-        .unwrap()
+    let Some(root_node) = tree.get(root_id) else {
+        return;
+    };
+    let ids: Vec<NodeId> = root_node
         .descendants()
         .filter_map(|node| match node.value() {
             Node::Element(el) if skip_tags.contains(&el.name()) => Some(node.id()),
@@ -98,11 +107,15 @@ fn normalize_text(text: &str) -> String {
     static RE_MULTILINE: OnceLock<regex::Regex> = OnceLock::new();
     static RE_LEADING_SPACE: OnceLock<regex::Regex> = OnceLock::new();
 
-    let re_multispace = RE_MULTISPACE.get_or_init(|| regex::Regex::new(r"[ \t]+").unwrap());
-    let re_multiline =
-        RE_MULTILINE.get_or_init(|| regex::Regex::new(r"\n[ \t]*\n[ \t\n]*").unwrap());
-    let re_leading_space =
-        RE_LEADING_SPACE.get_or_init(|| regex::Regex::new(r"[ \t]*\n[ \t]*").unwrap());
+    let re_multispace = RE_MULTISPACE.get_or_init(|| {
+        regex::Regex::new(r"[ \t]+").unwrap_or_else(|e| panic!("invalid regex: {e}"))
+    });
+    let re_multiline = RE_MULTILINE.get_or_init(|| {
+        regex::Regex::new(r"\n[ \t]*\n[ \t\n]*").unwrap_or_else(|e| panic!("invalid regex: {e}"))
+    });
+    let re_leading_space = RE_LEADING_SPACE.get_or_init(|| {
+        regex::Regex::new(r"[ \t]*\n[ \t]*").unwrap_or_else(|e| panic!("invalid regex: {e}"))
+    });
 
     let step1 = re_multispace.replace_all(text, " ");
     let step2 = re_multiline.replace_all(&step1, "\n\n");
