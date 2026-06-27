@@ -22,7 +22,10 @@ pub fn render(
 ) {
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
-            ui.label("Raycast Colliders (Debug)");
+            ui.label(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "raycast-colliders"
+            ));
             let debug_on = if let Some(ui_state) = world.get::<UiStateComponent>(ui_entity) {
                 ui_state.0.show_collider_debug
             } else {
@@ -44,9 +47,9 @@ pub fn render(
             ui.add_sized(
                 [220.0, 0.0],
                 egui::Label::new(if checkbox {
-                    "Visible (F3)"
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "visible-f3")
                 } else {
-                    "Hidden (F3)"
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "hidden-f3")
                 }),
             );
         });
@@ -58,18 +61,21 @@ pub fn render(
         };
         if show_colliders {
             ui.horizontal(|ui| {
-                ui.label("Hovered Bone");
+                ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "hovered-bone"));
                 let name = if let Some(ui_state) = world.get::<UiStateComponent>(ui_entity) {
                     ui_state.0.hovered_bone_name.clone()
                 } else {
                     None
                 };
-                ui.label(name.as_deref().unwrap_or("None"));
+                ui.label(name.unwrap_or_else(|| i18n_embed_fl::fl!(crate::i18n::loader(), "none")));
             });
         }
 
         ui.horizontal(|ui| {
-            ui.label("Input Region (Debug)");
+            ui.label(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "input-region-debug"
+            ));
             let debug_on = if let Some(ui_state) = world.get::<UiStateComponent>(ui_entity) {
                 ui_state.0.show_input_region_debug
             } else {
@@ -91,15 +97,18 @@ pub fn render(
             ui.add_sized(
                 [220.0, 0.0],
                 egui::Label::new(if checkbox {
-                    "Visible (F9)"
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "visible-f9")
                 } else {
-                    "Hidden (F9)"
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "hidden-f9")
                 }),
             );
         });
 
         ui.horizontal(|ui| {
-            ui.label("Debug Update FPS");
+            ui.label(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "debug-update-fps"
+            ));
             if ui.button("<").clicked() {
                 apply_action(
                     SettingsAction::DebugFpsDown,
@@ -147,7 +156,10 @@ fn render_linux_only(
     ui_entity: Entity,
 ) {
     ui.horizontal(|ui| {
-        ui.label("Mask Overlay (Debug)");
+        ui.label(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "mask-overlay-debug"
+        ));
         let debug_overlay_visible = if let Some(ui_state) = world.get::<UiStateComponent>(ui_entity)
         {
             ui_state.0.debug_overlay_visible
@@ -169,12 +181,16 @@ fn render_linux_only(
         }
         ui.add_sized(
             [220.0, 0.0],
-            egui::Label::new(if checkbox { "Visible" } else { "Hidden" }),
+            egui::Label::new(if checkbox {
+                i18n_embed_fl::fl!(crate::i18n::loader(), "visible")
+            } else {
+                i18n_embed_fl::fl!(crate::i18n::loader(), "hidden")
+            }),
         );
     });
 
     ui.horizontal(|ui| {
-        ui.label("Mask Downsample");
+        ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "mask-downsample"));
         if ui.button("<").clicked() {
             apply_action(
                 SettingsAction::MaskDownsampleDown,

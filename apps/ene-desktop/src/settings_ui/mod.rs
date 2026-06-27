@@ -31,17 +31,6 @@ pub enum PageKind {
     Debug,
 }
 
-impl PageKind {
-    pub fn label(self) -> &'static str {
-        match self {
-            PageKind::Character => "Character",
-            PageKind::Graphics => "Graphics",
-            PageKind::Ai => "AI",
-            PageKind::Debug => "Debug",
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct SettingsUi {
     pub current_page: PageKind,
@@ -85,6 +74,7 @@ impl SettingsUi {
         ai: &Arc<AiBridge>,
         world: &mut World,
         ui_entity: Entity,
+        now_secs: f64,
     ) {
         apply_egui_visuals(ui.ctx());
 
@@ -96,7 +86,12 @@ impl SettingsUi {
                 PageKind::Ai,
                 PageKind::Debug,
             ] {
-                let label = page.label();
+                let label = match page {
+                    PageKind::Character => i18n_embed_fl::fl!(crate::i18n::loader(), "character"),
+                    PageKind::Graphics => i18n_embed_fl::fl!(crate::i18n::loader(), "graphics"),
+                    PageKind::Debug => i18n_embed_fl::fl!(crate::i18n::loader(), "debug"),
+                    PageKind::Ai => i18n_embed_fl::fl!(crate::i18n::loader(), "ai"),
+                };
                 if ui
                     .selectable_label(self.current_page == page, label)
                     .clicked()
@@ -106,8 +101,6 @@ impl SettingsUi {
             }
         });
         ui.separator();
-
-        let now_secs = self.started_at.elapsed().as_secs_f64();
         match self.current_page {
             PageKind::Character => page_character::render(
                 ui,
@@ -149,6 +142,34 @@ impl Default for SettingsUi {
 /// these exact RGB values; v2 keeps the visual identity stable so
 /// screenshots and docs that reference the colors stay valid.
 pub fn apply_egui_visuals(ctx: &egui::Context) {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let assets_dir = ene_config::paths::assets_dir();
+        let font_path = assets_dir.join("fonts").join("NotoSansJP-Regular.ttf");
+        if font_path.exists() {
+            if let Ok(font_data) = std::fs::read(&font_path) {
+                let mut fonts = egui::FontDefinitions::default();
+                fonts.font_data.insert(
+                    "NotoSansJP".to_owned(),
+                    std::sync::Arc::new(egui::FontData::from_owned(font_data)),
+                );
+                if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                    prop.insert(0, "NotoSansJP".to_owned());
+                }
+                if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+                    mono.insert(0, "NotoSansJP".to_owned());
+                }
+                ctx.set_fonts(fonts);
+                tracing::info!("Successfully loaded NotoSansJP-Regular.ttf into egui Context");
+            } else {
+                tracing::warn!("Failed to read font file at {:?}", font_path);
+            }
+        } else {
+            tracing::warn!("Font file does not exist at {:?}", font_path);
+        }
+    });
+
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = egui::Color32::from_rgb(26, 28, 33);
     visuals.window_fill = egui::Color32::from_rgb(20, 22, 28);

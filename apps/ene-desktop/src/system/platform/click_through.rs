@@ -34,7 +34,7 @@ mod imp {
     use crate::resource::cursor_state::CursorState;
     use crate::resource::platform_state::resources::{
         LastAppliedInputRects, LastInputSource, LayerShell, LayerShellFreeze, MaskCapture,
-        WaylandInputRegion, X11ContextRes,
+        WaylandInputRegion, WindowScaleFactor, X11ContextRes,
     };
     use crate::system::platform::should_render_debug::{
         DragActive, ShouldRenderDebug, TransparentWindow,
@@ -58,6 +58,7 @@ mod imp {
         layer_shell: Res<LayerShell>,
         freeze: Res<LayerShellFreeze>,
         mask: Option<Res<MaskCapture>>,
+        scale_factor: Option<Res<WindowScaleFactor>>,
         mut last_rects: ResMut<LastAppliedInputRects>,
         mut last_source: ResMut<LastInputSource>,
     ) {
@@ -75,6 +76,7 @@ mod imp {
                 layer_shell_freeze: freeze.0,
                 mask_capture: mask.as_ref().and_then(|m| m.0.as_ref()),
                 drag_is_dragging,
+                scale_factor: scale_factor.map(|s| s.0).unwrap_or(1.0),
             },
             allows_input,
             cursor_over,
@@ -107,6 +109,7 @@ mod imp {
             world.init_resource::<LayerShell>();
             world.init_resource::<LayerShellFreeze>();
             world.init_resource::<MaskCapture>();
+            world.init_resource::<WindowScaleFactor>();
             world.init_resource::<LastAppliedInputRects>();
             world.init_resource::<LastInputSource>();
             world.init_resource::<ShouldRenderDebug>();

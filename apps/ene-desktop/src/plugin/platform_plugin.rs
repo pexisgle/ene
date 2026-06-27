@@ -26,7 +26,6 @@ use crate::system::platform::click_through::apply_linux_click_through_system;
 use crate::system::platform::cursor::update_cursor_state_system;
 #[cfg(target_os = "linux")]
 use crate::system::platform::gtk_pump::tick_gtk_system;
-use crate::system::platform::input_region::refresh_input_region_system;
 use crate::system::platform::should_render_debug::{
     DebugFps, DragActive, LastDebugUpdate, ShouldRenderDebug, TransparentWindow,
     should_render_debug_system,
@@ -73,7 +72,6 @@ impl Plugin for PlatformPlugin {
             (
                 should_render_debug_system.in_set(AppSet::Input),
                 update_cursor_state_system.in_set(AppSet::Input),
-                refresh_input_region_system.in_set(AppSet::Settings),
                 apply_linux_click_through_system.in_set(AppSet::Settings),
             )
                 .chain(),

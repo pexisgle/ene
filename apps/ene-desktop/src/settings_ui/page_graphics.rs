@@ -23,7 +23,42 @@ pub fn render(
 ) {
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
-            ui.label("Target FPS");
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "language"));
+            if ui.button("<").clicked() {
+                apply_action(
+                    SettingsAction::LanguageDown,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                    None,
+                    0.0,
+                );
+            }
+            ui.add_sized(
+                [220.0, 0.0],
+                egui::Label::new(match settings.language {
+                    crate::settings::Language::En => "English",
+                    crate::settings::Language::Ja => "日本語",
+                }),
+            );
+            if ui.button(">").clicked() {
+                apply_action(
+                    SettingsAction::LanguageUp,
+                    settings,
+                    animation,
+                    ai,
+                    world,
+                    ui_entity,
+                    None,
+                    0.0,
+                );
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "target-fps"));
             if ui.button("<").clicked() {
                 apply_action(
                     SettingsAction::TargetFpsDown,
@@ -58,7 +93,7 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label("Shadow Quality");
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "shadow-quality"));
             if ui.button("<").clicked() {
                 apply_action(
                     SettingsAction::ShadowQualityDown,
@@ -93,7 +128,7 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label("Antialiasing");
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "antialiasing"));
             if ui.button("<").clicked() {
                 apply_action(
                     SettingsAction::AntialiasingModeDown,

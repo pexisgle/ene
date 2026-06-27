@@ -258,6 +258,11 @@ fn set_nested(
     // write) and silently dropped the write if `cur`
     // ever landed on a non-object leaf.
     let (head, rest) = path.split_first().expect("non-empty by guard above");
+    if rest.is_empty() {
+        extra.insert((*head).to_string(), value);
+        return Ok(());
+    }
+
     let mut current: &mut serde_json::Value = extra
         .entry((*head).to_string())
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));

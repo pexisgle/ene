@@ -122,6 +122,11 @@ pub const ANTIALIASING_MODE_CHOICES: [AntialiasingMode; 4] = [
 pub const DEFAULT_ANTIALIASING_MODE: AntialiasingMode = AntialiasingMode::Fxaa;
 pub const DEBUG_FPS_CHOICES: [u32; 4] = [15, 30, 60, 0];
 pub const DEFAULT_DEBUG_FPS: u32 = 30;
+pub const LANGUAGE_CHOICES: [Language; 2] = [Language::En, Language::Ja];
+
+pub fn cycle_language(current: Language, step: isize) -> Language {
+    cycle_choice(&LANGUAGE_CHOICES, current, step)
+}
 
 pub fn cycle_mask_render_downsample(current: u32, step: isize) -> u32 {
     cycle_choice(&MASK_RENDER_DOWNSAMPLE_CHOICES, current, step)

@@ -37,7 +37,7 @@ pub fn render(
 
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
-            ui.label("Character Card");
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "character-card"));
             ui.add_sized(
                 [220.0, 0.0],
                 egui::Label::new(settings.current_character_card()),
@@ -45,7 +45,7 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label("User Name");
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "user-name"));
             let response = ui.add(
                 egui::TextEdit::singleline(&mut input.ai_user_name).desired_width(f32::INFINITY),
             );
@@ -56,7 +56,7 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label("Runtime Rules");
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "runtime-rules"));
             let response = ui.add(
                 egui::TextEdit::singleline(&mut input.ai_runtime_rules)
                     .desired_width(f32::INFINITY),
@@ -68,7 +68,7 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label("Provider Name");
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "provider-name"));
             let response = ui.add(
                 egui::TextEdit::singleline(&mut input.ai_provider_name)
                     .desired_width(f32::INFINITY),
@@ -81,7 +81,7 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label("Model");
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "model"));
             let response = ui
                 .add(egui::TextEdit::singleline(&mut input.ai_model).desired_width(f32::INFINITY));
             if response.changed() {
@@ -92,7 +92,7 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label("Base URL");
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "base-url"));
             let response = ui.add(
                 egui::TextEdit::singleline(&mut input.ai_base_url).desired_width(f32::INFINITY),
             );
@@ -104,7 +104,7 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label("API Key Source");
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "api-key-source"));
             let mut current_source = provider.api_key.source.clone();
             egui::ComboBox::from_id_salt("api_key_source")
                 .selected_text(current_source.as_str())
@@ -112,9 +112,13 @@ pub fn render(
                     ui.selectable_value(
                         &mut current_source,
                         "inline".to_string(),
-                        "Inline (settings.json)",
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "inline-settings"),
                     );
-                    ui.selectable_value(&mut current_source, "env".to_string(), "Environment");
+                    ui.selectable_value(
+                        &mut current_source,
+                        "env".to_string(),
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "environment"),
+                    );
                 });
             if current_source != provider.api_key.source {
                 provider.api_key.source = current_source;
@@ -125,7 +129,7 @@ pub fn render(
 
         if provider.api_key.source == "env" {
             ui.horizontal(|ui| {
-                ui.label("API Key Env Var");
+                ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "api-key-env-var"));
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut input.ai_api_key_env)
                         .desired_width(f32::INFINITY),
@@ -138,7 +142,7 @@ pub fn render(
             });
         } else {
             ui.horizontal(|ui| {
-                ui.label("API Key");
+                ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "api-key"));
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut input.ai_api_key)
                         .password(true)
@@ -153,7 +157,7 @@ pub fn render(
         }
 
         ui.horizontal(|ui| {
-            ui.label("Chat Input");
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "chat-input"));
             // Grey out the chat input + Send button while a
             // request is in flight, so the user cannot double-fire
             // a Run before the actor reports Done / Failed.
@@ -163,13 +167,16 @@ pub fn render(
                     egui::TextEdit::singleline(&mut input.ai_chat_input)
                         .desired_width(f32::INFINITY)
                         .hint_text(if processing {
-                            "waiting for AI…"
+                            i18n_embed_fl::fl!(crate::i18n::loader(), "waiting-for-ai")
                         } else {
-                            "message to AI"
+                            i18n_embed_fl::fl!(crate::i18n::loader(), "message-to-ai")
                         }),
                 );
                 let send_clicked = ui
-                    .add_enabled(!processing, egui::Button::new("Send"))
+                    .add_enabled(
+                        !processing,
+                        egui::Button::new(i18n_embed_fl::fl!(crate::i18n::loader(), "send")),
+                    )
                     .clicked();
                 if response.changed() {
                     if let Some(mut ui_state) = world.get_mut::<UiStateComponent>(ui_entity) {
@@ -193,16 +200,27 @@ pub fn render(
         });
 
         ui.separator();
-        ui.label("Embedding Settings");
+        ui.label(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "embedding-settings"
+        ));
 
         ui.horizontal(|ui| {
-            ui.label("Provider");
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "provider"));
             let mut current_provider = input.ai_embedding_provider.clone();
             egui::ComboBox::from_id_salt("embedding_provider")
                 .selected_text(current_provider.as_str())
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut current_provider, "cloud".to_string(), "Cloud (API)");
-                    ui.selectable_value(&mut current_provider, "local".to_string(), "Local (GGUF)");
+                    ui.selectable_value(
+                        &mut current_provider,
+                        "cloud".to_string(),
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "cloud-api"),
+                    );
+                    ui.selectable_value(
+                        &mut current_provider,
+                        "local".to_string(),
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "local-gguf"),
+                    );
                 });
             if current_provider != input.ai_embedding_provider {
                 input.ai_embedding_provider = current_provider.clone();
@@ -223,7 +241,7 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label("Model");
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "model"));
             let response = ui.add(
                 egui::TextEdit::singleline(&mut input.ai_embedding_model)
                     .desired_width(f32::INFINITY),
@@ -240,9 +258,12 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label("Dimensions");
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "dimensions"));
             if input.ai_embedding_provider == "local" {
-                ui.add_sized([100.0, 0.0], egui::Label::new("auto (from model)"));
+                ui.add_sized(
+                    [100.0, 0.0],
+                    egui::Label::new(i18n_embed_fl::fl!(crate::i18n::loader(), "auto-from-model")),
+                );
             } else {
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut input.ai_embedding_dimensions)
@@ -259,11 +280,14 @@ pub fn render(
         });
 
         ui.separator();
-        ui.label("Memory Settings");
+        ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "memory-settings"));
 
         ui.horizontal(|ui| {
             let mut checked = input.ai_memory_enabled;
-            ui.checkbox(&mut checked, "Enable Long-term Memory");
+            ui.checkbox(
+                &mut checked,
+                i18n_embed_fl::fl!(crate::i18n::loader(), "enable-long-term-memory"),
+            );
             if checked != input.ai_memory_enabled {
                 input.ai_memory_enabled = checked;
                 memory.enabled = checked;
@@ -273,7 +297,7 @@ pub fn render(
         });
 
         ui.separator();
-        ui.label("Latest Response");
+        ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "latest-response"));
         let ai_latest_response = if let Some(ui_state) = world.get::<UiStateComponent>(ui_entity) {
             ui_state.0.ai_latest_response.clone()
         } else {
@@ -284,7 +308,10 @@ pub fn render(
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 if ai_latest_response.is_empty() {
-                    ui.weak("(empty)");
+                    ui.weak(i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "empty-parentheses"
+                    ));
                 } else {
                     ui.label(ai_latest_response);
                 }
@@ -324,44 +351,66 @@ fn render_permission_dialog(
     // buttons already moved it.
     let request_id = pending.request_id;
     let mut open = true;
-    egui::Window::new("Permission Requested")
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ui.ctx(), |ui| {
-            ui.vertical(|ui| {
-                ui.label(format!("Action: {}", pending.action));
-                ui.label(format!("Target: {}", pending.target));
-                if let Some(description) = &pending.description {
-                    ui.label(format!("Description: {}", description));
+    egui::Window::new(i18n_embed_fl::fl!(
+        crate::i18n::loader(),
+        "permission-requested"
+    ))
+    .open(&mut open)
+    .collapsible(false)
+    .resizable(false)
+    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+    .show(ui.ctx(), |ui| {
+        ui.vertical(|ui| {
+            ui.label(format!(
+                "{}: {}",
+                i18n_embed_fl::fl!(crate::i18n::loader(), "action-label"),
+                pending.action
+            ));
+            ui.label(format!(
+                "{}: {}",
+                i18n_embed_fl::fl!(crate::i18n::loader(), "target-label"),
+                pending.target
+            ));
+            if let Some(description) = &pending.description {
+                ui.label(format!(
+                    "{}: {}",
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "description-label"),
+                    description
+                ));
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui
+                    .button(i18n_embed_fl::fl!(crate::i18n::loader(), "yes"))
+                    .clicked()
+                {
+                    let _ = ai.answer_permission(
+                        request_id.clone(),
+                        ene_core::PermissionDecision::AllowOnce,
+                    );
+                    clear_pending_permission(world, ui_entity);
                 }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("Yes").clicked() {
-                        let _ = ai.answer_permission(
-                            request_id.clone(),
-                            ene_core::PermissionDecision::AllowOnce,
-                        );
-                        clear_pending_permission(world, ui_entity);
-                    }
-                    if ui.button("No").clicked() {
-                        let _ = ai.answer_permission(
-                            request_id.clone(),
-                            ene_core::PermissionDecision::Deny,
-                        );
-                        clear_pending_permission(world, ui_entity);
-                    }
-                    if ui.button("Always").clicked() {
-                        let _ = ai.answer_permission(
-                            request_id.clone(),
-                            ene_core::PermissionDecision::AllowSession,
-                        );
-                        clear_pending_permission(world, ui_entity);
-                    }
-                });
+                if ui
+                    .button(i18n_embed_fl::fl!(crate::i18n::loader(), "no"))
+                    .clicked()
+                {
+                    let _ = ai
+                        .answer_permission(request_id.clone(), ene_core::PermissionDecision::Deny);
+                    clear_pending_permission(world, ui_entity);
+                }
+                if ui
+                    .button(i18n_embed_fl::fl!(crate::i18n::loader(), "always"))
+                    .clicked()
+                {
+                    let _ = ai.answer_permission(
+                        request_id.clone(),
+                        ene_core::PermissionDecision::AllowSession,
+                    );
+                    clear_pending_permission(world, ui_entity);
+                }
             });
         });
+    });
     if !open {
         // Treat window-close as "Deny" so a dismissed dialog
         // does not stall the actor waiting on the oneshot.
@@ -411,51 +460,61 @@ fn render_user_input_dialog(
     let request_id = prompt_snapshot.request_id;
     let items = prompt_snapshot.prompt.items.clone();
     let mut open = true;
-    egui::Window::new("User Input Requested")
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(true)
-        .default_size([420.0, 280.0])
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ui.ctx(), |ui| {
-            ui.vertical(|ui| {
-                ui.label("Answer each question, then Submit.");
-                ui.separator();
-                for (i, (item, draft)) in items.iter().zip(drafts.iter_mut()).enumerate() {
-                    render_user_input_row(ui, i, item, draft);
-                }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("Submit").clicked() {
-                        let answers: Vec<MultiAnswer> = drafts
-                            .iter()
-                            .map(|d| {
-                                if d.skipped {
-                                    MultiAnswer::Skip
-                                } else if let Some(option) = &d.selected {
-                                    MultiAnswer::Selected {
-                                        option: option.clone(),
-                                    }
-                                } else {
-                                    MultiAnswer::Answer {
-                                        text: d.text.clone(),
-                                    }
+    egui::Window::new(i18n_embed_fl::fl!(
+        crate::i18n::loader(),
+        "user-input-requested"
+    ))
+    .open(&mut open)
+    .collapsible(false)
+    .resizable(true)
+    .default_size([420.0, 280.0])
+    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+    .show(ui.ctx(), |ui| {
+        ui.vertical(|ui| {
+            ui.label(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "answer-each-question"
+            ));
+            ui.separator();
+            for (i, (item, draft)) in items.iter().zip(drafts.iter_mut()).enumerate() {
+                render_user_input_row(ui, i, item, draft);
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui
+                    .button(i18n_embed_fl::fl!(crate::i18n::loader(), "submit"))
+                    .clicked()
+                {
+                    let answers: Vec<MultiAnswer> = drafts
+                        .iter()
+                        .map(|d| {
+                            if d.skipped {
+                                MultiAnswer::Skip
+                            } else if let Some(option) = &d.selected {
+                                MultiAnswer::Selected {
+                                    option: option.clone(),
                                 }
-                            })
-                            .collect();
-                        let _ = ai.answer_user_input(
-                            request_id.clone(),
-                            UserInputResponse::Multi(answers),
-                        );
-                        clear_pending_user_input(world, ui_entity);
-                    }
-                    if ui.button("Cancel").clicked() {
-                        let _ = ai.answer_user_input(request_id.clone(), UserInputResponse::Cancel);
-                        clear_pending_user_input(world, ui_entity);
-                    }
-                });
+                            } else {
+                                MultiAnswer::Answer {
+                                    text: d.text.clone(),
+                                }
+                            }
+                        })
+                        .collect();
+                    let _ =
+                        ai.answer_user_input(request_id.clone(), UserInputResponse::Multi(answers));
+                    clear_pending_user_input(world, ui_entity);
+                }
+                if ui
+                    .button(i18n_embed_fl::fl!(crate::i18n::loader(), "cancel"))
+                    .clicked()
+                {
+                    let _ = ai.answer_user_input(request_id.clone(), UserInputResponse::Cancel);
+                    clear_pending_user_input(world, ui_entity);
+                }
             });
         });
+    });
     if !open {
         // Window close = Cancel.
         let _ = ai.answer_user_input(request_id, UserInputResponse::Cancel);
@@ -493,7 +552,13 @@ fn render_user_input_row(
             }
         }
         let mut skipped = draft.skipped;
-        if ui.checkbox(&mut skipped, "Skip this question").changed() {
+        if ui
+            .checkbox(
+                &mut skipped,
+                i18n_embed_fl::fl!(crate::i18n::loader(), "skip-this-question"),
+            )
+            .changed()
+        {
             draft.skipped = skipped;
         }
     });

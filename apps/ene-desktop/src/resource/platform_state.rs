@@ -23,6 +23,9 @@ pub mod resources {
     use crate::platform::x11_taskbar::X11Context;
 
     #[derive(Resource, Default)]
+    pub struct WindowScaleFactor(pub f64);
+
+    #[derive(Resource, Default)]
     pub struct WaylandInputRegion(pub Option<Arc<Mutex<WaylandInputRegionContext>>>);
 
     #[derive(Resource, Default)]

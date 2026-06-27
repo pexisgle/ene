@@ -11,7 +11,8 @@
       "shadow_quality": "medium",
       "antialiasing_mode": "fxaa",
       "debug_fps": 30
-    }
+    },
+    "language": "ja"
   },
   "memory": {
     "db_path": "",

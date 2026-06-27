@@ -72,6 +72,7 @@ pub struct ClickThroughInputs<'a> {
     pub layer_shell_freeze: bool,
     pub mask_capture: Option<&'a MaskCaptureState>,
     pub drag_is_dragging: bool,
+    pub scale_factor: f64,
 }
 
 /// Per-frame click-through update on Linux.
@@ -106,6 +107,7 @@ pub fn apply_linux_click_through(
         layer_shell_freeze: _layer_shell_freeze,
         mask_capture,
         drag_is_dragging,
+        scale_factor,
     } = inputs;
 
     let (rects, source) = if freeze_forced {
@@ -148,7 +150,17 @@ pub fn apply_linux_click_through(
         if freeze_forced || (allows_input && (cursor_on_silhouette || drag_is_dragging)) {
             guard.set_full_input();
         } else {
-            guard.set_rects(rects.clone());
+            let scale = scale_factor;
+            let logical_rects: Vec<Rect> = rects
+                .iter()
+                .map(|r| Rect {
+                    x: (r.x as f64 / scale).round() as i32,
+                    y: (r.y as f64 / scale).round() as i32,
+                    w: (r.w as f64 / scale).round().max(1.0) as i32,
+                    h: (r.h as f64 / scale).round().max(1.0) as i32,
+                })
+                .collect();
+            guard.set_rects(logical_rects);
         }
 
         guard.apply_to_winit_surface();

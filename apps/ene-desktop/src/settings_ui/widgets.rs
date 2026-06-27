@@ -60,6 +60,8 @@ pub enum SettingsAction {
     ToggleInputRegionDebug,
     DebugFpsDown,
     DebugFpsUp,
+    LanguageDown,
+    LanguageUp,
     SendAiChat,
 }
 
@@ -215,10 +217,22 @@ pub fn apply_action(
         SettingsAction::SendAiChat => {
             send_ai_chat(settings, ai, world, ui_entity);
         }
+        SettingsAction::LanguageDown => {
+            settings.language = crate::settings::cycle_language(settings.language, -1);
+            crate::i18n::select_language(settings.language);
+            settings.mark_dirty();
+        }
+        SettingsAction::LanguageUp => {
+            settings.language = crate::settings::cycle_language(settings.language, 1);
+            crate::i18n::select_language(settings.language);
+            settings.mark_dirty();
+        }
     }
 
     settings.clamp_runtime_values();
     settings.mark_dirty();
+    tracing::info!("apply_action: calling settings.save()");
+    settings.save();
 }
 
 fn cycle_index(index: usize, len: usize, step: isize) -> usize {

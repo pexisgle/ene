@@ -93,17 +93,46 @@ impl Runtime {
         }
     }
 
-    fn show_settings_window(&mut self) {
-        if let Some(uw) = self.ui_window.as_mut() {
-            let visible = self.state.ui_bevy_state().0.settings_window_visible;
-            if !visible {
-                self.state.ui_bevy_state_mut().0.settings_window_visible = true;
-                let ui_state_snapshot = self.state.ui_bevy_state().0.clone();
-                uw.settings_ui
-                    .sync_from_settings(&self.state.settings, &ui_state_snapshot);
-                uw.window.set_visible(true);
-                uw.window.request_redraw();
+    fn create_ui_window(&mut self, event_loop: &ActiveEventLoop) {
+        let ui_attrs = WindowAttributes::default()
+            .with_title("ene UI")
+            .with_inner_size(LogicalSize::new(460.0, 620.0))
+            .with_resizable(true);
+        let ui_w = match event_loop.create_window(ui_attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                tracing::error!("Failed to create ui window: {e}");
+                event_loop.exit();
+                return;
             }
+        };
+        let ui_size = ui_w.inner_size();
+        match UiWindow::new(
+            ui_w,
+            &self.state.gpu.instance,
+            &self.state.gpu.adapter,
+            &self.state.gpu.device,
+            ui_size,
+        ) {
+            Ok(uw) => {
+                let visible = self.state.ui_bevy_state().0.settings_window_visible;
+                uw.window.set_visible(visible);
+                if visible {
+                    uw.window.request_redraw();
+                }
+                self.ui_window = Some(uw);
+            }
+            Err(e) => {
+                tracing::error!("Failed to create UiWindow: {e}");
+                event_loop.exit();
+            }
+        }
+    }
+
+    fn show_settings_window(&mut self, _event_loop: &ActiveEventLoop) {
+        let visible = self.state.ui_bevy_state().0.settings_window_visible;
+        if !visible {
+            self.state.ui_bevy_state_mut().0.settings_window_visible = true;
         }
     }
 
@@ -112,9 +141,8 @@ impl Runtime {
         if visible {
             self.state.save();
             self.state.ui_bevy_state_mut().0.settings_window_visible = false;
-            if let Some(uw) = self.ui_window.as_mut() {
-                uw.window.set_visible(false);
-            }
+            // Re-create model: Drop the window entirely to work around Wayland/winit 0.30 unmap bugs.
+            self.ui_window = None;
         }
     }
 }
@@ -262,38 +290,9 @@ impl ApplicationHandler for Runtime {
             }
         }
 
-        let ui_attrs = WindowAttributes::default()
-            .with_title("ene UI")
-            .with_inner_size(LogicalSize::new(460.0, 620.0))
-            .with_resizable(true);
-        let ui_w = match event_loop.create_window(ui_attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                tracing::error!("Failed to create ui window: {e}");
-                event_loop.exit();
-                return;
-            }
-        };
-        let ui_size = ui_w.inner_size();
-        match UiWindow::new(
-            ui_w,
-            &self.state.gpu.instance,
-            &self.state.gpu.adapter,
-            &self.state.gpu.device,
-            ui_size,
-        ) {
-            Ok(uw) => {
-                let visible = self.state.ui_bevy_state().0.settings_window_visible;
-                uw.window.set_visible(visible);
-                if visible {
-                    uw.window.request_redraw();
-                }
-                self.ui_window = Some(uw);
-            }
-            Err(e) => {
-                tracing::error!("Failed to create UiWindow: {e}");
-                event_loop.exit();
-            }
+        let visible = self.state.ui_bevy_state().0.settings_window_visible;
+        if visible {
+            self.create_ui_window(event_loop);
         }
     }
 
@@ -450,6 +449,17 @@ impl Runtime {
             // expected to reach this match.
             Err(AcquireError::Reconfigure | AcquireError::Timeout) => {}
         }
+
+        let visible = self.state.ui_bevy_state().0.settings_window_visible;
+        if visible && self.ui_window.is_none() {
+            self.create_ui_window(event_loop);
+            if let Some(uw) = self.ui_window.as_mut() {
+                let ui_state_snapshot = self.state.ui_bevy_state().0.clone();
+                uw.settings_ui
+                    .sync_from_settings(&self.state.settings, &ui_state_snapshot);
+            }
+        }
+
         if let Some(uw) = self.ui_window.as_mut() {
             let visible = self.state.ui_bevy_state().0.settings_window_visible;
             if uw.window.is_visible() != Some(visible) {
@@ -470,7 +480,18 @@ impl Runtime {
                 ..
             } = self.state;
             let bevy_world = app.world_mut();
-            match uw.render_frame(&gpu.device, &gpu.queue, settings, ai, bevy_world, ui_entity) {
+            let now_secs = self
+                .emotion_clock
+                .map_or(0.0, |t| t.elapsed().as_secs_f64());
+            match uw.render_frame(
+                &gpu.device,
+                &gpu.queue,
+                settings,
+                ai,
+                bevy_world,
+                ui_entity,
+                now_secs,
+            ) {
                 Ok(_) => {}
                 Err(e) => match e {
                     AcquireError::Reconfigure => {
@@ -481,6 +502,22 @@ impl Runtime {
                         event_loop.exit();
                     }
                 },
+            }
+
+            // Drain the legacy SettingsUi::emotion_queue (filled by
+            // the manual expression buttons) into the Bevy
+            // UiEmotionQueue component so that apply_emotions_system
+            // can forward them to EmotionPipelineState::pending.
+            if !uw.settings_ui.emotion_queue.commands.is_empty() {
+                use crate::component::ui::UiEmotionQueue;
+                if let Some(ui_entity2) = self.state.ui_bevy_entity() {
+                    let bevy_world2 = self.state.app.world_mut();
+                    if let Some(mut eq) = bevy_world2.get_mut::<UiEmotionQueue>(ui_entity2) {
+                        while let Some(cmd) = uw.settings_ui.emotion_queue.commands.pop_front() {
+                            eq.0.commands.push_back(cmd);
+                        }
+                    }
+                }
             }
         }
         if self.char_surface_fatal {
@@ -652,7 +689,7 @@ impl Runtime {
                         if visible {
                             self.hide_settings_window();
                         } else {
-                            self.show_settings_window();
+                            self.show_settings_window(event_loop);
                         }
                     } else if key_code_pressed(&event) == Some(winit::keyboard::KeyCode::F3) {
                         let mut ui_state = self.state.ui_bevy_state_mut();
@@ -767,15 +804,33 @@ impl Runtime {
                 if !applied.name.is_empty()
                     && let Some(model) = character.model_mut()
                 {
-                    let name = ene_vrm::ExpressionName::new(applied.name);
+                    let expressions_meta = model.expressions_meta.clone();
                     let layer = model.expressions_mut();
-                    // `set_expression` is a no-op if the
-                    // model does not have this expression
-                    // in its expression map (returns false),
-                    // which is the right behavior for AI
-                    // tokens that don't match the loaded
-                    // VRM's expression set.
-                    layer.set_expression(&name, applied.weight);
+                    tracing::debug!(
+                        expression = %applied.name,
+                        weight = applied.weight,
+                        "apply emotion"
+                    );
+                    let names = match applied.name.as_str() {
+                        "happy" => vec!["happy", "joy", "fun"],
+                        "sad" => vec!["sad", "sorrow"],
+                        "relaxed" => vec!["relaxed", "fun"],
+                        other => vec![other],
+                    };
+                    // First reset all expression weights so a previous
+                    // expression doesn't linger after a new one starts.
+                    for en in layer.expression_names().into_iter() {
+                        layer.set_expression(&en, 0.0);
+                    }
+                    for name_str in names {
+                        let name = ene_vrm::ExpressionName::new(name_str.to_string());
+                        layer.set_expression(&name, applied.weight);
+                    }
+                    // Apply_overrides translates the named weights into the
+                    // per-(node, morph_target_index) map that the GPU
+                    // renderer reads via `morph_target_weights`.
+                    // Without this call, set_expression has no visible effect.
+                    layer.apply_overrides(&expressions_meta);
                 }
             }
         }
@@ -851,8 +906,6 @@ impl Runtime {
                     camera_target,
                     ene_vrm::camera::DEFAULT_UP.into(),
                 );
-                #[cfg_attr(target_os = "windows", expect(unused_variables))]
-                let view_inverse = cam_view.inverse();
                 let mut lines = Vec::new();
                 if show_collider_debug {
                     let (hit_collider, hit_point) = match last_raycast_hit {
@@ -956,7 +1009,7 @@ impl Runtime {
                                 mask,
                                 cw.config.width,
                                 cw.config.height,
-                                view_inverse,
+                                cam_view,
                                 view_z,
                             );
                         }
@@ -976,7 +1029,7 @@ impl Runtime {
                             world.resource::<LastInputSource>().0,
                             cw.config.width,
                             cw.config.height,
-                            view_inverse,
+                            cam_view,
                             view_z,
                         );
                     }
@@ -1030,8 +1083,12 @@ impl Runtime {
                     &model_uniform,
                 );
                 mask_guard.encode_readback(&mut encoder);
-                drop(mask_guard);
+                // Keep mask_guard alive (locked) through queue.submit so the
+                // background readback thread cannot call readback_slice() and
+                // map the buffer between encode_readback and submit, which would
+                // cause a wgpu validation error ("Buffer still mapped").
                 queue.submit(std::iter::once(encoder.finish()));
+                drop(mask_guard);
                 if let Some(worker) = world.resource::<MaskReadbackWorkerRes>().0.as_ref() {
                     worker.request_readback();
                 }
@@ -1064,6 +1121,12 @@ impl Runtime {
         let Some(uw) = self.ui_window.as_mut() else {
             return;
         };
+
+        if let WindowEvent::CloseRequested = event {
+            self.hide_settings_window();
+            return;
+        }
+
         let response = uw.egui_state.on_window_event(&uw.window, &event);
         if response.repaint {
             uw.window.request_redraw();
@@ -1073,8 +1136,7 @@ impl Runtime {
         }
         match event {
             WindowEvent::CloseRequested => {
-                self.state.save();
-                self.state.ui_bevy_state_mut().0.settings_window_visible = false;
+                self.hide_settings_window();
             }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                 uw.reconfigure(&self.state.gpu.device, uw.window.inner_size());
@@ -1082,8 +1144,7 @@ impl Runtime {
             }
             WindowEvent::KeyboardInput { .. } => {
                 if let Some(NamedKey::Escape) = key_pressed(&event) {
-                    self.state.save();
-                    self.state.ui_bevy_state_mut().0.settings_window_visible = false;
+                    self.hide_settings_window();
                 }
             }
             WindowEvent::RedrawRequested => {}
@@ -1247,7 +1308,7 @@ fn update_char_window_cursor_and_hittest(
     };
 
     let cursor_over = hit.is_some();
-
+    #[cfg_attr(not(target_os = "windows"), expect(unused_variables))]
     let allows_input = !transparent || cursor_over || drag_is_dragging;
 
     if let Some(lc) = local_cursor {
@@ -1262,35 +1323,6 @@ fn update_char_window_cursor_and_hittest(
     #[cfg(target_os = "windows")]
     {
         let _ = cw.window.set_cursor_hittest(allows_input);
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use crate::resource::platform_state::resources::{
-            LayerShell, LayerShellFreeze, MaskCapture, WaylandInputRegion, X11ContextRes,
-        };
-        let world = state.app.world();
-        let wayland = world.resource::<WaylandInputRegion>().0.as_ref();
-        let x11 = world.resource::<X11ContextRes>().0.as_ref();
-        let layer_shell = world.resource::<LayerShell>().0.as_ref();
-        let layer_shell_freeze = world.resource::<LayerShellFreeze>().0;
-        let mask = world.resource::<MaskCapture>().0.as_ref();
-        let (rects, source) = crate::platform::apply_linux_click_through(
-            crate::platform::ClickThroughInputs {
-                wayland,
-                x11,
-                layer_shell,
-                layer_shell_freeze,
-                mask_capture: mask,
-                drag_is_dragging,
-            },
-            allows_input,
-            cursor_over,
-            layer_shell_freeze,
-        );
-        use crate::resource::platform_state::resources::{LastAppliedInputRects, LastInputSource};
-        let world_mut = state.app.world_mut();
-        world_mut.resource_mut::<LastAppliedInputRects>().0 = rects;
-        world_mut.resource_mut::<LastInputSource>().0 = source;
     }
 
     hit
@@ -1541,6 +1573,7 @@ impl UiWindow {
         ai: &Arc<AiBridge>,
         world: &mut bevy_ecs::world::World,
         ui_entity: bevy_ecs::entity::Entity,
+        now_secs: f64,
     ) -> Result<(), AcquireError> {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -1570,7 +1603,8 @@ impl UiWindow {
         panel_ui.set_clip_rect(self.egui_ctx.content_rect());
 
         egui::CentralPanel::default().show_inside(&mut panel_ui, |ui| {
-            self.settings_ui.render(ui, settings, ai, world, ui_entity);
+            self.settings_ui
+                .render(ui, settings, ai, world, ui_entity, now_secs);
         });
 
         let full_output = self.egui_ctx.end_pass();

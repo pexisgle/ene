@@ -28,7 +28,7 @@ pub fn render(
 ) {
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
-            ui.label("Character");
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "character"));
             if ui.button("<").clicked() {
                 apply_action(
                     SettingsAction::PrevCharacter,
@@ -60,7 +60,7 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label("Motion");
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "motion"));
             if ui.button("<").clicked() {
                 apply_action(
                     SettingsAction::PrevMotion,
@@ -92,7 +92,7 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label("Animation");
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "animation"));
             if ui.button("Toggle").clicked() {
                 apply_action(
                     SettingsAction::TogglePlay,
@@ -108,16 +108,16 @@ pub fn render(
             ui.add_sized(
                 [220.0, 0.0],
                 egui::Label::new(if animation.playing {
-                    "Playing"
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "playing")
                 } else {
-                    "Paused"
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "paused")
                 }),
             );
         });
 
         render_numeric_row(
             ui,
-            "LookAt Strength",
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "lookat-strength"),
             &mut input.look_at_strength,
             settings,
             animation,
@@ -132,7 +132,7 @@ pub fn render(
         );
         render_numeric_row(
             ui,
-            "Model Scale",
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "model-scale"),
             &mut input.model_scale,
             settings,
             animation,
@@ -147,7 +147,7 @@ pub fn render(
         );
         render_numeric_row(
             ui,
-            "Character Pos X",
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "character-pos-x"),
             &mut input.character_pos_x,
             settings,
             animation,
@@ -162,7 +162,7 @@ pub fn render(
         );
         render_numeric_row(
             ui,
-            "Character Pos Y",
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "character-pos-y"),
             &mut input.character_pos_y,
             settings,
             animation,
@@ -177,7 +177,7 @@ pub fn render(
         );
         render_numeric_row(
             ui,
-            "Character Pos Z",
+            &i18n_embed_fl::fl!(crate::i18n::loader(), "character-pos-z"),
             &mut input.character_pos_z,
             settings,
             animation,
@@ -192,7 +192,10 @@ pub fn render(
         );
 
         ui.horizontal(|ui| {
-            if ui.button("Reset Position").clicked() {
+            if ui
+                .button(i18n_embed_fl::fl!(crate::i18n::loader(), "reset-position"))
+                .clicked()
+            {
                 apply_action(
                     SettingsAction::ResetCharacterPosition,
                     settings,
@@ -215,7 +218,10 @@ pub fn render(
         });
 
         ui.separator();
-        ui.label("Manual Expressions (Test)");
+        ui.label(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "manual-expressions"
+        ));
         ui.horizontal(|ui| {
             for emotion in EXPRESSIONS {
                 if ui.button(emotion).clicked() {
