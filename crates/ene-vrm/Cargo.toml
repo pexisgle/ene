@@ -5,18 +5,18 @@ edition = "2024"
 description = "VRM 1.0 character renderer for the ene desktop app, built on wgpu 29 and the gltf crate."
 
 [dependencies]
-# glTF 2.0 parser. `default-features = false` to keep the dependency
+	# glTF 2.0 parser. `default-features = false` to keep the dependency
 # graph small. We need `KHR_materials_unlit` (MToon flag), the
 # `extensions` meta-feature (VRMC_vrm 1.0 helpers, plus KHR_*), and
 # `utils` for the `Primitive::reader` / `Skin::reader` API that
 # pulls positions / normals / tex coords / inverse-bind matrices
 # out of the BIN chunk.
-gltf = { version = "1.4", default-features = false, features = ["KHR_materials_unlit", "extensions", "utils", "names"] }
+gltf = { workspace = true, features = ["KHR_materials_unlit", "extensions", "utils", "names"] }
 
 # PNG decode for embedded base-color textures.
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { workspace = true, features = ["png"] }
 
-base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+base64 = { workspace = true, features = ["alloc"] }
 
 wgpu = { workspace = true }
 glam = { workspace = true }
@@ -50,7 +50,7 @@ serde_json = { workspace = true }
 # `inspect_aabb` example extracts a `.glb` payload from a
 # VRM 1.0 zip archive. Pulled in as a dev-dep so the lib
 # itself stays slim.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { workspace = true, features = ["deflate"] }
 
 [lints]
 workspace = true

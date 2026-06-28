@@ -45,7 +45,7 @@ pub struct RayHit {
     /// Distance along the ray, in world units.
     pub toi: f32,
     /// World-space point of the hit (`origin + dir * toi`).
-    pub point: Point<f32>,
+    pub point: Vec3,
     /// The Rapier `ColliderHandle` that was hit. The caller can
     /// resolve this to a bevy `Entity` via
     /// `Query<(Entity, &PhysicsColliders)>`.
@@ -69,41 +69,39 @@ pub struct CharacterColliderRegistration {
 
 /// Wrapper for Rapier3D state.
 pub struct PhysicsWorld {
-    pub gravity: Vector<f32>,
+    pub gravity: Vec3,
     pub integration_parameters: IntegrationParameters,
     pub physics_pipeline: PhysicsPipeline,
     pub island_manager: IslandManager,
-    pub broad_phase: BroadPhaseMultiSap,
+    pub broad_phase: BroadPhaseBvh,
     pub narrow_phase: NarrowPhase,
     pub rigid_body_set: RigidBodySet,
     pub collider_set: ColliderSet,
     pub impulse_joint_set: ImpulseJointSet,
     pub multibody_joint_set: MultibodyJointSet,
     pub ccd_solver: CCDSolver,
-    pub query_pipeline: QueryPipeline,
 }
 
 impl PhysicsWorld {
     pub fn new() -> Self {
         Self {
-            gravity: vector![0.0, -9.81, 0.0],
+            gravity: Vec3::new(0.0, -9.81, 0.0),
             integration_parameters: IntegrationParameters::default(),
             physics_pipeline: PhysicsPipeline::new(),
             island_manager: IslandManager::new(),
-            broad_phase: BroadPhaseMultiSap::new(),
+            broad_phase: BroadPhaseBvh::new(),
             narrow_phase: NarrowPhase::new(),
             rigid_body_set: RigidBodySet::new(),
             collider_set: ColliderSet::new(),
             impulse_joint_set: ImpulseJointSet::new(),
             multibody_joint_set: MultibodyJointSet::new(),
             ccd_solver: CCDSolver::new(),
-            query_pipeline: QueryPipeline::new(),
         }
     }
 
     pub fn step(&mut self) {
         self.physics_pipeline.step(
-            &self.gravity,
+            self.gravity,
             &self.integration_parameters,
             &mut self.island_manager,
             &mut self.broad_phase,
@@ -113,33 +111,26 @@ impl PhysicsWorld {
             &mut self.impulse_joint_set,
             &mut self.multibody_joint_set,
             &mut self.ccd_solver,
-            None,
             &(),
             &(),
         );
-
-        self.query_pipeline.update(&self.collider_set);
     }
 
     /// Cast a ray against every collider. Returns the closest hit
     /// as a [`RayHit`], or `None` on a clean miss. BVH-accelerated
     /// by Rapier; `dir` need not be normalised.
-    pub fn cast_ray(&self, origin: Point<f32>, dir: Vector<f32>, max_toi: f32) -> Option<RayHit> {
+    pub fn cast_ray(&self, origin: Vec3, dir: Vec3, max_toi: f32) -> Option<RayHit> {
         let ray = Ray::new(origin, dir);
         let filter = QueryFilter::default();
-        let (handle, toi) = self.query_pipeline.cast_ray(
+        let dispatcher = self.narrow_phase.query_dispatcher();
+        let pipeline = self.broad_phase.as_query_pipeline(
+            dispatcher,
             &self.rigid_body_set,
             &self.collider_set,
-            &ray,
-            max_toi,
-            true,
             filter,
-        )?;
-        let point = Point::new(
-            origin.x + dir.x * toi,
-            origin.y + dir.y * toi,
-            origin.z + dir.z * toi,
         );
+        let (handle, toi) = pipeline.cast_ray(&ray, max_toi, true)?;
+        let point = origin + dir * toi;
         Some(RayHit {
             toi,
             point,
@@ -211,11 +202,11 @@ impl PhysicsWorld {
     ) {
         if let Some(body) = self.rigid_body_set.get_mut(reg.body) {
             body.set_translation(
-                vector![
+                Vec3::new(
                     character_position.x,
                     character_position.y,
-                    character_position.z
-                ],
+                    character_position.z,
+                ),
                 true,
             );
         }
@@ -232,15 +223,15 @@ impl PhysicsWorld {
 
                 let r_delta = pose.rotation * rest_rot.inverse();
                 let scaled_pos = pose.translation * actual_scale + r_delta * offset;
-                collider.set_translation_wrt_parent(vector![
+                collider.set_translation_wrt_parent(Vec3::new(
                     scaled_pos.x,
                     scaled_pos.y,
-                    scaled_pos.z
-                ]);
+                    scaled_pos.z,
+                ));
 
                 let final_rotation = r_delta * r_align;
                 let (axis, angle) = final_rotation.to_axis_angle();
-                let ang = vector![axis.x * angle, axis.y * angle, axis.z * angle];
+                let ang = Vec3::new(axis.x * angle, axis.y * angle, axis.z * angle);
                 collider.set_rotation_wrt_parent(ang);
             }
         }
@@ -273,17 +264,17 @@ fn build_collider_for_shape(spec: &BoneShapeSpec) -> ColliderBuilder {
             radius,
         } => ColliderBuilder::capsule_y(half_height, radius),
     };
-    builder = builder.translation(vector![
+    builder = builder.translation(Vec3::new(
         spec.local_position.x,
         spec.local_position.y,
-        spec.local_position.z
-    ]);
+        spec.local_position.z,
+    ));
     // Static local rotation: for limbs this is the rest-pose
     // "toward-child" direction; `update_character_bone_positions`
     // adds the bone's animated rotation on top via
     // `set_rotation_wrt_parent`, so the capsule follows the swing.
     let (axis, angle) = spec.local_rotation.to_axis_angle();
-    builder = builder.rotation(vector![axis.x * angle, axis.y * angle, axis.z * angle]);
+    builder = builder.rotation(Vec3::new(axis.x * angle, axis.y * angle, axis.z * angle));
     builder
 }
 
@@ -410,10 +401,7 @@ mod tests {
         // local +Y (its long axis) to the same world direction
         // the spec's rotation does.
         let collider_rot = collider.rotation();
-        let rapier_y: glam::Vec3 = {
-            let v = collider_rot * nalgebra::Vector3::new(0.0, 1.0, 0.0);
-            glam::Vec3::new(v.x, v.y, v.z)
-        };
+        let rapier_y: glam::Vec3 = collider_rot * glam::Vec3::new(0.0, 1.0, 0.0);
         let spec_y = rotation * glam::Vec3::Y;
         let diff = (rapier_y - spec_y).length();
         assert!(
@@ -430,17 +418,17 @@ mod tests {
         let reg = physics.register_character_colliders(&two_bone_specs());
         physics.step();
 
-        let hit = physics.cast_ray(Point::new(0.0, 0.0, 3.0), vector![0.0, 0.0, -1.0], 100.0);
+        let hit = physics.cast_ray(Vec3::new(0.0, 0.0, 3.0), Vec3::new(0.0, 0.0, -1.0), 100.0);
         assert!(hit.is_some(), "ray through chest must hit");
         assert!(
             reg.colliders.contains(&hit.unwrap().collider),
             "hit collider must belong to the registered character"
         );
 
-        let hit = physics.cast_ray(Point::new(0.0, 0.5, 3.0), vector![0.0, 0.0, -1.0], 100.0);
+        let hit = physics.cast_ray(Vec3::new(0.0, 0.5, 3.0), Vec3::new(0.0, 0.0, -1.0), 100.0);
         assert!(hit.is_some(), "ray through head must hit");
 
-        let hit = physics.cast_ray(Point::new(0.0, 0.7, 3.0), vector![0.0, 0.0, -1.0], 100.0);
+        let hit = physics.cast_ray(Vec3::new(0.0, 0.7, 3.0), Vec3::new(0.0, 0.0, -1.0), 100.0);
         assert!(hit.is_none(), "ray above head must miss all bone colliders");
     }
 
@@ -455,7 +443,7 @@ mod tests {
         physics.step();
 
         let hit = physics
-            .cast_ray(Point::new(0.0, 0.0, 3.0), vector![0.0, 0.0, -1.0], 100.0)
+            .cast_ray(Vec3::new(0.0, 0.0, 3.0), Vec3::new(0.0, 0.0, -1.0), 100.0)
             .expect("ray through chest must hit");
         assert!(
             (hit.toi - 2.8).abs() < 1e-4,
@@ -495,19 +483,19 @@ mod tests {
         );
         physics.step();
 
-        let hit = physics.cast_ray(Point::new(0.0, 0.0, 3.0), vector![0.0, 0.0, -1.0], 100.0);
+        let hit = physics.cast_ray(Vec3::new(0.0, 0.0, 3.0), Vec3::new(0.0, 0.0, -1.0), 100.0);
         assert!(
             hit.is_none(),
             "ray at the old chest position must miss after move"
         );
 
-        let hit = physics.cast_ray(Point::new(5.0, 0.0, 3.0), vector![0.0, 0.0, -1.0], 100.0);
+        let hit = physics.cast_ray(Vec3::new(5.0, 0.0, 3.0), Vec3::new(0.0, 0.0, -1.0), 100.0);
         assert!(
             hit.is_some(),
             "ray at the new chest position must hit after move"
         );
 
-        let hit = physics.cast_ray(Point::new(5.0, 0.75, 3.0), vector![0.0, 0.0, -1.0], 100.0);
+        let hit = physics.cast_ray(Vec3::new(5.0, 0.75, 3.0), Vec3::new(0.0, 0.0, -1.0), 100.0);
         assert!(hit.is_some(), "ray at the scaled head position must hit");
     }
 
@@ -532,7 +520,7 @@ mod tests {
         let reg = physics.register_character_colliders(&specs);
         physics.step();
 
-        let pre_hit = physics.cast_ray(Point::new(0.0, 0.0, 3.0), vector![0.0, 0.0, -1.0], 100.0);
+        let pre_hit = physics.cast_ray(Vec3::new(0.0, 0.0, 3.0), Vec3::new(0.0, 0.0, -1.0), 100.0);
         assert!(pre_hit.is_some(), "ray must hit the rest capsule");
 
         let poses = vec![BonePose {
@@ -542,7 +530,7 @@ mod tests {
         physics.update_character_bone_positions(&reg, &poses, Vec3::ZERO, 1.0);
         physics.step();
 
-        let x_hit = physics.cast_ray(Point::new(0.5, 0.0, 3.0), vector![0.0, 0.0, -1.0], 100.0);
+        let x_hit = physics.cast_ray(Vec3::new(0.5, 0.0, 3.0), Vec3::new(0.0, 0.0, -1.0), 100.0);
         assert!(
             x_hit.is_some(),
             "after rotating 90° about Z, a ray at (0.5, 0, 3) must hit the capsule along world X"
@@ -558,12 +546,12 @@ mod tests {
         let reg = physics.register_character_colliders(&two_bone_specs());
         physics.step();
 
-        let hit = physics.cast_ray(Point::new(0.0, 0.0, 3.0), vector![0.0, 0.0, -1.0], 100.0);
+        let hit = physics.cast_ray(Vec3::new(0.0, 0.0, 3.0), Vec3::new(0.0, 0.0, -1.0), 100.0);
         assert!(hit.is_some(), "precondition: ray must hit before removal");
 
         physics.remove_character_colliders(&reg);
 
-        let hit = physics.cast_ray(Point::new(0.0, 0.0, 3.0), vector![0.0, 0.0, -1.0], 100.0);
+        let hit = physics.cast_ray(Vec3::new(0.0, 0.0, 3.0), Vec3::new(0.0, 0.0, -1.0), 100.0);
         assert!(hit.is_none(), "ray must miss after removal");
     }
 }

@@ -1602,7 +1602,7 @@ impl UiWindow {
         );
         panel_ui.set_clip_rect(self.egui_ctx.content_rect());
 
-        egui::CentralPanel::default().show_inside(&mut panel_ui, |ui| {
+        egui::CentralPanel::default().show(&mut panel_ui, |ui| {
             self.settings_ui
                 .render(ui, settings, ai, world, ui_entity, now_secs);
         });

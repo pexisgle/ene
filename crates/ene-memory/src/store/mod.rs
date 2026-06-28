@@ -511,7 +511,7 @@ impl MemoryStore {
             vec![card_name.into()],
         );
 
-        let rows = self.db.query_all(stmt).await?;
+        let rows = self.db.query_all_raw(stmt).await?;
 
         rows.into_iter()
             .map(|row| {
@@ -1100,7 +1100,7 @@ impl MemoryStore {
             ],
         );
 
-        let rows = self.db.query_all(stmt).await?;
+        let rows = self.db.query_all_raw(stmt).await?;
         rows.into_iter()
             .map(|row| {
                 let similarity: f64 = row.try_get("", "similarity")?;
@@ -1179,7 +1179,7 @@ impl MemoryStore {
         let now = Utc::now().to_rfc3339();
         let result = self
             .db
-            .execute(sea_orm::Statement::from_sql_and_values(
+            .execute_raw(sea_orm::Statement::from_sql_and_values(
                 sea_orm::DatabaseBackend::Sqlite,
                 "UPDATE typed_memories SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?",
                 [now.into(), id.into()],

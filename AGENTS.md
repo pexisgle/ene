@@ -31,7 +31,7 @@ This project is an AI assistant application written in Rust that merges VTuber-l
 
 ## 3. Platform-Specific Notes
 
-* **Linux:** Uses `direnv` + Nix flake. If command execution is not within the `direnv` environment, use `direnv exec . [command]`.
+* **Linux:** Uses `direnv` + Nix flake. If `command not found: cargo` happens, use `direnv exec . cargo`.
 * **Windows:** Uses Windows Named Pipes for IPC.
 
 ## 4. Architecture & Philosophy
@@ -43,6 +43,7 @@ The workspace is highly granularly split to enforce strict boundaries and preven
 * **`ene-tool-proto`**: Defines the IPC ABI (Requests/Responses). *Must not contain business or DB logic.*
 * **`ene-tool-host`**: Orchestrates tools and IPC. Depends on proto.
 * **Rule:** Do not merge crates arbitrarily. Tool binaries must be kept extremely lightweight and only link what is absolutely necessary (typically just `ene-tool-proto` and `ene-tool-derive`).
+* **Rule: Dependency Centralization:** All external dependencies used by crates under `crates/` must be declared in the root `[workspace.dependencies]` table and referenced via `{ workspace = true }` in each crate's `Cargo.toml`. Do not pin version numbers directly in individual crate manifests.
 
 ### 4.2 Asset Distribution Strategy
 * **Static Assets** (Default characters, config templates, UI icons): Distributed alongside the executable. On first launch, `ene-config` copies them to the user data directory. To keep the distribution lightweight, `.gitignore`'d resources (such as `assets/models/` and generated `assets/schema/*.schema.json`) **must not be bundled** in the release package.

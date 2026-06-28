@@ -203,14 +203,14 @@ pub fn resolve_gguf_paths(
 
     tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(async move {
-            let api = hf_hub::api::tokio::ApiBuilder::new()
-                .with_cache_dir(model_dir)
+            let client = hf_hub::HFClient::builder()
+                .cache_dir(model_dir)
                 .build()
-                .map_err(super::candle_err("Failed to create HF API"))?;
+                .map_err(super::candle_err("Failed to create HF client"))?;
 
-            let repo_id = match model_name_owned.as_str() {
-                "jina-embeddings-v5-text-nano" => "jinaai/jina-embeddings-v5-text-nano-retrieval",
-                "jina-embeddings-v5-text-small" => "jinaai/jina-embeddings-v5-text-small-retrieval",
+            let (repo_owner, repo_name) = match model_name_owned.as_str() {
+                "jina-embeddings-v5-text-nano" => ("jinaai", "jina-embeddings-v5-text-nano-retrieval"),
+                "jina-embeddings-v5-text-small" => ("jinaai", "jina-embeddings-v5-text-small-retrieval"),
                 _ => {
                     return Err(EneEmbeddingError::CandleError(format!(
                         "Unknown model: {model_name_owned}. Supported models: \
@@ -224,7 +224,7 @@ pub fn resolve_gguf_paths(
                 }
             };
 
-            let repo = api.model(repo_id.to_string());
+            let repo = client.model(repo_owner, repo_name);
 
             let gguf_filename: String = match model_name_owned.as_str() {
                 "jina-embeddings-v5-text-small" => match quant_owned.as_str() {
@@ -255,12 +255,16 @@ pub fn resolve_gguf_paths(
             };
 
             let gguf_path = repo
-                .get(&gguf_filename)
+                .download_file()
+                .filename(&gguf_filename)
+                .send()
                 .await
                 .map_err(super::candle_err("Failed to download GGUF"))?;
 
             let tokenizer_path = repo
-                .get("tokenizer.json")
+                .download_file()
+                .filename("tokenizer.json")
+                .send()
                 .await
                 .map_err(super::candle_err("Failed to download tokenizer"))?;
 

@@ -14,7 +14,7 @@
 //!   the latest hit was on the character entity.
 //!
 //! The cross half-edge is [`CROSS_HALF_EXTENT`] from the renderer.
-use rapier3d::prelude::{ColliderHandle, ColliderSet, Point};
+use rapier3d::prelude::{ColliderHandle, ColliderSet};
 
 use crate::physics::PhysicsWorld;
 use ene_vrm::debug_renderer::{
@@ -59,14 +59,13 @@ pub fn build_collider_lines(
     physics: &PhysicsWorld,
     colliders: &[ColliderHandle],
     hit_collider: Option<ColliderHandle>,
-    hit_point: Option<Point<f32>>,
+    hit_point: Option<glam::Vec3>,
     show_all: bool,
 ) {
     out.clear();
     push_lines(out, physics, colliders, hit_collider, show_all);
     if let Some(point) = hit_point {
-        let center = glam::Vec3::new(point.x, point.y, point.z);
-        cross_lines(center, CROSS_HALF_EXTENT, HIT_POINT_COLOR, out);
+        cross_lines(point, CROSS_HALF_EXTENT, HIT_POINT_COLOR, out);
     }
 }
 
@@ -98,8 +97,8 @@ pub(crate) fn push_lines(
         // apply it to its local +Y. `position.rotation`
         // returns a `UnitQuaternion`; `.quaternion()`
         // exposes the raw `Quaternion` (i, j, k, w).
-        let q = position.rotation.quaternion();
-        let orientation = glam::Quat::from_xyzw(q.i, q.j, q.k, q.w);
+        let q = position.rotation;
+        let orientation = q;
         let color = if Some(*handle) == hit_collider {
             HIT_COLOR
         } else {
@@ -199,7 +198,7 @@ mod tests {
         }];
         let reg = physics.register_character_colliders(&specs);
         physics.step();
-        let hit_point = Point::new(0.0, 0.0, 0.2);
+        let hit_point = Vec3::new(0.0, 0.0, 0.2);
         let mut out = Vec::new();
         build_collider_lines(
             &mut out,

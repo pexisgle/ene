@@ -38,7 +38,7 @@ ctor = "1.0"
 # --- Workspace dependencies (shared across crates) ---
 dashmap = "6"
 base64 = "0.22"
-blake3 = "1.5"
+blake3 = "1.8"
 
 # --- Internal libraries ---
 ene-cognition = { path = "crates/ene-cognition" }
@@ -57,9 +57,9 @@ ene-tool-db = { path = "crates/ene-tool-db" }
 ene-vrm = { path = "crates/ene-vrm" }
 
 # --- Database ---
-sea-orm = { version = "1.1", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros", "with-chrono"] }
-sea-orm-migration = { version = "1.1", features = ["runtime-tokio-rustls", "sqlx-sqlite"] }
-libsqlite3-sys = { version = "0.30", features = ["bundled"] }
+sea-orm = { version = "2.0.0-rc.41", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros", "with-chrono"] }
+sea-orm-migration = { version = "2.0.0-rc.41", features = ["runtime-tokio-rustls", "sqlx-sqlite"] }
+libsqlite3-sys = { version = "0.37", features = ["bundled"] }
 sqlite-vec = "0.1"
 
 # --- Proc macros ---
@@ -69,15 +69,15 @@ syn = { version = "2", features = ["full", "extra-traits"] }
 darling = "0.23"
 
 # --- ML / Embedding ---
-candle-core = "0.10"
-candle-nn = "0.10"
+candle-core = "0.11"
+candle-nn = "0.11"
 tokenizers = "0.23"
-hf-hub = { version = "0.5.0", default-features = false }
+hf-hub = { version = "1.0.0-rc.1", default-features = false }
 
 # --- Tooling ---
 cargo-husky = { version = "1.5", default-features = false, features = ["user-hooks", "run-for-all"] }
 directories = "6"
-rmcp = { version = "1.7", features = ["client", "transport-child-process", "transport-streamable-http-client"] }
+rmcp = { version = "1.8", features = ["client", "transport-child-process", "transport-streamable-http-client"] }
 htmd = "0.5"
 scraper = "0.27"
 ego-tree = "0.11"
@@ -87,33 +87,37 @@ arboard = { version = "3.6", features = ["wayland-data-control"] }
 parking_lot = "0.12"
 png = "0.18"
 tray-icon = { version = "0.24", default-features = false }
-rust-embed = "8.5"
-i18n-embed = { version = "0.15", features = ["fluent-system", "fluent", "desktop-requester"] }
-i18n-embed-fl = "0.9"
+rust-embed = "8.11"
+i18n-embed = { version = "0.16", features = ["fluent-system", "fluent", "desktop-requester"] }
+i18n-embed-fl = "0.10"
 
 # --- Rendering stack (ene-desktop-v2: winit + wgpu + egui) ---
 winit = "0.30"
 wgpu = "29"
-egui = "0.34"
-egui-wgpu = "0.34"
-egui-winit = "0.34"
+egui = "0.35"
+egui-wgpu = "0.35"
+egui-winit = "0.35"
 glam = { version = "0.33", features = ["bytemuck"] }
-gltf = "1.4"
+gltf = { version = "1.4", default-features = false }
 encase = "0.12"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 raw-window-handle = "0.6"
-rapier3d = "0.22"
+rapier3d = { version = "0.33", features = ["simd-stable"] }
 
 # --- bevy_ecs (scheduler-only; no bevy_engine rendering/winit) ---
 bevy_ecs = { version = "0.19", default-features = false }
 bevy_app = { version = "0.19", default-features = false }
-rayon = "1.10"
+rayon = "1.12"
 bitflags = "2"
+image = { version = "0.25", default-features = false }
+reqwest = { version = "0.13", default-features = false }
+tempfile = "3"
+zip = "2"
 
 # --- Linux display-server integration (PR5.3+) ---
 wayland-client = { version = "0.31", default-features = false }
-wayland-protocols = { version = "0.31", default-features = false, features = ["staging", "client"] }
+wayland-protocols = { version = "0.32", default-features = false, features = ["staging", "client"] }
 wayland-protocols-wlr = { version = "0.3", default-features = false, features = ["client"] }
 x11rb = { version = "0.13", default-features = false }
 

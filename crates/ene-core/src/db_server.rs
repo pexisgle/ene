@@ -23,7 +23,7 @@ use ene_tool_db::{
 use sea_orm::sea_query::{Alias, Condition, Expr, Query, SqliteQueryBuilder};
 use sea_orm::{
     ConnectOptions, ConnectionTrait, Database, DatabaseBackend, DatabaseConnection, EntityTrait,
-    Statement,
+    ExprTrait, Statement,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
@@ -650,14 +650,14 @@ impl DbIpcServer {
 
         for table in &schema.tables {
             let create_sql = Self::build_create_table_sql(table);
-            db.execute(Statement::from_string(DatabaseBackend::Sqlite, create_sql))
+            db.execute_raw(Statement::from_string(DatabaseBackend::Sqlite, create_sql))
                 .await
                 .map_err(|e| DbServerError::Internal(e.to_string()))?;
 
             for index in &schema.indexes {
                 if index.table == table.name {
                     let create_index_sql = Self::build_create_index_sql(index);
-                    db.execute(Statement::from_string(
+                    db.execute_raw(Statement::from_string(
                         DatabaseBackend::Sqlite,
                         create_index_sql,
                     ))
@@ -826,7 +826,7 @@ impl DbIpcServer {
         let stmt = Statement::from_sql_and_values(DatabaseBackend::Sqlite, &sql, params);
 
         let exec_res = db
-            .execute(stmt)
+            .execute_raw(stmt)
             .await
             .map_err(|e| DbServerError::Internal(e.to_string()))?;
 
@@ -872,7 +872,7 @@ impl DbIpcServer {
         let stmt = Statement::from_sql_and_values(DatabaseBackend::Sqlite, &sql, params);
 
         let exec_res = db
-            .execute(stmt)
+            .execute_raw(stmt)
             .await
             .map_err(|e| DbServerError::Internal(e.to_string()))?;
 
@@ -925,7 +925,7 @@ impl DbIpcServer {
         let stmt = Statement::from_sql_and_values(DatabaseBackend::Sqlite, &sql, params);
 
         let query_results = db
-            .query_all(stmt)
+            .query_all_raw(stmt)
             .await
             .map_err(|e| DbServerError::Internal(e.to_string()))?;
 
@@ -1021,7 +1021,7 @@ impl DbIpcServer {
         let stmt = Statement::from_sql_and_values(DatabaseBackend::Sqlite, &sql, params);
 
         let exec_res = db
-            .execute(stmt)
+            .execute_raw(stmt)
             .await
             .map_err(|e| DbServerError::Internal(e.to_string()))?;
 
@@ -1043,7 +1043,7 @@ impl DbIpcServer {
         let stmt = Statement::from_sql_and_values(DatabaseBackend::Sqlite, &sql, params);
 
         let exec_res = db
-            .execute(stmt)
+            .execute_raw(stmt)
             .await
             .map_err(|e| DbServerError::Internal(e.to_string()))?;
 
@@ -1066,7 +1066,7 @@ impl DbIpcServer {
         let stmt = Statement::from_sql_and_values(DatabaseBackend::Sqlite, &sql, params);
 
         let res = db
-            .query_one(stmt)
+            .query_one_raw(stmt)
             .await
             .map_err(|e| DbServerError::Internal(e.to_string()))?;
 
