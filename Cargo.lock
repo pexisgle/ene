@@ -2850,7 +2850,6 @@ dependencies = [
  "ene-tool-db",
  "ene-tool-host",
  "ene-tool-proto",
- "libsqlite3-sys",
  "regex",
  "sea-orm",
  "serde",

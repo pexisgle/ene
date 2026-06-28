@@ -1143,20 +1143,15 @@ async fn build_tool_registry(
     memory_store: Option<Arc<ene_memory::MemoryStore>>,
 ) -> Result<Arc<dyn ToolRegistry>, EneCoreError> {
     let mut db_tokens = std::collections::HashMap::new();
-    if memory_store.is_some() {
-        #[cfg(any(unix, windows))]
-        let tool_config = config
-            .get_section::<ene_tool_host::ToolConfig>()
-            .unwrap_or_default();
-
-        #[cfg(any(unix, windows))]
-        let db_path = config
-            .get_section::<ene_memory::MemoryConfig>()
-            .unwrap_or_default()
-            .resolve_memory_db_path(&config.character);
-
+    if let Some(store) = &memory_store {
         #[cfg(any(unix, windows))]
         {
+            let tool_config = config
+                .get_section::<ene_tool_host::ToolConfig>()
+                .unwrap_or_default();
+
+            let db = store.connection().clone();
+
             let socket_dir = ene_config::paths::tool_socket_dir();
             std::fs::create_dir_all(&socket_dir).map_err(|e| {
                 EneCoreError::Tool(ene_tool_host::ToolHostError::ExecutionFailed {
@@ -1210,7 +1205,7 @@ async fn build_tool_registry(
                 db_tokens.insert(name.clone(), auth_token.clone());
 
                 let server = DbIpcServer::new(
-                    db_path.clone(),
+                    db.clone(),
                     socket_path,
                     tool_name.clone(),
                     prefix,

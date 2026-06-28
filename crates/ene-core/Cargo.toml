@@ -24,7 +24,6 @@ ene-embedding = { workspace = true }
 ene-memory = { workspace = true }
 ene-tool-db = { workspace = true }
 sea-orm = { workspace = true }
-libsqlite3-sys = { workspace = true }
 blake3 = { workspace = true }
 
 ene-session = { workspace = true }

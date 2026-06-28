@@ -22,8 +22,7 @@ use ene_tool_db::{
 };
 use sea_orm::sea_query::{Alias, Condition, Expr, Query, SqliteQueryBuilder};
 use sea_orm::{
-    ConnectOptions, ConnectionTrait, Database, DatabaseBackend, DatabaseConnection, EntityTrait,
-    ExprTrait, Statement,
+    ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, ExprTrait, Statement,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
@@ -79,7 +78,7 @@ impl DbServerError {
 
 /// Per-tool DB IPC server.
 pub struct DbIpcServer {
-    db_path: PathBuf,
+    db: DatabaseConnection,
     socket_path: PathBuf,
     tool_name: String,
     prefix: String,
@@ -91,15 +90,20 @@ pub struct DbIpcServer {
 
 impl DbIpcServer {
     /// Creates a new server for the given tool.
+    ///
+    /// `db` must be a sea-orm database connection that is already
+    /// open, has had its PRAGMAs applied, and has had migrations run.
+    /// The caller is responsible for providing a connection from
+    /// the same pool that `MemoryStore` uses.
     pub fn new(
-        db_path: PathBuf,
+        db: DatabaseConnection,
         socket_path: PathBuf,
         tool_name: String,
         prefix: String,
         auth_token: String,
     ) -> Self {
         Self {
-            db_path,
+            db,
             socket_path,
             tool_name,
             prefix,
@@ -142,11 +146,6 @@ impl DbIpcServer {
             "DB IPC server listening"
         );
 
-        let opt = ConnectOptions::new(format!("sqlite:{}", self.db_path.to_string_lossy()));
-        let db = Database::connect(opt)
-            .await
-            .map_err(|e| DbServerError::Internal(e.to_string()))?;
-
         loop {
             // Continue the accept loop on transient accept
             // errors (EMFILE, ENFILE, EINTR, ...). A
@@ -177,7 +176,7 @@ impl DbIpcServer {
             };
             debug!(tool = %self.tool_name, "Accepted DB IPC connection");
 
-            let db = db.clone();
+            let db = self.db.clone();
             let tool_name = self.tool_name.clone();
             let prefix = self.prefix.clone();
             let auth_token = self.auth_token.clone();
@@ -631,7 +630,7 @@ impl DbIpcServer {
             prefix: sea_orm::ActiveValue::Set(prefix.to_string()),
             schema_json: sea_orm::ActiveValue::Set(schema_json.clone()),
             fingerprint: sea_orm::ActiveValue::Set(fingerprint.clone()),
-            created_at: sea_orm::ActiveValue::Set(chrono::Utc::now().to_rfc3339()),
+            created_at: sea_orm::ActiveValue::Set(chrono::Utc::now()),
         };
 
         tool_schemas::Entity::insert(active_model)
