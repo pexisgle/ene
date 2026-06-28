@@ -330,12 +330,7 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(ToolSchemas::SchemaJson).string().not_null())
                     .col(ColumnDef::new(ToolSchemas::Fingerprint).string().not_null())
-                    .col(
-                        ColumnDef::new(ToolSchemas::CreatedAt)
-                            .string()
-                            .not_null()
-                            .default(Expr::current_timestamp()),
-                    )
+                    .col(ColumnDef::new(ToolSchemas::CreatedAt).string().not_null())
                     .to_owned(),
             )
             .await?;
