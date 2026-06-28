@@ -137,8 +137,10 @@ fn parse_dt(s: &str) -> Result<DateTime<Utc>, MemoryError> {
 }
 
 /// Convert a typed memory model row to a [`crate::MemoryItem`].
-fn model_to_memory_item(m: entities::typed_memories::Model) -> crate::MemoryItem {
-    crate::MemoryItem {
+fn model_to_memory_item(
+    m: entities::typed_memories::Model,
+) -> Result<crate::MemoryItem, MemoryError> {
+    Ok(crate::MemoryItem {
         id: Some(m.id),
         scope: str_to_scope(&m.scope),
         character_id: m.character_id,
@@ -157,34 +159,29 @@ fn model_to_memory_item(m: entities::typed_memories::Model) -> crate::MemoryItem
         relationship_impact: m.relationship_impact,
         access_count: m.access_count,
         last_accessed_at: m.last_accessed_at.as_deref().and_then(|s| parse_dt(s).ok()),
-        created_at: parse_dt(&m.created_at).unwrap_or_else(|_| Utc::now()),
-        updated_at: parse_dt(&m.updated_at).unwrap_or_else(|_| Utc::now()),
+        created_at: parse_dt(&m.created_at)?,
+        updated_at: parse_dt(&m.updated_at)?,
         valid_from: m.valid_from.as_deref().and_then(|s| parse_dt(s).ok()),
         valid_until: m.valid_until.as_deref().and_then(|s| parse_dt(s).ok()),
         status: str_to_status(&m.status),
         supersedes_id: m.supersedes_id,
-    }
-}
-
-fn serde_enum_to_str<T: serde::Serialize>(v: T) -> String {
-    let json = serde_json::to_string(&v).unwrap_or_default();
-    json.trim_matches('"').to_string()
+    })
 }
 
 fn str_to_kind(s: &str) -> crate::MemoryKind {
-    serde_json::from_str(&format!("\"{s}\"")).unwrap_or(crate::MemoryKind::Semantic)
+    crate::MemoryKind::from_db_str(s)
 }
 
 fn str_to_scope(s: &str) -> crate::MemoryScope {
-    serde_json::from_str(&format!("\"{s}\"")).unwrap_or(crate::MemoryScope::Character)
+    crate::MemoryScope::from_db_str(s)
 }
 
 fn str_to_source(s: &str) -> crate::MemorySource {
-    serde_json::from_str(&format!("\"{s}\"")).unwrap_or(crate::MemorySource::Conversation)
+    crate::MemorySource::from_db_str(s)
 }
 
 fn str_to_status(s: &str) -> crate::MemoryStatus {
-    serde_json::from_str(&format!("\"{s}\"")).unwrap_or(crate::MemoryStatus::Active)
+    crate::MemoryStatus::from_db_str(s)
 }
 
 /// Applies the SQLite PRAGMAs the store depends on to the
@@ -894,9 +891,17 @@ impl MemoryStore {
                     serde_json::from_str(&model.discrete_emotions).unwrap_or_default();
                 Ok(crate::AffectState {
                     character_id: model.character_id,
+                    user_id: model.user_id,
                     valence: model.valence,
                     arousal: model.arousal,
                     dominance: model.dominance,
+                    trust: model.trust,
+                    affinity: model.affinity,
+                    irritation: model.irritation,
+                    curiosity: model.curiosity,
+                    fatigue: model.fatigue,
+                    mood_label: model.mood_label,
+                    last_expression: model.last_expression,
                     discrete_emotions,
                 })
             }
@@ -919,18 +924,34 @@ impl MemoryStore {
 
         if let Some(model) = existing {
             let mut active: ActiveModel = model.into();
+            active.user_id = sea_orm::Set(state.user_id.clone());
             active.valence = sea_orm::Set(state.valence);
             active.arousal = sea_orm::Set(state.arousal);
             active.dominance = sea_orm::Set(state.dominance);
+            active.trust = sea_orm::Set(state.trust);
+            active.affinity = sea_orm::Set(state.affinity);
+            active.irritation = sea_orm::Set(state.irritation);
+            active.curiosity = sea_orm::Set(state.curiosity);
+            active.fatigue = sea_orm::Set(state.fatigue);
+            active.mood_label = sea_orm::Set(state.mood_label.clone());
+            active.last_expression = sea_orm::Set(state.last_expression.clone());
             active.discrete_emotions = sea_orm::Set(discrete_json);
             active.updated_at = sea_orm::Set(now);
             Entity::update(active).exec(&self.db).await?;
         } else {
             let active = ActiveModel {
                 character_id: sea_orm::Set(state.character_id.clone()),
+                user_id: sea_orm::Set(state.user_id.clone()),
                 valence: sea_orm::Set(state.valence),
                 arousal: sea_orm::Set(state.arousal),
                 dominance: sea_orm::Set(state.dominance),
+                trust: sea_orm::Set(state.trust),
+                affinity: sea_orm::Set(state.affinity),
+                irritation: sea_orm::Set(state.irritation),
+                curiosity: sea_orm::Set(state.curiosity),
+                fatigue: sea_orm::Set(state.fatigue),
+                mood_label: sea_orm::Set(state.mood_label.clone()),
+                last_expression: sea_orm::Set(state.last_expression.clone()),
                 discrete_emotions: sea_orm::Set(discrete_json),
                 updated_at: sea_orm::Set(now),
             };
@@ -951,13 +972,13 @@ impl MemoryStore {
 
         let now = Utc::now().to_rfc3339();
         let active = entities::typed_memories::ActiveModel {
-            scope: Set(serde_enum_to_str(item.scope)),
+            scope: Set(item.scope.as_str().to_string()),
             character_id: Set(item.character_id.clone()),
             user_id: Set(item.user_id.clone()),
-            kind: Set(serde_enum_to_str(item.kind)),
+            kind: Set(item.kind.as_str().to_string()),
             title: Set(item.title.clone()),
             content: Set(item.content.clone()),
-            source: Set(serde_enum_to_str(item.source)),
+            source: Set(item.source.as_str().to_string()),
             source_ref: Set(item.source_ref.clone()),
             confidence: Set(item.confidence.get()),
             salience: Set(item.salience.get()),
@@ -970,7 +991,7 @@ impl MemoryStore {
             updated_at: Set(now),
             valid_from: Set(item.valid_from.map(|dt| dt.to_rfc3339())),
             valid_until: Set(item.valid_until.map(|dt| dt.to_rfc3339())),
-            status: Set(serde_enum_to_str(item.status)),
+            status: Set(item.status.as_str().to_string()),
             supersedes_id: Set(item.supersedes_id),
             ..Default::default()
         };
@@ -987,7 +1008,7 @@ impl MemoryStore {
             .one(&self.db)
             .await?;
         match maybe_model {
-            Some(m) => Ok(Some(model_to_memory_item(m))),
+            Some(m) => model_to_memory_item(m).map(Some),
             None => Ok(None),
         }
     }
@@ -1006,7 +1027,7 @@ impl MemoryStore {
             .filter(entities::typed_memories::Column::CharacterId.eq(character_id));
 
         if let Some(k) = kind {
-            query = query.filter(entities::typed_memories::Column::Kind.eq(serde_enum_to_str(k)));
+            query = query.filter(entities::typed_memories::Column::Kind.eq(k.as_str()));
         }
 
         let models = query
@@ -1016,7 +1037,10 @@ impl MemoryStore {
             .all(&self.db)
             .await?;
 
-        Ok(models.into_iter().map(model_to_memory_item).collect())
+        models
+            .into_iter()
+            .map(model_to_memory_item)
+            .collect::<Result<Vec<_>, _>>()
     }
 
     /// Count typed memories for a character, optionally filtered by kind.
@@ -1031,7 +1055,7 @@ impl MemoryStore {
             .filter(entities::typed_memories::Column::CharacterId.eq(character_id));
 
         if let Some(k) = kind {
-            query = query.filter(entities::typed_memories::Column::Kind.eq(serde_enum_to_str(k)));
+            query = query.filter(entities::typed_memories::Column::Kind.eq(k.as_str()));
         }
 
         Ok(query.count(&self.db).await? as i64)
@@ -1107,8 +1131,14 @@ impl MemoryStore {
                         last_accessed_at: last_accessed_at
                             .as_deref()
                             .and_then(|s| parse_dt(s).ok()),
-                        created_at: parse_dt(&created_at).unwrap_or_else(|_| Utc::now()),
-                        updated_at: parse_dt(&updated_at).unwrap_or_else(|_| Utc::now()),
+                        created_at: parse_dt(&created_at).unwrap_or_else(|e| {
+                            tracing::warn!(error = %e, memory_id = row.try_get::<i64>("", "id").unwrap_or(-1), "corrupt created_at in DB, falling back to now");
+                            Utc::now()
+                        }),
+                        updated_at: parse_dt(&updated_at).unwrap_or_else(|e| {
+                            tracing::warn!(error = %e, memory_id = row.try_get::<i64>("", "id").unwrap_or(-1), "corrupt updated_at in DB, falling back to now");
+                            Utc::now()
+                        }),
                         valid_from: valid_from.as_deref().and_then(|s| parse_dt(s).ok()),
                         valid_until: valid_until.as_deref().and_then(|s| parse_dt(s).ok()),
                         status: str_to_status(&row.try_get::<String>("", "status")?),
@@ -1138,7 +1168,7 @@ impl MemoryStore {
         };
 
         let mut active: entities::typed_memories::ActiveModel = model.into();
-        active.status = Set(serde_enum_to_str(new_status));
+        active.status = Set(new_status.as_str().to_string());
         active.updated_at = Set(now);
         active.update(&self.db).await?;
         Ok(true)
@@ -1146,23 +1176,16 @@ impl MemoryStore {
 
     /// Bump the access count and last-accessed timestamp for a typed memory.
     pub async fn bump_typed_memory_access(&self, id: i64) -> Result<bool, MemoryError> {
-        use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
-
         let now = Utc::now().to_rfc3339();
-        let maybe_model = entities::typed_memories::Entity::find_by_id(id)
-            .one(&self.db)
+        let result = self
+            .db
+            .execute(sea_orm::Statement::from_sql_and_values(
+                sea_orm::DatabaseBackend::Sqlite,
+                "UPDATE typed_memories SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?",
+                [now.into(), id.into()],
+            ))
             .await?;
-
-        let old_count = maybe_model.as_ref().map(|m| m.access_count).unwrap_or(0);
-        let Some(model) = maybe_model else {
-            return Ok(false);
-        };
-
-        let mut active: entities::typed_memories::ActiveModel = model.into();
-        active.access_count = Set(old_count + 1);
-        active.last_accessed_at = Set(Some(now));
-        active.update(&self.db).await?;
-        Ok(true)
+        Ok(result.rows_affected() > 0)
     }
 
     /// Store a content embedding for a typed memory item.
@@ -1175,6 +1198,8 @@ impl MemoryStore {
     ) -> Result<(), MemoryError> {
         use sea_orm::sea_query::OnConflict;
         use sea_orm::{ActiveValue::Set, EntityTrait};
+
+        validate_embedding(embedding, self.embedding_dim)?;
 
         let now = Utc::now().to_rfc3339();
         let embedding_bytes = embedding_to_bytes(embedding);
@@ -1606,9 +1631,17 @@ mod tests {
 
         let mut state = crate::AffectState {
             character_id: "ene".into(),
+            user_id: String::new(),
             valence: 0.5,
             arousal: -0.3,
             dominance: 0.1,
+            trust: 0.4,
+            affinity: 0.6,
+            irritation: 0.0,
+            curiosity: 0.7,
+            fatigue: 0.1,
+            mood_label: String::new(),
+            last_expression: String::new(),
             discrete_emotions: vec![
                 crate::DiscreteEmotion::new("joy", 0.8),
                 crate::DiscreteEmotion::new("surprise", 0.4),

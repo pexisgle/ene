@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tracing;
 
 /// The kind of a typed memory item.
 ///
@@ -28,6 +29,46 @@ pub enum MemoryKind {
     Reflection,
 }
 
+impl MemoryKind {
+    /// Returns the snake_case string representation for storage/DB use.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Episodic => "episodic",
+            Self::Semantic => "semantic",
+            Self::UserProfile => "user_profile",
+            Self::Relationship => "relationship",
+            Self::Affective => "affective",
+            Self::Commitment => "commitment",
+            Self::Preference => "preference",
+            Self::Procedure => "procedure",
+            Self::Reflection => "reflection",
+        }
+    }
+
+    /// Parse from a snake_case string, logging a warning on unrecognized values.
+    pub(crate) fn from_db_str(s: &str) -> Self {
+        match s {
+            "episodic" => Self::Episodic,
+            "semantic" => Self::Semantic,
+            "user_profile" => Self::UserProfile,
+            "relationship" => Self::Relationship,
+            "affective" => Self::Affective,
+            "commitment" => Self::Commitment,
+            "preference" => Self::Preference,
+            "procedure" => Self::Procedure,
+            "reflection" => Self::Reflection,
+            other => {
+                tracing::warn!(
+                    other,
+                    "unrecognized MemoryKind in DB, falling back to Semantic"
+                );
+                Self::Semantic
+            }
+        }
+    }
+}
+
 /// The lifecycle status of a memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -46,6 +87,40 @@ pub enum MemoryStatus {
     UserDeleted,
 }
 
+impl MemoryStatus {
+    /// Returns the snake_case string representation for storage/DB use.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Faded => "faded",
+            Self::Archived => "archived",
+            Self::Disputed => "disputed",
+            Self::Superseded => "superseded",
+            Self::UserDeleted => "user_deleted",
+        }
+    }
+
+    /// Parse from a snake_case string, logging a warning on unrecognized values.
+    pub(crate) fn from_db_str(s: &str) -> Self {
+        match s {
+            "active" => Self::Active,
+            "faded" => Self::Faded,
+            "archived" => Self::Archived,
+            "disputed" => Self::Disputed,
+            "superseded" => Self::Superseded,
+            "user_deleted" => Self::UserDeleted,
+            other => {
+                tracing::warn!(
+                    other,
+                    "unrecognized MemoryStatus in DB, falling back to Active"
+                );
+                Self::Active
+            }
+        }
+    }
+}
+
 /// The scope or ownership of a memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,6 +131,34 @@ pub enum MemoryScope {
     User,
     /// Memory shared between character and user.
     Shared,
+}
+
+impl MemoryScope {
+    /// Returns the snake_case string representation for storage/DB use.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Character => "character",
+            Self::User => "user",
+            Self::Shared => "shared",
+        }
+    }
+
+    /// Parse from a snake_case string, logging a warning on unrecognized values.
+    pub(crate) fn from_db_str(s: &str) -> Self {
+        match s {
+            "character" => Self::Character,
+            "user" => Self::User,
+            "shared" => Self::Shared,
+            other => {
+                tracing::warn!(
+                    other,
+                    "unrecognized MemoryScope in DB, falling back to Character"
+                );
+                Self::Character
+            }
+        }
+    }
 }
 
 /// The provenance of a memory (how it was created).
@@ -74,6 +177,40 @@ pub enum MemorySource {
     Imported,
     /// Derived from CCv3 character card data.
     Ccv3,
+}
+
+impl MemorySource {
+    /// Returns the snake_case string representation for storage/DB use.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Conversation => "conversation",
+            Self::UserStated => "user_stated",
+            Self::LlmExtracted => "llm_extracted",
+            Self::Inferred => "inferred",
+            Self::Imported => "imported",
+            Self::Ccv3 => "ccv3",
+        }
+    }
+
+    /// Parse from a snake_case string, logging a warning on unrecognized values.
+    pub(crate) fn from_db_str(s: &str) -> Self {
+        match s {
+            "conversation" => Self::Conversation,
+            "user_stated" => Self::UserStated,
+            "llm_extracted" => Self::LlmExtracted,
+            "inferred" => Self::Inferred,
+            "imported" => Self::Imported,
+            "ccv3" => Self::Ccv3,
+            other => {
+                tracing::warn!(
+                    other,
+                    "unrecognized MemorySource in DB, falling back to Conversation"
+                );
+                Self::Conversation
+            }
+        }
+    }
 }
 
 /// A normalised confidence score for a memory (0.0–1.0).

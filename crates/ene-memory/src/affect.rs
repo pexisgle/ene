@@ -25,19 +25,38 @@ impl DiscreteEmotion {
 
 /// Persistent affective / emotional state.
 ///
-/// Tracks three PAD dimensions (Pleasure–Arousal–Dominance) and optional
-/// discrete emotion intensities. The engine updates this every turn and
-/// persists it so it survives restarts.
+/// Tracks three PAD dimensions (Pleasure–Arousal–Dominance), relationship
+/// metrics, and optional discrete emotion intensities. The engine updates
+/// this every turn and persists it so it survives restarts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AffectState {
     /// Character identifier.
     pub character_id: String,
+    /// User identifier (empty for character-global state).
+    #[serde(default)]
+    pub user_id: String,
     /// Pleasure–displeasure (-1.0 ..= 1.0).
     pub valence: f32,
     /// Excitement–calm (-1.0 ..= 1.0).
     pub arousal: f32,
     /// Control–submission (-1.0 ..= 1.0).
     pub dominance: f32,
+    /// Trust toward the user (-1.0 ..= 1.0).
+    pub trust: f32,
+    /// Affinity / liking toward the user (-1.0 ..= 1.0).
+    pub affinity: f32,
+    /// Irritation / annoyance level (0.0 ..= 1.0).
+    pub irritation: f32,
+    /// Curiosity / interest level (0.0 ..= 1.0).
+    pub curiosity: f32,
+    /// Fatigue / energy depletion (0.0 ..= 1.0).
+    pub fatigue: f32,
+    /// Human-readable mood label (e.g. "cheerful", "anxious").
+    #[serde(default)]
+    pub mood_label: String,
+    /// Natural-language description of the last expression/behaviour.
+    #[serde(default)]
+    pub last_expression: String,
     /// Discrete emotion intensities (joy, sadness, etc.).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub discrete_emotions: Vec<DiscreteEmotion>,
@@ -49,18 +68,31 @@ impl AffectState {
     pub fn neutral(character_id: impl Into<String>) -> Self {
         Self {
             character_id: character_id.into(),
+            user_id: String::new(),
             valence: 0.0,
             arousal: 0.0,
             dominance: 0.0,
+            trust: 0.0,
+            affinity: 0.0,
+            irritation: 0.0,
+            curiosity: 0.0,
+            fatigue: 0.0,
+            mood_label: String::new(),
+            last_expression: String::new(),
             discrete_emotions: Vec::new(),
         }
     }
 
-    /// Clamp all PAD values to their valid ranges.
+    /// Clamp all PAD and metric values to their valid ranges.
     pub fn clamp(&mut self) {
         self.valence = self.valence.clamp(-1.0, 1.0);
         self.arousal = self.arousal.clamp(-1.0, 1.0);
         self.dominance = self.dominance.clamp(-1.0, 1.0);
+        self.trust = self.trust.clamp(-1.0, 1.0);
+        self.affinity = self.affinity.clamp(-1.0, 1.0);
+        self.irritation = self.irritation.clamp(0.0, 1.0);
+        self.curiosity = self.curiosity.clamp(0.0, 1.0);
+        self.fatigue = self.fatigue.clamp(0.0, 1.0);
         for emo in &mut self.discrete_emotions {
             emo.intensity = emo.intensity.clamp(0.0, 1.0);
         }
@@ -75,9 +107,17 @@ mod tests {
     fn affect_state_serde_roundtrip() {
         let state = AffectState {
             character_id: "ene".into(),
+            user_id: String::new(),
             valence: 0.3,
             arousal: -0.1,
             dominance: 0.5,
+            trust: 0.4,
+            affinity: 0.6,
+            irritation: 0.1,
+            curiosity: 0.8,
+            fatigue: 0.2,
+            mood_label: "cheerful".into(),
+            last_expression: "smiling warmly".into(),
             discrete_emotions: vec![
                 DiscreteEmotion::new("joy", 0.7),
                 DiscreteEmotion::new("surprise", 0.2),

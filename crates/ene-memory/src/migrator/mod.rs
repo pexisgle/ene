@@ -7,7 +7,11 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(Migration), Box::new(Migration2)]
+        vec![
+            Box::new(Migration),
+            Box::new(Migration2),
+            Box::new(Migration3),
+        ]
     }
 }
 
@@ -865,13 +869,68 @@ enum MemorySpans {
 }
 
 #[derive(Iden)]
+#[allow(dead_code)]
 enum AffectStates {
     #[iden = "affect_states"]
     Table,
     CharacterId,
+    UserId,
     Valence,
     Arousal,
     Dominance,
+    Trust,
+    Affinity,
+    Irritation,
+    Curiosity,
+    Fatigue,
+    MoodLabel,
+    LastExpression,
     DiscreteEmotions,
     UpdatedAt,
+}
+
+// ── Migration 3: AffectState relationship fields ────────────────────────────
+
+pub struct Migration3;
+
+impl MigrationName for Migration3 {
+    fn name(&self) -> &str {
+        "m20250629_000001_affect_state_fields"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration3 {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let db = manager.get_connection();
+
+        let cols: &[(&str, &str)] = &[
+            ("user_id", "STRING NOT NULL DEFAULT ''"),
+            ("trust", "REAL NOT NULL DEFAULT 0.0"),
+            ("affinity", "REAL NOT NULL DEFAULT 0.0"),
+            ("irritation", "REAL NOT NULL DEFAULT 0.0"),
+            ("curiosity", "REAL NOT NULL DEFAULT 0.0"),
+            ("fatigue", "REAL NOT NULL DEFAULT 0.0"),
+            ("mood_label", "STRING NOT NULL DEFAULT ''"),
+            ("last_expression", "STRING NOT NULL DEFAULT ''"),
+        ];
+
+        for (col_name, col_def) in cols {
+            if !manager.has_column("affect_states", col_name).await? {
+                db.execute_unprepared(&format!(
+                    "ALTER TABLE affect_states ADD COLUMN {col_name} {col_def}"
+                ))
+                .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // SQLite doesn't support DROP COLUMN, so the down migration is a no-op.
+        // The columns remain but are ignored by older code versions.
+        let _ = manager;
+        Ok(())
+    }
 }
