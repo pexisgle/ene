@@ -3,21 +3,21 @@ use thiserror::Error;
 /// Error types for the cognitive runtime.
 #[derive(Error, Debug)]
 pub enum EneCognitionError {
-    /// Memory store operation failed.
-    #[error("Memory store error: {0}")]
-    MemoryStoreError(#[from] ene_memory::EneMemoryError),
+    /// Memory operation failed.
+    #[error(transparent)]
+    Memory(#[from] ene_memory::EneMemoryError),
 
     /// Configuration error.
     #[error(transparent)]
     Config(#[from] ene_config::EneConfigError),
 
     /// Provider error.
-    #[error("Provider error: {0}")]
-    Provider(String),
+    #[error(transparent)]
+    Provider(#[from] ene_provider::LlmProviderError),
 
     /// Embedding provider error.
-    #[error("Embedding error: {0}")]
-    Embedding(String),
+    #[error(transparent)]
+    Embedding(#[from] ene_provider::EmbeddingError),
 
     /// Memory extraction failed.
     #[error("Memory extraction failed: {0}")]

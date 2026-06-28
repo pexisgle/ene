@@ -36,10 +36,31 @@ ene_config::define_config!(
 );
 
 // ────────────────────────────────────────────
+// Emotion engine mode
+// ────────────────────────────────────────────
+
+ene_config::define_label_enum!(
+    /// Selects the emotion computation strategy.
+    pub enum EngineMode {
+        /// Rules-based affect with no LLM participation.
+        Deterministic => "Deterministic",
+        /// Pure LLM-driven emotion inference.
+        Llm => "LLM",
+        /// Combine deterministic rules with LLM proposals (default).
+        #[default]
+        Hybrid => "Hybrid",
+    }
+);
+
+// ────────────────────────────────────────────
 // Sub-sections
 // ────────────────────────────────────────────
 
 /// Token budget allocation and context compression settings.
+///
+/// NOTE: Allocation logic must validate that the sub-budget fields
+/// (`scene_summary_tokens`, `memory_budget_tokens`, `semantic_budget_tokens`,
+/// `style_example_budget_tokens`) sum to ≤ `max_prompt_tokens` at startup.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
@@ -107,8 +128,8 @@ impl Default for CognitionMemoryConfig {
 pub struct EmotionConfig {
     /// Enable emotion processing.
     pub enabled: bool,
-    /// Engine mode: "deterministic", "llm", or "hybrid".
-    pub engine: String,
+    /// Engine mode.
+    pub engine: EngineMode,
     /// Half-life in minutes for affect decay.
     pub decay_half_life_minutes: f64,
     /// Minimum seconds between expression changes (hysteresis).
@@ -123,7 +144,7 @@ impl Default for EmotionConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            engine: "hybrid".to_string(),
+            engine: EngineMode::default(),
             decay_half_life_minutes: 30.0,
             expression_hysteresis_seconds: 4.0,
             llm_can_propose_expression: true,
