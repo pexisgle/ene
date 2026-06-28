@@ -51,6 +51,30 @@ fn bytes_to_embedding(b: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+const COSINE_SIMILARITY_SQL: &str = "1.0 - vec_distance_cosine";
+
+fn cosine_similarity_expr(embedding_col: &str, query_bytes: &[u8]) -> sea_orm::sea_query::Expr {
+    use sea_orm::sea_query::Expr;
+    let sql = format!("{COSINE_SIMILARITY_SQL}({embedding_col}, ?)");
+    Expr::cust_with_values(sql, vec![query_bytes.to_vec()])
+}
+
+fn cosine_similarity_filter(
+    embedding_col: &str,
+    query_bytes: &[u8],
+    threshold: f64,
+) -> sea_orm::sea_query::Expr {
+    use sea_orm::sea_query::Expr;
+    let sql = format!("{COSINE_SIMILARITY_SQL}({embedding_col}, ?) >= ?");
+    Expr::cust_with_values(
+        sql,
+        vec![
+            sea_orm::Value::from(query_bytes.to_vec()),
+            sea_orm::Value::from(threshold),
+        ],
+    )
+}
+
 /// Validates an embedding vector before it is persisted.
 ///
 /// Returns an [`MemoryError::InvalidEmbedding`] if the
@@ -373,10 +397,7 @@ impl MemoryStore {
         }
 
         let query_bytes = embedding_to_bytes(query_embedding);
-        let similarity_expr = Expr::cust_with_values(
-            "1.0 - vec_distance_cosine(embedding, ?)",
-            vec![query_bytes.clone()],
-        );
+        let similarity_expr = cosine_similarity_expr("embedding", &query_bytes);
 
         // TODO: refactor the threshold filter to reference
         // the projected `similarity` column once the
@@ -387,12 +408,10 @@ impl MemoryStore {
         let select = entities::conversation_summaries::Entity::find()
             .filter(entities::conversation_summaries::Column::CardName.eq(card_name))
             .expr_as(similarity_expr, "similarity")
-            .filter(Expr::cust_with_values(
-                "1.0 - vec_distance_cosine(embedding, ?) >= ?",
-                vec![
-                    sea_orm::Value::from(query_bytes),
-                    sea_orm::Value::from(f64::from(similarity_threshold)),
-                ],
+            .filter(cosine_similarity_filter(
+                "embedding",
+                &query_bytes,
+                f64::from(similarity_threshold),
             ))
             .order_by_desc(Expr::col("similarity"))
             .limit(limit as u64);
@@ -828,10 +847,7 @@ impl MemoryStore {
         }
 
         let query_bytes = embedding_to_bytes(query_embedding);
-        let similarity_expr = Expr::cust_with_values(
-            "1.0 - vec_distance_cosine(embedding, ?)",
-            vec![query_bytes.clone()],
-        );
+        let similarity_expr = cosine_similarity_expr("embedding", &query_bytes);
 
         let factor = 4u64;
         let row_cap = (limit as u64).saturating_mul(factor).max(limit as u64);
@@ -840,12 +856,10 @@ impl MemoryStore {
             .select_only()
             .column(entities::tool_embedding_index::Column::ToolName)
             .expr_as(similarity_expr, "similarity")
-            .filter(Expr::cust_with_values(
-                "1.0 - vec_distance_cosine(embedding, ?) >= ?",
-                vec![
-                    sea_orm::Value::from(query_bytes),
-                    sea_orm::Value::from(f64::from(similarity_threshold)),
-                ],
+            .filter(cosine_similarity_filter(
+                "embedding",
+                &query_bytes,
+                f64::from(similarity_threshold),
             ))
             .order_by_desc(Expr::col("similarity"))
             .limit(row_cap);
@@ -1111,10 +1125,7 @@ impl MemoryStore {
         }
 
         let query_bytes = embedding_to_bytes(query_embedding);
-        let similarity_expr = Expr::cust_with_values(
-            "1.0 - vec_distance_cosine(memory_embeddings.embedding, ?)",
-            vec![query_bytes.clone()],
-        );
+        let similarity_expr = cosine_similarity_expr("memory_embeddings.embedding", &query_bytes);
 
         let threshold_val = f64::from(similarity_threshold);
         let limit_val = limit as u64;
@@ -1149,12 +1160,10 @@ impl MemoryStore {
             .filter(entities::typed_memories::Column::Status.eq("active"))
             .filter(entities::memory_embeddings::Column::ModelName.eq(model_name))
             .filter(entities::memory_embeddings::Column::Field.eq("content"))
-            .filter(Expr::cust_with_values(
-                "1.0 - vec_distance_cosine(memory_embeddings.embedding, ?) >= ?",
-                vec![
-                    sea_orm::Value::from(query_bytes),
-                    sea_orm::Value::from(threshold_val),
-                ],
+            .filter(cosine_similarity_filter(
+                "memory_embeddings.embedding",
+                &query_bytes,
+                threshold_val,
             ))
             .order_by_desc(Expr::col("similarity"))
             .limit(limit_val);
