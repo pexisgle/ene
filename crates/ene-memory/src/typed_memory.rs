@@ -1,0 +1,392 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+/// The kind of a typed memory item.
+///
+/// Each memory has exactly one kind, which drives retrieval strategy
+/// and lifecycle behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryKind {
+    /// Specific events or conversations (what happened when).
+    Episodic,
+    /// Facts and general knowledge (what is true).
+    Semantic,
+    /// Information about the user's identity, background, and traits.
+    UserProfile,
+    /// Information about the relationship between the user and the companion.
+    Relationship,
+    /// Memories with strong emotional salience.
+    Affective,
+    /// Promises, tasks, and obligations the companion has made.
+    Commitment,
+    /// User likes, dislikes, and preferences.
+    Preference,
+    /// How-to knowledge and procedural instructions.
+    Procedure,
+    /// Self-reflections by the companion about past interactions.
+    Reflection,
+}
+
+/// The lifecycle status of a memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryStatus {
+    /// Currently relevant and retrievable.
+    Active,
+    /// Decayed but still retrievable with lower priority.
+    Faded,
+    /// No longer shown in normal recall but preserved.
+    Archived,
+    /// User has disputed or corrected this memory.
+    Disputed,
+    /// Replaced by a newer, conflicting memory.
+    Superseded,
+    /// Explicitly deleted by the user.
+    UserDeleted,
+}
+
+/// The scope or ownership of a memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryScope {
+    /// Memory associated with the character/companion.
+    Character,
+    /// Memory associated with the user.
+    User,
+    /// Memory shared between character and user.
+    Shared,
+}
+
+/// The provenance of a memory (how it was created).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemorySource {
+    /// Extracted directly from conversation turns.
+    Conversation,
+    /// Explicitly stated by the user.
+    UserStated,
+    /// Extracted by an LLM-based extraction pipeline.
+    LlmExtracted,
+    /// Inferred by deterministic rules.
+    Inferred,
+    /// Imported from external data.
+    Imported,
+    /// Derived from CCv3 character card data.
+    Ccv3,
+}
+
+/// A normalised confidence score for a memory (0.0–1.0).
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MemoryConfidence(f32);
+
+impl MemoryConfidence {
+    /// The maximum possible confidence.
+    pub const MAX: Self = Self(1.0);
+
+    /// Create a new confidence value, clamping to [0.0, 1.0].
+    #[must_use]
+    pub fn new(raw: f32) -> Self {
+        Self(raw.clamp(0.0, 1.0))
+    }
+
+    /// Return the inner `f32`.
+    #[must_use]
+    pub fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl Default for MemoryConfidence {
+    fn default() -> Self {
+        Self(0.5)
+    }
+}
+
+/// A normalised salience / importance score for a memory (0.0–1.0).
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MemorySalience(f32);
+
+impl MemorySalience {
+    /// The maximum possible salience.
+    pub const MAX: Self = Self(1.0);
+
+    /// Create a new salience value, clamping to [0.0, 1.0].
+    #[must_use]
+    pub fn new(raw: f32) -> Self {
+        Self(raw.clamp(0.0, 1.0))
+    }
+
+    /// Return the inner `f32`.
+    #[must_use]
+    pub fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl Default for MemorySalience {
+    fn default() -> Self {
+        Self(0.5)
+    }
+}
+
+/// Affect / emotion annotation attached to a memory item.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AffectAnnotation {
+    /// Pleasure–displeasure (-1.0..=1.0).
+    pub valence: f32,
+    /// Excitement–calm (-1.0..=1.0).
+    pub arousal: f32,
+}
+
+impl Default for AffectAnnotation {
+    fn default() -> Self {
+        Self {
+            valence: 0.0,
+            arousal: 0.0,
+        }
+    }
+}
+
+/// A typed memory item.
+///
+/// The central unit of the typed memory store. Each item has a
+/// [`MemoryKind`], [`MemoryStatus`], [`MemorySource`], and
+/// associated confidence and salience scores.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryItem {
+    /// Primary key (`None` until persisted).
+    pub id: Option<i64>,
+    /// Ownership scope.
+    pub scope: MemoryScope,
+    /// Character identifier.
+    pub character_id: String,
+    /// User identifier (may be empty).
+    pub user_id: String,
+    /// Memory kind.
+    pub kind: MemoryKind,
+    /// Short title or label.
+    pub title: String,
+    /// Full memory content.
+    pub content: String,
+    /// Provenance of the memory.
+    pub source: MemorySource,
+    /// Optional reference to the source (e.g. session_id or turn sequence).
+    pub source_ref: Option<String>,
+    /// Confidence score.
+    pub confidence: MemoryConfidence,
+    /// Salience / importance score.
+    pub salience: MemorySalience,
+    /// Emotional annotation (valence + arousal).
+    pub affect: AffectAnnotation,
+    /// Relationship impact score (-1.0..=1.0).
+    pub relationship_impact: f32,
+    /// Number of times this memory has been accessed.
+    pub access_count: i64,
+    /// Timestamp of the last access.
+    pub last_accessed_at: Option<DateTime<Utc>>,
+    /// When the memory was created.
+    pub created_at: DateTime<Utc>,
+    /// When the memory was last updated.
+    pub updated_at: DateTime<Utc>,
+    /// Start of validity period.
+    pub valid_from: Option<DateTime<Utc>>,
+    /// End of validity period.
+    pub valid_until: Option<DateTime<Utc>>,
+    /// Lifecycle status.
+    pub status: MemoryStatus,
+    /// ID of the memory that supersedes this one.
+    pub supersedes_id: Option<i64>,
+}
+
+/// Payload for creating a new memory item (fields set by the store are omitted).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewMemoryItem {
+    /// Ownership scope.
+    pub scope: MemoryScope,
+    /// Character identifier.
+    pub character_id: String,
+    /// User identifier (may be empty).
+    pub user_id: String,
+    /// Memory kind.
+    pub kind: MemoryKind,
+    /// Short title or label.
+    pub title: String,
+    /// Full memory content.
+    pub content: String,
+    /// Provenance of the memory.
+    pub source: MemorySource,
+    /// Optional reference to the source.
+    pub source_ref: Option<String>,
+    /// Confidence score.
+    pub confidence: MemoryConfidence,
+    /// Salience / importance score.
+    pub salience: MemorySalience,
+    /// Emotional annotation.
+    pub affect: AffectAnnotation,
+    /// Relationship impact score.
+    pub relationship_impact: f32,
+    /// Start of validity period.
+    pub valid_from: Option<DateTime<Utc>>,
+    /// End of validity period.
+    pub valid_until: Option<DateTime<Utc>>,
+    /// Initial lifecycle status.
+    pub status: MemoryStatus,
+    /// ID of the memory this one supersedes.
+    pub supersedes_id: Option<i64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_kind_serde_roundtrip() {
+        let kinds = [
+            MemoryKind::Episodic,
+            MemoryKind::Semantic,
+            MemoryKind::UserProfile,
+            MemoryKind::Relationship,
+            MemoryKind::Affective,
+            MemoryKind::Commitment,
+            MemoryKind::Preference,
+            MemoryKind::Procedure,
+            MemoryKind::Reflection,
+        ];
+        for kind in kinds {
+            let json = serde_json::to_string(&kind).unwrap();
+            let back: MemoryKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(kind, back, "roundtrip failed for {kind:?}");
+        }
+    }
+
+    #[test]
+    fn memory_status_serde_roundtrip() {
+        let statuses = [
+            MemoryStatus::Active,
+            MemoryStatus::Faded,
+            MemoryStatus::Archived,
+            MemoryStatus::Disputed,
+            MemoryStatus::Superseded,
+            MemoryStatus::UserDeleted,
+        ];
+        for status in statuses {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: MemoryStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(status, back, "roundtrip failed for {status:?}");
+        }
+    }
+
+    #[test]
+    fn memory_scope_serde_roundtrip() {
+        let scopes = [
+            MemoryScope::Character,
+            MemoryScope::User,
+            MemoryScope::Shared,
+        ];
+        for scope in scopes {
+            let json = serde_json::to_string(&scope).unwrap();
+            let back: MemoryScope = serde_json::from_str(&json).unwrap();
+            assert_eq!(scope, back);
+        }
+    }
+
+    #[test]
+    fn memory_source_serde_roundtrip() {
+        let sources = [
+            MemorySource::Conversation,
+            MemorySource::UserStated,
+            MemorySource::LlmExtracted,
+            MemorySource::Inferred,
+            MemorySource::Imported,
+            MemorySource::Ccv3,
+        ];
+        for source in sources {
+            let json = serde_json::to_string(&source).unwrap();
+            let back: MemorySource = serde_json::from_str(&json).unwrap();
+            assert_eq!(source, back);
+        }
+    }
+
+    #[test]
+    fn memory_confidence_clamps() {
+        assert!((MemoryConfidence::new(1.5).get() - 1.0).abs() < f32::EPSILON);
+        assert!((MemoryConfidence::new(-0.3).get() - 0.0).abs() < f32::EPSILON);
+        assert!((MemoryConfidence::new(0.73).get() - 0.73).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn memory_salience_clamps() {
+        assert!((MemorySalience::new(1.5).get() - 1.0).abs() < f32::EPSILON);
+        assert!((MemorySalience::new(-0.3).get() - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn memory_item_serde_roundtrip() {
+        let item = MemoryItem {
+            id: Some(42),
+            scope: MemoryScope::Character,
+            character_id: "ene".into(),
+            user_id: String::new(),
+            kind: MemoryKind::Episodic,
+            title: "Test memory".into(),
+            content: "The user said hello".into(),
+            source: MemorySource::Conversation,
+            source_ref: Some("sess-1/turn-3".into()),
+            confidence: MemoryConfidence::new(0.9),
+            salience: MemorySalience::new(0.7),
+            affect: AffectAnnotation {
+                valence: 0.3,
+                arousal: -0.1,
+            },
+            relationship_impact: 0.2,
+            access_count: 5,
+            last_accessed_at: Some(chrono::Utc::now()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        let back: MemoryItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(item.id, back.id);
+        assert_eq!(item.scope, back.scope);
+        assert_eq!(item.kind, back.kind);
+        assert_eq!(item.title, back.title);
+        assert_eq!(item.content, back.content);
+        assert_eq!(item.source, back.source);
+        assert_eq!(item.status, back.status);
+        assert!((item.confidence.get() - back.confidence.get()).abs() < f32::EPSILON);
+        assert!((item.salience.get() - back.salience.get()).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn new_memory_item_serde_roundtrip() {
+        let new_item = NewMemoryItem {
+            scope: MemoryScope::User,
+            character_id: "ene".into(),
+            user_id: "user-1".into(),
+            kind: MemoryKind::Preference,
+            title: "Likes cats".into(),
+            content: "The user mentioned they like cats".into(),
+            source: MemorySource::LlmExtracted,
+            source_ref: None,
+            confidence: MemoryConfidence::new(0.8),
+            salience: MemorySalience::new(0.6),
+            affect: AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+        };
+        let json = serde_json::to_string(&new_item).unwrap();
+        let back: NewMemoryItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(new_item.kind, back.kind);
+        assert_eq!(new_item.title, back.title);
+    }
+}

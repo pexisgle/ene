@@ -25,6 +25,8 @@
 //! ```
 #![warn(missing_docs)]
 
+/// Affect state domain model.
+pub mod affect;
 /// Memory configuration types.
 pub mod config;
 /// SeaORM entities representation.
@@ -39,7 +41,11 @@ pub mod recall;
 pub mod store;
 /// LLM-driven conversation summarization.
 pub mod summarizer;
+/// Typed memory domain model.
+pub mod typed_memory;
 
+/// Affect state types.
+pub use affect::{AffectState, DiscreteEmotion};
 /// Memory feature toggle configuration.
 pub use config::MemoryConfig;
 /// Memory error type.
@@ -51,3 +57,8 @@ pub use recall::{format_summaries_for_prompt, format_summaries_with_library};
 pub use store::{ConversationSummary, KeyFact, MemoryStore, RecalledSummary};
 /// LLM summarization result type and entry-point.
 pub use summarizer::{ConversationSummaryResult, summarize_conversation};
+/// Typed memory domain types.
+pub use typed_memory::{
+    AffectAnnotation, MemoryConfidence, MemoryItem, MemoryKind, MemorySalience, MemoryScope,
+    MemorySource, MemoryStatus, NewMemoryItem,
+};
