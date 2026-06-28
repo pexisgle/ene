@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
@@ -17,7 +18,7 @@ pub struct Model {
     pub mood_label: String,
     pub last_expression: String,
     pub discrete_emotions: String,
-    pub updated_at: String,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

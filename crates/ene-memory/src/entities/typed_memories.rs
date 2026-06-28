@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
@@ -19,11 +20,11 @@ pub struct Model {
     pub affective_arousal: f32,
     pub relationship_impact: f32,
     pub access_count: i64,
-    pub last_accessed_at: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-    pub valid_from: Option<String>,
-    pub valid_until: Option<String>,
+    pub last_accessed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub valid_from: Option<DateTime<Utc>>,
+    pub valid_until: Option<DateTime<Utc>>,
     pub status: String,
     pub supersedes_id: Option<i64>,
 }
