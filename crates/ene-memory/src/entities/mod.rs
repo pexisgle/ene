@@ -1,13 +1,23 @@
 #![allow(missing_docs)]
 
+pub mod affect_states;
 pub mod conversation_keyfacts;
 pub mod conversation_logs;
 pub mod conversation_summaries;
+pub mod memory_embeddings;
+pub mod memory_links;
+pub mod memory_spans;
 pub mod tool_embedding_index;
 pub mod tool_schemas;
+pub mod typed_memories;
 
+pub use affect_states::Entity as AffectStates;
 pub use conversation_keyfacts::Entity as ConversationKeyFacts;
 pub use conversation_logs::Entity as ConversationLogs;
 pub use conversation_summaries::Entity as ConversationSummaries;
+pub use memory_embeddings::Entity as MemoryEmbeddings;
+pub use memory_links::Entity as MemoryLinks;
+pub use memory_spans::Entity as MemorySpans;
 pub use tool_embedding_index::Entity as ToolEmbeddingIndex;
 pub use tool_schemas::Entity as ToolSchemas;
+pub use typed_memories::Entity as TypedMemories;

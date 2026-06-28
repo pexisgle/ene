@@ -7,12 +7,17 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(Migration)]
+        vec![Box::new(Migration), Box::new(Migration2)]
     }
 }
 
-#[derive(DeriveMigrationName)]
 pub struct Migration;
+
+impl MigrationName for Migration {
+    fn name(&self) -> &str {
+        "m20250628_000000_initial_schema"
+    }
+}
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
@@ -411,4 +416,462 @@ enum ToolSchemas {
     SchemaJson,
     Fingerprint,
     CreatedAt,
+}
+
+// ── Migration 2: Typed Memory ─────────────────────────────────────────────────
+
+pub struct Migration2;
+
+impl MigrationName for Migration2 {
+    fn name(&self) -> &str {
+        "m20250629_000000_typed_memory_schema"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration2 {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // 1. typed_memories
+        manager
+            .create_table(
+                Table::create()
+                    .table(TypedMemories::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(TypedMemories::Id)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(TypedMemories::Scope)
+                            .string()
+                            .not_null()
+                            .default("character"),
+                    )
+                    .col(
+                        ColumnDef::new(TypedMemories::CharacterId)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(TypedMemories::UserId)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(ColumnDef::new(TypedMemories::Kind).string().not_null())
+                    .col(ColumnDef::new(TypedMemories::Title).string().not_null())
+                    .col(ColumnDef::new(TypedMemories::Content).string().not_null())
+                    .col(ColumnDef::new(TypedMemories::Source).string().not_null())
+                    .col(ColumnDef::new(TypedMemories::SourceRef).string().null())
+                    .col(
+                        ColumnDef::new(TypedMemories::Confidence)
+                            .float()
+                            .not_null()
+                            .default(0.5),
+                    )
+                    .col(
+                        ColumnDef::new(TypedMemories::Salience)
+                            .float()
+                            .not_null()
+                            .default(0.5),
+                    )
+                    .col(
+                        ColumnDef::new(TypedMemories::AffectiveValence)
+                            .float()
+                            .not_null()
+                            .default(0.0),
+                    )
+                    .col(
+                        ColumnDef::new(TypedMemories::AffectiveArousal)
+                            .float()
+                            .not_null()
+                            .default(0.0),
+                    )
+                    .col(
+                        ColumnDef::new(TypedMemories::RelationshipImpact)
+                            .float()
+                            .not_null()
+                            .default(0.0),
+                    )
+                    .col(
+                        ColumnDef::new(TypedMemories::AccessCount)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(TypedMemories::LastAccessedAt)
+                            .string()
+                            .null(),
+                    )
+                    .col(ColumnDef::new(TypedMemories::CreatedAt).string().not_null())
+                    .col(ColumnDef::new(TypedMemories::UpdatedAt).string().not_null())
+                    .col(ColumnDef::new(TypedMemories::ValidFrom).string().null())
+                    .col(ColumnDef::new(TypedMemories::ValidUntil).string().null())
+                    .col(
+                        ColumnDef::new(TypedMemories::Status)
+                            .string()
+                            .not_null()
+                            .default("active"),
+                    )
+                    .col(ColumnDef::new(TypedMemories::SupersedesId).integer().null())
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_typed_mem_character_status")
+                    .table(TypedMemories::Table)
+                    .col(TypedMemories::CharacterId)
+                    .col(TypedMemories::Status)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_typed_mem_kind")
+                    .table(TypedMemories::Table)
+                    .col(TypedMemories::Kind)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_typed_mem_created")
+                    .table(TypedMemories::Table)
+                    .col((TypedMemories::CreatedAt, IndexOrder::Desc))
+                    .to_owned(),
+            )
+            .await?;
+
+        // 2. memory_embeddings
+        manager
+            .create_table(
+                Table::create()
+                    .table(MemoryEmbeddings::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(MemoryEmbeddings::Id)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(MemoryEmbeddings::MemoryItemId)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(MemoryEmbeddings::ModelName)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(MemoryEmbeddings::Field)
+                            .string()
+                            .not_null()
+                            .default("content"),
+                    )
+                    .col(
+                        ColumnDef::new(MemoryEmbeddings::Embedding)
+                            .blob()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(MemoryEmbeddings::CreatedAt)
+                            .string()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_memory_embeddings_item")
+                            .from(MemoryEmbeddings::Table, MemoryEmbeddings::MemoryItemId)
+                            .to(TypedMemories::Table, TypedMemories::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .unique()
+                    .name("uniq_memory_embedding")
+                    .table(MemoryEmbeddings::Table)
+                    .col(MemoryEmbeddings::MemoryItemId)
+                    .col(MemoryEmbeddings::ModelName)
+                    .col(MemoryEmbeddings::Field)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_memory_embedding_item")
+                    .table(MemoryEmbeddings::Table)
+                    .col(MemoryEmbeddings::MemoryItemId)
+                    .to_owned(),
+            )
+            .await?;
+
+        // 3. memory_links
+        manager
+            .create_table(
+                Table::create()
+                    .table(MemoryLinks::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(MemoryLinks::Id)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(MemoryLinks::FromId).integer().not_null())
+                    .col(ColumnDef::new(MemoryLinks::ToId).integer().not_null())
+                    .col(ColumnDef::new(MemoryLinks::Relation).string().not_null())
+                    .col(
+                        ColumnDef::new(MemoryLinks::Weight)
+                            .float()
+                            .not_null()
+                            .default(1.0),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_memory_links_from")
+                            .from(MemoryLinks::Table, MemoryLinks::FromId)
+                            .to(TypedMemories::Table, TypedMemories::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_memory_links_to")
+                            .from(MemoryLinks::Table, MemoryLinks::ToId)
+                            .to(TypedMemories::Table, TypedMemories::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_memory_links_from")
+                    .table(MemoryLinks::Table)
+                    .col(MemoryLinks::FromId)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_memory_links_to")
+                    .table(MemoryLinks::Table)
+                    .col(MemoryLinks::ToId)
+                    .to_owned(),
+            )
+            .await?;
+
+        // 4. memory_spans
+        manager
+            .create_table(
+                Table::create()
+                    .table(MemorySpans::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(MemorySpans::Id)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(MemorySpans::SessionId).string().not_null())
+                    .col(ColumnDef::new(MemorySpans::TurnStart).integer().not_null())
+                    .col(ColumnDef::new(MemorySpans::TurnEnd).integer().not_null())
+                    .col(ColumnDef::new(MemorySpans::RawExcerpt).string().null())
+                    .col(
+                        ColumnDef::new(MemorySpans::CompressedSummary)
+                            .string()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(MemorySpans::CompressionLevel)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_memory_spans_session")
+                    .table(MemorySpans::Table)
+                    .col(MemorySpans::SessionId)
+                    .col(MemorySpans::TurnStart)
+                    .to_owned(),
+            )
+            .await?;
+
+        // 5. affect_states
+        manager
+            .create_table(
+                Table::create()
+                    .table(AffectStates::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(AffectStates::CharacterId)
+                            .string()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(AffectStates::Valence)
+                            .float()
+                            .not_null()
+                            .default(0.0),
+                    )
+                    .col(
+                        ColumnDef::new(AffectStates::Arousal)
+                            .float()
+                            .not_null()
+                            .default(0.0),
+                    )
+                    .col(
+                        ColumnDef::new(AffectStates::Dominance)
+                            .float()
+                            .not_null()
+                            .default(0.0),
+                    )
+                    .col(
+                        ColumnDef::new(AffectStates::DiscreteEmotions)
+                            .string()
+                            .not_null()
+                            .default("[]"),
+                    )
+                    .col(ColumnDef::new(AffectStates::UpdatedAt).string().not_null())
+                    .to_owned(),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(AffectStates::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(MemorySpans::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(MemoryLinks::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(MemoryEmbeddings::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(TypedMemories::Table).to_owned())
+            .await?;
+        Ok(())
+    }
+}
+
+#[derive(DeriveIden)]
+enum TypedMemories {
+    Table,
+    Id,
+    Scope,
+    CharacterId,
+    UserId,
+    Kind,
+    Title,
+    Content,
+    Source,
+    SourceRef,
+    Confidence,
+    Salience,
+    AffectiveValence,
+    AffectiveArousal,
+    RelationshipImpact,
+    AccessCount,
+    LastAccessedAt,
+    CreatedAt,
+    UpdatedAt,
+    ValidFrom,
+    ValidUntil,
+    Status,
+    SupersedesId,
+}
+
+#[derive(Iden)]
+enum MemoryEmbeddings {
+    #[iden = "memory_embeddings"]
+    Table,
+    Id,
+    MemoryItemId,
+    ModelName,
+    Field,
+    Embedding,
+    CreatedAt,
+}
+
+#[derive(Iden)]
+enum MemoryLinks {
+    #[iden = "memory_links"]
+    Table,
+    Id,
+    FromId,
+    ToId,
+    Relation,
+    Weight,
+}
+
+#[derive(Iden)]
+enum MemorySpans {
+    #[iden = "memory_spans"]
+    Table,
+    Id,
+    SessionId,
+    TurnStart,
+    TurnEnd,
+    RawExcerpt,
+    CompressedSummary,
+    CompressionLevel,
+}
+
+#[derive(Iden)]
+enum AffectStates {
+    #[iden = "affect_states"]
+    Table,
+    CharacterId,
+    Valence,
+    Arousal,
+    Dominance,
+    DiscreteEmotions,
+    UpdatedAt,
 }
