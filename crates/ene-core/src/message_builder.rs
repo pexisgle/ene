@@ -85,17 +85,14 @@ pub fn build_system_prompt(
 
     // 1. Desktop mascot context frame — always first so the model
     //    immediately understands the overlay / short-response constraint.
-    let mascot_context = prompts.render(
-        "system.mascot_context",
-        &[("char_name", char_name), ("user_name", user_name)],
-    );
+    let mascot_context = prompts.system().render_mascot_context(char_name, user_name);
     if !mascot_context.is_empty() {
         parts.push(mascot_context);
     }
 
     // 2. Runtime rules (user-configurable behaviour overrides).
     if !runtime_rules.trim().is_empty() {
-        let header = prompts.get("system.behavior_rules_header");
+        let header = &prompts.system().behavior_rules_header;
         if header.is_empty() {
             parts.push(runtime_rules.to_string());
         } else {
@@ -104,18 +101,18 @@ pub fn build_system_prompt(
     }
 
     // 3. Character identity block from the card.
-    let char_header = prompts.get("system.character_header");
+    let char_header = &prompts.system().character_header;
     let mut char_parts: Vec<String> = Vec::new();
 
     if !card.data.system_prompt.trim().is_empty() {
         char_parts.push(card.data.system_prompt.clone());
     }
     if !card.data.personality.trim().is_empty() {
-        let h = prompts.get("system.personality_header");
+        let h = &prompts.system().personality_header;
         char_parts.push(format!("{h}\n{}", card.data.personality));
     }
     if !card.data.description.trim().is_empty() {
-        let h = prompts.get("system.background_header");
+        let h = &prompts.system().background_header;
         char_parts.push(format!("{h}\n{}", card.data.description));
     }
 
@@ -130,7 +127,7 @@ pub fn build_system_prompt(
 
     // 4. Scene / scenario.
     if !card.data.scenario.trim().is_empty() {
-        let h = prompts.get("system.scene_header");
+        let h = &prompts.system().scene_header;
         if h.is_empty() {
             parts.push(card.data.scenario.clone());
         } else {
@@ -167,15 +164,15 @@ pub fn build_expression_phi(card: &CharacterCardV3, prompts: &PromptLibrary) -> 
             })
             .collect();
 
-        let header = prompts.get("emotion.header");
-        let rule = prompts.get("emotion.rule");
-        let token_header = prompts.get("emotion.token_header");
-        let examples_header = prompts.get("emotion.examples_header");
+        let header = &prompts.emotion().header;
+        let rule = &prompts.emotion().rule;
+        let token_header = &prompts.emotion().token_header;
+        let examples_header = &prompts.emotion().examples_header;
 
         let examples = [
-            prompts.get("emotion.example_happy"),
-            prompts.get("emotion.example_sad"),
-            prompts.get("emotion.example_neutral"),
+            &prompts.emotion().example_happy,
+            &prompts.emotion().example_sad,
+            &prompts.emotion().example_neutral,
         ]
         .iter()
         .filter(|s| !s.is_empty())
@@ -228,7 +225,7 @@ pub fn build_messages(
     // 2. Example messages — only on the first turn to seed the style.
     if ctx.history.is_empty() && !ctx.card.data.mes_example.trim().is_empty() {
         let ex = expand_cbs_macros(&ctx.card.data.mes_example, char_name, ctx.user_name);
-        let header = ctx.prompts.get("system.examples_header");
+        let header = &ctx.prompts.system().examples_header;
         messages.push(sys_msg(format!("{header}\n{ex}")));
     }
 
@@ -242,9 +239,7 @@ pub fn build_messages(
 
     // 4. Known key facts about the user.
     if !ctx.key_facts.is_empty() {
-        let header = ctx
-            .prompts
-            .render("memory.facts_header", &[("user_name", ctx.user_name)]);
+        let header = ctx.prompts.memory().render_facts_header(ctx.user_name);
         let lines: Vec<String> = ctx
             .key_facts
             .iter()
@@ -292,8 +287,8 @@ fn format_summaries(summaries: &[RecalledSummary], prompts: &PromptLibrary) -> S
     }
 
     let now = chrono::Utc::now();
-    let header = prompts.get("memory.summaries_header");
-    let item_tpl = prompts.get("memory.summary_item");
+    let header = &prompts.memory().summaries_header;
+    let item_tpl = &prompts.memory().summary_item;
 
     let mut lines = vec![header.to_string()];
     for s in summaries {
@@ -302,7 +297,7 @@ fn format_summaries(summaries: &[RecalledSummary], prompts: &PromptLibrary) -> S
         let line = if item_tpl.is_empty() {
             format!("[{age}] {text}")
         } else {
-            ene_config::substitute_prompt_vars(item_tpl, &[("age", &age), ("text", &text)])
+            prompts.memory().render_summary_item(&age, &text)
         };
         lines.push(line);
     }
@@ -426,7 +421,7 @@ mod tests {
     fn format_summaries_uses_template() {
         let lib = PromptLibrary::built_in_english();
         // Verify header is present when summaries would be non-empty
-        let header = lib.get("memory.summaries_header");
+        let header = &lib.memory().summaries_header;
         assert!(!header.is_empty(), "summaries header should be non-empty");
     }
 }

@@ -143,7 +143,7 @@ pub fn cycle_debug_fps(current: u32, step: isize) -> u32 {
 pub fn debug_fps_label(lang: Language, debug_fps: u32) -> String {
     let _ = lang;
     if debug_fps == 0 {
-        i18n_embed_fl::fl!(crate::i18n::loader(), "match-window").to_string()
+        crate::i18n::match_window()
     } else {
         format!("{debug_fps} FPS")
     }
@@ -167,7 +167,7 @@ fn cycle_choice<T: Copy + PartialEq>(choices: &[T], current: T, step: isize) -> 
 pub fn target_fps_label(lang: Language, target_fps: u32) -> String {
     let _ = lang;
     if target_fps == 0 {
-        i18n_embed_fl::fl!(crate::i18n::loader(), "unlimited").to_string()
+        crate::i18n::unlimited()
     } else {
         format!("{target_fps} FPS")
     }

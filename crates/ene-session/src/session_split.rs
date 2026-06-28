@@ -448,20 +448,17 @@ pub async fn execute_split(
 
     // Append the split reason to the summary
     let reason_str = match &reason {
-        SplitReason::Timeout { elapsed_minutes } => prompts.render(
-            "split.reason_timeout",
-            &[("minutes", &elapsed_minutes.to_string())],
-        ),
-        SplitReason::TopicChange { similarity } => prompts.render(
-            "split.reason_topic",
-            &[("similarity", &format!("{similarity:.2}"))],
-        ),
-        SplitReason::ContextPressure { .. } => prompts.get("split.reason_context").to_string(),
-        SplitReason::Composite { score } => prompts.render(
-            "split.reason_composite",
-            &[("score", &format!("{score:.2}"))],
-        ),
-        SplitReason::Manual => prompts.get("split.reason_manual").to_string(),
+        SplitReason::Timeout { elapsed_minutes } => prompts
+            .split()
+            .render_reason_timeout(&elapsed_minutes.to_string()),
+        SplitReason::TopicChange { similarity } => prompts
+            .split()
+            .render_reason_topic(&format!("{similarity:.2}")),
+        SplitReason::ContextPressure { .. } => prompts.split().reason_context.to_string(),
+        SplitReason::Composite { score } => prompts
+            .split()
+            .render_reason_composite(&format!("{score:.2}")),
+        SplitReason::Manual => prompts.split().reason_manual.to_string(),
     };
 
     let summary = if reason_str.is_empty() {

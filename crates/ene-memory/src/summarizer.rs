@@ -73,7 +73,7 @@ pub async fn summarize_conversation(
         }
     }
 
-    let no_facts_placeholder = prompts.get("summarizer.no_facts_placeholder");
+    let no_facts_placeholder = &prompts.summarizer().no_facts_placeholder;
     let existing_facts_str = if existing_facts.is_empty() {
         no_facts_placeholder.to_string()
     } else {
@@ -84,24 +84,17 @@ pub async fn summarize_conversation(
             .join("\n")
     };
 
-    let system_prompt = prompts.render(
-        "summarizer.system",
-        &[
-            ("user_name", user_name),
-            ("char_name", character_name),
-            ("existing_facts", &existing_facts_str),
-            ("conversation", &conversation_text),
-        ],
+    let system_prompt = prompts.summarizer().render_system(
+        user_name,
+        character_name,
+        &existing_facts_str,
+        &conversation_text,
     );
 
-    let user_prompt = prompts.render(
-        "summarizer.user_prompt",
-        &[
-            ("user_name", user_name),
-            ("existing_facts", &existing_facts_str),
-            ("conversation", &conversation_text),
-        ],
-    );
+    let user_prompt =
+        prompts
+            .summarizer()
+            .render_user_prompt(user_name, &existing_facts_str, &conversation_text);
 
     let schema = serde_json::json!({
         "type": "object",
@@ -238,7 +231,7 @@ mod tests {
     #[test]
     fn prompt_library_summarizer_system_is_non_empty() {
         let lib = PromptLibrary::built_in_english();
-        let system = lib.get("summarizer.system");
+        let system = &lib.summarizer().system;
         assert!(
             !system.is_empty(),
             "summarizer.system prompt must not be empty"

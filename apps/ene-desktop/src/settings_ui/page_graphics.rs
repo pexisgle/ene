@@ -23,7 +23,7 @@ pub fn render(
 ) {
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
-            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "language"));
+            ui.label(crate::i18n::language());
             if ui.button("<").clicked() {
                 apply_action(
                     SettingsAction::LanguageDown,
@@ -58,7 +58,7 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "target-fps"));
+            ui.label(crate::i18n::target_fps());
             if ui.button("<").clicked() {
                 apply_action(
                     SettingsAction::TargetFpsDown,
@@ -93,7 +93,7 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "shadow-quality"));
+            ui.label(crate::i18n::shadow_quality());
             if ui.button("<").clicked() {
                 apply_action(
                     SettingsAction::ShadowQualityDown,
@@ -128,7 +128,7 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "antialiasing"));
+            ui.label(crate::i18n::antialiasing());
             if ui.button("<").clicked() {
                 apply_action(
                     SettingsAction::AntialiasingModeDown,

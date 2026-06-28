@@ -1,0 +1,38 @@
+{
+  "system": {
+    "mascot_context_path": "ja/system/mascot_context.md",
+    "behavior_rules_header": "## 行動ルール",
+    "character_header": "## キャラクター設定",
+    "personality_header": "### 性格",
+    "background_header": "### 背景",
+    "scene_header": "## 現在の状況",
+    "examples_header": "会話例:"
+  },
+  "emotion": {
+    "header": "## 感情出力ルール",
+    "rule_path": "ja/emotion/rule.md",
+    "token_header": "使用可能なトークン:",
+    "examples_header": "常にこのフォーマットに従ってください（トークンが先頭、その後に文章）:",
+    "example_happy": "<|emo:happy|> それはすごく楽しみだね、もっと聞かせて！",
+    "example_sad": "<|emo:sad|> そっか、それは大変だったね…",
+    "example_angry": "<|emo:angry|> もう、本当にイライラしちゃうね！",
+    "example_neutral": "<|emo:neutral|> うーん、それについて考えてみるね。"
+  },
+  "memory": {
+    "summaries_header": "## 過去の会話（関連度順に想起）",
+    "summary_item": "[{age}] {text}",
+    "facts_header": "## {user_name} について知っている事実"
+  },
+  "summarizer": {
+    "system_path": "ja/summarizer/system.md",
+    "user_prompt_path": "ja/summarizer/user_prompt.md",
+    "no_facts_placeholder": "なし"
+  },
+  "split": {
+    "reason_timeout": "[一時停止から{minutes}分が経過したためセッションを終了しました]",
+    "reason_topic": "[話題の変化によりセッションを終了しました (類似度: {similarity})]",
+    "reason_context": "[コンテキスト制限のためセッションを終了しました]",
+    "reason_composite": "[セッションを終了しました — 分割スコア: {score}]",
+    "reason_manual": "[手動でセッションを終了しました]"
+  }
+}

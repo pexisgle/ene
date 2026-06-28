@@ -269,19 +269,17 @@ pub fn format_fps_label(lang: crate::settings::Language, fps: u32) -> String {
 
 pub fn format_shadow_label(lang: crate::settings::Language, quality: ShadowQuality) -> String {
     let _ = lang;
-    let loader = crate::i18n::loader();
     match quality {
-        ShadowQuality::Low => i18n_embed_fl::fl!(loader, "low"),
-        ShadowQuality::Medium => i18n_embed_fl::fl!(loader, "medium"),
-        ShadowQuality::High => i18n_embed_fl::fl!(loader, "high"),
+        ShadowQuality::Low => crate::i18n::low(),
+        ShadowQuality::Medium => crate::i18n::medium(),
+        ShadowQuality::High => crate::i18n::high(),
     }
 }
 
 pub fn format_aa_label(lang: crate::settings::Language, mode: AntialiasingMode) -> String {
     let _ = lang;
-    let loader = crate::i18n::loader();
     match mode {
-        AntialiasingMode::Off => i18n_embed_fl::fl!(loader, "off"),
+        AntialiasingMode::Off => crate::i18n::off(),
         AntialiasingMode::Fxaa => "FXAA".to_string(),
         AntialiasingMode::Smaa => "SMAA".to_string(),
         AntialiasingMode::Taa => "TAA".to_string(),

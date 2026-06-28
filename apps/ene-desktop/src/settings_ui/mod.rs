@@ -87,10 +87,10 @@ impl SettingsUi {
                 PageKind::Debug,
             ] {
                 let label = match page {
-                    PageKind::Character => i18n_embed_fl::fl!(crate::i18n::loader(), "character"),
-                    PageKind::Graphics => i18n_embed_fl::fl!(crate::i18n::loader(), "graphics"),
-                    PageKind::Debug => i18n_embed_fl::fl!(crate::i18n::loader(), "debug"),
-                    PageKind::Ai => i18n_embed_fl::fl!(crate::i18n::loader(), "ai"),
+                    PageKind::Character => crate::i18n::character(),
+                    PageKind::Graphics => crate::i18n::graphics(),
+                    PageKind::Debug => crate::i18n::debug(),
+                    PageKind::Ai => crate::i18n::ai(),
                 };
                 if ui
                     .selectable_label(self.current_page == page, label)

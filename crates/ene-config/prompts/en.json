@@ -1,0 +1,38 @@
+{
+  "system": {
+    "mascot_context_path": "en/system/mascot_context.md",
+    "behavior_rules_header": "## Behavior Rules",
+    "character_header": "## Character",
+    "personality_header": "### Personality",
+    "background_header": "### Background",
+    "scene_header": "## Current Scene",
+    "examples_header": "Example Messages:"
+  },
+  "emotion": {
+    "header": "## Emotion Output Rule",
+    "rule_path": "en/emotion/rule.md",
+    "token_header": "Available tokens:",
+    "examples_header": "Always follow this format (token FIRST, then the sentence):",
+    "example_happy": "<|emo:happy|> That's so exciting, tell me more!",
+    "example_sad": "<|emo:sad|> Aww, that sounds rough...",
+    "example_angry": "<|emo:angry|> Ugh, that's really frustrating!",
+    "example_neutral": "<|emo:neutral|> Hmm, let me think about that."
+  },
+  "memory": {
+    "summaries_header": "## Past Conversations (recalled by relevance)",
+    "summary_item": "[{age}] {text}",
+    "facts_header": "## Known Facts about {user_name}"
+  },
+  "summarizer": {
+    "system_path": "en/summarizer/system.md",
+    "user_prompt_path": "en/summarizer/user_prompt.md",
+    "no_facts_placeholder": "None"
+  },
+  "split": {
+    "reason_timeout": "[Session ended after {minutes} minutes of inactivity]",
+    "reason_topic": "[Session ended due to topic shift (similarity: {similarity})]",
+    "reason_context": "[Session ended due to context length pressure]",
+    "reason_composite": "[Session ended — split score: {score}]",
+    "reason_manual": "[Session ended manually]"
+  }
+}

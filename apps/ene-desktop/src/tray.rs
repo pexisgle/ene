@@ -93,10 +93,9 @@ impl TrayHandle {
 }
 
 fn build_menu() -> Menu {
-    let loader = crate::i18n::loader();
     let menu = Menu::new();
-    let settings_label = i18n_embed_fl::fl!(loader, "settings");
-    let quit_label = i18n_embed_fl::fl!(loader, "quit");
+    let settings_label = crate::i18n::settings();
+    let quit_label = crate::i18n::quit();
     let settings_item = MenuItem::with_id(SETTINGS_MENU_ID, settings_label, true, None);
     let quit_item = MenuItem::with_id(QUIT_MENU_ID, quit_label, true, None);
     let _ = menu.append_items(&[&settings_item, &PredefinedMenuItem::separator(), &quit_item]);

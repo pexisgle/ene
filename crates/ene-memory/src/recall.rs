@@ -6,7 +6,7 @@
 use super::store::RecalledSummary;
 use chrono::Utc;
 use ene_common::truncate::Truncate;
-use ene_config::{PromptLibrary, substitute_prompt_vars};
+use ene_config::PromptLibrary;
 
 /// Formats past conversation summaries into a text block for prompt injection.
 ///
@@ -34,8 +34,8 @@ pub fn format_summaries_with_library(
     }
 
     let now = Utc::now();
-    let header = prompts.get("memory.summaries_header");
-    let item_tpl = prompts.get("memory.summary_item");
+    let header = &prompts.memory().summaries_header;
+    let item_tpl = &prompts.memory().summary_item;
 
     let mut lines = vec![header.to_string()];
     for s in summaries {
@@ -44,7 +44,7 @@ pub fn format_summaries_with_library(
         let line = if item_tpl.is_empty() {
             format!("[{age}] {text}")
         } else {
-            substitute_prompt_vars(item_tpl, &[("age", &age), ("text", &text)])
+            prompts.memory().render_summary_item(&age, &text)
         };
         lines.push(line);
     }

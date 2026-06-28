@@ -34,3 +34,5 @@ pub fn select_language(lang: Language) {
         let _ = localizer.select(&requested_languages);
     }
 }
+
+include!(concat!(env!("OUT_DIR"), "/i18n_keys.rs"));
