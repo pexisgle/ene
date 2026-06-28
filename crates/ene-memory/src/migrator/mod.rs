@@ -334,7 +334,7 @@ impl MigrationTrait for Migration {
                         ColumnDef::new(ToolSchemas::CreatedAt)
                             .string()
                             .not_null()
-                            .default(Expr::cust("(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))")),
+                            .default(Expr::current_timestamp()),
                     )
                     .to_owned(),
             )
@@ -902,26 +902,104 @@ impl MigrationName for Migration3 {
 #[async_trait::async_trait]
 impl MigrationTrait for Migration3 {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        let db = manager.get_connection();
-
-        let cols: &[(&str, &str)] = &[
-            ("user_id", "STRING NOT NULL DEFAULT ''"),
-            ("trust", "REAL NOT NULL DEFAULT 0.0"),
-            ("affinity", "REAL NOT NULL DEFAULT 0.0"),
-            ("irritation", "REAL NOT NULL DEFAULT 0.0"),
-            ("curiosity", "REAL NOT NULL DEFAULT 0.0"),
-            ("fatigue", "REAL NOT NULL DEFAULT 0.0"),
-            ("mood_label", "STRING NOT NULL DEFAULT ''"),
-            ("last_expression", "STRING NOT NULL DEFAULT ''"),
-        ];
-
-        for (col_name, col_def) in cols {
-            if !manager.has_column("affect_states", col_name).await? {
-                db.execute_unprepared(&format!(
-                    "ALTER TABLE affect_states ADD COLUMN {col_name} {col_def}"
-                ))
-                .await?;
-            }
+        if !manager.has_column("affect_states", "user_id").await? {
+            let stmt = Table::alter()
+                .table(AffectStates::Table)
+                .add_column(
+                    ColumnDef::new(AffectStates::UserId)
+                        .string()
+                        .not_null()
+                        .default(""),
+                )
+                .to_owned();
+            manager.alter_table(stmt).await?;
+        }
+        if !manager.has_column("affect_states", "trust").await? {
+            let stmt = Table::alter()
+                .table(AffectStates::Table)
+                .add_column(
+                    ColumnDef::new(AffectStates::Trust)
+                        .float()
+                        .not_null()
+                        .default(0.0),
+                )
+                .to_owned();
+            manager.alter_table(stmt).await?;
+        }
+        if !manager.has_column("affect_states", "affinity").await? {
+            let stmt = Table::alter()
+                .table(AffectStates::Table)
+                .add_column(
+                    ColumnDef::new(AffectStates::Affinity)
+                        .float()
+                        .not_null()
+                        .default(0.0),
+                )
+                .to_owned();
+            manager.alter_table(stmt).await?;
+        }
+        if !manager.has_column("affect_states", "irritation").await? {
+            let stmt = Table::alter()
+                .table(AffectStates::Table)
+                .add_column(
+                    ColumnDef::new(AffectStates::Irritation)
+                        .float()
+                        .not_null()
+                        .default(0.0),
+                )
+                .to_owned();
+            manager.alter_table(stmt).await?;
+        }
+        if !manager.has_column("affect_states", "curiosity").await? {
+            let stmt = Table::alter()
+                .table(AffectStates::Table)
+                .add_column(
+                    ColumnDef::new(AffectStates::Curiosity)
+                        .float()
+                        .not_null()
+                        .default(0.0),
+                )
+                .to_owned();
+            manager.alter_table(stmt).await?;
+        }
+        if !manager.has_column("affect_states", "fatigue").await? {
+            let stmt = Table::alter()
+                .table(AffectStates::Table)
+                .add_column(
+                    ColumnDef::new(AffectStates::Fatigue)
+                        .float()
+                        .not_null()
+                        .default(0.0),
+                )
+                .to_owned();
+            manager.alter_table(stmt).await?;
+        }
+        if !manager.has_column("affect_states", "mood_label").await? {
+            let stmt = Table::alter()
+                .table(AffectStates::Table)
+                .add_column(
+                    ColumnDef::new(AffectStates::MoodLabel)
+                        .string()
+                        .not_null()
+                        .default(""),
+                )
+                .to_owned();
+            manager.alter_table(stmt).await?;
+        }
+        if !manager
+            .has_column("affect_states", "last_expression")
+            .await?
+        {
+            let stmt = Table::alter()
+                .table(AffectStates::Table)
+                .add_column(
+                    ColumnDef::new(AffectStates::LastExpression)
+                        .string()
+                        .not_null()
+                        .default(""),
+                )
+                .to_owned();
+            manager.alter_table(stmt).await?;
         }
 
         Ok(())

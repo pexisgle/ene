@@ -123,19 +123,6 @@ pub struct MemoryStore {
     embedding_dim: usize,
 }
 
-/// Parses an RFC3339 timestamp string into a `DateTime<Utc>`.
-///
-/// Returns an `InvalidTimestamp` error if `s` is not valid RFC3339.
-/// We deliberately do **not** fall back to `Utc::now()` on parse
-/// failure — silently substituting the current time would corrupt
-/// stored conversation history with the wrong `created_at` /
-/// `ended_at` and make the database impossible to reason about.
-fn parse_dt(s: &str) -> Result<DateTime<Utc>, MemoryError> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| MemoryError::Config(format!("invalid RFC3339 timestamp {s:?}: {e}")))
-}
-
 /// Convert a typed memory model row to a [`crate::MemoryItem`].
 fn model_to_memory_item(
     m: entities::typed_memories::Model,
@@ -158,11 +145,11 @@ fn model_to_memory_item(
         },
         relationship_impact: m.relationship_impact,
         access_count: m.access_count,
-        last_accessed_at: m.last_accessed_at.as_deref().and_then(|s| parse_dt(s).ok()),
-        created_at: parse_dt(&m.created_at)?,
-        updated_at: parse_dt(&m.updated_at)?,
-        valid_from: m.valid_from.as_deref().and_then(|s| parse_dt(s).ok()),
-        valid_until: m.valid_until.as_deref().and_then(|s| parse_dt(s).ok()),
+        last_accessed_at: m.last_accessed_at,
+        created_at: m.created_at,
+        updated_at: m.updated_at,
+        valid_from: m.valid_from,
+        valid_until: m.valid_until,
         status: str_to_status(&m.status),
         supersedes_id: m.supersedes_id,
     })
@@ -300,8 +287,7 @@ impl MemoryStore {
 
         validate_embedding(embedding, self.embedding_dim)?;
 
-        let now = Utc::now().to_rfc3339();
-        let ended_str = ended_at.to_rfc3339();
+        let now = Utc::now();
 
         let session_id = session_id.to_string();
         let card_name = card_name.to_string();
@@ -318,8 +304,8 @@ impl MemoryStore {
                         card_name: Set(card_name.clone()),
                         summary: Set(summary),
                         embedding: Set(embedding_bytes),
-                        created_at: Set(now.clone()),
-                        ended_at: Set(ended_str),
+                        created_at: Set(now),
+                        ended_at: Set(ended_at),
                         ..Default::default()
                     };
 
@@ -342,7 +328,7 @@ impl MemoryStore {
                                 summary_id: Set(Some(summary_id)),
                                 key: Set(fact.key),
                                 value: Set(fact.value),
-                                created_at: Set(now.clone()),
+                                created_at: Set(now),
                                 ..Default::default()
                             };
                             new_fact.insert(txn).await?;
@@ -381,8 +367,8 @@ impl MemoryStore {
             card_name: String,
             summary: String,
             embedding: Vec<u8>,
-            created_at: String,
-            ended_at: String,
+            created_at: DateTime<Utc>,
+            ended_at: DateTime<Utc>,
             similarity: f64,
         }
 
@@ -426,8 +412,8 @@ impl MemoryStore {
                         card_name: row.card_name,
                         summary: row.summary,
                         embedding: bytes_to_embedding(&row.embedding),
-                        created_at: parse_dt(&row.created_at)?,
-                        ended_at: parse_dt(&row.ended_at)?,
+                        created_at: row.created_at,
+                        ended_at: row.ended_at,
                     },
                     similarity: row.similarity as f32,
                 })
@@ -456,8 +442,8 @@ impl MemoryStore {
                     card_name: row.card_name,
                     summary: row.summary,
                     embedding: bytes_to_embedding(&row.embedding),
-                    created_at: parse_dt(&row.created_at)?,
-                    ended_at: parse_dt(&row.ended_at)?,
+                    created_at: row.created_at,
+                    ended_at: row.ended_at,
                 })
             })
             .collect()
@@ -500,26 +486,27 @@ impl MemoryStore {
 
     /// Returns all unique keyfacts for a card, with the latest value per key.
     pub async fn get_all_keyfacts(&self, card_name: &str) -> Result<Vec<KeyFact>, MemoryError> {
-        let stmt = sea_orm::Statement::from_sql_and_values(
-            sea_orm::DatabaseBackend::Sqlite,
-            "SELECT key, value FROM (
-                SELECT key, value, ROW_NUMBER() OVER (PARTITION BY key ORDER BY created_at DESC) as rn
-                FROM conversation_keyfacts
-                WHERE card_name = ?
-            ) WHERE rn = 1
-            ORDER BY key ASC",
-            vec![card_name.into()],
-        );
+        let rows = entities::conversation_keyfacts::Entity::find()
+            .filter(entities::conversation_keyfacts::Column::CardName.eq(card_name))
+            .order_by_asc(entities::conversation_keyfacts::Column::Key)
+            .order_by_desc(entities::conversation_keyfacts::Column::CreatedAt)
+            .all(&self.db)
+            .await?;
 
-        let rows = self.db.query_all_raw(stmt).await?;
-
-        rows.into_iter()
-            .map(|row| {
-                let key: String = row.try_get("", "key")?;
-                let value: String = row.try_get("", "value")?;
-                Ok(KeyFact { key, value })
+        let mut seen_keys: std::collections::HashSet<String> = Default::default();
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                if seen_keys.insert(row.key.clone()) {
+                    Some(KeyFact {
+                        key: row.key,
+                        value: row.value,
+                    })
+                } else {
+                    None
+                }
             })
-            .collect()
+            .collect())
     }
 
     /// Inserts or updates a keyfact for a card.
@@ -532,17 +519,43 @@ impl MemoryStore {
         use sea_orm::ActiveModelTrait;
         use sea_orm::ActiveValue::Set;
 
-        let now = Utc::now().to_rfc3339();
-        let new_fact = entities::conversation_keyfacts::ActiveModel {
-            card_name: Set(card_name.to_string()),
-            summary_id: Set(Some(0)),
-            key: Set(key.to_string()),
-            value: Set(value.to_string()),
-            created_at: Set(now),
-            ..Default::default()
-        };
+        let now = Utc::now();
+        let card_name = card_name.to_string();
+        let key = key.to_string();
+        let value = value.to_string();
 
-        new_fact.insert(&self.db).await?;
+        self.db
+            .transaction::<_, (), MemoryError>(|txn| {
+                let card_name = card_name.clone();
+                let key = key.clone();
+                let value = value.clone();
+                Box::pin(async move {
+                    entities::conversation_keyfacts::Entity::delete_many()
+                        .filter(entities::conversation_keyfacts::Column::CardName.eq(&card_name))
+                        .filter(entities::conversation_keyfacts::Column::Key.eq(&key))
+                        .exec(txn)
+                        .await?;
+
+                    let new_fact = entities::conversation_keyfacts::ActiveModel {
+                        card_name: Set(card_name),
+                        summary_id: Set(Some(0)),
+                        key: Set(key),
+                        value: Set(value),
+                        created_at: Set(now),
+                        ..Default::default()
+                    };
+                    new_fact.insert(txn).await?;
+
+                    Ok(())
+                })
+            })
+            .await
+            .map_err(|e| match e {
+                sea_orm::TransactionError::Connection(db_err) => {
+                    MemoryError::MemoryStoreError(db_err)
+                }
+                sea_orm::TransactionError::Transaction(e) => e,
+            })?;
 
         Ok(())
     }
@@ -582,7 +595,7 @@ impl MemoryStore {
         use sea_orm::ActiveModelTrait;
         use sea_orm::ActiveValue::Set;
 
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now();
         let new_log = entities::conversation_logs::ActiveModel {
             session_id: Set(session_id.to_string()),
             card_name: Set(card_name.to_string()),
@@ -609,14 +622,14 @@ impl MemoryStore {
         use sea_orm::ActiveModelTrait;
         use sea_orm::ActiveValue::Set;
 
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now();
         let txn = self.db.begin().await?;
         let user_log = entities::conversation_logs::ActiveModel {
             session_id: Set(session_id.to_string()),
             card_name: Set(card_name.to_string()),
             role: Set("user".to_string()),
             content: Set(user_message.to_string()),
-            created_at: Set(now.clone()),
+            created_at: Set(now),
             ..Default::default()
         };
         let user_res = user_log.insert(&txn).await?;
@@ -665,7 +678,7 @@ impl MemoryStore {
     pub async fn get_logs_by_session(
         &self,
         session_id: &str,
-    ) -> Result<Vec<(String, String, String)>, MemoryError> {
+    ) -> Result<Vec<(String, String, DateTime<Utc>)>, MemoryError> {
         let rows = entities::conversation_logs::Entity::find()
             .filter(entities::conversation_logs::Column::SessionId.eq(session_id))
             .order_by_asc(entities::conversation_logs::Column::CreatedAt)
@@ -700,7 +713,7 @@ impl MemoryStore {
 
         validate_embedding(embedding, self.embedding_dim)?;
 
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now();
         let embedding_bytes = embedding_to_bytes(embedding);
 
         let new_embedding = entities::tool_embedding_index::ActiveModel {
@@ -914,7 +927,7 @@ impl MemoryStore {
         use entities::affect_states::{ActiveModel, Entity};
         use sea_orm::EntityTrait;
 
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now();
         let discrete_json = serde_json::to_string(&state.discrete_emotions)
             .map_err(|e| MemoryError::Other(e.to_string()))?;
 
@@ -970,7 +983,7 @@ impl MemoryStore {
         use sea_orm::ActiveModelTrait;
         use sea_orm::ActiveValue::Set;
 
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now();
         let active = entities::typed_memories::ActiveModel {
             scope: Set(item.scope.as_str().to_string()),
             character_id: Set(item.character_id.clone()),
@@ -987,10 +1000,10 @@ impl MemoryStore {
             relationship_impact: Set(item.relationship_impact),
             access_count: Set(0),
             last_accessed_at: Set(None),
-            created_at: Set(now.clone()),
+            created_at: Set(now),
             updated_at: Set(now),
-            valid_from: Set(item.valid_from.map(|dt| dt.to_rfc3339())),
-            valid_until: Set(item.valid_until.map(|dt| dt.to_rfc3339())),
+            valid_from: Set(item.valid_from),
+            valid_until: Set(item.valid_until),
             status: Set(item.status.as_str().to_string()),
             supersedes_id: Set(item.supersedes_id),
             ..Default::default()
@@ -1070,81 +1083,114 @@ impl MemoryStore {
         limit: usize,
         similarity_threshold: f32,
     ) -> Result<Vec<(crate::MemoryItem, f32)>, MemoryError> {
+        #[derive(Debug, FromQueryResult)]
+        struct SearchMemoryRow {
+            id: i64,
+            scope: String,
+            character_id: String,
+            user_id: String,
+            kind: String,
+            title: String,
+            content: String,
+            source: String,
+            source_ref: Option<String>,
+            confidence: f32,
+            salience: f32,
+            affective_valence: f32,
+            affective_arousal: f32,
+            relationship_impact: f32,
+            access_count: i64,
+            last_accessed_at: Option<DateTime<Utc>>,
+            created_at: DateTime<Utc>,
+            updated_at: DateTime<Utc>,
+            valid_from: Option<DateTime<Utc>>,
+            valid_until: Option<DateTime<Utc>>,
+            status: String,
+            supersedes_id: Option<i64>,
+            similarity: f64,
+        }
+
         let query_bytes = embedding_to_bytes(query_embedding);
-        let stmt = sea_orm::Statement::from_sql_and_values(
-            sea_orm::DatabaseBackend::Sqlite,
-            "SELECT \
-             tm.id, tm.scope, tm.character_id, tm.user_id, tm.kind, \
-             tm.title, tm.content, tm.source, tm.source_ref, \
-             tm.confidence, tm.salience, tm.affective_valence, tm.affective_arousal, \
-             tm.relationship_impact, tm.access_count, tm.last_accessed_at, \
-             tm.created_at, tm.updated_at, tm.valid_from, tm.valid_until, \
-             tm.status, tm.supersedes_id, \
-             1.0 - vec_distance_cosine(me.embedding, ?) AS similarity \
-             FROM typed_memories tm \
-             INNER JOIN memory_embeddings me ON me.memory_item_id = tm.id \
-             WHERE tm.character_id = ? \
-               AND tm.status = 'active' \
-               AND me.model_name = ? \
-               AND me.field = 'content' \
-               AND 1.0 - vec_distance_cosine(me.embedding, ?) >= ? \
-             ORDER BY similarity DESC \
-             LIMIT ?",
-            vec![
-                query_bytes.clone().into(),
-                character_id.into(),
-                model_name.into(),
-                query_bytes.into(),
-                f64::from(similarity_threshold).into(),
-                (limit as u64).into(),
-            ],
+        let similarity_expr = Expr::cust_with_values(
+            "1.0 - vec_distance_cosine(memory_embeddings.embedding, ?)",
+            vec![query_bytes.clone()],
         );
 
-        let rows = self.db.query_all_raw(stmt).await?;
+        let threshold_val = f64::from(similarity_threshold);
+        let limit_val = limit as u64;
+
+        let select = entities::memory_embeddings::Entity::find()
+            .inner_join(entities::typed_memories::Entity)
+            .select_only()
+            .column(entities::typed_memories::Column::Id)
+            .column(entities::typed_memories::Column::Scope)
+            .column(entities::typed_memories::Column::CharacterId)
+            .column(entities::typed_memories::Column::UserId)
+            .column(entities::typed_memories::Column::Kind)
+            .column(entities::typed_memories::Column::Title)
+            .column(entities::typed_memories::Column::Content)
+            .column(entities::typed_memories::Column::Source)
+            .column(entities::typed_memories::Column::SourceRef)
+            .column(entities::typed_memories::Column::Confidence)
+            .column(entities::typed_memories::Column::Salience)
+            .column(entities::typed_memories::Column::AffectiveValence)
+            .column(entities::typed_memories::Column::AffectiveArousal)
+            .column(entities::typed_memories::Column::RelationshipImpact)
+            .column(entities::typed_memories::Column::AccessCount)
+            .column(entities::typed_memories::Column::LastAccessedAt)
+            .column(entities::typed_memories::Column::CreatedAt)
+            .column(entities::typed_memories::Column::UpdatedAt)
+            .column(entities::typed_memories::Column::ValidFrom)
+            .column(entities::typed_memories::Column::ValidUntil)
+            .column(entities::typed_memories::Column::Status)
+            .column(entities::typed_memories::Column::SupersedesId)
+            .expr_as(similarity_expr, "similarity")
+            .filter(entities::typed_memories::Column::CharacterId.eq(character_id))
+            .filter(entities::typed_memories::Column::Status.eq("active"))
+            .filter(entities::memory_embeddings::Column::ModelName.eq(model_name))
+            .filter(entities::memory_embeddings::Column::Field.eq("content"))
+            .filter(Expr::cust_with_values(
+                "1.0 - vec_distance_cosine(memory_embeddings.embedding, ?) >= ?",
+                vec![
+                    sea_orm::Value::from(query_bytes),
+                    sea_orm::Value::from(threshold_val),
+                ],
+            ))
+            .order_by_desc(Expr::col("similarity"))
+            .limit(limit_val);
+
+        let rows = select.into_model::<SearchMemoryRow>().all(&self.db).await?;
+
         rows.into_iter()
             .map(|row| {
-                let similarity: f64 = row.try_get("", "similarity")?;
-                let created_at: String = row.try_get("", "created_at")?;
-                let updated_at: String = row.try_get("", "updated_at")?;
-                let valid_from: Option<String> = row.try_get("", "valid_from")?;
-                let valid_until: Option<String> = row.try_get("", "valid_until")?;
-                let last_accessed_at: Option<String> = row.try_get("", "last_accessed_at")?;
                 Ok((
                     crate::MemoryItem {
-                        id: Some(row.try_get("", "id")?),
-                        scope: str_to_scope(&row.try_get::<String>("", "scope")?),
-                        character_id: row.try_get("", "character_id")?,
-                        user_id: row.try_get("", "user_id")?,
-                        kind: str_to_kind(&row.try_get::<String>("", "kind")?),
-                        title: row.try_get("", "title")?,
-                        content: row.try_get("", "content")?,
-                        source: str_to_source(&row.try_get::<String>("", "source")?),
-                        source_ref: row.try_get("", "source_ref")?,
-                        confidence: crate::MemoryConfidence::new(row.try_get("", "confidence")?),
-                        salience: crate::MemorySalience::new(row.try_get("", "salience")?),
+                        id: Some(row.id),
+                        scope: str_to_scope(&row.scope),
+                        character_id: row.character_id,
+                        user_id: row.user_id,
+                        kind: str_to_kind(&row.kind),
+                        title: row.title,
+                        content: row.content,
+                        source: str_to_source(&row.source),
+                        source_ref: row.source_ref,
+                        confidence: crate::MemoryConfidence::new(row.confidence),
+                        salience: crate::MemorySalience::new(row.salience),
                         affect: crate::AffectAnnotation {
-                            valence: row.try_get("", "affective_valence")?,
-                            arousal: row.try_get("", "affective_arousal")?,
+                            valence: row.affective_valence,
+                            arousal: row.affective_arousal,
                         },
-                        relationship_impact: row.try_get("", "relationship_impact")?,
-                        access_count: row.try_get("", "access_count")?,
-                        last_accessed_at: last_accessed_at
-                            .as_deref()
-                            .and_then(|s| parse_dt(s).ok()),
-                        created_at: parse_dt(&created_at).unwrap_or_else(|e| {
-                            tracing::warn!(error = %e, memory_id = row.try_get::<i64>("", "id").unwrap_or(-1), "corrupt created_at in DB, falling back to now");
-                            Utc::now()
-                        }),
-                        updated_at: parse_dt(&updated_at).unwrap_or_else(|e| {
-                            tracing::warn!(error = %e, memory_id = row.try_get::<i64>("", "id").unwrap_or(-1), "corrupt updated_at in DB, falling back to now");
-                            Utc::now()
-                        }),
-                        valid_from: valid_from.as_deref().and_then(|s| parse_dt(s).ok()),
-                        valid_until: valid_until.as_deref().and_then(|s| parse_dt(s).ok()),
-                        status: str_to_status(&row.try_get::<String>("", "status")?),
-                        supersedes_id: row.try_get("", "supersedes_id")?,
+                        relationship_impact: row.relationship_impact,
+                        access_count: row.access_count,
+                        last_accessed_at: row.last_accessed_at,
+                        created_at: row.created_at,
+                        updated_at: row.updated_at,
+                        valid_from: row.valid_from,
+                        valid_until: row.valid_until,
+                        status: str_to_status(&row.status),
+                        supersedes_id: row.supersedes_id,
                     },
-                    similarity as f32,
+                    row.similarity as f32,
                 ))
             })
             .collect()
@@ -1158,7 +1204,7 @@ impl MemoryStore {
     ) -> Result<bool, MemoryError> {
         use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
 
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now();
         let maybe_model = entities::typed_memories::Entity::find_by_id(id)
             .one(&self.db)
             .await?;
@@ -1176,16 +1222,22 @@ impl MemoryStore {
 
     /// Bump the access count and last-accessed timestamp for a typed memory.
     pub async fn bump_typed_memory_access(&self, id: i64) -> Result<bool, MemoryError> {
-        let now = Utc::now().to_rfc3339();
-        let result = self
-            .db
-            .execute_raw(sea_orm::Statement::from_sql_and_values(
-                sea_orm::DatabaseBackend::Sqlite,
-                "UPDATE typed_memories SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?",
-                [now.into(), id.into()],
-            ))
+        use sea_orm::ExprTrait;
+
+        let now = Utc::now();
+        let result = entities::typed_memories::Entity::update_many()
+            .col_expr(
+                entities::typed_memories::Column::AccessCount,
+                Expr::col(entities::typed_memories::Column::AccessCount).add(1),
+            )
+            .col_expr(
+                entities::typed_memories::Column::LastAccessedAt,
+                Expr::value(now),
+            )
+            .filter(entities::typed_memories::Column::Id.eq(id))
+            .exec(&self.db)
             .await?;
-        Ok(result.rows_affected() > 0)
+        Ok(result.rows_affected > 0)
     }
 
     /// Store a content embedding for a typed memory item.
@@ -1201,7 +1253,7 @@ impl MemoryStore {
 
         validate_embedding(embedding, self.embedding_dim)?;
 
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now();
         let embedding_bytes = embedding_to_bytes(embedding);
 
         let active = entities::memory_embeddings::ActiveModel {
@@ -1288,7 +1340,7 @@ mod tests {
                 value: "ramen".to_string(),
             },
         ];
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now();
 
         for f in &facts {
             let new_fact = entities::conversation_keyfacts::ActiveModel {
@@ -1327,7 +1379,7 @@ mod tests {
             .await
             .unwrap();
 
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now();
         let new_fact = entities::conversation_keyfacts::ActiveModel {
             card_name: sea_orm::ActiveValue::Set("char".to_string()),
             summary_id: sea_orm::ActiveValue::Set(Some(summary_id)),
@@ -1353,7 +1405,7 @@ mod tests {
             .await
             .unwrap();
 
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now();
         for (k, v) in &[("job", "engineer"), ("hobby", "guitar")] {
             let new_fact = entities::conversation_keyfacts::ActiveModel {
                 card_name: sea_orm::ActiveValue::Set("char".to_string()),
