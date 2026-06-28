@@ -11,7 +11,7 @@ ene-tool-derive = { workspace = true }
 enigo = "0.6"
 xcap = "0.9.6"
 active-win-pos-rs = "0.11.0"
-base64 = { workspace = true }
+base64 = { workspace = true, features = ["std"] }
 image = "0.25"
 tokio = { workspace = true }
 serde_json = { workspace = true }

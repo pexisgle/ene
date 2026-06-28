@@ -11,7 +11,7 @@
 //! scaled by `viewport_height / 2` and `viewport_height / 2 *
 //! aspect`, ray intersected with the plane through the head with
 //! normal `camera_forward` (world space).
-use glam::{Mat4, Vec2, Vec3};
+use glam::{Vec2, Vec3};
 
 /// Look-at state. Owned by `CharacterRenderer` so it survives
 /// across frames.
@@ -77,7 +77,7 @@ pub fn compute_world_target(
     smoothing: f32,
 ) -> Vec3 {
     let ndc = cursor_logical_to_ndc(cursor_logical, viewport_size);
-    let view = Mat4::look_at_rh(camera_eye, camera_target, camera_up);
+    let view = glam::camera::rh::view::look_at_mat4(camera_eye, camera_target, camera_up);
     let head_view = view.transform_point3(head_world);
     let aspect = (viewport_size.0 as f32 / viewport_size.1 as f32).max(0.0001);
     let view_pos =

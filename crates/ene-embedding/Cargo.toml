@@ -19,7 +19,7 @@ tracing = { workspace = true }
 ene-config = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-hf-hub = { workspace = true }
+hf-hub = { workspace = true, features = ["rustls-tls"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 hf-hub = { workspace = true }

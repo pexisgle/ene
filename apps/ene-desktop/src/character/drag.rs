@@ -134,7 +134,7 @@ pub fn cursor_logical_to_world_2d(
     }
     let ndc = ene_vrm::pixel_to_ndc(cursor_logical.x, cursor_logical.y, viewport);
     let view_pos = ene_vrm::ndc_to_view_pos(ndc, viewport, 0.0);
-    let view = Mat4::look_at_rh(camera_eye, camera_target, camera_up);
+    let view = glam::camera::rh::view::look_at_mat4(camera_eye, camera_target, camera_up);
     let world_3d = ene_vrm::view_pos_to_world(view_pos, view);
     Some(Vec2::new(world_3d.x, world_3d.y))
 }

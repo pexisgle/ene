@@ -14,11 +14,18 @@ pub struct DiscreteEmotion {
 
 impl DiscreteEmotion {
     /// Create a new discrete emotion with intensity clamped to [0.0, 1.0].
+    ///
+    /// NaN and infinite inputs are clamped to 0.0.
     #[must_use]
     pub fn new(label: impl Into<String>, intensity: f32) -> Self {
+        let intensity = if intensity.is_finite() {
+            intensity.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         Self {
             label: label.into(),
-            intensity: intensity.clamp(0.0, 1.0),
+            intensity,
         }
     }
 }
@@ -84,17 +91,30 @@ impl AffectState {
     }
 
     /// Clamp all PAD and metric values to their valid ranges.
+    ///
+    /// NaN and infinite inputs are replaced with 0.0.
     pub fn clamp(&mut self) {
-        self.valence = self.valence.clamp(-1.0, 1.0);
-        self.arousal = self.arousal.clamp(-1.0, 1.0);
-        self.dominance = self.dominance.clamp(-1.0, 1.0);
-        self.trust = self.trust.clamp(-1.0, 1.0);
-        self.affinity = self.affinity.clamp(-1.0, 1.0);
-        self.irritation = self.irritation.clamp(0.0, 1.0);
-        self.curiosity = self.curiosity.clamp(0.0, 1.0);
-        self.fatigue = self.fatigue.clamp(0.0, 1.0);
+        fn clamp_finite(v: &mut f32, min: f32, max: f32) {
+            if v.is_finite() {
+                *v = v.clamp(min, max);
+            } else {
+                *v = 0.0;
+            }
+        }
+        clamp_finite(&mut self.valence, -1.0, 1.0);
+        clamp_finite(&mut self.arousal, -1.0, 1.0);
+        clamp_finite(&mut self.dominance, -1.0, 1.0);
+        clamp_finite(&mut self.trust, -1.0, 1.0);
+        clamp_finite(&mut self.affinity, -1.0, 1.0);
+        clamp_finite(&mut self.irritation, 0.0, 1.0);
+        clamp_finite(&mut self.curiosity, 0.0, 1.0);
+        clamp_finite(&mut self.fatigue, 0.0, 1.0);
         for emo in &mut self.discrete_emotions {
-            emo.intensity = emo.intensity.clamp(0.0, 1.0);
+            if emo.intensity.is_finite() {
+                emo.intensity = emo.intensity.clamp(0.0, 1.0);
+            } else {
+                emo.intensity = 0.0;
+            }
         }
     }
 }

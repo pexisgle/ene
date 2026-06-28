@@ -9,7 +9,7 @@ ene-tool-proto = { workspace = true }
 ene-tool-common = { workspace = true }
 ene-tool-derive = { workspace = true }
 chromiumoxide = "0.9"
-base64 = { workspace = true }
+base64 = { workspace = true, features = ["std"] }
 dashmap = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

@@ -901,7 +901,7 @@ impl Runtime {
                 let camera_distance = (camera_eye - camera_target).length();
                 #[cfg_attr(target_os = "windows", expect(unused_variables))]
                 let view_z = -camera_distance;
-                let cam_view = glam::Mat4::look_at_rh(
+                let cam_view = glam::camera::rh::view::look_at_mat4(
                     camera_eye,
                     camera_target,
                     ene_vrm::camera::DEFAULT_UP.into(),

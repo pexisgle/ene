@@ -112,12 +112,14 @@ impl OrthographicCamera {
         let view = self.debug_view();
         let half_h = self.viewport_height * 0.5;
         let half_w = half_h * self.aspect;
-        // glam's `orthographic_rh` expects `near` and `far` to be
+        // glam's `orthographic` expects `near` and `far` to be
         // **positive** distances from the camera plane. A negative
         // `near` shifts the depth range so that geometry between
         // the camera and the original near plane is clipped —
         // making the model look like a tiny silhouette.
-        let proj = Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, 0.1, 100.0);
+        let proj = glam::camera::rh::proj::directx::orthographic(
+            -half_w, half_w, -half_h, half_h, 0.1, 100.0,
+        );
         Ok(CameraUniform {
             view_proj: (proj * view).to_cols_array_2d(),
             camera_pos: [self.eye[0], self.eye[1], self.eye[2], 1.0],
@@ -129,7 +131,7 @@ impl OrthographicCamera {
     /// it without having to plumb the private eye/target/up
     /// fields out to the desktop app.
     pub fn debug_view(&self) -> Mat4 {
-        Mat4::look_at_rh(self.eye.into(), self.target.into(), self.up.into())
+        glam::camera::rh::view::look_at_mat4(self.eye.into(), self.target.into(), self.up.into())
     }
 
     /// Diagnostic: just the orthographic projection
@@ -138,7 +140,7 @@ impl OrthographicCamera {
     pub fn debug_proj(&self) -> Mat4 {
         let half_h = self.viewport_height * 0.5;
         let half_w = half_h * self.aspect;
-        Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, 0.1, 100.0)
+        glam::camera::rh::proj::directx::orthographic(-half_w, half_w, -half_h, half_h, 0.1, 100.0)
     }
 }
 
@@ -318,14 +320,16 @@ mod tests {
     }
 
     /// diagnostic: confirm what glam's
-    /// `orthographic_rh(-half_w, half_w, -half_h, half_h, 0.1, 100.0)`
+    /// `orthographic(-half_w, half_w, -half_h, half_h, 0.1, 100.0)`
     /// actually produces, so the-diag log can be
     /// interpreted correctly. Just prints the matrix.
     #[test]
     fn orthographic_rh_diag_640x480() {
         let half_h = 2.6 * 0.5;
         let half_w = half_h * 1.3333333;
-        let p = Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, 0.1, 100.0);
+        let p = glam::camera::rh::proj::directx::orthographic(
+            -half_w, half_w, -half_h, half_h, 0.1, 100.0,
+        );
         println!("P = {p:?}");
     }
 

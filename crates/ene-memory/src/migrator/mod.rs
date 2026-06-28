@@ -619,17 +619,6 @@ impl MigrationTrait for Migration2 {
             )
             .await?;
 
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_memory_embedding_item")
-                    .table(MemoryEmbeddings::Table)
-                    .col(MemoryEmbeddings::MemoryItemId)
-                    .to_owned(),
-            )
-            .await?;
-
         // 3. memory_links
         manager
             .create_table(

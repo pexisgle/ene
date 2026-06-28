@@ -53,8 +53,14 @@ fn bytes_to_embedding(b: &[u8]) -> Vec<f32> {
 
 const COSINE_SIMILARITY_SQL: &str = "1.0 - vec_distance_cosine";
 
+const ALLOWED_EMBEDDING_COLS: &[&str] = &["embedding", "memory_embeddings.embedding"];
+
 fn cosine_similarity_expr(embedding_col: &str, query_bytes: &[u8]) -> sea_orm::sea_query::Expr {
     use sea_orm::sea_query::Expr;
+    assert!(
+        ALLOWED_EMBEDDING_COLS.contains(&embedding_col),
+        "unexpected embedding column: {embedding_col}"
+    );
     let sql = format!("{COSINE_SIMILARITY_SQL}({embedding_col}, ?)");
     Expr::cust_with_values(sql, vec![query_bytes.to_vec()])
 }
@@ -65,6 +71,10 @@ fn cosine_similarity_filter(
     threshold: f64,
 ) -> sea_orm::sea_query::Expr {
     use sea_orm::sea_query::Expr;
+    assert!(
+        ALLOWED_EMBEDDING_COLS.contains(&embedding_col),
+        "unexpected embedding column: {embedding_col}"
+    );
     let sql = format!("{COSINE_SIMILARITY_SQL}({embedding_col}, ?) >= ?");
     Expr::cust_with_values(
         sql,
@@ -207,9 +217,7 @@ fn str_to_status(s: &str) -> crate::MemoryStatus {
 ///   writers wait for the lock instead of failing with
 ///   `database is locked` immediately.
 /// * `foreign_keys=ON` enables enforcement of foreign-key
-///   constraints, in particular
-///   `conversation_keyfacts.summary_id` →
-///   `conversation_summaries.id`.
+///   constraints declared in migrations.
 async fn apply_pragmas(db: &DatabaseConnection) -> Result<(), MemoryError> {
     const STATEMENTS: &[&str] = &[
         "PRAGMA journal_mode = WAL",
@@ -252,9 +260,7 @@ impl MemoryStore {
     /// The connection has `journal_mode=WAL`, `busy_timeout=5000`, and
     /// `foreign_keys=ON` set on every pooled connection. WAL lets readers
     /// proceed concurrently with a writer; the busy timeout avoids
-    /// spurious `database is locked` errors under contention; and the FK
-    /// pragma makes the `conversation_keyfacts.summary_id` reference
-    /// actually enforced.
+    /// spurious `database is locked` errors under contention.
     pub async fn open(path: &Path, embedding_dim: usize) -> Result<Self, MemoryError> {
         let path_str = path
             .to_str()
@@ -384,6 +390,8 @@ impl MemoryStore {
         limit: usize,
         similarity_threshold: f32,
     ) -> Result<Vec<RecalledSummary>, MemoryError> {
+        validate_embedding(query_embedding, self.embedding_dim)?;
+
         #[derive(Debug, FromQueryResult)]
         struct SearchSummaryResultRow {
             id: i64,
@@ -846,6 +854,8 @@ impl MemoryStore {
             similarity: f64,
         }
 
+        validate_embedding(query_embedding, self.embedding_dim)?;
+
         let query_bytes = embedding_to_bytes(query_embedding);
         let similarity_expr = cosine_similarity_expr("embedding", &query_bytes);
 
@@ -915,7 +925,15 @@ impl MemoryStore {
         match maybe_model {
             Some(model) => {
                 let discrete_emotions: Vec<crate::DiscreteEmotion> =
-                    serde_json::from_str(&model.discrete_emotions).unwrap_or_default();
+                    serde_json::from_str(&model.discrete_emotions).unwrap_or_else(|e| {
+                        tracing::error!(
+                            component = "MemoryStore",
+                            character_id = %model.character_id,
+                            error = %e,
+                            "Failed to deserialize discrete_emotions, returning empty list"
+                        );
+                        Vec::new()
+                    });
                 Ok(crate::AffectState {
                     character_id: model.character_id,
                     user_id: model.user_id,
@@ -938,52 +956,56 @@ impl MemoryStore {
 
     /// Persist or update an [`crate::AffectState`].
     pub async fn upsert_affect_state(&self, state: &crate::AffectState) -> Result<(), MemoryError> {
-        use entities::affect_states::{ActiveModel, Entity};
-        use sea_orm::EntityTrait;
+        use entities::affect_states::{ActiveModel, Column, Entity};
+        use sea_orm::sea_query::OnConflict;
+
+        let mut state = state.clone();
+        state.clamp();
 
         let now = Utc::now();
         let discrete_json = serde_json::to_string(&state.discrete_emotions)
             .map_err(|e| MemoryError::Other(e.to_string()))?;
 
-        let existing = Entity::find_by_id(&state.character_id)
-            .one(&self.db)
+        let active = ActiveModel {
+            character_id: sea_orm::Set(state.character_id),
+            user_id: sea_orm::Set(state.user_id),
+            valence: sea_orm::Set(state.valence),
+            arousal: sea_orm::Set(state.arousal),
+            dominance: sea_orm::Set(state.dominance),
+            trust: sea_orm::Set(state.trust),
+            affinity: sea_orm::Set(state.affinity),
+            irritation: sea_orm::Set(state.irritation),
+            curiosity: sea_orm::Set(state.curiosity),
+            fatigue: sea_orm::Set(state.fatigue),
+            mood_label: sea_orm::Set(state.mood_label),
+            last_expression: sea_orm::Set(state.last_expression),
+            discrete_emotions: sea_orm::Set(discrete_json),
+            updated_at: sea_orm::Set(now),
+        };
+
+        Entity::insert(active)
+            .on_conflict(
+                OnConflict::column(Column::CharacterId)
+                    .update_columns([
+                        Column::UserId,
+                        Column::Valence,
+                        Column::Arousal,
+                        Column::Dominance,
+                        Column::Trust,
+                        Column::Affinity,
+                        Column::Irritation,
+                        Column::Curiosity,
+                        Column::Fatigue,
+                        Column::MoodLabel,
+                        Column::LastExpression,
+                        Column::DiscreteEmotions,
+                        Column::UpdatedAt,
+                    ])
+                    .to_owned(),
+            )
+            .exec(&self.db)
             .await?;
 
-        if let Some(model) = existing {
-            let mut active: ActiveModel = model.into();
-            active.user_id = sea_orm::Set(state.user_id.clone());
-            active.valence = sea_orm::Set(state.valence);
-            active.arousal = sea_orm::Set(state.arousal);
-            active.dominance = sea_orm::Set(state.dominance);
-            active.trust = sea_orm::Set(state.trust);
-            active.affinity = sea_orm::Set(state.affinity);
-            active.irritation = sea_orm::Set(state.irritation);
-            active.curiosity = sea_orm::Set(state.curiosity);
-            active.fatigue = sea_orm::Set(state.fatigue);
-            active.mood_label = sea_orm::Set(state.mood_label.clone());
-            active.last_expression = sea_orm::Set(state.last_expression.clone());
-            active.discrete_emotions = sea_orm::Set(discrete_json);
-            active.updated_at = sea_orm::Set(now);
-            Entity::update(active).exec(&self.db).await?;
-        } else {
-            let active = ActiveModel {
-                character_id: sea_orm::Set(state.character_id.clone()),
-                user_id: sea_orm::Set(state.user_id.clone()),
-                valence: sea_orm::Set(state.valence),
-                arousal: sea_orm::Set(state.arousal),
-                dominance: sea_orm::Set(state.dominance),
-                trust: sea_orm::Set(state.trust),
-                affinity: sea_orm::Set(state.affinity),
-                irritation: sea_orm::Set(state.irritation),
-                curiosity: sea_orm::Set(state.curiosity),
-                fatigue: sea_orm::Set(state.fatigue),
-                mood_label: sea_orm::Set(state.mood_label.clone()),
-                last_expression: sea_orm::Set(state.last_expression.clone()),
-                discrete_emotions: sea_orm::Set(discrete_json),
-                updated_at: sea_orm::Set(now),
-            };
-            Entity::insert(active).exec(&self.db).await?;
-        }
         Ok(())
     }
 
@@ -1126,6 +1148,8 @@ impl MemoryStore {
 
         let query_bytes = embedding_to_bytes(query_embedding);
         let similarity_expr = cosine_similarity_expr("memory_embeddings.embedding", &query_bytes);
+
+        validate_embedding(query_embedding, self.embedding_dim)?;
 
         let threshold_val = f64::from(similarity_threshold);
         let limit_val = limit as u64;
