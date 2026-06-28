@@ -346,6 +346,92 @@ GUI-specific settings for the desktop application. Only available when running `
 | `graphics.antialiasing_mode` | string | `"fxaa"` | Antialiasing mode |
 | `graphics.debug_fps` | int | `30` | Debug update throttle rate (FPS; 0 = no throttle) |
 
+### `cognition` — Cognitive Runtime
+
+Configuration for the Ene Cognitive Runtime, controlling context budget, memory extraction/retention, emotion processing, and character compilation.
+
+> **Note:** This section is part of the [Ene Cognitive Runtime](../architecture/cognitive-runtime.md) redesign. When `cognition.enabled` is `true`, the cognitive runtime replaces the legacy streaming pipeline (planned Phase 10 integration).
+
+```json
+{
+  "cognition": {
+    "enabled": true,
+    "context": {
+      "max_prompt_tokens": 12000,
+      "recent_turns": 8,
+      "scene_summary_tokens": 800,
+      "memory_budget_tokens": 1800,
+      "semantic_budget_tokens": 1200,
+      "style_example_budget_tokens": 600
+    },
+    "memory": {
+      "write_every_turn": true,
+      "hybrid_search": true,
+      "decay_enabled": true,
+      "default_forgetting_half_life_days": 30.0,
+      "min_confidence_to_persist": 0.65
+    },
+    "emotion": {
+      "enabled": true,
+      "engine": "hybrid",
+      "decay_half_life_minutes": 30.0,
+      "expression_hysteresis_seconds": 4.0,
+      "llm_can_propose_expression": true,
+      "llm_expression_is_advisory": true
+    },
+    "character": {
+      "compile_ccv3_to_semantic_memory": true,
+      "always_include_identity_kernel": true,
+      "style_retrieval": true
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable the cognitive runtime. When false, falls back to the legacy streaming pipeline. |
+
+#### `cognition.context` — Context Budget
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_prompt_tokens` | int | `12000` | Maximum total prompt tokens across all sections |
+| `recent_turns` | int | `8` | Number of recent conversation turns in the prompt |
+| `scene_summary_tokens` | int | `800` | Token budget for the scene/summary section |
+| `memory_budget_tokens` | int | `1800` | Token budget for recalled memories |
+| `semantic_budget_tokens` | int | `1200` | Token budget for semantic (lorebook) memory |
+| `style_example_budget_tokens` | int | `600` | Token budget for style examples from CCv3 lorebook |
+
+#### `cognition.memory` — Memory Extraction & Retention
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `write_every_turn` | bool | `true` | Extract and persist memory on every turn |
+| `hybrid_search` | bool | `true` | Use hybrid search (vector + recency + salience + confidence) |
+| `decay_enabled` | bool | `true` | Enable time-based memory decay |
+| `default_forgetting_half_life_days` | float | `30.0` | Default half-life in days for memory decay |
+| `min_confidence_to_persist` | float | `0.65` | Minimum confidence threshold (0.0–1.0) for persisting a memory |
+
+#### `cognition.emotion` — Emotion Engine
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable emotion processing |
+| `engine` | string | `"hybrid"` | Engine mode: `"deterministic"`, `"llm"`, or `"hybrid"` |
+| `decay_half_life_minutes` | float | `30.0` | Half-life in minutes for affect decay |
+| `expression_hysteresis_seconds` | float | `4.0` | Minimum seconds between expression changes (prevents flickering) |
+| `llm_can_propose_expression` | bool | `true` | Allow the LLM to propose expression tokens |
+| `llm_expression_is_advisory` | bool | `true` | Treat LLM expression proposals as advisory only (not commands) |
+
+#### `cognition.character` — Character Compilation
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `compile_ccv3_to_semantic_memory` | bool | `true` | Compile CCv3 lorebook entries into the semantic memory index |
+| `always_include_identity_kernel` | bool | `true` | Always include the Identity Kernel at the top of every prompt |
+| `style_retrieval` | bool | `true` | Enable retrieval of character style examples from lorebook |
+
 ## Tool-Specific Configuration
 
 Tool-specific settings are stored inside `tools.tools.<name>.config` and vary per tool.

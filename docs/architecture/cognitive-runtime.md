@@ -1,0 +1,190 @@
+# ADR: Ene Cognitive Runtime Architecture
+
+- **Status:** Proposed
+- **Date:** 2026-06-28
+- **Epic:** #63 — Redesign AI runtime as Ene Cognitive Runtime
+
+## Context & Problem
+
+The current Ene AI runtime bundles conversation history, long-term memory, emotions, and prompt construction into a relatively simple pipeline. This creates several issues for a long-running AI Companion / AITuber experience:
+
+1. **Emotion control depends heavily on LLM `<|emo:name|>` tokens.** There is no engine-side persistent emotional state; if the LLM omits the token, the expression does not update.
+2. **Memory is limited to `conversation_summaries` / `conversation_keyfacts`.** There is no support for memory kind, confidence, recency, emotional salience, or contradiction resolution.
+3. **Session splits fragment memory and conversation continuity.** Summaries are created at split boundaries, and each split resets the session, losing the sense of an ongoing relationship.
+4. **The prompt layer structure is weak.** Long contexts cause Character Drift — the LLM gradually forgets the character's core identity as the prompt fills with history.
+5. **CCv3 lorebook / semantic settings are underutilized.** They are only included as inline text, not indexed for semantic retrieval.
+6. **Forgetting is a hard delete.** The experience is "the memory vanished"—there is no faded / archived / superseded lifecycle.
+7. **Codex-style explicit state (context packing, task ledger, tool result grounding) is not integrated** into the companion experience.
+
+## Decision
+
+**Adopt the Ene Cognitive Runtime architecture.** Treat the LLM not as the entity that implicitly holds personality and memory, but as an **engine that generates natural utterances from an explicit cognitive state managed by Ene**.
+
+Ene will explicitly manage:
+- Identity Kernel
+- Typed Memory (with lifecycle)
+- Semantic Character Memory
+- Context Compression
+- Recall Planning
+- Affect / Mood / Relationship State
+- Expression Arbitration
+- Memory Writing
+- Context Budget Management
+- Companion Task Ledger
+
+## Crate Boundaries & Responsibilities
+
+| Component | Crate | Responsibility |
+|---|---|---|
+| Identity Kernel | `ene-cognition::character` | Compile CCv3 into an immutable character identity block always present in the prompt |
+| Typed Memory Store | `ene-memory` | CRUD + hybrid search for typed memories (kind, confidence, recency, salience, vector) |
+| Memory Extraction (Deterministic) | `ene-cognition::memory_writer` | Rule-based extraction of facts, preferences, commitments, and procedure memories |
+| Memory Extraction (LLM) | `ene-cognition::memory_writer` | LLM-driven extraction producing `MemoryCandidate` items |
+| Memory Arbiter | `ene-cognition::memory_writer` | Validate candidates against existing memories, compute confidence, deduplicate, resolve contradictions |
+| Recall Planner | `ene-cognition::recall` | Generate a `RecallPlan` with search intent and budget hints; execute hybrid search |
+| Hybrid Search Scoring | `ene-memory` | Score memories by vector similarity + recency + salience + confidence + affect + commitments |
+| Emotion Engine | `ene-cognition::emotion` | Deterministic affect computation from conversation dynamics + optional LLM classifier |
+| Expression Arbiter | `ene-cognition::output` | Map `AffectState` to character expressions with hysteresis and configured constraints |
+| Context Budget Manager | `ene-cognition::context` | Allocate token budgets across `PromptPacket` sections |
+| Context Compression | `ene-cognition::context` | Rolling compression of old conversation turns into memory spans |
+| PromptPacket Composer | `ene-cognition::prompt_packet` | Assemble sectioned prompt packets with independent budget per section |
+| Companion Commitment Ledger | `ene-cognition::commitments` | Track promises, tasks, and follow-ups the companion has made |
+| Conversation History | `ene-session` | Maintain turn history; session splits are phased out in favor of compression triggers |
+| Streaming Integration | `ene-core` | Orchestrate the full turn lifecycle and emit events |
+
+### Dependency Rules
+
+- `ene-cognition` **depends on** `ene-memory`, `ene-config`, `ene-provider`, `ene-common`
+- `ene-cognition` **does NOT depend on** `ene-core` or `ene-session` (prevents circular dependencies)
+- `ene-core` will depend on `ene-cognition` in Phase 10 (#100) to integrate the cognitive runtime into the streaming lifecycle
+- `ene-memory` remains the exclusive owner of `sea-orm` SQLite operations — extraction, arbitration, and recall planning logic lives in `ene-cognition`, not `ene-memory`
+
+## Turn Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Streaming as ene-core (streaming)
+    participant PreTurn as Pre-turn Analyzer
+    participant Recall as Recall Planner
+    participant Emotion as Emotion Engine
+    participant Composer as Context Composer
+    participant LLM
+    participant Arbiter as Output Arbiter
+    participant Writer as Memory Writer
+    participant Store as Cognitive Memory Store
+
+    User->>Streaming: user input
+    Streaming->>PreTurn: pre_turn.analyze(input, history, affect)
+    PreTurn->>Recall: trigger recall planning
+    Recall->>Store: hybrid search (kind, recency, salience, vector)
+    Store-->>Recall: recalled memories + commitments
+    Recall-->>Composer: recall plan
+    PreTurn->>Emotion: update affect from turn dynamics
+    Emotion-->>Composer: affect state
+    Composer->>Composer: build PromptPacket<br/>(Identity Kernel + Recall + Affect + History + Tools)
+    Composer->>LLM: prompt packet
+    LLM-->>Arbiter: raw response + optional expression hints
+    Arbiter->>Arbiter: validate expression, apply hysteresis
+    Arbiter-->>Streaming: text + expression events
+    Streaming-->>User: display output
+    Streaming->>Writer: post-turn write(input, response, affect)
+    Writer->>Writer: extract candidates (deterministic + LLM)
+    Writer->>Store: arbiter validates → write typed memories
+    Writer->>Store: execute forgetting lifecycle
+    Writer->>Emotion: persist affect state changes
+```
+
+### Lifecycle Steps
+
+1. **Pre-turn Analysis** — Assess the user input, current affect state, and recent history to determine the turn's intent, emotional tone, and memory retrieval needs.
+2. **Recall Planning** — Generate a `RecallPlan` with search queries, memory kind filters, and token budget hints. Execute hybrid search against the typed memory store.
+3. **Emotion Update** — Compute the new `AffectState` from turn dynamics (user sentiment, topic valence, relationship cues). Apply decay to previous affect.
+4. **Context Composition** — Build a `PromptPacket` with sectioned layers: Identity Kernel → Recalled Memories → Commitments → Affect State → Scene → Style Examples → History → Current Input.
+5. **LLM Generation** — Send the `PromptPacket` to the LLM provider. The LLM may optionally provide expression hints.
+6. **Output Arbitration** — Validate and map affect+response to character expressions. Apply hysteresis to prevent expression flickering.
+7. **Post-turn Writing** — Run deterministic and LLM extractors to produce `MemoryCandidate` items. The Memory Arbiter validates against existing memories, computes confidence, and writes to the store.
+8. **Forgetting Lifecycle** — Age existing memories according to decay curves. Transition through `active → faded → archived → superseded` statuses.
+
+## Key Terminology
+
+### Identity Kernel
+The immutable character identity block compiled from CCv3 character card data. Always placed at the top of every prompt packet. Contains: name, core personality, system prompt, and explicit behavioral constraints. **Must never be compressed or truncated.**
+
+### Typed Memory
+A memory with an explicit `MemoryKind`:
+- **Episodic** — Specific events / conversations
+- **Semantic** — Facts and knowledge
+- **Procedural** — How-to knowledge and user preferences for actions
+- **Preference** — User likes, dislikes, and traits
+- **Relationship** — Information about the user-companion relationship
+- **Commitment** — Promises, tasks, and follow-ups
+
+### MemoryStatus
+The lifecycle state of a memory:
+- `active` — Currently relevant and retrievable
+- `faded` — Decayed but still retrievable with lower priority
+- `archived` — No longer shown in normal recall but preserved
+- `superseded` — Replaced by a newer, conflicting memory
+
+### AffectState
+Persistent emotional state with dimensions:
+- **Valence** (pleasure — displeasure)
+- **Arousal** (excitement — calm)
+- **Dominance** (control — submission)
+- **Discrete emotions** (joy, sadness, anger, fear, surprise, neutral, etc.) with per-emotion intensity
+
+### PromptPacket
+A sectioned prompt structure where each section has its own token budget, managed by the Context Budget Manager:
+1. Identity Kernel (always first, never truncated)
+2. Recalled Memories
+3. Active Commitments
+4. Current Affect State
+5. Scene / Scenario
+6. Style Examples (from CCv3 lorebook)
+7. Conversation History (most recent N turns)
+8. Current User Input
+
+### RecallPlan
+A query plan generated by the Recall Planner that specifies:
+- Search queries (natural language + embedding)
+- Memory kind filters
+- Token budget allocated for recalled content
+- Minimum recency / confidence / salience thresholds
+
+### Expression Arbiter
+Receives the current `AffectState`, optional LLM expression hints, and character expression definitions. Outputs a resolved expression with:
+- **Hysteresis** — prevents rapid expression changes (configured in seconds)
+- **Advisory mode** — LLM hints are treated as suggestions, not commands, when configured
+
+### Context Compression
+Rolling compression that summarizes old conversation turns into compact memory spans. Unlike session splits, compression preserves continuity — the session ID remains the same, and the sense of an ongoing conversation is maintained.
+
+## Consequences & Migration Strategy
+
+### Positive
+- **Character Drift reduction** — Identity Kernel is always present, never truncated
+- **Memory continuity** — No session split breaking; compression preserves context
+- **Rich semantic memory** — CCv3 lorebook becomes a searchable memory index
+- **Sophisticated recall** — Multi-factor scoring (vector + recency + salience + confidence + affect + commitments)
+- **Persistent emotion** — Engine-managed affect state, not dependent on LLM tokens
+- **User agency** — Memory inspect / pin / archive / forget / dispute UX
+- **Natural forgetting** — Faded / archived / superseded lifecycle instead of hard delete
+
+### Migration Path
+- **Phase 0–9** are greenfield — new code in `ene-cognition`, no changes to existing runtime
+- **Phase 10 (#100)** integrates `ene-cognition` into `ene-core::streaming.rs`, replacing the old pipeline
+- **#98** defines migration from legacy `conversation_summaries` / `conversation_keyfacts` to the new typed memory schema
+- **#80** replaces automatic session splits with rolling context compression triggers
+- **No breaking changes** to the existing runtime until Phase 10
+- Existing CLI and desktop apps continue to function unchanged during Phase 0–9
+
+## References
+
+- Epic: #63 — Redesign AI runtime as Ene Cognitive Runtime
+- Full Phase & Dependency Map: `#63` issue body
+- Current architecture: `docs/architecture/overview.md`
+- Memory system: `docs/memory/memory.md`
+- Prompt construction: `docs/core/prompt.md`
+- Session splitting: `docs/core/session-split.md`
+- Emotion handling: `docs/core/emotions.md`

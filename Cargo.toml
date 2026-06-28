@@ -41,6 +41,7 @@ base64 = "0.22"
 blake3 = "1.5"
 
 # --- Internal libraries ---
+ene-cognition = { path = "crates/ene-cognition" }
 ene-common = { path = "crates/ene-common" }
 ene-config = { path = "crates/ene-config" }
 ene-core = { path = "crates/ene-core" }

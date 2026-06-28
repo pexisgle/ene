@@ -104,5 +104,7 @@ The actor pattern ensures thread safety and clean separation of concerns:
 Benefits:
 - **No global state** — all state is owned by the actor
 - **Thread-safe** — channel-based communication, no mutex contention on hot paths
+
+> **📘 Future Direction:** The [Ene Cognitive Runtime ADR](cognitive-runtime.md) describes a planned redesign of the AI runtime. The current actor-based streaming pipeline will be replaced with a cognitive architecture where LLMs are treated as utterance generators from explicitly managed cognitive state.
 - **Subscriber-friendly** — `try_recv()` for non-blocking polling (used by `ene-desktop`'s `AiBridge` drain task), `subscribe()` for multiple consumers
 - **Lifecycle-managed** — actor exits when all handles are dropped

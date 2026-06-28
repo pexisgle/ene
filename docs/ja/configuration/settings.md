@@ -346,6 +346,92 @@ pub struct EneConfig {
 | `graphics.antialiasing_mode` | string | `"fxaa"` | アンチエイリアシングモード |
 | `graphics.debug_fps` | int | `30` | デバッグ描画更新レート（FPS、0は制限なし） |
 
+### `cognition` — 認知ランタイム
+
+Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出・保持、感情処理、キャラクターコンパイルを制御します。
+
+> **注意:** このセクションは [Ene Cognitive Runtime](../architecture/cognitive-runtime.md) 再設計の一部です。`cognition.enabled` が `true` の場合、認知ランタイムがレガシーストリーミングパイプラインを置き換えます（Phase 10 統合予定）。
+
+```json
+{
+  "cognition": {
+    "enabled": true,
+    "context": {
+      "max_prompt_tokens": 12000,
+      "recent_turns": 8,
+      "scene_summary_tokens": 800,
+      "memory_budget_tokens": 1800,
+      "semantic_budget_tokens": 1200,
+      "style_example_budget_tokens": 600
+    },
+    "memory": {
+      "write_every_turn": true,
+      "hybrid_search": true,
+      "decay_enabled": true,
+      "default_forgetting_half_life_days": 30.0,
+      "min_confidence_to_persist": 0.65
+    },
+    "emotion": {
+      "enabled": true,
+      "engine": "hybrid",
+      "decay_half_life_minutes": 30.0,
+      "expression_hysteresis_seconds": 4.0,
+      "llm_can_propose_expression": true,
+      "llm_expression_is_advisory": true
+    },
+    "character": {
+      "compile_ccv3_to_semantic_memory": true,
+      "always_include_identity_kernel": true,
+      "style_retrieval": true
+    }
+  }
+}
+```
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|------|---------|------|
+| `enabled` | bool | `true` | 認知ランタイムを有効にする。`false` の場合はレガシーストリーミングパイプラインにフォールバック。 |
+
+#### `cognition.context` — コンテキスト予算
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|------|---------|------|
+| `max_prompt_tokens` | int | `12000` | 全セクションの最大プロンプトトークン数 |
+| `recent_turns` | int | `8` | プロンプトに含める直近の会話ターン数 |
+| `scene_summary_tokens` | int | `800` | シーン・サマリーセクションのトークン予算 |
+| `memory_budget_tokens` | int | `1800` | 想起記憶のトークン予算 |
+| `semantic_budget_tokens` | int | `1200` | 意味記憶（lorebook）のトークン予算 |
+| `style_example_budget_tokens` | int | `600` | CCv3 lorebook からのスタイル例のトークン予算 |
+
+#### `cognition.memory` — 記憶抽出・保持
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|------|---------|------|
+| `write_every_turn` | bool | `true` | 毎ターン記憶を抽出し永続化する |
+| `hybrid_search` | bool | `true` | ハイブリッド検索（ベクトル + 新しさ + 顕著性 + 信頼度）を使用 |
+| `decay_enabled` | bool | `true` | 時間ベースの記憶減衰を有効化 |
+| `default_forgetting_half_life_days` | float | `30.0` | 記憶減衰のデフォルト半減期（日） |
+| `min_confidence_to_persist` | float | `0.65` | 記憶永続化の最低信頼度しきい値（0.0〜1.0） |
+
+#### `cognition.emotion` — 感情エンジン
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|------|---------|------|
+| `enabled` | bool | `true` | 感情処理を有効化 |
+| `engine` | string | `"hybrid"` | エンジンモード: `"deterministic"`, `"llm"`, または `"hybrid"` |
+| `decay_half_life_minutes` | float | `30.0` | 感情減衰の半減期（分） |
+| `expression_hysteresis_seconds` | float | `4.0` | 表情変更の最小間隔（秒）（ちらつき防止） |
+| `llm_can_propose_expression` | bool | `true` | LLM が表情トークンを提案することを許可 |
+| `llm_expression_is_advisory` | bool | `true` | LLM の表情提案をコマンドではなくアドバイスとして扱う |
+
+#### `cognition.character` — キャラクターコンパイル
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|------|---------|------|
+| `compile_ccv3_to_semantic_memory` | bool | `true` | CCv3 lorebook エントリを意味記憶インデックスにコンパイル |
+| `always_include_identity_kernel` | bool | `true` | 全プロンプトの先頭に必ず Identity Kernel を含める |
+| `style_retrieval` | bool | `true` | lorebook からキャラクタースタイル例の検索を有効化 |
+
 ## ツール固有の設定
 
 ツール固有の設定は `tools.tools.<name>.config` 内に格納され、ツールごとに異なります。

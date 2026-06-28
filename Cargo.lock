@@ -2466,6 +2466,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-cognition"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ctor",
+ "ene-common",
+ "ene-config",
+ "ene-memory",
+ "ene-provider",
+ "parking_lot",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ene-common"
 version = "0.1.0"
 dependencies = [
