@@ -136,6 +136,57 @@ fn parse_dt(s: &str) -> Result<DateTime<Utc>, MemoryError> {
         .map_err(|e| MemoryError::Config(format!("invalid RFC3339 timestamp {s:?}: {e}")))
 }
 
+/// Convert a typed memory model row to a [`crate::MemoryItem`].
+fn model_to_memory_item(m: entities::typed_memories::Model) -> crate::MemoryItem {
+    crate::MemoryItem {
+        id: Some(m.id),
+        scope: str_to_scope(&m.scope),
+        character_id: m.character_id,
+        user_id: m.user_id,
+        kind: str_to_kind(&m.kind),
+        title: m.title,
+        content: m.content,
+        source: str_to_source(&m.source),
+        source_ref: m.source_ref,
+        confidence: crate::MemoryConfidence::new(m.confidence),
+        salience: crate::MemorySalience::new(m.salience),
+        affect: crate::AffectAnnotation {
+            valence: m.affective_valence,
+            arousal: m.affective_arousal,
+        },
+        relationship_impact: m.relationship_impact,
+        access_count: m.access_count,
+        last_accessed_at: m.last_accessed_at.as_deref().and_then(|s| parse_dt(s).ok()),
+        created_at: parse_dt(&m.created_at).unwrap_or_else(|_| Utc::now()),
+        updated_at: parse_dt(&m.updated_at).unwrap_or_else(|_| Utc::now()),
+        valid_from: m.valid_from.as_deref().and_then(|s| parse_dt(s).ok()),
+        valid_until: m.valid_until.as_deref().and_then(|s| parse_dt(s).ok()),
+        status: str_to_status(&m.status),
+        supersedes_id: m.supersedes_id,
+    }
+}
+
+fn serde_enum_to_str<T: serde::Serialize>(v: T) -> String {
+    let json = serde_json::to_string(&v).unwrap_or_default();
+    json.trim_matches('"').to_string()
+}
+
+fn str_to_kind(s: &str) -> crate::MemoryKind {
+    serde_json::from_str(&format!("\"{s}\"")).unwrap_or(crate::MemoryKind::Semantic)
+}
+
+fn str_to_scope(s: &str) -> crate::MemoryScope {
+    serde_json::from_str(&format!("\"{s}\"")).unwrap_or(crate::MemoryScope::Character)
+}
+
+fn str_to_source(s: &str) -> crate::MemorySource {
+    serde_json::from_str(&format!("\"{s}\"")).unwrap_or(crate::MemorySource::Conversation)
+}
+
+fn str_to_status(s: &str) -> crate::MemoryStatus {
+    serde_json::from_str(&format!("\"{s}\"")).unwrap_or(crate::MemoryStatus::Active)
+}
+
 /// Applies the SQLite PRAGMAs the store depends on to the
 /// given connection. Idempotent and safe to call from both
 /// `open` and `open_in_memory`.
@@ -549,6 +600,44 @@ impl MemoryStore {
         Ok(res.id)
     }
 
+    /// Inserts a full conversation turn (user message + assistant response)
+    /// as two log entries in a single transaction.
+    pub async fn insert_conversation_turn(
+        &self,
+        session_id: &str,
+        card_name: &str,
+        user_message: &str,
+        assistant_response: &str,
+    ) -> Result<(i64, i64), MemoryError> {
+        use sea_orm::ActiveModelTrait;
+        use sea_orm::ActiveValue::Set;
+
+        let now = Utc::now().to_rfc3339();
+        let txn = self.db.begin().await?;
+        let user_log = entities::conversation_logs::ActiveModel {
+            session_id: Set(session_id.to_string()),
+            card_name: Set(card_name.to_string()),
+            role: Set("user".to_string()),
+            content: Set(user_message.to_string()),
+            created_at: Set(now.clone()),
+            ..Default::default()
+        };
+        let user_res = user_log.insert(&txn).await?;
+
+        let assistant_log = entities::conversation_logs::ActiveModel {
+            session_id: Set(session_id.to_string()),
+            card_name: Set(card_name.to_string()),
+            role: Set("assistant".to_string()),
+            content: Set(assistant_response.to_string()),
+            created_at: Set(now),
+            ..Default::default()
+        };
+        let assistant_res = assistant_log.insert(&txn).await?;
+        txn.commit().await?;
+
+        Ok((user_res.id, assistant_res.id))
+    }
+
     /// Spawns a fire-and-forget task that inserts a conversation log entry.
     ///
     /// Errors are logged at the `error` tracing level. Takes an `Arc<Self>`
@@ -788,6 +877,331 @@ impl MemoryStore {
         let summaries = summaries_result?;
         let key_facts = key_facts_result?;
         Ok((summaries, key_facts))
+    }
+
+    /// Retrieve the current [`crate::AffectState`] for a character.
+    pub async fn get_affect_state(
+        &self,
+        character_id: &str,
+    ) -> Result<crate::AffectState, MemoryError> {
+        use entities::affect_states::Entity;
+        use sea_orm::EntityTrait;
+
+        let maybe_model = Entity::find_by_id(character_id).one(&self.db).await?;
+        match maybe_model {
+            Some(model) => {
+                let discrete_emotions: Vec<crate::DiscreteEmotion> =
+                    serde_json::from_str(&model.discrete_emotions).unwrap_or_default();
+                Ok(crate::AffectState {
+                    character_id: model.character_id,
+                    valence: model.valence,
+                    arousal: model.arousal,
+                    dominance: model.dominance,
+                    discrete_emotions,
+                })
+            }
+            None => Ok(crate::AffectState::neutral(character_id)),
+        }
+    }
+
+    /// Persist or update an [`crate::AffectState`].
+    pub async fn upsert_affect_state(&self, state: &crate::AffectState) -> Result<(), MemoryError> {
+        use entities::affect_states::{ActiveModel, Entity};
+        use sea_orm::EntityTrait;
+
+        let now = Utc::now().to_rfc3339();
+        let discrete_json = serde_json::to_string(&state.discrete_emotions)
+            .map_err(|e| MemoryError::Other(e.to_string()))?;
+
+        let existing = Entity::find_by_id(&state.character_id)
+            .one(&self.db)
+            .await?;
+
+        if let Some(model) = existing {
+            let mut active: ActiveModel = model.into();
+            active.valence = sea_orm::Set(state.valence);
+            active.arousal = sea_orm::Set(state.arousal);
+            active.dominance = sea_orm::Set(state.dominance);
+            active.discrete_emotions = sea_orm::Set(discrete_json);
+            active.updated_at = sea_orm::Set(now);
+            Entity::update(active).exec(&self.db).await?;
+        } else {
+            let active = ActiveModel {
+                character_id: sea_orm::Set(state.character_id.clone()),
+                valence: sea_orm::Set(state.valence),
+                arousal: sea_orm::Set(state.arousal),
+                dominance: sea_orm::Set(state.dominance),
+                discrete_emotions: sea_orm::Set(discrete_json),
+                updated_at: sea_orm::Set(now),
+            };
+            Entity::insert(active).exec(&self.db).await?;
+        }
+        Ok(())
+    }
+
+    // ── Typed Memory CRUD ───────────────────────────────────────────────────
+
+    /// Insert a new typed memory item and return its assigned ID.
+    pub async fn insert_typed_memory(
+        &self,
+        item: &crate::NewMemoryItem,
+    ) -> Result<i64, MemoryError> {
+        use sea_orm::ActiveModelTrait;
+        use sea_orm::ActiveValue::Set;
+
+        let now = Utc::now().to_rfc3339();
+        let active = entities::typed_memories::ActiveModel {
+            scope: Set(serde_enum_to_str(item.scope)),
+            character_id: Set(item.character_id.clone()),
+            user_id: Set(item.user_id.clone()),
+            kind: Set(serde_enum_to_str(item.kind)),
+            title: Set(item.title.clone()),
+            content: Set(item.content.clone()),
+            source: Set(serde_enum_to_str(item.source)),
+            source_ref: Set(item.source_ref.clone()),
+            confidence: Set(item.confidence.get()),
+            salience: Set(item.salience.get()),
+            affective_valence: Set(item.affect.valence),
+            affective_arousal: Set(item.affect.arousal),
+            relationship_impact: Set(item.relationship_impact),
+            access_count: Set(0),
+            last_accessed_at: Set(None),
+            created_at: Set(now.clone()),
+            updated_at: Set(now),
+            valid_from: Set(item.valid_from.map(|dt| dt.to_rfc3339())),
+            valid_until: Set(item.valid_until.map(|dt| dt.to_rfc3339())),
+            status: Set(serde_enum_to_str(item.status)),
+            supersedes_id: Set(item.supersedes_id),
+            ..Default::default()
+        };
+        let res = active.insert(&self.db).await?;
+        Ok(res.id)
+    }
+
+    /// Retrieve a typed memory item by its ID.
+    pub async fn get_typed_memory(
+        &self,
+        id: i64,
+    ) -> Result<Option<crate::MemoryItem>, MemoryError> {
+        let maybe_model = entities::typed_memories::Entity::find_by_id(id)
+            .one(&self.db)
+            .await?;
+        match maybe_model {
+            Some(m) => Ok(Some(model_to_memory_item(m))),
+            None => Ok(None),
+        }
+    }
+
+    /// List typed memories for a character, optionally filtered by kind.
+    pub async fn get_typed_memories_by_character(
+        &self,
+        character_id: &str,
+        kind: Option<crate::MemoryKind>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<crate::MemoryItem>, MemoryError> {
+        use sea_orm::{EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+
+        let mut query = entities::typed_memories::Entity::find()
+            .filter(entities::typed_memories::Column::CharacterId.eq(character_id));
+
+        if let Some(k) = kind {
+            query = query.filter(entities::typed_memories::Column::Kind.eq(serde_enum_to_str(k)));
+        }
+
+        let models = query
+            .order_by_desc(entities::typed_memories::Column::CreatedAt)
+            .limit(limit as u64)
+            .offset(offset as u64)
+            .all(&self.db)
+            .await?;
+
+        Ok(models.into_iter().map(model_to_memory_item).collect())
+    }
+
+    /// Count typed memories for a character, optionally filtered by kind.
+    pub async fn count_typed_memories(
+        &self,
+        character_id: &str,
+        kind: Option<crate::MemoryKind>,
+    ) -> Result<i64, MemoryError> {
+        use sea_orm::{EntityTrait, PaginatorTrait, QueryFilter};
+
+        let mut query = entities::typed_memories::Entity::find()
+            .filter(entities::typed_memories::Column::CharacterId.eq(character_id));
+
+        if let Some(k) = kind {
+            query = query.filter(entities::typed_memories::Column::Kind.eq(serde_enum_to_str(k)));
+        }
+
+        Ok(query.count(&self.db).await? as i64)
+    }
+
+    /// Search typed memories by cosine similarity via content embeddings.
+    pub async fn search_typed_memories(
+        &self,
+        query_embedding: &[f32],
+        character_id: &str,
+        model_name: &str,
+        limit: usize,
+        similarity_threshold: f32,
+    ) -> Result<Vec<(crate::MemoryItem, f32)>, MemoryError> {
+        let query_bytes = embedding_to_bytes(query_embedding);
+        let stmt = sea_orm::Statement::from_sql_and_values(
+            sea_orm::DatabaseBackend::Sqlite,
+            "SELECT \
+             tm.id, tm.scope, tm.character_id, tm.user_id, tm.kind, \
+             tm.title, tm.content, tm.source, tm.source_ref, \
+             tm.confidence, tm.salience, tm.affective_valence, tm.affective_arousal, \
+             tm.relationship_impact, tm.access_count, tm.last_accessed_at, \
+             tm.created_at, tm.updated_at, tm.valid_from, tm.valid_until, \
+             tm.status, tm.supersedes_id, \
+             1.0 - vec_distance_cosine(me.embedding, ?) AS similarity \
+             FROM typed_memories tm \
+             INNER JOIN memory_embeddings me ON me.memory_item_id = tm.id \
+             WHERE tm.character_id = ? \
+               AND tm.status = 'active' \
+               AND me.model_name = ? \
+               AND me.field = 'content' \
+               AND 1.0 - vec_distance_cosine(me.embedding, ?) >= ? \
+             ORDER BY similarity DESC \
+             LIMIT ?",
+            vec![
+                query_bytes.clone().into(),
+                character_id.into(),
+                model_name.into(),
+                query_bytes.into(),
+                f64::from(similarity_threshold).into(),
+                (limit as u64).into(),
+            ],
+        );
+
+        let rows = self.db.query_all(stmt).await?;
+        rows.into_iter()
+            .map(|row| {
+                let similarity: f64 = row.try_get("", "similarity")?;
+                let created_at: String = row.try_get("", "created_at")?;
+                let updated_at: String = row.try_get("", "updated_at")?;
+                let valid_from: Option<String> = row.try_get("", "valid_from")?;
+                let valid_until: Option<String> = row.try_get("", "valid_until")?;
+                let last_accessed_at: Option<String> = row.try_get("", "last_accessed_at")?;
+                Ok((
+                    crate::MemoryItem {
+                        id: Some(row.try_get("", "id")?),
+                        scope: str_to_scope(&row.try_get::<String>("", "scope")?),
+                        character_id: row.try_get("", "character_id")?,
+                        user_id: row.try_get("", "user_id")?,
+                        kind: str_to_kind(&row.try_get::<String>("", "kind")?),
+                        title: row.try_get("", "title")?,
+                        content: row.try_get("", "content")?,
+                        source: str_to_source(&row.try_get::<String>("", "source")?),
+                        source_ref: row.try_get("", "source_ref")?,
+                        confidence: crate::MemoryConfidence::new(row.try_get("", "confidence")?),
+                        salience: crate::MemorySalience::new(row.try_get("", "salience")?),
+                        affect: crate::AffectAnnotation {
+                            valence: row.try_get("", "affective_valence")?,
+                            arousal: row.try_get("", "affective_arousal")?,
+                        },
+                        relationship_impact: row.try_get("", "relationship_impact")?,
+                        access_count: row.try_get("", "access_count")?,
+                        last_accessed_at: last_accessed_at
+                            .as_deref()
+                            .and_then(|s| parse_dt(s).ok()),
+                        created_at: parse_dt(&created_at).unwrap_or_else(|_| Utc::now()),
+                        updated_at: parse_dt(&updated_at).unwrap_or_else(|_| Utc::now()),
+                        valid_from: valid_from.as_deref().and_then(|s| parse_dt(s).ok()),
+                        valid_until: valid_until.as_deref().and_then(|s| parse_dt(s).ok()),
+                        status: str_to_status(&row.try_get::<String>("", "status")?),
+                        supersedes_id: row.try_get("", "supersedes_id")?,
+                    },
+                    similarity as f32,
+                ))
+            })
+            .collect()
+    }
+
+    /// Transition a typed memory to a new lifecycle status.
+    pub async fn update_typed_memory_status(
+        &self,
+        id: i64,
+        new_status: crate::MemoryStatus,
+    ) -> Result<bool, MemoryError> {
+        use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
+
+        let now = Utc::now().to_rfc3339();
+        let maybe_model = entities::typed_memories::Entity::find_by_id(id)
+            .one(&self.db)
+            .await?;
+
+        let Some(model) = maybe_model else {
+            return Ok(false);
+        };
+
+        let mut active: entities::typed_memories::ActiveModel = model.into();
+        active.status = Set(serde_enum_to_str(new_status));
+        active.updated_at = Set(now);
+        active.update(&self.db).await?;
+        Ok(true)
+    }
+
+    /// Bump the access count and last-accessed timestamp for a typed memory.
+    pub async fn bump_typed_memory_access(&self, id: i64) -> Result<bool, MemoryError> {
+        use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
+
+        let now = Utc::now().to_rfc3339();
+        let maybe_model = entities::typed_memories::Entity::find_by_id(id)
+            .one(&self.db)
+            .await?;
+
+        let old_count = maybe_model.as_ref().map(|m| m.access_count).unwrap_or(0);
+        let Some(model) = maybe_model else {
+            return Ok(false);
+        };
+
+        let mut active: entities::typed_memories::ActiveModel = model.into();
+        active.access_count = Set(old_count + 1);
+        active.last_accessed_at = Set(Some(now));
+        active.update(&self.db).await?;
+        Ok(true)
+    }
+
+    /// Store a content embedding for a typed memory item.
+    pub async fn upsert_memory_embedding(
+        &self,
+        memory_item_id: i64,
+        model_name: &str,
+        field: &str,
+        embedding: &[f32],
+    ) -> Result<(), MemoryError> {
+        use sea_orm::sea_query::OnConflict;
+        use sea_orm::{ActiveValue::Set, EntityTrait};
+
+        let now = Utc::now().to_rfc3339();
+        let embedding_bytes = embedding_to_bytes(embedding);
+
+        let active = entities::memory_embeddings::ActiveModel {
+            memory_item_id: Set(memory_item_id),
+            model_name: Set(model_name.to_string()),
+            field: Set(field.to_string()),
+            embedding: Set(embedding_bytes),
+            created_at: Set(now),
+            ..Default::default()
+        };
+
+        entities::memory_embeddings::Entity::insert(active)
+            .on_conflict(
+                OnConflict::columns([
+                    entities::memory_embeddings::Column::MemoryItemId,
+                    entities::memory_embeddings::Column::ModelName,
+                    entities::memory_embeddings::Column::Field,
+                ])
+                .update_column(entities::memory_embeddings::Column::Embedding)
+                .to_owned(),
+            )
+            .exec(&self.db)
+            .await?;
+
+        Ok(())
     }
 }
 
@@ -1161,5 +1575,166 @@ mod tests {
             1,
             "foreign_keys PRAGMA should report 1 (ON)"
         );
+    }
+
+    #[tokio::test]
+    async fn test_insert_conversation_turn() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let session_id = "turn-test-session";
+
+        let ids = store
+            .insert_conversation_turn(session_id, "ene", "Hello", "Hi there!")
+            .await
+            .unwrap();
+        let logs = store.get_logs_by_session(session_id).await.unwrap();
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].0, "user");
+        assert_eq!(logs[0].1, "Hello");
+        assert_eq!(logs[1].0, "assistant");
+        assert_eq!(logs[1].1, "Hi there!");
+        let _ = ids;
+    }
+
+    #[tokio::test]
+    async fn affect_state_get_upsert() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+
+        let result = store.get_affect_state("ene").await.unwrap();
+        assert!((result.valence - 0.0).abs() < f32::EPSILON);
+        assert!((result.arousal - 0.0).abs() < f32::EPSILON);
+        assert!(result.discrete_emotions.is_empty());
+
+        let mut state = crate::AffectState {
+            character_id: "ene".into(),
+            valence: 0.5,
+            arousal: -0.3,
+            dominance: 0.1,
+            discrete_emotions: vec![
+                crate::DiscreteEmotion::new("joy", 0.8),
+                crate::DiscreteEmotion::new("surprise", 0.4),
+            ],
+        };
+        store.upsert_affect_state(&state).await.unwrap();
+
+        let loaded = store.get_affect_state("ene").await.unwrap();
+        assert!((loaded.valence - 0.5).abs() < f32::EPSILON);
+        assert!((loaded.arousal + 0.3).abs() < f32::EPSILON);
+        assert_eq!(loaded.discrete_emotions.len(), 2);
+        assert_eq!(loaded.discrete_emotions[0].label, "joy");
+        assert!((loaded.discrete_emotions[0].intensity - 0.8).abs() < f32::EPSILON);
+
+        state.valence = -0.2;
+        state.discrete_emotions = vec![crate::DiscreteEmotion::new("sadness", 0.6)];
+        store.upsert_affect_state(&state).await.unwrap();
+
+        let loaded2 = store.get_affect_state("ene").await.unwrap();
+        assert!((loaded2.valence + 0.2).abs() < f32::EPSILON);
+        assert_eq!(loaded2.discrete_emotions.len(), 1);
+        assert_eq!(loaded2.discrete_emotions[0].label, "sadness");
+    }
+
+    #[tokio::test]
+    async fn typed_memory_crud() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+
+        let item = crate::NewMemoryItem {
+            scope: crate::MemoryScope::Character,
+            character_id: "ene".into(),
+            user_id: String::new(),
+            kind: crate::MemoryKind::Episodic,
+            title: "Greeting".into(),
+            content: "The user greeted me this morning".into(),
+            source: crate::MemorySource::Conversation,
+            source_ref: Some("sess-1/turn-1".into()),
+            confidence: crate::MemoryConfidence::new(0.9),
+            salience: crate::MemorySalience::new(0.5),
+            affect: crate::AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: crate::MemoryStatus::Active,
+            supersedes_id: None,
+        };
+
+        let id = store.insert_typed_memory(&item).await.unwrap();
+        assert!(id > 0);
+
+        let loaded = store.get_typed_memory(id).await.unwrap().unwrap();
+        assert_eq!(loaded.title, "Greeting");
+        assert_eq!(loaded.kind, crate::MemoryKind::Episodic);
+        assert!((loaded.confidence.get() - 0.9).abs() < f32::EPSILON);
+
+        let by_char = store
+            .get_typed_memories_by_character("ene", None, 10, 0)
+            .await
+            .unwrap();
+        assert!(!by_char.is_empty());
+
+        let count = store
+            .count_typed_memories("ene", Some(crate::MemoryKind::Episodic))
+            .await
+            .unwrap();
+        assert!(count > 0);
+
+        let status_ok = store
+            .update_typed_memory_status(id, crate::MemoryStatus::Faded)
+            .await
+            .unwrap();
+        assert!(status_ok);
+
+        let access_ok = store.bump_typed_memory_access(id).await.unwrap();
+        assert!(access_ok);
+
+        let loaded2 = store.get_typed_memory(id).await.unwrap().unwrap();
+        assert_eq!(loaded2.status, crate::MemoryStatus::Faded);
+        assert_eq!(loaded2.access_count, 1);
+
+        assert!(store.get_typed_memory(999_999).await.unwrap().is_none());
+        assert!(
+            !store
+                .update_typed_memory_status(999_999, crate::MemoryStatus::Active)
+                .await
+                .unwrap()
+        );
+        assert!(!store.bump_typed_memory_access(999_999).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn typed_memory_search_with_embedding() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+
+        let item = crate::NewMemoryItem {
+            scope: crate::MemoryScope::Character,
+            character_id: "ene".into(),
+            user_id: String::new(),
+            kind: crate::MemoryKind::Semantic,
+            title: "Test memory".into(),
+            content: "The user likes pizza".into(),
+            source: crate::MemorySource::Conversation,
+            source_ref: None,
+            confidence: crate::MemoryConfidence::new(0.8),
+            salience: crate::MemorySalience::new(0.6),
+            affect: crate::AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: crate::MemoryStatus::Active,
+            supersedes_id: None,
+        };
+
+        let id = store.insert_typed_memory(&item).await.unwrap();
+        let emb = vec![0.1, 0.2, 0.3, 0.4];
+        store
+            .upsert_memory_embedding(id, "test-model", "content", &emb)
+            .await
+            .unwrap();
+
+        let results = store
+            .search_typed_memories(&emb, "ene", "test-model", 10, 0.0)
+            .await
+            .unwrap();
+        assert!(!results.is_empty());
+        assert!((results[0].1 - 1.0).abs() < f32::EPSILON);
+        assert_eq!(results[0].0.title, "Test memory");
     }
 }
