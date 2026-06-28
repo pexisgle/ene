@@ -31,7 +31,7 @@ This project is an AI assistant application written in Rust that merges VTuber-l
 
 ## 3. Platform-Specific Notes
 
-* **Linux:** Uses `direnv` + Nix flake. If `command not found: cargo` happens, use `direnv exec . cargo`.
+* **Linux:** Uses `direnv` + Nix flake. If `command not found: cargo` happens, use `direnv exec . cargo`. **Make sure to confirm that `cargo` cannot be executed directly before proceeding to execution with `direnv`.**
 * **Windows:** Uses Windows Named Pipes for IPC.
 
 ## 4. Architecture & Philosophy
