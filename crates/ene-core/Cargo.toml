@@ -30,14 +30,6 @@ ene-session = { workspace = true }
 ene-tool-host = { workspace = true }
 ene-tool-proto = { workspace = true }
 
-# Git hooks installer. Listed as a regular dep so its `prepare.rs` runs
-# on every `cargo build` (dev-deps are not compiled for plain `cargo build`
-# on a lib crate). cargo-husky is build-time-only: it does not expose any
-# symbols to ene-core, and its hook side-effects only fire inside a git
-# working tree. The `user-hooks` feature copies the executable scripts
-# under `.cargo-husky/hooks/` into `.git/hooks/`.
-cargo-husky = { workspace = true }
-
 [dev-dependencies]
 async-trait = { workspace = true }
 tracing-subscriber = { workspace = true }
