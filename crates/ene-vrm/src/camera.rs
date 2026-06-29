@@ -374,7 +374,7 @@ mod tests {
         let eye = Vec3::new(0.0, 0.3, 3.0);
         let target = Vec3::new(0.0, 0.0, 0.0);
         let up = Vec3::new(0.0, 1.0, 0.0);
-        let view = Mat4::look_at_rh(eye, target, up);
+        let view = glam::camera::rh::view::look_at_mat4(eye, target, up);
         let world_point = Vec3::new(1.2, 0.5, -0.4);
         let view_point = view.transform_point3(world_point);
         let back = view_pos_to_world(view_point, view);

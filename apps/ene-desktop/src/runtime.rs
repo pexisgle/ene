@@ -639,7 +639,7 @@ impl Runtime {
                     let aspect = (logical_size.width / logical_size.height.max(0.0001)) as f32;
                     let half_h = ene_vrm::camera::VIEWPORT_HEIGHT * 0.5;
                     let half_w = half_h * aspect;
-                    let view = glam::Mat4::look_at_rh(
+                    let view = glam::camera::rh::view::look_at_mat4(
                         eye.into(),
                         target.into(),
                         ene_vrm::camera::DEFAULT_UP.into(),
@@ -1282,7 +1282,7 @@ fn update_char_window_cursor_and_hittest(
             let half_h = ene_vrm::camera::VIEWPORT_HEIGHT * 0.5;
             let half_w = half_h * aspect.max(0.0001);
             let ndc = glam::Vec2::new(ndc_x as f32, ndc_y as f32);
-            let view = glam::Mat4::look_at_rh(
+            let view = glam::camera::rh::view::look_at_mat4(
                 eye.into(),
                 target.into(),
                 ene_vrm::camera::DEFAULT_UP.into(),
