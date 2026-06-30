@@ -261,6 +261,13 @@ impl PromptLibrary {
     /// when assets are missing (e.g. during unit tests or CI).
     #[must_use]
     pub fn built_in_english() -> Self {
+        // The bundled JSON is checked into the repository and is part of the
+        // build artifact. A parse failure here is a release-blocker bug, not
+        // a runtime condition we can recover from.
+        #[allow(
+            clippy::expect_used,
+            reason = "bundled JSON is validated at build time; parse failure is a release-blocker"
+        )]
         let raw: RawPromptLibraryData = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/prompts/en.json"
@@ -330,6 +337,13 @@ impl PromptLibrary {
     /// embedded at compile time as a fallback.
     #[must_use]
     pub fn built_in_japanese() -> Self {
+        // The bundled JSON is checked into the repository and is part of the
+        // build artifact. A parse failure here is a release-blocker bug, not
+        // a runtime condition we can recover from.
+        #[allow(
+            clippy::expect_used,
+            reason = "bundled JSON is validated at build time; parse failure is a release-blocker"
+        )]
         let raw: RawPromptLibraryData = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/prompts/ja.json"

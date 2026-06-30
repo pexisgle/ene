@@ -1044,6 +1044,13 @@ impl Runtime {
                         for line in &lines {
                             debug.push_line(*line);
                         }
+                        // `camera_uniform_dbg` returns `Option` for API symmetry with
+                        // the debug pipeline, but `Camera::uniform` is infallible by
+                        // construction (see `ene_vrm::camera::OrthographicCamera::uniform`).
+                        #[allow(
+                            clippy::expect_used,
+                            reason = "Camera::uniform is infallible by construction"
+                        )]
                         let camera_uniform = character
                             .camera_uniform_dbg()
                             .expect("orthographic camera uniform is infallible");

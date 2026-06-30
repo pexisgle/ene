@@ -180,7 +180,15 @@ fn synthetic_icon() -> Icon {
     for _ in 0..(w * h) {
         rgba.extend_from_slice(&[0, 128, 255, 255]);
     }
-    Icon::from_rgba(rgba, w, h).expect("32x32 RGBA must be a valid tray icon")
+    // The RGBA buffer is hardcoded to be valid (32x32 pixels of fixed RGBA
+    // quadruples), so `Icon::from_rgba` can only fail via a `tray-icon`
+    // internal bug. Panicking surfaces that bug rather than silently
+    // dropping the tray icon.
+    #[allow(
+        clippy::expect_used,
+        reason = "synthetic RGBA is valid by construction"
+    )]
+    Icon::from_rgba(rgba, w, h).expect("32x32 hardcoded RGBA must be a valid tray icon")
 }
 
 /// Spawn the per-platform event pump that translates
@@ -196,6 +204,14 @@ fn install_event_pump(event_tx: AppEventSender) {
         // forgetting it at the end of the pump keeps the
         // notification-area entry alive.
         std::thread::spawn(move || {
+            // The tray-icon builder API consumes the icon, so we
+            // can't lift the `Result` out of the closure. If the
+            // builder itself fails on Windows the only sensible
+            // action is to panic and surface the bug.
+            #[allow(
+                clippy::expect_used,
+                reason = "tray icon builder must succeed on Windows"
+            )]
             let _tray_icon = TrayIconBuilder::new()
                 .with_menu(Box::new(build_menu()))
                 .with_tooltip(TOOLTIP)

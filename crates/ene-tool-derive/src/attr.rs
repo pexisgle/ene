@@ -368,25 +368,27 @@ fn path_token(name: &str, default_module: &str) -> TokenStream2 {
     {
         return quote! { #path };
     }
+    // Parse the default module path once. A failure here means the proc-macro
+    // itself is buggy (the `default_module` literals are hardcoded in the
+    // call sites), so we surface a proper compile error instead of panicking
+    // — proc-macro panics produce the unhelpful "proc macro panicked" message.
+    let mod_path: syn::Path = match syn::parse_str(default_module) {
+        Ok(p) => p,
+        Err(err) => return err.to_compile_error(),
+    };
     let mut parts = name.split_whitespace();
     let head = parts.next().unwrap_or("ReadOnly");
     if let Ok(ident) = syn::parse_str::<syn::Ident>(head) {
         if ident == "ReadOnly" || ident == "Destructive" || ident == "Idempotent" {
-            let mod_path: syn::Path =
-                syn::parse_str(default_module).expect("default_module must be a valid path");
             return quote! { #mod_path::#ident };
         }
         if name.contains('{') {
-            let mod_path: syn::Path =
-                syn::parse_str(default_module).expect("default_module must be a valid path");
             let combined = format!("{default_module} :: {name}");
             let stream: TokenStream2 = combined
                 .parse()
                 .unwrap_or_else(|_| quote! { #mod_path::ReadOnly });
             return stream;
         }
-        let mod_path: syn::Path =
-            syn::parse_str(default_module).expect("default_module must be a valid path");
         return quote! { #mod_path::#ident };
     }
     let stream: TokenStream2 = syn::parse_str(name).unwrap_or_else(|_| quote! { ReadOnly });

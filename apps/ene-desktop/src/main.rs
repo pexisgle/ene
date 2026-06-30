@@ -61,9 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
 
     let mut app = runtime::Runtime::new(app_state, event_tx);
-    event_loop
-        .run_app(&mut app)
-        .expect("winit event loop failed");
+    event_loop.run_app(&mut app)?;
 
     // Shut the tokio runtime down gracefully so background tasks
     // (AI bridge pump, bootstrap load) can exit cleanly. Dropping

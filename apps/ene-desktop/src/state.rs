@@ -166,13 +166,26 @@ impl AppState {
     pub fn ui_bevy_state_mut(
         &mut self,
     ) -> bevy_ecs::change_detection::Mut<'_, crate::component::ui::UiStateComponent> {
+        // Both lookups are pre-conditions the caller must satisfy: the UI
+        // entity is spawned by the first `app.update()` and the component
+        // is inserted at spawn time. Violating either is a programmer bug
+        // and panicking with a clear message is the right behaviour.
+        #[allow(
+            clippy::expect_used,
+            reason = "UI entity is spawned by app.update() and carries UiStateComponent; violation is a programmer bug"
+        )]
         let entity = self
             .ui_bevy_entity()
             .expect("UI bevy entity not spawned; call app.update() first");
-        self.app
+        #[allow(
+            clippy::expect_used,
+            reason = "UI entity is spawned by app.update() and carries UiStateComponent; violation is a programmer bug"
+        )]
+        return self
+            .app
             .world_mut()
             .get_mut::<crate::component::ui::UiStateComponent>(entity)
-            .expect("UiStateComponent not on UI entity")
+            .expect("UiStateComponent not on UI entity");
     }
 
     /// Borrow the Rapier [`PhysicsWorld`](crate::physics::PhysicsWorld)
@@ -217,9 +230,21 @@ impl AppState {
     /// Borrow the per-UI-entity [`UiStateComponent`](crate::component::ui::UiStateComponent)
     /// immutably.
     pub fn ui_bevy_state(&mut self) -> &crate::component::ui::UiStateComponent {
+        // Both lookups are pre-conditions the caller must satisfy: the UI
+        // entity is spawned by the first `app.update()` and the component
+        // is inserted at spawn time. Violating either is a programmer bug
+        // and panicking with a clear message is the right behaviour.
+        #[allow(
+            clippy::expect_used,
+            reason = "UI entity is spawned by app.update() and carries UiStateComponent; violation is a programmer bug"
+        )]
         let entity = self
             .ui_bevy_entity()
             .expect("UI bevy entity not spawned; call app.update() first");
+        #[allow(
+            clippy::expect_used,
+            reason = "UI entity is spawned by app.update() and carries UiStateComponent; violation is a programmer bug"
+        )]
         self.app
             .world()
             .get::<crate::component::ui::UiStateComponent>(entity)

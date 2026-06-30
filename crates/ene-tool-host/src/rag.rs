@@ -102,9 +102,12 @@ impl Default for ToolRagOptions {
             min_similarity: 0.25,
             background_index_on_startup: false,
             forced: vec![
-                ToolName::try_new("utility.question").expect("valid tool name"),
-                ToolName::try_new("utility.todo_add").expect("valid tool name"),
-                ToolName::try_new("utility.get_current_time").expect("valid tool name"),
+                // These are string literals, so `ToolName::new` (which asserts
+                // validity) is the appropriate constructor — a `try_new` +
+                // `expect` chain would be redundant.
+                ToolName::new("utility.question"),
+                ToolName::new("utility.todo_add"),
+                ToolName::new("utility.get_current_time"),
             ],
             weights: FieldWeights::default(),
         }

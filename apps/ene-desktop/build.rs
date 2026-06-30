@@ -2,16 +2,14 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-fn main() {
-    let manifest_dir =
-        env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR env var must be set");
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR")?;
     let ftl_path = Path::new(&manifest_dir).join("i18n/en-US/ene_desktop.ftl");
 
     // Tell Cargo to rerun this build script if the translation file changes
     println!("cargo:rerun-if-changed={}", ftl_path.display());
 
-    let content = fs::read_to_string(&ftl_path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", ftl_path.display()));
+    let content = fs::read_to_string(&ftl_path)?;
 
     let mut keys = Vec::new();
 
@@ -67,7 +65,8 @@ fn main() {
         ));
     }
 
-    let out_dir = env::var("OUT_DIR").expect("OUT_DIR env var must be set");
+    let out_dir = env::var("OUT_DIR")?;
     let dest_path = Path::new(&out_dir).join("i18n_keys.rs");
-    fs::write(&dest_path, code).expect("failed to write i18n_keys.rs");
+    fs::write(&dest_path, code)?;
+    Ok(())
 }

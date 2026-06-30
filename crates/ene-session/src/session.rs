@@ -168,15 +168,11 @@ impl ConversationSession {
         let card = serde_json::from_str::<CharacterCardV3>(&file_content)
             .map_err(ene_config::EneConfigError::JsonError)?;
 
-        self.character_card = Some(card);
+        self.character_card = Some(card.clone());
         self.current_card_path = path.to_string();
         self.history.conversation_history.clear();
 
-        Ok(resolve_expressions(
-            self.character_card
-                .as_ref()
-                .expect("character_card was just set"),
-        ))
+        Ok(resolve_expressions(&card))
     }
 
     /// Appends a user message and trims history if it exceeds `max_history_turns * 2`.

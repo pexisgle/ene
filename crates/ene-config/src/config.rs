@@ -257,7 +257,9 @@ fn set_nested(
     // `extra` map into a JSON object (O(n) on every
     // write) and silently dropped the write if `cur`
     // ever landed on a non-object leaf.
-    let (head, rest) = path.split_first().expect("non-empty by guard above");
+    let [head, rest @ ..] = path else {
+        unreachable!("path is non-empty by the guard above")
+    };
     if rest.is_empty() {
         extra.insert((*head).to_string(), value);
         return Ok(());

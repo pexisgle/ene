@@ -77,17 +77,24 @@ pub fn tick_emotions(state: &mut EmotionPipelineState, now_secs: f64) -> Applied
     };
 
     // 1. Pop the next command whose target_time has elapsed.
-    while let Some(front) = state.pending.front() {
-        if front.target_time <= now_secs {
-            let cmd = state.pending.pop_front().expect("just peeked");
-            state.active = Some(ActiveEmotion {
-                name: cmd.emotion.clone(),
-                weight: cmd.weight,
-                hold_until_secs: cmd.target_time + cmd.hold_secs,
-            });
-        } else {
-            break;
-        }
+    loop {
+        // Borrow the front to inspect the target time, then pop and
+        // process it. The `front` borrow must end before `pop_front`
+        // (which needs `&mut self`) can run.
+        let target_time = match state.pending.front() {
+            Some(front) if front.target_time <= now_secs => front.target_time,
+            _ => break,
+        };
+        let cmd = state.pending.pop_front();
+        let cmd = match cmd {
+            Some(cmd) => cmd,
+            None => break,
+        };
+        state.active = Some(ActiveEmotion {
+            name: cmd.emotion.clone(),
+            weight: cmd.weight,
+            hold_until_secs: target_time + cmd.hold_secs,
+        });
     }
 
     // 2. Tick the active emotion's weight.

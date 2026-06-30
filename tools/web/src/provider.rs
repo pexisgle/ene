@@ -20,6 +20,14 @@ pub struct WebSearchConfig {
 fn generate_web_search_schema() -> serde_json::Value {
     let g = schemars::SchemaGenerator::default();
     let schema = g.into_root_schema_for::<WebSearchConfig>();
+    // `schemars::Schema` is a thin wrapper around `serde_json::Value`. The
+    // schemas produced by `into_root_schema_for` only contain JSON-safe
+    // primitives, so the `Result` from `to_value` is only there for API
+    // symmetry. A failure would mean a bug in schemars.
+    #[allow(
+        clippy::expect_used,
+        reason = "schemars::Schema from into_root_schema_for is always JSON-serializable"
+    )]
     serde_json::to_value(schema).expect("WebSearchConfig schema should always serialize")
 }
 

@@ -880,6 +880,14 @@ impl VrmRenderer {
         model_uniform: &ModelUniform,
         transparent: bool,
     ) {
+        // `OrthographicCamera::uniform` is infallible by construction: it
+        // only builds a view-proj matrix from already-validated fields and
+        // has no `Err` return path. The `VrmResult` wrapper exists for API
+        // symmetry with fallible camera accessors.
+        #[allow(
+            clippy::expect_used,
+            reason = "Camera::uniform is infallible by construction"
+        )]
         let camera_uniform = camera
             .uniform()
             .expect("orthographic camera uniform is infallible");
