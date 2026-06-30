@@ -61,7 +61,7 @@ The workspace is highly granularly split to enforce strict boundaries and preven
 * **Async:** `tokio` only. Do not use `async-std` or `smol`.
 * **Error Handling:** 
   - Use `thiserror` for module-level enums (e.g., `ToolHostError`). Do not use `anyhow` at the library boundary.
-  - **Avoid `unwrap()` and `expect()` outside of tests.** The workspace enforces `#![warn(clippy::unwrap_used)]`. Always propagate errors or handle them gracefully using typed errors.
+  - **Avoid `unwrap()` and `expect()` outside of tests.** The workspace enforces `#![warn(clippy::unwrap_used)]` and `#![warn(clippy::expect_used)]`. Always propagate errors or handle them gracefully using typed errors.
 * **Logging:** 
   - Use the `tracing` crate (`info!`, `warn!`, `error!`, `debug!`). **Never use `println!`.**
   - Always include structured context fields when appropriate to maintain machine-readable logs (e.g., `tracing::error!(component = "ToolHost", error = %e, "Failed to start")`).
