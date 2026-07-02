@@ -221,3 +221,20 @@ A dedicated summarization model can be configured via `memory.summarization_mode
 - (5 minutes ago) Summary: ...
 - (2 hours ago) Summary: ...
 ```
+
+## Typed Memory & Memory Arbiter (Cognitive Runtime)
+
+The cognitive runtime stores long-term facts in `typed_memories` with explicit `MemoryKind` and `MemoryStatus` lifecycle (`active`, `faded`, `archived`, `disputed`, `superseded`, `user_deleted`).
+
+After each turn, deterministic and LLM extractors produce `MemoryCandidate` items. The **Memory Arbiter** (`ene-cognition::memory_writer::MemoryArbiter`) validates each candidate against existing memories before calling `MemoryStore::insert_typed_memory` or `MemoryStore::supersede_typed_memory`.
+
+Key store APIs:
+
+| Method | Description |
+|--------|-------------|
+| `insert_typed_memory(item)` | Insert a new typed memory row |
+| `supersede_typed_memory(new_item, old_id)` | Atomically insert replacement and mark prior row `superseded` |
+| `update_typed_memory_status(id, status)` | Lifecycle transition (e.g. `user_deleted`, `disputed`) |
+| `search_typed_memories(embedding, ...)` | Vector similarity search over active memories |
+
+See [Cognitive Runtime ADR](../architecture/cognitive-runtime.md#memory-arbiter) for decision rules and thresholds.

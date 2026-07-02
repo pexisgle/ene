@@ -59,3 +59,9 @@ pub use config::{
 pub use engine::CognitionEngine;
 /// Cognitive runtime error type.
 pub use error::{CognitionError, EneCognitionError};
+/// Memory arbiter and related decision types.
+#[doc(no_inline)]
+pub use memory_writer::{
+    AppliedDecision, ArbiterAction, ArbiterContext, ArbiterOptions, ArbiterReason,
+    ArbiterReasonCode, CandidateDecision, CandidateProvenance, MemoryArbiter, SemanticMatch,
+};

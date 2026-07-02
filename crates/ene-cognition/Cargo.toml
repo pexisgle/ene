@@ -29,6 +29,7 @@ once_cell = { workspace = true }
 async-trait = { workspace = true }
 tokio-stream = { workspace = true }
 ene-tool-proto = { workspace = true }
+chrono = { workspace = true }
 
 [lints]
 workspace = true

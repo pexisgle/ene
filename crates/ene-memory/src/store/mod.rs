@@ -205,6 +205,13 @@ fn str_to_status(s: &str) -> crate::MemoryStatus {
     crate::MemoryStatus::from_db_str(s)
 }
 
+fn is_supersedeable_status(status: crate::MemoryStatus) -> bool {
+    matches!(
+        status,
+        crate::MemoryStatus::Active | crate::MemoryStatus::Faded | crate::MemoryStatus::Disputed
+    )
+}
+
 /// Applies the SQLite PRAGMAs the store depends on to the
 /// given connection. Idempotent and safe to call from both
 /// `open` and `open_in_memory`.
@@ -1229,6 +1236,77 @@ impl MemoryStore {
             .collect()
     }
 
+    /// Atomically insert a replacement memory and mark the prior row superseded.
+    ///
+    /// The new row's `supersedes_id` is set to `superseded_id` (predecessor link).
+    /// The old row is transitioned to [`crate::MemoryStatus::Superseded`] with
+    /// `supersedes_id` cleared. Only rows in `Active`, `Faded`, or `Disputed`
+    /// status may be superseded.
+    pub async fn supersede_typed_memory(
+        &self,
+        new_item: &crate::NewMemoryItem,
+        superseded_id: i64,
+    ) -> Result<i64, MemoryError> {
+        use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, TransactionTrait};
+
+        let txn = self.db.begin().await?;
+
+        let old_model = entities::typed_memories::Entity::find_by_id(superseded_id)
+            .one(&txn)
+            .await?
+            .ok_or_else(|| {
+                MemoryError::Other(format!("superseded memory id={superseded_id} not found"))
+            })?;
+
+        let old_status = str_to_status(&old_model.status);
+        if !is_supersedeable_status(old_status) {
+            return Err(MemoryError::Other(format!(
+                "memory id={superseded_id} cannot be superseded (status={})",
+                old_model.status
+            )));
+        }
+
+        let now = Utc::now();
+        let mut insert_item = new_item.clone();
+        insert_item.supersedes_id = Some(superseded_id);
+
+        let active = entities::typed_memories::ActiveModel {
+            scope: Set(insert_item.scope.as_str().to_string()),
+            character_id: Set(insert_item.character_id.clone()),
+            user_id: Set(insert_item.user_id.clone()),
+            kind: Set(insert_item.kind.as_str().to_string()),
+            title: Set(insert_item.title.clone()),
+            content: Set(insert_item.content.clone()),
+            source: Set(insert_item.source.as_str().to_string()),
+            source_ref: Set(insert_item.source_ref.clone()),
+            confidence: Set(insert_item.confidence.get()),
+            salience: Set(insert_item.salience.get()),
+            affective_valence: Set(insert_item.affect.valence),
+            affective_arousal: Set(insert_item.affect.arousal),
+            relationship_impact: Set(insert_item.relationship_impact),
+            access_count: Set(0),
+            last_accessed_at: Set(None),
+            created_at: Set(now),
+            updated_at: Set(now),
+            valid_from: Set(insert_item.valid_from),
+            valid_until: Set(insert_item.valid_until),
+            status: Set(insert_item.status.as_str().to_string()),
+            supersedes_id: Set(insert_item.supersedes_id),
+            ..Default::default()
+        };
+        let inserted = active.insert(&txn).await?;
+        let new_id = inserted.id;
+
+        let mut old_active: entities::typed_memories::ActiveModel = old_model.into();
+        old_active.status = Set(crate::MemoryStatus::Superseded.as_str().to_string());
+        old_active.supersedes_id = Set(None);
+        old_active.updated_at = Set(now);
+        old_active.update(&txn).await?;
+
+        txn.commit().await?;
+        Ok(new_id)
+    }
+
     /// Transition a typed memory to a new lifecycle status.
     pub async fn update_typed_memory_status(
         &self,
@@ -1854,5 +1932,90 @@ mod tests {
         assert!(!results.is_empty());
         assert!((results[0].1 - 1.0).abs() < f32::EPSILON);
         assert_eq!(results[0].0.title, "Test memory");
+    }
+
+    #[tokio::test]
+    async fn supersede_typed_memory_links_rows() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+
+        let old_item = crate::NewMemoryItem {
+            scope: crate::MemoryScope::User,
+            character_id: "ene".into(),
+            user_id: "user1".into(),
+            kind: crate::MemoryKind::Preference,
+            title: "drink".into(),
+            content: "likes coffee".into(),
+            source: crate::MemorySource::Inferred,
+            source_ref: None,
+            confidence: crate::MemoryConfidence::new(0.7),
+            salience: crate::MemorySalience::default(),
+            affect: crate::AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: crate::MemoryStatus::Active,
+            supersedes_id: None,
+        };
+        let old_id = store.insert_typed_memory(&old_item).await.unwrap();
+
+        let new_item = crate::NewMemoryItem {
+            content: "likes tea".into(),
+            confidence: crate::MemoryConfidence::new(0.9),
+            ..old_item
+        };
+        let new_id = store
+            .supersede_typed_memory(&new_item, old_id)
+            .await
+            .unwrap();
+
+        let old = store.get_typed_memory(old_id).await.unwrap().unwrap();
+        assert_eq!(old.status, crate::MemoryStatus::Superseded);
+        assert_eq!(old.supersedes_id, None);
+
+        let new_mem = store.get_typed_memory(new_id).await.unwrap().unwrap();
+        assert_eq!(new_mem.supersedes_id, Some(old_id));
+        assert_eq!(new_mem.status, crate::MemoryStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn supersede_typed_memory_rejects_terminal_status() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+
+        let item = crate::NewMemoryItem {
+            scope: crate::MemoryScope::User,
+            character_id: "ene".into(),
+            user_id: "user1".into(),
+            kind: crate::MemoryKind::Preference,
+            title: "drink".into(),
+            content: "likes coffee".into(),
+            source: crate::MemorySource::Inferred,
+            source_ref: None,
+            confidence: crate::MemoryConfidence::new(0.7),
+            salience: crate::MemorySalience::default(),
+            affect: crate::AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: crate::MemoryStatus::Active,
+            supersedes_id: None,
+        };
+        let old_id = store.insert_typed_memory(&item).await.unwrap();
+        store
+            .update_typed_memory_status(old_id, crate::MemoryStatus::UserDeleted)
+            .await
+            .unwrap();
+
+        let replacement = crate::NewMemoryItem {
+            content: "likes tea".into(),
+            ..item
+        };
+        let err = store
+            .supersede_typed_memory(&replacement, old_id)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::Other(_)),
+            "expected Other error, got {err:?}"
+        );
     }
 }

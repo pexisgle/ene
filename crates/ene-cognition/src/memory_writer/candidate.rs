@@ -38,7 +38,7 @@ pub struct TurnInput<'a> {
 ///
 /// This is an intermediate representation — the Memory Arbiter (#75) will
 /// decide whether to persist it, merge it with existing memories, or discard it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemoryCandidate {
     /// The kind of memory this candidate represents.
     pub kind: MemoryKind,

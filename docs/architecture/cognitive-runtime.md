@@ -157,6 +157,26 @@ Receives the current `AffectState`, optional LLM expression hints, and character
 - **Hysteresis** — prevents rapid expression changes (configured in seconds)
 - **Advisory mode** — LLM hints are treated as suggestions, not commands, when configured
 
+### Memory Arbiter
+Sits between memory extractors and the typed memory store in `ene-cognition::memory_writer::arbiter`. For each `MemoryCandidate` it emits a traceable decision:
+
+| Decision | When |
+|----------|------|
+| `Persist` | Candidate passes validation and has no conflicts |
+| `Ignore` | Low confidence, invalid fields, exact/semantic duplicate, or deletion target not found |
+| `Supersede` | New evidence replaces an existing memory (transactional insert + mark old `superseded`) |
+| `MarkDisputed` | Weak contradiction — existing memory flagged for user review |
+| `MarkUserDeleted` | User deletion request matched an existing memory |
+| `AskConfirmationLater` | Ambiguous contradiction deferred until user confirmation |
+
+Validation gates:
+- `min_confidence_to_persist` from `CognitionMemoryConfig` (default `0.65`)
+- Non-empty title/content
+- `source_quote` must appear in the turn text (procedure memories from tool results are exempt when `source_quote` is empty)
+- Deletion candidates require `deletion_target_key`
+
+Deduplication uses normalized exact match first; optional pre-computed semantic matches (vector search) can collapse near-duplicates or trigger supersede/dispute logic. Until MemoryWriter orchestration (#100) wires embedding search, callers must populate `ArbiterContext::semantic_matches` themselves (e.g. from `MemoryStore::search_typed_memories`).
+
 ### Context Compression
 Rolling compression that summarizes old conversation turns into compact memory spans. Unlike session splits, compression preserves continuity — the session ID remains the same, and the sense of an ongoing conversation is maintained.
 

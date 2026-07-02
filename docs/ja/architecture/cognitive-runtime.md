@@ -157,6 +157,26 @@ Recall Planner が生成するクエリ計画：
 - **ヒステリシス** — 急激な表情変化を防止（秒単位で設定可能）
 - **アドバイザリモード** — 設定時、LLM ヒントはコマンドではなく提案として扱われる
 
+### Memory Arbiter（記憶調停器）
+`ene-cognition::memory_writer::arbiter` にあり、記憶抽出器と型付き記憶ストアの間に位置する。各 `MemoryCandidate` に対して追跡可能な判断を返す：
+
+| 判断 | 条件 |
+|------|------|
+| `Persist` | 検証を通過し、矛盾・重複がない |
+| `Ignore` | 低信頼度、無効フィールド、完全一致/意味的重複、削除対象なし |
+| `Supersede` | 新しい根拠が既存記憶を置き換える（トランザクションで insert + 旧行を `superseded` に） |
+| `MarkDisputed` | 弱い矛盾 — 既存記憶をユーザー確認用にフラグ |
+| `MarkUserDeleted` | ユーザーの削除要求が既存記憶にマッチ |
+| `AskConfirmationLater` | 曖昧な矛盾 — ユーザー確認まで保留 |
+
+検証ゲート：
+- `CognitionMemoryConfig::min_confidence_to_persist`（デフォルト `0.65`）
+- title/content が非空
+- `source_quote` がターン内テキストに含まれる（tool result 由来の procedure 記憶で `source_quote` が空の場合は例外）
+- 削除候補には `deletion_target_key` が必須
+
+重複排除は正規化した完全一致を先に適用し、オプションの意味的マッチ（ベクトル検索結果）で近傍重複の統合や supersede/dispute を行う。MemoryWriter オーケストレーション（#100）が埋め込み検索を接続するまで、呼び出し側は `ArbiterContext::semantic_matches` を自前で設定する必要がある（例: `MemoryStore::search_typed_memories` から）。
+
 ### Context Compression（文脈圧縮）
 古い会話ターンをコンパクトな記憶スパンに要約する rolling compression。セッション分割とは異なり、圧縮は継続性を保持する — セッション ID は変わらず、継続的な会話の感覚が維持される。
 

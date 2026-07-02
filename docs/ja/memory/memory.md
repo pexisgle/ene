@@ -214,3 +214,20 @@ pub struct ConversationSummaryResult {
 - (5 minutes ago) Summary: ...
 - (2 hours ago) Summary: ...
 ```
+
+## 型付き記憶と Memory Arbiter（Cognitive Runtime）
+
+Cognitive Runtime は長期事実を `typed_memories` に保存し、明示的な `MemoryKind` と `MemoryStatus` ライフサイクル（`active`, `faded`, `archived`, `disputed`, `superseded`, `user_deleted`）を持つ。
+
+各ターン後、決定論的/LLM 抽出器が `MemoryCandidate` を生成する。**Memory Arbiter**（`ene-cognition::memory_writer::MemoryArbiter`）は、既存記憶と照合してから `MemoryStore::insert_typed_memory` または `MemoryStore::supersede_typed_memory` を呼ぶ。
+
+主要なストア API：
+
+| メソッド | 説明 |
+|----------|------|
+| `insert_typed_memory(item)` | 新しい型付き記憶行を挿入 |
+| `supersede_typed_memory(new_item, old_id)` | 置換を挿入し、旧行を `superseded` にする（トランザクション） |
+| `update_typed_memory_status(id, status)` | ライフサイクル遷移（例: `user_deleted`, `disputed`） |
+| `search_typed_memories(embedding, ...)` | アクティブ記憶に対するベクトル類似検索 |
+
+判断ルールとしきい値は [Cognitive Runtime ADR](../architecture/cognitive-runtime.md) を参照。

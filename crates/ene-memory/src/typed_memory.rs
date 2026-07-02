@@ -334,7 +334,10 @@ pub struct MemoryItem {
     pub valid_until: Option<DateTime<Utc>>,
     /// Lifecycle status.
     pub status: MemoryStatus,
-    /// ID of the memory that supersedes this one.
+    /// ID of the memory this one supersedes (predecessor link).
+    ///
+    /// Set on replacement rows; `None` when this memory is not a superseding
+    /// successor. Superseded rows do not populate this field.
     pub supersedes_id: Option<i64>,
 }
 
