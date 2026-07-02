@@ -189,6 +189,24 @@ fn model_to_memory_item(
     })
 }
 
+/// Convert a commitment model row to a [`crate::Commitment`].
+fn model_to_commitment(m: entities::commitments::Model) -> Result<crate::Commitment, MemoryError> {
+    Ok(crate::Commitment {
+        id: Some(m.id),
+        character_id: m.character_id,
+        user_id: m.user_id,
+        title: m.title,
+        description: m.description,
+        status: crate::CommitmentStatus::from_db_str(&m.status),
+        due_at: m.due_at,
+        due_label: m.due_label,
+        source_memory_id: m.source_memory_id,
+        created_at: m.created_at,
+        updated_at: m.updated_at,
+        completed_at: m.completed_at,
+    })
+}
+
 fn str_to_kind(s: &str) -> crate::MemoryKind {
     crate::MemoryKind::from_db_str(s)
 }
@@ -1391,6 +1409,168 @@ impl MemoryStore {
 
         Ok(())
     }
+
+    // ── Companion Commitments ─────────────────────────────────────────────────
+
+    /// Insert a new commitment row and return its assigned ID.
+    pub async fn insert_commitment(&self, item: &crate::NewCommitment) -> Result<i64, MemoryError> {
+        use sea_orm::ActiveModelTrait;
+        use sea_orm::ActiveValue::Set;
+
+        let now = Utc::now();
+        let active = entities::commitments::ActiveModel {
+            character_id: Set(item.character_id.clone()),
+            user_id: Set(item.user_id.clone()),
+            title: Set(item.title.clone()),
+            description: Set(item.description.clone()),
+            status: Set(item.status.as_str().to_string()),
+            due_at: Set(item.due_at),
+            due_label: Set(item.due_label.clone()),
+            source_memory_id: Set(item.source_memory_id),
+            created_at: Set(now),
+            updated_at: Set(now),
+            completed_at: Set(None),
+            ..Default::default()
+        };
+        let res = active.insert(&self.db).await?;
+        Ok(res.id)
+    }
+
+    /// Retrieve a commitment by its ID.
+    pub async fn get_commitment(&self, id: i64) -> Result<Option<crate::Commitment>, MemoryError> {
+        let maybe_model = entities::commitments::Entity::find_by_id(id)
+            .one(&self.db)
+            .await?;
+        match maybe_model {
+            Some(m) => model_to_commitment(m).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Look up a commitment linked to a typed memory row.
+    pub async fn get_commitment_by_source_memory(
+        &self,
+        source_memory_id: i64,
+    ) -> Result<Option<crate::Commitment>, MemoryError> {
+        let maybe_model = entities::commitments::Entity::find()
+            .filter(entities::commitments::Column::SourceMemoryId.eq(source_memory_id))
+            .one(&self.db)
+            .await?;
+        match maybe_model {
+            Some(m) => model_to_commitment(m).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// List active commitments for a character, optionally scoped to a user.
+    ///
+    /// Results are ordered by `due_at` ascending (nulls last), then `created_at`
+    /// descending so undated follow-ups still surface recently.
+    pub async fn list_active_commitments(
+        &self,
+        character_id: &str,
+        user_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::Commitment>, MemoryError> {
+        use sea_orm::{EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+
+        let mut query = entities::commitments::Entity::find()
+            .filter(entities::commitments::Column::CharacterId.eq(character_id))
+            .filter(
+                entities::commitments::Column::Status.eq(crate::CommitmentStatus::Active.as_str()),
+            );
+
+        if let Some(uid) = user_id {
+            query = query.filter(entities::commitments::Column::UserId.eq(uid));
+        }
+
+        // SQLite sorts NULLs first on plain ASC; order by `due_at IS NULL` so dated rows
+        // surface before undated follow-ups.
+        let models = query
+            .order_by_asc(Expr::cust("due_at IS NULL"))
+            .order_by_asc(entities::commitments::Column::DueAt)
+            .order_by_desc(entities::commitments::Column::CreatedAt)
+            .limit(limit as u64)
+            .all(&self.db)
+            .await?;
+
+        models
+            .into_iter()
+            .map(model_to_commitment)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    /// Transition an active commitment to a new lifecycle status.
+    ///
+    /// Returns `Ok(false)` when the row does not exist or is no longer `active`.
+    pub async fn update_commitment_status(
+        &self,
+        id: i64,
+        new_status: crate::CommitmentStatus,
+    ) -> Result<bool, MemoryError> {
+        use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
+
+        let now = Utc::now();
+        let maybe_model = entities::commitments::Entity::find_by_id(id)
+            .one(&self.db)
+            .await?;
+
+        let Some(model) = maybe_model else {
+            return Ok(false);
+        };
+
+        if crate::CommitmentStatus::from_db_str(&model.status) != crate::CommitmentStatus::Active {
+            return Ok(false);
+        }
+
+        let mut active: entities::commitments::ActiveModel = model.into();
+        active.status = Set(new_status.as_str().to_string());
+        active.updated_at = Set(now);
+        if new_status == crate::CommitmentStatus::Done {
+            active.completed_at = Set(Some(now));
+        }
+        active.update(&self.db).await?;
+        Ok(true)
+    }
+
+    /// Mark a commitment as done.
+    pub async fn complete_commitment(&self, id: i64) -> Result<bool, MemoryError> {
+        self.update_commitment_status(id, crate::CommitmentStatus::Done)
+            .await
+    }
+
+    /// Mark a commitment as cancelled.
+    pub async fn cancel_commitment(&self, id: i64) -> Result<bool, MemoryError> {
+        self.update_commitment_status(id, crate::CommitmentStatus::Cancelled)
+            .await
+    }
+
+    /// Mark active commitments whose `due_at` is before `now` as stale.
+    ///
+    /// Returns the number of rows updated.
+    pub async fn mark_stale_commitments(&self, now: DateTime<Utc>) -> Result<usize, MemoryError> {
+        use sea_orm::{EntityTrait, QueryFilter};
+
+        let rows = entities::commitments::Entity::find()
+            .filter(
+                entities::commitments::Column::Status.eq(crate::CommitmentStatus::Active.as_str()),
+            )
+            .filter(entities::commitments::Column::DueAt.is_not_null())
+            .filter(entities::commitments::Column::DueAt.lt(now))
+            .all(&self.db)
+            .await?;
+
+        let mut updated = 0usize;
+        for model in rows {
+            if self
+                .update_commitment_status(model.id, crate::CommitmentStatus::Stale)
+                .await?
+            {
+                updated += 1;
+            }
+        }
+        Ok(updated)
+    }
 }
 
 #[cfg(test)]
@@ -2016,6 +2196,204 @@ mod tests {
         assert!(
             matches!(err, MemoryError::Other(_)),
             "expected Other error, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn commitment_crud_and_lifecycle() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+
+        let memory_id = store
+            .insert_typed_memory(&crate::NewMemoryItem {
+                scope: crate::MemoryScope::Character,
+                character_id: "ene".into(),
+                user_id: "user1".into(),
+                kind: crate::MemoryKind::Commitment,
+                title: "design review".into(),
+                content: "Discuss the design next session".into(),
+                source: crate::MemorySource::Inferred,
+                source_ref: None,
+                confidence: crate::MemoryConfidence::new(0.8),
+                salience: crate::MemorySalience::new(0.7),
+                affect: crate::AffectAnnotation::default(),
+                relationship_impact: 0.0,
+                valid_from: None,
+                valid_until: None,
+                status: crate::MemoryStatus::Active,
+                supersedes_id: None,
+            })
+            .await
+            .unwrap();
+
+        let id = store
+            .insert_commitment(&crate::NewCommitment {
+                character_id: "ene".into(),
+                user_id: "user1".into(),
+                title: "design review".into(),
+                description: "Discuss the design next session".into(),
+                status: crate::CommitmentStatus::Active,
+                due_at: None,
+                due_label: Some("next session".into()),
+                source_memory_id: Some(memory_id),
+            })
+            .await
+            .unwrap();
+
+        let loaded = store.get_commitment(id).await.unwrap().unwrap();
+        assert_eq!(loaded.title, "design review");
+        assert_eq!(loaded.source_memory_id, Some(memory_id));
+
+        let by_source = store
+            .get_commitment_by_source_memory(memory_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_source.id, Some(id));
+
+        let active = store
+            .list_active_commitments("ene", Some("user1"), 10)
+            .await
+            .unwrap();
+        assert_eq!(active.len(), 1);
+
+        assert!(store.complete_commitment(id).await.unwrap());
+        let done = store.get_commitment(id).await.unwrap().unwrap();
+        assert_eq!(done.status, crate::CommitmentStatus::Done);
+        assert!(done.completed_at.is_some());
+
+        let active_after = store
+            .list_active_commitments("ene", None, 10)
+            .await
+            .unwrap();
+        assert!(active_after.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mark_stale_commitments_past_due() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let past = Utc::now() - chrono::Duration::days(1);
+        let future = Utc::now() + chrono::Duration::days(1);
+
+        let stale_target = store
+            .insert_commitment(&crate::NewCommitment {
+                character_id: "ene".into(),
+                user_id: String::new(),
+                title: "overdue".into(),
+                description: "was due yesterday".into(),
+                status: crate::CommitmentStatus::Active,
+                due_at: Some(past),
+                due_label: None,
+                source_memory_id: None,
+            })
+            .await
+            .unwrap();
+        let _still_active = store
+            .insert_commitment(&crate::NewCommitment {
+                character_id: "ene".into(),
+                user_id: String::new(),
+                title: "upcoming".into(),
+                description: "due tomorrow".into(),
+                status: crate::CommitmentStatus::Active,
+                due_at: Some(future),
+                due_label: None,
+                source_memory_id: None,
+            })
+            .await
+            .unwrap();
+
+        let updated = store.mark_stale_commitments(Utc::now()).await.unwrap();
+        assert_eq!(updated, 1);
+
+        let stale = store.get_commitment(stale_target).await.unwrap().unwrap();
+        assert_eq!(stale.status, crate::CommitmentStatus::Stale);
+    }
+
+    #[tokio::test]
+    async fn list_active_commitments_orders_dated_before_undated() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let now = Utc::now();
+
+        let later_id = store
+            .insert_commitment(&crate::NewCommitment {
+                character_id: "ene".into(),
+                user_id: "user1".into(),
+                title: "later".into(),
+                description: "due in two days".into(),
+                status: crate::CommitmentStatus::Active,
+                due_at: Some(now + chrono::Duration::days(2)),
+                due_label: None,
+                source_memory_id: None,
+            })
+            .await
+            .unwrap();
+        let sooner_id = store
+            .insert_commitment(&crate::NewCommitment {
+                character_id: "ene".into(),
+                user_id: "user1".into(),
+                title: "sooner".into(),
+                description: "due tomorrow".into(),
+                status: crate::CommitmentStatus::Active,
+                due_at: Some(now + chrono::Duration::days(1)),
+                due_label: None,
+                source_memory_id: None,
+            })
+            .await
+            .unwrap();
+        let undated_id = store
+            .insert_commitment(&crate::NewCommitment {
+                character_id: "ene".into(),
+                user_id: "user1".into(),
+                title: "undated".into(),
+                description: "no due date".into(),
+                status: crate::CommitmentStatus::Active,
+                due_at: None,
+                due_label: Some("next time".into()),
+                source_memory_id: None,
+            })
+            .await
+            .unwrap();
+
+        let active = store
+            .list_active_commitments("ene", Some("user1"), 10)
+            .await
+            .unwrap();
+        let ids: Vec<i64> = active.iter().map(|c| c.id.unwrap()).collect();
+        assert_eq!(ids, vec![sooner_id, later_id, undated_id]);
+    }
+
+    #[tokio::test]
+    async fn terminal_commitment_status_is_not_overwritten() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let past = Utc::now() - chrono::Duration::days(1);
+
+        let done_id = store
+            .insert_commitment(&crate::NewCommitment {
+                character_id: "ene".into(),
+                user_id: "user1".into(),
+                title: "completed".into(),
+                description: "already done".into(),
+                status: crate::CommitmentStatus::Active,
+                due_at: Some(past),
+                due_label: None,
+                source_memory_id: None,
+            })
+            .await
+            .unwrap();
+        assert!(store.complete_commitment(done_id).await.unwrap());
+
+        let updated = store.mark_stale_commitments(Utc::now()).await.unwrap();
+        assert_eq!(updated, 0);
+
+        let done = store.get_commitment(done_id).await.unwrap().unwrap();
+        assert_eq!(done.status, crate::CommitmentStatus::Done);
+        assert!(done.completed_at.is_some());
+
+        assert!(!store.cancel_commitment(done_id).await.unwrap());
+        assert!(
+            !store
+                .update_commitment_status(done_id, crate::CommitmentStatus::Stale)
+                .await
+                .unwrap()
         );
     }
 }

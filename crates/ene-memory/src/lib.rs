@@ -31,6 +31,8 @@
 
 /// Affect state domain model.
 pub mod affect;
+/// Companion commitment ledger domain model.
+pub mod commitment;
 /// Memory configuration types.
 pub mod config;
 /// SeaORM entities representation.
@@ -50,6 +52,8 @@ pub mod typed_memory;
 
 /// Affect state types.
 pub use affect::{AffectState, DiscreteEmotion};
+/// Commitment ledger types.
+pub use commitment::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
 /// Memory feature toggle configuration.
 pub use config::MemoryConfig;
 /// Memory error type.

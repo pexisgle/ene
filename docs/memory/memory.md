@@ -238,3 +238,38 @@ Key store APIs:
 | `search_typed_memories(embedding, ...)` | Vector similarity search over active memories |
 
 See [Cognitive Runtime ADR](../architecture/cognitive-runtime.md#memory-arbiter) for decision rules and thresholds.
+
+## Companion Commitment Ledger
+
+User and companion follow-ups (e.g. “next time let’s talk about X”) are stored in a dedicated `commitments` table:
+
+```sql
+commitments (
+    id INTEGER PRIMARY KEY,
+    character_id TEXT NOT NULL,
+    user_id TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',  -- active | done | cancelled | stale
+    due_at TEXT NULL,
+    due_label TEXT NULL,                    -- raw hint from extraction ("tomorrow", "次回")
+    source_memory_id INTEGER NULL REFERENCES typed_memories(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT NULL
+)
+```
+
+| Method | Description |
+|--------|-------------|
+| `insert_commitment(item)` | Insert a new commitment row |
+| `get_commitment(id)` | Fetch by primary key |
+| `get_commitment_by_source_memory(memory_id)` | Lookup ledger row for a typed memory |
+| `list_active_commitments(character_id, user_id, limit)` | Active rows for prompt injection (no vector search) |
+| `complete_commitment(id)` | Mark `done` |
+| `cancel_commitment(id)` | Mark `cancelled` |
+| `mark_stale_commitments(now)` | Mark overdue `active` rows as `stale` |
+
+**Due dates:** Extractors populate `MemoryCandidate::commitment_due`, which is stored as `due_label` on the ledger row. Natural-language due-date parsing into `due_at` is not implemented yet (see Memory Arbiter notes in [Cognitive Runtime ADR](../architecture/cognitive-runtime.md#companion-commitment-ledger)), so `mark_stale_commitments` only affects rows with an explicit `due_at`.
+
+**Runtime wiring:** `CommitmentLedger::arbitrate_apply_and_sync` runs the Memory Arbiter and syncs commitment rows in one call. `active_prompt_candidates` produces lightweight DTOs for the Active Commitments `PromptPacket` section (#87). MemoryWriter orchestration that calls sync after each turn is planned in #100. CLI list/complete commands are planned in #94.

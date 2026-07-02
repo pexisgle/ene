@@ -231,3 +231,38 @@ Cognitive Runtime は長期事実を `typed_memories` に保存し、明示的�
 | `search_typed_memories(embedding, ...)` | アクティブ記憶に対するベクトル類似検索 |
 
 判断ルールとしきい値は [Cognitive Runtime ADR](../architecture/cognitive-runtime.md) を参照。
+
+## Companion Commitment Ledger（約束・タスク台帳）
+
+「次回これを話そう」などのフォローアップは専用の `commitments` テーブルに保存する：
+
+```sql
+commitments (
+    id INTEGER PRIMARY KEY,
+    character_id TEXT NOT NULL,
+    user_id TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',  -- active | done | cancelled | stale
+    due_at TEXT NULL,
+    due_label TEXT NULL,                    -- 抽出時の生の期限ヒント（"tomorrow", "次回"）
+    source_memory_id INTEGER NULL REFERENCES typed_memories(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT NULL
+)
+```
+
+| メソッド | 説明 |
+|----------|------|
+| `insert_commitment(item)` | 新しい commitment 行を挿入 |
+| `get_commitment(id)` | 主キーで取得 |
+| `get_commitment_by_source_memory(memory_id)` | typed memory に紐づく ledger 行を検索 |
+| `list_active_commitments(character_id, user_id, limit)` | プロンプト注入用の active 行（ベクトル検索なし） |
+| `complete_commitment(id)` | `done` に遷移 |
+| `cancel_commitment(id)` | `cancelled` に遷移 |
+| `mark_stale_commitments(now)` | 期限切れの `active` 行を `stale` に遷移 |
+
+**期限:** 抽出器は `MemoryCandidate::commitment_due` を生成し、ledger 行では `due_label` として保存する。自然言語の期限を `due_at` に parse する処理は未実装のため（[Cognitive Runtime ADR](../architecture/cognitive-runtime.md#companion-commitment-ledger) 参照）、`mark_stale_commitments` が対象にするのは `due_at` が明示的に入っている行のみ。
+
+**ランタイム接続:** `ene-cognition::CommitmentLedger::arbitrate_apply_and_sync` は Memory Arbiter の実行と commitment 行の同期を一括で行う。`active_prompt_candidates` は Active Commitments `PromptPacket` セクション（#87）向けの軽量 DTO を生成する。ターンごとに sync を呼ぶ MemoryWriter オーケストレーションは #100 で接続予定。CLI の list/complete コマンドは #94 で追加予定。

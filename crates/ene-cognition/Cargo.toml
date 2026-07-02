@@ -19,6 +19,8 @@ ene-config = { workspace = true }
 ene-memory = { workspace = true }
 ene-provider = { workspace = true }
 
+chrono = { workspace = true }
+
 schemars = { workspace = true }
 ctor = { workspace = true }
 regex = { workspace = true }

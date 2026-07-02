@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 
 pub mod affect_states;
+pub mod commitments;
 pub mod conversation_keyfacts;
 pub mod conversation_logs;
 pub mod conversation_summaries;
@@ -12,6 +13,7 @@ pub mod tool_schemas;
 pub mod typed_memories;
 
 pub use affect_states::Entity as AffectStates;
+pub use commitments::Entity as Commitments;
 pub use conversation_keyfacts::Entity as ConversationKeyFacts;
 pub use conversation_logs::Entity as ConversationLogs;
 pub use conversation_summaries::Entity as ConversationSummaries;

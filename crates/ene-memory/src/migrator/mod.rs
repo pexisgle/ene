@@ -11,6 +11,7 @@ impl MigratorTrait for Migrator {
             Box::new(Migration),
             Box::new(Migration2),
             Box::new(Migration3),
+            Box::new(Migration4),
         ]
     }
 }
@@ -995,4 +996,115 @@ impl MigrationTrait for Migration3 {
         let _ = manager;
         Ok(())
     }
+}
+
+// ── Migration 4: Companion Commitment Ledger ────────────────────────────────
+
+pub struct Migration4;
+
+impl MigrationName for Migration4 {
+    fn name(&self) -> &str {
+        "m20250703_000000_commitments"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration4 {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(Commitments::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Commitments::Id)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Commitments::CharacterId).string().not_null())
+                    .col(
+                        ColumnDef::new(Commitments::UserId)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(ColumnDef::new(Commitments::Title).string().not_null())
+                    .col(ColumnDef::new(Commitments::Description).string().not_null())
+                    .col(
+                        ColumnDef::new(Commitments::Status)
+                            .string()
+                            .not_null()
+                            .default("active"),
+                    )
+                    .col(ColumnDef::new(Commitments::DueAt).string().null())
+                    .col(ColumnDef::new(Commitments::DueLabel).string().null())
+                    .col(ColumnDef::new(Commitments::SourceMemoryId).integer().null())
+                    .col(ColumnDef::new(Commitments::CreatedAt).string().not_null())
+                    .col(ColumnDef::new(Commitments::UpdatedAt).string().not_null())
+                    .col(ColumnDef::new(Commitments::CompletedAt).string().null())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_commitments_source_memory")
+                            .from(Commitments::Table, Commitments::SourceMemoryId)
+                            .to(TypedMemories::Table, TypedMemories::Id)
+                            .on_delete(ForeignKeyAction::SetNull),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_commitments_character_status_due")
+                    .table(Commitments::Table)
+                    .col(Commitments::CharacterId)
+                    .col(Commitments::Status)
+                    .col(Commitments::DueAt)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .unique()
+                    .name("uniq_commitments_source_memory")
+                    .table(Commitments::Table)
+                    .col(Commitments::SourceMemoryId)
+                    .to_owned(),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(Commitments::Table).to_owned())
+            .await?;
+        Ok(())
+    }
+}
+
+#[derive(Iden)]
+enum Commitments {
+    #[iden = "commitments"]
+    Table,
+    Id,
+    CharacterId,
+    UserId,
+    Title,
+    Description,
+    Status,
+    DueAt,
+    DueLabel,
+    SourceMemoryId,
+    CreatedAt,
+    UpdatedAt,
+    CompletedAt,
 }

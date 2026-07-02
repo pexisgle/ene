@@ -51,10 +51,16 @@ pub mod engine;
 /// Cognitive runtime error types.
 pub mod error;
 
+/// Commitment ledger types.
+#[doc(no_inline)]
+pub use commitments::{CommitmentLedger, CommitmentSyncContext};
 /// Cognitive configuration section.
 pub use config::{
     CharacterMemoryConfig, CognitionConfig, CognitionMemoryConfig, ContextConfig, EmotionConfig,
 };
+/// Re-export commitment domain types from ene-memory for consumers.
+#[doc(no_inline)]
+pub use ene_memory::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
 /// Central cognitive engine facade.
 pub use engine::CognitionEngine;
 /// Cognitive runtime error type.

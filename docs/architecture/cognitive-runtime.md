@@ -177,6 +177,22 @@ Validation gates:
 
 Deduplication uses normalized exact match first; optional pre-computed semantic matches (vector search) can collapse near-duplicates or trigger supersede/dispute logic. Until MemoryWriter orchestration (#100) wires embedding search, callers must populate `ArbiterContext::semantic_matches` themselves (e.g. from `MemoryStore::search_typed_memories`).
 
+### Companion Commitment Ledger
+
+Promises, tasks, and follow-ups (e.g. “let’s discuss this next time”) are tracked in a dedicated `commitments` table, separate from generic typed memory recall scoring.
+
+| Concept | Location |
+|---------|----------|
+| Domain types (`Commitment`, `CommitmentStatus`) | `ene-memory` |
+| Persistence (`insert_commitment`, `list_active_commitments`, …) | `ene-memory::MemoryStore` |
+| Sync from arbiter results | `ene-cognition::commitments::CommitmentLedger` |
+
+**Relationship to `MemoryKind::Commitment`:** Extractors produce `MemoryCandidate { kind: Commitment, commitment_due }`. The Memory Arbiter persists these as typed memories. `CommitmentLedger::sync_from_applied_decisions` (or `arbitrate_apply_and_sync`) then creates an active ledger row linked via `source_memory_id`.
+
+**Lifecycle:** `active` → `done` | `cancelled` | `stale`. Overdue rows with a parsed `due_at` can be transitioned to `stale` via `mark_stale_commitments`.
+
+**Prompt injection:** Active commitments are returned by `list_active_commitments` / `CommitmentLedger::active_prompt_candidates` **without** vector similarity — they are always candidates for the Active Commitments section of `PromptPacket` (#87).
+
 ### Context Compression
 Rolling compression that summarizes old conversation turns into compact memory spans. Unlike session splits, compression preserves continuity — the session ID remains the same, and the sense of an ongoing conversation is maintained.
 

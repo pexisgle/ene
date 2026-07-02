@@ -177,6 +177,22 @@ Recall Planner が生成するクエリ計画：
 
 重複排除は正規化した完全一致を先に適用し、オプションの意味的マッチ（ベクトル検索結果）で近傍重複の統合や supersede/dispute を行う。MemoryWriter オーケストレーション（#100）が埋め込み検索を接続するまで、呼び出し側は `ArbiterContext::semantic_matches` を自前で設定する必要がある（例: `MemoryStore::search_typed_memories` から）。
 
+### Companion Commitment Ledger（約束・タスク台帳）
+
+「次回これを話そう」などの約束・未完了事項は、汎用 typed memory の recall スコアとは独立した `commitments` テーブルで管理する。
+
+| 概念 | 所在 |
+|------|------|
+| ドメイン型（`Commitment`, `CommitmentStatus`） | `ene-memory` |
+| 永続化（`insert_commitment`, `list_active_commitments` など） | `ene-memory::MemoryStore` |
+| Arbiter 結果からの同期 | `ene-cognition::commitments::CommitmentLedger` |
+
+**`MemoryKind::Commitment` との関係:** 抽出器は `MemoryCandidate { kind: Commitment, commitment_due }` を生成する。Memory Arbiter が typed memory として保存した後、`CommitmentLedger::sync_from_applied_decisions`（または `arbitrate_apply_and_sync`）が `source_memory_id` で紐づく active な ledger 行を作成する。
+
+**ライフサイクル:** `active` → `done` | `cancelled` | `stale`。`due_at` が設定され期限切れの active 行は `mark_stale_commitments` で `stale` に遷移できる。
+
+**プロンプト注入:** active commitment は `list_active_commitments` / `CommitmentLedger::active_prompt_candidates` でベクトル類似度に関係なく取得され、常に `PromptPacket` の Active Commitments セクション候補になる（#87）。
+
 ### Context Compression（文脈圧縮）
 古い会話ターンをコンパクトな記憶スパンに要約する rolling compression。セッション分割とは異なり、圧縮は継続性を保持する — セッション ID は変わらず、継続的な会話の感覚が維持される。
 
