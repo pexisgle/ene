@@ -28,6 +28,8 @@ pub struct PromptLibraryData {
     pub summarizer: SummarizerPrompts,
     /// Session split prompts configuration.
     pub split: SplitPrompts,
+    /// Memory extractor prompts configuration.
+    pub extractor: ExtractorPrompts,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,6 +40,7 @@ struct RawPromptLibraryData {
     memory: MemoryPrompts,
     summarizer: RawSummarizerPrompts,
     split: SplitPrompts,
+    extractor: RawExtractorPrompts,
 }
 
 /// Prompt templates for the system prompt.
@@ -215,6 +218,30 @@ pub struct SplitPrompts {
     pub reason_manual: String,
 }
 
+/// Prompt templates for LLM-based memory extraction.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ExtractorPrompts {
+    /// System prompt for the memory extractor agent.
+    pub system: String,
+    /// User prompt template for the memory extractor agent.
+    pub user_prompt: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct RawExtractorPrompts {
+    system_path: String,
+    user_prompt_path: String,
+}
+
+impl ExtractorPrompts {
+    /// Renders the extractor user prompt replacing `{conversation}` placeholder.
+    #[must_use]
+    pub fn render_user_prompt(&self, conversation: &str) -> String {
+        substitute(&self.user_prompt, &[("conversation", conversation)])
+    }
+}
+
 impl SplitPrompts {
     /// Renders the split reason timeout message.
     #[must_use]
@@ -323,6 +350,18 @@ impl PromptLibrary {
             memory: raw.memory,
             summarizer,
             split: raw.split,
+            extractor: ExtractorPrompts {
+                system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/en/extractor/system.md"
+                ))
+                .to_string(),
+                user_prompt: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/en/extractor/user_prompt.md"
+                ))
+                .to_string(),
+            },
         };
 
         Self {
@@ -399,6 +438,18 @@ impl PromptLibrary {
             memory: raw.memory,
             summarizer,
             split: raw.split,
+            extractor: ExtractorPrompts {
+                system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/ja/extractor/system.md"
+                ))
+                .to_string(),
+                user_prompt: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/ja/extractor/user_prompt.md"
+                ))
+                .to_string(),
+            },
         };
 
         Self {
@@ -441,6 +492,12 @@ impl PromptLibrary {
     #[must_use]
     pub fn split(&self) -> &SplitPrompts {
         &self.data.split
+    }
+
+    /// Returns reference to extractor prompts.
+    #[must_use]
+    pub fn extractor(&self) -> &ExtractorPrompts {
+        &self.data.extractor
     }
 }
 

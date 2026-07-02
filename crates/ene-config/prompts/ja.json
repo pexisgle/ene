@@ -34,5 +34,9 @@
     "reason_context": "[コンテキスト制限のためセッションを終了しました]",
     "reason_composite": "[セッションを終了しました — 分割スコア: {score}]",
     "reason_manual": "[手動でセッションを終了しました]"
+  },
+  "extractor": {
+    "system_path": "ja/extractor/system.md",
+    "user_prompt_path": "ja/extractor/user_prompt.md"
   }
 }

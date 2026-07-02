@@ -6,6 +6,7 @@
 
 pub mod candidate;
 pub mod deterministic;
+pub mod llm;
 
 /// Memory Writer orchestrator — marker struct for Phase 10 (#100).
 pub struct MemoryWriter;

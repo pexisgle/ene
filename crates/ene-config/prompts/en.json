@@ -34,5 +34,9 @@
     "reason_context": "[Session ended due to context length pressure]",
     "reason_composite": "[Session ended — split score: {score}]",
     "reason_manual": "[Session ended manually]"
+  },
+  "extractor": {
+    "system_path": "en/extractor/system.md",
+    "user_prompt_path": "en/extractor/user_prompt.md"
   }
 }
