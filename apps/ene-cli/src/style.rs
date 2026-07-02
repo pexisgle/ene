@@ -15,11 +15,3 @@ pub fn error(text: impl AsRef<str>) -> String {
 pub fn warning(text: impl AsRef<str>) -> String {
     style(text.as_ref()).yellow().to_string()
 }
-
-pub fn emotion(text: impl AsRef<str>) -> String {
-    style(text.as_ref()).magenta().to_string()
-}
-
-pub fn dim(text: impl AsRef<str>) -> String {
-    style(text.as_ref()).dim().to_string()
-}

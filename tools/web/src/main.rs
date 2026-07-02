@@ -2,6 +2,7 @@
 //!
 //! IPC tool binary providing web fetch and search capabilities.
 #![warn(missing_docs)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod action;
 mod provider;

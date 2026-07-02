@@ -1,4 +1,5 @@
 //! Trybuild-style smoke test for the `#[derive(ToolSpec)]` proc-macro.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use ene_tool_derive::ToolSpec;
 use ene_tool_proto::{KeywordSet, SideEffects, ToolCategory, ToolExample, ToolName, ToolVersion};

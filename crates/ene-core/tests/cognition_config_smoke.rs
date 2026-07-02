@@ -8,6 +8,8 @@
 //! i.e. when some downstream crate (`ene-core`, `ene-cli`, `ene-desktop`)
 //! declares a hard dependency on it.
 //!
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+//!
 //! Without this dependency, the JSON schema shipped to users would be
 //! missing the `cognition` section even though the struct exists in
 //! source and the docs (`docs/configuration/settings.md`) already describe

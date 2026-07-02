@@ -16,6 +16,7 @@
 //! - [`error`] — top-level error type.
 
 #![warn(missing_docs)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod animation;
 pub mod camera;

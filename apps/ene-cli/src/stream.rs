@@ -1,4 +1,3 @@
-use crate::style;
 use ene_core::{
     EneEvent, EneEventReceiver, EneHandle, MultiAnswer, PermissionDecision, Truncate,
     UserInputResponse, extract_emotion_from_token,
@@ -16,36 +15,26 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
             }
             Ok(EneEvent::SpecialToken { token }) => {
                 if let Some(emotion) = extract_emotion_from_token(&token) {
-                    print!("{}", style::emotion(format!("[Emotion: {emotion}]")));
+                    print!("[Emotion: {emotion}]");
                 } else {
-                    print!("{}", style::warning(token));
+                    print!("{token}");
                 }
                 let _ = io::stdout().flush();
             }
             Ok(EneEvent::ToolCallStart { name, arguments }) => {
-                println!(
-                    "\n{}",
-                    style::header(format!("[Tool Calling: {name}({arguments})]"))
-                );
+                tracing::info!(tool = %name, arguments = %arguments, "Tool calling started");
             }
-            Ok(EneEvent::ToolCallResult { name: _, result }) => {
-                println!("{}\n", style::success(format!("[Tool Result: {result}]")));
+            Ok(EneEvent::ToolCallResult { name, result }) => {
+                tracing::info!(tool = %name, result = %result, "Tool result");
             }
             Ok(EneEvent::SessionSplit { summary, reason }) => {
-                println!("\n{}", style::warning(format!("[Session] {reason} ")));
-                println!(
-                    "{}",
-                    style::warning(format!(
-                        "[Session] Summary: {}",
-                        Truncate::simple(&summary, 80)
-                    ))
-                );
+                tracing::info!(reason = %reason, summary = %Truncate::simple(&summary, 80), "Session split");
             }
             Ok(EneEvent::Terminal(reason)) => {
                 if let ene_core::TerminalReason::Failed { message } = &reason {
-                    eprintln!("\n[Error] {message}");
+                    tracing::error!(error = %message, "Terminal failure");
                 } else {
-                    println!();
+                    tracing::info!(?reason, "Stream terminal");
                 }
                 break;
             }
@@ -55,11 +44,12 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
                 target,
                 description,
             }) => {
-                println!(
-                    "\n{}",
-                    style::warning(format!(
-                        "[Permission Required] {action} on {target} ({description})"
-                    ))
+                tracing::info!(
+                    request_id = %request_id,
+                    action = %action,
+                    target = %target,
+                    description = %description,
+                    "Permission required"
                 );
 
                 let choices = vec![
@@ -81,26 +71,17 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
                 };
 
                 let _ = handle.decide_permission(request_id, decision);
-                println!(
-                    "\n{}",
-                    style::success("承認の入力を送信しました。処理を再開します...")
-                );
+                tracing::info!("Permission decision submitted; resuming processing");
             }
             Ok(EneEvent::UserInputRequired { request_id, prompt }) => {
                 let total = prompt.items.len();
-                println!(
-                    "\n{}",
-                    style::header(format!("[Question] {total} 件の質問があります"))
-                );
+                tracing::info!(request_id = %request_id, total, "User input required");
 
                 let mut answers: Vec<MultiAnswer> = Vec::with_capacity(total);
                 let mut cancelled = false;
 
                 for (i, item) in prompt.items.iter().enumerate() {
-                    println!(
-                        "\n{}",
-                        style::header(format!("({}/{}) {}", i + 1, total, item.question))
-                    );
+                    tracing::info!(index = i + 1, total, question = %item.question, "Question prompt");
 
                     let answer = if !item.options.is_empty() {
                         let mut choices: Vec<String> = item.options.clone();
@@ -152,10 +133,7 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
                     UserInputResponse::Multi(answers)
                 };
                 let _ = handle.submit_user_input(request_id, decision);
-                println!(
-                    "\n{}",
-                    style::success("回答を送信しました。処理を再開します...")
-                );
+                tracing::info!("User input submitted; resuming processing");
             }
             Ok(EneEvent::TaskProgress {
                 task_id,
@@ -167,15 +145,10 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
                     Some(total) => format!("{step}/{total}"),
                     None => format!("{step}/?"),
                 };
-                println!(
-                    "\n{}",
-                    style::header(format!(
-                        "[Task {task_id}] Step {steps_display}: {description}"
-                    ))
-                );
+                tracing::info!(task_id, step = %steps_display, description = %description, "Task progress");
             }
             Ok(EneEvent::PipelinePhase { phase }) => {
-                print!("\x1b[2K\r{}", style::dim(format!("    {phase}...")));
+                print!("\x1b[2K\r    {phase}...");
                 let _ = io::stdout().flush();
             }
             Ok(EneEvent::PipelineMetrics { timings }) => {
@@ -196,18 +169,20 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
                 let prompt_ms = timings.get("Prompt Building").copied().unwrap_or(0);
                 let total_ms = timings.get("Total Pre-generation").copied().unwrap_or(0);
 
-                print!("\x1b[2K\r"); // clear the phase line
-                println!(
-                    "{}",
-                    style::dim(format!(
-                        "[Timings] Embedding: {}ms | Context: {}ms (DB: {}ms, RAG: {}ms) | Prompt: {}ms | Total: {}ms",
-                        emb_ms, ctx_ms, ctx_mem, ctx_tool, prompt_ms, total_ms
-                    ))
+                print!("\x1b[2K\r");
+                tracing::info!(
+                    emb_ms,
+                    ctx_ms,
+                    ctx_mem_ms = ctx_mem,
+                    ctx_tool_ms = ctx_tool,
+                    prompt_ms,
+                    total_ms,
+                    "Pipeline timings"
                 );
             }
             Ok(EneEvent::StatusChanged { .. }) => {}
             Err(e) => {
-                eprintln!("\n[Warning] Event receive error: {e:?}");
+                tracing::warn!(error = ?e, "Event receive error");
                 break;
             }
         }

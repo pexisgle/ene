@@ -4,6 +4,7 @@
 //! long-term memory, and session management through an actor-based
 //! message-passing architecture.
 #![warn(missing_docs)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 /// Per-tool DB IPC server.
 #[cfg(any(unix, windows))]

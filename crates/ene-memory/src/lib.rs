@@ -24,6 +24,10 @@
 //! }
 //! ```
 #![warn(missing_docs)]
+#![cfg_attr(
+    test,
+    allow(clippy::unwrap_used, clippy::expect_used, clippy::clone_on_copy)
+)]
 
 /// Affect state domain model.
 pub mod affect;

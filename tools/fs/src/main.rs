@@ -4,6 +4,7 @@
 //! read, write, edit, search, glob, patch, shell execution, and undo management.
 #![expect(dead_code)]
 #![warn(missing_docs)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod action;
 mod provider;

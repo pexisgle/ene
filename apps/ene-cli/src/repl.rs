@@ -27,12 +27,10 @@ async fn drain_and_exit(ctx: &mut AppContext, code: i32) -> i32 {
     match ctx.handle.shutdown(SHUTDOWN_TIMEOUT).await {
         Ok(()) => {}
         Err(e) => {
-            eprintln!(
-                "{}",
-                crate::style::error(format!(
-                    "Actor did not shut down within {:?}: {e}",
-                    SHUTDOWN_TIMEOUT
-                ))
+            tracing::error!(
+                timeout = ?SHUTDOWN_TIMEOUT,
+                error = %e,
+                "Actor did not shut down within timeout"
             );
         }
     }
@@ -50,19 +48,9 @@ pub async fn run(ctx: &mut AppContext) -> i32 {
             // `dialoguer::Input::interact()` is blocked.
             ctrl_c_result = tokio::signal::ctrl_c() => {
                 if let Err(e) = ctrl_c_result {
-                    eprintln!(
-                        "{}",
-                        crate::style::error(format!(
-                            "Failed to install Ctrl-C handler: {e}"
-                        ))
-                    );
+                    tracing::error!(error = %e, "Failed to install Ctrl-C handler");
                 } else {
-                    eprintln!(
-                        "{}",
-                        crate::style::header(
-                            "[Runtime] Ctrl-C received, shutting down..."
-                        )
-                    );
+                    tracing::info!("[Runtime] Ctrl-C received, shutting down...");
                 }
                 return drain_and_exit(ctx, 130).await;
             }

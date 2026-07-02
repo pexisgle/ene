@@ -6,6 +6,7 @@
 //! provider traits (`LlmProvider`, `EmbeddingProvider`, `LlmProviderFactory`),
 //! a global provider registry, and the built-in OpenAI-compatible implementation.
 #![warn(missing_docs)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 /// Configuration types for providers and embedding.
 pub mod config;

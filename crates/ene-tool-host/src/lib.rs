@@ -24,6 +24,7 @@
 //! in the `tool_embeddings` table. The RAG pipeline performs
 //! cosine-similarity filtering based on the user's current query embedding.
 #![warn(missing_docs)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 /// Tool and MCP configuration types.
 pub mod config;

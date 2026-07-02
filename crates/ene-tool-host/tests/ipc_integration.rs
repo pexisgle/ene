@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use ene_tool_host::ToolRegistry;
 use ene_tool_proto::transport::IpcListener;
 use ene_tool_proto::{

@@ -14,17 +14,14 @@ async fn main() {
     let handle = match config::init().await {
         Ok(h) => h,
         Err(e) => {
-            eprintln!(
-                "{}",
-                style::error(format!("Fatal: Failed to initialize runtime: {e}"))
-            );
+            tracing::error!(error = %e, "Fatal: Failed to initialize runtime");
             std::process::exit(1);
         }
     };
 
     let loader = i18n::loader();
-    println!("{}", i18n_embed_fl::fl!(loader, "welcome"));
-    println!("{}", i18n_embed_fl::fl!(loader, "help-hint"));
+    tracing::info!("{}", i18n_embed_fl::fl!(loader, "welcome"));
+    tracing::info!("{}", i18n_embed_fl::fl!(loader, "help-hint"));
 
     let mut ctx = context::AppContext::new(handle);
     let code = repl::run(&mut ctx).await;

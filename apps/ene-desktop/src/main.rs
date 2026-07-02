@@ -3,6 +3,8 @@
 //! Winit + wgpu shell for the ene AI character platform. Owns the
 //! `AiBridge`, system tray, character renderer, and the cross-subsystem
 //! [`AppEvent`] bus.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 mod ai_bridge;
 mod app;
 mod character;

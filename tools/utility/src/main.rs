@@ -3,6 +3,7 @@
 //! IPC tool binary providing utility operations:
 //! question prompting, todo list management, time, and system info.
 #![warn(missing_docs)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 /// Action modules for each tool.
 pub mod action;

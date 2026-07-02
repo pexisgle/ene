@@ -4,6 +4,8 @@
 //! center / merged-skeleton joint count and the resulting
 //! model matrix without spinning up a winit window.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::path::PathBuf;
 
 fn main() {

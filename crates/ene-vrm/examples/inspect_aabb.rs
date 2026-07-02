@@ -13,6 +13,8 @@
 //! Usage:
 //!   cargo run -p ene-vrm --example inspect_aabb -- <path/to/model.vrm>
 
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::type_complexity)]
+
 use std::path::PathBuf;
 
 fn main() {
