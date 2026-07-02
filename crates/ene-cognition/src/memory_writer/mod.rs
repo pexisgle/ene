@@ -1,4 +1,11 @@
-// Placeholder — will be populated in #70 (Deterministic Extractor), #66 (LLM Extractor), #75 (Memory Arbiter)
+// Memory Writer: deterministic/LLM extraction + Memory Arbiter.
+//
+// - `candidate` — shared types (MemoryCandidate, Locale, TurnInput)
+// - `deterministic` — pattern-based extraction (no LLM required)
+// - `llm` — LLM-based extraction (placeholder for #66)
 
-/// Memory Writer: deterministic/LLM extraction + Memory Arbiter.
+pub mod candidate;
+pub mod deterministic;
+
+/// Memory Writer orchestrator — marker struct for Phase 10 (#100).
 pub struct MemoryWriter;

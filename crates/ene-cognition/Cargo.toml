@@ -20,6 +20,12 @@ ene-provider = { workspace = true }
 
 schemars = { workspace = true }
 ctor = { workspace = true }
+regex = { workspace = true }
+unicode-normalization = { workspace = true }
+once_cell = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
