@@ -69,6 +69,17 @@ fn is_en_question(msg: &str) -> bool {
     })
 }
 
+/// Return `true` when `msg` reads as a Japanese question rather than an
+/// instruction: it contains a `?` (the fullwidth `？` is already folded
+/// to ASCII by [`nfkc`]) or ends with the interrogative particle `か`
+/// (covers `〜ますか` / `〜ですか` / `覚えてるか`). This prevents phrasing
+/// like `私の誕生日を覚えてますか` from being captured as a remember
+/// instruction (issue #70 precision guard).
+fn is_ja_question(msg: &str) -> bool {
+    let trimmed = msg.trim();
+    trimmed.contains('?') || trimmed.ends_with('か')
+}
+
 /// Trim a captured Japanese callsign down to the bare name.
 ///
 /// Drops everything up to and including the last topic/subject particle
@@ -112,25 +123,45 @@ fn ja_explicit_remember(
     _asst_msg: &str,
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
-    static RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?i)(覚えて|教えて|記憶して|メモして|保存して)[:：]?\s*(.*)").unwrap()
-    });
-    RE.captures(user_msg).and_then(|cap| {
-        let content = cap[2].trim();
-        if content.is_empty() {
-            return None;
-        }
-        let title: String = content.chars().take(20).collect();
-        Some(MemoryCandidate {
-            kind: MemoryKind::Semantic,
-            title: format!("{}...", title),
-            content: content.to_string(),
-            source_quote: user_msg.to_string(),
-            confidence: 0.85,
-            should_persist: true,
-            deletion_target_key: None,
-            commitment_due: None,
-        })
+    // Questions such as `私の誕生日を覚えてますか` are requests, not
+    // instructions, and must not be captured (issue #70 precision guard).
+    if is_ja_question(user_msg) {
+        return None;
+    }
+    // Japanese places the object before the verb, so the memorable content
+    // precedes the keyword: `X を覚えて(おいて)`. Capturing group 1 is the
+    // object. `教えて` ("tell me") is deliberately excluded because it is a
+    // request for information, not a memory instruction.
+    static RE_WO: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(.+?)を(覚えて|記憶して|メモして|保存して)").unwrap());
+    // Explicit colon annotation `覚えて: X`, where the content follows the
+    // keyword. The colon is required so a trailing verb continuation such as
+    // `覚えておいて` is not mis-captured as content (`おいて`).
+    static RE_COLON: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?i)(覚えて|記憶して|メモして|保存して)[:：]\s*(.+)").unwrap());
+
+    let content = RE_WO
+        .captures(user_msg)
+        .map(|cap| cap[1].trim().to_string())
+        .or_else(|| {
+            RE_COLON
+                .captures(user_msg)
+                .map(|cap| cap[2].trim().to_string())
+        })?;
+
+    if content.is_empty() {
+        return None;
+    }
+    let title: String = content.chars().take(20).collect();
+    Some(MemoryCandidate {
+        kind: MemoryKind::Semantic,
+        title: format!("{}...", title),
+        content,
+        source_quote: user_msg.to_string(),
+        confidence: 0.85,
+        should_persist: true,
+        deletion_target_key: None,
+        commitment_due: None,
     })
 }
 
@@ -289,9 +320,12 @@ fn en_explicit_remember(
         )
         .unwrap()
     });
-    RE.captures(user_msg).map(|cap| {
+    RE.captures(user_msg).and_then(|cap| {
         let content = cap[3].trim().to_string();
-        MemoryCandidate {
+        if content.is_empty() {
+            return None;
+        }
+        Some(MemoryCandidate {
             kind: MemoryKind::Semantic,
             title: format!("{}...", content.chars().take(20).collect::<String>()),
             content,
@@ -300,7 +334,7 @@ fn en_explicit_remember(
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
-        }
+        })
     })
 }
 
@@ -575,6 +609,37 @@ mod tests {
     }
 
     #[test]
+    fn ja_remember_captures_object_before_keyword() {
+        // Japanese puts the object before the verb; the content is what
+        // precedes を覚えて, not the trailing verb continuation `おいて`
+        // (issue #70 precision guard).
+        let out =
+            extract(&ja_turn("私の誕生日を覚えておいて"), Locale::Ja, 0.0).expect("extract failed");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, MemoryKind::Semantic);
+        assert!(
+            out[0].content.contains("私の誕生日") && !out[0].content.contains("おいて"),
+            "expected content 私の誕生日 without おいて, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn ja_teach_request_is_not_remembered() {
+        // 教えて ("tell me") is a request for information, not a memory
+        // instruction, so it must not produce a candidate (issue #70).
+        let out = extract(&ja_turn("今日の天気を教えて"), Locale::Ja, 0.0).expect("extract failed");
+        assert!(out.is_empty(), "教えて must not be captured: {out:?}");
+    }
+
+    #[test]
+    fn ja_remember_question_is_skipped() {
+        // A question about memory must not be captured as an instruction.
+        let out =
+            extract(&ja_turn("私の誕生日を覚えてますか"), Locale::Ja, 0.0).expect("extract failed");
+        assert!(out.is_empty(), "remember question must not match: {out:?}");
+    }
+
+    #[test]
     fn ja_forget_request_creates_deletion_candidate() {
         let out = extract(&ja_turn("さっきのプロジェクトを忘れて"), Locale::Ja, 0.0)
             .expect("extract failed");
@@ -683,6 +748,18 @@ mod tests {
         )
         .expect("extract failed");
         assert_eq!(out.len(), 1, "imperative remember must still match");
+    }
+
+    #[test]
+    fn en_remember_empty_content_is_rejected() {
+        // A remember keyword with only trailing whitespace must not produce
+        // a persistable candidate with empty content (Bugbot medium finding).
+        let out =
+            extract(&en_turn("please remember    "), Locale::En, 0.0).expect("extract failed");
+        assert!(
+            out.is_empty(),
+            "empty remember content must not match: {out:?}"
+        );
     }
 
     // ── English forget ────────────────────────────────────────────────

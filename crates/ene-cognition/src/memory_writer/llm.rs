@@ -8,7 +8,8 @@
 //! The extractor is designed to be called after the deterministic extractor
 //! in the memory pipeline. It handles:
 //! - Structured output via JSON schema (`additionalProperties: false`)
-//! - 30-second timeout (configurable)
+//! - A configurable call timeout (see [`extract_with_timeout`]; the default is
+//!   [`DEFAULT_EXTRACTION_TIMEOUT_SECS`])
 //! - Markdown wrapper stripping (```json ... ```)
 //! - Confidence capping at 0.9
 //! - Unknown `kind` fallback to `Semantic`
@@ -20,11 +21,25 @@ use super::candidate::{Locale, MemoryCandidate, TurnInput};
 use crate::error::CognitionError;
 use ene_memory::typed_memory::MemoryKind;
 
-/// Timeout for the LLM call in seconds.
-const EXTRACTION_TIMEOUT_SECS: u64 = 30;
+/// Default timeout for the LLM call in seconds, used by [`extract`] when no
+/// explicit budget is supplied. Callers that have a
+/// [`CognitionMemoryConfig`](crate::config::CognitionMemoryConfig) should pass
+/// its `extraction_timeout_secs` to [`extract_with_timeout`] instead.
+pub const DEFAULT_EXTRACTION_TIMEOUT_SECS: u64 = 30;
 
 /// Maximum confidence the extractor will accept from the LLM.
 const MAX_CONFIDENCE: f32 = 0.9;
+
+/// Advisory multiplier applied to confidence when the `source_quote` script
+/// does not match the requested locale. Kept mild (not a hard drop) because
+/// script heuristics cannot distinguish e.g. romaji Japanese from English,
+/// so a mismatch is only a weak signal (Bugbot medium finding).
+const LOCALE_MISMATCH_PENALTY: f32 = 0.8;
+
+/// Minimum `source_quote` length (in characters) before the locale-mismatch
+/// heuristic is applied. Short quotes such as names or interjections are too
+/// ambiguous to penalize reliably.
+const LOCALE_MISMATCH_MIN_CHARS: usize = 8;
 
 /// Extracts memory candidates from a conversation turn using an LLM.
 ///
@@ -33,10 +48,26 @@ const MAX_CONFIDENCE: f32 = 0.9;
 /// each raw candidate into a [`MemoryCandidate`].
 ///
 /// Returns an empty vec (not an error) when the LLM produces zero candidates.
+///
+/// Uses [`DEFAULT_EXTRACTION_TIMEOUT_SECS`] for the call timeout. To honour the
+/// operator-configured budget, use [`extract_with_timeout`].
 pub async fn extract(
     provider: &dyn LlmProvider,
     turn: &TurnInput<'_>,
     locale: Locale,
+) -> Result<Vec<MemoryCandidate>, CognitionError> {
+    extract_with_timeout(provider, turn, locale, DEFAULT_EXTRACTION_TIMEOUT_SECS).await
+}
+
+/// Same as [`extract`], but with an explicit call-timeout budget in seconds.
+///
+/// This is the entry point the runtime should use so the timeout can be driven
+/// by `CognitionMemoryConfig::extraction_timeout_secs` (issue #66).
+pub async fn extract_with_timeout(
+    provider: &dyn LlmProvider,
+    turn: &TurnInput<'_>,
+    locale: Locale,
+    timeout_secs: u64,
 ) -> Result<Vec<MemoryCandidate>, CognitionError> {
     let prompts = PromptLibrary::load(match locale {
         Locale::Ja => "ja",
@@ -60,14 +91,12 @@ pub async fn extract(
     ];
 
     let raw = tokio::time::timeout(
-        std::time::Duration::from_secs(EXTRACTION_TIMEOUT_SECS),
+        std::time::Duration::from_secs(timeout_secs),
         provider.chat_completion(&messages, Some(schema)),
     )
     .await
     .map_err(|_| {
-        CognitionError::ExtractionFailed(format!(
-            "LLM extraction timed out after {EXTRACTION_TIMEOUT_SECS}s"
-        ))
+        CognitionError::ExtractionFailed(format!("LLM extraction timed out after {timeout_secs}s"))
     })?
     .map_err(|e| CognitionError::ExtractionFailed(format!("LLM provider error: {e}")))?;
 
@@ -255,7 +284,7 @@ fn raw_to_candidate(raw: RawCandidate, locale: Locale) -> MemoryCandidate {
             source_quote = %raw.source_quote,
             "Locale mismatch detected, reducing confidence"
         );
-        confidence * 0.5
+        confidence * LOCALE_MISMATCH_PENALTY
     } else {
         confidence
     };
@@ -285,7 +314,9 @@ fn locale_mismatch(text: &str, locale: Locale) -> bool {
         })
         .count();
     let total = text.chars().count();
-    if total == 0 {
+    // Short quotes (names, interjections, code tokens) are too ambiguous for
+    // the script heuristic to judge reliably, so they are never flagged.
+    if total < LOCALE_MISMATCH_MIN_CHARS {
         return false;
     }
     let cjk_ratio = cjk_count as f32 / total as f32;
@@ -369,8 +400,9 @@ mod tests {
             _messages: &[LlmMessage],
             _json_schema: Option<serde_json::Value>,
         ) -> Result<String, ene_provider::LlmProviderError> {
-            // Simulate a slow provider — the timeout in extract() will catch this
-            tokio::time::sleep(std::time::Duration::from_secs(EXTRACTION_TIMEOUT_SECS + 1)).await;
+            // Simulate a slow provider. The extract() timeout cancels this
+            // future long before the sleep elapses, so the test stays fast.
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             Ok("{}".to_string())
         }
     }
@@ -514,13 +546,16 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_returns_extraction_failed() {
+        // A short, explicit budget (as would come from
+        // `CognitionMemoryConfig::extraction_timeout_secs`) is honoured and
+        // reported in the error message.
         let provider = TimeoutProvider;
-        let result = extract(&provider, &ja_turn("test"), Locale::En).await;
+        let result = extract_with_timeout(&provider, &ja_turn("test"), Locale::En, 1).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("timed out"),
-            "Expected timeout error, got: {err_msg}"
+            err_msg.contains("timed out") && err_msg.contains("1s"),
+            "Expected timeout error mentioning the configured budget, got: {err_msg}"
         );
     }
 
@@ -560,6 +595,34 @@ mod tests {
         assert!(
             result[0].confidence < 0.8,
             "Expected reduced confidence, got {}",
+            result[0].confidence
+        );
+    }
+
+    #[tokio::test]
+    async fn short_quote_is_not_penalized_by_locale_mismatch() {
+        // A short CJK quote (e.g. a name) in an English session is too
+        // ambiguous to penalize, so confidence is preserved (Bugbot finding).
+        let json = r#"{
+            "candidates": [{
+                "kind": "UserProfile",
+                "title": "name",
+                "content": "User's name is Yuki",
+                "source_quote": "ゆき",
+                "confidence": 0.8,
+                "should_persist": true,
+                "deletion_target_key": null,
+                "commitment_due": null
+            }]
+        }"#;
+        let provider = MockProvider::new(json);
+        let result = extract(&provider, &ja_turn("ゆき"), Locale::En)
+            .await
+            .expect("extract failed");
+        assert_eq!(result.len(), 1);
+        assert!(
+            (result[0].confidence - 0.8).abs() < 0.01,
+            "short quote must not be penalized, got {}",
             result[0].confidence
         );
     }

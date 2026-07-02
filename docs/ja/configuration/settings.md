@@ -369,7 +369,8 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
       "hybrid_search": true,
       "decay_enabled": true,
       "default_forgetting_half_life_days": 30.0,
-      "min_confidence_to_persist": 0.65
+      "min_confidence_to_persist": 0.65,
+      "extraction_timeout_secs": 30
     },
     "emotion": {
       "enabled": true,
@@ -412,6 +413,7 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 | `decay_enabled` | bool | `true` | 時間ベースの記憶減衰を有効化 |
 | `default_forgetting_half_life_days` | float | `30.0` | 記憶減衰のデフォルト半減期（日） |
 | `min_confidence_to_persist` | float | `0.65` | 記憶永続化の最低信頼度しきい値（0.0〜1.0） |
+| `extraction_timeout_secs` | int | `30` | LLM 記憶抽出呼び出し 1 回のタイムアウト（秒）。超過時は抽出失敗となり deterministic 候補にフォールバック |
 
 #### `cognition.emotion` — 感情エンジン
 

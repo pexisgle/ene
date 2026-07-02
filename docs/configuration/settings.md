@@ -369,7 +369,8 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
       "hybrid_search": true,
       "decay_enabled": true,
       "default_forgetting_half_life_days": 30.0,
-      "min_confidence_to_persist": 0.65
+      "min_confidence_to_persist": 0.65,
+      "extraction_timeout_secs": 30
     },
     "emotion": {
       "enabled": true,
@@ -412,6 +413,7 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 | `decay_enabled` | bool | `true` | Enable time-based memory decay |
 | `default_forgetting_half_life_days` | float | `30.0` | Default half-life in days for memory decay |
 | `min_confidence_to_persist` | float | `0.65` | Minimum confidence threshold (0.0–1.0) for persisting a memory |
+| `extraction_timeout_secs` | int | `30` | Timeout in seconds for a single LLM memory-extraction call; on timeout the extraction fails and falls back to deterministic candidates |
 
 #### `cognition.emotion` — Emotion Engine
 

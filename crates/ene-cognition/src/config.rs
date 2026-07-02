@@ -110,6 +110,10 @@ pub struct CognitionMemoryConfig {
     /// (issue #95 confidence range guard).
     #[serde(deserialize_with = "deserialize_unit_interval")]
     pub min_confidence_to_persist: f64,
+    /// Timeout in seconds for a single LLM memory-extraction call. When the
+    /// provider does not respond within this budget the extraction fails and
+    /// the pipeline falls back to deterministic candidates (issue #66).
+    pub extraction_timeout_secs: u64,
 }
 
 /// Clamp a deserialized confidence into the closed unit interval
@@ -132,6 +136,7 @@ impl Default for CognitionMemoryConfig {
             decay_enabled: true,
             default_forgetting_half_life_days: 30.0,
             min_confidence_to_persist: 0.65,
+            extraction_timeout_secs: 30,
         }
     }
 }
