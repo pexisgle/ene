@@ -19,8 +19,11 @@ fn main() {
     let mut json: Option<Vec<u8>> = None;
     let mut bin: Option<Vec<u8>> = None;
     while cursor + 8 <= glb_bytes.len() {
-        let chunk_len =
-            u32::from_le_bytes(glb_bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
+        let chunk_len = u32::from_le_bytes(
+            glb_bytes[cursor..cursor + 4]
+                .try_into()
+                .expect("4-byte GLB chunk length slice"),
+        ) as usize;
         let chunk_type = &glb_bytes[cursor + 4..cursor + 8];
         let payload_start = cursor + 8;
         let payload_end = payload_start + chunk_len;

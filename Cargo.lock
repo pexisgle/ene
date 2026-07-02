@@ -2767,6 +2767,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "chrono",
+ "ene-cognition",
  "ene-common",
  "ene-config",
  "ene-embedding",
