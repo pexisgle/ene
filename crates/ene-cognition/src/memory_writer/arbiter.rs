@@ -1397,6 +1397,141 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn arbitrate_and_apply_persists_valid_candidate() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let turn = TurnInput {
+            user_message: "remember project X",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let arbiter_ctx = ctx(turn);
+        let applied =
+            MemoryArbiter::arbitrate_and_apply(&store, &[sample_candidate(0.9)], &arbiter_ctx)
+                .await
+                .unwrap();
+
+        assert_eq!(applied.len(), 1);
+        assert!(applied[0].inserted_id.is_some());
+        assert!(matches!(
+            applied[0].decision.action,
+            ArbiterAction::Persist(_)
+        ));
+
+        let id = applied[0].inserted_id.unwrap();
+        let mem = store.get_typed_memory(id).await.unwrap().unwrap();
+        assert_eq!(mem.title, "project X");
+        assert_eq!(mem.status, MemoryStatus::Active);
+        assert_eq!(mem.source, MemorySource::Inferred);
+    }
+
+    #[tokio::test]
+    async fn arbitrate_and_apply_marks_user_deleted() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let existing_item = NewMemoryItem {
+            scope: MemoryScope::Character,
+            character_id: "ene".to_string(),
+            user_id: "user1".to_string(),
+            kind: MemoryKind::Semantic,
+            title: "project X".to_string(),
+            content: "User is working on project X".to_string(),
+            source: MemorySource::Inferred,
+            source_ref: None,
+            confidence: MemoryConfidence::new(0.8),
+            salience: MemorySalience::default(),
+            affect: AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+        };
+        let id = store.insert_typed_memory(&existing_item).await.unwrap();
+
+        let turn = TurnInput {
+            user_message: "forget project X",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let candidate = MemoryCandidate {
+            kind: MemoryKind::Semantic,
+            title: "forget: project X".to_string(),
+            content: "User requested to forget: project X".to_string(),
+            source_quote: "forget project X".to_string(),
+            confidence: 0.9,
+            should_persist: false,
+            deletion_target_key: Some("project X".to_string()),
+            commitment_due: None,
+        };
+        let applied = MemoryArbiter::arbitrate_and_apply(&store, &[candidate], &ctx(turn))
+            .await
+            .unwrap();
+
+        assert_eq!(applied.len(), 1);
+        assert!(applied[0].updated_existing);
+        assert!(matches!(
+            applied[0].decision.action,
+            ArbiterAction::MarkUserDeleted { memory_id } if memory_id == id
+        ));
+
+        let mem = store.get_typed_memory(id).await.unwrap().unwrap();
+        assert_eq!(mem.status, MemoryStatus::UserDeleted);
+    }
+
+    #[tokio::test]
+    async fn apply_disputed_updates_existing_memory() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let existing_item = NewMemoryItem {
+            scope: MemoryScope::User,
+            character_id: "ene".to_string(),
+            user_id: "user1".to_string(),
+            kind: MemoryKind::Preference,
+            title: "love: coffee".to_string(),
+            content: "I love coffee".to_string(),
+            source: MemorySource::Inferred,
+            source_ref: None,
+            confidence: MemoryConfidence::new(0.7),
+            salience: MemorySalience::default(),
+            affect: AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+        };
+        let id = store.insert_typed_memory(&existing_item).await.unwrap();
+        let existing = store.get_typed_memory(id).await.unwrap().unwrap();
+
+        let turn = TurnInput {
+            user_message: "I love tea now",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let candidate = MemoryCandidate {
+            kind: MemoryKind::Preference,
+            title: "love: coffee".to_string(),
+            content: "I love tea".to_string(),
+            source_quote: "I love tea now".to_string(),
+            confidence: 0.72,
+            should_persist: true,
+            deletion_target_key: None,
+            commitment_due: None,
+        };
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &ctx(turn));
+        assert!(matches!(
+            decision_action(&decisions),
+            ArbiterAction::MarkDisputed { memory_id } if memory_id == &id
+        ));
+
+        let applied = MemoryArbiter::apply_decisions(&store, &decisions)
+            .await
+            .unwrap();
+        assert!(applied[0].updated_existing);
+
+        let mem = store.get_typed_memory(id).await.unwrap().unwrap();
+        assert_eq!(mem.status, MemoryStatus::Disputed);
+    }
+
     #[test]
     fn commitment_due_not_mapped_to_valid_until() {
         let turn = TurnInput {
