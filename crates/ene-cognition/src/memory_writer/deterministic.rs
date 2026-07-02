@@ -27,6 +27,76 @@ fn nfkc(s: &str) -> String {
     unicode_normalization::UnicodeNormalization::nfkc(s).collect()
 }
 
+/// Interrogative sentence openers (lowercase). A `remember` / `forget`
+/// keyword inside a question is not an instruction — e.g.
+/// "do you remember my birthday" (issue #70 precision guard).
+const EN_QUESTION_STARTERS: &[&str] = &[
+    "do you",
+    "did you",
+    "does",
+    "can you",
+    "could you",
+    "will you",
+    "would you",
+    "have you",
+    "are you",
+    "what",
+    "when",
+    "where",
+    "who",
+    "why",
+    "how",
+    "which",
+    "is it",
+    "was it",
+];
+
+/// Return `true` when `msg` reads as an English question rather than an
+/// instruction: it contains a `?` (the fullwidth `？` is already folded
+/// to ASCII by [`nfkc`]) or begins with an interrogative opener, which
+/// catches questions written without a trailing `?`.
+fn is_en_question(msg: &str) -> bool {
+    if msg.contains('?') {
+        return true;
+    }
+    let head = msg.trim_start().to_lowercase();
+    EN_QUESTION_STARTERS.iter().any(|q| {
+        head.starts_with(q)
+            && !head[q.len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric())
+    })
+}
+
+/// Trim a captured Japanese callsign down to the bare name.
+///
+/// Drops everything up to and including the last topic/subject particle
+/// (`は` / `が`) so `ボクはレン` → `レン` and `私がミク` → `ミク`; if no
+/// particle is present, a leading first-person pronoun is stripped so
+/// `わたしレン` → `レン` (issue #70). Trimming is skipped when it would
+/// leave an empty callsign, so short names are not over-truncated.
+fn trim_ja_callsign(name: &str) -> &str {
+    let mut token = name.trim();
+    for particle in ["は", "が"] {
+        if let Some(idx) = token.rfind(particle) {
+            let rest = token[idx + particle.len()..].trim();
+            if !rest.is_empty() {
+                token = rest;
+            }
+        }
+    }
+    for pronoun in ["わたし", "私", "ボク", "僕", "俺", "自分"] {
+        if let Some(rest) = token.strip_prefix(pronoun) {
+            let rest = rest.trim();
+            if !rest.is_empty() {
+                token = rest;
+            }
+        }
+    }
+    token
+}
+
 // ---------------------------------------------------------------------------
 // Pattern matcher type
 // ---------------------------------------------------------------------------
@@ -140,9 +210,12 @@ fn ja_nickname(
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
     static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(.+?)って呼んで").unwrap());
-    RE.captures(user_msg).map(|cap| {
-        let name = cap[1].trim().to_string();
-        MemoryCandidate {
+    RE.captures(user_msg).and_then(|cap| {
+        let name = trim_ja_callsign(cap[1].trim()).to_string();
+        if name.is_empty() {
+            return None;
+        }
+        Some(MemoryCandidate {
             kind: MemoryKind::UserProfile,
             title: format!("呼び方: {}", name),
             content: format!("User wants to be called '{}'", name),
@@ -151,7 +224,7 @@ fn ja_nickname(
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
-        }
+        })
     })
 }
 
@@ -207,6 +280,9 @@ fn en_explicit_remember(
     _asst_msg: &str,
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
+    if is_en_question(user_msg) {
+        return None;
+    }
     static RE: Lazy<Regex> = Lazy::new(|| {
         Regex::new(
             r"(?i)(please\s+)?(remember|note|keep in mind|don't forget)[:：]?\s+(?:that\s+)?(.+)",
@@ -233,6 +309,9 @@ fn en_forget_request(
     _asst_msg: &str,
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
+    if is_en_question(user_msg) {
+        return None;
+    }
     static RE: Lazy<Regex> = Lazy::new(|| {
         Regex::new(r"(?i)(forget|erase|drop|stop remembering)\s+(?:about\s+)?(.+)").unwrap()
     });
@@ -536,6 +615,19 @@ mod tests {
         assert!(out[0].title.contains("さゆり"));
     }
 
+    #[test]
+    fn ja_nickname_strips_topic_marker() {
+        // The topic marker + first-person pronoun must be dropped so the
+        // captured callsign is レン, not ボクはレン (issue #70).
+        let out =
+            extract(&ja_turn("ボクはレンって呼んで"), Locale::Ja, 0.0).expect("extract failed");
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0].title.contains("レン") && !out[0].title.contains("ボク"),
+            "expected callsign レン without ボクは prefix, got: {out:?}"
+        );
+    }
+
     // ── Japanese NG ───────────────────────────────────────────────────
 
     #[test]
@@ -570,6 +662,27 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, MemoryKind::Semantic);
         assert!(out[0].content.contains("meeting"));
+    }
+
+    #[test]
+    fn indirect_question_without_mark_is_skipped() {
+        // No trailing '?' but clearly a question — must not be captured
+        // as a remember instruction.
+        let out = extract(&en_turn("do you remember my birthday"), Locale::En, 0.0)
+            .expect("extract failed");
+        assert!(out.is_empty(), "indirect question must not match: {out:?}");
+    }
+
+    #[test]
+    fn imperative_remember_still_matches() {
+        // Guard against the question detector being too aggressive.
+        let out = extract(
+            &en_turn("please remember that I take my coffee black"),
+            Locale::En,
+            0.0,
+        )
+        .expect("extract failed");
+        assert_eq!(out.len(), 1, "imperative remember must still match");
     }
 
     // ── English forget ────────────────────────────────────────────────

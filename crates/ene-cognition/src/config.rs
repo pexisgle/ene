@@ -105,8 +105,23 @@ pub struct CognitionMemoryConfig {
     pub decay_enabled: bool,
     /// Default half-life in days for memory decay.
     pub default_forgetting_half_life_days: f64,
-    /// Minimum confidence threshold for persisting a memory.
+    /// Minimum confidence threshold for persisting a memory. This is a
+    /// probability, so values outside `0.0..=1.0` are clamped on load
+    /// (issue #95 confidence range guard).
+    #[serde(deserialize_with = "deserialize_unit_interval")]
     pub min_confidence_to_persist: f64,
+}
+
+/// Clamp a deserialized confidence into the closed unit interval
+/// `0.0..=1.0`. Out-of-range user config values are clamped rather
+/// than rejected so a bad hand-edit degrades gracefully instead of
+/// failing the boot path.
+fn deserialize_unit_interval<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: ::ene_config::serde::Deserializer<'de>,
+{
+    use ::ene_config::serde::Deserialize;
+    Ok(f64::deserialize(deserializer)?.clamp(0.0, 1.0))
 }
 
 impl Default for CognitionMemoryConfig {
@@ -173,5 +188,33 @@ impl Default for CharacterMemoryConfig {
             always_include_identity_kernel: true,
             style_retrieval: true,
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+mod tests {
+    use super::*;
+
+    /// Out-of-range `min_confidence_to_persist` values from a
+    /// hand-edited config are clamped into `0.0..=1.0` on load rather
+    /// than accepted verbatim (issue #95 confidence range guard).
+    #[test]
+    fn min_confidence_out_of_range_is_clamped() {
+        let high: CognitionMemoryConfig =
+            serde_json::from_str(r#"{"min_confidence_to_persist": 2.5}"#).expect("deserialize");
+        assert!(
+            (high.min_confidence_to_persist - 1.0).abs() < f64::EPSILON,
+            "expected clamp to 1.0, got {}",
+            high.min_confidence_to_persist
+        );
+
+        let low: CognitionMemoryConfig =
+            serde_json::from_str(r#"{"min_confidence_to_persist": -0.4}"#).expect("deserialize");
+        assert!(
+            (low.min_confidence_to_persist - 0.0).abs() < f64::EPSILON,
+            "expected clamp to 0.0, got {}",
+            low.min_confidence_to_persist
+        );
     }
 }
