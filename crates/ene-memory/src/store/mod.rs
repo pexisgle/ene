@@ -1254,6 +1254,179 @@ impl MemoryStore {
             .collect()
     }
 
+    /// Hybrid search over typed memories with explainable score breakdown.
+    ///
+    /// Gathers candidates from vector similarity, lexical overlap, recent
+    /// active memories, and active commitments; scores and de-duplicates by
+    /// memory id; returns the top `options.limit` results.
+    pub async fn search_typed_memories_hybrid(
+        &self,
+        options: &crate::MemorySearchOptions<'_>,
+    ) -> Result<Vec<crate::ScoredMemory>, MemoryError> {
+        use crate::search::{
+            GatheredCandidate, is_recallable_status, lexical_overlap_score, score_candidate,
+        };
+        use crate::typed_memory::MemoryCandidateSource;
+        use std::collections::HashMap;
+
+        validate_embedding(options.query_embedding, self.embedding_dim)?;
+
+        let pool = options.candidate_pool_size.max(options.limit);
+        let mut gathered: HashMap<i64, GatheredCandidate> = HashMap::new();
+
+        let mut merge =
+            |item: crate::MemoryItem, vector_similarity: f32, source: MemoryCandidateSource| {
+                if !is_recallable_status(item.status) {
+                    return;
+                }
+                if let Some(uid) = options.user_id
+                    && !item.user_id.is_empty()
+                    && item.user_id != uid
+                {
+                    return;
+                }
+                let id = match item.id {
+                    Some(id) => id,
+                    None => return,
+                };
+                gathered
+                    .entry(id)
+                    .and_modify(|c| {
+                        c.vector_similarity = c.vector_similarity.max(vector_similarity);
+                        if !c.sources.contains(&source) {
+                            c.sources.push(source);
+                        }
+                    })
+                    .or_insert(GatheredCandidate {
+                        item,
+                        vector_similarity,
+                        sources: vec![source],
+                    });
+            };
+
+        // Vector candidates.
+        let vector_hits = self
+            .search_typed_memories(
+                options.query_embedding,
+                options.character_id,
+                options.model_name,
+                pool,
+                options.similarity_threshold,
+            )
+            .await?;
+        for (item, similarity) in vector_hits {
+            merge(item, similarity, MemoryCandidateSource::Vector);
+        }
+
+        // Recent + lexical candidates from recallable rows.
+        let recallable = self
+            .list_recallable_typed_memories(options.character_id, options.user_id, pool)
+            .await?;
+        for item in recallable {
+            let lexical = lexical_overlap_score(options.query_text, &item.title, &item.content);
+            if lexical > 0.0 {
+                merge(item.clone(), 0.0, MemoryCandidateSource::Lexical);
+            } else {
+                merge(item, 0.0, MemoryCandidateSource::Recent);
+            }
+        }
+
+        // Active commitment memories (ledger-linked + commitment kind).
+        let commitments = self
+            .list_active_commitments(options.character_id, options.user_id, pool)
+            .await?;
+        for commitment in commitments {
+            if let Some(memory_id) = commitment.source_memory_id
+                && let Some(item) = self.get_typed_memory(memory_id).await?
+            {
+                merge(item, 0.0, MemoryCandidateSource::Commitment);
+            }
+        }
+
+        let commitment_kind = self
+            .get_typed_memories_by_character(
+                options.character_id,
+                Some(crate::MemoryKind::Commitment),
+                pool,
+                0,
+            )
+            .await?;
+        for item in commitment_kind {
+            if item.status == crate::MemoryStatus::Active {
+                merge(item, 0.0, MemoryCandidateSource::Commitment);
+            }
+        }
+
+        let mut scored: Vec<crate::ScoredMemory> = gathered
+            .into_values()
+            .map(|candidate| {
+                let breakdown = score_candidate(options, &candidate);
+                crate::ScoredMemory {
+                    item: candidate.item,
+                    breakdown,
+                    sources: candidate.sources,
+                }
+            })
+            .collect();
+
+        scored.sort_by(|a, b| {
+            b.breakdown
+                .total
+                .partial_cmp(&a.breakdown.total)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    b.breakdown
+                        .vector_similarity
+                        .partial_cmp(&a.breakdown.vector_similarity)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| b.item.updated_at.cmp(&a.item.updated_at))
+        });
+
+        scored.truncate(options.limit);
+        Ok(scored)
+    }
+
+    /// List typed memories eligible for hybrid recall (`active`, `faded`, `disputed`).
+    pub async fn list_recallable_typed_memories(
+        &self,
+        character_id: &str,
+        user_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::MemoryItem>, MemoryError> {
+        use sea_orm::{EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+
+        let statuses = [
+            crate::MemoryStatus::Active.as_str(),
+            crate::MemoryStatus::Faded.as_str(),
+            crate::MemoryStatus::Disputed.as_str(),
+        ];
+
+        let mut query = entities::typed_memories::Entity::find()
+            .filter(entities::typed_memories::Column::CharacterId.eq(character_id))
+            .filter(entities::typed_memories::Column::Status.is_in(statuses));
+
+        if let Some(uid) = user_id {
+            use sea_orm::Condition;
+            query = query.filter(
+                Condition::any()
+                    .add(entities::typed_memories::Column::UserId.eq(uid))
+                    .add(entities::typed_memories::Column::UserId.eq("")),
+            );
+        }
+
+        let models = query
+            .order_by_desc(entities::typed_memories::Column::UpdatedAt)
+            .limit(limit as u64)
+            .all(&self.db)
+            .await?;
+
+        models
+            .into_iter()
+            .map(model_to_memory_item)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
     /// Atomically insert a replacement memory and mark the prior row superseded.
     ///
     /// The new row's `supersedes_id` is set to `superseded_id` (predecessor link).
@@ -2395,5 +2568,279 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    fn hybrid_search_options<'a>(
+        query_text: &'a str,
+        query_embedding: &'a [f32],
+        now: DateTime<Utc>,
+    ) -> crate::MemorySearchOptions<'a> {
+        crate::MemorySearchOptions {
+            query_text,
+            query_embedding,
+            character_id: "ene",
+            user_id: None,
+            model_name: "test-model",
+            limit: 10,
+            similarity_threshold: 0.0,
+            candidate_pool_size: 50,
+            query_affect: None,
+            weights: crate::HybridSearchWeights::default(),
+            decay_half_life_days: 30.0,
+            now,
+        }
+    }
+
+    async fn insert_memory_with_embedding(
+        store: &MemoryStore,
+        item: &crate::NewMemoryItem,
+        embedding: &[f32],
+    ) -> i64 {
+        let id = store.insert_typed_memory(item).await.unwrap();
+        store
+            .upsert_memory_embedding(id, "test-model", "content", embedding)
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_ranks_by_salience_and_recency_not_vector_alone() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let now = Utc::now();
+        let query_emb = vec![1.0, 0.0, 0.0, 0.0];
+
+        let low_salience = crate::NewMemoryItem {
+            scope: crate::MemoryScope::Character,
+            character_id: "ene".into(),
+            user_id: String::new(),
+            kind: crate::MemoryKind::Semantic,
+            title: "distant topic".into(),
+            content: "unrelated content".into(),
+            source: crate::MemorySource::Conversation,
+            source_ref: None,
+            confidence: crate::MemoryConfidence::new(0.5),
+            salience: crate::MemorySalience::new(0.2),
+            affect: crate::AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: crate::MemoryStatus::Active,
+            supersedes_id: None,
+        };
+        let high_salience = crate::NewMemoryItem {
+            salience: crate::MemorySalience::new(0.95),
+            confidence: crate::MemoryConfidence::new(0.9),
+            title: "important fact".into(),
+            content: "user preference about music".into(),
+            ..low_salience.clone()
+        };
+
+        insert_memory_with_embedding(&store, &low_salience, &query_emb).await;
+        insert_memory_with_embedding(&store, &high_salience, &query_emb).await;
+
+        let options = hybrid_search_options("music preference", &query_emb, now);
+        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].item.title, "important fact");
+        assert!(results[0].breakdown.total >= results[1].breakdown.total);
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_lexical_component_for_matching_query() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let now = Utc::now();
+        let orthogonal = vec![0.0, 1.0, 0.0, 0.0];
+
+        let item = crate::NewMemoryItem {
+            scope: crate::MemoryScope::Character,
+            character_id: "ene".into(),
+            user_id: String::new(),
+            kind: crate::MemoryKind::Semantic,
+            title: "favorite drink".into(),
+            content: "The user loves matcha latte".into(),
+            source: crate::MemorySource::Conversation,
+            source_ref: None,
+            confidence: crate::MemoryConfidence::default(),
+            salience: crate::MemorySalience::default(),
+            affect: crate::AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: crate::MemoryStatus::Active,
+            supersedes_id: None,
+        };
+        insert_memory_with_embedding(&store, &item, &orthogonal).await;
+
+        let options = hybrid_search_options("matcha latte", &orthogonal, now);
+        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].breakdown.lexical_score > 0.0);
+        assert!(
+            results[0]
+                .sources
+                .contains(&crate::MemoryCandidateSource::Lexical)
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_surfaces_active_commitment_with_low_vector_similarity() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let now = Utc::now();
+        let query_emb = vec![1.0, 0.0, 0.0, 0.0];
+        let orthogonal = vec![0.0, 1.0, 0.0, 0.0];
+
+        let memory_id = store
+            .insert_typed_memory(&crate::NewMemoryItem {
+                scope: crate::MemoryScope::Character,
+                character_id: "ene".into(),
+                user_id: "user1".into(),
+                kind: crate::MemoryKind::Commitment,
+                title: "follow up".into(),
+                content: "Review the architecture document".into(),
+                source: crate::MemorySource::Inferred,
+                source_ref: None,
+                confidence: crate::MemoryConfidence::new(0.8),
+                salience: crate::MemorySalience::new(0.5),
+                affect: crate::AffectAnnotation::default(),
+                relationship_impact: 0.0,
+                valid_from: None,
+                valid_until: None,
+                status: crate::MemoryStatus::Active,
+                supersedes_id: None,
+            })
+            .await
+            .unwrap();
+        store
+            .upsert_memory_embedding(memory_id, "test-model", "content", &orthogonal)
+            .await
+            .unwrap();
+        store
+            .insert_commitment(&crate::NewCommitment {
+                character_id: "ene".into(),
+                user_id: "user1".into(),
+                title: "follow up".into(),
+                description: "Review the architecture document".into(),
+                status: crate::CommitmentStatus::Active,
+                due_at: None,
+                due_label: Some("next time".into()),
+                source_memory_id: Some(memory_id),
+            })
+            .await
+            .unwrap();
+
+        let options = hybrid_search_options("unrelated query", &query_emb, now);
+        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        assert!(
+            results
+                .iter()
+                .any(|r| r.item.id == Some(memory_id) && r.breakdown.commitment_boost > 0.0),
+            "active commitment should be recalled despite low vector similarity"
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_excludes_archived_superseded_and_user_deleted() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let now = Utc::now();
+        let emb = vec![0.5, 0.5, 0.5, 0.5];
+
+        let base = crate::NewMemoryItem {
+            scope: crate::MemoryScope::Character,
+            character_id: "ene".into(),
+            user_id: String::new(),
+            kind: crate::MemoryKind::Semantic,
+            title: "memory".into(),
+            content: "shared content".into(),
+            source: crate::MemorySource::Conversation,
+            source_ref: None,
+            confidence: crate::MemoryConfidence::default(),
+            salience: crate::MemorySalience::default(),
+            affect: crate::AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: crate::MemoryStatus::Active,
+            supersedes_id: None,
+        };
+
+        for status in [
+            crate::MemoryStatus::Archived,
+            crate::MemoryStatus::Superseded,
+            crate::MemoryStatus::UserDeleted,
+        ] {
+            let mut item = base.clone();
+            item.title = format!("{:?}", status);
+            item.status = status;
+            insert_memory_with_embedding(&store, &item, &emb).await;
+        }
+
+        let options = hybrid_search_options("shared content", &emb, now);
+        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_faded_memory_has_stale_penalty() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let now = Utc::now();
+        let emb = vec![1.0, 0.0, 0.0, 0.0];
+
+        let item = crate::NewMemoryItem {
+            scope: crate::MemoryScope::Character,
+            character_id: "ene".into(),
+            user_id: String::new(),
+            kind: crate::MemoryKind::Semantic,
+            title: "old fact".into(),
+            content: "faded memory content".into(),
+            source: crate::MemorySource::Conversation,
+            source_ref: None,
+            confidence: crate::MemoryConfidence::default(),
+            salience: crate::MemorySalience::default(),
+            affect: crate::AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: crate::MemoryStatus::Faded,
+            supersedes_id: None,
+        };
+        insert_memory_with_embedding(&store, &item, &emb).await;
+
+        let options = hybrid_search_options("faded memory", &emb, now);
+        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].breakdown.stale_penalty > 0.0);
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_dedupes_multi_source_candidates() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let now = Utc::now();
+        let emb = vec![1.0, 0.0, 0.0, 0.0];
+
+        let item = crate::NewMemoryItem {
+            scope: crate::MemoryScope::Character,
+            character_id: "ene".into(),
+            user_id: String::new(),
+            kind: crate::MemoryKind::Semantic,
+            title: "pizza night".into(),
+            content: "Friday pizza tradition".into(),
+            source: crate::MemorySource::Conversation,
+            source_ref: None,
+            confidence: crate::MemoryConfidence::default(),
+            salience: crate::MemorySalience::default(),
+            affect: crate::AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: crate::MemoryStatus::Active,
+            supersedes_id: None,
+        };
+        insert_memory_with_embedding(&store, &item, &emb).await;
+
+        let options = hybrid_search_options("pizza tradition", &emb, now);
+        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].sources.len() >= 2);
     }
 }

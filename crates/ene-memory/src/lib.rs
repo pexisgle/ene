@@ -43,6 +43,8 @@ pub mod error;
 pub mod migrator;
 /// Summary recall and prompt formatting utilities.
 pub mod recall;
+/// Hybrid memory search scoring.
+pub mod search;
 /// Core memory store (`SQLite` + sqlite-vec).
 pub mod store;
 /// LLM-driven conversation summarization.
@@ -67,6 +69,7 @@ pub use store::{ConversationSummary, KeyFact, MemoryStore, RecalledSummary};
 pub use summarizer::{ConversationSummaryResult, summarize_conversation};
 /// Typed memory domain types.
 pub use typed_memory::{
-    AffectAnnotation, MemoryConfidence, MemoryItem, MemoryKind, MemorySalience, MemoryScope,
-    MemorySource, MemoryStatus, NewMemoryItem,
+    AffectAnnotation, HybridSearchWeights, MemoryCandidateSource, MemoryConfidence, MemoryItem,
+    MemoryKind, MemorySalience, MemoryScope, MemoryScoreBreakdown, MemorySearchOptions,
+    MemorySource, MemoryStatus, NewMemoryItem, ScoredMemory,
 };

@@ -229,8 +229,39 @@ Cognitive Runtime は長期事実を `typed_memories` に保存し、明示的�
 | `supersede_typed_memory(new_item, old_id)` | 置換を挿入し、旧行を `superseded` にする（トランザクション） |
 | `update_typed_memory_status(id, status)` | ライフサイクル遷移（例: `user_deleted`, `disputed`） |
 | `search_typed_memories(embedding, ...)` | アクティブ記憶に対するベクトル類似検索 |
+| `search_typed_memories_hybrid(options)` | 説明可能なスコア内訳付きハイブリッド想起 |
+| `list_recallable_typed_memories(character_id, user_id, limit)` | 想起対象（`active` / `faded` / `disputed`）の一覧 |
 
 判断ルールとしきい値は [Cognitive Runtime ADR](../architecture/cognitive-runtime.md) を参照。
+
+### ハイブリッド記憶検索（#73）
+
+型付き記憶の想起は、ベクトル類似度だけでなく複数シグナルを組み合わせられます。`MemorySearchOptions` を `MemoryStore::search_typed_memories_hybrid` に渡すと、`ScoredMemory`（`MemoryScoreBreakdown` と recall source: `vector` / `lexical` / `recent` / `commitment`）が返ります。
+
+デフォルトのスコア式:
+
+```text
+score =
+  vector_similarity * 0.45
++ lexical_score     * 0.15
++ recency_score     * 0.10
++ salience          * 0.15
++ emotional_match   * 0.05
++ relationship      * 0.05
++ access_boost      * 0.05
++ commitment_boost  (active commitments のみ)
+- contradiction_penalty
+- stale_penalty
+```
+
+挙動:
+
+- `Archived` / `Superseded` / `UserDeleted` は通常のハイブリッド想起から除外されます。
+- `Faded` や期限切れ記憶は想起可能ですが `stale_penalty` が付きます。
+- commitment ledger に紐づく active commitment は、ベクトル類似度が低くても結果に含まれます。
+- 複数ソースから集めた候補は memory id で de-dupe してから順位付けします。
+
+ベクトル類似度のみが必要な既存呼び出し向けに `search_typed_memories(...)` は従来どおり残しています。
 
 ## Companion Commitment Ledger（約束・タスク台帳）
 

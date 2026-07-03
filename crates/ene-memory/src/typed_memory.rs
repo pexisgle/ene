@@ -378,6 +378,122 @@ pub struct NewMemoryItem {
     pub supersedes_id: Option<i64>,
 }
 
+/// Recall source that surfaced a memory candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryCandidateSource {
+    /// Vector embedding similarity search.
+    Vector,
+    /// Lexical token overlap with query text.
+    Lexical,
+    /// Recent / active memory listing.
+    Recent,
+    /// Active companion commitment ledger.
+    Commitment,
+}
+
+/// Weights for hybrid memory search scoring components.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct HybridSearchWeights {
+    /// Weight for vector cosine similarity.
+    pub vector: f32,
+    /// Weight for lexical token overlap.
+    pub lexical: f32,
+    /// Weight for recency decay score.
+    pub recency: f32,
+    /// Weight for memory salience.
+    pub salience: f32,
+    /// Weight for emotional/affect match.
+    pub emotional_match: f32,
+    /// Weight for relationship impact.
+    pub relationship: f32,
+    /// Weight for prior access boost.
+    pub access_boost: f32,
+}
+
+impl Default for HybridSearchWeights {
+    fn default() -> Self {
+        Self {
+            vector: 0.45,
+            lexical: 0.15,
+            recency: 0.10,
+            salience: 0.15,
+            emotional_match: 0.05,
+            relationship: 0.05,
+            access_boost: 0.05,
+        }
+    }
+}
+
+/// Options for hybrid typed-memory search.
+#[derive(Debug, Clone)]
+pub struct MemorySearchOptions<'a> {
+    /// Natural-language query for lexical scoring.
+    pub query_text: &'a str,
+    /// Query embedding for vector similarity.
+    pub query_embedding: &'a [f32],
+    /// Character scope.
+    pub character_id: &'a str,
+    /// Optional user scope filter.
+    pub user_id: Option<&'a str>,
+    /// Embedding model name for vector index lookup.
+    pub model_name: &'a str,
+    /// Maximum results to return.
+    pub limit: usize,
+    /// Minimum vector similarity for vector-sourced candidates.
+    pub similarity_threshold: f32,
+    /// Upper bound on candidates gathered before scoring.
+    pub candidate_pool_size: usize,
+    /// Optional query affect for emotional match scoring.
+    pub query_affect: Option<AffectAnnotation>,
+    /// Component weights for the hybrid formula.
+    pub weights: HybridSearchWeights,
+    /// Half-life in days for recency decay.
+    pub decay_half_life_days: f64,
+    /// Reference time for recency and expiry checks.
+    pub now: DateTime<Utc>,
+}
+
+/// Explainable score breakdown for a recalled memory.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryScoreBreakdown {
+    /// Raw vector cosine similarity.
+    pub vector_similarity: f32,
+    /// Lexical overlap score.
+    pub lexical_score: f32,
+    /// Recency decay score.
+    pub recency_score: f32,
+    /// Memory salience value.
+    pub salience: f32,
+    /// Memory confidence value (informational; not always weighted).
+    pub confidence: f32,
+    /// Affect match score.
+    pub emotional_match: f32,
+    /// Normalized relationship impact score.
+    pub relationship: f32,
+    /// Access-frequency boost.
+    pub access_boost: f32,
+    /// Penalty for disputed status.
+    pub contradiction_penalty: f32,
+    /// Penalty for faded or expired memories.
+    pub stale_penalty: f32,
+    /// Boost for active commitment candidates.
+    pub commitment_boost: f32,
+    /// Final hybrid total score.
+    pub total: f32,
+}
+
+/// A typed memory with hybrid score breakdown and recall sources.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScoredMemory {
+    /// The recalled memory item.
+    pub item: MemoryItem,
+    /// Explainable score components.
+    pub breakdown: MemoryScoreBreakdown,
+    /// Sources that contributed this candidate.
+    pub sources: Vec<MemoryCandidateSource>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

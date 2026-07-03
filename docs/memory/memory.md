@@ -236,8 +236,39 @@ Key store APIs:
 | `supersede_typed_memory(new_item, old_id)` | Atomically insert replacement and mark prior row `superseded` |
 | `update_typed_memory_status(id, status)` | Lifecycle transition (e.g. `user_deleted`, `disputed`) |
 | `search_typed_memories(embedding, ...)` | Vector similarity search over active memories |
+| `search_typed_memories_hybrid(options)` | Hybrid recall with explainable score breakdown |
+| `list_recallable_typed_memories(character_id, user_id, limit)` | List `active` / `faded` / `disputed` memories for recall |
 
 See [Cognitive Runtime ADR](../architecture/cognitive-runtime.md#memory-arbiter) for decision rules and thresholds.
+
+### Hybrid Memory Search (#73)
+
+Typed memory recall can combine multiple signals instead of vector similarity alone. Use `MemorySearchOptions` with `MemoryStore::search_typed_memories_hybrid` to obtain `ScoredMemory` results that include a `MemoryScoreBreakdown` and the recall sources (`vector`, `lexical`, `recent`, `commitment`).
+
+Default scoring formula:
+
+```text
+score =
+  vector_similarity * 0.45
++ lexical_score     * 0.15
++ recency_score     * 0.10
++ salience          * 0.15
++ emotional_match   * 0.05
++ relationship      * 0.05
++ access_boost      * 0.05
++ commitment_boost  (active commitments only)
+- contradiction_penalty
+- stale_penalty
+```
+
+Behavior:
+
+- `Archived`, `Superseded`, and `UserDeleted` memories are excluded from normal hybrid recall.
+- `Faded` and expired memories remain recallable but receive `stale_penalty`.
+- Active commitments linked via the commitment ledger are surfaced even when vector similarity is low.
+- Candidates gathered from multiple sources are de-duplicated by memory id before ranking.
+
+`search_typed_memories(...)` remains available as the legacy vector-only API for callers that only need cosine similarity.
 
 ## Companion Commitment Ledger
 
