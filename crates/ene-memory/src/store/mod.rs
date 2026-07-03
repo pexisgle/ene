@@ -230,6 +230,43 @@ fn is_supersedeable_status(status: crate::MemoryStatus) -> bool {
     )
 }
 
+fn merge_hybrid_candidate(
+    gathered: &mut std::collections::HashMap<i64, crate::search::GatheredCandidate>,
+    user_id: Option<&str>,
+    item: crate::MemoryItem,
+    vector_similarity: f32,
+    source: crate::MemoryCandidateSource,
+) {
+    use crate::search::{GatheredCandidate, is_recallable_status};
+
+    if !is_recallable_status(item.status) {
+        return;
+    }
+    if let Some(uid) = user_id
+        && !item.user_id.is_empty()
+        && item.user_id != uid
+    {
+        return;
+    }
+    let id = match item.id {
+        Some(id) => id,
+        None => return,
+    };
+    gathered
+        .entry(id)
+        .and_modify(|candidate| {
+            candidate.vector_similarity = candidate.vector_similarity.max(vector_similarity);
+            if !candidate.sources.contains(&source) {
+                candidate.sources.push(source);
+            }
+        })
+        .or_insert(GatheredCandidate {
+            item,
+            vector_similarity,
+            sources: vec![source],
+        });
+}
+
 /// Applies the SQLite PRAGMAs the store depends on to the
 /// given connection. Idempotent and safe to call from both
 /// `open` and `open_in_memory`.
@@ -1136,11 +1173,36 @@ impl MemoryStore {
     }
 
     /// Search typed memories by cosine similarity via content embeddings.
+    ///
+    /// Legacy vector-only search over `active` memories.
     pub async fn search_typed_memories(
         &self,
         query_embedding: &[f32],
         character_id: &str,
         model_name: &str,
+        limit: usize,
+        similarity_threshold: f32,
+    ) -> Result<Vec<(crate::MemoryItem, f32)>, MemoryError> {
+        self.search_typed_memories_vector(
+            query_embedding,
+            character_id,
+            model_name,
+            None,
+            &[crate::MemoryStatus::Active.as_str()],
+            limit,
+            similarity_threshold,
+        )
+        .await
+    }
+
+    /// Vector similarity search with configurable recallable statuses.
+    async fn search_typed_memories_vector(
+        &self,
+        query_embedding: &[f32],
+        character_id: &str,
+        model_name: &str,
+        user_id: Option<&str>,
+        statuses: &[&str],
         limit: usize,
         similarity_threshold: f32,
     ) -> Result<Vec<(crate::MemoryItem, f32)>, MemoryError> {
@@ -1179,7 +1241,7 @@ impl MemoryStore {
         let threshold_val = f64::from(similarity_threshold);
         let limit_val = limit as u64;
 
-        let select = entities::memory_embeddings::Entity::find()
+        let mut select = entities::memory_embeddings::Entity::find()
             .inner_join(entities::typed_memories::Entity)
             .select_only()
             .column(entities::typed_memories::Column::Id)
@@ -1206,7 +1268,7 @@ impl MemoryStore {
             .column(entities::typed_memories::Column::SupersedesId)
             .expr_as(similarity_expr, "similarity")
             .filter(entities::typed_memories::Column::CharacterId.eq(character_id))
-            .filter(entities::typed_memories::Column::Status.eq("active"))
+            .filter(entities::typed_memories::Column::Status.is_in(statuses.to_vec()))
             .filter(entities::memory_embeddings::Column::ModelName.eq(model_name))
             .filter(entities::memory_embeddings::Column::Field.eq("content"))
             .filter(cosine_similarity_filter(
@@ -1216,6 +1278,15 @@ impl MemoryStore {
             ))
             .order_by_desc(Expr::col("similarity"))
             .limit(limit_val);
+
+        if let Some(uid) = user_id {
+            use sea_orm::Condition;
+            select = select.filter(
+                Condition::any()
+                    .add(entities::typed_memories::Column::UserId.eq(uid))
+                    .add(entities::typed_memories::Column::UserId.eq("")),
+            );
+        }
 
         let rows = select.into_model::<SearchMemoryRow>().all(&self.db).await?;
 
@@ -1256,78 +1327,68 @@ impl MemoryStore {
 
     /// Hybrid search over typed memories with explainable score breakdown.
     ///
-    /// Gathers candidates from vector similarity, lexical overlap, recent
-    /// active memories, and active commitments; scores and de-duplicates by
-    /// memory id; returns the top `options.limit` results.
+    /// Gathers candidates from recallable vector similarity, lexical token
+    /// matches, a limited recent fallback, and active commitments; scores and
+    /// de-duplicates by memory id; returns the top `options.limit` results.
     pub async fn search_typed_memories_hybrid(
         &self,
         options: &crate::MemorySearchOptions<'_>,
     ) -> Result<Vec<crate::ScoredMemory>, MemoryError> {
-        use crate::search::{
-            GatheredCandidate, is_recallable_status, lexical_overlap_score, score_candidate,
-        };
+        use crate::search::{lexical_overlap_score, score_candidate};
         use crate::typed_memory::MemoryCandidateSource;
         use std::collections::HashMap;
 
         validate_embedding(options.query_embedding, self.embedding_dim)?;
 
         let pool = options.candidate_pool_size.max(options.limit);
-        let mut gathered: HashMap<i64, GatheredCandidate> = HashMap::new();
+        let recallable_statuses = [
+            crate::MemoryStatus::Active.as_str(),
+            crate::MemoryStatus::Faded.as_str(),
+            crate::MemoryStatus::Disputed.as_str(),
+        ];
+        let mut gathered: HashMap<i64, crate::search::GatheredCandidate> = HashMap::new();
 
-        let mut merge =
-            |item: crate::MemoryItem, vector_similarity: f32, source: MemoryCandidateSource| {
-                if !is_recallable_status(item.status) {
-                    return;
-                }
-                if let Some(uid) = options.user_id
-                    && !item.user_id.is_empty()
-                    && item.user_id != uid
-                {
-                    return;
-                }
-                let id = match item.id {
-                    Some(id) => id,
-                    None => return,
-                };
-                gathered
-                    .entry(id)
-                    .and_modify(|c| {
-                        c.vector_similarity = c.vector_similarity.max(vector_similarity);
-                        if !c.sources.contains(&source) {
-                            c.sources.push(source);
-                        }
-                    })
-                    .or_insert(GatheredCandidate {
-                        item,
-                        vector_similarity,
-                        sources: vec![source],
-                    });
-            };
-
-        // Vector candidates.
+        // Vector candidates across recallable statuses.
         let vector_hits = self
-            .search_typed_memories(
+            .search_typed_memories_vector(
                 options.query_embedding,
                 options.character_id,
                 options.model_name,
+                options.user_id,
+                &recallable_statuses,
                 pool,
                 options.similarity_threshold,
             )
             .await?;
         for (item, similarity) in vector_hits {
-            merge(item, similarity, MemoryCandidateSource::Vector);
+            merge_hybrid_candidate(
+                &mut gathered,
+                options.user_id,
+                item,
+                similarity,
+                MemoryCandidateSource::Vector,
+            );
         }
 
-        // Recent + lexical candidates from recallable rows.
-        let recallable = self
-            .list_recallable_typed_memories(options.character_id, options.user_id, pool)
+        // Lexical candidates from token-based DB lookup.
+        let lexical_candidates = self
+            .list_lexical_typed_memory_candidates(
+                options.query_text,
+                options.character_id,
+                options.user_id,
+                pool,
+            )
             .await?;
-        for item in recallable {
+        for item in lexical_candidates {
             let lexical = lexical_overlap_score(options.query_text, &item.title, &item.content);
             if lexical > 0.0 {
-                merge(item.clone(), 0.0, MemoryCandidateSource::Lexical);
-            } else {
-                merge(item, 0.0, MemoryCandidateSource::Recent);
+                merge_hybrid_candidate(
+                    &mut gathered,
+                    options.user_id,
+                    item,
+                    0.0,
+                    MemoryCandidateSource::Lexical,
+                );
             }
         }
 
@@ -1335,12 +1396,21 @@ impl MemoryStore {
         let commitments = self
             .list_active_commitments(options.character_id, options.user_id, pool)
             .await?;
-        for commitment in commitments {
-            if let Some(memory_id) = commitment.source_memory_id
-                && let Some(item) = self.get_typed_memory(memory_id).await?
-            {
-                merge(item, 0.0, MemoryCandidateSource::Commitment);
-            }
+        let commitment_memory_ids: Vec<i64> = commitments
+            .iter()
+            .filter_map(|commitment| commitment.source_memory_id)
+            .collect();
+        let commitment_memories = self
+            .get_typed_memories_by_ids(&commitment_memory_ids)
+            .await?;
+        for item in commitment_memories {
+            merge_hybrid_candidate(
+                &mut gathered,
+                options.user_id,
+                item,
+                0.0,
+                MemoryCandidateSource::Commitment,
+            );
         }
 
         let commitment_kind = self
@@ -1353,7 +1423,44 @@ impl MemoryStore {
             .await?;
         for item in commitment_kind {
             if item.status == crate::MemoryStatus::Active {
-                merge(item, 0.0, MemoryCandidateSource::Commitment);
+                merge_hybrid_candidate(
+                    &mut gathered,
+                    options.user_id,
+                    item,
+                    0.0,
+                    MemoryCandidateSource::Commitment,
+                );
+            }
+        }
+
+        // Limited recent fallback for memories not already gathered.
+        if options.recent_fallback_limit > 0 {
+            let recent_candidates = self
+                .list_recallable_typed_memories(
+                    options.character_id,
+                    options.user_id,
+                    options.recent_fallback_limit.saturating_mul(2).max(pool),
+                )
+                .await?;
+            let mut recent_added = 0usize;
+            for item in recent_candidates {
+                if recent_added >= options.recent_fallback_limit {
+                    break;
+                }
+                let Some(id) = item.id else {
+                    continue;
+                };
+                if gathered.contains_key(&id) {
+                    continue;
+                }
+                merge_hybrid_candidate(
+                    &mut gathered,
+                    options.user_id,
+                    item,
+                    0.0,
+                    MemoryCandidateSource::Recent,
+                );
+                recent_added += 1;
             }
         }
 
@@ -1367,18 +1474,17 @@ impl MemoryStore {
                     sources: candidate.sources,
                 }
             })
+            .filter(|scored| scored.breakdown.total >= options.min_score)
             .collect();
 
         scored.sort_by(|a, b| {
             b.breakdown
                 .total
-                .partial_cmp(&a.breakdown.total)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .total_cmp(&a.breakdown.total)
                 .then_with(|| {
                     b.breakdown
                         .vector_similarity
-                        .partial_cmp(&a.breakdown.vector_similarity)
-                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .total_cmp(&a.breakdown.vector_similarity)
                 })
                 .then_with(|| b.item.updated_at.cmp(&a.item.updated_at))
         });
@@ -1408,6 +1514,83 @@ impl MemoryStore {
 
         if let Some(uid) = user_id {
             use sea_orm::Condition;
+            query = query.filter(
+                Condition::any()
+                    .add(entities::typed_memories::Column::UserId.eq(uid))
+                    .add(entities::typed_memories::Column::UserId.eq("")),
+            );
+        }
+
+        let models = query
+            .order_by_desc(entities::typed_memories::Column::UpdatedAt)
+            .limit(limit as u64)
+            .all(&self.db)
+            .await?;
+
+        models
+            .into_iter()
+            .map(model_to_memory_item)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    /// Fetch typed memories by primary key.
+    async fn get_typed_memories_by_ids(
+        &self,
+        ids: &[i64],
+    ) -> Result<Vec<crate::MemoryItem>, MemoryError> {
+        use sea_orm::{EntityTrait, QueryFilter};
+
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let models = entities::typed_memories::Entity::find()
+            .filter(entities::typed_memories::Column::Id.is_in(ids.to_vec()))
+            .all(&self.db)
+            .await?;
+
+        models
+            .into_iter()
+            .map(model_to_memory_item)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    /// List recallable typed memories whose title or content matches query tokens.
+    async fn list_lexical_typed_memory_candidates(
+        &self,
+        query_text: &str,
+        character_id: &str,
+        user_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::MemoryItem>, MemoryError> {
+        use crate::search::tokenize;
+        use sea_orm::{Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+
+        let tokens: Vec<String> = tokenize(query_text).into_iter().collect();
+        if tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let statuses = [
+            crate::MemoryStatus::Active.as_str(),
+            crate::MemoryStatus::Faded.as_str(),
+            crate::MemoryStatus::Disputed.as_str(),
+        ];
+
+        let mut lexical_match = Condition::any();
+        for token in tokens {
+            let pattern = format!("%{token}%");
+            lexical_match = lexical_match
+                .add(entities::typed_memories::Column::Title.like(&pattern))
+                .add(entities::typed_memories::Column::Content.like(&pattern));
+        }
+
+        let mut query = entities::typed_memories::Entity::find()
+            .filter(entities::typed_memories::Column::CharacterId.eq(character_id))
+            .filter(entities::typed_memories::Column::Status.is_in(statuses))
+            .filter(lexical_match);
+
+        if let Some(uid) = user_id {
             query = query.filter(
                 Condition::any()
                     .add(entities::typed_memories::Column::UserId.eq(uid))
@@ -2588,6 +2771,9 @@ mod tests {
             weights: crate::HybridSearchWeights::default(),
             decay_half_life_days: 30.0,
             now,
+            min_score: 0.0,
+            commitment_boost: 0.25,
+            recent_fallback_limit: 5,
         }
     }
 
@@ -2809,7 +2995,188 @@ mod tests {
         let options = hybrid_search_options("faded memory", &emb, now);
         let results = store.search_typed_memories_hybrid(&options).await.unwrap();
         assert_eq!(results.len(), 1);
+        assert!(results[0].breakdown.vector_similarity > 0.0);
         assert!(results[0].breakdown.stale_penalty > 0.0);
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_finds_old_lexical_match_outside_recent_pool() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let now = Utc::now();
+        let query_emb = vec![0.0, 0.0, 1.0, 0.0];
+        let orthogonal = vec![0.0, 1.0, 0.0, 0.0];
+
+        let old_item = crate::NewMemoryItem {
+            scope: crate::MemoryScope::Character,
+            character_id: "ene".into(),
+            user_id: String::new(),
+            kind: crate::MemoryKind::Semantic,
+            title: "ancient dragon recipe".into(),
+            content: "A very old note about ancient dragon recipe".into(),
+            source: crate::MemorySource::Conversation,
+            source_ref: None,
+            confidence: crate::MemoryConfidence::default(),
+            salience: crate::MemorySalience::default(),
+            affect: crate::AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: crate::MemoryStatus::Active,
+            supersedes_id: None,
+        };
+        let old_id = store.insert_typed_memory(&old_item).await.unwrap();
+        store
+            .upsert_memory_embedding(old_id, "test-model", "content", &orthogonal)
+            .await
+            .unwrap();
+
+        for i in 0..10 {
+            let filler = crate::NewMemoryItem {
+                scope: crate::MemoryScope::Character,
+                character_id: "ene".into(),
+                user_id: String::new(),
+                kind: crate::MemoryKind::Semantic,
+                title: format!("recent filler {i}"),
+                content: "unrelated filler content".into(),
+                source: crate::MemorySource::Conversation,
+                source_ref: None,
+                confidence: crate::MemoryConfidence::default(),
+                salience: crate::MemorySalience::new(0.95),
+                affect: crate::AffectAnnotation::default(),
+                relationship_impact: 0.0,
+                valid_from: None,
+                valid_until: None,
+                status: crate::MemoryStatus::Active,
+                supersedes_id: None,
+            };
+            insert_memory_with_embedding(&store, &filler, &orthogonal).await;
+        }
+
+        let mut options = hybrid_search_options("ancient dragon recipe", &query_emb, now);
+        options.recent_fallback_limit = 0;
+        options.similarity_threshold = 0.8;
+        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        assert!(
+            results
+                .iter()
+                .any(|r| r.item.id == Some(old_id) && r.breakdown.lexical_score > 0.0),
+            "old lexical match should be found outside the recent pool"
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_excludes_unrelated_recent_without_fallback() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let now = Utc::now();
+        let query_emb = vec![1.0, 0.0, 0.0, 0.0];
+        let orthogonal = vec![0.0, 1.0, 0.0, 0.0];
+
+        let unrelated = crate::NewMemoryItem {
+            scope: crate::MemoryScope::Character,
+            character_id: "ene".into(),
+            user_id: String::new(),
+            kind: crate::MemoryKind::Semantic,
+            title: "fresh but unrelated".into(),
+            content: "nothing to do with the query".into(),
+            source: crate::MemorySource::Conversation,
+            source_ref: None,
+            confidence: crate::MemoryConfidence::default(),
+            salience: crate::MemorySalience::new(0.99),
+            affect: crate::AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: crate::MemoryStatus::Active,
+            supersedes_id: None,
+        };
+        insert_memory_with_embedding(&store, &unrelated, &orthogonal).await;
+
+        let mut options = hybrid_search_options("completely different topic", &query_emb, now);
+        options.recent_fallback_limit = 0;
+        options.similarity_threshold = 0.8;
+        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_ranks_higher_confidence_when_other_signals_match() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let now = Utc::now();
+        let query_emb = vec![1.0, 0.0, 0.0, 0.0];
+
+        let base = crate::NewMemoryItem {
+            scope: crate::MemoryScope::Character,
+            character_id: "ene".into(),
+            user_id: String::new(),
+            kind: crate::MemoryKind::Semantic,
+            title: "shared topic".into(),
+            content: "shared topic content".into(),
+            source: crate::MemorySource::Conversation,
+            source_ref: None,
+            confidence: crate::MemoryConfidence::new(0.2),
+            salience: crate::MemorySalience::new(0.5),
+            affect: crate::AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: crate::MemoryStatus::Active,
+            supersedes_id: None,
+        };
+        let low_confidence = base.clone();
+        let high_confidence = crate::NewMemoryItem {
+            title: "shared topic high".into(),
+            confidence: crate::MemoryConfidence::new(0.95),
+            ..base
+        };
+
+        insert_memory_with_embedding(&store, &low_confidence, &query_emb).await;
+        insert_memory_with_embedding(&store, &high_confidence, &query_emb).await;
+
+        let options = hybrid_search_options("shared topic", &query_emb, now);
+        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].item.title, "shared topic high");
+        assert!(results[0].breakdown.confidence > results[1].breakdown.confidence);
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_respects_user_id_scope() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let now = Utc::now();
+        let query_emb = vec![1.0, 0.0, 0.0, 0.0];
+
+        let base = crate::NewMemoryItem {
+            scope: crate::MemoryScope::User,
+            character_id: "ene".into(),
+            user_id: String::new(),
+            kind: crate::MemoryKind::Semantic,
+            title: "scoped memory".into(),
+            content: "user scoped content".into(),
+            source: crate::MemorySource::Conversation,
+            source_ref: None,
+            confidence: crate::MemoryConfidence::default(),
+            salience: crate::MemorySalience::default(),
+            affect: crate::AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: crate::MemoryStatus::Active,
+            supersedes_id: None,
+        };
+
+        let mut user1_item = base.clone();
+        user1_item.user_id = "user1".into();
+        let mut user2_item = base;
+        user2_item.user_id = "user2".into();
+
+        insert_memory_with_embedding(&store, &user1_item, &query_emb).await;
+        insert_memory_with_embedding(&store, &user2_item, &query_emb).await;
+
+        let mut options = hybrid_search_options("scoped memory", &query_emb, now);
+        options.user_id = Some("user1");
+        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].item.user_id, "user1");
     }
 
     #[tokio::test]

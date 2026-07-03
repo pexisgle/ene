@@ -242,23 +242,34 @@ Cognitive Runtime は長期事実を `typed_memories` に保存し、明示的�
 
 ```text
 score =
-  vector_similarity * 0.45
+  vector_similarity * 0.40
 + lexical_score     * 0.15
 + recency_score     * 0.10
 + salience          * 0.15
++ confidence        * 0.05
 + emotional_match   * 0.05
 + relationship      * 0.05
 + access_boost      * 0.05
-+ commitment_boost  (active commitments のみ)
++ commitment_boost  (active commitments のみ、既定 0.25)
 - contradiction_penalty
 - stale_penalty
 ```
 
+`MemorySearchOptions` では次も指定できます。
+
+- `min_score` — この hybrid total 未満の結果を除外
+- `commitment_boost` — commitment 由来候補へのブースト（既定 `0.25`）
+- `recent_fallback_limit` — 純 recent フォールバック候補の上限（既定 `5`）
+
 挙動:
 
 - `Archived` / `Superseded` / `UserDeleted` は通常のハイブリッド想起から除外されます。
+- `Faded` / `Disputed` は recallable vector search の対象になり、必要に応じてペナルティが付きます。
 - `Faded` や期限切れ記憶は想起可能ですが `stale_penalty` が付きます。
+- lexical 候補は直近更新プールだけでなく、token ベースの DB 検索で recallable 行から集めます。
+- 純 recent フォールバックは上限付きで、無関係な recent memory を候補全体に流し込みません。
 - commitment ledger に紐づく active commitment は、ベクトル類似度が低くても結果に含まれます。
+- `user_id` 指定時は他ユーザーの user-specific memory を除外します。`user_id` が空の character scope 行は引き続き表示対象です。
 - 複数ソースから集めた候補は memory id で de-dupe してから順位付けします。
 
 ベクトル類似度のみが必要な既存呼び出し向けに `search_typed_memories(...)` は従来どおり残しています。

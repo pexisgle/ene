@@ -403,6 +403,8 @@ pub struct HybridSearchWeights {
     pub recency: f32,
     /// Weight for memory salience.
     pub salience: f32,
+    /// Weight for memory confidence.
+    pub confidence: f32,
     /// Weight for emotional/affect match.
     pub emotional_match: f32,
     /// Weight for relationship impact.
@@ -414,10 +416,11 @@ pub struct HybridSearchWeights {
 impl Default for HybridSearchWeights {
     fn default() -> Self {
         Self {
-            vector: 0.45,
+            vector: 0.40,
             lexical: 0.15,
             recency: 0.10,
             salience: 0.15,
+            confidence: 0.05,
             emotional_match: 0.05,
             relationship: 0.05,
             access_boost: 0.05,
@@ -452,6 +455,12 @@ pub struct MemorySearchOptions<'a> {
     pub decay_half_life_days: f64,
     /// Reference time for recency and expiry checks.
     pub now: DateTime<Utc>,
+    /// Minimum hybrid total score required to return a result.
+    pub min_score: f32,
+    /// Boost applied when a candidate is surfaced via an active commitment.
+    pub commitment_boost: f32,
+    /// Maximum number of pure-recent fallback candidates to gather.
+    pub recent_fallback_limit: usize,
 }
 
 /// Explainable score breakdown for a recalled memory.
@@ -465,7 +474,7 @@ pub struct MemoryScoreBreakdown {
     pub recency_score: f32,
     /// Memory salience value.
     pub salience: f32,
-    /// Memory confidence value (informational; not always weighted).
+    /// Memory confidence value used in the weighted score.
     pub confidence: f32,
     /// Affect match score.
     pub emotional_match: f32,

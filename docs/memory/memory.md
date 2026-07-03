@@ -249,23 +249,34 @@ Default scoring formula:
 
 ```text
 score =
-  vector_similarity * 0.45
+  vector_similarity * 0.40
 + lexical_score     * 0.15
 + recency_score     * 0.10
 + salience          * 0.15
++ confidence        * 0.05
 + emotional_match   * 0.05
 + relationship      * 0.05
 + access_boost      * 0.05
-+ commitment_boost  (active commitments only)
++ commitment_boost  (active commitments only; default 0.25)
 - contradiction_penalty
 - stale_penalty
 ```
 
+`MemorySearchOptions` also supports:
+
+- `min_score` — drop results below this hybrid total
+- `commitment_boost` — configurable boost for commitment-sourced candidates
+- `recent_fallback_limit` — cap on pure-recent fallback candidates (default `5`)
+
 Behavior:
 
 - `Archived`, `Superseded`, and `UserDeleted` memories are excluded from normal hybrid recall.
+- `Faded` and `Disputed` memories participate in recallable vector search and receive penalties when applicable.
 - `Faded` and expired memories remain recallable but receive `stale_penalty`.
+- Lexical candidates are gathered via token-based DB lookup across recallable rows, not only the most recently updated pool.
+- Pure-recent fallback is limited; unrelated recent memories are not admitted to the full candidate pool.
 - Active commitments linked via the commitment ledger are surfaced even when vector similarity is low.
+- When `user_id` is set, user-specific memories from other users are excluded; character-scoped rows with an empty `user_id` remain visible.
 - Candidates gathered from multiple sources are de-duplicated by memory id before ranking.
 
 `search_typed_memories(...)` remains available as the legacy vector-only API for callers that only need cosine similarity.

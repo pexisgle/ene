@@ -147,6 +147,7 @@ pub(crate) fn score_candidate(
         + lexical * w.lexical
         + recency * w.recency
         + salience * w.salience
+        + confidence * w.confidence
         + emotional * w.emotional_match
         + relationship * w.relationship
         + access * w.access_boost;
@@ -155,7 +156,7 @@ pub(crate) fn score_candidate(
         .sources
         .contains(&MemoryCandidateSource::Commitment)
     {
-        0.25
+        options.commitment_boost
     } else {
         0.0
     };
@@ -255,6 +256,9 @@ mod tests {
             weights: HybridSearchWeights::default(),
             decay_half_life_days: 30.0,
             now,
+            min_score: 0.0,
+            commitment_boost: 0.25,
+            recent_fallback_limit: 5,
         };
         let candidate = GatheredCandidate {
             item: sample_item(MemoryStatus::Faded),
