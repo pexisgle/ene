@@ -374,7 +374,10 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
       "use_hyde": false,
       "recall_result_limit": 8,
       "recall_similarity_threshold": 0.35,
-      "recall_min_score": 0.20
+      "recall_min_score": 0.20,
+      "rerank_enabled": false,
+      "rerank_candidate_limit": 16,
+      "rerank_timeout_secs": 10
     },
     "emotion": {
       "enabled": true,
@@ -422,6 +425,9 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 | `recall_result_limit` | int | `8` | `RecallPlan` が要求する型付き記憶結果の最大数 |
 | `recall_similarity_threshold` | float | `0.35` | vector 由来 recall candidate の最低類似度 |
 | `recall_min_score` | float | `0.20` | recalled memory result に必要な最低 hybrid score |
+| `rerank_enabled` | bool | `false` | hybrid recall 候補に対する optional LLM rerank を有効化 |
+| `rerank_candidate_limit` | int | `16` | reranker に渡す hybrid-search 上位候補の最大数 |
+| `rerank_timeout_secs` | int | `10` | LLM memory rerank 呼び出し 1 回のタイムアウト（秒）。超過時または provider 失敗時は hybrid search 順序にフォールバック |
 
 #### `cognition.emotion` — 感情エンジン
 

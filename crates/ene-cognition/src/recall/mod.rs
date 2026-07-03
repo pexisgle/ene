@@ -9,6 +9,7 @@ mod input;
 mod intent;
 mod plan;
 mod planner;
+mod rerank;
 mod result;
 mod topic;
 
@@ -20,6 +21,11 @@ pub use input::{RecallPlannerInput, RecallTurn};
 pub use plan::{RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHints};
 /// Recall planner implementation and options.
 pub use planner::{RecallPlanner, RecallPlannerOptions};
+/// Optional memory reranking after hybrid search.
+pub use rerank::{
+    LlmMemoryReranker, MemoryRerankError, MemoryRerankInput, MemoryRerankOptions,
+    MemoryRerankPipeline, MemoryReranker, PassthroughMemoryReranker,
+};
 /// Explainable recall result DTOs and helpers.
 pub use result::{
     EMOTIONAL_MATCH_REASON_THRESHOLD, RecallReason, RecalledMemory, explain_scored_memories,

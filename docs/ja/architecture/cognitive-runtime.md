@@ -156,6 +156,8 @@ Recall Planner が生成するクエリ計画：
 
 後続の recall execution は `MemoryStore::search_typed_memories_hybrid` の結果を `RecallResultMapper::map` または `RecallPlanner::explain_results` 経由で、主 `RecallReason` と score breakdown 付きの `RecalledMemory` に変換し、debug / UX / prompt introspection に使う（#74）。
 
+`cognition.memory.rerank_enabled` が true の場合、マッピング前に optional な LLM rerank stage（`MemoryRerankPipeline`）が上位 hybrid-search 候補の順序を調整することがあります。無効時または rerank 失敗時は hybrid search の順序にフォールバックし、`MemoryScoreBreakdown::total` は変更しません（#77）。
+
 ### Expression Arbiter（表現調停器）
 現在の `AffectState`、オプションの LLM 表情ヒント、キャラクター表情定義を受け取り、解決された表情を出力する：
 - **ヒステリシス** — 急激な表情変化を防止（秒単位で設定可能）

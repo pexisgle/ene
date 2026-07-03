@@ -123,6 +123,13 @@ pub struct CognitionMemoryConfig {
     pub recall_similarity_threshold: f32,
     /// Minimum hybrid score required for recalled memory results.
     pub recall_min_score: f32,
+    /// Enable optional LLM reranking of hybrid recall candidates.
+    pub rerank_enabled: bool,
+    /// Maximum number of top hybrid-search candidates sent to the reranker.
+    pub rerank_candidate_limit: usize,
+    /// Timeout in seconds for a single LLM memory-rerank call. On timeout or
+    /// provider failure the pipeline falls back to hybrid search order (#77).
+    pub rerank_timeout_secs: u64,
 }
 
 /// Clamp a deserialized confidence into the closed unit interval
@@ -150,6 +157,9 @@ impl Default for CognitionMemoryConfig {
             recall_result_limit: 8,
             recall_similarity_threshold: 0.35,
             recall_min_score: 0.20,
+            rerank_enabled: false,
+            rerank_candidate_limit: 16,
+            rerank_timeout_secs: 10,
         }
     }
 }

@@ -160,7 +160,15 @@ pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
     let (memory_result, tools_result) = tokio::join!(
         async {
             let start = std::time::Instant::now();
-            let res = fetch_memory_context(&session, &config, query_embedding.as_deref()).await;
+            let res = fetch_memory_context(
+                &session,
+                &config,
+                &user_input,
+                query_embedding.as_deref(),
+                Some(provider.clone()),
+                embedder.as_ref(),
+            )
+            .await;
             (res, start.elapsed().as_millis() as u64)
         },
         async {
@@ -416,7 +424,10 @@ pub(crate) async fn select_relevant_tools(
 pub(crate) async fn fetch_memory_context(
     session: &ConversationSession,
     config: &EneConfig,
+    user_input: &str,
     query_embedding: Option<&[f32]>,
+    provider: Option<Arc<dyn ene_provider::LlmProvider>>,
+    embedder: Option<&Arc<dyn ene_provider::EmbeddingProvider>>,
 ) -> (Vec<RecalledSummary>, Vec<ene_memory::KeyFact>) {
     let mem_config = config
         .get_section::<ene_memory::MemoryConfig>()
@@ -441,7 +452,7 @@ pub(crate) async fn fetch_memory_context(
     let card_name = session.card_name().to_string();
     let embedding = embedding.to_vec();
 
-    store
+    let (summaries, mut key_facts) = store
         .recall_context(
             &card_name,
             &embedding,
@@ -452,7 +463,15 @@ pub(crate) async fn fetch_memory_context(
         .unwrap_or_else(|e| {
             tracing::error!(component = "Memory", error = %e, "Context recall error");
             (vec![], vec![])
-        })
+        });
+
+    let typed_facts = crate::memory_recall::recall_typed_memories_for_prompt(
+        session, config, user_input, &embedding, provider, embedder,
+    )
+    .await;
+    key_facts.extend(typed_facts);
+
+    (summaries, key_facts)
 }
 
 /// Builds the full list of chat completion request messages for the AI stream.

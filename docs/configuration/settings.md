@@ -374,7 +374,10 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
       "use_hyde": false,
       "recall_result_limit": 8,
       "recall_similarity_threshold": 0.35,
-      "recall_min_score": 0.20
+      "recall_min_score": 0.20,
+      "rerank_enabled": false,
+      "rerank_candidate_limit": 16,
+      "rerank_timeout_secs": 10
     },
     "emotion": {
       "enabled": true,
@@ -422,6 +425,9 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 | `recall_result_limit` | int | `8` | Maximum typed-memory results requested by `RecallPlan` |
 | `recall_similarity_threshold` | float | `0.35` | Minimum vector similarity for vector-sourced recall candidates |
 | `recall_min_score` | float | `0.20` | Minimum hybrid score required for recalled memory results |
+| `rerank_enabled` | bool | `false` | Enable optional LLM reranking of hybrid recall candidates after search |
+| `rerank_candidate_limit` | int | `16` | Maximum number of top hybrid-search candidates sent to the reranker |
+| `rerank_timeout_secs` | int | `10` | Timeout in seconds for a single LLM memory-rerank call; on timeout or provider failure the pipeline falls back to hybrid search order |
 
 #### `cognition.emotion` — Emotion Engine
 

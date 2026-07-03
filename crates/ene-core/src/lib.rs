@@ -13,6 +13,8 @@ pub mod db_server;
 pub mod error;
 /// Actor-based runtime with message-passing architecture.
 pub mod handle;
+/// Typed memory recall execution for prompt context.
+mod memory_recall;
 /// System prompt and message assembly helpers.
 pub mod message_builder;
 /// Permission types and streaming engine internals.

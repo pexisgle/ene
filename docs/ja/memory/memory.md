@@ -323,6 +323,22 @@ score =
 
 理由の優先順位（先に一致したものを採用）: `ActivePromise` → `CharacterLore` → `UserPreference` → `EmotionalContinuity` → `RecentConversation` → `SimilarTopic`。
 
+### Optional Memory Reranking（#77）
+
+ハイブリッド検索の後、downstream recall execution は `RecalledMemory` への変換前に optional な rerank を実行できます。
+
+1. `MemoryStore::search_typed_memories_hybrid` が hybrid `total` 順の `ScoredMemory` を返す。
+2. `cognition.memory.rerank_enabled` が `false`（既定）の場合、順序は変更されない。
+3. 有効時、`MemoryRerankPipeline` が上位 `rerank_candidate_limit` 件を LLM reranker に渡す。prompt には recall question と各候補の `content` のみを含め、title / source / kind / user metadata は含めない。limit を超える候補は hybrid 順序のまま rerank 対象の末尾に追加される。
+4. timeout、provider error、structured output の不正時は hybrid search 順序にフォールバックする。
+5. `RecallResultMapper::map` が（rerank 後の）リストを説明可能な `RecalledMemory` に変換する。
+
+**順序とスコア:** rerank はリスト順序のみを変更する。各結果の `score_breakdown.total` は hybrid-search スコアのままなので、先頭の recalled item が下位より低い `total` を表示することがある。
+
+**プライバシーとコスト:** rerank を有効にすると、複数候補がある recall のたびに保存済み memory content が設定された LLM provider に送信されます。候補数と content 長に比例して latency と token コストが増えます。専用 rerank model を使わない場合は `rerank_candidate_limit` を控えめに保つことを推奨します。parse 失敗時のログには構造的なエラー詳細と response 長のみを記録し、LLM payload 全文は含めません。
+
+**トレース:** rerank latency と状態は `component = "MemoryRerank"`（`elapsed_ms`, `candidate_count`, `reranked_count`, `tail_count`, `outcome`、skip 時は `skip_reason`）でログ出力されます。
+
 ## Companion Commitment Ledger（約束・タスク台帳）
 
 「次回これを話そう」などのフォローアップは専用の `commitments` テーブルに保存する：

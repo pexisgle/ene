@@ -330,6 +330,22 @@ Use `RecallResultMapper::map`, `RecallPlanner::explain_results`, `RecalledMemory
 
 Reason priority (first match wins): `ActivePromise` → `CharacterLore` → `UserPreference` → `EmotionalContinuity` → `RecentConversation` → `SimilarTopic`.
 
+### Optional Memory Reranking (#77)
+
+After hybrid search, downstream recall execution may optionally rerank the top candidates before mapping to `RecalledMemory`:
+
+1. `MemoryStore::search_typed_memories_hybrid` returns `ScoredMemory` rows ordered by hybrid `total`.
+2. When `cognition.memory.rerank_enabled` is `false` (default), order is unchanged.
+3. When enabled, `MemoryRerankPipeline` sends up to `rerank_candidate_limit` top candidates to an LLM reranker. The prompt includes only the recall question and each candidate's `content` — no title, source, kind, or user metadata. Candidates beyond the limit keep their original hybrid order and are appended after the reranked head.
+4. On timeout, provider error, or malformed structured output, the pipeline falls back to the hybrid search order.
+5. `RecallResultMapper::map` converts the (possibly reranked) list into explainable `RecalledMemory` values.
+
+**Order vs scores:** Reranking changes list order only. Each result's `score_breakdown.total` remains the hybrid-search score, so the first recalled item may display a lower `total` than items ranked below it.
+
+**Privacy & cost:** Enabling rerank sends stored memory content to the configured LLM provider on every recall that has multiple candidates. This adds latency and token cost proportional to candidate count and content length. Keep `rerank_candidate_limit` conservative unless a dedicated rerank model is configured. Parse failures log structural error details and response length only — not the full LLM payload.
+
+**Tracing:** Rerank latency and status are logged under `component = "MemoryRerank"` (`elapsed_ms`, `candidate_count`, `reranked_count`, `tail_count`, `outcome`, and `skip_reason` when skipped).
+
 ## Companion Commitment Ledger
 
 User and companion follow-ups (e.g. “next time let’s talk about X”) are stored in a dedicated `commitments` table:
