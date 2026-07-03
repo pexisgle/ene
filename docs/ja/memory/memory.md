@@ -298,6 +298,31 @@ score =
 
 ベクトル類似度のみが必要な既存呼び出し向けに `search_typed_memories(...)` は従来どおり残しています。
 
+### 説明可能な想起理由（#74）
+
+`MemoryStore::search_typed_memories_hybrid` は生の `ScoredMemory` を返します。理由付けは `ene-cognition::recall` の責務で、後続の recall execution がそれを `RecalledMemory` DTO に変換します。各結果には次が含まれます。
+
+- `item` — 型付き記憶行
+- `reason` — UX / debug / prompt 向けの単一 `RecallReason`
+- `score_breakdown` — ハイブリッド検索と同じ `MemoryScoreBreakdown`
+- `sources` — 寄与した recall source（`vector` / `lexical` / `recent` / `commitment`）
+
+`RecallReason` の variant:
+
+| 理由 | 典型的なシグナル |
+|------|------------------|
+| `similar_topic` | vector/lexical ハイブリッド一致のデフォルト |
+| `recent_conversation` | `recent` source または `Episodic` kind |
+| `active_promise` | `commitment` source または `Commitment` kind |
+| `character_lore` | `MemorySource::Ccv3`（CCv3 lorebook） |
+| `user_preference` | `Preference` または `UserProfile` kind |
+| `emotional_continuity` | `Affective` kind、または `emotional_match >= 0.85` |
+| `pinned` | 将来の user-pinned memory 用（現時点では推論されない） |
+
+`RecallResultMapper::map`、`RecallPlanner::explain_results`、`RecalledMemory::from_scored`、または `explain_scored_memories` でハイブリッド検索結果を変換します。CLI inspect や JSON snapshot 向けにすべて `Serialize` / `Deserialize` 対応です。
+
+理由の優先順位（先に一致したものを採用）: `ActivePromise` → `CharacterLore` → `UserPreference` → `EmotionalContinuity` → `RecentConversation` → `SimilarTopic`。
+
 ## Companion Commitment Ledger（約束・タスク台帳）
 
 「次回これを話そう」などのフォローアップは専用の `commitments` テーブルに保存する：

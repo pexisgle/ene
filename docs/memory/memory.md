@@ -305,6 +305,31 @@ Behavior:
 
 `search_typed_memories(...)` remains available as the legacy vector-only API for callers that only need cosine similarity.
 
+### Explainable Recall Reasons (#74)
+
+`MemoryStore::search_typed_memories_hybrid` returns raw [`ScoredMemory`](../../crates/ene-memory/src/typed_memory.rs) values. Reason assignment lives in `ene-cognition::recall`: downstream recall execution converts those results into `RecalledMemory` DTOs. Each result includes:
+
+- `item` — the typed memory row
+- `reason` — a single primary `RecallReason` for UX, debug, and prompt introspection
+- `score_breakdown` — the same `MemoryScoreBreakdown` from hybrid search
+- `sources` — contributing recall sources (`vector`, `lexical`, `recent`, `commitment`)
+
+`RecallReason` variants:
+
+| Reason | Typical signal |
+|--------|----------------|
+| `similar_topic` | Default for vector/lexical hybrid match |
+| `recent_conversation` | `recent` source or `Episodic` kind |
+| `active_promise` | `commitment` source or `Commitment` kind |
+| `character_lore` | `MemorySource::Ccv3` (CCv3 lorebook) |
+| `user_preference` | `Preference` or `UserProfile` kind |
+| `emotional_continuity` | `Affective` kind, or `emotional_match >= 0.85` |
+| `pinned` | Reserved for future user-pinned memories (not inferred yet) |
+
+Use `RecallResultMapper::map`, `RecallPlanner::explain_results`, `RecalledMemory::from_scored`, or `explain_scored_memories` to map hybrid search output. All types are `Serialize`/`Deserialize` for CLI inspect and JSON snapshots.
+
+Reason priority (first match wins): `ActivePromise` → `CharacterLore` → `UserPreference` → `EmotionalContinuity` → `RecentConversation` → `SimilarTopic`.
+
 ## Companion Commitment Ledger
 
 User and companion follow-ups (e.g. “next time let’s talk about X”) are stored in a dedicated `commitments` table:

@@ -74,6 +74,7 @@ pub use memory_writer::{
 /// Recall planning types.
 #[doc(no_inline)]
 pub use recall::{
-    RecallBudgetHints, RecallPlan, RecallPlanner, RecallPlannerInput, RecallPlannerOptions,
-    RecallScopeFilter, RecallSearchHints, RecallTurn,
+    EMOTIONAL_MATCH_REASON_THRESHOLD, RecallBudgetHints, RecallPlan, RecallPlanner,
+    RecallPlannerInput, RecallPlannerOptions, RecallReason, RecallResultMapper, RecallScopeFilter,
+    RecallSearchHints, RecallTurn, RecalledMemory, explain_scored_memories, infer_recall_reason,
 };

@@ -154,6 +154,8 @@ Recall Planner が生成するクエリ計画：
 - vector similarity threshold、minimum total score、recency half-life、optional query affect などのハイブリッド検索ヒント
 - 後続 recall execution 向けの HyDE 拡張 hint（`use_hyde`）
 
+後続の recall execution は `MemoryStore::search_typed_memories_hybrid` の結果を `RecallResultMapper::map` または `RecallPlanner::explain_results` 経由で、主 `RecallReason` と score breakdown 付きの `RecalledMemory` に変換し、debug / UX / prompt introspection に使う（#74）。
+
 ### Expression Arbiter（表現調停器）
 現在の `AffectState`、オプションの LLM 表情ヒント、キャラクター表情定義を受け取り、解決された表情を出力する：
 - **ヒステリシス** — 急激な表情変化を防止（秒単位で設定可能）

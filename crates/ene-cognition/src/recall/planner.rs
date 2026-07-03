@@ -1,11 +1,13 @@
 use chrono::{DateTime, Utc};
 use ene_memory::{
-    ActiveCommitmentPrompt, AffectAnnotation, AffectState, HybridSearchWeights, MemorySearchOptions,
+    ActiveCommitmentPrompt, AffectAnnotation, AffectState, HybridSearchWeights,
+    MemorySearchOptions, ScoredMemory,
 };
 
 use super::input::RecallPlannerInput;
 use super::intent::{RecallIntent, contains_any, infer_intents, kinds_for_intents};
 use super::plan::{RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHints};
+use super::result::RecalledMemory;
 use super::topic::{current_topic, normalize_text, recent_user_turn};
 use crate::config::{CognitionMemoryConfig, ContextConfig};
 use crate::error::CognitionError;
@@ -144,6 +146,15 @@ impl RecallPlanner {
             commitment_boost: DEFAULT_COMMITMENT_BOOST,
             recent_fallback_limit: DEFAULT_RECENT_FALLBACK_LIMIT,
         }
+    }
+
+    /// Map hybrid search results into explainable recalled memories.
+    ///
+    /// Cognition-side entry point for attaching recall reasons after
+    /// `MemoryStore::search_typed_memories_hybrid`.
+    #[must_use]
+    pub fn explain_results(scored: Vec<ScoredMemory>) -> Vec<RecalledMemory> {
+        super::executor::RecallResultMapper::map(scored)
     }
 }
 
