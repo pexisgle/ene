@@ -114,6 +114,15 @@ pub struct CognitionMemoryConfig {
     /// provider does not respond within this budget the extraction fails and
     /// the pipeline falls back to deterministic candidates (issue #66).
     pub extraction_timeout_secs: u64,
+    /// Use HyDE query expansion for cognitive memory recall. The planner only
+    /// records this hint; downstream recall execution performs the provider call.
+    pub use_hyde: bool,
+    /// Maximum number of typed memories requested by recall planning.
+    pub recall_result_limit: usize,
+    /// Minimum vector similarity for vector-sourced recall candidates.
+    pub recall_similarity_threshold: f32,
+    /// Minimum hybrid score required for recalled memory results.
+    pub recall_min_score: f32,
 }
 
 /// Clamp a deserialized confidence into the closed unit interval
@@ -137,6 +146,10 @@ impl Default for CognitionMemoryConfig {
             default_forgetting_half_life_days: 30.0,
             min_confidence_to_persist: 0.65,
             extraction_timeout_secs: 30,
+            use_hyde: false,
+            recall_result_limit: 8,
+            recall_similarity_threshold: 0.35,
+            recall_min_score: 0.20,
         }
     }
 }

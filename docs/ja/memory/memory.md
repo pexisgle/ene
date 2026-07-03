@@ -234,6 +234,30 @@ Cognitive Runtime は長期事実を `typed_memories` に保存し、明示的�
 
 判断ルールとしきい値は [Cognitive Runtime ADR](../architecture/cognitive-runtime.md) を参照。
 
+### Recall Plan 生成（#72）
+
+`ene-cognition::recall::RecallPlanner` は、現在のターン文脈から決定論的に `RecallPlan` を生成します。planner 自体は SQLite 検索や埋め込み provider 呼び出しを行わず、後続段階に渡す検索意図を準備します。
+
+入力:
+
+- 現在の user input
+- 直近の raw turns
+- active scene summary
+- 現在の `AffectState`
+- active commitments (`ActiveCommitmentPrompt`)
+- character id と optional user id
+
+出力:
+
+- facts / preferences / relationship context / lore 向けの `semantic_queries`
+- 過去会話や直近ターン文脈向けの `episodic_queries`
+- `required_kinds`（常に `Semantic` / `Episodic` を含み、active commitment がある場合は `Commitment` を含む）
+- character/user scope 用の `RecallScopeFilter`
+- `cognition.context` 由来の `RecallBudgetHints`
+- `MemorySearchOptions` 互換の `RecallSearchHints`（`similarity_threshold`, `min_score`, recency half-life, optional query affect）
+
+`RecallPlanner::to_memory_search_options` は、plan と単一の query embedding から `MemoryStore::search_typed_memories_hybrid` 用の `MemorySearchOptions` を組み立てる helper です。使用するのは `plan.search.primary_query_text`（最初の semantic query）のみです。`semantic_queries` / `episodic_queries` / `required_kinds` / `use_hyde` は plan hints として残り、multi-query 展開・kind フィルタ・HyDE embedding 呼び出しは後続の recall execution が担当します。
+
 ### ハイブリッド記憶検索（#73）
 
 型付き記憶の想起は、ベクトル類似度だけでなく複数シグナルを組み合わせられます。`MemorySearchOptions` を `MemoryStore::search_typed_memories_hybrid` に渡すと、`ScoredMemory`（`MemoryScoreBreakdown` と recall source: `vector` / `lexical` / `recent` / `commitment`）が返ります。

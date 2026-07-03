@@ -28,7 +28,7 @@
 //! crate and trigger the `ctor`.
 
 use ene_config::EneConfig;
-use ene_core::{CognitionConfig, ContextConfig, EmotionConfig};
+use ene_core::{CognitionConfig, CognitionMemoryConfig, ContextConfig, EmotionConfig};
 
 #[test]
 fn cognition_schema_appears_as_top_level_property_when_ene_cognition_is_linked() {
@@ -140,6 +140,11 @@ fn cognition_section_defaults_match_macro_definition() {
         EmotionConfig::default(),
         "cognition.emotion should equal the macro-defined defaults"
     );
+    assert_eq!(
+        cog.memory,
+        CognitionMemoryConfig::default(),
+        "cognition.memory should equal the macro-defined defaults"
+    );
     assert!(
         cog.context.max_prompt_tokens > 0,
         "cognition.context.max_prompt_tokens must be a positive budget"
@@ -151,6 +156,14 @@ fn cognition_section_defaults_match_macro_definition() {
     assert_eq!(
         cog.context.recent_turns, 8,
         "cognition.context.recent_turns should be 8 per docs"
+    );
+    assert_eq!(
+        cog.memory.recall_result_limit, 8,
+        "cognition.memory.recall_result_limit should be 8 per docs"
+    );
+    assert!(
+        !cog.memory.use_hyde,
+        "cognition.memory.use_hyde should default to false"
     );
 }
 

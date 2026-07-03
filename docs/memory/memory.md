@@ -241,6 +241,30 @@ Key store APIs:
 
 See [Cognitive Runtime ADR](../architecture/cognitive-runtime.md#memory-arbiter) for decision rules and thresholds.
 
+### Recall Plan Generation (#72)
+
+`ene-cognition::recall::RecallPlanner` turns the current turn context into a deterministic `RecallPlan`. The planner does not query SQLite or call an embedding provider; it prepares search intent for later stages.
+
+Inputs:
+
+- current user input
+- recent raw turns
+- active scene summary
+- current `AffectState`
+- active commitments (`ActiveCommitmentPrompt`)
+- character id and optional user id
+
+Outputs:
+
+- `semantic_queries` for facts, preferences, relationship context, and lore
+- `episodic_queries` for past conversations and recent-turn context
+- `required_kinds`, always including `Semantic` / `Episodic`, and including `Commitment` whenever active commitments exist
+- `RecallScopeFilter` for character/user scoping
+- `RecallBudgetHints` from `cognition.context`
+- `RecallSearchHints` compatible with `MemorySearchOptions` (`similarity_threshold`, `min_score`, recency half-life, optional query affect)
+
+`RecallPlanner::to_memory_search_options` is a helper that maps a plan plus a single query embedding into `MemorySearchOptions` for `MemoryStore::search_typed_memories_hybrid`. It uses only `plan.search.primary_query_text` (the first semantic query). `semantic_queries`, `episodic_queries`, `required_kinds`, and `use_hyde` remain plan hints for downstream recall execution, which is responsible for multi-query expansion, kind filtering, and HyDE embedding calls.
+
 ### Hybrid Memory Search (#73)
 
 Typed memory recall can combine multiple signals instead of vector similarity alone. Use `MemorySearchOptions` with `MemoryStore::search_typed_memories_hybrid` to obtain `ScoredMemory` results that include a `MemoryScoreBreakdown` and the recall sources (`vector`, `lexical`, `recent`, `commitment`).

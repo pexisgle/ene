@@ -71,3 +71,9 @@ pub use memory_writer::{
     AppliedDecision, ArbiterAction, ArbiterContext, ArbiterOptions, ArbiterReason,
     ArbiterReasonCode, CandidateDecision, CandidateProvenance, MemoryArbiter, SemanticMatch,
 };
+/// Recall planning types.
+#[doc(no_inline)]
+pub use recall::{
+    RecallBudgetHints, RecallPlan, RecallPlanner, RecallPlannerInput, RecallPlannerOptions,
+    RecallScopeFilter, RecallSearchHints, RecallTurn,
+};

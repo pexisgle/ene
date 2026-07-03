@@ -41,7 +41,7 @@ Ene が明示的に管理するもの：
 | Memory Extraction (決定論的) | `ene-cognition::memory_writer` | ルールベースで facts, preferences, commitments, procedure 記憶を抽出 |
 | Memory Extraction (LLM) | `ene-cognition::memory_writer` | LLM による `MemoryCandidate` 生成 |
 | Memory Arbiter | `ene-cognition::memory_writer` | 候補を既存記憶と照合し、信頼度計算・重複排除・矛盾解決 |
-| Recall Planner | `ene-cognition::recall` | 検索意図と予算ヒントを含む `RecallPlan` を生成し、ハイブリッド検索を実行 |
+| Recall Planner | `ene-cognition::recall` | 検索意図と予算ヒントを含む `RecallPlan` を生成し、後続の recall execution に渡す |
 | Hybrid Search Scoring | `ene-memory` | vector 類似度 + recency + salience + confidence + affect + commitments の多要素スコアリング |
 | Emotion Engine | `ene-cognition::emotion` | 会話ダイナミクスからの決定論的感情計算 + オプション LLM 分類器 |
 | Expression Arbiter | `ene-cognition::output` | `AffectState` をキャラクター表情にマッピング。ヒステリシスと設定制約を適用 |
@@ -77,9 +77,10 @@ sequenceDiagram
     User->>Streaming: ユーザー入力
     Streaming->>PreTurn: pre_turn.analyze(input, history, affect)
     PreTurn->>Recall: 想起計画をトリガー
-    Recall->>Store: ハイブリッド検索 (kind, recency, salience, vector)
-    Store-->>Recall: 想起された記憶 + コミットメント
-    Recall-->>Composer: recall plan
+    Recall-->>Composer: recall plan (queries, kind hints, budget)
+    Note over Recall,Store: 後続の recall execution が plan を使ってハイブリッド検索を実行
+    Composer->>Store: ハイブリッド検索 (kind, recency, salience, vector)
+    Store-->>Composer: 想起された記憶 + コミットメント
     PreTurn->>Emotion: ターンダイナミクスから感情を更新
     Emotion-->>Composer: affect state
     Composer->>Composer: PromptPacket を構築<br/>(Identity Kernel + Recall + Affect + History + Tools)
@@ -98,7 +99,7 @@ sequenceDiagram
 ### ライフサイクルステップ
 
 1. **Pre-turn Analysis** — ユーザー入力・現在の感情状態・最近の履歴を評価し、ターンの意図・感情トーン・記憶検索ニーズを決定する。
-2. **Recall Planning** — 検索クエリ・記憶種別フィルタ・トークン予算ヒントを含む `RecallPlan` を生成。型付き記憶ストアに対してハイブリッド検索を実行。
+2. **Recall Planning** — 検索クエリ・記憶種別フィルタ・トークン予算ヒントを含む `RecallPlan` を生成。後続の recall execution が plan を使って型付き記憶ストアに対してハイブリッド検索を実行。
 3. **Emotion Update** — ターンダイナミクス（ユーザー感情・トピック価・関係性の手がかり）から新しい `AffectState` を計算。以前の感情に減衰を適用。
 4. **Context Composition** — `PromptPacket` をセクション化された層で構築: Identity Kernel → Recalled Memories → Commitments → Affect State → Scene → Style Examples → History → Current Input。
 5. **LLM Generation** — `PromptPacket` を LLM プロバイダに送信。LLM はオプションで表情ヒントを提供できる。
@@ -148,9 +149,10 @@ CCv3 キャラクターカードからコンパイルされた不変の人格定
 ### RecallPlan（想起計画）
 Recall Planner が生成するクエリ計画：
 - 検索クエリ（自然言語 + 埋め込み）
-- 記憶種別フィルタ
+- 記憶種別フィルタ（後続 recall execution 向けの hint）
 - 想起コンテンツに割り当てられたトークン予算
-- 最低 recency / confidence / salience しきい値
+- vector similarity threshold、minimum total score、recency half-life、optional query affect などのハイブリッド検索ヒント
+- 後続 recall execution 向けの HyDE 拡張 hint（`use_hyde`）
 
 ### Expression Arbiter（表現調停器）
 現在の `AffectState`、オプションの LLM 表情ヒント、キャラクター表情定義を受け取り、解決された表情を出力する：

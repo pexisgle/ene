@@ -370,7 +370,11 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
       "decay_enabled": true,
       "default_forgetting_half_life_days": 30.0,
       "min_confidence_to_persist": 0.65,
-      "extraction_timeout_secs": 30
+      "extraction_timeout_secs": 30,
+      "use_hyde": false,
+      "recall_result_limit": 8,
+      "recall_similarity_threshold": 0.35,
+      "recall_min_score": 0.20
     },
     "emotion": {
       "enabled": true,
@@ -414,6 +418,10 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 | `default_forgetting_half_life_days` | float | `30.0` | 記憶減衰のデフォルト半減期（日） |
 | `min_confidence_to_persist` | float | `0.65` | 記憶永続化の最低信頼度しきい値（0.0〜1.0） |
 | `extraction_timeout_secs` | int | `30` | LLM 記憶抽出呼び出し 1 回のタイムアウト（秒）。超過時は抽出失敗となり deterministic 候補にフォールバック |
+| `use_hyde` | bool | `false` | cognitive recall plan に HyDE query expansion hint を記録する。実際の provider 呼び出しは後続の recall execution が担当 |
+| `recall_result_limit` | int | `8` | `RecallPlan` が要求する型付き記憶結果の最大数 |
+| `recall_similarity_threshold` | float | `0.35` | vector 由来 recall candidate の最低類似度 |
+| `recall_min_score` | float | `0.20` | recalled memory result に必要な最低 hybrid score |
 
 #### `cognition.emotion` — 感情エンジン
 

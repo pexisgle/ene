@@ -370,7 +370,11 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
       "decay_enabled": true,
       "default_forgetting_half_life_days": 30.0,
       "min_confidence_to_persist": 0.65,
-      "extraction_timeout_secs": 30
+      "extraction_timeout_secs": 30,
+      "use_hyde": false,
+      "recall_result_limit": 8,
+      "recall_similarity_threshold": 0.35,
+      "recall_min_score": 0.20
     },
     "emotion": {
       "enabled": true,
@@ -414,6 +418,10 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 | `default_forgetting_half_life_days` | float | `30.0` | Default half-life in days for memory decay |
 | `min_confidence_to_persist` | float | `0.65` | Minimum confidence threshold (0.0–1.0) for persisting a memory |
 | `extraction_timeout_secs` | int | `30` | Timeout in seconds for a single LLM memory-extraction call; on timeout the extraction fails and falls back to deterministic candidates |
+| `use_hyde` | bool | `false` | Record a HyDE query-expansion hint in cognitive recall plans; downstream recall execution performs the provider call |
+| `recall_result_limit` | int | `8` | Maximum typed-memory results requested by `RecallPlan` |
+| `recall_similarity_threshold` | float | `0.35` | Minimum vector similarity for vector-sourced recall candidates |
+| `recall_min_score` | float | `0.20` | Minimum hybrid score required for recalled memory results |
 
 #### `cognition.emotion` — Emotion Engine
 
