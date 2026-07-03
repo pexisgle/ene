@@ -6,7 +6,7 @@ This project is an AI assistant application written in Rust that merges VTuber-l
 ## 0. Crucial Behaviors
 
 * **Check Documentation:** Before planning changes, always read the relevant files in `docs/` or `crates/` to confirm the current design.
-* **Verify & Complete:** Before declaring a task finished, run `cargo clippy --workspace` and `cargo test --workspace`. Finally, check the PR Verification Checklist (§8) to ensure all requirements are met.
+* **Verify & Complete:** Before declaring a task finished, run `cargo clippy --workspace` and `cargo test --workspace` (on Linux, use the §3 direnv invocation). Finally, check the PR Verification Checklist (§8) to ensure all requirements are met.
 * **Correct Fixes:** If a test or build fails, read the compiler errors carefully. Always clarify the cause and the reason, and create a fix plan before making corrections. If the error is environment-specific, ask the user how to fix it.
 * **Follow the Recipes:** When asked to add tools, configs, or IPC messages, strictly follow the steps in **§6 Common Tasks**.
 * **Handle Hooks Gracefully:** If a git commit fails due to `cargo-husky` pre-commit hooks, read the hook output, fix the formatting or linter errors, and try committing again before resorting to `--no-verify`.
@@ -31,7 +31,8 @@ This project is an AI assistant application written in Rust that merges VTuber-l
 
 ## 3. Platform-Specific Notes
 
-* **Linux:** Uses `direnv` + Nix flake. If `command not found: cargo` happens, use `direnv exec . env CARGO_TARGET_DIR="$PWD/target" cargo <command>`. **Make sure to confirm that `cargo` cannot be executed directly before proceeding to execution with `direnv`.**
+* **Linux:** Uses `direnv` + Nix flake. Run Cargo from the workspace root (shell cwd is already the repo; do not prefix commands with `cd`). Confirm `cargo` is not on PATH (`command -v cargo`); when it is not, **always** use this form — do not drop `CARGO_TARGET_DIR`:
+  `direnv exec . env CARGO_TARGET_DIR="$PWD/target" cargo <command>`
 * **Windows:** Uses Windows Named Pipes for IPC.
 
 ## 4. Architecture & Philosophy
