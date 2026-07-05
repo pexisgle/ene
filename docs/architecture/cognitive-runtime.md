@@ -217,11 +217,16 @@ Rolling compression that summarizes old conversation turns into compact memory s
 
 ### Migration Path
 - **Phase 0–9** are greenfield — new code in `ene-cognition`, no changes to existing runtime
-- **Phase 10 (#100)** integrates `ene-cognition` into `ene-core::streaming.rs`, replacing the old pipeline
-- **#98** defines migration from legacy `conversation_summaries` / `conversation_keyfacts` to the new typed memory schema
+- **Phase 10 (#100)** integrates `ene-cognition` into `ene-core::streaming.rs` behind `cognition.enabled` (falls back to the legacy pipeline when no embedding provider is configured)
+- **#98 (hybrid policy)** — When cognition is enabled:
+  - Legacy summary/keyfact tables are **read-only** (no new summaries/keyfacts)
+  - Unmigrated legacy summaries/keyfacts are merged into cognitive recall until `/memory migrate legacy` completes
+  - Optional one-shot CLI migration maps summaries → `Episodic`, keyfacts → `UserProfile`/`Preference`, logs → `memory_spans` (transactional)
+  - After migration, recall uses typed memory only; legacy rows remain for audit unless reset
+  - `cognition.memory.require_migration` blocks recall when summaries/keyfacts remain unmigrated (logs alone do not block)
+  - Affect **persistence** runs each turn; affect **computation** is planned in #86 (`EmotionEngine`)
 - **#80** replaces automatic session splits with rolling context compression triggers
-- **No breaking changes** to the existing runtime until Phase 10
-- Existing CLI and desktop apps continue to function unchanged during Phase 0–9
+- **`cognition.enabled = false`** keeps the legacy streaming pipeline unchanged
 
 ## References
 

@@ -385,7 +385,8 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
       "mmr_min_slots_episodic": 1,
       "mmr_min_slots_user_profile": 1,
       "mmr_min_slots_commitment": 1,
-      "mmr_source_diversity_bonus": 0.05
+      "mmr_source_diversity_bonus": 0.05,
+      "require_migration": false
     },
     "emotion": {
       "enabled": true,
@@ -444,6 +445,7 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 | `mmr_min_slots_user_profile` | int | `1` | user profile 記憶の最低 recalled 枠 |
 | `mmr_min_slots_commitment` | int | `1` | commitment 記憶の最低 recalled 枠 |
 | `mmr_source_diversity_bonus` | float | `0.05` | 新しい recall source 種別を持つ候補に加算する MMR ボーナス |
+| `require_migration` | bool | `false` | true のとき、レガシー summaries/keyfacts が残り migration 未完了なら typed recall をブロック（通常の `conversation_logs` だけではブロックしない）(#98) |
 
 #### `cognition.emotion` — 感情エンジン
 

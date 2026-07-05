@@ -406,7 +406,42 @@ retention =
 - `faded` 記憶（および低信頼度の `active`）に `[uncertain] `
 - `disputed` 記憶に `[disputed] `
 
-`recall_context` のレガシー `conversation_keyfacts` には #98 までマーカーは付かない。
+`recall_context` のレガシー `conversation_keyfacts` にも、cognitive runtime 有効時は同じ uncertain/disputed マーカーが付く（#98）。
+
+## レガシーテーブルからの移行
+
+cognitive runtime を有効にした場合（`cognition.enabled = true`）、**新規 memory 書き込みは typed memory のみ**です。移行またはリセットを行うまで、レガシーテーブル（`conversation_summaries`, `conversation_keyfacts`）は **read-only** です。
+
+### マッピング規則（one-shot migration）
+
+| レガシーテーブル | 移行先 | 規則 |
+|------------------|--------|------|
+| `conversation_summaries` | `typed_memories` (`Episodic`) | `content` ← 要約本文; `confidence = 0.7`, `salience = 0.5`; embedding を `memory_embeddings` にコピー; `source_ref = legacy:summary:{id}` |
+| `conversation_keyfacts` | `UserProfile` または `Preference` | `pref_*`, `like`, `dislike` に一致 → `Preference`; それ以外 → `UserProfile`; `title` = key, `content` = value |
+| `conversation_logs` | `memory_spans` | user/assistant ペアごとに span; `raw_excerpt` に本文; `compressed_summary` は空（#79 後に再圧縮可能） |
+
+移行状態はキャラクターごとに `memory_migration_meta` に記録されます。
+
+### ユーザー選択肢
+
+1. **何もしない（read-only fallback）** — 移行完了まで、typed recall にレガシー `recall_context` の summaries/keyfacts をマージ。新規抽出 memory は typed のみ。各ターンの raw log は引き続き `conversation_logs` に追記。
+2. **`/memory migrate legacy`** — 単一トランザクションで one-shot 変換 + migration marker 設定。以降 typed-only recall。
+3. **`/memory reset legacy --yes`** — レガシーテーブル truncate + typed memory クリア（破壊的操作、確認必須）。memory span は当該カードの log に紐づく session のみ削除。
+
+### strict モード
+
+`cognition.memory.require_migration = true` にすると、**レガシー summaries または keyfacts** が残り migration 未完了の場合 recall をブロックします。通常チャットで増える `conversation_logs` だけではブロックされません。`LegacyMemoryNotMigrated` と reset/migrate ガイダンスを返します。
+
+### リセット手順
+
+移行せず初期化する場合:
+
+```bash
+ene-cli
+/memory reset legacy --yes
+```
+
+またはユーザーデータディレクトリの SQLite ファイルを削除して再起動（全キャラクターの memory が失われます）。
 
 ## Companion Commitment Ledger（約束・タスク台帳）
 

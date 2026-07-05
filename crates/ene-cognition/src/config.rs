@@ -150,6 +150,8 @@ pub struct CognitionMemoryConfig {
     /// Bonus added to MMR score when a candidate introduces a new recall source (#78).
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub mmr_source_diversity_bonus: f32,
+    /// When true, block recall if legacy rows exist and migration is incomplete (#98).
+    pub require_migration: bool,
 }
 
 /// Clamp a deserialized confidence into the closed unit interval
@@ -197,6 +199,7 @@ impl Default for CognitionMemoryConfig {
             mmr_min_slots_user_profile: 1,
             mmr_min_slots_commitment: 1,
             mmr_source_diversity_bonus: 0.05,
+            require_migration: false,
         }
     }
 }

@@ -12,6 +12,43 @@ use sea_orm_migration::MigratorTrait;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
+
+/// Legacy table write policy for cognitive runtime integration (#98).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LegacyWriteMode {
+    /// Legacy summaries/keyfacts/logs may be written (default).
+    #[default]
+    ReadWrite = 0,
+    /// Legacy writes rejected; tables remain for read-only recall.
+    ReadOnly = 1,
+}
+
+impl LegacyWriteMode {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::ReadOnly,
+            _ => Self::ReadWrite,
+        }
+    }
+}
+
+/// Input for inserting a compressed conversation span (#79 / #98).
+#[derive(Debug, Clone)]
+pub struct NewMemorySpan {
+    /// Session this span belongs to.
+    pub session_id: String,
+    /// First turn index in the span.
+    pub turn_start: i32,
+    /// Last turn index in the span.
+    pub turn_end: i32,
+    /// Raw excerpt from source logs.
+    pub raw_excerpt: Option<String>,
+    /// Compressed summary (empty until compression runs).
+    pub compressed_summary: Option<String>,
+    /// Compression level (0 = raw only).
+    pub compression_level: i32,
+}
 
 /// A row of tool embedding data: `(tool_name, field, field_key, version_hash, model_name, embedding_vec, source_text)`.
 pub type ToolEmbeddingFieldRow = (String, String, String, String, String, Vec<f32>, String);
@@ -157,6 +194,7 @@ pub struct RecalledSummary {
 pub struct MemoryStore {
     db: DatabaseConnection,
     embedding_dim: usize,
+    legacy_write_mode: AtomicU8,
 }
 
 /// Result of a natural-decay batch run (#76).
@@ -308,9 +346,222 @@ async fn apply_pragmas(db: &DatabaseConnection) -> Result<(), MemoryError> {
     Ok(())
 }
 
+async fn list_session_ids_for_card_on_conn<C: ConnectionTrait>(
+    conn: &C,
+    card_name: &str,
+) -> Result<Vec<String>, MemoryError> {
+    use sea_orm::QuerySelect;
+
+    let rows = entities::conversation_logs::Entity::find()
+        .filter(entities::conversation_logs::Column::CardName.eq(card_name))
+        .select_only()
+        .column(entities::conversation_logs::Column::SessionId)
+        .distinct()
+        .into_tuple::<String>()
+        .all(conn)
+        .await?;
+    Ok(rows)
+}
+
+async fn typed_memory_exists_by_source_ref_on<C: ConnectionTrait>(
+    conn: &C,
+    source_ref: &str,
+) -> Result<bool, MemoryError> {
+    use sea_orm::PaginatorTrait;
+
+    let count = entities::typed_memories::Entity::find()
+        .filter(entities::typed_memories::Column::SourceRef.eq(source_ref))
+        .count(conn)
+        .await?;
+    Ok(count > 0)
+}
+
+async fn insert_typed_memory_on<C: ConnectionTrait>(
+    conn: &C,
+    item: &crate::NewMemoryItem,
+) -> Result<i64, MemoryError> {
+    use sea_orm::ActiveModelTrait;
+    use sea_orm::ActiveValue::Set;
+
+    let now = Utc::now();
+    let created_at = item.created_at.unwrap_or(now);
+    let active = entities::typed_memories::ActiveModel {
+        scope: Set(item.scope.as_str().to_string()),
+        character_id: Set(item.character_id.clone()),
+        user_id: Set(item.user_id.clone()),
+        kind: Set(item.kind.as_str().to_string()),
+        title: Set(item.title.clone()),
+        content: Set(item.content.clone()),
+        source: Set(item.source.as_str().to_string()),
+        source_ref: Set(item.source_ref.clone()),
+        confidence: Set(item.confidence.get()),
+        salience: Set(item.salience.get()),
+        affective_valence: Set(item.affect.valence),
+        affective_arousal: Set(item.affect.arousal),
+        relationship_impact: Set(item.relationship_impact),
+        access_count: Set(0),
+        last_accessed_at: Set(None),
+        created_at: Set(created_at),
+        updated_at: Set(now),
+        valid_from: Set(item.valid_from),
+        valid_until: Set(item.valid_until),
+        status: Set(item.status.as_str().to_string()),
+        supersedes_id: Set(item.supersedes_id),
+        pinned: Set(i32::from(item.pinned)),
+        ..Default::default()
+    };
+    let res = active.insert(conn).await?;
+    Ok(res.id)
+}
+
+async fn patch_typed_memory_created_at_on<C: ConnectionTrait>(
+    conn: &C,
+    memory_id: i64,
+    created_at: DateTime<Utc>,
+) -> Result<(), MemoryError> {
+    use sea_orm::ActiveModelTrait;
+    use sea_orm::ActiveValue::Set;
+
+    let mut active: entities::typed_memories::ActiveModel =
+        entities::typed_memories::Entity::find_by_id(memory_id)
+            .one(conn)
+            .await?
+            .ok_or_else(|| MemoryError::Other(format!("memory {memory_id} not found")))?
+            .into();
+    active.created_at = Set(created_at);
+    active.update(conn).await?;
+    Ok(())
+}
+
+async fn upsert_memory_embedding_on<C: ConnectionTrait>(
+    conn: &C,
+    embedding_dim: usize,
+    memory_item_id: i64,
+    model_name: &str,
+    field: &str,
+    embedding: &[f32],
+) -> Result<(), MemoryError> {
+    use sea_orm::ActiveValue::Set;
+    use sea_orm::EntityTrait;
+
+    validate_embedding(embedding, embedding_dim)?;
+
+    let now = Utc::now();
+    let embedding_bytes = embedding_to_bytes(embedding);
+
+    let active = entities::memory_embeddings::ActiveModel {
+        memory_item_id: Set(memory_item_id),
+        model_name: Set(model_name.to_string()),
+        field: Set(field.to_string()),
+        embedding: Set(embedding_bytes),
+        created_at: Set(now),
+        ..Default::default()
+    };
+
+    entities::memory_embeddings::Entity::insert(active)
+        .on_conflict(
+            OnConflict::columns([
+                entities::memory_embeddings::Column::MemoryItemId,
+                entities::memory_embeddings::Column::ModelName,
+                entities::memory_embeddings::Column::Field,
+            ])
+            .update_column(entities::memory_embeddings::Column::Embedding)
+            .to_owned(),
+        )
+        .exec(conn)
+        .await?;
+
+    Ok(())
+}
+
+async fn memory_span_exists_on<C: ConnectionTrait>(
+    conn: &C,
+    session_id: &str,
+    turn_start: i32,
+) -> Result<bool, MemoryError> {
+    use sea_orm::PaginatorTrait;
+
+    let count = entities::memory_spans::Entity::find()
+        .filter(entities::memory_spans::Column::SessionId.eq(session_id))
+        .filter(entities::memory_spans::Column::TurnStart.eq(turn_start))
+        .count(conn)
+        .await?;
+    Ok(count > 0)
+}
+
+async fn insert_memory_span_on<C: ConnectionTrait>(
+    conn: &C,
+    span: &NewMemorySpan,
+) -> Result<i64, MemoryError> {
+    use sea_orm::ActiveModelTrait;
+    use sea_orm::ActiveValue::Set;
+
+    let active = entities::memory_spans::ActiveModel {
+        session_id: Set(span.session_id.clone()),
+        turn_start: Set(span.turn_start),
+        turn_end: Set(span.turn_end),
+        raw_excerpt: Set(span.raw_excerpt.clone()),
+        compressed_summary: Set(span.compressed_summary.clone()),
+        compression_level: Set(span.compression_level),
+        ..Default::default()
+    };
+    let res = active.insert(conn).await?;
+    Ok(res.id)
+}
+
+async fn mark_migration_complete_on<C: ConnectionTrait>(
+    conn: &C,
+    card_name: &str,
+    counts: crate::LegacyRowCounts,
+    strategy: &str,
+) -> Result<(), MemoryError> {
+    use sea_orm::ActiveModelTrait;
+    use sea_orm::ActiveValue::Set;
+
+    let now = Utc::now();
+    let active = entities::memory_migration_meta::ActiveModel {
+        card_name: Set(card_name.to_string()),
+        migrated_at: Set(now),
+        legacy_summaries_count: Set(counts.summaries as i32),
+        legacy_keyfacts_count: Set(counts.keyfacts as i32),
+        legacy_logs_count: Set(counts.logs as i32),
+        strategy: Set(strategy.to_string()),
+    };
+    active.insert(conn).await?;
+    Ok(())
+}
+
 impl MemoryStore {
     fn init(db: DatabaseConnection, embedding_dim: usize) -> Self {
-        Self { db, embedding_dim }
+        Self {
+            db,
+            embedding_dim,
+            legacy_write_mode: AtomicU8::new(LegacyWriteMode::ReadWrite as u8),
+        }
+    }
+
+    /// Returns the current legacy write mode (#98).
+    #[must_use]
+    pub fn legacy_write_mode(&self) -> LegacyWriteMode {
+        LegacyWriteMode::from_u8(self.legacy_write_mode.load(Ordering::Relaxed))
+    }
+
+    /// Set legacy table write mode (read-only when cognition path is active).
+    pub fn set_legacy_write_mode(&self, mode: LegacyWriteMode) {
+        self.legacy_write_mode.store(mode as u8, Ordering::Relaxed);
+    }
+
+    fn ensure_legacy_writable(&self) -> Result<(), MemoryError> {
+        if self.legacy_write_mode() == LegacyWriteMode::ReadOnly {
+            return Err(MemoryError::LegacyWriteForbidden);
+        }
+        Ok(())
+    }
+
+    /// Decode stored embedding bytes (used by legacy migration).
+    #[must_use]
+    pub fn decode_embedding_bytes(&self, bytes: &[u8]) -> Vec<f32> {
+        bytes_to_embedding(bytes)
     }
 
     /// Returns the database connection handle.
@@ -387,6 +638,7 @@ impl MemoryStore {
         embedding: &[f32],
         ended_at: DateTime<Utc>,
     ) -> Result<i64, MemoryError> {
+        self.ensure_legacy_writable()?;
         use sea_orm::ActiveModelTrait;
         use sea_orm::ActiveValue::Set;
 
@@ -618,6 +870,7 @@ impl MemoryStore {
         key: &str,
         value: &str,
     ) -> Result<(), MemoryError> {
+        self.ensure_legacy_writable()?;
         use sea_orm::ActiveModelTrait;
         use sea_orm::ActiveValue::Set;
 
@@ -979,6 +1232,10 @@ impl MemoryStore {
         limit: usize,
         similarity_threshold: f32,
     ) -> Result<(Vec<RecalledSummary>, Vec<KeyFact>), MemoryError> {
+        if self.is_legacy_migrated(card_name).await? {
+            return Ok((vec![], vec![]));
+        }
+
         let (summaries_result, key_facts_result) = tokio::join!(
             self.search_summaries(query_embedding, card_name, limit, similarity_threshold),
             self.get_all_keyfacts(card_name),
@@ -1095,6 +1352,7 @@ impl MemoryStore {
         use sea_orm::ActiveValue::Set;
 
         let now = Utc::now();
+        let created_at = item.created_at.unwrap_or(now);
         let active = entities::typed_memories::ActiveModel {
             scope: Set(item.scope.as_str().to_string()),
             character_id: Set(item.character_id.clone()),
@@ -1111,7 +1369,7 @@ impl MemoryStore {
             relationship_impact: Set(item.relationship_impact),
             access_count: Set(0),
             last_accessed_at: Set(None),
-            created_at: Set(now),
+            created_at: Set(created_at),
             updated_at: Set(now),
             valid_from: Set(item.valid_from),
             valid_until: Set(item.valid_until),
@@ -1933,6 +2191,396 @@ impl MemoryStore {
         Ok(())
     }
 
+    // ── Legacy Migration & Memory Spans (#98) ─────────────────────────────────
+
+    /// Count legacy rows for a character card.
+    pub async fn count_legacy_rows(
+        &self,
+        card_name: &str,
+    ) -> Result<crate::LegacyRowCounts, MemoryError> {
+        use sea_orm::PaginatorTrait;
+
+        let summaries = entities::conversation_summaries::Entity::find()
+            .filter(entities::conversation_summaries::Column::CardName.eq(card_name))
+            .count(&self.db)
+            .await? as i64;
+
+        let keyfacts = entities::conversation_keyfacts::Entity::find()
+            .filter(entities::conversation_keyfacts::Column::CardName.eq(card_name))
+            .count(&self.db)
+            .await? as i64;
+
+        let logs = entities::conversation_logs::Entity::find()
+            .filter(entities::conversation_logs::Column::CardName.eq(card_name))
+            .count(&self.db)
+            .await? as i64;
+
+        Ok(crate::LegacyRowCounts {
+            summaries,
+            keyfacts,
+            logs,
+        })
+    }
+
+    /// Returns migration metadata when the card has been migrated.
+    pub async fn get_migration_status(
+        &self,
+        card_name: &str,
+    ) -> Result<Option<crate::MigrationStatus>, MemoryError> {
+        let row = entities::memory_migration_meta::Entity::find_by_id(card_name.to_string())
+            .one(&self.db)
+            .await?;
+
+        Ok(row.map(|m| crate::MigrationStatus {
+            card_name: m.card_name,
+            migrated_at: m.migrated_at,
+            legacy_summaries_count: m.legacy_summaries_count,
+            legacy_keyfacts_count: m.legacy_keyfacts_count,
+            legacy_logs_count: m.legacy_logs_count,
+            strategy: m.strategy,
+        }))
+    }
+
+    /// Returns true when one-shot migration has completed for the card.
+    pub async fn is_legacy_migrated(&self, card_name: &str) -> Result<bool, MemoryError> {
+        Ok(self.get_migration_status(card_name).await?.is_some())
+    }
+
+    /// Record migration completion for a character card.
+    pub async fn mark_migration_complete(
+        &self,
+        card_name: &str,
+        counts: crate::LegacyRowCounts,
+        strategy: &str,
+    ) -> Result<(), MemoryError> {
+        use sea_orm::ActiveModelTrait;
+        use sea_orm::ActiveValue::Set;
+
+        let now = Utc::now();
+        let active = entities::memory_migration_meta::ActiveModel {
+            card_name: Set(card_name.to_string()),
+            migrated_at: Set(now),
+            legacy_summaries_count: Set(counts.summaries as i32),
+            legacy_keyfacts_count: Set(counts.keyfacts as i32),
+            legacy_logs_count: Set(counts.logs as i32),
+            strategy: Set(strategy.to_string()),
+        };
+        active.insert(&self.db).await?;
+        Ok(())
+    }
+
+    /// Run one-shot legacy → typed migration.
+    pub async fn migrate_legacy(
+        &self,
+        options: &crate::LegacyMigrationOptions,
+    ) -> Result<crate::LegacyMigrationReport, MemoryError> {
+        crate::legacy_migration::execute_legacy_migration(self, options).await
+    }
+
+    /// Apply legacy migration writes inside a single database transaction.
+    pub(crate) async fn apply_legacy_migration_writes(
+        &self,
+        options: &crate::LegacyMigrationOptions,
+        counts: crate::LegacyRowCounts,
+        summary_rows: Vec<crate::legacy_migration::LegacySummaryRow>,
+        keyfact_rows: Vec<crate::legacy_migration::LegacyKeyfactRow>,
+        spans: Vec<NewMemorySpan>,
+    ) -> Result<crate::LegacyMigrationReport, MemoryError> {
+        use sea_orm::TransactionTrait;
+
+        let card_name = options.card_name.clone();
+        let user_id = options.user_id.clone();
+        let embedding_model = options.embedding_model.clone();
+        let embedding_dim = self.embedding_dim;
+
+        self.db
+            .transaction::<_, crate::LegacyMigrationReport, MemoryError>(|txn| {
+                let card_name = card_name.clone();
+                let user_id = user_id.clone();
+                let embedding_model = embedding_model.clone();
+                Box::pin(async move {
+                    let mut report = crate::LegacyMigrationReport {
+                        summaries_migrated: 0,
+                        keyfacts_migrated: 0,
+                        spans_migrated: 0,
+                        skipped_existing: 0,
+                    };
+
+                    for row in summary_rows {
+                        let source_ref = format!("legacy:summary:{}", row.id);
+                        if typed_memory_exists_by_source_ref_on(txn, &source_ref).await? {
+                            report.skipped_existing += 1;
+                            continue;
+                        }
+
+                        let item = crate::legacy_migration::summaries::summary_to_typed_memory(
+                            &card_name,
+                            &user_id,
+                            &row.summary,
+                            row.id,
+                        );
+                        let memory_id = insert_typed_memory_on(txn, &item).await?;
+                        patch_typed_memory_created_at_on(txn, memory_id, row.created_at).await?;
+
+                        let embedding = bytes_to_embedding(&row.embedding);
+                        if !embedding.is_empty() {
+                            upsert_memory_embedding_on(
+                                txn,
+                                embedding_dim,
+                                memory_id,
+                                &embedding_model,
+                                "content",
+                                &embedding,
+                            )
+                            .await?;
+                        }
+                        report.summaries_migrated += 1;
+                    }
+
+                    for row in keyfact_rows {
+                        if row.value.is_empty() {
+                            continue;
+                        }
+                        let source_ref = format!("legacy:keyfact:{}", row.id);
+                        if typed_memory_exists_by_source_ref_on(txn, &source_ref).await? {
+                            report.skipped_existing += 1;
+                            continue;
+                        }
+
+                        let item = crate::legacy_migration::keyfacts::keyfact_to_typed_memory(
+                            &card_name, &user_id, &row.key, &row.value, row.id,
+                        );
+                        let memory_id = insert_typed_memory_on(txn, &item).await?;
+                        patch_typed_memory_created_at_on(txn, memory_id, row.created_at).await?;
+                        report.keyfacts_migrated += 1;
+                    }
+
+                    for span in spans {
+                        if memory_span_exists_on(txn, &span.session_id, span.turn_start).await? {
+                            report.skipped_existing += 1;
+                            continue;
+                        }
+                        insert_memory_span_on(txn, &span).await?;
+                        report.spans_migrated += 1;
+                    }
+
+                    mark_migration_complete_on(txn, &card_name, counts, "one_shot").await?;
+                    Ok(report)
+                })
+            })
+            .await
+            .map_err(|e| match e {
+                sea_orm::TransactionError::Connection(db_err) => {
+                    MemoryError::MemoryStoreError(db_err)
+                }
+                sea_orm::TransactionError::Transaction(e) => e,
+            })
+    }
+
+    /// Truncate legacy tables and typed memory for a card (destructive reset).
+    pub async fn reset_legacy_memory(&self, card_name: &str) -> Result<(), MemoryError> {
+        use sea_orm::TransactionTrait;
+
+        let card_name = card_name.to_string();
+        self.db
+            .transaction::<_, (), MemoryError>(|txn| {
+                let card_name = card_name.clone();
+                Box::pin(async move {
+                    let card = card_name.as_str();
+                    entities::conversation_keyfacts::Entity::delete_many()
+                        .filter(entities::conversation_keyfacts::Column::CardName.eq(card))
+                        .exec(txn)
+                        .await?;
+                    entities::conversation_summaries::Entity::delete_many()
+                        .filter(entities::conversation_summaries::Column::CardName.eq(card))
+                        .exec(txn)
+                        .await?;
+                    let session_ids = list_session_ids_for_card_on_conn(txn, card).await?;
+                    entities::conversation_logs::Entity::delete_many()
+                        .filter(entities::conversation_logs::Column::CardName.eq(card))
+                        .exec(txn)
+                        .await?;
+                    entities::memory_migration_meta::Entity::delete_by_id(card_name.clone())
+                        .exec(txn)
+                        .await?;
+                    if !session_ids.is_empty() {
+                        entities::memory_spans::Entity::delete_many()
+                            .filter(entities::memory_spans::Column::SessionId.is_in(session_ids))
+                            .exec(txn)
+                            .await?;
+                    }
+                    entities::typed_memories::Entity::delete_many()
+                        .filter(entities::typed_memories::Column::CharacterId.eq(card))
+                        .exec(txn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .map_err(|e| match e {
+                sea_orm::TransactionError::Connection(db_err) => {
+                    MemoryError::MemoryStoreError(db_err)
+                }
+                sea_orm::TransactionError::Transaction(e) => e,
+            })?;
+
+        Ok(())
+    }
+
+    /// Returns an error when legacy data exists, migration is incomplete, and strict mode is on.
+    pub async fn ensure_legacy_migration_allowed(
+        &self,
+        card_name: &str,
+        require_migration: bool,
+    ) -> Result<(), MemoryError> {
+        if !require_migration {
+            return Ok(());
+        }
+        let counts = self.count_legacy_rows(card_name).await?;
+        if counts.requires_migration_gate() && !self.is_legacy_migrated(card_name).await? {
+            return Err(MemoryError::LegacyMemoryNotMigrated {
+                card_name: card_name.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Distinct session IDs that have conversation logs for a character card.
+    pub async fn list_session_ids_for_card(
+        &self,
+        card_name: &str,
+    ) -> Result<Vec<String>, MemoryError> {
+        list_session_ids_for_card_on_conn(&self.db, card_name).await
+    }
+
+    /// Returns true when a memory span already exists for the session turn.
+    pub async fn memory_span_exists(
+        &self,
+        session_id: &str,
+        turn_start: i32,
+    ) -> Result<bool, MemoryError> {
+        use sea_orm::PaginatorTrait;
+
+        let count = entities::memory_spans::Entity::find()
+            .filter(entities::memory_spans::Column::SessionId.eq(session_id))
+            .filter(entities::memory_spans::Column::TurnStart.eq(turn_start))
+            .count(&self.db)
+            .await?;
+        Ok(count > 0)
+    }
+
+    pub(crate) async fn list_legacy_summaries(
+        &self,
+        card_name: &str,
+    ) -> Result<Vec<crate::legacy_migration::LegacySummaryRow>, MemoryError> {
+        use sea_orm::QueryOrder;
+
+        let rows = entities::conversation_summaries::Entity::find()
+            .filter(entities::conversation_summaries::Column::CardName.eq(card_name))
+            .order_by_asc(entities::conversation_summaries::Column::Id)
+            .all(&self.db)
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::legacy_migration::LegacySummaryRow {
+                id: r.id,
+                summary: r.summary,
+                embedding: r.embedding,
+                created_at: r.created_at,
+            })
+            .collect())
+    }
+
+    pub(crate) async fn list_legacy_keyfacts(
+        &self,
+        card_name: &str,
+    ) -> Result<Vec<crate::legacy_migration::LegacyKeyfactRow>, MemoryError> {
+        use sea_orm::QueryOrder;
+
+        let rows = entities::conversation_keyfacts::Entity::find()
+            .filter(entities::conversation_keyfacts::Column::CardName.eq(card_name))
+            .order_by_asc(entities::conversation_keyfacts::Column::Id)
+            .all(&self.db)
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::legacy_migration::LegacyKeyfactRow {
+                id: r.id,
+                key: r.key,
+                value: r.value,
+                created_at: r.created_at,
+            })
+            .collect())
+    }
+
+    pub(crate) async fn list_legacy_logs(
+        &self,
+        card_name: &str,
+    ) -> Result<Vec<crate::legacy_migration::LegacyLogRowRaw>, MemoryError> {
+        use sea_orm::QueryOrder;
+
+        let rows = entities::conversation_logs::Entity::find()
+            .filter(entities::conversation_logs::Column::CardName.eq(card_name))
+            .order_by_asc(entities::conversation_logs::Column::Id)
+            .all(&self.db)
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::legacy_migration::LegacyLogRowRaw {
+                session_id: r.session_id,
+                role: r.role,
+                content: r.content,
+            })
+            .collect())
+    }
+
+    /// Insert a memory span row.
+    pub async fn insert_memory_span(&self, span: &NewMemorySpan) -> Result<i64, MemoryError> {
+        use sea_orm::ActiveModelTrait;
+        use sea_orm::ActiveValue::Set;
+
+        let active = entities::memory_spans::ActiveModel {
+            session_id: Set(span.session_id.clone()),
+            turn_start: Set(span.turn_start),
+            turn_end: Set(span.turn_end),
+            raw_excerpt: Set(span.raw_excerpt.clone()),
+            compressed_summary: Set(span.compressed_summary.clone()),
+            compression_level: Set(span.compression_level),
+            ..Default::default()
+        };
+        let res = active.insert(&self.db).await?;
+        Ok(res.id)
+    }
+
+    /// List memory spans for a session ordered by turn start.
+    pub async fn list_memory_spans_by_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<NewMemorySpan>, MemoryError> {
+        use sea_orm::QueryOrder;
+
+        let rows = entities::memory_spans::Entity::find()
+            .filter(entities::memory_spans::Column::SessionId.eq(session_id))
+            .order_by_asc(entities::memory_spans::Column::TurnStart)
+            .all(&self.db)
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| NewMemorySpan {
+                session_id: r.session_id,
+                turn_start: r.turn_start,
+                turn_end: r.turn_end,
+                raw_excerpt: r.raw_excerpt,
+                compressed_summary: r.compressed_summary,
+                compression_level: r.compression_level,
+            })
+            .collect())
+    }
+
     // ── Companion Commitments ─────────────────────────────────────────────────
 
     /// Insert a new commitment row and return its assigned ID.
@@ -2554,6 +3202,7 @@ mod tests {
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
             pinned: false,
+            created_at: None,
         };
 
         let id = store.insert_typed_memory(&item).await.unwrap();
@@ -2621,6 +3270,7 @@ mod tests {
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
             pinned: false,
+            created_at: None,
         };
 
         let id = store.insert_typed_memory(&item).await.unwrap();
@@ -2661,6 +3311,7 @@ mod tests {
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
             pinned: false,
+            created_at: None,
         };
         let old_id = store.insert_typed_memory(&old_item).await.unwrap();
 
@@ -2705,6 +3356,7 @@ mod tests {
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
             pinned: false,
+            created_at: None,
         };
         let old_id = store.insert_typed_memory(&item).await.unwrap();
         store
@@ -2749,6 +3401,7 @@ mod tests {
                 status: crate::MemoryStatus::Active,
                 supersedes_id: None,
                 pinned: false,
+                created_at: None,
             })
             .await
             .unwrap();
@@ -2986,6 +3639,7 @@ mod tests {
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
             pinned: false,
+            created_at: None,
         };
         let high_salience = crate::NewMemoryItem {
             salience: crate::MemorySalience::new(0.95),
@@ -3029,6 +3683,7 @@ mod tests {
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
             pinned: false,
+            created_at: None,
         };
         insert_memory_with_embedding(&store, &item, &orthogonal).await;
 
@@ -3069,6 +3724,7 @@ mod tests {
                 status: crate::MemoryStatus::Active,
                 supersedes_id: None,
                 pinned: false,
+                created_at: None,
             })
             .await
             .unwrap();
@@ -3124,6 +3780,7 @@ mod tests {
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
             pinned: false,
+            created_at: None,
         };
 
         for status in [
@@ -3166,6 +3823,7 @@ mod tests {
             status: crate::MemoryStatus::Faded,
             supersedes_id: None,
             pinned: false,
+            created_at: None,
         };
         insert_memory_with_embedding(&store, &item, &emb).await;
 
@@ -3201,6 +3859,7 @@ mod tests {
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
             pinned: false,
+            created_at: None,
         };
         let old_id = store.insert_typed_memory(&old_item).await.unwrap();
         store
@@ -3227,6 +3886,7 @@ mod tests {
                 status: crate::MemoryStatus::Active,
                 supersedes_id: None,
                 pinned: false,
+                created_at: None,
             };
             insert_memory_with_embedding(&store, &filler, &orthogonal).await;
         }
@@ -3268,6 +3928,7 @@ mod tests {
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
             pinned: false,
+            created_at: None,
         };
         insert_memory_with_embedding(&store, &unrelated, &orthogonal).await;
 
@@ -3302,6 +3963,7 @@ mod tests {
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
             pinned: false,
+            created_at: None,
         };
         let low_confidence = base.clone();
         let high_confidence = crate::NewMemoryItem {
@@ -3344,6 +4006,7 @@ mod tests {
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
             pinned: false,
+            created_at: None,
         };
 
         let mut user1_item = base.clone();
@@ -3385,6 +4048,7 @@ mod tests {
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
             pinned: false,
+            created_at: None,
         };
         insert_memory_with_embedding(&store, &item, &emb).await;
 
@@ -3416,6 +4080,7 @@ mod tests {
                 status: crate::MemoryStatus::Faded,
                 supersedes_id: None,
                 pinned: false,
+                created_at: None,
             })
             .await
             .unwrap();
@@ -3457,6 +4122,7 @@ mod tests {
                 status: crate::MemoryStatus::Active,
                 supersedes_id: None,
                 pinned: false,
+                created_at: None,
             })
             .await
             .unwrap();
@@ -3484,6 +4150,7 @@ mod tests {
                 status: crate::MemoryStatus::Faded,
                 supersedes_id: None,
                 pinned: false,
+                created_at: None,
             })
             .await
             .unwrap();
@@ -3528,6 +4195,7 @@ mod tests {
                 status: crate::MemoryStatus::Active,
                 supersedes_id: None,
                 pinned: true,
+                created_at: None,
             })
             .await
             .unwrap();
@@ -3566,6 +4234,7 @@ mod tests {
                 status: crate::MemoryStatus::Active,
                 supersedes_id: None,
                 pinned: false,
+                created_at: None,
             })
             .await
             .unwrap();
@@ -3608,6 +4277,7 @@ mod tests {
                 status: crate::MemoryStatus::Active,
                 supersedes_id: None,
                 pinned: false,
+                created_at: None,
             })
             .await
             .unwrap();
@@ -3658,6 +4328,7 @@ mod tests {
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
             pinned: true,
+            created_at: None,
         };
         insert_memory_with_embedding(&store, &item, &emb).await;
 
@@ -3665,5 +4336,243 @@ mod tests {
         let results = store.search_typed_memories_hybrid(&options).await.unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].item.pinned);
+    }
+
+    #[tokio::test]
+    async fn legacy_migration_summaries_to_episodic() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
+        store
+            .insert_summary("s1", "char", "Legacy summary text", &[], &emb, Utc::now())
+            .await
+            .unwrap();
+
+        let report = store
+            .migrate_legacy(&crate::LegacyMigrationOptions {
+                card_name: "char".into(),
+                user_id: "user".into(),
+                embedding_model: "test".into(),
+                dry_run: false,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(report.summaries_migrated, 1);
+        let typed = store
+            .get_typed_memories_by_character("char", Some(crate::MemoryKind::Episodic), 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(typed.len(), 1);
+        assert!(typed[0].content.contains("Legacy summary"));
+        assert!(store.is_legacy_migrated("char").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn legacy_write_forbidden_in_read_only_mode() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        store.set_legacy_write_mode(LegacyWriteMode::ReadOnly);
+        let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
+        let err = store
+            .insert_summary("s1", "char", "blocked", &[], &emb, Utc::now())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MemoryError::LegacyWriteForbidden));
+    }
+
+    #[tokio::test]
+    async fn migration_idempotent_skips_existing_source_ref() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
+        store
+            .insert_summary("s1", "char", "Once", &[], &emb, Utc::now())
+            .await
+            .unwrap();
+
+        let options = crate::LegacyMigrationOptions {
+            card_name: "char".into(),
+            user_id: "user".into(),
+            embedding_model: "test".into(),
+            dry_run: false,
+        };
+        store.migrate_legacy(&options).await.unwrap();
+        let err = store.migrate_legacy(&options).await.unwrap_err();
+        assert!(matches!(err, MemoryError::LegacyAlreadyMigrated { .. }));
+    }
+
+    #[tokio::test]
+    async fn reset_legacy_clears_tables() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
+        store
+            .insert_summary("s1", "char", "x", &[], &emb, Utc::now())
+            .await
+            .unwrap();
+        store.reset_legacy_memory("char").await.unwrap();
+        let counts = store.count_legacy_rows("char").await.unwrap();
+        assert_eq!(counts.summaries, 0);
+        assert_eq!(counts.keyfacts, 0);
+    }
+
+    #[tokio::test]
+    async fn reset_legacy_preserves_other_card_spans() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        store
+            .insert_log("s-char", "char", "user", "hello")
+            .await
+            .unwrap();
+        store
+            .insert_log("s-other", "other", "user", "hi")
+            .await
+            .unwrap();
+        store
+            .insert_memory_span(&NewMemorySpan {
+                session_id: "s-char".into(),
+                turn_start: 0,
+                turn_end: 0,
+                raw_excerpt: Some("char span".into()),
+                compressed_summary: None,
+                compression_level: 0,
+            })
+            .await
+            .unwrap();
+        store
+            .insert_memory_span(&NewMemorySpan {
+                session_id: "s-other".into(),
+                turn_start: 0,
+                turn_end: 0,
+                raw_excerpt: Some("other span".into()),
+                compressed_summary: None,
+                compression_level: 0,
+            })
+            .await
+            .unwrap();
+
+        store.reset_legacy_memory("char").await.unwrap();
+
+        let char_spans = store.list_memory_spans_by_session("s-char").await.unwrap();
+        let other_spans = store.list_memory_spans_by_session("s-other").await.unwrap();
+        assert!(char_spans.is_empty());
+        assert_eq!(other_spans.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn require_migration_allows_logs_only() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        store
+            .insert_log("s1", "char", "user", "hello")
+            .await
+            .unwrap();
+        store
+            .ensure_legacy_migration_allowed("char", true)
+            .await
+            .expect("logs alone should not block");
+    }
+
+    #[tokio::test]
+    async fn require_migration_blocks_unmigrated_summaries() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
+        store
+            .insert_summary("s1", "char", "summary", &[], &emb, Utc::now())
+            .await
+            .unwrap();
+        let err = store
+            .ensure_legacy_migration_allowed("char", true)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MemoryError::LegacyMemoryNotMigrated { .. }));
+    }
+
+    #[tokio::test]
+    async fn legacy_migration_keyfacts_to_preference_and_profile() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        store
+            .upsert_keyfact("char", "pref_color", "blue")
+            .await
+            .unwrap();
+        store
+            .upsert_keyfact("char", "job", "engineer")
+            .await
+            .unwrap();
+
+        let report = store
+            .migrate_legacy(&crate::LegacyMigrationOptions {
+                card_name: "char".into(),
+                user_id: "user".into(),
+                embedding_model: "test".into(),
+                dry_run: false,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(report.keyfacts_migrated, 2);
+        let prefs = store
+            .get_typed_memories_by_character("char", Some(crate::MemoryKind::Preference), 10, 0)
+            .await
+            .unwrap();
+        let profiles = store
+            .get_typed_memories_by_character("char", Some(crate::MemoryKind::UserProfile), 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(prefs.len(), 1);
+        assert_eq!(profiles.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_migration_logs_to_spans() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        store
+            .insert_log("s1", "char", "user", "hello")
+            .await
+            .unwrap();
+        store
+            .insert_log("s1", "char", "assistant", "hi there")
+            .await
+            .unwrap();
+
+        let report = store
+            .migrate_legacy(&crate::LegacyMigrationOptions {
+                card_name: "char".into(),
+                user_id: "user".into(),
+                embedding_model: "test".into(),
+                dry_run: false,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(report.spans_migrated, 1);
+        let spans = store.list_memory_spans_by_session("s1").await.unwrap();
+        assert_eq!(spans.len(), 1);
+        let excerpt = spans[0].raw_excerpt.as_ref().unwrap();
+        assert!(excerpt.contains("hello"));
+        assert!(excerpt.contains("hi there"));
+    }
+
+    #[tokio::test]
+    async fn legacy_migration_span_idempotent_on_retry_before_marker() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        store
+            .insert_log("s1", "char", "user", "once")
+            .await
+            .unwrap();
+
+        let options = crate::LegacyMigrationOptions {
+            card_name: "char".into(),
+            user_id: "user".into(),
+            embedding_model: "test".into(),
+            dry_run: false,
+        };
+
+        let first = store.migrate_legacy(&options).await.unwrap();
+        assert_eq!(first.spans_migrated, 1);
+
+        entities::memory_migration_meta::Entity::delete_by_id("char".to_string())
+            .exec(store.connection())
+            .await
+            .unwrap();
+
+        let second = store.migrate_legacy(&options).await.unwrap();
+        assert_eq!(second.spans_migrated, 0);
+        assert_eq!(second.skipped_existing, 1);
     }
 }

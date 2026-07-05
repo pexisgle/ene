@@ -50,6 +50,8 @@ pub mod config;
 pub mod engine;
 /// Cognitive runtime error types.
 pub mod error;
+/// Turn lifecycle DTOs for streaming integration (#100).
+pub mod lifecycle;
 
 /// Commitment ledger types.
 #[doc(no_inline)]
@@ -65,6 +67,10 @@ pub use ene_memory::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCo
 pub use engine::CognitionEngine;
 /// Cognitive runtime error type.
 pub use error::{CognitionError, EneCognitionError};
+/// Turn lifecycle types for streaming integration.
+pub use lifecycle::{
+    ComposedPrompt, HistoryEntry, PostTurnInput, PreTurnOutput, PromptPacketMeta, TurnContext,
+};
 /// Memory arbiter and related decision types.
 #[doc(no_inline)]
 pub use memory_writer::{

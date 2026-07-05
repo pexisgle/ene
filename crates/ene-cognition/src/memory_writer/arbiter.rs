@@ -637,6 +637,7 @@ fn candidate_to_new_item(candidate: &MemoryCandidate, ctx: &ArbiterContext<'_>) 
         status: MemoryStatus::Active,
         supersedes_id: None,
         pinned: false,
+        created_at: None,
     }
 }
 
@@ -873,6 +874,7 @@ mod tests {
             status: MemoryStatus::Active,
             supersedes_id: None,
             pinned: false,
+            created_at: None,
         };
         let id = store.insert_typed_memory(&item).await.unwrap();
         let existing = store.get_typed_memory(id).await.unwrap().unwrap();
@@ -909,6 +911,7 @@ mod tests {
             status: MemoryStatus::Active,
             supersedes_id: None,
             pinned: false,
+            created_at: None,
         };
         let id = store.insert_typed_memory(&existing_item).await.unwrap();
         let existing = store.get_typed_memory(id).await.unwrap().unwrap();
@@ -960,6 +963,7 @@ mod tests {
             status: MemoryStatus::Active,
             supersedes_id: None,
             pinned: false,
+            created_at: None,
         };
         let id = store.insert_typed_memory(&existing_item).await.unwrap();
         let existing = store.get_typed_memory(id).await.unwrap().unwrap();
@@ -1037,6 +1041,7 @@ mod tests {
             status: MemoryStatus::Active,
             supersedes_id: None,
             pinned: false,
+            created_at: None,
         };
         let old_id = store.insert_typed_memory(&old_item).await.unwrap();
         let existing = store.get_typed_memory(old_id).await.unwrap().unwrap();
@@ -1459,6 +1464,7 @@ mod tests {
             status: MemoryStatus::Active,
             supersedes_id: None,
             pinned: false,
+            created_at: None,
         };
         let id = store.insert_typed_memory(&existing_item).await.unwrap();
 
@@ -1513,6 +1519,7 @@ mod tests {
             status: MemoryStatus::Active,
             supersedes_id: None,
             pinned: false,
+            created_at: None,
         };
         let id = store.insert_typed_memory(&existing_item).await.unwrap();
         let existing = store.get_typed_memory(id).await.unwrap().unwrap();

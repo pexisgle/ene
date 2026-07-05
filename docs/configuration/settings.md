@@ -385,7 +385,8 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
       "mmr_min_slots_episodic": 1,
       "mmr_min_slots_user_profile": 1,
       "mmr_min_slots_commitment": 1,
-      "mmr_source_diversity_bonus": 0.05
+      "mmr_source_diversity_bonus": 0.05,
+      "require_migration": false
     },
     "emotion": {
       "enabled": true,
@@ -444,6 +445,7 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 | `mmr_min_slots_user_profile` | int | `1` | Minimum recalled slots reserved for user profile memories |
 | `mmr_min_slots_commitment` | int | `1` | Minimum recalled slots reserved for commitment memories |
 | `mmr_source_diversity_bonus` | float | `0.05` | Bonus added to MMR score when a candidate introduces a new recall source type |
+| `require_migration` | bool | `false` | When true, block typed recall while legacy summaries/keyfacts exist and migration is incomplete; ongoing `conversation_logs` do not block (#98) |
 
 #### `cognition.emotion` — Emotion Engine
 

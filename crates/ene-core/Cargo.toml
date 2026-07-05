@@ -33,7 +33,15 @@ ene-tool-proto = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+tokio-stream = { workspace = true }
+ene-tool-proto = { workspace = true }
 tracing-subscriber = { workspace = true }
+ene-config = { workspace = true }
+ene-memory = { workspace = true }
+ene-provider = { workspace = true }
+ene-session = { workspace = true }
+ene-tool-host = { workspace = true }
+ene-cognition = { workspace = true }
 
 [lints]
 workspace = true

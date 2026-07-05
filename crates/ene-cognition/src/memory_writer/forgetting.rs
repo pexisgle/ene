@@ -145,6 +145,7 @@ mod tests {
                 status: MemoryStatus::Active,
                 supersedes_id: None,
                 pinned: false,
+                created_at: None,
             })
             .await
             .unwrap();

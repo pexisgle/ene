@@ -290,6 +290,77 @@ impl MemoryQueryHandle {
             .await
             .map_err(EneCoreError::Memory)
     }
+
+    /// Count legacy memory rows for a character card.
+    pub async fn count_legacy_rows(
+        &self,
+        card_name: &str,
+    ) -> Result<ene_memory::LegacyRowCounts, EneCoreError> {
+        let store = self.require_store()?;
+        store
+            .count_legacy_rows(card_name)
+            .await
+            .map_err(EneCoreError::Memory)
+    }
+
+    /// Migration status for a character card.
+    pub async fn migration_status(
+        &self,
+        card_name: &str,
+    ) -> Result<Option<ene_memory::MigrationStatus>, EneCoreError> {
+        let store = self.require_store()?;
+        store
+            .get_migration_status(card_name)
+            .await
+            .map_err(EneCoreError::Memory)
+    }
+
+    /// Run legacy → typed one-shot migration.
+    pub async fn migrate_legacy(
+        &self,
+        card_name: &str,
+        user_id: &str,
+        dry_run: bool,
+    ) -> Result<ene_memory::LegacyMigrationReport, EneCoreError> {
+        let store = self.require_store()?;
+        let model = self
+            .embedder
+            .as_ref()
+            .ok_or_else(|| {
+                EneCoreError::Embedding(ene_provider::EmbeddingError::Init(
+                    "Embedding provider not available".into(),
+                ))
+            })?
+            .model_name()
+            .to_string();
+        let options = ene_memory::LegacyMigrationOptions {
+            card_name: card_name.to_string(),
+            user_id: user_id.to_string(),
+            embedding_model: model,
+            dry_run,
+        };
+        store
+            .migrate_legacy(&options)
+            .await
+            .map_err(EneCoreError::Memory)
+    }
+
+    /// Destructive legacy memory reset for a character card.
+    pub async fn reset_legacy_memory(&self, card_name: &str) -> Result<(), EneCoreError> {
+        let store = self.require_store()?;
+        store
+            .reset_legacy_memory(card_name)
+            .await
+            .map_err(EneCoreError::Memory)
+    }
+
+    fn require_store(&self) -> Result<&std::sync::Arc<ene_memory::MemoryStore>, EneCoreError> {
+        self.store.as_ref().ok_or_else(|| {
+            EneCoreError::Memory(ene_memory::MemoryError::MemoryStoreConnectionError(
+                "Memory store not available".into(),
+            ))
+        })
+    }
 }
 
 /// A snapshot of the current actor state for read-only queries.
@@ -1114,6 +1185,13 @@ impl EneActor {
                 .map_err(|e| {
                     EneCoreError::Memory(ene_memory::MemoryError::MemoryStoreConnectionError(e))
                 })?;
+            let cognition = self
+                .config
+                .get_section::<ene_cognition::CognitionConfig>()
+                .unwrap_or_default();
+            if cognition.enabled {
+                store.set_legacy_write_mode(ene_memory::LegacyWriteMode::ReadOnly);
+            }
             self.session.memory.memory_store = Some(store);
         }
 

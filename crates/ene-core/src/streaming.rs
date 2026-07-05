@@ -52,7 +52,7 @@ pub enum UserInputResponse {
 /// succeeds. If the cancel command (or another emit site) has
 /// already emitted a terminal, this is a no-op so exactly one
 /// terminal event is delivered per run.
-fn emit_terminal(
+pub(crate) fn emit_terminal(
     event_tx: &broadcast::Sender<EneEvent>,
     guard: &AtomicBool,
     reason: TerminalReason,
@@ -66,31 +66,55 @@ fn emit_terminal(
 }
 
 /// Configuration for a single AI streaming run.
-pub(crate) struct StreamContext {
-    pub(crate) config: EneConfig,
-    pub(crate) session: ConversationSession,
-    pub(crate) user_input: String,
-    pub(crate) embedder: Option<Arc<dyn ene_provider::EmbeddingProvider>>,
-    pub(crate) registry: Arc<dyn ene_tool_host::ToolRegistry>,
-    pub(crate) tool_rag: Option<Arc<ene_tool_host::ToolRag>>,
-    pub(crate) provider: Arc<dyn ene_provider::LlmProvider>,
-    pub(crate) event_tx: broadcast::Sender<EneEvent>,
-    pub(crate) cancel_token: CancellationToken,
-    pub(crate) pending_permissions:
-        Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
-    pub(crate) pending_user_inputs:
-        Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
+#[doc(hidden)]
+pub struct StreamContext {
+    pub config: EneConfig,
+    pub session: ConversationSession,
+    pub user_input: String,
+    pub embedder: Option<Arc<dyn ene_provider::EmbeddingProvider>>,
+    pub registry: Arc<dyn ene_tool_host::ToolRegistry>,
+    pub tool_rag: Option<Arc<ene_tool_host::ToolRag>>,
+    pub provider: Arc<dyn ene_provider::LlmProvider>,
+    pub event_tx: broadcast::Sender<EneEvent>,
+    pub cancel_token: CancellationToken,
+    pub pending_permissions: Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
+    pub pending_user_inputs: Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
     /// Shared with [`crate::EneActor`]. The first side to flip this
     /// from `false` to `true` via `compare_exchange` is the one
     /// that emits [`EneEvent::Terminal`] for the current run, so
     /// exactly one terminal event is sent even if both the stream
     /// task and the cancel command race.
-    pub(crate) terminal_emitted: Arc<std::sync::atomic::AtomicBool>,
+    pub terminal_emitted: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Runs the full AI streaming completion loop with tool calling, memory
 /// retrieval, and session management. Sends events through the broadcast channel.
-pub(crate) async fn run_stream(ctx: StreamContext) -> ConversationSession {
+#[doc(hidden)]
+pub async fn run_stream(ctx: StreamContext) -> ConversationSession {
+    let cognition = ctx
+        .config
+        .get_section::<ene_cognition::CognitionConfig>()
+        .unwrap_or_default();
+    let mem_enabled = ctx
+        .config
+        .get_section::<ene_memory::MemoryConfig>()
+        .map(|m| m.enabled)
+        .unwrap_or_default();
+
+    if cognition.enabled && mem_enabled {
+        if ctx.embedder.is_some() {
+            return crate::streaming_cognitive::run_stream_cognitive(ctx).await;
+        }
+        tracing::warn!(
+            component = "Streaming",
+            "Cognitive path requires embedder; falling back to legacy pipeline"
+        );
+    }
+
+    run_stream_legacy(ctx).await
+}
+
+async fn run_stream_legacy(ctx: StreamContext) -> ConversationSession {
     let StreamContext {
         config,
         mut session,
@@ -513,7 +537,7 @@ pub(crate) fn build_chat_messages_list(
 }
 
 /// Executes a batch of tool calls and sends result events through the broadcast channel.
-async fn perform_tool_executions(
+pub(crate) async fn perform_tool_executions(
     registry: &dyn ene_tool_host::ToolRegistry,
     session_id: &str,
     tool_calls: Vec<LlmToolCall>,
@@ -692,7 +716,7 @@ async fn perform_tool_executions(
     Ok(round_messages)
 }
 
-fn accumulate_tool_calls(
+pub(crate) fn accumulate_tool_calls(
     current_tool_calls: &mut Vec<LlmToolCallChunk>,
     tool_calls_delta: &[LlmToolCallChunk],
 ) {
@@ -722,7 +746,7 @@ fn accumulate_tool_calls(
     }
 }
 
-fn finalize_tool_calls(current_tool_calls: Vec<LlmToolCallChunk>) -> Vec<LlmToolCall> {
+pub(crate) fn finalize_tool_calls(current_tool_calls: Vec<LlmToolCallChunk>) -> Vec<LlmToolCall> {
     let mut tool_calls = Vec::new();
     for tc in current_tool_calls {
         tool_calls.push(LlmToolCall {

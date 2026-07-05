@@ -413,7 +413,42 @@ Post-turn wiring of `ForgettingLifecycle::apply` into the streaming pipeline is 
 - `[uncertain] ` for `faded` memories (and low-confidence `active` memories)
 - `[disputed] ` for `disputed` memories
 
-Legacy `conversation_keyfacts` from `recall_context` do not receive these markers until #98.
+Legacy `conversation_keyfacts` from `recall_context` receive the same uncertain/disputed markers when the cognitive runtime is enabled (#98).
+
+## Migration from Legacy Tables
+
+When the cognitive runtime is enabled (`cognition.enabled = true`), **new memory writes go to typed memory only**. Legacy tables (`conversation_summaries`, `conversation_keyfacts`) become **read-only** until you migrate or reset.
+
+### Mapping rules (one-shot migration)
+
+| Legacy table | Target | Rules |
+|--------------|--------|-------|
+| `conversation_summaries` | `typed_memories` (`Episodic`) | `content` ← summary text; `confidence = 0.7`, `salience = 0.5`; embedding copied to `memory_embeddings`; `source_ref = legacy:summary:{id}` |
+| `conversation_keyfacts` | `UserProfile` or `Preference` | Keys matching `pref_*`, `like`, or `dislike` → `Preference`; otherwise → `UserProfile`; `title` = key, `content` = value; `source_ref = legacy:keyfact:{id}` |
+| `conversation_logs` | `memory_spans` | One span per user/assistant pair (or single message when unpaired); `raw_excerpt` holds message text; `compressed_summary` empty until rolling compression (#79) |
+
+Migration progress is recorded in `memory_migration_meta` per character card.
+
+### User options
+
+1. **Do nothing (read-only fallback)** — Until you migrate, legacy summaries and key facts are merged into cognitive recall (typed search + legacy `recall_context`). New extracted memories go to typed tables only. Raw conversation logs continue to append to `conversation_logs` on each turn.
+2. **`/memory migrate legacy`** — One-shot conversion inside a single transaction; sets the migration marker. After migration, recall uses typed memory only for that card.
+3. **`/memory reset legacy --yes`** — Truncates legacy tables and clears typed memory for the card (destructive; requires confirmation). Memory spans are removed only for sessions linked to that card's logs.
+
+### Strict mode
+
+Set `cognition.memory.require_migration = true` to block recall when **legacy summaries or keyfacts** exist but migration has not completed. Ongoing `conversation_logs` from normal chat do **not** trigger this gate. The store returns `LegacyMemoryNotMigrated` with reset/migrate guidance.
+
+### Reset guidance
+
+To start fresh without migrating:
+
+```bash
+ene-cli
+/memory reset legacy --yes
+```
+
+Or delete the SQLite file under your user data directory and restart (all memory for all characters is lost).
 
 ## Companion Commitment Ledger
 

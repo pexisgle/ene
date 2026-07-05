@@ -217,11 +217,16 @@ Recall Planner が生成するクエリ計画：
 
 ### 移行パス
 - **Phase 0–9** はグリーンフィールド — `ene-cognition` の新規コード、既存ランタイムは変更しない
-- **Phase 10 (#100)** で `ene-cognition` を `ene-core::streaming.rs` に統合し、旧パイプラインを置き換え
-- **#98** でレガシー `conversation_summaries` / `conversation_keyfacts` から新しい型付き記憶スキーマへの移行を定義
+- **Phase 10 (#100)** で `ene-cognition` を `ene-core::streaming.rs` に統合（`cognition.enabled` で切替。embedding provider 未設定時はレガシーパイプラインにフォールバック）
+- **#98（ハイブリッド方針）** — cognition 有効時:
+  - レガシー summary/keyfact テーブルは **read-only**（新規 summary/keyfact 書き込みなし）
+  - 未移行の summaries/keyfacts は `/memory migrate legacy` 完了まで cognitive recall にマージ
+  - 任意 one-shot CLI migration（トランザクション）で summaries → `Episodic`、keyfacts → `UserProfile`/`Preference`、logs → `memory_spans`
+  - migration 完了後は typed-only recall。レガシー行は reset まで監査用に残る
+  - `cognition.memory.require_migration` は summaries/keyfacts 未移行時のみ recall をブロック（logs のみではブロックしない）
+  - affect **永続化**は毎ターン実行。affect **計算**は #86（`EmotionEngine`）で予定
 - **#80** で自動セッション分割を rolling context compression トリガーに置き換え
-- **Phase 10 まで既存ランタイムに破壊的変更なし**
-- 既存の CLI とデスクトップアプリは Phase 0–9 の間、変更なく動作し続ける
+- **`cognition.enabled = false`** のときはレガシー streaming パイプラインを維持
 
 ## 参照
 

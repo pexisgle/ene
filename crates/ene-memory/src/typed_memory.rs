@@ -385,6 +385,9 @@ pub struct NewMemoryItem {
     /// Pin state — pinned memories skip natural decay.
     #[serde(default)]
     pub pinned: bool,
+    /// Optional created timestamp (defaults to now on insert).
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 /// Recall source that surfaced a memory candidate.
@@ -660,6 +663,7 @@ mod tests {
             status: MemoryStatus::Active,
             supersedes_id: None,
             pinned: false,
+            created_at: None,
         };
         let json = serde_json::to_string(&new_item).unwrap();
         let back: NewMemoryItem = serde_json::from_str(&json).unwrap();

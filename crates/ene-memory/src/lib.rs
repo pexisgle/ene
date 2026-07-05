@@ -41,6 +41,8 @@ pub mod entities;
 pub mod error;
 /// Memory forgetting lifecycle (decay score and status transitions).
 pub mod forgetting;
+/// Legacy memory table migration (#98).
+pub mod legacy_migration;
 /// SeaORM schema migrations.
 pub mod migrator;
 /// Summary recall and prompt formatting utilities.
@@ -68,12 +70,20 @@ pub use forgetting::{
     ARCHIVE_THRESHOLD, FADE_THRESHOLD, InvalidTransition, active_decay_anchor, decay_score,
     emotional_impact, faded_decay_anchor, target_status_after_decay, validate_transition,
 };
+/// Legacy migration types and orchestration (#98).
+pub use legacy_migration::{
+    LegacyMigrationOptions, LegacyMigrationReport, LegacyRowCounts, MigrationStatus,
+    execute_legacy_migration, keyfact_kind_for_key,
+};
 /// Formats recalled summaries for prompt injection.
 pub use recall::{format_summaries_for_prompt, format_summaries_with_library};
 /// Document-to-document lexical similarity for recall diversification.
 pub use search::document_lexical_similarity;
 /// Core memory types.
-pub use store::{ConversationSummary, KeyFact, MemoryStore, NaturalDecayReport, RecalledSummary};
+pub use store::{
+    ConversationSummary, KeyFact, LegacyWriteMode, MemoryStore, NaturalDecayReport, NewMemorySpan,
+    RecalledSummary,
+};
 /// LLM summarization result type and entry-point.
 pub use summarizer::{ConversationSummaryResult, summarize_conversation};
 /// Typed memory domain types.

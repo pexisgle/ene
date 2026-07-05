@@ -1,17 +1,10 @@
 //! Maps hybrid search output from `ene-memory` into explainable recall results.
-//!
-//! `MemoryStore::search_typed_memories_hybrid` returns raw [`ScoredMemory`] values.
-//! This module is the cognition-side boundary that attaches a primary [`RecallReason`]
-//! and exposes [`RecalledMemory`] for UX, debug output, and prompt introspection.
 
 use ene_memory::ScoredMemory;
 
 use super::result::{RecalledMemory, explain_scored_memories};
 
 /// Maps hybrid search results into explainable recalled memories.
-///
-/// Downstream recall execution should call this after `search_typed_memories_hybrid`
-/// rather than re-implementing reason inference at each call site.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RecallResultMapper;
 

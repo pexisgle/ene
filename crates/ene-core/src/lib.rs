@@ -19,6 +19,7 @@ mod memory_recall;
 pub mod message_builder;
 /// Permission types and streaming engine internals.
 pub mod streaming;
+mod streaming_cognitive;
 /// Type-safe identifiers for runtime concepts.
 pub mod types;
 

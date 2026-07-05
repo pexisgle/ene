@@ -14,6 +14,7 @@ impl MigratorTrait for Migrator {
             Box::new(Migration4),
             Box::new(Migration5),
             Box::new(Migration6),
+            Box::new(Migration7),
         ]
     }
 }
@@ -1183,4 +1184,79 @@ impl MigrationTrait for Migration6 {
         let _ = manager;
         Ok(())
     }
+}
+
+// ── Migration 7: Legacy migration metadata (#98) ─────────────────────────────
+
+pub struct Migration7;
+
+impl MigrationName for Migration7 {
+    fn name(&self) -> &str {
+        "m20250705_000002_memory_migration_meta"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration7 {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(MemoryMigrationMeta::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(MemoryMigrationMeta::CardName)
+                            .string()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(MemoryMigrationMeta::MigratedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(MemoryMigrationMeta::LegacySummariesCount)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(MemoryMigrationMeta::LegacyKeyfactsCount)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(MemoryMigrationMeta::LegacyLogsCount)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(MemoryMigrationMeta::Strategy)
+                            .string()
+                            .not_null(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(MemoryMigrationMeta::Table).to_owned())
+            .await?;
+        Ok(())
+    }
+}
+
+#[derive(Iden)]
+enum MemoryMigrationMeta {
+    #[iden = "memory_migration_meta"]
+    Table,
+    CardName,
+    MigratedAt,
+    LegacySummariesCount,
+    LegacyKeyfactsCount,
+    LegacyLogsCount,
+    Strategy,
 }

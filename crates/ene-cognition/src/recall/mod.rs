@@ -8,11 +8,13 @@ mod diversify;
 mod executor;
 mod input;
 mod intent;
+mod legacy;
 mod plan;
 mod planner;
 mod prompt_qualifier;
 mod rerank;
 mod result;
+mod runner;
 mod topic;
 
 /// MMR diversification after hybrid search (#78).
@@ -37,3 +39,5 @@ pub use result::{
     EMOTIONAL_MATCH_REASON_THRESHOLD, RecallReason, RecalledMemory, explain_scored_memories,
     infer_recall_reason,
 };
+/// Hybrid recall execution for streaming integration (#100).
+pub use runner::{ExecuteRecallInput, execute_hybrid_recall};
