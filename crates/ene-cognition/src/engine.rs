@@ -54,6 +54,31 @@ impl CognitionEngine {
         }
     }
 
+    /// Sync CCv3 lorebook and style indices when the card or config changes.
+    pub async fn sync_character_memories(
+        &self,
+        ctx: TurnContext<'_>,
+        previous_hash: Option<u64>,
+    ) -> Result<(crate::character::CharacterMemorySyncReport, u64), CognitionError> {
+        let store = ctx.store.ok_or_else(|| {
+            CognitionError::Other("Memory store required for character memory sync".into())
+        })?;
+        let embedder = ctx.embedder.ok_or_else(|| {
+            CognitionError::Other("Embedding provider required for character memory sync".into())
+        })?;
+
+        CharacterProcessor::sync_card_memories(
+            store,
+            embedder,
+            ctx.character_id,
+            ctx.user_name,
+            ctx.card,
+            &ctx.config.character,
+            previous_hash,
+        )
+        .await
+    }
+
     /// Pre-turn: load affect, plan recall, execute hybrid search.
     pub async fn before_turn(&self, ctx: TurnContext<'_>) -> Result<PreTurnOutput, CognitionError> {
         let store = ctx.store.ok_or_else(|| {
@@ -83,6 +108,7 @@ impl CognitionEngine {
             embedding_model: embedder.model_name(),
             llm_provider: ctx.llm_provider.clone(),
             affect: Some(&affect),
+            card: Some(ctx.card),
         };
 
         let (recall_plan, recalled) = execute_hybrid_recall(ctx.config, &recall_input).await?;
@@ -112,12 +138,33 @@ impl CognitionEngine {
     }
 
     /// Compose a sectioned prompt packet into LLM messages.
-    pub fn compose_prompt_packet(
+    pub async fn compose_prompt_packet(
         &self,
         ctx: TurnContext<'_>,
         pre: &PreTurnOutput,
     ) -> Result<ComposedPrompt, CognitionError> {
-        let kernel = CharacterProcessor::compile_kernel(ctx.card, ctx.user_name);
+        let max_kernel_tokens = ctx.config.character.identity_kernel_max_tokens;
+        let kernel = if ctx.config.character.always_include_identity_kernel {
+            CharacterProcessor::compile_kernel(ctx.card, ctx.user_name, max_kernel_tokens)
+        } else {
+            crate::character::IdentityKernel {
+                name: ctx.card.data.get_character_name().to_string(),
+                text: String::new(),
+                post_history_instructions: None,
+            }
+        };
+
+        let style_examples = CharacterProcessor::select_style_examples(
+            ctx.card,
+            ctx.user_name,
+            ctx.user_input,
+            ctx.history,
+            ctx.store,
+            ctx.embedder,
+            &ctx.config.character,
+            2,
+        )
+        .await;
 
         let affect_summary = Some(format!(
             "mood={}; valence={:.2}; arousal={:.2}",
@@ -127,12 +174,15 @@ impl CognitionEngine {
         let history = ctx.history.to_vec();
         let packet = PromptPacket::compose(
             kernel,
+            style_examples,
             pre.recalled.clone(),
             pre.commitments.clone(),
             affect_summary,
             history,
+            ctx.post_history_block.map(str::to_string),
             ctx.user_input,
             ctx.config.context.max_prompt_tokens,
+            ctx.config.context.style_example_budget_tokens,
         );
 
         let (messages, meta) = packet.to_llm_messages();

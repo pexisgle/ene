@@ -43,6 +43,8 @@ pub struct TurnContext<'a> {
     pub embedder: Option<&'a Arc<dyn EmbeddingProvider>>,
     /// LLM provider for optional reranking.
     pub llm_provider: Option<Arc<dyn LlmProvider>>,
+    /// Expression PHI block (emotion protocol + card post-history instructions).
+    pub post_history_block: Option<&'a str>,
 }
 
 /// Output of pre-turn analysis and recall planning.
@@ -63,8 +65,12 @@ pub struct PreTurnOutput {
 pub struct PromptPacketMeta {
     /// Whether the identity kernel section was included.
     pub identity_kernel_included: bool,
+    /// Number of style examples injected.
+    pub style_example_count: usize,
     /// Number of recalled memories injected.
     pub recalled_memory_count: usize,
+    /// Whether the post-history PHI block was included.
+    pub post_history_included: bool,
 }
 
 /// Result of prompt packet composition.

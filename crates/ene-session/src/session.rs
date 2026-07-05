@@ -53,6 +53,8 @@ pub struct MemoryContext {
     pub session_started_at: chrono::DateTime<chrono::Utc>,
     /// Embedding of the pending user input.
     pub pending_embedding: Option<Vec<f32>>,
+    /// Cached hash of the last synced CCv3 character memory index.
+    pub ccv3_memory_hash: Option<u64>,
 }
 
 /// Tracks session metadata like embedding and timing.
@@ -131,6 +133,7 @@ impl ConversationSession {
                 session_id: generate_session_id(),
                 session_started_at: chrono::Utc::now(),
                 pending_embedding: None,
+                ccv3_memory_hash: None,
             },
             state: SessionState {
                 last_input_embedding: None,
@@ -171,6 +174,7 @@ impl ConversationSession {
         self.character_card = Some(card.clone());
         self.current_card_path = path.to_string();
         self.history.conversation_history.clear();
+        self.memory.ccv3_memory_hash = None;
 
         Ok(resolve_expressions(&card))
     }

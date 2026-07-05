@@ -333,6 +333,17 @@ Use `RecallResultMapper::map`, `RecallPlanner::explain_results`, `RecalledMemory
 
 Reason priority (first match wins): `ActivePromise` → `CharacterLore` → `UserPreference` → `EmotionalContinuity` → `RecentConversation` → `SimilarTopic`.
 
+### CCv3 Character Memory Index (#82–#84)
+
+When `cognition.enabled` is true, `CognitionEngine::sync_character_memories` compiles CCv3 card data into character-scoped typed memories:
+
+| Source | `source_ref` prefix | `MemoryKind` | Notes |
+|--------|----------------------|--------------|-------|
+| Lorebook entry | `ccv3:lorebook:{id}` | `Semantic` | Constant entries are `pinned`; trigger keys are stored in **content** as `Triggers: …` |
+| `mes_example` chunk | `ccv3:style:{index}` | `Procedure` | Selected per turn for the Style Examples prompt section |
+
+Rows under these prefixes that are no longer present in the card are archived on reindex. Rows with the same `source_ref` but changed content are **superseded** and re-embedded. The session caches the combined lorebook/style hash in `MemoryContext.ccv3_memory_hash` to skip redundant sync work across turns. Store helpers: `list_typed_memories_by_source_prefix`, `get_active_typed_memory_by_source_ref`, `archive_typed_memories_by_source_prefixes`, `supersede_typed_memory`.
+
 ### Optional Memory Reranking (#77)
 
 After hybrid search, downstream recall execution may optionally rerank the top candidates before mapping to `RecalledMemory`:

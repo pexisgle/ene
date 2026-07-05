@@ -399,6 +399,7 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
     "character": {
       "compile_ccv3_to_semantic_memory": true,
       "always_include_identity_kernel": true,
+      "identity_kernel_max_tokens": 400,
       "style_retrieval": true
     }
   }
@@ -464,6 +465,7 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 |-------|------|---------|-------------|
 | `compile_ccv3_to_semantic_memory` | bool | `true` | Compile CCv3 lorebook entries into the semantic memory index |
 | `always_include_identity_kernel` | bool | `true` | Always include the Identity Kernel at the top of every prompt |
+| `identity_kernel_max_tokens` | int | `400` | Approximate token budget for the compiled Identity Kernel (#82). Optional detail sections are dropped first; core header lines are preserved |
 | `style_retrieval` | bool | `true` | Enable retrieval of character style examples from lorebook |
 
 ## Tool-Specific Configuration

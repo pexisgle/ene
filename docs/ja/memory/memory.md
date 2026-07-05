@@ -326,6 +326,17 @@ score =
 
 理由の優先順位（先に一致したものを採用）: `ActivePromise` → `CharacterLore` → `UserPreference` → `EmotionalContinuity` → `RecentConversation` → `SimilarTopic`。
 
+### CCv3 キャラクタ記憶インデックス（#82–#84）
+
+`cognition.enabled` が true のとき、`CognitionEngine::sync_character_memories` が CCv3 カードデータをキャラクタスコープ typed memory にコンパイルする:
+
+| ソース | `source_ref` プレフィックス | `MemoryKind` | 備考 |
+|--------|---------------------------|--------------|------|
+| Lorebook エントリ | `ccv3:lorebook:{id}` | `Semantic` | constant は `pinned`。トリガーキーは **content** 先頭の `Triggers: …` |
+| `mes_example` チャンク | `ccv3:style:{index}` | `Procedure` | ターンごとに Style Examples セクションへ |
+
+カードから消えた `source_ref` は reindex 時に archive される。同一 `source_ref` で内容が変わった行は **supersede** され再埋め込みされる。セッションは `MemoryContext.ccv3_memory_hash` に lorebook/style の結合ハッシュを保持し、ターン間の冗長 sync を省略する。Store ヘルパー: `list_typed_memories_by_source_prefix`, `get_active_typed_memory_by_source_ref`, `archive_typed_memories_by_source_prefixes`, `supersede_typed_memory`。
+
 ### Optional Memory Reranking（#77）
 
 ハイブリッド検索の後、downstream recall execution は `RecalledMemory` への変換前に optional な rerank を実行できます。

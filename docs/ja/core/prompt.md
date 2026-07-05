@@ -80,3 +80,18 @@ MessageBuildContext {
 | `{{roll:d20}}` | ダイスロール |
 | `{{//...}}` / `{{comment:...}}` | コメント (削除) |
 | `{{reverse:...}}` | 文字列反転 |
+
+## Cognitive Runtime PromptPacket（#87 / Phase 5–6）
+
+`cognition.enabled` が true のとき、`ene-core::streaming_cognitive` は `build_messages` の代わりに `CognitionEngine::compose_prompt_packet` を使う。system 内容の組み立て順:
+
+| # | セクション | ソース | truncate |
+|---|-----------|--------|----------|
+| 1 | **Identity Kernel** | `CharacterCompiler`（#82） | 不可（コアヘッダー保持） |
+| 2 | **Style Examples** | `StyleExampleSelector`（#84） | drop 可。予算 `style_example_budget_tokens` |
+| 3 | **Recalled Memories** | hybrid recall + lorebook boost（#83） | `max_prompt_tokens` 尾部予算 |
+| 4 | **Active Commitments** | commitment ledger | 同上 |
+| 5 | **Current Mood** | affect 要約 | 同上 |
+| 6 | 履歴 | セッション履歴 | 別 LLM メッセージ |
+| 7 | **Expression PHI** | `build_expression_phi`（レガシー互換） | 履歴の後の別 system メッセージ |
+| 8 | 現在のユーザー入力 | ユーザーターン | 最後の LLM メッセージ |

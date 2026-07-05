@@ -4,7 +4,8 @@
 
 use async_trait::async_trait;
 use ene_cognition::{CognitionConfig, CognitionEngine, HistoryEntry, TurnContext};
-use ene_config::CharacterCardV3;
+use ene_config::{CharacterCardV3, PromptLibrary, expand_cbs_macros};
+use ene_core::message_builder::build_expression_phi;
 use ene_memory::{
     AffectAnnotation, MemoryConfidence, MemoryKind, MemorySalience, MemoryScope, MemorySource,
     MemoryStatus, MemoryStore, NewMemoryItem,
@@ -117,6 +118,7 @@ async fn cognitive_lifecycle_compose_prompt_includes_identity_kernel_and_recall(
         query_embedding: Some(&query_emb),
         embedder: Some(&embedder),
         llm_provider: Some(llm.clone()),
+        post_history_block: None,
     };
 
     let pre = engine.before_turn(turn_ctx).await.expect("before_turn");
@@ -139,10 +141,12 @@ async fn cognitive_lifecycle_compose_prompt_includes_identity_kernel_and_recall(
         query_embedding: Some(&query_emb),
         embedder: Some(&embedder),
         llm_provider: Some(llm),
+        post_history_block: None,
     };
 
     let composed = engine
         .compose_prompt_packet(compose_ctx, &pre)
+        .await
         .expect("compose");
 
     assert!(composed.meta.identity_kernel_included);
@@ -173,4 +177,67 @@ async fn cognitive_lifecycle_compose_prompt_includes_identity_kernel_and_recall(
     let loaded = store.get_affect_state("ene").await.unwrap();
     assert_eq!(loaded.character_id, "ene");
     assert_eq!(loaded.mood_label, affect_before.mood_label);
+}
+
+#[tokio::test]
+async fn cognitive_compose_includes_post_history_phi_block() {
+    let store = MemoryStore::open_in_memory(4).await.unwrap();
+    let mut card = CharacterCardV3::default();
+    card.data.name = "Ene".into();
+    card.data.post_history_instructions = "Stay in character at all times.".into();
+
+    let cognition = CognitionConfig::default();
+    let engine = CognitionEngine::new();
+    let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbedder);
+    let llm: Arc<dyn LlmProvider> = Arc::new(MockLlm);
+    let query_emb = embedder.embed_query("hello").await.unwrap();
+
+    let prompts = PromptLibrary::load("en");
+    let phi =
+        build_expression_phi(&card, &prompts).map(|block| expand_cbs_macros(&block, "Ene", "user"));
+
+    let pre_ctx = TurnContext {
+        config: &cognition,
+        card: &card,
+        character_id: "ene",
+        user_name: "user",
+        session_id: "sess-phi",
+        user_input: "hello",
+        history: &[],
+        store: Some(&store),
+        query_embedding: Some(&query_emb),
+        embedder: Some(&embedder),
+        llm_provider: Some(llm.clone()),
+        post_history_block: phi.as_deref(),
+    };
+    let pre = engine.before_turn(pre_ctx).await.expect("before_turn");
+
+    let compose_ctx = TurnContext {
+        config: &cognition,
+        card: &card,
+        character_id: "ene",
+        user_name: "user",
+        session_id: "sess-phi",
+        user_input: "hello",
+        history: &[],
+        store: Some(&store),
+        query_embedding: Some(&query_emb),
+        embedder: Some(&embedder),
+        llm_provider: Some(llm),
+        post_history_block: phi.as_deref(),
+    };
+    let composed = engine
+        .compose_prompt_packet(compose_ctx, &pre)
+        .await
+        .expect("compose");
+
+    assert!(composed.meta.post_history_included);
+    let phi_message = composed
+        .messages
+        .iter()
+        .find(|msg| matches!(msg, LlmMessage::System { content } if content.contains("Stay in character")));
+    assert!(
+        phi_message.is_some(),
+        "post-history PHI should appear as a system message"
+    );
 }

@@ -2,10 +2,12 @@
 
 use ene_cognition::memory_writer::candidate::TurnInput;
 use ene_cognition::{CognitionConfig, CognitionEngine, HistoryEntry, PostTurnInput, TurnContext};
+use ene_config::{PromptLibrary, expand_cbs_macros};
 use ene_provider::LlmToolCallChunk;
 use tokio_stream::StreamExt;
 
 use crate::handle::{EneEvent, TerminalReason};
+use crate::message_builder::build_expression_phi;
 use crate::streaming::{
     PHASE_CONTEXT_SEARCH, PHASE_EMBEDDING, PHASE_PROMPT_BUILDING, StreamContext,
     accumulate_tool_calls, emit_terminal, finalize_tool_calls, perform_tool_executions,
@@ -24,6 +26,7 @@ fn build_turn_context<'a>(
     query_embedding: Option<&'a [f32]>,
     embedder: Option<&'a std::sync::Arc<dyn ene_provider::EmbeddingProvider>>,
     provider: &std::sync::Arc<dyn ene_provider::LlmProvider>,
+    post_history_block: Option<&'a str>,
 ) -> TurnContext<'a> {
     TurnContext {
         config: cognition,
@@ -37,6 +40,7 @@ fn build_turn_context<'a>(
         query_embedding,
         embedder,
         llm_provider: Some(provider.clone()),
+        post_history_block,
     }
 }
 
@@ -133,9 +137,58 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_session::Con
         })
         .collect();
 
+    let prompts = PromptLibrary::load("en");
+    let char_name = card.data.get_character_name();
+    let post_history_phi = build_expression_phi(&card, &prompts)
+        .map(|phi| expand_cbs_macros(&phi, char_name, &user_name));
+
     let _ = event_tx.send(EneEvent::PipelinePhase {
         phase: PHASE_CONTEXT_SEARCH.to_string(),
     });
+
+    if cognition.enabled
+        && let (Some(_store), Some(embedder)) = (mem_store.as_deref(), embedder.as_ref())
+    {
+        let sync_ctx = build_turn_context(
+            &cognition,
+            &card,
+            &card_name,
+            &user_name,
+            session_id.as_str(),
+            &user_input,
+            &history,
+            &mem_store,
+            query_embedding.as_deref(),
+            Some(embedder),
+            &provider,
+            post_history_phi.as_deref(),
+        );
+        match engine
+            .sync_character_memories(sync_ctx, session.memory.ccv3_memory_hash)
+            .await
+        {
+            Ok((report, hash)) => {
+                session.memory.ccv3_memory_hash = Some(hash);
+                tracing::debug!(
+                    component = "CognitionEngine",
+                    skipped = report.skipped,
+                    lorebook_inserted = report.lorebook_inserted,
+                    lorebook_updated = report.lorebook_updated,
+                    style_inserted = report.style_inserted,
+                    style_updated = report.style_updated,
+                    archived = report.archived,
+                    "CCv3 character memory sync complete"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    component = "CognitionEngine",
+                    error = %error,
+                    "CCv3 character memory sync failed; continuing turn"
+                );
+            }
+        }
+    }
 
     let turn_ctx = build_turn_context(
         &cognition,
@@ -149,6 +202,7 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_session::Con
         query_embedding.as_deref(),
         embedder.as_ref(),
         &provider,
+        post_history_phi.as_deref(),
     );
 
     let (pre_turn_result, tools) = tokio::join!(
@@ -204,9 +258,10 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_session::Con
         query_embedding.as_deref(),
         embedder.as_ref(),
         &provider,
+        post_history_phi.as_deref(),
     );
 
-    let composed = match engine.compose_prompt_packet(compose_ctx, &pre_turn) {
+    let composed = match engine.compose_prompt_packet(compose_ctx, &pre_turn).await {
         Ok(v) => v,
         Err(e) => {
             emit_terminal(

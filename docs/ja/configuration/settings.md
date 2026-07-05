@@ -399,6 +399,7 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
     "character": {
       "compile_ccv3_to_semantic_memory": true,
       "always_include_identity_kernel": true,
+      "identity_kernel_max_tokens": 400,
       "style_retrieval": true
     }
   }
@@ -464,6 +465,7 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 |-----------|------|---------|------|
 | `compile_ccv3_to_semantic_memory` | bool | `true` | CCv3 lorebook エントリを意味記憶インデックスにコンパイル |
 | `always_include_identity_kernel` | bool | `true` | 全プロンプトの先頭に必ず Identity Kernel を含める |
+| `identity_kernel_max_tokens` | int | `400` | コンパイル済み Identity Kernel の概算トークン予算（#82）。詳細セクションから優先的に削り、コア見出し行は保持 |
 | `style_retrieval` | bool | `true` | lorebook からキャラクタースタイル例の検索を有効化 |
 
 ## ツール固有の設定

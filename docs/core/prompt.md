@@ -80,3 +80,18 @@ Tool specifications (`Vec<ToolSpec>`) are selected via `select_relevant_tools()`
 | `{{roll:d20}}` | Dice roll |
 | `{{//...}}` / `{{comment:...}}` | Comment (removed) |
 | `{{reverse:...}}` | String reversal |
+
+## Cognitive Runtime PromptPacket (#87 / Phase 5–6)
+
+When `cognition.enabled` is true, `ene-core::streaming_cognitive` uses `CognitionEngine::compose_prompt_packet` instead of `build_messages`. System content is assembled in this order:
+
+| # | Section | Source | Truncation |
+|---|---------|--------|------------|
+| 1 | **Identity Kernel** | `CharacterCompiler` (#82) | Never truncated (core header preserved) |
+| 2 | **Style Examples** | `StyleExampleSelector` (#84) | Droppable; budget `style_example_budget_tokens` |
+| 3 | **Recalled Memories** | Hybrid typed recall + lorebook boost (#83) | Subject to `max_prompt_tokens` tail budget |
+| 4 | **Active Commitments** | Commitment ledger | Same |
+| 5 | **Current Mood** | Affect state summary | Same |
+| 6 | History | Session history | Separate LLM messages |
+| 7 | **Expression PHI** | `build_expression_phi` (legacy parity) | Separate system message after history |
+| 8 | Current user input | User turn | Final LLM message |

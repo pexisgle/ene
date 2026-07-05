@@ -247,6 +247,8 @@ pub struct CharacterMemoryConfig {
     pub always_include_identity_kernel: bool,
     /// Enable retrieval of character style examples from lorebook.
     pub style_retrieval: bool,
+    /// Maximum approximate token budget for the Identity Kernel section.
+    pub identity_kernel_max_tokens: usize,
 }
 
 impl Default for CharacterMemoryConfig {
@@ -255,6 +257,7 @@ impl Default for CharacterMemoryConfig {
             compile_ccv3_to_semantic_memory: true,
             always_include_identity_kernel: true,
             style_retrieval: true,
+            identity_kernel_max_tokens: 400,
         }
     }
 }

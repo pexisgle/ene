@@ -9,6 +9,7 @@ mod executor;
 mod input;
 mod intent;
 mod legacy;
+mod lorebook_boost;
 mod plan;
 mod planner;
 mod prompt_qualifier;
@@ -23,6 +24,8 @@ pub use diversify::{MemoryDiversifyOptions, MemoryDiversifyPipeline};
 pub use executor::RecallResultMapper;
 /// Recall planner input DTOs.
 pub use input::{RecallPlannerInput, RecallTurn};
+/// Lorebook constant/key recall merge (#83).
+pub use lorebook_boost::merge_lorebook_recall;
 /// Recall plan output DTOs.
 pub use plan::{RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHints};
 /// Recall planner implementation and options.

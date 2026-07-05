@@ -110,7 +110,13 @@ sequenceDiagram
 ## 主要用語
 
 ### Identity Kernel（人格核）
-CCv3 キャラクターカードからコンパイルされた不変の人格定義ブロック。常にすべてのプロンプトパケットの最上位に配置される。名前、中核的人格、システムプロンプト、明示的行動制約を含む。**絶対に圧縮・切り詰めしてはいけない。**
+CCv3 キャラクターカードから `ene-cognition::character::CharacterCompiler`（#82）がコンパイルする不変の人格定義ブロック。常に prompt packet の最上位に配置。構造化ヘッダー行（名前・役割・コア人格・話し方・ hard instruction）と、`system_prompt` / `description` / `scenario` / `creator_notes` 由来の任意セクションを含む。CBS マクロはコンパイル時に展開。**コアヘッダー行は truncate しない**。任意セクションは `cognition.character.identity_kernel_max_tokens` を尊重。
+
+### CCv3 意味記憶（#83）
+`character_book` エントリは `MemoryKind::Semantic` / `MemorySource::Ccv3` の typed memory として `ccv3:lorebook:*` の安定 `source_ref` で index 化。constant エントリは pinned。キートリガーは保存 **content** の先頭に `Triggers: …` として含まれる（タイトルではない）。`CognitionEngine::sync_character_memories` がカード変更時に reindex し、削除されたエントリは archive、同一 `source_ref` で内容が変わった行は **supersede** して再埋め込みする。
+
+### スタイル例检索（#84）
+`mes_example` チャンクは `ccv3:style:*` procedure memory として index 化され、ターン intent に応じて最大 2 件選択。`## Style Examples` セクション（`style_example_budget_tokens`）に注入され、overflow 時は kernel を触らず drop 可能。
 
 ### Typed Memory（型付き記憶）
 明示的な `MemoryKind` を持つ記憶：
@@ -138,13 +144,15 @@ CCv3 キャラクターカードからコンパイルされた不変の人格定
 ### PromptPacket（プロンプトパケット）
 各セクションが独立したトークン予算を持ち、Context Budget Manager によって管理されるセクション化されたプロンプト構造：
 1. Identity Kernel（常に最初、決して切り詰めない）
-2. Recalled Memories（想起された記憶）
-3. Active Commitments（アクティブなコミットメント）
-4. Current Affect State（現在の感情状態）
-5. Scene / Scenario（シーン・シナリオ）
-6. Style Examples（CCv3 lorebook からのスタイル例）
-7. Conversation History（直近 N ターンの会話履歴）
+2. Style Examples（CCv3 `mes_example` からのスタイル例）
+3. Recalled Memories（想起された記憶）
+4. Active Commitments（アクティブなコミットメント）
+5. Current Affect State（現在の感情状態）
+6. Conversation History（直近 N ターンの会話履歴）
+7. Expression PHI（`build_expression_phi` — 感情プロトコル + カード post-history instructions）
 8. Current User Input（現在のユーザー入力）
+
+> **既知の制限:** CCv3 lorebook の `selective` / `secondary_keys` / `position` は現時点では cognitive runtime で解釈されない。
 
 ### RecallPlan（想起計画）
 Recall Planner が生成するクエリ計画：

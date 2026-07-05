@@ -1444,6 +1444,106 @@ impl MemoryStore {
         Ok(query.count(&self.db).await? as i64)
     }
 
+    /// List active typed memories whose `source_ref` starts with `prefix`.
+    pub async fn list_typed_memories_by_source_prefix(
+        &self,
+        character_id: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::MemoryItem>, MemoryError> {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+
+        let models = entities::typed_memories::Entity::find()
+            .filter(entities::typed_memories::Column::CharacterId.eq(character_id))
+            .filter(
+                entities::typed_memories::Column::Status.eq(crate::MemoryStatus::Active.as_str()),
+            )
+            .filter(entities::typed_memories::Column::SourceRef.starts_with(prefix))
+            .order_by_desc(entities::typed_memories::Column::Salience)
+            .limit(limit as u64)
+            .all(&self.db)
+            .await?;
+
+        models
+            .into_iter()
+            .map(model_to_memory_item)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    /// Returns whether an active typed memory exists for `character_id` + `source_ref`.
+    pub async fn typed_memory_exists_by_source_ref(
+        &self,
+        character_id: &str,
+        source_ref: &str,
+    ) -> Result<bool, MemoryError> {
+        Ok(self
+            .get_active_typed_memory_by_source_ref(character_id, source_ref)
+            .await?
+            .is_some())
+    }
+
+    /// Returns the active typed memory for `character_id` + `source_ref`, if any.
+    pub async fn get_active_typed_memory_by_source_ref(
+        &self,
+        character_id: &str,
+        source_ref: &str,
+    ) -> Result<Option<crate::MemoryItem>, MemoryError> {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+
+        let model = entities::typed_memories::Entity::find()
+            .filter(entities::typed_memories::Column::CharacterId.eq(character_id))
+            .filter(entities::typed_memories::Column::SourceRef.eq(source_ref))
+            .filter(
+                entities::typed_memories::Column::Status.eq(crate::MemoryStatus::Active.as_str()),
+            )
+            .limit(1)
+            .one(&self.db)
+            .await?;
+
+        match model {
+            Some(m) => model_to_memory_item(m).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Archive active typed memories under `prefixes` whose `source_ref` is not kept.
+    pub async fn archive_typed_memories_by_source_prefixes(
+        &self,
+        character_id: &str,
+        prefixes: &[&str],
+        keep_refs: &std::collections::HashSet<String>,
+    ) -> Result<usize, MemoryError> {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        let mut archived = 0usize;
+        for prefix in prefixes {
+            let models = entities::typed_memories::Entity::find()
+                .filter(entities::typed_memories::Column::CharacterId.eq(character_id))
+                .filter(
+                    entities::typed_memories::Column::Status
+                        .eq(crate::MemoryStatus::Active.as_str()),
+                )
+                .filter(entities::typed_memories::Column::SourceRef.starts_with(*prefix))
+                .all(&self.db)
+                .await?;
+
+            for model in models {
+                let Some(source_ref) = model.source_ref else {
+                    continue;
+                };
+                if keep_refs.contains(&source_ref) {
+                    continue;
+                }
+                self.transition_typed_memory_status(model.id, crate::MemoryStatus::Faded)
+                    .await?;
+                self.transition_typed_memory_status(model.id, crate::MemoryStatus::Archived)
+                    .await?;
+                archived += 1;
+            }
+        }
+        Ok(archived)
+    }
+
     /// Search typed memories by cosine similarity via content embeddings.
     ///
     /// Legacy vector-only search over `active` memories.
