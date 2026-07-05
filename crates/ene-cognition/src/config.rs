@@ -130,6 +130,25 @@ pub struct CognitionMemoryConfig {
     /// Timeout in seconds for a single LLM memory-rerank call. On timeout or
     /// provider failure the pipeline falls back to hybrid search order (#77).
     pub rerank_timeout_secs: u64,
+    /// Enable MMR diversification after hybrid search (#78).
+    pub mmr_enabled: bool,
+    /// MMR relevance-vs-diversity tradeoff in `[0.0, 1.0]`; higher favors relevance.
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    pub mmr_lambda: f32,
+    /// Lexical similarity threshold for duplicate cluster merging (#78).
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    pub mmr_duplicate_cluster_threshold: f32,
+    /// Minimum recalled slots reserved for semantic memories (#78).
+    pub mmr_min_slots_semantic: usize,
+    /// Minimum recalled slots reserved for episodic memories (#78).
+    pub mmr_min_slots_episodic: usize,
+    /// Minimum recalled slots reserved for user profile memories (#78).
+    pub mmr_min_slots_user_profile: usize,
+    /// Minimum recalled slots reserved for commitment memories (#78).
+    pub mmr_min_slots_commitment: usize,
+    /// Bonus added to MMR score when a candidate introduces a new recall source (#78).
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    pub mmr_source_diversity_bonus: f32,
 }
 
 /// Clamp a deserialized confidence into the closed unit interval
@@ -142,6 +161,15 @@ where
 {
     use ::ene_config::serde::Deserialize;
     Ok(f64::deserialize(deserializer)?.clamp(0.0, 1.0))
+}
+
+/// Clamp a deserialized `f32` into the closed unit interval `0.0..=1.0`.
+fn deserialize_unit_interval_f32<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: ::ene_config::serde::Deserializer<'de>,
+{
+    use ::ene_config::serde::Deserialize;
+    Ok(f32::deserialize(deserializer)?.clamp(0.0, 1.0))
 }
 
 impl Default for CognitionMemoryConfig {
@@ -160,6 +188,14 @@ impl Default for CognitionMemoryConfig {
             rerank_enabled: false,
             rerank_candidate_limit: 16,
             rerank_timeout_secs: 10,
+            mmr_enabled: true,
+            mmr_lambda: 0.7,
+            mmr_duplicate_cluster_threshold: 0.75,
+            mmr_min_slots_semantic: 1,
+            mmr_min_slots_episodic: 1,
+            mmr_min_slots_user_profile: 1,
+            mmr_min_slots_commitment: 1,
+            mmr_source_diversity_bonus: 0.05,
         }
     }
 }
@@ -244,5 +280,20 @@ mod tests {
             "expected clamp to 0.0, got {}",
             low.min_confidence_to_persist
         );
+    }
+
+    #[test]
+    fn mmr_float_fields_out_of_range_are_clamped() {
+        let cfg: CognitionMemoryConfig = serde_json::from_str(
+            r#"{
+                "mmr_lambda": 1.5,
+                "mmr_duplicate_cluster_threshold": -0.2,
+                "mmr_source_diversity_bonus": 2.0
+            }"#,
+        )
+        .expect("deserialize");
+        assert!((cfg.mmr_lambda - 1.0).abs() < f32::EPSILON);
+        assert!(cfg.mmr_duplicate_cluster_threshold < f32::EPSILON);
+        assert!((cfg.mmr_source_diversity_bonus - 1.0).abs() < f32::EPSILON);
     }
 }

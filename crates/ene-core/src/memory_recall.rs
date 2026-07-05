@@ -7,8 +7,9 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use ene_cognition::{
-    CognitionConfig, CommitmentLedger, MemoryRerankOptions, MemoryRerankPipeline, RecallPlanner,
-    RecallPlannerInput, RecallPlannerOptions, RecallResultMapper, RecallTurn, RecalledMemory,
+    CognitionConfig, CommitmentLedger, MemoryDiversifyOptions, MemoryDiversifyPipeline,
+    MemoryRerankOptions, MemoryRerankPipeline, RecallPlanner, RecallPlannerInput,
+    RecallPlannerOptions, RecallResultMapper, RecallTurn, RecalledMemory,
 };
 use ene_config::EneConfig;
 use ene_memory::KeyFact;
@@ -113,7 +114,12 @@ pub(crate) async fn recall_typed_memories_for_prompt(
     };
 
     let rerank_options = MemoryRerankOptions::from_config(&cognition.memory);
+
+    let diversify_options = MemoryDiversifyOptions::from_config(&cognition.memory);
+    let diversified = MemoryDiversifyPipeline::diversify(scored, &plan, diversify_options);
+
     let recall_question = plan.search.primary_query_text;
+
     let llm_provider = if rerank_options.enabled {
         provider
     } else {
@@ -121,7 +127,7 @@ pub(crate) async fn recall_typed_memories_for_prompt(
     };
     let pipeline = MemoryRerankPipeline::new(llm_provider);
     let reranked = pipeline
-        .rerank(&recall_question, scored, rerank_options)
+        .rerank(&recall_question, diversified, rerank_options)
         .await;
 
     recalled_memories_to_key_facts(RecallResultMapper::map(reranked))

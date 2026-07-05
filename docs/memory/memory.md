@@ -346,6 +346,21 @@ After hybrid search, downstream recall execution may optionally rerank the top c
 
 **Tracing:** Rerank latency and status are logged under `component = "MemoryRerank"` (`elapsed_ms`, `candidate_count`, `reranked_count`, `tail_count`, `outcome`, and `skip_reason` when skipped).
 
+### MMR Diversification (#78)
+
+After hybrid search and before optional LLM reranking, downstream recall execution applies deterministic MMR diversification via `MemoryDiversifyPipeline`:
+
+1. `MemoryStore::search_typed_memories_hybrid` returns `ScoredMemory` rows ordered by hybrid `total`.
+2. **Cluster dedup** merges near-duplicate candidates (lexical Jaccard similarity on title + content ≥ `mmr_duplicate_cluster_threshold`), keeping the highest-scoring representative per cluster.
+3. **Greedy MMR** selects up to `RecallPlan.budget.result_limit` items using `λ * relevance - (1-λ) * max_similarity_to_selected`, where `relevance` is `score_breakdown.total` normalized to the pool maximum and pairwise similarity uses the same lexical metric. A small `mmr_source_diversity_bonus` is added when a candidate introduces a recall source type not yet present in the selected set.
+4. **Kind quotas** reserve minimum slots for semantic, episodic, user profile, and commitment memories (`mmr_min_slots_*`). Kinds listed in `RecallPlan.required_kinds` (including `preference`, `relationship`, `affective`, and `procedure`) receive at least one slot when budget allows. When the sum of minimums exceeds `result_limit`, slots are allocated by priority: commitment → user profile → preference → semantic → episodic → relationship → affective → procedure → reflection.
+5. When `cognition.memory.mmr_enabled` is `false`, the pipeline truncates to `result_limit` without reordering.
+6. Optional LLM reranking (#77) runs on the diversified list. Hybrid scores on each `ScoredMemory` are never modified.
+
+**Order vs scores:** MMR and reranking change list order only. Each result's `score_breakdown.total` remains the hybrid-search score.
+
+**Tracing:** Diversification is logged under `component = "Recall"`, `stage = "diversify"` (`input_count`, `pool_count`, `output_count`, `clusters_merged`, `kind_distribution`).
+
 ## Companion Commitment Ledger
 
 User and companion follow-ups (e.g. “next time let’s talk about X”) are stored in a dedicated `commitments` table:

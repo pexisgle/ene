@@ -27,6 +27,34 @@ pub(crate) fn tokenize(text: &str) -> HashSet<String> {
         .collect()
 }
 
+/// Jaccard similarity between two memory documents (title + content tokens).
+///
+/// Used for duplicate clustering and MMR pairwise diversity (#78).
+pub fn document_lexical_similarity(
+    title_a: &str,
+    content_a: &str,
+    title_b: &str,
+    content_b: &str,
+) -> f32 {
+    let tokens_a: HashSet<String> = tokenize(title_a)
+        .into_iter()
+        .chain(tokenize(content_a))
+        .collect();
+    let tokens_b: HashSet<String> = tokenize(title_b)
+        .into_iter()
+        .chain(tokenize(content_b))
+        .collect();
+    if tokens_a.is_empty() || tokens_b.is_empty() {
+        return 0.0;
+    }
+    let intersection = tokens_a.intersection(&tokens_b).count();
+    let union = tokens_a.union(&tokens_b).count();
+    if union == 0 {
+        return 0.0;
+    }
+    intersection as f32 / union as f32
+}
+
 /// Jaccard-like overlap between query tokens and document tokens.
 pub(crate) fn lexical_overlap_score(query: &str, title: &str, content: &str) -> f32 {
     let query_tokens = tokenize(query);
@@ -219,6 +247,40 @@ mod tests {
         let score = lexical_overlap_score("pizza favorite", "favorite food", "likes pizza");
         assert!(score > 0.0);
         assert!(lexical_overlap_score("", "a", "b") < f32::EPSILON);
+    }
+
+    #[test]
+    fn document_lexical_similarity_identical_content() {
+        let sim = document_lexical_similarity(
+            "favorite food",
+            "The user likes pizza",
+            "favorite food",
+            "The user likes pizza",
+        );
+        assert!((sim - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn document_lexical_similarity_unrelated_content() {
+        let sim = document_lexical_similarity(
+            "weather",
+            "It was sunny today",
+            "programming",
+            "Rust ownership is important",
+        );
+        assert!(sim < 0.1);
+    }
+
+    #[test]
+    fn document_lexical_similarity_partial_overlap() {
+        let sim = document_lexical_similarity(
+            "pizza night",
+            "We ordered pepperoni pizza",
+            "pizza tradition",
+            "Family pizza night every Friday",
+        );
+        assert!(sim > 0.2);
+        assert!(sim < 1.0);
     }
 
     #[test]

@@ -74,9 +74,10 @@ pub use memory_writer::{
 /// Recall planning types.
 #[doc(no_inline)]
 pub use recall::{
-    EMOTIONAL_MATCH_REASON_THRESHOLD, LlmMemoryReranker, MemoryRerankError, MemoryRerankInput,
-    MemoryRerankOptions, MemoryRerankPipeline, MemoryReranker, PassthroughMemoryReranker,
-    RecallBudgetHints, RecallPlan, RecallPlanner, RecallPlannerInput, RecallPlannerOptions,
-    RecallReason, RecallResultMapper, RecallScopeFilter, RecallSearchHints, RecallTurn,
-    RecalledMemory, explain_scored_memories, infer_recall_reason,
+    EMOTIONAL_MATCH_REASON_THRESHOLD, LlmMemoryReranker, MemoryDiversifyOptions,
+    MemoryDiversifyPipeline, MemoryRerankError, MemoryRerankInput, MemoryRerankOptions,
+    MemoryRerankPipeline, MemoryReranker, PassthroughMemoryReranker, RecallBudgetHints, RecallPlan,
+    RecallPlanner, RecallPlannerInput, RecallPlannerOptions, RecallReason, RecallResultMapper,
+    RecallScopeFilter, RecallSearchHints, RecallTurn, RecalledMemory, explain_scored_memories,
+    infer_recall_reason,
 };

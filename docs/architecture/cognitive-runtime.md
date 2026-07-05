@@ -158,6 +158,8 @@ Downstream recall execution maps `MemoryStore::search_typed_memories_hybrid` out
 
 When `cognition.memory.rerank_enabled` is true, an optional LLM rerank stage (`MemoryRerankPipeline`) may reorder the top hybrid-search candidates before mapping. Disabled or failed rerank falls back to hybrid search order without changing `MemoryScoreBreakdown::total` (#77).
 
+When `cognition.memory.mmr_enabled` is true (default), a deterministic MMR diversification stage (`MemoryDiversifyPipeline`) runs after hybrid search and before optional reranking. It merges near-duplicate clusters, applies greedy MMR selection, enforces per-kind minimum slots, and rewards recall-source diversity. Hybrid scores are preserved unchanged (#78).
+
 ### Expression Arbiter
 Receives the current `AffectState`, optional LLM expression hints, and character expression definitions. Outputs a resolved expression with:
 - **Hysteresis** — prevents rapid expression changes (configured in seconds)

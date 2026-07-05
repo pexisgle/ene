@@ -377,7 +377,15 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
       "recall_min_score": 0.20,
       "rerank_enabled": false,
       "rerank_candidate_limit": 16,
-      "rerank_timeout_secs": 10
+      "rerank_timeout_secs": 10,
+      "mmr_enabled": true,
+      "mmr_lambda": 0.7,
+      "mmr_duplicate_cluster_threshold": 0.75,
+      "mmr_min_slots_semantic": 1,
+      "mmr_min_slots_episodic": 1,
+      "mmr_min_slots_user_profile": 1,
+      "mmr_min_slots_commitment": 1,
+      "mmr_source_diversity_bonus": 0.05
     },
     "emotion": {
       "enabled": true,
@@ -428,6 +436,14 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 | `rerank_enabled` | bool | `false` | hybrid recall 候補に対する optional LLM rerank を有効化 |
 | `rerank_candidate_limit` | int | `16` | reranker に渡す hybrid-search 上位候補の最大数 |
 | `rerank_timeout_secs` | int | `10` | LLM memory rerank 呼び出し 1 回のタイムアウト（秒）。超過時または provider 失敗時は hybrid search 順序にフォールバック |
+| `mmr_enabled` | bool | `true` | hybrid search 後の MMR 多様化を有効化（#78）。既定 true のため、recall 候補の順序は pure hybrid スコア順と異なる場合がある |
+| `mmr_lambda` | float | `0.7` | MMR の relevance 対 diversity トレードオフ（`0.0`–`1.0`）。高いほど relevance 優先 |
+| `mmr_duplicate_cluster_threshold` | float | `0.75` | 近傍重複 recall 候補をマージする lexical 類似度しきい値 |
+| `mmr_min_slots_semantic` | int | `1` | semantic 記憶の最低 recalled 枠 |
+| `mmr_min_slots_episodic` | int | `1` | episodic 記憶の最低 recalled 枠 |
+| `mmr_min_slots_user_profile` | int | `1` | user profile 記憶の最低 recalled 枠 |
+| `mmr_min_slots_commitment` | int | `1` | commitment 記憶の最低 recalled 枠 |
+| `mmr_source_diversity_bonus` | float | `0.05` | 新しい recall source 種別を持つ候補に加算する MMR ボーナス |
 
 #### `cognition.emotion` — 感情エンジン
 

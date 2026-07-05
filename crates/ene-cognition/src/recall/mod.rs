@@ -4,6 +4,7 @@
 //! execute database searches; callers pass the resulting [`RecallPlan`] to the
 //! memory store or later recall pipeline stages.
 
+mod diversify;
 mod executor;
 mod input;
 mod intent;
@@ -13,6 +14,8 @@ mod rerank;
 mod result;
 mod topic;
 
+/// MMR diversification after hybrid search (#78).
+pub use diversify::{MemoryDiversifyOptions, MemoryDiversifyPipeline};
 /// Cognition-side mapper from hybrid search output to explainable recall results.
 pub use executor::RecallResultMapper;
 /// Recall planner input DTOs.

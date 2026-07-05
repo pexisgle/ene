@@ -1,7 +1,8 @@
-//! Optional memory reranking after hybrid search.
+//! Optional memory reranking after hybrid search and MMR diversification.
 //!
 //! Downstream recall execution can call [`MemoryRerankPipeline::rerank`] after
-//! `MemoryStore::search_typed_memories_hybrid` and before [`RecallResultMapper::map`].
+//! `MemoryStore::search_typed_memories_hybrid`, [`MemoryDiversifyPipeline::diversify`],
+//! and before [`RecallResultMapper::map`].
 //!
 //! LLM relevance scores affect **candidate order only**. Each [`ScoredMemory`]'s
 //! [`MemoryScoreBreakdown::total`](ene_memory::MemoryScoreBreakdown::total) remains

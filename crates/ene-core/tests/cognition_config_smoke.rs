@@ -165,6 +165,38 @@ fn cognition_section_defaults_match_macro_definition() {
         !cog.memory.use_hyde,
         "cognition.memory.use_hyde should default to false"
     );
+    assert!(
+        cog.memory.mmr_enabled,
+        "cognition.memory.mmr_enabled should default to true"
+    );
+    assert!(
+        (cog.memory.mmr_lambda - 0.7).abs() < f32::EPSILON,
+        "cognition.memory.mmr_lambda should default to 0.7"
+    );
+    assert!(
+        (cog.memory.mmr_duplicate_cluster_threshold - 0.75).abs() < f32::EPSILON,
+        "cognition.memory.mmr_duplicate_cluster_threshold should default to 0.75"
+    );
+    assert_eq!(
+        cog.memory.mmr_min_slots_semantic, 1,
+        "cognition.memory.mmr_min_slots_semantic should default to 1"
+    );
+    assert_eq!(
+        cog.memory.mmr_min_slots_episodic, 1,
+        "cognition.memory.mmr_min_slots_episodic should default to 1"
+    );
+    assert_eq!(
+        cog.memory.mmr_min_slots_user_profile, 1,
+        "cognition.memory.mmr_min_slots_user_profile should default to 1"
+    );
+    assert_eq!(
+        cog.memory.mmr_min_slots_commitment, 1,
+        "cognition.memory.mmr_min_slots_commitment should default to 1"
+    );
+    assert!(
+        (cog.memory.mmr_source_diversity_bonus - 0.05).abs() < f32::EPSILON,
+        "cognition.memory.mmr_source_diversity_bonus should default to 0.05"
+    );
 }
 
 #[test]

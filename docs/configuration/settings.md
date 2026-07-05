@@ -377,7 +377,15 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
       "recall_min_score": 0.20,
       "rerank_enabled": false,
       "rerank_candidate_limit": 16,
-      "rerank_timeout_secs": 10
+      "rerank_timeout_secs": 10,
+      "mmr_enabled": true,
+      "mmr_lambda": 0.7,
+      "mmr_duplicate_cluster_threshold": 0.75,
+      "mmr_min_slots_semantic": 1,
+      "mmr_min_slots_episodic": 1,
+      "mmr_min_slots_user_profile": 1,
+      "mmr_min_slots_commitment": 1,
+      "mmr_source_diversity_bonus": 0.05
     },
     "emotion": {
       "enabled": true,
@@ -428,6 +436,14 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 | `rerank_enabled` | bool | `false` | Enable optional LLM reranking of hybrid recall candidates after search |
 | `rerank_candidate_limit` | int | `16` | Maximum number of top hybrid-search candidates sent to the reranker |
 | `rerank_timeout_secs` | int | `10` | Timeout in seconds for a single LLM memory-rerank call; on timeout or provider failure the pipeline falls back to hybrid search order |
+| `mmr_enabled` | bool | `true` | Enable MMR diversification after hybrid search (#78). When enabled (default), recall candidate order may differ from pure hybrid-score ranking |
+| `mmr_lambda` | float | `0.7` | MMR relevance-vs-diversity tradeoff in `0.0`–`1.0`; higher favors relevance |
+| `mmr_duplicate_cluster_threshold` | float | `0.75` | Lexical similarity threshold for merging near-duplicate recall candidates |
+| `mmr_min_slots_semantic` | int | `1` | Minimum recalled slots reserved for semantic memories |
+| `mmr_min_slots_episodic` | int | `1` | Minimum recalled slots reserved for episodic memories |
+| `mmr_min_slots_user_profile` | int | `1` | Minimum recalled slots reserved for user profile memories |
+| `mmr_min_slots_commitment` | int | `1` | Minimum recalled slots reserved for commitment memories |
+| `mmr_source_diversity_bonus` | float | `0.05` | Bonus added to MMR score when a candidate introduces a new recall source type |
 
 #### `cognition.emotion` — Emotion Engine
 

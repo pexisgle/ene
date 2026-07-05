@@ -339,6 +339,21 @@ score =
 
 **トレース:** rerank latency と状態は `component = "MemoryRerank"`（`elapsed_ms`, `candidate_count`, `reranked_count`, `tail_count`, `outcome`、skip 時は `skip_reason`）でログ出力されます。
 
+### MMR Diversification（#78）
+
+ハイブリッド検索の後、optional LLM rerank の前に、downstream recall execution は `MemoryDiversifyPipeline` による決定論的 MMR 多様化を適用します。
+
+1. `MemoryStore::search_typed_memories_hybrid` が hybrid `total` 順の `ScoredMemory` を返す。
+2. **クラスタ dedup** で近傍重複候補（title + content の lexical Jaccard 類似度 ≥ `mmr_duplicate_cluster_threshold`）をマージし、クラスタ内最高スコアの代表 1 件のみを残す。
+3. **Greedy MMR** で `RecallPlan.budget.result_limit` 件まで選択する。`λ * relevance - (1-λ) * max_similarity_to_selected` を用い、`relevance` は pool 内最大値で正規化した `score_breakdown.total`、pairwise 類似度は同じ lexical 指標。selected set に未登場の recall source 種別を持つ候補には `mmr_source_diversity_bonus` を小幅加算する。
+4. **Kind quota** で semantic / episodic / user profile / commitment の最低枠（`mmr_min_slots_*`）を確保する。`RecallPlan.required_kinds` に含まれる kind（`preference` / `relationship` / `affective` / `procedure` など）も予算が許せば最低 1 枠を確保する。minimum の合計が `result_limit` を超える場合は、commitment → user profile → preference → semantic → episodic → relationship → affective → procedure → reflection の優先順で枠を割り当てる。
+5. `cognition.memory.mmr_enabled` が `false` の場合、`result_limit` で truncate するのみで順序は変更しない。
+6. optional LLM rerank（#77）は多様化後のリストに対して実行される。各 `ScoredMemory` の hybrid スコアは変更されない。
+
+**順序とスコア:** MMR と rerank はリスト順序のみを変更する。各結果の `score_breakdown.total` は hybrid-search スコアのまま。
+
+**トレース:** 多様化は `component = "Recall"`, `stage = "diversify"`（`input_count`, `pool_count`, `output_count`, `clusters_merged`, `kind_distribution`）でログ出力されます。
+
 ## Companion Commitment Ledger（約束・タスク台帳）
 
 「次回これを話そう」などのフォローアップは専用の `commitments` テーブルに保存する：
