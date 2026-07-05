@@ -337,7 +337,7 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
             }
         } else if is_bgr && bpp == 3 {
             let mut rgb = pixels.clone();
-            for chunk in rgb.chunks_exact_mut(3) {
+            for chunk in rgb.as_chunks_mut::<3>().0 {
                 chunk.swap(0, 2);
             }
             DynamicImage::ImageRgb8(image::RgbImage::from_raw(width, height, rgb).ok_or_else(

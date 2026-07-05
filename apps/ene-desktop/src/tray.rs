@@ -141,7 +141,7 @@ fn build_icon() -> Option<Icon> {
         png::ColorType::Rgba => src.to_vec(),
         png::ColorType::Rgb => {
             let mut out = Vec::with_capacity((frame.width * frame.height * 4) as usize);
-            for chunk in src.chunks_exact(3) {
+            for chunk in src.as_chunks::<3>().0 {
                 out.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
             }
             out
@@ -155,7 +155,7 @@ fn build_icon() -> Option<Icon> {
         }
         png::ColorType::GrayscaleAlpha => {
             let mut out = Vec::with_capacity((frame.width * frame.height * 4) as usize);
-            for chunk in src.chunks_exact(2) {
+            for chunk in src.as_chunks::<2>().0 {
                 out.extend_from_slice(&[chunk[0], chunk[0], chunk[0], chunk[1]]);
             }
             out
