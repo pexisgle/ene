@@ -80,15 +80,15 @@
         };
         bundle = agentLib.mkBundle { inherit pkgs selection; };
         # MinGW compat header for aws-lc-sys (jitterentropy needs <sched.h>)
-        mingwCompatHeaders = pkgs.runCommandNoCC "mingw-compat-headers" {} ''
-          mkdir -p $out/include
-          cat > $out/include/sched.h << 'INNEREOF'
-#ifndef _SCHED_H
-#define _SCHED_H
-void __attribute__((stdcall)) Sleep(unsigned long dwMilliseconds);
-static inline int sched_yield(void) { Sleep(0); return 0; }
-#endif
-INNEREOF
+        mingwCompatHeaders = pkgs.runCommand "mingw-compat-headers" { } ''
+                    mkdir -p $out/include
+                    cat > $out/include/sched.h << 'INNEREOF'
+          #ifndef _SCHED_H
+          #define _SCHED_H
+          void __attribute__((stdcall)) Sleep(unsigned long dwMilliseconds);
+          static inline int sched_yield(void) { Sleep(0); return 0; }
+          #endif
+          INNEREOF
         '';
         # MinGW winpthreads: Rust's x86_64-pc-windows-gnu target requires libpthread.a
         mingwPthreads = pkgs.pkgsCross.mingwW64.stdenv.mkDerivation {
@@ -117,7 +117,9 @@ INNEREOF
           '';
         };
         localTargets = {
-          opencode = agentLib.defaultLocalTargets.opencode // { enable = true; };
+          opencode = agentLib.defaultLocalTargets.opencode // {
+            enable = true;
+          };
         };
       in
       {
@@ -138,7 +140,7 @@ INNEREOF
               # OpenSSL (required for native-tls)
               openssl
             ]
-              ++ lib.optionals (lib.strings.hasInfix "linux" system) [
+            ++ lib.optionals (lib.strings.hasInfix "linux" system) [
               # for Linux
               # Faster linker
               mold
@@ -214,21 +216,23 @@ INNEREOF
             ];
             # libxdo (enigo dependency)
             NIX_LDFLAGS = "-L${pkgs.xdotool}/lib";
-            shellHook = let
-              skillsHook = agentLib.mkShellHook {
-                inherit pkgs bundle;
-                targets = localTargets;
-              };
-              appindicatorHook = lib.optionalString (lib.strings.hasInfix "linux" system) ''
-                appindicator_compat_dir="$(mktemp -d -t ene-appindicator-compat-XXXXXX)"
-                ln -sfn ${libayatana-appindicator}/lib/libayatana-appindicator3.so.1 "$appindicator_compat_dir/libappindicator3.so.1"
-                ln -sfn ${libayatana-appindicator}/lib/libayatana-appindicator3.so.1 "$appindicator_compat_dir/libappindicator3.so"
-                export LD_LIBRARY_PATH="$appindicator_compat_dir:''${LD_LIBRARY_PATH:-}"
+            shellHook =
+              let
+                skillsHook = agentLib.mkShellHook {
+                  inherit pkgs bundle;
+                  targets = localTargets;
+                };
+                appindicatorHook = lib.optionalString (lib.strings.hasInfix "linux" system) ''
+                  appindicator_compat_dir="$(mktemp -d -t ene-appindicator-compat-XXXXXX)"
+                  ln -sfn ${libayatana-appindicator}/lib/libayatana-appindicator3.so.1 "$appindicator_compat_dir/libappindicator3.so.1"
+                  ln -sfn ${libayatana-appindicator}/lib/libayatana-appindicator3.so.1 "$appindicator_compat_dir/libappindicator3.so"
+                  export LD_LIBRARY_PATH="$appindicator_compat_dir:''${LD_LIBRARY_PATH:-}"
+                '';
+              in
+              ''
+                ${skillsHook}
+                ${appindicatorHook}
               '';
-            in ''
-              ${skillsHook}
-              ${appindicatorHook}
-            '';
           };
       }
     );
