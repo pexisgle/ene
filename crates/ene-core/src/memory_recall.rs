@@ -9,7 +9,7 @@ use chrono::Utc;
 use ene_cognition::{
     CognitionConfig, CommitmentLedger, MemoryDiversifyOptions, MemoryDiversifyPipeline,
     MemoryRerankOptions, MemoryRerankPipeline, RecallPlanner, RecallPlannerInput,
-    RecallPlannerOptions, RecallResultMapper, RecallTurn, RecalledMemory,
+    RecallPlannerOptions, RecallResultMapper, RecallTurn, RecalledMemory, format_recalled_content,
 };
 use ene_config::EneConfig;
 use ene_memory::KeyFact;
@@ -130,19 +130,40 @@ pub(crate) async fn recall_typed_memories_for_prompt(
         .rerank(&recall_question, diversified, rerank_options)
         .await;
 
-    recalled_memories_to_key_facts(RecallResultMapper::map(reranked))
+    let recalled = RecallResultMapper::map(reranked);
+    bump_recalled_memory_access(store, &recalled).await;
+    recalled_memories_to_key_facts(recalled)
+}
+
+async fn bump_recalled_memory_access(store: &ene_memory::MemoryStore, recalled: &[RecalledMemory]) {
+    for memory in recalled {
+        let Some(id) = memory.item.id else {
+            continue;
+        };
+        if let Err(error) = store.bump_typed_memory_access(id).await {
+            tracing::warn!(
+                component = "Memory",
+                memory_id = id,
+                error = %error,
+                "Failed to bump typed memory access after recall"
+            );
+        }
+    }
 }
 
 fn recalled_memories_to_key_facts(recalled: Vec<RecalledMemory>) -> Vec<KeyFact> {
     recalled
         .into_iter()
-        .map(|memory| KeyFact {
-            key: if memory.item.title.trim().is_empty() {
+        .map(|memory| {
+            let key = if memory.item.title.trim().is_empty() {
                 memory.item.kind.as_str().to_string()
             } else {
-                memory.item.title
-            },
-            value: memory.item.content,
+                memory.item.title.clone()
+            };
+            KeyFact {
+                key,
+                value: format_recalled_content(&memory),
+            }
         })
         .collect()
 }
@@ -152,7 +173,7 @@ mod tests {
     use super::*;
     use ene_memory::{
         AffectAnnotation, MemoryConfidence, MemoryItem, MemoryKind, MemorySalience, MemoryScope,
-        MemoryScoreBreakdown, MemorySource, MemoryStatus, ScoredMemory,
+        MemoryScoreBreakdown, MemorySource, MemoryStatus,
     };
 
     #[test]
@@ -180,6 +201,8 @@ mod tests {
                 valid_until: None,
                 status: MemoryStatus::Active,
                 supersedes_id: None,
+                pinned: false,
+                faded_at: None,
             },
             reason: ene_cognition::RecallReason::UserPreference,
             score_breakdown: MemoryScoreBreakdown {
@@ -203,5 +226,55 @@ mod tests {
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].key, "favorite drink");
         assert_eq!(facts[0].value, "matcha latte");
+    }
+
+    #[test]
+    fn faded_recalled_memories_get_uncertain_marker() {
+        let recalled = vec![RecalledMemory {
+            item: MemoryItem {
+                id: Some(2),
+                scope: MemoryScope::Character,
+                character_id: "ene".into(),
+                user_id: String::new(),
+                kind: MemoryKind::Semantic,
+                title: "old fact".into(),
+                content: "maybe remembers this".into(),
+                source: MemorySource::Conversation,
+                source_ref: None,
+                confidence: MemoryConfidence::new(0.8),
+                salience: MemorySalience::default(),
+                affect: AffectAnnotation::default(),
+                relationship_impact: 0.0,
+                access_count: 0,
+                last_accessed_at: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                valid_from: None,
+                valid_until: None,
+                status: MemoryStatus::Faded,
+                supersedes_id: None,
+                pinned: false,
+                faded_at: None,
+            },
+            reason: ene_cognition::RecallReason::SimilarTopic,
+            score_breakdown: MemoryScoreBreakdown {
+                vector_similarity: 0.0,
+                lexical_score: 0.0,
+                recency_score: 0.0,
+                salience: 0.0,
+                confidence: 0.0,
+                emotional_match: 0.0,
+                relationship: 0.0,
+                access_boost: 0.0,
+                contradiction_penalty: 0.0,
+                stale_penalty: 0.1,
+                commitment_boost: 0.0,
+                total: 0.0,
+            },
+            sources: vec![],
+        }];
+
+        let facts = recalled_memories_to_key_facts(recalled);
+        assert_eq!(facts[0].value, "[uncertain] maybe remembers this");
     }
 }

@@ -12,6 +12,8 @@ impl MigratorTrait for Migrator {
             Box::new(Migration2),
             Box::new(Migration3),
             Box::new(Migration4),
+            Box::new(Migration5),
+            Box::new(Migration6),
         ]
     }
 }
@@ -815,6 +817,8 @@ enum TypedMemories {
     ValidUntil,
     Status,
     SupersedesId,
+    Pinned,
+    FadedAt,
 }
 
 #[derive(Iden)]
@@ -1107,4 +1111,76 @@ enum Commitments {
     CreatedAt,
     UpdatedAt,
     CompletedAt,
+}
+
+// ── Migration 5: Typed memory pin flag (#76) ────────────────────────────────
+
+pub struct Migration5;
+
+impl MigrationName for Migration5 {
+    fn name(&self) -> &str {
+        "m20250705_000000_typed_memory_pinned"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration5 {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if !manager.has_column("typed_memories", "pinned").await? {
+            let stmt = Table::alter()
+                .table(TypedMemories::Table)
+                .add_column(
+                    ColumnDef::new(TypedMemories::Pinned)
+                        .integer()
+                        .not_null()
+                        .default(0),
+                )
+                .to_owned();
+            manager.alter_table(stmt).await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let _ = manager;
+        Ok(())
+    }
+}
+
+// ── Migration 6: Typed memory faded_at timestamp (#76) ────────────────────────
+
+pub struct Migration6;
+
+impl MigrationName for Migration6 {
+    fn name(&self) -> &str {
+        "m20250705_000001_typed_memory_faded_at"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration6 {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if !manager.has_column("typed_memories", "faded_at").await? {
+            let stmt = Table::alter()
+                .table(TypedMemories::Table)
+                .add_column(ColumnDef::new(TypedMemories::FadedAt).timestamp_with_time_zone())
+                .to_owned();
+            manager.alter_table(stmt).await?;
+
+            // Backfill existing faded rows so archive decay has a stable anchor.
+            let backfill = Query::update()
+                .table(TypedMemories::Table)
+                .value(TypedMemories::FadedAt, Expr::col(TypedMemories::UpdatedAt))
+                .and_where(Expr::col(TypedMemories::Status).eq("faded"))
+                .and_where(Expr::col(TypedMemories::FadedAt).is_null())
+                .to_owned();
+            manager.exec_stmt(backfill).await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let _ = manager;
+        Ok(())
+    }
 }

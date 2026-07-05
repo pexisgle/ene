@@ -13,7 +13,7 @@
 3. **セッション分割が記憶保存と会話継続感を分断する。** サマリーは分割境界でのみ作られ、分割のたびにセッションがリセットされ、継続的な関係性の感覚が失われる。
 4. **プロンプトの層構造が弱い。** 長文脈で Character Drift（キャラクター性の逸脱）が起きやすい。履歴が増えるほど中核的人格定義が埋もれる。
 5. **CCv3 の lorebook / semantic 設定が検索対象として十分活用されていない。** インラインテキストとして含まれるのみで、semantic retrieval されない。
-6. **忘却がハードデリートである。** 「記憶が消えた」という体験で、faded / archived / superseded のような自然なライフサイクルがない。
+6. **忘却はレガシー keyfacts ではハードデリートである。** typed memory は faded / archived / superseded ライフサイクルに対応済み（#76）。レガシー `conversation_keyfacts` の移行は #98 で予定。
 7. **Codex 的な明示的状态管理（context packing / task ledger / tool result grounding）が companion 体験に統合されていない。**
 
 ## 決定
@@ -105,7 +105,7 @@ sequenceDiagram
 5. **LLM Generation** — `PromptPacket` を LLM プロバイダに送信。LLM はオプションで表情ヒントを提供できる。
 6. **Output Arbitration** — 感情+レスポンスをキャラクター表情にマッピング。表情のちらつきを防ぐヒステリシスを適用。
 7. **Post-turn Writing** — 決定論的抽出器と LLM 抽出器を実行し `MemoryCandidate` を生成。Memory Arbiter が既存記憶と照合し、信頼度を計算してストアに書き込む。
-8. **Forgetting Lifecycle** — 減衰曲線に従って既存記憶を経年処理。`active → faded → archived → superseded` のステータス遷移を管理。
+8. **Forgetting Lifecycle** — 減衰曲線に従って既存記憶を経年処理。`ForgettingLifecycle::apply` で `active → faded → archived` のステータス遷移を管理。ユーザーの明示的忘却（`user_deleted`）と矛盾解決（`disputed` / `superseded`）は Memory Arbiter が担当。
 
 ## 主要用語
 

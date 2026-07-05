@@ -271,6 +271,7 @@ mod tests {
                     valid_until: None,
                     status: MemoryStatus::Active,
                     supersedes_id: None,
+                    pinned: false,
                 }),
                 reason: ArbiterReason {
                     code: ArbiterReasonCode::ValidNewMemory,
@@ -308,6 +309,7 @@ mod tests {
                         valid_until: None,
                         status: MemoryStatus::Active,
                         supersedes_id: Some(superseded_id),
+                        pinned: false,
                     },
                     superseded_id,
                 },
@@ -370,6 +372,7 @@ mod tests {
                 valid_until: None,
                 status: MemoryStatus::Active,
                 supersedes_id: None,
+                pinned: false,
             })
             .await
             .unwrap()
@@ -396,6 +399,7 @@ mod tests {
                 valid_until: None,
                 status: MemoryStatus::Active,
                 supersedes_id: None,
+                pinned: false,
             })
             .await
             .unwrap();
@@ -440,6 +444,7 @@ mod tests {
                 valid_until: None,
                 status: MemoryStatus::Active,
                 supersedes_id: None,
+                pinned: false,
             })
             .await
             .unwrap();

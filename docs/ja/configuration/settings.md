@@ -425,8 +425,8 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 |-----------|------|---------|------|
 | `write_every_turn` | bool | `true` | 毎ターン記憶を抽出し永続化する |
 | `hybrid_search` | bool | `true` | ハイブリッド検索（ベクトル + 新しさ + 顕著性 + 信頼度）を使用 |
-| `decay_enabled` | bool | `true` | 時間ベースの記憶減衰を有効化 |
-| `default_forgetting_half_life_days` | float | `30.0` | 記憶減衰のデフォルト半減期（日） |
+| `decay_enabled` | bool | `true` | post-turn の自然減衰（`Active → Faded → Archived`）を `ForgettingLifecycle` で有効化 |
+| `default_forgetting_half_life_days` | float | `30.0` | ライフサイクル減衰スコアと recall 新しさスコアの半減期（日） |
 | `min_confidence_to_persist` | float | `0.65` | 記憶永続化の最低信頼度しきい値（0.0〜1.0） |
 | `extraction_timeout_secs` | int | `30` | LLM 記憶抽出呼び出し 1 回のタイムアウト（秒）。超過時は抽出失敗となり deterministic 候補にフォールバック |
 | `use_hyde` | bool | `false` | cognitive recall plan に HyDE query expansion hint を記録する。実際の provider 呼び出しは後続の recall execution が担当 |

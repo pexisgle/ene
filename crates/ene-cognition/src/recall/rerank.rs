@@ -438,6 +438,8 @@ mod tests {
                 valid_until: None,
                 status: MemoryStatus::Active,
                 supersedes_id: None,
+                pinned: false,
+                faded_at: None,
             },
             breakdown: MemoryScoreBreakdown {
                 vector_similarity: total,

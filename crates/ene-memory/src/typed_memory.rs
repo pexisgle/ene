@@ -339,6 +339,12 @@ pub struct MemoryItem {
     /// Set on replacement rows; `None` when this memory is not a superseding
     /// successor. Superseded rows do not populate this field.
     pub supersedes_id: Option<i64>,
+    /// User-pinned memories are exempt from natural decay (#76).
+    #[serde(default)]
+    pub pinned: bool,
+    /// When the memory entered `faded` status (archive-decay anchor).
+    #[serde(default)]
+    pub faded_at: Option<DateTime<Utc>>,
 }
 
 /// Payload for creating a new memory item (fields set by the store are omitted).
@@ -376,6 +382,9 @@ pub struct NewMemoryItem {
     pub status: MemoryStatus,
     /// ID of the memory this one supersedes.
     pub supersedes_id: Option<i64>,
+    /// Pin state — pinned memories skip natural decay.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 /// Recall source that surfaced a memory candidate.
@@ -615,6 +624,8 @@ mod tests {
             valid_until: None,
             status: MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
+            faded_at: None,
         };
         let json = serde_json::to_string(&item).unwrap();
         let back: MemoryItem = serde_json::from_str(&json).unwrap();
@@ -648,6 +659,7 @@ mod tests {
             valid_until: None,
             status: MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
         };
         let json = serde_json::to_string(&new_item).unwrap();
         let back: NewMemoryItem = serde_json::from_str(&json).unwrap();

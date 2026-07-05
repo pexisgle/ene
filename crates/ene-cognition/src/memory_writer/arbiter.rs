@@ -566,7 +566,7 @@ impl MemoryArbiter {
             }
             ArbiterAction::MarkUserDeleted { memory_id } => {
                 let updated = store
-                    .update_typed_memory_status(*memory_id, MemoryStatus::UserDeleted)
+                    .transition_typed_memory_status(*memory_id, MemoryStatus::UserDeleted)
                     .await
                     .map_err(CognitionError::Memory)?;
                 Ok(AppliedDecision {
@@ -577,7 +577,7 @@ impl MemoryArbiter {
             }
             ArbiterAction::MarkDisputed { memory_id } => {
                 let updated = store
-                    .update_typed_memory_status(*memory_id, MemoryStatus::Disputed)
+                    .transition_typed_memory_status(*memory_id, MemoryStatus::Disputed)
                     .await
                     .map_err(CognitionError::Memory)?;
                 Ok(AppliedDecision {
@@ -636,6 +636,7 @@ fn candidate_to_new_item(candidate: &MemoryCandidate, ctx: &ArbiterContext<'_>) 
         valid_until,
         status: MemoryStatus::Active,
         supersedes_id: None,
+        pinned: false,
     }
 }
 
@@ -871,6 +872,7 @@ mod tests {
             valid_until: None,
             status: MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
         };
         let id = store.insert_typed_memory(&item).await.unwrap();
         let existing = store.get_typed_memory(id).await.unwrap().unwrap();
@@ -906,6 +908,7 @@ mod tests {
             valid_until: None,
             status: MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
         };
         let id = store.insert_typed_memory(&existing_item).await.unwrap();
         let existing = store.get_typed_memory(id).await.unwrap().unwrap();
@@ -956,6 +959,7 @@ mod tests {
             valid_until: None,
             status: MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
         };
         let id = store.insert_typed_memory(&existing_item).await.unwrap();
         let existing = store.get_typed_memory(id).await.unwrap().unwrap();
@@ -1032,6 +1036,7 @@ mod tests {
             valid_until: None,
             status: MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
         };
         let old_id = store.insert_typed_memory(&old_item).await.unwrap();
         let existing = store.get_typed_memory(old_id).await.unwrap().unwrap();
@@ -1125,6 +1130,8 @@ mod tests {
             valid_until: None,
             status: MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
+            faded_at: None,
         };
         let mut semantic_matches = HashMap::new();
         semantic_matches.insert(
@@ -1176,6 +1183,8 @@ mod tests {
             valid_until: None,
             status: MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
+            faded_at: None,
         };
         let stronger = MemoryItem {
             id: Some(2),
@@ -1251,6 +1260,8 @@ mod tests {
             valid_until: None,
             status: MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
+            faded_at: None,
         };
         let candidate = MemoryCandidate {
             kind: MemoryKind::Preference,
@@ -1315,6 +1326,8 @@ mod tests {
             valid_until: None,
             status: MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
+            faded_at: None,
         };
         let candidate = MemoryCandidate {
             kind: MemoryKind::Preference,
@@ -1445,6 +1458,7 @@ mod tests {
             valid_until: None,
             status: MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
         };
         let id = store.insert_typed_memory(&existing_item).await.unwrap();
 
@@ -1498,6 +1512,7 @@ mod tests {
             valid_until: None,
             status: MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
         };
         let id = store.insert_typed_memory(&existing_item).await.unwrap();
         let existing = store.get_typed_memory(id).await.unwrap().unwrap();

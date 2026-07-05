@@ -10,6 +10,7 @@ mod input;
 mod intent;
 mod plan;
 mod planner;
+mod prompt_qualifier;
 mod rerank;
 mod result;
 mod topic;
@@ -24,6 +25,8 @@ pub use input::{RecallPlannerInput, RecallTurn};
 pub use plan::{RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHints};
 /// Recall planner implementation and options.
 pub use planner::{RecallPlanner, RecallPlannerOptions};
+/// Prompt qualifiers for recalled memory content (#76).
+pub use prompt_qualifier::{format_recalled_content, recall_content_qualifier};
 /// Optional memory reranking after hybrid search.
 pub use rerank::{
     LlmMemoryReranker, MemoryRerankError, MemoryRerankInput, MemoryRerankOptions,

@@ -56,6 +56,8 @@ mod tests {
                 valid_until: None,
                 status: MemoryStatus::Active,
                 supersedes_id: None,
+                pinned: false,
+                faded_at: None,
             },
             breakdown: ene_memory::MemoryScoreBreakdown {
                 vector_similarity: 0.5,

@@ -69,7 +69,8 @@ pub use error::{CognitionError, EneCognitionError};
 #[doc(no_inline)]
 pub use memory_writer::{
     AppliedDecision, ArbiterAction, ArbiterContext, ArbiterOptions, ArbiterReason,
-    ArbiterReasonCode, CandidateDecision, CandidateProvenance, MemoryArbiter, SemanticMatch,
+    ArbiterReasonCode, CandidateDecision, CandidateProvenance, ForgettingContext,
+    ForgettingLifecycle, ForgettingReport, MemoryArbiter, SemanticMatch,
 };
 /// Recall planning types.
 #[doc(no_inline)]
@@ -79,5 +80,5 @@ pub use recall::{
     MemoryRerankPipeline, MemoryReranker, PassthroughMemoryReranker, RecallBudgetHints, RecallPlan,
     RecallPlanner, RecallPlannerInput, RecallPlannerOptions, RecallReason, RecallResultMapper,
     RecallScopeFilter, RecallSearchHints, RecallTurn, RecalledMemory, explain_scored_memories,
-    infer_recall_reason,
+    format_recalled_content, infer_recall_reason, recall_content_qualifier,
 };

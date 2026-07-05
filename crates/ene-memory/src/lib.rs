@@ -39,6 +39,8 @@ pub mod config;
 pub mod entities;
 /// Memory-related error types.
 pub mod error;
+/// Memory forgetting lifecycle (decay score and status transitions).
+pub mod forgetting;
 /// SeaORM schema migrations.
 pub mod migrator;
 /// Summary recall and prompt formatting utilities.
@@ -61,12 +63,17 @@ pub use config::MemoryConfig;
 /// Memory error type.
 pub use error::EneMemoryError;
 pub use error::MemoryError;
+/// Forgetting lifecycle helpers.
+pub use forgetting::{
+    ARCHIVE_THRESHOLD, FADE_THRESHOLD, InvalidTransition, active_decay_anchor, decay_score,
+    emotional_impact, faded_decay_anchor, target_status_after_decay, validate_transition,
+};
 /// Formats recalled summaries for prompt injection.
 pub use recall::{format_summaries_for_prompt, format_summaries_with_library};
 /// Document-to-document lexical similarity for recall diversification.
 pub use search::document_lexical_similarity;
 /// Core memory types.
-pub use store::{ConversationSummary, KeyFact, MemoryStore, RecalledSummary};
+pub use store::{ConversationSummary, KeyFact, MemoryStore, NaturalDecayReport, RecalledSummary};
 /// LLM summarization result type and entry-point.
 pub use summarizer::{ConversationSummaryResult, summarize_conversation};
 /// Typed memory domain types.

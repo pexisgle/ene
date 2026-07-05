@@ -101,9 +101,10 @@ pub struct CognitionMemoryConfig {
     pub write_every_turn: bool,
     /// Use hybrid search (vector + recency + salience + confidence).
     pub hybrid_search: bool,
-    /// Enable time-based memory decay.
+    /// Enable post-turn natural decay (`Active → Faded → Archived`) via
+    /// `ForgettingLifecycle` (#76).
     pub decay_enabled: bool,
-    /// Default half-life in days for memory decay.
+    /// Half-life in days for lifecycle decay score and recall recency scoring.
     pub default_forgetting_half_life_days: f64,
     /// Minimum confidence threshold for persisting a memory. This is a
     /// probability, so values outside `0.0..=1.0` are clamped on load

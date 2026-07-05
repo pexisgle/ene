@@ -46,8 +46,10 @@ fn embedding_to_bytes(v: &[f32]) -> Vec<u8> {
 }
 
 fn bytes_to_embedding(b: &[u8]) -> Vec<f32> {
-    b.chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+    b.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect()
 }
 
@@ -157,6 +159,15 @@ pub struct MemoryStore {
     embedding_dim: usize,
 }
 
+/// Result of a natural-decay batch run (#76).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NaturalDecayReport {
+    /// Memories transitioned to `faded`.
+    pub faded_count: usize,
+    /// Memories transitioned to `archived`.
+    pub archived_count: usize,
+}
+
 /// Convert a typed memory model row to a [`crate::MemoryItem`].
 fn model_to_memory_item(
     m: entities::typed_memories::Model,
@@ -186,6 +197,8 @@ fn model_to_memory_item(
         valid_until: m.valid_until,
         status: str_to_status(&m.status),
         supersedes_id: m.supersedes_id,
+        pinned: m.pinned != 0,
+        faded_at: m.faded_at,
     })
 }
 
@@ -1104,6 +1117,7 @@ impl MemoryStore {
             valid_until: Set(item.valid_until),
             status: Set(item.status.as_str().to_string()),
             supersedes_id: Set(item.supersedes_id),
+            pinned: Set(i32::from(item.pinned)),
             ..Default::default()
         };
         let res = active.insert(&self.db).await?;
@@ -1230,6 +1244,8 @@ impl MemoryStore {
             valid_until: Option<DateTime<Utc>>,
             status: String,
             supersedes_id: Option<i64>,
+            pinned: i32,
+            faded_at: Option<DateTime<Utc>>,
             similarity: f64,
         }
 
@@ -1266,6 +1282,8 @@ impl MemoryStore {
             .column(entities::typed_memories::Column::ValidUntil)
             .column(entities::typed_memories::Column::Status)
             .column(entities::typed_memories::Column::SupersedesId)
+            .column(entities::typed_memories::Column::Pinned)
+            .column(entities::typed_memories::Column::FadedAt)
             .expr_as(similarity_expr, "similarity")
             .filter(entities::typed_memories::Column::CharacterId.eq(character_id))
             .filter(entities::typed_memories::Column::Status.is_in(statuses.to_vec()))
@@ -1318,6 +1336,8 @@ impl MemoryStore {
                         valid_until: row.valid_until,
                         status: str_to_status(&row.status),
                         supersedes_id: row.supersedes_id,
+                        pinned: row.pinned != 0,
+                        faded_at: row.faded_at,
                     },
                     row.similarity as f32,
                 ))
@@ -1666,6 +1686,7 @@ impl MemoryStore {
             valid_until: Set(insert_item.valid_until),
             status: Set(insert_item.status.as_str().to_string()),
             supersedes_id: Set(insert_item.supersedes_id),
+            pinned: Set(i32::from(insert_item.pinned)),
             ..Default::default()
         };
         let inserted = active.insert(&txn).await?;
@@ -1687,22 +1708,7 @@ impl MemoryStore {
         id: i64,
         new_status: crate::MemoryStatus,
     ) -> Result<bool, MemoryError> {
-        use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
-
-        let now = Utc::now();
-        let maybe_model = entities::typed_memories::Entity::find_by_id(id)
-            .one(&self.db)
-            .await?;
-
-        let Some(model) = maybe_model else {
-            return Ok(false);
-        };
-
-        let mut active: entities::typed_memories::ActiveModel = model.into();
-        active.status = Set(new_status.as_str().to_string());
-        active.updated_at = Set(now);
-        active.update(&self.db).await?;
-        Ok(true)
+        self.transition_typed_memory_status(id, new_status).await
     }
 
     /// Bump the access count and last-accessed timestamp for a typed memory.
@@ -1723,6 +1729,167 @@ impl MemoryStore {
             .exec(&self.db)
             .await?;
         Ok(result.rows_affected > 0)
+    }
+
+    /// Transition a typed memory with lifecycle edge validation (#76).
+    pub async fn transition_typed_memory_status(
+        &self,
+        id: i64,
+        new_status: crate::MemoryStatus,
+    ) -> Result<bool, MemoryError> {
+        use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
+
+        let maybe_model = entities::typed_memories::Entity::find_by_id(id)
+            .one(&self.db)
+            .await?;
+
+        let Some(model) = maybe_model else {
+            return Ok(false);
+        };
+
+        let current = str_to_status(&model.status);
+        if let Err(invalid) = crate::forgetting::validate_transition(current, new_status) {
+            return Err(MemoryError::InvalidTransition {
+                from: invalid.from,
+                to: invalid.to,
+            });
+        }
+
+        let item = model_to_memory_item(model.clone())?;
+        let now = Utc::now();
+        let mut active: entities::typed_memories::ActiveModel = model.into();
+        active.status = Set(new_status.as_str().to_string());
+        active.updated_at = Set(now);
+        if current == crate::MemoryStatus::Active && new_status == crate::MemoryStatus::Faded {
+            active.faded_at = Set(Some(crate::forgetting::active_decay_anchor(&item)));
+        }
+        active.update(&self.db).await?;
+        Ok(true)
+    }
+
+    /// Set whether a typed memory is pinned (exempt from natural decay).
+    pub async fn pin_typed_memory(&self, id: i64, pinned: bool) -> Result<bool, MemoryError> {
+        use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
+
+        let maybe_model = entities::typed_memories::Entity::find_by_id(id)
+            .one(&self.db)
+            .await?;
+
+        let Some(model) = maybe_model else {
+            return Ok(false);
+        };
+
+        let now = Utc::now();
+        let mut active: entities::typed_memories::ActiveModel = model.into();
+        active.pinned = Set(i32::from(pinned));
+        active.updated_at = Set(now);
+        active.update(&self.db).await?;
+        Ok(true)
+    }
+
+    /// List typed memories eligible for natural decay processing.
+    pub async fn list_memories_for_decay(
+        &self,
+        character_id: &str,
+        user_id: Option<&str>,
+        statuses: &[crate::MemoryStatus],
+        limit: usize,
+    ) -> Result<Vec<crate::MemoryItem>, MemoryError> {
+        use sea_orm::{EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+
+        if statuses.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let status_strs: Vec<&str> = statuses.iter().map(|s| s.as_str()).collect();
+        let mut query = entities::typed_memories::Entity::find()
+            .filter(entities::typed_memories::Column::CharacterId.eq(character_id))
+            .filter(entities::typed_memories::Column::Status.is_in(status_strs));
+
+        if let Some(uid) = user_id {
+            use sea_orm::Condition;
+            query = query.filter(
+                Condition::any()
+                    .add(entities::typed_memories::Column::UserId.eq(uid))
+                    .add(entities::typed_memories::Column::UserId.eq("")),
+            );
+        }
+
+        let models = query
+            .order_by_asc(entities::typed_memories::Column::UpdatedAt)
+            .limit(limit as u64)
+            .all(&self.db)
+            .await?;
+
+        models
+            .into_iter()
+            .map(model_to_memory_item)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    /// Apply natural decay transitions for recallable memories in a scope.
+    pub async fn apply_natural_decay_batch(
+        &self,
+        character_id: &str,
+        user_id: Option<&str>,
+        now: DateTime<Utc>,
+        half_life_days: f64,
+        limit: usize,
+    ) -> Result<NaturalDecayReport, MemoryError> {
+        let candidates = self
+            .list_memories_for_decay(
+                character_id,
+                user_id,
+                &[crate::MemoryStatus::Active, crate::MemoryStatus::Faded],
+                limit,
+            )
+            .await?;
+
+        let mut report = NaturalDecayReport::default();
+        for item in candidates {
+            let Some(id) = item.id else {
+                continue;
+            };
+            if item.pinned {
+                continue;
+            }
+            let score = crate::forgetting::decay_score(&item, now, half_life_days);
+            let Some(target) = crate::forgetting::target_status_after_decay(item.status, score)
+            else {
+                continue;
+            };
+            self.transition_typed_memory_status(id, target).await?;
+            match target {
+                crate::MemoryStatus::Faded => report.faded_count += 1,
+                crate::MemoryStatus::Archived => report.archived_count += 1,
+                _ => {}
+            }
+        }
+        Ok(report)
+    }
+
+    /// Backdate typed memory timestamps for integration tests (#76).
+    #[doc(hidden)]
+    pub async fn test_backdate_typed_memory(
+        &self,
+        id: i64,
+        days_ago: i64,
+    ) -> Result<bool, MemoryError> {
+        use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
+
+        let maybe_model = entities::typed_memories::Entity::find_by_id(id)
+            .one(&self.db)
+            .await?;
+        let Some(model) = maybe_model else {
+            return Ok(false);
+        };
+        let anchor = Utc::now() - chrono::Duration::days(days_ago);
+        let mut active: entities::typed_memories::ActiveModel = model.into();
+        active.created_at = Set(anchor);
+        active.updated_at = Set(anchor);
+        active.last_accessed_at = Set(None);
+        active.update(&self.db).await?;
+        Ok(true)
     }
 
     /// Store a content embedding for a typed memory item.
@@ -2386,6 +2553,7 @@ mod tests {
             valid_until: None,
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
         };
 
         let id = store.insert_typed_memory(&item).await.unwrap();
@@ -2452,6 +2620,7 @@ mod tests {
             valid_until: None,
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
         };
 
         let id = store.insert_typed_memory(&item).await.unwrap();
@@ -2491,6 +2660,7 @@ mod tests {
             valid_until: None,
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
         };
         let old_id = store.insert_typed_memory(&old_item).await.unwrap();
 
@@ -2534,6 +2704,7 @@ mod tests {
             valid_until: None,
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
         };
         let old_id = store.insert_typed_memory(&item).await.unwrap();
         store
@@ -2577,6 +2748,7 @@ mod tests {
                 valid_until: None,
                 status: crate::MemoryStatus::Active,
                 supersedes_id: None,
+                pinned: false,
             })
             .await
             .unwrap();
@@ -2813,6 +2985,7 @@ mod tests {
             valid_until: None,
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
         };
         let high_salience = crate::NewMemoryItem {
             salience: crate::MemorySalience::new(0.95),
@@ -2855,6 +3028,7 @@ mod tests {
             valid_until: None,
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
         };
         insert_memory_with_embedding(&store, &item, &orthogonal).await;
 
@@ -2894,6 +3068,7 @@ mod tests {
                 valid_until: None,
                 status: crate::MemoryStatus::Active,
                 supersedes_id: None,
+                pinned: false,
             })
             .await
             .unwrap();
@@ -2948,6 +3123,7 @@ mod tests {
             valid_until: None,
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
         };
 
         for status in [
@@ -2989,6 +3165,7 @@ mod tests {
             valid_until: None,
             status: crate::MemoryStatus::Faded,
             supersedes_id: None,
+            pinned: false,
         };
         insert_memory_with_embedding(&store, &item, &emb).await;
 
@@ -3023,6 +3200,7 @@ mod tests {
             valid_until: None,
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
         };
         let old_id = store.insert_typed_memory(&old_item).await.unwrap();
         store
@@ -3048,6 +3226,7 @@ mod tests {
                 valid_until: None,
                 status: crate::MemoryStatus::Active,
                 supersedes_id: None,
+                pinned: false,
             };
             insert_memory_with_embedding(&store, &filler, &orthogonal).await;
         }
@@ -3088,6 +3267,7 @@ mod tests {
             valid_until: None,
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
         };
         insert_memory_with_embedding(&store, &unrelated, &orthogonal).await;
 
@@ -3121,6 +3301,7 @@ mod tests {
             valid_until: None,
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
         };
         let low_confidence = base.clone();
         let high_confidence = crate::NewMemoryItem {
@@ -3162,6 +3343,7 @@ mod tests {
             valid_until: None,
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
         };
 
         let mut user1_item = base.clone();
@@ -3202,6 +3384,7 @@ mod tests {
             valid_until: None,
             status: crate::MemoryStatus::Active,
             supersedes_id: None,
+            pinned: false,
         };
         insert_memory_with_embedding(&store, &item, &emb).await;
 
@@ -3209,5 +3392,278 @@ mod tests {
         let results = store.search_typed_memories_hybrid(&options).await.unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].sources.len() >= 2);
+    }
+
+    #[tokio::test]
+    async fn transition_typed_memory_status_rejects_invalid_edge() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let id = store
+            .insert_typed_memory(&crate::NewMemoryItem {
+                scope: crate::MemoryScope::Character,
+                character_id: "ene".into(),
+                user_id: String::new(),
+                kind: crate::MemoryKind::Semantic,
+                title: "fact".into(),
+                content: "content".into(),
+                source: crate::MemorySource::Conversation,
+                source_ref: None,
+                confidence: crate::MemoryConfidence::default(),
+                salience: crate::MemorySalience::default(),
+                affect: crate::AffectAnnotation::default(),
+                relationship_impact: 0.0,
+                valid_from: None,
+                valid_until: None,
+                status: crate::MemoryStatus::Faded,
+                supersedes_id: None,
+                pinned: false,
+            })
+            .await
+            .unwrap();
+
+        let err = store
+            .transition_typed_memory_status(id, crate::MemoryStatus::Active)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MemoryError::InvalidTransition {
+                from: crate::MemoryStatus::Faded,
+                to: crate::MemoryStatus::Active,
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn apply_natural_decay_batch_fades_and_archives() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let now = Utc::now();
+
+        let active_id = store
+            .insert_typed_memory(&crate::NewMemoryItem {
+                scope: crate::MemoryScope::Character,
+                character_id: "ene".into(),
+                user_id: "user1".into(),
+                kind: crate::MemoryKind::Semantic,
+                title: "old active".into(),
+                content: "old content".into(),
+                source: crate::MemorySource::Conversation,
+                source_ref: None,
+                confidence: crate::MemoryConfidence::new(0.2),
+                salience: crate::MemorySalience::new(0.1),
+                affect: crate::AffectAnnotation::default(),
+                relationship_impact: 0.0,
+                valid_from: None,
+                valid_until: None,
+                status: crate::MemoryStatus::Active,
+                supersedes_id: None,
+                pinned: false,
+            })
+            .await
+            .unwrap();
+        store
+            .test_backdate_typed_memory(active_id, 120)
+            .await
+            .unwrap();
+
+        let faded_id = store
+            .insert_typed_memory(&crate::NewMemoryItem {
+                scope: crate::MemoryScope::Character,
+                character_id: "ene".into(),
+                user_id: "user1".into(),
+                kind: crate::MemoryKind::Semantic,
+                title: "old faded".into(),
+                content: "very old content".into(),
+                source: crate::MemorySource::Conversation,
+                source_ref: None,
+                confidence: crate::MemoryConfidence::new(0.1),
+                salience: crate::MemorySalience::new(0.1),
+                affect: crate::AffectAnnotation::default(),
+                relationship_impact: 0.0,
+                valid_from: None,
+                valid_until: None,
+                status: crate::MemoryStatus::Faded,
+                supersedes_id: None,
+                pinned: false,
+            })
+            .await
+            .unwrap();
+        store
+            .test_backdate_typed_memory(faded_id, 365)
+            .await
+            .unwrap();
+
+        let report = store
+            .apply_natural_decay_batch("ene", Some("user1"), now, 30.0, 64)
+            .await
+            .unwrap();
+        assert!(report.faded_count >= 1);
+        assert!(report.archived_count >= 1);
+
+        let active_loaded = store.get_typed_memory(active_id).await.unwrap().unwrap();
+        assert_eq!(active_loaded.status, crate::MemoryStatus::Faded);
+
+        let faded_loaded = store.get_typed_memory(faded_id).await.unwrap().unwrap();
+        assert_eq!(faded_loaded.status, crate::MemoryStatus::Archived);
+    }
+
+    #[tokio::test]
+    async fn pin_typed_memory_excludes_from_natural_decay() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let id = store
+            .insert_typed_memory(&crate::NewMemoryItem {
+                scope: crate::MemoryScope::Character,
+                character_id: "ene".into(),
+                user_id: String::new(),
+                kind: crate::MemoryKind::Semantic,
+                title: "pinned".into(),
+                content: "pinned content".into(),
+                source: crate::MemorySource::Conversation,
+                source_ref: None,
+                confidence: crate::MemoryConfidence::new(0.1),
+                salience: crate::MemorySalience::new(0.1),
+                affect: crate::AffectAnnotation::default(),
+                relationship_impact: 0.0,
+                valid_from: None,
+                valid_until: None,
+                status: crate::MemoryStatus::Active,
+                supersedes_id: None,
+                pinned: true,
+            })
+            .await
+            .unwrap();
+        store.test_backdate_typed_memory(id, 200).await.unwrap();
+
+        let report = store
+            .apply_natural_decay_batch("ene", None, Utc::now(), 30.0, 64)
+            .await
+            .unwrap();
+        assert_eq!(report.faded_count, 0);
+
+        let loaded = store.get_typed_memory(id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, crate::MemoryStatus::Active);
+        assert!(loaded.pinned);
+    }
+
+    #[tokio::test]
+    async fn transition_active_to_faded_sets_faded_at_from_decay_anchor() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let id = store
+            .insert_typed_memory(&crate::NewMemoryItem {
+                scope: crate::MemoryScope::Character,
+                character_id: "ene".into(),
+                user_id: "user1".into(),
+                kind: crate::MemoryKind::Semantic,
+                title: "anchor test".into(),
+                content: "anchor content".into(),
+                source: crate::MemorySource::Conversation,
+                source_ref: None,
+                confidence: crate::MemoryConfidence::default(),
+                salience: crate::MemorySalience::default(),
+                affect: crate::AffectAnnotation::default(),
+                relationship_impact: 0.0,
+                valid_from: None,
+                valid_until: None,
+                status: crate::MemoryStatus::Active,
+                supersedes_id: None,
+                pinned: false,
+            })
+            .await
+            .unwrap();
+        store.test_backdate_typed_memory(id, 45).await.unwrap();
+
+        let before = store.get_typed_memory(id).await.unwrap().unwrap();
+        assert!(
+            store
+                .transition_typed_memory_status(id, crate::MemoryStatus::Faded)
+                .await
+                .unwrap()
+        );
+
+        let after = store.get_typed_memory(id).await.unwrap().unwrap();
+        assert_eq!(after.status, crate::MemoryStatus::Faded);
+        assert_eq!(after.faded_at, Some(before.updated_at));
+    }
+
+    #[tokio::test]
+    async fn single_row_natural_decay_reaches_archived_in_two_passes() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let now = Utc::now();
+
+        let id = store
+            .insert_typed_memory(&crate::NewMemoryItem {
+                scope: crate::MemoryScope::Character,
+                character_id: "ene".into(),
+                user_id: "user1".into(),
+                kind: crate::MemoryKind::Semantic,
+                title: "ancient".into(),
+                content: "very old fact".into(),
+                source: crate::MemorySource::Conversation,
+                source_ref: None,
+                confidence: crate::MemoryConfidence::new(0.1),
+                salience: crate::MemorySalience::new(0.1),
+                affect: crate::AffectAnnotation::default(),
+                relationship_impact: 0.0,
+                valid_from: None,
+                valid_until: None,
+                status: crate::MemoryStatus::Active,
+                supersedes_id: None,
+                pinned: false,
+            })
+            .await
+            .unwrap();
+        store.test_backdate_typed_memory(id, 365).await.unwrap();
+
+        let first = store
+            .apply_natural_decay_batch("ene", Some("user1"), now, 30.0, 64)
+            .await
+            .unwrap();
+        assert_eq!(first.faded_count, 1);
+        assert_eq!(first.archived_count, 0);
+
+        let faded = store.get_typed_memory(id).await.unwrap().unwrap();
+        assert_eq!(faded.status, crate::MemoryStatus::Faded);
+        assert!(faded.faded_at.is_some());
+
+        let second = store
+            .apply_natural_decay_batch("ene", Some("user1"), now, 30.0, 64)
+            .await
+            .unwrap();
+        assert_eq!(second.archived_count, 1);
+
+        let archived = store.get_typed_memory(id).await.unwrap().unwrap();
+        assert_eq!(archived.status, crate::MemoryStatus::Archived);
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_preserves_pinned_flag() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let now = Utc::now();
+        let emb = vec![1.0, 0.0, 0.0, 0.0];
+
+        let item = crate::NewMemoryItem {
+            scope: crate::MemoryScope::Character,
+            character_id: "ene".into(),
+            user_id: String::new(),
+            kind: crate::MemoryKind::Semantic,
+            title: "pinned fact".into(),
+            content: "pinned vector content".into(),
+            source: crate::MemorySource::Conversation,
+            source_ref: None,
+            confidence: crate::MemoryConfidence::default(),
+            salience: crate::MemorySalience::default(),
+            affect: crate::AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: crate::MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: true,
+        };
+        insert_memory_with_embedding(&store, &item, &emb).await;
+
+        let options = hybrid_search_options("pinned vector", &emb, now);
+        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].item.pinned);
     }
 }

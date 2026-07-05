@@ -234,7 +234,10 @@ Key store APIs:
 |--------|-------------|
 | `insert_typed_memory(item)` | Insert a new typed memory row |
 | `supersede_typed_memory(new_item, old_id)` | Atomically insert replacement and mark prior row `superseded` |
-| `update_typed_memory_status(id, status)` | Lifecycle transition (e.g. `user_deleted`, `disputed`) |
+| `update_typed_memory_status(id, status)` | Low-level lifecycle status write (no edge validation) |
+| `transition_typed_memory_status(id, status)` | Validated lifecycle transition (#76) |
+| `pin_typed_memory(id, pinned)` | Pin / unpin a memory (exempt from natural decay) |
+| `apply_natural_decay_batch(...)` | Batch `Active → Faded → Archived` from decay score |
 | `search_typed_memories(embedding, ...)` | Vector similarity search over active memories |
 | `search_typed_memories_hybrid(options)` | Hybrid recall with explainable score breakdown |
 | `list_recallable_typed_memories(character_id, user_id, limit)` | List `active` / `faded` / `disputed` memories for recall |
@@ -360,6 +363,57 @@ After hybrid search and before optional LLM reranking, downstream recall executi
 **Order vs scores:** MMR and reranking change list order only. Each result's `score_breakdown.total` remains the hybrid-search score.
 
 **Tracing:** Diversification is logged under `component = "Recall"`, `stage = "diversify"` (`input_count`, `pool_count`, `output_count`, `clusters_merged`, `kind_distribution`).
+
+### Memory Forgetting Lifecycle (#76)
+
+Typed memories age through explicit status transitions instead of hard delete. Natural decay and user explicit forget are separate paths.
+
+**Allowed single-step transitions** (`ene-memory::forgetting::validate_transition`):
+
+| From | To |
+|------|-----|
+| `active` | `faded`, `superseded`, `user_deleted`, `disputed` |
+| `faded` | `archived`, `disputed` |
+
+All lifecycle status writes go through `transition_typed_memory_status` (including `update_typed_memory_status`, which delegates to it). `supersede_typed_memory` continues to handle transactional `active/faded/disputed → superseded` plus successor insert.
+
+**`faded_at` column:** Set when a memory transitions `active → faded`, using the active decay anchor at transition time (`last_accessed_at`, else `updated_at`). Existing `faded` rows are backfilled with `faded_at = updated_at` on migration. Archive decay uses `faded_at` (fallback: `created_at`), not the post-transition `updated_at`.
+
+**Natural decay score** (`decay_score`, distinct from hybrid-recall `recency_score`):
+
+```text
+retention =
+  exp(-ln2 * age_days / half_life)
+  * (0.5 + 0.5 * salience)
+  * (0.5 + 0.5 * confidence)
+  * (0.7 + 0.3 * emotional_impact)
+```
+
+- **Active fade decisions:** `age_days` from `active_decay_anchor` (`last_accessed_at`, else `updated_at`).
+- **Faded archive decisions:** `age_days` from `faded_decay_anchor` (`faded_at`, else `created_at`).
+- `half_life` comes from `cognition.memory.default_forgetting_half_life_days`.
+- `pinned` memories return retention `1.0` and are skipped.
+
+**Thresholds (defaults):**
+
+- `retention < 0.40` and `active` → `faded`
+- `retention < 0.15` and `faded` → `archived`
+
+**Explicit vs natural forget:**
+
+| Path | Trigger | Result |
+|------|---------|--------|
+| User forget | Memory Arbiter `MarkUserDeleted` | Immediate `user_deleted` (decay bypassed) |
+| Natural decay | `ForgettingLifecycle::apply` when `decay_enabled` is true | `active → faded → archived` |
+
+Post-turn wiring of `ForgettingLifecycle::apply` into the streaming pipeline is planned in #100. Recall bumps `last_accessed_at` via `bump_typed_memory_access` for surfaced memories.
+
+**Prompt uncertain markers:** When typed recall maps to legacy `KeyFact` rows, `format_recalled_content` prefixes:
+
+- `[uncertain] ` for `faded` memories (and low-confidence `active` memories)
+- `[disputed] ` for `disputed` memories
+
+Legacy `conversation_keyfacts` from `recall_context` do not receive these markers until #98.
 
 ## Companion Commitment Ledger
 

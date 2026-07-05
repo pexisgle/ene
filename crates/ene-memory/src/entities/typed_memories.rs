@@ -27,6 +27,8 @@ pub struct Model {
     pub valid_until: Option<DateTime<Utc>>,
     pub status: String,
     pub supersedes_id: Option<i64>,
+    pub pinned: i32,
+    pub faded_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

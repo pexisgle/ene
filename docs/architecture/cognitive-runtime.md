@@ -13,7 +13,7 @@ The current Ene AI runtime bundles conversation history, long-term memory, emoti
 3. **Session splits fragment memory and conversation continuity.** Summaries are created at split boundaries, and each split resets the session, losing the sense of an ongoing relationship.
 4. **The prompt layer structure is weak.** Long contexts cause Character Drift — the LLM gradually forgets the character's core identity as the prompt fills with history.
 5. **CCv3 lorebook / semantic settings are underutilized.** They are only included as inline text, not indexed for semantic retrieval.
-6. **Forgetting is a hard delete.** The experience is "the memory vanished"—there is no faded / archived / superseded lifecycle.
+6. **Forgetting is a hard delete for legacy keyfacts.** Typed memories support a faded / archived / superseded lifecycle (#76); legacy `conversation_keyfacts` migration is planned in #98.
 7. **Codex-style explicit state (context packing, task ledger, tool result grounding) is not integrated** into the companion experience.
 
 ## Decision
@@ -105,7 +105,7 @@ sequenceDiagram
 5. **LLM Generation** — Send the `PromptPacket` to the LLM provider. The LLM may optionally provide expression hints.
 6. **Output Arbitration** — Validate and map affect+response to character expressions. Apply hysteresis to prevent expression flickering.
 7. **Post-turn Writing** — Run deterministic and LLM extractors to produce `MemoryCandidate` items. The Memory Arbiter validates against existing memories, computes confidence, and writes to the store.
-8. **Forgetting Lifecycle** — Age existing memories according to decay curves. Transition through `active → faded → archived → superseded` statuses.
+8. **Forgetting Lifecycle** — Age existing memories according to decay curves via `ForgettingLifecycle::apply`. Transition through `active → faded → archived` statuses. User explicit forget (`user_deleted`) and contradiction paths (`disputed`, `superseded`) remain in the Memory Arbiter.
 
 ## Key Terminology
 

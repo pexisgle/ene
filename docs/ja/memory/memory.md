@@ -227,7 +227,10 @@ Cognitive Runtime は長期事実を `typed_memories` に保存し、明示的�
 |----------|------|
 | `insert_typed_memory(item)` | 新しい型付き記憶行を挿入 |
 | `supersede_typed_memory(new_item, old_id)` | 置換を挿入し、旧行を `superseded` にする（トランザクション） |
-| `update_typed_memory_status(id, status)` | ライフサイクル遷移（例: `user_deleted`, `disputed`） |
+| `update_typed_memory_status(id, status)` | 低レベルなステータス更新（遷移検証なし） |
+| `transition_typed_memory_status(id, status)` | 検証付きライフサイクル遷移（#76） |
+| `pin_typed_memory(id, pinned)` | ピン / ピン解除（自然減衰から除外） |
+| `apply_natural_decay_batch(...)` | 減衰スコアに基づく `active → faded → archived` 一括処理 |
 | `search_typed_memories(embedding, ...)` | アクティブ記憶に対するベクトル類似検索 |
 | `search_typed_memories_hybrid(options)` | 説明可能なスコア内訳付きハイブリッド想起 |
 | `list_recallable_typed_memories(character_id, user_id, limit)` | 想起対象（`active` / `faded` / `disputed`）の一覧 |
@@ -353,6 +356,57 @@ score =
 **順序とスコア:** MMR と rerank はリスト順序のみを変更する。各結果の `score_breakdown.total` は hybrid-search スコアのまま。
 
 **トレース:** 多様化は `component = "Recall"`, `stage = "diversify"`（`input_count`, `pool_count`, `output_count`, `clusters_merged`, `kind_distribution`）でログ出力されます。
+
+### Memory Forgetting Lifecycle（#76）
+
+typed memory はハードデリートではなく明示的なステータス遷移で経年変化する。自然減衰とユーザーの明示的忘却は別パス。
+
+**許可される単一ステップ遷移**（`ene-memory::forgetting::validate_transition`）:
+
+| From | To |
+|------|-----|
+| `active` | `faded`, `superseded`, `user_deleted`, `disputed` |
+| `faded` | `archived`, `disputed` |
+
+ライフサイクルの status 更新はすべて `transition_typed_memory_status` 経由（`update_typed_memory_status` も委譲）。`supersede_typed_memory` は従来どおり、後継 insert と `active/faded/disputed → superseded` をトランザクションで処理する。
+
+**`faded_at` 列:** `active → faded` 遷移時に、当時の active 減衰アンカー（`last_accessed_at`、なければ `updated_at`）を記録する。既存の `faded` 行はマイグレーションで `faded_at = updated_at` にバックフィル。archive 減衰は遷移後の `updated_at` ではなく `faded_at`（なければ `created_at`）を使う。
+
+**自然減衰スコア**（`decay_score`。hybrid-recall の `recency_score` とは別）:
+
+```text
+retention =
+  exp(-ln2 * age_days / half_life)
+  * (0.5 + 0.5 * salience)
+  * (0.5 + 0.5 * confidence)
+  * (0.7 + 0.3 * emotional_impact)
+```
+
+- **active の fade 判定:** `active_decay_anchor`（`last_accessed_at` → `updated_at`）から `age_days`。
+- **faded の archive 判定:** `faded_decay_anchor`（`faded_at` → `created_at`）から `age_days`。
+- `half_life` は `cognition.memory.default_forgetting_half_life_days`。
+- `pinned` 記憶は retention `1.0` を返し、自然減衰の対象外。
+
+**閾値（デフォルト）:**
+
+- `retention < 0.40` かつ `active` → `faded`
+- `retention < 0.15` かつ `faded` → `archived`
+
+**明示的忘却 vs 自然減衰:**
+
+| パス | トリガー | 結果 |
+|------|---------|------|
+| ユーザー忘却 | Memory Arbiter `MarkUserDeleted` | 即時 `user_deleted`（減衰をバイパス） |
+| 自然減衰 | `decay_enabled` が true のとき `ForgettingLifecycle::apply` | `active → faded → archived` |
+
+`ForgettingLifecycle::apply` の post-turn 配線は #100 で予定。recall 時は表示された記憶に `bump_typed_memory_access` で `last_accessed_at` を更新する。
+
+**プロンプトの不確実性マーカー:** typed recall を legacy `KeyFact` にマップする際、`format_recalled_content` が以下を付与:
+
+- `faded` 記憶（および低信頼度の `active`）に `[uncertain] `
+- `disputed` 記憶に `[disputed] `
+
+`recall_context` のレガシー `conversation_keyfacts` には #98 までマーカーは付かない。
 
 ## Companion Commitment Ledger（約束・タスク台帳）
 

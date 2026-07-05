@@ -425,8 +425,8 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 |-------|------|---------|-------------|
 | `write_every_turn` | bool | `true` | Extract and persist memory on every turn |
 | `hybrid_search` | bool | `true` | Use hybrid search (vector + recency + salience + confidence) |
-| `decay_enabled` | bool | `true` | Enable time-based memory decay |
-| `default_forgetting_half_life_days` | float | `30.0` | Default half-life in days for memory decay |
+| `decay_enabled` | bool | `true` | Enable post-turn natural decay (`Active → Faded → Archived`) via `ForgettingLifecycle` |
+| `default_forgetting_half_life_days` | float | `30.0` | Half-life in days for lifecycle decay score and recall recency scoring |
 | `min_confidence_to_persist` | float | `0.65` | Minimum confidence threshold (0.0–1.0) for persisting a memory |
 | `extraction_timeout_secs` | int | `30` | Timeout in seconds for a single LLM memory-extraction call; on timeout the extraction fails and falls back to deterministic candidates |
 | `use_hyde` | bool | `false` | Record a HyDE query-expansion hint in cognitive recall plans; downstream recall execution performs the provider call |

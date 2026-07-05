@@ -239,6 +239,8 @@ mod tests {
             valid_until: None,
             status,
             supersedes_id: None,
+            pinned: false,
+            faded_at: None,
         }
     }
 
