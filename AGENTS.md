@@ -31,8 +31,8 @@ This project is an AI assistant application written in Rust that merges VTuber-l
 
 ## 3. Platform-Specific Notes
 
-* **Linux:** Uses `direnv` + Nix flake. Run Cargo from the workspace root (shell cwd is already the repo; do not prefix commands with `cd`). Confirm `cargo` is not on PATH (`command -v cargo`); when it is not, **always** use this form — do not drop `CARGO_TARGET_DIR`:
-  `direnv exec . env CARGO_TARGET_DIR="$PWD/target" cargo <command>`
+* **Linux:** Uses `direnv` + Nix flake. Run Cargo from the workspace root (shell cwd is already the repo; do not prefix commands with `cd`). Confirm `cargo` is not on PATH (`command -v cargo`); when it is not, use:
+ `direnv exec . cargo <command>`
 * **Windows:** Uses Windows Named Pipes for IPC.
 
 ## 4. Architecture & Philosophy
