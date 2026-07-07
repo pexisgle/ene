@@ -230,6 +230,7 @@
                 '';
               in
               ''
+                export CARGO_TARGET_DIR="$PWD/target"
                 is_interactive="false"
                 if [[ "$-" == *i* ]]; then
                   is_interactive="true"
