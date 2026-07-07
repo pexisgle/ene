@@ -56,9 +56,9 @@ ene_config::define_label_enum!(
 // Sub-sections
 // ────────────────────────────────────────────
 
-/// Token budget allocation and context compression settings.
+/// Token budget allocation, compression triggers, and rolling summarization.
 ///
-/// NOTE: Allocation logic must validate that the sub-budget fields
+/// NOTE: Allocation logic validates that the sub-budget fields
 /// (`scene_summary_tokens`, `memory_budget_tokens`, `semantic_budget_tokens`,
 /// `style_example_budget_tokens`) sum to ≤ `max_prompt_tokens` at startup.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
@@ -77,6 +77,16 @@ pub struct ContextConfig {
     pub semantic_budget_tokens: usize,
     /// Token budget for style examples from CCv3 lorebook.
     pub style_example_budget_tokens: usize,
+    /// Enable rolling context compression instead of session splits (#79).
+    pub compression_enabled: bool,
+    /// Turn count threshold before scene-level compression runs.
+    pub scene_turn_threshold: usize,
+    /// Number of scene spans before chapter rollup.
+    pub chapter_span_threshold: usize,
+    /// Number of chapter spans before arc rollup.
+    pub arc_span_threshold: usize,
+    /// Timeout in seconds for a single compression summarization call.
+    pub compression_timeout_secs: u64,
 }
 
 impl Default for ContextConfig {
@@ -88,6 +98,11 @@ impl Default for ContextConfig {
             memory_budget_tokens: 1_800,
             semantic_budget_tokens: 1_200,
             style_example_budget_tokens: 600,
+            compression_enabled: true,
+            scene_turn_threshold: 12,
+            chapter_span_threshold: 5,
+            arc_span_threshold: 3,
+            compression_timeout_secs: 60,
         }
     }
 }

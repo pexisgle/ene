@@ -71,6 +71,19 @@ pub use error::{CognitionError, EneCognitionError};
 pub use lifecycle::{
     ComposedPrompt, HistoryEntry, PostTurnInput, PreTurnOutput, PromptPacketMeta, TurnContext,
 };
+/// Context budget and compression types.
+#[doc(no_inline)]
+pub use context::{
+    ActiveSceneSummary, CompressionLevel, CompressionReason, CompressionResult,
+    CompressionTaskInput, ContextBudget, ContextManager, MIN_MESSAGES_TO_COMPRESS, PackInput,
+    PackedPrompt, PendingCompressionTask, compression_has_usable_summary,
+    evaluate_compression_trigger, execute_compression, load_active_scene_summary,
+    maybe_roll_up_chapter, pack_prompt, poll_compression_result, spawn_compression_task,
+    validate_context_config,
+};
+/// Prompt packet section types.
+#[doc(no_inline)]
+pub use prompt_packet::{PromptPacket, PromptSection, PromptSectionKind};
 /// Memory arbiter and related decision types.
 #[doc(no_inline)]
 pub use memory_writer::{

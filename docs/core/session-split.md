@@ -1,5 +1,7 @@
 # Automatic Session Splitting
 
+> **Cognitive runtime note:** When `cognition.enabled` is `true` and `cognition.context.compression_enabled` is `true`, automatic session splits are **bypassed**. Context pressure instead triggers rolling context compression (`memory_spans`) while preserving the session ID (#80). When cognition is enabled but compression is disabled, legacy automatic session splits still apply. Legacy splitting also remains active when cognition is disabled.
+
 Sessions are automatically split to manage LLM context window limits and adapt to topic changes.
 
 ## Split Reasons

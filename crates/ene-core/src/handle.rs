@@ -8,6 +8,12 @@ use ene_config::CharacterCardV3;
 use ene_config::EneConfig;
 use ene_provider::LlmProviderRegistry;
 use ene_provider::Role;
+use ene_cognition::{
+    CompressionLevel, CompressionTaskInput, HistoryEntry as CognitionHistoryEntry,
+    MIN_MESSAGES_TO_COMPRESS, PendingCompressionTask, compression_has_usable_summary,
+    evaluate_compression_trigger, execute_compression, maybe_roll_up_chapter,
+    poll_compression_result, spawn_compression_task,
+};
 use ene_session::PendingSplitTask;
 use ene_session::{CardName, SessionId};
 use ene_session::{
@@ -710,6 +716,7 @@ struct EneActor {
     pending_permissions: Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
     pending_user_inputs: Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
     pending_split: Option<PendingSplitTask>,
+    pending_compression: Option<PendingCompressionTask>,
     /// Background tasks spawned for direct `EneCommand::CallTool`
     /// invocations. Tracked so we can abort them cleanly on
     /// shutdown and detect the completion of an in-flight call
@@ -741,6 +748,7 @@ impl EneActor {
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
             pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
             pending_split: None,
+            pending_compression: None,
             call_tool_tasks: tokio::task::JoinSet::new(),
             terminal_emitted: Arc::new(AtomicBool::new(false)),
         }
@@ -991,8 +999,9 @@ impl EneActor {
     }
 
     async fn start_stream(&mut self, user_input: String) {
-        // 1. Apply any pending split result from the previous run
+        // 1. Apply any pending split/compression result from the previous run
         self.apply_pending_split();
+        self.apply_pending_compression();
 
         // 2. Record the triggering user message *before* taking the split
         //    snapshot so the summary includes this turn, and so the snapshot
@@ -1001,7 +1010,7 @@ impl EneActor {
         self.session.record_user_input();
         self.session.add_user_message(&user_input);
 
-        // 3. Check and spawn a split task for this input
+        // 3. Check and spawn a split or compression task for this input
         self.check_and_perform_split(&user_input);
 
         // 5. Create provider
@@ -1078,6 +1087,14 @@ impl EneActor {
         if self.session.history().is_empty() {
             return Err(EneCoreError::Session(EneSessionError::SplitNotNeeded));
         }
+        let cognition = self
+            .config
+            .get_section::<ene_cognition::CognitionConfig>()
+            .unwrap_or_default();
+        if cognition.enabled && cognition.context.compression_enabled {
+            return self.handle_manual_compression().await;
+        }
+
         let Some(store) = &self.session.memory.memory_store else {
             return Err(EneCoreError::Session(EneSessionError::SplitNotNeeded));
         };
@@ -1110,6 +1127,41 @@ impl EneActor {
         Ok(result)
     }
 
+    async fn handle_manual_compression(&mut self) -> Result<SplitResult, EneCoreError> {
+        let Some(store) = self.session.memory.memory_store.clone() else {
+            return Err(EneCoreError::Session(EneSessionError::SplitNotNeeded));
+        };
+        let provider = self.create_provider()?;
+        let cognition = self
+            .config
+            .get_section::<ene_cognition::CognitionConfig>()
+            .unwrap_or_default();
+        let turns = self.cognition_history_entries();
+        let turn_end = self.session.current_turn_count() as i32;
+        let turn_start = (turn_end - turns.len() as i32 / 2).max(0);
+        let input = CompressionTaskInput {
+            session_id: self.session.memory.session_id.to_string(),
+            character_name: self.session.card_name().to_string(),
+            user_name: self.config.user_name.clone(),
+            turns,
+            turn_start,
+            turn_end,
+            level: CompressionLevel::Scene,
+            config: cognition.context.clone(),
+        };
+        let result = execute_compression(store, provider, input).await?;
+        if compression_has_usable_summary(&result) {
+            self.trim_history_after_compression();
+        }
+        Ok(SplitResult {
+            reason: ene_session::SplitReason::Manual,
+            summary: result.summary,
+            key_facts: vec![],
+            new_session_id: self.session.memory.session_id.clone(),
+            snapshot_len: self.session.history().len(),
+        })
+    }
+
     fn apply_pending_split(&mut self) {
         if let Some(result) = poll_split_result(&mut self.pending_split) {
             match result {
@@ -1133,6 +1185,15 @@ impl EneActor {
     }
 
     fn check_and_perform_split(&mut self, user_input: &str) {
+        let cognition = self
+            .config
+            .get_section::<ene_cognition::CognitionConfig>()
+            .unwrap_or_default();
+        if cognition.enabled && cognition.context.compression_enabled {
+            self.check_and_trigger_compression();
+            return;
+        }
+
         let mem_config = match self.config.get_section::<ene_memory::MemoryConfig>() {
             Ok(c) => c,
             Err(_) => return,
@@ -1169,9 +1230,178 @@ impl EneActor {
         }
     }
 
+    fn check_and_trigger_compression(&mut self) {
+        let mem_config = match self.config.get_section::<ene_memory::MemoryConfig>() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let cognition = match self.config.get_section::<ene_cognition::CognitionConfig>() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        if !mem_config.enabled || !cognition.context.compression_enabled {
+            return;
+        }
+        if self.pending_compression.is_some() {
+            return;
+        }
+
+        let turn_count = self.session.current_turn_count();
+        let history_len = self.session.history().len();
+        if evaluate_compression_trigger(&cognition.context, turn_count, history_len).is_none() {
+            return;
+        }
+
+        let Some(store) = self.session.memory.memory_store.clone() else {
+            return;
+        };
+        let provider = match self.create_provider() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        let recent_cap = cognition.context.recent_turns.saturating_mul(2).max(2);
+        let history = self.session.history();
+        if history.len() <= recent_cap {
+            return;
+        }
+        let compress_count = history.len().saturating_sub(recent_cap);
+        if compress_count < MIN_MESSAGES_TO_COMPRESS {
+            return;
+        }
+        let turns: Vec<CognitionHistoryEntry> = history[..compress_count]
+            .iter()
+            .map(|(role, content)| CognitionHistoryEntry {
+                role: match role {
+                    Role::User => "user".into(),
+                    Role::Assistant => "assistant".into(),
+                    Role::System => "system".into(),
+                },
+                content: content.clone(),
+            })
+            .collect();
+        let turn_end = turn_count as i32;
+        let turn_start = (turn_end - (compress_count as i32 / 2).max(1)).max(0);
+
+        let input = CompressionTaskInput {
+            session_id: self.session.memory.session_id.to_string(),
+            character_name: self.session.card_name().to_string(),
+            user_name: self.config.user_name.clone(),
+            turns,
+            turn_start,
+            turn_end,
+            level: CompressionLevel::Scene,
+            config: cognition.context.clone(),
+        };
+        spawn_compression_task(&mut self.pending_compression, store, provider, input);
+    }
+
+    fn apply_pending_compression(&mut self) {
+        if let Some(result) = poll_compression_result(&mut self.pending_compression) {
+            match result {
+                Ok(compression) if compression_has_usable_summary(&compression) => {
+                    tracing::info!(
+                        component = "ContextCompression",
+                        session_id = %compression.session_id,
+                        span_id = compression.span_id,
+                        level = ?compression.level,
+                        "Rolling compression completed"
+                    );
+                    self.trim_history_after_compression();
+                    self.spawn_chapter_rollup_if_needed();
+                }
+                Ok(compression) => {
+                    tracing::warn!(
+                        component = "ContextCompression",
+                        session_id = %compression.session_id,
+                        span_id = compression.span_id,
+                        "Rolling compression finished without a usable summary; history preserved"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        component = "ContextCompression",
+                        error = %error,
+                        "Rolling compression failed"
+                    );
+                }
+            }
+        }
+    }
+
+    fn trim_history_after_compression(&mut self) {
+        let recent_cap = self
+            .config
+            .get_section::<ene_cognition::CognitionConfig>()
+            .map(|c| c.context.recent_turns.saturating_mul(2).max(2))
+            .unwrap_or(16);
+        let history_len = self.session.history().len();
+        if history_len > recent_cap {
+            self.session.trim_history_keep_last(recent_cap);
+        }
+    }
+
+    fn spawn_chapter_rollup_if_needed(&self) {
+        let cognition = match self.config.get_section::<ene_cognition::CognitionConfig>() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let Some(store) = self.session.memory.memory_store.clone() else {
+            return;
+        };
+        let Ok(provider) = self.create_provider() else {
+            return;
+        };
+        let session_id = self.session.memory.session_id.to_string();
+        let character_name = self.session.card_name().to_string();
+        let user_name = self.config.user_name.clone();
+        let context = cognition.context.clone();
+        tokio::spawn(async move {
+            if let Err(error) = maybe_roll_up_chapter(
+                store.as_ref(),
+                provider,
+                &session_id,
+                &character_name,
+                &user_name,
+                &context,
+            )
+            .await
+            {
+                tracing::warn!(
+                    component = "ContextCompression",
+                    error = %error,
+                    "Chapter rollup failed"
+                );
+            }
+        });
+    }
+
+    fn cognition_history_entries(&self) -> Vec<CognitionHistoryEntry> {
+        self.session
+            .history()
+            .iter()
+            .map(|(role, content)| CognitionHistoryEntry {
+                role: match role {
+                    Role::User => "user".into(),
+                    Role::Assistant => "assistant".into(),
+                    Role::System => "system".into(),
+                },
+                content: content.clone(),
+            })
+            .collect()
+    }
+
     // ── Config / Character ──
 
     async fn reconfigure(&mut self, config: EneConfig) -> Result<(), EneCoreError> {
+        let cognition = config
+            .get_section::<ene_cognition::CognitionConfig>()
+            .unwrap_or_default();
+        if cognition.enabled {
+            ene_cognition::CognitionEngine::validate_config(&cognition)
+                .map_err(EneCoreError::Cognition)?;
+        }
+
         self.config = config;
 
         let embedder = init_embedding(&self.config)?;

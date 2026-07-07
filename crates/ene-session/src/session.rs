@@ -353,6 +353,14 @@ impl ConversationSession {
         self.state.current_turn_count
     }
 
+    /// Trim in-memory history, keeping only the last `keep` messages.
+    pub fn trim_history_keep_last(&mut self, keep: usize) {
+        let len = self.history.conversation_history.len();
+        if len > keep {
+            self.history.conversation_history.drain(0..(len - keep));
+        }
+    }
+
     /// Returns the timestamp of the last received message, if any.
     #[must_use]
     pub fn last_message_time(&self) -> Option<DateTime<Utc>> {

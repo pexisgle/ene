@@ -436,7 +436,9 @@ When the cognitive runtime is enabled (`cognition.enabled = true`), **new memory
 |--------------|--------|-------|
 | `conversation_summaries` | `typed_memories` (`Episodic`) | `content` ← summary text; `confidence = 0.7`, `salience = 0.5`; embedding copied to `memory_embeddings`; `source_ref = legacy:summary:{id}` |
 | `conversation_keyfacts` | `UserProfile` or `Preference` | Keys matching `pref_*`, `like`, or `dislike` → `Preference`; otherwise → `UserProfile`; `title` = key, `content` = value; `source_ref = legacy:keyfact:{id}` |
-| `conversation_logs` | `memory_spans` | One span per user/assistant pair (or single message when unpaired); `raw_excerpt` holds message text; `compressed_summary` empty until rolling compression (#79) |
+| `conversation_logs` | `memory_spans` | One span per user/assistant pair (or single message when unpaired); `raw_excerpt` holds message text; `compressed_summary` filled by rolling compression (#79) at runtime |
+
+At runtime (cognitive path), `ene-cognition::context::compression` writes scene-level spans when turn count or context pressure exceeds `cognition.context` thresholds. Active scene summaries are injected into the **Current Scene** section of `PromptPacket` via `MemoryStore::get_active_scene_summary`. Raw `conversation_logs` are always preserved.
 
 Migration progress is recorded in `memory_migration_meta` per character card.
 

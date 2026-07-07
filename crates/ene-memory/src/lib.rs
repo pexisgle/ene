@@ -81,7 +81,8 @@ pub use recall::{format_summaries_for_prompt, format_summaries_with_library};
 pub use search::document_lexical_similarity;
 /// Core memory types.
 pub use store::{
-    ConversationSummary, KeyFact, LegacyWriteMode, MemoryStore, NaturalDecayReport, NewMemorySpan,
+    ConversationSummary, KeyFact, LegacyWriteMode, MemoryStore, NaturalDecayReport,
+    ActiveSceneSummaryRow, NewMemorySpan,
     RecalledSummary,
 };
 /// LLM summarization result type and entry-point.

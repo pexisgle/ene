@@ -46,7 +46,18 @@ pub struct NewMemorySpan {
     pub raw_excerpt: Option<String>,
     /// Compressed summary (empty until compression runs).
     pub compressed_summary: Option<String>,
-    /// Compression level (0 = raw only).
+    /// Compression level (0 = scene, 1 = chapter, 2 = arc).
+    pub compression_level: i32,
+}
+
+/// Active scene summary row for prompt injection (#79).
+#[derive(Debug, Clone)]
+pub struct ActiveSceneSummaryRow {
+    /// Span database id.
+    pub span_id: i64,
+    /// Summary text.
+    pub summary: String,
+    /// Compression level.
     pub compression_level: i32,
 }
 
@@ -2679,6 +2690,80 @@ impl MemoryStore {
                 compression_level: r.compression_level,
             })
             .collect())
+    }
+
+    /// List memory spans for a session filtered by compression level.
+    pub async fn list_memory_spans_by_session_and_level(
+        &self,
+        session_id: &str,
+        compression_level: i32,
+    ) -> Result<Vec<NewMemorySpan>, MemoryError> {
+        use sea_orm::QueryOrder;
+
+        let rows = entities::memory_spans::Entity::find()
+            .filter(entities::memory_spans::Column::SessionId.eq(session_id))
+            .filter(entities::memory_spans::Column::CompressionLevel.eq(compression_level))
+            .order_by_asc(entities::memory_spans::Column::TurnStart)
+            .all(&self.db)
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| NewMemorySpan {
+                session_id: r.session_id,
+                turn_start: r.turn_start,
+                turn_end: r.turn_end,
+                raw_excerpt: r.raw_excerpt,
+                compressed_summary: r.compressed_summary,
+                compression_level: r.compression_level,
+            })
+            .collect())
+    }
+
+    /// Return the latest scene-level compressed summary for a session.
+    pub async fn get_active_scene_summary(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<ActiveSceneSummaryRow>, MemoryError> {
+        use sea_orm::QueryOrder;
+
+        let row = entities::memory_spans::Entity::find()
+            .filter(entities::memory_spans::Column::SessionId.eq(session_id))
+            .filter(entities::memory_spans::Column::CompressedSummary.is_not_null())
+            .order_by_desc(entities::memory_spans::Column::CompressionLevel)
+            .order_by_desc(entities::memory_spans::Column::TurnEnd)
+            .one(&self.db)
+            .await?;
+
+        Ok(row.and_then(|r| {
+            let summary = r.compressed_summary?;
+            if summary.trim().is_empty() {
+                return None;
+            }
+            Some(ActiveSceneSummaryRow {
+                span_id: r.id,
+                summary,
+                compression_level: r.compression_level,
+            })
+        }))
+    }
+
+    /// Update the compressed summary for an existing span.
+    pub async fn update_span_summary(
+        &self,
+        span_id: i64,
+        summary: &str,
+    ) -> Result<(), MemoryError> {
+        use sea_orm::{ActiveModelTrait, ActiveValue::Set};
+
+        let mut active: entities::memory_spans::ActiveModel =
+            entities::memory_spans::ActiveModel {
+                id: Set(span_id),
+                ..Default::default()
+            };
+        active.compressed_summary = Set(Some(summary.to_string()));
+        active.update(&self.db).await?;
+        Ok(())
     }
 
     // ── Companion Commitments ─────────────────────────────────────────────────

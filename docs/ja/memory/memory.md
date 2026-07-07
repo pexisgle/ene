@@ -429,7 +429,9 @@ cognitive runtime を有効にした場合（`cognition.enabled = true`）、**�
 |------------------|--------|------|
 | `conversation_summaries` | `typed_memories` (`Episodic`) | `content` ← 要約本文; `confidence = 0.7`, `salience = 0.5`; embedding を `memory_embeddings` にコピー; `source_ref = legacy:summary:{id}` |
 | `conversation_keyfacts` | `UserProfile` または `Preference` | `pref_*`, `like`, `dislike` に一致 → `Preference`; それ以外 → `UserProfile`; `title` = key, `content` = value |
-| `conversation_logs` | `memory_spans` | user/assistant ペアごとに span; `raw_excerpt` に本文; `compressed_summary` は空（#79 後に再圧縮可能） |
+| `conversation_logs` | `memory_spans` | user/assistant ペアごとに span; `raw_excerpt` に本文; `compressed_summary` は rolling compression（#79）でランタイム更新 |
+
+ランタイム（認知パス）では、`ene-cognition::context::compression` が `cognition.context` の閾値超過時にシーンレベル span を書き込む。アクティブなシーン要約は `MemoryStore::get_active_scene_summary` 経由で `PromptPacket` の **Current Scene** セクションに注入される。`conversation_logs` は常に保持される。
 
 移行状態はキャラクターごとに `memory_migration_meta` に記録されます。
 

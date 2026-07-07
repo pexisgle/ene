@@ -420,6 +420,11 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 | `memory_budget_tokens` | int | `1800` | 想起記憶のトークン予算 |
 | `semantic_budget_tokens` | int | `1200` | 意味記憶（lorebook）のトークン予算 |
 | `style_example_budget_tokens` | int | `600` | CCv3 lorebook からのスタイル例のトークン予算 |
+| `compression_enabled` | bool | `true` | 認知ランタイム有効時にセッション分割の代わりに rolling context compression を使う |
+| `scene_turn_threshold` | int | `12` | シーンレベル圧縮を開始するターン数 |
+| `chapter_span_threshold` | int | `5` | チャプター rollup 前のシーン span 数 |
+| `arc_span_threshold` | int | `3` | アーク rollup 前のチャプター span 数 |
+| `compression_timeout_secs` | int | `60` | 圧縮要約 LLM 呼び出しのタイムアウト（秒） |
 
 #### `cognition.memory` — 記憶抽出・保持
 

@@ -30,4 +30,7 @@ pub enum EneCoreError {
     /// Task channel closed.
     #[error("Task channel closed")]
     ChannelClosed,
+    /// Cognitive runtime error.
+    #[error(transparent)]
+    Cognition(#[from] ene_cognition::CognitionError),
 }

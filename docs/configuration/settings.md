@@ -420,6 +420,11 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 | `memory_budget_tokens` | int | `1800` | Token budget for recalled memories |
 | `semantic_budget_tokens` | int | `1200` | Token budget for semantic (lorebook) memory |
 | `style_example_budget_tokens` | int | `600` | Token budget for style examples from CCv3 lorebook |
+| `compression_enabled` | bool | `true` | Enable rolling context compression instead of session splits when cognition is enabled |
+| `scene_turn_threshold` | int | `12` | Turn count before scene-level compression is triggered |
+| `chapter_span_threshold` | int | `5` | Number of scene spans before chapter rollup |
+| `arc_span_threshold` | int | `3` | Number of chapter spans before arc rollup |
+| `compression_timeout_secs` | int | `60` | Timeout for a single compression summarization LLM call |
 
 #### `cognition.memory` — Memory Extraction & Retention
 

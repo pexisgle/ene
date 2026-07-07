@@ -71,6 +71,12 @@ pub struct PromptPacketMeta {
     pub recalled_memory_count: usize,
     /// Whether the post-history PHI block was included.
     pub post_history_included: bool,
+    /// Whether an active scene summary was included.
+    pub scene_summary_included: bool,
+    /// Sections dropped by the budget manager.
+    pub dropped_sections: Vec<crate::prompt_packet::PromptSectionKind>,
+    /// Approximate packed token count.
+    pub packed_tokens: usize,
 }
 
 /// Result of prompt packet composition.

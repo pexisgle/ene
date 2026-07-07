@@ -1,104 +1,59 @@
-//! Sectioned prompt packet composition (#87 seed for #100).
+//! Sectioned prompt packet composition (#87).
 
-use ene_memory::ActiveCommitmentPrompt;
+mod section;
+
+pub use section::{PromptSection, PromptSectionKind};
+
+use ene_memory::{ActiveCommitmentPrompt, MemoryKind, MemorySource};
 use ene_provider::{LlmMessage, UserMessagePart};
 
 use crate::character::{IdentityKernel, StyleExample};
 use crate::lifecycle::{HistoryEntry, PromptPacketMeta};
-use crate::recall::{RecalledMemory, format_recalled_content};
+use crate::recall::{RecallReason, RecalledMemory, format_recalled_content};
 
 /// A sectioned prompt structure with independent logical layers.
 #[derive(Debug, Clone, Default)]
 pub struct PromptPacket {
-    /// Immutable character identity (never truncated).
-    pub identity_kernel: Option<String>,
-    /// Style example anchors (budgeted; droppable on overflow).
-    pub style_examples: Vec<String>,
-    /// Recalled typed memories.
-    pub recalled_memories: Vec<RecalledMemory>,
-    /// Active commitments for prompt injection.
-    pub commitments: Vec<ActiveCommitmentPrompt>,
-    /// Affect summary line (optional).
-    pub affect_summary: Option<String>,
-    /// Recent conversation history.
+    /// Ordered prompt sections (system + user input metadata).
+    pub sections: Vec<PromptSection>,
+    /// Recent conversation history rendered as separate LLM messages.
     pub history: Vec<HistoryEntry>,
-    /// Expression PHI placed after history, before the user turn.
-    pub post_history_block: Option<String>,
-    /// Current user input.
-    pub user_input: String,
-    /// Maximum approximate characters for truncatable sections.
-    pub max_chars: usize,
-    /// Maximum approximate characters for the style-examples section.
-    pub style_max_chars: usize,
 }
 
 impl PromptPacket {
+    /// Look up a section by kind (first match).
+    #[must_use]
+    pub fn section(&self, kind: PromptSectionKind) -> Option<&PromptSection> {
+        self.sections.iter().find(|s| s.kind == kind)
+    }
+
+    /// Whether a section has non-empty content.
+    #[must_use]
+    pub fn section_included(&self, kind: PromptSectionKind) -> bool {
+        self.section(kind)
+            .is_some_and(|s| !s.content.trim().is_empty())
+    }
+
     /// Convert the packet into LLM messages (system + history + PHI + user).
     #[must_use]
     pub fn to_llm_messages(&self) -> (Vec<LlmMessage>, PromptPacketMeta) {
         let mut system_parts = Vec::new();
 
-        let identity_included = if let Some(kernel) = &self.identity_kernel {
-            system_parts.push(kernel.clone());
-            true
-        } else {
-            false
-        };
-
-        let style_block = self.render_style_block();
-        let style_included = style_block.is_some();
-        if let Some(block) = style_block {
-            system_parts.push(block);
-        }
-
-        if !self.recalled_memories.is_empty() {
-            let mut block = String::from("## Recalled Memories\n");
-            for memory in &self.recalled_memories {
-                let line = format_recalled_content(memory);
-                block.push_str("- ");
-                block.push_str(&line);
-                block.push('\n');
+        for kind in PromptSectionKind::render_order() {
+            if matches!(
+                *kind,
+                PromptSectionKind::OutputContract | PromptSectionKind::UserInput
+            ) {
+                continue;
             }
-            system_parts.push(block);
-        }
-
-        if !self.commitments.is_empty() {
-            let mut block = String::from("## Active Commitments\n");
-            for c in &self.commitments {
-                block.push_str("- ");
-                block.push_str(&c.title);
-                if !c.description.is_empty() {
-                    block.push_str(": ");
-                    block.push_str(&c.description);
-                }
-                block.push('\n');
-            }
-            system_parts.push(block);
-        }
-
-        if let Some(affect) = &self.affect_summary {
-            system_parts.push(format!("## Current Mood\n{affect}"));
-        }
-
-        let mut system_text = system_parts.join("\n\n");
-        if self.max_chars > 0 && system_text.chars().count() > self.max_chars {
-            if let Some(kernel) = &self.identity_kernel {
-                let kernel_char_len = kernel.chars().count();
-                if kernel_char_len < self.max_chars {
-                    let budget = self.max_chars - kernel_char_len;
-                    let tail = system_text[kernel.len()..]
-                        .chars()
-                        .take(budget)
-                        .collect::<String>();
-                    system_text = format!("{kernel}{tail}");
-                } else {
-                    system_text = kernel.chars().take(self.max_chars).collect();
-                }
-            } else {
-                system_text = system_text.chars().take(self.max_chars).collect();
+            if let Some(section) = self.section(*kind)
+                && let Some(block) = section.render_system_block()
+            {
+                system_parts.push(block);
             }
         }
 
+        let system_text = system_parts.join("\n\n");
         let mut messages = vec![LlmMessage::System {
             content: system_text,
         }];
@@ -121,60 +76,56 @@ impl PromptPacket {
             messages.push(msg);
         }
 
-        let post_history_included = self
-            .post_history_block
-            .as_ref()
-            .is_some_and(|block| !block.trim().is_empty());
+        let post_history_included = self.section_included(PromptSectionKind::OutputContract);
         if post_history_included {
-            messages.push(LlmMessage::System {
-                content: self.post_history_block.clone().unwrap_or_default(),
-            });
+            let content = self
+                .section(PromptSectionKind::OutputContract)
+                .map(|s| s.content.clone())
+                .unwrap_or_default();
+            messages.push(LlmMessage::System { content });
         }
 
+        let user_input = self
+            .section(PromptSectionKind::UserInput)
+            .map(|s| s.content.clone())
+            .unwrap_or_default();
         messages.push(LlmMessage::User {
-            parts: vec![UserMessagePart::Text {
-                text: self.user_input.clone(),
-            }],
+            parts: vec![UserMessagePart::Text { text: user_input }],
         });
 
+        let semantic_count = self
+            .section(PromptSectionKind::SemanticContext)
+            .map(|s| s.content.lines().filter(|l| l.starts_with("- ")).count())
+            .unwrap_or(0);
+        let profile_count = self
+            .section(PromptSectionKind::UserProfile)
+            .map(|s| s.content.lines().filter(|l| l.starts_with("- ")).count())
+            .unwrap_or(0);
+        let episodic_count = self
+            .section(PromptSectionKind::EpisodicMemories)
+            .map(|s| s.content.lines().filter(|l| l.starts_with("- ")).count())
+            .unwrap_or(0);
+
         let meta = PromptPacketMeta {
-            identity_kernel_included: identity_included,
-            style_example_count: if style_included {
-                self.style_examples.len()
+            identity_kernel_included: self.section_included(PromptSectionKind::IdentityKernel),
+            style_example_count: if self.section_included(PromptSectionKind::StyleExamples) {
+                self.section(PromptSectionKind::StyleExamples)
+                    .map(|s| s.content.split("\n\n").count())
+                    .unwrap_or(0)
             } else {
                 0
             },
-            recalled_memory_count: self.recalled_memories.len(),
+            recalled_memory_count: semantic_count + profile_count + episodic_count,
             post_history_included,
+            scene_summary_included: self.section_included(PromptSectionKind::SceneState),
+            dropped_sections: Vec::new(),
+            packed_tokens: 0,
         };
 
         (messages, meta)
     }
 
-    fn render_style_block(&self) -> Option<String> {
-        if self.style_examples.is_empty() || self.style_max_chars == 0 {
-            return None;
-        }
-        let mut block = String::from("## Style Examples\n");
-        for example in &self.style_examples {
-            let candidate = if block == "## Style Examples\n" {
-                format!("{block}{example}\n")
-            } else {
-                format!("{block}\n{example}\n")
-            };
-            if candidate.chars().count() > self.style_max_chars {
-                break;
-            }
-            block = candidate;
-        }
-        if block == "## Style Examples\n" {
-            None
-        } else {
-            Some(block)
-        }
-    }
-
-    /// Build a packet from composed inputs.
+    /// Build a packet from composed inputs (legacy helper; prefer [`crate::context::pack_prompt`]).
     #[must_use]
     pub fn compose(
         kernel: IdentityKernel,
@@ -188,22 +139,147 @@ impl PromptPacket {
         max_prompt_tokens: usize,
         style_example_budget_tokens: usize,
     ) -> Self {
-        // Rough char budget from token limit (4 chars/token heuristic).
-        let max_chars = max_prompt_tokens.saturating_mul(4);
-        let style_max_chars = style_example_budget_tokens.saturating_mul(4);
-        Self {
-            identity_kernel: Some(kernel.text),
-            style_examples: style_examples.into_iter().map(|e| e.text).collect(),
-            recalled_memories: recalled,
-            commitments,
-            affect_summary,
-            history,
-            post_history_block,
-            user_input: user_input.into(),
-            max_chars,
-            style_max_chars,
+        let (semantic, profile, episodic) = classify_recalled_memories(&recalled);
+        let mut sections = Vec::new();
+
+        sections.push(PromptSection::new(
+            PromptSectionKind::IdentityKernel,
+            kernel.text,
+            0,
+        ));
+
+        if let Some(affect) = affect_summary {
+            sections.push(PromptSection::new(
+                PromptSectionKind::CharacterState,
+                affect,
+                200,
+            ));
+        }
+
+        if !semantic.is_empty() {
+            let body = semantic
+                .iter()
+                .map(|m| format_recalled_content(m))
+                .map(|line| format!("- {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            sections.push(PromptSection::new(
+                PromptSectionKind::SemanticContext,
+                body,
+                max_prompt_tokens / 4,
+            ));
+        }
+
+        if !profile.is_empty() {
+            let body = profile
+                .iter()
+                .map(|m| format_recalled_content(m))
+                .map(|line| format!("- {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            sections.push(PromptSection::new(
+                PromptSectionKind::UserProfile,
+                body,
+                max_prompt_tokens / 4,
+            ));
+        }
+
+        if !commitments.is_empty() {
+            sections.push(PromptSection::new(
+                PromptSectionKind::ActiveCommitments,
+                render_commitments_block(&commitments),
+                400,
+            ));
+        }
+
+        if !episodic.is_empty() {
+            let body = episodic
+                .iter()
+                .map(|m| format_recalled_content(m))
+                .map(|line| format!("- {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            sections.push(PromptSection::new(
+                PromptSectionKind::EpisodicMemories,
+                body,
+                max_prompt_tokens / 3,
+            ));
+        }
+
+        if !style_examples.is_empty() {
+            let body = style_examples
+                .into_iter()
+                .map(|e| e.text)
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            sections.push(PromptSection::new(
+                PromptSectionKind::StyleExamples,
+                body,
+                style_example_budget_tokens,
+            ));
+        }
+
+        if let Some(phi) = post_history_block {
+            sections.push(PromptSection::new(
+                PromptSectionKind::OutputContract,
+                phi,
+                0,
+            ));
+        }
+
+        sections.push(PromptSection::new(
+            PromptSectionKind::UserInput,
+            user_input.into(),
+            0,
+        ));
+
+        Self { sections, history }
+    }
+}
+
+/// Split recalled memories into semantic, profile, and episodic buckets.
+#[must_use]
+pub fn classify_recalled_memories(
+    recalled: &[RecalledMemory],
+) -> (Vec<&RecalledMemory>, Vec<&RecalledMemory>, Vec<&RecalledMemory>) {
+    let mut semantic = Vec::new();
+    let mut profile = Vec::new();
+    let mut episodic = Vec::new();
+
+    for memory in recalled {
+        match memory.item.kind {
+            MemoryKind::UserProfile | MemoryKind::Preference | MemoryKind::Relationship => {
+                profile.push(memory);
+            }
+            MemoryKind::Semantic | MemoryKind::Procedure
+                if memory.reason == RecallReason::CharacterLore
+                    || memory.item.source == MemorySource::Ccv3 =>
+            {
+                semantic.push(memory);
+            }
+            MemoryKind::Commitment => {}
+            _ => episodic.push(memory),
         }
     }
+
+    (semantic, profile, episodic)
+}
+
+/// Render active commitments as a bullet list body (without heading).
+#[must_use]
+pub fn render_commitments_block(commitments: &[ActiveCommitmentPrompt]) -> String {
+    commitments
+        .iter()
+        .map(|c| {
+            if c.description.is_empty() {
+                c.title.clone()
+            } else {
+                format!("{}: {}", c.title, c.description)
+            }
+        })
+        .map(|line| format!("- {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -211,9 +287,57 @@ mod tests {
     use super::*;
     use crate::character::StyleIntent;
     use ene_memory::{
-        AffectAnnotation, MemoryConfidence, MemoryItem, MemoryKind, MemorySalience, MemoryScope,
-        MemoryScoreBreakdown, MemorySource, MemoryStatus,
+        AffectAnnotation, MemoryConfidence, MemoryItem, MemorySalience, MemoryScope,
+        MemoryScoreBreakdown, MemoryStatus,
     };
+
+    #[test]
+    fn section_order_is_deterministic() {
+        let kernel = IdentityKernel {
+            name: "Ene".into(),
+            text: "KERNEL_MARKER".into(),
+            post_history_instructions: None,
+        };
+        let styles = vec![StyleExample {
+            text: "STYLE_MARKER".into(),
+            intent: StyleIntent::Greeting,
+        }];
+        let packet = PromptPacket::compose(
+            kernel,
+            styles,
+            vec![],
+            vec![],
+            Some("mood=calm".into()),
+            vec![],
+            Some("PHI_MARKER".into()),
+            "hello",
+            12_000,
+            600,
+        );
+        let (messages, meta) = packet.to_llm_messages();
+        assert!(meta.identity_kernel_included);
+        assert!(meta.post_history_included);
+        let LlmMessage::System { content } = &messages[0] else {
+            panic!("expected system");
+        };
+        let kernel_pos = content.find("KERNEL_MARKER").expect("kernel");
+        let style_pos = content.find("STYLE_MARKER").expect("style");
+        let mood_pos = content.find("mood=calm").expect("mood");
+        assert!(kernel_pos < style_pos);
+        assert!(kernel_pos < mood_pos);
+        assert_eq!(messages.len(), 3);
+        let LlmMessage::System { content } = &messages[0] else {
+            panic!("expected system");
+        };
+        assert!(!content.contains("PHI_MARKER"));
+        let LlmMessage::System { content } = &messages[1] else {
+            panic!("expected PHI system message");
+        };
+        assert!(content.contains("PHI_MARKER"));
+        let LlmMessage::User { .. } = &messages[2] else {
+            panic!("expected user message");
+        };
+    }
 
     #[test]
     fn identity_kernel_always_in_system_message() {
@@ -240,67 +364,6 @@ mod tests {
             panic!("expected system message");
         };
         assert!(content.contains("KERNEL_MARKER"));
-    }
-
-    #[test]
-    fn style_examples_appear_after_kernel() {
-        let kernel = IdentityKernel {
-            name: "Ene".into(),
-            text: "KERNEL".into(),
-            post_history_instructions: None,
-        };
-        let styles = vec![StyleExample {
-            text: "STYLE_MARKER".into(),
-            intent: StyleIntent::Greeting,
-        }];
-        let packet = PromptPacket::compose(
-            kernel,
-            styles,
-            vec![],
-            vec![],
-            None,
-            vec![],
-            None,
-            "hi",
-            12_000,
-            600,
-        );
-        let (messages, meta) = packet.to_llm_messages();
-        assert_eq!(meta.style_example_count, 1);
-        let LlmMessage::System { content } = &messages[0] else {
-            panic!("expected system");
-        };
-        assert!(content.contains("KERNEL"));
-        assert!(content.contains("STYLE_MARKER"));
-        assert!(content.find("KERNEL").unwrap() < content.find("STYLE_MARKER").unwrap());
-    }
-
-    #[test]
-    fn style_section_dropped_when_budget_zero() {
-        let kernel = IdentityKernel {
-            name: "Ene".into(),
-            text: "K".into(),
-            post_history_instructions: None,
-        };
-        let styles = vec![StyleExample {
-            text: "STYLE".into(),
-            intent: StyleIntent::Greeting,
-        }];
-        let mut packet = PromptPacket::compose(
-            kernel,
-            styles,
-            vec![],
-            vec![],
-            None,
-            vec![],
-            None,
-            "hi",
-            12_000,
-            600,
-        );
-        packet.style_max_chars = 0;
-        let (_, meta) = packet.to_llm_messages();
-        assert_eq!(meta.style_example_count, 0);
     }
 
     #[test]
@@ -346,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn recalled_memories_appear_in_system() {
+    fn recalled_memories_split_by_kind() {
         let kernel = IdentityKernel {
             name: "Ene".into(),
             text: "K".into(),
@@ -379,7 +442,7 @@ mod tests {
                 faded_at: None,
             },
             reason: crate::recall::RecallReason::UserPreference,
-            score_breakdown: ene_memory::MemoryScoreBreakdown {
+            score_breakdown: MemoryScoreBreakdown {
                 vector_similarity: 0.8,
                 lexical_score: 0.0,
                 recency_score: 0.0,
@@ -413,5 +476,6 @@ mod tests {
             panic!("expected system");
         };
         assert!(content.contains("matcha"));
+        assert!(content.contains("User Profile"));
     }
 }

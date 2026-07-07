@@ -81,17 +81,24 @@ MessageBuildContext {
 | `{{//...}}` / `{{comment:...}}` | コメント (削除) |
 | `{{reverse:...}}` | 文字列反転 |
 
-## Cognitive Runtime PromptPacket（#87 / Phase 5–6）
+## Cognitive Runtime PromptPacket（#87 / Phase 6）
 
-`cognition.enabled` が true のとき、`ene-core::streaming_cognitive` は `build_messages` の代わりに `CognitionEngine::compose_prompt_packet` を使う。system 内容の組み立て順:
+`cognition.enabled` が true のとき、`ene-core::streaming_cognitive` は Context Budget Manager（`ene-cognition::context::pack_prompt`）付きの `CognitionEngine::compose_prompt_packet` を使う。system 内容の組み立て順:
 
-| # | セクション | ソース | truncate |
-|---|-----------|--------|----------|
-| 1 | **Identity Kernel** | `CharacterCompiler`（#82） | 不可（コアヘッダー保持） |
-| 2 | **Style Examples** | `StyleExampleSelector`（#84） | drop 可。予算 `style_example_budget_tokens` |
-| 3 | **Recalled Memories** | hybrid recall + lorebook boost（#83） | `max_prompt_tokens` 尾部予算 |
-| 4 | **Active Commitments** | commitment ledger | 同上 |
-| 5 | **Current Mood** | affect 要約 | 同上 |
-| 6 | 履歴 | セッション履歴 | 別 LLM メッセージ |
-| 7 | **Expression PHI** | `build_expression_phi`（レガシー互換） | 履歴の後の別 system メッセージ |
-| 8 | 現在のユーザー入力 | ユーザーターン | 最後の LLM メッセージ |
+| # | セクション | ソース | 予算 / truncate |
+|---|-----------|--------|-----------------|
+| 1 | **Platform Contract** | `PromptLibrary` マスコット文脈 | 必須 |
+| 2 | **Identity Kernel** | `CharacterCompiler`（#82） | 必須。drop 不可 |
+| 3 | **Behavior Contract** | カード creator notes / ランタイムルール | 任意 |
+| 4 | **Current Mood** | `AffectState` 要約 | drop 可 |
+| 5 | **Current Scene** | アクティブな `memory_spans` シーン要約（#79） | drop 可。`scene_summary_tokens` |
+| 6 | **Semantic Context** | lorebook / 意味記憶 recall（#83） | drop 可。`semantic_budget_tokens` |
+| 7 | **User Profile** | 嗜好 / 関係性 recall | drop 可 |
+| 8 | **Active Commitments** | commitment ledger（#90） | drop 可 |
+| 9 | **Episodic Memories** | hybrid typed recall | drop 可。低信頼度を優先 drop |
+| 10 | **Style Examples** | `StyleExampleSelector`（#84） | drop 可。`style_example_budget_tokens` |
+| 11 | 履歴 | 直近 raw ターン（`recent_turns`） | 別 LLM メッセージ |
+| 12 | **Output Contract** | `build_expression_phi` | 必須。履歴後の別 system メッセージ |
+| 13 | 現在のユーザー入力 | ユーザーターン | 必須。最後の LLM メッセージ |
+
+オーバーフロー時: Identity Kernel・Platform Contract・Output Contract・現在のユーザー入力は drop されない。Style Examples と低信頼度記憶が最初に drop される。

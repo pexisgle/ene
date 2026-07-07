@@ -81,17 +81,24 @@ Tool specifications (`Vec<ToolSpec>`) are selected via `select_relevant_tools()`
 | `{{//...}}` / `{{comment:...}}` | Comment (removed) |
 | `{{reverse:...}}` | String reversal |
 
-## Cognitive Runtime PromptPacket (#87 / Phase 5–6)
+## Cognitive Runtime PromptPacket (#87 / Phase 6)
 
-When `cognition.enabled` is true, `ene-core::streaming_cognitive` uses `CognitionEngine::compose_prompt_packet` instead of `build_messages`. System content is assembled in this order:
+When `cognition.enabled` is true, `ene-core::streaming_cognitive` uses `CognitionEngine::compose_prompt_packet` with the Context Budget Manager (`ene-cognition::context::pack_prompt`). System content is assembled in this deterministic order:
 
-| # | Section | Source | Truncation |
-|---|---------|--------|------------|
-| 1 | **Identity Kernel** | `CharacterCompiler` (#82) | Never truncated (core header preserved) |
-| 2 | **Style Examples** | `StyleExampleSelector` (#84) | Droppable; budget `style_example_budget_tokens` |
-| 3 | **Recalled Memories** | Hybrid typed recall + lorebook boost (#83) | Subject to `max_prompt_tokens` tail budget |
-| 4 | **Active Commitments** | Commitment ledger | Same |
-| 5 | **Current Mood** | Affect state summary | Same |
-| 6 | History | Session history | Separate LLM messages |
-| 7 | **Expression PHI** | `build_expression_phi` (legacy parity) | Separate system message after history |
-| 8 | Current user input | User turn | Final LLM message |
+| # | Section | Source | Budget / Truncation |
+|---|---------|--------|---------------------|
+| 1 | **Platform Contract** | `PromptLibrary` mascot context | Required |
+| 2 | **Identity Kernel** | `CharacterCompiler` (#82) | Required; never dropped |
+| 3 | **Behavior Contract** | Card creator notes / runtime rules | Optional |
+| 4 | **Current Mood** | `AffectState` summary | Droppable; `cognition.context` budget |
+| 5 | **Current Scene** | Active `memory_spans` scene summary (#79) | Droppable; `scene_summary_tokens` |
+| 6 | **Semantic Context** | Lorebook / semantic recall (#83) | Droppable; `semantic_budget_tokens` |
+| 7 | **User Profile** | Preference / relationship recall | Droppable; memory budget share |
+| 8 | **Active Commitments** | Commitment ledger (#90) | Droppable |
+| 9 | **Episodic Memories** | Hybrid typed recall | Droppable; low confidence dropped first |
+| 10 | **Style Examples** | `StyleExampleSelector` (#84) | Droppable; `style_example_budget_tokens` |
+| 11 | History | Recent raw turns (`recent_turns`) | Separate LLM messages |
+| 12 | **Output Contract** | `build_expression_phi` | Required; separate system message after history |
+| 13 | Current user input | User turn | Required; final LLM message |
+
+Overflow policy: Identity Kernel, Platform Contract, Output Contract, and the current user input are never dropped. Style examples and low-confidence memories are dropped first.

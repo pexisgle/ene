@@ -82,9 +82,19 @@ async fn handle_split(ctx: &AppContext, snapshot: &ene_core::EneStateSnapshot) {
         return;
     }
 
+    let cognition_enabled = snapshot
+        .config
+        .get_section::<ene_core::CognitionConfig>()
+        .map(|c| c.enabled && c.context.compression_enabled)
+        .unwrap_or(false);
+
     println!(
         "{}",
-        style::header("[Session] Manually splitting session...")
+        style::header(if cognition_enabled {
+            "[Session] Manually triggering context compression..."
+        } else {
+            "[Session] Manually splitting session..."
+        })
     );
     match ctx.handle.manual_split().await {
         Ok(result) => {
@@ -95,7 +105,15 @@ async fn handle_split(ctx: &AppContext, snapshot: &ene_core::EneStateSnapshot) {
                     Truncate::simple(&result.summary, 120)
                 ))
             );
-            if !result.key_facts.is_empty() {
+            if cognition_enabled {
+                println!(
+                    "{}",
+                    style::warning(format!(
+                        "[Session] Session ID unchanged: {}",
+                        result.new_session_id
+                    ))
+                );
+            } else if !result.key_facts.is_empty() {
                 let facts_str = result
                     .key_facts
                     .iter()
@@ -107,7 +125,14 @@ async fn handle_split(ctx: &AppContext, snapshot: &ene_core::EneStateSnapshot) {
                     style::warning(format!("[Session] Key Facts: {facts_str}"))
                 );
             }
-            println!("{}", style::warning("[Session] Session split completed."));
+            println!(
+                "{}",
+                style::warning(if cognition_enabled {
+                    "[Session] Context compression completed."
+                } else {
+                    "[Session] Session split completed."
+                })
+            );
         }
         Err(e) => {
             println!("{}", style::error(format!("[Session] Split error: {e}")));

@@ -241,3 +241,72 @@ async fn cognitive_compose_includes_post_history_phi_block() {
         "post-history PHI should appear as a system message"
     );
 }
+
+#[tokio::test]
+async fn cognitive_compose_includes_active_scene_summary() {
+    use ene_memory::NewMemorySpan;
+
+    let store = MemoryStore::open_in_memory(4).await.unwrap();
+    store
+        .insert_memory_span(&NewMemorySpan {
+            session_id: "sess-scene".into(),
+            turn_start: 0,
+            turn_end: 4,
+            raw_excerpt: Some("user: hi\nassistant: hello".into()),
+            compressed_summary: Some("They greeted each other warmly.".into()),
+            compression_level: 0,
+        })
+        .await
+        .unwrap();
+
+    let mut card = CharacterCardV3::default();
+    card.data.name = "Ene".into();
+    card.data.system_prompt = "Be helpful.".into();
+
+    let cognition = CognitionConfig::default();
+    let engine = CognitionEngine::new();
+    let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbedder);
+    let llm: Arc<dyn LlmProvider> = Arc::new(MockLlm);
+    let query_emb = embedder.embed_query("hello").await.unwrap();
+
+    let pre_ctx = TurnContext {
+        config: &cognition,
+        card: &card,
+        character_id: "ene",
+        user_name: "user",
+        session_id: "sess-scene",
+        user_input: "hello again",
+        history: &[],
+        store: Some(&store),
+        query_embedding: Some(&query_emb),
+        embedder: Some(&embedder),
+        llm_provider: Some(llm.clone()),
+        post_history_block: None,
+    };
+    let pre = engine.before_turn(pre_ctx).await.expect("before_turn");
+
+    let compose_ctx = TurnContext {
+        config: &cognition,
+        card: &card,
+        character_id: "ene",
+        user_name: "user",
+        session_id: "sess-scene",
+        user_input: "hello again",
+        history: &[],
+        store: Some(&store),
+        query_embedding: Some(&query_emb),
+        embedder: Some(&embedder),
+        llm_provider: Some(llm),
+        post_history_block: None,
+    };
+    let composed = engine
+        .compose_prompt_packet(compose_ctx, &pre)
+        .await
+        .expect("compose");
+
+    assert!(composed.meta.scene_summary_included);
+    let LlmMessage::System { content } = &composed.messages[0] else {
+        panic!("expected system message");
+    };
+    assert!(content.contains("greeted each other"));
+}

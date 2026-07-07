@@ -1,12 +1,16 @@
+use ene_config::{CharacterCardV3, PromptLibrary};
 use ene_memory::MemoryStore;
 
 use crate::character::CharacterProcessor;
 use crate::commitments::CommitmentLedger;
 use crate::config::CognitionConfig;
+use crate::context::{
+    ContextBudget, ContextManager, PackInput, load_active_scene_summary, pack_prompt,
+    validate_context_config,
+};
 use crate::error::CognitionError;
 use crate::lifecycle::{ComposedPrompt, PostTurnInput, PreTurnOutput, TurnContext};
 use crate::memory_writer::MemoryWriter;
-use crate::prompt_packet::PromptPacket;
 use crate::recall::{ExecuteRecallInput, execute_hybrid_recall};
 
 /// Central cognitive engine facade.
@@ -14,7 +18,7 @@ pub struct CognitionEngine {
     /// Pre-turn input analysis.
     pub pre_turn: crate::pre_turn::PreTurnAnalyzer,
     /// Context budget and compression management.
-    pub context: crate::context::ContextManager,
+    pub context: ContextManager,
     /// Memory extraction and arbitration.
     pub memory_writer: MemoryWriter,
     /// Memory recall planning.
@@ -24,7 +28,7 @@ pub struct CognitionEngine {
     /// Character identity and lorebook processing.
     pub character: CharacterProcessor,
     /// Sectioned prompt composition.
-    pub prompt_packet: PromptPacket,
+    pub prompt_packet: crate::prompt_packet::PromptPacket,
     /// Expression arbitration and output validation.
     pub output: crate::output::OutputArbiter,
     /// Companion promise and task tracking.
@@ -43,15 +47,20 @@ impl CognitionEngine {
     pub fn new() -> Self {
         Self {
             pre_turn: crate::pre_turn::PreTurnAnalyzer,
-            context: crate::context::ContextManager,
+            context: ContextManager,
             memory_writer: MemoryWriter,
             recall: crate::recall::RecallPlanner,
             emotion: crate::emotion::EmotionEngine,
             character: CharacterProcessor,
-            prompt_packet: PromptPacket::default(),
+            prompt_packet: crate::prompt_packet::PromptPacket::default(),
             output: crate::output::OutputArbiter,
             commitments: CommitmentLedger,
         }
+    }
+
+    /// Validate cognitive configuration, including context sub-budgets.
+    pub fn validate_config(config: &CognitionConfig) -> Result<(), CognitionError> {
+        validate_context_config(&config.context)
     }
 
     /// Sync CCv3 lorebook and style indices when the card or config changes.
@@ -143,6 +152,8 @@ impl CognitionEngine {
         ctx: TurnContext<'_>,
         pre: &PreTurnOutput,
     ) -> Result<ComposedPrompt, CognitionError> {
+        Self::validate_config(ctx.config)?;
+
         let max_kernel_tokens = ctx.config.character.identity_kernel_max_tokens;
         let kernel = if ctx.config.character.always_include_identity_kernel {
             CharacterProcessor::compile_kernel(ctx.card, ctx.user_name, max_kernel_tokens)
@@ -171,21 +182,50 @@ impl CognitionEngine {
             pre.affect.mood_label, pre.affect.valence, pre.affect.arousal
         ));
 
-        let history = ctx.history.to_vec();
-        let packet = PromptPacket::compose(
-            kernel,
-            style_examples,
-            pre.recalled.clone(),
-            pre.commitments.clone(),
-            affect_summary,
-            history,
-            ctx.post_history_block.map(str::to_string),
-            ctx.user_input,
-            ctx.config.context.max_prompt_tokens,
-            ctx.config.context.style_example_budget_tokens,
-        );
+        let scene_summary = if let Some(store) = ctx.store {
+            load_active_scene_summary(store, ctx.session_id)
+                .await?
+                .map(|s| s.text)
+        } else {
+            None
+        };
 
-        let (messages, meta) = packet.to_llm_messages();
+        let prompts = PromptLibrary::load("en");
+        let char_name = ctx.card.data.get_character_name();
+        let platform_contract = Some(
+            prompts
+                .system()
+                .render_mascot_context(char_name, ctx.user_name),
+        );
+        let behavior_contract = build_behavior_contract(ctx.card, ctx.user_name);
+
+        let recent_limit = ctx.config.context.recent_turns.saturating_mul(2).max(2);
+        let history: Vec<_> = if ctx.history.len() > recent_limit {
+            ctx.history[ctx.history.len() - recent_limit..].to_vec()
+        } else {
+            ctx.history.to_vec()
+        };
+
+        let pack_input = PackInput {
+            platform_contract,
+            identity_kernel: kernel,
+            behavior_contract,
+            style_examples,
+            recalled: pre.recalled.clone(),
+            commitments: pre.commitments.clone(),
+            affect_summary,
+            scene_summary,
+            history,
+            output_contract: ctx.post_history_block.map(str::to_string),
+            user_input: ctx.user_input.to_string(),
+        };
+
+        let budget = ContextBudget::from_config_and_hints(&ctx.config.context, &pre.recall_plan.budget);
+        let packed = pack_prompt(pack_input, &budget);
+        let (messages, mut meta) = packed.packet.to_llm_messages();
+        meta.dropped_sections = packed.meta.dropped.clone();
+        meta.packed_tokens = packed.meta.packed_tokens;
+
         Ok(ComposedPrompt { messages, meta })
     }
 
@@ -197,5 +237,22 @@ impl CognitionEngine {
         input: PostTurnInput<'_>,
     ) -> Result<(), CognitionError> {
         MemoryWriter::after_turn(store, config, input).await
+    }
+}
+
+fn build_behavior_contract(card: &CharacterCardV3, user_name: &str) -> Option<String> {
+    let data = &card.data;
+    let char_name = data.get_character_name();
+    let mut parts = Vec::new();
+    if !data.creator_notes.trim().is_empty() {
+        parts.push(format!(
+            "## Creator Notes\n{}",
+            ene_config::expand_cbs_macros(&data.creator_notes, char_name, user_name)
+        ));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
     }
 }
