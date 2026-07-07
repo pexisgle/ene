@@ -53,29 +53,12 @@ pub mod error;
 /// Turn lifecycle DTOs for streaming integration (#100).
 pub mod lifecycle;
 
-/// Emotion engine types.
-#[doc(no_inline)]
-pub use emotion::{AffectProposal, EmotionEngine, TurnAffectInput};
-/// Expression arbiter types.
-#[doc(no_inline)]
-pub use output::{ExpressionDecision, ExpressionInput, ExpressionSource, OutputArbiter};
 #[doc(no_inline)]
 pub use commitments::{CommitmentLedger, CommitmentSyncContext};
 /// Cognitive configuration section.
 pub use config::{
     CharacterMemoryConfig, CognitionConfig, CognitionMemoryConfig, ContextConfig, EmotionConfig,
-    EngineMode,
-};
-/// Re-export commitment domain types from ene-memory for consumers.
-#[doc(no_inline)]
-pub use ene_memory::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
-/// Central cognitive engine facade.
-pub use engine::CognitionEngine;
-/// Cognitive runtime error type.
-pub use error::{CognitionError, EneCognitionError};
-/// Turn lifecycle types for streaming integration.
-pub use lifecycle::{
-    ComposedPrompt, HistoryEntry, PostTurnInput, PreTurnOutput, PromptPacketMeta, TurnContext,
+    EngineMode, ToolGroundingConfig,
 };
 /// Context budget and compression types.
 #[doc(no_inline)]
@@ -87,9 +70,20 @@ pub use context::{
     maybe_roll_up_chapter, pack_prompt, poll_compression_result, spawn_compression_task,
     validate_context_config,
 };
-/// Prompt packet section types.
+/// Emotion engine types.
 #[doc(no_inline)]
-pub use prompt_packet::{PromptPacket, PromptSection, PromptSectionKind};
+pub use emotion::{AffectProposal, EmotionEngine, TurnAffectInput};
+/// Re-export commitment domain types from ene-memory for consumers.
+#[doc(no_inline)]
+pub use ene_memory::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
+/// Central cognitive engine facade.
+pub use engine::CognitionEngine;
+/// Cognitive runtime error type.
+pub use error::{CognitionError, EneCognitionError};
+/// Turn lifecycle types for streaming integration.
+pub use lifecycle::{
+    ComposedPrompt, HistoryEntry, PostTurnInput, PreTurnOutput, PromptPacketMeta, TurnContext,
+};
 /// Memory arbiter and related decision types.
 #[doc(no_inline)]
 pub use memory_writer::{
@@ -97,6 +91,12 @@ pub use memory_writer::{
     ArbiterReasonCode, CandidateDecision, CandidateProvenance, ForgettingContext,
     ForgettingLifecycle, ForgettingReport, MemoryArbiter, SemanticMatch,
 };
+/// Expression arbiter types.
+#[doc(no_inline)]
+pub use output::{ExpressionDecision, ExpressionInput, ExpressionSource, OutputArbiter};
+/// Prompt packet section types.
+#[doc(no_inline)]
+pub use prompt_packet::{PromptPacket, PromptSection, PromptSectionKind};
 /// Recall planning types.
 #[doc(no_inline)]
 pub use recall::{

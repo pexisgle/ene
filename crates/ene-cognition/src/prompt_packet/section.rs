@@ -38,10 +38,7 @@ impl PromptSectionKind {
     pub const fn is_required(self) -> bool {
         matches!(
             self,
-            Self::PlatformContract
-                | Self::IdentityKernel
-                | Self::OutputContract
-                | Self::UserInput
+            Self::PlatformContract | Self::IdentityKernel | Self::OutputContract | Self::UserInput
         )
     }
 

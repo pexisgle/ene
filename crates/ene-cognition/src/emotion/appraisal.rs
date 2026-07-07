@@ -127,7 +127,10 @@ pub fn apply_appraisal(
         if !deltas.is_empty() {
             reasons.push(AffectUpdateReason {
                 category: rule.category,
-                detail: format!("matched keyword rule `{category}`", category = rule.category),
+                detail: format!(
+                    "matched keyword rule `{category}`",
+                    category = rule.category
+                ),
                 deltas,
             });
         }

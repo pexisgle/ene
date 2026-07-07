@@ -360,11 +360,11 @@ impl Runtime {
             .get_section::<ene_core::CognitionConfig>()
             .map(|c| c.emotion.expression_hysteresis_seconds)
             .unwrap_or(4.0);
-        if let Some(mut pipeline) = self
-            .state
-            .app
-            .world_mut()
-            .get_resource_mut::<crate::resource::emotion_pipeline::EmotionPipelineState>()
+        if let Some(mut pipeline) =
+            self.state
+                .app
+                .world_mut()
+                .get_resource_mut::<crate::resource::emotion_pipeline::EmotionPipelineState>()
         {
             pipeline.expression_hold_secs = expression_hold_secs;
         }

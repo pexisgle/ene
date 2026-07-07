@@ -39,9 +39,7 @@ pub async fn classify_with_timeout(
     )
     .await
     .map_err(|_| {
-        CognitionError::EmotionFailed(format!(
-            "Affect classifier timed out after {timeout_secs}s"
-        ))
+        CognitionError::EmotionFailed(format!("Affect classifier timed out after {timeout_secs}s"))
     })?
     .map_err(|e| CognitionError::EmotionFailed(format!("LLM provider error: {e}")))?;
 

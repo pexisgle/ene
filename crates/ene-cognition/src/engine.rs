@@ -157,11 +157,9 @@ impl CognitionEngine {
                 .await
                 {
                     Ok(proposal)
-                        if proposal.confidence
-                            >= ctx.config.emotion.classifier_min_confidence =>
+                        if proposal.confidence >= ctx.config.emotion.classifier_min_confidence =>
                     {
-                        classifier_expression_hint =
-                            Some(proposal.recommended_expression.clone());
+                        classifier_expression_hint = Some(proposal.recommended_expression.clone());
                         turn_input = turn_input.with_proposal(proposal);
                     }
                     Ok(proposal) if proposal.confidence > 0.0 => {
@@ -178,7 +176,9 @@ impl CognitionEngine {
                 }
             }
 
-            let update = self.emotion.update_turn(&ctx.config.emotion, &mut turn_input);
+            let update = self
+                .emotion
+                .update_turn(&ctx.config.emotion, &mut turn_input);
             tracing::debug!(
                 component = "CognitionEngine",
                 mood = %update.mood_label,
@@ -320,7 +320,8 @@ impl CognitionEngine {
             user_input: ctx.user_input.to_string(),
         };
 
-        let budget = ContextBudget::from_config_and_hints(&ctx.config.context, &pre.recall_plan.budget);
+        let budget =
+            ContextBudget::from_config_and_hints(&ctx.config.context, &pre.recall_plan.budget);
         let packed = pack_prompt(pack_input, &budget);
         let (messages, mut meta) = packed.packet.to_llm_messages();
         meta.dropped_sections = packed.meta.dropped.clone();

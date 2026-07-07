@@ -4,9 +4,7 @@
 
 use std::time::Duration;
 
-use ene_cognition::{
-    AffectProposal, EmotionConfig, EmotionEngine, TurnAffectInput,
-};
+use ene_cognition::{AffectProposal, EmotionConfig, EmotionEngine, TurnAffectInput};
 use ene_memory::AffectState;
 
 #[test]

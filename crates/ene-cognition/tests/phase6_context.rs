@@ -1,11 +1,11 @@
 //! Phase 6 context management tests (#79, #81).
 
-use ene_cognition::{
-    CognitionConfig, CompressionResult, CompressionLevel, ContextConfig, ContextManager,
-    PackInput, compression_has_usable_summary, evaluate_compression_trigger, pack_prompt,
-    validate_context_config, ContextBudget,
-};
 use ene_cognition::character::IdentityKernel;
+use ene_cognition::{
+    CognitionConfig, CompressionLevel, CompressionResult, ContextBudget, ContextConfig,
+    ContextManager, PackInput, compression_has_usable_summary, evaluate_compression_trigger,
+    pack_prompt, validate_context_config,
+};
 
 #[test]
 fn context_config_validation_accepts_default_budgets() {

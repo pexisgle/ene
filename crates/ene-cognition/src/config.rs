@@ -130,6 +130,8 @@ pub struct CognitionMemoryConfig {
     /// provider does not respond within this budget the extraction fails and
     /// the pipeline falls back to deterministic candidates (issue #66).
     pub extraction_timeout_secs: u64,
+    /// Tool-result grounding and guardrail settings (#92).
+    pub tool_grounding: ToolGroundingConfig,
     /// Use HyDE query expansion for cognitive memory recall. The planner only
     /// records this hint; downstream recall execution performs the provider call.
     pub use_hyde: bool,
@@ -169,6 +171,26 @@ pub struct CognitionMemoryConfig {
     pub require_migration: bool,
 }
 
+/// Tool-result grounding and guardrail settings.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct ToolGroundingConfig {
+    /// Enable grounding tool call results into cognitive memory (#92).
+    pub enabled: bool,
+    /// Maximum characters kept for each tool summary stored in memory.
+    pub max_summary_chars: usize,
+    /// Persist successful tool calls as procedure memories.
+    pub persist_success_procedure: bool,
+    /// Persist failed tool calls as reflection memories.
+    pub persist_failure_reflection: bool,
+    /// Persist concise user-visible tool outcomes as episodic memories.
+    pub persist_user_visible_episodic: bool,
+    /// Minimum confidence for tool-derived candidates.
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    pub min_confidence: f32,
+}
+
 /// Clamp a deserialized confidence into the closed unit interval
 /// `0.0..=1.0`. Out-of-range user config values are clamped rather
 /// than rejected so a bad hand-edit degrades gracefully instead of
@@ -199,6 +221,7 @@ impl Default for CognitionMemoryConfig {
             default_forgetting_half_life_days: 30.0,
             min_confidence_to_persist: 0.65,
             extraction_timeout_secs: 30,
+            tool_grounding: ToolGroundingConfig::default(),
             use_hyde: false,
             recall_result_limit: 8,
             recall_similarity_threshold: 0.35,
@@ -215,6 +238,19 @@ impl Default for CognitionMemoryConfig {
             mmr_min_slots_commitment: 1,
             mmr_source_diversity_bonus: 0.05,
             require_migration: false,
+        }
+    }
+}
+
+impl Default for ToolGroundingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_summary_chars: 500,
+            persist_success_procedure: true,
+            persist_failure_reflection: true,
+            persist_user_visible_episodic: true,
+            min_confidence: 0.60,
         }
     }
 }
@@ -327,5 +363,18 @@ mod tests {
         assert!((cfg.mmr_lambda - 1.0).abs() < f32::EPSILON);
         assert!(cfg.mmr_duplicate_cluster_threshold < f32::EPSILON);
         assert!((cfg.mmr_source_diversity_bonus - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn tool_grounding_min_confidence_out_of_range_is_clamped() {
+        let cfg: CognitionMemoryConfig = serde_json::from_str(
+            r#"{
+                "tool_grounding": {
+                    "min_confidence": 2.0
+                }
+            }"#,
+        )
+        .expect("deserialize");
+        assert!((cfg.tool_grounding.min_confidence - 1.0).abs() < f32::EPSILON);
     }
 }

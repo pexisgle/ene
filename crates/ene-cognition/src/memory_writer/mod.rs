@@ -5,11 +5,13 @@ pub mod candidate;
 pub mod deterministic;
 pub mod forgetting;
 pub mod llm;
+pub mod tool_grounding;
 
 pub use arbiter::{
     AppliedDecision, ArbiterAction, ArbiterContext, ArbiterOptions, ArbiterReason,
     ArbiterReasonCode, CandidateDecision, CandidateProvenance, MemoryArbiter, SemanticMatch,
 };
+pub use candidate::ToolResultSummary;
 pub use forgetting::{ForgettingContext, ForgettingLifecycle, ForgettingReport};
 
 use std::collections::HashMap;
@@ -17,6 +19,7 @@ use std::collections::HashMap;
 use chrono::Utc;
 use ene_memory::MemoryStore;
 
+use crate::commitments::{CommitmentLedger, CommitmentSyncContext};
 use crate::config::CognitionConfig;
 use crate::error::CognitionError;
 use crate::lifecycle::PostTurnInput;
@@ -36,10 +39,11 @@ impl MemoryWriter {
             return Ok(());
         }
 
-        let candidates = deterministic::extract(
+        let candidates = deterministic::extract_with_tool_grounding(
             &input.turn,
             candidate::Locale::En,
             config.memory.min_confidence_to_persist as f32,
+            &config.memory.tool_grounding,
         )?;
 
         if candidates.is_empty() {
@@ -50,7 +54,7 @@ impl MemoryWriter {
             min_confidence: config.memory.min_confidence_to_persist as f32,
             ..Default::default()
         };
-        let ctx = ArbiterContext {
+        let base_ctx = ArbiterContext {
             turn: candidate::TurnInput {
                 user_message: input.turn.user_message,
                 assistant_message: input.turn.assistant_message,
@@ -63,7 +67,38 @@ impl MemoryWriter {
             options,
             semantic_matches: HashMap::new(),
         };
-        MemoryArbiter::arbitrate_and_apply(store, &candidates, &ctx).await?;
+
+        let sync_ctx = CommitmentSyncContext {
+            character_id: input.character_id,
+            user_id: input.user_id,
+        };
+        let mut regular = Vec::new();
+
+        for (idx, candidate) in candidates.into_iter().enumerate() {
+            if candidate.source_quote.is_empty() {
+                let source_ref = Some(format!("tool:{}:{}", sanitize_ref(&candidate.title), idx));
+                let ctx = ArbiterContext {
+                    source_ref: source_ref.as_deref(),
+                    ..base_ctx.clone()
+                };
+                let _ = CommitmentLedger::arbitrate_apply_and_sync(
+                    store,
+                    &[candidate],
+                    &ctx,
+                    &sync_ctx,
+                )
+                .await?;
+            } else {
+                regular.push(candidate);
+            }
+        }
+
+        if !regular.is_empty() {
+            let _ =
+                CommitmentLedger::arbitrate_apply_and_sync(store, &regular, &base_ctx, &sync_ctx)
+                    .await?;
+        }
+
         Ok(())
     }
 
@@ -96,6 +131,22 @@ impl MemoryWriter {
     ) -> Result<(), CognitionError> {
         Self::write_memories(store, config, &input).await?;
         Self::finalize_turn(store, config, &input).await
+    }
+}
+
+fn sanitize_ref(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':' {
+            out.push(c.to_ascii_lowercase());
+        } else if c.is_whitespace() {
+            out.push('-');
+        }
+    }
+    if out.is_empty() {
+        "tool".to_string()
+    } else {
+        out
     }
 }
 

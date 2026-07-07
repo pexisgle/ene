@@ -241,7 +241,11 @@ impl PromptPacket {
 #[must_use]
 pub fn classify_recalled_memories(
     recalled: &[RecalledMemory],
-) -> (Vec<&RecalledMemory>, Vec<&RecalledMemory>, Vec<&RecalledMemory>) {
+) -> (
+    Vec<&RecalledMemory>,
+    Vec<&RecalledMemory>,
+    Vec<&RecalledMemory>,
+) {
     let mut semantic = Vec::new();
     let mut profile = Vec::new();
     let mut episodic = Vec::new();

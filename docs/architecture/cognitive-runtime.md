@@ -193,6 +193,16 @@ Validation gates:
 
 Deduplication uses normalized exact match first; optional pre-computed semantic matches (vector search) can collapse near-duplicates or trigger supersede/dispute logic. Until MemoryWriter orchestration (#100) wires embedding search, callers must populate `ArbiterContext::semantic_matches` themselves (e.g. from `MemoryStore::search_typed_memories`).
 
+### Tool Result Grounding (#92)
+
+Phase 8 grounds tool-call outcomes into typed memory with explicit safety constraints:
+
+- `ene-core::streaming::perform_tool_executions` emits bounded `ToolResultSummary` entries for each call.
+- `ene-cognition::memory_writer::tool_grounding` sanitizes/truncates raw outputs (`max_summary_chars`) and masks screenshot payloads so large blobs are not persisted verbatim.
+- Success paths produce `Procedure` candidates and short user-visible outcomes can produce `Episodic` candidates.
+- Failure paths produce `Reflection` candidates so repeated failed actions can be avoided in later turns.
+- The cognitive streaming path now forwards per-turn `tool_results` into `PostTurnInput`, enabling Memory Writer + Arbiter persistence with `source_ref` prefix `tool:`.
+
 ### Companion Commitment Ledger
 
 Promises, tasks, and follow-ups (e.g. “let’s discuss this next time”) are tracked in a dedicated `commitments` table, separate from generic typed memory recall scoring.

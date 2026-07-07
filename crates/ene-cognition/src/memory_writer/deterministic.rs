@@ -10,7 +10,7 @@
 //! - Nickname: 0.75
 //! - NG instruction: 0.80
 //! - Commitment: 0.50
-//! - Tool success (procedure): 0.55
+//! - Tool-grounded procedure/reflection/episodic: 0.60–0.70
 //! - Soft signals (implicit): 0.30–0.50
 
 #![allow(clippy::unwrap_used)]
@@ -19,6 +19,8 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 use super::candidate::{Locale, MemoryCandidate, ToolResultSummary, TurnInput};
+use super::tool_grounding;
+use crate::config::ToolGroundingConfig;
 use crate::error::CognitionError;
 use ene_memory::typed_memory::MemoryKind;
 
@@ -459,36 +461,6 @@ fn en_commitment(
 }
 
 // ---------------------------------------------------------------------------
-// Tool-result matcher (locale-independent)
-// ---------------------------------------------------------------------------
-
-fn tool_procedure(
-    _user_msg: &str,
-    _asst_msg: &str,
-    tool_results: &[ToolResultSummary],
-) -> Option<MemoryCandidate> {
-    let successful: Vec<&ToolResultSummary> = tool_results.iter().filter(|t| t.success).collect();
-    if successful.is_empty() {
-        return None;
-    }
-    let content = successful
-        .iter()
-        .map(|t| format!("[{}] {}", t.tool_name, t.summary))
-        .collect::<Vec<_>>()
-        .join("; ");
-    Some(MemoryCandidate {
-        kind: MemoryKind::Procedure,
-        title: "tool success".to_string(),
-        content,
-        source_quote: String::new(),
-        confidence: 0.55,
-        should_persist: true,
-        deletion_target_key: None,
-        commitment_due: None,
-    })
-}
-
-// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -524,6 +496,21 @@ pub fn extract(
     locale: Locale,
     min_confidence: f32,
 ) -> Result<Vec<MemoryCandidate>, CognitionError> {
+    extract_with_tool_grounding(
+        turn,
+        locale,
+        min_confidence,
+        &ToolGroundingConfig::default(),
+    )
+}
+
+/// Same as [`extract`], but with explicit tool-grounding configuration.
+pub fn extract_with_tool_grounding(
+    turn: &TurnInput<'_>,
+    locale: Locale,
+    min_confidence: f32,
+    tool_grounding_cfg: &ToolGroundingConfig,
+) -> Result<Vec<MemoryCandidate>, CognitionError> {
     let user_norm = nfkc(turn.user_message);
     let asst_norm = turn.assistant_message.map(nfkc).unwrap_or_default();
 
@@ -540,16 +527,23 @@ pub fn extract(
         }
     }
 
-    // Tool-result matcher (always applied)
-    if let Some(c) = tool_procedure(&user_norm, &asst_norm, turn.tool_results) {
-        candidates.push(c);
-    }
+    // Tool-result matcher (always applied when enabled).
+    candidates.extend(tool_grounding::extract_tool_candidates(
+        turn.tool_results,
+        tool_grounding_cfg,
+    ));
 
     // Filter by min_confidence and deduplicate by (title, kind)
     let mut seen = std::collections::HashSet::new();
     let filtered: Vec<MemoryCandidate> = candidates
         .into_iter()
-        .filter(|c| c.confidence >= min_confidence)
+        .filter(|c| {
+            if c.source_quote.is_empty() {
+                c.confidence >= tool_grounding_cfg.min_confidence
+            } else {
+                c.confidence >= min_confidence
+            }
+        })
         .filter(|c| {
             let key = (c.title.clone(), c.kind, c.should_persist);
             seen.insert(key)
@@ -833,9 +827,8 @@ mod tests {
             tool_results: &tools,
         };
         let out = extract(&turn, Locale::Ja, 0.0).expect("extract failed");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].kind, MemoryKind::Procedure);
-        assert!(out[0].content.contains("fs"));
+        assert!(out.iter().any(|c| c.kind == MemoryKind::Procedure));
+        assert!(out.iter().any(|c| c.content.contains("fs")));
     }
 
     // ── Edge cases ────────────────────────────────────────────────────

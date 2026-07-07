@@ -45,11 +45,8 @@ impl EmotionEngine {
         }
 
         if let Some(proposal) = &input.classifier_proposal
-            && let Some(reason) = merge_classifier_proposal(
-                input.state,
-                proposal,
-                input.classifier_min_confidence,
-            )
+            && let Some(reason) =
+                merge_classifier_proposal(input.state, proposal, input.classifier_min_confidence)
         {
             reasons.push(reason);
         }
@@ -98,8 +95,20 @@ fn merge_classifier_proposal(
     let weight = proposal.confidence.clamp(0.0, 1.0);
     let mut deltas = Vec::new();
 
-    apply_weighted_delta(state, "valence", proposal.valence_delta, weight, &mut deltas);
-    apply_weighted_delta(state, "arousal", proposal.arousal_delta, weight, &mut deltas);
+    apply_weighted_delta(
+        state,
+        "valence",
+        proposal.valence_delta,
+        weight,
+        &mut deltas,
+    );
+    apply_weighted_delta(
+        state,
+        "arousal",
+        proposal.arousal_delta,
+        weight,
+        &mut deltas,
+    );
     apply_weighted_delta(
         state,
         "irritation",
@@ -107,7 +116,13 @@ fn merge_classifier_proposal(
         weight,
         &mut deltas,
     );
-    apply_weighted_delta(state, "affinity", proposal.affinity_delta, weight, &mut deltas);
+    apply_weighted_delta(
+        state,
+        "affinity",
+        proposal.affinity_delta,
+        weight,
+        &mut deltas,
+    );
 
     if deltas.is_empty() {
         return None;
@@ -223,16 +238,16 @@ mod tests {
         let run = || {
             let mut state = AffectState::neutral("ene");
             state.valence = 0.2;
-        let mut input = TurnAffectInput {
-            state: &mut state,
-            user_message: "Thank you!",
-            elapsed_since_update: Duration::from_secs(60),
-            recent_turn_count: 4,
-            classifier_proposal: None,
-            classifier_min_confidence: 0.5,
-            llm_only: false,
-        };
-        engine.update_turn(&config, &mut input);
+            let mut input = TurnAffectInput {
+                state: &mut state,
+                user_message: "Thank you!",
+                elapsed_since_update: Duration::from_secs(60),
+                recent_turn_count: 4,
+                classifier_proposal: None,
+                classifier_min_confidence: 0.5,
+                llm_only: false,
+            };
+            engine.update_turn(&config, &mut input);
             state
         };
 

@@ -337,6 +337,18 @@ score =
 
 カードから消えた `source_ref` は reindex 時に archive される。同一 `source_ref` で内容が変わった行は **supersede** され再埋め込みされる。セッションは `MemoryContext.ccv3_memory_hash` に lorebook/style の結合ハッシュを保持し、ターン間の冗長 sync を省略する。Store ヘルパー: `list_typed_memories_by_source_prefix`, `get_active_typed_memory_by_source_ref`, `archive_typed_memories_by_source_prefixes`, `supersede_typed_memory`。
 
+### Tool Result Grounding（#92）
+
+ツール実行結果は、cognitive の post-turn writer を通じて typed memory に取り込まれる:
+
+- 各呼び出し結果は `ToolResultSummary { tool_name, success, summary }` として収集される。
+- 生出力は `max_summary_chars` で sanitize/truncate され、スクリーンショット payload は固定の sentinel 文字列に置き換えられる。
+- 成功結果は `Procedure` 記憶として保存される（`source_ref` プレフィックス: `tool:`）。
+- 失敗結果は `Reflection` 記憶として保存され、同じ失敗経路の反復を避けるヒントに使われる。
+- 短くユーザー向けの成功結果は、設定有効時に `Episodic` 記憶としても保存できる。
+
+これにより recall に有用な情報を残しつつ、巨大な生ツール出力の丸ごと保存を防ぐ。
+
 ### Optional Memory Reranking（#77）
 
 ハイブリッド検索の後、downstream recall execution は `RecalledMemory` への変換前に optional な rerank を実行できます。

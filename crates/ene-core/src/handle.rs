@@ -4,16 +4,16 @@ use crate::error::EneCoreError;
 use crate::streaming::{self, PermissionDecision, UserInputResponse};
 use crate::types::RequestId;
 use chrono::{DateTime, Utc};
-use ene_config::CharacterCardV3;
-use ene_config::EneConfig;
-use ene_provider::LlmProviderRegistry;
-use ene_provider::Role;
 use ene_cognition::{
     CompressionLevel, CompressionTaskInput, HistoryEntry as CognitionHistoryEntry,
     MIN_MESSAGES_TO_COMPRESS, PendingCompressionTask, compression_has_usable_summary,
     evaluate_compression_trigger, execute_compression, maybe_roll_up_chapter,
     poll_compression_result, spawn_compression_task,
 };
+use ene_config::CharacterCardV3;
+use ene_config::EneConfig;
+use ene_provider::LlmProviderRegistry;
+use ene_provider::Role;
 use ene_session::PendingSplitTask;
 use ene_session::{CardName, SessionId};
 use ene_session::{

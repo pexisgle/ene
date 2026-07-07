@@ -213,8 +213,11 @@ pub fn build_natural_dialogue_contract(
     let char_name = card.data.get_character_name();
     let manual = card.data.post_history_instructions.trim();
 
-    let mut contract =
-        expand_cbs_macros(&prompts.emotion().natural_dialogue_contract, char_name, user_name);
+    let mut contract = expand_cbs_macros(
+        &prompts.emotion().natural_dialogue_contract,
+        char_name,
+        user_name,
+    );
 
     if manual.is_empty() {
         Some(contract)

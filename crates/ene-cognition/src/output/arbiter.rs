@@ -138,9 +138,7 @@ pub fn normalize_expression(name: &str, available: &[String]) -> String {
         return alias.to_string();
     }
     // Nearest Levenshtein among available.
-    if let Some(best) = available
-        .iter()
-        .min_by_key(|n| levenshtein(&lower, n))
+    if let Some(best) = available.iter().min_by_key(|n| levenshtein(&lower, n))
         && levenshtein(&lower, best) <= 2
     {
         return best.clone();
@@ -152,7 +150,10 @@ fn fallback_name(available: &[String]) -> String {
     if available.iter().any(|n| n == "neutral") {
         "neutral".into()
     } else {
-        available.first().cloned().unwrap_or_else(|| "neutral".into())
+        available
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "neutral".into())
     }
 }
 
@@ -164,11 +165,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
         let mut curr = vec![i + 1];
         for (j, cb) in b.iter().enumerate() {
             let cost = if ca == cb { 0 } else { 1 };
-            curr.push(
-                (prev[j + 1] + 1)
-                    .min(curr[j] + 1)
-                    .min(prev[j] + cost),
-            );
+            curr.push((prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost));
         }
         prev = curr;
     }

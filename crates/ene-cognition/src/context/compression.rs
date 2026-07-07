@@ -381,7 +381,10 @@ mod tests {
     fn trigger_fires_on_turn_threshold() {
         let config = ContextConfig::default();
         let reason = evaluate_compression_trigger(&config, config.scene_turn_threshold, 4);
-        assert!(matches!(reason, Some(CompressionReason::TurnThreshold { .. })));
+        assert!(matches!(
+            reason,
+            Some(CompressionReason::TurnThreshold { .. })
+        ));
     }
 
     #[test]

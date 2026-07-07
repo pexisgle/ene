@@ -371,6 +371,14 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
       "default_forgetting_half_life_days": 30.0,
       "min_confidence_to_persist": 0.65,
       "extraction_timeout_secs": 30,
+      "tool_grounding": {
+        "enabled": true,
+        "max_summary_chars": 500,
+        "persist_success_procedure": true,
+        "persist_failure_reflection": true,
+        "persist_user_visible_episodic": true,
+        "min_confidence": 0.60
+      },
       "use_hyde": false,
       "recall_result_limit": 8,
       "recall_similarity_threshold": 0.35,
@@ -439,6 +447,7 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 | `default_forgetting_half_life_days` | float | `30.0` | ライフサイクル減衰スコアと recall 新しさスコアの半減期（日） |
 | `min_confidence_to_persist` | float | `0.65` | 記憶永続化の最低信頼度しきい値（0.0〜1.0） |
 | `extraction_timeout_secs` | int | `30` | LLM 記憶抽出呼び出し 1 回のタイムアウト（秒）。超過時は抽出失敗となり deterministic 候補にフォールバック |
+| `tool_grounding` | object | (下記参照) | ツール結果のグラウンディング用ガードレールと候補抽出設定（#92） |
 | `use_hyde` | bool | `false` | cognitive recall plan に HyDE query expansion hint を記録する。実際の provider 呼び出しは後続の recall execution が担当 |
 | `recall_result_limit` | int | `8` | `RecallPlan` が要求する型付き記憶結果の最大数 |
 | `recall_similarity_threshold` | float | `0.35` | vector 由来 recall candidate の最低類似度 |
@@ -455,6 +464,17 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 | `mmr_min_slots_commitment` | int | `1` | commitment 記憶の最低 recalled 枠 |
 | `mmr_source_diversity_bonus` | float | `0.05` | 新しい recall source 種別を持つ候補に加算する MMR ボーナス |
 | `require_migration` | bool | `false` | true のとき、レガシー summaries/keyfacts が残り migration 未完了なら typed recall をブロック（通常の `conversation_logs` だけではブロックしない）(#98) |
+
+#### `cognition.memory.tool_grounding` — ツール結果グラウンディング
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|------|---------|------|
+| `enabled` | bool | `true` | ツール呼び出し結果を認知記憶へグラウンディングする |
+| `max_summary_chars` | int | `500` | 記憶保存前にツール要約で保持する最大文字数 |
+| `persist_success_procedure` | bool | `true` | 成功したツール呼び出しを `Procedure` 記憶として保存する |
+| `persist_failure_reflection` | bool | `true` | 失敗したツール呼び出しを `Reflection` 記憶として保存する |
+| `persist_user_visible_episodic` | bool | `true` | ユーザー向けに意味のある短い結果を `Episodic` 記憶として保存する |
+| `min_confidence` | float | `0.60` | ツール由来記憶候補の信頼度しきい値（`0.0`–`1.0`） |
 
 #### `cognition.emotion` — 感情エンジン
 

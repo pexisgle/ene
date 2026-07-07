@@ -344,6 +344,18 @@ When `cognition.enabled` is true, `CognitionEngine::sync_character_memories` com
 
 Rows under these prefixes that are no longer present in the card are archived on reindex. Rows with the same `source_ref` but changed content are **superseded** and re-embedded. The session caches the combined lorebook/style hash in `MemoryContext.ccv3_memory_hash` to skip redundant sync work across turns. Store helpers: `list_typed_memories_by_source_prefix`, `get_active_typed_memory_by_source_ref`, `archive_typed_memories_by_source_prefixes`, `supersede_typed_memory`.
 
+### Tool Result Grounding (#92)
+
+Tool execution results are grounded into typed memory through the cognitive post-turn writer:
+
+- Tool outcomes are captured as `ToolResultSummary { tool_name, success, summary }` per call.
+- Raw outputs are sanitized and truncated by `max_summary_chars`; screenshot payloads are reduced to a fixed sentinel message.
+- Successful calls produce `Procedure` memories (`source_ref` prefix: `tool:`).
+- Failed calls produce `Reflection` memories so future behavior can avoid repeating the same failed path.
+- Short user-visible successes may also produce `Episodic` memories when enabled.
+
+This keeps memory useful for recall while preventing large raw tool outputs from being persisted as-is.
+
 ### Optional Memory Reranking (#77)
 
 After hybrid search, downstream recall execution may optionally rerank the top candidates before mapping to `RecalledMemory`:

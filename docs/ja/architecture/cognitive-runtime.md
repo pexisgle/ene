@@ -193,6 +193,16 @@ Recall Planner が生成するクエリ計画：
 
 重複排除は正規化した完全一致を先に適用し、オプションの意味的マッチ（ベクトル検索結果）で近傍重複の統合や supersede/dispute を行う。MemoryWriter オーケストレーション（#100）が埋め込み検索を接続するまで、呼び出し側は `ArbiterContext::semantic_matches` を自前で設定する必要がある（例: `MemoryStore::search_typed_memories` から）。
 
+### Tool Result Grounding（#92）
+
+Phase 8 では、ツール呼び出し結果を安全に typed memory へ接続する:
+
+- `ene-core::streaming::perform_tool_executions` が各呼び出しごとに境界付き `ToolResultSummary` を生成する。
+- `ene-cognition::memory_writer::tool_grounding` が生の出力を sanitize/truncate（`max_summary_chars`）し、スクリーンショット payload などの巨大データをそのまま保存しない。
+- 成功結果は `Procedure` 候補になり、短くユーザー向けの結果は `Episodic` 候補として追加できる。
+- 失敗結果は `Reflection` 候補になり、同じ失敗行動の反復を将来ターンで避けられるようにする。
+- cognitive streaming path がターン単位の `tool_results` を `PostTurnInput` に渡すことで、Memory Writer / Arbiter が `tool:` プレフィックス付き `source_ref` で永続化できる。
+
 ### Companion Commitment Ledger（約束・タスク台帳）
 
 「次回これを話そう」などの約束・未完了事項は、汎用 typed memory の recall スコアとは独立した `commitments` テーブルで管理する。

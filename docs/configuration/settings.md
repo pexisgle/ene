@@ -371,6 +371,14 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
       "default_forgetting_half_life_days": 30.0,
       "min_confidence_to_persist": 0.65,
       "extraction_timeout_secs": 30,
+      "tool_grounding": {
+        "enabled": true,
+        "max_summary_chars": 500,
+        "persist_success_procedure": true,
+        "persist_failure_reflection": true,
+        "persist_user_visible_episodic": true,
+        "min_confidence": 0.60
+      },
       "use_hyde": false,
       "recall_result_limit": 8,
       "recall_similarity_threshold": 0.35,
@@ -439,6 +447,7 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 | `default_forgetting_half_life_days` | float | `30.0` | Half-life in days for lifecycle decay score and recall recency scoring |
 | `min_confidence_to_persist` | float | `0.65` | Minimum confidence threshold (0.0–1.0) for persisting a memory |
 | `extraction_timeout_secs` | int | `30` | Timeout in seconds for a single LLM memory-extraction call; on timeout the extraction fails and falls back to deterministic candidates |
+| `tool_grounding` | object | (see below) | Tool-result grounding guardrails and candidate extraction controls (#92) |
 | `use_hyde` | bool | `false` | Record a HyDE query-expansion hint in cognitive recall plans; downstream recall execution performs the provider call |
 | `recall_result_limit` | int | `8` | Maximum typed-memory results requested by `RecallPlan` |
 | `recall_similarity_threshold` | float | `0.35` | Minimum vector similarity for vector-sourced recall candidates |
@@ -455,6 +464,17 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 | `mmr_min_slots_commitment` | int | `1` | Minimum recalled slots reserved for commitment memories |
 | `mmr_source_diversity_bonus` | float | `0.05` | Bonus added to MMR score when a candidate introduces a new recall source type |
 | `require_migration` | bool | `false` | When true, block typed recall while legacy summaries/keyfacts exist and migration is incomplete; ongoing `conversation_logs` do not block (#98) |
+
+#### `cognition.memory.tool_grounding` — Tool Result Grounding
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable grounding tool call results into cognitive memory |
+| `max_summary_chars` | int | `500` | Maximum characters retained per tool summary before truncation |
+| `persist_success_procedure` | bool | `true` | Persist successful tool calls as `Procedure` memories |
+| `persist_failure_reflection` | bool | `true` | Persist failed tool calls as `Reflection` memories |
+| `persist_user_visible_episodic` | bool | `true` | Persist concise user-visible tool outcomes as `Episodic` memories |
+| `min_confidence` | float | `0.60` | Confidence threshold for tool-derived memory candidates (`0.0`–`1.0`) |
 
 #### `cognition.emotion` — Emotion Engine
 

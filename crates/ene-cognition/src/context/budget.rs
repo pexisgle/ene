@@ -33,8 +33,7 @@ impl ContextBudget {
         section_budgets[PromptSectionKind::SceneState as usize] = config.scene_summary_tokens;
         section_budgets[PromptSectionKind::SemanticContext as usize] =
             config.semantic_budget_tokens;
-        section_budgets[PromptSectionKind::EpisodicMemories as usize] =
-            config.memory_budget_tokens;
+        section_budgets[PromptSectionKind::EpisodicMemories as usize] = config.memory_budget_tokens;
         section_budgets[PromptSectionKind::StyleExamples as usize] =
             config.style_example_budget_tokens;
         section_budgets[PromptSectionKind::CharacterState as usize] = 200;
@@ -311,10 +310,7 @@ fn apply_section_budget(section: &mut PromptSection) {
 }
 
 fn section_token_total(sections: &[PromptSection]) -> usize {
-    sections
-        .iter()
-        .map(|s| estimate_tokens(&s.content))
-        .sum()
+    sections.iter().map(|s| estimate_tokens(&s.content)).sum()
 }
 
 /// Pack a prompt packet under the configured token budget.
@@ -322,7 +318,8 @@ fn section_token_total(sections: &[PromptSection]) -> usize {
 pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
     let mut sections = build_sections(&input, budget);
     let mut dropped = Vec::new();
-    let (mut semantic, mut profile, mut episodic) = classify_recalled_memories_owned(&input.recalled);
+    let (mut semantic, mut profile, mut episodic) =
+        classify_recalled_memories_owned(&input.recalled);
 
     for section in &mut sections {
         apply_section_budget(section);
@@ -357,7 +354,8 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
             sort_memories_for_drop(memories);
             while total > budget.total_tokens && memories.len() > 1 {
                 let removed = memories.remove(0);
-                let removed_tokens = estimate_tokens(&memory_section_body(std::slice::from_ref(&removed)));
+                let removed_tokens =
+                    estimate_tokens(&memory_section_body(std::slice::from_ref(&removed)));
                 set_section_body(&mut sections, kind, memory_section_body(memories));
                 total = total.saturating_sub(removed_tokens);
             }
@@ -375,10 +373,7 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
 
     let packed_tokens = total;
 
-    let packet = PromptPacket {
-        sections,
-        history,
-    };
+    let packet = PromptPacket { sections, history };
 
     PackedPrompt {
         packet,
@@ -392,7 +387,11 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
 
 fn classify_recalled_memories_owned(
     recalled: &[RecalledMemory],
-) -> (Vec<RecalledMemory>, Vec<RecalledMemory>, Vec<RecalledMemory>) {
+) -> (
+    Vec<RecalledMemory>,
+    Vec<RecalledMemory>,
+    Vec<RecalledMemory>,
+) {
     let (semantic, profile, episodic) = classify_recalled_memories(recalled);
     (
         semantic.iter().map(|m| (*m).clone()).collect(),
@@ -609,13 +608,7 @@ mod tests {
             result_limit: 4,
         };
         let budget = ContextBudget::from_config_and_hints(&config, &hints);
-        assert_eq!(
-            budget.budget_for(PromptSectionKind::EpisodicMemories),
-            999
-        );
-        assert_eq!(
-            budget.budget_for(PromptSectionKind::SemanticContext),
-            888
-        );
+        assert_eq!(budget.budget_for(PromptSectionKind::EpisodicMemories), 999);
+        assert_eq!(budget.budget_for(PromptSectionKind::SemanticContext), 888);
     }
 }

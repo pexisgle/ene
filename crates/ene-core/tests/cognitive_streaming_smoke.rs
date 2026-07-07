@@ -366,3 +366,39 @@ async fn persist_affect_snapshot_writes_before_finalize() {
     let loaded = store.get_affect_state("ene").await.unwrap();
     assert!((loaded.valence - 0.42).abs() < f32::EPSILON);
 }
+
+#[tokio::test]
+async fn post_turn_tool_results_persist_procedure_memory() {
+    let store = MemoryStore::open_in_memory(4).await.unwrap();
+    let cognition = CognitionConfig::default();
+    let engine = CognitionEngine::new();
+    let affect = AffectState::neutral("ene");
+    let tool_results = vec![ene_cognition::memory_writer::ToolResultSummary {
+        tool_name: "fs".into(),
+        success: true,
+        summary: "wrote notes.txt".into(),
+    }];
+    let post = ene_cognition::PostTurnInput {
+        turn: ene_cognition::memory_writer::candidate::TurnInput {
+            user_message: "save this",
+            assistant_message: Some("saved"),
+            tool_results: &tool_results,
+        },
+        affect,
+        character_id: "ene",
+        user_id: "User",
+    };
+    engine
+        .after_turn(&store, &cognition, post)
+        .await
+        .expect("after_turn");
+
+    let grounded = store
+        .list_typed_memories_by_source_prefix("ene", "tool:", 16)
+        .await
+        .expect("list by source prefix");
+    assert!(
+        grounded.iter().any(|m| m.kind == MemoryKind::Procedure),
+        "expected Procedure memory from tool grounding, got {grounded:?}"
+    );
+}

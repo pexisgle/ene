@@ -2757,11 +2757,10 @@ impl MemoryStore {
     ) -> Result<(), MemoryError> {
         use sea_orm::{ActiveModelTrait, ActiveValue::Set};
 
-        let mut active: entities::memory_spans::ActiveModel =
-            entities::memory_spans::ActiveModel {
-                id: Set(span_id),
-                ..Default::default()
-            };
+        let mut active: entities::memory_spans::ActiveModel = entities::memory_spans::ActiveModel {
+            id: Set(span_id),
+            ..Default::default()
+        };
         active.compressed_summary = Set(Some(summary.to_string()));
         active.update(&self.db).await?;
         Ok(())
