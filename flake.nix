@@ -230,39 +230,16 @@
                 '';
               in
               ''
-                debug_log_path="/home/pexisgle/dev/Ene/.cursor/debug-7549ee.log"
-                debug_ts="$(date +%s%3N 2>/dev/null || date +%s000)"
                 is_interactive="false"
                 if [[ "$-" == *i* ]]; then
                   is_interactive="true"
                 fi
-                #region agent log
-                printf '%s\n' "{\"sessionId\":\"7549ee\",\"runId\":\"pre-fix\",\"hypothesisId\":\"H2\",\"location\":\"flake.nix:shellHook:entry\",\"message\":\"shellHook entry\",\"data\":{\"interactive\":\"$is_interactive\",\"shellFlags\":\"$-\"},\"timestamp\":$debug_ts}" >> "$debug_log_path"
-                #endregion
-                #region agent log
-                printf '%s\n' "{\"sessionId\":\"7549ee\",\"runId\":\"pre-fix\",\"hypothesisId\":\"H1\",\"location\":\"flake.nix:shellHook:beforeSkillsHook\",\"message\":\"before skillsHook\",\"data\":{\"pwd\":\"$PWD\"},\"timestamp\":$(date +%s%3N 2>/dev/null || date +%s000)}" >> "$debug_log_path"
-                #endregion
                 if [[ "$is_interactive" == "true" ]]; then
-                  #region agent log
-                  printf '%s\n' "{\"sessionId\":\"7549ee\",\"runId\":\"post-fix\",\"hypothesisId\":\"H4\",\"location\":\"flake.nix:shellHook:interactiveBranch\",\"message\":\"running interactive-only hooks\",\"data\":{\"interactive\":\"true\"},\"timestamp\":$(date +%s%3N 2>/dev/null || date +%s000)}" >> "$debug_log_path"
-                  #endregion
                   set +e
                   ${skillsHook}
-                  skills_hook_rc="$?"
                   set -e
-                  #region agent log
-                  printf '%s\n' "{\"sessionId\":\"7549ee\",\"runId\":\"post-fix\",\"hypothesisId\":\"H1\",\"location\":\"flake.nix:shellHook:afterSkillsHook\",\"message\":\"after skillsHook\",\"data\":{\"skillsHookRc\":$skills_hook_rc},\"timestamp\":$(date +%s%3N 2>/dev/null || date +%s000)}" >> "$debug_log_path"
-                  #endregion
                   ${appindicatorHook}
-                else
-                  #region agent log
-                  printf '%s\n' "{\"sessionId\":\"7549ee\",\"runId\":\"post-fix\",\"hypothesisId\":\"H5\",\"location\":\"flake.nix:shellHook:nonInteractiveBranch\",\"message\":\"skipping interactive-only hooks\",\"data\":{\"interactive\":\"false\"},\"timestamp\":$(date +%s%3N 2>/dev/null || date +%s000)}" >> "$debug_log_path"
-                  #endregion
-                  skills_hook_rc=0
                 fi
-                #region agent log
-                printf '%s\n' "{\"sessionId\":\"7549ee\",\"runId\":\"post-fix\",\"hypothesisId\":\"H3\",\"location\":\"flake.nix:shellHook:afterAppindicator\",\"message\":\"after appindicator hook\",\"data\":{\"ldLibraryPathSet\":\"true\",\"skillsHookRc\":$skills_hook_rc},\"timestamp\":$(date +%s%3N 2>/dev/null || date +%s000)}" >> "$debug_log_path"
-                #endregion
               '';
           };
       }
