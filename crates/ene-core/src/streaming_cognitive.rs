@@ -1,6 +1,6 @@
 //! Cognitive runtime streaming path (#100).
 
-use ene_cognition::memory_writer::candidate::TurnInput;
+use ene_cognition::memory_writer::candidate::{ToolResultSummary, TurnInput};
 use ene_cognition::{CognitionConfig, CognitionEngine, HistoryEntry, PostTurnInput, TurnContext};
 use ene_config::PromptLibrary;
 use ene_provider::LlmToolCallChunk;
@@ -138,12 +138,8 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_session::Con
         .collect();
 
     let prompts = PromptLibrary::load(&cognition.emotion.classifier_language);
-    let post_history_phi = build_cognitive_output_contract(
-        &card,
-        &prompts,
-        cognition.emotion.enabled,
-        &user_name,
-    );
+    let post_history_phi =
+        build_cognitive_output_contract(&card, &prompts, cognition.emotion.enabled, &user_name);
 
     let _ = event_tx.send(EneEvent::PipelinePhase {
         phase: PHASE_CONTEXT_SEARCH.to_string(),
@@ -295,6 +291,7 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_session::Con
     let max_rounds = tool_config.max_rounds;
     let session_id_for_tools = session.memory.session_id.clone();
     let mut round = 0usize;
+    let mut turn_tool_results: Vec<ToolResultSummary> = Vec::new();
 
     loop {
         if cancel_token.is_cancelled() {
@@ -330,8 +327,8 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_session::Con
         let mut current_tool_calls: Vec<LlmToolCallChunk> = Vec::new();
         let mut assistant_content = String::new();
         let mut accumulated_emotion_tokens: Vec<String> = Vec::new();
-        let suppress_stream_tokens = cognition.emotion.enabled
-            && cognition.emotion.llm_expression_is_advisory;
+        let suppress_stream_tokens =
+            cognition.emotion.enabled && cognition.emotion.llm_expression_is_advisory;
 
         while let Some(chunk_res) = stream.next().await {
             if cancel_token.is_cancelled() {
@@ -413,7 +410,7 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_session::Con
                     turn: TurnInput {
                         user_message: &user_input,
                         assistant_message: Some(&assistant_content),
-                        tool_results: &[],
+                        tool_results: &turn_tool_results,
                     },
                     affect: turn_affect,
                     character_id: &card_name,
@@ -460,12 +457,14 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_session::Con
             &pending_permissions,
             &pending_user_inputs,
             tool_config.timeout_ms,
+            cognition.memory.tool_grounding.max_summary_chars,
         )
         .await;
 
         match tx_messages {
-            Ok(msgs) => {
-                messages.extend(msgs);
+            Ok(output) => {
+                messages.extend(output.messages);
+                turn_tool_results.extend(output.summaries);
                 round += 1;
             }
             Err(e) => {

@@ -1,6 +1,7 @@
 use crate::handle::{ConversationEntry, EneEvent, TerminalReason};
 use crate::message_builder::{MessageBuildContext, build_messages};
 use crate::types::RequestId;
+use ene_cognition::memory_writer::{ToolResultSummary, tool_grounding};
 use ene_config::{EneConfig, PromptLibrary};
 use ene_memory::RecalledSummary;
 use ene_provider::{LlmMessage, LlmToolCall, LlmToolCallChunk, UserMessagePart};
@@ -45,6 +46,15 @@ pub enum UserInputResponse {
     Multi(Vec<MultiAnswer>),
     /// The user dismissed or cancelled the entire prompt.
     Cancel,
+}
+
+/// Output of one tool execution round.
+#[derive(Debug, Default)]
+pub(crate) struct ToolExecutionOutput {
+    /// Assistant/tool messages fed back to the LLM loop.
+    pub messages: Vec<LlmMessage>,
+    /// Bounded summaries for cognitive memory grounding.
+    pub summaries: Vec<ToolResultSummary>,
 }
 
 /// Atomically claim the right to emit the terminal event for the
@@ -139,6 +149,9 @@ async fn run_stream_legacy(ctx: StreamContext) -> ConversationSession {
         .get_section::<ene_tool_host::ToolConfig>()
         .unwrap_or_default();
     let tool_calling_enabled = tool_config.enabled;
+    let cognition = config
+        .get_section::<ene_cognition::CognitionConfig>()
+        .unwrap_or_default();
 
     let pipeline_start = std::time::Instant::now();
     let mut timings = std::collections::HashMap::new();
@@ -385,12 +398,13 @@ async fn run_stream_legacy(ctx: StreamContext) -> ConversationSession {
             &pending_permissions,
             &pending_user_inputs,
             tool_config.timeout_ms,
+            cognition.memory.tool_grounding.max_summary_chars,
         )
         .await;
 
         match tx_messages {
-            Ok(msgs) => {
-                messages.extend(msgs);
+            Ok(output) => {
+                messages.extend(output.messages);
                 round += 1;
             }
             Err(e) => {
@@ -546,8 +560,10 @@ pub(crate) async fn perform_tool_executions(
     pending_permissions: &Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
     pending_user_inputs: &Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
     timeout_ms: u64,
-) -> Result<Vec<LlmMessage>, crate::error::EneCoreError> {
+    max_summary_chars: usize,
+) -> Result<ToolExecutionOutput, crate::error::EneCoreError> {
     let mut round_messages = Vec::new();
+    let mut summaries = Vec::new();
 
     round_messages.push(LlmMessage::Assistant {
         content: if assistant_content.is_empty() {
@@ -682,15 +698,22 @@ pub(crate) async fn perform_tool_executions(
             }
         }
 
-        let result_str = match result {
-            Ok(res) => res,
-            Err(e) => format!("Error executing tool: {e}"),
+        let (result_str, success) = match result {
+            Ok(res) => (res, true),
+            Err(e) => (format!("Error executing tool: {e}"), false),
         };
 
         let _ = event_tx.send(EneEvent::ToolCallResult {
             name: name.clone(),
             result: result_str.clone(),
         });
+
+        summaries.push(tool_grounding::summarize_tool_result(
+            &name,
+            &result_str,
+            success,
+            max_summary_chars,
+        ));
 
         let (final_tool_text, screenshot_data) = extract_screenshot(&result_str);
 
@@ -713,7 +736,10 @@ pub(crate) async fn perform_tool_executions(
         }
     }
 
-    Ok(round_messages)
+    Ok(ToolExecutionOutput {
+        messages: round_messages,
+        summaries,
+    })
 }
 
 pub(crate) fn accumulate_tool_calls(
@@ -858,6 +884,70 @@ mod tests {
         assert_eq!(de, answers);
     }
 
+    #[tokio::test]
+    async fn perform_tool_executions_respects_summary_char_limit() {
+        use ene_provider::LlmToolCall;
+        use ene_tool_host::ToolRegistry;
+
+        struct AlwaysOk {
+            output: String,
+        }
+
+        #[async_trait::async_trait]
+        impl ToolRegistry for AlwaysOk {
+            fn list_tools(&self) -> Vec<ene_tool_proto::ToolSpec> {
+                Vec::new()
+            }
+
+            async fn call_tool(
+                &self,
+                _name: &str,
+                _arguments: &str,
+            ) -> Result<String, ToolHostError> {
+                Ok(self.output.clone())
+            }
+
+            async fn approve_permission(&self, _request_id: &str) {}
+        }
+
+        let registry = AlwaysOk {
+            output: "x".repeat(64),
+        };
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<EneEvent>(16);
+        let pending_permissions: Arc<
+            Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>,
+        > = Arc::new(Mutex::new(HashMap::new()));
+        let pending_user_inputs: Arc<
+            Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>,
+        > = Arc::new(Mutex::new(HashMap::new()));
+        let tool_calls = vec![LlmToolCall {
+            id: "call-1".to_string(),
+            name: "fs.write".to_string(),
+            arguments: "{}".to_string(),
+        }];
+
+        let output = perform_tool_executions(
+            &registry,
+            "session-1",
+            tool_calls,
+            "",
+            &event_tx,
+            &pending_permissions,
+            &pending_user_inputs,
+            5_000,
+            10,
+        )
+        .await
+        .expect("tool executions");
+
+        assert_eq!(output.summaries.len(), 1);
+        assert!(
+            output.summaries[0].summary.chars().count() <= 13,
+            "summary should be truncated to max+ellipsis, got: {:?}",
+            output.summaries[0].summary
+        );
+    }
+
     /// Regression test for #35: a fast consumer that receives
     /// `EneEvent::PermissionRequired` and immediately sends a
     /// `PermissionDecision` must never race ahead of the executor's
@@ -952,6 +1042,7 @@ mod tests {
             &pending_permissions,
             &pending_user_inputs,
             5_000,
+            500,
         );
 
         // Bound the test: if the fix regresses, the executor would
@@ -961,8 +1052,9 @@ mod tests {
         let _ = consumer.await;
 
         let result = result.expect("executor hung: decision was dropped");
-        let messages = result.expect("executor returned error");
-        assert_eq!(messages.len(), 2);
+        let output = result.expect("executor returned error");
+        assert_eq!(output.messages.len(), 2);
+        assert_eq!(output.summaries.len(), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
@@ -1089,15 +1181,17 @@ mod tests {
             &pending_permissions,
             &pending_user_inputs,
             5_000,
+            500,
         );
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), exec).await;
         let _ = consumer.await;
 
-        let messages = result
+        let output = result
             .expect("executor hung: pending request not resolved")
             .expect("executor returned error");
-        assert_eq!(messages.len(), 2);
+        assert_eq!(output.messages.len(), 2);
+        assert_eq!(output.summaries.len(), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 

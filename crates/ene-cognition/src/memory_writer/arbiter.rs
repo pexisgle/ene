@@ -660,7 +660,10 @@ fn dedup_key(candidate: &MemoryCandidate) -> (MemoryKind, String) {
 
 fn source_quote_valid(candidate: &MemoryCandidate, turn: &TurnInput<'_>) -> bool {
     if candidate.source_quote.trim().is_empty() {
-        return candidate.kind == MemoryKind::Procedure && !turn.tool_results.is_empty();
+        return matches!(
+            candidate.kind,
+            MemoryKind::Procedure | MemoryKind::Reflection | MemoryKind::Episodic
+        ) && !turn.tool_results.is_empty();
     }
 
     let quote = normalize_text(&candidate.source_quote);
@@ -1007,6 +1010,35 @@ mod tests {
             kind: MemoryKind::Procedure,
             title: "tool success".to_string(),
             content: "[fs] wrote file".to_string(),
+            source_quote: String::new(),
+            confidence: 0.7,
+            should_persist: true,
+            deletion_target_key: None,
+            commitment_due: None,
+        };
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
+        assert!(matches!(
+            decision_action(&decisions),
+            ArbiterAction::Persist(_)
+        ));
+    }
+
+    #[test]
+    fn reflection_with_empty_source_quote_allowed_when_tools_present() {
+        let tools = [ToolResultSummary {
+            tool_name: "web".to_string(),
+            success: false,
+            summary: "error: timeout".to_string(),
+        }];
+        let turn = TurnInput {
+            user_message: "search docs",
+            assistant_message: None,
+            tool_results: &tools,
+        };
+        let candidate = MemoryCandidate {
+            kind: MemoryKind::Reflection,
+            title: "tool failure:web".to_string(),
+            content: "Tool failed due to timeout".to_string(),
             source_quote: String::new(),
             confidence: 0.7,
             should_persist: true,
