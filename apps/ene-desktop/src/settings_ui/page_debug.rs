@@ -10,6 +10,7 @@ use crate::component::ui::UiStateComponent;
 use crate::settings::CharacterSettings;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
+use i18n_embed_fl::fl;
 use std::sync::Arc;
 
 pub fn render(
@@ -134,7 +135,184 @@ pub fn render(
         });
 
         render_linux_only(ui, settings, animation, ai, world, ui_entity);
+        ui.separator();
+        render_memory_journal(ui, ai, world, ui_entity);
     });
+}
+
+fn render_memory_journal(
+    ui: &mut egui::Ui,
+    ai: &Arc<AiBridge>,
+    world: &mut World,
+    ui_entity: Entity,
+) {
+    ui.heading(fl!(crate::i18n::loader(), "memory-journal-title"));
+    let mut do_refresh = false;
+    ui.horizontal(|ui| {
+        if ui
+            .button(fl!(crate::i18n::loader(), "memory-journal-refresh"))
+            .clicked()
+        {
+            do_refresh = true;
+        }
+        if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+            ui.checkbox(
+                &mut state.0.memory_journal_show_deleted,
+                fl!(crate::i18n::loader(), "memory-journal-show-deleted"),
+            );
+        }
+    });
+
+    if do_refresh {
+        match ai.refresh_memory_journal(32) {
+            Ok((mut memories, affect, commitments)) => {
+                if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+                    if !state.0.memory_journal_show_deleted {
+                        memories.retain(|m| m.status != ene_memory::MemoryStatus::UserDeleted);
+                    }
+                    state.0.memory_journal_rows = memories
+                        .into_iter()
+                        .map(|m| crate::settings::MemoryJournalRow {
+                            id: m.id.unwrap_or_default(),
+                            title: m.title,
+                            kind: m.kind.as_str().to_string(),
+                            status: m.status.as_str().to_string(),
+                            confidence: m.confidence.get(),
+                            salience: m.salience.get(),
+                            last_accessed: m.last_accessed_at.map(|ts| ts.to_rfc3339()),
+                            why_recalled: format!(
+                                "source={} access_count={}",
+                                m.source.as_str(),
+                                m.access_count
+                            ),
+                        })
+                        .collect();
+                    state.0.memory_journal_affect = format!(
+                        "mood={} expression={} valence={:.2} arousal={:.2}",
+                        affect.mood_label, affect.last_expression, affect.valence, affect.arousal
+                    );
+                    state.0.memory_journal_commitments = commitments
+                        .into_iter()
+                        .map(|c| format!("{} [{}]", c.title, c.status.as_str()))
+                        .collect();
+                    state.0.memory_journal_message =
+                        Some(fl!(crate::i18n::loader(), "memory-journal-refresh-ok"));
+                }
+            }
+            Err(error) => {
+                if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+                    state.0.memory_journal_message = Some(format!(
+                        "{}: {error}",
+                        fl!(crate::i18n::loader(), "memory-journal-refresh-error")
+                    ));
+                }
+            }
+        }
+    }
+
+    let snapshot = world
+        .get::<UiStateComponent>(ui_entity)
+        .map(|s| s.0.clone());
+    let Some(snapshot) = snapshot else {
+        return;
+    };
+
+    if let Some(message) = snapshot.memory_journal_message.as_deref() {
+        ui.label(message);
+    }
+    if !snapshot.memory_journal_affect.is_empty() {
+        ui.label(format!(
+            "{}: {}",
+            fl!(crate::i18n::loader(), "memory-journal-affect"),
+            snapshot.memory_journal_affect
+        ));
+    }
+    if !snapshot.memory_journal_commitments.is_empty() {
+        ui.label(fl!(crate::i18n::loader(), "memory-journal-commitments"));
+        for line in &snapshot.memory_journal_commitments {
+            ui.label(format!("  - {line}"));
+        }
+    }
+
+    egui::ScrollArea::vertical()
+        .max_height(260.0)
+        .show(ui, |ui| {
+            if snapshot.memory_journal_rows.is_empty() {
+                ui.weak(fl!(crate::i18n::loader(), "memory-journal-empty"));
+                return;
+            }
+            for row in &snapshot.memory_journal_rows {
+                ui.group(|ui| {
+                    ui.label(format!(
+                        "#{} [{}|{}] {}",
+                        row.id, row.kind, row.status, row.title
+                    ));
+                    ui.label(format!(
+                        "confidence={:.2} salience={:.2} last_accessed={}",
+                        row.confidence,
+                        row.salience,
+                        row.last_accessed.as_deref().unwrap_or("-"),
+                    ));
+                    ui.label(format!("why: {}", row.why_recalled));
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("pin").clicked() {
+                            set_action_message(world, ui_entity, ai.pin_memory(row.id), "pin");
+                        }
+                        if ui.button("archive").clicked() {
+                            set_action_message(
+                                world,
+                                ui_entity,
+                                ai.update_memory_status(row.id, ene_memory::MemoryStatus::Archived),
+                                "archive",
+                            );
+                        }
+                        if ui.button("forget").clicked() {
+                            set_action_message(
+                                world,
+                                ui_entity,
+                                ai.update_memory_status(
+                                    row.id,
+                                    ene_memory::MemoryStatus::UserDeleted,
+                                ),
+                                "forget",
+                            );
+                        }
+                        if ui.button("dispute").clicked() {
+                            set_action_message(
+                                world,
+                                ui_entity,
+                                ai.update_memory_status(row.id, ene_memory::MemoryStatus::Disputed),
+                                "dispute",
+                            );
+                        }
+                        if ui.button("restore").clicked() {
+                            set_action_message(
+                                world,
+                                ui_entity,
+                                ai.update_memory_status(row.id, ene_memory::MemoryStatus::Active),
+                                "restore",
+                            );
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+            }
+        });
+}
+
+fn set_action_message(
+    world: &mut World,
+    ui_entity: Entity,
+    result: Result<bool, String>,
+    action: &str,
+) {
+    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        state.0.memory_journal_message = Some(match result {
+            Ok(true) => format!("memory {action} ok"),
+            Ok(false) => format!("memory {action}: no change"),
+            Err(error) => format!("memory {action} error: {error}"),
+        });
+    }
 }
 
 #[cfg(target_os = "linux")]

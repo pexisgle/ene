@@ -1,111 +1,61 @@
 # アーキテクチャ概要
 
-ene は `ene-core` を中心としたモジュラーな Rust ワークスペースであり、
-LLM 統合、ツール呼び出し、長期記憶、セッション管理を**チャネルベースのメッセージパッシングによるアクターパターン**で結合します。
+ene は `ene-core` の実行オーケストレーションと `ene-cognition` の認知ランタイムを中心に構成されたモジュラー Rust ワークスペースです。
 
-## クレート依存関係グラフ
+## ランタイム構成
 
-```
-ene-desktop ──┬── ene-core ──── ene-tool-host ──── ene-tool-proto
-ene-cli ──────┘       │           │     │     │          │
-                      │           │     │     │          └── ene-tool-derive
-                      │     ene-tool-utility, ene-tool-fs, ene-tool-web,
-                      │     ene-tool-app, ene-tool-browser  (proc-macro)
-                      │     (IPC 子プロセス)
-                      │
-                ene-core 内部依存:
-                  ├── ene-config    (設定, パス, スキーマ生成)
-                  ├── ene-embedding (ローカル GGUF + クラウド埋め込み)
-                  ├── ene-memory    (長期記憶ストア, sea-orm/sqlite-vec)
-                  ├── ene-session   (会話履歴, 自動分割)
-                  ├── ene-provider  (LLM + 埋め込みトレイト, OpenAI 実装)
-                  ├── ene-tool-host (ツールプロセス管理, MCP, Tool RAG)
-                  ├── ene-tool-common  (共通ツールユーティリティ, ToolAction)
-                  └── ene-tool-db   (ツール別 DB IPC クライアント)
+実行シェルは引き続きアクターモデル（`EneHandle` / `EneActor`）ですが、ターンごとの知的処理は cognition コンポーネントが担当します。
 
-ene-desktop のみ:
-  ├── ene-vrm    (VRM 1.0 ローダー + MToon レンダラー)
-  ├── winit      (ウィンドウ / イベントループ)
-  ├── wgpu       (GPU レンダリング)
-  ├── egui       (設定 UI)
-  └── bevy_ecs / bevy_app 0.19 (ECS スケジューラのみ。 Bevy プラグインは不使用)
-```
+### ターン処理フロー
 
-## レイヤー説明
-
-### 設定レイヤー
-- **`ene-config`** — `figment` ベースの JSON 設定。`define_config!` と `define_label_enum!` マクロを提供し、宣言的な設定構造体定義を可能にします。プラットフォーム対応のパス解決と自動 `settings.schema.json` 生成を管理します。
-
-### コアランタイムレイヤー
-- **`ene-core`** — 統一ランタイムファサード。**アクターベースアーキテクチャ**とチャネルベースのメッセージパッシングを使用します。`EneHandle` が公開 API であり、バックグラウンドの `EneActor` タスクを生成します。コンシューマーは `EneCommand`（mpsc）で通信し、`EneEvent`（broadcast）でイベントを受信します。アクターセッション、設定、ツールレジストリを所有し、ストリーミング、ツールオーケストレーション、権限管理、セッション分割を内部で管理します。
-
-### AI サブシステム
-- **`ene-embedding`** — ベクトル埋め込み生成。`CloudEmbeddingProvider` (OpenAI 互換 API) と `GgufEmbeddingProvider` (candle/GGUF、ローカル、GPU 不要) の 2 つのバックエンド。
-- **`ene-memory`** — SQLite + sqlite-vec エピソディック記憶。会話要約、キーファクト、ツール埋め込みをコサイン類似度ベクトル検索で保存。
-- **`ene-session`** — 会話履歴バッファ、`CharacterCardV3` 読み込み、感情トークン解析 (`<|emo:name|>`)、およびタイムアウトと話題変化に基づく自動セッション分割。
-
-### ツール基盤レイヤー
-- **`ene-tool-proto`** — プロトコル契約。`ToolProvider` トレイト、`ToolSpec`/`ToolError` 型、`IpcRequest`/`IpcResponse` ワイヤ形式 (現在の `IPC_PROTOCOL_VERSION = 1`)、`SandboxConfigData`、`run_tool_server()` ヘルパーを定義。
-- **`ene-tool-derive`** — Proc-macro クレート。`#[derive(ToolSpec)]` が引数構造体の宣言的属性から `ToolSpec` 実装を生成。
-- **`ene-tool-host`** — ツールライフサイクル管理。ツールバイナリを子プロセスとして起動 (Unix ドメインソケット / Windows 名前付きパイプ)、クラッシュ耐性 (指数バックオフ、最大 5 回再起動) でラップ、MCP サーバー対応、`ToolRag` 構造体を介した Tool RAG フィルタリング (HyDE、LLM リランキング、カテゴリ別制限) を提供。また、ツール別 SQLite アクセスを仲介する `DbIpcServer` (Unix) をホスト。
-- **`ene-tool-db`** — ツール別 DB IPC クライアントライブラリ。ツールバイナリは `ene-memory` の代わりにこれをリンクし、ホストの `DbIpcServer` に対して Unix ソケットで SQL を実行する (プレフィックスベースのアクセス制御)。
-- **`ene-tool-common`** — ツールクレートが消費する共通ユーティリティ (`ToolAction` トレイト、HTML→Markdown 抽出)。
-- **`ene-vrm`** — `ene-desktop` が使用する VRM 1.0 モデルローダーと MToon レンダラー。`ene-core` に依存しないスタンドアロンライブラリ。
-- **`ene-provider`** — LLM・埋め込みプロバイダトレイト (`LlmProvider`, `EmbeddingProvider`)、OpenAI 互換実装、HyDE/リランキング用 `HybridRerankProvider`。
-
-### ツールプロバイダ (IPC 子プロセス)
-- **`ene-tool-fs`** — ファイルシステム操作: `read`, `write`, `edit`, `delete`, `glob`, `grep`, `patch`, `shell`, `undo`。全操作がサンドボックス設定を尊重。
-- **`ene-tool-web`** — Web アクセス: `webfetch` (URL→text/markdown/html) と `websearch` (複数バックエンド)。
-- **`ene-tool-utility`** — ユーティリティツール: `question`, `todo`, `get_current_time`, `get_system_info`。
-- **`ene-tool-app`** — OS レベルの GUI 自動化: ウィンドウ管理、キーボード/マウス入力、スクリーンショット、クリップボード。
-- **`ene-tool-browser`** — CDP 経由の Chromium 自動化: ナビゲーション、クリック、タイピング、コンテンツ抽出、スクリーンショット。
-
-### アプリケーション
-- **`ene-cli`** — 対話型ターミナル REPL。`/` コマンドでセッションとメモリを管理。
-- **`ene-desktop`** — `winit` + `wgpu` + `egui` シェル。VRM キャラクター (`ene-vrm` 経由) を常時最前面透明オーバーレイでレンダリングし、システムトレイと egui 設定 UI を提供。フレーム単位のロジックは `bevy_app::App` が所有し、winit イベントループがスケジューラを駆動する。Bevy プラグインや Bevy レンダラーは使用しない。
-
-## データフロー
-
-```
+```text
 ユーザー入力
-  ↓
-コンシューマーが EneCommand::Run { input } を送信
-  ↓
-EneActor がコマンドを受信
-  ↓
-記憶検索 → build_messages()
-  ↓
-ストリームタスク生成 → LLM API (ストリーム)
-  ↓
-EneEvent パイプライン (broadcast チャンネル):
-  → TextDelta → 表示
-  → SpecialToken → 感情処理
-  → ToolCallStart → ツール実行 → ToolCallResult → LLM API (ループ)
-  → PermissionRequired → ユーザー承認 → PermissionDecision
-  → UserInputRequired → ユーザー応答 → UserInputResponse
-  → Finished
-  ↓
-ストリームタスクが更新されたセッションを oneshot で送信
-  ↓
-アクターがセッションを更新、StatusChanged { Idle } を送出
+  -> before_turn（recall 計画 + affect 更新）
+  -> compose_prompt_packet（セクション化文脈 + 予算管理）
+  -> LLM ストリーミング
+  -> output arbitration（エンジン管理表情）
+  -> after_turn（memory 書き込み + 忘却 + affect 永続化）
 ```
 
-## アーキテクチャ
+`ene-core` はこのフローを streaming lifecycle に統合し、desktop/CLI へイベントを配信します。
 
-アクターパターンによりスレッド安全性と関心の分離を実現:
+## 主要クレート
 
-| コンポーネント | 役割 |
-|-------------|------|
-| `EneHandle` | スレッドセーフな公開 API。mpsc でコマンド送信、broadcast でイベント受信。 |
-| `EneActor` | バックグラウンドタスク。全変更可能状態 (セッション、設定、レジストリ) を所有。 |
-| `EneCommand` | コンシューマー → アクターメッセージ (Run, Cancel, Reconfigure, LoadCharacter, ListTools, CallTool など) |
-| `EneEvent` | アクター → コンシューマーイベント (TextDelta, ToolCall*, PermissionRequired, UserInputRequired, Finished など) |
-| `stream::run_stream` | Run コマンドごとに生成される内部ストリーミングエンジン。更新されたセッションを oneshot で返す。 |
+- `ene-core`: アクターランタイム、ストリーミング、イベント、ツール実行。
+- `ene-cognition`: recall planner、prompt packet、emotion engine、output arbiter、memory writer、context compression。
+- `ene-memory`: typed memory 永続化、hybrid search、commitment/affect ストア。
+- `ene-session`: 会話セッション状態と互換 split/compression フック。
+- `ene-provider`: LLM/埋め込みプロバイダ抽象。
+- `ene-tool-*`: サンドボックス化されたツール実行と IPC プロトコル。
 
-利点:
-- **グローバル状態なし** — 全状態はアクターが所有
-- **スレッドセーフ** — チャネルベース通信、ホットパスでのミューテックス競合なし
-- **サブスクライバー対応** — `try_recv()` でノンブロッキングポーリング (`ene-desktop` の `AiBridge` ドレインタスクが使用)、`subscribe()` で複数コンシューマー対応
-- **ライフサイクル管理** — 全ハンドルがドロップされるとアクターが終了
+## メモリモデル
 
-> **📘 将来の方向性:** [Ene Cognitive Runtime ADR](cognitive-runtime.md) は AI ランタイムの計画的な再設計について説明しています。現在のアクターベースのストリーミングパイプラインは、LLM を明示的に管理された認知状態から発話を生成するエンジンとして扱う認知アーキテクチャに置き換えられる予定です。
+typed memory（`episodic`、`semantic`、`preference`、`commitment` など）を使用し、状態は `active` / `faded` / `archived` / `disputed` / `superseded` / `user_deleted` で管理されます。
+
+hybrid recall は以下を合成します。
+
+- ベクトル類似度
+- 語彙一致
+- 時間減衰
+- salience / confidence
+- affect / commitment シグナル
+
+## プロンプトモデル
+
+プロンプトは `PromptPacket` としてセクション化され、明示的なトークン予算で管理されます。Identity と output contract は予算超過時にも保持されます。
+
+## 感情・表情モデル
+
+- Affect state はエンジン側で永続化
+- LLM 分類器は任意かつ advisory
+- 最終表情は Output Arbiter がヒステリシス付きで決定
+- UI 側は `EneEvent::Expression` を受信して反映
+
+## アプリケーション
+
+- `ene-cli`: メモリ/感情/コミットメントのデバッグコマンドを含む REPL。
+- `ene-desktop`: `winit` + `wgpu` + `egui` + VRM 表示、認知デバッグ UI を提供。
+
+## 参照
+
+設計詳細は `docs/ja/architecture/cognitive-runtime.md` を参照してください。

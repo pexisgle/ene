@@ -1,5 +1,7 @@
+mod affect;
 mod card;
 mod clear;
+mod commitments;
 mod config;
 mod help;
 mod history;
@@ -40,6 +42,7 @@ pub trait CliCommand: Send + Sync {
 /// Static registry containing all CLI command implementations except `/quit`
 pub static COMMANDS: &[&dyn CliCommand] = &[
     &clear::ClearCommand as &dyn CliCommand,
+    &affect::AffectCommand as &dyn CliCommand,
     &prompt::PromptCommand as &dyn CliCommand,
     &card::CardCommand as &dyn CliCommand,
     &config::ConfigCommand as &dyn CliCommand,
@@ -48,6 +51,7 @@ pub static COMMANDS: &[&dyn CliCommand] = &[
     &undo::UndoCommand as &dyn CliCommand,
     &tool::ToolCommand as &dyn CliCommand,
     &memory::MemoryCommand as &dyn CliCommand,
+    &commitments::CommitmentsCommand as &dyn CliCommand,
     &session::SessionCommand as &dyn CliCommand,
 ];
 

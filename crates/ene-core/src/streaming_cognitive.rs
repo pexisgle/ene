@@ -399,6 +399,17 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_session::Con
                 );
                 turn_affect = updated_affect;
                 session.record_expression_change(&decision.expression);
+                tracing::debug!(
+                    component = "CognitionEngine",
+                    event = "expression selected",
+                    session_id = %session_id,
+                    character_id = %card_name,
+                    user_id = %user_name,
+                    turn_id = history.len() + 1,
+                    expression = %decision.expression,
+                    source = %decision.source.as_str(),
+                    "Expression arbiter selected expression"
+                );
                 let _ = event_tx.send(EneEvent::Expression {
                     name: decision.expression.clone(),
                     source: decision.source.as_str().to_string(),

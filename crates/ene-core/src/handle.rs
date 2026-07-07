@@ -367,6 +367,137 @@ impl MemoryQueryHandle {
             .map_err(EneCoreError::Memory)
     }
 
+    /// List typed memories for the current character.
+    pub async fn list_typed_memories(
+        &self,
+        character_id: &str,
+        kind: Option<ene_memory::MemoryKind>,
+        limit: usize,
+    ) -> Result<Vec<ene_memory::MemoryItem>, EneCoreError> {
+        let store = self.require_store()?;
+        store
+            .get_typed_memories_by_character(character_id, kind, limit, 0)
+            .await
+            .map_err(EneCoreError::Memory)
+    }
+
+    /// Fetch a typed memory by id.
+    pub async fn inspect_typed_memory(
+        &self,
+        id: i64,
+    ) -> Result<Option<ene_memory::MemoryItem>, EneCoreError> {
+        let store = self.require_store()?;
+        store
+            .get_typed_memory(id)
+            .await
+            .map_err(EneCoreError::Memory)
+    }
+
+    /// Search typed memories using hybrid scoring.
+    pub async fn search_typed_memories_hybrid(
+        &self,
+        character_id: &str,
+        user_id: Option<&str>,
+        query_text: &str,
+        limit: usize,
+    ) -> Result<Vec<ene_memory::ScoredMemory>, EneCoreError> {
+        let store = self.require_store()?;
+        let embedder = self.embedder.as_ref().ok_or_else(|| {
+            EneCoreError::Embedding(ene_provider::EmbeddingError::Init(
+                "Embedding provider not available".into(),
+            ))
+        })?;
+        let query_embedding = embedder.embed_query(query_text).await?;
+        let options = ene_memory::MemorySearchOptions {
+            query_text,
+            query_embedding: &query_embedding,
+            character_id,
+            user_id,
+            model_name: embedder.model_name(),
+            limit,
+            similarity_threshold: 0.45,
+            candidate_pool_size: 64,
+            query_affect: None,
+            weights: ene_memory::HybridSearchWeights::default(),
+            decay_half_life_days: 30.0,
+            now: chrono::Utc::now(),
+            min_score: 0.10,
+            commitment_boost: 0.25,
+            recent_fallback_limit: 6,
+        };
+        store
+            .search_typed_memories_hybrid(&options)
+            .await
+            .map_err(EneCoreError::Memory)
+    }
+
+    /// Update typed memory pinned flag.
+    pub async fn pin_typed_memory(&self, id: i64, pinned: bool) -> Result<bool, EneCoreError> {
+        let store = self.require_store()?;
+        store
+            .pin_typed_memory(id, pinned)
+            .await
+            .map_err(EneCoreError::Memory)
+    }
+
+    /// Transition typed memory lifecycle status.
+    pub async fn transition_typed_memory_status(
+        &self,
+        id: i64,
+        status: ene_memory::MemoryStatus,
+    ) -> Result<bool, EneCoreError> {
+        let store = self.require_store()?;
+        store
+            .transition_typed_memory_status(id, status)
+            .await
+            .map_err(EneCoreError::Memory)
+    }
+
+    /// Show current affect state for a character.
+    pub async fn show_affect_state(
+        &self,
+        character_id: &str,
+    ) -> Result<ene_memory::AffectState, EneCoreError> {
+        let store = self.require_store()?;
+        store
+            .get_affect_state(character_id)
+            .await
+            .map_err(EneCoreError::Memory)
+    }
+
+    /// Reset affect state to neutral baseline.
+    pub async fn reset_affect_state(&self, character_id: &str) -> Result<(), EneCoreError> {
+        let store = self.require_store()?;
+        let neutral = ene_memory::AffectState::neutral(character_id);
+        store
+            .upsert_affect_state(&neutral)
+            .await
+            .map_err(EneCoreError::Memory)
+    }
+
+    /// List active commitments for a character/user.
+    pub async fn list_active_commitments(
+        &self,
+        character_id: &str,
+        user_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ene_memory::Commitment>, EneCoreError> {
+        let store = self.require_store()?;
+        store
+            .list_active_commitments(character_id, user_id, limit)
+            .await
+            .map_err(EneCoreError::Memory)
+    }
+
+    /// Mark a commitment as done.
+    pub async fn complete_commitment(&self, id: i64) -> Result<bool, EneCoreError> {
+        let store = self.require_store()?;
+        store
+            .complete_commitment(id)
+            .await
+            .map_err(EneCoreError::Memory)
+    }
+
     fn require_store(&self) -> Result<&std::sync::Arc<ene_memory::MemoryStore>, EneCoreError> {
         self.store.as_ref().ok_or_else(|| {
             EneCoreError::Memory(ene_memory::MemoryError::MemoryStoreConnectionError(

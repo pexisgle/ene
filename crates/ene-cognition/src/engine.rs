@@ -209,6 +209,19 @@ impl CognitionEngine {
         };
 
         let (recall_plan, recalled) = execute_hybrid_recall(ctx.config, &recall_input).await?;
+        tracing::debug!(
+            component = "CognitionEngine",
+            event = "recall plan generated",
+            session_id = %ctx.session_id,
+            character_id = %ctx.character_id,
+            user_id = %ctx.user_name,
+            turn_id = ctx.history.len() + 1,
+            result_limit = recall_plan.budget.result_limit,
+            memory_budget_tokens = recall_plan.budget.memory_budget_tokens,
+            semantic_budget_tokens = recall_plan.budget.semantic_budget_tokens,
+            recalled_count = recalled.len(),
+            "Cognitive recall plan generated"
+        );
 
         let commitment_rows =
             match CommitmentLedger::list_active(store, ctx.character_id, Some(ctx.user_name), 16)
@@ -326,6 +339,18 @@ impl CognitionEngine {
         let (messages, mut meta) = packed.packet.to_llm_messages();
         meta.dropped_sections = packed.meta.dropped.clone();
         meta.packed_tokens = packed.meta.packed_tokens;
+        tracing::debug!(
+            component = "CognitionEngine",
+            event = "prompt packet composed",
+            session_id = %ctx.session_id,
+            character_id = %ctx.character_id,
+            user_id = %ctx.user_name,
+            turn_id = ctx.history.len() + 1,
+            message_count = messages.len(),
+            packed_tokens = meta.packed_tokens,
+            dropped_sections = meta.dropped_sections.len(),
+            "Prompt packet composed"
+        );
 
         Ok(ComposedPrompt { messages, meta })
     }

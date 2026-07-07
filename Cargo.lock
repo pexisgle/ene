@@ -2813,6 +2813,7 @@ dependencies = [
  "egui-winit",
  "ene-config",
  "ene-core",
+ "ene-memory",
  "ene-tool-proto",
  "ene-vrm",
  "glam 0.33.2",

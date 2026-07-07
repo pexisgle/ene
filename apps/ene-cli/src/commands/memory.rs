@@ -1,7 +1,6 @@
 use crate::commands::CliCommand;
 use crate::{context::AppContext, style};
 use async_trait::async_trait;
-use ene_core::Truncate;
 
 pub struct MemoryCommand;
 
@@ -12,11 +11,11 @@ impl CliCommand for MemoryCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Search, list, migrate, and inspect memories"
+        "Inspect and manage cognitive memories"
     }
 
     fn usage(&self) -> &'static str {
-        "/memory <search|list|status|migrate|reset>"
+        "/memory <list|inspect|search|why|pin|archive|forget|dispute|restore|status|migrate|reset>"
     }
 
     async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), String> {
@@ -31,17 +30,65 @@ impl CliCommand for MemoryCommand {
 
         match subcmd {
             "search" => handle_search(parts.get(1).copied().unwrap_or(""), &snapshot).await,
-            "list" => handle_list(&snapshot).await,
+            "list" => handle_list(parts.get(1).copied().unwrap_or(""), &snapshot).await,
+            "inspect" => handle_inspect(parts.get(1).copied().unwrap_or(""), &snapshot).await,
+            "why" => handle_why(parts.get(1).copied().unwrap_or(""), &snapshot).await,
+            "pin" => handle_pin(parts.get(1).copied().unwrap_or(""), &snapshot).await,
+            "archive" => {
+                handle_transition(
+                    parts.get(1).copied().unwrap_or(""),
+                    &snapshot,
+                    ene_memory::MemoryStatus::Archived,
+                    "archived",
+                )
+                .await
+            }
+            "forget" => {
+                handle_transition(
+                    parts.get(1).copied().unwrap_or(""),
+                    &snapshot,
+                    ene_memory::MemoryStatus::UserDeleted,
+                    "forgotten",
+                )
+                .await
+            }
+            "dispute" => {
+                handle_transition(
+                    parts.get(1).copied().unwrap_or(""),
+                    &snapshot,
+                    ene_memory::MemoryStatus::Disputed,
+                    "disputed",
+                )
+                .await
+            }
+            "restore" => {
+                handle_transition(
+                    parts.get(1).copied().unwrap_or(""),
+                    &snapshot,
+                    ene_memory::MemoryStatus::Active,
+                    "restored",
+                )
+                .await
+            }
             "status" => handle_status(&snapshot).await,
             "migrate" => handle_migrate(parts.get(1).copied().unwrap_or(""), &snapshot).await,
             "reset" => handle_reset(parts.get(1).copied().unwrap_or(""), &snapshot).await,
             _ => {
                 println!(
                     "{}",
-                    style::warning("Usage: /memory <search|list|status|migrate|reset>")
+                    style::warning(
+                        "Usage: /memory <list|inspect|search|why|pin|archive|forget|dispute|restore|status|migrate|reset>",
+                    )
                 );
-                println!("  search <query>       - Search memories by similarity");
-                println!("  list                 - List stored summaries and key facts");
+                println!("  list [--kind <kind>] - List typed memories");
+                println!("  inspect <id>         - Show full memory details");
+                println!("  search <query>       - Search typed memories (hybrid score)");
+                println!("  why <id>             - Explain memory lifecycle/debug context");
+                println!("  pin <id>             - Pin memory against natural decay");
+                println!("  archive <id>         - Mark memory archived");
+                println!("  forget <id>          - Mark memory as user_deleted");
+                println!("  dispute <id>         - Mark memory as disputed");
+                println!("  restore <id>         - Restore memory to active");
                 println!("  status               - Legacy row counts and migration marker");
                 println!("  migrate legacy       - One-shot legacy → typed migration");
                 println!("  migrate legacy --dry-run - Preview migration counts");
@@ -64,89 +111,196 @@ async fn handle_search(query: &str, snapshot: &ene_core::EneStateSnapshot) {
         println!("{}", style::warning("[Memory] Memory is not enabled."));
         return;
     }
-    println!(
-        "{}",
-        style::header(format!("[Memory] Searching query: {query}"))
-    );
-    match snapshot.memory.embed_query(query).await {
-        Ok(embedding) => {
-            let card_name = snapshot.card_name.as_str();
-            let threshold = snapshot
-                .config
-                .get_section::<ene_memory::MemoryConfig>()
-                .map(|c| c.similarity_threshold)
-                .unwrap_or(0.5);
-            match snapshot
-                .memory
-                .search_summaries(&embedding, card_name, 10, threshold)
-                .await
-            {
-                Ok(results) => {
-                    if results.is_empty() {
-                        println!("{}", style::warning("[Memory] No matching memories found."));
-                    } else {
-                        println!(
-                            "{}",
-                            style::success(format!(
-                                "[Memory] {} memories recalled:",
-                                results.len()
-                            ))
-                        );
-                        for (i, recalled) in results.iter().enumerate() {
-                            println!(
-                                "\n--- Memory #{} (similarity: {:.4}) ---",
-                                i + 1,
-                                recalled.similarity
-                            );
-                            println!("  Session ID: {}", recalled.entry.session_id);
-                            println!(
-                                "  Date: {}",
-                                recalled.entry.ended_at.format("%Y-%m-%d %H:%M")
-                            );
-                            println!("  Summary: {}", recalled.entry.summary);
-                        }
-                    }
+    let card_name = snapshot.card_name.as_str();
+    match snapshot
+        .memory
+        .search_typed_memories_hybrid(card_name, Some(&snapshot.config.user_name), query, 10)
+        .await
+    {
+        Ok(results) => {
+            if results.is_empty() {
+                println!(
+                    "{}",
+                    style::warning("[Memory] No matching typed memories found.")
+                );
+            } else {
+                println!(
+                    "{}",
+                    style::success(format!("[Memory] {} matches:", results.len()))
+                );
+                for (i, scored) in results.iter().enumerate() {
+                    println!(
+                        "\n--- #{} id={} kind={} total={:.3} ---",
+                        i + 1,
+                        scored.item.id.unwrap_or_default(),
+                        scored.item.kind.as_str(),
+                        scored.breakdown.total
+                    );
+                    println!("  title: {}", scored.item.title);
+                    println!(
+                        "  why: vector={:.3} lexical={:.3} recency={:.3} salience={:.3} confidence={:.3}",
+                        scored.breakdown.vector_similarity,
+                        scored.breakdown.lexical_score,
+                        scored.breakdown.recency_score,
+                        scored.breakdown.salience,
+                        scored.breakdown.confidence
+                    );
                 }
-                Err(e) => println!("{}", style::error(format!("[Memory] Search error: {e}"))),
             }
         }
-        Err(e) => println!("{}", style::error(format!("[Memory] Embedding error: {e}"))),
+        Err(e) => println!("{}", style::error(format!("[Memory] Search error: {e}"))),
     }
 }
 
-async fn handle_list(snapshot: &ene_core::EneStateSnapshot) {
+async fn handle_list(args: &str, snapshot: &ene_core::EneStateSnapshot) {
     if !snapshot.memory.is_enabled() {
         println!("{}", style::warning("[Memory] Memory is not enabled."));
         return;
     }
     let card_name = snapshot.card_name.as_str();
-    match snapshot.memory.list_recent_summaries(card_name, 50).await {
-        Ok(summaries) => {
-            if summaries.is_empty() {
-                println!("[Memory] No saved conversation summaries found.");
-            } else {
-                println!("--- Stored Summaries ({}) ---", summaries.len());
-                for s in &summaries {
-                    println!(
-                        "  {} | {} | {}",
-                        s.ended_at.format("%Y-%m-%d %H:%M"),
-                        s.session_id,
-                        Truncate::simple(&s.summary, 80)
-                    );
-                }
-                println!("----------------------------------------");
+    let kind = parse_kind_arg(args);
+    match snapshot
+        .memory
+        .list_typed_memories(card_name, kind, 50)
+        .await
+    {
+        Ok(memories) => {
+            if memories.is_empty() {
+                println!("[Memory] No typed memories found.");
+                return;
             }
+            println!("--- Typed Memories ({}) ---", memories.len());
+            for memory in memories {
+                println!(
+                    "  id={} [{}|{}] {}",
+                    memory.id.unwrap_or_default(),
+                    memory.kind.as_str(),
+                    memory.status.as_str(),
+                    memory.title
+                );
+            }
+            println!("----------------------------");
         }
         Err(e) => println!("[Memory] Error: {e}"),
     }
-    if let Ok(facts) = snapshot.memory.get_all_keyfacts(card_name).await
-        && !facts.is_empty()
-    {
-        println!("\n--- Key Facts ({}) ---", facts.len());
-        for f in &facts {
-            println!("  {}: {}", f.key, f.value);
+}
+
+async fn handle_inspect(id_arg: &str, snapshot: &ene_core::EneStateSnapshot) {
+    let Some(id) = parse_id(id_arg) else {
+        println!("{}", style::warning("[Memory] Usage: /memory inspect <id>"));
+        return;
+    };
+    match snapshot.memory.inspect_typed_memory(id).await {
+        Ok(Some(m)) => {
+            println!("id={}", m.id.unwrap_or_default());
+            println!("kind={}", m.kind.as_str());
+            println!("status={}", m.status.as_str());
+            println!("title={}", m.title);
+            println!("content={}", m.content);
+            println!(
+                "confidence={:.2} salience={:.2}",
+                m.confidence.get(),
+                m.salience.get()
+            );
+            println!(
+                "source={} source_ref={}",
+                m.source.as_str(),
+                m.source_ref.unwrap_or_default()
+            );
+            println!(
+                "last_accessed={} access_count={}",
+                m.last_accessed_at
+                    .map(|ts| ts.to_rfc3339())
+                    .unwrap_or_else(|| "-".to_string()),
+                m.access_count
+            );
         }
-        println!("------------------------");
+        Ok(None) => println!("{}", style::warning(format!("[Memory] id={id} not found"))),
+        Err(e) => println!("{}", style::error(format!("[Memory] Inspect error: {e}"))),
+    }
+}
+
+async fn handle_why(id_arg: &str, snapshot: &ene_core::EneStateSnapshot) {
+    let Some(id) = parse_id(id_arg) else {
+        println!("{}", style::warning("[Memory] Usage: /memory why <id>"));
+        return;
+    };
+    match snapshot.memory.inspect_typed_memory(id).await {
+        Ok(Some(m)) => {
+            println!(
+                "[Memory] why id={}: status={}, confidence={:.2}, salience={:.2}, source={}, last_accessed={}",
+                id,
+                m.status.as_str(),
+                m.confidence.get(),
+                m.salience.get(),
+                m.source.as_str(),
+                m.last_accessed_at
+                    .map(|ts| ts.to_rfc3339())
+                    .unwrap_or_else(|| "never".to_string())
+            );
+            println!("  note: live recall score breakdown is shown by `/memory search <query>`");
+        }
+        Ok(None) => println!("{}", style::warning(format!("[Memory] id={id} not found"))),
+        Err(e) => println!("{}", style::error(format!("[Memory] Why error: {e}"))),
+    }
+}
+
+async fn handle_pin(id_arg: &str, snapshot: &ene_core::EneStateSnapshot) {
+    let Some(id) = parse_id(id_arg) else {
+        println!("{}", style::warning("[Memory] Usage: /memory pin <id>"));
+        return;
+    };
+    match snapshot.memory.pin_typed_memory(id, true).await {
+        Ok(true) => println!("{}", style::success(format!("[Memory] Pinned id={id}"))),
+        Ok(false) => println!("{}", style::warning(format!("[Memory] id={id} not found"))),
+        Err(e) => println!("{}", style::error(format!("[Memory] Pin error: {e}"))),
+    }
+}
+
+async fn handle_transition(
+    id_arg: &str,
+    snapshot: &ene_core::EneStateSnapshot,
+    status: ene_memory::MemoryStatus,
+    label: &str,
+) {
+    let Some(id) = parse_id(id_arg) else {
+        println!(
+            "{}",
+            style::warning(format!("[Memory] Usage: /memory {label} <id>"))
+        );
+        return;
+    };
+    match snapshot
+        .memory
+        .transition_typed_memory_status(id, status)
+        .await
+    {
+        Ok(true) => println!("{}", style::success(format!("[Memory] {label} id={id}"))),
+        Ok(false) => println!("{}", style::warning(format!("[Memory] id={id} not found"))),
+        Err(e) => println!("{}", style::error(format!("[Memory] Update error: {e}"))),
+    }
+}
+
+fn parse_id(raw: &str) -> Option<i64> {
+    raw.trim().parse::<i64>().ok()
+}
+
+fn parse_kind_arg(args: &str) -> Option<ene_memory::MemoryKind> {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    if tokens.len() < 2 || tokens[0] != "--kind" {
+        return None;
+    }
+    match tokens[1] {
+        "episodic" => Some(ene_memory::MemoryKind::Episodic),
+        "semantic" => Some(ene_memory::MemoryKind::Semantic),
+        "user_profile" => Some(ene_memory::MemoryKind::UserProfile),
+        "relationship" => Some(ene_memory::MemoryKind::Relationship),
+        "affective" => Some(ene_memory::MemoryKind::Affective),
+        "commitment" => Some(ene_memory::MemoryKind::Commitment),
+        "preference" => Some(ene_memory::MemoryKind::Preference),
+        "procedure" => Some(ene_memory::MemoryKind::Procedure),
+        "reflection" => Some(ene_memory::MemoryKind::Reflection),
+        _ => None,
     }
 }
 

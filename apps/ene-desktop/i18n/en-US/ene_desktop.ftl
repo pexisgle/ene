@@ -38,6 +38,14 @@ mask-overlay-debug = Mask Overlay (Debug)
 mask-downsample = Mask Downsample
 visible = Visible
 hidden = Hidden
+memory-journal-title = Memory Journal
+memory-journal-refresh = Refresh
+memory-journal-show-deleted = Show deleted memories
+memory-journal-refresh-ok = Memory journal refreshed
+memory-journal-refresh-error = Failed to refresh memory journal
+memory-journal-affect = Affect
+memory-journal-commitments = Active commitments
+memory-journal-empty = No memories loaded. Press Refresh.
 
 # Character
 character = Character

@@ -38,6 +38,14 @@ mask-overlay-debug = マスクオーバーレイ (デバッグ)
 mask-downsample = マスクダウンサンプル
 visible = 表示
 hidden = 非表示
+memory-journal-title = メモリージャーナル
+memory-journal-refresh = 更新
+memory-journal-show-deleted = 削除済みメモリを表示
+memory-journal-refresh-ok = メモリージャーナルを更新しました
+memory-journal-refresh-error = メモリージャーナルの更新に失敗しました
+memory-journal-affect = 感情状態
+memory-journal-commitments = アクティブなコミットメント
+memory-journal-empty = メモリが読み込まれていません。更新を押してください。
 
 # Character
 character = キャラクター

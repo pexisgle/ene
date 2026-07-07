@@ -23,6 +23,7 @@ use crate::events::{AiStreamUpdate, AppEvent, AppEventSender};
 /// back through [`AiBridge::run`] and [`AiBridge::cancel`].
 pub struct AiBridge {
     handle: EneHandle,
+    runtime: tokio::runtime::Handle,
     /// Set on `EneCommand::Run`, cleared on
     /// `EneEvent::Done` / `EneEvent::Failed`. The AI page's chat
     /// input and Send button read this via
@@ -43,6 +44,7 @@ impl AiBridge {
         let processing = Arc::new(AtomicBool::new(false));
         let bridge = Self {
             handle: handle.clone(),
+            runtime: bootstrap_handle.clone(),
             processing: processing.clone(),
         };
 
@@ -123,6 +125,68 @@ impl AiBridge {
     ) -> Result<(), String> {
         self.handle
             .submit_user_input(request_id, response)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Fetches a fresh actor snapshot on the runtime thread.
+    pub fn get_snapshot_blocking(&self) -> Result<ene_core::EneStateSnapshot, String> {
+        self.runtime
+            .block_on(self.handle.get_snapshot())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Refresh memory journal payload (typed memories + affect + commitments).
+    pub fn refresh_memory_journal(
+        &self,
+        limit: usize,
+    ) -> Result<
+        (
+            Vec<ene_memory::MemoryItem>,
+            ene_memory::AffectState,
+            Vec<ene_memory::Commitment>,
+        ),
+        String,
+    > {
+        let snapshot = self.get_snapshot_blocking()?;
+        let character_id = snapshot.card_name.as_str().to_string();
+        let user_id = snapshot.config.user_name.clone();
+        self.runtime.block_on(async {
+            let memories = snapshot
+                .memory
+                .list_typed_memories(&character_id, None, limit)
+                .await
+                .map_err(|e| e.to_string())?;
+            let affect = snapshot
+                .memory
+                .show_affect_state(&character_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            let commitments = snapshot
+                .memory
+                .list_active_commitments(&character_id, Some(&user_id), limit)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok((memories, affect, commitments))
+        })
+    }
+
+    /// Applies a memory lifecycle action.
+    pub fn update_memory_status(
+        &self,
+        id: i64,
+        status: ene_memory::MemoryStatus,
+    ) -> Result<bool, String> {
+        let snapshot = self.get_snapshot_blocking()?;
+        self.runtime
+            .block_on(snapshot.memory.transition_typed_memory_status(id, status))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Pins a memory row in the typed store.
+    pub fn pin_memory(&self, id: i64) -> Result<bool, String> {
+        let snapshot = self.get_snapshot_blocking()?;
+        self.runtime
+            .block_on(snapshot.memory.pin_typed_memory(id, true))
             .map_err(|e| e.to_string())
     }
 }

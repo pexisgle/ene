@@ -70,8 +70,32 @@ pub trait CliCommand: Send + Sync {
 
 | コマンド | 動作 |
 |---------|------|
-| `/memory search <query>` | 長期記憶を検索 (埋め込み類似度) |
-| `/memory list` | 保存済み要約とキーファクトを一覧 |
+| `/memory list [--kind <kind>]` | typed memory を一覧表示 (kind フィルタ可) |
+| `/memory inspect <id>` | typed memory の詳細を表示 |
+| `/memory search <query>` | typed memory をハイブリッド検索 (スコア内訳付き) |
+| `/memory why <id>` | メモリの想起/ライフサイクル理由を表示 |
+| `/memory pin <id>` | メモリをピン留めし自然減衰対象から除外 |
+| `/memory archive <id>` | メモリを archived に遷移 |
+| `/memory forget <id>` | メモリを user_deleted に遷移 |
+| `/memory dispute <id>` | メモリを disputed に遷移 |
+| `/memory restore <id>` | メモリを active に戻す |
+| `/memory status` | legacy 移行状態と件数を表示 |
+| `/memory migrate legacy [--dry-run]` | legacy → typed の一括移行を実行 |
+| `/memory reset legacy --yes` | legacy/typed メモリを破壊的に初期化 |
+
+### 感情コマンド
+
+| コマンド | 動作 |
+|---------|------|
+| `/affect show` | 現在の affect state を表示 |
+| `/affect reset` | affect state をニュートラルにリセット |
+
+### コミットメントコマンド
+
+| コマンド | 動作 |
+|---------|------|
+| `/commitments list` | active な commitments を一覧表示 |
+| `/commitments done <id>` | commitment を完了済みにする |
 
 ### セッション分割コマンド
 

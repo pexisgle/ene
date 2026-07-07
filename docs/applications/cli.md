@@ -70,8 +70,32 @@ Commands are entered with `/` prefix:
 
 | Command | Action |
 |---------|--------|
-| `/memory search <query>` | Search long-term memory (embedding similarity) |
-| `/memory list` | List stored summaries and key facts |
+| `/memory list [--kind <kind>]` | List typed memories (optional kind filter) |
+| `/memory inspect <id>` | Show full typed-memory details |
+| `/memory search <query>` | Search typed memories (hybrid score + breakdown) |
+| `/memory why <id>` | Show recall/lifecycle debug context for a memory |
+| `/memory pin <id>` | Pin memory to skip natural decay |
+| `/memory archive <id>` | Mark memory as archived |
+| `/memory forget <id>` | Mark memory as user-deleted |
+| `/memory dispute <id>` | Mark memory as disputed |
+| `/memory restore <id>` | Restore memory status to active |
+| `/memory status` | Show legacy migration status and row counts |
+| `/memory migrate legacy [--dry-run]` | Run one-shot legacy to typed migration |
+| `/memory reset legacy --yes` | Destructively reset legacy and typed memory |
+
+### Affect Commands
+
+| Command | Action |
+|---------|--------|
+| `/affect show` | Show current affect state |
+| `/affect reset` | Reset affect state to neutral |
+
+### Commitment Commands
+
+| Command | Action |
+|---------|--------|
+| `/commitments list` | List active commitments |
+| `/commitments done <id>` | Mark a commitment as done |
 
 ### Session Split Commands
 

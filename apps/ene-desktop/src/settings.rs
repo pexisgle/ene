@@ -281,6 +281,16 @@ pub struct UiState {
     /// One per [`UserInputPrompt::items`] entry, used as scratch
     /// state for the question dialog.
     pub user_input_drafts: Vec<QuestionDraft>,
+    /// Cached memory-journal rows for desktop debug UX (#93).
+    pub memory_journal_rows: Vec<MemoryJournalRow>,
+    /// Cached active commitments for desktop debug UX (#93).
+    pub memory_journal_commitments: Vec<String>,
+    /// Cached affect-state summary text for desktop debug UX (#93).
+    pub memory_journal_affect: String,
+    /// Last journal operation status/error message.
+    pub memory_journal_message: Option<String>,
+    /// Whether user-deleted memories should be shown in the journal list.
+    pub memory_journal_show_deleted: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -305,6 +315,18 @@ pub struct QuestionDraft {
     pub text: String,
     pub selected: Option<String>,
     pub skipped: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct MemoryJournalRow {
+    pub id: i64,
+    pub title: String,
+    pub kind: String,
+    pub status: String,
+    pub confidence: f32,
+    pub salience: f32,
+    pub last_accessed: Option<String>,
+    pub why_recalled: String,
 }
 
 #[derive(Clone, Debug, Default)]

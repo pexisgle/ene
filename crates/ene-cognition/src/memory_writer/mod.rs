@@ -45,6 +45,15 @@ impl MemoryWriter {
             config.memory.min_confidence_to_persist as f32,
             &config.memory.tool_grounding,
         )?;
+        tracing::debug!(
+            component = "MemoryWriter",
+            event = "memory candidates extracted",
+            character_id = %input.character_id,
+            user_id = %input.user_id,
+            turn_id = 0usize,
+            candidate_count = candidates.len(),
+            "Deterministic memory candidates extracted"
+        );
 
         if candidates.is_empty() {
             return Ok(());
@@ -81,22 +90,24 @@ impl MemoryWriter {
                     source_ref: source_ref.as_deref(),
                     ..base_ctx.clone()
                 };
-                let _ = CommitmentLedger::arbitrate_apply_and_sync(
+                let (applied, _synced_commitments) = CommitmentLedger::arbitrate_apply_and_sync(
                     store,
                     &[candidate],
                     &ctx,
                     &sync_ctx,
                 )
                 .await?;
+                log_arbiter_outcomes(input, &applied);
             } else {
                 regular.push(candidate);
             }
         }
 
         if !regular.is_empty() {
-            let _ =
+            let (applied, _synced_commitments) =
                 CommitmentLedger::arbitrate_apply_and_sync(store, &regular, &base_ctx, &sync_ctx)
                     .await?;
+            log_arbiter_outcomes(input, &applied);
         }
 
         Ok(())
@@ -119,6 +130,16 @@ impl MemoryWriter {
             .upsert_affect_state(&input.affect)
             .await
             .map_err(CognitionError::Memory)?;
+        tracing::debug!(
+            component = "MemoryWriter",
+            event = "affect state updated",
+            character_id = %input.character_id,
+            user_id = %input.user_id,
+            mood = %input.affect.mood_label,
+            valence = input.affect.valence,
+            arousal = input.affect.arousal,
+            "Affect state persisted"
+        );
 
         Ok(())
     }
@@ -147,6 +168,29 @@ fn sanitize_ref(raw: &str) -> String {
         "tool".to_string()
     } else {
         out
+    }
+}
+
+fn log_arbiter_outcomes(
+    input: &PostTurnInput<'_>,
+    applied: &[crate::memory_writer::AppliedDecision],
+) {
+    for outcome in applied {
+        if matches!(
+            outcome.decision.action,
+            crate::memory_writer::ArbiterAction::Ignore
+                | crate::memory_writer::ArbiterAction::AskConfirmationLater
+        ) {
+            tracing::debug!(
+                component = "MemoryWriter",
+                event = "memory candidate rejected",
+                character_id = %input.character_id,
+                user_id = %input.user_id,
+                reason_code = ?outcome.decision.reason.code,
+                reason_detail = %outcome.decision.reason.detail,
+                "Memory candidate was not persisted"
+            );
+        }
     }
 }
 
