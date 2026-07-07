@@ -285,8 +285,8 @@ pub struct UiState {
     pub memory_journal_rows: Vec<MemoryJournalRow>,
     /// Cached active commitments for desktop debug UX (#93).
     pub memory_journal_commitments: Vec<String>,
-    /// Cached affect-state summary text for desktop debug UX (#93).
-    pub memory_journal_affect: String,
+    /// Cached affect-state snapshot for memory journal UX (#93).
+    pub memory_journal_affect: MemoryJournalAffect,
     /// Last journal operation status/error message.
     pub memory_journal_message: Option<String>,
     /// Whether user-deleted memories should be shown in the journal list.
@@ -327,6 +327,14 @@ pub struct MemoryJournalRow {
     pub salience: f32,
     pub last_accessed: Option<String>,
     pub why_recalled: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MemoryJournalAffect {
+    pub mood: String,
+    pub expression: String,
+    pub affinity: f32,
+    pub trust: f32,
 }
 
 #[derive(Clone, Debug, Default)]

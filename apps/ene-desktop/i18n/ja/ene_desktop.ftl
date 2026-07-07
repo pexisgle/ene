@@ -46,6 +46,25 @@ memory-journal-refresh-error = メモリージャーナルの更新に失敗し�
 memory-journal-affect = 感情状態
 memory-journal-commitments = アクティブなコミットメント
 memory-journal-empty = メモリが読み込まれていません。更新を押してください。
+memory-journal-title-field = タイトル
+memory-journal-kind = 種別
+memory-journal-status = ステータス
+memory-journal-confidence = 信頼度
+memory-journal-salience = 重要度
+memory-journal-last-accessed = 最終参照
+memory-journal-why-recalled = 想起理由
+memory-journal-mood = ムード
+memory-journal-expression = 表情
+memory-journal-affinity = 親密度
+memory-journal-trust = 信頼
+memory-journal-action-pin = ピン留め
+memory-journal-action-archive = アーカイブ
+memory-journal-action-forget = 忘却
+memory-journal-action-dispute = 異議
+memory-journal-action-restore = 復元
+memory-journal-action-ok = 完了
+memory-journal-action-no-change = 変更なし
+memory-journal-action-error = 失敗
 
 # Character
 character = キャラクター
@@ -63,6 +82,7 @@ manual-expressions = 手動表情テスト
 
 # AI
 ai = AI
+memory = メモリ
 character-card = キャラクターカード
 user-name = ユーザー名
 runtime-rules = 実行ルール

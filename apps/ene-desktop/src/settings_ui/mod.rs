@@ -9,6 +9,7 @@ pub mod page_ai;
 pub mod page_character;
 pub mod page_debug;
 pub mod page_graphics;
+pub mod page_memory;
 pub mod widgets;
 
 pub use input::SettingsInputState;
@@ -28,6 +29,7 @@ pub enum PageKind {
     Character,
     Graphics,
     Ai,
+    Memory,
     Debug,
 }
 
@@ -84,6 +86,7 @@ impl SettingsUi {
                 PageKind::Character,
                 PageKind::Graphics,
                 PageKind::Ai,
+                PageKind::Memory,
                 PageKind::Debug,
             ] {
                 let label = match page {
@@ -91,6 +94,7 @@ impl SettingsUi {
                     PageKind::Graphics => crate::i18n::graphics(),
                     PageKind::Debug => crate::i18n::debug(),
                     PageKind::Ai => crate::i18n::ai(),
+                    PageKind::Memory => i18n_embed_fl::fl!(crate::i18n::loader(), "memory"),
                 };
                 if ui
                     .selectable_label(self.current_page == page, label)
@@ -125,6 +129,7 @@ impl SettingsUi {
                 world,
                 ui_entity,
             ),
+            PageKind::Memory => page_memory::render(ui, ai, world, ui_entity),
             PageKind::Debug => {
                 page_debug::render(ui, settings, &mut self.animation, ai, world, ui_entity)
             }

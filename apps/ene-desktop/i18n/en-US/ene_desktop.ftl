@@ -46,6 +46,25 @@ memory-journal-refresh-error = Failed to refresh memory journal
 memory-journal-affect = Affect
 memory-journal-commitments = Active commitments
 memory-journal-empty = No memories loaded. Press Refresh.
+memory-journal-title-field = Title
+memory-journal-kind = Kind
+memory-journal-status = Status
+memory-journal-confidence = Confidence
+memory-journal-salience = Salience
+memory-journal-last-accessed = Last accessed
+memory-journal-why-recalled = Why recalled
+memory-journal-mood = Mood
+memory-journal-expression = Expression
+memory-journal-affinity = Affinity
+memory-journal-trust = Trust
+memory-journal-action-pin = Pin
+memory-journal-action-archive = Archive
+memory-journal-action-forget = Forget
+memory-journal-action-dispute = Dispute
+memory-journal-action-restore = Restore
+memory-journal-action-ok = completed
+memory-journal-action-no-change = no change
+memory-journal-action-error = failed
 
 # Character
 character = Character
@@ -63,6 +82,7 @@ manual-expressions = Manual Expressions (Test)
 
 # AI
 ai = AI
+memory = Memory
 character-card = Character Card
 user-name = User Name
 runtime-rules = Runtime Rules
