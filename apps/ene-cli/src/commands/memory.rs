@@ -4,6 +4,13 @@ use async_trait::async_trait;
 
 pub struct MemoryCommand;
 
+fn parse_subcommand_and_tail(arg: &str) -> (&str, &str) {
+    match arg.trim().split_once(' ') {
+        Some((sub, rest)) => (sub, rest.trim()),
+        None => (arg.trim(), ""),
+    }
+}
+
 #[async_trait]
 impl CliCommand for MemoryCommand {
     fn name(&self) -> &'static str {
@@ -19,8 +26,7 @@ impl CliCommand for MemoryCommand {
     }
 
     async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), String> {
-        let parts: Vec<&str> = arg.splitn(3, ' ').collect();
-        let subcmd = parts.first().copied().unwrap_or("");
+        let (subcmd, tail) = parse_subcommand_and_tail(arg);
 
         let snapshot = ctx
             .handle
@@ -29,14 +35,14 @@ impl CliCommand for MemoryCommand {
             .map_err(|e| format!("Failed to get actor state: {e}"))?;
 
         match subcmd {
-            "search" => handle_search(parts.get(1).copied().unwrap_or(""), &snapshot).await,
-            "list" => handle_list(parts.get(1).copied().unwrap_or(""), &snapshot).await,
-            "inspect" => handle_inspect(parts.get(1).copied().unwrap_or(""), &snapshot).await,
-            "why" => handle_why(parts.get(1).copied().unwrap_or(""), &snapshot).await,
-            "pin" => handle_pin(parts.get(1).copied().unwrap_or(""), &snapshot).await,
+            "search" => handle_search(tail, &snapshot).await,
+            "list" => handle_list(tail, &snapshot).await,
+            "inspect" => handle_inspect(tail, &snapshot).await,
+            "why" => handle_why(tail, &snapshot).await,
+            "pin" => handle_pin(tail, &snapshot).await,
             "archive" => {
                 handle_transition(
-                    parts.get(1).copied().unwrap_or(""),
+                    tail,
                     &snapshot,
                     ene_memory::MemoryStatus::Archived,
                     "archived",
@@ -45,7 +51,7 @@ impl CliCommand for MemoryCommand {
             }
             "forget" => {
                 handle_transition(
-                    parts.get(1).copied().unwrap_or(""),
+                    tail,
                     &snapshot,
                     ene_memory::MemoryStatus::UserDeleted,
                     "forgotten",
@@ -54,7 +60,7 @@ impl CliCommand for MemoryCommand {
             }
             "dispute" => {
                 handle_transition(
-                    parts.get(1).copied().unwrap_or(""),
+                    tail,
                     &snapshot,
                     ene_memory::MemoryStatus::Disputed,
                     "disputed",
@@ -63,7 +69,7 @@ impl CliCommand for MemoryCommand {
             }
             "restore" => {
                 handle_transition(
-                    parts.get(1).copied().unwrap_or(""),
+                    tail,
                     &snapshot,
                     ene_memory::MemoryStatus::Active,
                     "restored",
@@ -71,8 +77,8 @@ impl CliCommand for MemoryCommand {
                 .await
             }
             "status" => handle_status(&snapshot).await,
-            "migrate" => handle_migrate(parts.get(1).copied().unwrap_or(""), &snapshot).await,
-            "reset" => handle_reset(parts.get(1).copied().unwrap_or(""), &snapshot).await,
+            "migrate" => handle_migrate(tail, &snapshot).await,
+            "reset" => handle_reset(tail, &snapshot).await,
             _ => {
                 println!(
                     "{}",
@@ -390,5 +396,39 @@ async fn handle_reset(args: &str, snapshot: &ene_core::EneStateSnapshot) {
             style::success(format!("[Memory] Reset legacy memory for {card_name}"))
         ),
         Err(e) => println!("{}", style::error(format!("[Memory] Reset failed: {e}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_kind_arg, parse_subcommand_and_tail};
+
+    #[test]
+    fn parse_subcommand_and_tail_preserves_multi_word_search_query() {
+        let (subcmd, tail) = parse_subcommand_and_tail("search what tea do i like");
+        assert_eq!(subcmd, "search");
+        assert_eq!(tail, "what tea do i like");
+    }
+
+    #[test]
+    fn parse_subcommand_and_tail_preserves_migrate_flags() {
+        let (subcmd, tail) = parse_subcommand_and_tail("migrate legacy --dry-run");
+        assert_eq!(subcmd, "migrate");
+        assert_eq!(tail, "legacy --dry-run");
+    }
+
+    #[test]
+    fn parse_subcommand_and_tail_preserves_reset_confirmation() {
+        let (subcmd, tail) = parse_subcommand_and_tail("reset legacy --yes");
+        assert_eq!(subcmd, "reset");
+        assert_eq!(tail, "legacy --yes");
+    }
+
+    #[test]
+    fn parse_kind_arg_reads_kind_flag_value_pair() {
+        assert_eq!(
+            parse_kind_arg("--kind preference"),
+            Some(ene_memory::MemoryKind::Preference)
+        );
     }
 }

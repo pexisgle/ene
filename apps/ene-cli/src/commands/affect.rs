@@ -4,6 +4,10 @@ use async_trait::async_trait;
 
 pub struct AffectCommand;
 
+fn parse_subcommand(arg: &str) -> &str {
+    arg.trim()
+}
+
 #[async_trait]
 impl CliCommand for AffectCommand {
     fn name(&self) -> &'static str {
@@ -19,7 +23,7 @@ impl CliCommand for AffectCommand {
     }
 
     async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), String> {
-        let sub = arg.trim();
+        let sub = parse_subcommand(arg);
         let snapshot = ctx
             .handle
             .get_snapshot()
@@ -45,5 +49,16 @@ impl CliCommand for AffectCommand {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_subcommand;
+
+    #[test]
+    fn parse_subcommand_trims_whitespace() {
+        assert_eq!(parse_subcommand("  show  "), "show");
+        assert_eq!(parse_subcommand("  reset"), "reset");
     }
 }

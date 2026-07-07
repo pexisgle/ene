@@ -4,6 +4,10 @@ use async_trait::async_trait;
 
 pub struct CommitmentsCommand;
 
+fn parse_parts(arg: &str) -> Vec<&str> {
+    arg.split_whitespace().collect()
+}
+
 #[async_trait]
 impl CliCommand for CommitmentsCommand {
     fn name(&self) -> &'static str {
@@ -19,7 +23,7 @@ impl CliCommand for CommitmentsCommand {
     }
 
     async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), String> {
-        let parts: Vec<&str> = arg.split_whitespace().collect();
+        let parts = parse_parts(arg);
         let sub = parts.first().copied().unwrap_or("");
         let snapshot = ctx
             .handle
@@ -73,5 +77,16 @@ impl CliCommand for CommitmentsCommand {
             _ => println!("{}", style::warning("Usage: /commitments <list|done <id>>")),
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_parts;
+
+    #[test]
+    fn parse_parts_for_list_and_done_subcommands() {
+        assert_eq!(parse_parts("list"), vec!["list"]);
+        assert_eq!(parse_parts("done 42"), vec!["done", "42"]);
     }
 }
