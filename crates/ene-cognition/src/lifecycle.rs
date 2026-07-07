@@ -58,6 +58,8 @@ pub struct PreTurnOutput {
     pub recalled: Vec<RecalledMemory>,
     /// Active commitments for prompt injection.
     pub commitments: Vec<ActiveCommitmentPrompt>,
+    /// Classifier expression hint when confidence meets threshold (#88).
+    pub classifier_expression_hint: Option<String>,
 }
 
 /// Metadata about a composed prompt packet.

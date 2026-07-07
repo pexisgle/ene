@@ -142,6 +142,9 @@ async fn pump_events(
                     let _ = event_tx.send(AppEvent::EmoteToken(name.to_string()));
                 }
             }
+            Ok(EneEvent::Expression { name, .. }) => {
+                let _ = event_tx.send(AppEvent::EmoteToken(name));
+            }
             Ok(EneEvent::ToolCallStart { name, arguments }) => {
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::ToolCallStart {
                     name,

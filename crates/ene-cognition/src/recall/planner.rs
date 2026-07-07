@@ -366,6 +366,7 @@ mod tests {
             mood_label: "warm".to_string(),
             last_expression: "smiling".to_string(),
             discrete_emotions: vec![DiscreteEmotion::new("joy", 0.7)],
+            updated_at: None,
         };
 
         let plan = RecallPlanner::plan(

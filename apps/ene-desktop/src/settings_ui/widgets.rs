@@ -220,11 +220,13 @@ pub fn apply_action(
         SettingsAction::LanguageDown => {
             settings.language = crate::settings::cycle_language(settings.language, -1);
             crate::i18n::select_language(settings.language);
+            settings.sync_classifier_language_from_ui();
             settings.mark_dirty();
         }
         SettingsAction::LanguageUp => {
             settings.language = crate::settings::cycle_language(settings.language, 1);
             crate::i18n::select_language(settings.language);
+            settings.sync_classifier_language_from_ui();
             settings.mark_dirty();
         }
     }

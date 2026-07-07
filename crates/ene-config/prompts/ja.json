@@ -11,6 +11,7 @@
   "emotion": {
     "header": "## 感情出力ルール",
     "rule_path": "ja/emotion/rule.md",
+    "natural_dialogue_contract_path": "ja/emotion/natural_dialogue_contract.md",
     "token_header": "使用可能なトークン:",
     "examples_header": "常にこのフォーマットに従ってください（トークンが先頭、その後に文章）:",
     "example_happy": "<|emo:happy|> それはすごく楽しみだね、もっと聞かせて！",
@@ -38,5 +39,9 @@
   "extractor": {
     "system_path": "ja/extractor/system.md",
     "user_prompt_path": "ja/extractor/user_prompt.md"
+  },
+  "affect_classifier": {
+    "system_path": "ja/affect_classifier/system.md",
+    "user_prompt_path": "ja/affect_classifier/user_prompt.md"
   }
 }

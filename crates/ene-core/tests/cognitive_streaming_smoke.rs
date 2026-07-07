@@ -5,10 +5,10 @@
 use async_trait::async_trait;
 use ene_cognition::{CognitionConfig, CognitionEngine, HistoryEntry, TurnContext};
 use ene_config::{CharacterCardV3, PromptLibrary, expand_cbs_macros};
-use ene_core::message_builder::build_expression_phi;
+use ene_core::message_builder::{build_cognitive_output_contract, build_expression_phi};
 use ene_memory::{
-    AffectAnnotation, MemoryConfidence, MemoryKind, MemorySalience, MemoryScope, MemorySource,
-    MemoryStatus, MemoryStore, NewMemoryItem,
+    AffectAnnotation, AffectState, MemoryConfidence, MemoryKind, MemorySalience, MemoryScope,
+    MemorySource, MemoryStatus, MemoryStore, NewMemoryItem,
 };
 use ene_provider::{
     EmbeddingKind, EmbeddingProvider, LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk,
@@ -309,4 +309,60 @@ async fn cognitive_compose_includes_active_scene_summary() {
         panic!("expected system message");
     };
     assert!(content.contains("greeted each other"));
+}
+
+#[test]
+fn cognitive_output_contract_uses_natural_dialogue_when_emotion_enabled() {
+    let card = CharacterCardV3::default();
+    let prompts = PromptLibrary::load("en");
+    let contract =
+        build_cognitive_output_contract(&card, &prompts, true, "Alice").expect("contract");
+    assert!(contract.contains("natural dialogue") || contract.contains("Output Contract"));
+    assert!(contract.contains("Do NOT emit") || contract.contains("トークン"));
+}
+
+#[test]
+fn cognitive_output_contract_uses_phi_when_emotion_disabled() {
+    let card = CharacterCardV3::default();
+    let prompts = PromptLibrary::load("en");
+    let contract = build_cognitive_output_contract(&card, &prompts, false, "Alice");
+    // Default card includes built-in expressions via resolve_expressions.
+    if let Some(phi) = contract {
+        assert!(phi.contains("<|emo:") || phi.contains("Emotion") || phi.contains("emotion"));
+    }
+}
+
+#[test]
+fn expression_resolves_from_classifier_hint_without_stream_token() {
+    let cognition = CognitionConfig::default();
+    let engine = CognitionEngine::new();
+    let card = CharacterCardV3::default();
+    let mut affect = AffectState::neutral("ene");
+    affect.valence = 0.1;
+    affect.arousal = 0.0;
+
+    let (decision, _) = engine.resolve_expression_turn(
+        &cognition,
+        &card,
+        &affect,
+        "That sounds great!",
+        Some("happy"),
+        "",
+        None,
+    );
+    assert_eq!(decision.expression, "happy");
+}
+
+#[tokio::test]
+async fn persist_affect_snapshot_writes_before_finalize() {
+    let store = MemoryStore::open_in_memory(4).await.unwrap();
+    let mut affect = AffectState::neutral("ene");
+    affect.valence = 0.42;
+
+    CognitionEngine::persist_affect_snapshot(&store, &affect)
+        .await
+        .expect("persist snapshot");
+
+    let loaded = store.get_affect_state("ene").await.unwrap();
+    assert!((loaded.valence - 0.42).abs() < f32::EPSILON);
 }

@@ -53,12 +53,18 @@ pub mod error;
 /// Turn lifecycle DTOs for streaming integration (#100).
 pub mod lifecycle;
 
-/// Commitment ledger types.
+/// Emotion engine types.
+#[doc(no_inline)]
+pub use emotion::{AffectProposal, EmotionEngine, TurnAffectInput};
+/// Expression arbiter types.
+#[doc(no_inline)]
+pub use output::{ExpressionDecision, ExpressionInput, ExpressionSource, OutputArbiter};
 #[doc(no_inline)]
 pub use commitments::{CommitmentLedger, CommitmentSyncContext};
 /// Cognitive configuration section.
 pub use config::{
     CharacterMemoryConfig, CognitionConfig, CognitionMemoryConfig, ContextConfig, EmotionConfig,
+    EngineMode,
 };
 /// Re-export commitment domain types from ene-memory for consumers.
 #[doc(no_inline)]

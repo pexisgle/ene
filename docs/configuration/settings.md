@@ -394,7 +394,10 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
       "decay_half_life_minutes": 30.0,
       "expression_hysteresis_seconds": 4.0,
       "llm_can_propose_expression": true,
-      "llm_expression_is_advisory": true
+      "llm_expression_is_advisory": true,
+      "classifier_timeout_secs": 15,
+      "classifier_min_confidence": 0.5,
+      "classifier_language": "en"
     },
     "character": {
       "compile_ccv3_to_semantic_memory": true,
@@ -463,6 +466,9 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 | `expression_hysteresis_seconds` | float | `4.0` | Minimum seconds between expression changes (prevents flickering) |
 | `llm_can_propose_expression` | bool | `true` | Allow the LLM to propose expression tokens |
 | `llm_expression_is_advisory` | bool | `true` | Treat LLM expression proposals as advisory only (not commands) |
+| `classifier_timeout_secs` | int | `15` | Timeout in seconds for the optional LLM affect classifier (#88) |
+| `classifier_min_confidence` | float | `0.5` | Minimum classifier confidence to apply LLM affect deltas |
+| `classifier_language` | string | `"en"` | Prompt library language for affect classifier and natural-dialogue output contract (`en` or `ja`) |
 
 #### `cognition.character` — Character Compilation
 

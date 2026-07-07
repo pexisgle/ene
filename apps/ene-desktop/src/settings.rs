@@ -607,10 +607,25 @@ impl CharacterSettings {
             self.language = desktop.language;
         }
 
+        self.sync_classifier_language_from_ui();
+
         crate::i18n::select_language(self.language);
 
         self.clamp_runtime_values();
         self.load_per_character_settings();
+    }
+
+    /// Keep cognitive prompt language aligned with the desktop UI language.
+    pub fn sync_classifier_language_from_ui(&mut self) {
+        let lang = match self.language {
+            Language::En => "en",
+            Language::Ja => "ja",
+        };
+        if let Ok(mut cognition) = self.ai.ai.get_section::<ene_core::CognitionConfig>() {
+            cognition.emotion.classifier_language = lang.into();
+            let _ = self.ai.ai.set_section(&cognition);
+            *self.store.write() = ene_config::ConfigStore::from_config(self.ai.ai.clone());
+        }
     }
 }
 

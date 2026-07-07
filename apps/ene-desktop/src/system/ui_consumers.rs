@@ -128,14 +128,15 @@ pub fn apply_emote_tokens_system(
     mut events: MessageReader<EmoteToken>,
     mut pipeline: ResMut<EmotionPipelineState>,
 ) {
+    let hold_secs = pipeline.expression_hold_secs;
     for token in events.read() {
         pipeline.pending.push_back(EmotionCommand {
             emotion: token.0.clone(),
             // 0.0 means "ready immediately": `tick_emotions`
             // pops this command the next time it is called and
-            // starts the 4s hold + 0.3s fade.
+            // starts the hold + fade window from cognition config.
             target_time: 0.0,
-            hold_secs: 4.0,
+            hold_secs,
             weight: 1.0,
         });
     }

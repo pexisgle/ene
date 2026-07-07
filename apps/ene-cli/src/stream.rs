@@ -21,6 +21,10 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
                 }
                 let _ = io::stdout().flush();
             }
+            Ok(EneEvent::Expression { name, source }) => {
+                print!("[Expression: {name} ({source})]");
+                let _ = io::stdout().flush();
+            }
             Ok(EneEvent::ToolCallStart { name, arguments }) => {
                 tracing::info!(tool = %name, arguments = %arguments, "Tool calling started");
             }

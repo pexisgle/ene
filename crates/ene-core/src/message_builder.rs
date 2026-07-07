@@ -200,6 +200,46 @@ pub fn build_expression_phi(card: &CharacterCardV3, prompts: &PromptLibrary) -> 
     }
 }
 
+/// Builds the natural-dialogue output contract for engine-managed expression (#91).
+///
+/// Instructs the LLM to respond in plain dialogue without inline emotion tokens.
+/// Expression is resolved by the cognitive runtime Output Arbiter after the turn.
+#[must_use]
+pub fn build_natural_dialogue_contract(
+    card: &CharacterCardV3,
+    prompts: &PromptLibrary,
+    user_name: &str,
+) -> Option<String> {
+    let char_name = card.data.get_character_name();
+    let manual = card.data.post_history_instructions.trim();
+
+    let mut contract =
+        expand_cbs_macros(&prompts.emotion().natural_dialogue_contract, char_name, user_name);
+
+    if manual.is_empty() {
+        Some(contract)
+    } else {
+        contract.push_str("\n\n");
+        contract.push_str(&expand_cbs_macros(manual, char_name, user_name));
+        Some(contract)
+    }
+}
+
+/// Selects the post-history output block for the cognitive streaming path.
+#[must_use]
+pub fn build_cognitive_output_contract(
+    card: &CharacterCardV3,
+    prompts: &PromptLibrary,
+    emotion_enabled: bool,
+    user_name: &str,
+) -> Option<String> {
+    if emotion_enabled {
+        build_natural_dialogue_contract(card, prompts, user_name)
+    } else {
+        build_expression_phi(card, prompts)
+    }
+}
+
 /// Assembles the full message list for an AI completion request.
 ///
 /// Message order:

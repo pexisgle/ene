@@ -17,7 +17,7 @@ use bevy_ecs::prelude::*;
 
 use crate::character_state::{ActiveEmotion, EmotionCommand};
 
-#[derive(Resource, Debug, Default)]
+#[derive(Resource, Debug)]
 pub struct EmotionPipelineState {
     /// Commands buffered by the AI bridge / settings UI. Drained by
     /// the render-side system in `AppSet::Render`.
@@ -25,6 +25,18 @@ pub struct EmotionPipelineState {
     /// Last-applied emotion + remaining hold time. Read by the
     /// render-side system to drive fade-out after the hold window.
     pub active: Option<ActiveEmotion>,
+    /// Hold duration for new expression commands (`cognition.emotion.expression_hysteresis_seconds`).
+    pub expression_hold_secs: f64,
+}
+
+impl Default for EmotionPipelineState {
+    fn default() -> Self {
+        Self {
+            pending: VecDeque::new(),
+            active: None,
+            expression_hold_secs: 4.0,
+        }
+    }
 }
 
 /// How long the weight takes to ramp from target -> 0 once the

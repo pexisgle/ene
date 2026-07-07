@@ -232,7 +232,7 @@ Recall Planner が生成するクエリ計画：
   - 任意 one-shot CLI migration（トランザクション）で summaries → `Episodic`、keyfacts → `UserProfile`/`Preference`、logs → `memory_spans`
   - migration 完了後は typed-only recall。レガシー行は reset まで監査用に残る
   - `cognition.memory.require_migration` は summaries/keyfacts 未移行時のみ recall をブロック（logs のみではブロックしない）
-  - affect **永続化**は毎ターン実行。affect **計算**は #86（`EmotionEngine`）で予定
+  - affect **永続化**は毎ターン実行。affect **計算**は `EmotionEngine`（#86）、オプション LLM 分類器（#88）、`OutputArbiter` による表情解決（#89, #91）で実装済み
 - **#80** で自動セッション分割を rolling context compression トリガーに置き換え
 - **`cognition.enabled = false`** のときはレガシー streaming パイプラインを維持
 

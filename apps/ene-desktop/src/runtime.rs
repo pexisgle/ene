@@ -352,6 +352,22 @@ impl Runtime {
         self.state.app.world_mut().insert_resource(
             crate::system::platform::should_render_debug::TransparentWindow(transparent),
         );
+        let expression_hold_secs = self
+            .state
+            .settings
+            .ai
+            .ai
+            .get_section::<ene_core::CognitionConfig>()
+            .map(|c| c.emotion.expression_hysteresis_seconds)
+            .unwrap_or(4.0);
+        if let Some(mut pipeline) = self
+            .state
+            .app
+            .world_mut()
+            .get_resource_mut::<crate::resource::emotion_pipeline::EmotionPipelineState>()
+        {
+            pipeline.expression_hold_secs = expression_hold_secs;
+        }
         self.state.settings.flush_if_dirty();
     }
 

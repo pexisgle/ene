@@ -1291,6 +1291,7 @@ impl MemoryStore {
                     mood_label: model.mood_label,
                     last_expression: model.last_expression,
                     discrete_emotions,
+                    updated_at: Some(model.updated_at),
                 })
             }
             None => Ok(crate::AffectState::neutral(character_id)),
@@ -3345,6 +3346,7 @@ mod tests {
                 crate::DiscreteEmotion::new("joy", 0.8),
                 crate::DiscreteEmotion::new("surprise", 0.4),
             ],
+            updated_at: None,
         };
         store.upsert_affect_state(&state).await.unwrap();
 

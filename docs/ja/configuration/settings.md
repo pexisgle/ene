@@ -394,7 +394,10 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
       "decay_half_life_minutes": 30.0,
       "expression_hysteresis_seconds": 4.0,
       "llm_can_propose_expression": true,
-      "llm_expression_is_advisory": true
+      "llm_expression_is_advisory": true,
+      "classifier_timeout_secs": 15,
+      "classifier_min_confidence": 0.5,
+      "classifier_language": "ja"
     },
     "character": {
       "compile_ccv3_to_semantic_memory": true,
@@ -463,6 +466,9 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 | `expression_hysteresis_seconds` | float | `4.0` | 表情変更の最小間隔（秒）（ちらつき防止） |
 | `llm_can_propose_expression` | bool | `true` | LLM が表情トークンを提案することを許可 |
 | `llm_expression_is_advisory` | bool | `true` | LLM の表情提案をコマンドではなくアドバイスとして扱う |
+| `classifier_timeout_secs` | int | `15` | オプション LLM 感情分類器のタイムアウト（秒）（#88） |
+| `classifier_min_confidence` | float | `0.5` | LLM 感情デルタ適用に必要な最小 confidence |
+| `classifier_language` | string | `"en"` | 感情分類器と自然対話出力契約のプロンプト言語（`en` または `ja`） |
 
 #### `cognition.character` — キャラクターコンパイル
 

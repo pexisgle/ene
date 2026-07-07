@@ -30,6 +30,8 @@ pub struct PromptLibraryData {
     pub split: SplitPrompts,
     /// Memory extractor prompts configuration.
     pub extractor: ExtractorPrompts,
+    /// Affect classifier prompts configuration (#88).
+    pub affect_classifier: AffectClassifierPrompts,
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,6 +43,8 @@ struct RawPromptLibraryData {
     summarizer: RawSummarizerPrompts,
     split: SplitPrompts,
     extractor: RawExtractorPrompts,
+    #[serde(default)]
+    affect_classifier: RawAffectClassifierPrompts,
 }
 
 /// Prompt templates for the system prompt.
@@ -104,6 +108,8 @@ pub struct EmotionPrompts {
     pub example_angry: String,
     /// Neutral example string.
     pub example_neutral: String,
+    /// Natural-dialogue output contract for engine-managed expression (#91).
+    pub natural_dialogue_contract: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +117,8 @@ pub struct EmotionPrompts {
 struct RawEmotionPrompts {
     header: String,
     rule_path: String,
+    #[serde(default = "default_natural_dialogue_contract_path_en")]
+    natural_dialogue_contract_path: String,
     token_header: String,
     examples_header: String,
     example_happy: String,
@@ -242,6 +250,44 @@ impl ExtractorPrompts {
     }
 }
 
+/// Prompt templates for the LLM affect classifier (#88).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AffectClassifierPrompts {
+    /// System prompt for the affect classifier.
+    pub system: String,
+    /// User prompt template for the affect classifier.
+    pub user_prompt: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[allow(dead_code)]
+struct RawAffectClassifierPrompts {
+    #[serde(default = "default_affect_classifier_system_path")]
+    system_path: String,
+    #[serde(default = "default_affect_classifier_user_path")]
+    user_prompt_path: String,
+}
+
+fn default_affect_classifier_system_path() -> String {
+    "en/affect_classifier/system.md".into()
+}
+
+fn default_affect_classifier_user_path() -> String {
+    "en/affect_classifier/user_prompt.md".into()
+}
+
+fn default_natural_dialogue_contract_path_en() -> String {
+    "en/emotion/natural_dialogue_contract.md".into()
+}
+
+impl AffectClassifierPrompts {
+    /// Renders the classifier user prompt replacing `{conversation}` placeholder.
+    #[must_use]
+    pub fn render_user_prompt(&self, conversation: &str) -> String {
+        substitute(&self.user_prompt, &[("conversation", conversation)])
+    }
+}
+
 impl SplitPrompts {
     /// Renders the split reason timeout message.
     #[must_use]
@@ -328,6 +374,11 @@ impl PromptLibrary {
             example_sad: raw.emotion.example_sad,
             example_angry: raw.emotion.example_angry,
             example_neutral: raw.emotion.example_neutral,
+            natural_dialogue_contract: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/prompts/en/emotion/natural_dialogue_contract.md"
+            ))
+            .to_string(),
         };
 
         let summarizer = SummarizerPrompts {
@@ -359,6 +410,18 @@ impl PromptLibrary {
                 user_prompt: include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
                     "/prompts/en/extractor/user_prompt.md"
+                ))
+                .to_string(),
+            },
+            affect_classifier: AffectClassifierPrompts {
+                system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/en/affect_classifier/system.md"
+                ))
+                .to_string(),
+                user_prompt: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/en/affect_classifier/user_prompt.md"
                 ))
                 .to_string(),
             },
@@ -416,6 +479,11 @@ impl PromptLibrary {
             example_sad: raw.emotion.example_sad,
             example_angry: raw.emotion.example_angry,
             example_neutral: raw.emotion.example_neutral,
+            natural_dialogue_contract: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/prompts/ja/emotion/natural_dialogue_contract.md"
+            ))
+            .to_string(),
         };
 
         let summarizer = SummarizerPrompts {
@@ -447,6 +515,18 @@ impl PromptLibrary {
                 user_prompt: include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
                     "/prompts/ja/extractor/user_prompt.md"
+                ))
+                .to_string(),
+            },
+            affect_classifier: AffectClassifierPrompts {
+                system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/ja/affect_classifier/system.md"
+                ))
+                .to_string(),
+                user_prompt: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/ja/affect_classifier/user_prompt.md"
                 ))
                 .to_string(),
             },
@@ -498,6 +578,12 @@ impl PromptLibrary {
     #[must_use]
     pub fn extractor(&self) -> &ExtractorPrompts {
         &self.data.extractor
+    }
+
+    /// Returns reference to affect classifier prompts.
+    #[must_use]
+    pub fn affect_classifier(&self) -> &AffectClassifierPrompts {
+        &self.data.affect_classifier
     }
 }
 

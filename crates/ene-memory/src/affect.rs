@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Discrete emotional label with intensity.
@@ -67,6 +68,9 @@ pub struct AffectState {
     /// Discrete emotion intensities (joy, sadness, etc.).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub discrete_emotions: Vec<DiscreteEmotion>,
+    /// Last persistence timestamp (used for time-based decay).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 impl AffectState {
@@ -87,6 +91,7 @@ impl AffectState {
             mood_label: String::new(),
             last_expression: String::new(),
             discrete_emotions: Vec::new(),
+            updated_at: None,
         }
     }
 
@@ -142,6 +147,7 @@ mod tests {
                 DiscreteEmotion::new("joy", 0.7),
                 DiscreteEmotion::new("surprise", 0.2),
             ],
+            updated_at: None,
         };
         let json = serde_json::to_string(&state).unwrap();
         let back: AffectState = serde_json::from_str(&json).unwrap();

@@ -236,6 +236,13 @@ pub struct EmotionConfig {
     pub llm_can_propose_expression: bool,
     /// Treat LLM expression proposals as advisory only (not commands).
     pub llm_expression_is_advisory: bool,
+    /// Timeout in seconds for a single LLM affect-classifier call (#88).
+    pub classifier_timeout_secs: u64,
+    /// Minimum classifier confidence to apply LLM affect deltas (#88).
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    pub classifier_min_confidence: f32,
+    /// Prompt library language for affect classifier and cognitive output contract (`en` or `ja`).
+    pub classifier_language: String,
 }
 
 impl Default for EmotionConfig {
@@ -247,6 +254,9 @@ impl Default for EmotionConfig {
             expression_hysteresis_seconds: 4.0,
             llm_can_propose_expression: true,
             llm_expression_is_advisory: true,
+            classifier_timeout_secs: 15,
+            classifier_min_confidence: 0.5,
+            classifier_language: "en".into(),
         }
     }
 }

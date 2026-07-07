@@ -232,7 +232,7 @@ Rolling compression that summarizes old conversation turns into compact memory s
   - Optional one-shot CLI migration maps summaries → `Episodic`, keyfacts → `UserProfile`/`Preference`, logs → `memory_spans` (transactional)
   - After migration, recall uses typed memory only; legacy rows remain for audit unless reset
   - `cognition.memory.require_migration` blocks recall when summaries/keyfacts remain unmigrated (logs alone do not block)
-  - Affect **persistence** runs each turn; affect **computation** is planned in #86 (`EmotionEngine`)
+  - Affect **persistence** runs each turn; affect **computation** is implemented by `EmotionEngine` (#86) with optional LLM classifier (#88) and `OutputArbiter` expression resolution (#89, #91)
 - **#80** replaces automatic session splits with rolling context compression triggers
 - **`cognition.enabled = false`** keeps the legacy streaming pipeline unchanged
 

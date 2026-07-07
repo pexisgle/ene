@@ -10,6 +10,7 @@ use ene_provider::EmbeddingProvider;
 use ene_provider::Role;
 
 use ene_memory::MemoryStore;
+use std::borrow::Cow;
 use std::sync::Arc;
 
 /// Manages the conversation history with automatic trimming.
@@ -72,6 +73,10 @@ pub struct SessionState {
     /// that the triggering turn and any subsequent user/assistant messages
     /// added while the split was running are preserved.
     pub pending_split_snapshot_len: Option<usize>,
+    /// Last resolved expression name (in-session hysteresis).
+    pub last_resolved_expression: String,
+    /// When the last expression change occurred.
+    pub last_expression_changed_at: Option<DateTime<Utc>>,
 }
 
 /// Central session container holding conversation history, display state, memory context,
@@ -140,6 +145,8 @@ impl ConversationSession {
                 last_message_time: None,
                 current_turn_count: 0,
                 pending_split_snapshot_len: None,
+                last_resolved_expression: String::new(),
+                last_expression_changed_at: None,
             },
             character_card: None,
             current_card_path: String::new(),
@@ -296,6 +303,8 @@ impl ConversationSession {
         self.state.last_input_embedding = None;
         self.state.last_message_time = None;
         self.state.current_turn_count = 0;
+        self.state.last_resolved_expression.clear();
+        self.state.last_expression_changed_at = None;
         new_id
     }
 
@@ -319,6 +328,58 @@ impl ConversationSession {
     pub fn record_assistant_response(&mut self) {
         self.state.current_turn_count += 1;
         self.state.last_message_time = Some(Utc::now());
+    }
+
+    /// Elapsed time since the last expression change (for arbiter hysteresis).
+    #[must_use]
+    pub fn expression_elapsed(&self) -> Option<std::time::Duration> {
+        self.state.last_expression_changed_at.map(|ts| {
+            Utc::now()
+                .signed_duration_since(ts)
+                .to_std()
+                .unwrap_or(std::time::Duration::ZERO)
+        })
+    }
+
+    /// Records a resolved expression for in-session hysteresis tracking.
+    pub fn record_expression_change(&mut self, name: &str) {
+        if self.state.last_resolved_expression != name {
+            self.state.last_resolved_expression = name.to_string();
+            self.state.last_expression_changed_at = Some(Utc::now());
+        }
+    }
+
+    /// Returns the last resolved expression name for this session.
+    #[must_use]
+    pub fn last_resolved_expression(&self) -> &str {
+        &self.state.last_resolved_expression
+    }
+
+    /// Previous expression and elapsed time for arbiter hysteresis.
+    ///
+    /// Falls back to persisted [`ene_memory::AffectState::last_expression`] and
+    /// `updated_at` when the in-session tracker is empty (e.g. after restart).
+    #[must_use]
+    pub fn expression_context<'a>(
+        &'a self,
+        affect: &'a ene_memory::AffectState,
+    ) -> (Cow<'a, str>, Option<std::time::Duration>) {
+        if !self.state.last_resolved_expression.is_empty() {
+            return (
+                Cow::Borrowed(self.last_resolved_expression()),
+                self.expression_elapsed(),
+            );
+        }
+        if affect.last_expression.is_empty() {
+            return (Cow::Borrowed(""), None);
+        }
+        let elapsed = affect.updated_at.map(|ts| {
+            Utc::now()
+                .signed_duration_since(ts)
+                .to_std()
+                .unwrap_or(std::time::Duration::ZERO)
+        });
+        (Cow::Borrowed(&affect.last_expression), elapsed)
     }
 
     /// Returns the current character name, or `"default"` if no card is loaded.

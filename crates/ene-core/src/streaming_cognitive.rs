@@ -2,12 +2,12 @@
 
 use ene_cognition::memory_writer::candidate::TurnInput;
 use ene_cognition::{CognitionConfig, CognitionEngine, HistoryEntry, PostTurnInput, TurnContext};
-use ene_config::{PromptLibrary, expand_cbs_macros};
+use ene_config::PromptLibrary;
 use ene_provider::LlmToolCallChunk;
 use tokio_stream::StreamExt;
 
 use crate::handle::{EneEvent, TerminalReason};
-use crate::message_builder::build_expression_phi;
+use crate::message_builder::build_cognitive_output_contract;
 use crate::streaming::{
     PHASE_CONTEXT_SEARCH, PHASE_EMBEDDING, PHASE_PROMPT_BUILDING, StreamContext,
     accumulate_tool_calls, emit_terminal, finalize_tool_calls, perform_tool_executions,
@@ -137,10 +137,13 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_session::Con
         })
         .collect();
 
-    let prompts = PromptLibrary::load("en");
-    let char_name = card.data.get_character_name();
-    let post_history_phi = build_expression_phi(&card, &prompts)
-        .map(|phi| expand_cbs_macros(&phi, char_name, &user_name));
+    let prompts = PromptLibrary::load(&cognition.emotion.classifier_language);
+    let post_history_phi = build_cognitive_output_contract(
+        &card,
+        &prompts,
+        cognition.emotion.enabled,
+        &user_name,
+    );
 
     let _ = event_tx.send(EneEvent::PipelinePhase {
         phase: PHASE_CONTEXT_SEARCH.to_string(),
@@ -230,6 +233,19 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_session::Con
         }
     };
 
+    let mut turn_affect = pre_turn.affect.clone();
+
+    if cognition.emotion.enabled
+        && let Some(store) = mem_store.as_deref()
+        && let Err(error) = CognitionEngine::persist_affect_snapshot(store, &turn_affect).await
+    {
+        tracing::warn!(
+            component = "CognitionEngine",
+            error = %error,
+            "Failed to persist pre-turn affect snapshot"
+        );
+    }
+
     if mem_config.enabled
         && let Some(store) = &mem_store
     {
@@ -313,6 +329,9 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_session::Con
 
         let mut current_tool_calls: Vec<LlmToolCallChunk> = Vec::new();
         let mut assistant_content = String::new();
+        let mut accumulated_emotion_tokens: Vec<String> = Vec::new();
+        let suppress_stream_tokens = cognition.emotion.enabled
+            && cognition.emotion.llm_expression_is_advisory;
 
         while let Some(chunk_res) = stream.next().await {
             if cancel_token.is_cancelled() {
@@ -329,7 +348,10 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_session::Con
                             let _ = event_tx.send(EneEvent::TextDelta { delta: text });
                         }
                         for token in special_tokens {
-                            let _ = event_tx.send(EneEvent::SpecialToken { token });
+                            accumulated_emotion_tokens.push(token.clone());
+                            if !suppress_stream_tokens {
+                                let _ = event_tx.send(EneEvent::SpecialToken { token });
+                            }
                         }
                     }
                     if let Some(tool_calls_delta) = &chunk.tool_calls_delta {
@@ -362,6 +384,30 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_session::Con
                 );
             }
 
+            if cognition.emotion.enabled {
+                let llm_proposal = accumulated_emotion_tokens
+                    .iter()
+                    .find_map(|token| ene_session::extract_emotion_from_token(token))
+                    .or(pre_turn.classifier_expression_hint.clone());
+                let (previous_expression, elapsed_since_change) =
+                    session.expression_context(&turn_affect);
+                let (decision, updated_affect) = engine.resolve_expression_turn(
+                    &cognition,
+                    &card,
+                    &turn_affect,
+                    &assistant_content,
+                    llm_proposal.as_deref(),
+                    previous_expression.as_ref(),
+                    elapsed_since_change,
+                );
+                turn_affect = updated_affect;
+                session.record_expression_change(&decision.expression);
+                let _ = event_tx.send(EneEvent::Expression {
+                    name: decision.expression.clone(),
+                    source: decision.source.as_str().to_string(),
+                });
+            }
+
             if let Some(store) = mem_store.as_deref() {
                 let post = PostTurnInput {
                     turn: TurnInput {
@@ -369,7 +415,7 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_session::Con
                         assistant_message: Some(&assistant_content),
                         tool_results: &[],
                     },
-                    affect: pre_turn.affect.clone(),
+                    affect: turn_affect,
                     character_id: &card_name,
                     user_id: &user_name,
                 };

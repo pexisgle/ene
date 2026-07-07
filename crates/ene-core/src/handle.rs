@@ -116,6 +116,13 @@ pub enum EneEvent {
         /// The full token string (e.g. `<|emo:happy|>`).
         token: String,
     },
+    /// Engine-managed expression resolved by the Output Arbiter (#91).
+    Expression {
+        /// Normalized expression name (e.g. `happy`, `neutral`).
+        name: String,
+        /// Resolution source for debugging (`affect`, `llm_advisory`, `hysteresis`, …).
+        source: String,
+    },
     /// A tool call has been requested by the LLM.
     ToolCallStart {
         /// The tool name (e.g. "fs.write").
