@@ -19,6 +19,7 @@ mod input_region_debug;
 mod look_at;
 #[cfg(target_os = "linux")]
 mod mask_gizmo;
+mod memory_journal;
 mod physics;
 #[cfg(target_os = "linux")]
 mod platform;
@@ -35,8 +36,9 @@ mod tray;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use tracing_subscriber::{EnvFilter, fmt};
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,sea_orm=warn,wgpu_core=warn,wgpu_hal=warn,naga=warn"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("info,sqlx=warn,sea_orm=warn,wgpu_core=warn,wgpu_hal=warn,naga=warn")
+    });
     fmt().with_env_filter(filter).init();
 
     // The enter guard must live for the rest of `main` so that

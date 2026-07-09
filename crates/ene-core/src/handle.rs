@@ -381,6 +381,18 @@ impl MemoryQueryHandle {
             .map_err(EneCoreError::Memory)
     }
 
+    /// List typed memories for the memory journal with user/scope and status filters.
+    pub async fn list_journal_memories(
+        &self,
+        options: &ene_memory::MemoryJournalListOptions<'_>,
+    ) -> Result<Vec<ene_memory::MemoryItem>, EneCoreError> {
+        let store = self.require_store()?;
+        store
+            .list_journal_memories(options)
+            .await
+            .map_err(EneCoreError::Memory)
+    }
+
     /// Fetch a typed memory by id.
     pub async fn inspect_typed_memory(
         &self,
@@ -431,6 +443,20 @@ impl MemoryQueryHandle {
             .map_err(EneCoreError::Memory)
     }
 
+    /// Search typed memories and attach explainable recall reasons (#74).
+    pub async fn search_typed_memories_explained(
+        &self,
+        character_id: &str,
+        user_id: Option<&str>,
+        query_text: &str,
+        limit: usize,
+    ) -> Result<Vec<ene_cognition::RecalledMemory>, EneCoreError> {
+        let scored = self
+            .search_typed_memories_hybrid(character_id, user_id, query_text, limit)
+            .await?;
+        Ok(ene_cognition::explain_scored_memories(scored))
+    }
+
     /// Update typed memory pinned flag.
     pub async fn pin_typed_memory(&self, id: i64, pinned: bool) -> Result<bool, EneCoreError> {
         let store = self.require_store()?;
@@ -449,6 +475,24 @@ impl MemoryQueryHandle {
         let store = self.require_store()?;
         store
             .transition_typed_memory_status(id, status)
+            .await
+            .map_err(EneCoreError::Memory)
+    }
+
+    /// User-driven restore to active status (journal/CLI UX).
+    pub async fn user_restore_typed_memory(&self, id: i64) -> Result<bool, EneCoreError> {
+        let store = self.require_store()?;
+        store
+            .user_restore_typed_memory(id)
+            .await
+            .map_err(EneCoreError::Memory)
+    }
+
+    /// User-driven forget (`Active` → `UserDeleted`).
+    pub async fn user_forget_typed_memory(&self, id: i64) -> Result<bool, EneCoreError> {
+        let store = self.require_store()?;
+        store
+            .user_forget_typed_memory(id)
             .await
             .map_err(EneCoreError::Memory)
     }

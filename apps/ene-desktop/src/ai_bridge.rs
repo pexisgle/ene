@@ -18,6 +18,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use ene_core::{EneEvent, EneEventReceiver, EneHandle, PermissionDecision, UserInputResponse};
 
 use crate::events::{AiStreamUpdate, AppEvent, AppEventSender};
+use crate::memory_journal::{MemoryJournalAction, MemoryJournalPresenter};
+use crate::settings::MemoryJournalRecallRow;
 
 /// Owns the actor handle. The runtime can also send user input
 /// back through [`AiBridge::run`] and [`AiBridge::cancel`].
@@ -139,6 +141,9 @@ impl AiBridge {
     pub fn refresh_memory_journal(
         &self,
         limit: usize,
+        include_user_deleted: bool,
+        include_archived: bool,
+        include_superseded: bool,
     ) -> Result<
         (
             Vec<ene_memory::MemoryItem>,
@@ -148,29 +153,121 @@ impl AiBridge {
         String,
     > {
         let snapshot = self.get_snapshot_blocking()?;
-        let character_id = snapshot.card_name.as_str().to_string();
+        let character_id = snapshot.card_name.as_str();
         let user_id = snapshot.config.user_name.clone();
         self.runtime.block_on(async {
+            let options = ene_memory::MemoryJournalListOptions {
+                character_id,
+                user_id: Some(user_id.as_str()),
+                include_archived,
+                include_superseded,
+                include_user_deleted,
+                kind: None,
+                limit,
+                offset: 0,
+            };
             let memories = snapshot
                 .memory
-                .list_typed_memories(&character_id, None, limit)
+                .list_journal_memories(&options)
                 .await
                 .map_err(|e| e.to_string())?;
             let affect = snapshot
                 .memory
-                .show_affect_state(&character_id)
+                .show_affect_state(character_id)
                 .await
                 .map_err(|e| e.to_string())?;
             let commitments = snapshot
                 .memory
-                .list_active_commitments(&character_id, Some(&user_id), limit)
+                .list_active_commitments(character_id, Some(&user_id), limit)
                 .await
                 .map_err(|e| e.to_string())?;
             Ok((memories, affect, commitments))
         })
     }
 
+    /// Run explainable recall search for the journal debug mode.
+    pub fn search_memory_journal_recall(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryJournalRecallRow>, String> {
+        let snapshot = self.get_snapshot_blocking()?;
+        let character_id = snapshot.card_name.as_str();
+        let user_id = snapshot.config.user_name.as_str();
+        self.runtime.block_on(async {
+            let recalled = snapshot
+                .memory
+                .search_typed_memories_explained(character_id, Some(user_id), query, limit)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(recalled
+                .iter()
+                .map(|entry| {
+                    let breakdown = &entry.score_breakdown;
+                    MemoryJournalPresenter::recall_row(
+                        entry.item.id.unwrap_or_default(),
+                        entry.item.title.clone(),
+                        recall_reason_key(entry.reason),
+                        format!(
+                            "total={:.3} vector={:.3} lexical={:.3} recency={:.3} salience={:.3} confidence={:.3}",
+                            breakdown.total,
+                            breakdown.vector_similarity,
+                            breakdown.lexical_score,
+                            breakdown.recency_score,
+                            breakdown.salience,
+                            breakdown.confidence,
+                        ),
+                    )
+                })
+                .collect())
+        })
+    }
+
+    /// Execute a journal action using the correct store API.
+    pub fn execute_journal_action(
+        &self,
+        id: i64,
+        action: MemoryJournalAction,
+    ) -> Result<bool, String> {
+        let snapshot = self.get_snapshot_blocking()?;
+        self.runtime.block_on(async {
+            match action {
+                MemoryJournalAction::Pin => snapshot
+                    .memory
+                    .pin_typed_memory(id, true)
+                    .await
+                    .map_err(|e| e.to_string()),
+                MemoryJournalAction::Unpin => snapshot
+                    .memory
+                    .pin_typed_memory(id, false)
+                    .await
+                    .map_err(|e| e.to_string()),
+                MemoryJournalAction::Archive => snapshot
+                    .memory
+                    .transition_typed_memory_status(id, ene_memory::MemoryStatus::Archived)
+                    .await
+                    .map_err(|e| e.to_string()),
+                MemoryJournalAction::Forget => snapshot
+                    .memory
+                    .user_forget_typed_memory(id)
+                    .await
+                    .map_err(|e| e.to_string()),
+                MemoryJournalAction::Dispute => snapshot
+                    .memory
+                    .transition_typed_memory_status(id, ene_memory::MemoryStatus::Disputed)
+                    .await
+                    .map_err(|e| e.to_string()),
+                MemoryJournalAction::Restore => snapshot
+                    .memory
+                    .user_restore_typed_memory(id)
+                    .await
+                    .map_err(|e| e.to_string()),
+            }
+        })
+    }
+
     /// Applies a memory lifecycle action.
+    #[expect(dead_code, reason = "retained for transitional callers")]
     pub fn update_memory_status(
         &self,
         id: i64,
@@ -183,11 +280,24 @@ impl AiBridge {
     }
 
     /// Pins a memory row in the typed store.
+    #[expect(dead_code, reason = "replaced by execute_journal_action")]
     pub fn pin_memory(&self, id: i64) -> Result<bool, String> {
         let snapshot = self.get_snapshot_blocking()?;
         self.runtime
             .block_on(snapshot.memory.pin_typed_memory(id, true))
             .map_err(|e| e.to_string())
+    }
+}
+
+fn recall_reason_key(reason: ene_cognition::RecallReason) -> String {
+    match reason {
+        ene_cognition::RecallReason::SimilarTopic => "similar_topic".to_string(),
+        ene_cognition::RecallReason::RecentConversation => "recent_conversation".to_string(),
+        ene_cognition::RecallReason::ActivePromise => "active_promise".to_string(),
+        ene_cognition::RecallReason::CharacterLore => "character_lore".to_string(),
+        ene_cognition::RecallReason::UserPreference => "user_preference".to_string(),
+        ene_cognition::RecallReason::EmotionalContinuity => "emotional_continuity".to_string(),
+        ene_cognition::RecallReason::Pinned => "pinned".to_string(),
     }
 }
 

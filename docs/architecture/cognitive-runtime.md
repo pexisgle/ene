@@ -1,6 +1,6 @@
 # ADR: Ene Cognitive Runtime Architecture
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-28
 - **Epic:** #63 — Redesign AI runtime as Ene Cognitive Runtime
 
@@ -56,7 +56,7 @@ Ene will explicitly manage:
 
 - `ene-cognition` **depends on** `ene-memory`, `ene-config`, `ene-provider`, `ene-common`
 - `ene-cognition` **does NOT depend on** `ene-core` or `ene-session` (prevents circular dependencies)
-- `ene-core` will depend on `ene-cognition` in Phase 10 (#100) to integrate the cognitive runtime into the streaming lifecycle
+- `ene-core` depends on `ene-cognition` and integrates the cognitive runtime into `ene-core::streaming.rs` behind `cognition.enabled` (falls back to the legacy pipeline when no embedding provider is configured)
 - `ene-memory` remains the exclusive owner of `sea-orm` SQLite operations — extraction, arbitration, and recall planning logic lives in `ene-cognition`, not `ene-memory`
 
 ## Turn Lifecycle
@@ -234,8 +234,7 @@ Rolling compression that summarizes old conversation turns into compact memory s
 - **Natural forgetting** — Faded / archived / superseded lifecycle instead of hard delete
 
 ### Migration Path
-- **Phase 0–9** are greenfield — new code in `ene-cognition`, no changes to existing runtime
-- **Phase 10 (#100)** integrates `ene-cognition` into `ene-core::streaming.rs` behind `cognition.enabled` (falls back to the legacy pipeline when no embedding provider is configured)
+- **Phase 0–10** are implemented — `ene-cognition` is integrated into `ene-core::streaming.rs` behind `cognition.enabled` (falls back to the legacy pipeline when no embedding provider is configured)
 - **#98 (hybrid policy)** — When cognition is enabled:
   - Legacy summary/keyfact tables are **read-only** (no new summaries/keyfacts)
   - Unmigrated legacy summaries/keyfacts are merged into cognitive recall until `/memory migrate legacy` completes

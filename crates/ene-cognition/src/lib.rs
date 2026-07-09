@@ -100,7 +100,7 @@ pub use lifecycle::{
 pub use memory_writer::{
     AppliedDecision, ArbiterAction, ArbiterContext, ArbiterOptions, ArbiterReason,
     ArbiterReasonCode, CandidateDecision, CandidateProvenance, ForgettingContext,
-    ForgettingLifecycle, ForgettingReport, MemoryArbiter, SemanticMatch,
+    ForgettingLifecycle, ForgettingReport, MemoryArbiter, MemoryWriteProviders, SemanticMatch,
 };
 /// Expression arbiter types.
 #[doc(no_inline)]

@@ -16,6 +16,7 @@ egui = { workspace = true }
 egui-wgpu = { workspace = true }
 egui-winit = { workspace = true }
 ene-core = { workspace = true }
+ene-cognition = { workspace = true }
 ene-memory = { workspace = true }
 ene-config = { workspace = true }
 ene-tool-proto = { workspace = true }

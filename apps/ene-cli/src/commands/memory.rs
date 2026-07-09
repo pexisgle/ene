@@ -49,15 +49,7 @@ impl CliCommand for MemoryCommand {
                 )
                 .await
             }
-            "forget" => {
-                handle_transition(
-                    tail,
-                    &snapshot,
-                    ene_memory::MemoryStatus::UserDeleted,
-                    "forgotten",
-                )
-                .await
-            }
+            "forget" => handle_forget(tail, &snapshot).await,
             "dispute" => {
                 handle_transition(
                     tail,
@@ -67,15 +59,7 @@ impl CliCommand for MemoryCommand {
                 )
                 .await
             }
-            "restore" => {
-                handle_transition(
-                    tail,
-                    &snapshot,
-                    ene_memory::MemoryStatus::Active,
-                    "restored",
-                )
-                .await
-            }
+            "restore" => handle_restore(tail, &snapshot).await,
             "status" => handle_status(&snapshot).await,
             "migrate" => handle_migrate(tail, &snapshot).await,
             "reset" => handle_reset(tail, &snapshot).await,
@@ -260,6 +244,30 @@ async fn handle_pin(id_arg: &str, snapshot: &ene_core::EneStateSnapshot) {
         Ok(true) => println!("{}", style::success(format!("[Memory] Pinned id={id}"))),
         Ok(false) => println!("{}", style::warning(format!("[Memory] id={id} not found"))),
         Err(e) => println!("{}", style::error(format!("[Memory] Pin error: {e}"))),
+    }
+}
+
+async fn handle_forget(id_arg: &str, snapshot: &ene_core::EneStateSnapshot) {
+    let Some(id) = parse_id(id_arg) else {
+        println!("{}", style::warning("[Memory] Usage: /memory forget <id>"));
+        return;
+    };
+    match snapshot.memory.user_forget_typed_memory(id).await {
+        Ok(true) => println!("{}", style::success(format!("[Memory] forgotten id={id}"))),
+        Ok(false) => println!("{}", style::warning(format!("[Memory] id={id} not found"))),
+        Err(e) => println!("{}", style::error(format!("[Memory] Forget error: {e}"))),
+    }
+}
+
+async fn handle_restore(id_arg: &str, snapshot: &ene_core::EneStateSnapshot) {
+    let Some(id) = parse_id(id_arg) else {
+        println!("{}", style::warning("[Memory] Usage: /memory restore <id>"));
+        return;
+    };
+    match snapshot.memory.user_restore_typed_memory(id).await {
+        Ok(true) => println!("{}", style::success(format!("[Memory] restored id={id}"))),
+        Ok(false) => println!("{}", style::warning(format!("[Memory] id={id} not found"))),
+        Err(e) => println!("{}", style::error(format!("[Memory] Restore error: {e}"))),
     }
 }
 

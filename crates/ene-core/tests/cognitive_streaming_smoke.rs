@@ -171,7 +171,12 @@ async fn cognitive_lifecycle_compose_prompt_includes_identity_kernel_and_recall(
         user_id: "User",
     };
     engine
-        .after_turn(&store, &cognition, post)
+        .after_turn(
+            &store,
+            &cognition,
+            post,
+            ene_cognition::memory_writer::MemoryWriteProviders::default(),
+        )
         .await
         .expect("after_turn");
     let loaded = store.get_affect_state("ene").await.unwrap();
@@ -389,7 +394,12 @@ async fn post_turn_tool_results_persist_procedure_memory() {
         user_id: "User",
     };
     engine
-        .after_turn(&store, &cognition, post)
+        .after_turn(
+            &store,
+            &cognition,
+            post,
+            ene_cognition::memory_writer::MemoryWriteProviders::default(),
+        )
         .await
         .expect("after_turn");
 

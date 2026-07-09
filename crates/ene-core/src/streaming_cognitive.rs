@@ -429,7 +429,13 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_session::Con
                 };
                 if cognition.memory.write_every_turn
                     && let Err(error) = ene_cognition::memory_writer::MemoryWriter::write_memories(
-                        store, &cognition, &post,
+                        store,
+                        &cognition,
+                        &post,
+                        ene_cognition::memory_writer::MemoryWriteProviders {
+                            llm: Some(provider.as_ref()),
+                            embedder: embedder.as_ref().map(|arc| arc.as_ref()),
+                        },
                     )
                     .await
                 {

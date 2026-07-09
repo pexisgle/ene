@@ -83,7 +83,8 @@ pub use error::MemoryError;
 /// Forgetting lifecycle helpers.
 pub use forgetting::{
     ARCHIVE_THRESHOLD, FADE_THRESHOLD, InvalidTransition, active_decay_anchor, decay_score,
-    emotional_impact, faded_decay_anchor, target_status_after_decay, validate_transition,
+    emotional_impact, faded_decay_anchor, target_status_after_decay, user_restorable_statuses,
+    validate_transition, validate_user_restore,
 };
 /// Legacy migration types and orchestration (#98).
 pub use legacy_migration::{
@@ -104,6 +105,6 @@ pub use summarizer::{ConversationSummaryResult, summarize_conversation};
 /// Typed memory domain types.
 pub use typed_memory::{
     AffectAnnotation, HybridSearchWeights, MemoryCandidateSource, MemoryConfidence, MemoryItem,
-    MemoryKind, MemorySalience, MemoryScope, MemoryScoreBreakdown, MemorySearchOptions,
-    MemorySource, MemoryStatus, NewMemoryItem, ScoredMemory,
+    MemoryJournalListOptions, MemoryKind, MemorySalience, MemoryScope, MemoryScoreBreakdown,
+    MemorySearchOptions, MemorySource, MemoryStatus, NewMemoryItem, ScoredMemory,
 };

@@ -24,6 +24,30 @@ pub struct InvalidTransition {
     pub to: MemoryStatus,
 }
 
+/// Statuses that a user may restore to [`MemoryStatus::Active`] via journal/CLI UX.
+#[must_use]
+pub fn user_restorable_statuses() -> &'static [MemoryStatus] {
+    &[
+        MemoryStatus::Faded,
+        MemoryStatus::Archived,
+        MemoryStatus::Disputed,
+        MemoryStatus::UserDeleted,
+        MemoryStatus::Superseded,
+    ]
+}
+
+/// Validate whether a user-driven restore to [`MemoryStatus::Active`] is permitted.
+pub fn validate_user_restore(from: MemoryStatus) -> Result<(), InvalidTransition> {
+    if user_restorable_statuses().contains(&from) {
+        Ok(())
+    } else {
+        Err(InvalidTransition {
+            from,
+            to: MemoryStatus::Active,
+        })
+    }
+}
+
 /// Validate whether a single-step lifecycle transition is permitted.
 pub fn validate_transition(from: MemoryStatus, to: MemoryStatus) -> Result<(), InvalidTransition> {
     let allowed = matches!(
@@ -153,6 +177,14 @@ mod tests {
         assert!(validate_transition(MemoryStatus::Faded, MemoryStatus::Active).is_err());
         assert!(validate_transition(MemoryStatus::Archived, MemoryStatus::Faded).is_err());
         assert!(validate_transition(MemoryStatus::UserDeleted, MemoryStatus::Active).is_err());
+    }
+
+    #[test]
+    fn validate_user_restore_allows_journal_targets() {
+        assert!(validate_user_restore(MemoryStatus::Archived).is_ok());
+        assert!(validate_user_restore(MemoryStatus::UserDeleted).is_ok());
+        assert!(validate_user_restore(MemoryStatus::Faded).is_ok());
+        assert!(validate_user_restore(MemoryStatus::Active).is_err());
     }
 
     #[test]

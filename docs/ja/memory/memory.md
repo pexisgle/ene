@@ -422,7 +422,7 @@ retention =
 | ユーザー忘却 | Memory Arbiter `MarkUserDeleted` | 即時 `user_deleted`（減衰をバイパス） |
 | 自然減衰 | `decay_enabled` が true のとき `ForgettingLifecycle::apply` | `active → faded → archived` |
 
-`ForgettingLifecycle::apply` の post-turn 配線は #100 で予定。recall 時は表示された記憶に `bump_typed_memory_access` で `last_accessed_at` を更新する。
+`ForgettingLifecycle::apply` はメモリ有効時、各アシスタントターン後に `streaming_cognitive.rs` から実行される。recall 時は表示された記憶に `bump_typed_memory_access` で `last_accessed_at` を更新する。
 
 **プロンプトの不確実性マーカー:** typed recall を legacy `KeyFact` にマップする際、`format_recalled_content` が以下を付与:
 
@@ -501,4 +501,30 @@ commitments (
 
 **期限:** 抽出器は `MemoryCandidate::commitment_due` を生成し、ledger 行では `due_label` として保存する。自然言語の期限を `due_at` に parse する処理は未実装のため（[Cognitive Runtime ADR](../architecture/cognitive-runtime.md#companion-commitment-ledger) 参照）、`mark_stale_commitments` が対象にするのは `due_at` が明示的に入っている行のみ。
 
-**ランタイム接続:** `ene-cognition::CommitmentLedger::arbitrate_apply_and_sync` は Memory Arbiter の実行と commitment 行の同期を一括で行う。`active_prompt_candidates` は Active Commitments `PromptPacket` セクション（#87）向けの軽量 DTO を生成する。ターンごとに sync を呼ぶ MemoryWriter オーケストレーションは #100 で接続予定。CLI の list/complete コマンドは #94 で追加予定。
+**ランタイム接続:** `ene-cognition::CommitmentLedger::arbitrate_apply_and_sync` は Memory Arbiter の実行と commitment 行の同期を一括で行う。`active_prompt_candidates` は Active Commitments `PromptPacket` セクション（#87）向けの軽量 DTO を生成する。`cognition.memory.write_every_turn` が有効なとき `MemoryWriter::write_memories` が各ターン後に sync を呼ぶ。CLI の list/complete コマンドは `/commitments`（#94）で利用できる。
+
+## メモリージャーナル（Desktop UX）
+
+Desktop の **メモリージャーナル** ページ（`ene-desktop` 設定 → Memory）で、typed memory・感情状態・アクティブなコミットメントを確認できる。
+
+### ブラウズモード（デフォルト）
+
+- 現在のキャラクターについて、設定ユーザー **および** グローバル行（`user_id = ""`）を対象に一覧表示する。
+- 種別・ステータス・スコープ・信頼度・重要度・由来メタデータ・ピン状態を表示する。
+- ライフサイクル操作は `MemoryJournalPresenter` がストア規則に合わせて出し分ける:
+  - **Active:** Pin/Unpin、忘却（`user_forget_typed_memory`）、異議
+  - **Faded:** Pin/Unpin、アーカイブ（`transition_typed_memory_status`）、異議、復元（`user_restore_typed_memory`）
+  - **Archived / UserDeleted / Superseded / Disputed:** Pin/Unpin、復元
+- フィルタ: 削除済み・アーカイブ済み・置き換え済みを個別に表示可能。
+
+### 想起デバッグモード
+
+- クエリ入力で `search_typed_memories_explained`（ハイブリッド検索 + #74 想起理由）を実行する。
+- `RecallReason` ラベルとスコア内訳（vector / lexical / recency / salience / confidence）を表示する。
+
+### API
+
+| 層 | メソッド |
+|----|----------|
+| `ene-memory` | `list_journal_memories`, `user_restore_typed_memory`, `user_forget_typed_memory` |
+| `ene-core` | `MemoryQueryHandle::list_journal_memories`, `user_restore_typed_memory`, `search_typed_memories_explained` |

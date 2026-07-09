@@ -18,11 +18,30 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use ene_memory::MemoryStore;
+use ene_provider::{EmbeddingProvider, LlmProvider};
 
 use crate::commitments::{CommitmentLedger, CommitmentSyncContext};
 use crate::config::CognitionConfig;
 use crate::error::CognitionError;
 use crate::lifecycle::PostTurnInput;
+
+/// Optional providers for LLM extraction and semantic deduplication.
+pub struct MemoryWriteProviders<'a> {
+    /// LLM provider for optional memory candidate extraction (#66).
+    pub llm: Option<&'a dyn LlmProvider>,
+    /// Embedding provider for pre-arbitration semantic duplicate detection (#75).
+    pub embedder: Option<&'a dyn EmbeddingProvider>,
+}
+
+#[allow(clippy::derivable_impls)]
+impl<'a> Default for MemoryWriteProviders<'a> {
+    fn default() -> Self {
+        Self {
+            llm: None,
+            embedder: None,
+        }
+    }
+}
 
 /// Memory Writer orchestrator.
 #[derive(Debug, Default)]
@@ -34,13 +53,22 @@ impl MemoryWriter {
         store: &MemoryStore,
         config: &CognitionConfig,
         input: &PostTurnInput<'_>,
+        providers: MemoryWriteProviders<'_>,
     ) -> Result<(), CognitionError> {
         if !config.memory.write_every_turn {
             return Ok(());
         }
 
-        let candidates = deterministic::extract_with_tool_grounding(
-            &input.turn,
+        let turn = candidate::TurnInput {
+            user_message: input.turn.user_message,
+            assistant_message: input.turn.assistant_message,
+            tool_results: input.turn.tool_results,
+        };
+
+        let mut batches: Vec<(Vec<candidate::MemoryCandidate>, CandidateProvenance)> = Vec::new();
+
+        let deterministic = deterministic::extract_with_tool_grounding(
+            &turn,
             candidate::Locale::En,
             config.memory.min_confidence_to_persist as f32,
             &config.memory.tool_grounding,
@@ -51,63 +79,134 @@ impl MemoryWriter {
             character_id = %input.character_id,
             user_id = %input.user_id,
             turn_id = 0usize,
-            candidate_count = candidates.len(),
+            candidate_count = deterministic.len(),
+            provenance = "deterministic",
             "Deterministic memory candidates extracted"
         );
+        if !deterministic.is_empty() {
+            batches.push((deterministic, CandidateProvenance::Deterministic));
+        }
 
-        if candidates.is_empty() {
+        if config.memory.llm_extraction_enabled {
+            if let Some(provider) = providers.llm {
+                match llm::extract_with_timeout(
+                    provider,
+                    &turn,
+                    candidate::Locale::En,
+                    config.memory.extraction_timeout_secs,
+                )
+                .await
+                {
+                    Ok(llm_candidates) => {
+                        tracing::debug!(
+                            component = "MemoryWriter",
+                            event = "memory candidates extracted",
+                            character_id = %input.character_id,
+                            user_id = %input.user_id,
+                            turn_id = 0usize,
+                            candidate_count = llm_candidates.len(),
+                            provenance = "llm",
+                            "LLM memory candidates extracted"
+                        );
+                        if !llm_candidates.is_empty() {
+                            batches.push((llm_candidates, CandidateProvenance::LlmExtracted));
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            component = "MemoryWriter",
+                            error = %error,
+                            character_id = %input.character_id,
+                            user_id = %input.user_id,
+                            "LLM memory extraction failed; continuing with deterministic candidates"
+                        );
+                    }
+                }
+            } else {
+                tracing::debug!(
+                    component = "MemoryWriter",
+                    character_id = %input.character_id,
+                    "LLM memory extraction enabled but no provider available"
+                );
+            }
+        }
+
+        if batches.is_empty() {
             return Ok(());
         }
 
-        let options = ArbiterOptions {
-            min_confidence: config.memory.min_confidence_to_persist as f32,
-            ..Default::default()
-        };
-        let base_ctx = ArbiterContext {
-            turn: candidate::TurnInput {
-                user_message: input.turn.user_message,
-                assistant_message: input.turn.assistant_message,
-                tool_results: input.turn.tool_results,
-            },
-            character_id: input.character_id,
-            user_id: input.user_id,
-            source_ref: None,
-            provenance: CandidateProvenance::Deterministic,
-            options,
-            semantic_matches: HashMap::new(),
-        };
-
+        let options = ArbiterOptions::from_config(&config.memory);
         let sync_ctx = CommitmentSyncContext {
             character_id: input.character_id,
             user_id: input.user_id,
         };
-        let mut regular = Vec::new();
 
-        for (idx, candidate) in candidates.into_iter().enumerate() {
-            if candidate.source_quote.is_empty() {
-                let source_ref = Some(format!("tool:{}:{}", sanitize_ref(&candidate.title), idx));
-                let ctx = ArbiterContext {
-                    source_ref: source_ref.as_deref(),
-                    ..base_ctx.clone()
-                };
-                let (applied, _synced_commitments) = CommitmentLedger::arbitrate_apply_and_sync(
+        for (candidates, provenance) in batches {
+            let semantic_matches = if config.memory.semantic_dedup_enabled {
+                build_semantic_matches(
                     store,
-                    &[candidate],
-                    &ctx,
-                    &sync_ctx,
+                    providers.embedder,
+                    &config.memory,
+                    input.character_id,
+                    input.user_id,
+                    &candidates,
+                    options.semantic_similarity_threshold,
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!(
+                        component = "MemoryWriter",
+                        error = %error,
+                        character_id = %input.character_id,
+                        "Semantic dedup lookup failed; continuing without matches"
+                    );
+                    HashMap::new()
+                })
+            } else {
+                HashMap::new()
+            };
+
+            let base_ctx = ArbiterContext {
+                turn: turn.clone(),
+                character_id: input.character_id,
+                user_id: input.user_id,
+                source_ref: None,
+                provenance,
+                options: options.clone(),
+                semantic_matches,
+            };
+
+            let mut regular = Vec::new();
+
+            for (idx, candidate) in candidates.into_iter().enumerate() {
+                if candidate.source_quote.is_empty() {
+                    let source_ref =
+                        Some(format!("tool:{}:{}", sanitize_ref(&candidate.title), idx));
+                    let ctx = ArbiterContext {
+                        source_ref: source_ref.as_deref(),
+                        ..base_ctx.clone()
+                    };
+                    let (applied, _synced_commitments) =
+                        CommitmentLedger::arbitrate_apply_and_sync(
+                            store,
+                            &[candidate],
+                            &ctx,
+                            &sync_ctx,
+                        )
+                        .await?;
+                    log_arbiter_outcomes(input, &applied);
+                } else {
+                    regular.push(candidate);
+                }
+            }
+
+            if !regular.is_empty() {
+                let (applied, _synced_commitments) = CommitmentLedger::arbitrate_apply_and_sync(
+                    store, &regular, &base_ctx, &sync_ctx,
                 )
                 .await?;
                 log_arbiter_outcomes(input, &applied);
-            } else {
-                regular.push(candidate);
             }
-        }
-
-        if !regular.is_empty() {
-            let (applied, _synced_commitments) =
-                CommitmentLedger::arbitrate_apply_and_sync(store, &regular, &base_ctx, &sync_ctx)
-                    .await?;
-            log_arbiter_outcomes(input, &applied);
         }
 
         Ok(())
@@ -149,10 +248,78 @@ impl MemoryWriter {
         store: &MemoryStore,
         config: &CognitionConfig,
         input: PostTurnInput<'_>,
+        providers: MemoryWriteProviders<'_>,
     ) -> Result<(), CognitionError> {
-        Self::write_memories(store, config, &input).await?;
+        Self::write_memories(store, config, &input, providers).await?;
         Self::finalize_turn(store, config, &input).await
     }
+}
+
+async fn build_semantic_matches(
+    store: &MemoryStore,
+    embedder: Option<&dyn EmbeddingProvider>,
+    config: &crate::config::CognitionMemoryConfig,
+    character_id: &str,
+    user_id: &str,
+    candidates: &[candidate::MemoryCandidate],
+    similarity_threshold: f32,
+) -> Result<HashMap<usize, Vec<SemanticMatch>>, CognitionError> {
+    let Some(embedder) = embedder else {
+        return Ok(HashMap::new());
+    };
+
+    let mut matches = HashMap::new();
+    let user_filter = if user_id.is_empty() {
+        None
+    } else {
+        Some(user_id)
+    };
+
+    for (idx, candidate) in candidates.iter().enumerate() {
+        let query_text = format!("{} {}", candidate.title, candidate.content);
+        let query_embedding = embedder
+            .embed_query(query_text.trim())
+            .await
+            .map_err(CognitionError::Embedding)?;
+        let options = ene_memory::MemorySearchOptions {
+            query_text: query_text.as_str(),
+            query_embedding: &query_embedding,
+            character_id,
+            user_id: user_filter,
+            model_name: embedder.model_name(),
+            limit: 5,
+            similarity_threshold,
+            candidate_pool_size: 8,
+            query_affect: None,
+            weights: ene_memory::HybridSearchWeights::default(),
+            decay_half_life_days: config.default_forgetting_half_life_days,
+            now: Utc::now(),
+            min_score: 0.0,
+            commitment_boost: 0.0,
+            recent_fallback_limit: 0,
+        };
+
+        let scored = store
+            .search_typed_memories_hybrid(&options)
+            .await
+            .map_err(CognitionError::Memory)?;
+
+        let semantic: Vec<SemanticMatch> = scored
+            .into_iter()
+            .filter(|hit| hit.breakdown.vector_similarity >= similarity_threshold)
+            .map(|hit| SemanticMatch {
+                memory_id: hit.item.id.unwrap_or_default(),
+                similarity: hit.breakdown.vector_similarity,
+                memory: hit.item,
+            })
+            .collect();
+
+        if !semantic.is_empty() {
+            matches.insert(idx, semantic);
+        }
+    }
+
+    Ok(matches)
 }
 
 fn sanitize_ref(raw: &str) -> String {

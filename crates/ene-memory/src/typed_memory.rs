@@ -475,6 +475,27 @@ pub struct MemorySearchOptions<'a> {
     pub recent_fallback_limit: usize,
 }
 
+/// Filter options for the desktop/CLI memory journal browse list.
+#[derive(Debug, Clone)]
+pub struct MemoryJournalListOptions<'a> {
+    /// Character scope.
+    pub character_id: &'a str,
+    /// When set, include rows scoped to this user or global (empty `user_id`).
+    pub user_id: Option<&'a str>,
+    /// Include archived memories.
+    pub include_archived: bool,
+    /// Include superseded memories.
+    pub include_superseded: bool,
+    /// Include user-deleted memories.
+    pub include_user_deleted: bool,
+    /// Optional kind filter.
+    pub kind: Option<MemoryKind>,
+    /// Maximum rows to return.
+    pub limit: usize,
+    /// Pagination offset.
+    pub offset: usize,
+}
+
 /// Explainable score breakdown for a recalled memory.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryScoreBreakdown {

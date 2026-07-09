@@ -350,7 +350,7 @@ GUI-specific settings for the desktop application. Only available when running `
 
 Configuration for the Ene Cognitive Runtime, controlling context budget, memory extraction/retention, emotion processing, and character compilation.
 
-> **Note:** This section is part of the [Ene Cognitive Runtime](../architecture/cognitive-runtime.md) redesign. When `cognition.enabled` is `true`, the cognitive runtime replaces the legacy streaming pipeline (planned Phase 10 integration).
+> **Note:** This section is part of the [Ene Cognitive Runtime](../architecture/cognitive-runtime.md). When `cognition.enabled` is `true`, the cognitive runtime replaces the legacy streaming pipeline.
 
 ```json
 {
@@ -366,6 +366,8 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
     },
     "memory": {
       "write_every_turn": true,
+      "llm_extraction_enabled": false,
+      "semantic_dedup_enabled": true,
       "hybrid_search": true,
       "decay_enabled": true,
       "default_forgetting_half_life_days": 30.0,
@@ -442,6 +444,8 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `write_every_turn` | bool | `true` | Extract and persist memory on every turn |
+| `llm_extraction_enabled` | bool | `false` | Enable optional LLM memory candidate extraction (#66); on failure falls back to deterministic extraction only |
+| `semantic_dedup_enabled` | bool | `true` | Pre-arbitration semantic duplicate detection via embedding search (#75) |
 | `hybrid_search` | bool | `true` | Use hybrid search (vector + recency + salience + confidence) |
 | `decay_enabled` | bool | `true` | Enable post-turn natural decay (`Active → Faded → Archived`) via `ForgettingLifecycle` |
 | `default_forgetting_half_life_days` | float | `30.0` | Half-life in days for lifecycle decay score and recall recency scoring |

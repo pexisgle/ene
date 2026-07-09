@@ -361,8 +361,9 @@ impl CognitionEngine {
         store: &MemoryStore,
         config: &CognitionConfig,
         input: PostTurnInput<'_>,
+        providers: crate::memory_writer::MemoryWriteProviders<'_>,
     ) -> Result<(), CognitionError> {
-        MemoryWriter::after_turn(store, config, input).await
+        MemoryWriter::after_turn(store, config, input, providers).await
     }
 
     /// Resolve the final character expression after an assistant turn (#89).

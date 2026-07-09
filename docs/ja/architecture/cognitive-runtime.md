@@ -1,6 +1,6 @@
 # ADR: Ene Cognitive Runtime アーキテクチャ
 
-- **ステータス:** Proposed
+- **ステータス:** Accepted
 - **日付:** 2026-06-28
 - **Epic:** #63 — AI ランタイムを Ene Cognitive Runtime として再設計
 
@@ -56,7 +56,7 @@ Ene が明示的に管理するもの：
 
 - `ene-cognition` は `ene-memory`, `ene-config`, `ene-provider`, `ene-common` に依存する
 - `ene-cognition` は `ene-core` および `ene-session` に依存しない（循環依存防止）
-- `ene-core` は Phase 10 (#100) で `ene-cognition` に依存するようになる
+- `ene-core` は `ene-cognition` に依存し、`cognition.enabled` で `ene-core::streaming.rs` に認知ランタイムを統合する（embedding provider 未設定時はレガシーパイプラインにフォールバック）
 - `ene-memory` は引き続き `sea-orm` SQLite 操作の排他的所有者。抽出・調停・想起計画のロジックは `ene-cognition` に置く
 
 ## ターンライフサイクル
@@ -234,8 +234,7 @@ Phase 8 では、ツール呼び出し結果を安全に typed memory へ接続�
 - **自然な忘却** — ハードデリートではなく faded / archived / superseded ライフサイクル
 
 ### 移行パス
-- **Phase 0–9** はグリーンフィールド — `ene-cognition` の新規コード、既存ランタイムは変更しない
-- **Phase 10 (#100)** で `ene-cognition` を `ene-core::streaming.rs` に統合（`cognition.enabled` で切替。embedding provider 未設定時はレガシーパイプラインにフォールバック）
+- **Phase 0–10** は実装済み — `ene-cognition` は `cognition.enabled` で `ene-core::streaming.rs` に統合される（embedding provider 未設定時はレガシーパイプラインにフォールバック）
 - **#98（ハイブリッド方針）** — cognition 有効時:
   - レガシー summary/keyfact テーブルは **read-only**（新規 summary/keyfact 書き込みなし）
   - 未移行の summaries/keyfacts は `/memory migrate legacy` 完了まで cognitive recall にマージ

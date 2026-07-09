@@ -429,7 +429,7 @@ retention =
 | User forget | Memory Arbiter `MarkUserDeleted` | Immediate `user_deleted` (decay bypassed) |
 | Natural decay | `ForgettingLifecycle::apply` when `decay_enabled` is true | `active → faded → archived` |
 
-Post-turn wiring of `ForgettingLifecycle::apply` into the streaming pipeline is planned in #100. Recall bumps `last_accessed_at` via `bump_typed_memory_access` for surfaced memories.
+Post-turn `ForgettingLifecycle::apply` runs from `streaming_cognitive.rs` after each assistant turn when memory is enabled. Recall bumps `last_accessed_at` via `bump_typed_memory_access` for surfaced memories.
 
 **Prompt uncertain markers:** When typed recall maps to legacy `KeyFact` rows, `format_recalled_content` prefixes:
 
@@ -508,4 +508,30 @@ commitments (
 
 **Due dates:** Extractors populate `MemoryCandidate::commitment_due`, which is stored as `due_label` on the ledger row. Natural-language due-date parsing into `due_at` is not implemented yet (see Memory Arbiter notes in [Cognitive Runtime ADR](../architecture/cognitive-runtime.md#companion-commitment-ledger)), so `mark_stale_commitments` only affects rows with an explicit `due_at`.
 
-**Runtime wiring:** `CommitmentLedger::arbitrate_apply_and_sync` runs the Memory Arbiter and syncs commitment rows in one call. `active_prompt_candidates` produces lightweight DTOs for the Active Commitments `PromptPacket` section (#87). MemoryWriter orchestration that calls sync after each turn is planned in #100. CLI list/complete commands are planned in #94.
+**Runtime wiring:** `CommitmentLedger::arbitrate_apply_and_sync` runs the Memory Arbiter and syncs commitment rows in one call. `active_prompt_candidates` produces lightweight DTOs for the Active Commitments `PromptPacket` section (#87). `MemoryWriter::write_memories` calls sync after each turn when `cognition.memory.write_every_turn` is enabled. CLI list/complete commands are available via `/commitments` (#94).
+
+## Memory Journal (Desktop UX)
+
+The desktop **Memory Journal** page (`ene-desktop` Settings → Memory) exposes typed memory, affect state, and active commitments for inspection.
+
+### Browse mode (default)
+
+- Lists memories for the current character scoped to the configured user **plus** global rows (`user_id = ""`).
+- Shows kind, status, scope, confidence, salience, source metadata, and pin state.
+- Lifecycle actions are gated by `MemoryJournalPresenter` to match store rules:
+  - **Active:** Pin/Unpin, Forget (`user_forget_typed_memory`), Dispute
+  - **Faded:** Pin/Unpin, Archive (`transition_typed_memory_status`), Dispute, Restore (`user_restore_typed_memory`)
+  - **Archived / UserDeleted / Superseded / Disputed:** Pin/Unpin, Restore
+- Filters: show deleted, archived, and superseded rows independently.
+
+### Recall debug mode
+
+- Optional query box runs `search_typed_memories_explained` (hybrid search + #74 recall reasons).
+- Displays `RecallReason` labels and score breakdown (vector, lexical, recency, salience, confidence).
+
+### APIs
+
+| Layer | Method |
+|-------|--------|
+| `ene-memory` | `list_journal_memories`, `user_restore_typed_memory`, `user_forget_typed_memory` |
+| `ene-core` | `MemoryQueryHandle::list_journal_memories`, `user_restore_typed_memory`, `search_typed_memories_explained` |

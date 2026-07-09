@@ -291,6 +291,16 @@ pub struct UiState {
     pub memory_journal_message: Option<String>,
     /// Whether user-deleted memories should be shown in the journal list.
     pub memory_journal_show_deleted: bool,
+    /// Whether archived memories should be shown in the journal list.
+    pub memory_journal_show_archived: bool,
+    /// Whether superseded memories should be shown in the journal list.
+    pub memory_journal_show_superseded: bool,
+    /// Browse vs recall-debug mode for the memory journal.
+    pub memory_journal_recall_debug: bool,
+    /// Recall-debug query text.
+    pub memory_journal_recall_query: String,
+    /// Cached recall-debug rows.
+    pub memory_journal_recall_rows: Vec<MemoryJournalRecallRow>,
 }
 
 #[derive(Clone, Debug)]
@@ -326,7 +336,18 @@ pub struct MemoryJournalRow {
     pub confidence: f32,
     pub salience: f32,
     pub last_accessed: Option<String>,
-    pub why_recalled: String,
+    pub source_metadata: String,
+    pub pinned: bool,
+    pub scope: String,
+    pub available_actions: Vec<crate::memory_journal::MemoryJournalAction>,
+}
+
+#[derive(Clone, Debug)]
+pub struct MemoryJournalRecallRow {
+    pub id: i64,
+    pub title: String,
+    pub reason: String,
+    pub score_summary: String,
 }
 
 #[derive(Clone, Debug, Default)]

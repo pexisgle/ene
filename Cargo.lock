@@ -2811,6 +2811,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "egui-winit",
+ "ene-cognition",
  "ene-config",
  "ene-core",
  "ene-memory",

@@ -114,6 +114,11 @@ impl Default for ContextConfig {
 pub struct CognitionMemoryConfig {
     /// Extract and persist memory on every turn.
     pub write_every_turn: bool,
+    /// Enable optional LLM memory candidate extraction (#66). When disabled or
+    /// on provider failure, only deterministic extraction runs.
+    pub llm_extraction_enabled: bool,
+    /// Pre-arbitration semantic duplicate detection via embedding search (#75).
+    pub semantic_dedup_enabled: bool,
     /// Use hybrid search (vector + recency + salience + confidence).
     pub hybrid_search: bool,
     /// Enable post-turn natural decay (`Active → Faded → Archived`) via
@@ -216,6 +221,8 @@ impl Default for CognitionMemoryConfig {
     fn default() -> Self {
         Self {
             write_every_turn: true,
+            llm_extraction_enabled: false,
+            semantic_dedup_enabled: true,
             hybrid_search: true,
             decay_enabled: true,
             default_forgetting_half_life_days: 30.0,

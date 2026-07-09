@@ -2137,6 +2137,92 @@ impl MemoryStore {
         Ok(true)
     }
 
+    /// User-driven restore to [`MemoryStatus::Active`] (journal/CLI UX).
+    pub async fn user_restore_typed_memory(&self, id: i64) -> Result<bool, MemoryError> {
+        use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
+
+        let maybe_model = entities::typed_memories::Entity::find_by_id(id)
+            .one(&self.db)
+            .await?;
+
+        let Some(model) = maybe_model else {
+            return Ok(false);
+        };
+
+        let current = str_to_status(&model.status);
+        if let Err(invalid) = crate::forgetting::validate_user_restore(current) {
+            return Err(MemoryError::InvalidTransition {
+                from: invalid.from,
+                to: invalid.to,
+            });
+        }
+
+        let now = Utc::now();
+        let mut active: entities::typed_memories::ActiveModel = model.into();
+        active.status = Set(crate::MemoryStatus::Active.as_str().to_string());
+        active.faded_at = Set(None);
+        active.updated_at = Set(now);
+        active.update(&self.db).await?;
+        Ok(true)
+    }
+
+    /// User-driven forget (`Active` → `UserDeleted`).
+    pub async fn user_forget_typed_memory(&self, id: i64) -> Result<bool, MemoryError> {
+        self.transition_typed_memory_status(id, crate::MemoryStatus::UserDeleted)
+            .await
+    }
+
+    /// List typed memories for the memory journal with user/scope and status filters.
+    pub async fn list_journal_memories(
+        &self,
+        options: &crate::MemoryJournalListOptions<'_>,
+    ) -> Result<Vec<crate::MemoryItem>, MemoryError> {
+        use sea_orm::{Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+
+        let mut allowed_statuses = vec![
+            crate::MemoryStatus::Active.as_str(),
+            crate::MemoryStatus::Faded.as_str(),
+            crate::MemoryStatus::Disputed.as_str(),
+        ];
+        if options.include_archived {
+            allowed_statuses.push(crate::MemoryStatus::Archived.as_str());
+        }
+        if options.include_superseded {
+            allowed_statuses.push(crate::MemoryStatus::Superseded.as_str());
+        }
+        if options.include_user_deleted {
+            allowed_statuses.push(crate::MemoryStatus::UserDeleted.as_str());
+        }
+
+        let mut query = entities::typed_memories::Entity::find()
+            .filter(entities::typed_memories::Column::CharacterId.eq(options.character_id))
+            .filter(entities::typed_memories::Column::Status.is_in(allowed_statuses));
+
+        if let Some(uid) = options.user_id {
+            query = query.filter(
+                Condition::any()
+                    .add(entities::typed_memories::Column::UserId.eq(uid))
+                    .add(entities::typed_memories::Column::UserId.eq("")),
+            );
+        }
+
+        if let Some(kind) = options.kind {
+            query = query.filter(entities::typed_memories::Column::Kind.eq(kind.as_str()));
+        }
+
+        let models = query
+            .order_by_desc(entities::typed_memories::Column::UpdatedAt)
+            .limit(options.limit as u64)
+            .offset(options.offset as u64)
+            .all(&self.db)
+            .await?;
+
+        models
+            .into_iter()
+            .map(model_to_memory_item)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
     /// Set whether a typed memory is pinned (exempt from natural decay).
     pub async fn pin_typed_memory(&self, id: i64, pinned: bool) -> Result<bool, MemoryError> {
         use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};

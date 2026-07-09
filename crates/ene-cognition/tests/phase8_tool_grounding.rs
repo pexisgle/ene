@@ -2,6 +2,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use ene_cognition::memory_writer::MemoryWriteProviders;
 use ene_cognition::memory_writer::MemoryWriter;
 use ene_cognition::memory_writer::candidate::{ToolResultSummary, TurnInput};
 use ene_cognition::memory_writer::tool_grounding::{
@@ -65,7 +66,7 @@ async fn memory_writer_persists_tool_grounded_procedure() {
         user_id: "user",
     };
 
-    MemoryWriter::write_memories(&store, &config, &input)
+    MemoryWriter::write_memories(&store, &config, &input, MemoryWriteProviders::default())
         .await
         .expect("write memories");
 
@@ -104,7 +105,7 @@ async fn memory_writer_persists_tool_grounded_episodic() {
         user_id: "user",
     };
 
-    MemoryWriter::write_memories(&store, &config, &input)
+    MemoryWriter::write_memories(&store, &config, &input, MemoryWriteProviders::default())
         .await
         .expect("write memories");
 

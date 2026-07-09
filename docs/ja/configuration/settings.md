@@ -350,7 +350,7 @@ pub struct EneConfig {
 
 Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出・保持、感情処理、キャラクターコンパイルを制御します。
 
-> **注意:** このセクションは [Ene Cognitive Runtime](../architecture/cognitive-runtime.md) 再設計の一部です。`cognition.enabled` が `true` の場合、認知ランタイムがレガシーストリーミングパイプラインを置き換えます（Phase 10 統合予定）。
+> **注意:** このセクションは [Ene Cognitive Runtime](../architecture/cognitive-runtime.md) の一部です。`cognition.enabled` が `true` の場合、認知ランタイムがレガシーストリーミングパイプラインを置き換えます。
 
 ```json
 {
@@ -366,6 +366,8 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
     },
     "memory": {
       "write_every_turn": true,
+      "llm_extraction_enabled": false,
+      "semantic_dedup_enabled": true,
       "hybrid_search": true,
       "decay_enabled": true,
       "default_forgetting_half_life_days": 30.0,
@@ -442,6 +444,8 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
 | `write_every_turn` | bool | `true` | 毎ターン記憶を抽出し永続化する |
+| `llm_extraction_enabled` | bool | `false` | 任意の LLM 記憶候補抽出を有効化（#66）。失敗時は deterministic 抽出のみにフォールバック |
+| `semantic_dedup_enabled` | bool | `true` | Arbiter 前の embedding 検索による意味的重複検出（#75） |
 | `hybrid_search` | bool | `true` | ハイブリッド検索（ベクトル + 新しさ + 顕著性 + 信頼度）を使用 |
 | `decay_enabled` | bool | `true` | post-turn の自然減衰（`Active → Faded → Archived`）を `ForgettingLifecycle` で有効化 |
 | `default_forgetting_half_life_days` | float | `30.0` | ライフサイクル減衰スコアと recall 新しさスコアの半減期（日） |
