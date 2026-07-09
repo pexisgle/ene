@@ -188,10 +188,7 @@ fn render_browse_rows(
                     ));
                     ui.horizontal_wrapped(|ui| {
                         for action in &row.available_actions {
-                            if ui
-                                .button(action_label(*action))
-                                .clicked()
-                            {
+                            if ui.button(action_label(*action)).clicked() {
                                 set_action_message(
                                     world,
                                     ui_entity,
@@ -262,16 +259,31 @@ fn action_label(action: MemoryJournalAction) -> String {
 
 fn recall_reason_label(reason_key: &str) -> String {
     match reason_key {
-        "similar_topic" => fl!(crate::i18n::loader(), "memory-journal-recall-reason-similar_topic"),
+        "similar_topic" => fl!(
+            crate::i18n::loader(),
+            "memory-journal-recall-reason-similar_topic"
+        ),
         "recent_conversation" => {
-            fl!(crate::i18n::loader(), "memory-journal-recall-reason-recent_conversation")
+            fl!(
+                crate::i18n::loader(),
+                "memory-journal-recall-reason-recent_conversation"
+            )
         }
         "active_promise" => {
-            fl!(crate::i18n::loader(), "memory-journal-recall-reason-active_promise")
+            fl!(
+                crate::i18n::loader(),
+                "memory-journal-recall-reason-active_promise"
+            )
         }
-        "character_lore" => fl!(crate::i18n::loader(), "memory-journal-recall-reason-character_lore"),
+        "character_lore" => fl!(
+            crate::i18n::loader(),
+            "memory-journal-recall-reason-character_lore"
+        ),
         "user_preference" => {
-            fl!(crate::i18n::loader(), "memory-journal-recall-reason-user_preference")
+            fl!(
+                crate::i18n::loader(),
+                "memory-journal-recall-reason-user_preference"
+            )
         }
         "emotional_continuity" => fl!(
             crate::i18n::loader(),
