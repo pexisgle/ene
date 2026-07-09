@@ -21,13 +21,12 @@ ctor = { workspace = true }
 thiserror = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-async-openai = { workspace = true, default-features = false, features = ["rustls"] }
+async-openai = { workspace = true, default-features = false, features = ["rustls", "byot"] }
+reqwest = { workspace = true, features = ["rustls", "json"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-async-openai = { workspace = true, default-features = false, features = ["native-tls"] }
-
-[dev-dependencies]
-reqwest = { workspace = true }
+async-openai = { workspace = true, default-features = false, features = ["native-tls", "byot"] }
+reqwest = { workspace = true, features = ["native-tls", "json"] }
 
 
 [lints]

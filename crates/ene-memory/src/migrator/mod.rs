@@ -15,6 +15,7 @@ impl MigratorTrait for Migrator {
             Box::new(Migration5),
             Box::new(Migration6),
             Box::new(Migration7),
+            Box::new(Migration8),
         ]
     }
 }
@@ -1259,4 +1260,82 @@ enum MemoryMigrationMeta {
     LegacyKeyfactsCount,
     LegacyLogsCount,
     Strategy,
+}
+
+// ── Migration 8: Pending affect proposals (#88 async post-turn) ──────────────
+
+pub struct Migration8;
+
+impl MigrationName for Migration8 {
+    fn name(&self) -> &str {
+        "m20260709_000000_pending_affect_proposals"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration8 {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(PendingAffectProposals::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(PendingAffectProposals::CharacterId)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PendingAffectProposals::UserId)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(
+                        ColumnDef::new(PendingAffectProposals::SourceTurnId)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PendingAffectProposals::ProposalJson)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PendingAffectProposals::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .primary_key(
+                        Index::create()
+                            .col(PendingAffectProposals::CharacterId)
+                            .col(PendingAffectProposals::UserId),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(PendingAffectProposals::Table)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+#[derive(Iden)]
+enum PendingAffectProposals {
+    #[iden = "pending_affect_proposals"]
+    Table,
+    CharacterId,
+    UserId,
+    SourceTurnId,
+    ProposalJson,
+    CreatedAt,
 }

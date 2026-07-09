@@ -82,7 +82,7 @@ impl EmotionEngine {
     }
 }
 
-/// Merge an advisory LLM classifier proposal with confidence weighting.
+/// Merge an advisory LLM classifier absolute estimate with confidence-weighted blending.
 fn merge_classifier_proposal(
     state: &mut AffectState,
     proposal: &AffectProposal,
@@ -95,31 +95,31 @@ fn merge_classifier_proposal(
     let weight = proposal.confidence.clamp(0.0, 1.0);
     let mut deltas = Vec::new();
 
-    apply_weighted_delta(
+    apply_weighted_blend(
         state,
         "valence",
-        proposal.valence_delta,
+        proposal.valence,
         weight,
         &mut deltas,
     );
-    apply_weighted_delta(
+    apply_weighted_blend(
         state,
         "arousal",
-        proposal.arousal_delta,
+        proposal.arousal,
         weight,
         &mut deltas,
     );
-    apply_weighted_delta(
+    apply_weighted_blend(
         state,
         "irritation",
-        proposal.irritation_delta,
+        proposal.irritation,
         weight,
         &mut deltas,
     );
-    apply_weighted_delta(
+    apply_weighted_blend(
         state,
         "affinity",
-        proposal.affinity_delta,
+        proposal.affinity,
         weight,
         &mut deltas,
     );
@@ -132,59 +132,70 @@ fn merge_classifier_proposal(
         category: "classifier",
         detail: if proposal.reason.is_empty() {
             format!(
-                "LLM proposal (confidence={weight:.2}, user_emotion={})",
+                "LLM absolute estimate (confidence={weight:.2}, user_emotion={})",
                 proposal.user_emotion
             )
         } else {
-            format!("LLM proposal (confidence={weight:.2}): {}", proposal.reason)
+            format!("LLM absolute estimate (confidence={weight:.2}): {}", proposal.reason)
         },
         deltas,
     })
 }
 
-fn apply_weighted_delta(
+fn apply_weighted_blend(
     state: &mut AffectState,
     field: &'static str,
-    delta: f32,
+    target: f32,
     weight: f32,
     deltas: &mut Vec<AffectDelta>,
 ) {
-    let scaled = delta * weight;
-    if scaled.abs() < f32::EPSILON {
+    if !target.is_finite() || weight.abs() < f32::EPSILON {
         return;
     }
     match field {
         "valence" => {
             let old = state.valence;
-            state.valence += scaled;
-            deltas.push(AffectDelta {
-                field,
-                delta: state.valence - old,
-            });
+            state.valence += (target - state.valence) * weight;
+            let applied = state.valence - old;
+            if applied.abs() >= f32::EPSILON {
+                deltas.push(AffectDelta {
+                    field,
+                    delta: applied,
+                });
+            }
         }
         "arousal" => {
             let old = state.arousal;
-            state.arousal += scaled;
-            deltas.push(AffectDelta {
-                field,
-                delta: state.arousal - old,
-            });
+            state.arousal += (target - state.arousal) * weight;
+            let applied = state.arousal - old;
+            if applied.abs() >= f32::EPSILON {
+                deltas.push(AffectDelta {
+                    field,
+                    delta: applied,
+                });
+            }
         }
         "irritation" => {
             let old = state.irritation;
-            state.irritation += scaled;
-            deltas.push(AffectDelta {
-                field,
-                delta: state.irritation - old,
-            });
+            state.irritation += (target - state.irritation) * weight;
+            let applied = state.irritation - old;
+            if applied.abs() >= f32::EPSILON {
+                deltas.push(AffectDelta {
+                    field,
+                    delta: applied,
+                });
+            }
         }
         "affinity" => {
             let old = state.affinity;
-            state.affinity += scaled;
-            deltas.push(AffectDelta {
-                field,
-                delta: state.affinity - old,
-            });
+            state.affinity += (target - state.affinity) * weight;
+            let applied = state.affinity - old;
+            if applied.abs() >= f32::EPSILON {
+                deltas.push(AffectDelta {
+                    field,
+                    delta: applied,
+                });
+            }
         }
         _ => {}
     }

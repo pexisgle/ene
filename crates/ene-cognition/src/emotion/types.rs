@@ -11,14 +11,14 @@ pub struct AffectProposal {
     pub user_emotion: String,
     /// Detected user intent label.
     pub user_intent: String,
-    /// Proposed valence delta.
-    pub valence_delta: f32,
-    /// Proposed arousal delta.
-    pub arousal_delta: f32,
-    /// Proposed irritation delta.
-    pub irritation_delta: f32,
-    /// Proposed affinity delta.
-    pub affinity_delta: f32,
+    /// Estimated valence after the conversation (-1.0 ..= 1.0).
+    pub valence: f32,
+    /// Estimated arousal after the conversation (-1.0 ..= 1.0).
+    pub arousal: f32,
+    /// Estimated irritation after the conversation (0.0 ..= 1.0).
+    pub irritation: f32,
+    /// Estimated affinity after the conversation (-1.0 ..= 1.0).
+    pub affinity: f32,
     /// Suggested expression name from the classifier.
     pub recommended_expression: String,
     /// Classifier confidence in `[0.0, 1.0]`.
@@ -59,7 +59,7 @@ pub struct TurnAffectInput<'a> {
     pub recent_turn_count: usize,
     /// Optional LLM classifier proposal (advisory only).
     pub classifier_proposal: Option<AffectProposal>,
-    /// Minimum confidence to apply classifier deltas.
+    /// Minimum confidence to blend classifier absolute estimates.
     pub classifier_min_confidence: f32,
     /// When true, skip deterministic appraisal (LLM-only mode).
     pub llm_only: bool,

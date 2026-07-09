@@ -73,6 +73,37 @@ pub struct AffectState {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
+/// Serialized post-turn LLM classifier proposal waiting for next-turn merge.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingAffectProposal {
+    /// Character identifier.
+    pub character_id: String,
+    /// User identifier (empty when global).
+    pub user_id: String,
+    /// Turn index that produced this proposal.
+    pub source_turn_id: i64,
+    /// Detected user emotion label.
+    pub user_emotion: String,
+    /// Detected user intent label.
+    pub user_intent: String,
+    /// Estimated valence after the conversation (-1.0 ..= 1.0).
+    pub valence: f32,
+    /// Estimated arousal after the conversation (-1.0 ..= 1.0).
+    pub arousal: f32,
+    /// Estimated irritation after the conversation (0.0 ..= 1.0).
+    pub irritation: f32,
+    /// Estimated affinity after the conversation (-1.0 ..= 1.0).
+    pub affinity: f32,
+    /// Suggested expression name.
+    pub recommended_expression: String,
+    /// Proposal confidence in `[0.0, 1.0]`.
+    pub confidence: f32,
+    /// Human-readable reason from the classifier.
+    pub reason: String,
+    /// Creation timestamp for observability.
+    pub created_at: DateTime<Utc>,
+}
+
 impl AffectState {
     /// Create a neutral affect state.
     #[must_use]

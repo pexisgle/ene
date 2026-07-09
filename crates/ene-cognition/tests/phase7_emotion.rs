@@ -77,18 +77,18 @@ fn classifier_proposal_merged_when_confident() {
     let proposal = AffectProposal {
         user_emotion: "happy".into(),
         user_intent: "praise".into(),
-        valence_delta: 0.2,
-        arousal_delta: 0.1,
-        irritation_delta: 0.0,
-        affinity_delta: 0.1,
+        valence: 0.5,
+        arousal: 0.2,
+        irritation: 0.0,
+        affinity: 0.4,
         recommended_expression: "happy".into(),
-        confidence: 0.85,
+        confidence: 0.8,
         reason: "user praised".into(),
     };
 
     let mut input = TurnAffectInput {
         state: &mut state,
-        user_message: "nice",
+        user_message: "ok",
         elapsed_since_update: Duration::ZERO,
         recent_turn_count: 1,
         classifier_proposal: Some(proposal),
@@ -96,7 +96,7 @@ fn classifier_proposal_merged_when_confident() {
         llm_only: false,
     };
     let result = engine.update_turn(&config, &mut input);
-    assert!(state.valence > 0.0);
+    assert!((state.valence - 0.4).abs() < 0.01);
     assert!(result.reasons.iter().any(|r| r.category == "classifier"));
 }
 
@@ -109,10 +109,10 @@ fn low_confidence_classifier_ignored() {
     let proposal = AffectProposal {
         user_emotion: "angry".into(),
         user_intent: "complaint".into(),
-        valence_delta: -0.3,
-        arousal_delta: 0.2,
-        irritation_delta: 0.3,
-        affinity_delta: -0.2,
+        valence: -0.8,
+        arousal: 0.5,
+        irritation: 0.9,
+        affinity: -0.5,
         recommended_expression: "angry".into(),
         confidence: 0.2,
         reason: "uncertain".into(),

@@ -40,7 +40,13 @@ ene_config::define_config!(
 // ────────────────────────────────────────────
 
 ene_config::define_label_enum!(
-    /// Selects the emotion computation strategy.
+    /// Selects how pre-turn affect is computed each turn.
+    ///
+    /// - **`deterministic`**: Rule-based appraisal (gratitude, insult, etc.) and time decay only.
+    ///   No post-turn LLM classifier runs.
+    /// - **`hybrid`** (default): Same deterministic path **plus** an async post-turn LLM classifier
+    ///   whose estimate is blended at the **next** turn start (weighted by `classifier_min_confidence`).
+    /// - **`llm`**: Skips deterministic appraisal; decay and the post-turn classifier drive affect.
     pub enum EngineMode {
         /// Rules-based affect with no LLM participation.
         Deterministic => "Deterministic",
@@ -286,6 +292,11 @@ pub struct EmotionConfig {
     pub classifier_min_confidence: f32,
     /// Prompt library language for affect classifier and cognitive output contract (`en` or `ja`).
     pub classifier_language: String,
+    /// Chat model for the affect classifier (defaults to [`crate::emotion::classifier::DEFAULT_CLASSIFIER_MODEL`]).
+    #[serde(default = "default_classifier_model")]
+    pub classifier_model: Option<String>,
+    /// Max completion tokens for classifier LLM calls (`0` = no cap).
+    pub classifier_max_tokens: u32,
 }
 
 impl Default for EmotionConfig {
@@ -297,11 +308,17 @@ impl Default for EmotionConfig {
             expression_hysteresis_seconds: 4.0,
             llm_can_propose_expression: true,
             llm_expression_is_advisory: true,
-            classifier_timeout_secs: 15,
+            classifier_timeout_secs: crate::emotion::classifier::DEFAULT_CLASSIFIER_TIMEOUT_SECS,
             classifier_min_confidence: 0.5,
             classifier_language: "en".into(),
+            classifier_model: default_classifier_model(),
+            classifier_max_tokens: 0,
         }
     }
+}
+
+fn default_classifier_model() -> Option<String> {
+    Some(crate::emotion::classifier::DEFAULT_CLASSIFIER_MODEL.to_owned())
 }
 
 /// Character card compilation settings.

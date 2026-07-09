@@ -135,7 +135,7 @@ Memory extraction, hybrid search, retention, and MMR diversification settings.
 | `llm_can_propose_expression` | `bool` | `true` | Allow the LLM to propose an expression token |
 | `llm_expression_is_advisory` | `bool` | `true` | Treat LLM proposals as advisory, not commands |
 | `classifier_timeout_secs` | `u64` | `15` | Timeout for one LLM affect-classifier call |
-| `classifier_min_confidence` | `f32` | `0.5` | Minimum confidence to apply LLM affect deltas |
+| `classifier_min_confidence` | `f32` | `0.5` | Minimum confidence to blend LLM absolute affect estimates |
 | `classifier_language` | `String` | `"en"` | Prompt library language (`en` or `ja`) for the classifier and output contract |
 
 ### `EngineMode`
@@ -362,16 +362,16 @@ pub struct TurnAffectInput<'a> {
 
 ### `AffectProposal`
 
-Optional LLM affect classifier output (advisory only, never applied below `classifier_min_confidence`).
+Optional LLM affect classifier output: absolute post-conversation estimates (advisory only, blended below `classifier_min_confidence` is skipped).
 
 ```rust
 pub struct AffectProposal {
     pub user_emotion: String,
     pub user_intent: String,
-    pub valence_delta: f32,
-    pub arousal_delta: f32,
-    pub irritation_delta: f32,
-    pub affinity_delta: f32,
+    pub valence: f32,
+    pub arousal: f32,
+    pub irritation: f32,
+    pub affinity: f32,
     pub recommended_expression: String,
     pub confidence: f32,
     pub reason: String,

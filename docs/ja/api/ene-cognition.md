@@ -135,7 +135,7 @@ pub struct CognitionConfig {
 | `llm_can_propose_expression` | `bool` | `true` | LLMが表情トークンを提案することを許可する |
 | `llm_expression_is_advisory` | `bool` | `true` | LLMの提案を命令ではなく助言として扱う |
 | `classifier_timeout_secs` | `u64` | `15` | 1回のLLMアフェクト分類器呼び出しのタイムアウト |
-| `classifier_min_confidence` | `f32` | `0.5` | LLMのアフェクトデルタを適用する最小確信度 |
+| `classifier_min_confidence` | `f32` | `0.5` | LLMの絶対感情推定をブレンド適用する最小確信度 |
 | `classifier_language` | `String` | `"en"` | 分類器と出力コントラクトのプロンプトライブラリ言語（`en` または `ja`） |
 
 ### `EngineMode`
@@ -362,16 +362,16 @@ pub struct TurnAffectInput<'a> {
 
 ### `AffectProposal`
 
-オプションのLLMアフェクト分類器の出力（助言のみであり、`classifier_min_confidence` を下回る場合は決して適用されません）。
+オプションのLLM感情分類器の出力（会話後の絶対推定値。助言のみで、`classifier_min_confidence` 未満はブレンドしません）。
 
 ```rust
 pub struct AffectProposal {
     pub user_emotion: String,
     pub user_intent: String,
-    pub valence_delta: f32,
-    pub arousal_delta: f32,
-    pub irritation_delta: f32,
-    pub affinity_delta: f32,
+    pub valence: f32,
+    pub arousal: f32,
+    pub irritation: f32,
+    pub affinity: f32,
     pub recommended_expression: String,
     pub confidence: f32,
     pub reason: String,

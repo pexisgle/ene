@@ -122,13 +122,6 @@ impl CognitionEngine {
                 .filter(|entry| entry.role == "user")
                 .count();
 
-            if ctx.config.emotion.engine == EngineMode::Llm && ctx.llm_provider.is_none() {
-                tracing::warn!(
-                    component = "EmotionEngine",
-                    "LLM emotion mode enabled but no LLM provider; only decay will apply"
-                );
-            }
-
             let mut turn_input = TurnAffectInput {
                 state: &mut affect,
                 user_message: ctx.user_input,
@@ -139,39 +132,42 @@ impl CognitionEngine {
                 llm_only: ctx.config.emotion.engine == EngineMode::Llm,
             };
 
-            let classifier_lang = ctx.config.emotion.classifier_language.as_str();
-
-            // Optional LLM classifier (#88) — advisory merge inside update_turn.
+            // Consume a pending post-turn classifier proposal from the previous turn.
+            let mut classifier_estimate_for_log = None;
             if matches!(
                 ctx.config.emotion.engine,
                 EngineMode::Llm | EngineMode::Hybrid
-            ) && let Some(provider) = ctx.llm_provider.as_deref()
-            {
-                let snippet = build_classifier_snippet(ctx.user_input, ctx.history);
-                match crate::emotion::classifier::classify_with_timeout(
-                    provider,
-                    &snippet,
-                    ctx.config.emotion.classifier_timeout_secs,
-                    classifier_lang,
-                )
-                .await
+            ) {
+                let current_user_turn = count_user_turns(ctx.history);
+                if let Some(pending) = store
+                    .take_pending_affect_proposal(ctx.character_id, ctx.user_name)
+                    .await
+                    .map_err(CognitionError::Memory)?
                 {
-                    Ok(proposal)
-                        if proposal.confidence >= ctx.config.emotion.classifier_min_confidence =>
-                    {
-                        classifier_expression_hint = Some(proposal.recommended_expression.clone());
-                        turn_input = turn_input.with_proposal(proposal);
-                    }
-                    Ok(proposal) if proposal.confidence > 0.0 => {
-                        turn_input = turn_input.with_proposal(proposal);
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
+                    if pending.source_turn_id >= current_user_turn {
                         tracing::warn!(
                             component = "EmotionEngine",
-                            error = %error,
-                            "LLM affect classifier failed; using deterministic path"
+                            source_turn_id = pending.source_turn_id,
+                            current_user_turn,
+                            "Dropping future pending classifier proposal"
                         );
+                    } else if pending.source_turn_id < current_user_turn - 1 {
+                        tracing::warn!(
+                            component = "EmotionEngine",
+                            source_turn_id = pending.source_turn_id,
+                            current_user_turn,
+                            "Dropping stale pending classifier proposal"
+                        );
+                    } else {
+                        let proposal = pending_to_affect_proposal(pending);
+                        if proposal.confidence >= ctx.config.emotion.classifier_min_confidence {
+                            classifier_expression_hint =
+                                Some(proposal.recommended_expression.clone());
+                        }
+                        if proposal.confidence > 0.0 {
+                            classifier_estimate_for_log = Some(proposal.clone());
+                            turn_input = turn_input.with_proposal(proposal);
+                        }
                     }
                 }
             }
@@ -179,6 +175,28 @@ impl CognitionEngine {
             let update = self
                 .emotion
                 .update_turn(&ctx.config.emotion, &mut turn_input);
+
+            if let Some(proposal) = classifier_estimate_for_log {
+                tracing::info!(
+                    component = "EmotionEngine",
+                    user_emotion = %proposal.user_emotion,
+                    user_intent = %proposal.user_intent,
+                    estimated_valence = proposal.valence,
+                    estimated_arousal = proposal.arousal,
+                    estimated_irritation = proposal.irritation,
+                    estimated_affinity = proposal.affinity,
+                    recommended_expression = %proposal.recommended_expression,
+                    confidence = proposal.confidence,
+                    reason = %proposal.reason,
+                    mood_after = %update.mood_label,
+                    valence_after = affect.valence,
+                    arousal_after = affect.arousal,
+                    irritation_after = affect.irritation,
+                    affinity_after = affect.affinity,
+                    "Blended post-turn classifier estimate into affect"
+                );
+            }
+
             tracing::debug!(
                 component = "CognitionEngine",
                 mood = %update.mood_label,
@@ -415,15 +433,162 @@ fn build_behavior_contract(card: &CharacterCardV3, user_name: &str) -> Option<St
     }
 }
 
-fn build_classifier_snippet(
-    user_input: &str,
-    history: &[crate::lifecycle::HistoryEntry],
-) -> String {
-    let mut lines = Vec::new();
-    let tail: Vec<_> = history.iter().rev().take(4).collect();
-    for entry in tail.into_iter().rev() {
-        lines.push(format!("{}: {}", entry.role, entry.content));
+fn pending_to_affect_proposal(
+    pending: ene_memory::PendingAffectProposal,
+) -> crate::emotion::AffectProposal {
+    crate::emotion::AffectProposal {
+        user_emotion: pending.user_emotion,
+        user_intent: pending.user_intent,
+        valence: pending.valence,
+        arousal: pending.arousal,
+        irritation: pending.irritation,
+        affinity: pending.affinity,
+        recommended_expression: pending.recommended_expression,
+        confidence: pending.confidence,
+        reason: pending.reason,
     }
-    lines.push(format!("user: {user_input}"));
-    lines.join("\n")
+}
+
+/// Count user messages in a history snapshot (current turn user is already included).
+#[must_use]
+pub fn count_user_turns(history: &[crate::lifecycle::HistoryEntry]) -> i64 {
+    history.iter().filter(|entry| entry.role == "user").count() as i64
+}
+
+/// Completed user-turn index for a post-turn classifier proposal.
+///
+/// Uses the stream-start history snapshot, which already includes the current
+/// user message but not the assistant reply produced in this turn.
+#[must_use]
+pub fn completed_user_turn_at_post_turn(history: &[crate::lifecycle::HistoryEntry]) -> i64 {
+    count_user_turns(history)
+}
+
+/// Compact affect snapshot passed to the post-turn classifier prompt.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ClassifierAffectSnapshot {
+    /// Pleasure–displeasure (-1.0 ..= 1.0).
+    pub valence: f32,
+    /// Excitement–calm (-1.0 ..= 1.0).
+    pub arousal: f32,
+    /// Irritation (0.0 ..= 1.0).
+    pub irritation: f32,
+    /// Affinity toward user (-1.0 ..= 1.0).
+    pub affinity: f32,
+    /// Human-readable mood label at turn start.
+    pub mood_label: String,
+}
+
+impl ClassifierAffectSnapshot {
+    /// Build a compact snapshot from persistent affect state.
+    #[must_use]
+    pub fn from_affect_state(affect: &ene_memory::AffectState) -> Self {
+        Self {
+            valence: affect.valence,
+            arousal: affect.arousal,
+            irritation: affect.irritation,
+            affinity: affect.affinity,
+            mood_label: affect.mood_label.clone(),
+        }
+    }
+
+    /// Serialize for the classifier user prompt.
+    #[must_use]
+    pub fn to_prompt_json(&self) -> String {
+        serde_json::json!({
+            "valence": self.valence,
+            "arousal": self.arousal,
+            "irritation": self.irritation,
+            "affinity": self.affinity,
+            "mood_label": self.mood_label,
+        })
+        .to_string()
+    }
+}
+
+/// Input bundle for the post-turn affect classifier.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassifierContext {
+    /// Affect state at the start of the turn (before this exchange).
+    pub current_affect: ClassifierAffectSnapshot,
+    /// Recent conversation lines including the current assistant reply.
+    pub conversation: String,
+}
+
+/// Build classifier input from history, current assistant output, and turn-start affect.
+#[must_use]
+pub fn build_classifier_context(
+    history: &[crate::lifecycle::HistoryEntry],
+    current_assistant: &str,
+    affect: &ene_memory::AffectState,
+    max_turns: usize,
+) -> ClassifierContext {
+    let max_entries = max_turns.saturating_mul(2).max(2);
+    let start = history.len().saturating_sub(max_entries);
+    let mut lines = Vec::new();
+    for entry in &history[start..] {
+        let role = entry.role.as_str();
+        if role == "user" || role == "assistant" {
+            lines.push(format!("{role}: {}", entry.content));
+        }
+    }
+    if !current_assistant.trim().is_empty() {
+        lines.push(format!("assistant: {current_assistant}"));
+    }
+
+    ClassifierContext {
+        current_affect: ClassifierAffectSnapshot::from_affect_state(affect),
+        conversation: lines.join("\n"),
+    }
+}
+
+#[cfg(test)]
+mod turn_id_tests {
+    use super::*;
+    use crate::lifecycle::HistoryEntry;
+
+    #[test]
+    fn count_user_turns_ignores_assistant_messages() {
+        let history = vec![
+            HistoryEntry {
+                role: "user".into(),
+                content: "one".into(),
+            },
+            HistoryEntry {
+                role: "assistant".into(),
+                content: "reply".into(),
+            },
+            HistoryEntry {
+                role: "user".into(),
+                content: "two".into(),
+            },
+        ];
+        assert_eq!(count_user_turns(&history), 2);
+        assert_eq!(completed_user_turn_at_post_turn(&history), 2);
+    }
+
+    #[test]
+    fn build_classifier_context_includes_history_and_assistant() {
+        use ene_memory::AffectState;
+
+        let history = vec![
+            HistoryEntry {
+                role: "user".into(),
+                content: "hi".into(),
+            },
+            HistoryEntry {
+                role: "assistant".into(),
+                content: "hello".into(),
+            },
+            HistoryEntry {
+                role: "user".into(),
+                content: "thanks".into(),
+            },
+        ];
+        let affect = AffectState::neutral("ene");
+        let ctx = build_classifier_context(&history, "you're welcome", &affect, 8);
+        assert!(ctx.conversation.contains("user: thanks"));
+        assert!(ctx.conversation.contains("assistant: you're welcome"));
+        assert!(ctx.current_affect.to_prompt_json().contains("valence"));
+    }
 }

@@ -498,7 +498,7 @@ pub struct PromptLibrary { /* opaque: PromptLibraryData + lang */ }
 | `summarizer()` | `&SummarizerPrompts` | LLM summarizer system/user prompt templates. Has `render_system(user_name, char_name, existing_facts, conversation)` and `render_user_prompt(user_name, existing_facts, conversation)`. |
 | `split()` | `&SplitPrompts` | Session-split reason message templates (`reason_timeout`, `reason_topic`, `reason_context`, `reason_composite`, `reason_manual`). Has `render_reason_timeout(minutes)`, `render_reason_topic(similarity)`, `render_reason_composite(score)`. |
 | `extractor()` | `&ExtractorPrompts` | LLM memory-extractor system/user prompt templates. Has `render_user_prompt(conversation)`. |
-| `affect_classifier()` | `&AffectClassifierPrompts` | LLM affect-classifier system/user prompt templates. Has `render_user_prompt(conversation)`. |
+| `affect_classifier()` | `&AffectClassifierPrompts` | LLM affect-classifier system/user prompt templates. Has `render_user_prompt(current_affect, conversation)`. |
 
 ### `substitute`
 

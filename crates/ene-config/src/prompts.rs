@@ -281,10 +281,13 @@ fn default_natural_dialogue_contract_path_en() -> String {
 }
 
 impl AffectClassifierPrompts {
-    /// Renders the classifier user prompt replacing `{conversation}` placeholder.
+    /// Renders the classifier user prompt replacing `{current_affect}` and `{conversation}`.
     #[must_use]
-    pub fn render_user_prompt(&self, conversation: &str) -> String {
-        substitute(&self.user_prompt, &[("conversation", conversation)])
+    pub fn render_user_prompt(&self, current_affect: &str, conversation: &str) -> String {
+        substitute(
+            &self.user_prompt,
+            &[("current_affect", current_affect), ("conversation", conversation)],
+        )
     }
 }
 

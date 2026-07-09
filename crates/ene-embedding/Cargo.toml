@@ -18,6 +18,10 @@ tokenizers = { workspace = true }
 tracing = { workspace = true }
 ene-config = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { workspace = true, features = ["accelerate"] }
+accelerate-src = { workspace = true }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 hf-hub = { workspace = true, features = ["rustls-tls"] }
 

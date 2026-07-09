@@ -29,9 +29,12 @@ pub use config::{
 pub use error::LlmProviderError;
 pub use hybrid::HybridRerankProvider;
 pub use message::{LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart};
-pub use openai::{CloudEmbeddingProvider, OpenAiProvider, OpenAiProviderFactory};
+pub use openai::{
+    CloudEmbeddingProvider, OpenAiProvider, OpenAiProviderFactory,
+    create_openai_compatible_chat_provider,
+};
 pub use role::Role;
 pub use traits::{
     EmbeddingError, EmbeddingKind, EmbeddingProvider, LlmProvider, LlmProviderFactory,
-    LlmProviderRegistry, cosine_similarity,
+    LlmProviderRegistry, collect_chat_completion, cosine_similarity,
 };

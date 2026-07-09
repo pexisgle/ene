@@ -72,7 +72,7 @@ pub mod summarizer;
 pub mod typed_memory;
 
 /// Affect state types.
-pub use affect::{AffectState, DiscreteEmotion};
+pub use affect::{AffectState, DiscreteEmotion, PendingAffectProposal};
 /// Commitment ledger types.
 pub use commitment::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
 /// Memory feature toggle configuration.

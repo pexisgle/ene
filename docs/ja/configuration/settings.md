@@ -485,14 +485,16 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
 | `enabled` | bool | `true` | 感情処理を有効化 |
-| `engine` | string | `"hybrid"` | エンジンモード: `"deterministic"`, `"llm"`, または `"hybrid"` |
+| `engine` | string | `"hybrid"` | 感情エンジンモード。`"deterministic"`: ルール + 減衰のみ（post-turn classifier なし）。`"hybrid"`: ルール + 減衰 **と** 非同期 post-turn classifier（推奨）。`"llm"`: 減衰 + classifier のみ（ルールベース評価をスキップ） |
 | `decay_half_life_minutes` | float | `30.0` | 感情減衰の半減期（分） |
 | `expression_hysteresis_seconds` | float | `4.0` | 表情変更の最小間隔（秒）（ちらつき防止） |
 | `llm_can_propose_expression` | bool | `true` | LLM が表情トークンを提案することを許可 |
 | `llm_expression_is_advisory` | bool | `true` | LLM の表情提案をコマンドではなくアドバイスとして扱う |
-| `classifier_timeout_secs` | int | `15` | オプション LLM 感情分類器のタイムアウト（秒）（#88） |
-| `classifier_min_confidence` | float | `0.5` | LLM 感情デルタ適用に必要な最小 confidence |
+| `classifier_timeout_secs` | int | `30` | post-turn 非同期 LLM 感情分類器ジョブのタイムアウト（秒）（#88）。応答生成の待ち時間には直結しない。strict JSON Schema、ストリーミング fallback、`classifier_max_tokens` を使用 |
+| `classifier_min_confidence` | float | `0.5` | LLM 絶対感情推定をブレンド適用する最小 confidence |
 | `classifier_language` | string | `"en"` | 感情分類器と自然対話出力契約のプロンプト言語（`en` または `ja`） |
+| `classifier_model` | string | `"google/gemini-2.5-flash-lite"` | 感情分類器のチャットモデル（OpenRouter スラッグ） |
+| `classifier_max_tokens` | int | `0` | 分類器 LLM 呼び出しの最大 completion トークン数（`0` = 上限なし） |
 
 #### `cognition.character` — キャラクターコンパイル
 

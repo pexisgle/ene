@@ -1,7 +1,9 @@
 //! Cognitive runtime streaming path (#100).
 
 use ene_cognition::memory_writer::candidate::{ToolResultSummary, TurnInput};
-use ene_cognition::{CognitionConfig, CognitionEngine, HistoryEntry, PostTurnInput, TurnContext};
+use ene_cognition::{
+    CognitionConfig, CognitionEngine, EngineMode, HistoryEntry, PostTurnInput, TurnContext,
+};
 use ene_config::PromptLibrary;
 use ene_provider::LlmToolCallChunk;
 use tokio_stream::StreamExt;
@@ -455,6 +457,110 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_session::Con
                         error = %error,
                         "Post-turn finalize failed"
                     );
+                }
+
+                if cognition.emotion.enabled
+                    && matches!(
+                        cognition.emotion.engine,
+                        EngineMode::Llm | EngineMode::Hybrid
+                    )
+                    && !assistant_content.trim().is_empty()
+                {
+                    let classifier_store = mem_store.clone();
+                    let classifier_config = config.clone();
+                    let classifier_model = cognition.emotion.classifier_model.clone();
+                    let classifier_max_tokens = cognition.emotion.classifier_max_tokens;
+                    let classifier_lang = cognition.emotion.classifier_language.clone();
+                    let classifier_timeout_secs = cognition.emotion.classifier_timeout_secs;
+                    let classifier_character_id = card_name.clone();
+                    let classifier_user_id = user_name.clone();
+                    let classifier_turn_id =
+                        ene_cognition::engine::completed_user_turn_at_post_turn(&history);
+                    let classifier_context = ene_cognition::engine::build_classifier_context(
+                        &history,
+                        &assistant_content,
+                        &pre_turn.affect,
+                        cognition.context.recent_turns,
+                    );
+
+                    if let Some(classifier_store) = classifier_store {
+                        tokio::spawn(async move {
+                            tracing::info!(
+                                component = "EmotionEngine",
+                                turn_id = classifier_turn_id,
+                                "Starting post-turn affect classifier"
+                            );
+                            let started = std::time::Instant::now();
+                            match ene_cognition::emotion::classifier::classify_for_config(
+                                &classifier_config,
+                                classifier_model.as_deref(),
+                                classifier_max_tokens,
+                                &classifier_context,
+                                classifier_timeout_secs,
+                                &classifier_lang,
+                            )
+                            .await
+                            {
+                                Ok(proposal) => {
+                                    let pending = ene_memory::PendingAffectProposal {
+                                        character_id: classifier_character_id.clone(),
+                                        user_id: classifier_user_id.clone(),
+                                        source_turn_id: classifier_turn_id,
+                                        user_emotion: proposal.user_emotion,
+                                        user_intent: proposal.user_intent,
+                                        valence: proposal.valence,
+                                        arousal: proposal.arousal,
+                                        irritation: proposal.irritation,
+                                        affinity: proposal.affinity,
+                                        recommended_expression: proposal.recommended_expression,
+                                        confidence: proposal.confidence,
+                                        reason: proposal.reason,
+                                        created_at: chrono::Utc::now(),
+                                    };
+                                    if let Err(error) = classifier_store
+                                        .upsert_pending_affect_proposal(&pending)
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            component = "EmotionEngine",
+                                            error = %error,
+                                            turn_id = classifier_turn_id,
+                                            "Failed to persist post-turn classifier proposal"
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            component = "EmotionEngine",
+                                            turn_id = classifier_turn_id,
+                                            elapsed_ms = started.elapsed().as_millis(),
+                                            user_emotion = %pending.user_emotion,
+                                            user_intent = %pending.user_intent,
+                                            estimated_valence = pending.valence,
+                                            estimated_arousal = pending.arousal,
+                                            estimated_irritation = pending.irritation,
+                                            estimated_affinity = pending.affinity,
+                                            recommended_expression = %pending.recommended_expression,
+                                            confidence = pending.confidence,
+                                            reason = %pending.reason,
+                                            "Post-turn affect classifier estimate complete"
+                                        );
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        component = "EmotionEngine",
+                                        error = %error,
+                                        failure_reason =
+                                            ene_cognition::emotion::classifier::classify_failure_reason(
+                                                &error
+                                            ),
+                                        turn_id = classifier_turn_id,
+                                        elapsed_ms = started.elapsed().as_millis(),
+                                        "Post-turn affect classifier failed"
+                                    );
+                                }
+                            }
+                        });
+                    }
                 }
             }
 

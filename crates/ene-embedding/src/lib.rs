@@ -4,6 +4,9 @@
 
 #![warn(missing_docs)]
 
+#[cfg(target_os = "macos")]
+extern crate accelerate_src;
+
 /// Embedding-related error types.
 pub mod error;
 mod quantized;

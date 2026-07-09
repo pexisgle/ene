@@ -35,6 +35,10 @@ pub enum EneCognitionError {
     #[error("Emotion computation failed: {0}")]
     EmotionFailed(String),
 
+    /// Affect classifier LLM call failed.
+    #[error(transparent)]
+    Classifier(#[from] crate::emotion::classifier::ClassifierError),
+
     /// Prompt composition failed.
     #[error("Prompt composition failed: {0}")]
     PromptBuildError(String),

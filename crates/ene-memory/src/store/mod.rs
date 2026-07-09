@@ -1353,6 +1353,104 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// Upsert a pending post-turn classifier proposal for the next turn.
+    pub async fn upsert_pending_affect_proposal(
+        &self,
+        proposal: &crate::PendingAffectProposal,
+    ) -> Result<(), MemoryError> {
+        use entities::pending_affect_proposals::{ActiveModel, Column, Entity};
+        use sea_orm::sea_query::OnConflict;
+
+        let proposal_json =
+            serde_json::to_string(proposal).map_err(|e| MemoryError::Other(e.to_string()))?;
+
+        let active = ActiveModel {
+            character_id: sea_orm::Set(proposal.character_id.clone()),
+            user_id: sea_orm::Set(proposal.user_id.clone()),
+            source_turn_id: sea_orm::Set(proposal.source_turn_id),
+            proposal_json: sea_orm::Set(proposal_json),
+            created_at: sea_orm::Set(proposal.created_at),
+        };
+
+        Entity::insert(active)
+            .on_conflict(
+                OnConflict::columns([Column::CharacterId, Column::UserId])
+                    .update_columns([
+                        Column::SourceTurnId,
+                        Column::ProposalJson,
+                        Column::CreatedAt,
+                    ])
+                    .to_owned(),
+            )
+            .exec(&self.db)
+            .await?;
+        Ok(())
+    }
+
+    /// Retrieve a pending post-turn classifier proposal, if any.
+    pub async fn get_pending_affect_proposal(
+        &self,
+        character_id: &str,
+        user_id: &str,
+    ) -> Result<Option<crate::PendingAffectProposal>, MemoryError> {
+        use entities::pending_affect_proposals::Entity;
+        use sea_orm::EntityTrait;
+
+        let maybe_model = Entity::find_by_id((character_id.to_string(), user_id.to_string()))
+            .one(&self.db)
+            .await?;
+        let Some(model) = maybe_model else {
+            return Ok(None);
+        };
+
+        match serde_json::from_str::<crate::PendingAffectProposal>(&model.proposal_json) {
+            Ok(proposal) => Ok(Some(proposal)),
+            Err(error) => {
+                tracing::warn!(
+                    component = "MemoryStore",
+                    character_id,
+                    user_id,
+                    error = %error,
+                    "Dropping stale pending affect proposal with incompatible JSON"
+                );
+                self.delete_pending_affect_proposal(character_id, user_id)
+                    .await?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Delete a pending post-turn classifier proposal for a character/user key.
+    pub async fn delete_pending_affect_proposal(
+        &self,
+        character_id: &str,
+        user_id: &str,
+    ) -> Result<(), MemoryError> {
+        use entities::pending_affect_proposals::Entity;
+        use sea_orm::EntityTrait;
+
+        Entity::delete_by_id((character_id.to_string(), user_id.to_string()))
+            .exec(&self.db)
+            .await?;
+        Ok(())
+    }
+
+    /// Fetch and consume a pending post-turn classifier proposal.
+    pub async fn take_pending_affect_proposal(
+        &self,
+        character_id: &str,
+        user_id: &str,
+    ) -> Result<Option<crate::PendingAffectProposal>, MemoryError> {
+        let proposal = self
+            .get_pending_affect_proposal(character_id, user_id)
+            .await?;
+        if proposal.is_some() {
+            self.delete_pending_affect_proposal(character_id, user_id)
+                .await?;
+        }
+        Ok(proposal)
+    }
+
     // ── Typed Memory CRUD ───────────────────────────────────────────────────
 
     /// Insert a new typed memory item and return its assigned ID.

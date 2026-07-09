@@ -6,7 +6,7 @@ Ene supports two expression paths: **legacy token mode** (when `cognition.emotio
 
 When `cognition.emotion.enabled` is true:
 
-1. **Pre-turn:** `EmotionEngine` loads `AffectState` from the database, applies time-based decay and deterministic appraisal (gratitude, praise, insult, urgency, fatigue), and optionally merges an advisory LLM affect classifier proposal.
+1. **Pre-turn:** `EmotionEngine` loads `AffectState` from the database, applies time-based decay and deterministic appraisal (gratitude, praise, insult, urgency, fatigue), then consumes any pending post-turn classifier proposal from the previous turn.
 2. **Prompt:** `build_natural_dialogue_contract()` replaces the token-list PHI. The LLM is asked for natural dialogue only — no `<|emo:|>` tokens required.
 3. **Post-stream:** `OutputArbiter` maps updated `AffectState` (+ optional LLM token hints) to a resolved expression with hysteresis.
 4. **Event:** `EneEvent::Expression { name, source }` is emitted to consumers.
@@ -14,7 +14,7 @@ When `cognition.emotion.enabled` is true:
 
 ```
 User input
-  → EmotionEngine (decay + appraisal [+ optional classifier])
+  → EmotionEngine (decay + appraisal [+ pending classifier from previous turn])
   → PromptPacket (Current Mood section + natural dialogue contract)
   → LLM stream (text only)
   → OutputArbiter
@@ -29,12 +29,45 @@ See `cognition.emotion` in [settings.md](../configuration/settings.md):
 | Key | Role |
 |-----|------|
 | `enabled` | Master switch for engine-managed emotion |
-| `engine` | `deterministic`, `llm`, or `hybrid` (classifier) |
+| `engine` | `deterministic`, `llm`, or `hybrid` (classifier) — see [Engine modes](#engine-modes) |
 | `decay_half_life_minutes` | PAD decay toward neutral between turns |
 | `expression_hysteresis_seconds` | Minimum hold time before expression changes |
 | `llm_expression_is_advisory` | When true, stream tokens are accumulated for the arbiter instead of emitted immediately |
-| `classifier_timeout_secs` / `classifier_min_confidence` | LLM affect classifier budget (#88) |
+| `classifier_timeout_secs` / `classifier_min_confidence` | Post-turn async classifier budget and merge gate (#88) |
 | `classifier_language` | Prompt library locale for classifier and natural-dialogue contract (`en` / `ja`) |
+| `classifier_model` | Chat model for the classifier (default `google/gemini-2.5-flash-lite` on OpenRouter) |
+| `classifier_max_tokens` | Max completion tokens for classifier calls (`0` = no cap) |
+
+### Post-turn async classifier
+
+When `engine` is `llm` or `hybrid`, Ene runs the affect classifier **after** the assistant response is produced.
+
+- Input: turn-start `AffectState` snapshot + recent conversation history (including the current `user + assistant` exchange)
+- Output: absolute post-conversation estimates for `valence`, `arousal`, `irritation`, and `affinity`
+- Success: proposal is stored as pending with `source_turn_id = N` (completed user turn) and blended once at the **next** pre-turn when `current_user_turn == N + 1` (weighted by `confidence`)
+- Failure/timeout: logged and ignored (deterministic path remains active)
+- Stale/future pending proposals are dropped (too old or tagged for the current/future turn)
+
+At **INFO** level you should see:
+- `Starting post-turn affect classifier` when the async job starts
+- `Post-turn affect classifier estimate complete` with the full estimate when classification succeeds
+- `Blended post-turn classifier estimate into affect` at the **next** turn start when the pending proposal is merged
+
+If you see no classifier logs, check that `cognition.emotion.engine` is `hybrid` or `llm` (not `deterministic`).
+
+### Engine modes
+
+| Mode | Pre-turn rules | Post-turn classifier |
+|------|----------------|----------------------|
+| `deterministic` | Yes (gratitude, insult, decay, …) | **No** |
+| `hybrid` (default) | Yes | Yes — estimate blended next turn |
+| `llm` | **No** (decay only) | Yes — estimate blended next turn |
+
+Use `hybrid` unless you explicitly want to disable either the rule-based path or the classifier.
+
+The classifier uses a **dedicated provider instance** (not the main stream client), strict JSON Schema output (`response_format` with `strict: true`), optional `classifier_max_tokens`, and resilient transport fallbacks for OpenRouter compatibility.
+
+This keeps immediate user-facing expression/reactivity in the response LLM path while using the classifier as a delayed advisory signal for internal affect stabilization.
 
 ## Legacy Token Path
 

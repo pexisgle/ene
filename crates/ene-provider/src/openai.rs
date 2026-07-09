@@ -1,6 +1,7 @@
 use async_openai::{Client, config::OpenAIConfig};
 use async_trait::async_trait;
 use std::pin::Pin;
+use std::sync::OnceLock;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::config::ProviderConfig;
@@ -156,7 +157,13 @@ fn convert_tools(
 /// Built-in OpenAI-Compatible Provider.
 pub struct OpenAiProvider {
     client: Client<OpenAIConfig>,
+    api_base: String,
+    api_key: String,
     model: String,
+    /// When set, caps completion length for short structured outputs (e.g. affect classifier).
+    chat_max_tokens: Option<u32>,
+    /// Disable MiMo / reasoning-model thinking so JSON lands in `content`.
+    thinking_disabled: bool,
 }
 
 impl OpenAiProvider {
@@ -165,9 +172,197 @@ impl OpenAiProvider {
     pub fn new(base_url: &str, api_key: &str, model: &str) -> Self {
         Self {
             client: build_openai_client(base_url, api_key),
+            api_base: base_url.to_string(),
+            api_key: api_key.to_string(),
             model: model.to_string(),
+            chat_max_tokens: None,
+            thinking_disabled: false,
         }
     }
+
+    /// Limit completion tokens for short JSON-style responses.
+    #[must_use]
+    pub fn with_chat_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.chat_max_tokens = Some(max_tokens);
+        self
+    }
+
+    /// Send `thinking: { type: disabled }` for models that otherwise fill `reasoning_content`.
+    #[must_use]
+    pub fn with_thinking_disabled(mut self, disabled: bool) -> Self {
+        self.thinking_disabled = disabled;
+        self
+    }
+}
+
+fn model_wants_thinking_disabled(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("mimo")
+}
+
+/// Build a chat provider with model-specific transport tweaks applied.
+fn new_openai_chat_provider(base_url: &str, api_key: &str, model: &str) -> OpenAiProvider {
+    let mut provider = OpenAiProvider::new(base_url, api_key, model);
+    if model_wants_thinking_disabled(model) {
+        provider = provider.with_thinking_disabled(true);
+    }
+    provider
+}
+
+fn merge_request_body(
+    mut request: async_openai::types::chat::CreateChatCompletionRequest,
+    stream: bool,
+    thinking_disabled: bool,
+) -> Result<serde_json::Value, LlmProviderError> {
+    if stream {
+        request.stream = Some(true);
+    }
+    let mut body = serde_json::to_value(request)
+        .map_err(|e| LlmProviderError::Provider(format!("request serialize failed: {e}")))?;
+    let Some(obj) = body.as_object_mut() else {
+        return Err(LlmProviderError::Provider(
+            "invalid chat request body".to_string(),
+        ));
+    };
+    if thinking_disabled {
+        obj.insert("thinking".into(), serde_json::json!({"type": "disabled"}));
+    }
+    Ok(body)
+}
+
+fn text_from_message_value(message: &serde_json::Value) -> Option<String> {
+    if let Some(content) = message.get("content").and_then(serde_json::Value::as_str)
+        && !content.trim().is_empty()
+    {
+        return Some(content.to_string());
+    }
+    message
+        .get("reasoning_content")
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_string)
+}
+
+fn text_from_delta_value(delta: &serde_json::Value) -> Option<String> {
+    if let Some(content) = delta.get("content").and_then(serde_json::Value::as_str)
+        && !content.is_empty()
+    {
+        return Some(content.to_string());
+    }
+    delta
+        .get("reasoning_content")
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn collect_sse_content(sse: &str) -> String {
+    let mut content = String::new();
+
+    for line in sse.lines() {
+        let Some(payload) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        if payload.trim() == "[DONE]" {
+            continue;
+        }
+        let Ok(chunk) = serde_json::from_str::<serde_json::Value>(payload) else {
+            continue;
+        };
+        if let Some(delta) = chunk.pointer("/choices/0/delta")
+            && let Some(text) = text_from_delta_value(delta)
+        {
+            content.push_str(&text);
+        }
+    }
+
+    content
+}
+
+fn byot_http_client() -> Result<&'static reqwest::Client, LlmProviderError> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map_err(|e| LlmProviderError::Provider(format!("HTTP client init failed: {e}")))
+}
+
+/// Non-stream BYOT chat completion via direct HTTP.
+///
+/// `async-openai`'s `create_byot` can hang on OpenRouter MiMo with `thinking: disabled`;
+/// a plain POST matches the reliable direct-HTTP path used in classifier benchmarks.
+async fn post_chat_byot_via_http(
+    api_base: &str,
+    api_key: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, LlmProviderError> {
+    let url = format!(
+        "{}/chat/completions",
+        api_base.trim_end_matches('/')
+    );
+    let response = byot_http_client()?
+        .post(url)
+        .bearer_auth(api_key)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| LlmProviderError::Provider(format!("chat completion HTTP failed: {e}")))?;
+
+    let status = response.status();
+    let raw = response
+        .text()
+        .await
+        .map_err(|e| LlmProviderError::Provider(format!("chat completion read failed: {e}")))?;
+
+    if !status.is_success() {
+        return Err(LlmProviderError::Provider(format!(
+            "chat completion HTTP {status}: {}",
+            raw.chars().take(200).collect::<String>()
+        )));
+    }
+
+    serde_json::from_str(&raw)
+        .map_err(|e| LlmProviderError::Provider(format!("chat completion JSON parse failed: {e}")))
+}
+
+/// Stream BYOT chat completion via direct HTTP (buffered SSE).
+async fn post_chat_stream_collect_via_http(
+    api_base: &str,
+    api_key: &str,
+    body: serde_json::Value,
+) -> Result<String, LlmProviderError> {
+    let url = format!(
+        "{}/chat/completions",
+        api_base.trim_end_matches('/')
+    );
+    let response = byot_http_client()?
+        .post(url)
+        .bearer_auth(api_key)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| LlmProviderError::Provider(format!("chat stream HTTP failed: {e}")))?;
+
+    let status = response.status();
+    let raw = response
+        .text()
+        .await
+        .map_err(|e| LlmProviderError::Provider(format!("chat stream read failed: {e}")))?;
+
+    if !status.is_success() {
+        return Err(LlmProviderError::Provider(format!(
+            "chat stream HTTP {status}: {}",
+            raw.chars().take(200).collect::<String>()
+        )));
+    }
+
+    Ok(collect_sse_content(&raw))
 }
 
 #[async_trait]
@@ -200,10 +395,40 @@ impl LlmProvider for OpenAiProvider {
         if let Some(t) = oa_tools {
             req_builder.tools(t);
         }
+        if let Some(max_tokens) = self.chat_max_tokens {
+            req_builder.max_tokens(max_tokens);
+        }
 
         let request = req_builder
             .build()
             .map_err(|e| LlmProviderError::Provider(e.to_string()))?;
+
+        if self.thinking_disabled {
+            let body = merge_request_body(request, true, true)?;
+            let api_base = self.api_base.clone();
+            let api_key = self.api_key.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            tokio::spawn(async move {
+                let chunk = post_chat_stream_collect_via_http(&api_base, &api_key, body)
+                    .await
+                    .map(|content| LlmResponseChunk {
+                        text_delta: if content.is_empty() {
+                            None
+                        } else {
+                            Some(content)
+                        },
+                        tool_calls_delta: None,
+                    });
+                let _ = tx.send(chunk).await;
+            });
+
+            use tokio_stream::wrappers::ReceiverStream;
+            return Ok(Box::pin(ReceiverStream::new(rx))
+                as Pin<
+                    Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>,
+                >);
+        }
+
         let stream = self
             .client
             .chat()
@@ -284,10 +509,31 @@ impl LlmProvider for OpenAiProvider {
                 },
             });
         }
+        if let Some(max_tokens) = self.chat_max_tokens {
+            req_builder.max_tokens(max_tokens);
+        }
 
         let request = req_builder
             .build()
             .map_err(|e| LlmProviderError::Provider(e.to_string()))?;
+
+        if self.thinking_disabled {
+            let body = merge_request_body(request, false, true)?;
+            let response =
+                post_chat_byot_via_http(&self.api_base, &self.api_key, body).await?;
+
+            let message = response
+                .get("choices")
+                .and_then(|choices| choices.as_array())
+                .and_then(|choices| choices.first())
+                .and_then(|choice| choice.get("message"));
+            let content = message
+                .and_then(text_from_message_value)
+                .unwrap_or_default();
+
+            return Ok(content);
+        }
+
         let response = self
             .client
             .chat()
@@ -347,12 +593,42 @@ impl LlmProviderFactory for OpenAiProviderFactory {
 
         let api_key = provider_config.resolve_api_key();
 
-        Ok(Box::new(OpenAiProvider::new(
+        Ok(Box::new(new_openai_chat_provider(
             &base_url,
             &api_key,
             &provider_config.model,
         )))
     }
+}
+
+/// Create an OpenAI-compatible chat provider, optionally overriding the model name.
+///
+/// Used by the post-turn affect classifier so it can target a faster/cheaper model
+/// than the main conversation stream.
+pub fn create_openai_compatible_chat_provider(
+    config: &ene_config::EneConfig,
+    model_override: Option<&str>,
+    max_tokens: Option<u32>,
+) -> Result<Box<dyn LlmProvider>, LlmProviderError> {
+    let provider_config = config.get_section::<ProviderConfig>().map_err(|e| {
+        LlmProviderError::Provider(format!("Failed to parse provider config: {e}"))
+    })?;
+
+    let base_url = provider_config
+        .resolve_base_url()
+        .map_err(|e| LlmProviderError::Provider(format!("Failed to resolve base URL: {e}")))?;
+
+    let api_key = provider_config.resolve_api_key();
+    let model = model_override
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(provider_config.model.as_str());
+
+    let mut provider = new_openai_chat_provider(&base_url, &api_key, model);
+    if let Some(max_tokens) = max_tokens.filter(|&n| n > 0) {
+        provider = provider.with_chat_max_tokens(max_tokens);
+    }
+
+    Ok(Box::new(provider))
 }
 
 /// Cloud embedding provider.

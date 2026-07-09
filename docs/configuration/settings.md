@@ -485,14 +485,16 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `true` | Enable emotion processing |
-| `engine` | string | `"hybrid"` | Engine mode: `"deterministic"`, `"llm"`, or `"hybrid"` |
+| `engine` | string | `"hybrid"` | Emotion engine mode. `"deterministic"`: rules + decay only (no post-turn classifier). `"hybrid"`: rules + decay **and** async post-turn classifier (recommended). `"llm"`: decay + classifier only (skips rule-based appraisal) |
 | `decay_half_life_minutes` | float | `30.0` | Half-life in minutes for affect decay |
 | `expression_hysteresis_seconds` | float | `4.0` | Minimum seconds between expression changes (prevents flickering) |
 | `llm_can_propose_expression` | bool | `true` | Allow the LLM to propose expression tokens |
 | `llm_expression_is_advisory` | bool | `true` | Treat LLM expression proposals as advisory only (not commands) |
-| `classifier_timeout_secs` | int | `15` | Timeout in seconds for the optional LLM affect classifier (#88) |
-| `classifier_min_confidence` | float | `0.5` | Minimum classifier confidence to apply LLM affect deltas |
+| `classifier_timeout_secs` | int | `30` | Timeout in seconds for the post-turn async LLM affect classifier job (#88); does not block response generation. Uses strict JSON Schema, streaming fallback, and `classifier_max_tokens` |
+| `classifier_min_confidence` | float | `0.5` | Minimum classifier confidence to blend absolute LLM affect estimates |
 | `classifier_language` | string | `"en"` | Prompt library language for affect classifier and natural-dialogue output contract (`en` or `ja`) |
+| `classifier_model` | string | `"google/gemini-2.5-flash-lite"` | Chat model for the affect classifier (OpenRouter slug) |
+| `classifier_max_tokens` | int | `0` | Max completion tokens for classifier LLM calls (`0` = no cap) |
 
 #### `cognition.character` — Character Compilation
 

@@ -32,6 +32,7 @@ rand = "0.10"
 async-openai = { version = "0.41", default-features = false, features = [
     "chat-completion",
     "embedding",
+    "byot",
 ] }
 figment = { version = "0.10", features = ["json", "env"] }
 schemars = { version = "1.2", features = ["preserve_order"] }
@@ -73,6 +74,8 @@ darling = "0.23"
 # --- ML / Embedding ---
 candle-core = "0.11"
 candle-nn = "0.11"
+intel-mkl-src = { version = "0.8.1", features = ["mkl-static-lp64-iomp"] }
+accelerate-src = "0.3.2"
 tokenizers = "0.23"
 hf-hub = { version = "1.0.0-rc.1", default-features = false }
 

@@ -135,12 +135,13 @@ impl GgufEmbeddingProvider {
         let result = model.forward(&input_tensor);
         let t_forward = t_forward_start.elapsed();
 
-        println!(
-            "\n[Embedding Debug] {} tokens | tokenize: {:.2}ms, tensor: {:.2}ms, forward: {:.2}ms",
-            input_ids.len(),
-            t_tokenize.as_secs_f64() * 1000.0,
-            t_tensor.as_secs_f64() * 1000.0,
-            t_forward.as_secs_f64() * 1000.0
+        tracing::debug!(
+            component = "GgufEmbeddingProvider",
+            tokens = input_ids.len(),
+            tokenize_ms = t_tokenize.as_secs_f64() * 1000.0,
+            tensor_ms = t_tensor.as_secs_f64() * 1000.0,
+            forward_ms = t_forward.as_secs_f64() * 1000.0,
+            "Embedding timing"
         );
 
         result

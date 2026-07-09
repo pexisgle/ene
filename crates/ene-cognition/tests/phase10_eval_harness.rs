@@ -1,11 +1,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ene_cognition::{CognitionConfig, CognitionEngine, HistoryEntry, TurnContext};
 use ene_config::CharacterCardV3;
 use ene_memory::{
     AffectAnnotation, CommitmentStatus, MemoryConfidence, MemoryKind, MemorySalience, MemoryScope,
-    MemorySource, MemoryStatus, MemoryStore, NewCommitment, NewMemoryItem,
+    MemorySource, MemoryStatus, MemoryStore, NewCommitment, NewMemoryItem, PendingAffectProposal,
 };
 use ene_provider::{
     EmbeddingKind, EmbeddingProvider, LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk,
@@ -69,6 +70,34 @@ impl LlmProvider for EvalLlm {
         _json_schema: Option<serde_json::Value>,
     ) -> Result<String, LlmProviderError> {
         Ok("ok".into())
+    }
+}
+
+struct PanicLlm;
+
+#[async_trait]
+impl LlmProvider for PanicLlm {
+    fn name(&self) -> &str {
+        "panic-llm"
+    }
+
+    async fn create_chat_stream(
+        &self,
+        _messages: &[LlmMessage],
+        _tools: &[ene_tool_proto::ToolSpec],
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
+        LlmProviderError,
+    > {
+        Err(LlmProviderError::Provider("not used".into()))
+    }
+
+    async fn chat_completion(
+        &self,
+        _messages: &[LlmMessage],
+        _json_schema: Option<serde_json::Value>,
+    ) -> Result<String, LlmProviderError> {
+        panic!("before_turn must not call classifier chat_completion");
     }
 }
 
@@ -379,5 +408,256 @@ async fn scenario_affect_update_is_deterministic() {
         "affect update should be deterministic: left={:?}, right={:?}",
         pre_a.affect,
         pre_b.affect
+    );
+}
+
+#[tokio::test]
+async fn scenario_before_turn_does_not_block_on_classifier() {
+    let store = MemoryStore::open_in_memory(4).await.unwrap();
+    let embedder: Arc<dyn EmbeddingProvider> = Arc::new(EvalEmbedder);
+    let llm: Arc<dyn LlmProvider> = Arc::new(PanicLlm);
+    let engine = CognitionEngine::new();
+    let mut config = CognitionConfig::default();
+    config.emotion.engine = ene_cognition::EngineMode::Hybrid;
+    let card = eval_card();
+
+    let pre = run_before_turn(
+        &engine,
+        &store,
+        &config,
+        &card,
+        embedder,
+        llm,
+        "thanks for helping me",
+        &[],
+    )
+    .await;
+    assert!(
+        !pre.affect.mood_label.is_empty(),
+        "before_turn should complete without classifier provider call"
+    );
+}
+
+#[tokio::test]
+async fn scenario_pending_classifier_proposal_applies_once() {
+    let store = MemoryStore::open_in_memory(4).await.unwrap();
+    let embedder: Arc<dyn EmbeddingProvider> = Arc::new(EvalEmbedder);
+    let llm: Arc<dyn LlmProvider> = Arc::new(EvalLlm);
+    let engine = CognitionEngine::new();
+    let config = CognitionConfig::default();
+    let card = eval_card();
+    store
+        .upsert_pending_affect_proposal(&PendingAffectProposal {
+            character_id: "ene".into(),
+            user_id: "user".into(),
+            source_turn_id: 1,
+            user_emotion: "happy".into(),
+            user_intent: "praise".into(),
+            valence: 0.3,
+            arousal: 0.0,
+            irritation: 0.0,
+            affinity: 0.2,
+            recommended_expression: "happy".into(),
+            confidence: 0.9,
+            reason: "test".into(),
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let history = vec![
+        HistoryEntry {
+            role: "user".into(),
+            content: "previous turn".into(),
+        },
+        HistoryEntry {
+            role: "assistant".into(),
+            content: "previous reply".into(),
+        },
+        HistoryEntry {
+            role: "user".into(),
+            content: "hello again".into(),
+        },
+    ];
+    let pre = run_before_turn(
+        &engine,
+        &store,
+        &config,
+        &card,
+        embedder.clone(),
+        llm.clone(),
+        "hello again",
+        &history,
+    )
+    .await;
+    assert_eq!(pre.classifier_expression_hint.as_deref(), Some("happy"));
+    assert!(
+        pre.affect.valence > 0.0,
+        "pending classifier estimate should affect next turn"
+    );
+
+    let pending = store
+        .get_pending_affect_proposal("ene", "user")
+        .await
+        .unwrap();
+    assert!(pending.is_none(), "proposal must be consumed once");
+
+    let pre_second = run_before_turn(
+        &engine,
+        &store,
+        &config,
+        &card,
+        embedder,
+        llm,
+        "third turn",
+        &[
+            HistoryEntry {
+                role: "user".into(),
+                content: "previous turn".into(),
+            },
+            HistoryEntry {
+                role: "assistant".into(),
+                content: "previous reply".into(),
+            },
+            HistoryEntry {
+                role: "user".into(),
+                content: "hello again".into(),
+            },
+            HistoryEntry {
+                role: "assistant".into(),
+                content: "second reply".into(),
+            },
+            HistoryEntry {
+                role: "user".into(),
+                content: "third turn".into(),
+            },
+        ],
+    )
+    .await;
+    assert!(
+        pre_second.classifier_expression_hint.is_none(),
+        "consumed proposal should not be applied again"
+    );
+}
+
+#[tokio::test]
+async fn scenario_stale_pending_classifier_proposal_is_dropped() {
+    let store = MemoryStore::open_in_memory(4).await.unwrap();
+    let embedder: Arc<dyn EmbeddingProvider> = Arc::new(EvalEmbedder);
+    let llm: Arc<dyn LlmProvider> = Arc::new(EvalLlm);
+    let engine = CognitionEngine::new();
+    let mut config = CognitionConfig::default();
+    config.emotion.engine = ene_cognition::EngineMode::Hybrid;
+    let card = eval_card();
+    store
+        .upsert_pending_affect_proposal(&PendingAffectProposal {
+            character_id: "ene".into(),
+            user_id: "user".into(),
+            source_turn_id: 1,
+            user_emotion: "happy".into(),
+            user_intent: "praise".into(),
+            valence: 0.3,
+            arousal: 0.0,
+            irritation: 0.0,
+            affinity: 0.2,
+            recommended_expression: "happy".into(),
+            confidence: 0.9,
+            reason: "stale".into(),
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let history = vec![
+        HistoryEntry {
+            role: "user".into(),
+            content: "turn 1".into(),
+        },
+        HistoryEntry {
+            role: "assistant".into(),
+            content: "reply 1".into(),
+        },
+        HistoryEntry {
+            role: "user".into(),
+            content: "turn 2".into(),
+        },
+        HistoryEntry {
+            role: "assistant".into(),
+            content: "reply 2".into(),
+        },
+        HistoryEntry {
+            role: "user".into(),
+            content: "turn 3".into(),
+        },
+    ];
+    let pre = run_before_turn(
+        &engine, &store, &config, &card, embedder, llm, "turn 3", &history,
+    )
+    .await;
+
+    assert!(
+        pre.classifier_expression_hint.is_none(),
+        "stale proposal from turn 1 should not apply on turn 3"
+    );
+    assert!(
+        store
+            .get_pending_affect_proposal("ene", "user")
+            .await
+            .unwrap()
+            .is_none(),
+        "stale proposal should be consumed and dropped"
+    );
+}
+
+#[tokio::test]
+async fn scenario_future_pending_classifier_proposal_is_dropped() {
+    let store = MemoryStore::open_in_memory(4).await.unwrap();
+    let embedder: Arc<dyn EmbeddingProvider> = Arc::new(EvalEmbedder);
+    let llm: Arc<dyn LlmProvider> = Arc::new(EvalLlm);
+    let engine = CognitionEngine::new();
+    let mut config = CognitionConfig::default();
+    config.emotion.engine = ene_cognition::EngineMode::Hybrid;
+    let card = eval_card();
+    store
+        .upsert_pending_affect_proposal(&PendingAffectProposal {
+            character_id: "ene".into(),
+            user_id: "user".into(),
+            source_turn_id: 2,
+            user_emotion: "happy".into(),
+            user_intent: "praise".into(),
+            valence: 0.3,
+            arousal: 0.0,
+            irritation: 0.0,
+            affinity: 0.2,
+            recommended_expression: "happy".into(),
+            confidence: 0.9,
+            reason: "future".into(),
+            created_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let history = vec![
+        HistoryEntry {
+            role: "user".into(),
+            content: "turn 1".into(),
+        },
+        HistoryEntry {
+            role: "assistant".into(),
+            content: "reply 1".into(),
+        },
+        HistoryEntry {
+            role: "user".into(),
+            content: "turn 2".into(),
+        },
+    ];
+    let pre = run_before_turn(
+        &engine, &store, &config, &card, embedder, llm, "turn 2", &history,
+    )
+    .await;
+
+    assert!(
+        pre.classifier_expression_hint.is_none(),
+        "future proposal tagged for turn 2 should not apply on turn 2 pre-turn"
     );
 }

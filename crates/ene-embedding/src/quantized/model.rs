@@ -52,11 +52,12 @@ impl EmbeddingModel {
         }
         let t_norm = t_norm_start.elapsed();
 
-        println!(
-            "[Model Forward Debug] embed: {:.2}ms, layers: {:.2}ms, norm_pool: {:.2}ms",
-            t_embed.as_secs_f64() * 1000.0,
-            t_layers.as_secs_f64() * 1000.0,
-            t_norm.as_secs_f64() * 1000.0
+        tracing::debug!(
+            component = "EmbeddingModel",
+            embed_ms = t_embed.as_secs_f64() * 1000.0,
+            layers_ms = t_layers.as_secs_f64() * 1000.0,
+            norm_pool_ms = t_norm.as_secs_f64() * 1000.0,
+            "Model forward timing"
         );
 
         Ok(vec)

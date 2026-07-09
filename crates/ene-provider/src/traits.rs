@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
-use tokio_stream::Stream;
+use tokio_stream::{Stream, StreamExt};
 
 use crate::error::LlmProviderError;
 use crate::message::{LlmMessage, LlmResponseChunk};
@@ -30,6 +30,25 @@ pub trait LlmProvider: Send + Sync {
         messages: &[LlmMessage],
         json_schema: Option<serde_json::Value>,
     ) -> Result<String, LlmProviderError>;
+}
+
+/// Collect a full assistant reply from a streaming chat completion.
+///
+/// OpenRouter and some OpenAI-compatible models respond reliably to streaming
+/// requests but may hang or exceed budgets on non-streaming `chat().create()`.
+pub async fn collect_chat_completion(
+    provider: &dyn LlmProvider,
+    messages: &[LlmMessage],
+) -> Result<String, LlmProviderError> {
+    let mut stream = provider.create_chat_stream(messages, &[]).await?;
+    let mut content = String::new();
+    while let Some(chunk_res) = stream.next().await {
+        let chunk = chunk_res?;
+        if let Some(delta) = chunk.text_delta {
+            content.push_str(&delta);
+        }
+    }
+    Ok(content)
 }
 
 /// Distinguishes embedding use cases. Providers may apply different prefixes
