@@ -8,13 +8,17 @@ LLM 駆動の会話、アニメーションする VRM キャラクター、ツ�
 
 - [アーキテクチャ概要](architecture/overview.md) — クレートマップと依存関係グラフ
 - [起動フロー](architecture/startup.md) — デスクトップ (winit+wgpu+egui) と CLI のブートシーケンス
+- [認知ランタイムアーキテクチャ](architecture/cognitive-runtime.md) — Identity Kernel、型付きメモリ、感情、表情調停の設計に関するADR
+- [API リファクタリング計画](architecture/api-refactor-plan.md) — クレートAPI表面の再構成に関する進行中の計画
 - [設定](configuration/settings.md) — settings.json の全スキーマリファレンス
+- [API リファレンス](api/index.md) — すべてのライブラリクレートの公開APIドキュメント
 
 ## コアエンジン
 
 | ドキュメント | トピック |
 |-------------|---------|
 | [ストリーミングエンジン](core/streaming.md) | アクターベースアーキテクチャ, `EneHandle`, `EneEvent`, ツール呼び出しループ |
+| [ストリーミングイベント](core/streaming-events.md) | レガシー vs 認知ストリーミングパスで発生する `EneEvent` バリアントの違い |
 | [プロンプト構築](core/prompt.md) | メッセージ構築順序, システムプロンプト, 感情プロトコル, 関数呼び出し |
 | [セッション管理](core/session.md) | `ConversationSession`, `CharacterCardV3`, CBS 式展開 |
 | [セッション分割](core/session-split.md) | タイムアウト, 話題変化検出, 手動分割, 非同期ライフサイクル |
@@ -48,6 +52,7 @@ LLM 駆動の会話、アニメーションする VRM キャラクター、ツ�
 |---------|------|------|
 | `ene-config` | Library | 設定管理, スキーマ生成, キャラクターカード, マクロ |
 | `ene-core` | Library | アクターベースランタイム, LLM ストリーミング, ツール統合, 記憶統合 |
+| `ene-cognition` | Library | 認知ランタイム — Identity Kernel, 型付きメモリ, 感情, 表情調停, コミットメント |
 | `ene-embedding` | Library | 埋め込みプロバイダ (API + ローカル GGUF) |
 | `ene-memory` | Library | SQLite-vec 記憶ストア |
 | `ene-session` | Library | 会話履歴, セッション分割 |

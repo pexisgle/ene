@@ -182,6 +182,11 @@ impl Default for MToonMaterial {
 /// The glTF core `emissiveFactor` and `emissiveTexture` are also
 /// captured into the material struct so the shader can read them
 /// from the same uniform.
+///
+/// Called internally by [`crate::loader::load_vrm`]; hidden from the "Supported API" docs —
+/// `ene-desktop` never inspects per-material MToon data directly, only via
+/// `VrmPrimitive::mtoon`/`mtoon_textures` inside the renderer.
+#[doc(hidden)]
 pub fn load_mtoon_materials(gltf: &gltf::Gltf) -> Vec<Option<MToonMaterial>> {
     let mut out = Vec::with_capacity(gltf.document.materials().count());
 
@@ -339,6 +344,9 @@ fn parse_texture_ref_from_obj(
 
 /// Bitflags for which textures a material uses. The shader reads
 /// this as a `u32` bitmask in the per-material uniform.
+///
+/// Used internally by [`texture_flags`]; hidden from the "Supported API" docs.
+#[doc(hidden)]
 pub mod flags {
     /// Base color (albedo) texture present.
     pub const BASE_COLOR_TEXTURE: u32 = 1 << 0;
@@ -392,6 +400,9 @@ impl std::fmt::Debug for MToonGpuTextures {
 
 /// Compute the texture-presence bitmask for a material. Used by
 /// the renderer to fill the per-material uniform.
+///
+/// Called internally by [`crate::renderer::VrmRenderer`]; hidden from the "Supported API" docs.
+#[doc(hidden)]
 pub fn texture_flags(mat: &MToonMaterial, has_base_color: bool) -> u32 {
     let mut f = 0u32;
     if has_base_color {

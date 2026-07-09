@@ -16,12 +16,24 @@
 
 ## `#[derive(ToolSpec)]`
 
-以下を生成します：
-- `impl ToolSpecArgs for MyArgs`
-- `const TOOL_NAME: &'static str`
-- `const DISPLAY_NAME: &'static str`
-- `const SUMMARY: &'static str`
-- `fn spec() -> ToolSpec`
+ストラクトに直接（**固有アイテム**として、単純な `impl MyArgs { ... }` ブロック内に）以下を生成します：
+- `pub const TOOL_NAME: &'static str`
+- `pub const DISPLAY_NAME: &'static str`
+- `pub const SUMMARY: &'static str`
+- `pub fn spec() -> ToolSpec`
+
+...そして別に、`TOOL_NAME` と `spec()` のみを持つ `impl ToolSpecArgs for MyArgs` を生成します：
+
+```rust
+impl ToolSpecArgs for MyArgs {
+    const TOOL_NAME: &'static str = /* ... */;
+    fn spec() -> ToolSpec {
+        Self::spec() // 上記の固有関数に委譲する
+    }
+}
+```
+
+> **重要：** `DISPLAY_NAME` と `SUMMARY` は**ストラクトのみに存在する固有定数**です — `ToolSpecArgs` トレイトの一部では*ありません*（[`ene-tool-common`](./ene-tool-common.md#toolspecargs-トレイト) を参照）。常に具体的な型に対して直接 `MyArgs::DISPLAY_NAME` / `MyArgs::SUMMARY` としてアクセスしてください。汎用的な `T: ToolSpecArgs` 境界を通してはアクセスできません。
 
 `parameters` の JSON スキーマは `schemars` を使用してストラクトのフィールドから生成されます。マクロはルートスキーマオブジェクトに自動的に `additionalProperties: false` を設定します。
 
@@ -143,14 +155,46 @@ impl DoThingAction {
 
 ### バイナリへの組み込み
 
-```rust
+`run_tool_server` は**ジェネリックではありません** — `run_tool_server::<T>()` ではなく、ボックス化された `dyn ToolProvider` を受け取ります。1つ以上の `ToolAction` を `ToolProvider` でラップし（完全な例は [`ene-tool-common`](./ene-tool-common.md#ツールバイナリの組み込み方) を参照）、そのプロバイダーを渡します：
+
+```rust,no_run
 // tools/my_tool/src/main.rs
-use ene_tool_proto::run_tool_server;
+use async_trait::async_trait;
+use ene_tool_common::ToolAction;
+use ene_tool_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec, run_tool_server};
+
 mod actions;
+use actions::DoThingAction;
+
+struct MyToolProvider {
+    actions: Vec<Box<dyn ToolAction>>,
+}
+
+#[async_trait]
+impl ToolProvider for MyToolProvider {
+    fn list_specs(&self) -> Vec<ToolSpec> {
+        self.actions.iter().map(|a| a.definition()).collect()
+    }
+
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
+        for action in &self.actions {
+            if action.name() == name {
+                return action.execute(arguments).await;
+            }
+        }
+        Err(ToolError::NotFound { tool_name: name.to_string() })
+    }
+
+    fn set_session_id(&self, _session_id: &str) {}
+    fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
+}
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    run_tool_server::<actions::DoThingAction>().await
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let action = DoThingAction { path: String::new(), max_bytes: None, context: Default::default() };
+    let provider = MyToolProvider { actions: vec![Box::new(action)] };
+    run_tool_server(Box::new(provider)).await?;
+    Ok(())
 }
 ```
 

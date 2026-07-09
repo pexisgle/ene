@@ -1,15 +1,15 @@
 # `ene-provider` — API Reference
 
-> **Crate:** `ene-provider`  
+> **Crate:** `ene-provider`
 > **Role:** Trait definitions and built-in implementations for LLM and embedding providers.
 
 ---
 
 ## Overview
 
-`ene-provider` defines the provider abstraction layer that decouples the Ene runtime from specific AI service vendors. All LLM calls and embedding operations flow through the two core traits: `LlmProvider` and `EmbeddingProvider`.
+`ene-provider` defines the provider abstraction layer that decouples the Ene runtime from specific AI service vendors. All LLM calls and embedding operations flow through two core `async` traits: `LlmProvider` and `EmbeddingProvider`. Both report failures through typed errors (`LlmProviderError`, `EmbeddingError`) rather than `String`, so callers can dispatch on the variant (e.g. show a "rate limited" notice on `LlmProviderError::RateLimit`).
 
-Providers are registered at startup via `LlmProviderRegistry` and can be swapped via configuration without changing application code.
+Providers are registered at startup via `LlmProviderRegistry` and can be swapped via configuration (`ProviderConfig`) without changing application code.
 
 ```mermaid
 flowchart LR
@@ -25,106 +25,131 @@ flowchart LR
 
 ## `LlmProvider` Trait
 
-The core interface for language model backends.
+The core interface for language model backends. Every method is `async`.
 
 ```rust
+#[async_trait]
 pub trait LlmProvider: Send + Sync {
-    /// Human-readable provider name (e.g. `"openai"`).
     fn name(&self) -> &str;
 
-    /// Opens a streaming chat completion.
-    ///
-    /// Returns a `Stream` that yields `LlmResponseChunk` fragments as the model generates text.
-    fn create_chat_stream(
+    async fn create_chat_stream(
         &self,
         messages: &[LlmMessage],
-        tools: &[ToolSpec],
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, String>> + Send>>, String>;
+        tools: &[ene_tool_proto::ToolSpec],
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
+        LlmProviderError,
+    >;
 
-    /// Performs a blocking (non-streaming) chat completion.
-    ///
-    /// Pass `json_schema` to request structured JSON output conforming to a schema.
-    fn chat_completion(
+    async fn chat_completion(
         &self,
         messages: &[LlmMessage],
         json_schema: Option<serde_json::Value>,
-    ) -> Result<String, String>;
+    ) -> Result<String, LlmProviderError>;
 }
 ```
 
-### Notes
+### Method Table
 
-- `create_chat_stream` is used for all interactive turns where the user sees streamed output.
-- `chat_completion` is used for internal tasks such as session summarization that require structured output.
+| Method | Signature | Description |
+|---|---|---|
+| `name` | `fn name(&self) -> &str` | Human-readable provider name (e.g. `"openai-compatible"`). Not `async`. |
+| `create_chat_stream` | `async fn create_chat_stream(&self, messages: &[LlmMessage], tools: &[ToolSpec]) -> Result<Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>, LlmProviderError>` | Opens a streaming chat completion. Used for all interactive turns where the user sees streamed output. |
+| `chat_completion` | `async fn chat_completion(&self, messages: &[LlmMessage], json_schema: Option<serde_json::Value>) -> Result<String, LlmProviderError>` | Non-streaming completion, optionally constrained to a JSON Schema. Used for internal tasks (e.g. session summarization, rerank scoring) that need structured output. |
 
 ---
 
 ## `EmbeddingProvider` Trait
 
-Interface for text embedding and semantic utility operations.
+Interface for text embedding and semantic utility operations. Every method is `async` except `dimensions`/`model_name`/`has_reranker`, which have defaults or are trivial getters.
 
 ```rust
+#[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
-    /// Embed a single text string with the given purpose hint.
     async fn embed(&self, text: &str, kind: EmbeddingKind) -> Result<Vec<f32>, EmbeddingError>;
 
-    /// Convenience wrapper: embed a query string (`EmbeddingKind::Query`).
-    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbeddingError>;
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
+        self.embed(text, EmbeddingKind::Query).await
+    }
 
-    /// Embed multiple texts in a single batched call.
     async fn embed_batch(
         &self,
         items: &[(&str, EmbeddingKind)],
-    ) -> Result<Vec<Vec<f32>>, EmbeddingError>;
+    ) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+        /* default: serial loop calling embed() once per item */
+        unimplemented!()
+    }
 
-    /// HyDE: generate a hypothetical answer document for the given query,
-    /// then embed it. Returns the embedded vector of the hypothetical document.
-    async fn hyde(&self, query: &str) -> Result<String, EmbeddingError>;
+    async fn hyde(&self, query: &str) -> Result<String, EmbeddingError> {
+        Ok(query.to_string())
+    }
 
-    /// Score `candidates` (tool specs) against `query` for re-ranking.
-    /// Returns a score per candidate in the same order.
+    fn has_reranker(&self) -> bool {
+        false
+    }
+
     async fn rerank(
         &self,
         query: &str,
-        candidates: &[ToolSpec],
-    ) -> Result<Vec<f32>, EmbeddingError>;
+        candidates: &[ene_tool_proto::ToolSpec],
+    ) -> Result<Vec<f32>, EmbeddingError> {
+        /* default: cosine similarity between embed_query(query) and embed_batch(candidates) */
+        unimplemented!()
+    }
 
-    /// Number of dimensions in the output vectors.
     fn dimensions(&self) -> usize;
-
-    /// Model identifier string.
     fn model_name(&self) -> &str;
 }
 ```
 
+### Method Table
+
+| Method | Required? | Default behavior |
+|---|---|---|
+| `embed(text, kind)` | **Required** | — |
+| `embed_query(text)` | Optional | Delegates to `embed(text, EmbeddingKind::Query)`. Override only if the provider needs a different query-prefix code path. |
+| `embed_batch(items)` | Optional | Serial loop calling `embed` once per item. Override for real batching/parallelism. |
+| `hyde(query)` | Optional | Echoes `query` back unchanged (no-op HyDE). Override to generate a real hypothetical document (typically via an LLM). |
+| `has_reranker()` | Optional | `false`. Override to advertise a native reranker so callers can skip a manual `rerank()` call when it would just add latency. |
+| `rerank(query, candidates)` | Optional | Embeds `query` via `embed_query`, embeds each candidate's `"{summary} {description}"` via `embed_batch` with `EmbeddingKind::Description`, and scores each with [`cosine_similarity`](#cosine_similarity). Returned scores are aligned with `candidates` (same length). |
+| `dimensions()` | **Required** | — Dimensionality of the output vectors. |
+| `model_name()` | **Required** | — Human-readable model identifier string. |
+
 ### `EmbeddingKind`
 
-A hint that tells the provider how the text will be used. Some providers (e.g., `e5-mistral`) use different prefixes per kind.
+A hint that tells the provider how the text will be used. Providers may apply different prefixes or chunking strategies per kind (e.g. the built-in providers prefix `Query`/`Hyde` text with `"Query: "`).
 
 ```rust
 pub enum EmbeddingKind {
-    /// A session or conversation summary.
     Summary,
-
-    /// Descriptive text about a tool or entity.
     Description,
-
-    /// A tool's capability text.
     Capability,
-
-    /// An example interaction.
     Example,
-
-    /// Negative example (for contrastive indexing).
     Negative,
-
-    /// A user search query.
     Query,
-
-    /// A hypothetical document embedding (HyDE).
     Hyde,
 }
 ```
+
+| Variant | Meaning |
+|---|---|
+| `Summary` | Concise tool or document summary text. |
+| `Description` | Full description text (often long). |
+| `Capability` | One embedding per capability/action within a mega-tool. |
+| `Example` | One embedding per worked example. |
+| `Negative` | Negative-keyword text (soft penalties in Tool RAG). |
+| `Query` | A user query — may use a different prefix than documents. |
+| `Hyde` | A hypothetical document generated by HyDE. |
+
+---
+
+## `cosine_similarity`
+
+```rust
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32
+```
+
+Cosine similarity between two vectors. Returns `0.0` if either input is empty or the two lengths differ (rather than panicking). Both vectors should have the same length for a meaningful result. Used internally by the default `rerank()` implementation and by [`HybridRerankProvider`](#hybridrerankprovider)'s fallback path.
 
 ---
 
@@ -132,35 +157,32 @@ pub enum EmbeddingKind {
 
 ### `LlmMessage`
 
-The unified message format sent to any LLM provider.
+The unified message format sent to any LLM provider. Serialized with `#[serde(rename_all = "snake_case", tag = "role")]`.
 
 ```rust
 pub enum LlmMessage {
-    /// Instructions to the model. Typically the character card + injected context.
     System { content: String },
-
-    /// A user message, which may include text and inline images.
     User { parts: Vec<UserMessagePart> },
-
-    /// A previous assistant response, optionally with tool call records.
     Assistant {
         content: Option<String>,
         tool_calls: Option<Vec<LlmToolCall>>,
     },
-
-    /// The result of a tool call, keyed by `tool_call_id`.
     Tool { tool_call_id: String, content: String },
 }
 ```
+
+| Variant | Description |
+|---|---|
+| `System { content }` | Instructions to the model. Typically the character card + injected context. |
+| `User { parts }` | A user message, which may include text and inline images (see `UserMessagePart`). |
+| `Assistant { content, tool_calls }` | A previous assistant response, optionally with tool call records. |
+| `Tool { tool_call_id, content }` | The result of a tool call, keyed by `tool_call_id`. |
 
 ### `UserMessagePart`
 
 ```rust
 pub enum UserMessagePart {
-    /// Plain text fragment.
     Text { text: String },
-
-    /// Base64-encoded image data (multimodal models).
     Image { base64_image_data: String },
 }
 ```
@@ -171,10 +193,7 @@ A single streaming fragment from the LLM.
 
 ```rust
 pub struct LlmResponseChunk {
-    /// A text fragment, if this chunk contains text.
     pub text_delta: Option<String>,
-
-    /// Tool call fragments, if this chunk contains tool call data.
     pub tool_calls_delta: Option<Vec<LlmToolCallChunk>>,
 }
 ```
@@ -185,13 +204,8 @@ A fully-assembled tool call (from history / non-streaming response).
 
 ```rust
 pub struct LlmToolCall {
-    /// Unique ID assigned by the LLM for correlation with `Tool` messages.
     pub id: String,
-
-    /// The name of the tool to invoke.
     pub name: String,
-
-    /// JSON string of the tool arguments.
     pub arguments: String,
 }
 ```
@@ -202,16 +216,9 @@ A streaming fragment of a tool call. Multiple chunks with the same `index` must 
 
 ```rust
 pub struct LlmToolCallChunk {
-    /// Index identifying which tool call this fragment belongs to.
     pub index: usize,
-
-    /// ID fragment (present in first chunk for a given index).
     pub id: Option<String>,
-
-    /// Name fragment (present in first chunk for a given index).
     pub name: Option<String>,
-
-    /// Arguments fragment (may be split across many chunks).
     pub arguments: Option<String>,
 }
 ```
@@ -220,49 +227,156 @@ pub struct LlmToolCallChunk {
 
 ```rust
 pub enum Role {
+    System,
     User,
     Assistant,
-    System,
+}
+```
+
+Represents the role of a message author in conversation *history* storage (distinct from `LlmMessage`, which is the wire-format sent to providers).
+
+---
+
+## `LlmProviderFactory` and `LlmProviderRegistry`
+
+```rust
+pub trait LlmProviderFactory: Send + Sync {
+    fn provider_name(&self) -> &str;
+
+    fn create_provider(
+        &self,
+        config: &ene_config::EneConfig,
+    ) -> Result<Box<dyn LlmProvider>, LlmProviderError>;
+}
+```
+
+A factory builds a concrete `LlmProvider` from the **live `EneConfig`**, not a raw `serde_json::Value` — the factory itself is responsible for extracting whatever config section it needs (typically via `config.get_section::<ProviderConfig>()`).
+
+```rust
+pub struct LlmProviderRegistry { /* opaque */ }
+
+impl LlmProviderRegistry {
+    pub fn register(factory: Arc<dyn LlmProviderFactory>);
+
+    pub fn create_provider(
+        name: &str,
+        config: &ene_config::EneConfig,
+    ) -> Result<Box<dyn LlmProvider>, LlmProviderError>;
+}
+```
+
+A global, `OnceLock`-backed singleton that maps provider names to registered factories.
+
+| Method | Description |
+|---|---|
+| `register(factory)` | Registers a factory under `factory.provider_name()`. Takes an `Arc<dyn LlmProviderFactory>`, not a bare value — factories are shared, not owned per-call. |
+| `create_provider(name, config)` | Looks up the factory registered under `name` and calls `factory.create_provider(config)`. Returns `LlmProviderError::Provider` if no factory is registered under `name`. |
+
+---
+
+## Configuration Types
+
+Defined via `ene_config::define_config!` (see [`ene-config`](./ene-config.md)); re-exported from this crate.
+
+### `ProviderConfig`
+
+```rust
+pub struct ProviderConfig {
+    pub name: String,             // default: "openai-compatible"
+    pub model: String,            // default: "gpt-4o-mini"
+    pub base_url: String,         // default: ""
+    pub api_key: ApiKeyConfig,
+    pub embedding: EmbeddingConfig,
+}
+```
+
+| Method | Signature | Description |
+|---|---|---|
+| `resolve_base_url` | `fn resolve_base_url(&self) -> Result<String, ene_config::ConfigError>` | Returns `base_url` if non-empty; otherwise `Err(ConfigError::MissingBaseUrl { .. })`. |
+| `resolve_api_key` | `fn resolve_api_key(&self) -> String` | Resolves the API key per `api_key.source`: `"inline"` uses `api_key.inline` (falling back to the `API_TOKEN` env var in debug builds only); `"env"` reads the env var named by `api_key.env` (defaulting to `"OPENAI_API_KEY"` if unset/blank); any other value behaves like `"inline"`. Returns `""` if nothing resolves — never panics. |
+
+### `ApiKeyConfig`
+
+```rust
+pub struct ApiKeyConfig {
+    pub source: String,  // default: "inline"
+    pub inline: String,  // default: ""
+    pub env: String,      // default: "OPENAI_API_KEY"
+}
+```
+
+### `EmbeddingConfig`
+
+```rust
+pub struct EmbeddingConfig {
+    pub backend: String,               // default: "cloud"
+    pub query_prefix: Option<String>,  // default: None
+    pub cloud: CloudEmbeddingConfig,
+    pub local: LocalEmbeddingConfig,
+}
+```
+
+`backend` selects between `"cloud"` (uses the same LLM provider's embeddings API) and `"local"` (uses a local GGUF model via [`ene-embedding`](./ene-embedding.md)).
+
+### `CloudEmbeddingConfig` / `LocalEmbeddingConfig`
+
+```rust
+pub struct CloudEmbeddingConfig {
+    pub model: String,       // default: "text-embedding-3-small"
+    pub dimensions: usize,   // default: 1536
+}
+
+pub struct LocalEmbeddingConfig {
+    pub model: String,         // default: "jina-embeddings-v5-text-small"
+    pub quantization: String,  // default: "F16"
 }
 ```
 
 ---
 
-## Error Types
+## Errors
+
+### `LlmProviderError`
+
+Errors returned by `LlmProvider` implementations at the library boundary.
+
+```rust
+pub enum LlmProviderError {
+    Auth(String),
+    RateLimit(String),
+    Network(String),
+    Truncated { reason: String, partial_chars: usize },
+    ContentFilter(String),
+    Provider(String),
+}
+```
+
+| Variant | Meaning |
+|---|---|
+| `Auth(String)` | The provider rejected the credentials (typically HTTP 401/403). |
+| `RateLimit(String)` | The provider throttled this request (typically HTTP 429). |
+| `Network(String)` | A network-level failure (connect refused, DNS, TLS, read timeout) prevented the request from completing — distinct from `Provider`, which is for HTTP-level errors *with* a response. |
+| `Truncated { reason, partial_chars }` | The response was cut off because the configured token limit was reached (`finish_reason=length`). `partial_chars` is how much text was returned before the cut, useful for diagnostics. |
+| `ContentFilter(String)` | The provider blocked the response (typically `finish_reason=content_filter`); no usable text was returned. |
+| `Provider(String)` | Catch-all for provider-specific errors that don't map to the categories above. |
+
+`map_openai_error` (crate-internal) maps `async_openai::error::OpenAIError` into these variants by HTTP status code: 401/403 → `Auth`, 429 → `RateLimit`, other API errors → `Provider`, transport/stream errors → `Network`.
 
 ### `EmbeddingError`
 
 ```rust
 pub enum EmbeddingError {
-    /// The embedding model failed to initialize (e.g. GGUF load error).
-    /// Distinct from `Provider`, which is for transport / API errors.
     Init(String),
-    /// The provider returned a malformed or empty response, or a
-    /// transport error (HTTP 4xx/5xx, network failure) prevented the
-    /// request.
     Provider(String),
-    /// The supplied text is empty or whitespace-only. The provider
-    /// refused to produce an embedding for it because every
-    /// implementation would either return the zero vector (undefined
-    /// cosine similarity; silently pollutes the store) or fall back to
-    /// a placeholder that does not represent the input.
     EmptyInput,
 }
 ```
 
----
-
-## `LlmProviderRegistry`
-
-A global singleton that maps provider names to factory functions.
-
-```rust
-// Register a factory for a named provider.
-pub fn register(factory: impl LlmProviderFactory + 'static);
-
-// Instantiate a provider by name, passing provider-specific config.
-pub fn create_provider(name: &str, config: &serde_json::Value) -> Result<Box<dyn LlmProvider>, String>;
-```
+| Variant | Meaning |
+|---|---|
+| `Init(String)` | The embedding model failed to initialize (e.g. GGUF load error). Distinct from `Provider`, which is for transport/API errors. |
+| `Provider(String)` | The provider returned a malformed or empty response, or a transport error (HTTP 4xx/5xx, network failure) prevented the request. |
+| `EmptyInput` | The supplied text is empty or whitespace-only. Providers refuse to embed it — returning a zero vector would have undefined cosine similarity and silently pollute the store. |
 
 ---
 
@@ -270,89 +384,153 @@ pub fn create_provider(name: &str, config: &serde_json::Value) -> Result<Box<dyn
 
 ### `OpenAiProvider`
 
-Communicates with OpenAI-compatible HTTP APIs. Supports streaming via SSE and structured JSON output.
+Communicates with OpenAI-compatible HTTP APIs (OpenAI, Azure, local proxies) via `async-openai`. Supports streaming and structured JSON output.
 
 ```rust
 pub struct OpenAiProvider { /* opaque */ }
+
+impl OpenAiProvider {
+    pub fn new(base_url: &str, api_key: &str, model: &str) -> Self;
+}
 ```
 
-Configured via the `[llm]` section of `settings.json`. Supports any OpenAI-compatible endpoint (OpenAI, Azure, local proxies).
+`new` builds the underlying `async_openai::Client` immediately; if `base_url` is non-empty it overrides the client's default API base.
 
 ### `OpenAiProviderFactory`
 
-Factory type registered in `LlmProviderRegistry` for the `"openai"` key.
+```rust
+pub struct OpenAiProviderFactory;
+
+impl LlmProviderFactory for OpenAiProviderFactory { /* ... */ }
+```
+
+Registered under the name `"openai-compatible"`. Its `create_provider` reads `ProviderConfig` from the passed `EneConfig`, resolves the base URL and API key, and constructs an `OpenAiProvider`.
 
 ### `CloudEmbeddingProvider`
 
-An `EmbeddingProvider` that delegates to a cloud API (e.g. OpenAI Embeddings). Suitable for production use with higher throughput.
+An `EmbeddingProvider` that delegates to a cloud embeddings API (OpenAI-compatible). Suitable for production use with higher throughput than the local GGUF provider.
 
 ```rust
 pub struct CloudEmbeddingProvider { /* opaque */ }
+
+impl CloudEmbeddingProvider {
+    pub fn new(
+        base_url: &str,
+        api_key: &str,
+        embedding_model: &str,
+        embedding_dimensions: usize,
+        query_prefix: Option<String>,
+    ) -> Self;
+
+    pub fn with_hyde_model(self, model: String) -> Self;
+}
 ```
+
+| Method | Description |
+|---|---|
+| `new(...)` | Builds the client and stores `embedding_model`/`embedding_dimensions`/`query_prefix`. `query_prefix` (if set) is prepended exactly once to `Query`-kind text — never to other kinds, and never twice (`embed_query` calls `embed` rather than re-applying the prefix itself). |
+| `with_hyde_model(model)` | Builder method. When set, `hyde()` calls the given chat model to generate a real hypothetical document instead of echoing the query back. |
+
+`embed_batch` fails loudly with `EmbeddingError::Provider` if the API returns a different number of embeddings than inputs, rather than silently truncating.
 
 ### `HybridRerankProvider`
 
-Wraps another `EmbeddingProvider` and adds a re-ranking step using cross-encoder style scoring. Used by the tool RAG index to improve tool selection accuracy.
+Wraps a primary `EmbeddingProvider` and adds **optional** LLM-backed HyDE and rerank steps on top.
 
 ```rust
 pub struct HybridRerankProvider { /* opaque */ }
+
+impl HybridRerankProvider {
+    pub fn new(embedder: Arc<dyn EmbeddingProvider>) -> Self;
+
+    pub fn with_llm(
+        self,
+        hyde_llm: Option<Arc<dyn LlmProvider>>,
+        rerank_llm: Option<Arc<dyn LlmProvider>>,
+    ) -> Self;
+}
 ```
+
+| Method | Description |
+|---|---|
+| `new(embedder)` | Wraps `embedder` for all `embed`/`embed_query`/`embed_batch` calls. `hyde()` and `rerank()` fall back to the trait defaults (echo query / cosine similarity) until an LLM is attached. |
+| `with_llm(hyde_llm, rerank_llm)` | Attaches separate LLM providers for HyDE generation and rerank scoring. Each is independently optional — pass `None` to keep the default fallback for that task. The two are deliberately separate `Arc<dyn LlmProvider>` instances (not a shared provider + model-name pair) because a model name alone can't override the model an already-constructed provider talks to on the wire. |
+
+`rerank()`, when `rerank_llm` is set, prompts the LLM with all candidates and asks for a JSON array of `0.0..=1.0` scores (`{"scores": [...]}`) in the same order as `candidates`; a malformed or wrong-length response is a typed `EmbeddingError::Provider`, not a silent all-zero fallback. `has_reranker()` returns `true` exactly when `rerank_llm` is `Some`.
 
 ---
 
-## Usage Examples
+## Usage
 
 ### Streaming a chat turn
 
-```rust
-use ene_provider::{LlmMessage, LlmResponseChunk};
+```rust,no_run
+use ene_provider::{LlmMessage, LlmProvider, UserMessagePart};
 use futures::StreamExt;
 
-let messages = vec![
-    LlmMessage::System { content: "You are a helpful assistant.".into() },
-    LlmMessage::User {
-        parts: vec![ene_provider::UserMessagePart::Text {
-            text: "What is the capital of France?".into(),
-        }],
-    },
-];
+async fn stream_reply(provider: &dyn LlmProvider) -> Result<(), Box<dyn std::error::Error>> {
+    let messages = vec![
+        LlmMessage::System { content: "You are a helpful assistant.".into() },
+        LlmMessage::User {
+            parts: vec![UserMessagePart::Text {
+                text: "What is the capital of France?".into(),
+            }],
+        },
+    ];
 
-let mut stream = provider.create_chat_stream(&messages, &[])?;
+    let mut stream = provider.create_chat_stream(&messages, &[]).await?;
 
-while let Some(chunk) = stream.next().await {
-    let chunk = chunk.map_err(|e| anyhow::anyhow!(e))?;
-    if let Some(delta) = chunk.text_delta {
-        print!("{}", delta);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if let Some(delta) = chunk.text_delta {
+            print!("{delta}");
+        }
     }
+    println!();
+    Ok(())
 }
-println!();
 ```
 
 ### Embedding a query
 
-```rust
-use ene_provider::{EmbeddingProvider, EmbeddingKind};
+```rust,no_run
+use ene_provider::EmbeddingProvider;
 
-let query_vec = provider.embed_query("recent conversations about Rust")?;
-// query_vec is a Vec<f32> ready for cosine similarity search
+async fn embed_query(provider: &dyn EmbeddingProvider) -> Result<Vec<f32>, ene_provider::EmbeddingError> {
+    provider.embed_query("recent conversations about Rust").await
+}
 ```
 
 ### Structured completion
 
-```rust
-use serde_json::json;
+```rust,no_run
+use ene_provider::{LlmMessage, LlmProvider};
 
-let schema = json!({
-    "type": "object",
-    "properties": {
-        "summary": { "type": "string" },
-        "key_facts": { "type": "array", "items": { "type": "string" } }
-    },
-    "required": ["summary", "key_facts"]
-});
+async fn summarize(provider: &dyn LlmProvider, messages: &[LlmMessage]) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "summary": { "type": "string" },
+            "key_facts": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["summary", "key_facts"]
+    });
 
-let json_str = provider.chat_completion(&messages, Some(schema))?;
-let result: serde_json::Value = serde_json::from_str(&json_str)?;
+    let json_str = provider.chat_completion(messages, Some(schema)).await?;
+    Ok(serde_json::from_str(&json_str)?)
+}
+```
+
+### Registering and using a factory
+
+```rust,no_run
+use ene_provider::{LlmProviderRegistry, OpenAiProviderFactory};
+use std::sync::Arc;
+
+fn setup(config: &ene_config::EneConfig) -> Result<Box<dyn ene_provider::LlmProvider>, ene_provider::LlmProviderError> {
+    LlmProviderRegistry::register(Arc::new(OpenAiProviderFactory));
+    LlmProviderRegistry::create_provider("openai-compatible", config)
+}
 ```
 
 ---
@@ -360,5 +538,6 @@ let result: serde_json::Value = serde_json::from_str(&json_str)?;
 ## See Also
 
 - [`ene-core`](./ene-core.md) — Runtime that drives providers
-- [`ene-embedding`](./ene-embedding.md) — Local GGUF embedding provider
+- [`ene-embedding`](./ene-embedding.md) — Local GGUF embedding provider (implements `EmbeddingProvider`)
+- [`ene-config`](./ene-config.md) — `EneConfig`, `define_config!`
 - [`ene-memory`](./ene-memory.md) — Consumes embeddings for vector search

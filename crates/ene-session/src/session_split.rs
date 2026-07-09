@@ -155,6 +155,10 @@ pub fn compute_split_score(
 /// - `auto_split` is disabled, or
 /// - fewer than `min_turns_before_split` turns have occurred, or
 /// - the composite score is below the configured threshold.
+///
+/// Part of the legacy, split-only strategy (see the crate-level docs); `ene-core` skips this
+/// check entirely in favor of `ene_cognition::context::evaluate_compression_trigger` whenever
+/// compression is enabled.
 pub async fn check_boundary(
     last_input_embedding: Option<&Vec<f32>>,
     last_message_time: Option<DateTime<Utc>>,
@@ -379,6 +383,10 @@ pub struct SplitTaskInput {
 
 /// Executes a session split: summarizes conversation, saves to memory, and
 /// generates a new session ID.
+///
+/// This is the **legacy, split-only** context-management strategy — prefer enabling
+/// `ene-cognition`'s `CognitionConfig::context.compression_enabled` where possible, which trims
+/// history gradually without minting a new session ID. See the crate-level docs for details.
 pub async fn execute_split(
     history: &[(Role, String)],
     session_id: &str,

@@ -1,6 +1,6 @@
 use crate::transport::{IpcListener, cleanup_path};
 use crate::{
-    IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, ToolProvider, read_ipc_request,
+    IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, ToolError, ToolProvider, read_ipc_request,
     write_ipc_response,
 };
 use std::path::PathBuf;
@@ -12,6 +12,13 @@ use std::sync::Arc;
 /// and listens for requests over IPC.
 /// Shuts down upon receiving a `Shutdown` request.
 ///
+/// Returns [`ToolError`] (an alias for [`crate::EneToolProtoError`]) rather
+/// than a boxed error trait object, so callers that want to `match` on the
+/// failure (e.g. distinguishing a bind failure from a transport error) can
+/// do so without downcasting. `ToolError` already has a `From<io::Error>`
+/// impl, so the socket bind/accept/permission calls inside this function
+/// convert transparently via `?`.
+///
 /// # Usage Example
 ///
 /// ```ignore
@@ -21,9 +28,7 @@ use std::sync::Arc;
 ///     ene_tool_proto::run_tool_server(Box::new(provider)).await;
 /// }
 /// ```
-pub async fn run_tool_server(
-    provider: Box<dyn ToolProvider>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn run_tool_server(provider: Box<dyn ToolProvider>) -> Result<(), ToolError> {
     let socket_path = std::env::var("ENE_TOOL_SOCKET").unwrap_or_else(|_| {
         #[cfg(unix)]
         {

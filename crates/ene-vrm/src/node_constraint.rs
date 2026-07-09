@@ -328,6 +328,10 @@ impl NodeConstraintRegistry {
 /// `extensions` for `VRMC_node_constraint`, and parses the
 /// constraint JSON. Returns an empty registry for models
 /// without the extension.
+///
+/// Called internally by [`crate::loader::load_vrm`]; hidden from the "Supported API" docs —
+/// hosts get the registry via [`VrmModel::node_constraints`](crate::model::VrmModel).
+#[doc(hidden)]
 pub fn load_node_constraints(gltf: &gltf::Gltf) -> NodeConstraintRegistry {
     let mut entries = Vec::new();
 

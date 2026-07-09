@@ -541,6 +541,10 @@ pub fn calc_yaw_pitch(
 /// not pull in `serde` — the rest of the loader is hand-rolled
 /// JSON, and a single field's worth of dependency weight is
 /// not worth it.
+///
+/// Called internally by [`crate::loader::load_vrm`]; hidden from the "Supported API" docs —
+/// hosts get the result via [`VrmModel::look_at`](crate::model::VrmModel).
+#[doc(hidden)]
 pub fn load_look_at(gltf: &gltf::Gltf) -> Option<LookAtProperties> {
     let ext = gltf.document.extensions()?;
     let vrm = ext.get("VRMC_vrm")?;

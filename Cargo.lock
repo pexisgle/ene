@@ -2974,6 +2974,7 @@ dependencies = [
  "scraper 0.27.0",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

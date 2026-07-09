@@ -23,6 +23,17 @@
 //! A split is triggered when the weighted score ≥ `split_weights.threshold` (default 0.65).
 //! See [`compute_split_score`] and [`spawn_split_task`] for details.
 //!
+//! **Compression preferred:** this hard-split machinery ([`execute_split`], [`check_boundary`],
+//! [`spawn_split_task`]) is the *legacy* context-management strategy — it discards trimmed
+//! history behind a single rolling summary and mints a brand-new session ID. When
+//! `ene-cognition`'s `CognitionConfig::context.compression_enabled` is set, `ene-core`'s actor
+//! (`EneHandle::manual_split()` and the auto-split check) routes to `ene_cognition::context::execute_compression`
+//! instead, which keeps the session ID stable and trims history more gradually. See
+//! [Streaming Events: the `SessionSplit` / compression gap](../../docs/core/streaming-events.md#the-sessionsplit--compression-gap)
+//! for the event-visibility difference between the two strategies. This module is not being
+//! removed — it remains the active path whenever compression is disabled — but new integrations
+//! should prefer enabling compression rather than relying on hard splits.
+//!
 //! ## Emotion Tokens
 //!
 //! The session layer parses `<|emo:name|>` tokens from LLM output streams:

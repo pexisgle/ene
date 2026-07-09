@@ -10,6 +10,24 @@
 //! - [`SandboxConfigData`] — Sandbox configuration shared across tool processes
 //! - [`run_tool_server`] — Helper to start an IPC server for a [`ToolProvider`]
 //!
+//! ## Crate Boundaries
+//!
+//! Enforced by [AGENTS.md §4.1](../../AGENTS.md) and reconfirmed by the
+//! [API refactor plan](../../docs/architecture/api-refactor-plan.md) (item 2):
+//!
+//! - This crate is limited to **wire-protocol concerns only**: IPC request/response
+//!   types, the [`ToolProvider`] trait, the UDS/Named-Pipe [`transport`] layer,
+//!   sandbox-configuration **data** ([`SandboxConfigData`]), and the
+//!   [`run_tool_server`] entry point.
+//! - It must NOT gain business logic, database access, or `sea-orm` dependencies —
+//!   those belong to `ene-tool-host` (orchestration) and `ene-memory` (the sole
+//!   SQLite owner) respectively. A future "convenience" SQL helper or policy
+//!   decision does not belong here even if it seems locally useful to a tool
+//!   author; it belongs in `ene-tool-host` or the calling tool binary.
+//! - Depends only on `ene-config` (for the `define_tool_config!` macro used by
+//!   [`SandboxConfigData`]'s schema registration). Does NOT depend on `ene-core`,
+//!   `ene-memory`, or `ene-cognition`.
+//!
 //! ## Creating a Custom Tool
 //!
 //! ```rust,no_run

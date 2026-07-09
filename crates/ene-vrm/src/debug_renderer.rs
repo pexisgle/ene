@@ -21,6 +21,10 @@ const SHADER_SOURCE: &str = include_str!("shaders/debug_line.wgsl");
 /// two vertices). 8,192 lines = 16,384 vertices is well
 /// above the 50-bone sphere budget and small enough to keep
 /// the per-frame upload cheap.
+///
+/// Hidden from the "Supported API" docs — an internal GPU vertex-buffer sizing constant;
+/// `ene-desktop` only interacts with [`DebugRenderer`] as an opaque handle.
+#[doc(hidden)]
 pub const DEFAULT_LINE_CAPACITY: usize = 8_192;
 
 /// Number of longitude (meridian) lines per wireframe
@@ -40,6 +44,10 @@ pub const SPHERE_LATITUDES: usize = 8;
 pub const CROSS_HALF_EXTENT: f32 = 0.05;
 
 /// Vertex layout consumed by the line shader.
+///
+/// Hidden from the "Supported API" docs — an internal GPU vertex format; hosts build
+/// [`DebugLine`]s and never touch this type directly.
+#[doc(hidden)]
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct DebugVertex {

@@ -6,13 +6,17 @@ ene is a local AI character platform implemented as a Rust workspace. It provide
 
 - [Architecture Overview](architecture/overview.md) — Crate map and dependency graph
 - [Startup Flow](architecture/startup.md) — Desktop (winit+wgpu+egui) and CLI boot sequences
+- [Cognitive Runtime Architecture](architecture/cognitive-runtime.md) — ADR for the Identity Kernel, typed memory, affect, and expression arbitration design
+- [API Refactor Plan](architecture/api-refactor-plan.md) — Ongoing plan for restructuring the crate API surface
 - [Configuration](configuration/settings.md) — Full settings.json schema reference
+- [API Reference](api/index.md) — Public API documentation for every library crate
 
 ## Core Engine
 
 | Document | Topic |
 |----------|-------|
 | [Streaming Engine](core/streaming.md) | Actor-based architecture, `EneHandle`, `EneEvent`, tool calling loop |
+| [Streaming Events](core/streaming-events.md) | Which `EneEvent` variants fire on the legacy vs. cognitive streaming path |
 | [Prompt Construction](core/prompt.md) | Message assembly order, system prompt, emotion protocol, function calling |
 | [Session Management](core/session.md) | `ConversationSession`, `CharacterCardV3`, CBS macro expansion |
 | [Session Splitting](core/session-split.md) | Timeout, topic change detection, manual split, async lifecycle |
@@ -46,6 +50,7 @@ ene is a local AI character platform implemented as a Rust workspace. It provide
 |-------|------|-------------|
 | `ene-config` | Library | Configuration, schemas, character cards, macros |
 | `ene-core` | Library | Actor-based runtime, LLM streaming, tool orchestration, memory integration |
+| `ene-cognition` | Library | Cognitive runtime — Identity Kernel, typed memory, affect, expression arbitration, commitments |
 | `ene-embedding` | Library | Embedding providers (API + local GGUF) |
 | `ene-memory` | Library | SQLite-vec memory store |
 | `ene-session` | Library | Conversation history, session splitting |

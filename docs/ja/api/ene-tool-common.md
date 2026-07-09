@@ -1,63 +1,79 @@
-# `ene-tool-common`
+# `ene-tool-common` — APIリファレンス
 
-> Ene ツールバイナリのための `ToolAction` トレイト、共有ヘルパー、および標準プレリュード。
+> **クレート:** `ene-tool-common`
+> **役割:** Eneツールバイナリのための `ToolAction`/`ToolSpecArgs` トレイト、共有ヘルパー、標準プレリュード。
+
+---
+
+## 概要
 
 `ene-tool-common` は `tools/` ワークスペース内のあらゆるツールバイナリの主要な依存クレートです。以下を提供します：
 
-- すべてのツールアクションが実装する必要がある **`ToolAction`** および **`ToolSpecArgs`** トレイト。
+- ツールのメタデータを記述する **`ToolSpecArgs`** トレイト（`#[derive(ToolSpec)]`/`#[derive(ToolAction)]` によって実装される）と、すべてのツールアクションがディスパッチ可能になるために実装する **`ToolAction`** トレイト。
 - 1 行の `use` 文で必要なものをすべて取り込める **`prelude`** モジュール。
-- Web コンテンツを扱うツール向けの HTML→Markdown 変換ユーティリティ。
-- `ene-common` からのテキスト切り詰めユーティリティの再エクスポート。
+- Web コンテンツを扱うツール向けの HTML→Markdown 変換とコンテンツ抽出ヘルパー。
+- `ene-common` の `Truncate`/`TruncateResult` 構造体 API の再エクスポート。
 
-関連ページ：トレイトを自動実装するプロシージャルマクロについては [`ene-tool-derive`](ene-tool-derive.md)、基盤となるワイヤー型については [`ene-tool-proto`](ene-tool-proto.md) を参照してください。
+`ToolAction` は意図的に `ToolSpecArgs` のスーパートレイトに**なっていません** — その理由は [`ToolAction` トレイト](#toolaction-トレイト) を参照してください — これにより、ツールバイナリのディスパッチテーブルは単純な `Vec<Box<dyn ToolAction>>` を保持できます。
+
+関連ページ：これらのトレイトを自動実装するプロシージャルマクロについては [`ene-tool-derive`](./ene-tool-derive.md)、基盤となるワイヤー型（`ToolSpec`、`ToolError`、`ToolProvider`、`run_tool_server`）については [`ene-tool-proto`](./ene-tool-proto.md) を参照してください。
 
 ---
 
 ## `ToolSpecArgs` トレイト
 
-ツールのメタデータを記述する型のための静的ディスパッチインターフェースです。`#[derive(ToolSpec)]` および `#[derive(ToolAction)]` によって自動的に実装されます。
+ツールのメタデータを記述する引数ストラクトのための静的ディスパッチインターフェースです。`#[derive(ToolSpec)]` および `#[derive(ToolAction)]` によって自動的に実装されます — 手動での実装は避けてください。
 
 ```rust
-pub trait ToolSpecArgs {
-    /// `namespace.action` 形式の正規ツール名。
+pub trait ToolSpecArgs: DeserializeOwned + Send + Sync + 'static {
+    /// 正規のツール名（例：`"app.press_key"`）。
     const TOOL_NAME: &'static str;
 
-    /// 人間が読める表示名（`#[tool(display_name = "…")]` で設定）。
-    const DISPLAY_NAME: &'static str;
-
-    /// このツールの機能を一文で説明するサマリー。
-    const SUMMARY: &'static str;
-
-    /// このアクションの完全な [`ToolSpec`] を構築して返す。
+    /// この args 型に対する LLM 向けの `ToolSpec` を返す。
     fn spec() -> ToolSpec;
 }
 ```
 
-これらの定数を直接呼び出す必要はほとんどありません。`ToolAction` の実装と `run_tool_server` によって内部的に使用されます。
+| メンバー | 説明 |
+|---|---|
+| `const TOOL_NAME: &'static str` | このトレイトの唯一の関連定数。 |
+| `fn spec() -> ToolSpec` | この args 型に対する完全な `ToolSpec` を構築する。 |
+
+> **注意：** `DISPLAY_NAME` と `SUMMARY` はこのトレイトの**メンバーではありません**。`#[derive(ToolSpec)]` マクロはストラクトに `pub const DISPLAY_NAME: &'static str` と `pub const SUMMARY: &'static str` を生成しますが、これらはトレイトメンバーではなく単なる**固有定数**です。`ToolSpecArgs` の境界を通してではなく、`MyArgs::DISPLAY_NAME` / `MyArgs::SUMMARY` としてアクセスしてください。
+
+`TOOL_NAME`/`spec()` を直接呼び出す必要はほとんどありません。これらは生成された `ToolAction` 実装によって内部的に使用されます。
 
 ---
 
 ## `ToolAction` トレイト
 
-すべての実行可能なツールアクションが実装するコアトレイトです。
+すべての実行可能なツールアクションが実装するコアトレイトであり、`ToolProvider` 内で動的ディスパッチ（`Box<dyn ToolAction>`）に使用されます。
 
 ```rust
-pub trait ToolAction: ToolSpecArgs + Send + Sync {
-    /// ツールの正規名。`Self::TOOL_NAME` と同じ値。
+#[async_trait]
+pub trait ToolAction: Send + Sync {
+    /// 正規のツール名を返す。`MyArgs::TOOL_NAME` として実装する。
     fn name(&self) -> &'static str;
 
-    /// このアクションの完全な [`ToolSpec`] を返す。
+    /// このツールのメタデータ定義を返す。`MyArgs::spec()` として実装する。
     fn definition(&self) -> ToolSpec;
 
-    /// JSON エンコードされた引数文字列でアクションを実行する。
-    ///
-    /// `arguments` は LLM から渡された生の JSON オブジェクトです。
-    /// `#[derive(ToolAction)]` で作成された実装では、これは自動的にデシリアライズされます。
-    fn execute(&self, arguments: &str) -> Result<String, ToolError>;
+    /// JSON 引数文字列でアクションを実行する。
+    async fn execute(&self, arguments: &str) -> Result<String, ToolError>;
 }
 ```
 
-`#[derive(ToolAction)]` を使用した場合、`execute` メソッドはマクロによって生成されます。自分のストラクトに `async fn run(&self) -> Result<String, ToolError>` メソッドを実装するだけで済みます。
+### メソッドテーブル
+
+| メソッド | シグネチャ | 説明 |
+|---|---|---|
+| `name` | `fn name(&self) -> &'static str` | 正規のツール名。実装は `Args::TOOL_NAME` に転送する。 |
+| `definition` | `fn definition(&self) -> ToolSpec` | LLM 向けのメタデータ。実装は `Args::spec()` に転送する。 |
+| `execute` | `async fn execute(&self, arguments: &str) -> Result<String, ToolError>` | **非同期。** LLM のツール呼び出しに由来する JSON エンコードされた引数文字列でアクションを実行する。 |
+
+`ToolAction` は意図的に `ToolSpecArgs` を拡張していません。（`ToolSpecArgs + Send + Sync` ではなく）単純な `Send + Sync` トレイトのままにすることで、`dyn ToolAction` はオブジェクトセーフのままとなり、単一の `Vec<Box<dyn ToolAction>>` に、異なる無関係な `Args` 型を裏付けとするアクションを保持できます。慣習として、`name()` と `definition()` は args ストラクトの `TOOL_NAME` 定数と `spec()` メソッドへの1行の転送関数であり、これによりスペック名とディスパッチ名が構造的に同じ `&'static str` であることが保証されます。
+
+`ene-tool-derive` の `#[derive(ToolAction)]` マクロは実装全体を生成します — JSON を `Self` にデシリアライズし、`#[tool(skip)]` フィールドをコピーし、`self.run().await` を呼び出す `async` な `execute` を含みます。書くべきなのは `run` の本体だけです。詳しくは [`ene-tool-derive`](./ene-tool-derive.md) を参照してください。
 
 ---
 
@@ -65,7 +81,7 @@ pub trait ToolAction: ToolSpecArgs + Send + Sync {
 
 1 行ですべての必要なものをインポートします：
 
-```rust
+```rust,no_run
 use ene_tool_common::prelude::*;
 ```
 
@@ -74,56 +90,40 @@ use ene_tool_common::prelude::*;
 | アイテム | ソース |
 |---|---|
 | `async_trait` | `async-trait` クレート（アトリビュートマクロ） |
-| `ToolAction` | このクレート |
-| `ToolSpec` | `ene-tool-proto` |
-| `tool_action` | `ene-tool-derive` のアトリビュートマクロ |
+| `ToolAction`（トレイト、`as _` によって非修飾でスコープに導入される） | このクレート |
+| `ToolSpec`、`tool_action`、`ToolSpec`（derive マクロ）、`ToolAction`（derive マクロ） | `ene-tool-derive` |
 | `ToolError` | `ene-tool-proto` |
-| `JsonSchema` | `schemars` のデライブマクロ |
-| `Deserialize` | `serde` のデライブマクロ |
+| `JsonSchema` | `schemars` の derive マクロ |
+| `Deserialize` | `serde` の derive マクロ |
 
-> [!NOTE]
-> 他のワークスペースクレートからのすべての再エクスポートには `#[doc(no_inline)]` が付与されており、rustdoc のリンクが元のクレートのドキュメントを参照するようになっています。
+> **注意：** 他のワークスペースクレートからのすべての再エクスポートには `#[doc(no_inline)]` が付与されており、rustdoc のリンクが元のクレートのドキュメントを参照するようになっています。
 
 ---
 
 ## `truncate` モジュール
 
-ツールの出力フォーマットに使用するテキスト切り詰めユーティリティを `ene-common` から再エクスポートします。
+ツールの出力フォーマットに使用する `Truncate` 構造体 API を `ene-common` から再エクスポートします：
 
 ```rust
-pub use ene_common::truncate::{Truncate, TruncateResult};
-```
-
-### `Truncate` トレイト
-
-`String` と `&str` に実装されています：
-
-```rust
-pub trait Truncate {
-    /// 最大 `max_chars` 個の Unicode スカラー値に切り詰める。
-    /// 切り詰めが発生したかどうかを示す `TruncateResult` を返す。
-    fn truncate_chars(&self, max_chars: usize) -> TruncateResult<'_>;
+pub mod truncate {
+    pub use ene_common::truncate::{Truncate, TruncateResult};
 }
 ```
 
-### `TruncateResult`
-
-```rust
-pub struct TruncateResult<'a> {
-    pub content: &'a str,
-    /// 元の文字列が max_chars より長かった場合に true。
-    pub was_truncated: bool,
-}
-```
+`Truncate` は**静的メソッドを持つユニット構造体**です — トレイトではなく、`&str`/`String` に対して直接呼び出せるものはありません。完全なメソッドリファレンス（`Truncate::simple`、`Truncate::detailed`、`Truncate::chars`、`Truncate::output`、`Truncate::tail`）と [`TruncateResult`](./ene-common.md#truncateresult)（`content: String`、`truncated: bool`）については [`ene-common`](./ene-common.md) を参照してください。
 
 ツールでの典型的な使用例：
 
-```rust
-let output = large_text.truncate_chars(8_000);
-if output.was_truncated {
-    Ok(format!("{}\n\n[出力が切り詰められました]", output.content))
-} else {
-    Ok(output.content.to_string())
+```rust,no_run
+use ene_tool_common::truncate::Truncate;
+
+fn format_tool_output(large_text: &str) -> String {
+    let output = Truncate::output(large_text, /* max_lines */ 200, /* max_bytes */ 8_000);
+    if output.truncated {
+        format!("{}\n\n[Output truncated]", output.content)
+    } else {
+        output.content
+    }
 }
 ```
 
@@ -133,64 +133,129 @@ if output.was_truncated {
 
 Web コンテンツを取得するツール向けの HTML→Markdown 変換とコンテンツ抽出ユーティリティです。
 
-> [!NOTE]
-> このモジュールは [`scraper`](https://crates.io/crates/scraper) クレートをベースとした静的な HTML パースを行います。JavaScript は実行されません。
+> **注意：** このモジュールは（`htmd` を介して）[`scraper`](https://crates.io/crates/scraper) クレートをベースとした静的な HTML パースを行います。JavaScript は実行されません。
 
-### 関数
+### メソッドテーブル
 
-```rust
-/// HTML 文字列を Markdown に変換する。
-///
-/// ナビゲーション、広告、ボイラープレートを除去し、
-/// 本文のメインコンテンツを抽出する。
-pub fn html_to_markdown(html: &str) -> String;
+| 関数 | シグネチャ | 説明 |
+|---|---|---|
+| `html_to_markdown` | `fn html_to_markdown(html: &str) -> String` | 生の HTML を Markdown に変換する。基盤となるコンバーターが失敗した場合、空文字列ではなく元の HTML をプレーンテキストとして返す。 |
+| `extract_html` | `fn extract_html(html: &str, extract: &str, trim: bool) -> String` | ドキュメントの一部（`"body"`、`"main"`、または `"full"`／その他）を抽出し、生の HTML として返す。`trim` が `true` の場合、返す前に非セマンティックなノイズ（`script`、`style`、`nav`、`header`、`footer`、`aside`、`iframe`、`svg` など）を除去する。 |
+| `extract_markdown` | `fn extract_markdown(html: &str, extract: &str, trim: bool) -> String` | `extract_html` を適用し（`extract == "full"` かつ `trim == false` の場合を除く。この場合は入力全体をそのまま使用する）、結果を Markdown に変換し、空白を正規化する（連続するスペース／タブを圧縮し、3行以上の改行を1つの空行に圧縮し、トリムする）。 |
 
-/// HTML 文字列からプレーンテキストを抽出する（Markdown 書式なし）。
-pub fn html_to_text(html: &str) -> String;
-
-/// HTML ドキュメントから <title> を抽出する（存在する場合）。
-pub fn extract_title(html: &str) -> Option<String>;
-```
+> **注意：** このモジュールには `html_to_text` や `extract_title` という関数は**存在しません**。プレーンテキストが必要な場合は、`html_to_markdown`/`extract_markdown` で Markdown に変換し、必要であれば自前で書式を除去してください。タイトルが必要な場合は、生の HTML から自前のセレクタロジック（例：`extract_html` と後続の HTML パーサーの組み合わせ）で抜き出してください。
 
 ### 使用例
 
-```rust
+```rust,no_run
 use ene_tool_common::html;
 
-let html = reqwest::get("https://example.com").await?.text().await?;
-let title = html::extract_title(&html).unwrap_or_default();
-let markdown = html::html_to_markdown(&html);
-
-Ok(format!("# {title}\n\n{markdown}"))
+async fn fetch_article(url: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let raw_html = reqwest::get(url).await?.text().await?;
+    let markdown = html::extract_markdown(&raw_html, "main", /* trim */ true);
+    Ok(markdown)
+}
 ```
 
 ---
 
-## ツールバイナリの組み込み方
+## エラー
 
-`ToolAction` を実装したら（手動または derive 経由）、`ene-tool-proto` の `run_tool_server` を使ってサーバーループに組み込みます：
+`ene-tool-common` は独自のエラー型を定義していません。ツール境界を越えるすべての失敗しうる操作は `ene-tool-proto` の [`ToolError`](./ene-tool-proto.md#toolerror) を使用します。バリアントの完全な一覧はそのクレートのドキュメントを参照してください。`ToolAction::execute` は `Result<String, ToolError>` を返し、`#[derive(ToolAction)]` によって生成される `execute` は JSON デシリアライズの失敗を `ToolError::InvalidArguments` として報告します。
 
-```rust
-// tools/my_tool/src/main.rs
+---
+
+## 使用例
+
+### `ToolAction` を手動で実装する
+
+```rust,no_run
 use ene_tool_common::prelude::*;
-use ene_tool_proto::run_tool_server;
+
+#[derive(Debug, Clone, Deserialize, JsonSchema, ToolSpec)]
+#[tool(
+    namespace = "utility",
+    name = "echo",
+    summary = "Echoes the given text back.",
+    category = "Utility",
+)]
+pub struct EchoArgs {
+    /// エコーバックするテキスト。
+    pub text: String,
+}
+
+pub struct EchoAction;
+
+#[async_trait]
+impl ToolAction for EchoAction {
+    fn name(&self) -> &'static str {
+        EchoArgs::TOOL_NAME
+    }
+
+    fn definition(&self) -> ToolSpec {
+        EchoArgs::spec()
+    }
+
+    async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
+        let args: EchoArgs = serde_json::from_str(arguments)
+            .map_err(|e| ToolError::InvalidArguments { message: e.to_string() })?;
+        Ok(args.text)
+    }
+}
+```
+
+### ツールバイナリの組み込み方
+
+1つ以上の `ToolAction` を実装したら、それらを `ToolProvider` の背後に集約し、そのプロバイダーを `ene-tool-proto` の `run_tool_server` に渡します。`run_tool_server` は**ジェネリックではありません** — `run_tool_server::<T>()` ではなく、ボックス化されたトレイトオブジェクトを受け取ります。
+
+```rust,no_run
+// tools/my_tool/src/main.rs
+use async_trait::async_trait;
+use ene_tool_common::ToolAction;
+use ene_tool_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec, run_tool_server};
 
 mod actions;
 use actions::MyAction;
 
+struct MyToolProvider {
+    actions: Vec<Box<dyn ToolAction>>,
+}
+
+#[async_trait]
+impl ToolProvider for MyToolProvider {
+    fn list_specs(&self) -> Vec<ToolSpec> {
+        self.actions.iter().map(|a| a.definition()).collect()
+    }
+
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
+        for action in &self.actions {
+            if action.name() == name {
+                return action.execute(arguments).await;
+            }
+        }
+        Err(ToolError::NotFound { tool_name: name.to_string() })
+    }
+
+    fn set_session_id(&self, _session_id: &str) {}
+    fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    run_tool_server::<MyAction>().await
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let provider = MyToolProvider { actions: vec![Box::new(MyAction)] };
+    run_tool_server(Box::new(provider)).await?;
+    Ok(())
 }
 ```
 
-`run_tool_server` は、ハンドシェイク・初期化・ツールリスト・ディスパッチループという IPC ライフサイクル全体を処理します。詳細は [`ene-tool-proto`](ene-tool-proto.md) を参照してください。
+`run_tool_server` は、ハンドシェイク・初期化・ツールリスト・ディスパッチループという IPC ライフサイクル全体を処理します。詳細は [`ene-tool-proto`](./ene-tool-proto.md) を参照してください。
 
 ---
 
 ## 関連ページ
 
-- [`ene-tool-derive`](ene-tool-derive.md) — プロシージャルマクロ：`#[derive(ToolAction)]`、`#[derive(ToolSpec)]`
-- [`ene-tool-proto`](ene-tool-proto.md) — `ToolSpec`、`ToolError`、`IpcRequest`/`IpcResponse`
-- [`ene-tool-host`](ene-tool-host.md) — ホスト側のプロセス管理と `ToolRegistry`
+- [`ene-tool-derive`](./ene-tool-derive.md) — プロシージャルマクロ：`#[derive(ToolAction)]`、`#[derive(ToolSpec)]`、`#[tool_action(args = T)]`
+- [`ene-tool-proto`](./ene-tool-proto.md) — `ToolSpec`、`ToolError`、`ToolProvider`、`run_tool_server`、`IpcRequest`/`IpcResponse`
+- [`ene-common`](./ene-common.md) — `Truncate`/`TruncateResult`
+- [`ene-tool-host`](./ene-tool-host.md) — ホスト側のプロセス管理と `ToolRegistry`
 - [ツールの作成方法](../tools/sdk.md)

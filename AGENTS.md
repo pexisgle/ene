@@ -77,8 +77,8 @@ The workspace is highly granularly split to enforce strict boundaries and preven
 
 ### R1. Add a new tool
 1. **Create:** `cargo new --bin tools/<name>`
-2. **Implement:** `#[derive(ene_tool_derive::ToolSpec)]` on the args struct.
-3. **Wire up:** Call `run_tool_server::<MyAction>()` from `ene-tool-proto` inside `main`.
+2. **Implement:** `#[derive(ene_tool_derive::ToolSpec)]` on the args struct, then wrap one or more `ToolAction`s in a `ToolProvider` — use `ene_tool_common::{ActionSetProvider, SingleActionProvider}` instead of hand-writing the dispatch loop.
+3. **Wire up:** Call `run_tool_server(Box::new(provider)).await` from `ene-tool-proto` inside `main`. This is **not generic** — there is no `run_tool_server::<MyAction>()`; it always takes a boxed `dyn ToolProvider`.
 4. **Document:** Add to a category in `docs/tools/` and `docs/ja/tools/`.
 5. **Verify:** Run `cargo run -p ene-cli` -> `/tool list`.
 

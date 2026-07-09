@@ -69,6 +69,10 @@ use crate::model::Skeleton;
 /// segments — proximal + intermediate + distal), and 8 leg
 /// bones. See [`canonicalize_bone_name`] for the case /
 /// separator variants the loader accepts.
+///
+/// Hidden from the "Supported API" docs — `ene-desktop` walks the loaded
+/// [`HumanoidBoneRegistry`] rather than this raw name table.
+#[doc(hidden)]
 pub const HUMANOID_BONE_NAMES: &[&str] = &[
     // Trunk + head (9)
     "hips",
@@ -324,6 +328,11 @@ impl HumanoidBoneRegistry {
 /// once (an `OnceLock<BTreeMap<&str, &str>>` would be the
 /// next step; the current linear scan is fast enough for
 /// 55 entries and keeps the module dependency-free).
+///
+/// Used internally by [`load_humanoid_bones`] and by `update_skin_palette`'s
+/// `HumanoidBoneRegistry::by_name` lookup; hidden from the "Supported API" docs since
+/// `ene-desktop` never needs to canonicalize a raw bone name itself.
+#[doc(hidden)]
 pub fn canonicalize_bone_name(raw: &str) -> Option<VrmBone> {
     // First normalise: drop separators and lowercase. This
     // collapses "Hips" / "hips" / "HIPS" / "left_upper_arm" /
@@ -359,6 +368,10 @@ pub fn canonicalize_bone_name(raw: &str) -> Option<VrmBone> {
 /// indices, or `Node::transform()` calls that fail, are
 /// also warned and the entry is stored with a
 /// default `BoneRestTransform`.
+///
+/// Called internally by [`crate::loader::load_vrm`]; hidden from the "Supported API" docs —
+/// hosts get the registry via [`VrmModel::humanoid`](crate::model::VrmModel).
+#[doc(hidden)]
 pub fn load_humanoid_bones(gltf: &gltf::Gltf, skel: &Skeleton) -> HumanoidBoneRegistry {
     let mut registry = HumanoidBoneRegistry::new();
 

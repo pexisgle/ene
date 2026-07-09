@@ -1,7 +1,7 @@
 # `ene-common` — APIリファレンス
 
-> **クレート:** `ene-common`  
-> **役割:** Eneワークスペース全体で共有されるユーティリティ型とトレイト。
+> **クレート:** `ene-common`
+> **役割:** Eneワークスペース全体で共有されるユーティリティ型。
 
 ---
 
@@ -9,147 +9,214 @@
 
 `ene-common` は複数のワークスペースメンバーで共有されるコードを保持する基盤ユーティリティクレートです。重い推移的依存関係を避けるため、意図的に最小限に保たれています。
 
-現在の主要なエクスポートは、さまざまな単位で文字列長を安全に制限するための `Truncate` トレイトです。
+このクレートの唯一のエクスポートは `Truncate` です。これは、文字数、行/バイト予算、あるいはコンテンツの先頭または末尾を基準にテキストを安全に短縮するための、一連の静的（`Self` を取らない）ヘルパー関数を提供するユニット構造体です。`Truncate` は**トレイトではありません**。実装すべきものは何もなく、`&str` や `String` に対して直接呼び出せるメソッドもありません。すべての操作は `Truncate::method(...)` という形で呼び出します。
 
 ---
 
-## `Truncate` トレイト
+## 型
 
-文字列型に対して3種類のトランケーション戦略を提供します。いずれも（切り詰められた可能性のある）文字列と、実際に切り詰めが発生したかどうかを示すフラグを持つ `TruncateResult` を返します。
-
-このトレイトはブランケット実装によって `str` と `String` の両方に実装されています。
+### `Truncate`
 
 ```rust
-pub trait Truncate {
-    /// Unicodeスカラー値（文字）を最大 `n` 個に切り詰める。
-    fn truncate_chars(&self, n: usize) -> TruncateResult;
-
-    /// 最大 `n` 行に切り詰める。
-    fn truncate_lines(&self, n: usize) -> TruncateResult;
-
-    /// 最大 `n` バイトに切り詰める。
-    fn truncate_bytes(&self, n: usize) -> TruncateResult;
-}
+/// 高性能かつ詳細な文字列トランケーションのためのヘルパー構造体。
+pub struct Truncate;
 ```
+
+サイズゼロのマーカー構造体です。以下のトランケーションヘルパー関数の名前空間として存在するだけであり、インスタンス化されることはありません。
 
 ### `TruncateResult`
 
 ```rust
+#[derive(Debug, Clone)]
 pub struct TruncateResult {
-    /// （切り詰められた可能性のある）文字列の内容。
-    pub truncated: String,
-
-    /// 入力が `n` より長く、実際に切り詰められた場合は `true`。
-    pub was_truncated: bool,
+    /// 切り詰められた（または元のままの）テキスト内容。
+    pub content: String,
+    /// 実際に切り詰めが行われたかどうか。
+    pub truncated: bool,
 }
 ```
+
+[`Truncate::output`](#truncateoutput) と [`Truncate::tail`](#truncatetail) の戻り値です。結果のテキストと、入力が実際に切り詰めを必要としたかどうかを示すフラグを保持します。
+
+---
+
+## メソッドテーブル
+
+すべてのメソッドは `Truncate` に対する `Self` を取らない固有関数です（トレイト経由ではなく `Truncate::simple(...)` のように呼び出します）。
+
+| メソッド | シグネチャ | 戻り値 | 説明 |
+|---|---|---|---|
+| `simple` | `fn simple(text: &str, max_chars: usize) -> String` | `String` | `max_chars` Unicode文字に切り詰め、切り詰めが発生した場合は `"..."` を付加する。 |
+| `detailed` | `fn detailed(text: &str, max_chars: usize) -> String` | `String` | `max_chars` Unicode文字に切り詰め、切り詰めが発生した場合は元の文字数を含む詳細な注記を付加する。 |
+| `chars` | `fn chars(text: &str, max_chars: usize) -> String` | `String` | [`detailed`](#truncatedetailed) のエイリアス。ツールから利用される。 |
+| `output` | `fn output(text: &str, max_lines: usize, max_bytes: usize) -> TruncateResult` | `TruncateResult` | `text` を行数・バイト数の両方の予算に収め、**先頭**からコンテンツを保持する。 |
+| `tail` | `fn tail(text: &str, max_lines: usize, max_bytes: usize) -> TruncateResult` | `TruncateResult` | `text` を行数・バイト数の両方の予算に収め、**末尾**からコンテンツを保持する。 |
+
+これらのメソッドはいずれも不正なUTF-8入力に対してパニックすることはありません。文字境界の計算はすべて `char_indices()` の境界にスナップされ、行/バイト分割は `str::lines()`／元の文字列の有効な境界内に収まるバイトスライス上で行われます。
 
 ---
 
 ## メソッドリファレンス
 
-### `truncate_chars`
+### `Truncate::simple`
 
 ```rust
-fn truncate_chars(&self, n: usize) -> TruncateResult
+pub fn simple(text: &str, max_chars: usize) -> String
 ```
 
-`n` 番目のUnicodeスカラー値の境界で分割します。マルチバイトUTF-8テキストに対して安全で、無効なUTF-8を生成しません。
+`text` を最大 `max_chars` Unicodeスカラー値に切り詰めます。テキストがそれより長い場合、超過分は削られ `"..."` が付加されます。すでに収まっている場合はそのまま返されます。
 
-| 入力 | `n` | `truncated` | `was_truncated` |
-|------|-----|-------------|-----------------|
-| `"Hello, world!"` | `5` | `"Hello"` | `true` |
-| `"Hi"` | `10` | `"Hi"` | `false` |
-| `"日本語テキスト"` | `3` | `"日本語"` | `true` |
+| 入力 | `max_chars` | 結果 |
+|---|---|---|
+| `"hello"` | `10` | `"hello"` |
+| `"hello world"` | `5` | `"hello..."` |
 
-### `truncate_lines`
+### `Truncate::detailed`
 
 ```rust
-fn truncate_lines(&self, n: usize) -> TruncateResult
+pub fn detailed(text: &str, max_chars: usize) -> String
 ```
 
-最大 `n` 行を保持します（`\n` で分割）。最後に保持された行の末尾の改行は保持されます。
+[`simple`](#truncatesimple) と同様ですが、切り詰めが発生した場合は単なる `"..."` の代わりに、元の文字数を含む説明的な通知を付加します。
 
-| 入力 | `n` | `truncated` | `was_truncated` |
-|------|-----|-------------|-----------------|
-| `"a\nb\nc\nd"` | `2` | `"a\nb"` | `true` |
-| `"one line only"` | `5` | `"one line only"` | `false` |
+```text
+{先頭部分}
 
-### `truncate_bytes`
+[... truncated, total {char_count} chars ...]
+```
+
+| 入力 | `max_chars` | 結果（切り詰めが発生する場合） |
+|---|---|---|
+| `"hello"` | `10` | `"hello"`（変更なし） |
+| `"hello world"` | `5` | `"hello\n\n[... truncated, total 11 chars ...]"` |
+
+### `Truncate::chars`
 
 ```rust
-fn truncate_bytes(&self, n: usize) -> TruncateResult
+pub fn chars(text: &str, max_chars: usize) -> String
 ```
 
-最大 `n` バイトに切り詰め、最も近い有効なUTF-8文字境界まで戻すことで無効な出力を回避します。
+[`Truncate::detailed`](#truncatedetailed) への直接のエイリアスです。より簡潔で説明的な名前を好む呼び出し元（主にツール実装）向けに、別名として保持されています。
 
-| 入力 | `n` | `truncated` | `was_truncated` |
-|------|-----|-------------|-----------------|
-| `"Hello"` | `3` | `"Hel"` | `true` |
-| `"Hi"` | `100` | `"Hi"` | `false` |
+### `Truncate::output`
+
+```rust
+pub fn output(text: &str, max_lines: usize, max_bytes: usize) -> TruncateResult
+```
+
+`text` を最大行数・最大バイト数の**両方**の予算に収め、テキストの先頭（head）から行を保持します。`text` が両方の予算をすでに満たしている場合、`TruncateResult { content: text.to_string(), truncated: false }` が変更なしで返されます。
+
+そうでない場合、いずれかの予算を超えるまで先頭から行が積み上げられ、結果には以下の注記が付加されます。
+
+```text
+{保持された行}
+
+...{removed} {"bytes" | "lines"} truncated...
+
+Use offset/limit or grep to view specific sections.
+```
+
+コンテンツが実際に切り詰められた場合、`truncated` フィールドは `true` になります。最も重要な情報が先頭付近にあることが多い、コマンド／ツールの標準出力を切り詰める際の典型的な選択肢です。
+
+### `Truncate::tail`
+
+```rust
+pub fn tail(text: &str, max_lines: usize, max_bytes: usize) -> TruncateResult
+```
+
+[`output`](#truncateoutput) と同じ予算ロジックですが、先頭ではなくテキストの**末尾**から行を保持します。注記は末尾に付加されるのではなく先頭に付加されます。
+
+```text
+...{removed} {"bytes" | "lines"} truncated...
+
+{保持された行}
+```
+
+最新の行が最も重要となる、ログや長時間実行されるコマンド出力の切り詰めに便利です。
+
+---
+
+## エラー
+
+`ene-common` にはエラー型は存在しません。すべての `Truncate` メソッドは `&str` 入力に対する全域関数（total function）であり、パニックすることも失敗することもなく、常に値を返します（切り詰めが不要な場合は元のテキストをそのまま返すだけです）。
 
 ---
 
 ## 使用例
 
-### 基本的な使い方
+### 省略記号によるシンプルな切り詰め
 
-```rust
+```rust,no_run
 use ene_common::Truncate;
 
-let text = "これは切り詰めたい長いテキストです。";
-
-let result = text.truncate_chars(5);
-println!("{}", result.truncated);       // "これは切り詰"
-println!("{}", result.was_truncated);   // true
-
-let short = "Hello".truncate_chars(100);
-assert!(!short.was_truncated);
-assert_eq!(short.truncated, "Hello");
+let text = "This is a long piece of text that we want to shorten.";
+let short = Truncate::simple(text, 10);
+assert_eq!(short, "This is a ...");
 ```
 
-### 複数行出力の切り詰め
+### 文字数付きの詳細な切り詰め
 
-```rust
+```rust,no_run
 use ene_common::Truncate;
 
-let output = "1行目\n2行目\n3行目\n4行目\n5行目";
-let result = output.truncate_lines(3);
-
-assert_eq!(result.truncated, "1行目\n2行目\n3行目");
-assert!(result.was_truncated);
+let text = "This is a long piece of text that we want to shorten.";
+let detailed = Truncate::detailed(text, 10);
+assert!(detailed.contains("truncated, total"));
 ```
 
-### バッファ制限のための安全なバイトトランケーション
+### ツール出力を行/バイト予算に収める
 
-```rust
+```rust,no_run
 use ene_common::Truncate;
 
-// バイト長制限のあるAPIを呼び出す際に便利
-let user_input = get_user_input();
-let safe_input = user_input.truncate_bytes(4096);
+let stdout = run_some_command();
+let result = Truncate::output(&stdout, /* max_lines */ 200, /* max_bytes */ 16_000);
 
-if safe_input.was_truncated {
-    eprintln!("警告: 入力が4096バイトに切り詰められました");
+if result.truncated {
+    eprintln!("警告: コマンド出力が切り詰められました");
 }
-send_to_api(&safe_input.truncated);
+send_to_model(&result.content);
+
+fn run_some_command() -> String {
+    unimplemented!()
+}
+fn send_to_model(_: &str) {}
+```
+
+### 長いログの末尾を保持する
+
+```rust,no_run
+use ene_common::Truncate;
+
+let log = read_log_file();
+let result = Truncate::tail(&log, /* max_lines */ 100, /* max_bytes */ 8_000);
+
+println!("{}", result.content);
+
+fn read_log_file() -> String {
+    unimplemented!()
+}
 ```
 
 ---
 
 ## 他のクレートからの再エクスポート
 
-`ene-common::Truncate` はクレートトップで再エクスポートされており、
-`ene-session` と `ene-core` もさらに再エクスポートしています。
-`ene-core` の利用者は `ene-common` を直接依存させる必要がありません：
+`ene-common::Truncate`（および `TruncateResult`）は、`ene-common` に直接依存する必要がないよう、複数のコンシューマークレートから再エクスポートされています。
 
-```rust
-// ene-core/src/lib.rs:
+```rust,no_run
+// crates/ene-core/src/lib.rs
 #[doc(no_inline)]
 pub use ene_common::Truncate;
 
-// ene-session/src/lib.rs:
+// crates/ene-session/src/lib.rs
 pub use ene_common::truncate::Truncate;
+
+// crates/ene-tool-common/src/lib.rs
+pub mod truncate {
+    #[doc(no_inline)]
+    pub use ene_common::truncate::{Truncate, TruncateResult};
+}
 ```
 
 ---
@@ -167,5 +234,6 @@ pub use ene_common::truncate::Truncate;
 
 ## 関連項目
 
+- [`ene-tool-common`](./ene-tool-common.md) — ツール実装向けに `Truncate`/`TruncateResult` を再エクスポートしている
 - [`ene-session`](./ene-session.md) — `Truncate` を再エクスポートしている
 - [`ene-core`](./ene-core.md) — ワークスペースのエントリーポイント

@@ -1,7 +1,7 @@
 # `ene-common` — API Reference
 
-> **Crate:** `ene-common`  
-> **Role:** Shared utility types and traits used across the Ene workspace.
+> **Crate:** `ene-common`
+> **Role:** Shared utility types used across the Ene workspace.
 
 ---
 
@@ -9,144 +9,214 @@
 
 `ene-common` is the foundational utility crate that holds code shared between multiple workspace members. It is kept intentionally minimal to avoid creating heavy transitive dependencies.
 
-Currently, its primary export is the `Truncate` trait for safely limiting string length in various units.
+Its sole export is `Truncate`, a unit struct exposing a set of static (`Self`-less) helper functions for safely shortening text — by character count, by line/byte budget, or from the head or tail of the content. `Truncate` is **not** a trait; there is nothing to implement and nothing to call on `&str` or `String` directly. All operations are invoked as `Truncate::method(...)`.
 
 ---
 
-## `Truncate` Trait
+## Types
 
-Provides three truncation strategies on string types, each returning a `TruncateResult` that carries both the (possibly truncated) string and a flag indicating whether truncation occurred.
-
-The trait is implemented for both `str` and `String` via a blanket implementation.
+### `Truncate`
 
 ```rust
-pub trait Truncate {
-    /// Truncate to at most `n` Unicode scalar values (characters).
-    fn truncate_chars(&self, n: usize) -> TruncateResult;
-
-    /// Truncate to at most `n` lines.
-    fn truncate_lines(&self, n: usize) -> TruncateResult;
-
-    /// Truncate to at most `n` bytes.
-    fn truncate_bytes(&self, n: usize) -> TruncateResult;
-}
+/// Helper struct for high-performance and detailed string truncation.
+pub struct Truncate;
 ```
+
+A zero-sized marker struct. It only exists to namespace the truncation helper functions below; it is never instantiated.
 
 ### `TruncateResult`
 
 ```rust
+#[derive(Debug, Clone)]
 pub struct TruncateResult {
-    /// The (possibly truncated) string content.
-    pub truncated: String,
-
-    /// `true` if the input was longer than `n` and was actually cut.
-    pub was_truncated: bool,
+    /// The truncated (or original) text content.
+    pub content: String,
+    /// Whether the content was actually truncated.
+    pub truncated: bool,
 }
 ```
+
+Returned by [`Truncate::output`](#truncateoutput) and [`Truncate::tail`](#truncatetail). Carries the resulting text plus a flag indicating whether the input actually needed to be cut.
+
+---
+
+## Method Table
+
+All methods are inherent `Self`-less functions on `Truncate` (i.e. called as `Truncate::simple(...)`, not via a trait).
+
+| Method | Signature | Returns | Description |
+|---|---|---|---|
+| `simple` | `fn simple(text: &str, max_chars: usize) -> String` | `String` | Truncates to `max_chars` Unicode characters, appending `"..."` if cut. |
+| `detailed` | `fn detailed(text: &str, max_chars: usize) -> String` | `String` | Truncates to `max_chars` Unicode characters, appending a note with the original character count if cut. |
+| `chars` | `fn chars(text: &str, max_chars: usize) -> String` | `String` | Alias for [`detailed`](#truncatedetailed); used by tools. |
+| `output` | `fn output(text: &str, max_lines: usize, max_bytes: usize) -> TruncateResult` | `TruncateResult` | Fits `text` within both a line and byte budget, keeping content from the **head**. |
+| `tail` | `fn tail(text: &str, max_lines: usize, max_bytes: usize) -> TruncateResult` | `TruncateResult` | Fits `text` within both a line and byte budget, keeping content from the **tail**. |
+
+None of these methods can panic on malformed UTF-8 input: all character-boundary math snaps to `char_indices()` boundaries, and line/byte splitting operates on `str::lines()`/byte slices that stay within the original string's valid boundaries.
 
 ---
 
 ## Method Reference
 
-### `truncate_chars`
+### `Truncate::simple`
 
 ```rust
-fn truncate_chars(&self, n: usize) -> TruncateResult
+pub fn simple(text: &str, max_chars: usize) -> String
 ```
 
-Splits at the `n`-th Unicode scalar value boundary. Safe for multi-byte UTF-8 text — will not produce invalid UTF-8.
+Truncates `text` to at most `max_chars` Unicode scalar values. If the text is longer, the excess is cut and `"..."` is appended. If the text already fits, it is returned unchanged.
 
-| Input | `n` | `truncated` | `was_truncated` |
-|-------|-----|-------------|-----------------|
-| `"Hello, world!"` | `5` | `"Hello"` | `true` |
-| `"Hi"` | `10` | `"Hi"` | `false` |
-| `"日本語テキスト"` | `3` | `"日本語"` | `true` |
+| Input | `max_chars` | Result |
+|---|---|---|
+| `"hello"` | `10` | `"hello"` |
+| `"hello world"` | `5` | `"hello..."` |
 
-### `truncate_lines`
+### `Truncate::detailed`
 
 ```rust
-fn truncate_lines(&self, n: usize) -> TruncateResult
+pub fn detailed(text: &str, max_chars: usize) -> String
 ```
 
-Keeps at most `n` lines (split on `\n`). Trailing newlines in the last retained line are preserved.
+Like [`simple`](#truncatesimple), but on truncation appends a descriptive notice instead of just `"..."`, including the original character count:
 
-| Input | `n` | `truncated` | `was_truncated` |
-|-------|-----|-------------|-----------------|
-| `"a\nb\nc\nd"` | `2` | `"a\nb"` | `true` |
-| `"only one line"` | `5` | `"only one line"` | `false` |
+```text
+{head}
 
-### `truncate_bytes`
+[... truncated, total {char_count} chars ...]
+```
+
+| Input | `max_chars` | Result (truncated case) |
+|---|---|---|
+| `"hello"` | `10` | `"hello"` (unchanged) |
+| `"hello world"` | `5` | `"hello\n\n[... truncated, total 11 chars ...]"` |
+
+### `Truncate::chars`
 
 ```rust
-fn truncate_bytes(&self, n: usize) -> TruncateResult
+pub fn chars(text: &str, max_chars: usize) -> String
 ```
 
-Truncates to at most `n` bytes, snapping back to the nearest valid UTF-8 character boundary to avoid producing invalid output.
+A direct alias for [`Truncate::detailed`](#truncatedetailed), kept as a separate name for call sites (mainly tool implementations) that prefer the shorter, more descriptive name.
 
-| Input | `n` | `truncated` | `was_truncated` |
-|-------|-----|-------------|-----------------|
-| `"Hello"` | `3` | `"Hel"` | `true` |
-| `"Hi"` | `100` | `"Hi"` | `false` |
+### `Truncate::output`
+
+```rust
+pub fn output(text: &str, max_lines: usize, max_bytes: usize) -> TruncateResult
+```
+
+Fits `text` within **both** a maximum line count and a maximum byte count, keeping lines from the beginning (head) of the text. If `text` already satisfies both budgets, `TruncateResult { content: text.to_string(), truncated: false }` is returned unchanged.
+
+Otherwise, lines are accumulated from the start until either budget would be exceeded, and the result is annotated:
+
+```text
+{kept lines}
+
+...{removed} {"bytes" | "lines"} truncated...
+
+Use offset/limit or grep to view specific sections.
+```
+
+The `truncated` field is `true` whenever content was cut. This is the typical choice for truncating command/tool stdout where the most relevant information is usually near the top.
+
+### `Truncate::tail`
+
+```rust
+pub fn tail(text: &str, max_lines: usize, max_bytes: usize) -> TruncateResult
+```
+
+Identical budget logic to [`output`](#truncateoutput), but keeps lines from the **end** of the text instead of the beginning. The annotation is prepended rather than appended:
+
+```text
+...{removed} {"bytes" | "lines"} truncated...
+
+{kept lines}
+```
+
+Useful for truncating logs or long-running command output where the most recent lines matter most.
 
 ---
 
-## Usage Examples
+## Errors
 
-### Basic usage
+`ene-common` has no error types. All `Truncate` methods are total functions over `&str` inputs — they never panic, never fail, and always return a value (falling back to returning the original text unchanged when no truncation is needed).
 
-```rust
+---
+
+## Usage
+
+### Simple ellipsis truncation
+
+```rust,no_run
 use ene_common::Truncate;
 
-let text = "This is a long piece of text that we want to truncate.";
-
-let result = text.truncate_chars(10);
-println!("{}", result.truncated);       // "This is a "
-println!("{}", result.was_truncated);   // true
-
-let short = "Hello".truncate_chars(100);
-assert!(!short.was_truncated);
-assert_eq!(short.truncated, "Hello");
+let text = "This is a long piece of text that we want to shorten.";
+let short = Truncate::simple(text, 10);
+assert_eq!(short, "This is a ...");
 ```
 
-### Truncating multi-line output
+### Detailed truncation with character count
 
-```rust
+```rust,no_run
 use ene_common::Truncate;
 
-let output = "line 1\nline 2\nline 3\nline 4\nline 5";
-let result = output.truncate_lines(3);
-
-assert_eq!(result.truncated, "line 1\nline 2\nline 3");
-assert!(result.was_truncated);
+let text = "This is a long piece of text that we want to shorten.";
+let detailed = Truncate::detailed(text, 10);
+assert!(detailed.contains("truncated, total"));
 ```
 
-### Byte-safe truncation for buffer limits
+### Fitting tool output within a line/byte budget
 
-```rust
+```rust,no_run
 use ene_common::Truncate;
 
-// Useful when interfacing with APIs that have byte-length limits
-let user_input = get_user_input();
-let safe_input = user_input.truncate_bytes(4096);
+let stdout = run_some_command();
+let result = Truncate::output(&stdout, /* max_lines */ 200, /* max_bytes */ 16_000);
 
-if safe_input.was_truncated {
-    eprintln!("Warning: input was truncated to 4096 bytes");
+if result.truncated {
+    eprintln!("warning: command output was truncated");
 }
-send_to_api(&safe_input.truncated);
+send_to_model(&result.content);
+
+fn run_some_command() -> String {
+    unimplemented!()
+}
+fn send_to_model(_: &str) {}
+```
+
+### Keeping the tail of a long log
+
+```rust,no_run
+use ene_common::Truncate;
+
+let log = read_log_file();
+let result = Truncate::tail(&log, /* max_lines */ 100, /* max_bytes */ 8_000);
+
+println!("{}", result.content);
+
+fn read_log_file() -> String {
+    unimplemented!()
+}
 ```
 
 ---
 
 ## Re-exports in Other Crates
 
-`ene-common::Truncate` is re-exported at the top of the crate, and
-`ene-core` re-exports it again under its own name. Consumers of
-`ene-core` do not need to depend on `ene-common` directly:
+`ene-common::Truncate` (and `TruncateResult`) is re-exported by several consumer crates so they do not need to depend on `ene-common` directly:
 
-```rust
-// In ene-core/src/lib.rs:
+```rust,no_run
+// crates/ene-core/src/lib.rs
 #[doc(no_inline)]
 pub use ene_common::Truncate;
+
+// crates/ene-session/src/lib.rs
+pub use ene_common::truncate::Truncate;
+
+// crates/ene-tool-common/src/lib.rs
+pub mod truncate {
+    #[doc(no_inline)]
+    pub use ene_common::truncate::{Truncate, TruncateResult};
+}
 ```
 
 ---
@@ -164,5 +234,6 @@ When adding a new utility to `ene-common`:
 
 ## See Also
 
+- [`ene-tool-common`](./ene-tool-common.md) — Re-exports `Truncate`/`TruncateResult` for use in tool implementations
 - [`ene-session`](./ene-session.md) — Re-exports `Truncate`
 - [`ene-core`](./ene-core.md) — Workspace entry point

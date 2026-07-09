@@ -793,6 +793,12 @@ impl EneHandle {
 
     /// Request a manual session split. Returns the split result (summary,
     /// key facts, new session ID) when the actor has completed the split.
+    ///
+    /// Internally dispatches to `ene_cognition::context::execute_compression` (no
+    /// `EneEvent::SessionSplit` broadcast, session ID unchanged) when cognition and compression
+    /// are both enabled, or to the legacy `ene_session::execute_split` (broadcasts
+    /// `EneEvent::SessionSplit`, mints a new session ID) otherwise. See
+    /// [Streaming Events: the `SessionSplit` / compression gap](../../docs/core/streaming-events.md#the-sessionsplit--compression-gap).
     pub async fn manual_split(&self) -> Result<SplitResult, EneCoreError> {
         let (tx, rx) = oneshot::channel();
         self.send(EneCommand::ManualSplit { reply: tx });

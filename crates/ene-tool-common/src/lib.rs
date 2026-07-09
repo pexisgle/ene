@@ -26,8 +26,11 @@ pub mod html;
 
 /// Unified tool action interface.
 pub mod action;
+/// `ToolProvider` adapters over `Vec<Box<dyn ToolAction>>` (or a single action).
+pub mod provider;
 
 pub use action::{ToolAction, ToolSpecArgs};
+pub use provider::{ActionSetProvider, SingleActionProvider};
 
 /// Re-exports of smart truncation from ene-common.
 pub mod truncate {
@@ -53,4 +56,6 @@ pub mod prelude {
 
     #[doc(no_inline)]
     pub use crate::ToolAction as _;
+    #[doc(no_inline)]
+    pub use crate::{ActionSetProvider, SingleActionProvider};
 }

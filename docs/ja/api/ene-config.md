@@ -111,17 +111,23 @@ ene_config::define_config! {
 ### `load_config`
 
 ```rust
-pub fn load_config() -> EneConfig
+pub fn load_config() -> Result<EneConfig, EneConfigError>
 ```
 
 デフォルトパス（バイナリの隣の `assets/` ディレクトリ）から設定を
 読み込みます。アプリケーション起動時の主要なエントリーポイント。
-内部で `load_full_config()` を呼びます。
+内部で `load_full_config()` を呼びます。`settings.json` が不正な
+形式である場合や `ENE_*` 環境変数を期待する型にパースできない場合は
+`Err(EneConfigError::GenericConfigError(..))` を返します — 不正な
+設定ファイルに対して**サイレントにデフォルトへフォールバックすること
+はありません**。（ホスト起動時の使い勝手のために意図的にフォールバック
+を残している呼び出し元については [`ConfigStore::load`](#configstore)
+を参照してください。）
 
 ### `load_config_from`
 
 ```rust
-pub fn load_config_from(assets_dir: &Path, config_path: &Path) -> EneConfig
+pub fn load_config_from(assets_dir: &Path, config_path: &Path) -> Result<EneConfig, EneConfigError>
 ```
 
 明示的なディレクトリとファイルパスから設定を読み込みます。テストや
@@ -130,13 +136,19 @@ pub fn load_config_from(assets_dir: &Path, config_path: &Path) -> EneConfig
 ### `load_full_config` / `load_full_config_from`
 
 ```rust
-pub fn load_full_config() -> EneConfig
-pub fn load_full_config_from(assets_dir: &Path, config_path: &Path) -> EneConfig
+pub fn load_full_config() -> Result<EneConfig, EneConfigError>
+pub fn load_full_config_from(assets_dir: &Path, config_path: &Path) -> Result<EneConfig, EneConfigError>
 ```
 
-完全な `EneConfig` 読み込み。`settings.json` を読み込み、`ENE_*`
-環境変数を適用し、生成されたスキーマをアセットディレクトリに書き出し、
+完全な `EneConfig` 読み込み。優先度順に次のレイヤーを重ねます：
+`EneConfig::default()` → `settings.json` → `ENE_*` 環境変数
+（`__` 区切り、`ENE_PROVIDER__API_KEY` が `provider.api_key` パスに
+マップされるよう小文字にケースフォールディングされる）。成功時は
+生成されたスキーマをアセットディレクトリに書き出し、`Ok` を返す前に
 `update_global_config` 経由でグローバルシングルトンを更新します。
+失敗時（不正な形式の JSON、型が一致しない環境変数など）は
+グローバルシングルトンやディスク上のスキーマファイルに**一切触れず**
+`Err(EneConfigError::GenericConfigError(..))` を返します。
 
 ### `save_full_config`
 
@@ -234,7 +246,52 @@ pub static GLOBAL_CONFIG: std::sync::OnceLock<std::sync::RwLock<EneConfig>>;
 | `get_global_section<T>() -> T` | グローバル設定からセクションをデシリアライズ（無い場合は `T::default()`）。 |
 
 `ConfigStore` 型（`store.rs` を参照）はダーティ追跡と自動保存を追加
-する高レベルラッパーです。
+する高レベルラッパーです。詳細は下記の [`ConfigStore`](#configstore) を
+参照してください。
+
+---
+
+## `ConfigStore`
+
+`ConfigStore` は `ene-desktop` と `ene-cli` がランタイムで使用する単一の
+永続化レイヤーです。グローバルな [`EneConfig`](#eneconfig) とアクティブな
+[`CharacterConfig`](#キャラクター設定) の両方をラップし、それぞれに
+未保存の変更があるかどうかをアトミックなダーティフラグで追跡します。
+これにより、定期的なフラッシュシステム（例えば1フレームごとに実行される
+Bevy システム）が変更されていないファイルを再シリアライズ・再書き込み
+することなく、安価に [`flush_if_dirty`](#configstoreのメソッド) を毎ティック
+呼び出すことができます。
+
+```rust
+pub struct ConfigStore { /* 非公開: RwLock<EneConfig> + RwLock<CharacterConfig> + 2つの AtomicBool */ }
+```
+
+### コンストラクタ
+
+| コンストラクタ | シグネチャ | 説明 |
+|---|---|---|
+| `load` | `fn load() -> Self` | 標準の figment パイプラインを介してグローバル設定をディスクから読み込む。読み込みに失敗した場合はエラーをログに記録し、`EneConfig::default()` にフォールバックする — これはクレート内で唯一、以前のサイレントデフォルトの挙動を維持している呼び出し箇所であり、ユーザーが壊れた `settings.json` を修正する前でもホストプロセスがストアを構築できる必要があるためである。キャラクター設定は `CharacterConfig::default()` として開始する。後で `load_character_config` を呼び出して populate すること。 |
+| `try_load` | `fn try_load() -> Result<Self, EneConfigError>` | `load` と同様だが、サイレントにフォールバックせず読み込みエラーを伝播する。ユーザーが設定の問題を即座に確認できるよう、CLI 起動時にはこちらを優先すべき。 |
+| `from_config` | `fn from_config(config: EneConfig) -> Self` | 既に読み込まれた `EneConfig`（例：テストで構築したもの、または他の手段で読み込んだもの）からストアを構築する。 |
+
+### メソッド {#configstoreのメソッド}
+
+| メソッド | シグネチャ | 説明 |
+|---|---|---|
+| `config` | `fn config(&self) -> EneConfig` | 現在のグローバル設定のクローンを返す。 |
+| `with_config_mut` | `fn with_config_mut(&self, f: impl FnOnce(&mut EneConfig))` | 書き込みロックの下でグローバル設定に対して `f` を実行し、その後ストアをダーティにマークする。増分編集には `set_config` よりも優先して使用すべき。 |
+| `set_config` | `fn set_config(&self, config: EneConfig)` | グローバル設定全体を置き換え、ストアをダーティにマークする。 |
+| `get_section<T>` | `fn get_section<T>(&self) -> T where T: DeserializeOwned + Default + HasConfigKey` | グローバル設定から型付きセクションを読み取る。エラー（キーが無い、またはデシリアライズ失敗）が発生した場合は `T::default()` を返す。これは `get_global_section` と一致する挙動。 |
+| `set_section<T>` | `fn set_section<T>(&self, section: &T) where T: Serialize + HasConfigKey` | グローバル設定に型付きセクションを書き込み、ストアをダーティにマークする。基盤となる `EneConfig::set_section` のエラーは握りつぶされる（`.ok()`）— このメソッドは呼び出し元の視点からは失敗しない。 |
+| `character_config` | `fn character_config(&self) -> CharacterConfig` | 現在のキャラクター固有設定のクローンを返す。 |
+| `with_character_config_mut` | `fn with_character_config_mut(&self, f: impl FnOnce(&mut CharacterConfig))` | 書き込みロックの下でキャラクター固有設定に対して `f` を実行し、その後ダーティにマークする。 |
+| `load_character_config` | `fn load_character_config(&self, character_name: &str)` | `character_name` の `character_settings.json`（`character_settings_path` 経由）を読み取り、メモリ上の `CharacterConfig` を置き換える。ファイルが存在しない、またはパースに失敗した場合は `CharacterConfig::default()` にフォールバックする。ストアをダーティにマーク**しない**（読み込みであり変更ではないため）。 |
+| `set_character_config` | `fn set_character_config(&self, config: CharacterConfig)` | キャラクター固有設定を置き換え、ダーティにマークする。 |
+| `get_character_section<T>` | `fn get_character_section<T>(&self) -> T where T: DeserializeOwned + Default + HasConfigKey` | キャラクター固有設定の `extra` マップから型付きセクションを読み取る。 |
+| `set_character_section<T>` | `fn set_character_section<T>(&self, section: &T) where T: Serialize + HasConfigKey` | キャラクター固有設定の `extra` マップに型付きセクションを書き込み、ダーティにマークする。 |
+| `flush_if_dirty` | `fn flush_if_dirty(&self, character_name: Option<&str>) -> std::io::Result<bool>` | グローバル設定のダーティフラグが立っていればディスクに保存する（フラグをクリアする）。キャラクター固有設定についても、そのダーティフラグが立っていて*かつ* `character_name` が `Some` の場合に保存する。何かが書き込まれた場合は `Ok(true)`、何もダーティでなければ `Ok(false)` を返す。フレームごとの自動保存システムが呼び出すべきメソッド。 |
+| `flush` | `fn flush(&self, character_name: Option<&str>) -> std::io::Result<()>` | 両方のダーティフラグを強制的に `true` にし、`flush_if_dirty` を呼び出して両方の設定を無条件にディスクへ書き込む。シャットダウン時や明示的な「保存」アクションで使用する。 |
+| `is_dirty` | `fn is_dirty(&self) -> bool` | グローバル設定またはキャラクター固有設定のいずれかに未保存の変更がある場合 `true`。 |
 
 ---
 
@@ -258,6 +315,30 @@ pub static GLOBAL_CONFIG: std::sync::OnceLock<std::sync::RwLock<EneConfig>>;
 
 `EneConfigError` が正準のエラー enum で、`ConfigError` は型エイリアス
 (`pub type ConfigError = EneConfigError;`) です。
+
+### `EneConfigError`
+
+```rust
+pub enum EneConfigError {
+    MissingBaseUrl { env_var: String },
+    MissingApiKey { env_var: String },
+    NoCharacterCard,
+    CardReadError(#[from] std::io::Error),
+    JsonError(#[from] serde_json::Error),
+    GenericConfigError(String),
+    IoError(#[source] std::io::Error),
+}
+```
+
+| バリアント | 意味 |
+|---|---|
+| `MissingBaseUrl { env_var }` | AI プロバイダーのベース URL が空で、フォールバックとなる環境変数も設定されていない。`env_var` はチェックされた変数名（例：`"OPENAI_BASE_URL"`）。 |
+| `MissingApiKey { env_var }` | API キーが空で、フォールバックとなる環境変数も設定されていない。 |
+| `NoCharacterCard` | キャラクターカードが読み込まれる前に要求された。 |
+| `CardReadError(std::io::Error)` | ディスクからキャラクターカードファイルを読み取る際の I/O 失敗。`#[from] std::io::Error` を実装しているため、カード読み取りに対する `?` が自動的に変換される。 |
+| `JsonError(serde_json::Error)` | キャラクターカードまたは設定ファイルの JSON パースに失敗した。`#[from] serde_json::Error` を実装している。 |
+| `GenericConfigError(String)` | 自由形式のメッセージを持つ設定エラーのキャッチオール — `load_config`/`load_full_config_from` が不正な `settings.json` や不正な形式の `ENE_*` 環境変数で返すのはこれであり、`set_section`/`get_section` がシリアライズ／デシリアライズ失敗や間違った設定ターゲットを介したセクションの読み書き（[`EneConfig::get_section`](#メソッド) を参照）で返すのもこれ。 |
+| `IoError(std::io::Error)` | キャラクターカードの読み取り*ではない*一般的な I/O エラー（`CardReadError` とは異なり、このバリアントは `#[from]` を実装していないため、呼び出し元は明示的にラップする必要がある）。 |
 
 ---
 
@@ -349,38 +430,154 @@ pub fn resolve_expressions(card: &CharacterCardV3) -> Vec<ResolvedExpression>
 
 ---
 
-## キャラクター設定
+## キャラクター設定 {#キャラクター設定}
 
 `ene_config::CharacterConfig` は `EneConfig` に対するキャラクター固有
 のコンパニオンです。キャラクターカードの隣の `character_settings.json`
-から読み込まれ、`position`、モーションプリセット (`MotionEntry`)、
-表情バインディングなどの UI/ランタイム設定を保持します。
+から読み込まれ、デスクトップ 3D レンダラー用の UI/ランタイム設定 —
+モデルのトランスフォーム、注視動作、ロード時に再生するデフォルトの
+モーション/表情 — を保持します。`EneConfig` と同様に、
+`define_config!(character, "key", …)` で登録された型付きセクションのための
+`#[serde(flatten)]` キャッチオール `extra` マップを持ちます。
 
 ```rust
-pub struct CharacterConfig { /* … */ }
-pub struct MotionEntry { /* … */ }
+pub struct CharacterConfig {
+    pub character_position: [f32; 3],  // デフォルト: [0.0, 0.0, 0.0]
+    pub model_scale: f32,               // デフォルト: 1.0
+    pub look_at_strength: f32,           // デフォルト: 0.6
+    pub default_motion: String,          // デフォルト: ""
+    pub default_expression: String,      // デフォルト: "neutral"
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+```
+
+| フィールド | 説明 |
+|---|---|
+| `character_position` | シーン内のキャラクターモデルの3D位置 `[x, y, z]`。 |
+| `model_scale` | キャラクターモデルに適用される均一スケール係数。 |
+| `look_at_strength` | キャラクターの視線がユーザーをどれだけ強く追従するか。`0.0`（決してユーザーを見ない）から `1.0`（常にユーザーを見る）まで。 |
+| `default_motion` | デフォルトで再生するモーションの名前。キャラクターのモーションリストの `MotionEntry.name` に一致するべき。 |
+| `default_expression` | デフォルトで適用する表情の名前（例：`"neutral"`）。 |
+| `extra` | `character` ターゲットの `define_config!` セクション用キャッチオールマップ。 |
+
+### メソッド
+
+| メソッド | シグネチャ | 説明 |
+|---|---|---|
+| `get_section<T>` | `fn get_section<T>(&self) -> Result<T, EneConfigError> where T: DeserializeOwned + Default + HasConfigKey` | `T::path()` により `extra` から `character` ターゲットのサブセクションをデシリアライズする。パスが存在しない場合は `Ok(T::default())`。デバッグビルドでは `T::TARGET == ConfigTarget::Character` をアサートする。 |
+| `set_section<T>` | `fn set_section<T>(&mut self, section: &T) -> Result<(), EneConfigError> where T: Serialize + HasConfigKey` | `T::path()` により `character` ターゲットのサブセクションをシリアライズして `extra` に挿入する。 |
+
+### `MotionEntry`
+
+単一の名前付きモーションファイル参照で、キャラクター固有のモーション
+リスト（通常はカスタムの `character` ターゲット設定セクション内の
+`Vec<MotionEntry>` として保存される）で使用されます。
+
+```rust
+pub struct MotionEntry {
+    pub name: String,  // 例: "VRMA_01"
+    pub path: String,  // 例: "motions/VRMA_01.vrma"
+}
+```
+
+---
+
+## プロンプトテンプレート: `PromptLibrary`
+
+`PromptLibrary` は、`ene-core` 全体で使用される LLM 向けのプロンプト
+文字列（システムプロンプトのフレーミング、感情ルール、
+メモリ/サマライザー/エクストラクター/感情分類器のテンプレート）を
+読み込みます。ユーザー向けの文章をコンパイル済みコードから分離し、
+各文字列に安定したローカライズ可能な場所を与えます。
+
+```rust
+pub struct PromptLibrary { /* 非公開: PromptLibraryData + lang */ }
+```
+
+### コンストラクタ
+
+| コンストラクタ | シグネチャ | 説明 |
+|---|---|---|
+| `load` | `fn load(lang: &str) -> Self` | 言語コードに対応する組み込みのプロンプトセットを読み込む。`"ja"`/`"jp"` は日本語のデフォルトを読み込み、それ以外（未知のコードを含む）は英語にフォールバックする。 |
+| `built_in_english` | `fn built_in_english() -> Self` | コンパイル時に埋め込まれた英語のプロンプトを返す（`crates/ene-config/prompts/en.json` と付随する `.md` フラグメントを `include_str!` 経由で）。ここでのパース失敗はビルド時のバグであり、実行時の条件ではない。 |
+| `built_in_japanese` | `fn built_in_japanese() -> Self` | 上記と同様、日本語版（`prompts/ja.json`）。 |
+
+### アクセサ
+
+| メソッド | 戻り値 | 説明 |
+|---|---|---|
+| `lang()` | `&str` | このライブラリが読み込まれた言語コード（`"en"` または `"ja"`）。 |
+| `system()` | `&SystemPrompts` | システムプロンプトのフレーミング：`mascot_context`、セクションヘッダー（`behavior_rules_header`、`character_header`、`personality_header`、`background_header`、`scene_header`、`examples_header`）。`render_mascot_context(char_name, user_name)` を持つ。 |
+| `emotion()` | `&EmotionPrompts` | 感情タグ出力ルールのテキスト、トークン/例のヘッダー、感情別の例、`natural_dialogue_contract`。 |
+| `memory()` | `&MemoryPrompts` | エピソードメモリの想起テンプレート。`render_summary_item(age, text)` と `render_facts_header(user_name)` を持つ。 |
+| `summarizer()` | `&SummarizerPrompts` | LLM サマライザーのシステム/ユーザープロンプトテンプレート。`render_system(user_name, char_name, existing_facts, conversation)` と `render_user_prompt(user_name, existing_facts, conversation)` を持つ。 |
+| `split()` | `&SplitPrompts` | セッション分割理由のメッセージテンプレート（`reason_timeout`、`reason_topic`、`reason_context`、`reason_composite`、`reason_manual`）。`render_reason_timeout(minutes)`、`render_reason_topic(similarity)`、`render_reason_composite(score)` を持つ。 |
+| `extractor()` | `&ExtractorPrompts` | LLM メモリエクストラクターのシステム/ユーザープロンプトテンプレート。`render_user_prompt(conversation)` を持つ。 |
+| `affect_classifier()` | `&AffectClassifierPrompts` | LLM 感情分類器のシステム/ユーザープロンプトテンプレート。`render_user_prompt(conversation)` を持つ。 |
+
+### `substitute`
+
+```rust
+pub fn substitute(template: &str, vars: &[(&str, &str)]) -> String
+```
+
+`template` 内のすべての `{name}` プレースホルダーを `vars` の対応する
+値で置き換えます。未知のプレースホルダーはそのまま残されます
+（パニックもエラーも発生しません）。これは上記のすべての `render_*`
+ヘルパーが基盤としているプリミティブです。他の `substitute` という
+名前との衝突を避けるため、クレートルートでは `substitute_prompt_vars`
+として再エクスポートされています。
+
+```rust,no_run
+use ene_config::PromptLibrary;
+
+let lib = PromptLibrary::load("en");
+let framing = lib.system().render_mascot_context("Alicia", "Sam");
+let facts_header = lib.memory().render_facts_header("Sam");
 ```
 
 ---
 
 ## 使用例
 
-```rust
-use ene_config::{load_config, EneConfig, EneConfigError};
+### `EneConfig` を直接読み込んで変更する
 
-// デフォルトパスから読み込む
-let config = load_config();
+```rust,no_run
+use ene_config::{load_config, save_full_config, EneConfigError};
 
-// セクションを読み取る (キーが無いと T::default() を返す)
-let llm: LlmConfig = config.get_section().unwrap_or_default();
-println!("使用モデル: {}", llm.model);
+fn update_model(new_model: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // デフォルトパスで読み込む。不正な settings.json では EneConfigError を伝播する。
+    let mut config = load_config()?;
 
-// 変更して書き戻す
-let mut config = config;
-let mut llm = config.get_section::<LlmConfig>().unwrap_or_default();
-llm.model = "gpt-4o-mini".to_string();
-config.set_section(&llm).map_err(EneConfigError::from)?;
-ene_config::save_full_config(&config)?;
+    // セクションを読み取る (キーが無いと T::default() を返す)
+    let mut llm: LlmConfig = config.get_section().unwrap_or_default();
+    println!("使用モデル: {}", llm.model);
+
+    // 変更して書き戻す
+    llm.model = new_model.to_string();
+    config.set_section(&llm).map_err(EneConfigError::from)?;
+    save_full_config(&config)?;
+    Ok(())
+}
+```
+
+### `ConfigStore` を使う（長時間実行するプロセスに推奨）
+
+```rust,no_run
+use ene_config::ConfigStore;
+
+fn update_model_via_store(store: &ConfigStore, new_model: &str) {
+    store.with_config_mut(|_config| {
+        // 実際には EneConfig の生フィールドではなく、型付きセクションを変更する。
+    });
+
+    let mut llm: LlmConfig = store.get_section();
+    llm.model = new_model.to_string();
+    store.set_section(&llm);
+
+    // 実際のホストでは1フレーム/1ティックごとに呼ばれる。ここでは例のために強制する。
+    let _ = store.flush(None);
+}
 ```
 
 ---

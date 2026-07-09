@@ -470,6 +470,12 @@ fn sample_cubic_spline_quat(sampler: &Sampler<Quat>, t: f32) -> Quat {
 /// NLR = W_src * L_src^-1 * src_pose * W_src^-1
 /// dst_pose = L_dst * W_dst^-1 * NLR * W_dst
 /// ```
+///
+/// Not currently called by `ene-desktop` (VRoid-style models sharing a common T-pose
+/// convention use the source local rotation directly); hidden from the crate's "Supported
+/// API" docs (see `docs/api/ene-vrm.md`) pending a consumer, but kept `pub` for other hosts
+/// that need cross-skeleton retargeting.
+#[doc(hidden)]
 pub fn retarget_rotation(
     src_pose: Quat,
     src_rest_local: Quat,
@@ -488,6 +494,10 @@ pub fn retarget_rotation(
 /// scale = dst_hips_height / src_hips_height
 /// result = dst_rest_local + delta * scale
 /// ```
+///
+/// See [`retarget_rotation`]'s note — not currently called by `ene-desktop`, hidden from the
+/// "Supported API" docs but kept `pub` for other hosts.
+#[doc(hidden)]
 pub fn retarget_hips_translation(
     src_pose: Vec3,
     src_rest_local: Vec3,
@@ -508,6 +518,11 @@ pub fn retarget_hips_translation(
 ///
 /// The VRMA spec says: Y rotation = yaw, X rotation = pitch.
 /// Yaw positive = model looks left, pitch positive = looks down.
+///
+/// Used internally by [`evaluate_clip`] to populate [`VrmaFrame::look_at_yaw_pitch`]; hidden
+/// from the "Supported API" docs since `ene-desktop` consumes the resulting `VrmaFrame` field
+/// rather than calling this directly.
+#[doc(hidden)]
 pub fn quat_to_yaw_pitch(q: Quat) -> (f32, f32) {
     let (yaw, pitch, _roll) = q.to_euler(glam::EulerRot::ZXY);
     (yaw.to_degrees(), pitch.to_degrees())

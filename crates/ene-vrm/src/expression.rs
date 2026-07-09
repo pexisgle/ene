@@ -62,6 +62,10 @@ pub const WEIGHTS_PER_VEC4: usize = 4;
 
 /// Total morph-target weights per primitive. Always a multiple
 /// of [`WEIGHTS_PER_VEC4`].
+///
+/// Hidden from the "Supported API" docs — an internal GPU uniform-buffer sizing constant that
+/// `ene-desktop` never references directly.
+#[doc(hidden)]
 pub const MAX_MORPH_TARGETS_PER_PRIMITIVE: usize = MAX_WEIGHT_SLOTS * WEIGHTS_PER_VEC4;
 
 /// Number of f32 slots in a [`PrimitiveMorphMeta`]. Used by the

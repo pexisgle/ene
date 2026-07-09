@@ -5,6 +5,9 @@
 //!
 //! ## Module map
 //!
+//! - [`prelude`] — curated "Supported API" re-exports (issue #6 of the [API refactor
+//!   plan](https://github.com/pexisgle/Ene/blob/main/docs/architecture/api-refactor-plan.md)).
+//!   Start here.
 //! - [`camera`] — orthographic camera uniform + view-projection helpers.
 //! - [`loader`] — read a `.vrm` from disk and produce a [`VrmModel`].
 //! - [`model`] — public data types: [`VrmModel`], [`VrmMesh`], etc.
@@ -14,6 +17,18 @@
 //! - [`expression_override`] — expression override semantics.
 //! - [`renderer`] — wgpu render pipeline + bind group layouts.
 //! - [`error`] — top-level error type.
+//!
+//! ## Supported API vs. internal
+//!
+//! Everything under `pub` remains callable (this crate makes no breaking-removal changes as
+//! part of curating the surface), but not every `pub` item is meant for `ene-desktop` (or other
+//! hosts) to use directly. [`prelude`] and `docs/api/ene-vrm.md` name the intentionally
+//! supported subset — model loading, rendering, animation playback, look-at, and expressions.
+//! Sub-parsers called only from [`loader::load_vrm`] (e.g. `load_humanoid_bones`,
+//! `load_look_at`, `load_spring_bones`, `load_node_constraints`, `load_expression_overrides`,
+//! `load_mtoon_materials`) and a handful of internal-only helpers/constants are marked
+//! `#[doc(hidden)]` to keep the rendered API docs focused, even though their types remain `pub`
+//! (some are unavoidably part of other supported types' public fields).
 
 #![warn(missing_docs)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
@@ -32,6 +47,8 @@ pub mod model;
 pub mod mtoon;
 pub mod node_constraint;
 pub mod post_process;
+/// Curated "Supported API" re-exports — see the crate-level module map above.
+pub mod prelude;
 pub mod renderer;
 pub mod spring_bone;
 

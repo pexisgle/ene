@@ -14,8 +14,19 @@
 //!
 //! ## Crate Boundaries
 //!
+//! Enforced by the [Cognitive Runtime ADR](../../docs/architecture/cognitive-runtime.md)
+//! and [AGENTS.md §4.1](../../AGENTS.md); see the
+//! [API refactor plan](../../docs/architecture/api-refactor-plan.md) (item 2) for the
+//! audit that reconfirmed these boundaries still hold.
+//!
 //! - Depends on: `ene-memory`, `ene-config`, `ene-provider`, `ene-common`
 //! - Does NOT depend on: `ene-core`, `ene-session` (prevents circular dependencies)
+//! - Calls `ene-memory` only through its public `MemoryStore` methods — never issues
+//!   raw SQL or `sea-orm` queries directly. `ene-memory` remains the sole SQLite owner.
+//! - Owns cognition logic exclusively: memory extraction, recall planning, emotion,
+//!   context budgeting, and prompt composition all live here, not in `ene-core`.
+//!   `ene-core` only *invokes* `CognitionEngine`; it must not reimplement cognition
+//!   logic inline in its own streaming path.
 //!
 //! ## Quick Start
 //!

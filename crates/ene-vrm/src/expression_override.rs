@@ -50,16 +50,25 @@ use std::collections::BTreeMap;
 use crate::expression::ExpressionName;
 
 /// Procedural mouth-shape target names (lip sync).
+///
+/// Hidden from the "Supported API" docs — used internally by [`is_procedural`] and
+/// [`apply_overrides`]; `ene-desktop` never needs the raw name lists.
+#[doc(hidden)]
 pub const MOUTH_TARGET_NAMES: &[&str] = &["aa", "ih", "ou", "ee", "oh"];
 
 /// Procedural blink target names.
+#[doc(hidden)]
 pub const BLINK_TARGET_NAMES: &[&str] = &["blink", "blinkLeft", "blinkRight"];
 
 /// Procedural gaze target names.
+#[doc(hidden)]
 pub const GAZE_TARGET_NAMES: &[&str] = &["lookUp", "lookDown", "lookLeft", "lookRight"];
 
 /// All procedural expression names. Pre-built so callers can
 /// quickly check whether a name is a known procedural target.
+///
+/// Used internally by [`apply_overrides`]; hidden from the "Supported API" docs.
+#[doc(hidden)]
 pub fn is_procedural(name: &str) -> bool {
     MOUTH_TARGET_NAMES.contains(&name)
         || BLINK_TARGET_NAMES.contains(&name)
@@ -285,6 +294,10 @@ pub fn apply_overrides(weights: &mut BTreeMap<ExpressionName, f32>, defs: &[Expr
 /// Returns an empty Vec when the `VRMC_vrm.expressions` block is
 /// missing (e.g. VRM 0.x models), so the override pass becomes a
 /// no-op.
+///
+/// Called internally by [`crate::loader::load_vrm`]; hidden from the "Supported API" docs —
+/// hosts get the result via [`VrmModel::expressions_meta`](crate::model::VrmModel).
+#[doc(hidden)]
 pub fn load_expression_overrides(gltf: &gltf::Gltf) -> Vec<ExpressionDefinition> {
     let mut defs = Vec::new();
 

@@ -54,6 +54,16 @@ impl HelloAction {
 
 ### 3. ToolProvider を実装
 
+単一のステートレスなアクションの場合は、`ToolProvider` を手書きする代わりに [`SingleActionProvider`](#toolprovider-アダプタ) を使うことを推奨します:
+
+```rust
+use ene_tool_common::SingleActionProvider;
+
+let provider = SingleActionProvider::new(HelloAction::default());
+```
+
+カスタムの `set_session_id`/`set_sandbox` の動作が必要な場合、または完全な制御が必要な場合は、代わりに `ToolProvider` を手書きします:
+
 ```rust
 use ene_tool_proto::{ToolError, ToolProvider, ToolSpec};
 
@@ -170,7 +180,18 @@ async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolErr
 
 ## 複数ツール
 
-単一プロバイダから複数のツールを公開できます:
+単一プロバイダから複数のツールを公開できます。[`ActionSetProvider`](#toolprovider-アダプタ) を使えば、ディスパッチ用の `match` を手書きする必要はありません:
+
+```rust
+use ene_tool_common::ActionSetProvider;
+
+let provider = ActionSetProvider::new(vec![
+    Box::new(AddAction::default()),
+    Box::new(SubtractAction::default()),
+]);
+```
+
+同等の手書き実装（単純な名前マッチを超えるディスパッチロジックが必要な場合に有用）:
 
 ```rust
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, ToolAction)]
@@ -215,6 +236,30 @@ impl ToolProvider for CalculatorProvider {
     fn set_session_id(&self, _session_id: &str) {}
 }
 ```
+
+## ToolProvider アダプタ
+
+`ene-tool-common` は `ToolProvider` を実装する2つのアダプタを提供しており、ほとんどのツールは `list_specs`/`call_tool` のディスパッチループを手書きする必要がありません:
+
+| アダプタ | 使用場面 | セッション/サンドボックスフック |
+|---|---|---|
+| `SingleActionProvider::new(action)` | バイナリあたり1アクション（`ene-tool-web` で使われている個別ツールパターン） | `.with_session_id_hook(...)`、`.with_sandbox_hook(...)` |
+| `ActionSetProvider::new(vec![...])` | バイナリあたり複数アクション（`ene-tool-fs`、`ene-tool-app`、`ene-tool-browser` で使われているメガツールパターン） | `.with_session_id_hook(...)`、`.with_sandbox_hook(...)` |
+
+両方とも、リクエストされたツール名と `ToolAction::name()` を照合して `call_tool` をディスパッチし、一致しない場合は `ToolError::NotFound` を返します — これは、このコードベース内のすべての手書きプロバイダーがこれまで再実装してきたのと同じ動作です。アクションが `set_session_id`/`set_sandbox` に反応する必要がある場合（例: セッションIDやDBソケットを共有状態に伝える）は、手動の `ToolProvider` 実装に切り替える代わりにフックを登録してください:
+
+```rust
+use ene_tool_common::ActionSetProvider;
+use std::sync::Arc;
+
+let state = Arc::new(MyState::default());
+let session_state = state.clone();
+
+let provider = ActionSetProvider::new(vec![Box::new(MyAction::new(state))])
+    .with_session_id_hook(move |session_id| session_state.set_session_id(session_id));
+```
+
+完全な実例は `tools/utility/src/provider.rs` を参照してください（セッションIDとDBサンドボックスのソケット/トークンの両方がフック経由で伝えられています）。
 
 ## ToolProvider トレイトリファレンス
 
@@ -371,6 +416,22 @@ pub enum ToolError {
   → ツールがサンドボックス + 設定で初期化
   → CallTool リクエストを処理可能に
 ```
+
+## ABI 互換性
+
+ワイヤーABIは `ene-tool-proto` のIPC表面すべてを指します: `IpcRequest`/`IpcResponse`、`IPC_PROTOCOL_VERSION`、`ToolSpec`/`ActionSpec` のフィールド、`SandboxConfigData`、`ToolError`。`run_tool_server` は `IPC_PROTOCOL_VERSION` の不一致を**厳密に拒否**します — ダウングレードや交渉は行いません — そのため、バージョンアップの判断は重要です。
+
+| 変更 | 互換性あり? | 必要な対応 |
+|---|---|---|
+| `IpcRequest`/`IpcResponse` に新しいenumバリアントを追加 | ✅ 追加的 | 不要 — 古いツールバイナリは新しいバリアントを単に送受信しません。新しいホストコードは、古いツールバイナリがそれを送らないケースも処理する必要があります。 |
+| `ToolSpec`/`ActionSpec`/`SandboxConfigData` に新しい任意フィールドを追加（`#[serde(default)]` またはマクロ提供のデフォルト付き） | ✅ 追加的 | 不要。`SandboxConfigData` が既に使っている `define_tool_config!`/`schemars` のパターンに従えば、フィールドのない古いJSONもそのままデシリアライズできます。 |
+| `ToolError` に新しいバリアントを追加 | ✅ 追加的 | 不要 — `ToolError` は（タグ付き列挙体ではあるが）単純な列挙型なので、古いコードがワイルドカードアームなしで網羅的に `match` していない限り、新しいバリアントは問題なくデシリアライズされます。新しい `match` にはワイルドカード（`_ => ...`）アームを追加することを推奨します。 |
+| `ToolProvider` トレイトに新しいメソッドを追加 | ✅ 追加的（デフォルト実装がある場合） | `set_sandbox`、`approve_permission`、`set_config` などが既にそうしているように、デフォルト（no-op / 空）実装を与えてください — これにより、既存のすべてのプロバイダー（手書きでもアダプタベースでも）がコンパイルされ続けます。 |
+| 既存の `IpcRequest`/`IpcResponse` バリアントを削除・改名、またはフィールドの型/意味を変更 | ❌ 破壊的 | `ene-tool-proto` で `IPC_PROTOCOL_VERSION` をバンプする（[AGENTS.md §6 R3](../../AGENTS.md) を参照）。同じ変更でホスト（`ene-tool-host`）とすべてのツールバイナリを更新してください。 |
+| `ToolProvider` トレイトメソッドを削除、または既存のデフォルト付きメソッドを必須化 | ❌ 破壊的 | 上記と同様 — これは各ツールバイナリが実装すべき内容を変更します。`tools/*` 全体での連携した更新に加え、ワイヤー動作も変わる場合は `PROTOCOL_VERSION` のバンプが必要です。 |
+| `Box::new(provider)` の呼び出し箇所を壊すような形で `run_tool_server` のシグネチャを変更 | ❌ 破壊的（ソースレベル） | それ自体は `PROTOCOL_VERSION` のバンプを必要としません（Rust APIの破壊であり、ワイヤーの破壊ではない）が、同じ変更内ですべての `tools/*/src/main.rs` の呼び出し箇所と `AGENTS.md` §6 R1 のレシピを更新してください。 |
+
+要約すると: **追加的な変更は常に安全**です。既存のワイヤーフィールド/バリアントの意味を変更したり、ツールバイナリが既に送信している可能性のあるものを削除する変更には、`PROTOCOL_VERSION` のバンプとホスト・ツールバイナリ双方の連携した更新が必要です。
 
 ## ベストプラクティス
 

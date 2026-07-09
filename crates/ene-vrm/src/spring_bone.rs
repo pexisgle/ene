@@ -142,6 +142,10 @@ pub struct SpringBoneProperties {
 ///
 /// Returns `None` if the extension is not present. Logs
 /// warnings for malformed entries and falls back to defaults.
+///
+/// Called internally by [`crate::loader::load_vrm`]; hidden from the "Supported API" docs —
+/// hosts get the result via [`VrmModel::spring_bones`](crate::model::VrmModel).
+#[doc(hidden)]
 pub fn load_spring_bones(gltf: &gltf::Gltf) -> Option<SpringBoneProperties> {
     let ext = gltf.document.extensions()?;
     let value = ext.get("VRMC_springBone")?;

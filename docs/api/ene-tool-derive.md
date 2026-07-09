@@ -16,12 +16,24 @@ In the vast majority of cases you should use `#[derive(ToolAction)]`, which subs
 
 ## `#[derive(ToolSpec)]`
 
-Generates:
-- `impl ToolSpecArgs for MyArgs`
-- `const TOOL_NAME: &'static str`
-- `const DISPLAY_NAME: &'static str`
-- `const SUMMARY: &'static str`
-- `fn spec() -> ToolSpec`
+Generates, directly on the struct (as **inherent items**, in a plain `impl MyArgs { ... }` block):
+- `pub const TOOL_NAME: &'static str`
+- `pub const DISPLAY_NAME: &'static str`
+- `pub const SUMMARY: &'static str`
+- `pub fn spec() -> ToolSpec`
+
+...and, separately, an `impl ToolSpecArgs for MyArgs` that only carries `TOOL_NAME` and `spec()`:
+
+```rust
+impl ToolSpecArgs for MyArgs {
+    const TOOL_NAME: &'static str = /* ... */;
+    fn spec() -> ToolSpec {
+        Self::spec() // delegates to the inherent fn above
+    }
+}
+```
+
+> **Important:** `DISPLAY_NAME` and `SUMMARY` are **inherent consts on the struct only** — they are *not* part of the `ToolSpecArgs` trait (see [`ene-tool-common`](./ene-tool-common.md#toolspecargs-trait)). Always access them as `MyArgs::DISPLAY_NAME` / `MyArgs::SUMMARY` directly on the concrete type; they are not reachable through a generic `T: ToolSpecArgs` bound.
 
 The JSON Schema for `parameters` is derived from the struct fields using `schemars`. The macro automatically sets `additionalProperties: false` on the root schema object.
 
@@ -143,14 +155,46 @@ impl DoThingAction {
 
 ### Wiring the binary
 
-```rust
+`run_tool_server` is **not generic** — it takes a boxed `dyn ToolProvider`, not `run_tool_server::<T>()`. Wrap one or more `ToolAction`s in a `ToolProvider` (see [`ene-tool-common`](./ene-tool-common.md#wiring-a-tool-binary) for a full example) and pass that provider in:
+
+```rust,no_run
 // tools/my_tool/src/main.rs
-use ene_tool_proto::run_tool_server;
+use async_trait::async_trait;
+use ene_tool_common::ToolAction;
+use ene_tool_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec, run_tool_server};
+
 mod actions;
+use actions::DoThingAction;
+
+struct MyToolProvider {
+    actions: Vec<Box<dyn ToolAction>>,
+}
+
+#[async_trait]
+impl ToolProvider for MyToolProvider {
+    fn list_specs(&self) -> Vec<ToolSpec> {
+        self.actions.iter().map(|a| a.definition()).collect()
+    }
+
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
+        for action in &self.actions {
+            if action.name() == name {
+                return action.execute(arguments).await;
+            }
+        }
+        Err(ToolError::NotFound { tool_name: name.to_string() })
+    }
+
+    fn set_session_id(&self, _session_id: &str) {}
+    fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
+}
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    run_tool_server::<actions::DoThingAction>().await
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let action = DoThingAction { path: String::new(), max_bytes: None, context: Default::default() };
+    let provider = MyToolProvider { actions: vec![Box::new(action)] };
+    run_tool_server(Box::new(provider)).await?;
+    Ok(())
 }
 ```
 

@@ -35,18 +35,29 @@ impl McpToolRegistry {
         name: &str,
         command: &str,
         args: &[&str],
-    ) -> Result<(), String> {
+    ) -> Result<(), ToolHostError> {
         let cmd = Command::new(command).configure(|c| {
             for arg in args {
                 c.arg(arg);
             }
         });
 
-        let client = serve_client((), TokioChildProcess::new(cmd).map_err(|e| e.to_string())?)
-            .await
-            .map_err(|e| e.to_string())?;
+        let to_execution_failed = |e: std::io::Error| ToolHostError::ExecutionFailed {
+            message: e.to_string(),
+        };
 
-        let mcp_tools_resp = client.list_tools(None).await.map_err(|e| e.to_string())?;
+        let client = serve_client((), TokioChildProcess::new(cmd).map_err(to_execution_failed)?)
+            .await
+            .map_err(|e| ToolHostError::ExecutionFailed {
+                message: e.to_string(),
+            })?;
+
+        let mcp_tools_resp = client
+            .list_tools(None)
+            .await
+            .map_err(|e| ToolHostError::ExecutionFailed {
+                message: e.to_string(),
+            })?;
 
         let mut tools = Vec::new();
         for t in mcp_tools_resp.tools {
@@ -64,8 +75,10 @@ impl McpToolRegistry {
             // names with a structured error rather than
             // panicking, so a hostile MCP server cannot crash
             // the host.
-            let name = ToolName::try_new(t.name.to_string())
-                .map_err(|e| format!("MCP server advertised an invalid tool name: {e}"))?;
+            let name =
+                ToolName::try_new(t.name.to_string()).map_err(|e| ToolHostError::ExecutionFailed {
+                    message: format!("MCP server advertised an invalid tool name: {e}"),
+                })?;
             tools.push(ToolSpec {
                 name,
                 version: ToolVersion::default(),

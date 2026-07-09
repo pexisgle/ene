@@ -11,6 +11,21 @@
 //! - **Tool RAG**: Embedding-based tool selection (stored in `tool_embedding_index` table, multi-vector per tool)
 //! - **Conversation logging**: Full conversation history in `conversation_logs` for audit and replay
 //!
+//! ## Crate Boundaries
+//!
+//! Enforced by [AGENTS.md §4.1](../../AGENTS.md) and reconfirmed by the
+//! [API refactor plan](../../docs/architecture/api-refactor-plan.md) (item 2):
+//!
+//! - `ene-memory` is the **sole owner** of the SQLite / `sea-orm` connection and schema
+//!   for the entire workspace. No other crate (`ene-cognition`, `ene-core`, tool
+//!   binaries) opens its own database connection or issues raw SQL against
+//!   `memory.db`; they call into `MemoryStore` (or, for tool binaries, the IPC-based
+//!   `ene-tool-db` client backed by `ene-core`'s `db_server`) instead.
+//! - Depends on: `ene-common`, `ene-config`, `ene-provider`. Does NOT depend on
+//!   `ene-core`, `ene-cognition`, `ene-session`, or `ene-tool-proto` — memory sits
+//!   low in the dependency graph so it can be safely called from any of those
+//!   crates without introducing a cycle.
+//!
 //! ## Quick Start
 //!
 //! ```rust,no_run

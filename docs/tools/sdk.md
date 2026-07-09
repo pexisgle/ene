@@ -54,6 +54,16 @@ impl HelloAction {
 
 ### 3. Implement ToolProvider
 
+For a single stateless action, use [`SingleActionProvider`](#toolprovider-adapters) instead of hand-writing a `ToolProvider` — this is the recommended default:
+
+```rust
+use ene_tool_common::SingleActionProvider;
+
+let provider = SingleActionProvider::new(HelloAction::default());
+```
+
+If you need custom `set_session_id`/`set_sandbox` behavior, or want full control, implement `ToolProvider` by hand instead:
+
 ```rust
 use ene_tool_proto::{ToolError, ToolProvider, ToolSpec};
 
@@ -170,7 +180,18 @@ async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolErr
 
 ## Multiple Tools
 
-Expose multiple tools from a single provider:
+Expose multiple tools from a single provider. With [`ActionSetProvider`](#toolprovider-adapters), you don't need to hand-write the dispatch `match`:
+
+```rust
+use ene_tool_common::ActionSetProvider;
+
+let provider = ActionSetProvider::new(vec![
+    Box::new(AddAction::default()),
+    Box::new(SubtractAction::default()),
+]);
+```
+
+The equivalent hand-written form (useful if you need dispatch logic beyond simple name-matching):
 
 ```rust
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, ToolAction)]
@@ -215,6 +236,30 @@ impl ToolProvider for CalculatorProvider {
     fn set_session_id(&self, _session_id: &str) {}
 }
 ```
+
+## ToolProvider Adapters
+
+`ene-tool-common` provides two adapters that implement `ToolProvider` for you, so most tools never need to hand-write the `list_specs`/`call_tool` dispatch loop:
+
+| Adapter | Use for | Session/sandbox hooks |
+|---|---|---|
+| `SingleActionProvider::new(action)` | One action per binary (the individual-tool pattern used by `ene-tool-web`) | `.with_session_id_hook(...)`, `.with_sandbox_hook(...)` |
+| `ActionSetProvider::new(vec![...])` | Multiple actions per binary (the mega-tool pattern used by `ene-tool-fs`, `ene-tool-app`, `ene-tool-browser`) | `.with_session_id_hook(...)`, `.with_sandbox_hook(...)` |
+
+Both dispatch `call_tool` by matching `ToolAction::name()` against the requested tool name and return `ToolError::NotFound` on a miss — the same behavior every hand-written provider in this codebase used to reimplement. If an action needs to react to `set_session_id`/`set_sandbox` (e.g. to thread a session ID or a DB socket into shared state), register a hook instead of dropping down to a manual `ToolProvider` impl:
+
+```rust
+use ene_tool_common::ActionSetProvider;
+use std::sync::Arc;
+
+let state = Arc::new(MyState::default());
+let session_state = state.clone();
+
+let provider = ActionSetProvider::new(vec![Box::new(MyAction::new(state))])
+    .with_session_id_hook(move |session_id| session_state.set_session_id(session_id));
+```
+
+See `tools/utility/src/provider.rs` for a full worked example (session ID + DB sandbox socket/token both threaded through hooks).
 
 ## ToolProvider Trait Reference
 
@@ -371,6 +416,22 @@ Tool binary starts
   → tool initialized with sandbox + config
   → ready to handle CallTool requests
 ```
+
+## ABI Compatibility
+
+The wire ABI is everything in `ene-tool-proto`'s IPC surface: `IpcRequest`/`IpcResponse`, `IPC_PROTOCOL_VERSION`, `ToolSpec`/`ActionSpec` fields, `SandboxConfigData`, and `ToolError`. `run_tool_server` **strictly rejects** a handshake with a mismatched `IPC_PROTOCOL_VERSION` — there is no downgrade/negotiation — so version-bump decisions matter.
+
+| Change | Compatible? | Action required |
+|---|---|---|
+| Add a new `IpcRequest`/`IpcResponse` enum variant | ✅ Additive | None — old tool binaries simply never send/receive the new variant. New host code must still handle old tool binaries not sending it. |
+| Add a new optional field to `ToolSpec`/`ActionSpec`/`SandboxConfigData` (with a `#[serde(default)]` or macro-provided default) | ✅ Additive | None. Follow the `define_tool_config!`/`schemars` pattern already used by `SandboxConfigData` so old JSON without the field still deserializes. |
+| Add a new `ToolError` variant | ✅ Additive | None — `ToolError` is `#[serde(tag = "kind" ...)]`-free (plain enum), so new variants deserialize fine as long as old code doesn't exhaustively `match` without a wildcard arm. Prefer adding a `_ => ...` arm in new `match`es over new crates. |
+| Add a new `ToolProvider` trait method | ✅ Additive, if it has a default impl | Give it a default (no-op / empty) implementation, exactly like `set_sandbox`, `approve_permission`, `set_config`, etc. already do — this is what keeps every existing provider (hand-written or adapter-based) compiling. |
+| Remove/rename an existing `IpcRequest`/`IpcResponse` variant, or change a field's type/meaning | ❌ Breaking | Bump `IPC_PROTOCOL_VERSION` in `ene-tool-proto` (see [AGENTS.md §6 R3](../../AGENTS.md)). Update both the host (`ene-tool-host`) and every tool binary in the same change. |
+| Remove a `ToolProvider` trait method, or make an existing default-having method required | ❌ Breaking | Same as above — this changes what every tool binary must implement. Requires a coordinated update across `tools/*` plus a `PROTOCOL_VERSION` bump if it also changes wire behavior. |
+| Change `run_tool_server`'s signature in a way that breaks `Box::new(provider)` call sites | ❌ Breaking (source-level) | Does not require a `PROTOCOL_VERSION` bump on its own (it's a Rust API break, not a wire break), but update every `tools/*/src/main.rs` call site and the recipe in `AGENTS.md` §6 R1 in the same change. |
+
+In short: **additive is always safe**; anything that changes the meaning of an existing wire field/variant or removes something a tool binary might already be sending needs a `PROTOCOL_VERSION` bump plus a coordinated host+tool-binary update.
 
 ## Best Practices
 

@@ -1,7 +1,7 @@
 use crate::action;
 use crate::todo_store::TodoStore;
 use async_trait::async_trait;
-use ene_tool_common::ToolAction;
+use ene_tool_common::{ActionSetProvider, ToolAction};
 use ene_tool_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec};
 use std::sync::Mutex;
 use std::sync::{Arc, RwLock};
@@ -125,9 +125,14 @@ impl Default for UtilityState {
 }
 
 /// Built-in utility tool provider.
+///
+/// Built on [`ActionSetProvider`] (see the tool-ABI adapter documented in
+/// `docs/tools/sdk.md`): `list_specs`/`call_tool` dispatch is handled
+/// generically, and the two utility-specific pieces of `ToolProvider`
+/// state — session ID and the DB sandbox socket/token — are threaded into
+/// `UtilityState` via hooks instead of a hand-written `ToolProvider` impl.
 pub struct UtilityToolProvider {
-    actions: Vec<Box<dyn ToolAction>>,
-    state: UtilityState,
+    inner: ActionSetProvider,
 }
 
 impl UtilityToolProvider {
@@ -145,10 +150,19 @@ impl UtilityToolProvider {
             Box::new(action::GetCurrentTimeAction::default()),
             Box::new(action::GetSystemInfoAction::default()),
         ];
-        Self {
-            actions,
-            state: (*state).clone(),
-        }
+
+        let session_state = state.clone();
+        let sandbox_state = state;
+        let inner = ActionSetProvider::new(actions)
+            .with_session_id_hook(move |session_id| session_state.set_session_id(session_id))
+            .with_sandbox_hook(move |sandbox: &SandboxConfigData| {
+                if let Some(socket) = &sandbox.db_socket {
+                    sandbox_state.set_db_socket(socket.clone());
+                }
+                sandbox_state.set_db_auth_token(sandbox.db_auth_token.clone());
+            });
+
+        Self { inner }
     }
 }
 
@@ -161,27 +175,18 @@ impl Default for UtilityToolProvider {
 #[async_trait]
 impl ToolProvider for UtilityToolProvider {
     fn list_specs(&self) -> Vec<ToolSpec> {
-        self.actions.iter().map(|a| a.definition()).collect()
+        self.inner.list_specs()
     }
+
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
-        for action in &self.actions {
-            if action.name() == name {
-                return action.execute(arguments).await;
-            }
-        }
-        Err(ToolError::NotFound {
-            tool_name: name.to_string(),
-        })
+        self.inner.call_tool(name, arguments).await
     }
 
     fn set_session_id(&self, session_id: &str) {
-        self.state.set_session_id(session_id);
+        self.inner.set_session_id(session_id);
     }
 
     fn set_sandbox(&self, sandbox: &SandboxConfigData) {
-        if let Some(socket) = &sandbox.db_socket {
-            self.state.set_db_socket(socket.clone());
-        }
-        self.state.set_db_auth_token(sandbox.db_auth_token.clone());
+        self.inner.set_sandbox(sandbox);
     }
 }
