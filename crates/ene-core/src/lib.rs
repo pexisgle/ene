@@ -23,6 +23,12 @@ mod memory_recall;
 /// [`docs/api/index.md`](../../../docs/api/index.md) for the async/error
 /// conventions that apply to new additions here.
 pub mod message_builder;
+/// Cognition-config re-exports that exist solely to keep `ene-cognition`
+/// linked for schema registration (issue #95). See the module docs for
+/// details; prefer importing these from `ene-cognition` directly in new
+/// code — they are re-exported at the crate root only for backward
+/// compatibility with existing `ene_core::CognitionConfig`-style imports.
+pub mod schema_link;
 /// Permission types and streaming engine internals.
 ///
 /// Kept `pub` for contributor/integration-test use (`ene-core`'s own
@@ -33,12 +39,6 @@ pub mod message_builder;
 /// change without a semver-relevant deprecation cycle.
 pub mod streaming;
 mod streaming_cognitive;
-/// Cognition-config re-exports that exist solely to keep `ene-cognition`
-/// linked for schema registration (issue #95). See the module docs for
-/// details; prefer importing these from `ene-cognition` directly in new
-/// code — they are re-exported at the crate root only for backward
-/// compatibility with existing `ene_core::CognitionConfig`-style imports.
-pub mod schema_link;
 /// Type-safe identifiers for runtime concepts.
 pub mod types;
 

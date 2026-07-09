@@ -9,7 +9,8 @@ mod style;
 #[tokio::main]
 async fn main() {
     use tracing_subscriber::{EnvFilter, fmt};
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,sea_orm=warn"));
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,sea_orm=warn"));
     fmt().with_env_filter(filter).init();
     let handle = match config::init().await {
         Ok(h) => h,

@@ -149,8 +149,8 @@ impl ToolProvider for SingleActionProvider {
 mod tests {
     use super::*;
     use ene_tool_proto::{KeywordSet, SideEffects, ToolCategory, ToolName, ToolSpec, ToolVersion};
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     struct EchoAction;
 
