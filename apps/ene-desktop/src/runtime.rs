@@ -1555,6 +1555,7 @@ impl UiWindow {
         surface.configure(device, &config);
 
         let egui_ctx = egui::Context::default();
+        crate::settings_ui::apply_egui_fonts(&egui_ctx);
         let viewport_id = egui::ViewportId::ROOT;
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(),

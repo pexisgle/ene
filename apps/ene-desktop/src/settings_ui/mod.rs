@@ -14,7 +14,7 @@ pub mod widgets;
 
 pub use input::SettingsInputState;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use crate::ai_bridge::AiBridge;
@@ -143,38 +143,53 @@ impl Default for SettingsUi {
     }
 }
 
+fn noto_sans_jp_font_definitions() -> Option<&'static egui::FontDefinitions> {
+    static FONTS: OnceLock<Option<egui::FontDefinitions>> = OnceLock::new();
+    FONTS.get_or_init(|| {
+        let assets_dir = ene_config::paths::assets_dir();
+        let font_path = assets_dir.join("fonts").join("NotoSansJP-Regular.ttf");
+        if !font_path.exists() {
+            tracing::warn!("Font file does not exist at {:?}", font_path);
+            return None;
+        }
+        let font_data = match std::fs::read(&font_path) {
+            Ok(data) => data,
+            Err(error) => {
+                tracing::warn!(%error, path = ?font_path, "Failed to read font file");
+                return None;
+            }
+        };
+
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "NotoSansJP".to_owned(),
+            Arc::new(egui::FontData::from_owned(font_data)),
+        );
+        if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+            prop.insert(0, "NotoSansJP".to_owned());
+        }
+        if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+            mono.insert(0, "NotoSansJP".to_owned());
+        }
+        tracing::info!("Successfully loaded NotoSansJP-Regular.ttf for egui");
+        Some(fonts)
+    })
+    .as_ref()
+}
+
+/// Install NotoSansJP into a dedicated egui context. Each winit window
+/// owns its own [`egui::Context`], so fonts must be applied per context
+/// (not once process-wide).
+pub fn apply_egui_fonts(ctx: &egui::Context) {
+    if let Some(fonts) = noto_sans_jp_font_definitions() {
+        ctx.set_fonts(fonts.clone());
+    }
+}
+
 /// Apply the legacy dark theme tokens. The v1 Bevy build uses
 /// these exact RGB values; v2 keeps the visual identity stable so
 /// screenshots and docs that reference the colors stay valid.
 pub fn apply_egui_visuals(ctx: &egui::Context) {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        let assets_dir = ene_config::paths::assets_dir();
-        let font_path = assets_dir.join("fonts").join("NotoSansJP-Regular.ttf");
-        if font_path.exists() {
-            if let Ok(font_data) = std::fs::read(&font_path) {
-                let mut fonts = egui::FontDefinitions::default();
-                fonts.font_data.insert(
-                    "NotoSansJP".to_owned(),
-                    std::sync::Arc::new(egui::FontData::from_owned(font_data)),
-                );
-                if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                    prop.insert(0, "NotoSansJP".to_owned());
-                }
-                if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-                    mono.insert(0, "NotoSansJP".to_owned());
-                }
-                ctx.set_fonts(fonts);
-                tracing::info!("Successfully loaded NotoSansJP-Regular.ttf into egui Context");
-            } else {
-                tracing::warn!("Failed to read font file at {:?}", font_path);
-            }
-        } else {
-            tracing::warn!("Font file does not exist at {:?}", font_path);
-        }
-    });
-
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = egui::Color32::from_rgb(26, 28, 33);
     visuals.window_fill = egui::Color32::from_rgb(20, 22, 28);
