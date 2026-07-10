@@ -15,6 +15,7 @@ use crate::event::ai::{
 };
 #[cfg(target_os = "linux")]
 use crate::event::lifecycle::TickGtk;
+use crate::event::chat::OpenChat;
 use crate::event::settings::OpenSettings;
 use crate::events::{AiStreamUpdate, AppEvent};
 use crate::resource::{event_channels::EventChannels, exit::ExitRequested};
@@ -37,6 +38,7 @@ pub fn pump_legacy_events(
     mut finished: MessageWriter<AiStreamFinished>,
     mut emote: MessageWriter<EmoteToken>,
     mut open_settings: MessageWriter<OpenSettings>,
+    mut open_chat: MessageWriter<OpenChat>,
     #[cfg(target_os = "linux")] mut tick_gtk: MessageWriter<TickGtk>,
 ) {
     while let Ok(event) = channels.rx.try_recv() {
@@ -49,6 +51,7 @@ pub fn pump_legacy_events(
             &mut finished,
             &mut emote,
             &mut open_settings,
+            &mut open_chat,
         );
     }
     // Phase 7.5: publish a `TickGtk` every frame on Linux so the
@@ -69,6 +72,7 @@ fn translate_event(
     finished: &mut MessageWriter<AiStreamFinished>,
     emote: &mut MessageWriter<EmoteToken>,
     open_settings: &mut MessageWriter<OpenSettings>,
+    open_chat: &mut MessageWriter<OpenChat>,
 ) {
     match event {
         AppEvent::Quit => {
@@ -79,6 +83,9 @@ fn translate_event(
         }
         AppEvent::Tray(crate::events::TrayAction::OpenSettings { page }) => {
             open_settings.write(OpenSettings { page });
+        }
+        AppEvent::Tray(crate::events::TrayAction::OpenChat) => {
+            open_chat.write(OpenChat);
         }
         AppEvent::Ai(AiStreamUpdate::TextDelta(text)) => {
             text_delta.write(AiTextDelta(text));
@@ -142,6 +149,7 @@ mod tests {
         world.init_resource::<Messages<AiUserInputRequested>>();
         world.init_resource::<Messages<EmoteToken>>();
         world.init_resource::<Messages<OpenSettings>>();
+        world.init_resource::<Messages<OpenChat>>();
         #[cfg(target_os = "linux")]
         world.init_resource::<Messages<crate::event::lifecycle::TickGtk>>();
         (world, tx)

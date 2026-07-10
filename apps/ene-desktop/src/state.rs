@@ -151,6 +151,14 @@ impl AppState {
         q.iter(self.app.world()).next()
     }
 
+    pub fn chat_bevy_entity(&mut self) -> Option<bevy_ecs::entity::Entity> {
+        let mut q = self.app.world_mut().query_filtered::<
+            bevy_ecs::entity::Entity,
+            bevy_ecs::prelude::With<crate::component::chat::ChatWindow>,
+        >();
+        q.iter(self.app.world()).next()
+    }
+
     /// Borrow the bevy `World` mutably for UI render / action
     /// dispatch sites. Phase 5+ reads / writes UI components
     /// through this handle.
@@ -249,6 +257,57 @@ impl AppState {
             .world()
             .get::<crate::component::ui::UiStateComponent>(entity)
             .expect("UiStateComponent not on UI entity")
+    }
+
+    pub fn chat_bevy_state_mut(
+        &mut self,
+    ) -> bevy_ecs::change_detection::Mut<'_, crate::component::chat::ChatStateComponent> {
+        #[allow(clippy::expect_used)]
+        let entity = self
+            .chat_bevy_entity()
+            .expect("Chat bevy entity not spawned; call app.update() first");
+        #[allow(clippy::expect_used)]
+        self.app
+            .world_mut()
+            .get_mut::<crate::component::chat::ChatStateComponent>(entity)
+            .expect("ChatStateComponent not on chat entity")
+    }
+
+    pub fn chat_bevy_state(&mut self) -> &crate::component::chat::ChatStateComponent {
+        #[allow(clippy::expect_used)]
+        let entity = self
+            .chat_bevy_entity()
+            .expect("Chat bevy entity not spawned; call app.update() first");
+        #[allow(clippy::expect_used)]
+        self.app
+            .world()
+            .get::<crate::component::chat::ChatStateComponent>(entity)
+            .expect("ChatStateComponent not on chat entity")
+    }
+
+    /// Reconcile the chat message list from the actor history snapshot.
+    pub fn reconcile_chat_history_if_needed(&mut self) {
+        let Some(entity) = self.chat_bevy_entity() else {
+            return;
+        };
+        let needs = self
+            .app
+            .world()
+            .get::<crate::component::chat::ChatStateComponent>(entity)
+            .is_some_and(|chat| chat.0.needs_history_reconcile || chat.0.messages.is_empty());
+        if !needs {
+            return;
+        }
+        let Ok(snapshot) = self.ai.get_snapshot_blocking() else {
+            return;
+        };
+        if let Some(mut chat) = self
+            .app
+            .world_mut()
+            .get_mut::<crate::component::chat::ChatStateComponent>(entity)
+        {
+            chat.0.sync_from_history(&snapshot.history);
+        }
     }
 }
 

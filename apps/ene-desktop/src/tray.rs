@@ -30,6 +30,7 @@ use tray_icon::{Icon, MouseButton, TrayIconBuilder, TrayIconEvent};
 use crate::events::{AppEvent, AppEventSender, TrayAction};
 
 const SETTINGS_MENU_ID: &str = "ene.settings";
+const CHAT_MENU_ID: &str = "ene.chat";
 const QUIT_MENU_ID: &str = "ene.quit";
 const TOOLTIP: &str = "ene";
 
@@ -95,10 +96,17 @@ impl TrayHandle {
 fn build_menu() -> Menu {
     let menu = Menu::new();
     let settings_label = crate::i18n::settings();
+    let chat_label = crate::i18n::tray_chat();
     let quit_label = crate::i18n::quit();
     let settings_item = MenuItem::with_id(SETTINGS_MENU_ID, settings_label, true, None);
+    let chat_item = MenuItem::with_id(CHAT_MENU_ID, chat_label, true, None);
     let quit_item = MenuItem::with_id(QUIT_MENU_ID, quit_label, true, None);
-    let _ = menu.append_items(&[&settings_item, &PredefinedMenuItem::separator(), &quit_item]);
+    let _ = menu.append_items(&[
+        &settings_item,
+        &chat_item,
+        &PredefinedMenuItem::separator(),
+        &quit_item,
+    ]);
     menu
 }
 
@@ -270,6 +278,7 @@ fn pump_tray_events(event_tx: &AppEventSender) {
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             let action = match event.id.as_ref() {
                 SETTINGS_MENU_ID => Some(TrayAction::OpenSettings { page: None }),
+                CHAT_MENU_ID => Some(TrayAction::OpenChat),
                 QUIT_MENU_ID => Some(TrayAction::Quit),
                 _ => None,
             };

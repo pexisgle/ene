@@ -28,7 +28,9 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel};
 
+use crate::acquire_error::AcquireError;
 use crate::ai_bridge::AiBridge;
+use crate::chat_ui::ChatEguiWindow;
 use crate::events::AppEventSender;
 use crate::gpu::pick_format_and_alpha;
 use crate::settings::CharacterSettings;
@@ -43,6 +45,7 @@ pub struct Runtime {
     transparent: bool,
     char_window: Option<CharacterWindow>,
     ui_window: Option<UiWindow>,
+    chat_egui_window: Option<ChatEguiWindow>,
     last_cursor_physical: Option<PhysicalPosition<f64>>,
     last_frame_instant: Option<Instant>,
     /// Lazily-initialized clock for the emotion pipeline. The
@@ -85,6 +88,7 @@ impl Runtime {
             transparent: true,
             char_window: None,
             ui_window: None,
+            chat_egui_window: None,
             last_cursor_physical: None,
             last_frame_instant: None,
             emotion_clock: None,
@@ -143,6 +147,59 @@ impl Runtime {
             self.state.ui_bevy_state_mut().0.settings_window_visible = false;
             // Re-create model: Drop the window entirely to work around Wayland/winit 0.30 unmap bugs.
             self.ui_window = None;
+        }
+    }
+
+    fn create_chat_window(&mut self, event_loop: &ActiveEventLoop) {
+        let mut chat_attrs = WindowAttributes::default()
+            .with_title(crate::i18n::chat_window_title())
+            .with_inner_size(LogicalSize::new(400.0, 600.0))
+            .with_resizable(true);
+        if let Some(monitor) = event_loop.primary_monitor() {
+            let monitor_size = monitor.size();
+            let width = 400.0;
+            let height = 600.0;
+            let x = monitor_size.width as f64 - width - 16.0;
+            let y = monitor_size.height as f64 - height - 48.0;
+            chat_attrs = chat_attrs.with_position(PhysicalPosition::new(x.max(0.0) as i32, y.max(0.0) as i32));
+        }
+        let chat_w = match event_loop.create_window(chat_attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                tracing::error!("Failed to create chat window: {e}");
+                return;
+            }
+        };
+        let chat_size = chat_w.inner_size();
+        match ChatEguiWindow::new(
+            chat_w,
+            &self.state.gpu.instance,
+            &self.state.gpu.adapter,
+            &self.state.gpu.device,
+            chat_size,
+        ) {
+            Ok(cw) => {
+                let visible = self.state.chat_bevy_state().0.chat_window_visible;
+                cw.window.set_visible(visible);
+                if visible {
+                    cw.window.request_redraw();
+                }
+                self.chat_egui_window = Some(cw);
+            }
+            Err(e) => tracing::error!("Failed to create ChatEguiWindow: {e}"),
+        }
+    }
+
+    fn show_chat_window(&mut self) {
+        if !self.state.chat_bevy_state().0.chat_window_visible {
+            self.state.chat_bevy_state_mut().0.chat_window_visible = true;
+        }
+    }
+
+    fn hide_chat_window(&mut self) {
+        if self.state.chat_bevy_state().0.chat_window_visible {
+            self.state.chat_bevy_state_mut().0.chat_window_visible = false;
+            self.chat_egui_window = None;
         }
     }
 }
@@ -294,6 +351,12 @@ impl ApplicationHandler for Runtime {
         if visible {
             self.create_ui_window(event_loop);
         }
+
+        let chat_visible = self.state.chat_bevy_state().0.chat_window_visible;
+        if chat_visible {
+            self.create_chat_window(event_loop);
+            self.state.reconcile_chat_history_if_needed();
+        }
     }
 
     fn window_event(
@@ -312,9 +375,16 @@ impl ApplicationHandler for Runtime {
             .as_ref()
             .map(|w| w.window.id() == window_id)
             .unwrap_or(false);
+        let is_chat = self
+            .chat_egui_window
+            .as_ref()
+            .map(|w| w.window.id() == window_id)
+            .unwrap_or(false);
 
         if is_ui {
             self.handle_ui_window_event(event_loop, event);
+        } else if is_chat {
+            self.handle_chat_window_event(event_loop, event);
         } else if is_char {
             self.handle_char_window_event(event_loop, event);
         }
@@ -458,14 +528,59 @@ impl Runtime {
                 tracing::error!("[ene-desktop] char surface hit a fatal error; exiting event loop");
                 event_loop.exit();
             }
-            // `Reconfigure` and `Timeout` are already
-            // handled inline inside render_char_frame
-            // and surface as Ok(()); the variants are
-            // only listed for completeness and not
-            // expected to reach this match.
             Err(AcquireError::Reconfigure | AcquireError::Timeout) => {}
         }
 
+        self.render_chat_frame(event_loop);
+        self.render_settings_frame(event_loop);
+
+        if self.char_surface_fatal {
+            event_loop.exit();
+        }
+    }
+
+    fn render_chat_frame(&mut self, event_loop: &ActiveEventLoop) {
+        let chat_visible = self.state.chat_bevy_state().0.chat_window_visible;
+        if chat_visible && self.chat_egui_window.is_none() {
+            self.create_chat_window(event_loop);
+            self.state.reconcile_chat_history_if_needed();
+        } else if self.state.chat_bevy_state().0.needs_history_reconcile {
+            self.state.reconcile_chat_history_if_needed();
+        }
+
+        let Some(cw) = self.chat_egui_window.as_mut() else {
+            return;
+        };
+        if cw.window.is_visible() != Some(chat_visible) {
+            cw.window.set_visible(chat_visible);
+        }
+        if !chat_visible {
+            return;
+        }
+        cw.window.request_redraw();
+        let Some(chat_entity) = self.state.chat_bevy_entity() else {
+            return;
+        };
+        let AppState {
+            ref gpu,
+            ref ai,
+            ref mut app,
+            ..
+        } = self.state;
+        let bevy_world = app.world_mut();
+        match cw.render_frame(&gpu.device, &gpu.queue, ai, bevy_world, chat_entity) {
+            Ok(_) => {}
+            Err(e) => match e {
+                AcquireError::Reconfigure => {
+                    cw.reconfigure(&self.state.gpu.device, cw.window.inner_size());
+                }
+                AcquireError::Timeout => {}
+                AcquireError::Fatal => event_loop.exit(),
+            },
+        }
+    }
+
+    fn render_settings_frame(&mut self, event_loop: &ActiveEventLoop) {
         let visible = self.state.ui_bevy_state().0.settings_window_visible;
         if visible && self.ui_window.is_none() {
             self.create_ui_window(event_loop);
@@ -535,9 +650,6 @@ impl Runtime {
                     }
                 }
             }
-        }
-        if self.char_surface_fatal {
-            event_loop.exit();
         }
     }
 
@@ -706,6 +818,20 @@ impl Runtime {
                             self.hide_settings_window();
                         } else {
                             self.show_settings_window(event_loop);
+                        }
+                    } else if key_code_pressed(&event) == Some(winit::keyboard::KeyCode::F2) {
+                        let visible = self.state.chat_bevy_state().0.chat_window_visible;
+                        if visible {
+                            self.hide_chat_window();
+                        } else {
+                            self.show_chat_window();
+                            if self.chat_egui_window.is_none() {
+                                self.create_chat_window(event_loop);
+                            }
+                            self.state.reconcile_chat_history_if_needed();
+                            if let Some(cw) = self.chat_egui_window.as_ref() {
+                                cw.window.request_redraw();
+                            }
                         }
                     } else if key_code_pressed(&event) == Some(winit::keyboard::KeyCode::F3) {
                         let mut ui_state = self.state.ui_bevy_state_mut();
@@ -1168,6 +1294,38 @@ impl Runtime {
             WindowEvent::KeyboardInput { .. } => {
                 if let Some(NamedKey::Escape) = key_pressed(&event) {
                     self.hide_settings_window();
+                }
+            }
+            WindowEvent::RedrawRequested => {}
+            _ => {}
+        }
+    }
+
+    fn handle_chat_window_event(&mut self, _event_loop: &ActiveEventLoop, event: WindowEvent) {
+        let Some(cw) = self.chat_egui_window.as_mut() else {
+            return;
+        };
+
+        if let WindowEvent::CloseRequested = event {
+            self.hide_chat_window();
+            return;
+        }
+
+        let response = cw.egui_state.on_window_event(&cw.window, &event);
+        if response.repaint {
+            cw.window.request_redraw();
+        }
+        if response.consumed {
+            return;
+        }
+        match event {
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                cw.reconfigure(&self.state.gpu.device, cw.window.inner_size());
+                cw.window.request_redraw();
+            }
+            WindowEvent::KeyboardInput { .. } => {
+                if let Some(NamedKey::Escape) = key_pressed(&event) {
+                    self.hide_chat_window();
                 }
             }
             WindowEvent::RedrawRequested => {}
@@ -1700,10 +1858,4 @@ impl UiWindow {
         frame.present();
         Ok(())
     }
-}
-
-enum AcquireError {
-    Reconfigure,
-    Timeout,
-    Fatal,
 }

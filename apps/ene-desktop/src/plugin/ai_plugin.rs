@@ -12,8 +12,9 @@ use bevy_ecs::prelude::*;
 
 use crate::schedule::AppSet;
 use crate::system::ui_consumers::{
-    apply_ai_permission_system, apply_ai_text_deltas_system, apply_ai_user_input_system,
-    apply_emote_tokens_system, apply_emotions_system, open_settings_system,
+    apply_ai_permission_system, apply_ai_stream_finished_system, apply_ai_text_deltas_system,
+    apply_ai_user_input_system, apply_emote_tokens_system, apply_emotions_system,
+    open_chat_system, open_settings_system,
 };
 
 #[derive(Default)]
@@ -25,7 +26,9 @@ impl Plugin for AiPlugin {
             Update,
             (
                 open_settings_system,
+                open_chat_system,
                 apply_ai_text_deltas_system,
+                apply_ai_stream_finished_system,
                 apply_ai_permission_system,
                 apply_ai_user_input_system,
                 apply_emotions_system,

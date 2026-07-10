@@ -5,10 +5,13 @@
 //! [`AppEvent`] bus.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+mod acquire_error;
 mod ai_bridge;
 mod app;
 mod character;
 mod character_state;
+mod chat_state;
+mod chat_ui;
 mod component;
 mod event;
 mod events;

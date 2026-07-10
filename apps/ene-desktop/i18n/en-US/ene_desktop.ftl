@@ -16,6 +16,13 @@ empty-parentheses = (empty)
 settings = Settings
 quit = Quit
 send = Send
+tray-chat = Chat
+chat-window-title = ene Chat
+chat-open-hint = Chat in the dedicated window (F2).
+chat-you = You
+chat-ene = Ene
+chat-waiting = waiting for AI…
+chat-empty-history = No messages yet. Say hello!
 
 # Graphics
 graphics = Graphics

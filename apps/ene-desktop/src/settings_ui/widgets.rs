@@ -62,14 +62,13 @@ pub enum SettingsAction {
     DebugFpsUp,
     LanguageDown,
     LanguageUp,
-    SendAiChat,
 }
 
 pub fn apply_action(
     action: SettingsAction,
     settings: &mut CharacterSettings,
     animation: &mut AnimationControl,
-    ai: &Arc<AiBridge>,
+    _ai: &Arc<AiBridge>,
     world: &mut World,
     ui_entity: Entity,
     emotion_queue: Option<&mut EmotionQueue>,
@@ -214,9 +213,6 @@ pub fn apply_action(
             settings.graphics.debug_fps = cycle_debug_fps(settings.graphics.debug_fps, 1);
             settings.mark_dirty();
         }
-        SettingsAction::SendAiChat => {
-            send_ai_chat(settings, ai, world, ui_entity);
-        }
         SettingsAction::LanguageDown => {
             settings.language = crate::settings::cycle_language(settings.language, -1);
             crate::i18n::select_language(settings.language);
@@ -246,23 +242,6 @@ fn cycle_index(index: usize, len: usize, step: isize) -> usize {
 
 fn adjust_f32(value: &mut f32, delta: f32) {
     *value += delta;
-}
-
-fn send_ai_chat(
-    _settings: &mut CharacterSettings,
-    ai: &Arc<AiBridge>,
-    world: &mut World,
-    ui_entity: Entity,
-) {
-    if let Some(mut ui_state) = world.get_mut::<UiStateComponent>(ui_entity) {
-        let user_input = ui_state.0.ai_chat_input.trim().to_string();
-        if user_input.is_empty() {
-            return;
-        }
-        ai.run(user_input);
-        ui_state.0.ai_chat_input.clear();
-        ui_state.0.ai_latest_response.clear();
-    }
 }
 
 pub fn format_fps_label(lang: crate::settings::Language, fps: u32) -> String {

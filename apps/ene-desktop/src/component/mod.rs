@@ -11,6 +11,7 @@
 //! - [`ui`] — UI window, page, input drafts (added in Phase 5).
 //! - [`physics`] — rigid-body / collider handles (added in Phase 4).
 pub mod character;
+pub mod chat;
 pub mod physics;
 pub mod transform;
 pub mod ui;

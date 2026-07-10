@@ -21,6 +21,7 @@
 //! - `DebugPlugin` (deferred — see plan)
 pub mod ai_plugin;
 pub mod character_plugin;
+pub mod chat_plugin;
 pub mod physics_plugin;
 pub mod platform_plugin;
 pub mod tray_plugin;

@@ -107,7 +107,7 @@ impl AiBridge {
     }
 
     /// Forward a `PermissionDecision` for the request
-    /// currently sitting in `UiState::pending_permission`.
+    /// currently sitting in `ChatState::pending_permission`.
     pub fn answer_permission(
         &self,
         request_id: impl Into<ene_core::RequestId>,
@@ -119,7 +119,7 @@ impl AiBridge {
     }
 
     /// Forward a `UserInputResponse` for the request
-    /// currently sitting in `UiState::pending_user_input`.
+    /// currently sitting in `ChatState::pending_user_input`.
     pub fn answer_user_input(
         &self,
         request_id: impl Into<ene_core::RequestId>,

@@ -18,7 +18,6 @@ pub struct SettingsInputState {
     pub ai_runtime_rules: String,
     pub ai_base_url: String,
     pub ai_api_key: String,
-    pub ai_chat_input: String,
     pub ai_memory_enabled: bool,
     pub ai_embedding_provider: String,
     pub ai_embedding_model: String,
@@ -44,7 +43,7 @@ impl SettingsInputState {
     pub fn sync_from_settings(
         &mut self,
         settings: &CharacterSettings,
-        ui_state: &crate::settings::UiState,
+        _ui_state: &crate::settings::UiState,
     ) {
         self.look_at_strength = format!("{:.2}", settings.character_state.look_at_strength);
         self.model_scale = format!("{:.2}", settings.character_state.model_scale);
@@ -60,7 +59,6 @@ impl SettingsInputState {
             .unwrap_or_default();
         self.ai_base_url = provider.base_url.clone();
         self.ai_api_key = provider.api_key.inline.clone();
-        self.ai_chat_input = ui_state.ai_chat_input.clone();
         let mem = settings
             .ai
             .ai

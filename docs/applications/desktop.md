@@ -18,9 +18,9 @@ cargo run -p ene-desktop -- /path/to/character.vrm /path/to/animation.vrma
 ## Architecture
 
 The winit `Runtime` (`apps/ene-desktop/src/runtime.rs`) is an
-`ApplicationHandler` that owns two winit windows (character +
-settings) and their `wgpu::Surface`s. On every `about_to_wait` it
-runs the full bevy schedule:
+`ApplicationHandler` that owns three winit windows (character,
+dedicated chat, and settings) and their `wgpu::Surface`s. On every
+`about_to_wait` it runs the full bevy schedule:
 
 ```rust
 fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -44,8 +44,8 @@ returns the runtime:
   `update_char_window_cursor_and_hittest`; the bevy-side
   `update_cursor_state_system` is a no-op kept as a slot for
   a future `PointerMoved`-based migration;
-* acquires + encodes + presents the character frame and the
-  egui settings frame;
+* acquires + encodes + presents the character frame, the chat
+  window, and the egui settings frame;
 * schedules the next winit wake-up via
   `set_control_flow(WaitUntil(...))` based on
   `settings.graphics.target_fps`.
@@ -61,6 +61,7 @@ The bevy `App` is configured by `DesktopPlugins` in
 | `UiPlugin` | `plugin/ui_plugin.rs` | Spawns the `SettingsUiBundle` entity in `Startup`. |
 | `PlatformPlugin` | `plugin/platform_plugin.rs` | Per-frame cursor state, input-region refresh, click-through. |
 | `TrayPlugin` | `plugin/tray_plugin.rs` | Linux-only `tick_gtk_system` in `Last` (drain-only, no actual icon logic). |
+| `ChatPlugin` | `plugin/chat_plugin.rs` | Spawns the `ChatUiBundle` entity in `Startup`. |
 | `AiPlugin` | `plugin/ai_plugin.rs` | Adds the `system::ui_consumers` systems in `Update`. |
 
 The schedule (`apps/ene-desktop/src/schedule.rs`) has six sets:
@@ -115,20 +116,37 @@ tokio EneActor (ene-core)
           → pump_legacy_events (First/EventDispatch)
             → Messages<AiTextDelta> / Messages<AiPermissionRequested> / …
               → apply_ai_text_deltas_system / apply_ai_permission_system / … (Update)
-                → UiStateComponent / CharacterSettings
+                → ChatStateComponent / UiStateComponent / CharacterSettings
 ```
+
+### Chat window (#109)
+
+User conversation lives in a dedicated egui window (`400 × 600`,
+bottom-right by default), not in the settings AI tab.
+
+| Control | Action |
+|---------|--------|
+| F2 | Toggle chat window |
+| Tray → Chat | Show chat window |
+| Enter | Send message (Shift+Enter inserts newline) |
+
+Streaming text, permission prompts, and user-input dialogs are
+handled on the chat window. History is reconciled from
+`EneStateSnapshot.history` when the window opens and after each
+completed turn.
 
 ### Message types
 
-The 13 messages registered by `CorePlugin`:
+The messages registered by `CorePlugin` include:
 
 | Message | Source | Consumer |
 |---------|--------|----------|
-| `AiTextDelta` | `pump_legacy_events` | `apply_ai_text_deltas_system` |
-| `AiStreamFinished` | `pump_legacy_events` | (consumed by the AI page itself) |
-| `AiPermissionRequested` | `pump_legacy_events` | `apply_ai_permission_system` |
-| `AiUserInputRequested` | `pump_legacy_events` | `apply_ai_user_input_system` |
-| `EmoteToken` | `pump_legacy_events` | `apply_emotions_system` |
+| `AiTextDelta` | `pump_legacy_events` | `apply_ai_text_deltas_system` (chat entity) |
+| `AiStreamFinished` | `pump_legacy_events` | `apply_ai_stream_finished_system` |
+| `AiPermissionRequested` | `pump_legacy_events` | `apply_ai_permission_system` (opens chat) |
+| `AiUserInputRequested` | `pump_legacy_events` | `apply_ai_user_input_system` (opens chat) |
+| `EmoteToken` | `pump_legacy_events` | `apply_emote_tokens_system` |
+| `OpenChat` | `pump_legacy_events` (tray) | `open_chat_system` |
 | `PointerMoved` | `pump_window_events` | `update_cursor_state_system` (no-op; `device_query` is the cursor source of truth) |
 | `PointerButton` | `pump_window_events` | (drag / future systems) |
 | `KeyboardKey` | `pump_window_events` | (settings hotkey future) |
@@ -143,6 +161,7 @@ The 13 messages registered by `CorePlugin`:
 | Property | Value |
 |----------|-------|
 | Character size | driven by `settings.graphics.character_size` |
+| Chat size | 400 × 600 (dedicated chat window) |
 | UI size | 460 × 620 (settings window) |
 | Z-order | Always on top |
 | Transparency | Composite alpha (OS-dependent) |

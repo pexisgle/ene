@@ -38,6 +38,7 @@ pub enum TrayAction {
     OpenSettings {
         page: Option<crate::settings_ui::PageKind>,
     },
+    OpenChat,
     Quit,
 }
 

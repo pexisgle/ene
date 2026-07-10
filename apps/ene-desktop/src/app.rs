@@ -22,8 +22,10 @@ use crate::event::{
     ui_action::SettingsActionEvent,
 };
 use crate::events::AppEventReceiver;
+use crate::event::chat::OpenChat;
 use crate::plugin::ai_plugin::AiPlugin;
 use crate::plugin::character_plugin::CharacterPlugin;
+use crate::plugin::chat_plugin::ChatPlugin;
 use crate::plugin::physics_plugin::PhysicsPlugin;
 use crate::plugin::platform_plugin::PlatformPlugin;
 use crate::plugin::tray_plugin::TrayPlugin;
@@ -49,6 +51,7 @@ impl PluginGroup for DesktopPlugins {
             .add(CharacterPlugin)
             .add(PhysicsPlugin)
             .add(UiPlugin)
+            .add(ChatPlugin)
             .add(PlatformPlugin)
             .add(TrayPlugin)
             .add(AiPlugin)
@@ -100,6 +103,7 @@ pub fn build_app(
     app.add_message::<AiUserInputRequested>();
     app.add_message::<EmoteToken>();
     app.add_message::<OpenSettings>();
+    app.add_message::<OpenChat>();
     app.add_message::<SettingsActionEvent>();
     app.add_message::<TickGtk>();
     app

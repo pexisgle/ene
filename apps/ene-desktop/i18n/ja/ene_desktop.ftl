@@ -16,6 +16,13 @@ empty-parentheses = (空)
 settings = 設定
 quit = 終了
 send = 送信
+tray-chat = チャット
+chat-window-title = ene チャット
+chat-open-hint = チャットは専用ウィンドウで行えます（F2）。
+chat-you = あなた
+chat-ene = エネ
+chat-waiting = AIの応答を待っています…
+chat-empty-history = まだメッセージがありません。話しかけてみてください。
 
 # Graphics
 graphics = グラフィックス

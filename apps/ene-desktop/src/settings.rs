@@ -267,20 +267,6 @@ pub struct UiState {
     pub show_input_region_debug: bool,
     /// The name of the bone collider currently hovered, if any.
     pub hovered_bone_name: Option<String>,
-    pub ai_chat_input: String,
-    pub ai_latest_response: String,
-    /// A pending permission request (Yes / No / Always) from the AI
-    /// bridge. Populated when the runtime observes
-    /// `AiStreamUpdate::PermissionRequired`. The settings UI is
-    /// auto-shown when this transitions from `None` → `Some(_)`.
-    pub pending_permission: Option<PendingPermission>,
-    /// A pending interactive question (multi-select + free-text)
-    /// from the AI bridge. Mirrors
-    /// `EneStreamEvent::UserInputRequired`.
-    pub pending_user_input: Option<PendingUserInput>,
-    /// One per [`UserInputPrompt::items`] entry, used as scratch
-    /// state for the question dialog.
-    pub user_input_drafts: Vec<QuestionDraft>,
     /// Cached memory-journal rows for desktop debug UX (#93).
     pub memory_journal_rows: Vec<MemoryJournalRow>,
     /// Cached active commitments for desktop debug UX (#93).

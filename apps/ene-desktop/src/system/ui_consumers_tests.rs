@@ -1,26 +1,12 @@
-//! Phase 6/7 tests for the new platform / tray / AI consumer
-//! systems. The 7 new tests cover:
-//!
-//! * `open_settings_system` flips `settings_window_visible` to
-//!   `true` and respects the `page` field.
-//! * `apply_ai_text_deltas_system` concatenates `AiTextDelta`
-//!   messages into `ai_latest_response`.
-//! * `apply_ai_permission_system` populates `pending_permission`
-//!   and auto-shows the AI page.
-//! * `apply_ai_user_input_system` allocates the
-//!   `user_input_drafts` slots and auto-shows the AI page.
-//! * `pump_legacy_events` with `AppEvent::EmoteToken` enqueues
-//!   the command into `Messages<EmoteToken>`.
-//! * The `PlatformPlugin` registers its `CursorState` resource
-//!   and `update_cursor_state_system` consumes a
-//!   `PointerMoved` message.
-//! * `apply_emotions_system` drains the bevy `UiEmotionQueue`
-//!   into the `EmotionPipelineState` resource.
+//! Phase 6/7 tests for platform / tray / AI consumer systems.
+
 use bevy_app::App;
 use bevy_ecs::prelude::*;
 
+use crate::component::chat::{ChatStateComponent, ChatUiBundle, ChatWindow};
 use crate::component::ui::{SettingsUiBundle, UiStartedAt, UiStateComponent, UiWindow};
-use crate::event::ai::{AiPermissionRequested, AiTextDelta, AiUserInputRequested, EmoteToken};
+use crate::event::ai::{AiPermissionRequested, AiStreamFinished, AiTextDelta, AiUserInputRequested, EmoteToken};
+use crate::event::chat::OpenChat;
 use crate::event::input::PointerMoved;
 use crate::event::settings::OpenSettings;
 use crate::events::AppEvent;
@@ -34,8 +20,8 @@ use crate::settings_ui::PageKind;
 use crate::system::event_pump::pump_legacy_events;
 use crate::system::platform::cursor::update_cursor_state_system;
 use crate::system::ui_consumers::{
-    apply_ai_permission_system, apply_ai_text_deltas_system, apply_ai_user_input_system,
-    open_settings_system,
+    apply_ai_permission_system, apply_ai_stream_finished_system, apply_ai_text_deltas_system,
+    apply_ai_user_input_system, open_chat_system, open_settings_system,
 };
 use ene_core::RequestId;
 use ene_tool_proto::UserInputPrompt;
@@ -48,9 +34,15 @@ fn spawn_ui(world: &mut World) {
     });
 }
 
+fn spawn_chat(world: &mut World) {
+    world.spawn(ChatUiBundle::default());
+}
+
 fn init_messages(world: &mut World) {
     world.init_resource::<Messages<OpenSettings>>();
+    world.init_resource::<Messages<OpenChat>>();
     world.init_resource::<Messages<AiTextDelta>>();
+    world.init_resource::<Messages<AiStreamFinished>>();
     world.init_resource::<Messages<AiPermissionRequested>>();
     world.init_resource::<Messages<AiUserInputRequested>>();
     world.init_resource::<Messages<PointerMoved>>();
@@ -61,7 +53,9 @@ fn run_consumers(world: &mut World) {
     schedule.add_systems(
         (
             open_settings_system,
+            open_chat_system,
             apply_ai_text_deltas_system,
+            apply_ai_stream_finished_system,
             apply_ai_permission_system,
             apply_ai_user_input_system,
         )
@@ -111,28 +105,84 @@ fn open_settings_stays_visible_on_second_send() {
 }
 
 #[test]
-fn apply_ai_text_deltas_concatenates_in_order() {
+fn open_chat_sets_chat_visible() {
     let mut world = World::new();
     init_messages(&mut world);
-    spawn_ui(&mut world);
+    spawn_chat(&mut world);
+
+    {
+        let mut chat = world
+            .query_filtered::<&mut ChatStateComponent, With<ChatWindow>>()
+            .iter_mut(&mut world)
+            .next()
+            .expect("chat entity");
+        chat.0.chat_window_visible = false;
+    }
+
+    world.write_message(OpenChat);
+    run_consumers(&mut world);
+
+    let chat = world
+        .query_filtered::<&ChatStateComponent, With<ChatWindow>>()
+        .iter(&world)
+        .next()
+        .expect("chat entity");
+    assert!(chat.0.chat_window_visible);
+}
+
+#[test]
+fn apply_ai_text_deltas_appends_to_streaming_assistant() {
+    let mut world = World::new();
+    init_messages(&mut world);
+    spawn_chat(&mut world);
 
     world.write_message(AiTextDelta("hello ".into()));
     world.write_message(AiTextDelta("world".into()));
     run_consumers(&mut world);
 
-    let ui = world
-        .query_filtered::<&UiStateComponent, With<UiWindow>>()
+    let chat = world
+        .query_filtered::<&ChatStateComponent, With<ChatWindow>>()
         .iter(&world)
         .next()
-        .expect("UI entity");
-    assert_eq!(ui.0.ai_latest_response, "hello world");
+        .expect("chat entity");
+    assert_eq!(chat.0.messages.len(), 1);
+    assert_eq!(chat.0.messages[0].content, "hello world");
+    assert!(chat.0.messages[0].is_streaming);
 }
 
 #[test]
-fn apply_ai_permission_populates_pending_and_focuses() {
+fn apply_ai_stream_finished_marks_reconcile() {
     let mut world = World::new();
     init_messages(&mut world);
-    spawn_ui(&mut world);
+    spawn_chat(&mut world);
+
+    world.write_message(AiTextDelta("done".into()));
+    world.write_message(AiStreamFinished);
+    run_consumers(&mut world);
+
+    let chat = world
+        .query_filtered::<&ChatStateComponent, With<ChatWindow>>()
+        .iter(&world)
+        .next()
+        .expect("chat entity");
+    assert!(!chat.0.messages[0].is_streaming);
+    assert!(chat.0.needs_history_reconcile);
+}
+
+#[test]
+fn apply_ai_permission_populates_pending_and_shows_chat() {
+    let mut world = World::new();
+    init_messages(&mut world);
+    spawn_chat(&mut world);
+
+    {
+        let mut chat = world
+            .query_filtered::<&mut ChatStateComponent, With<ChatWindow>>()
+            .iter_mut(&mut world)
+            .next()
+            .expect("chat entity");
+        chat.0.chat_window_visible = false;
+    }
 
     world.write_message(AiPermissionRequested {
         request_id: RequestId::new("req-1"),
@@ -142,27 +192,27 @@ fn apply_ai_permission_populates_pending_and_focuses() {
     });
     run_consumers(&mut world);
 
-    let ui = world
-        .query_filtered::<&UiStateComponent, With<UiWindow>>()
+    let chat = world
+        .query_filtered::<&ChatStateComponent, With<ChatWindow>>()
         .iter(&world)
         .next()
-        .expect("UI entity");
-    let perm =
-        ui.0.pending_permission
-            .as_ref()
-            .expect("permission present");
+        .expect("chat entity");
+    let perm = chat
+        .0
+        .pending_permission
+        .as_ref()
+        .expect("permission present");
     assert_eq!(perm.action, "read");
     assert_eq!(perm.target, "file.txt");
     assert_eq!(perm.description.as_deref(), Some("needs approval"));
-    assert_eq!(ui.0.focused_page, Some(PageKind::Ai));
-    assert!(ui.0.settings_window_visible);
+    assert!(chat.0.chat_window_visible);
 }
 
 #[test]
 fn apply_ai_user_input_allocates_drafts() {
     let mut world = World::new();
     init_messages(&mut world);
-    spawn_ui(&mut world);
+    spawn_chat(&mut world);
 
     let item = ene_tool_proto::QuestionItem {
         question: "Pick a colour".into(),
@@ -177,23 +227,24 @@ fn apply_ai_user_input_allocates_drafts() {
     });
     run_consumers(&mut world);
 
-    let ui = world
-        .query_filtered::<&UiStateComponent, With<UiWindow>>()
+    let chat = world
+        .query_filtered::<&ChatStateComponent, With<ChatWindow>>()
         .iter(&world)
         .next()
-        .expect("UI entity");
-    let pui =
-        ui.0.pending_user_input
-            .as_ref()
-            .expect("user input present");
+        .expect("chat entity");
+    let pui = chat
+        .0
+        .pending_user_input
+        .as_ref()
+        .expect("user input present");
     assert_eq!(pui.prompt.items.len(), 3);
-    assert_eq!(ui.0.user_input_drafts.len(), 3);
-    for draft in &ui.0.user_input_drafts {
+    assert_eq!(chat.0.user_input_drafts.len(), 3);
+    for draft in &chat.0.user_input_drafts {
         assert_eq!(draft.text, "");
         assert!(draft.selected.is_none());
         assert!(!draft.skipped);
     }
-    assert_eq!(ui.0.focused_page, Some(PageKind::Ai));
+    assert!(chat.0.chat_window_visible);
 }
 
 #[test]
@@ -205,9 +256,10 @@ fn emote_token_emits_message_via_pump() {
     world.init_resource::<Messages<AiTextDelta>>();
     world.init_resource::<Messages<AiPermissionRequested>>();
     world.init_resource::<Messages<AiUserInputRequested>>();
-    world.init_resource::<Messages<crate::event::ai::AiStreamFinished>>();
+    world.init_resource::<Messages<AiStreamFinished>>();
     world.init_resource::<Messages<EmoteToken>>();
     world.init_resource::<Messages<OpenSettings>>();
+    world.init_resource::<Messages<OpenChat>>();
     #[cfg(target_os = "linux")]
     world.init_resource::<Messages<crate::event::lifecycle::TickGtk>>();
 
@@ -243,24 +295,12 @@ fn platform_plugin_provides_cursor_state_and_pointer_moved_is_reserved() {
     schedule.add_systems(update_cursor_state_system);
     schedule.run(app.world_mut());
 
-    // Phase 8: device_query is the source of truth for the
-    // per-frame click-through test. `update_cursor_state_system`
-    // is intentionally a no-op — PointerMoved is reserved for
-    // a future migration that routes cursor state through
-    // bevy end-to-end. The message must not leak into
-    // `CursorState`.
     assert!(app.world().resource::<CursorState>().physical.is_none());
     assert!(app.world().resource::<Messages<PointerMoved>>().len() == 1);
 }
 
 #[test]
-fn mark_gtk_tick_removed_in_phase_75() {
-    // `mark_gtk_tick` was retired in Phase 7.5; the pump now
-    // publishes a typed `Messages<TickGtk>` and the consumer
-    // system is `tick_gtk_system` (Linux only). This test is
-    // intentionally a no-op stub so the test count stays
-    // stable across the migration.
-}
+fn mark_gtk_tick_removed_in_phase_75() {}
 
 #[test]
 fn question_draft_default_is_blank() {

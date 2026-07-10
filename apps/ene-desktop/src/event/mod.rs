@@ -4,6 +4,7 @@
 //! that the `First`-stage pump system emits and `Update` / `Last`
 //! consumer systems read.
 pub mod ai;
+pub mod chat;
 pub mod input;
 pub mod lifecycle;
 pub mod settings;
