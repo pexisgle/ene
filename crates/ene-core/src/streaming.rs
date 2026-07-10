@@ -1,3 +1,4 @@
+use crate::empty_response_log::{EmptyResponseContext, log_empty_response_if_needed};
 use crate::handle::{ConversationEntry, EneEvent, TerminalReason};
 use crate::message_builder::{MessageBuildContext, build_messages};
 use crate::types::RequestId;
@@ -379,6 +380,22 @@ async fn run_stream_legacy(ctx: StreamContext) -> ConversationSession {
                     &assistant_content,
                 );
             }
+
+            log_empty_response_if_needed(EmptyResponseContext {
+                pipeline: "legacy",
+                config: &config,
+                session_id: session_id.as_str(),
+                character_id: &card_name,
+                user_input: &user_input,
+                round,
+                tool_count: tools.len(),
+                messages: &messages,
+                raw_assistant_content: &assistant_content,
+                display_buffer: &session.display.display_buffer,
+                emotion_tokens: &[],
+                suppress_stream_tokens: false,
+                prompt_meta: None,
+            });
 
             session.finalize_response();
             session.record_assistant_response();

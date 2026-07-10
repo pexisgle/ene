@@ -8,6 +8,7 @@ use ene_config::PromptLibrary;
 use ene_provider::LlmToolCallChunk;
 use tokio_stream::StreamExt;
 
+use crate::empty_response_log::{EmptyResponseContext, log_empty_response_if_needed};
 use crate::handle::{EneEvent, TerminalReason};
 use crate::message_builder::build_cognitive_output_contract;
 use crate::streaming::{
@@ -563,6 +564,22 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_session::Con
                     }
                 }
             }
+
+            log_empty_response_if_needed(EmptyResponseContext {
+                pipeline: "cognitive",
+                config: &config,
+                session_id: session_id.as_str(),
+                character_id: &card_name,
+                user_input: &user_input,
+                round,
+                tool_count: tools.len(),
+                messages: &messages,
+                raw_assistant_content: &assistant_content,
+                display_buffer: &session.display.display_buffer,
+                emotion_tokens: &accumulated_emotion_tokens,
+                suppress_stream_tokens,
+                prompt_meta: Some(&composed.meta),
+            });
 
             session.finalize_response();
             session.record_assistant_response();

@@ -15,6 +15,7 @@ pub mod error;
 pub mod handle;
 /// Typed memory recall execution for prompt context.
 mod memory_recall;
+mod empty_response_log;
 /// System prompt and message assembly helpers.
 ///
 /// Kept `pub` (rather than `pub(crate)`) because `ene-cli` calls the
