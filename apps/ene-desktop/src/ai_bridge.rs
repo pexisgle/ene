@@ -15,7 +15,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use ene_core::{EneEvent, EneEventReceiver, EneHandle, PermissionDecision, UserInputResponse};
+use ene_core::{
+    BootstrapOptions, EneEvent, EneEventReceiver, EneHandle, PermissionDecision, UserInputResponse,
+    bootstrap_runtime,
+};
+use ene_config::EneConfig;
 
 use crate::events::{AiStreamUpdate, AppEvent, AppEventSender};
 use crate::memory_journal::{MemoryJournalAction, MemoryJournalPresenter};
@@ -40,7 +44,15 @@ impl AiBridge {
     ///
     /// The `event_tx` sender is cloned into the background task; the
     /// receiver is held by the runtime.
-    pub fn new(event_tx: AppEventSender, bootstrap_handle: &tokio::runtime::Handle) -> Self {
+    ///
+    /// `config` must be the same [`EneConfig`] already loaded by
+    /// [`crate::settings::CharacterSettings::discover`] so the actor
+    /// does not reload settings from disk a second time.
+    pub fn new(
+        event_tx: AppEventSender,
+        bootstrap_handle: &tokio::runtime::Handle,
+        config: EneConfig,
+    ) -> Self {
         let handle = EneHandle::new();
         let receiver = handle.subscribe();
         let processing = Arc::new(AtomicBool::new(false));
@@ -53,22 +65,18 @@ impl AiBridge {
         // Background drain: EneEvent -> AppEvent
         bootstrap_handle.spawn(pump_events(receiver, event_tx.clone(), processing.clone()));
 
-        // Background bootstrap: load_config + load_character
+        // Phase 3: runtime warmup (reconfigure, character, tool index, CCv3 sync)
         bootstrap_handle.spawn({
             let handle = handle.clone();
             async move {
-                match handle.load_config().await {
-                    Ok(config) => {
-                        // Write configuration schemas after runtime initialization
-                        ene_config::write_schemas(&ene_config::paths::assets_dir());
-
-                        if let Err(e) = handle.load_character(&config.character).await {
-                            tracing::warn!("[Ene] Failed to load character: {e}");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("[Ene] Failed to load config: {e}");
-                    }
+                if let Err(e) =
+                    bootstrap_runtime(&handle, BootstrapOptions::with_config(config)).await
+                {
+                    tracing::warn!(
+                        component = "AiBridge",
+                        error = %e,
+                        "Runtime bootstrap failed"
+                    );
                 }
             }
         });

@@ -100,7 +100,7 @@ impl Default for ToolRagOptions {
             use_rerank: true,
             rerank_candidates: 24,
             min_similarity: 0.25,
-            background_index_on_startup: false,
+            background_index_on_startup: true,
             forced: vec![
                 // These are string literals, so `ToolName::new` (which asserts
                 // validity) is the appropriate constructor — a `try_new` +

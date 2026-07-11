@@ -1,16 +1,12 @@
-use ene_core::{EneCoreError, EneHandle, MemoryConfig};
+use ene_core::{BootstrapOptions, EneCoreError, EneHandle, MemoryConfig, bootstrap_runtime};
 
-/// Initializes the actor, loading configuration and the active character card.
+/// Initializes the actor via the shared bootstrap path.
 pub async fn init() -> Result<EneHandle, EneCoreError> {
     tracing::info!("[Runtime] Initializing AI runtime...");
 
     let handle = EneHandle::new();
 
-    let config = handle.load_config().await?;
-
-    if let Err(e) = handle.load_character(&config.character).await {
-        tracing::warn!(error = %e, "[Runtime] Failed to load character card");
-    }
+    let config = bootstrap_runtime(&handle, BootstrapOptions::from_disk()).await?;
 
     tracing::info!("[Runtime] AI runtime initialized successfully.");
 
@@ -24,8 +20,6 @@ pub async fn init() -> Result<EneHandle, EneCoreError> {
                 .display()
         );
     }
-
-    ene_config::write_schemas(&ene_config::paths::assets_dir());
 
     Ok(handle)
 }

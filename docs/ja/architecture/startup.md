@@ -9,34 +9,36 @@
 として `bevy_ecs 0.19` / `bevy_app 0.19` を、VRM レンダリング
 として `ene-vrm` を使用します。
 
+### 起動フェーズ
+
+デスクトップ起動は 4 つの明示的フェーズに分かれています
+(フェーズ 1–2 は `apps/ene-desktop/src/startup.rs` が統括):
+
+| フェーズ | タイミング | 場所 | 処理内容 |
+|---------|-----------|------|---------|
+| **1 — 初回起動** | インストールごとに 1 回 (release) | `startup::first_launch_setup` → `ene_config::ensure_resource_dirs` | 同梱デフォルトアセットを OS アプリデータディレクトリへコピー |
+| **2 — アプリ起動** | プロセス起動ごと (同期) | `startup::load_desktop_settings`, `startup::init_app_state`, `Runtime::new` の eager Startup | `settings.json` を 1 回ロード (schema も 1 回)、キャラクター探索、GPU + ECS 初期化 |
+| **3 — ランタイムウォームアップ** | 起動ごと (非同期) | `AiBridge` → `ene_core::bootstrap_runtime` | `reconfigure`、キャラクターカード読み込み、ツール embedding バックグラウンド index (#108)、CCv3 character-memory sync |
+| **4 — グラフィックス準備** | winit サーフェス作成後 | `Runtime::resumed` | トレイ、ウィンドウ、VRM GPU 初期化、クリックスルー |
+
+CLI も `apps/ene-cli/src/config.rs` 内の
+`ene_core::bootstrap_runtime` で同じフェーズ 3 を使用します
+(bootstrap 内でディスクから config をロード)。
+
 ### 起動シーケンス
 
 ```rust
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,wgpu_core=warn,wgpu_hal=warn,naga=warn"));
-    fmt().with_env_filter(filter).init();
+    // … tracing + tokio runtime …
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let handle = runtime.handle().clone();
-    let _guard = runtime.enter();
-
-    let (assets_dir, default_vrm, _default_vrma) = state::resolve_paths()?;
+    let paths = startup::first_launch_setup()?;
     let gpu = pollster::block_on(gpu::GpuContext::new())?;
-    let settings = settings::CharacterSettings::discover(&assets_dir, default_vrm);
-    let (app_state, event_tx) = state::AppState::with_channel(gpu, settings, &handle);
-
-    let event_loop = winit::event_loop::EventLoop::new()?;
-    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+    let settings = startup::load_desktop_settings(&paths);
+    let (app_state, event_tx) = startup::init_app_state(gpu, settings, &handle);
 
     let mut app = runtime::Runtime::new(app_state, event_tx);
-    event_loop.run_app(&mut app).expect("winit event loop failed");
-
-    drop(_guard);
-    runtime.shutdown_timeout(std::time::Duration::from_millis(500));
-    Ok(())
+    event_loop.run_app(&mut app)?;
+    // … tokio の graceful shutdown …
 }
 ```
 
@@ -120,7 +122,12 @@ bevy `App` は `apps/ene-desktop/src/app.rs` で構成されます:
    `AppEvent` (`AiStreamUpdate`, `EmoteToken`,
    `SessionSplit`, `StatusChanged` 等) にマッピングして
    クロスサブシステムの `AppEventSender` に push する。
-3. `processing: Arc<AtomicBool>` フラグを所有し、
+3. フェーズ 3 のランタイムウォームアップを
+   [`ene_core::bootstrap_runtime`](../../crates/ene-core/src/bootstrap.rs)
+   経由で非同期実行する (`CharacterSettings::discover` で既に
+   ロード済みの config を渡す — ディスクの二重ロードや schema の
+   重複書き込みなし)。
+4. `processing: Arc<AtomicBool>` フラグを所有し、
    `EneCommand::Run` でセット、`Done` / `Failed` で
    クリアする。
 
@@ -212,9 +219,10 @@ EneEvent::SpecialToken → AiBridge → AppEvent::EmoteToken
 main()
   ├── clap: Args 解析
   ├── config::init()
-  │   ├── ensure_resource_dirs()
-  │   ├── settings.json 読み込み
-  │   └── EneHandle::new() → アクターを生成
+  │   ├── EneHandle::new() → アクターを生成
+  │   └── ene_core::bootstrap_runtime (config ロード、reconfigure、
+  │       キャラクター読み込み、ツール index ウォームアップ、
+  │       CCv3 memory sync)
   └── 通常モード:
       ├── AppContext { handle: EneHandle, commands: Vec<Arc<dyn CliCommand>> }
       └── repl::run(ctx) → 対話ループ

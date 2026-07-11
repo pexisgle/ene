@@ -8,34 +8,35 @@ winit event loop. **No Bevy plugins or Bevy renderer are used** —
 only `bevy_ecs 0.19` / `bevy_app 0.19` for the scheduler, and
 `ene-vrm` for VRM rendering.
 
+### Startup Phases
+
+Desktop startup is split into four explicit phases
+(`apps/ene-desktop/src/startup.rs` orchestrates phases 1–2):
+
+| Phase | When | Where | Work |
+|-------|------|-------|------|
+| **1 — First launch** | Once per install (release) | `startup::first_launch_setup` → `ene_config::ensure_resource_dirs` | Copy bundled default assets into the OS app-data directory |
+| **2 — App launch** | Every process start (sync) | `startup::load_desktop_settings`, `startup::init_app_state`, eager `Runtime::new` Startup schedule | Load `settings.json` once (schema write once), discover characters, init GPU + ECS |
+| **3 — Runtime warmup** | Every start (async) | `AiBridge` → `ene_core::bootstrap_runtime` | `reconfigure`, load character card, background tool embedding index (#108), CCv3 character-memory sync |
+| **4 — Graphics ready** | After winit surface exists | `Runtime::resumed` | Tray, windows, VRM GPU init, platform click-through |
+
+CLI uses the same Phase 3 path via `ene_core::bootstrap_runtime` in
+`apps/ene-cli/src/config.rs` (loads config from disk inside bootstrap).
+
 ### Boot Sequence
 
 ```rust
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,wgpu_core=warn,wgpu_hal=warn,naga=warn"));
-    fmt().with_env_filter(filter).init();
+    // … tracing + tokio runtime …
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let handle = runtime.handle().clone();
-    let _guard = runtime.enter();
-
-    let (assets_dir, default_vrm, _default_vrma) = state::resolve_paths()?;
+    let paths = startup::first_launch_setup()?;
     let gpu = pollster::block_on(gpu::GpuContext::new())?;
-    let settings = settings::CharacterSettings::discover(&assets_dir, default_vrm);
-    let (app_state, event_tx) = state::AppState::with_channel(gpu, settings, &handle);
-
-    let event_loop = winit::event_loop::EventLoop::new()?;
-    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+    let settings = startup::load_desktop_settings(&paths);
+    let (app_state, event_tx) = startup::init_app_state(gpu, settings, &handle);
 
     let mut app = runtime::Runtime::new(app_state, event_tx);
-    event_loop.run_app(&mut app).expect("winit event loop failed");
-
-    drop(_guard);
-    runtime.shutdown_timeout(std::time::Duration::from_millis(500));
-    Ok(())
+    event_loop.run_app(&mut app)?;
+    // … graceful tokio shutdown …
 }
 ```
 
@@ -114,7 +115,11 @@ The schedule (`apps/ene-desktop/src/schedule.rs`) has six sets:
    `AppEvent` (`AiStreamUpdate`, `EmoteToken`, `SessionSplit`,
    `StatusChanged`, etc.) and pushes them into the cross-subsystem
    `AppEventSender`.
-3. Owns a `processing: Arc<AtomicBool>` flag, set on
+3. Spawns Phase 3 runtime warmup via
+   [`ene_core::bootstrap_runtime`](../../crates/ene-core/src/bootstrap.rs)
+   using the config already loaded by `CharacterSettings::discover`
+   (no second disk load, no duplicate schema write).
+4. Owns a `processing: Arc<AtomicBool>` flag, set on
    `EneCommand::Run` and cleared on `Done` / `Failed`.
 
 User input flows back through `AiBridge::run` /
@@ -204,9 +209,9 @@ and the full file layout in
 main()
   ├── clap: Args parse
   ├── config::init()
-  │   ├── ensure_resource_dirs()
-  │   ├── Load settings.json
-  │   └── EneHandle::new() → spawns actor
+  │   ├── EneHandle::new() → spawns actor
+  │   └── ene_core::bootstrap_runtime (load config, reconfigure,
+  │       load character, tool index warmup, CCv3 memory sync)
   └── Normal mode:
       ├── AppContext { handle: EneHandle, commands: Vec<Arc<dyn CliCommand>> }
       └── repl::run(ctx) → interactive loop

@@ -174,7 +174,7 @@ pub struct EneConfig {
       "use_rerank": true,
       "rerank_candidates": 24,
       "min_similarity": 0.25,
-      "background_index_on_startup": false,
+      "background_index_on_startup": true,
       "forced": [
         "utility.question",
         "utility.todo_add",
@@ -262,7 +262,7 @@ pub struct EneConfig {
     "use_rerank": true,
     "rerank_candidates": 24,
     "min_similarity": 0.25,
-    "background_index_on_startup": false,
+    "background_index_on_startup": true,
     "forced": ["utility.question", "utility.todo_add", "utility.get_current_time"],
     "weights": {
       "summary": 1.0,
@@ -285,7 +285,7 @@ pub struct EneConfig {
 | `use_rerank` | bool | `true` | LLM ベースのリランキングを実行 |
 | `rerank_candidates` | int | `24` | リランキングに渡す候補数 |
 | `min_similarity` | float | `0.25` | ツールが考慮される最小類似度スコア |
-| `background_index_on_startup` | bool | `false` | 起動時にバックグラウンドタスクでインデックスをウォーム |
+| `background_index_on_startup` | bool | `true` | ランタイム bootstrap (フェーズ 3) でツール embedding index をウォームアップ |
 | `forced` | string[] | `["utility.question", "utility.todo_add", "utility.get_current_time"]` | 関連性に関わらず常に含めるツール |
 | `weights` | object | (下記参照) | マルチベクトル類似度計算のフィールド別重み |
 

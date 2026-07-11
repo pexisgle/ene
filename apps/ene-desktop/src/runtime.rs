@@ -205,6 +205,10 @@ impl Runtime {
 }
 
 impl ApplicationHandler for Runtime {
+    /// Phase 4 (GraphicsReady): create winit windows, init GPU surfaces,
+    /// load the VRM, and set up platform-specific click-through / tray.
+    /// Runs after Phase 2 (sync app launch) and in parallel with Phase 3
+    /// (async runtime warmup in [`crate::ai_bridge::AiBridge`]).
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::Poll);
 

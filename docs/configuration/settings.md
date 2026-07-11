@@ -174,7 +174,7 @@ pub struct EneConfig {
       "use_rerank": true,
       "rerank_candidates": 24,
       "min_similarity": 0.25,
-      "background_index_on_startup": false,
+      "background_index_on_startup": true,
       "forced": [
         "utility.question",
         "utility.todo_add",
@@ -262,7 +262,7 @@ Tool RAG dynamically selects only user-input-relevant tools to reduce token cons
     "use_rerank": true,
     "rerank_candidates": 24,
     "min_similarity": 0.25,
-    "background_index_on_startup": false,
+    "background_index_on_startup": true,
     "forced": ["utility.question", "utility.todo_add", "utility.get_current_time"],
     "weights": {
       "summary": 1.0,
@@ -285,7 +285,7 @@ Tool RAG dynamically selects only user-input-relevant tools to reduce token cons
 | `use_rerank` | bool | `true` | Use LLM-based reranking on the candidate set |
 | `rerank_candidates` | int | `24` | Number of candidates to pass to the reranker |
 | `min_similarity` | float | `0.25` | Minimum similarity score for a tool to be considered |
-| `background_index_on_startup` | bool | `false` | Warm the index at startup in a background task |
+| `background_index_on_startup` | bool | `true` | Warm the tool embedding index during runtime bootstrap (Phase 3) |
 | `forced` | string[] | `["utility.question", "utility.todo_add", "utility.get_current_time"]` | Tools always included regardless of relevance |
 | `weights` | object | (see below) | Per-field weighting for multi-vector similarity |
 

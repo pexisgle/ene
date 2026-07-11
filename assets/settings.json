@@ -21,6 +21,8 @@
     },
     "memory": {
       "write_every_turn": true,
+      "llm_extraction_enabled": false,
+      "semantic_dedup_enabled": true,
       "hybrid_search": true,
       "decay_enabled": true,
       "default_forgetting_half_life_days": 30.0,
@@ -148,7 +150,7 @@
     "max_rounds": 10,
     "mcp_servers": [],
     "rag": {
-      "background_index_on_startup": false,
+      "background_index_on_startup": true,
       "enabled": true,
       "final_n": 6,
       "forced": [

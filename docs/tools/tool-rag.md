@@ -40,7 +40,7 @@ In `settings.json` under `tools`:
       "use_rerank": true,
       "rerank_candidates": 24,
       "min_similarity": 0.25,
-      "background_index_on_startup": false,
+      "background_index_on_startup": true,
       "forced_tools": [
         "utility.question",
         "utility.todo_add",
@@ -71,7 +71,7 @@ In `settings.json` under `tools`:
 | `use_rerank` | bool | `true` | Use LLM reranking on top candidates |
 | `rerank_candidates` | int | `24` | Number of candidates for LLM reranking |
 | `min_similarity` | float | `0.25` | Minimum similarity threshold |
-| `background_index_on_startup` | bool | `false` | Index tools on startup |
+| `background_index_on_startup` | bool | `true` | Warm the tool embedding index in a background task during runtime bootstrap (Phase 3). Avoids first-turn latency (#108). |
 | `forced_tools` | string[] | `["utility.question", "utility.todo_add", "utility.get_current_time"]` | Always include these tools |
 
 ## Multi-Vector Embedding

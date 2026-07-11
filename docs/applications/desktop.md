@@ -7,6 +7,9 @@ calls `app.update()` every frame.
 
 ## Startup
 
+Boot orchestration lives in `apps/ene-desktop/src/startup.rs`
+(four phases — see [Startup Flow](../architecture/startup.md)).
+
 ```bash
 cargo run -p ene-desktop
 # Specify VRM:

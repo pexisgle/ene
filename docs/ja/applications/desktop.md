@@ -7,6 +7,9 @@ winit + `wgpu` + `bevy_ecs 0.19` + `bevy_app 0.19` アプリ。
 
 ## 起動
 
+起動オーケストレーションは `apps/ene-desktop/src/startup.rs` に
+あります (4 フェーズ — [起動フロー](../architecture/startup.md) を参照)。
+
 ```bash
 cargo run -p ene-desktop
 # 特定の VRM を指定:

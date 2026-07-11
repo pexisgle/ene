@@ -98,6 +98,13 @@ pub enum EneCommand {
     },
     /// Invalidate the Tool RAG index, forcing re-embedding on next query.
     InvalidateToolIndex,
+    /// Persist the CCv3 character-memory content hash after startup warmup.
+    SetCcv3MemoryHash {
+        /// Combined lorebook + style content hash.
+        hash: u64,
+        /// Confirmation channel.
+        reply: oneshot::Sender<()>,
+    },
 }
 
 /// Events emitted from the actor to all consumers via broadcast channel.
@@ -240,6 +247,18 @@ impl MemoryQueryHandle {
     #[must_use]
     pub fn is_enabled(&self) -> bool {
         self.store.is_some() && self.embedder.is_some()
+    }
+
+    /// Returns the backing memory store when memory is configured.
+    #[must_use]
+    pub fn store(&self) -> Option<&Arc<ene_memory::MemoryStore>> {
+        self.store.as_ref()
+    }
+
+    /// Returns the embedding provider when memory is configured.
+    #[must_use]
+    pub fn embedder(&self) -> Option<&Arc<dyn ene_provider::EmbeddingProvider>> {
+        self.embedder.as_ref()
     }
 
     /// Embed a text query for similarity search.
@@ -873,6 +892,14 @@ impl EneHandle {
             .send(EneCommand::InvalidateToolIndex)
             .map_err(|_| ActorDeadError)
     }
+
+    /// Store the CCv3 character-memory hash after startup warmup so the
+    /// first conversation turn skips redundant re-indexing.
+    pub async fn set_ccv3_memory_hash(&self, hash: u64) -> Result<(), EneCoreError> {
+        let (tx, rx) = oneshot::channel();
+        self.send(EneCommand::SetCcv3MemoryHash { hash, reply: tx });
+        rx.await.map_err(|_| EneCoreError::ChannelClosed)
+    }
 }
 
 impl Default for EneHandle {
@@ -1181,6 +1208,11 @@ impl EneActor {
             }
             EneCommand::InvalidateToolIndex => {
                 self.tool_rag = None;
+                true
+            }
+            EneCommand::SetCcv3MemoryHash { hash, reply } => {
+                self.session.memory.ccv3_memory_hash = Some(hash);
+                let _ = reply.send(());
                 true
             }
         }
@@ -1618,6 +1650,13 @@ impl EneActor {
 
         // Build the ToolRag pipeline from config.
         self.tool_rag = init_tool_rag(&self.config, &embedder, &self.session);
+
+        if let Some(rag) = &self.tool_rag
+            && rag.opts().background_index_on_startup
+        {
+            let specs = self.registry.list_tools();
+            rag.start_background_indexer(specs);
+        }
 
         Ok(())
     }

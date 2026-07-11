@@ -8,7 +8,6 @@
 //! Senders (clones of [`AppEventSender`](crate::events::AppEventSender))
 //! are passed to producers at construction time so they can push
 //! without holding a reference to the state.
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use bevy_app::App;
@@ -74,7 +73,8 @@ impl AppState {
         bootstrap_handle: &tokio::runtime::Handle,
     ) -> (Self, AppEventSender) {
         let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
-        let ai = Arc::new(AiBridge::new(tx.clone(), bootstrap_handle));
+        let config = settings.ai.ai.clone();
+        let ai = Arc::new(AiBridge::new(tx.clone(), bootstrap_handle, config));
         let character =
             CharacterRenderer::uninit(&settings.assets_dir, settings.current_character());
 
@@ -320,17 +320,6 @@ pub enum AppStateError {
     AssetsDir(String),
     #[error("Tokio runtime error: {0}")]
     Tokio(#[from] tokio::io::Error),
-}
-
-/// Read CLI overrides and return `(assets_dir, default_vrm,
-/// default_vrma)`. `assets_dir` comes from
-/// [`ene_config::ensure_resource_dirs`], which also creates the
-/// directory if missing.
-pub fn resolve_paths() -> Result<(PathBuf, String, String), AppStateError> {
-    let assets_dir =
-        ene_config::ensure_resource_dirs().map_err(|e| AppStateError::AssetsDir(e.to_string()))?;
-    let (default_vrm, default_vrma) = crate::settings::read_cli_paths();
-    Ok((assets_dir, default_vrm, default_vrma))
 }
 
 #[cfg(test)]

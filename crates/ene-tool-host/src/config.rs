@@ -72,7 +72,7 @@ impl Default for ToolRagConfig {
             use_rerank: true,
             rerank_candidates: 24,
             min_similarity: 0.25,
-            background_index_on_startup: false,
+            background_index_on_startup: true,
             forced: default_forced(),
             weights: FieldWeightsConfig::default(),
         }

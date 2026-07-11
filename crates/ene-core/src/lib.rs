@@ -11,6 +11,8 @@
 pub mod db_server;
 /// Core error types.
 pub mod error;
+/// Shared runtime bootstrap for application entry points.
+pub mod bootstrap;
 /// Actor-based runtime with message-passing architecture.
 pub mod handle;
 /// Typed memory recall execution for prompt context.
@@ -42,6 +44,11 @@ pub mod streaming;
 mod streaming_cognitive;
 /// Type-safe identifiers for runtime concepts.
 pub mod types;
+
+// ── Bootstrap ──
+/// Shared runtime initialization for desktop and CLI.
+#[doc(no_inline)]
+pub use bootstrap::{BootstrapOptions, bootstrap_runtime};
 
 // ── Actor types ──
 /// Actor handle, events, status, and state snapshot.

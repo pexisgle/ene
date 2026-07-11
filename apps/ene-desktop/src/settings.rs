@@ -358,9 +358,7 @@ pub struct CharacterSettings {
     pub language: Language,
     pub character_state: CharacterState,
     pub ai: AiConfig,
-    /// Shared with the AI bridge bootstrap task: that task loads
-    /// the on-disk config into a fresh `ConfigStore`, then the
-    /// runtime reads it back here via `load_from_file`.
+    /// Dirty-tracked config store shared with the settings UI for persistence.
     pub store: Arc<RwLock<ene_config::ConfigStore>>,
 }
 

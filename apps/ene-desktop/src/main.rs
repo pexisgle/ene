@@ -33,6 +33,7 @@ mod runtime;
 mod schedule;
 mod settings;
 mod settings_ui;
+mod startup;
 mod state;
 mod system;
 mod tray;
@@ -53,16 +54,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = runtime.handle().clone();
     let _guard = runtime.enter();
 
-    let (assets_dir, default_vrm, _default_vrma) = state::resolve_paths()?;
+    let paths = startup::first_launch_setup()?;
     tracing::info!(
         "ene-desktop starting: assets={}, default_vrm={}",
-        assets_dir.display(),
-        default_vrm
+        paths.assets_dir.display(),
+        paths.default_vrm
     );
 
     let gpu = pollster::block_on(gpu::GpuContext::new())?;
-    let settings = settings::CharacterSettings::discover(&assets_dir, default_vrm);
-    let (app_state, event_tx) = state::AppState::with_channel(gpu, settings, &handle);
+    let settings = startup::load_desktop_settings(&paths);
+    let (app_state, event_tx) = startup::init_app_state(gpu, settings, &handle);
 
     let event_loop = winit::event_loop::EventLoop::new()?;
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);

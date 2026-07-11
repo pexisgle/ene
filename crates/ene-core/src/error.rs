@@ -33,4 +33,7 @@ pub enum EneCoreError {
     /// Cognitive runtime error.
     #[error(transparent)]
     Cognition(#[from] ene_cognition::CognitionError),
+    /// Bootstrap misconfiguration or internal failure.
+    #[error("Bootstrap error: {0}")]
+    Bootstrap(String),
 }

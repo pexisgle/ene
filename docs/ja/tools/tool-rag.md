@@ -40,7 +40,7 @@ Vec<ToolSpec> → passed to LLM
       "use_rerank": true,
       "rerank_candidates": 24,
       "min_similarity": 0.25,
-      "background_index_on_startup": false,
+      "background_index_on_startup": true,
       "forced_tools": [
         "utility.question",
         "utility.todo_add",
@@ -71,7 +71,7 @@ Vec<ToolSpec> → passed to LLM
 | `use_rerank` | bool | `true` | 上位候補に対して LLM リランクを使用する |
 | `rerank_candidates` | int | `24` | LLM リランク対象の候補数 |
 | `min_similarity` | float | `0.25` | 最小類似度の閾値 |
-| `background_index_on_startup` | bool | `false` | 起動時にバックグラウンドでツールのインデックスを作成する |
+| `background_index_on_startup` | bool | `true` | ランタイム bootstrap (フェーズ 3) でバックグラウンドタスクによりツール embedding index をウォームアップする (#108 の初回ターン遅延を回避) |
 | `forced_tools` | string[] | `["utility.question", "utility.todo_add", "utility.get_current_time"]` | 常に含めるツール |
 
 ## マルチベクトル埋め込み (Multi-Vector Embedding)
