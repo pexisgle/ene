@@ -363,67 +363,67 @@ impl ActionSpec {
 }
 
 /// The structured, LLM-facing tool specification.
+///
+/// Per API v2 / #135 this is limited to the fields the model sees:
+/// `name`, `description`, and `parameters` (JSON Schema). Host-side RAG
+/// indexes from description (+ parameters text); a separate
+/// `ToolRagProfile` is deferred.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ToolSpec {
     /// Unique, validated tool name.
     pub name: ToolName,
-    /// Semantic version.
-    pub version: ToolVersion,
-    /// Short human-friendly name (e.g. "Read File").
-    pub display_name: String,
-    /// One-line summary used for embedding.
-    pub summary: String,
-    /// Full markdown description.
+    /// Full description shown to the LLM (and used for RAG embedding).
     pub description: String,
-    /// Category.
-    pub category: ToolCategory,
-    /// Structured keyword bag.
-    pub keywords: KeywordSet,
     /// JSON Schema (auto-derived by `schemars` from the args struct).
     pub parameters: serde_json::Value,
-    /// Example invocations.
-    #[serde(default)]
-    pub examples: Vec<ToolExample>,
-    /// Caveats the LLM should be aware of.
-    #[serde(default)]
-    pub caveats: Vec<String>,
-    /// Side effects classification.
-    pub side_effects: SideEffects,
-    /// Preconditions that must hold before invocation.
-    #[serde(default)]
-    pub preconditions: Vec<String>,
-    /// Names of related / complementary tools.
-    #[serde(default)]
-    pub related: Vec<ToolName>,
 }
 
 impl ToolSpec {
+    /// Construct an LLM-facing tool spec.
+    #[must_use]
+    pub fn new(
+        name: impl Into<ToolName>,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            parameters,
+        }
+    }
+
     /// Build a text representation of this spec for RAG embedding. The
     /// `field` parameter controls which fields are included.
+    ///
+    /// Negative-keyword embeddings are deferred with `ToolRagProfile`
+    /// (#135) and always return an empty string.
     #[must_use]
     pub fn embedding_text(&self, field: EmbeddingField) -> String {
         match field {
             EmbeddingField::Summary => {
-                format!("{}: {}", self.name.as_str(), self.summary)
+                let first_line = self
+                    .description
+                    .lines()
+                    .next()
+                    .unwrap_or(self.description.as_str())
+                    .trim();
+                if first_line.is_empty() {
+                    self.name.as_str().to_string()
+                } else {
+                    format!("{}: {first_line}", self.name.as_str())
+                }
             }
             EmbeddingField::Description => {
                 let mut out = format!("{}\n{}", self.name.as_str(), self.description);
-                if !self.keywords.is_empty() {
+                let params = self.parameters.to_string();
+                if params != "null" && params != "{}" {
                     out.push('\n');
-                    out.push_str(&format_keywords(&self.keywords));
+                    out.push_str(&params);
                 }
                 out
             }
-            EmbeddingField::Negative => {
-                if self.keywords.negative.is_empty() {
-                    return String::new();
-                }
-                format!(
-                    "{} NOT: {}",
-                    self.name.as_str(),
-                    self.keywords.negative.join(", ")
-                )
-            }
+            EmbeddingField::Negative => String::new(),
         }
     }
 }
@@ -432,11 +432,11 @@ impl ToolSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EmbeddingField {
-    /// Embed only `name + summary` (highest-signal, used for fast retrieval).
+    /// Embed only `name + first line of description` (highest-signal).
     Summary,
-    /// Embed the full description + keywords (used for ranking refinement).
+    /// Embed the full description + parameters JSON (ranking refinement).
     Description,
-    /// Embed the negative-keyword phrase (used for disambiguation).
+    /// Reserved for a future negative-keyword / `ToolRagProfile` channel (#135).
     Negative,
 }
 
@@ -450,23 +450,6 @@ impl EmbeddingField {
             Self::Negative => "negative",
         }
     }
-}
-
-fn format_keywords(k: &KeywordSet) -> String {
-    let mut parts = Vec::new();
-    if !k.primary.is_empty() {
-        parts.push(format!("Primary: {}", k.primary.join(", ")));
-    }
-    if !k.secondary.is_empty() {
-        parts.push(format!("Secondary: {}", k.secondary.join(", ")));
-    }
-    if !k.domain.is_empty() {
-        parts.push(format!("Domain: {}", k.domain.join(", ")));
-    }
-    if !k.negative.is_empty() {
-        parts.push(format!("Negative: {}", k.negative.join(", ")));
-    }
-    parts.join(" | ")
 }
 
 #[cfg(test)]
@@ -534,47 +517,23 @@ mod tests {
 
     #[test]
     fn tool_spec_embedding_text_summary() {
-        let s = ToolSpec {
-            name: ToolName::new("filesystem.read"),
-            version: ToolVersion::default(),
-            display_name: "Read File".into(),
-            summary: "Read a file".into(),
-            description: "Reads a file from disk and returns its contents.".into(),
-            category: ToolCategory::Filesystem,
-            keywords: KeywordSet::default(),
-            parameters: serde_json::json!({}),
-            examples: vec![],
-            caveats: vec![],
-            side_effects: SideEffects::ReadOnly,
-            preconditions: vec![],
-            related: vec![],
-        };
+        let s = ToolSpec::new(
+            ToolName::new("filesystem.read"),
+            "Read a file\nReads a file from disk and returns its contents.",
+            serde_json::json!({}),
+        );
         let t = s.embedding_text(EmbeddingField::Summary);
         assert_eq!(t, "filesystem.read: Read a file");
     }
 
     #[test]
-    fn tool_spec_embedding_text_negative() {
-        let s = ToolSpec {
-            name: ToolName::new("filesystem.read"),
-            version: ToolVersion::default(),
-            display_name: "Read File".into(),
-            summary: "Read a file".into(),
-            description: String::new(),
-            category: ToolCategory::Filesystem,
-            keywords: KeywordSet {
-                negative: vec!["write".into(), "delete".into()],
-                ..Default::default()
-            },
-            parameters: serde_json::json!({}),
-            examples: vec![],
-            caveats: vec![],
-            side_effects: SideEffects::ReadOnly,
-            preconditions: vec![],
-            related: vec![],
-        };
-        let t = s.embedding_text(EmbeddingField::Negative);
-        assert_eq!(t, "filesystem.read NOT: write, delete");
+    fn tool_spec_embedding_text_negative_deferred() {
+        let s = ToolSpec::new(
+            ToolName::new("filesystem.read"),
+            "Read a file",
+            serde_json::json!({}),
+        );
+        assert!(s.embedding_text(EmbeddingField::Negative).is_empty());
     }
 
     #[test]

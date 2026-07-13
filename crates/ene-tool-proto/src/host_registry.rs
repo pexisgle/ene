@@ -19,9 +19,14 @@ impl HostRegistry {
         Self::default()
     }
 
-    /// Register a tool provider. First-wins on name conflicts.
-    pub fn add_provider(&mut self, provider: Box<dyn ToolProvider>) {
+    /// Register a tool provider.
+    ///
+    /// # Errors
+    /// Returns [`ToolError::DuplicateName`] when the provider exposes a
+    /// name already registered by a previous provider (#135).
+    pub fn try_add_provider(&mut self, provider: Box<dyn ToolProvider>) -> Result<(), ToolError> {
         let idx = self.providers.len();
+        let mut pending = Vec::new();
         for spec in provider.list_specs() {
             // `spec.name` was built by the provider via
             // `ToolName::new` (compile-time-validated string
@@ -29,11 +34,27 @@ impl HostRegistry {
             // string is guaranteed valid; access via `as_str`
             // is a borrow, not a clone, so the registry stays
             // O(1) on add.
-            self.tool_index
-                .entry(spec.name.as_str().to_string())
-                .or_insert(idx);
+            let name = spec.name.as_str().to_string();
+            if self.tool_index.contains_key(&name) {
+                return Err(ToolError::DuplicateName { tool_name: name });
+            }
+            pending.push(name);
+        }
+        for name in pending {
+            self.tool_index.insert(name, idx);
         }
         self.providers.push(provider);
+        Ok(())
+    }
+
+    /// Register a tool provider.
+    ///
+    /// # Panics
+    /// Panics on name collision. Prefer [`try_add_provider`](Self::try_add_provider).
+    pub fn add_provider(&mut self, provider: Box<dyn ToolProvider>) {
+        if let Err(e) = self.try_add_provider(provider) {
+            panic!("HostRegistry::add_provider failed: {e}");
+        }
     }
 
     /// Returns all tool specs from all registered providers.
@@ -107,7 +128,7 @@ impl ToolProvider for HostRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{KeywordSet, SideEffects, ToolCategory, ToolVersion};
+    use crate::ToolName;
     use std::sync::{Arc, Mutex};
 
     struct MockProvider {
@@ -126,21 +147,11 @@ mod tests {
         }
 
         fn spec(&self) -> ToolSpec {
-            ToolSpec {
-                name: ToolName::new(format!("tool_{}", self.name)),
-                version: ToolVersion::default(),
-                display_name: format!("Tool {}", self.name),
-                summary: format!("Tool from {}", self.name),
-                description: format!("Tool from {}", self.name),
-                category: ToolCategory::Utility,
-                keywords: KeywordSet::default(),
-                parameters: serde_json::json!({}),
-                examples: vec![],
-                caveats: vec![],
-                side_effects: SideEffects::ReadOnly,
-                preconditions: vec![],
-                related: vec![],
-            }
+            ToolSpec::new(
+                ToolName::new(format!("tool_{}", self.name)),
+                format!("Tool from {}", self.name),
+                serde_json::json!({}),
+            )
         }
     }
 
@@ -187,6 +198,20 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"tool_alpha"));
         assert!(names.contains(&"tool_beta"));
+    }
+
+    #[test]
+    fn host_registry_duplicate_name_is_hard_error() {
+        let mut reg = HostRegistry::new();
+        reg.try_add_provider(Box::new(MockProvider::new("alpha")))
+            .unwrap();
+        let err = reg
+            .try_add_provider(Box::new(MockProvider::new("alpha")))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ToolError::DuplicateName { tool_name } if tool_name == "tool_alpha"
+        ));
     }
 
     #[tokio::test]

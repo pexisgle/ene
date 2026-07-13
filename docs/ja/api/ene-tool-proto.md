@@ -7,7 +7,7 @@
 
 ## 概要
 
-`ene-tool-proto` は、ホストランタイム（`ene-core` / `ene-tool-host`）とスタンドアロンのツールバイナリとの間でプロセス境界を越えるすべての型とヘルパーを定義します。IPC チャンネルの両サイドはこのクレートに依存しています。`ene-core` への依存がないため、ツールバイナリは完全なランタイムを引き込まずにこのクレートをリンクできます。
+`ene-tool-proto` は、ホストランタイム（`ene-runtime` / `ene-tool-host`）とスタンドアロンのツールバイナリとの間でプロセス境界を越えるすべての型とヘルパーを定義します。IPC チャンネルの両サイドはこのクレートに依存しています。`ene-runtime` への依存がないため、ツールバイナリは完全なランタイムを引き込まずにこのクレートをリンクできます。
 
 このクレートには3つの責務があります。
 
@@ -469,7 +469,7 @@ pub enum MultiAnswer {
 
 ## `IpcRequest`
 
-**コア**（`ene-core` / `ene-tool-host`）からツールバイナリへ送信されるメッセージです。
+**コア**（`ene-runtime` / `ene-tool-host`）からツールバイナリへ送信されるメッセージです。
 
 ```rust
 pub enum IpcRequest {
@@ -512,7 +512,7 @@ pub enum IpcRequest {
 
 ## `IpcResponse`
 
-ツールバイナリから**コア**（`ene-core` / `ene-tool-host`）へ返送されるメッセージです。
+ツールバイナリから**コア**（`ene-runtime` / `ene-tool-host`）へ返送されるメッセージです。
 
 ```rust
 pub enum IpcResponse {

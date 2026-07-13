@@ -88,6 +88,14 @@ pub enum EneToolProtoError {
         /// Why the name was rejected.
         reason: String,
     },
+    /// Two providers exposed the same public tool name.
+    ///
+    /// Name collision is a hard error at `HostRegistry::add_provider`
+    /// time — first-wins silent overwrite is not allowed (#135).
+    DuplicateName {
+        /// Colliding tool name.
+        tool_name: String,
+    },
     /// Invalid arguments were passed to a tool call.
     InvalidArguments {
         /// Description of what was invalid.
@@ -201,6 +209,9 @@ impl std::fmt::Display for EneToolProtoError {
             EneToolProtoError::NotFound { tool_name } => write!(f, "Tool not found: {tool_name}"),
             EneToolProtoError::InvalidName { reason } => {
                 write!(f, "Invalid tool name: {reason}")
+            }
+            EneToolProtoError::DuplicateName { tool_name } => {
+                write!(f, "Duplicate tool name: {tool_name}")
             }
             EneToolProtoError::InvalidArguments { message } => {
                 write!(f, "Invalid arguments: {message}")

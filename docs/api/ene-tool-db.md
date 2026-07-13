@@ -1,13 +1,13 @@
 # `ene-tool-db` — API Reference
 
 > **Crate:** `ene-tool-db`
-> **Role:** Typed CRUD database client for tool binaries — communicates with the `DbIpcServer` in `ene-core` via IPC.
+> **Role:** Typed CRUD database client for tool binaries — communicates with the `DbIpcServer` in `ene-runtime` via IPC.
 
 ---
 
 ## Overview
 
-Tool binaries must **not** link `ene-memory` directly. Instead, `ene-tool-db` provides a typed async client (`DbClient`) that speaks a length-prefixed JSON protocol to the `DbIpcServer` process running inside `ene-core`. The server enforces prefix-based access control so that each tool can only read and write tables whose name starts with its declared prefix (e.g. `fs_`, `utility_`).
+Tool binaries must **not** link `ene-store` directly. Instead, `ene-tool-db` provides a typed async client (`DbClient`) that speaks a length-prefixed JSON protocol to the `DbIpcServer` process running inside `ene-runtime`. The server enforces prefix-based access control so that each tool can only read and write tables whose name starts with its declared prefix (e.g. `fs_`, `utility_`).
 
 All connection state (the underlying socket, plus the socket path and auth token needed to [`reconnect`](#reconnect)) lives behind `&mut self`: every CRUD method takes `&mut DbClient` because each call is a synchronous request/response round-trip over a single stream, and `reconnect` needs exclusive access to replace that stream after the server restarts.
 
@@ -386,7 +386,7 @@ Pass a `Vec<DbOrderBy>` to `DbClient::select`; an empty `vec![]` means no explic
 
 ## Prefix Access Control
 
-The `DbIpcServer` in `ene-core` enforces the following rule for every request:
+The `DbIpcServer` in `ene-runtime` enforces the following rule for every request:
 
 > A tool may only access tables whose name begins with `<tool_prefix>_`.
 

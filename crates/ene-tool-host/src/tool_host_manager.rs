@@ -317,7 +317,7 @@ impl ToolHostManager {
             }
         }
 
-        let composite = Arc::new(CompositeToolRegistry::new(supervised_registries));
+        let composite = Arc::new(CompositeToolRegistry::try_new(supervised_registries)?);
 
         Ok(Self { composite })
     }
@@ -383,15 +383,32 @@ impl ToolHostManager {
                     }
                 }
             }
-            manager.add_registry(Arc::new(mcp));
+            manager.try_add_registry(Arc::new(mcp))?;
         }
 
         Ok(manager.into_registry())
     }
 
     /// Add a manual registry to the manager. Useful for testing or injecting custom MCP registries.
+    ///
+    /// # Errors
+    /// Propagates [`ToolHostError::DuplicateToolName`] when the registry
+    /// collides with an already-indexed tool name.
+    pub fn try_add_registry(
+        &mut self,
+        registry: Arc<dyn ToolRegistry>,
+    ) -> Result<(), ToolHostError> {
+        self.composite.try_add_registry(registry)
+    }
+
+    /// Add a manual registry to the manager.
+    ///
+    /// # Panics
+    /// Panics on name collision. Prefer [`try_add_registry`](Self::try_add_registry).
     pub fn add_registry(&mut self, registry: Arc<dyn ToolRegistry>) {
-        self.composite.add_registry(registry);
+        if let Err(e) = self.try_add_registry(registry) {
+            panic!("ToolHostManager::add_registry failed: {e}");
+        }
     }
 
     /// Consume the manager and return a unified [`CompositeToolRegistry`] containing all added registries.

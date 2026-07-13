@@ -88,7 +88,7 @@ message size: 64 MB. Protocol version: `IPC_PROTOCOL_VERSION = 1` (see
 > **Note:** The `with_store(store)` method shown in earlier drafts of
 > this doc no longer exists on `ToolHostManager`. Tool RAG wiring is
 > performed by `EneActor::reconfigure` via `init_tool_rag(config,
-> embedder, session)` (see `crates/ene-core/src/handle.rs`).
+> embedder, session)` (see `crates/ene-runtime/src/handle.rs`).
 
 ### Binary Discovery
 

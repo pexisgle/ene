@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ene_tool_common::ToolAction;
+use ene_tool_common::{ActionSetProvider, ToolAction};
 use ene_tool_proto::{ToolError, ToolProvider, ToolSpec};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -33,11 +33,9 @@ fn generate_web_search_schema() -> serde_json::Value {
 
 /// Built-in web tool provider.
 ///
-/// Exposes `webfetch` and `websearch` tools.
-/// Internally uses a dynamic list of actions implementing `ToolAction`.
+/// Exposes `webfetch` and `websearch` tools via [`ActionSetProvider`].
 pub struct WebToolProvider {
-    actions: Vec<Box<dyn ToolAction>>,
-    config: Arc<RwLock<WebSearchConfig>>,
+    inner: ActionSetProvider,
 }
 
 impl WebToolProvider {
@@ -79,7 +77,18 @@ impl WebToolProvider {
             Box::new(crate::action::WebSearchAction::new(config.clone())),
         ];
 
-        Self { actions, config }
+        let config_for_set = config;
+        let inner = ActionSetProvider::new(actions)
+            .with_set_config_hook(move |value| {
+                if let Ok(cfg) = serde_json::from_value::<WebSearchConfig>(value.clone())
+                    && let Ok(mut guard) = config_for_set.write()
+                {
+                    *guard = cfg;
+                }
+            })
+            .with_config_schema_hook(|| Some(generate_web_search_schema()));
+
+        Self { inner }
     }
 }
 
@@ -92,32 +101,22 @@ impl Default for WebToolProvider {
 #[async_trait]
 impl ToolProvider for WebToolProvider {
     fn list_specs(&self) -> Vec<ToolSpec> {
-        self.actions.iter().map(|a| a.definition()).collect()
+        self.inner.list_specs()
     }
+
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
-        for action in &self.actions {
-            if action.name() == name {
-                return action.execute(arguments).await;
-            }
-        }
-        Err(ToolError::NotFound {
-            tool_name: name.to_string(),
-        })
+        self.inner.call_tool(name, arguments).await
     }
 
     fn set_config(&self, config: &serde_json::Value) {
-        if let Ok(cfg) = serde_json::from_value::<WebSearchConfig>(config.clone())
-            && let Ok(mut guard) = self.config.write()
-        {
-            *guard = cfg;
-        }
+        self.inner.set_config(config);
     }
 
     fn config_schema(&self) -> Option<serde_json::Value> {
-        Some(generate_web_search_schema())
+        self.inner.config_schema()
     }
 
-    fn set_session_id(&self, _session_id: &str) {
-        // Web tools are stateless
+    fn set_session_id(&self, session_id: &str) {
+        self.inner.set_session_id(session_id);
     }
 }

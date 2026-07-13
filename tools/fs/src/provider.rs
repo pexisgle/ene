@@ -1,16 +1,20 @@
 use async_trait::async_trait;
-use ene_tool_common::ToolAction;
+use ene_tool_common::{ActionSetProvider, ToolAction};
 use ene_tool_proto::{ToolError, ToolProvider, ToolSpec};
 use std::sync::{Arc, RwLock};
 
 use crate::utils::sandbox::Sandbox;
 
+/// Built-in filesystem tool provider.
+///
+/// Dispatch is handled by [`ActionSetProvider`]; sandbox / permission state
+/// is threaded through hooks (#135 / #139).
 pub struct FsToolProvider {
-    actions: Vec<Box<dyn ToolAction>>,
-    sandbox: Arc<RwLock<Option<Arc<Sandbox>>>>,
+    inner: ActionSetProvider,
 }
 
 impl FsToolProvider {
+    /// Creates a new filesystem tool provider with all FS actions registered.
     pub fn new() -> Self {
         let sandbox = Arc::new(RwLock::new(None));
         let actions: Vec<Box<dyn ToolAction>> = vec![
@@ -28,7 +32,46 @@ impl FsToolProvider {
             Box::new(crate::action::shell::ShellAction::new(sandbox.clone())),
             Box::new(crate::action::undo::UndoAction::new(sandbox.clone())),
         ];
-        Self { actions, sandbox }
+
+        let session_sandbox = sandbox.clone();
+        let set_sandbox = sandbox.clone();
+        let approve_sandbox = sandbox.clone();
+        let allow_sandbox = sandbox;
+
+        let inner = ActionSetProvider::new(actions)
+            .with_session_id_hook(move |session_id| {
+                let guard = session_sandbox
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(s) = guard.as_ref() {
+                    s.set_session_id(session_id);
+                }
+            })
+            .with_sandbox_hook(move |data| {
+                let new_sandbox = Arc::new(Sandbox::new(data.clone().into()));
+                let mut guard = set_sandbox
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *guard = Some(new_sandbox);
+            })
+            .with_approve_permission_hook(move |request_id| {
+                let guard = approve_sandbox
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(s) = guard.as_ref() {
+                    s.approve_request(request_id);
+                }
+            })
+            .with_allow_pattern_hook(move |action, target_pattern| {
+                let guard = allow_sandbox
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(s) = guard.as_ref() {
+                    s.allow_pattern(action, target_pattern);
+                }
+            });
+
+        Self { inner }
     }
 }
 
@@ -41,56 +84,26 @@ impl Default for FsToolProvider {
 #[async_trait]
 impl ToolProvider for FsToolProvider {
     fn list_specs(&self) -> Vec<ToolSpec> {
-        self.actions.iter().map(|a| a.definition()).collect()
+        self.inner.list_specs()
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
-        for action in &self.actions {
-            if action.name() == name {
-                return action.execute(arguments).await;
-            }
-        }
-        Err(ToolError::NotFound {
-            tool_name: name.to_string(),
-        })
+        self.inner.call_tool(name, arguments).await
     }
 
     fn set_session_id(&self, session_id: &str) {
-        let guard = self
-            .sandbox
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(s) = guard.as_ref() {
-            s.set_session_id(session_id);
-        }
+        self.inner.set_session_id(session_id);
     }
 
     fn set_sandbox(&self, data: &ene_tool_proto::SandboxConfigData) {
-        let new_sandbox = Arc::new(Sandbox::new(data.clone().into()));
-        let mut guard = self
-            .sandbox
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *guard = Some(new_sandbox);
+        self.inner.set_sandbox(data);
     }
 
     fn approve_permission(&self, request_id: &str) {
-        let guard = self
-            .sandbox
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(s) = guard.as_ref() {
-            s.approve_request(request_id);
-        }
+        self.inner.approve_permission(request_id);
     }
 
     fn allow_pattern(&self, action: &str, target_pattern: &str) {
-        let guard = self
-            .sandbox
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(s) = guard.as_ref() {
-            s.allow_pattern(action, target_pattern);
-        }
+        self.inner.allow_pattern(action, target_pattern);
     }
 }

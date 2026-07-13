@@ -249,10 +249,7 @@ pub async fn write_ipc_response<W: AsyncWriteExt + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        ActionSpec, KeywordSet, SandboxConfigData, SideEffects, ToolCategory, ToolName, ToolSpec,
-        ToolVersion,
-    };
+    use crate::{ActionSpec, SandboxConfigData, ToolName, ToolSpec};
 
     async fn send_recv_request(req: &IpcRequest) -> IpcRequest {
         let (mut a, mut b) = tokio::io::duplex(4096);
@@ -340,21 +337,11 @@ mod tests {
 
     #[tokio::test]
     async fn ipc_response_tools_roundtrip() {
-        let tools = vec![ToolSpec {
-            name: ToolName::new("test"),
-            version: ToolVersion::default(),
-            display_name: "Test".into(),
-            summary: "desc".into(),
-            description: "desc".into(),
-            category: ToolCategory::Filesystem,
-            keywords: KeywordSet::default(),
-            parameters: serde_json::json!({}),
-            examples: vec![],
-            caveats: vec![],
-            side_effects: SideEffects::ReadOnly,
-            preconditions: vec![],
-            related: vec![],
-        }];
+        let tools = vec![ToolSpec::new(
+            ToolName::new("test"),
+            "desc",
+            serde_json::json!({}),
+        )];
         let resp = IpcResponse::Tools { tools };
         let got = send_recv_response(&resp).await;
         assert_eq!(got, resp);

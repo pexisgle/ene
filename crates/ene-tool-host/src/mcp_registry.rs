@@ -1,7 +1,7 @@
 use crate::ToolHostError;
 use crate::tools::registry::ToolRegistry;
 use async_trait::async_trait;
-use ene_tool_proto::{KeywordSet, SideEffects, ToolCategory, ToolName, ToolSpec, ToolVersion};
+use ene_tool_proto::{ToolName, ToolSpec};
 use rmcp::serve_client;
 use rmcp::transport::child_process::{ConfigureCommandExt, TokioChildProcess};
 use std::sync::{Arc, RwLock};
@@ -66,14 +66,6 @@ impl McpToolRegistry {
         let mut tools = Vec::new();
         for t in mcp_tools_resp.tools {
             let desc = t.description.map(|d| d.to_string()).unwrap_or_default();
-            let side_effects = match t.annotations.as_ref().and_then(|a| a.read_only_hint) {
-                Some(true) => SideEffects::ReadOnly,
-                _ => match t.annotations.as_ref() {
-                    Some(a) if a.destructive_hint.unwrap_or(false) => SideEffects::Destructive,
-                    Some(a) if a.idempotent_hint.unwrap_or(false) => SideEffects::Idempotent,
-                    _ => SideEffects::System { privileged: false },
-                },
-            };
             // MCP tool names are untrusted (they come from a
             // child process's JSON response). Reject invalid
             // names with a structured error rather than
@@ -84,21 +76,11 @@ impl McpToolRegistry {
                     message: format!("MCP server advertised an invalid tool name: {e}"),
                 }
             })?;
-            tools.push(ToolSpec {
+            tools.push(ToolSpec::new(
                 name,
-                version: ToolVersion::default(),
-                display_name: desc.clone(),
-                summary: desc.clone(),
-                description: desc,
-                category: ToolCategory::Utility,
-                keywords: KeywordSet::default(),
-                parameters: serde_json::Value::Object(t.input_schema.as_ref().clone()),
-                examples: Vec::new(),
-                caveats: Vec::new(),
-                side_effects,
-                preconditions: Vec::new(),
-                related: Vec::new(),
-            });
+                desc,
+                serde_json::Value::Object(t.input_schema.as_ref().clone()),
+            ));
         }
 
         let mut servers = self.servers.write().unwrap_or_else(|e| e.into_inner());

@@ -7,7 +7,7 @@
 
 ## Overview
 
-`ene-tool-proto` defines every type and helper that crosses the process boundary between the host runtime (`ene-core` / `ene-tool-host`) and the standalone tool binaries. Both sides of the IPC channel depend on this crate. It has no dependency on `ene-core`, so tool binaries can link it without pulling in the full runtime.
+`ene-tool-proto` defines every type and helper that crosses the process boundary between the host runtime (`ene-runtime` / `ene-tool-host`) and the standalone tool binaries. Both sides of the IPC channel depend on this crate. It has no dependency on `ene-runtime`, so tool binaries can link it without pulling in the full runtime.
 
 The crate has three responsibilities:
 
@@ -469,7 +469,7 @@ Returned as a `Vec<MultiAnswer>`, one entry per `QuestionItem`, in the same orde
 
 ## `IpcRequest`
 
-Messages sent from the **core** (`ene-core` / `ene-tool-host`) **to** the tool binary.
+Messages sent from the **core** (`ene-runtime` / `ene-tool-host`) **to** the tool binary.
 
 ```rust
 pub enum IpcRequest {
@@ -512,7 +512,7 @@ pub enum IpcRequest {
 
 ## `IpcResponse`
 
-Messages sent from the **tool binary** back to the **core** (`ene-core` / `ene-tool-host`).
+Messages sent from the **tool binary** back to the **core** (`ene-runtime` / `ene-tool-host`).
 
 ```rust
 pub enum IpcResponse {

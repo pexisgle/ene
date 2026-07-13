@@ -88,7 +88,7 @@ pub enum IpcResponse {
 > **注意:** 旧版ドキュメントにあった `with_store(store)` メソッドは
 > 現在の `ToolHostManager` には存在しません。Tool RAG のワイヤリングは
 > `EneActor::reconfigure` 内の `init_tool_rag(config, embedder, session)`
-> が担当します (`crates/ene-core/src/handle.rs` を参照)。
+> が担当します (`crates/ene-runtime/src/handle.rs` を参照)。
 
 ### バイナリ発見
 

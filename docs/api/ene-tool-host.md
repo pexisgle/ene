@@ -7,7 +7,7 @@
 
 ## Overview
 
-`ene-tool-host` is the bridge between `ene-core` and the standalone tool binaries. It is responsible for:
+`ene-tool-host` is the bridge between `ene-runtime` and the standalone tool binaries. It is responsible for:
 
 1. **Spawning and supervising** tool child processes, with automatic reconnect and restart on crash.
 2. **Negotiating** the IPC handshake and maintaining persistent Unix-socket connections.
@@ -328,7 +328,7 @@ pub struct ToolRagStats {
 pub fn compute_tool_version_hash(tool: &ToolSpec) -> String
 ```
 
-Computes a stable BLAKE3 hash used to invalidate cached tool embeddings whenever a tool's spec changes meaningfully. The hash covers `tool.name`, `tool.version`, **`tool.display_name`**, **`tool.summary`**, `tool.description`, `tool.parameters`, and all four `keywords` tiers (`primary`, `secondary`, `domain`, `negative`). When this hash changes for a tool (tracked via `list_tool_embedding_hashes` in `ene-memory`), `ToolRag::ensure_index` re-embeds it.
+Computes a stable BLAKE3 hash used to invalidate cached tool embeddings whenever a tool's spec changes meaningfully. The hash covers `tool.name`, `tool.version`, **`tool.display_name`**, **`tool.summary`**, `tool.description`, `tool.parameters`, and all four `keywords` tiers (`primary`, `secondary`, `domain`, `negative`). When this hash changes for a tool (tracked via `list_tool_embedding_hashes` in `ene-store`), `ToolRag::ensure_index` re-embeds it.
 
 ---
 
@@ -420,6 +420,6 @@ pub type ToolHostError = EneToolHostError;
 - [`ene-tool-proto`](./ene-tool-proto.md) — IPC wire types (`ToolSpec`, `IpcRequest`/`IpcResponse`, `ToolError`)
 - [`ene-tool-common`](./ene-tool-common.md) — Tool-side `ToolAction` trait and helpers for tool binaries
 - [`ene-tool-derive`](./ene-tool-derive.md) — Proc-macros for tool authors (`#[derive(ToolSpec)]`)
-- [`ene-memory`](./ene-memory.md) — Backs `ToolRag`'s persistent embedding index (`tool_embedding_index` table)
-- [`ene-core`](./ene-core.md) — Owns the `Arc<dyn ToolRegistry>` returned by `start_full` and drives tool calls from the actor loop
+- [`ene-store`](./ene-store.md) — Backs `ToolRag`'s persistent embedding index (`tool_embedding_index` table)
+- [`ene-runtime`](./ene-runtime.md) — Owns the `Arc<dyn ToolRegistry>` returned by `start_full` and drives tool calls from the actor loop
 - [Tool System Overview](../tools/overview.md)

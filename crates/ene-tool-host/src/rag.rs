@@ -4,8 +4,8 @@
 //! Replaces the inline RAG logic previously embedded in
 //! [`CompositeToolRegistry`](crate::CompositeToolRegistry).
 
-use ene_memory::MemoryStore;
-use ene_provider::{EmbeddingError, EmbeddingProvider, cosine_similarity};
+use ene_ai::{EmbeddingError, EmbeddingProvider, cosine_similarity, embed};
+use ene_store::MemoryStore;
 use ene_tool_proto::{EmbeddingField, ToolName, ToolSpec};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -279,10 +279,12 @@ impl ToolRag {
                 );
                 let hash = field_version_hash("summary", &summary_text);
                 if !is_cached(&cached, &key, &hash, &model_name) {
-                    let emb = self
-                        .embedder
-                        .embed(&summary_text, ene_provider::EmbeddingKind::Summary)
-                        .await?;
+                    let emb = embed(
+                        self.embedder.as_ref(),
+                        &summary_text,
+                        ene_ai::EmbeddingKind::Summary,
+                    )
+                    .await?;
                     persist(
                         &store,
                         spec.name.as_str(),
@@ -309,7 +311,7 @@ impl ToolRag {
                 if !is_cached(&cached, &key, &hash, &model_name) {
                     let emb = self
                         .embedder
-                        .embed(&desc_text, ene_provider::EmbeddingKind::Description)
+                        .embed(&desc_text, ene_ai::EmbeddingKind::Description)
                         .await?;
                     persist(
                         &store,
@@ -325,7 +327,8 @@ impl ToolRag {
                 }
             }
 
-            // (3) Negative
+            // (3) Negative — deferred with ToolRagProfile (#135); embedding_text
+            // returns empty, so this block is a no-op until a profile lands.
             let neg_text = spec.embedding_text(EmbeddingField::Negative);
             if !neg_text.is_empty() {
                 let key = (
@@ -337,7 +340,7 @@ impl ToolRag {
                 if !is_cached(&cached, &key, &hash, &model_name) {
                     let emb = self
                         .embedder
-                        .embed(&neg_text, ene_provider::EmbeddingKind::Negative)
+                        .embed(&neg_text, ene_ai::EmbeddingKind::Negative)
                         .await?;
                     persist(
                         &store,
@@ -348,35 +351,6 @@ impl ToolRag {
                         &model_name,
                         &emb,
                         &neg_text,
-                    )
-                    .await?;
-                }
-            }
-
-            // (4) Examples (one per example)
-            for (i, example) in spec.examples.iter().enumerate() {
-                let ex_text = format!("{}: {}", example.description, example.input);
-                let field_key = format!("ex_{}", i);
-                let key = (
-                    spec.name.as_str().to_string(),
-                    "example".into(),
-                    field_key.clone(),
-                );
-                let hash = field_version_hash("example", &ex_text);
-                if !is_cached(&cached, &key, &hash, &model_name) {
-                    let emb = self
-                        .embedder
-                        .embed(&ex_text, ene_provider::EmbeddingKind::Example)
-                        .await?;
-                    persist(
-                        &store,
-                        spec.name.as_str(),
-                        "example",
-                        &field_key,
-                        &hash,
-                        &model_name,
-                        &emb,
-                        &ex_text,
                     )
                     .await?;
                 }
@@ -465,7 +439,7 @@ impl ToolRag {
 
         // 2. Optional HyDE — generate a hypothetical document embedding.
         let hyde_vec = if self.opts.use_hyde {
-            match self.embedder.hyde(query).await {
+            match ene_ai::hyde_document(None, query).await {
                 Ok(hyde_text) => {
                     // Fast path: if the provider's hyde implementation just echoes the query
                     // (e.g. the default local embedding provider), we can reuse the existing
@@ -473,10 +447,13 @@ impl ToolRag {
                     if hyde_text == query {
                         Some(query_vec.clone())
                     } else {
-                        self.embedder
-                            .embed(&hyde_text, ene_provider::EmbeddingKind::Hyde)
-                            .await
-                            .ok()
+                        ene_ai::embed(
+                            self.embedder.as_ref(),
+                            &hyde_text,
+                            ene_ai::EmbeddingKind::Hyde,
+                        )
+                        .await
+                        .ok()
                     }
                 }
                 Err(_) => None,
@@ -609,9 +586,11 @@ impl ToolRag {
         let t_score = t_start.elapsed();
 
         // 6. Optional rerank.
-        if self.opts.use_rerank && self.embedder.has_reranker() && candidates.len() > 1 {
+        if self.opts.use_rerank && candidates.len() > 1 {
             let rerank_specs: Vec<ToolSpec> = candidates.iter().map(|(s, _)| s.clone()).collect();
-            match self.embedder.rerank(query, &rerank_specs).await {
+            match ene_ai::rerank_tool_specs(self.embedder.as_ref(), None, query, &rerank_specs)
+                .await
+            {
                 Ok(rerank_scores) => {
                     for (i, score) in rerank_scores.iter().enumerate() {
                         if i < candidates.len() {

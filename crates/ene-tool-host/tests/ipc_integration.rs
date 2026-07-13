@@ -3,8 +3,8 @@
 use ene_tool_host::ToolRegistry;
 use ene_tool_proto::transport::IpcListener;
 use ene_tool_proto::{
-    IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, KeywordSet, SandboxConfigData, SideEffects,
-    ToolCategory, ToolName, ToolSpec, ToolVersion, read_ipc_request, write_ipc_response,
+    IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, SandboxConfigData, ToolName, ToolSpec,
+    read_ipc_request, write_ipc_response,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -82,25 +82,15 @@ async fn test_ipc_list_tools_and_call_tool() {
         write_ipc_response(
             &mut stream,
             &IpcResponse::Tools {
-                tools: vec![ToolSpec {
-                    name: ToolName::new("utility.get_current_time"),
-                    version: ToolVersion::default(),
-                    display_name: "Get the current date and time.".to_string(),
-                    summary: "Get the current date and time.".to_string(),
-                    description: "Get the current date and time.".to_string(),
-                    category: ToolCategory::Utility,
-                    keywords: KeywordSet::primary_only(["time"]),
-                    parameters: serde_json::json!({
+                tools: vec![ToolSpec::new(
+                    ToolName::new("utility.get_current_time"),
+                    "Get the current date and time.",
+                    serde_json::json!({
                         "type": "object",
                         "properties": {},
                         "required": []
                     }),
-                    examples: Vec::new(),
-                    caveats: Vec::new(),
-                    side_effects: SideEffects::default(),
-                    preconditions: Vec::new(),
-                    related: Vec::new(),
-                }],
+                )],
             },
         )
         .await

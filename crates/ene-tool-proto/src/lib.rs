@@ -6,9 +6,16 @@
 //!
 //! - [`ToolProvider`] trait — Interface each tool implements
 //! - [`IpcRequest`] / [`IpcResponse`] — Wire protocol messages (length-prefixed JSON over UDS/Named Pipe)
-//! - [`ToolSpec`] — Structured schema describing a tool (name, parameters, category, keywords, side effects, ...)
+//! - [`ToolSpec`] — LLM-facing schema (`name`, `description`, `parameters`)
 //! - [`SandboxConfigData`] — Sandbox configuration shared across tool processes
 //! - [`run_tool_server`] — Helper to start an IPC server for a [`ToolProvider`]
+//!
+//! ## Two-layer ABI (API v2 / #135)
+//!
+//! - **Wire:** [`ToolProvider`] in this crate (IPC / sandbox binaries)
+//! - **Host:** `ene_tool_host::ToolRegistry` (IPC + MCP + composite)
+//! - Name collision is a hard error at registry build / add time
+//! - Prefer the `ene-tool` facade crate for new tool binaries
 //!
 //! ## Crate Boundaries
 //!
@@ -20,21 +27,20 @@
 //!   sandbox-configuration **data** ([`SandboxConfigData`]), and the
 //!   [`run_tool_server`] entry point.
 //! - It must NOT gain business logic, database access, or `sea-orm` dependencies —
-//!   those belong to `ene-tool-host` (orchestration) and `ene-memory` (the sole
+//!   those belong to `ene-tool-host` (orchestration) and `ene-store` (the sole
 //!   SQLite owner) respectively. A future "convenience" SQL helper or policy
 //!   decision does not belong here even if it seems locally useful to a tool
 //!   author; it belongs in `ene-tool-host` or the calling tool binary.
 //! - Depends only on `ene-config` (for the `define_tool_config!` macro used by
-//!   [`SandboxConfigData`]'s schema registration). Does NOT depend on `ene-core`,
-//!   `ene-memory`, or `ene-cognition`.
+//!   [`SandboxConfigData`]'s schema registration). Does NOT depend on `ene-runtime`,
+//!   `ene-store`, or `ene-mind`.
 //!
 //! ## Creating a Custom Tool
 //!
 //! ```rust,no_run
 //! use async_trait::async_trait;
 //! use ene_tool_proto::{
-//!     KeywordSet, SideEffects, ToolCategory, ToolError, ToolName, ToolProvider, ToolSpec,
-//!     ToolVersion, run_tool_server,
+//!     ToolError, ToolName, ToolProvider, ToolSpec, run_tool_server,
 //! };
 //!
 //! struct MyTool;
@@ -42,27 +48,17 @@
 //! #[async_trait]
 //! impl ToolProvider for MyTool {
 //!     fn list_specs(&self) -> Vec<ToolSpec> {
-//!         vec![ToolSpec {
-//!             name: ToolName::new("hello"),
-//!             version: ToolVersion::new(1, 0, 0),
-//!             display_name: "Hello".into(),
-//!             summary: "Greets the user".into(),
-//!             description: "Greets the user with a personalised message.".into(),
-//!             category: ToolCategory::Utility,
-//!             keywords: KeywordSet::primary_only(["greet", "hello", "greeting"]),
-//!             parameters: serde_json::json!({
+//!         vec![ToolSpec::new(
+//!             ToolName::new("hello"),
+//!             "Greets the user with a personalised message.",
+//!             serde_json::json!({
 //!                 "type": "object",
 //!                 "properties": {
 //!                     "name": {"type": "string", "description": "Name to greet"}
 //!                 },
 //!                 "required": ["name"]
 //!             }),
-//!             examples: vec![],
-//!             caveats: vec![],
-//!             side_effects: SideEffects::ReadOnly,
-//!             preconditions: vec![],
-//!             related: vec![],
-//!         }]
+//!         )]
 //!     }
 //!
 //!     async fn call_tool(&self, name: &str, args: &str) -> Result<String, ToolError> {
@@ -165,15 +161,15 @@ pub trait ToolProvider: Send + Sync {
 
 // ── DB IPC auth-token handoff ───────────────────────────────────────
 //
-// ene-core generates a per-tool pre-shared auth token when it spawns
+// ene-runtime generates a per-tool pre-shared auth token when it spawns
 // each per-tool DB IPC server (see `DbIpcServer::new`). The token
 // must be presented by the tool binary on the very first
 // `ene_tool_db::DbRequest::Handshake` to prevent a stray local
 // process from connecting to the (chmod-0600) unix socket and
-// declaring a schema. ene-core records the token here; the tool
+// declaring a schema. ene-runtime records the token here; the tool
 // host reads it back when initialising the tool's sandbox config
 // so the value reaches the binary inside `SandboxConfigData`.
 //
-// The map is process-global because the producer (ene-core's actor
+// The map is process-global because the producer (ene-runtime's actor
 // thread) and the consumer (ene-tool-host's startup path) are
 // independent threads spawned at slightly different times.

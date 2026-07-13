@@ -260,17 +260,23 @@ fn expand_tool_spec(ast: DeriveInput) -> syn::Result<TokenStream2> {
     let display_name = struct_attrs.display_name_value(ident.to_string());
     let summary = struct_attrs.summary_value()?;
     let description = struct_attrs.description_value();
-    let category_path = struct_attrs.category_path();
-    let side_effects_path = struct_attrs.side_effects_path();
-    let keywords_primary = struct_attrs.keywords_list("primary");
-    let keywords_secondary = struct_attrs.keywords_list("secondary");
-    let keywords_domain = struct_attrs.keywords_list("domain");
-    let keywords_negative = struct_attrs.keywords_list("negative");
-    let examples_json = struct_attrs.examples_value();
-    let caveats = struct_attrs.string_list("caveats");
-    let preconditions = struct_attrs.string_list("preconditions");
-    let related = struct_attrs.related_list();
-    let version = struct_attrs.version_tokens();
+    // Extra metadata attrs (category, keywords, side_effects, examples, …)
+    // remain parsed so existing `#[tool(...)]` annotations keep compiling,
+    // but they are intentionally not emitted on the LLM-facing `ToolSpec`
+    // (#135 / #137 — ToolRagProfile deferred).
+    let _ = (
+        struct_attrs.category_path(),
+        struct_attrs.side_effects_path(),
+        struct_attrs.keywords_list("primary"),
+        struct_attrs.keywords_list("secondary"),
+        struct_attrs.keywords_list("domain"),
+        struct_attrs.keywords_list("negative"),
+        struct_attrs.examples_value(),
+        struct_attrs.string_list("caveats"),
+        struct_attrs.string_list("preconditions"),
+        struct_attrs.related_list(),
+        struct_attrs.version_tokens(),
+    );
     let args_const_ident = struct_attrs.args_const_ident(ident);
 
     // Per-field post-processing instructions.
@@ -290,8 +296,13 @@ fn expand_tool_spec(ast: DeriveInput) -> syn::Result<TokenStream2> {
             pub const SUMMARY: &'static str = #summary;
 
             /// Construct a `ToolSpec` for this args type.
+            ///
+            /// Emits the LLM-facing contract only (`name`, `description`,
+            /// `parameters`). Extra `#[tool(...)]` metadata attrs remain
+            /// accepted for authoring convenience but are not stored on
+            /// the wire `ToolSpec` (#135 / #137).
             pub fn spec() -> ::ene_tool_proto::ToolSpec {
-                use ::ene_tool_proto::{ToolSpec, ToolName, ToolVersion, ToolExample, ToolCategory, KeywordSet, SideEffects};
+                use ::ene_tool_proto::{ToolSpec, ToolName};
                 use ::schemars::JsonSchema as _;
                 use ::serde_json::json;
 
@@ -308,28 +319,19 @@ fn expand_tool_spec(ast: DeriveInput) -> syn::Result<TokenStream2> {
 
                 #(#field_instrs)*
 
-                let name = ToolName::new(#tool_name_str);
-                let version = #version;
+                let description = {
+                    let from_attr = #description;
+                    if from_attr.is_empty() {
+                        #summary.to_string()
+                    } else {
+                        from_attr.to_string()
+                    }
+                };
 
                 ToolSpec {
-                    name,
-                    version,
-                    display_name: #display_name.to_string(),
-                    summary: #summary.to_string(),
-                    description: #description.to_string(),
-                    category: #category_path,
-                    keywords: KeywordSet {
-                        primary: vec![#(#keywords_primary.to_string()),*],
-                        secondary: vec![#(#keywords_secondary.to_string()),*],
-                        domain: vec![#(#keywords_domain.to_string()),*],
-                        negative: vec![#(#keywords_negative.to_string()),*],
-                    },
+                    name: ToolName::new(#tool_name_str),
+                    description,
                     parameters: schema,
-                    examples: #examples_json,
-                    caveats: vec![#(#caveats.to_string()),*],
-                    side_effects: #side_effects_path,
-                    preconditions: vec![#(#preconditions.to_string()),*],
-                    related: vec![#(::ene_tool_proto::ToolName::new(#related.to_string())),*],
                 }
             }
         }

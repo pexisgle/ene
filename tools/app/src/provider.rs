@@ -1,15 +1,17 @@
 use crate::action;
 use async_trait::async_trait;
-use ene_tool_common::ToolAction;
+use ene_tool_common::{ActionSetProvider, ToolAction};
 use ene_tool_proto::{ToolError, ToolProvider, ToolSpec};
 
 /// App tool provider managing GUI automation tasks.
+///
+/// Dispatch is handled by [`ActionSetProvider`] (#139).
 pub struct AppToolProvider {
-    actions: Vec<Box<dyn ToolAction>>,
+    inner: ActionSetProvider,
 }
 
 impl AppToolProvider {
-    /// Creates a new `AppToolProvider` and registers all 15 individual tool actions.
+    /// Creates a new `AppToolProvider` and registers all app tool actions.
     pub fn new() -> Self {
         let actions: Vec<Box<dyn ToolAction>> = vec![
             // Window management (5)
@@ -32,7 +34,9 @@ impl AppToolProvider {
             Box::new(action::ClipboardReadAction::default()),
             Box::new(action::ClipboardWriteAction::default()),
         ];
-        Self { actions }
+        Self {
+            inner: ActionSetProvider::new(actions),
+        }
     }
 }
 
@@ -45,20 +49,14 @@ impl Default for AppToolProvider {
 #[async_trait]
 impl ToolProvider for AppToolProvider {
     fn list_specs(&self) -> Vec<ToolSpec> {
-        self.actions.iter().map(|a| a.definition()).collect()
-    }
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
-        for action in &self.actions {
-            if action.name() == name {
-                return action.execute(arguments).await;
-            }
-        }
-        Err(ToolError::NotFound {
-            tool_name: name.to_string(),
-        })
+        self.inner.list_specs()
     }
 
-    fn set_session_id(&self, _session_id: &str) {
-        // App tools are stateless
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
+        self.inner.call_tool(name, arguments).await
+    }
+
+    fn set_session_id(&self, session_id: &str) {
+        self.inner.set_session_id(session_id);
     }
 }

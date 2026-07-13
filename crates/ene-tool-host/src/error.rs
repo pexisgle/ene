@@ -18,6 +18,15 @@ pub enum EneToolHostError {
         /// A descriptive message about the failure.
         message: String,
     },
+    /// Two registries exposed the same public tool name.
+    ///
+    /// Name collision is a hard error at composite build / `add_registry`
+    /// time — first-wins silent overwrite is not allowed (#135).
+    #[error("Duplicate tool name: {name}")]
+    DuplicateToolName {
+        /// Colliding tool name.
+        name: String,
+    },
 }
 
 impl EneToolHostError {

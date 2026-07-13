@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use ene_tool_derive::ToolSpec;
-use ene_tool_proto::{KeywordSet, SideEffects, ToolCategory, ToolExample, ToolName, ToolVersion};
+use ene_tool_proto::ToolName;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -39,72 +39,13 @@ fn consts() {
 }
 
 #[test]
-fn spec_basics() {
+fn spec_llm_facing_only() {
     let s = ReadArgs::spec();
     assert_eq!(s.name, ToolName::new("filesystem.read"));
-    assert_eq!(s.version, ToolVersion::new(1, 2, 0));
-    assert_eq!(s.display_name, "Read");
-    assert_eq!(s.summary, "Read a file from disk");
-    assert_eq!(s.category, ToolCategory::Filesystem);
-    assert_eq!(s.side_effects, SideEffects::ReadOnly);
-    assert!(
-        s.keywords
-            .primary
-            .iter()
-            .any(|k| k == "read" || k == "open" || k == "cat" || k == "load")
-    );
-    assert!(
-        s.keywords
-            .secondary
-            .iter()
-            .any(|k| k == "file" || k == "view" || k == "text")
-    );
-    assert!(s.keywords.domain.iter().any(|k| k == "fs"));
-    assert!(s.keywords.domain.iter().any(|k| k == "posix"));
-    assert!(s.keywords.negative.iter().any(|k| k == "write"));
     assert_eq!(
-        s.caveats,
-        vec!["Files larger than the configured limit are truncated.".to_string()]
+        s.description,
+        "Reads the contents of a file at the given path and returns them as a string."
     );
-    assert_eq!(s.preconditions, vec!["Path must be readable.".to_string()]);
-    assert_eq!(
-        s.related,
-        vec![
-            ToolName::new("filesystem.write"),
-            ToolName::new("filesystem.glob")
-        ]
-    );
-    assert_eq!(
-        s.keywords,
-        KeywordSet {
-            primary: vec!["read".into(), "open".into(), "cat".into(), "load".into()],
-            secondary: vec!["file".into(), "view".into(), "text".into()],
-            domain: vec!["fs".into(), "posix".into()],
-            negative: vec!["write".into(), "delete".into()],
-        }
-    );
-}
-
-#[test]
-fn spec_examples() {
-    let s = ReadArgs::spec();
-    assert_eq!(s.examples.len(), 2);
-    let ex0 = &s.examples[0];
-    assert_eq!(ex0.description, "Read /etc/hostname");
-    assert_eq!(ex0.input, serde_json::json!({"path":"/etc/hostname"}));
-    assert_eq!(ex0.output, Some("ene.local".to_string()));
-    let ex1 = &s.examples[1];
-    assert_eq!(ex1.description, "Read missing file");
-    assert_eq!(ex1.input, serde_json::json!({"path":"/no/such"}));
-    assert_eq!(ex1.output, None);
-    // Roundtrip the examples
-    for ex in &s.examples {
-        let _ = ToolExample {
-            description: ex.description.clone(),
-            input: ex.input.clone(),
-            output: ex.output.clone(),
-        };
-    }
 }
 
 #[test]
@@ -122,12 +63,11 @@ fn spec_parameters_is_json_schema() {
 }
 
 #[test]
-fn spec_embedding_text_contains_keywords() {
+fn spec_embedding_text_from_description() {
     let s = ReadArgs::spec();
     let text = s.embedding_text(ene_tool_proto::EmbeddingField::Description);
     assert!(text.contains("filesystem.read"));
-    assert!(text.contains("Primary:"));
-    assert!(text.contains("read"));
+    assert!(text.contains("Reads the contents"));
     let neg = s.embedding_text(ene_tool_proto::EmbeddingField::Negative);
-    assert!(neg.contains("write"));
+    assert!(neg.is_empty());
 }

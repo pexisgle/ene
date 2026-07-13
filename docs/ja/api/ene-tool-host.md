@@ -7,7 +7,7 @@
 
 ## 概要
 
-`ene-tool-host` は `ene-core` とスタンドアロンのツールバイナリとの間の橋渡しを行います。担う責務は以下の通りです:
+`ene-tool-host` は `ene-runtime` とスタンドアロンのツールバイナリとの間の橋渡しを行います。担う責務は以下の通りです:
 
 1. ツール子プロセスの**生成と監視** — クラッシュ時の自動再接続・再起動を含む。
 2. IPCハンドシェイクの**交渉**と、永続的なUnixソケット接続の維持。
@@ -328,7 +328,7 @@ pub struct ToolRagStats {
 pub fn compute_tool_version_hash(tool: &ToolSpec) -> String
 ```
 
-ツールの仕様が意味的に変化した際に、キャッシュされたツール埋め込みを無効化するために使われる安定したBLAKE3ハッシュを計算します。このハッシュは `tool.name`、`tool.version`、**`tool.display_name`**、**`tool.summary`**、`tool.description`、`tool.parameters`、および `keywords` の4つの階層（`primary`、`secondary`、`domain`、`negative`）すべてをカバーします。あるツールについてこのハッシュが変化すると（`ene-memory` の `list_tool_embedding_hashes` で追跡される）、`ToolRag::ensure_index` はそのツールを再埋め込みします。
+ツールの仕様が意味的に変化した際に、キャッシュされたツール埋め込みを無効化するために使われる安定したBLAKE3ハッシュを計算します。このハッシュは `tool.name`、`tool.version`、**`tool.display_name`**、**`tool.summary`**、`tool.description`、`tool.parameters`、および `keywords` の4つの階層（`primary`、`secondary`、`domain`、`negative`）すべてをカバーします。あるツールについてこのハッシュが変化すると（`ene-store` の `list_tool_embedding_hashes` で追跡される）、`ToolRag::ensure_index` はそのツールを再埋め込みします。
 
 ---
 
@@ -420,6 +420,6 @@ pub type ToolHostError = EneToolHostError;
 - [`ene-tool-proto`](./ene-tool-proto.md) — IPC配線型（`ToolSpec`、`IpcRequest`/`IpcResponse`、`ToolError`）
 - [`ene-tool-common`](./ene-tool-common.md) — ツール側の `ToolAction` トレイトとツールバイナリ向けヘルパー
 - [`ene-tool-derive`](./ene-tool-derive.md) — ツール作者向けのプロシージャルマクロ（`#[derive(ToolSpec)]`）
-- [`ene-memory`](./ene-memory.md) — `ToolRag` の永続的な埋め込みインデックス（`tool_embedding_index` テーブル）を支える
-- [`ene-core`](./ene-core.md) — `start_full` が返す `Arc<dyn ToolRegistry>` を所有し、アクターループからツール呼び出しを駆動する
+- [`ene-store`](./ene-store.md) — `ToolRag` の永続的な埋め込みインデックス（`tool_embedding_index` テーブル）を支える
+- [`ene-runtime`](./ene-runtime.md) — `start_full` が返す `Arc<dyn ToolRegistry>` を所有し、アクターループからツール呼び出しを駆動する
 - [ツールシステム概要](../tools/overview.md)

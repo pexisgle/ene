@@ -193,13 +193,7 @@ async fn main() {
     // Print the specs for demonstration.
     let provider = CalculatorProvider;
     for spec in provider.list_specs() {
-        println!(
-            "  {} — {} (category: {:?}, side_effects: {:?})",
-            spec.name.as_str(),
-            spec.summary,
-            spec.category,
-            spec.side_effects,
-        );
+        println!("  {} — {}", spec.name.as_str(), spec.description,);
         println!(
             "    parameters: {}",
             serde_json::to_string_pretty(&spec.parameters).unwrap_or_default()
