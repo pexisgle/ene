@@ -506,6 +506,20 @@ pub fn resolve_character_path(name: &str) -> String {
     }
 }
 
+/// Loads a [`CharacterCardV3`] from a resolved path (or bare character name).
+///
+/// Host apps (`ene-cli`, `ene-desktop`) load the card via this helper (or their
+/// own I/O) and pass it to [`ene_runtime::EneHandle::open`] — the runtime does
+/// not perform character-card file I/O on the product path.
+pub fn load_character_card(
+    name_or_path: &str,
+) -> Result<crate::CharacterCardV3, crate::EneConfigError> {
+    let path = resolve_character_path(name_or_path);
+    let file_content =
+        std::fs::read_to_string(&path).map_err(crate::EneConfigError::CardReadError)?;
+    serde_json::from_str(&file_content).map_err(crate::EneConfigError::JsonError)
+}
+
 /// Reads the asset directory and settings.json, resolves `character_card_path`, etc., and returns `EneConfig`.
 ///
 /// Returns [`EneConfigError`] if the on-disk `settings.json` is malformed,
@@ -659,7 +673,7 @@ mod tests {
 
     /// Inspect the env-var-derived `extra` map directly, instead of
     /// going through `get_section::<T>()`. This avoids the dual-crate
-    /// problem (`ene_provider` is not a dev-dep of `ene_config`, so its
+    /// problem (`ene_ai` is not a dev-dep of `ene_config`, so its
     /// `define_config!`-generated impls of `HasConfigKey` are for a
     /// different copy of the trait). The `extra` map is what
     /// `get_section` reads from, so checking it is equivalent to

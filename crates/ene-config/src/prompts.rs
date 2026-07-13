@@ -286,7 +286,10 @@ impl AffectClassifierPrompts {
     pub fn render_user_prompt(&self, current_affect: &str, conversation: &str) -> String {
         substitute(
             &self.user_prompt,
-            &[("current_affect", current_affect), ("conversation", conversation)],
+            &[
+                ("current_affect", current_affect),
+                ("conversation", conversation),
+            ],
         )
     }
 }

@@ -2,7 +2,9 @@
 
 ene の設定は `assets/settings.json` に集約されています。`settings.schema.json` が自動生成され、エディタでのバリデーションが可能です。
 
-読み込み: `ene_config::load_full_config()` がデフォルト値、ファイル、環境変数を解決します。
+読み込み: `ene_config::load_full_config()` / `ConfigStore` がデフォルト値、ファイル、環境変数を解決します。
+
+**API v2 の所有:** 永続化トグルは `store`（`enabled`、`db_path` のみ）。想起 / 書き込み / 減衰 / MMR / 感情 / Performance の方針ノブは `mind.*`（`mind.memory.*` を含む）。トップレベルの `memory.*` 方針セクションや `cognition.enabled` 二重パイプラインスイッチはありません — mind パスが唯一のストリーミングパスです。
 
 ## トップレベル構造 (`EneConfig`)
 
@@ -90,31 +92,21 @@ pub struct EneConfig {
 | `model` | string | `"jina-embeddings-v5-text-small"` | ローカル GGUF 埋め込みモデル名 |
 | `quantization` | string | `"F16"` | 量子化レベル (例: `"F16"`, `"Q4_K_M"`) |
 
-### `memory` — 長期記憶
+### `store` — SQLite-vec 永続化ストア
 
 ```json
 {
-  "memory": {
+  "store": {
     "enabled": false,
-    "db_path": "",
-    "recall_limit": 5,
-    "similarity_threshold": 0.5,
-    "time_decay_hours": 24.0,
-    "similarity_weight": 0.7,
-    "recency_weight": 0.3
+    "db_path": ""
   }
 }
 ```
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
-| `enabled` | bool | `false` | 長期記憶を有効化 |
+| `enabled` | bool | `false` | 永続化ストアを有効化 |
 | `db_path` | string | `""` | SQLite データベースパス (空 = デフォルト位置) |
-| `recall_limit` | int | `5` | 1クエリあたりの最大呼び出し要約数 |
-| `similarity_threshold` | float | `0.5` | 呼び出しの最小コサイン類似度 |
-| `time_decay_hours` | float | `24.0` | 直近性が減衰するまでの時間 (時間) |
-| `similarity_weight` | float | `0.7` | 呼び出しランキングにおける類似度スコアの重み |
-| `recency_weight` | float | `0.3` | 呼び出しランキングにおける直近性スコアの重み |
 
 ### `session` — セッション管理
 
@@ -125,7 +117,6 @@ pub struct EneConfig {
     "timeout_minutes": 30,
     "topic_similarity_threshold": 0.5,
     "min_turns_before_split": 3,
-    "recall_limit": 3,
     "summarization": {
       "model": "",
       "base_url": ""
@@ -140,7 +131,6 @@ pub struct EneConfig {
 | `timeout_minutes` | int | `30` | 分割前のアイドルタイムアウト |
 | `topic_similarity_threshold` | float | `0.5` | 話題変化検出のコサイン類似度しきい値 (0.0–1.0) |
 | `min_turns_before_split` | int | `3` | 分割が発生する最小ターン数 |
-| `recall_limit` | int | `3` | プロンプトに注入する要約の最大数 |
 | `summarization` | object | (下記参照) | 要約モデルの設定 |
 
 #### `session.summarization` — 要約モデル設定
@@ -346,16 +336,15 @@ pub struct EneConfig {
 | `graphics.antialiasing_mode` | string | `"fxaa"` | アンチエイリアシングモード |
 | `graphics.debug_fps` | int | `30` | デバッグ描画更新レート（FPS、0は制限なし） |
 
-### `cognition` — 認知ランタイム
+### `mind` — 認知ランタイム
 
 Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出・保持、感情処理、キャラクターコンパイルを制御します。
 
-> **注意:** このセクションは [Ene Cognitive Runtime](../architecture/cognitive-runtime.md) の一部です。`cognition.enabled` が `true` の場合、認知ランタイムがレガシーストリーミングパイプラインを置き換えます。
+> **注意:** このセクションは [Ene Cognitive Runtime](../architecture/cognitive-runtime.md) の一部です。mind ランタイムが唯一のストリーミング経路です。store/embedder 前提条件が欠けるとフェイルクローズします。
 
 ```json
 {
-  "cognition": {
-    "enabled": true,
+  "mind": {
     "context": {
       "max_prompt_tokens": 12000,
       "recent_turns": 8,
@@ -421,9 +410,7 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
-| `enabled` | bool | `true` | 認知ランタイムを有効にする。`false` の場合はレガシーストリーミングパイプラインにフォールバック。 |
-
-#### `cognition.context` — コンテキスト予算
+#### `mind.context` — コンテキスト予算
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
@@ -433,13 +420,13 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 | `memory_budget_tokens` | int | `1800` | 想起記憶のトークン予算 |
 | `semantic_budget_tokens` | int | `1200` | 意味記憶（lorebook）のトークン予算 |
 | `style_example_budget_tokens` | int | `600` | CCv3 lorebook からのスタイル例のトークン予算 |
-| `compression_enabled` | bool | `true` | 認知ランタイム有効時にセッション分割の代わりに rolling context compression を使う |
+| `compression_enabled` | bool | `true` | セッション分割の代わりに rolling context compression を使う |
 | `scene_turn_threshold` | int | `12` | シーンレベル圧縮を開始するターン数 |
 | `chapter_span_threshold` | int | `5` | チャプター rollup 前のシーン span 数 |
 | `arc_span_threshold` | int | `3` | アーク rollup 前のチャプター span 数 |
 | `compression_timeout_secs` | int | `60` | 圧縮要約 LLM 呼び出しのタイムアウト（秒） |
 
-#### `cognition.memory` — 記憶抽出・保持
+#### `mind.memory` — 記憶抽出・保持
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
@@ -469,7 +456,7 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 | `mmr_source_diversity_bonus` | float | `0.05` | 新しい recall source 種別を持つ候補に加算する MMR ボーナス |
 | `require_migration` | bool | `false` | true のとき、レガシー summaries/keyfacts が残り migration 未完了なら typed recall をブロック（通常の `conversation_logs` だけではブロックしない）(#98) |
 
-#### `cognition.memory.tool_grounding` — ツール結果グラウンディング
+#### `mind.memory.tool_grounding` — ツール結果グラウンディング
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
@@ -480,7 +467,7 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 | `persist_user_visible_episodic` | bool | `true` | ユーザー向けに意味のある短い結果を `Episodic` 記憶として保存する |
 | `min_confidence` | float | `0.60` | ツール由来記憶候補の信頼度しきい値（`0.0`–`1.0`） |
 
-#### `cognition.emotion` — 感情エンジン
+#### `mind.emotion` — 感情エンジン
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
@@ -496,7 +483,7 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 | `classifier_model` | string | `"google/gemini-2.5-flash-lite"` | 感情分類器のチャットモデル（OpenRouter スラッグ） |
 | `classifier_max_tokens` | int | `0` | 分類器 LLM 呼び出しの最大 completion トークン数（`0` = 上限なし） |
 
-#### `cognition.character` — キャラクターコンパイル
+#### `mind.character` — キャラクターコンパイル
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|

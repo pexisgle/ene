@@ -2,7 +2,9 @@
 
 ene settings are centralized in `assets/settings.json`. A `settings.schema.json` is auto-generated for editor validation.
 
-Loading: `ene_config::load_full_config()` resolves defaults, file, and environment variables.
+Loading: `ene_config::load_full_config()` / `ConfigStore` resolves defaults, file, and environment variables.
+
+**API v2 ownership:** persistence toggles live under `store` (`enabled`, `db_path` only). Recall / write / decay / MMR / emotion / performance policy knobs live under `mind.*` (including `mind.memory.*`). There is no top-level `memory.*` policy section and no `cognition.enabled` dual-pipeline switch — the mind path is the only streaming path.
 
 ## Top-Level Structure (`EneConfig`)
 
@@ -90,31 +92,21 @@ pub struct EneConfig {
 | `model` | string | `"jina-embeddings-v5-text-small"` | Local GGUF embedding model name |
 | `quantization` | string | `"F16"` | Quantization level (e.g. `"F16"`, `"Q4_K_M"`) |
 
-### `memory` — Long-Term Memory
+### `store` — Persistent SQLite-vec Store
 
 ```json
 {
-  "memory": {
+  "store": {
     "enabled": false,
-    "db_path": "",
-    "recall_limit": 5,
-    "similarity_threshold": 0.5,
-    "time_decay_hours": 24.0,
-    "similarity_weight": 0.7,
-    "recency_weight": 0.3
+    "db_path": ""
   }
 }
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `false` | Enable long-term memory |
+| `enabled` | bool | `false` | Enable the persistence store |
 | `db_path` | string | `""` | SQLite database path (empty = default location) |
-| `recall_limit` | int | `5` | Max summaries to recall per query |
-| `similarity_threshold` | float | `0.5` | Minimum cosine similarity for recall |
-| `time_decay_hours` | float | `24.0` | Hours before recency decays |
-| `similarity_weight` | float | `0.7` | Weight for similarity score in recall ranking |
-| `recency_weight` | float | `0.3` | Weight for recency score in recall ranking |
 
 ### `session` — Session Management
 
@@ -125,7 +117,6 @@ pub struct EneConfig {
     "timeout_minutes": 30,
     "topic_similarity_threshold": 0.5,
     "min_turns_before_split": 3,
-    "recall_limit": 3,
     "summarization": {
       "model": "",
       "base_url": ""
@@ -140,7 +131,6 @@ pub struct EneConfig {
 | `timeout_minutes` | int | `30` | Idle timeout before split |
 | `topic_similarity_threshold` | float | `0.5` | Cosine similarity threshold for topic drift detection (0.0–1.0) |
 | `min_turns_before_split` | int | `3` | Minimum turns before any split can occur |
-| `recall_limit` | int | `3` | Max summaries to inject into the prompt |
 | `summarization` | object | (see below) | Summarization model configuration |
 
 #### `session.summarization` — Summarization Model Config
@@ -346,16 +336,15 @@ GUI-specific settings for the desktop application. Only available when running `
 | `graphics.antialiasing_mode` | string | `"fxaa"` | Antialiasing mode |
 | `graphics.debug_fps` | int | `30` | Debug update throttle rate (FPS; 0 = no throttle) |
 
-### `cognition` — Cognitive Runtime
+### `mind` — Mind Runtime
 
 Configuration for the Ene Cognitive Runtime, controlling context budget, memory extraction/retention, emotion processing, and character compilation.
 
-> **Note:** This section is part of the [Ene Cognitive Runtime](../architecture/cognitive-runtime.md). When `cognition.enabled` is `true`, the cognitive runtime replaces the legacy streaming pipeline.
+> **Note:** This section is part of the [Ene Cognitive Runtime](../architecture/cognitive-runtime.md). The mind runtime is the sole streaming path; missing store/embedder prerequisites fail closed.
 
 ```json
 {
-  "cognition": {
-    "enabled": true,
+  "mind": {
     "context": {
       "max_prompt_tokens": 12000,
       "recent_turns": 8,
@@ -421,9 +410,8 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `true` | Enable the cognitive runtime. When false, falls back to the legacy streaming pipeline. |
 
-#### `cognition.context` — Context Budget
+#### `mind.context` — Context Budget
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -433,13 +421,13 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 | `memory_budget_tokens` | int | `1800` | Token budget for recalled memories |
 | `semantic_budget_tokens` | int | `1200` | Token budget for semantic (lorebook) memory |
 | `style_example_budget_tokens` | int | `600` | Token budget for style examples from CCv3 lorebook |
-| `compression_enabled` | bool | `true` | Enable rolling context compression instead of session splits when cognition is enabled |
+| `compression_enabled` | bool | `true` | Enable rolling context compression instead of session splits |
 | `scene_turn_threshold` | int | `12` | Turn count before scene-level compression is triggered |
 | `chapter_span_threshold` | int | `5` | Number of scene spans before chapter rollup |
 | `arc_span_threshold` | int | `3` | Number of chapter spans before arc rollup |
 | `compression_timeout_secs` | int | `60` | Timeout for a single compression summarization LLM call |
 
-#### `cognition.memory` — Memory Extraction & Retention
+#### `mind.memory` — Memory Extraction & Retention
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -469,7 +457,7 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 | `mmr_source_diversity_bonus` | float | `0.05` | Bonus added to MMR score when a candidate introduces a new recall source type |
 | `require_migration` | bool | `false` | When true, block typed recall while legacy summaries/keyfacts exist and migration is incomplete; ongoing `conversation_logs` do not block (#98) |
 
-#### `cognition.memory.tool_grounding` — Tool Result Grounding
+#### `mind.memory.tool_grounding` — Tool Result Grounding
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -480,7 +468,7 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 | `persist_user_visible_episodic` | bool | `true` | Persist concise user-visible tool outcomes as `Episodic` memories |
 | `min_confidence` | float | `0.60` | Confidence threshold for tool-derived memory candidates (`0.0`–`1.0`) |
 
-#### `cognition.emotion` — Emotion Engine
+#### `mind.emotion` — Emotion Engine
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -496,7 +484,7 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 | `classifier_model` | string | `"google/gemini-2.5-flash-lite"` | Chat model for the affect classifier (OpenRouter slug) |
 | `classifier_max_tokens` | int | `0` | Max completion tokens for classifier LLM calls (`0` = no cap) |
 
-#### `cognition.character` — Character Compilation
+#### `mind.character` — Character Compilation
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

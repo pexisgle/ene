@@ -4,8 +4,7 @@
   "user_name": "pexisgle",
   "runtime_rules": "Keep responses relatively short and sweet, suitable for displaying on a screen overlay.",
   "$schema": "./schema/settings.schema.json",
-  "cognition": {
-    "enabled": true,
+  "mind": {
     "context": {
       "max_prompt_tokens": 12000,
       "recent_turns": 8,
@@ -83,14 +82,9 @@
     },
     "language": "ja"
   },
-  "memory": {
+  "store": {
     "db_path": "",
-    "enabled": true,
-    "recall_limit": 5,
-    "recency_weight": 0.3,
-    "similarity_threshold": 0.5,
-    "similarity_weight": 0.7,
-    "time_decay_hours": 24.0
+    "enabled": true
   },
   "provider": {
     "api_key": {
@@ -117,7 +111,6 @@
   "session": {
     "auto_split": true,
     "min_turns_before_split": 3,
-    "recall_limit": 3,
     "summarization": {
       "base_url": "",
       "model": ""
