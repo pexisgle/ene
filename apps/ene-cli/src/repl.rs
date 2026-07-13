@@ -79,8 +79,20 @@ pub async fn run(ctx: &mut AppContext) -> i32 {
 
                 // Subscribe before sending the run command to avoid missing events
                 let mut rx = ctx.handle.subscribe();
-                let _ = ctx.handle.run(&input);
-                stream::process_stream(&mut rx, &ctx.handle).await;
+                match ctx.handle.run(&input) {
+                    Ok(turn) => {
+                        tracing::debug!(%turn, "Turn started");
+                        stream::process_stream(&mut rx, &ctx.handle, Some(&turn)).await;
+                    }
+                    Err(ene_runtime::RunError::Busy) => {
+                        println!("{}", crate::style::warning(
+                            "[Busy] A turn is already in progress. Wait for it to finish.",
+                        ));
+                    }
+                    Err(e) => {
+                        println!("{}", crate::style::error(format!("[Run] Failed: {e}")));
+                    }
+                }
             }
         }
     }

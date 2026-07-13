@@ -1,54 +1,90 @@
-use ene_core::{
-    EneEvent, EneEventReceiver, EneHandle, MultiAnswer, PermissionDecision, Truncate,
-    UserInputResponse, extract_emotion_from_token,
+use ene_runtime::{
+    CueSource, EneEvent, EneEventReceiver, EneHandle, MultiAnswer, PermissionDecision, TurnId,
+    UserInputResponse,
 };
 use std::io::{self, Write};
 
 /// Processes AI events from the actor in real-time, printing them to stdout.
-/// Returns when the stream finishes or an error occurs.
-pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
+///
+/// When `active_turn` is set, turn-scoped events for other turns are ignored
+/// (single-flight hosts should only see one turn, but this keeps the stream
+/// safe if a lagged subscriber still holds an older id).
+/// Returns when the matching stream finishes or an error occurs.
+pub async fn process_stream(
+    rx: &mut EneEventReceiver,
+    handle: &EneHandle,
+    active_turn: Option<&TurnId>,
+) {
     loop {
         match rx.recv().await {
-            Ok(EneEvent::TextDelta { delta }) => {
+            Ok(EneEvent::TextDelta { turn, delta }) => {
+                if !turn_matches(active_turn, &turn) {
+                    continue;
+                }
                 print!("{delta}");
                 let _ = io::stdout().flush();
             }
-            Ok(EneEvent::SpecialToken { token }) => {
-                if let Some(emotion) = extract_emotion_from_token(&token) {
-                    print!("[Emotion: {emotion}]");
-                } else {
-                    print!("{token}");
+            Ok(EneEvent::Performance { turn, cues, source }) => {
+                if !turn_matches(active_turn, &turn) {
+                    continue;
+                }
+                for cue in cues {
+                    let label = match source {
+                        CueSource::Affect => "affect",
+                        CueSource::LlmAdvisory => "llm_advisory",
+                        CueSource::LlmCommand => "llm_command",
+                        CueSource::Hysteresis => "hysteresis",
+                        CueSource::Fallback => "fallback",
+                    };
+                    print!("\n[Performance: {} ({label})]", cue.name);
                 }
                 let _ = io::stdout().flush();
             }
-            Ok(EneEvent::Expression { name, source }) => {
-                print!("\n[Expression: {name} ({source})]");
-                let _ = io::stdout().flush();
+            Ok(EneEvent::ToolCallStart {
+                turn,
+                name,
+                arguments,
+            }) => {
+                if !turn_matches(active_turn, &turn) {
+                    continue;
+                }
+                tracing::info!(%turn, tool = %name, arguments = %arguments, "Tool calling started");
             }
-            Ok(EneEvent::ToolCallStart { name, arguments }) => {
-                tracing::info!(tool = %name, arguments = %arguments, "Tool calling started");
+            Ok(EneEvent::ToolCallResult { turn, name, result }) => {
+                if !turn_matches(active_turn, &turn) {
+                    continue;
+                }
+                tracing::info!(%turn, tool = %name, result = %result, "Tool result");
             }
-            Ok(EneEvent::ToolCallResult { name, result }) => {
-                tracing::info!(tool = %name, result = %result, "Tool result");
+            Ok(EneEvent::ContextCompressed { turn, level, .. }) => {
+                if !turn_matches(active_turn, &turn) {
+                    continue;
+                }
+                tracing::info!(%turn, level = %level, "Context compressed");
             }
-            Ok(EneEvent::SessionSplit { summary, reason }) => {
-                tracing::info!(reason = %reason, summary = %Truncate::simple(&summary, 80), "Session split");
-            }
-            Ok(EneEvent::Terminal(reason)) => {
-                if let ene_core::TerminalReason::Failed { message } = &reason {
-                    tracing::error!(error = %message, "Terminal failure");
+            Ok(EneEvent::Terminal { turn, reason }) => {
+                if !turn_matches(active_turn, &turn) {
+                    continue;
+                }
+                if let ene_runtime::TerminalReason::Failed { message } = &reason {
+                    tracing::error!(%turn, error = %message, "Terminal failure");
                 } else {
-                    tracing::info!(?reason, "Stream terminal");
+                    tracing::info!(%turn, ?reason, "Stream terminal");
                 }
                 break;
             }
             Ok(EneEvent::PermissionRequired {
+                turn,
                 request_id,
                 action,
                 target,
                 description,
             }) => {
+                if !turn_matches(active_turn, &turn) {
+                    continue;
+                }
                 tracing::info!(
+                    %turn,
                     request_id = %request_id,
                     action = %action,
                     target = %target,
@@ -77,9 +113,16 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
                 let _ = handle.decide_permission(request_id, decision);
                 tracing::info!("Permission decision submitted; resuming processing");
             }
-            Ok(EneEvent::UserInputRequired { request_id, prompt }) => {
+            Ok(EneEvent::UserInputRequired {
+                turn,
+                request_id,
+                prompt,
+            }) => {
+                if !turn_matches(active_turn, &turn) {
+                    continue;
+                }
                 let total = prompt.items.len();
-                tracing::info!(request_id = %request_id, total, "User input required");
+                tracing::info!(%turn, request_id = %request_id, total, "User input required");
 
                 let mut answers: Vec<MultiAnswer> = Vec::with_capacity(total);
                 let mut cancelled = false;
@@ -124,7 +167,6 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
                             MultiAnswer::Answer { text }
                         }
                     } else {
-                        // No options, no free text: record a skip and move on.
                         MultiAnswer::Skip
                     };
 
@@ -139,51 +181,6 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
                 let _ = handle.submit_user_input(request_id, decision);
                 tracing::info!("User input submitted; resuming processing");
             }
-            Ok(EneEvent::TaskProgress {
-                task_id,
-                step,
-                total_steps,
-                description,
-            }) => {
-                let steps_display = match total_steps {
-                    Some(total) => format!("{step}/{total}"),
-                    None => format!("{step}/?"),
-                };
-                tracing::info!(task_id, step = %steps_display, description = %description, "Task progress");
-            }
-            Ok(EneEvent::PipelinePhase { phase }) => {
-                print!("\x1b[2K\r    {phase}...");
-                let _ = io::stdout().flush();
-            }
-            Ok(EneEvent::PipelineMetrics { timings }) => {
-                let emb_ms = timings.get("Embedding").copied().unwrap_or(0);
-                let ctx_ms = timings
-                    .get("Context Search (Total)")
-                    .copied()
-                    .or_else(|| timings.get("Context Search").copied())
-                    .unwrap_or(0);
-                let ctx_mem = timings
-                    .get("Context Search (Memory DB)")
-                    .copied()
-                    .unwrap_or(0);
-                let ctx_tool = timings
-                    .get("Context Search (Tool RAG)")
-                    .copied()
-                    .unwrap_or(0);
-                let prompt_ms = timings.get("Prompt Building").copied().unwrap_or(0);
-                let total_ms = timings.get("Total Pre-generation").copied().unwrap_or(0);
-
-                print!("\x1b[2K\r");
-                tracing::info!(
-                    emb_ms,
-                    ctx_ms,
-                    ctx_mem_ms = ctx_mem,
-                    ctx_tool_ms = ctx_tool,
-                    prompt_ms,
-                    total_ms,
-                    "Pipeline timings"
-                );
-            }
             Ok(EneEvent::StatusChanged { .. }) => {}
             Err(e) => {
                 tracing::warn!(error = ?e, "Event receive error");
@@ -191,4 +188,8 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle) {
             }
         }
     }
+}
+
+fn turn_matches(active: Option<&TurnId>, event_turn: &TurnId) -> bool {
+    active.is_none_or(|t| t == event_turn)
 }

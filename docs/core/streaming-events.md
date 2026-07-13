@@ -1,49 +1,51 @@
-# Streaming Events: Legacy vs Cognitive
+# Streaming Events: Mind Runtime
 
-`ene-core`'s actor dispatches every `EneCommand::Run` to one of two implementations of the streaming pipeline (see [`ene-core` API reference § Streaming Dispatch](../api/ene-core.md#streaming-dispatch)):
+`ene-runtime`'s actor dispatches every `EneCommand::Run` to the mind streaming pipeline (see [`ene-runtime` API reference § Streaming Dispatch](../api/ene-runtime.md#streaming-dispatch)):
 
-- **Legacy** (`run_stream_legacy`, in `streaming.rs`) — the original embed → recall → build-messages → stream loop.
-- **Cognitive** (`streaming_cognitive::run_stream_cognitive`) — delegates prompt composition, recall, affect, and post-turn memory writing to `ene-cognition`'s `CognitionEngine`.
+- **Mind** (`streaming_cognitive::run_stream_cognitive`) — delegates prompt composition, recall, affect, and post-turn memory writing to `ene-mind`'s `CognitionEngine`.
 
-The dispatch condition is `cognition.enabled && memory.enabled && embedder.is_some()`; if cognition and memory are both enabled but no embedder is configured, the turn silently falls back to legacy. Both paths broadcast [`EneEvent`](../api/ene-core.md#eneevent) on the same channel, so **consumers do not need to know which path handled a given turn** — but the *set* of variants they can expect to see differs, which this page exists to pin down (see [API refactor plan](../architecture/api-refactor-plan.md), item 4).
+The dispatch requires an enabled and initialized store plus an embedding provider. Missing prerequisites return `EneRuntimeError::MindPrerequisite` and emit a failed `Terminal` event; the runtime never falls back to a legacy stream.
 
-## Variant-by-path matrix
+Every turn is identified by a [`TurnId`](../api/ene-runtime.md). `run` returns that id (or `RunError::Busy` if a turn is already in flight). Turn-scoped chat events carry the same `turn` field. `Terminal` is emitted only after awaited `after_turn` work completes.
 
-| `EneEvent` variant | Legacy | Cognitive | Notes |
-|---|---|---|---|
-| `TextDelta` | ✅ | ✅ | Plain-text chunks from the LLM stream. |
-| `SpecialToken` | ✅ | ✅ (conditionally) | Emitted whenever the raw model output still contains `<\|emo:name\|>` tokens. Under cognitive dispatch, in-stream tokens are only *suppressed* (not sent as `SpecialToken`) when `cognition.emotion.enabled && cognition.emotion.llm_expression_is_advisory` — i.e. the emotion engine is on and treats LLM proposals as advisory, so it prefers to resolve `Expression` itself instead of surfacing raw tokens. If `emotion.enabled == false`, or advisory mode is off, tokens stream through as `SpecialToken` exactly like the legacy path. |
-| `Expression` | ❌ | ✅ (conditionally) | Engine-managed expression resolved by the cognitive runtime's Output Arbiter (#91) once a turn without pending tool calls completes. Only emitted when `cognition.emotion.enabled == true`; never emitted by the legacy path, which relies solely on inline `<\|emo:name\|>` tokens (`SpecialToken`). |
-| `ToolCallStart` / `ToolCallResult` | ✅ | ✅ | Both paths call the same shared tool-execution machinery (`select_relevant_tools`, `perform_tool_executions`, `accumulate_tool_calls`, `finalize_tool_calls`), so tool-calling events are identical on both paths. |
-| `PermissionRequired` / `UserInputRequired` | ✅ | ✅ | Also sourced from the shared `perform_tool_executions` — same reasoning as above. |
-| `TaskProgress` | ✅ | ✅ | Forwarded from long-running tool calls on either path; not specific to either pipeline. |
-| `PipelinePhase` | ✅ | ✅ | Marks entry into a pre-generation phase (`Embedding`, `Context Search`, `Prompt Building`). Both pipelines emit this, though the cognitive path's phases correspond to `CognitionEngine::before_turn`/`compose_prompt_packet` rather than the legacy recall/build-messages steps. |
-| `PipelineMetrics` | ✅ | ❌ | Legacy-only today: emitted once, just before the first `TextDelta`, with per-phase elapsed milliseconds. The cognitive path does not currently emit an equivalent metrics snapshot — a gap worth closing if per-phase timing becomes important for the cognitive pipeline too. |
-| `SessionSplit` | ✅ (actor-level) | ⚠️ (see below) | Not emitted by either streaming pipeline directly — it comes from the *actor's* auto-split check (`apply_pending_split`) or `EneHandle::manual_split()`, which run independently of which pipeline handled the preceding turn. |
-| `Terminal` | ✅ | ✅ | Exactly one per `Run`, guaranteed by the shared `emit_terminal` + `terminal_emitted` guard on both paths. |
-| `StatusChanged` | ✅ (actor-level) | ✅ (actor-level) | Emitted by the actor around dispatch, not by either streaming function itself. |
+## Chat `EneEvent` variants
 
-## The `SessionSplit` / compression gap
+| `EneEvent` variant | Notes |
+|---|---|
+| `TextDelta { turn, delta }` | Plain-text chunks; emotion / performance markers are stripped. |
+| `Performance { turn, cues, source }` | Presentation cues from the Output Arbiter (`PerformanceCue` / `CueSource` in `ene-mind`). Replaces former `SpecialToken` + standalone `Expression` chat events. |
+| `ToolCallStart` / `ToolCallResult` | Tool execution lifecycle (when the UI needs them). |
+| `PermissionRequired` / `UserInputRequired` | Interactive tool gates. |
+| `ContextCompressed { turn, level }` | Thin signal that compression ran; details live on diagnostics. |
+| `Terminal { turn, reason }` | Exactly one per `Run`, after `after_turn` (memory write, forgetting, affect persist). |
+| `StatusChanged { status }` | Actor-level Idle / Running / Error. |
 
-`EneHandle::manual_split()` and the actor's automatic split check both call into `handle_manual_split`, which branches on `cognition.enabled && cognition.context.compression_enabled`:
+### Not on the chat bus
 
-- **Legacy branch** (compression disabled, or cognition disabled): runs `ene_session::execute_split`, applies the split, and broadcasts `EneEvent::SessionSplit { summary, reason }`.
-- **Compression branch** (`handle_manual_compression`): runs `execute_compression`, trims history, and returns a `SplitResult` to the caller — **but does not broadcast any `EneEvent`**. A consumer that only watches the event stream (rather than polling `manual_split()`'s return value) currently has no way to observe that a compression pass ran.
+These are **not** chat `EneEvent` variants under API v2:
 
-This is a known gap tracked by the [API refactor plan](../architecture/api-refactor-plan.md) item 4, "Phase B": the plan calls for emitting a compression-oriented event (or enriching `SessionSplit`) once this becomes a priority. Until then, `SessionSplit` should be read as "a **legacy-style hard split** occurred" — its absence does not mean nothing happened to the session's history.
+| Former / diagnostic | Where it lives now |
+|---|---|
+| `SpecialToken`, standalone `Expression` | Folded into `Performance` (or stripped from text) |
+| `SessionSplit` | Compression / split via `diagnostics().manual_split()`; optional thin `ContextCompressed` |
+| `PipelinePhase`, `PipelineMetrics`, `TaskProgress` | `handle.diagnostics().subscribe()` |
+
+## Diagnostics
+
+`handle.diagnostics()` returns a concrete `EneDiagnostics` facade. UIs do not implement a diagnostics trait. Use it for snapshots, tool inspection, manual compression/split, and the diagnostic event stream.
 
 ## App consumer checklist
 
-Both `ene-cli` (`apps/ene-cli/src/stream.rs`) and `ene-desktop` (`apps/ene-desktop/src/ai_bridge.rs`) already match on every current `EneEvent` variant, including `Terminal` and `Expression` — this was re-verified as part of the API refactor pass that produced this document. When adding a new UI, model your event loop on one of those two as a reference, and:
+Both `ene-cli` (`apps/ene-cli/src/stream.rs`) and `ene-desktop` (`apps/ene-desktop/src/ai_bridge.rs`) match on the minimal chat bus, including `Performance` and `Terminal`. When adding a new UI:
 
-- Always break your loop on `Terminal`, not on any single "success" variant — it is the only guaranteed one-per-run signal.
-- Handle `Expression` even if you also handle `SpecialToken`-derived emotion tokens; a character running with cognition and advisory emotion mode enabled will only ever send `Expression`, never emotion `SpecialToken`s.
-- Treat `SessionSplit` as legacy-path-only signal per the gap above; don't build UX that assumes it fires on every context-management pass.
+- Break the turn loop on `Terminal` with a matching `turn` — it is the only guaranteed one-per-run completion signal.
+- Map `Performance` cues to VRM / CLI display; do not expect `SpecialToken` or standalone `Expression` on the chat bus.
+- Treat `ContextCompressed` as an optional thin signal; poll `manual_split()` / diagnostics when you need compression details.
 
 ## Related documentation
 
-- [`ene-core` API reference](../api/ene-core.md) — full `EneEvent` field reference and the streaming dispatch condition
+- [`ene-runtime` API reference](../api/ene-runtime.md) — full `EneEvent` field reference and streaming dispatch
+- [API v2 ADR](../architecture/api-v2.md) — locked host / event contracts
 - [Session Split and Compression](session-split.md) — why compression is preferred over hard splits
-- [Streaming Engine](streaming.md) — actor/handle architecture (legacy-path-oriented; predates the cognitive dispatch and `Expression`/`Terminal` variants documented here)
+- [Streaming Engine](streaming.md) — actor/handle architecture
 - [Cognitive Runtime ADR](../architecture/cognitive-runtime.md)
-- [API Refactor Plan](../architecture/api-refactor-plan.md) — item 4 (events/session migration)

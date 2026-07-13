@@ -3,7 +3,7 @@
 //! Producers (AI bridge, tray, hotkey handlers) push into a single
 //! `UnboundedSender`. The winit event loop owns the receiver and
 //! drains it on the main thread.
-use ene_core::RequestId;
+use ene_runtime::RequestId;
 use ene_tool_proto::UserInputPrompt;
 use tokio::sync::mpsc;
 
@@ -20,11 +20,12 @@ pub type AppEventReceiver = mpsc::UnboundedReceiver<AppEvent>;
 pub enum AppEvent {
     /// System tray (or future global hotkey) actions.
     Tray(TrayAction),
-    /// Streamed AI events mirrored from [`ene_core::EneEvent`].
+    /// Streamed AI events mirrored from [`ene_runtime::EneEvent`].
     Ai(AiStreamUpdate),
-    /// Raw `<|emo:NAME|>` token extracted by the AI bridge before
-    /// forwarding. Currently logged only.
-    EmoteToken(String),
+    /// Raw performance cue name from [`ene_runtime::EneEvent::Performance`].
+    /// Desktop maps this to VRM playback; do not forward SpecialToken /
+    /// Expression events (removed in API v2).
+    PerformanceCue(String),
     /// Request the event loop to exit.
     Quit,
 }
@@ -42,8 +43,8 @@ pub enum TrayAction {
     Quit,
 }
 
-/// Flattened subset of [`ene_core::EneEvent`] the UI layer cares
-/// about. `StatusChanged` / `SessionSplit` are dropped by the bridge.
+/// Flattened subset of [`ene_runtime::EneEvent`] the UI layer cares
+/// about. Pipeline diagnostics stay off this bus (use `diagnostics()`).
 #[derive(Debug, Clone)]
 pub enum AiStreamUpdate {
     TextDelta(String),
@@ -69,17 +70,6 @@ pub enum AiStreamUpdate {
         request_id: RequestId,
         prompt: UserInputPrompt,
     },
-    TaskProgress {
-        #[expect(dead_code)]
-        task_id: String,
-        #[expect(dead_code)]
-        step: usize,
-        #[expect(dead_code)]
-        total_steps: Option<usize>,
-        #[expect(dead_code)]
-        description: String,
-    },
     Finished,
-    #[expect(dead_code)]
     Error(String),
 }

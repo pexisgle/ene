@@ -20,8 +20,8 @@ fn spawn_chat_window(mut commands: Commands) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy_app::App;
     use crate::component::chat::ChatWindow;
+    use bevy_app::App;
 
     #[test]
     fn plugin_spawns_chat_entity() {

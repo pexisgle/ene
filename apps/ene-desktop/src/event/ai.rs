@@ -5,7 +5,7 @@
 //! `pump_legacy_events` system in the `First` stage and consumed by
 //! the AI consumer systems in the `Update` stage.
 use bevy_ecs::prelude::*;
-use ene_core::RequestId;
+use ene_runtime::RequestId;
 use ene_tool_proto::UserInputPrompt;
 
 #[derive(Message, Debug, Clone)]
@@ -13,6 +13,10 @@ pub struct AiTextDelta(pub String);
 
 #[derive(Message, Debug, Clone, Copy)]
 pub struct AiStreamFinished;
+
+/// Terminal failure or host Busy — message text for the chat UI.
+#[derive(Message, Debug, Clone)]
+pub struct AiStreamError(pub String);
 
 #[derive(Message, Debug, Clone)]
 pub struct AiPermissionRequested {
@@ -28,5 +32,11 @@ pub struct AiUserInputRequested {
     pub prompt: UserInputPrompt,
 }
 
+/// Performance cue name mapped toward VRM expression playback by the
+/// desktop emotion pipeline (from [`ene_runtime::EneEvent::Performance`]).
+/// Does not pass SpecialToken/Expression into the VRM API.
 #[derive(Message, Debug, Clone)]
-pub struct EmoteToken(pub String);
+pub struct PerformanceCue(pub String);
+
+/// Compatibility alias for older call sites (same type).
+pub use PerformanceCue as EmoteToken;

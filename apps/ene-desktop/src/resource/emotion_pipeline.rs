@@ -25,7 +25,7 @@ pub struct EmotionPipelineState {
     /// Last-applied emotion + remaining hold time. Read by the
     /// render-side system to drive fade-out after the hold window.
     pub active: Option<ActiveEmotion>,
-    /// Hold duration for new expression commands (`cognition.emotion.expression_hysteresis_seconds`).
+    /// Hold duration for new expression commands (`mind.emotion.expression_hysteresis_seconds`).
     pub expression_hold_secs: f64,
 }
 

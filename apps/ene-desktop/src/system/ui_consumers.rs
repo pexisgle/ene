@@ -8,7 +8,8 @@ use crate::character_state::EmotionCommand;
 use crate::component::chat::{ChatStateComponent, ChatWindow};
 use crate::component::ui::{UiStateComponent, UiWindow};
 use crate::event::ai::{
-    AiPermissionRequested, AiStreamFinished, AiTextDelta, AiUserInputRequested, EmoteToken,
+    AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
+    EmoteToken,
 };
 use crate::event::chat::OpenChat;
 use crate::event::settings::OpenSettings;
@@ -67,6 +68,19 @@ pub fn apply_ai_stream_finished_system(
         return;
     };
     chat.0.finish_streaming();
+}
+
+pub fn apply_ai_stream_error_system(
+    mut events: MessageReader<AiStreamError>,
+    mut chat_query: Query<&mut ChatStateComponent, With<ChatWindow>>,
+) {
+    let Some(last) = events.read().last() else {
+        return;
+    };
+    let Some(mut chat) = chat_query.iter_mut().next() else {
+        return;
+    };
+    chat.0.finish_streaming_with_error(&last.0);
 }
 
 pub fn apply_ai_permission_system(

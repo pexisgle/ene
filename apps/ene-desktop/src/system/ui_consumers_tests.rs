@@ -5,7 +5,10 @@ use bevy_ecs::prelude::*;
 
 use crate::component::chat::{ChatStateComponent, ChatUiBundle, ChatWindow};
 use crate::component::ui::{SettingsUiBundle, UiStartedAt, UiStateComponent, UiWindow};
-use crate::event::ai::{AiPermissionRequested, AiStreamFinished, AiTextDelta, AiUserInputRequested, EmoteToken};
+use crate::event::ai::{
+    AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
+    EmoteToken,
+};
 use crate::event::chat::OpenChat;
 use crate::event::input::PointerMoved;
 use crate::event::settings::OpenSettings;
@@ -23,7 +26,7 @@ use crate::system::ui_consumers::{
     apply_ai_permission_system, apply_ai_stream_finished_system, apply_ai_text_deltas_system,
     apply_ai_user_input_system, open_chat_system, open_settings_system,
 };
-use ene_core::RequestId;
+use ene_runtime::RequestId;
 use ene_tool_proto::UserInputPrompt;
 use tokio::sync::mpsc;
 
@@ -43,6 +46,7 @@ fn init_messages(world: &mut World) {
     world.init_resource::<Messages<OpenChat>>();
     world.init_resource::<Messages<AiTextDelta>>();
     world.init_resource::<Messages<AiStreamFinished>>();
+    world.init_resource::<Messages<AiStreamError>>();
     world.init_resource::<Messages<AiPermissionRequested>>();
     world.init_resource::<Messages<AiUserInputRequested>>();
     world.init_resource::<Messages<PointerMoved>>();
@@ -257,6 +261,7 @@ fn emote_token_emits_message_via_pump() {
     world.init_resource::<Messages<AiPermissionRequested>>();
     world.init_resource::<Messages<AiUserInputRequested>>();
     world.init_resource::<Messages<AiStreamFinished>>();
+    world.init_resource::<Messages<AiStreamError>>();
     world.init_resource::<Messages<EmoteToken>>();
     world.init_resource::<Messages<OpenSettings>>();
     world.init_resource::<Messages<OpenChat>>();
@@ -266,7 +271,7 @@ fn emote_token_emits_message_via_pump() {
     world
         .resource::<EventChannels>()
         .tx
-        .send(AppEvent::EmoteToken("happy".into()))
+        .send(AppEvent::PerformanceCue("happy".into()))
         .unwrap();
 
     let mut schedule = Schedule::default();

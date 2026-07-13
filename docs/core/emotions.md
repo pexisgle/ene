@@ -1,16 +1,18 @@
-# Emotion & Expression
+# Emotion & Performance
 
-Ene supports two expression paths: **legacy token mode** (when `cognition.emotion.enabled` is false or the legacy streaming pipeline is active) and **cognitive runtime mode** (engine-managed affect + Output Arbiter).
+Ene supports two presentation mechanisms within the mind stream: **token compatibility mode** (when `mind.emotion.enabled` is false) and **engine-managed affect** (Output Arbiter → `Performance` cues).
 
-## Cognitive Runtime Path (default when `cognition.enabled`)
+Under API v2, chat consumers receive [`EneEvent::Performance`](streaming-events.md) — not standalone `SpecialToken` or `Expression` events.
 
-When `cognition.emotion.enabled` is true:
+## Mind Runtime Path
+
+When `mind.emotion.enabled` is true:
 
 1. **Pre-turn:** `EmotionEngine` loads `AffectState` from the database, applies time-based decay and deterministic appraisal (gratitude, praise, insult, urgency, fatigue), then consumes any pending post-turn classifier proposal from the previous turn.
 2. **Prompt:** `build_natural_dialogue_contract()` replaces the token-list PHI. The LLM is asked for natural dialogue only — no `<|emo:|>` tokens required.
-3. **Post-stream:** `OutputArbiter` maps updated `AffectState` (+ optional LLM token hints) to a resolved expression with hysteresis.
-4. **Event:** `EneEvent::Expression { name, source }` is emitted to consumers.
-5. **Post-turn:** Updated `AffectState` (including `last_expression`) is persisted.
+3. **Post-stream:** `OutputArbiter` maps updated `AffectState` (+ optional LLM token hints) to resolved presentation cues with hysteresis.
+4. **Event:** `EneEvent::Performance { turn, cues, source }` is emitted to consumers.
+5. **Post-turn:** Updated `AffectState` (including last expression / cue state) is persisted before `Terminal`.
 
 ```
 User input
@@ -18,21 +20,23 @@ User input
   → PromptPacket (Current Mood section + natural dialogue contract)
   → LLM stream (text only)
   → OutputArbiter
-  → EneEvent::Expression
+  → EneEvent::Performance
   → VRM / CLI display
 ```
 
+`PerformanceCue` / `CueSource` are owned by `ene-mind` (runtime re-exports). Desktop maps cue names to VRM playback without importing mind into `ene-vrm`.
+
 ### Configuration
 
-See `cognition.emotion` in [settings.md](../configuration/settings.md):
+See `mind.emotion` in [settings.md](../configuration/settings.md):
 
 | Key | Role |
 |-----|------|
 | `enabled` | Master switch for engine-managed emotion |
 | `engine` | `deterministic`, `llm`, or `hybrid` (classifier) — see [Engine modes](#engine-modes) |
 | `decay_half_life_minutes` | PAD decay toward neutral between turns |
-| `expression_hysteresis_seconds` | Minimum hold time before expression changes |
-| `llm_expression_is_advisory` | When true, stream tokens are accumulated for the arbiter instead of emitted immediately |
+| `expression_hysteresis_seconds` | Minimum hold time before expression / cue changes |
+| `llm_expression_is_advisory` | When true, stream tokens are accumulated for the arbiter instead of driving cues immediately |
 | `classifier_timeout_secs` / `classifier_min_confidence` | Post-turn async classifier budget and merge gate (#88) |
 | `classifier_language` | Prompt library locale for classifier and natural-dialogue contract (`en` / `ja`) |
 | `classifier_model` | Chat model for the classifier (default `google/gemini-2.5-flash-lite` on OpenRouter) |
@@ -53,7 +57,7 @@ At **INFO** level you should see:
 - `Post-turn affect classifier estimate complete` with the full estimate when classification succeeds
 - `Blended post-turn classifier estimate into affect` at the **next** turn start when the pending proposal is merged
 
-If you see no classifier logs, check that `cognition.emotion.engine` is `hybrid` or `llm` (not `deterministic`).
+If you see no classifier logs, check that `mind.emotion.engine` is `hybrid` or `llm` (not `deterministic`).
 
 ### Engine modes
 
@@ -67,43 +71,36 @@ Use `hybrid` unless you explicitly want to disable either the rule-based path or
 
 The classifier uses a **dedicated provider instance** (not the main stream client), strict JSON Schema output (`response_format` with `strict: true`), optional `classifier_max_tokens`, and resilient transport fallbacks for OpenRouter compatibility.
 
-This keeps immediate user-facing expression/reactivity in the response LLM path while using the classifier as a delayed advisory signal for internal affect stabilization.
+## Token Compatibility Path
 
-## Legacy Token Path
-
-When emotion engine is disabled or the legacy pipeline runs, the LLM can produce `<|emo:name|>` special tokens to control the character's facial expression.
+When the emotion engine is disabled, the LLM may still produce `<|emo:name|>` special tokens. The stream task strips markers from `TextDelta` and the Output / performance path may surface them as `Performance` cues rather than separate chat events.
 
 ### Token Parsing
 
-Implemented in `special_token.rs`:
+Implemented in mind special-token helpers:
 
 | Function | Description |
 |----------|-------------|
 | `split_text_and_special_tokens(carry, chunk)` | Splits stream chunks into text fragments and `<\|...\|>` tokens. Tokens spanning chunk boundaries are held in `carry` |
 | `extract_emotion_from_token(token)` | Extracts emotion name from `<\|emo:name\|>` (case-insensitive) |
 
-### Legacy Data Flow
+### Token Data Flow
 
 ```
 LLM stream → raw text chunks
   ↓
-ene-core stream task: session.process_delta(chunk)
-  ├── Text → EneEvent::TextDelta { delta }
-  └── <|emo:name|> → EneEvent::SpecialToken { token }
+ene-runtime / mind stream path
+  ├── Text → EneEvent::TextDelta { turn, delta }
+  └── <|emo:name|> → stripped from text; may become Performance cues
        ↓
-Consumer receives separate events:
-  ├── CLI: TextDelta → print directly
-  │       SpecialToken → extract_emotion_from_token → "[Emotion: name]"
-  └── Desktop: TextDelta → EneStreamEvent::TextDelta
-              SpecialToken → extract_emotion_from_token → EmoteToken
-                → EmotionQueue → hold → fade-out → SetExpressions (VRM blendshapes)
+Consumer:
+  ├── CLI: TextDelta → print; Performance → "[Performance: name]" (or similar)
+  └── Desktop: TextDelta → AI text; Performance → PerformanceCue / EmoteToken → VRM
 ```
-
-**Important:** Emotion extraction from `TextDelta` happens inside `ene-core`'s stream task, not in the consumer. Consumers receive pre-parsed `SpecialToken` events.
 
 ### Emotion Expression Protocol (PHI)
 
-`build_expression_phi()` injects an instruction block listing available `<|emo:name|>` tokens. Tokens are derived from `card.data.extensions["expressions"]`.
+When emotion is disabled, `build_expression_phi()` may inject an instruction block listing available `<|emo:name|>` tokens derived from `card.data.extensions["expressions"]`.
 
 Default expressions (can be disabled per-card):
 
@@ -116,13 +113,13 @@ Default expressions (can be disabled per-card):
 | relaxed | Defined value |
 | surprised | Defined value |
 
-Merged with `post_history_instructions` before injection.
+Merged with `post_history_instructions` before injection when that path is active.
 
 ## Per-Application Processing
 
-| Application | Cognitive path | Legacy path |
-|-------------|----------------|-------------|
-| ene-desktop | `Expression` → `EmoteToken` → `EmotionPipelineState` | `SpecialToken` → `EmoteToken` |
-| ene-cli | `Expression` → `[Expression: name]` | `SpecialToken` → `[Emotion: name]` |
+| Application | Chat event | Downstream |
+|-------------|------------|------------|
+| ene-desktop | `Performance` | `AppEvent::PerformanceCue` → `EmoteToken` → VRM blendshapes |
+| ene-cli | `Performance` | Printed / logged cue names |
 
-Hold duration on desktop follows `cognition.emotion.expression_hysteresis_seconds` (default 4.0s).
+Hold duration on desktop follows `mind.emotion.expression_hysteresis_seconds` (default 4.0s).

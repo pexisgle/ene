@@ -11,11 +11,12 @@ use std::time::Instant;
 use bevy_ecs::prelude::*;
 
 use crate::event::ai::{
-    AiPermissionRequested, AiStreamFinished, AiTextDelta, AiUserInputRequested, EmoteToken,
+    AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
+    EmoteToken,
 };
+use crate::event::chat::OpenChat;
 #[cfg(target_os = "linux")]
 use crate::event::lifecycle::TickGtk;
-use crate::event::chat::OpenChat;
 use crate::event::settings::OpenSettings;
 use crate::events::{AiStreamUpdate, AppEvent};
 use crate::resource::{event_channels::EventChannels, exit::ExitRequested};
@@ -36,6 +37,7 @@ pub fn pump_legacy_events(
     mut permission: MessageWriter<AiPermissionRequested>,
     mut user_input: MessageWriter<AiUserInputRequested>,
     mut finished: MessageWriter<AiStreamFinished>,
+    mut stream_error: MessageWriter<AiStreamError>,
     mut emote: MessageWriter<EmoteToken>,
     mut open_settings: MessageWriter<OpenSettings>,
     mut open_chat: MessageWriter<OpenChat>,
@@ -49,6 +51,7 @@ pub fn pump_legacy_events(
             &mut permission,
             &mut user_input,
             &mut finished,
+            &mut stream_error,
             &mut emote,
             &mut open_settings,
             &mut open_chat,
@@ -70,6 +73,7 @@ fn translate_event(
     permission: &mut MessageWriter<AiPermissionRequested>,
     user_input: &mut MessageWriter<AiUserInputRequested>,
     finished: &mut MessageWriter<AiStreamFinished>,
+    stream_error: &mut MessageWriter<AiStreamError>,
     emote: &mut MessageWriter<EmoteToken>,
     open_settings: &mut MessageWriter<OpenSettings>,
     open_chat: &mut MessageWriter<OpenChat>,
@@ -90,8 +94,11 @@ fn translate_event(
         AppEvent::Ai(AiStreamUpdate::TextDelta(text)) => {
             text_delta.write(AiTextDelta(text));
         }
-        AppEvent::Ai(AiStreamUpdate::Finished | AiStreamUpdate::Error(_)) => {
+        AppEvent::Ai(AiStreamUpdate::Finished) => {
             finished.write(AiStreamFinished);
+        }
+        AppEvent::Ai(AiStreamUpdate::Error(message)) => {
+            stream_error.write(AiStreamError(message));
         }
         AppEvent::Ai(AiStreamUpdate::PermissionRequired {
             request_id,
@@ -109,10 +116,12 @@ fn translate_event(
         AppEvent::Ai(AiStreamUpdate::UserInputRequired { request_id, prompt }) => {
             user_input.write(AiUserInputRequested { request_id, prompt });
         }
-        AppEvent::EmoteToken(name) => {
+        AppEvent::PerformanceCue(name) => {
             emote.write(EmoteToken(name));
         }
-        _ => {}
+        AppEvent::Ai(
+            AiStreamUpdate::ToolCallStart { .. } | AiStreamUpdate::ToolCallResult { .. },
+        ) => {}
     }
 }
 
@@ -135,7 +144,7 @@ mod tests {
     use crate::events::TrayAction;
     use crate::settings_ui::PageKind;
     use bevy_ecs::message::MessageReader;
-    use ene_core::RequestId;
+    use ene_runtime::RequestId;
     use tokio::sync::mpsc;
 
     fn build_world() -> (World, mpsc::UnboundedSender<AppEvent>) {
@@ -145,6 +154,7 @@ mod tests {
         world.insert_resource(ExitRequested::default());
         world.init_resource::<Messages<AiTextDelta>>();
         world.init_resource::<Messages<AiStreamFinished>>();
+        world.init_resource::<Messages<AiStreamError>>();
         world.init_resource::<Messages<AiPermissionRequested>>();
         world.init_resource::<Messages<AiUserInputRequested>>();
         world.init_resource::<Messages<EmoteToken>>();
@@ -233,7 +243,8 @@ mod tests {
     #[test]
     fn emote_token_emits_typed_message() {
         let (mut world, tx) = build_world();
-        tx.send(AppEvent::EmoteToken("happy".to_string())).unwrap();
+        tx.send(AppEvent::PerformanceCue("happy".to_string()))
+            .unwrap();
         run_pump(&mut world);
         let messages = world.resource_mut::<Messages<EmoteToken>>();
         let mut cursor = messages.get_cursor();
