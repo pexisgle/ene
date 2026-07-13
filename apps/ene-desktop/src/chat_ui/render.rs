@@ -27,6 +27,7 @@ impl ChatUi {
             return;
         };
         let processing = ai.is_processing();
+        let can_cancel = processing || ai.has_active_turn();
         let scroll_to_bottom = chat_state.0.scroll_to_bottom;
         let messages = chat_state.0.messages.clone();
         chat_state.0.scroll_to_bottom = false;
@@ -77,7 +78,7 @@ impl ChatUi {
                     .add_enabled(!processing, egui::Button::new(crate::i18n::send()))
                     .clicked();
                 let cancel_clicked = ui
-                    .add_enabled(processing, egui::Button::new(crate::i18n::cancel()))
+                    .add_enabled(can_cancel, egui::Button::new(crate::i18n::cancel()))
                     .clicked();
 
                 // Multiline TextEdit inserts a newline on Enter; detect send
@@ -85,7 +86,7 @@ impl ChatUi {
                 let enter_send = !processing
                     && response.has_focus()
                     && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-                let escape_cancel = processing && ui.input(|i| i.key_pressed(egui::Key::Escape));
+                let escape_cancel = can_cancel && ui.input(|i| i.key_pressed(egui::Key::Escape));
 
                 if cancel_clicked || escape_cancel {
                     ai.cancel();

@@ -8,7 +8,6 @@ use chrono::{DateTime, Utc};
 use ene_ai::LlmProviderRegistry;
 use ene_config::CharacterCardV3;
 use ene_config::EneConfig;
-use ene_mind::PendingSplitTask;
 use ene_mind::{CardName, SessionId};
 use ene_mind::{
     CompressionLevel, CompressionTaskInput, HistoryEntry as MindHistoryEntry,
@@ -16,7 +15,7 @@ use ene_mind::{
     evaluate_compression_trigger, execute_compression, maybe_roll_up_chapter,
     poll_compression_result, spawn_compression_task,
 };
-use ene_mind::{ConversationSession, EneSessionError, SplitResult, poll_split_result};
+use ene_mind::{ConversationSession, EneSessionError, SplitResult};
 use ene_tool_host::{ToolHostManager, ToolRegistry};
 use ene_tool_proto::ToolSpec;
 use std::collections::HashMap;
@@ -459,7 +458,6 @@ impl EneHandle {
             active_turn: None,
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
             pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
-            pending_split: None,
             pending_compression: None,
             call_tool_tasks: tokio::task::JoinSet::new(),
             terminal_emitted: Arc::new(AtomicBool::new(false)),
@@ -601,7 +599,6 @@ struct EneActor {
     active_turn: Option<TurnId>,
     pending_permissions: Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
     pending_user_inputs: Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
-    pending_split: Option<PendingSplitTask>,
     pending_compression: Option<PendingCompressionTask>,
     call_tool_tasks: tokio::task::JoinSet<()>,
     /// Shared with the running stream task; first party to flip emits Terminal.
@@ -735,30 +732,12 @@ impl EneActor {
                 }
                 self.cancel_token.cancel();
 
-                // Prefer cooperative completion: join briefly before aborting so
-                // a finishing turn can still deliver its session update.
-                const CANCEL_JOIN_TIMEOUT: std::time::Duration =
-                    std::time::Duration::from_millis(250);
+                // Abort immediately so the actor loop is not blocked on join.
+                // Cancel discards in-flight session updates by design.
                 if let Some(handle) = self.stream_handle.take() {
-                    let abort = handle.abort_handle();
-                    match tokio::time::timeout(CANCEL_JOIN_TIMEOUT, handle).await {
-                        Ok(_) => {}
-                        Err(_elapsed) => {
-                            abort.abort();
-                        }
-                    }
+                    handle.abort();
                 }
-
-                if let Some(rx) = self.stream_session_rx.take() {
-                    match tokio::time::timeout(CANCEL_JOIN_TIMEOUT, rx).await {
-                        Ok(Ok(Ok(updated_session))) => {
-                            self.session = updated_session;
-                        }
-                        Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
-                            // Failed turn, sender dropped, or timeout after abort.
-                        }
-                    }
-                }
+                let _ = self.stream_session_rx.take();
 
                 self.drain_pending().await;
                 self.cancel_token = CancellationToken::new();
@@ -878,21 +857,8 @@ impl EneActor {
     }
 
     async fn start_stream(&mut self, user_input: String, turn: TurnId) {
-        // 1. Apply any pending split/compression result from the previous run
-        self.apply_pending_split();
-        self.apply_pending_compression();
-
-        // 2. Record the triggering user message *before* taking the split
-        //    snapshot so the summary includes this turn, and so the snapshot
-        //    boundary points at it. apply_split_result will keep this entry
-        //    and any messages added after the snapshot.
-        self.session.record_user_input();
-        self.session.add_user_message(&user_input);
-
-        // 3. Check and spawn a split or compression task for this input
-        self.check_and_perform_split(&user_input);
-
-        // 5. Create provider
+        // Create the provider before mutating history so a failed open leaves
+        // the session unchanged.
         let provider = match self.create_provider() {
             Ok(p) => p,
             Err(e) => {
@@ -922,7 +888,13 @@ impl EneActor {
             }
         };
 
-        // 6. Clone state for the stream task
+        self.apply_pending_compression();
+
+        self.session.record_user_input();
+        self.session.add_user_message(&user_input);
+
+        self.check_and_perform_split(&user_input);
+
         let config = self.config.clone();
         let session = self.session.clone();
         let embedder = self.session.memory.embedding_provider.clone();
@@ -936,7 +908,6 @@ impl EneActor {
         let terminal_emitted = self.terminal_emitted.clone();
         let turn_for_stream = turn;
 
-        // 7. Spawn the stream task
         let (session_tx, session_rx) = oneshot::channel();
         self.stream_session_rx = Some(session_rx);
 
@@ -1021,39 +992,10 @@ impl EneActor {
         })
     }
 
-    fn apply_pending_split(&mut self) {
-        if let Some(result) = poll_split_result(&mut self.pending_split) {
-            match result {
-                Ok(split) => {
-                    if let Some(turn) = self.active_turn.clone() {
-                        let _ = self.event_tx.send(EneEvent::ContextCompressed {
-                            turn,
-                            level: "split".into(),
-                        });
-                    }
-                    self.session.apply_split_result(&split);
-                }
-                Err(e) => {
-                    if !matches!(e, ene_mind::EneSessionError::SplitNotNeeded) {
-                        tracing::error!(component = "Session", error = %e, "Summary generation error");
-                    }
-                    // Split failed or wasn't needed: clear the marker so
-                    // history trimming resumes.
-                    self.session.clear_split_pending();
-                }
-            }
-        }
-    }
-
     fn check_and_perform_split(&mut self, _user_input: &str) {
-        let mind = self
-            .config
-            .get_section::<ene_mind::MindConfig>()
-            .unwrap_or_default();
         // Product path is compression-only; hard session-ID minting is not used.
-        if mind.context.compression_enabled {
-            self.check_and_trigger_compression();
-        }
+        // compression_enabled is required by MindConfig validation at open.
+        self.check_and_trigger_compression();
     }
 
     fn check_and_trigger_compression(&mut self) {

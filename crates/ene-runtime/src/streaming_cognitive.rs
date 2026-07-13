@@ -485,20 +485,55 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::Conver
                         "Post-turn finalize failed"
                     );
                 }
+            }
 
-                if mind.emotion.enabled
-                    && matches!(mind.emotion.engine, EngineMode::Llm | EngineMode::Hybrid)
-                    && !assistant_content.trim().is_empty()
-                {
-                    let classifier_turn_id =
-                        ene_mind::engine::completed_user_turn_at_post_turn(&history);
-                    let classifier_context = ene_mind::engine::build_classifier_context(
-                        &history,
-                        &assistant_content,
-                        &pre_turn.affect,
-                        mind.context.recent_turns,
-                    );
+            log_empty_response_if_needed(EmptyResponseContext {
+                pipeline: "cognitive",
+                config: &config,
+                session_id: session_id.as_str(),
+                character_id: &card_name,
+                user_input: &user_input,
+                round,
+                tool_count: tools.len(),
+                messages: &messages,
+                raw_assistant_content: &assistant_content,
+                display_buffer: &session.display.display_buffer,
+                emotion_tokens: &accumulated_emotion_tokens,
+                suppress_stream_tokens,
+                prompt_meta: Some(&composed.meta),
+            });
 
+            // Finalize and emit Terminal before the affect classifier so the
+            // chat UI is not blocked for up to classifier_timeout_secs, and so
+            // a cancel abort cannot drop an already-streamed assistant reply
+            // from history.
+            session.finalize_response();
+            session.record_assistant_response();
+            emit_terminal(&event_tx, &terminal_emitted, &turn, TerminalReason::Done);
+
+            if let Some(classifier_store) = mem_store.clone()
+                && mind.emotion.enabled
+                && matches!(mind.emotion.engine, EngineMode::Llm | EngineMode::Hybrid)
+                && !assistant_content.trim().is_empty()
+            {
+                let classifier_config = config.clone();
+                let classifier_model = mind.emotion.classifier_model.clone();
+                let classifier_max_tokens = mind.emotion.classifier_max_tokens;
+                let classifier_lang = mind.emotion.classifier_language.clone();
+                let classifier_timeout_secs = mind.emotion.classifier_timeout_secs;
+                let classifier_character_id = card_name.clone();
+                let classifier_user_id = user_name.clone();
+                let classifier_turn_id =
+                    ene_mind::engine::completed_user_turn_at_post_turn(&history);
+                let classifier_context = ene_mind::engine::build_classifier_context(
+                    &history,
+                    &assistant_content,
+                    &pre_turn.affect,
+                    mind.context.recent_turns,
+                );
+
+                // Fire-and-forget: must not delay Terminal (already emitted).
+                tokio::spawn(async move {
                     tracing::info!(
                         component = "EmotionEngine",
                         turn_id = classifier_turn_id,
@@ -506,19 +541,19 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::Conver
                     );
                     let started = std::time::Instant::now();
                     match ene_mind::emotion::classifier::classify_for_config(
-                        &config,
-                        mind.emotion.classifier_model.as_deref(),
-                        mind.emotion.classifier_max_tokens,
+                        &classifier_config,
+                        classifier_model.as_deref(),
+                        classifier_max_tokens,
                         &classifier_context,
-                        mind.emotion.classifier_timeout_secs,
-                        &mind.emotion.classifier_language,
+                        classifier_timeout_secs,
+                        &classifier_lang,
                     )
                     .await
                     {
                         Ok(proposal) => {
                             let pending = ene_store::PendingAffectProposal {
-                                character_id: card_name.clone(),
-                                user_id: user_name.clone(),
+                                character_id: classifier_character_id,
+                                user_id: classifier_user_id,
                                 source_turn_id: classifier_turn_id,
                                 user_emotion: proposal.user_emotion,
                                 user_intent: proposal.user_intent,
@@ -531,7 +566,9 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::Conver
                                 reason: proposal.reason,
                                 created_at: chrono::Utc::now(),
                             };
-                            if let Err(error) = store.upsert_pending_affect_proposal(&pending).await
+                            if let Err(error) = classifier_store
+                                .upsert_pending_affect_proposal(&pending)
+                                .await
                             {
                                 tracing::warn!(
                                     component = "EmotionEngine",
@@ -569,28 +606,9 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::Conver
                             );
                         }
                     }
-                }
+                });
             }
 
-            log_empty_response_if_needed(EmptyResponseContext {
-                pipeline: "cognitive",
-                config: &config,
-                session_id: session_id.as_str(),
-                character_id: &card_name,
-                user_input: &user_input,
-                round,
-                tool_count: tools.len(),
-                messages: &messages,
-                raw_assistant_content: &assistant_content,
-                display_buffer: &session.display.display_buffer,
-                emotion_tokens: &accumulated_emotion_tokens,
-                suppress_stream_tokens,
-                prompt_meta: Some(&composed.meta),
-            });
-
-            session.finalize_response();
-            session.record_assistant_response();
-            emit_terminal(&event_tx, &terminal_emitted, &turn, TerminalReason::Done);
             return session;
         }
 

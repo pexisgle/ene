@@ -15,7 +15,7 @@
 1. **`TurnId` は必須。** `run(input) -> Result<TurnId, Busy | ActorDead>`。ターンスコープのイベントと `cancel(turn)` はその id を運ぶ。
 2. **並行性:** single-flight。ターン実行中の二度目の `run` は `Busy` — 暗黙 abort や broadcast だけの相関はしない。
 3. **ライフサイクル:** `EneHandle::open(config, card) -> Result<ReadyHandle, _>`。公開の未準備 `new` + 多段 `load_config` / `load_character` は置かない。設定ファイル I/O は `ConfigStore` / `ene-config` 側。
-4. **`Terminal` はターンの完全完了**を意味する（`after_turn` の memory write / forgetting / affect persist を含む）。切り離し処理がチャット経路で `Terminal` を追い越してはならない。
+4. **`Terminal` はチャット経路のターン完了**を意味する（返信をブロックする memory write / forgetting / affect persist の後）。ポストターンの LLM affect **分類**は `Terminal` 後の fire-and-forget であり、Done を遅らせたりターンゲートを占有してはならない。
 
 ### イベント
 
@@ -118,7 +118,8 @@ handle.diagnostics() -> &EneDiagnostics;
 ## 移行メモ
 
 - 二重パイプライン fallback なし: 埋め込み未初期化で memory 機能が必要な場合は fail closed
-- **文脈境界は compression-only:** rolling compression（`mind.context.compression_*`）が製品経路。hard session-ID 発行 / hard-split は製品経路ではない。`session.auto_split` はオフ（デフォルト `false`）のまま、圧縮を優先する
+- **文脈境界は compression-only:** `mind.context.compression_enabled` は `EneHandle::open` 時点で `true` 必須（さもなくば validation 失敗）。hard session-ID 発行 / hard-split は製品経路ではなく、`ene-runtime` は hard-split タスクを起動しない
+- **Cancel:** ストリームタスクを即 abort し、進行中の session 更新は破棄する。`Terminal::Cancelled` は最大一度
 - 単一の `HistoryEntry { role: Role, content: String }` を mind + runtime snapshot で共有
 - 公開互換 alias や移行用 feature/config は作らない — 呼び出し側を同一変更で更新
 - ストア無しチャットはサポート；メモリ有効化時に store + embedder が無ければ fail closed

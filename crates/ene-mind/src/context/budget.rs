@@ -112,6 +112,12 @@ pub struct PackInput {
 
 /// Validate that configured sub-budgets do not exceed the total ceiling.
 pub fn validate_context_config(config: &ContextConfig) -> Result<(), CognitionError> {
+    if !config.compression_enabled {
+        return Err(CognitionError::Other(
+            "mind.context.compression_enabled must be true (hard session split is not a product path)"
+                .into(),
+        ));
+    }
     let dynamic_sum = config.scene_summary_tokens
         + config.memory_budget_tokens
         + config.semantic_budget_tokens
@@ -535,6 +541,13 @@ mod tests {
             arc_span_threshold: 3,
             compression_timeout_secs: 60,
         };
+        assert!(validate_context_config(&config).is_err());
+    }
+
+    #[test]
+    fn validate_context_config_requires_compression() {
+        let mut config = ContextConfig::default();
+        config.compression_enabled = false;
         assert!(validate_context_config(&config).is_err());
     }
 

@@ -1,39 +1,31 @@
 # セッション分割と圧縮
 
-**hard-split は製品経路ではない。** 文脈境界は mind ランタイムの rolling compression（`mind.context.compression_*`）を使う。分割スコアによる session-ID 発行はレガシー／明示時のみ。
+**Hard-split は製品経路ではない。** 文脈境界は rolling compression のみ（`mind.context.compression_*`）。`ene-runtime` は hard-split / session-ID 発行タスクを起動しない。
 
-## 現在のポリシー
+## 現行ポリシー
 
-- **Compression（製品経路、`mind.context.compression_enabled=true`）**
-  - compression が権威のとき自動 hard-split はバイパス
-  - 古いターンは `memory_spans` に圧縮
-  - `session_id` は維持される
-- **Hard-split（非推奨、`session.auto_split` デフォルト `false`）**
-  - コンパニオン UX では推奨しない
-  - 明示的に有効かつ compression オフのとき、複合スコアで分割し新しい `session_id` を発行しうる
-  - 手動 `/session split` は運用／デバッグ用に残る場合がある；cognition+compression 時は手動 compression 挙動を優先
+- **圧縮（必須の製品経路）**
+  - `mind.context.compression_enabled` は `true` 必須。さもなくば `EneHandle::open` の validation が失敗する。
+  - 古いターンは `memory_spans` に圧縮される。
+  - 連続性のため Session ID は安定したまま。
+  - 手動 `/session split` は **コンテキスト圧縮**を起動する（同じ session id）。
+- **Hard-split**
+  - ホストからは使わない。スコアリング / `execute_split` は `ene-mind` にライブラリ実験用として残ってもよいが、`ene-runtime` からは配線しない。
 
-## 圧縮が優先される理由
+## 圧縮を優先する理由
 
-- コンパニオン体験の継続性を保つ
-- 人工的な会話断絶を減らす
-- 長文脈でもプロンプト予算を安定化できる
-
-## レガシー分割の理由
-
-- Timeout
-- TopicChange
-- Manual
+- 進行中のセッション ID を維持し、関係の連続性を保つ。
+- コンパニオン対話での硬い境界を避ける。
+- rolling summary でプロンプトサイズを抑える。
 
 ## 運用メモ
 
-- pending な split/compression タスクは同時に 1 つのみ処理されます。
-- mind + compression モードでの手動 split は、実体として手動 compression 挙動にルーティングされます。
-- legacy hard-split が発生した場合は apply 後に新しい `session_id` が発行されます。
+- 保留中の圧縮タスクは同時に一つだけ処理する。
+- ホストの手動 split は手動圧縮の挙動にルーティングする。
 
 ## 関連ドキュメント
 
 - `docs/ja/architecture/api-v2.md`
 - `docs/ja/architecture/cognitive-runtime.md`
 - `docs/ja/core/session.md`
-- `docs/ja/configuration/settings.md`（`session.auto_split`、`mind.context.compression_*`）
+- `docs/ja/configuration/settings.md`（`mind.context.compression_*`）

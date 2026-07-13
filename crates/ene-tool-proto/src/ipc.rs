@@ -15,7 +15,7 @@ const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 /// - `IpcRequest::CallTool` `name` field accepts the new `ToolName` (still
 ///   a string on the wire)
 /// - `SandboxConfigData::db_socket` replaces old `db_path`
-pub const IPC_PROTOCOL_VERSION: u32 = 1;
+pub const IPC_PROTOCOL_VERSION: u32 = 2;
 
 /// IPC request — core → host
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

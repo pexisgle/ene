@@ -62,7 +62,9 @@ pub enum EneEvent {
 
 - `TextDelta` はプレーンテキストのみ。マーカーは除去済み。
 - 提示 cue は `Performance`。`SpecialToken` / 単独 `Expression` ではない。
-- `Terminal` は `Run` ごとに正確に1回、`after_turn` 完了後。
+- `Terminal` は `Run` ごとに正確に1回、チャット経路の `after_turn`（記憶書き込み / 忘却）の後。ポストターン LLM affect **分類**は `Terminal` 後に spawn され、Done を遅らせてはならない。
+- `cancel(turn)` はストリームを即 abort し、進行中の session 更新は破棄する。キャンセルされたターンの部分アシスタント履歴のマージを期待してはならない。
+- Desktop: broadcast `Lagged` 時はアクティブターンを cancel（ゲート解放）しつつ入力を開ける。`processing` がクリアされても `active_turn` がある間は Cancel を有効にする。
 - パイプライン位相 / メトリクスは `diagnostics().subscribe()`。
 
 詳細は [ストリーミングイベント](streaming-events.md) を参照。
@@ -80,7 +82,7 @@ Run { input, turn }
 4. メインループ（max_tool_call_rounds まで）:
       ├── LLM ストリーミング → TextDelta / Performance
       ├── tool_calls あり → ToolCallStart / 実行 / ToolCallResult → 継続
-      └── なし → after_turn（記憶書き込み、忘却、感情永続化）
+      └── なし → after_turn（記憶書き込み、忘却）→ Terminal → affect 分類を spawn
 5. Terminal { turn, Done | Failed | Cancelled }
 ```
 

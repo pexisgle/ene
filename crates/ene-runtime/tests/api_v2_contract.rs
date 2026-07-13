@@ -160,8 +160,9 @@ async fn marker_tokens_become_performance_not_text() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn store_off_run_emits_terminal() {
-    // Without a live LLM the turn fails or cancels, but it must still Terminal
-    // (chat is allowed with store.enabled=false).
+    // Without a live LLM the turn fails, but it must still Terminal with
+    // Done or Failed (chat is allowed with store.enabled=false). Cancel must
+    // not be used as a success path for this contract.
     let handle = EneHandle::open(test_config_memory_off(), test_card())
         .await
         .expect("open");
@@ -182,7 +183,7 @@ async fn store_off_run_emits_terminal() {
                     turn: ref t,
                     reason: TerminalReason::Cancelled,
                 } if t == &turn => {
-                    saw_terminal = true;
+                    panic!("store-off contract must not rely on Cancel; got Cancelled for {t}");
                 }
                 _ => {}
             }
@@ -193,23 +194,9 @@ async fn store_off_run_emits_terminal() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
-    if !saw_terminal {
-        let _ = handle.cancel(&turn);
-        for _ in 0..64 {
-            tokio::task::yield_now().await;
-        }
-        while let Ok(ev) = rx.try_recv() {
-            if let EneEvent::Terminal { turn: ref t, .. } = ev
-                && t == &turn
-            {
-                saw_terminal = true;
-            }
-        }
-    }
-
     assert!(
         saw_terminal,
-        "store.enabled=false must still complete a turn with Terminal"
+        "store.enabled=false must complete a turn with Terminal Done or Failed"
     );
     let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
 }
@@ -227,19 +214,17 @@ async fn snapshot_history_is_history_entry() {
 }
 
 #[tokio::test]
-async fn manual_split_requires_compression() {
+async fn open_rejects_compression_disabled() {
     let mut config = test_config_memory_off();
     let mut mind = ene_mind::MindConfig::default();
     mind.context.compression_enabled = false;
     config.set_section(&mind).expect("mind");
 
-    let handle = EneHandle::open(config, test_card()).await.expect("open");
-    let err = handle.diagnostics().manual_split().await;
+    let err = EneHandle::open(config, test_card()).await;
     assert!(
-        matches!(err, Err(ene_runtime::EneRuntimeError::CompressionRequired)),
-        "expected CompressionRequired, got {err:?}"
+        err.is_err(),
+        "expected open to fail when compression_enabled=false, got {err:?}"
     );
-    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
 }
 
 #[tokio::test(flavor = "current_thread")]

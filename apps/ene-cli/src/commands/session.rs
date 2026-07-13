@@ -2,7 +2,6 @@ use crate::commands::CliCommand;
 use crate::{context::AppContext, style};
 use async_trait::async_trait;
 use ene_config::Truncate;
-use ene_mind::SessionConfig;
 
 pub struct SessionCommand;
 
@@ -58,15 +57,14 @@ fn handle_info(snapshot: &ene_runtime::EneStateSnapshot) {
     println!("Elapsed: ? (not tracked locally) min");
     println!("Turn count: {}", snapshot.current_turn_count);
     println!("History messages: {}", snapshot.history.len());
-    let session_config = snapshot
+    let mind = snapshot
         .config
-        .get_section::<SessionConfig>()
+        .get_section::<ene_mind::MindConfig>()
         .unwrap_or_default();
-    println!("Auto-split: {}", session_config.auto_split);
-    println!("Timeout: {} min", session_config.timeout_minutes);
+    println!("Context compression: {}", mind.context.compression_enabled);
     println!(
-        "Split threshold: {} (topic wt: {})",
-        session_config.split_weights.threshold, session_config.split_weights.topic
+        "Scene turn threshold: {}",
+        mind.context.scene_turn_threshold
     );
     println!("--------------------");
 }
@@ -75,7 +73,7 @@ async fn handle_split(ctx: &AppContext, snapshot: &ene_runtime::EneStateSnapshot
     if snapshot.history.is_empty() {
         println!(
             "{}",
-            style::warning("[Session] Cannot split: No conversation history.")
+            style::warning("[Session] Cannot compress: No conversation history.")
         );
         return;
     }
@@ -84,19 +82,9 @@ async fn handle_split(ctx: &AppContext, snapshot: &ene_runtime::EneStateSnapshot
         return;
     }
 
-    let compression_enabled = snapshot
-        .config
-        .get_section::<ene_mind::MindConfig>()
-        .map(|c| c.context.compression_enabled)
-        .unwrap_or(false);
-
     println!(
         "{}",
-        style::header(if compression_enabled {
-            "[Session] Manually triggering context compression..."
-        } else {
-            "[Session] Manually splitting session..."
-        })
+        style::header("[Session] Manually triggering context compression...")
     );
     match ctx.handle.diagnostics().manual_split().await {
         Ok(result) => {
@@ -107,37 +95,20 @@ async fn handle_split(ctx: &AppContext, snapshot: &ene_runtime::EneStateSnapshot
                     Truncate::simple(&result.summary, 120)
                 ))
             );
-            if compression_enabled {
-                println!(
-                    "{}",
-                    style::warning(format!(
-                        "[Session] Session ID unchanged: {}",
-                        result.new_session_id
-                    ))
-                );
-            } else if !result.key_facts.is_empty() {
-                let facts_str = result
-                    .key_facts
-                    .iter()
-                    .map(|f| format!("{}:{}", f.key, f.value))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                println!(
-                    "  {}",
-                    style::warning(format!("[Session] Key Facts: {facts_str}"))
-                );
-            }
             println!(
                 "{}",
-                style::warning(if compression_enabled {
-                    "[Session] Context compression completed."
-                } else {
-                    "[Session] Session split completed."
-                })
+                style::warning(format!(
+                    "[Session] Session ID unchanged: {}",
+                    result.new_session_id
+                ))
+            );
+            println!(
+                "{}",
+                style::warning("[Session] Context compression completed.")
             );
         }
         Err(e) => {
-            println!("{}", style::error(format!("[Session] Split error: {e}")));
+            println!("{}", style::error(format!("[Session] Compress error: {e}")));
         }
     }
 }

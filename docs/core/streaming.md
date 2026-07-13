@@ -62,7 +62,9 @@ pub enum EneEvent {
 
 - `TextDelta` is plain text only; markers are stripped.
 - Presentation cues arrive as `Performance`, not `SpecialToken` / standalone `Expression`.
-- `Terminal` is emitted exactly once per `Run`, after `after_turn` completes.
+- `Terminal` is emitted exactly once per `Run`, after chat-path `after_turn` (memory write / forgetting). Post-turn LLM affect **classification** is spawned after `Terminal` and must not delay Done.
+- `cancel(turn)` aborts the stream immediately and discards in-flight session updates; hosts must not expect cancelled turns to merge partial assistant history.
+- Desktop: on broadcast `Lagged`, cancel the active turn (free the gate) while unlocking input; Cancel stays available while `active_turn` is set even if `processing` was cleared.
 - Pipeline phases / metrics live on `diagnostics().subscribe()`, not the chat bus.
 
 See [Streaming Events](streaming-events.md) for the full consumer checklist.
@@ -80,7 +82,7 @@ Run { input, turn }
 4. Main loop (up to max_tool_call_rounds):
       ├── LLM streaming → TextDelta / Performance
       ├── If tool_calls → ToolCallStart / execute / ToolCallResult → continue
-      └── Else → after_turn (memory write, forgetting, affect persist)
+      └── Else → after_turn (memory write, forgetting) → Terminal → spawn affect classifier
 5. Terminal { turn, Done | Failed | Cancelled }
 ```
 

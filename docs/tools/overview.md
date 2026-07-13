@@ -71,7 +71,7 @@ pub enum IpcResponse {
 ```
 
 Wire format: 4-byte little-endian length prefix + JSON payload. Max
-message size: 64 MB. Protocol version: `IPC_PROTOCOL_VERSION = 1` (see
+message size: 64 MB. Protocol version: `IPC_PROTOCOL_VERSION = 2` (see
 `crates/ene-tool-proto/src/ipc.rs`).
 
 ## ToolHostManager

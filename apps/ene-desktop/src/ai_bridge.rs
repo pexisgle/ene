@@ -72,6 +72,7 @@ impl AiBridge {
         bootstrap_handle.spawn(pump_events(
             receiver,
             event_tx.clone(),
+            handle.clone(),
             processing.clone(),
             active_turn,
         ));
@@ -120,6 +121,12 @@ impl AiBridge {
     /// gate on this.
     pub fn is_processing(&self) -> bool {
         self.processing.load(Ordering::Relaxed)
+    }
+
+    /// True while a turn id is still tracked (may outlive `processing`
+    /// after broadcast lag so Cancel remains available).
+    pub fn has_active_turn(&self) -> bool {
+        self.active_turn.lock().ok().is_some_and(|g| g.is_some())
     }
 
     /// Forward a `PermissionDecision` for the request
@@ -312,17 +319,19 @@ fn recall_reason_key(reason: ene_mind::RecallReason) -> String {
 fn turn_matches(active_turn: &Mutex<Option<TurnId>>, event_turn: &TurnId) -> bool {
     match active_turn.lock() {
         Ok(guard) => match guard.as_ref() {
-            // No active turn yet (race before run sets it): accept events.
-            None => true,
+            // No active turn: drop turn-scoped events (avoids ghost deltas
+            // after Terminal / Lagged clearing).
+            None => false,
             Some(active) => active == event_turn,
         },
-        Err(_) => true,
+        Err(_) => false,
     }
 }
 
 async fn pump_events(
     mut receiver: EneEventReceiver,
     event_tx: AppEventSender,
+    handle: EneHandle,
     processing: Arc<AtomicBool>,
     active_turn: Arc<Mutex<Option<TurnId>>>,
 ) {
@@ -424,11 +433,19 @@ async fn pump_events(
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Error(message)));
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!("[Ene] Dropped {n} events (broadcast lag); unlocking chat input");
-                // Avoid sticky UI if Terminal was among the dropped events.
+                tracing::warn!(
+                    "[Ene] Dropped {n} events (broadcast lag); cancelling active turn if any"
+                );
+                // Unlock input, but keep active_turn and cancel so TurnGate
+                // is freed even if Terminal was among the dropped events.
                 processing.store(false, Ordering::Relaxed);
-                if let Ok(mut guard) = active_turn.lock() {
-                    *guard = None;
+                if let Ok(guard) = active_turn.lock()
+                    && let Some(turn) = guard.clone()
+                {
+                    drop(guard);
+                    if let Err(e) = handle.cancel(&turn) {
+                        tracing::warn!("[Ene] Lagged cancel failed: {e}");
+                    }
                 }
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Finished));
             }
@@ -468,10 +485,10 @@ mod tests {
     }
 
     #[test]
-    fn turn_matches_accepts_when_no_active_turn() {
+    fn turn_matches_rejects_when_no_active_turn() {
         let active = Mutex::new(None);
         let turn = TurnId::new();
-        assert!(turn_matches(&active, &turn));
+        assert!(!turn_matches(&active, &turn));
     }
 
     #[test]

@@ -22,10 +22,10 @@ See also: [`ene-tool-host`](./ene-tool-host.md) for the host-side connection man
 ## Protocol Version
 
 ```rust
-pub const IPC_PROTOCOL_VERSION: u32 = 1;
+pub const IPC_PROTOCOL_VERSION: u32 = 2;
 ```
 
-Both parties send their version in the `Handshake` / `HandshakeAck` messages. The server (`run_tool_server`) **strictly rejects** a mismatched version — it does not downgrade or negotiate — closing the connection with an `IpcResponse::Error`. Bump this constant only when the wire format changes in a backward-incompatible way (see [AGENTS.md §6 R3](../../AGENTS.md)).
+Both parties send their version in the `Handshake` / `HandshakeAck` messages. The server (`run_tool_server`) **strictly rejects** a mismatched version — it does not downgrade or negotiate — closing the connection with an `IpcResponse::Error`. Bump this constant only when the wire format changes in a backward-incompatible way (see [AGENTS.md §6 R3](../../AGENTS.md)). Version **2** reflects the slim LLM-facing `ToolSpec` (`name` / `description` / `parameters` only).
 
 ---
 

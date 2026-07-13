@@ -15,7 +15,7 @@ The library surface grew dual streaming pipelines (legacy + cognitive), an unrea
 1. **`TurnId` is mandatory.** `run(input) -> Result<TurnId, Busy | ActorDead>`. Every turn-scoped event and `cancel(turn)` carry that id.
 2. **Concurrency:** single-flight. A second `run` while a turn is active returns `Busy` — never silent abort or broadcast-only correlation.
 3. **Lifecycle:** `EneHandle::open(config, card) -> Result<ReadyHandle, _>`. No public unready `new` + multi-step `load_config` / `load_character`. Config file I/O stays in `ConfigStore` / `ene-config`.
-4. **`Terminal` means full turn completion**, including awaited `after_turn` effects (memory write, forgetting, affect persist). Detached work must not race past `Terminal` on the chat path.
+4. **`Terminal` means chat-path turn completion** after memory write / forgetting / affect *persist that blocks the reply*. Post-turn LLM affect **classification** is fire-and-forget after `Terminal` and must not delay Done or keep the turn gate busy.
 
 ### Events
 
@@ -120,7 +120,8 @@ Removed from chat: `SpecialToken`, standalone `Expression`, `SessionSplit`, `Pip
 ## Migration Notes
 
 - No dual-pipeline fallback: missing embedder with memory features → fail closed
-- **Compression-only context boundary:** rolling compression (`mind.context.compression_*`) is the product path. Hard session-ID minting / hard-split is not; keep `session.auto_split` off (default `false`) and prefer compression
+- **Compression-only context boundary:** `mind.context.compression_enabled` must be `true` at `EneHandle::open` (validation fails otherwise). Hard session-ID minting / hard-split is not a product path; `ene-runtime` does not spawn hard-split tasks
+- **Cancel:** abort the stream task immediately and discard in-flight session updates; emit `Terminal::Cancelled` at most once
 - Single `HistoryEntry { role: Role, content: String }` across mind + runtime snapshots
 - No public compatibility aliases or migration feature flags — callers update in the same change
 - Chat without store is supported; enabling memory without store + embedder fails closed

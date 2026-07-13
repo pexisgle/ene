@@ -72,7 +72,7 @@ pub enum IpcResponse {
 
 ワイヤ形式: 4 バイトリトルエンディアン長さプレフィックス + JSON ペイロード。
 最大メッセージサイズ: 64 MB。プロトコルバージョン:
-`IPC_PROTOCOL_VERSION = 1` (`crates/ene-tool-proto/src/ipc.rs` を参照)。
+`IPC_PROTOCOL_VERSION = 2` (`crates/ene-tool-proto/src/ipc.rs` を参照)。
 
 ## ToolHostManager
 
