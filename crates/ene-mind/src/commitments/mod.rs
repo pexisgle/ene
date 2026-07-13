@@ -1,8 +1,9 @@
 //! Companion Commitment Ledger — promises, tasks, and follow-ups.
 //!
-//! Commitments are stored in a dedicated `commitments` table in `ene-store`,
-//! linked to typed memories (`MemoryKind::Commitment`) via `source_memory_id`.
-//! Active commitments are surfaced independently of vector recall similarity.
+//! The `commitments` table is the sole source of truth for commitment lifecycle
+//! and prompt injection (#124). Typed `MemoryKind::Commitment` rows are optional
+//! references (`typed_memories.commitment_id`) and are no longer dual-written
+//! from arbiter persist → sync.
 
 use ene_store::{
     ActiveCommitmentPrompt, Commitment, CommitmentStatus, MemoryKind, MemoryStore, NewCommitment,
@@ -10,13 +11,14 @@ use ene_store::{
 use tracing::debug;
 
 use crate::error::CognitionError;
-use crate::memory_writer::{AppliedDecision, ArbiterAction, ArbiterContext, MemoryArbiter};
+use crate::memory_writer::candidate::MemoryCandidate;
+use crate::memory_writer::{AppliedDecision, ArbiterContext, MemoryArbiter};
 
 /// Companion Commitment Ledger: promises, tasks, follow-ups.
 #[derive(Debug, Default)]
 pub struct CommitmentLedger;
 
-/// Context required when syncing ledger rows from arbiter results.
+/// Context required when writing ledger rows from commitment candidates.
 #[derive(Debug, Clone)]
 pub struct CommitmentSyncContext<'a> {
     /// Character identifier.
@@ -26,101 +28,98 @@ pub struct CommitmentSyncContext<'a> {
 }
 
 impl CommitmentLedger {
-    /// Create ledger rows for commitment memories persisted by the arbiter.
+    /// Persist commitment candidates to the ledger first (sole SoT).
     ///
-    /// Skips decisions that did not insert a memory, non-commitment candidates,
-    /// and rows that already exist for the same `source_memory_id`.
-    pub async fn sync_from_applied_decisions(
+    /// Does **not** insert typed `MemoryKind::Commitment` bodies. Deletion-style
+    /// candidates (`should_persist = false`) cancel matching active ledger rows
+    /// by normalized title.
+    pub async fn apply_commitment_candidates(
         store: &MemoryStore,
         ctx: &CommitmentSyncContext<'_>,
-        applied: &[AppliedDecision],
+        candidates: &[MemoryCandidate],
     ) -> Result<Vec<i64>, CognitionError> {
         let mut inserted = Vec::new();
 
-        for app in applied {
-            match &app.decision.action {
-                ArbiterAction::MarkUserDeleted { memory_id } => {
-                    Self::cancel_by_source_memory(store, *memory_id).await?;
-                    continue;
-                }
-                ArbiterAction::MarkDisputed { memory_id } => {
-                    Self::mark_stale_by_source_memory(store, *memory_id).await?;
-                    continue;
-                }
-                _ => {}
-            }
-
-            let candidate = &app.decision.candidate;
+        for candidate in candidates {
             if candidate.kind != MemoryKind::Commitment {
                 continue;
             }
 
-            match &app.decision.action {
-                ArbiterAction::Persist(_) | ArbiterAction::Supersede { .. } => {
-                    let Some(memory_id) = app.inserted_id else {
-                        continue;
-                    };
-
-                    if let ArbiterAction::Supersede { superseded_id, .. } = &app.decision.action {
-                        Self::mark_stale_by_source_memory(store, *superseded_id).await?;
-                    }
-
-                    if store
-                        .get_commitment_by_source_memory(memory_id)
-                        .await
-                        .map_err(CognitionError::Memory)?
-                        .is_some()
-                    {
-                        debug!(
-                            component = "CommitmentLedger",
-                            source_memory_id = memory_id,
-                            "commitment already exists for source memory, skipping"
-                        );
-                        continue;
-                    }
-
-                    let new_item = NewCommitment {
-                        character_id: ctx.character_id.to_string(),
-                        user_id: ctx.user_id.to_string(),
-                        title: candidate.title.clone(),
-                        description: candidate.content.clone(),
-                        status: CommitmentStatus::Active,
-                        due_at: None,
-                        due_label: candidate.commitment_due.clone(),
-                        source_memory_id: Some(memory_id),
-                    };
-
-                    let id = store
-                        .insert_commitment(&new_item)
-                        .await
-                        .map_err(CognitionError::Memory)?;
-
-                    debug!(
-                        component = "CommitmentLedger",
-                        commitment_id = id,
-                        source_memory_id = memory_id,
-                        title = %candidate.title,
-                        "inserted active commitment"
-                    );
-                    inserted.push(id);
-                }
-                ArbiterAction::Ignore | ArbiterAction::AskConfirmationLater => {}
-                ArbiterAction::MarkUserDeleted { .. } | ArbiterAction::MarkDisputed { .. } => {}
+            if !candidate.should_persist {
+                Self::cancel_matching_by_title(store, ctx, &candidate.title).await?;
+                continue;
             }
+
+            let title_key = normalize_title(&candidate.title);
+            let active = store
+                .list_active_commitments(ctx.character_id, Some(ctx.user_id), 64)
+                .await
+                .map_err(CognitionError::Memory)?;
+            if active
+                .iter()
+                .any(|c| normalize_title(&c.title) == title_key)
+            {
+                debug!(
+                    component = "CommitmentLedger",
+                    title = %candidate.title,
+                    "active commitment with same title exists, skipping"
+                );
+                continue;
+            }
+
+            let new_item = NewCommitment {
+                character_id: ctx.character_id.to_string(),
+                user_id: ctx.user_id.to_string(),
+                title: candidate.title.clone(),
+                description: candidate.content.clone(),
+                status: CommitmentStatus::Active,
+                due_at: None,
+                due_label: candidate.commitment_due.clone(),
+                // Deprecated dual-write link; new rows leave this unset (#124).
+                source_memory_id: None,
+            };
+
+            let id = store
+                .insert_commitment(&new_item)
+                .await
+                .map_err(CognitionError::Memory)?;
+
+            debug!(
+                component = "CommitmentLedger",
+                commitment_id = id,
+                title = %candidate.title,
+                "inserted active commitment (ledger-first)"
+            );
+            inserted.push(id);
         }
 
         Ok(inserted)
     }
 
-    /// Run arbitration, apply decisions, and sync commitment ledger rows.
+    /// Arbitrate non-commitment candidates; write commitments ledger-first.
+    ///
+    /// Replaces the former dual-write path (`arbitrate` → typed persist →
+    /// `sync_from_applied_decisions`).
     pub async fn arbitrate_apply_and_sync(
         store: &MemoryStore,
-        candidates: &[crate::memory_writer::candidate::MemoryCandidate],
+        candidates: &[MemoryCandidate],
         arbiter_ctx: &ArbiterContext<'_>,
         sync_ctx: &CommitmentSyncContext<'_>,
     ) -> Result<(Vec<AppliedDecision>, Vec<i64>), CognitionError> {
-        let applied = MemoryArbiter::arbitrate_and_apply(store, candidates, arbiter_ctx).await?;
-        let commitment_ids = Self::sync_from_applied_decisions(store, sync_ctx, &applied).await?;
+        let (commitment_candidates, other_candidates): (Vec<_>, Vec<_>) = candidates
+            .iter()
+            .cloned()
+            .partition(|c| c.kind == MemoryKind::Commitment);
+
+        let commitment_ids =
+            Self::apply_commitment_candidates(store, sync_ctx, &commitment_candidates).await?;
+
+        let applied: Vec<AppliedDecision> = if other_candidates.is_empty() {
+            Vec::new()
+        } else {
+            MemoryArbiter::arbitrate_and_apply(store, &other_candidates, arbiter_ctx).await?
+        };
+
         Ok((applied, commitment_ids))
     }
 
@@ -182,53 +181,39 @@ impl CommitmentLedger {
             .map_err(CognitionError::Memory)
     }
 
-    async fn mark_stale_by_source_memory(
+    async fn cancel_matching_by_title(
         store: &MemoryStore,
-        source_memory_id: i64,
+        ctx: &CommitmentSyncContext<'_>,
+        title: &str,
     ) -> Result<(), CognitionError> {
-        if let Some(old) = store
-            .get_commitment_by_source_memory(source_memory_id)
+        let key = normalize_title(title);
+        let active = store
+            .list_active_commitments(ctx.character_id, Some(ctx.user_id), 64)
             .await
-            .map_err(CognitionError::Memory)?
-            && let Some(id) = old.id
-        {
-            store
-                .update_commitment_status(id, CommitmentStatus::Stale)
-                .await
-                .map_err(CognitionError::Memory)?;
+            .map_err(CognitionError::Memory)?;
+        for row in active {
+            if normalize_title(&row.title) == key
+                && let Some(id) = row.id
+            {
+                store
+                    .cancel_commitment(id)
+                    .await
+                    .map_err(CognitionError::Memory)?;
+            }
         }
         Ok(())
     }
+}
 
-    async fn cancel_by_source_memory(
-        store: &MemoryStore,
-        source_memory_id: i64,
-    ) -> Result<(), CognitionError> {
-        if let Some(old) = store
-            .get_commitment_by_source_memory(source_memory_id)
-            .await
-            .map_err(CognitionError::Memory)?
-            && let Some(id) = old.id
-        {
-            store
-                .cancel_commitment(id)
-                .await
-                .map_err(CognitionError::Memory)?;
-        }
-        Ok(())
-    }
+fn normalize_title(title: &str) -> String {
+    title.trim().to_lowercase()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::memory_writer::candidate::{MemoryCandidate, TurnInput};
-    use crate::memory_writer::{
-        ArbiterOptions, ArbiterReason, ArbiterReasonCode, CandidateDecision, CandidateProvenance,
-    };
-    use ene_store::{
-        MemoryConfidence, MemorySalience, MemoryScope, MemorySource, MemoryStatus, NewMemoryItem,
-    };
+    use crate::memory_writer::{ArbiterContext, ArbiterOptions, CandidateProvenance};
 
     fn sync_ctx<'a>() -> CommitmentSyncContext<'a> {
         CommitmentSyncContext {
@@ -250,168 +235,16 @@ mod tests {
         }
     }
 
-    fn applied_persist(candidate: MemoryCandidate, memory_id: i64) -> AppliedDecision {
-        AppliedDecision {
-            decision: CandidateDecision {
-                candidate,
-                action: ArbiterAction::Persist(NewMemoryItem {
-                    scope: MemoryScope::Character,
-                    character_id: "ene".to_string(),
-                    user_id: "user1".to_string(),
-                    kind: MemoryKind::Commitment,
-                    title: "discuss design".to_string(),
-                    content: "Next time, let's discuss the design".to_string(),
-                    source: MemorySource::Inferred,
-                    source_ref: None,
-                    confidence: MemoryConfidence::new(0.9),
-                    salience: MemorySalience::new(0.7),
-                    affect: ene_store::AffectAnnotation::default(),
-                    relationship_impact: 0.0,
-                    valid_from: None,
-                    valid_until: None,
-                    status: MemoryStatus::Active,
-                    supersedes_id: None,
-                    pinned: false,
-                    created_at: None,
-                }),
-                reason: ArbiterReason {
-                    code: ArbiterReasonCode::ValidNewMemory,
-                    detail: "test".to_string(),
-                },
-            },
-            inserted_id: Some(memory_id),
-            updated_existing: false,
-        }
-    }
-
-    fn applied_supersede(
-        candidate: MemoryCandidate,
-        new_memory_id: i64,
-        superseded_id: i64,
-    ) -> AppliedDecision {
-        AppliedDecision {
-            decision: CandidateDecision {
-                candidate,
-                action: ArbiterAction::Supersede {
-                    new_item: NewMemoryItem {
-                        scope: MemoryScope::Character,
-                        character_id: "ene".to_string(),
-                        user_id: "user1".to_string(),
-                        kind: MemoryKind::Commitment,
-                        title: "discuss design v2".to_string(),
-                        content: "Let's revisit the design next time".to_string(),
-                        source: MemorySource::Inferred,
-                        source_ref: None,
-                        confidence: MemoryConfidence::new(0.9),
-                        salience: MemorySalience::new(0.7),
-                        affect: ene_store::AffectAnnotation::default(),
-                        relationship_impact: 0.0,
-                        valid_from: None,
-                        valid_until: None,
-                        status: MemoryStatus::Active,
-                        supersedes_id: Some(superseded_id),
-                        pinned: false,
-                        created_at: None,
-                    },
-                    superseded_id,
-                },
-                reason: ArbiterReason {
-                    code: ArbiterReasonCode::ContradictionSupersede,
-                    detail: "test".to_string(),
-                },
-            },
-            inserted_id: Some(new_memory_id),
-            updated_existing: true,
-        }
-    }
-
-    fn applied_mark_user_deleted(candidate: MemoryCandidate, memory_id: i64) -> AppliedDecision {
-        AppliedDecision {
-            decision: CandidateDecision {
-                candidate,
-                action: ArbiterAction::MarkUserDeleted { memory_id },
-                reason: ArbiterReason {
-                    code: ArbiterReasonCode::DeletionRequest,
-                    detail: "test".to_string(),
-                },
-            },
-            inserted_id: None,
-            updated_existing: true,
-        }
-    }
-
-    fn applied_mark_disputed(candidate: MemoryCandidate, memory_id: i64) -> AppliedDecision {
-        AppliedDecision {
-            decision: CandidateDecision {
-                candidate,
-                action: ArbiterAction::MarkDisputed { memory_id },
-                reason: ArbiterReason {
-                    code: ArbiterReasonCode::ContradictionDisputed,
-                    detail: "test".to_string(),
-                },
-            },
-            inserted_id: None,
-            updated_existing: true,
-        }
-    }
-
-    async fn seed_commitment_memory(store: &MemoryStore, title: &str, content: &str) -> i64 {
-        store
-            .insert_typed_memory(&NewMemoryItem {
-                scope: MemoryScope::Character,
-                character_id: "ene".to_string(),
-                user_id: "user1".to_string(),
-                kind: MemoryKind::Commitment,
-                title: title.to_string(),
-                content: content.to_string(),
-                source: MemorySource::Inferred,
-                source_ref: None,
-                confidence: MemoryConfidence::new(0.9),
-                salience: MemorySalience::new(0.7),
-                affect: ene_store::AffectAnnotation::default(),
-                relationship_impact: 0.0,
-                valid_from: None,
-                valid_until: None,
-                status: MemoryStatus::Active,
-                supersedes_id: None,
-                pinned: false,
-                created_at: None,
-            })
-            .await
-            .unwrap()
-    }
-
     #[tokio::test]
-    async fn sync_creates_active_commitment_from_persist() {
+    async fn apply_creates_active_commitment_ledger_first() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let memory_id = store
-            .insert_typed_memory(&NewMemoryItem {
-                scope: MemoryScope::Character,
-                character_id: "ene".to_string(),
-                user_id: "user1".to_string(),
-                kind: MemoryKind::Commitment,
-                title: "discuss design".to_string(),
-                content: "Next time, let's discuss the design".to_string(),
-                source: MemorySource::Inferred,
-                source_ref: None,
-                confidence: MemoryConfidence::new(0.9),
-                salience: MemorySalience::new(0.7),
-                affect: ene_store::AffectAnnotation::default(),
-                relationship_impact: 0.0,
-                valid_from: None,
-                valid_until: None,
-                status: MemoryStatus::Active,
-                supersedes_id: None,
-                pinned: false,
-                created_at: None,
-            })
-            .await
-            .unwrap();
-
-        let applied = vec![applied_persist(commitment_candidate(0.9), memory_id)];
-        let ids = CommitmentLedger::sync_from_applied_decisions(&store, &sync_ctx(), &applied)
-            .await
-            .unwrap();
+        let ids = CommitmentLedger::apply_commitment_candidates(
+            &store,
+            &sync_ctx(),
+            &[commitment_candidate(0.9)],
+        )
+        .await
+        .unwrap();
         assert_eq!(ids.len(), 1);
 
         let active = CommitmentLedger::list_active(&store, "ene", Some("user1"), 10)
@@ -419,7 +252,7 @@ mod tests {
             .unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].status, CommitmentStatus::Active);
-        assert_eq!(active[0].source_memory_id, Some(memory_id));
+        assert_eq!(active[0].source_memory_id, None);
         assert_eq!(active[0].due_label.as_deref(), Some("Next time"));
 
         let prompts = CommitmentLedger::active_prompt_candidates(&active);
@@ -428,39 +261,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_skips_duplicate_source_memory() {
+    async fn apply_skips_duplicate_title() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let memory_id = store
-            .insert_typed_memory(&NewMemoryItem {
-                scope: MemoryScope::Character,
-                character_id: "ene".to_string(),
-                user_id: "user1".to_string(),
-                kind: MemoryKind::Commitment,
-                title: "discuss design".to_string(),
-                content: "Next time, let's discuss the design".to_string(),
-                source: MemorySource::Inferred,
-                source_ref: None,
-                confidence: MemoryConfidence::new(0.9),
-                salience: MemorySalience::new(0.7),
-                affect: ene_store::AffectAnnotation::default(),
-                relationship_impact: 0.0,
-                valid_from: None,
-                valid_until: None,
-                status: MemoryStatus::Active,
-                supersedes_id: None,
-                pinned: false,
-                created_at: None,
-            })
-            .await
-            .unwrap();
-        let applied = vec![applied_persist(commitment_candidate(0.9), memory_id)];
-
-        let ids1 = CommitmentLedger::sync_from_applied_decisions(&store, &sync_ctx(), &applied)
+        let candidates = [commitment_candidate(0.9)];
+        let ids1 = CommitmentLedger::apply_commitment_candidates(&store, &sync_ctx(), &candidates)
             .await
             .unwrap();
         assert_eq!(ids1.len(), 1);
 
-        let ids2 = CommitmentLedger::sync_from_applied_decisions(&store, &sync_ctx(), &applied)
+        let ids2 = CommitmentLedger::apply_commitment_candidates(&store, &sync_ctx(), &candidates)
             .await
             .unwrap();
         assert!(ids2.is_empty());
@@ -472,20 +281,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_ignores_non_commitment_candidates() {
+    async fn apply_ignores_non_commitment_candidates() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut candidate = commitment_candidate(0.9);
         candidate.kind = MemoryKind::Semantic;
-        let applied = vec![applied_persist(candidate, 1)];
-
-        let ids = CommitmentLedger::sync_from_applied_decisions(&store, &sync_ctx(), &applied)
+        let ids = CommitmentLedger::apply_commitment_candidates(&store, &sync_ctx(), &[candidate])
             .await
             .unwrap();
         assert!(ids.is_empty());
     }
 
     #[tokio::test]
-    async fn arbitrate_apply_and_sync_end_to_end() {
+    async fn apply_deletion_cancels_matching_title() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        CommitmentLedger::apply_commitment_candidates(
+            &store,
+            &sync_ctx(),
+            &[commitment_candidate(0.9)],
+        )
+        .await
+        .unwrap();
+
+        let mut deletion = commitment_candidate(0.9);
+        deletion.should_persist = false;
+        CommitmentLedger::apply_commitment_candidates(&store, &sync_ctx(), &[deletion])
+            .await
+            .unwrap();
+
+        let active = CommitmentLedger::list_active(&store, "ene", Some("user1"), 10)
+            .await
+            .unwrap();
+        assert!(active.is_empty());
+    }
+
+    #[tokio::test]
+    async fn arbitrate_apply_and_sync_end_to_end_ledger_first() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let turn = TurnInput {
             user_message: "Next time, let's discuss the design",
@@ -515,8 +345,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(applied.len(), 1);
-        assert!(applied[0].inserted_id.is_some());
+        // Commitment candidates bypass typed arbiter persist.
+        assert!(applied.is_empty());
         assert_eq!(commitment_ids.len(), 1);
 
         let active = CommitmentLedger::list_active(&store, "ene", Some("user1"), 10)
@@ -524,6 +354,7 @@ mod tests {
             .unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].title, "discuss design");
+        assert_eq!(active[0].source_memory_id, None);
     }
 
     #[tokio::test]
@@ -564,146 +395,5 @@ mod tests {
         assert!(CommitmentLedger::cancel(&store, id2).await.unwrap());
         let cancelled = store.get_commitment(id2).await.unwrap().unwrap();
         assert_eq!(cancelled.status, CommitmentStatus::Cancelled);
-    }
-
-    #[tokio::test]
-    async fn sync_supersede_marks_old_stale_and_creates_new_active() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let old_memory_id = seed_commitment_memory(
-            &store,
-            "discuss design",
-            "Next time, let's discuss the design",
-        )
-        .await;
-        let new_memory_id = seed_commitment_memory(
-            &store,
-            "discuss design v2",
-            "Let's revisit the design next time",
-        )
-        .await;
-
-        let initial = vec![applied_persist(commitment_candidate(0.9), old_memory_id)];
-        CommitmentLedger::sync_from_applied_decisions(&store, &sync_ctx(), &initial)
-            .await
-            .unwrap();
-
-        let supersede = vec![applied_supersede(
-            commitment_candidate(0.9),
-            new_memory_id,
-            old_memory_id,
-        )];
-        let ids = CommitmentLedger::sync_from_applied_decisions(&store, &sync_ctx(), &supersede)
-            .await
-            .unwrap();
-        assert_eq!(ids.len(), 1);
-
-        let old = store
-            .get_commitment_by_source_memory(old_memory_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(old.status, CommitmentStatus::Stale);
-
-        let new = store
-            .get_commitment_by_source_memory(new_memory_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(new.status, CommitmentStatus::Active);
-        assert_eq!(new.title, "discuss design");
-    }
-
-    #[tokio::test]
-    async fn sync_mark_user_deleted_cancels_linked_commitment() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let memory_id = seed_commitment_memory(&store, "follow up", "Talk about project X").await;
-        let initial = vec![applied_persist(commitment_candidate(0.9), memory_id)];
-        CommitmentLedger::sync_from_applied_decisions(&store, &sync_ctx(), &initial)
-            .await
-            .unwrap();
-
-        let mut deletion_candidate = commitment_candidate(0.9);
-        deletion_candidate.kind = MemoryKind::Semantic;
-        deletion_candidate.should_persist = false;
-        deletion_candidate.deletion_target_key = Some("project X".to_string());
-        let applied = vec![applied_mark_user_deleted(deletion_candidate, memory_id)];
-
-        CommitmentLedger::sync_from_applied_decisions(&store, &sync_ctx(), &applied)
-            .await
-            .unwrap();
-
-        let cancelled = store
-            .get_commitment_by_source_memory(memory_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(cancelled.status, CommitmentStatus::Cancelled);
-    }
-
-    #[tokio::test]
-    async fn sync_mark_disputed_marks_linked_commitment_stale() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let memory_id = seed_commitment_memory(&store, "follow up", "Talk about project X").await;
-        let initial = vec![applied_persist(commitment_candidate(0.9), memory_id)];
-        CommitmentLedger::sync_from_applied_decisions(&store, &sync_ctx(), &initial)
-            .await
-            .unwrap();
-
-        let applied = vec![applied_mark_disputed(commitment_candidate(0.75), memory_id)];
-        CommitmentLedger::sync_from_applied_decisions(&store, &sync_ctx(), &applied)
-            .await
-            .unwrap();
-
-        let stale = store
-            .get_commitment_by_source_memory(memory_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(stale.status, CommitmentStatus::Stale);
-    }
-
-    #[tokio::test]
-    async fn sync_supersede_does_not_overwrite_done_commitment() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let old_memory_id = seed_commitment_memory(
-            &store,
-            "discuss design",
-            "Next time, let's discuss the design",
-        )
-        .await;
-        let new_memory_id = seed_commitment_memory(
-            &store,
-            "discuss design v2",
-            "Let's revisit the design next time",
-        )
-        .await;
-
-        let initial = vec![applied_persist(commitment_candidate(0.9), old_memory_id)];
-        let ids = CommitmentLedger::sync_from_applied_decisions(&store, &sync_ctx(), &initial)
-            .await
-            .unwrap();
-        assert!(CommitmentLedger::complete(&store, ids[0]).await.unwrap());
-
-        let supersede = vec![applied_supersede(
-            commitment_candidate(0.9),
-            new_memory_id,
-            old_memory_id,
-        )];
-        CommitmentLedger::sync_from_applied_decisions(&store, &sync_ctx(), &supersede)
-            .await
-            .unwrap();
-
-        let old = store
-            .get_commitment_by_source_memory(old_memory_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(old.status, CommitmentStatus::Done);
-
-        let active = CommitmentLedger::list_active(&store, "ene", Some("user1"), 10)
-            .await
-            .unwrap();
-        assert_eq!(active.len(), 1);
-        assert_eq!(active[0].source_memory_id, Some(new_memory_id));
     }
 }

@@ -280,9 +280,9 @@ async fn build_semantic_matches(
         let query_embedding = ene_ai::embed_query(embedder, query_text.trim())
             .await
             .map_err(CognitionError::Embedding)?;
-        let options = ene_store::MemorySearchOptions {
+        let options = ene_store::Query {
             query_text: query_text.as_str(),
-            query_embedding: &query_embedding,
+            embedding: Some(&query_embedding),
             character_id,
             user_id: user_filter,
             model_name: embedder.model_name(),
@@ -290,7 +290,7 @@ async fn build_semantic_matches(
             similarity_threshold,
             candidate_pool_size: 8,
             query_affect: None,
-            weights: ene_store::HybridSearchWeights::default(),
+            weights: config.hybrid_weights,
             decay_half_life_days: config.default_forgetting_half_life_days,
             now: Utc::now(),
             min_score: 0.0,
@@ -299,7 +299,7 @@ async fn build_semantic_matches(
         };
 
         let scored = store
-            .search_typed_memories_hybrid(&options)
+            .search(&options)
             .await
             .map_err(CognitionError::Memory)?;
 

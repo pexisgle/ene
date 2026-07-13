@@ -214,7 +214,7 @@ pub struct MemoryQueryHandle { /* 非公開 */ }
 
 | メソッド | シグネチャ | 説明 |
 |---|---|---|
-| `search_summaries` | `async fn search_summaries(&self, query_embedding: &[f32], card_name: &str, limit: usize, threshold: f32) -> Result<Vec<RecalledSummary>, EneRuntimeError>` | 会話サマリーへのベクトル類似度検索。 |
+| `search_summaries` | `async fn search_summaries(&self, embedding: &[f32], card_name: &str, limit: usize, threshold: f32) -> Result<Vec<RecalledSummary>, EneRuntimeError>` | 会話サマリーへのベクトル類似度検索。 |
 | `list_recent_summaries` | `async fn list_recent_summaries(&self, card_name: &str, limit: usize) -> Result<Vec<ConversationSummary>, EneRuntimeError>` | キャラクターカードの最近のサマリーを新しい順で返す。 |
 | `get_all_keyfacts` | `async fn get_all_keyfacts(&self, card_name: &str) -> Result<Vec<KeyFact>, EneRuntimeError>` | キャラクターカードに保存されている全レガシーキーファクト。 |
 
@@ -233,7 +233,7 @@ pub struct MemoryQueryHandle { /* 非公開 */ }
 |---|---|---|
 | `list_typed_memories` | `async fn list_typed_memories(&self, character_id: &str, kind: Option<MemoryKind>, limit: usize) -> Result<Vec<MemoryItem>, EneRuntimeError>` | キャラクターの型付きメモリを一覧表示する（`MemoryKind` で任意にフィルタ可能）。 |
 | `inspect_typed_memory` | `async fn inspect_typed_memory(&self, id: i64) -> Result<Option<MemoryItem>, EneRuntimeError>` | 行IDで単一の型付きメモリを取得する。 |
-| `search_typed_memories_hybrid` | `async fn search_typed_memories_hybrid(&self, character_id: &str, user_id: Option<&str>, query_text: &str, limit: usize) -> Result<Vec<ScoredMemory>, EneRuntimeError>` | `query_text` を埋め込み、CLIのデフォルトの重み/しきい値で `ene-store` のハイブリッド（ベクトル＋新近性＋顕著性＋確信度）検索を実行する。 |
+| `search_typed_memories_hybrid` | `async fn search_typed_memories_hybrid(...) -> Result<Vec<ScoredMemory>, EneRuntimeError>` | `query_text` を埋め込み、`ene_mind::MemoryJournal` 経由で `mind.memory.*` の重み/しきい値を使ってスコア付き検索する（#123）。 |
 | `pin_typed_memory` | `async fn pin_typed_memory(&self, id: i64, pinned: bool) -> Result<bool, EneRuntimeError>` | 型付きメモリのピン留めフラグを設定/解除する。 |
 | `transition_typed_memory_status` | `async fn transition_typed_memory_status(&self, id: i64, status: MemoryStatus) -> Result<bool, EneRuntimeError>` | 型付きメモリのライフサイクルステータスを手動で遷移させる（例: `Archived` へ）。 |
 

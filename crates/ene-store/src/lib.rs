@@ -20,8 +20,9 @@
 //!   binaries) opens its own database connection or issues raw SQL against
 //!   `memory.db`; they call into `MemoryStore` (or, for tool binaries, the IPC-based
 //!   `ene-tool-db` client backed by `ene-runtime`'s `db_server`) instead.
-//! - Depends on: `ene-common`, `ene-config`. The store has no LLM or embedding
-//!   provider dependency; callers supply vectors and the mind runtime owns summarization.
+//! - Depends on: `ene-common`, `ene-config`. The store has no LLM, embedding
+//!   provider, or prompt-assembly dependency; callers supply vectors and the mind
+//!   runtime owns summarization and prompt formatting.
 //!   It does NOT depend on `ene-runtime`, `ene-ai`, `ene-mind`, or
 //!   `ene-tool-proto` — the store sits low in the dependency graph so it can be
 //!   safely called from any of those crates without introducing a cycle.
@@ -60,8 +61,6 @@ pub mod forgetting;
 pub mod legacy_migration;
 /// SeaORM schema migrations.
 pub mod migrator;
-/// Summary recall and prompt formatting utilities.
-pub mod recall;
 /// Hybrid memory search scoring.
 pub mod search;
 /// Core memory store (`SQLite` + sqlite-vec).
@@ -89,8 +88,6 @@ pub use legacy_migration::{
     LegacyMigrationOptions, LegacyMigrationReport, LegacyRowCounts, MigrationStatus,
     execute_legacy_migration, keyfact_kind_for_key,
 };
-/// Formats recalled summaries for prompt injection.
-pub use recall::{format_summaries_for_prompt, format_summaries_with_library};
 /// Document-to-document lexical similarity for recall diversification.
 pub use search::document_lexical_similarity;
 /// Core memory types.
@@ -102,5 +99,5 @@ pub use store::{
 pub use typed_memory::{
     AffectAnnotation, HybridSearchWeights, MemoryCandidateSource, MemoryConfidence, MemoryItem,
     MemoryJournalListOptions, MemoryKind, MemorySalience, MemoryScope, MemoryScoreBreakdown,
-    MemorySearchOptions, MemorySource, MemoryStatus, NewMemoryItem, ScoredMemory,
+    MemorySearchOptions, MemorySource, MemoryStatus, NewMemoryItem, Query, ScoredMemory,
 };

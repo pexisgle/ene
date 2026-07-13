@@ -291,12 +291,14 @@ pub struct NewMemoryItem {
 }
 ```
 
-### `MemorySearchOptions` / `HybridSearchWeights`
+### `Query` / `HybridSearchWeights`
 
 ```rust
-pub struct MemorySearchOptions<'a> {
+/// Sole typed-memory search contract (#123). Callers (mind) pre-compute
+/// `embedding`; `None` skips vector gather (lexical/recency/commitment only).
+pub struct Query<'a> {
     pub query_text: &'a str,
-    pub query_embedding: &'a [f32],
+    pub embedding: Option<&'a [f32]>,
     pub character_id: &'a str,
     pub user_id: Option<&'a str>,
     pub model_name: &'a str,
@@ -307,17 +309,14 @@ pub struct MemorySearchOptions<'a> {
     pub weights: HybridSearchWeights,
     pub decay_half_life_days: f64,
     pub now: DateTime<Utc>,
-    /// Minimum hybrid total score required to return a result.
     pub min_score: f32,
-    /// Boost applied when a candidate is surfaced via an active commitment.
     pub commitment_boost: f32,
-    /// Cap on how many pure-recent fallback candidates to gather.
     pub recent_fallback_limit: usize,
 }
 
-/// Component weights for the hybrid recall score. Defaults:
-/// `vector 0.40, lexical 0.15, recency 0.10, salience 0.15,`
-/// `confidence 0.05, emotional_match 0.05, relationship 0.05, access_boost 0.05`.
+/// Component weights for the hybrid recall score. Store defaults match the
+/// historical constants; **product defaults** are supplied by
+/// `mind.memory.hybrid_weights` (`MindMemoryConfig`).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct HybridSearchWeights {
     pub vector: f32,
@@ -331,6 +330,7 @@ pub struct HybridSearchWeights {
 }
 ```
 
+`MemorySearchOptions` remains a type alias of `Query` for transitional call sites.
 ### `ScoredMemory` / `MemoryScoreBreakdown`
 
 ```rust
@@ -370,8 +370,7 @@ pub enum MemoryCandidateSource { Vector, Lexical, Recent, Commitment }
 | `typed_memory_exists_by_source_ref` | `async fn typed_memory_exists_by_source_ref(&self, character_id: &str, source_ref: &str) -> Result<bool, MemoryError>` | Existence check for idempotent re-sync. |
 | `get_active_typed_memory_by_source_ref` | `async fn get_active_typed_memory_by_source_ref(&self, character_id: &str, source_ref: &str) -> Result<Option<MemoryItem>, MemoryError>` | Fetch the active row for a given `source_ref`. |
 | `archive_typed_memories_by_source_prefixes` | `async fn archive_typed_memories_by_source_prefixes(&self, character_id: &str, prefixes: &[&str], keep_refs: &HashSet<String>) -> Result<usize, MemoryError>` | Archives rows under the given prefixes that are no longer present on re-sync (e.g. removed lorebook entries). |
-| `search_typed_memories` | `async fn search_typed_memories(&self, query_embedding: &[f32], character_id: &str, model_name: &str, limit: usize, similarity_threshold: f32) -> Result<Vec<(MemoryItem, f32)>, MemoryError>` | Legacy vector-only search. Still available for callers that only need cosine similarity. |
-| `search_typed_memories_hybrid` | `async fn search_typed_memories_hybrid(&self, options: &MemorySearchOptions<'_>) -> Result<Vec<ScoredMemory>, MemoryError>` | Primary recall path — combines vector, lexical, recency, salience, confidence, affect, relationship, access, and commitment signals. See [`docs/memory/memory.md`](../memory/memory.md#hybrid-memory-search-73) for the full scoring formula. |
+| `search` | `async fn search(&self, query: &Query<'_>) -> Result<Vec<ScoredMemory>, MemoryError>` | **Sole** typed-memory search entry (#123) — combines optional vector, lexical, recency, salience, confidence, affect, relationship, access, and commitment signals. Callers must pre-compute embeddings. See [`docs/memory/memory.md`](../memory/memory.md#hybrid-memory-search-73). |
 | `list_recallable_typed_memories` | `async fn list_recallable_typed_memories(&self, character_id: &str, user_id: Option<&str>, limit: usize) -> Result<Vec<MemoryItem>, MemoryError>` | `Active`/`Faded`/`Disputed` rows for a character (and optional user scope). |
 | `supersede_typed_memory` | `async fn supersede_typed_memory(&self, new_item: &NewMemoryItem, superseded_id: i64) -> Result<i64, MemoryError>` | Atomically inserts the replacement row and marks the prior row `Superseded`. |
 | `update_typed_memory_status` | `async fn update_typed_memory_status(&self, id: i64, new_status: MemoryStatus) -> Result<bool, MemoryError>` | Low-level status write; internally delegates to `transition_typed_memory_status`. |
@@ -669,18 +668,11 @@ pub struct ActiveSceneSummaryRow {
 
 ---
 
-LLM-based conversation summarization lives in `ene-mind::summarizer`; `ene-store` only persists and recalls the resulting summaries.
+LLM-based conversation summarization lives in `ene-mind::summarizer`; `ene-store` only persists and recalls the resulting summaries. Prompt formatting of recalled summaries lives in `ene-runtime::message_builder` (not in the store — #122).
 
 ---
 
-## Recall Formatters & Lexical Similarity
-
-### `recall` — prompt formatting
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `format_summaries_for_prompt` | `fn format_summaries_for_prompt(summaries: &[RecalledSummary]) -> String` | Renders recalled summaries as a human-readable text block (with relative ages) for injection into the system prompt. |
-| `format_summaries_with_library` | `fn format_summaries_with_library(summaries: &[RecalledSummary], prompts: &PromptLibrary) -> String` | Same, using i18n-aware phrasing from a `PromptLibrary`. |
+## Lexical Similarity
 
 ### `search` — lexical similarity
 
@@ -693,7 +685,7 @@ pub fn document_lexical_similarity(
 ) -> f32
 ```
 
-Jaccard similarity over tokenized `title + content` pairs. Used both inside `search_typed_memories_hybrid`'s lexical scoring component and for candidate de-duplication in downstream MMR diversification (see [`docs/memory/memory.md`](../memory/memory.md#mmr-diversification-78)).
+Jaccard similarity over tokenized `title + content` pairs. Used both inside hybrid typed-memory scoring and for candidate de-duplication in downstream MMR diversification (see [`docs/memory/memory.md`](../memory/memory.md#mmr-diversification-78)).
 
 ---
 

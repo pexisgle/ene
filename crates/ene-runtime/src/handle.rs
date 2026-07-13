@@ -430,9 +430,14 @@ impl EneHandle {
             session.memory.ccv3_memory_hash = Some(hash);
         }
 
+        let mind_memory = config
+            .get_section::<ene_mind::MindConfig>()
+            .unwrap_or_default()
+            .memory;
         let memory = MemoryQueryHandle::new(
             session.memory.memory_store.clone(),
             session.memory.embedding_provider.clone(),
+            mind_memory,
         );
 
         let diagnostics = crate::diagnostics::EneDiagnostics {
@@ -810,6 +815,10 @@ impl EneActor {
                     memory: MemoryQueryHandle::new(
                         self.session.memory.memory_store.clone(),
                         self.session.memory.embedding_provider.clone(),
+                        self.config
+                            .get_section::<ene_mind::MindConfig>()
+                            .unwrap_or_default()
+                            .memory,
                     ),
                     current_turn_count: self.session.current_turn_count() as u32,
                     session_started_at: self.session.session_started_at(),

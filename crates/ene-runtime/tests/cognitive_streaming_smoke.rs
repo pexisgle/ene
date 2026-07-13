@@ -88,6 +88,7 @@ async fn cognitive_lifecycle_compose_prompt_includes_identity_kernel_and_recall(
         supersedes_id: None,
         pinned: false,
         created_at: None,
+        commitment_id: None,
     };
     let id = store.insert_typed_memory(&item).await.unwrap();
     store

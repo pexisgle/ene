@@ -186,7 +186,7 @@ pub struct CognitionEngine {
 | `before_turn` | `async fn before_turn(&self, ctx: TurnContext<'_>) -> Result<PreTurnOutput, CognitionError>` | Loads affect, runs the Emotion Engine, plans + executes hybrid recall, and gathers active commitments. |
 | `persist_affect_snapshot` | `async fn persist_affect_snapshot(store: &MemoryStore, affect: &AffectState) -> Result<(), CognitionError>` | Persists the affect state immediately after pre-turn update (survives stream cancel/failure). |
 | `compose_prompt_packet` | `async fn compose_prompt_packet(&self, ctx: TurnContext<'_>, pre: &PreTurnOutput) -> Result<ComposedPrompt, CognitionError>` | Compiles the Identity Kernel, selects style examples, loads the scene summary, packs everything under budget, and converts to `Vec<LlmMessage>`. |
-| `after_turn` | `async fn after_turn(&self, store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>) -> Result<(), CognitionError>` | Delegates to `MemoryWriter::after_turn` — extraction, arbitration, forgetting lifecycle, affect persistence. |
+| `after_turn` | `async fn after_turn(&self, store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>, providers: MemoryWriteProviders<'_>) -> Result<(), CognitionError>` | **Sole product write entry** from the host (`ene-runtime`). Delegates to `MemoryWriter::after_turn` — extraction, arbitration, forgetting lifecycle, affect persistence. Runtime must not call `MemoryWriter` directly. |
 | `resolve_expression_turn` | `fn resolve_expression_turn(&self, config: &MindConfig, card: &CharacterCardV3, affect: &AffectState, response_text: &str, llm_proposal: Option<&str>, previous_expression: &str, elapsed_since_change: Option<Duration>) -> (ExpressionDecision, AffectState)` | Resolves the final character expression for a completed assistant turn via the `OutputArbiter`. Returns the decision plus an `AffectState` with `last_expression` updated. |
 
 ---
@@ -583,7 +583,7 @@ pub struct RecallPlan {
 | Method | Signature | Description |
 |---|---|---|
 | `plan` | `fn plan(input: &RecallPlannerInput<'_>, options: &RecallPlannerOptions) -> Result<RecallPlan, CognitionError>` | Infers `RecallIntent`s from the topic/affect, builds semantic/episodic query variants, and fills budget/search hints. Errors on empty turn text. |
-| `to_memory_search_options` | `fn to_memory_search_options<'a>(plan: &'a RecallPlan, query_embedding: &'a [f32], model_name: &'a str, now: DateTime<Utc>) -> MemorySearchOptions<'a>` | Maps the plan's primary query onto `ene-store`'s hybrid search options. |
+| `to_memory_search_options` | `fn to_memory_search_options<'a>(plan: &'a RecallPlan, query_embedding: &'a [f32], model_name: &'a str, now: DateTime<Utc>, memory: &MindMemoryConfig) -> Query<'a>` | Maps the plan's primary query onto `ene-store::Query`, filling hybrid weights / commitment boost from `mind.memory.*` (#123). |
 | `explain_results` | `fn explain_results(scored: Vec<ScoredMemory>) -> Vec<RecalledMemory>` | Attaches a `RecallReason` and score breakdown to each hybrid-search result. |
 
 `RecallPlannerOptions::from_config(context: &ContextConfig, memory: &MindMemoryConfig) -> Self` derives planner options (budgets, thresholds, `use_hyde`) from the two config sections.
@@ -632,13 +632,13 @@ End-to-end pipeline used by `CognitionEngine::before_turn`: plan → (if `hybrid
 pub struct MemoryWriter;
 
 impl MemoryWriter {
-    pub async fn write_memories(store: &MemoryStore, config: &MindConfig, input: &PostTurnInput<'_>) -> Result<(), CognitionError>;
+    pub async fn write_memories(store: &MemoryStore, config: &MindConfig, input: &PostTurnInput<'_>, providers: MemoryWriteProviders<'_>) -> Result<(), CognitionError>;
     pub async fn finalize_turn(store: &MemoryStore, config: &MindConfig, input: &PostTurnInput<'_>) -> Result<(), CognitionError>;
-    pub async fn after_turn(store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>) -> Result<(), CognitionError>;
+    pub async fn after_turn(store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>, providers: MemoryWriteProviders<'_>) -> Result<(), CognitionError>;
 }
 ```
 
-`after_turn` = `write_memories` (deterministic extraction incl. tool grounding → `MemoryArbiter` → `CommitmentLedger` sync) then `finalize_turn` (`ForgettingLifecycle::apply` → `upsert_affect_state`). Extraction is skipped when `mind.memory.write_every_turn` is `false` (`finalize_turn` still runs from `after_turn`).
+`after_turn` = `write_memories` (deterministic extraction incl. tool grounding → `MemoryArbiter` → `CommitmentLedger` sync) then `finalize_turn` (`ForgettingLifecycle::apply` → `upsert_affect_state`). Extraction is skipped when `mind.memory.write_every_turn` is `false` (`finalize_turn` still runs from `after_turn`). Hosts (`ene-runtime`) must call only `CognitionEngine::after_turn` — not `MemoryWriter` methods directly (#121).
 
 ### `MemoryCandidate`
 

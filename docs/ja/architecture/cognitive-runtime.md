@@ -164,7 +164,7 @@ Recall Planner が生成するクエリ計画：
 - vector similarity threshold、minimum total score、recency half-life、optional query affect などのハイブリッド検索ヒント
 - 後続 recall execution 向けの HyDE 拡張 hint（`use_hyde`）
 
-後続の recall execution は `MemoryStore::search_typed_memories_hybrid` の結果を `RecallResultMapper::map` または `RecallPlanner::explain_results` 経由で、主 `RecallReason` と score breakdown 付きの `RecalledMemory` に変換し、debug / UX / prompt introspection に使う（#74）。
+後続の recall execution は `MemoryStore::search` の結果を `RecallResultMapper::map` または `RecallPlanner::explain_results` 経由で、主 `RecallReason` と score breakdown 付きの `RecalledMemory` に変換し、debug / UX / prompt introspection に使う（#74）。
 
 `mind.memory.rerank_enabled` が true の場合、マッピング前に optional な LLM rerank stage（`MemoryRerankPipeline`）が上位 hybrid-search 候補の順序を調整することがあります。無効時または rerank 失敗時は hybrid search の順序にフォールバックし、`MemoryScoreBreakdown::total` は変更しません（#77）。
 

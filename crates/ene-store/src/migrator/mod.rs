@@ -16,6 +16,10 @@ impl MigratorTrait for Migrator {
             Box::new(Migration6),
             Box::new(Migration7),
             Box::new(Migration8),
+            Box::new(Migration9),
+            // Migration10 (drop conversation_summaries / conversation_keyfacts)
+            // is deferred until legacy_migration tooling and store unit tests no
+            // longer need those tables on fresh in-memory DBs (#125).
         ]
     }
 }
@@ -821,6 +825,7 @@ enum TypedMemories {
     SupersedesId,
     Pinned,
     FadedAt,
+    CommitmentId,
 }
 
 #[derive(Iden)]
@@ -1338,4 +1343,93 @@ enum PendingAffectProposals {
     SourceTurnId,
     ProposalJson,
     CreatedAt,
+}
+
+// ── Migration 9: typed_memories.commitment_id (ledger sole SoT, #124) ────────
+
+pub struct Migration9;
+
+impl MigrationName for Migration9 {
+    fn name(&self) -> &str {
+        "m20260714_000000_typed_memory_commitment_id"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration9 {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(TypedMemories::Table)
+                    .add_column(ColumnDef::new(TypedMemories::CommitmentId).integer().null())
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_typed_memories_commitment_id")
+                    .table(TypedMemories::Table)
+                    .col(TypedMemories::CommitmentId)
+                    .to_owned(),
+            )
+            .await?;
+
+        // Backfill: commitments.source_memory_id → typed_memories.commitment_id
+        let db = manager.get_connection();
+        db.execute_unprepared(
+            r#"
+            UPDATE typed_memories
+            SET commitment_id = (
+                SELECT c.id FROM commitments c
+                WHERE c.source_memory_id = typed_memories.id
+                LIMIT 1
+            )
+            WHERE EXISTS (
+                SELECT 1 FROM commitments c
+                WHERE c.source_memory_id = typed_memories.id
+            )
+            "#,
+        )
+        .await?;
+
+        // Fade unlinked typed Commitment bodies (ledger is now SoT).
+        db.execute_unprepared(
+            r#"
+            UPDATE typed_memories
+            SET status = 'faded',
+                faded_at = COALESCE(faded_at, CURRENT_TIMESTAMP),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE kind = 'commitment'
+              AND commitment_id IS NULL
+              AND status = 'active'
+            "#,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_index(
+                Index::drop()
+                    .name("idx_typed_memories_commitment_id")
+                    .table(TypedMemories::Table)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(TypedMemories::Table)
+                    .drop_column(TypedMemories::CommitmentId)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
 }

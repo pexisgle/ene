@@ -458,12 +458,14 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::Conver
                     character_id: &card_name,
                     user_id: &user_name,
                 };
-                if mind.memory.write_every_turn
-                    && let Err(error) = ene_mind::memory_writer::MemoryWriter::write_memories(
+                // Sole runtime write entry: CognitionEngine::after_turn (#121).
+                // write_every_turn is gated inside mind's after_turn path.
+                if let Err(error) = engine
+                    .after_turn(
                         store,
                         &mind,
-                        &post,
-                        ene_mind::memory_writer::MemoryWriteProviders {
+                        post,
+                        ene_mind::MemoryWriteProviders {
                             llm: Some(provider.as_ref()),
                             embedder: embedder.as_ref().map(|arc| arc.as_ref()),
                         },
@@ -473,16 +475,7 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::Conver
                     tracing::warn!(
                         component = "CognitionEngine",
                         error = %error,
-                        "Post-turn memory write failed"
-                    );
-                }
-                if let Err(error) =
-                    ene_mind::memory_writer::MemoryWriter::finalize_turn(store, &mind, &post).await
-                {
-                    tracing::warn!(
-                        component = "CognitionEngine",
-                        error = %error,
-                        "Post-turn finalize failed"
+                        "Post-turn after_turn failed"
                     );
                 }
             }

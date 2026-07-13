@@ -1,7 +1,7 @@
 //! MMR diversification for hybrid recall candidates (#78).
 //!
 //! Downstream recall execution calls [`MemoryDiversifyPipeline::diversify`] after
-//! `MemoryStore::search_typed_memories_hybrid` and before optional LLM reranking.
+//! `MemoryStore::search` and before optional LLM reranking.
 //!
 //! The pipeline merges near-duplicate clusters, applies greedy MMR selection,
 //! enforces per-kind minimum slots, and rewards source diversity. Hybrid scores
@@ -432,6 +432,7 @@ mod tests {
                 supersedes_id: None,
                 pinned: false,
                 faded_at: None,
+                commitment_id: None,
             },
             breakdown: sample_breakdown(total),
             sources: vec![MemoryCandidateSource::Vector],

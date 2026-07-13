@@ -118,6 +118,7 @@ impl StyleExampleSelector {
                 supersedes_id: None,
                 pinned: false,
                 created_at: None,
+                commitment_id: None,
             })
             .collect()
     }

@@ -207,7 +207,7 @@ pub struct ConversationSummaryResult {
 
 ## プロンプト注入形式
 
-`format_summaries_for_prompt()` が呼び出された要約をプロンプト用にレンダリング:
+`ene-runtime::message_builder` が呼び出された要約をプロンプト用にレンダリングします（ストアはプロンプト整形を持ちません — #122）:
 
 ```
 [Past Conversation Summaries — relevant previous conversations]
@@ -232,7 +232,7 @@ Cognitive Runtime は長期事実を `typed_memories` に保存し、明示的�
 | `pin_typed_memory(id, pinned)` | ピン / ピン解除（自然減衰から除外） |
 | `apply_natural_decay_batch(...)` | 減衰スコアに基づく `active → faded → archived` 一括処理 |
 | `search_typed_memories(embedding, ...)` | アクティブ記憶に対するベクトル類似検索 |
-| `search_typed_memories_hybrid(options)` | 説明可能なスコア内訳付きハイブリッド想起 |
+| `search(options)` | 説明可能なスコア内訳付きハイブリッド想起 |
 | `list_recallable_typed_memories(character_id, user_id, limit)` | 想起対象（`active` / `faded` / `disputed`）の一覧 |
 
 判断ルールとしきい値は [Cognitive Runtime ADR](../architecture/cognitive-runtime.md) を参照。
@@ -257,13 +257,13 @@ Cognitive Runtime は長期事実を `typed_memories` に保存し、明示的�
 - `required_kinds`（常に `Semantic` / `Episodic` を含み、active commitment がある場合は `Commitment` を含む）
 - character/user scope 用の `RecallScopeFilter`
 - `mind.context` 由来の `RecallBudgetHints`
-- `MemorySearchOptions` 互換の `RecallSearchHints`（`similarity_threshold`, `min_score`, recency half-life, optional query affect）
+- `Query` 互換の `RecallSearchHints`（`similarity_threshold`, `min_score`, recency half-life, optional query affect）
 
-`RecallPlanner::to_memory_search_options` は、plan と単一の query embedding から `MemoryStore::search_typed_memories_hybrid` 用の `MemorySearchOptions` を組み立てる helper です。使用するのは `plan.search.primary_query_text`（最初の semantic query）のみです。`semantic_queries` / `episodic_queries` / `required_kinds` / `use_hyde` は plan hints として残り、multi-query 展開・kind フィルタ・HyDE embedding 呼び出しは後続の recall execution が担当します。
+`RecallPlanner::to_memory_search_options` は、plan と単一の query embedding から `MemoryStore::search` 用の `Query` を組み立てる helper です。使用するのは `plan.search.primary_query_text`（最初の semantic query）のみです。`semantic_queries` / `episodic_queries` / `required_kinds` / `use_hyde` は plan hints として残り、multi-query 展開・kind フィルタ・HyDE embedding 呼び出しは後続の recall execution が担当します。
 
 ### ハイブリッド記憶検索（#73）
 
-型付き記憶の想起は、ベクトル類似度だけでなく複数シグナルを組み合わせられます。`MemorySearchOptions` を `MemoryStore::search_typed_memories_hybrid` に渡すと、`ScoredMemory`（`MemoryScoreBreakdown` と recall source: `vector` / `lexical` / `recent` / `commitment`）が返ります。
+型付き記憶の想起は、ベクトル類似度だけでなく複数シグナルを組み合わせられます。`Query` を `MemoryStore::search` に渡すと、`ScoredMemory`（`MemoryScoreBreakdown` と recall source: `vector` / `lexical` / `recent` / `commitment`）が返ります。
 
 デフォルトのスコア式:
 
@@ -282,7 +282,7 @@ score =
 - stale_penalty
 ```
 
-`MemorySearchOptions` では次も指定できます。
+`Query` では次も指定できます。
 
 - `min_score` — この hybrid total 未満の結果を除外
 - `commitment_boost` — commitment 由来候補へのブースト（既定 `0.25`）
@@ -303,7 +303,7 @@ score =
 
 ### 説明可能な想起理由（#74）
 
-`MemoryStore::search_typed_memories_hybrid` は生の `ScoredMemory` を返します。理由付けは `ene-mind::recall` の責務で、後続の recall execution がそれを `RecalledMemory` DTO に変換します。各結果には次が含まれます。
+`MemoryStore::search` は生の `ScoredMemory` を返します。理由付けは `ene-mind::recall` の責務で、後続の recall execution がそれを `RecalledMemory` DTO に変換します。各結果には次が含まれます。
 
 - `item` — 型付き記憶行
 - `reason` — UX / debug / prompt 向けの単一 `RecallReason`
@@ -353,7 +353,7 @@ mind ランタイムの `CognitionEngine::sync_character_memories` が CCv3 カ�
 
 ハイブリッド検索の後、downstream recall execution は `RecalledMemory` への変換前に optional な rerank を実行できます。
 
-1. `MemoryStore::search_typed_memories_hybrid` が hybrid `total` 順の `ScoredMemory` を返す。
+1. `MemoryStore::search` が hybrid `total` 順の `ScoredMemory` を返す。
 2. `mind.memory.rerank_enabled` が `false`（既定）の場合、順序は変更されない。
 3. 有効時、`MemoryRerankPipeline` が上位 `rerank_candidate_limit` 件を LLM reranker に渡す。prompt には recall question と各候補の `content` のみを含め、title / source / kind / user metadata は含めない。limit を超える候補は hybrid 順序のまま rerank 対象の末尾に追加される。
 4. timeout、provider error、structured output の不正時は hybrid search 順序にフォールバックする。
@@ -369,7 +369,7 @@ mind ランタイムの `CognitionEngine::sync_character_memories` が CCv3 カ�
 
 ハイブリッド検索の後、optional LLM rerank の前に、downstream recall execution は `MemoryDiversifyPipeline` による決定論的 MMR 多様化を適用します。
 
-1. `MemoryStore::search_typed_memories_hybrid` が hybrid `total` 順の `ScoredMemory` を返す。
+1. `MemoryStore::search` が hybrid `total` 順の `ScoredMemory` を返す。
 2. **クラスタ dedup** で近傍重複候補（title + content の lexical Jaccard 類似度 ≥ `mmr_duplicate_cluster_threshold`）をマージし、クラスタ内最高スコアの代表 1 件のみを残す。
 3. **Greedy MMR** で `RecallPlan.budget.result_limit` 件まで選択する。`λ * relevance - (1-λ) * max_similarity_to_selected` を用い、`relevance` は pool 内最大値で正規化した `score_breakdown.total`、pairwise 類似度は同じ lexical 指標。selected set に未登場の recall source 種別を持つ候補には `mmr_source_diversity_bonus` を小幅加算する。
 4. **Kind quota** で semantic / episodic / user profile / commitment の最低枠（`mmr_min_slots_*`）を確保する。`RecallPlan.required_kinds` に含まれる kind（`preference` / `relationship` / `affective` / `procedure` など）も予算が許せば最低 1 枠を確保する。minimum の合計が `result_limit` を超える場合は、commitment → user profile → preference → semantic → episodic → relationship → affective → procedure → reflection の優先順で枠を割り当てる。
@@ -501,7 +501,7 @@ commitments (
 
 **期限:** 抽出器は `MemoryCandidate::commitment_due` を生成し、ledger 行では `due_label` として保存する。自然言語の期限を `due_at` に parse する処理は未実装のため（[Cognitive Runtime ADR](../architecture/cognitive-runtime.md#companion-commitment-ledger) 参照）、`mark_stale_commitments` が対象にするのは `due_at` が明示的に入っている行のみ。
 
-**ランタイム接続:** `ene-mind::CommitmentLedger::arbitrate_apply_and_sync` は Memory Arbiter の実行と commitment 行の同期を一括で行う。`active_prompt_candidates` は Active Commitments `PromptPacket` セクション（#87）向けの軽量 DTO を生成する。`mind.memory.write_every_turn` が有効なとき `MemoryWriter::write_memories` が各ターン後に sync を呼ぶ。CLI の list/complete コマンドは `/commitments`（#94）で利用できる。
+**ランタイム接続:** `ene-mind::CommitmentLedger::arbitrate_apply_and_sync` は commitment 候補を **ledger-first**（唯一の SoT、#124）で書き込み、他 kind は Memory Arbiter で調停する — typed→ledger の dual-write / `sync_from_applied_decisions` はない。任意の typed 行は `typed_memories.commitment_id` で参照できる。`active_prompt_candidates` は Active Commitments `PromptPacket` セクション（#87）向けの軽量 DTO を生成する。CLI の list/complete コマンドは `/commitments`（#94）で利用できる。
 
 ## メモリージャーナル（Desktop UX）
 

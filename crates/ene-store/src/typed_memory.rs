@@ -345,6 +345,9 @@ pub struct MemoryItem {
     /// When the memory entered `faded` status (archive-decay anchor).
     #[serde(default)]
     pub faded_at: Option<DateTime<Utc>>,
+    /// Optional FK to the commitment ledger row (`commitments.id`) (#124).
+    #[serde(default)]
+    pub commitment_id: Option<i64>,
 }
 
 /// Payload for creating a new memory item (fields set by the store are omitted).
@@ -388,6 +391,9 @@ pub struct NewMemoryItem {
     /// Optional created timestamp (defaults to now on insert).
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
+    /// Optional FK to the commitment ledger row (#124).
+    #[serde(default)]
+    pub commitment_id: Option<i64>,
 }
 
 /// Recall source that surfaced a memory candidate.
@@ -405,7 +411,15 @@ pub enum MemoryCandidateSource {
 }
 
 /// Weights for hybrid memory search scoring components.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+///
+/// Product defaults are supplied by `mind.memory.hybrid_weights`
+/// ([`ene_mind::MindMemoryConfig`]); the store only applies caller-provided
+/// weights when scoring (#123).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Serialize, Deserialize, ene_config::schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case", default)]
+#[schemars(crate = "ene_config::schemars")]
 pub struct HybridSearchWeights {
     /// Weight for vector cosine similarity.
     pub vector: f32,
@@ -440,18 +454,22 @@ impl Default for HybridSearchWeights {
     }
 }
 
-/// Options for hybrid typed-memory search.
+/// Typed-memory search query (#123).
+///
+/// Callers (mind) pre-compute `embedding` when vector search is desired.
+/// `None` skips the vector gather path and scores lexical/recency/commitment
+/// candidates only. The store never calls an embedder.
 #[derive(Debug, Clone)]
-pub struct MemorySearchOptions<'a> {
+pub struct Query<'a> {
     /// Natural-language query for lexical scoring.
     pub query_text: &'a str,
-    /// Query embedding for vector similarity.
-    pub query_embedding: &'a [f32],
+    /// Optional query embedding for vector similarity (`None` = lexical/recency only).
+    pub embedding: Option<&'a [f32]>,
     /// Character scope.
     pub character_id: &'a str,
     /// Optional user scope filter.
     pub user_id: Option<&'a str>,
-    /// Embedding model name for vector index lookup.
+    /// Embedding model name for vector index lookup (ignored when `embedding` is `None`).
     pub model_name: &'a str,
     /// Maximum results to return.
     pub limit: usize,
@@ -474,6 +492,9 @@ pub struct MemorySearchOptions<'a> {
     /// Maximum number of pure-recent fallback candidates to gather.
     pub recent_fallback_limit: usize,
 }
+
+/// Deprecated name for [`Query`]; prefer `Query`.
+pub type MemorySearchOptions<'a> = Query<'a>;
 
 /// Filter options for the desktop/CLI memory journal browse list.
 #[derive(Debug, Clone)]
@@ -650,6 +671,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             faded_at: None,
+            commitment_id: None,
         };
         let json = serde_json::to_string(&item).unwrap();
         let back: MemoryItem = serde_json::from_str(&json).unwrap();
@@ -685,6 +707,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             created_at: None,
+            commitment_id: None,
         };
         let json = serde_json::to_string(&new_item).unwrap();
         let back: NewMemoryItem = serde_json::from_str(&json).unwrap();

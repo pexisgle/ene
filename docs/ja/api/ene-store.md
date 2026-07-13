@@ -109,11 +109,11 @@ pub struct RecalledSummary {
 | メソッド | シグネチャ | 説明 |
 |--------|-----------|-------------|
 | `insert_summary` | `async fn insert_summary(&self, session_id: &str, card_name: &str, summary: &str, key_facts: &[KeyFact], embedding: &[f32], ended_at: DateTime<Utc>) -> Result<i64, MemoryError>` | 要約とキーファクトを1つのトランザクションで挿入する。`ReadOnly` モードでは `LegacyWriteForbidden` で拒否される。 |
-| `search_summaries` | `async fn search_summaries(&self, query_embedding: &[f32], card_name: &str, limit: usize, similarity_threshold: f32) -> Result<Vec<RecalledSummary>, MemoryError>` | `vec_distance_cosine` によるコサイン類似度検索。 |
+| `search_summaries` | `async fn search_summaries(&self, embedding: &[f32], card_name: &str, limit: usize, similarity_threshold: f32) -> Result<Vec<RecalledSummary>, MemoryError>` | `vec_distance_cosine` によるコサイン類似度検索。 |
 | `list_recent_summaries` | `async fn list_recent_summaries(&self, card_name: &str, limit: usize) -> Result<Vec<ConversationSummary>, MemoryError>` | `created_at DESC` で最新の要約を取得する。 |
 | `count_summaries` | `async fn count_summaries(&self, card_name: &str) -> Result<i64, MemoryError>` | キャラクターの要約総数。 |
 | `delete_summary` | `async fn delete_summary(&self, id: i64) -> Result<usize, MemoryError>` | カスケード削除（関連するキーファクトも削除される）。 |
-| `recall_context` | `async fn recall_context(&self, card_name: &str, query_embedding: &[f32], limit: usize, similarity_threshold: f32) -> Result<(Vec<RecalledSummary>, Vec<KeyFact>), MemoryError>` | 要約検索とすべてのキーファクトの取得を1回でまとめて行う便利メソッド。カードがタイプ付きメモリへ移行済みの場合は空のベクトルを返す。 |
+| `recall_context` | `async fn recall_context(&self, card_name: &str, embedding: &[f32], limit: usize, similarity_threshold: f32) -> Result<(Vec<RecalledSummary>, Vec<KeyFact>), MemoryError>` | 要約検索とすべてのキーファクトの取得を1回でまとめて行う便利メソッド。カードがタイプ付きメモリへ移行済みの場合は空のベクトルを返す。 |
 
 ### キーファクトメソッド
 
@@ -154,7 +154,7 @@ pub type ToolEmbeddingFieldRow = (String, String, String, String, String, Vec<f3
 | `list_tool_embedding_fields` | `async fn list_tool_embedding_fields(&self) -> Result<Vec<ToolEmbeddingFieldRow>, MemoryError>` | ベクトルと `source_text` を含む完全な行。インメモリRAGインデックスの再構築に使用される。 |
 | `list_tool_embedding_hashes` | `async fn list_tool_embedding_hashes(&self) -> Result<Vec<(String, String, String, String, String)>, MemoryError>` | ベクトルを含まない軽量な `(tool_name, field, field_key, version_hash, model_name)` 行 — 再埋め込みが必要なツールの検出に使用される。 |
 | `delete_tool_embeddings` | `async fn delete_tool_embeddings(&self, tool_name: &str) -> Result<usize, MemoryError>` | ツールの全フィールド行を削除する。 |
-| `search_tools` | `async fn search_tools(&self, query_embedding: &[f32], limit: usize, similarity_threshold: f32) -> Result<Vec<(String, f32)>, MemoryError>` | すべてのフィールドに対するコサイン類似度を**ツールごとにmaxプール**し、降順で並べる。`(tool_name, score)` を返す。 |
+| `search_tools` | `async fn search_tools(&self, embedding: &[f32], limit: usize, similarity_threshold: f32) -> Result<Vec<(String, f32)>, MemoryError>` | すべてのフィールドに対するコサイン類似度を**ツールごとにmaxプール**し、降順で並べる。`(tool_name, score)` を返す。 |
 
 ---
 
@@ -291,12 +291,12 @@ pub struct NewMemoryItem {
 }
 ```
 
-### `MemorySearchOptions` / `HybridSearchWeights`
+### `Query` / `HybridSearchWeights`
 
 ```rust
-pub struct MemorySearchOptions<'a> {
+pub struct Query<'a> {
     pub query_text: &'a str,
-    pub query_embedding: &'a [f32],
+    pub embedding: &'a [f32],
     pub character_id: &'a str,
     pub user_id: Option<&'a str>,
     pub model_name: &'a str,
@@ -370,8 +370,8 @@ pub enum MemoryCandidateSource { Vector, Lexical, Recent, Commitment }
 | `typed_memory_exists_by_source_ref` | `async fn typed_memory_exists_by_source_ref(&self, character_id: &str, source_ref: &str) -> Result<bool, MemoryError>` | 冪等な再同期のための存在チェック。 |
 | `get_active_typed_memory_by_source_ref` | `async fn get_active_typed_memory_by_source_ref(&self, character_id: &str, source_ref: &str) -> Result<Option<MemoryItem>, MemoryError>` | 指定した `source_ref` のアクティブな行を取得する。 |
 | `archive_typed_memories_by_source_prefixes` | `async fn archive_typed_memories_by_source_prefixes(&self, character_id: &str, prefixes: &[&str], keep_refs: &HashSet<String>) -> Result<usize, MemoryError>` | 再同期時にもはや存在しない、指定プレフィックス下の行をアーカイブする（例: 削除されたロアブックエントリ）。 |
-| `search_typed_memories` | `async fn search_typed_memories(&self, query_embedding: &[f32], character_id: &str, model_name: &str, limit: usize, similarity_threshold: f32) -> Result<Vec<(MemoryItem, f32)>, MemoryError>` | レガシーなベクトルのみの検索。コサイン類似度だけが必要な呼び出し元向けに引き続き利用可能。 |
-| `search_typed_memories_hybrid` | `async fn search_typed_memories_hybrid(&self, options: &MemorySearchOptions<'_>) -> Result<Vec<ScoredMemory>, MemoryError>` | 主要な回想経路 — ベクトル、字句、新近性、顕著性、確信度、感情、関係性、アクセス、コミットメントの各シグナルを組み合わせる。完全なスコアリング式は [`docs/memory/memory.md`](../memory/memory.md#hybrid-memory-search-73) を参照。 |
+| `search_typed_memories` | `async fn search_typed_memories(&self, embedding: &[f32], character_id: &str, model_name: &str, limit: usize, similarity_threshold: f32) -> Result<Vec<(MemoryItem, f32)>, MemoryError>` | レガシーなベクトルのみの検索。コサイン類似度だけが必要な呼び出し元向けに引き続き利用可能。 |
+| `search` | `async fn search(&self, options: &Query<'_>) -> Result<Vec<ScoredMemory>, MemoryError>` | 主要な回想経路 — ベクトル、字句、新近性、顕著性、確信度、感情、関係性、アクセス、コミットメントの各シグナルを組み合わせる。完全なスコアリング式は [`docs/memory/memory.md`](../memory/memory.md#hybrid-memory-search-73) を参照。 |
 | `list_recallable_typed_memories` | `async fn list_recallable_typed_memories(&self, character_id: &str, user_id: Option<&str>, limit: usize) -> Result<Vec<MemoryItem>, MemoryError>` | キャラクター（およびオプションのユーザースコープ）の `Active`/`Faded`/`Disputed` 行。 |
 | `supersede_typed_memory` | `async fn supersede_typed_memory(&self, new_item: &NewMemoryItem, superseded_id: i64) -> Result<i64, MemoryError>` | 置き換え行をアトミックに挿入し、以前の行を `Superseded` にマークする。 |
 | `update_typed_memory_status` | `async fn update_typed_memory_status(&self, id: i64, new_status: MemoryStatus) -> Result<bool, MemoryError>` | 低レベルのステータス書き込み。内部的には `transition_typed_memory_status` に委譲する。 |
@@ -669,18 +669,11 @@ pub struct ActiveSceneSummaryRow {
 
 ---
 
-LLMベースの会話要約は `ene-mind::summarizer` が担当し、`ene-store` は生成された要約の永続化と回想だけを担当します。
+LLMベースの会話要約は `ene-mind::summarizer` が担当し、`ene-store` は生成された要約の永続化と回想だけを担当します。回想要約のプロンプト整形は `ene-runtime::message_builder` が担当します（ストアには置きません — #122）。
 
 ---
 
-## 回想フォーマッタ & 字句類似度
-
-### `recall` — プロンプトのフォーマット
-
-| 関数 | シグネチャ | 説明 |
-|----------|-----------|-------------|
-| `format_summaries_for_prompt` | `fn format_summaries_for_prompt(summaries: &[RecalledSummary]) -> String` | 回想された要約を（相対的な経過時間付きで）システムプロンプトに注入するための人間が読めるテキストブロックとして整形する。 |
-| `format_summaries_with_library` | `fn format_summaries_with_library(summaries: &[RecalledSummary], prompts: &PromptLibrary) -> String` | 同様だが、`PromptLibrary` によるi18n対応の言い回しを使用する。 |
+## 字句類似度
 
 ### `search` — 字句類似度
 
@@ -693,7 +686,7 @@ pub fn document_lexical_similarity(
 ) -> f32
 ```
 
-トークン化された `title + content` のペアに対するJaccard類似度。`search_typed_memories_hybrid` の字句スコアリング要素、および下流のMMR多様化における候補の重複排除の両方で使用されます（[`docs/memory/memory.md`](../memory/memory.md#mmr-diversification-78) 参照）。
+トークン化された `title + content` のペアに対するJaccard類似度。ハイブリッド型付きメモリのスコアリング、および下流のMMR多様化における候補の重複排除の両方で使用されます（[`docs/memory/memory.md`](../memory/memory.md#mmr-diversification-78) 参照）。
 
 ---
 

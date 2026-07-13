@@ -29,6 +29,8 @@ pub struct Model {
     pub supersedes_id: Option<i64>,
     pub pinned: i32,
     pub faded_at: Option<DateTime<Utc>>,
+    /// Optional FK to `commitments.id` when this row is a ledger reference (#124).
+    pub commitment_id: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

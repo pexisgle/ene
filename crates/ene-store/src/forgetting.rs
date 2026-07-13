@@ -159,6 +159,7 @@ mod tests {
             } else {
                 None
             },
+            commitment_id: None,
         }
     }
 

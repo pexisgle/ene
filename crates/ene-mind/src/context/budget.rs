@@ -441,6 +441,7 @@ mod tests {
                 supersedes_id: None,
                 pinned: false,
                 faded_at: None,
+                commitment_id: None,
             },
             reason: crate::recall::RecallReason::SimilarTopic,
             score_breakdown: MemoryScoreBreakdown {

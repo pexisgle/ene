@@ -638,6 +638,7 @@ fn candidate_to_new_item(candidate: &MemoryCandidate, ctx: &ArbiterContext<'_>) 
         supersedes_id: None,
         pinned: false,
         created_at: None,
+        commitment_id: None,
     }
 }
 
@@ -878,6 +879,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             created_at: None,
+            commitment_id: None,
         };
         let id = store.insert_typed_memory(&item).await.unwrap();
         let existing = store.get_typed_memory(id).await.unwrap().unwrap();
@@ -915,6 +917,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             created_at: None,
+            commitment_id: None,
         };
         let id = store.insert_typed_memory(&existing_item).await.unwrap();
         let existing = store.get_typed_memory(id).await.unwrap().unwrap();
@@ -967,6 +970,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             created_at: None,
+            commitment_id: None,
         };
         let id = store.insert_typed_memory(&existing_item).await.unwrap();
         let existing = store.get_typed_memory(id).await.unwrap().unwrap();
@@ -1074,6 +1078,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             created_at: None,
+            commitment_id: None,
         };
         let old_id = store.insert_typed_memory(&old_item).await.unwrap();
         let existing = store.get_typed_memory(old_id).await.unwrap().unwrap();
@@ -1169,6 +1174,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             faded_at: None,
+            commitment_id: None,
         };
         let mut semantic_matches = HashMap::new();
         semantic_matches.insert(
@@ -1222,6 +1228,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             faded_at: None,
+            commitment_id: None,
         };
         let stronger = MemoryItem {
             id: Some(2),
@@ -1299,6 +1306,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             faded_at: None,
+            commitment_id: None,
         };
         let candidate = MemoryCandidate {
             kind: MemoryKind::Preference,
@@ -1365,6 +1373,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             faded_at: None,
+            commitment_id: None,
         };
         let candidate = MemoryCandidate {
             kind: MemoryKind::Preference,
@@ -1497,6 +1506,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             created_at: None,
+            commitment_id: None,
         };
         let id = store.insert_typed_memory(&existing_item).await.unwrap();
 
@@ -1552,6 +1562,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             created_at: None,
+            commitment_id: None,
         };
         let id = store.insert_typed_memory(&existing_item).await.unwrap();
         let existing = store.get_typed_memory(id).await.unwrap().unwrap();

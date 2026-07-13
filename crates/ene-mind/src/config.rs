@@ -176,6 +176,18 @@ pub struct MindMemoryConfig {
     pub mmr_source_diversity_bonus: f32,
     /// When true, block recall if legacy rows exist and migration is incomplete (#98).
     pub require_migration: bool,
+    /// Hybrid scoring component weights (product defaults live here; store only applies them).
+    pub hybrid_weights: ene_store::HybridSearchWeights,
+    /// Score boost when a candidate is sourced from an active commitment.
+    pub commitment_boost: f32,
+    /// Maximum pure-recent fallback candidates gathered during hybrid search.
+    pub recent_fallback_limit: usize,
+    /// Candidate pool size multiplier base for journal / diagnostics search.
+    pub journal_candidate_pool_size: usize,
+    /// Minimum vector similarity for journal / diagnostics search (#123).
+    pub journal_similarity_threshold: f32,
+    /// Minimum hybrid score for journal / diagnostics search (#123).
+    pub journal_min_score: f32,
 }
 
 /// Tool-result grounding and guardrail settings.
@@ -247,6 +259,12 @@ impl Default for MindMemoryConfig {
             mmr_min_slots_commitment: 1,
             mmr_source_diversity_bonus: 0.05,
             require_migration: false,
+            hybrid_weights: ene_store::HybridSearchWeights::default(),
+            commitment_boost: 0.25,
+            recent_fallback_limit: 5,
+            journal_candidate_pool_size: 64,
+            journal_similarity_threshold: 0.45,
+            journal_min_score: 0.10,
         }
     }
 }

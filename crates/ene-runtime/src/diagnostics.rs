@@ -20,6 +20,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 pub struct MemoryQueryHandle {
     pub(crate) store: Option<Arc<ene_store::MemoryStore>>,
     pub(crate) embedder: Option<Arc<dyn ene_ai::EmbeddingProvider>>,
+    pub(crate) mind_memory: ene_mind::MindMemoryConfig,
 }
 
 impl std::fmt::Debug for MemoryQueryHandle {
@@ -34,8 +35,13 @@ impl MemoryQueryHandle {
     pub(crate) fn new(
         store: Option<Arc<ene_store::MemoryStore>>,
         embedder: Option<Arc<dyn ene_ai::EmbeddingProvider>>,
+        mind_memory: ene_mind::MindMemoryConfig,
     ) -> Self {
-        Self { store, embedder }
+        Self {
+            store,
+            embedder,
+            mind_memory,
+        }
     }
 
     /// Whether memory is enabled and both store and embedder are available.
@@ -66,58 +72,6 @@ impl MemoryQueryHandle {
         ene_ai::embed_query(embedder.as_ref(), text)
             .await
             .map_err(EneRuntimeError::from)
-    }
-
-    /// Search conversation summaries by embedding similarity.
-    pub async fn search_summaries(
-        &self,
-        query_embedding: &[f32],
-        card_name: &str,
-        limit: usize,
-        threshold: f32,
-    ) -> Result<Vec<ene_store::RecalledSummary>, EneRuntimeError> {
-        let store = self.store.as_ref().ok_or_else(|| {
-            EneRuntimeError::Memory(ene_store::MemoryError::MemoryStoreConnectionError(
-                "Memory store not available".into(),
-            ))
-        })?;
-        store
-            .search_summaries(query_embedding, card_name, limit, threshold)
-            .await
-            .map_err(EneRuntimeError::Memory)
-    }
-
-    /// List recent conversation summaries for a character card.
-    pub async fn list_recent_summaries(
-        &self,
-        card_name: &str,
-        limit: usize,
-    ) -> Result<Vec<ene_store::ConversationSummary>, EneRuntimeError> {
-        let store = self.store.as_ref().ok_or_else(|| {
-            EneRuntimeError::Memory(ene_store::MemoryError::MemoryStoreConnectionError(
-                "Memory store not available".into(),
-            ))
-        })?;
-        store
-            .list_recent_summaries(card_name, limit)
-            .await
-            .map_err(EneRuntimeError::Memory)
-    }
-
-    /// List all known key facts for a character card.
-    pub async fn get_all_keyfacts(
-        &self,
-        card_name: &str,
-    ) -> Result<Vec<ene_store::KeyFact>, EneRuntimeError> {
-        let store = self.store.as_ref().ok_or_else(|| {
-            EneRuntimeError::Memory(ene_store::MemoryError::MemoryStoreConnectionError(
-                "Memory store not available".into(),
-            ))
-        })?;
-        store
-            .get_all_keyfacts(card_name)
-            .await
-            .map_err(EneRuntimeError::Memory)
     }
 
     /// Count legacy memory rows for a character card.
@@ -221,7 +175,7 @@ impl MemoryQueryHandle {
             .map_err(EneRuntimeError::Memory)
     }
 
-    /// Search typed memories using hybrid scoring.
+    /// Search typed memories using hybrid scoring via [`ene_mind::MemoryJournal`].
     pub async fn search_typed_memories_hybrid(
         &self,
         character_id: &str,
@@ -235,31 +189,20 @@ impl MemoryQueryHandle {
                 "Embedding provider not available".into(),
             ))
         })?;
-        let query_embedding = ene_ai::embed_query(embedder.as_ref(), query_text).await?;
-        let options = ene_store::MemorySearchOptions {
-            query_text,
-            query_embedding: &query_embedding,
+        ene_mind::MemoryJournal::search(
+            store,
+            embedder.as_ref(),
+            &self.mind_memory,
             character_id,
             user_id,
-            model_name: embedder.model_name(),
+            query_text,
             limit,
-            similarity_threshold: 0.45,
-            candidate_pool_size: 64,
-            query_affect: None,
-            weights: ene_store::HybridSearchWeights::default(),
-            decay_half_life_days: 30.0,
-            now: chrono::Utc::now(),
-            min_score: 0.10,
-            commitment_boost: 0.25,
-            recent_fallback_limit: 6,
-        };
-        store
-            .search_typed_memories_hybrid(&options)
-            .await
-            .map_err(EneRuntimeError::Memory)
+        )
+        .await
+        .map_err(EneRuntimeError::from)
     }
 
-    /// Search typed memories and attach explainable recall reasons (#74).
+    /// Search typed memories and attach explainable recall reasons (#74 / #123).
     pub async fn search_typed_memories_explained(
         &self,
         character_id: &str,
@@ -267,10 +210,23 @@ impl MemoryQueryHandle {
         query_text: &str,
         limit: usize,
     ) -> Result<Vec<ene_mind::RecalledMemory>, EneRuntimeError> {
-        let scored = self
-            .search_typed_memories_hybrid(character_id, user_id, query_text, limit)
-            .await?;
-        Ok(ene_mind::explain_scored_memories(scored))
+        let store = self.require_store()?;
+        let embedder = self.embedder.as_ref().ok_or_else(|| {
+            EneRuntimeError::from(ene_ai::EmbeddingError::Init(
+                "Embedding provider not available".into(),
+            ))
+        })?;
+        ene_mind::MemoryJournal::search_explained(
+            store,
+            embedder.as_ref(),
+            &self.mind_memory,
+            character_id,
+            user_id,
+            query_text,
+            limit,
+        )
+        .await
+        .map_err(EneRuntimeError::from)
     }
 
     /// Update typed memory pinned flag.

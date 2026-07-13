@@ -113,28 +113,11 @@ async fn handle_split(ctx: &AppContext, snapshot: &ene_runtime::EneStateSnapshot
     }
 }
 
-async fn handle_summaries(snapshot: &ene_runtime::EneStateSnapshot) {
-    if !snapshot.memory.is_enabled() {
-        println!("{}", style::warning("[Session] Memory is not enabled."));
-        return;
-    }
-    let card_name = snapshot.card_name.as_str();
-    match snapshot.memory.list_recent_summaries(card_name, 10).await {
-        Ok(summaries) => {
-            if summaries.is_empty() {
-                println!("[Session] No saved conversation summaries found.");
-            } else {
-                println!("--- Past Conversation Summaries ({}) ---", summaries.len());
-                for s in &summaries {
-                    println!(
-                        "  {} | {}",
-                        s.ended_at.format("%Y-%m-%d %H:%M"),
-                        Truncate::simple(&s.summary, 80),
-                    );
-                }
-                println!("----------------------------------------");
-            }
-        }
-        Err(e) => println!("[Session] Error: {e}"),
-    }
+async fn handle_summaries(_snapshot: &ene_runtime::EneStateSnapshot) {
+    println!(
+        "{}",
+        style::warning(
+            "[Session] Legacy conversation summaries are retired (#125). Use typed memory via /memory list|search, or scene compression via /session split."
+        )
+    );
 }

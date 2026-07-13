@@ -95,11 +95,12 @@ pub async fn execute_hybrid_recall(
         input.query_embedding,
         input.embedding_model,
         Utc::now(),
+        &config.memory,
     );
 
     let scored = input
         .store
-        .search_typed_memories_hybrid(&search_options)
+        .search(&search_options)
         .await
         .map_err(CognitionError::Memory)?;
 
@@ -214,6 +215,7 @@ mod tests {
             supersedes_id: None,
             pinned: true,
             created_at: None,
+            commitment_id: None,
         };
         let id = store.insert_typed_memory(&item).await.unwrap();
         store

@@ -169,6 +169,7 @@ async fn scenario_recall_relevant_memory_not_irrelevant() {
         supersedes_id: None,
         pinned: false,
         created_at: None,
+        commitment_id: None,
     };
     let movie = NewMemoryItem {
         title: "favorite movie".into(),
@@ -299,6 +300,7 @@ async fn scenario_explicit_forget_respected_by_recall() {
         supersedes_id: None,
         pinned: false,
         created_at: None,
+        commitment_id: None,
     };
     let id = store.insert_typed_memory(&item).await.unwrap();
     store

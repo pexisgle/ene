@@ -214,7 +214,7 @@ The resulting summary and key facts are persisted by `ene-store`; the store itse
 
 ## Prompt Injection Format
 
-`format_summaries_for_prompt()` renders recalled summaries for the prompt:
+`ene-runtime::message_builder` renders recalled summaries for the prompt (store no longer owns prompt formatters — #122):
 
 ```
 [Past Conversation Summaries — relevant previous conversations]
@@ -239,7 +239,7 @@ Key store APIs:
 | `pin_typed_memory(id, pinned)` | Pin / unpin a memory (exempt from natural decay) |
 | `apply_natural_decay_batch(...)` | Batch `Active → Faded → Archived` from decay score |
 | `search_typed_memories(embedding, ...)` | Vector similarity search over active memories |
-| `search_typed_memories_hybrid(options)` | Hybrid recall with explainable score breakdown |
+| `search(options)` | Hybrid recall with explainable score breakdown |
 | `list_recallable_typed_memories(character_id, user_id, limit)` | List `active` / `faded` / `disputed` memories for recall |
 
 See [Cognitive Runtime ADR](../architecture/cognitive-runtime.md#memory-arbiter) for decision rules and thresholds.
@@ -264,13 +264,13 @@ Outputs:
 - `required_kinds`, always including `Semantic` / `Episodic`, and including `Commitment` whenever active commitments exist
 - `RecallScopeFilter` for character/user scoping
 - `RecallBudgetHints` from `mind.context`
-- `RecallSearchHints` compatible with `MemorySearchOptions` (`similarity_threshold`, `min_score`, recency half-life, optional query affect)
+- `RecallSearchHints` compatible with `Query` (`similarity_threshold`, `min_score`, recency half-life, optional query affect)
 
-`RecallPlanner::to_memory_search_options` is a helper that maps a plan plus a single query embedding into `MemorySearchOptions` for `MemoryStore::search_typed_memories_hybrid`. It uses only `plan.search.primary_query_text` (the first semantic query). `semantic_queries`, `episodic_queries`, `required_kinds`, and `use_hyde` remain plan hints for downstream recall execution, which is responsible for multi-query expansion, kind filtering, and HyDE embedding calls.
+`RecallPlanner::to_memory_search_options` is a helper that maps a plan plus a single query embedding into `Query` for `MemoryStore::search`. It uses only `plan.search.primary_query_text` (the first semantic query). `semantic_queries`, `episodic_queries`, `required_kinds`, and `use_hyde` remain plan hints for downstream recall execution, which is responsible for multi-query expansion, kind filtering, and HyDE embedding calls.
 
 ### Hybrid Memory Search (#73)
 
-Typed memory recall can combine multiple signals instead of vector similarity alone. Use `MemorySearchOptions` with `MemoryStore::search_typed_memories_hybrid` to obtain `ScoredMemory` results that include a `MemoryScoreBreakdown` and the recall sources (`vector`, `lexical`, `recent`, `commitment`).
+Typed memory recall can combine multiple signals instead of vector similarity alone. Use `Query` with `MemoryStore::search` to obtain `ScoredMemory` results that include a `MemoryScoreBreakdown` and the recall sources (`vector`, `lexical`, `recent`, `commitment`).
 
 Default scoring formula:
 
@@ -289,7 +289,7 @@ score =
 - stale_penalty
 ```
 
-`MemorySearchOptions` also supports:
+`Query` also supports:
 
 - `min_score` — drop results below this hybrid total
 - `commitment_boost` — configurable boost for commitment-sourced candidates
@@ -310,7 +310,7 @@ Behavior:
 
 ### Explainable Recall Reasons (#74)
 
-`MemoryStore::search_typed_memories_hybrid` returns raw [`ScoredMemory`](../../crates/ene-store/src/typed_memory.rs) values. Reason assignment lives in `ene-mind::recall`: downstream recall execution converts those results into `RecalledMemory` DTOs. Each result includes:
+`MemoryStore::search` returns raw [`ScoredMemory`](../../crates/ene-store/src/typed_memory.rs) values. Reason assignment lives in `ene-mind::recall`: downstream recall execution converts those results into `RecalledMemory` DTOs. Each result includes:
 
 - `item` — the typed memory row
 - `reason` — a single primary `RecallReason` for UX, debug, and prompt introspection
@@ -360,7 +360,7 @@ This keeps memory useful for recall while preventing large raw tool outputs from
 
 After hybrid search, downstream recall execution may optionally rerank the top candidates before mapping to `RecalledMemory`:
 
-1. `MemoryStore::search_typed_memories_hybrid` returns `ScoredMemory` rows ordered by hybrid `total`.
+1. `MemoryStore::search` returns `ScoredMemory` rows ordered by hybrid `total`.
 2. When `mind.memory.rerank_enabled` is `false` (default), order is unchanged.
 3. When enabled, `MemoryRerankPipeline` sends up to `rerank_candidate_limit` top candidates to an LLM reranker. The prompt includes only the recall question and each candidate's `content` — no title, source, kind, or user metadata. Candidates beyond the limit keep their original hybrid order and are appended after the reranked head.
 4. On timeout, provider error, or malformed structured output, the pipeline falls back to the hybrid search order.
@@ -376,7 +376,7 @@ After hybrid search, downstream recall execution may optionally rerank the top c
 
 After hybrid search and before optional LLM reranking, downstream recall execution applies deterministic MMR diversification via `MemoryDiversifyPipeline`:
 
-1. `MemoryStore::search_typed_memories_hybrid` returns `ScoredMemory` rows ordered by hybrid `total`.
+1. `MemoryStore::search` returns `ScoredMemory` rows ordered by hybrid `total`.
 2. **Cluster dedup** merges near-duplicate candidates (lexical Jaccard similarity on title + content ≥ `mmr_duplicate_cluster_threshold`), keeping the highest-scoring representative per cluster.
 3. **Greedy MMR** selects up to `RecallPlan.budget.result_limit` items using `λ * relevance - (1-λ) * max_similarity_to_selected`, where `relevance` is `score_breakdown.total` normalized to the pool maximum and pairwise similarity uses the same lexical metric. A small `mmr_source_diversity_bonus` is added when a candidate introduces a recall source type not yet present in the selected set.
 4. **Kind quotas** reserve minimum slots for semantic, episodic, user profile, and commitment memories (`mmr_min_slots_*`). Kinds listed in `RecallPlan.required_kinds` (including `preference`, `relationship`, `affective`, and `procedure`) receive at least one slot when budget allows. When the sum of minimums exceeds `result_limit`, slots are allocated by priority: commitment → user profile → preference → semantic → episodic → relationship → affective → procedure → reflection.
@@ -508,7 +508,7 @@ commitments (
 
 **Due dates:** Extractors populate `MemoryCandidate::commitment_due`, which is stored as `due_label` on the ledger row. Natural-language due-date parsing into `due_at` is not implemented yet (see Memory Arbiter notes in [Cognitive Runtime ADR](../architecture/cognitive-runtime.md#companion-commitment-ledger)), so `mark_stale_commitments` only affects rows with an explicit `due_at`.
 
-**Runtime wiring:** `CommitmentLedger::arbitrate_apply_and_sync` runs the Memory Arbiter and syncs commitment rows in one call. `active_prompt_candidates` produces lightweight DTOs for the Active Commitments `PromptPacket` section (#87). `MemoryWriter::write_memories` calls sync after each turn when `mind.memory.write_every_turn` is enabled. CLI list/complete commands are available via `/commitments` (#94).
+**Runtime wiring:** `CommitmentLedger::arbitrate_apply_and_sync` writes commitment candidates **ledger-first** (sole SoT, #124) and arbitrates other kinds via the Memory Arbiter — there is no typed→ledger dual-write / `sync_from_applied_decisions`. Optional typed rows may reference `typed_memories.commitment_id`. `active_prompt_candidates` produces lightweight DTOs for the Active Commitments `PromptPacket` section (#87). CLI list/complete commands are available via `/commitments` (#94).
 
 ## Memory Journal (Desktop UX)
 

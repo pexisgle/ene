@@ -1,7 +1,7 @@
 //! Optional memory reranking after hybrid search and MMR diversification.
 //!
 //! Downstream recall execution can call [`MemoryRerankPipeline::rerank`] after
-//! `MemoryStore::search_typed_memories_hybrid`, [`MemoryDiversifyPipeline::diversify`],
+//! `MemoryStore::search`, [`MemoryDiversifyPipeline::diversify`],
 //! and before [`RecallResultMapper::map`].
 //!
 //! LLM relevance scores affect **candidate order only**. Each [`ScoredMemory`]'s
@@ -439,6 +439,7 @@ mod tests {
                 supersedes_id: None,
                 pinned: false,
                 faded_at: None,
+                commitment_id: None,
             },
             breakdown: MemoryScoreBreakdown {
                 vector_similarity: total,

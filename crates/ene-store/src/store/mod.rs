@@ -248,6 +248,7 @@ fn model_to_memory_item(
         supersedes_id: m.supersedes_id,
         pinned: m.pinned != 0,
         faded_at: m.faded_at,
+        commitment_id: m.commitment_id,
     })
 }
 
@@ -419,6 +420,7 @@ async fn insert_typed_memory_on<C: ConnectionTrait>(
         status: Set(item.status.as_str().to_string()),
         supersedes_id: Set(item.supersedes_id),
         pinned: Set(i32::from(item.pinned)),
+        commitment_id: Set(item.commitment_id),
         ..Default::default()
     };
     let res = active.insert(conn).await?;
@@ -1486,6 +1488,7 @@ impl MemoryStore {
             status: Set(item.status.as_str().to_string()),
             supersedes_id: Set(item.supersedes_id),
             pinned: Set(i32::from(item.pinned)),
+            commitment_id: Set(item.commitment_id),
             ..Default::default()
         };
         let res = active.insert(&self.db).await?;
@@ -1654,10 +1657,210 @@ impl MemoryStore {
         Ok(archived)
     }
 
-    /// Search typed memories by cosine similarity via content embeddings.
+    /// Search typed memories with explainable hybrid scoring (#123).
     ///
-    /// Legacy vector-only search over `active` memories.
-    pub async fn search_typed_memories(
+    /// Sole public typed-memory search entry. Gathers candidates from optional
+    /// vector similarity (when `query.embedding` is `Some`), lexical token
+    /// matches, a limited recent fallback, and active commitments; scores and
+    /// de-duplicates by memory id; returns the top `query.limit` results.
+    /// Callers must pre-compute embeddings — the store never embeds.
+    pub async fn search(
+        &self,
+        query: &crate::Query<'_>,
+    ) -> Result<Vec<crate::ScoredMemory>, MemoryError> {
+        use crate::search::{lexical_overlap_score, score_candidate};
+        use crate::typed_memory::MemoryCandidateSource;
+        use std::collections::HashMap;
+
+        if let Some(embedding) = query.embedding {
+            validate_embedding(embedding, self.embedding_dim)?;
+        }
+
+        let pool = query.candidate_pool_size.max(query.limit);
+        let recallable_statuses = [
+            crate::MemoryStatus::Active.as_str(),
+            crate::MemoryStatus::Faded.as_str(),
+            crate::MemoryStatus::Disputed.as_str(),
+        ];
+        let mut gathered: HashMap<i64, crate::search::GatheredCandidate> = HashMap::new();
+
+        // Vector candidates across recallable statuses (skipped when no embedding).
+        if let Some(embedding) = query.embedding {
+            let vector_hits = self
+                .search_typed_memories_vector(
+                    embedding,
+                    query.character_id,
+                    query.model_name,
+                    query.user_id,
+                    &recallable_statuses,
+                    pool,
+                    query.similarity_threshold,
+                )
+                .await?;
+            for (item, similarity) in vector_hits {
+                merge_hybrid_candidate(
+                    &mut gathered,
+                    query.user_id,
+                    item,
+                    similarity,
+                    MemoryCandidateSource::Vector,
+                );
+            }
+        }
+
+        // Lexical candidates from token-based DB lookup.
+        let lexical_candidates = self
+            .list_lexical_typed_memory_candidates(
+                query.query_text,
+                query.character_id,
+                query.user_id,
+                pool,
+            )
+            .await?;
+        for item in lexical_candidates {
+            let lexical = lexical_overlap_score(query.query_text, &item.title, &item.content);
+            if lexical > 0.0 {
+                merge_hybrid_candidate(
+                    &mut gathered,
+                    query.user_id,
+                    item,
+                    0.0,
+                    MemoryCandidateSource::Lexical,
+                );
+            }
+        }
+
+        // Active commitment ledger rows are the SoT for Commitment boost (#124).
+        // Prefer typed rows linked via commitment_id; otherwise synthesize from ledger.
+        let commitments = self
+            .list_active_commitments(query.character_id, query.user_id, pool)
+            .await?;
+        let commitment_ids: Vec<i64> = commitments.iter().filter_map(|c| c.id).collect();
+        let linked = self
+            .get_typed_memories_by_commitment_ids(&commitment_ids)
+            .await?;
+        let mut linked_commitment_ids = std::collections::HashSet::new();
+        for item in linked {
+            if let Some(cid) = item.commitment_id {
+                linked_commitment_ids.insert(cid);
+            }
+            merge_hybrid_candidate(
+                &mut gathered,
+                query.user_id,
+                item,
+                0.0,
+                MemoryCandidateSource::Commitment,
+            );
+        }
+        for commitment in &commitments {
+            let Some(cid) = commitment.id else {
+                continue;
+            };
+            if linked_commitment_ids.contains(&cid) {
+                continue;
+            }
+            // Ephemeral MemoryItem keyed by negated commitment id to avoid
+            // colliding with typed_memories primary keys in the gather map.
+            let item = crate::MemoryItem {
+                id: Some(-cid),
+                scope: crate::MemoryScope::Character,
+                character_id: commitment.character_id.clone(),
+                user_id: commitment.user_id.clone(),
+                kind: crate::MemoryKind::Commitment,
+                title: commitment.title.clone(),
+                content: commitment.description.clone(),
+                source: crate::MemorySource::Conversation,
+                source_ref: Some(format!("commitment:{cid}")),
+                confidence: crate::MemoryConfidence::new(0.9),
+                salience: crate::MemorySalience::new(0.8),
+                affect: crate::AffectAnnotation::default(),
+                relationship_impact: 0.0,
+                access_count: 0,
+                last_accessed_at: None,
+                created_at: commitment.created_at,
+                updated_at: commitment.updated_at,
+                valid_from: None,
+                valid_until: commitment.due_at,
+                status: crate::MemoryStatus::Active,
+                supersedes_id: None,
+                pinned: false,
+                faded_at: None,
+                commitment_id: Some(cid),
+            };
+            merge_hybrid_candidate(
+                &mut gathered,
+                query.user_id,
+                item,
+                0.0,
+                MemoryCandidateSource::Commitment,
+            );
+        }
+
+        // Limited recent fallback for memories not already gathered.
+        if query.recent_fallback_limit > 0 {
+            let recent_candidates = self
+                .list_recallable_typed_memories(
+                    query.character_id,
+                    query.user_id,
+                    query.recent_fallback_limit.saturating_mul(2).max(pool),
+                )
+                .await?;
+            let mut recent_added = 0usize;
+            for item in recent_candidates {
+                if recent_added >= query.recent_fallback_limit {
+                    break;
+                }
+                let Some(id) = item.id else {
+                    continue;
+                };
+                if gathered.contains_key(&id) {
+                    continue;
+                }
+                merge_hybrid_candidate(
+                    &mut gathered,
+                    query.user_id,
+                    item,
+                    0.0,
+                    MemoryCandidateSource::Recent,
+                );
+                recent_added += 1;
+            }
+        }
+
+        let mut scored: Vec<crate::ScoredMemory> = gathered
+            .into_values()
+            .map(|candidate| {
+                let breakdown = score_candidate(query, &candidate);
+                crate::ScoredMemory {
+                    item: candidate.item,
+                    breakdown,
+                    sources: candidate.sources,
+                }
+            })
+            .filter(|scored| scored.breakdown.total >= query.min_score)
+            .collect();
+
+        scored.sort_by(|a, b| {
+            b.breakdown
+                .total
+                .total_cmp(&a.breakdown.total)
+                .then_with(|| {
+                    b.breakdown
+                        .vector_similarity
+                        .total_cmp(&a.breakdown.vector_similarity)
+                })
+                .then_with(|| b.item.updated_at.cmp(&a.item.updated_at))
+        });
+
+        if scored.len() > query.limit {
+            scored.truncate(query.limit);
+        }
+        Ok(scored)
+    }
+
+    /// Legacy vector-only search over `active` memories (tests / internal).
+    #[cfg(test)]
+    pub(crate) async fn search_typed_memories(
         &self,
         query_embedding: &[f32],
         character_id: &str,
@@ -1714,6 +1917,7 @@ impl MemoryStore {
             supersedes_id: Option<i64>,
             pinned: i32,
             faded_at: Option<DateTime<Utc>>,
+            commitment_id: Option<i64>,
             similarity: f64,
         }
 
@@ -1752,6 +1956,7 @@ impl MemoryStore {
             .column(entities::typed_memories::Column::SupersedesId)
             .column(entities::typed_memories::Column::Pinned)
             .column(entities::typed_memories::Column::FadedAt)
+            .column(entities::typed_memories::Column::CommitmentId)
             .expr_as(similarity_expr, "similarity")
             .filter(entities::typed_memories::Column::CharacterId.eq(character_id))
             .filter(entities::typed_memories::Column::Status.is_in(statuses.to_vec()))
@@ -1806,179 +2011,12 @@ impl MemoryStore {
                         supersedes_id: row.supersedes_id,
                         pinned: row.pinned != 0,
                         faded_at: row.faded_at,
+                        commitment_id: row.commitment_id,
                     },
                     row.similarity as f32,
                 ))
             })
             .collect()
-    }
-
-    /// Hybrid search over typed memories with explainable score breakdown.
-    ///
-    /// Gathers candidates from recallable vector similarity, lexical token
-    /// matches, a limited recent fallback, and active commitments; scores and
-    /// de-duplicates by memory id; returns the top `options.limit` results.
-    pub async fn search_typed_memories_hybrid(
-        &self,
-        options: &crate::MemorySearchOptions<'_>,
-    ) -> Result<Vec<crate::ScoredMemory>, MemoryError> {
-        use crate::search::{lexical_overlap_score, score_candidate};
-        use crate::typed_memory::MemoryCandidateSource;
-        use std::collections::HashMap;
-
-        validate_embedding(options.query_embedding, self.embedding_dim)?;
-
-        let pool = options.candidate_pool_size.max(options.limit);
-        let recallable_statuses = [
-            crate::MemoryStatus::Active.as_str(),
-            crate::MemoryStatus::Faded.as_str(),
-            crate::MemoryStatus::Disputed.as_str(),
-        ];
-        let mut gathered: HashMap<i64, crate::search::GatheredCandidate> = HashMap::new();
-
-        // Vector candidates across recallable statuses.
-        let vector_hits = self
-            .search_typed_memories_vector(
-                options.query_embedding,
-                options.character_id,
-                options.model_name,
-                options.user_id,
-                &recallable_statuses,
-                pool,
-                options.similarity_threshold,
-            )
-            .await?;
-        for (item, similarity) in vector_hits {
-            merge_hybrid_candidate(
-                &mut gathered,
-                options.user_id,
-                item,
-                similarity,
-                MemoryCandidateSource::Vector,
-            );
-        }
-
-        // Lexical candidates from token-based DB lookup.
-        let lexical_candidates = self
-            .list_lexical_typed_memory_candidates(
-                options.query_text,
-                options.character_id,
-                options.user_id,
-                pool,
-            )
-            .await?;
-        for item in lexical_candidates {
-            let lexical = lexical_overlap_score(options.query_text, &item.title, &item.content);
-            if lexical > 0.0 {
-                merge_hybrid_candidate(
-                    &mut gathered,
-                    options.user_id,
-                    item,
-                    0.0,
-                    MemoryCandidateSource::Lexical,
-                );
-            }
-        }
-
-        // Active commitment memories (ledger-linked + commitment kind).
-        let commitments = self
-            .list_active_commitments(options.character_id, options.user_id, pool)
-            .await?;
-        let commitment_memory_ids: Vec<i64> = commitments
-            .iter()
-            .filter_map(|commitment| commitment.source_memory_id)
-            .collect();
-        let commitment_memories = self
-            .get_typed_memories_by_ids(&commitment_memory_ids)
-            .await?;
-        for item in commitment_memories {
-            merge_hybrid_candidate(
-                &mut gathered,
-                options.user_id,
-                item,
-                0.0,
-                MemoryCandidateSource::Commitment,
-            );
-        }
-
-        let commitment_kind = self
-            .get_typed_memories_by_character(
-                options.character_id,
-                Some(crate::MemoryKind::Commitment),
-                pool,
-                0,
-            )
-            .await?;
-        for item in commitment_kind {
-            if item.status == crate::MemoryStatus::Active {
-                merge_hybrid_candidate(
-                    &mut gathered,
-                    options.user_id,
-                    item,
-                    0.0,
-                    MemoryCandidateSource::Commitment,
-                );
-            }
-        }
-
-        // Limited recent fallback for memories not already gathered.
-        if options.recent_fallback_limit > 0 {
-            let recent_candidates = self
-                .list_recallable_typed_memories(
-                    options.character_id,
-                    options.user_id,
-                    options.recent_fallback_limit.saturating_mul(2).max(pool),
-                )
-                .await?;
-            let mut recent_added = 0usize;
-            for item in recent_candidates {
-                if recent_added >= options.recent_fallback_limit {
-                    break;
-                }
-                let Some(id) = item.id else {
-                    continue;
-                };
-                if gathered.contains_key(&id) {
-                    continue;
-                }
-                merge_hybrid_candidate(
-                    &mut gathered,
-                    options.user_id,
-                    item,
-                    0.0,
-                    MemoryCandidateSource::Recent,
-                );
-                recent_added += 1;
-            }
-        }
-
-        let mut scored: Vec<crate::ScoredMemory> = gathered
-            .into_values()
-            .map(|candidate| {
-                let breakdown = score_candidate(options, &candidate);
-                crate::ScoredMemory {
-                    item: candidate.item,
-                    breakdown,
-                    sources: candidate.sources,
-                }
-            })
-            .filter(|scored| scored.breakdown.total >= options.min_score)
-            .collect();
-
-        scored.sort_by(|a, b| {
-            b.breakdown
-                .total
-                .total_cmp(&a.breakdown.total)
-                .then_with(|| {
-                    b.breakdown
-                        .vector_similarity
-                        .total_cmp(&a.breakdown.vector_similarity)
-                })
-                .then_with(|| b.item.updated_at.cmp(&a.item.updated_at))
-        });
-
-        scored.truncate(options.limit);
-        Ok(scored)
     }
 
     /// List typed memories eligible for hybrid recall (`active`, `faded`, `disputed`).
@@ -2021,19 +2059,19 @@ impl MemoryStore {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    /// Fetch typed memories by primary key.
-    async fn get_typed_memories_by_ids(
+    /// Fetch typed memories linked to commitment ledger rows (#124).
+    async fn get_typed_memories_by_commitment_ids(
         &self,
-        ids: &[i64],
+        commitment_ids: &[i64],
     ) -> Result<Vec<crate::MemoryItem>, MemoryError> {
         use sea_orm::{EntityTrait, QueryFilter};
 
-        if ids.is_empty() {
+        if commitment_ids.is_empty() {
             return Ok(Vec::new());
         }
 
         let models = entities::typed_memories::Entity::find()
-            .filter(entities::typed_memories::Column::Id.is_in(ids.to_vec()))
+            .filter(entities::typed_memories::Column::CommitmentId.is_in(commitment_ids.to_vec()))
             .all(&self.db)
             .await?;
 
@@ -3573,6 +3611,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             created_at: None,
+            commitment_id: None,
         };
 
         let id = store.insert_typed_memory(&item).await.unwrap();
@@ -3641,6 +3680,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             created_at: None,
+            commitment_id: None,
         };
 
         let id = store.insert_typed_memory(&item).await.unwrap();
@@ -3682,6 +3722,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             created_at: None,
+            commitment_id: None,
         };
         let old_id = store.insert_typed_memory(&old_item).await.unwrap();
 
@@ -3727,6 +3768,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             created_at: None,
+            commitment_id: None,
         };
         let old_id = store.insert_typed_memory(&item).await.unwrap();
         store
@@ -3772,6 +3814,7 @@ mod tests {
                 supersedes_id: None,
                 pinned: false,
                 created_at: None,
+                commitment_id: None,
             })
             .await
             .unwrap();
@@ -3952,10 +3995,10 @@ mod tests {
         query_text: &'a str,
         query_embedding: &'a [f32],
         now: DateTime<Utc>,
-    ) -> crate::MemorySearchOptions<'a> {
-        crate::MemorySearchOptions {
+    ) -> crate::Query<'a> {
+        crate::Query {
             query_text,
-            query_embedding,
+            embedding: Some(query_embedding),
             character_id: "ene",
             user_id: None,
             model_name: "test-model",
@@ -4010,6 +4053,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             created_at: None,
+            commitment_id: None,
         };
         let high_salience = crate::NewMemoryItem {
             salience: crate::MemorySalience::new(0.95),
@@ -4023,7 +4067,7 @@ mod tests {
         insert_memory_with_embedding(&store, &high_salience, &query_emb).await;
 
         let options = hybrid_search_options("music preference", &query_emb, now);
-        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        let results = store.search(&options).await.unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].item.title, "important fact");
         assert!(results[0].breakdown.total >= results[1].breakdown.total);
@@ -4054,11 +4098,12 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             created_at: None,
+            commitment_id: None,
         };
         insert_memory_with_embedding(&store, &item, &orthogonal).await;
 
         let options = hybrid_search_options("matcha latte", &orthogonal, now);
-        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        let results = store.search(&options).await.unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].breakdown.lexical_score > 0.0);
         assert!(
@@ -4073,36 +4118,8 @@ mod tests {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let now = Utc::now();
         let query_emb = vec![1.0, 0.0, 0.0, 0.0];
-        let orthogonal = vec![0.0, 1.0, 0.0, 0.0];
 
-        let memory_id = store
-            .insert_typed_memory(&crate::NewMemoryItem {
-                scope: crate::MemoryScope::Character,
-                character_id: "ene".into(),
-                user_id: "user1".into(),
-                kind: crate::MemoryKind::Commitment,
-                title: "follow up".into(),
-                content: "Review the architecture document".into(),
-                source: crate::MemorySource::Inferred,
-                source_ref: None,
-                confidence: crate::MemoryConfidence::new(0.8),
-                salience: crate::MemorySalience::new(0.5),
-                affect: crate::AffectAnnotation::default(),
-                relationship_impact: 0.0,
-                valid_from: None,
-                valid_until: None,
-                status: crate::MemoryStatus::Active,
-                supersedes_id: None,
-                pinned: false,
-                created_at: None,
-            })
-            .await
-            .unwrap();
-        store
-            .upsert_memory_embedding(memory_id, "test-model", "content", &orthogonal)
-            .await
-            .unwrap();
-        store
+        let commitment_id = store
             .insert_commitment(&crate::NewCommitment {
                 character_id: "ene".into(),
                 user_id: "user1".into(),
@@ -4111,18 +4128,21 @@ mod tests {
                 status: crate::CommitmentStatus::Active,
                 due_at: None,
                 due_label: Some("next time".into()),
-                source_memory_id: Some(memory_id),
+                source_memory_id: None,
             })
             .await
             .unwrap();
 
         let options = hybrid_search_options("unrelated query", &query_emb, now);
-        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        let results = store.search(&options).await.unwrap();
         assert!(
-            results
-                .iter()
-                .any(|r| r.item.id == Some(memory_id) && r.breakdown.commitment_boost > 0.0),
-            "active commitment should be recalled despite low vector similarity"
+            results.iter().any(|r| {
+                r.item.commitment_id == Some(commitment_id)
+                    && r.breakdown.commitment_boost > 0.0
+                    && r.sources
+                        .contains(&crate::MemoryCandidateSource::Commitment)
+            }),
+            "active ledger commitment should be recalled despite low vector similarity"
         );
     }
 
@@ -4151,6 +4171,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             created_at: None,
+            commitment_id: None,
         };
 
         for status in [
@@ -4165,7 +4186,7 @@ mod tests {
         }
 
         let options = hybrid_search_options("shared content", &emb, now);
-        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        let results = store.search(&options).await.unwrap();
         assert!(results.is_empty());
     }
 
@@ -4194,11 +4215,12 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             created_at: None,
+            commitment_id: None,
         };
         insert_memory_with_embedding(&store, &item, &emb).await;
 
         let options = hybrid_search_options("faded memory", &emb, now);
-        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        let results = store.search(&options).await.unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].breakdown.vector_similarity > 0.0);
         assert!(results[0].breakdown.stale_penalty > 0.0);
@@ -4230,6 +4252,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             created_at: None,
+            commitment_id: None,
         };
         let old_id = store.insert_typed_memory(&old_item).await.unwrap();
         store
@@ -4257,6 +4280,7 @@ mod tests {
                 supersedes_id: None,
                 pinned: false,
                 created_at: None,
+                commitment_id: None,
             };
             insert_memory_with_embedding(&store, &filler, &orthogonal).await;
         }
@@ -4264,7 +4288,7 @@ mod tests {
         let mut options = hybrid_search_options("ancient dragon recipe", &query_emb, now);
         options.recent_fallback_limit = 0;
         options.similarity_threshold = 0.8;
-        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        let results = store.search(&options).await.unwrap();
         assert!(
             results
                 .iter()
@@ -4299,13 +4323,14 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             created_at: None,
+            commitment_id: None,
         };
         insert_memory_with_embedding(&store, &unrelated, &orthogonal).await;
 
         let mut options = hybrid_search_options("completely different topic", &query_emb, now);
         options.recent_fallback_limit = 0;
         options.similarity_threshold = 0.8;
-        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        let results = store.search(&options).await.unwrap();
         assert!(results.is_empty());
     }
 
@@ -4334,6 +4359,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             created_at: None,
+            commitment_id: None,
         };
         let low_confidence = base.clone();
         let high_confidence = crate::NewMemoryItem {
@@ -4346,7 +4372,7 @@ mod tests {
         insert_memory_with_embedding(&store, &high_confidence, &query_emb).await;
 
         let options = hybrid_search_options("shared topic", &query_emb, now);
-        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        let results = store.search(&options).await.unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].item.title, "shared topic high");
         assert!(results[0].breakdown.confidence > results[1].breakdown.confidence);
@@ -4377,6 +4403,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             created_at: None,
+            commitment_id: None,
         };
 
         let mut user1_item = base.clone();
@@ -4389,7 +4416,7 @@ mod tests {
 
         let mut options = hybrid_search_options("scoped memory", &query_emb, now);
         options.user_id = Some("user1");
-        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        let results = store.search(&options).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].item.user_id, "user1");
     }
@@ -4419,11 +4446,12 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             created_at: None,
+            commitment_id: None,
         };
         insert_memory_with_embedding(&store, &item, &emb).await;
 
         let options = hybrid_search_options("pizza tradition", &emb, now);
-        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        let results = store.search(&options).await.unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].sources.len() >= 2);
     }
@@ -4451,6 +4479,7 @@ mod tests {
                 supersedes_id: None,
                 pinned: false,
                 created_at: None,
+                commitment_id: None,
             })
             .await
             .unwrap();
@@ -4493,6 +4522,7 @@ mod tests {
                 supersedes_id: None,
                 pinned: false,
                 created_at: None,
+                commitment_id: None,
             })
             .await
             .unwrap();
@@ -4521,6 +4551,7 @@ mod tests {
                 supersedes_id: None,
                 pinned: false,
                 created_at: None,
+                commitment_id: None,
             })
             .await
             .unwrap();
@@ -4566,6 +4597,7 @@ mod tests {
                 supersedes_id: None,
                 pinned: true,
                 created_at: None,
+                commitment_id: None,
             })
             .await
             .unwrap();
@@ -4605,6 +4637,7 @@ mod tests {
                 supersedes_id: None,
                 pinned: false,
                 created_at: None,
+                commitment_id: None,
             })
             .await
             .unwrap();
@@ -4648,6 +4681,7 @@ mod tests {
                 supersedes_id: None,
                 pinned: false,
                 created_at: None,
+                commitment_id: None,
             })
             .await
             .unwrap();
@@ -4699,11 +4733,12 @@ mod tests {
             supersedes_id: None,
             pinned: true,
             created_at: None,
+            commitment_id: None,
         };
         insert_memory_with_embedding(&store, &item, &emb).await;
 
         let options = hybrid_search_options("pinned vector", &emb, now);
-        let results = store.search_typed_memories_hybrid(&options).await.unwrap();
+        let results = store.search(&options).await.unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].item.pinned);
     }

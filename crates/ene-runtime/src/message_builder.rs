@@ -1,6 +1,5 @@
 use ene_ai::{LlmMessage, Role, UserMessagePart};
 use ene_config::{CharacterCardV3, PromptLibrary, expand_cbs_macros, resolve_expressions};
-use ene_store::{KeyFact, RecalledSummary};
 
 /// Input parameters for [`build_messages`].
 #[derive(Debug, Clone)]
@@ -17,10 +16,6 @@ pub struct MessageBuildContext<'a> {
     pub runtime_rules: &'a str,
     /// Display name of the user.
     pub user_name: &'a str,
-    /// Recalled memory summaries.
-    pub recalled_summaries: &'a [RecalledSummary],
-    /// Key facts about the user.
-    pub key_facts: &'a [KeyFact],
     /// Prompt template library (caller provides; defaults to built-in English).
     pub prompts: &'a PromptLibrary,
 }
@@ -248,50 +243,28 @@ pub fn build_cognitive_output_contract(
 /// Message order:
 /// 1. `System` — mascot-aware system prompt (rules + character identity + scene)
 /// 2. `System` — example messages (first turn only)
-/// 3. `System` — past conversation summaries (memory recall)
-/// 4. `System` — known key facts about the user
-/// 5. History — alternating `User` / `Assistant` turns
-/// 6. `System` — Expression PHI (emotion token protocol + post-history instructions)
-/// 7. `User`   — current user input (+ optional runtime context)
+/// 3. History — alternating `User` / `Assistant` turns
+/// 4. `System` — Expression PHI (emotion token protocol + post-history instructions)
+/// 5. `User`   — current user input (+ optional runtime context)
+///
+/// Legacy recalled summaries / keyfacts are no longer injected (#125).
 pub fn build_messages(
     ctx: &MessageBuildContext<'_>,
 ) -> Result<Vec<LlmMessage>, crate::error::EneRuntimeError> {
     let mut messages: Vec<LlmMessage> = Vec::new();
     let char_name = ctx.card.data.get_character_name();
 
-    // 1. System prompt — mascot context + character identity.
     let sys_prompt = build_system_prompt(ctx.card, ctx.runtime_rules, ctx.user_name, ctx.prompts);
     if !sys_prompt.trim().is_empty() {
         messages.push(sys_msg(sys_prompt));
     }
 
-    // 2. Example messages — only on the first turn to seed the style.
     if ctx.history.is_empty() && !ctx.card.data.mes_example.trim().is_empty() {
         let ex = expand_cbs_macros(&ctx.card.data.mes_example, char_name, ctx.user_name);
         let header = &ctx.prompts.system().examples_header;
         messages.push(sys_msg(format!("{header}\n{ex}")));
     }
 
-    // 3. Past conversation summaries from episodic memory.
-    if !ctx.recalled_summaries.is_empty() {
-        let summary_block = format_summaries(ctx.recalled_summaries, ctx.prompts);
-        if !summary_block.trim().is_empty() {
-            messages.push(sys_msg(summary_block));
-        }
-    }
-
-    // 4. Known key facts about the user.
-    if !ctx.key_facts.is_empty() {
-        let header = ctx.prompts.memory().render_facts_header(ctx.user_name);
-        let lines: Vec<String> = ctx
-            .key_facts
-            .iter()
-            .map(|f| format!("- {}: {}", f.key, f.value))
-            .collect();
-        messages.push(sys_msg(format!("{header}\n{}", lines.join("\n"))));
-    }
-
-    // 5. Conversation history.
     for entry in ctx.history {
         match entry.role {
             Role::User => messages.push(user_msg(entry.content.clone())),
@@ -300,14 +273,11 @@ pub fn build_messages(
         }
     }
 
-    // 6. Expression PHI — placed last among system blocks so it is the
-    //    most-recently-seen instruction before the user turn.
     if let Some(phi) = build_expression_phi(ctx.card, ctx.prompts) {
         let phi_expanded = expand_cbs_macros(&phi, char_name, ctx.user_name);
         messages.push(sys_msg(phi_expanded));
     }
 
-    // 7. Current user input (+ optional runtime context).
     let mut final_input = ctx.user_input.to_string();
     if let Some(rc) = ctx.runtime_context
         && !rc.trim().is_empty()
@@ -318,62 +288,6 @@ pub fn build_messages(
     messages.push(user_msg(final_input));
 
     Ok(messages)
-}
-
-/// Formats recalled past-conversation summaries for prompt injection.
-///
-/// Extracted here (rather than calling `ene_store::format_summaries_for_prompt`)
-/// so the template key paths come from the `PromptLibrary`.
-fn format_summaries(summaries: &[RecalledSummary], prompts: &PromptLibrary) -> String {
-    if summaries.is_empty() {
-        return String::new();
-    }
-
-    let now = chrono::Utc::now();
-    let header = &prompts.memory().summaries_header;
-    let item_tpl = &prompts.memory().summary_item;
-
-    let mut lines = vec![header.to_string()];
-    for s in summaries {
-        let age = format_age(now - s.entry.ended_at);
-        let text = ene_config::truncate::Truncate::simple(&s.entry.summary, 300);
-        let line = if item_tpl.is_empty() {
-            format!("[{age}] {text}")
-        } else {
-            prompts.memory().render_summary_item(&age, &text)
-        };
-        lines.push(line);
-    }
-
-    lines.join("\n")
-}
-
-fn format_age(dur: chrono::Duration) -> String {
-    let total_seconds = dur.num_seconds().max(0);
-    if total_seconds < 60 {
-        "just now".to_string()
-    } else if total_seconds < 3600 {
-        let mins = total_seconds / 60;
-        if mins == 1 {
-            "1 min ago".to_string()
-        } else {
-            format!("{mins} min ago")
-        }
-    } else if total_seconds < 86400 {
-        let hours = total_seconds / 3600;
-        if hours == 1 {
-            "1 hour ago".to_string()
-        } else {
-            format!("{hours} hours ago")
-        }
-    } else {
-        let days = total_seconds / 86400;
-        if days == 1 {
-            "1 day ago".to_string()
-        } else {
-            format!("{days} days ago")
-        }
-    }
 }
 
 #[cfg(test)]
@@ -458,13 +372,5 @@ mod tests {
             phi.contains("RULE:"),
             "phi should contain RULE directive: {phi}"
         );
-    }
-
-    #[test]
-    fn format_summaries_uses_template() {
-        let lib = PromptLibrary::built_in_english();
-        // Verify header is present when summaries would be non-empty
-        let header = &lib.memory().summaries_header;
-        assert!(!header.is_empty(), "summaries header should be non-empty");
     }
 }

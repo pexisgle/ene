@@ -45,6 +45,8 @@ pub mod commitments;
 pub mod context;
 /// Emotion Engine: deterministic + optional LLM affect computation.
 pub mod emotion;
+/// Diagnostics/CLI memory journal search facade (#123).
+pub mod memory_journal;
 /// Deterministic/LLM memory extraction and Memory Arbiter.
 pub mod memory_writer;
 /// Output arbitration: expression validation and hysteresis management.
@@ -100,6 +102,9 @@ pub use error::{CognitionError, EneCognitionError, MindError};
 pub use lifecycle::{
     ComposedPrompt, HistoryEntry, PostTurnInput, PreTurnOutput, PromptPacketMeta, TurnContext,
 };
+/// Journal-style scored memory search (#123).
+#[doc(no_inline)]
+pub use memory_journal::MemoryJournal;
 /// Memory arbiter and related decision types.
 #[doc(no_inline)]
 pub use memory_writer::{

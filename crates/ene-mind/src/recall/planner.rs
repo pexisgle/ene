@@ -1,8 +1,5 @@
 use chrono::{DateTime, Utc};
-use ene_store::{
-    ActiveCommitmentPrompt, AffectAnnotation, AffectState, HybridSearchWeights,
-    MemorySearchOptions, ScoredMemory,
-};
+use ene_store::{ActiveCommitmentPrompt, AffectAnnotation, AffectState, Query, ScoredMemory};
 
 use super::input::RecallPlannerInput;
 use super::intent::{RecallIntent, contains_any, infer_intents, kinds_for_intents};
@@ -12,8 +9,6 @@ use super::topic::{current_topic, normalize_text, recent_user_turn};
 use crate::config::{ContextConfig, MindMemoryConfig};
 use crate::error::CognitionError;
 
-const DEFAULT_RECENT_FALLBACK_LIMIT: usize = 5;
-const DEFAULT_COMMITMENT_BOOST: f32 = 0.25;
 const DEFAULT_CANDIDATE_POOL_MULTIPLIER: usize = 4;
 
 /// Recall Planner: deterministic recall-plan generation from turn context.
@@ -111,24 +106,24 @@ impl RecallPlanner {
         })
     }
 
-    /// Convert a recall plan into hybrid memory-search options for one primary query.
+    /// Convert a recall plan into a store [`Query`] for one primary query.
     ///
-    /// This helper maps [`RecallSearchHints`] and scope fields onto
-    /// [`MemorySearchOptions`]. It uses only `plan.search.primary_query_text`
-    /// (the first semantic query). Multi-query expansion, `required_kinds`
-    /// filtering, and HyDE embedding calls are the responsibility of downstream
-    /// recall execution.
+    /// Maps [`RecallSearchHints`] and scope fields onto [`Query`], filling
+    /// hybrid weights / commitment boost from [`MindMemoryConfig`] (#123).
+    /// Multi-query expansion, `required_kinds` filtering, and HyDE embedding
+    /// calls remain the responsibility of downstream recall execution.
     #[must_use]
-    pub fn to_memory_search_options<'a>(
+    pub fn to_query<'a>(
         plan: &'a RecallPlan,
-        query_embedding: &'a [f32],
+        embedding: Option<&'a [f32]>,
         model_name: &'a str,
         now: DateTime<Utc>,
-    ) -> MemorySearchOptions<'a> {
+        memory: &MindMemoryConfig,
+    ) -> Query<'a> {
         let limit = plan.budget.result_limit.max(1);
-        MemorySearchOptions {
+        Query {
             query_text: &plan.search.primary_query_text,
-            query_embedding,
+            embedding,
             character_id: &plan.scope.character_id,
             user_id: plan.scope.user_id.as_deref(),
             model_name,
@@ -139,19 +134,31 @@ impl RecallPlanner {
                 .max(limit)
                 .max(16),
             query_affect: plan.search.query_affect,
-            weights: HybridSearchWeights::default(),
+            weights: memory.hybrid_weights,
             decay_half_life_days: plan.search.decay_half_life_days,
             now,
             min_score: plan.search.min_score,
-            commitment_boost: DEFAULT_COMMITMENT_BOOST,
-            recent_fallback_limit: DEFAULT_RECENT_FALLBACK_LIMIT,
+            commitment_boost: memory.commitment_boost,
+            recent_fallback_limit: memory.recent_fallback_limit,
         }
+    }
+
+    /// Alias for [`Self::to_query`] kept for call-site clarity.
+    #[must_use]
+    pub fn to_memory_search_options<'a>(
+        plan: &'a RecallPlan,
+        query_embedding: &'a [f32],
+        model_name: &'a str,
+        now: DateTime<Utc>,
+        memory: &MindMemoryConfig,
+    ) -> Query<'a> {
+        Self::to_query(plan, Some(query_embedding), model_name, now, memory)
     }
 
     /// Map hybrid search results into explainable recalled memories.
     ///
     /// Cognition-side entry point for attaching recall reasons after
-    /// `MemoryStore::search_typed_memories_hybrid`.
+    /// `MemoryStore::search`.
     #[must_use]
     pub fn explain_results(scored: Vec<ScoredMemory>) -> Vec<RecalledMemory> {
         super::executor::RecallResultMapper::map(scored)
@@ -425,7 +432,8 @@ mod tests {
         let embedding = [0.1, 0.2, 0.3];
         let now = Utc::now();
 
-        let search = RecallPlanner::to_memory_search_options(&plan, &embedding, "model-a", now);
+        let search =
+            RecallPlanner::to_memory_search_options(&plan, &embedding, "model-a", now, &memory);
 
         assert_eq!(search.query_text, plan.search.primary_query_text.as_str());
         assert_eq!(search.character_id, "ene");

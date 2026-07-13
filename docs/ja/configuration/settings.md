@@ -455,6 +455,12 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 | `mmr_min_slots_commitment` | int | `1` | commitment 記憶の最低 recalled 枠 |
 | `mmr_source_diversity_bonus` | float | `0.05` | 新しい recall source 種別を持つ候補に加算する MMR ボーナス |
 | `require_migration` | bool | `false` | true のとき、レガシー summaries/keyfacts が残り migration 未完了なら typed recall をブロック（通常の `conversation_logs` だけではブロックしない）(#98) |
+| `hybrid_weights` | object | （デフォルト参照） | ハイブリッドスコア重み。製品デフォルトはここに置く。store は呼び出し側が渡した重みだけを適用する（#123） |
+| `commitment_boost` | float | `0.25` | アクティブな commitment 由来候補へのスコアブースト |
+| `recent_fallback_limit` | int | `5` | ハイブリッド検索で集める純 recent フォールバック候補の上限 |
+| `journal_candidate_pool_size` | int | `64` | 診断/CLI/デスクトップ journal 検索の候補プールサイズ |
+| `journal_similarity_threshold` | float | `0.45` | journal 検索の最小ベクトル類似度 |
+| `journal_min_score` | float | `0.10` | journal 検索の最小ハイブリッドスコア |
 
 #### `mind.memory.tool_grounding` — ツール結果グラウンディング
 

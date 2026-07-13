@@ -146,6 +146,7 @@ mod tests {
                 supersedes_id: None,
                 pinned: false,
                 created_at: None,
+                commitment_id: None,
             })
             .await
             .unwrap();

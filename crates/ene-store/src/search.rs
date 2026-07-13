@@ -4,8 +4,7 @@
 //! relationship, and access signals into an explainable score breakdown.
 
 use crate::typed_memory::{
-    AffectAnnotation, MemoryCandidateSource, MemoryItem, MemoryScoreBreakdown, MemorySearchOptions,
-    MemoryStatus,
+    AffectAnnotation, MemoryCandidateSource, MemoryItem, MemoryScoreBreakdown, MemoryStatus, Query,
 };
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
@@ -156,7 +155,7 @@ pub(crate) fn is_recallable_status(status: MemoryStatus) -> bool {
 
 /// Compute weighted hybrid score breakdown for a gathered candidate.
 pub(crate) fn score_candidate(
-    options: &MemorySearchOptions<'_>,
+    options: &Query<'_>,
     candidate: &GatheredCandidate,
 ) -> MemoryScoreBreakdown {
     let item = &candidate.item;
@@ -241,6 +240,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             faded_at: None,
+            commitment_id: None,
         }
     }
 
@@ -307,9 +307,9 @@ mod tests {
     #[test]
     fn score_breakdown_total_is_non_negative() {
         let now = Utc::now();
-        let options = MemorySearchOptions {
+        let options = Query {
             query_text: "pizza",
-            query_embedding: &[0.1, 0.2, 0.3, 0.4],
+            embedding: Some(&[0.1, 0.2, 0.3, 0.4]),
             character_id: "ene",
             user_id: None,
             model_name: "test",

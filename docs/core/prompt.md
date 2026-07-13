@@ -25,7 +25,7 @@ MessageBuildContext {
 |---|---------|--------|-----------|
 | 1 | **System prompt** | `build_system_prompt()` | Always |
 | 2 | **Example messages** | Card `mes_example` | First turn only |
-| 3 | **Recalled summaries** | `format_summaries_for_prompt()` | Memory enabled |
+| 3 | **Recalled summaries** | `ene-runtime` message_builder | Memory enabled |
 | 4 | **Key facts** | `[Known facts about {user_name}]` | Memory enabled |
 | 5 | **Conversation history** | `session.history.conversation_history` | Always |
 | 6 | **Expression protocol** | `build_expression_phi()` | Always |

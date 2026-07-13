@@ -25,7 +25,7 @@ MessageBuildContext {
 |---|------|--------|------|
 | 1 | **システムプロンプト** | `build_system_prompt()` | 常時 |
 | 2 | **例メッセージ** | カード `mes_example` | 初回ターンのみ |
-| 3 | **呼び出された要約** | `format_summaries_for_prompt()` | メモリ有効時 |
+| 3 | **呼び出された要約** | `ene-runtime` message_builder | メモリ有効時 |
 | 4 | **キーファクト** | `[Known facts about {user_name}]` | メモリ有効時 |
 | 5 | **会話履歴** | `session.history.conversation_history` | 常時 |
 | 6 | **表情プロトコル** | `build_expression_phi()` | 常時 |

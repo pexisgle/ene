@@ -456,6 +456,12 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 | `mmr_min_slots_commitment` | int | `1` | Minimum recalled slots reserved for commitment memories |
 | `mmr_source_diversity_bonus` | float | `0.05` | Bonus added to MMR score when a candidate introduces a new recall source type |
 | `require_migration` | bool | `false` | When true, block typed recall while legacy summaries/keyfacts exist and migration is incomplete; ongoing `conversation_logs` do not block (#98) |
+| `hybrid_weights` | object | (see defaults) | Hybrid scoring weights (`vector`, `lexical`, `recency`, `salience`, `confidence`, `emotional_match`, `relationship`, `access_boost`). Product defaults live here; store only applies caller-provided weights (#123) |
+| `commitment_boost` | float | `0.25` | Score boost when a candidate is sourced from an active commitment |
+| `recent_fallback_limit` | int | `5` | Max pure-recent fallback candidates gathered during hybrid search |
+| `journal_candidate_pool_size` | int | `64` | Candidate pool size for diagnostics/CLI/desktop journal search |
+| `journal_similarity_threshold` | float | `0.45` | Minimum vector similarity for journal search |
+| `journal_min_score` | float | `0.10` | Minimum hybrid score for journal search |
 
 #### `mind.memory.tool_grounding` — Tool Result Grounding
 

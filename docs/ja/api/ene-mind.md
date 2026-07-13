@@ -186,7 +186,7 @@ pub struct CognitionEngine {
 | `before_turn` | `async fn before_turn(&self, ctx: TurnContext<'_>) -> Result<PreTurnOutput, CognitionError>` | アフェクトをロードし、感情エンジンを実行し、ハイブリッドリコールを計画・実行し、アクティブなコミットメントを収集する。 |
 | `persist_affect_snapshot` | `async fn persist_affect_snapshot(store: &MemoryStore, affect: &AffectState) -> Result<(), CognitionError>` | プレターン更新の直後にアフェクト状態を永続化する（ストリームのキャンセル/失敗時にも生き残る）。 |
 | `compose_prompt_packet` | `async fn compose_prompt_packet(&self, ctx: TurnContext<'_>, pre: &PreTurnOutput) -> Result<ComposedPrompt, CognitionError>` | Identity Kernelをコンパイルし、スタイル例を選択し、シーンサマリーをロードし、予算内にすべてをパッキングして `Vec<LlmMessage>` に変換する。 |
-| `after_turn` | `async fn after_turn(&self, store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>) -> Result<(), CognitionError>` | `MemoryWriter::after_turn` に委譲する — 抽出、調停、忘却ライフサイクル、アフェクト永続化。 |
+| `after_turn` | `async fn after_turn(&self, store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>, providers: MemoryWriteProviders<'_>) -> Result<(), CognitionError>` | ホスト（`ene-runtime`）からの**唯一の製品向け書き込み入口**。`MemoryWriter::after_turn` に委譲する — 抽出、調停、忘却ライフサイクル、アフェクト永続化。ランタイムは `MemoryWriter` を直接呼んではならない。 |
 | `resolve_expression_turn` | `fn resolve_expression_turn(&self, config: &MindConfig, card: &CharacterCardV3, affect: &AffectState, response_text: &str, llm_proposal: Option<&str>, previous_expression: &str, elapsed_since_change: Option<Duration>) -> (ExpressionDecision, AffectState)` | 完了したアシスタントターンの最終的なキャラクター表情を `OutputArbiter` 経由で解決する。判定結果と、`last_expression` が更新された `AffectState` を返す。 |
 
 ---
@@ -583,7 +583,7 @@ pub struct RecallPlan {
 | メソッド | シグネチャ | 説明 |
 |---|---|---|
 | `plan` | `fn plan(input: &RecallPlannerInput<'_>, options: &RecallPlannerOptions) -> Result<RecallPlan, CognitionError>` | トピック/アフェクトから `RecallIntent` を推論し、セマンティック/エピソードクエリのバリアントを構築し、予算/検索ヒントを埋める。空のターンテキストではエラーになる。 |
-| `to_memory_search_options` | `fn to_memory_search_options<'a>(plan: &'a RecallPlan, query_embedding: &'a [f32], model_name: &'a str, now: DateTime<Utc>) -> MemorySearchOptions<'a>` | プランのプライマリクエリを `ene-store` のハイブリッド検索オプションにマッピングする。 |
+| `to_memory_search_options` | `fn to_memory_search_options<'a>(plan: &'a RecallPlan, query_embedding: &'a [f32], model_name: &'a str, now: DateTime<Utc>, memory: &MindMemoryConfig) -> Query<'a>` | プランのプライマリクエリを `ene-store::Query` にマッピングし、`mind.memory.*` からハイブリッド重み / commitment boost を埋める（#123）。 |
 | `explain_results` | `fn explain_results(scored: Vec<ScoredMemory>) -> Vec<RecalledMemory>` | 各ハイブリッド検索結果に `RecallReason` とスコアの詳細を付加する。 |
 
 `RecallPlannerOptions::from_config(context: &ContextConfig, memory: &MindMemoryConfig) -> Self` は、この2つの設定セクションからプランナーオプション（予算、しきい値、`use_hyde`）を導出します。
@@ -632,13 +632,13 @@ pub async fn execute_hybrid_recall(
 pub struct MemoryWriter;
 
 impl MemoryWriter {
-    pub async fn write_memories(store: &MemoryStore, config: &MindConfig, input: &PostTurnInput<'_>) -> Result<(), CognitionError>;
+    pub async fn write_memories(store: &MemoryStore, config: &MindConfig, input: &PostTurnInput<'_>, providers: MemoryWriteProviders<'_>) -> Result<(), CognitionError>;
     pub async fn finalize_turn(store: &MemoryStore, config: &MindConfig, input: &PostTurnInput<'_>) -> Result<(), CognitionError>;
-    pub async fn after_turn(store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>) -> Result<(), CognitionError>;
+    pub async fn after_turn(store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>, providers: MemoryWriteProviders<'_>) -> Result<(), CognitionError>;
 }
 ```
 
-`after_turn` = `write_memories`（決定論的抽出、ツールグラウンディングを含む → `MemoryArbiter` → `CommitmentLedger` 同期）に続いて `finalize_turn`（`ForgettingLifecycle::apply` → `upsert_affect_state`）です。`mind.memory.write_every_turn` が `false` の場合、抽出のみがスキップされます（`finalize_turn` は `after_turn` から常に実行されます）。
+`after_turn` = `write_memories`（決定論的抽出、ツールグラウンディングを含む → `MemoryArbiter` → `CommitmentLedger` 同期）に続いて `finalize_turn`（`ForgettingLifecycle::apply` → `upsert_affect_state`）です。`mind.memory.write_every_turn` が `false` の場合、抽出のみがスキップされます（`finalize_turn` は `after_turn` から常に実行されます）。ホスト（`ene-runtime`）は `CognitionEngine::after_turn` のみを呼び、`MemoryWriter` メソッドを直接呼んではなりません（#121）。
 
 ### `MemoryCandidate`
 

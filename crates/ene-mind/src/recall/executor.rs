@@ -51,6 +51,7 @@ mod tests {
                 supersedes_id: None,
                 pinned: false,
                 faded_at: None,
+                commitment_id: None,
             },
             breakdown: ene_store::MemoryScoreBreakdown {
                 vector_similarity: 0.5,

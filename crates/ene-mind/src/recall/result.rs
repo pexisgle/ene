@@ -131,6 +131,7 @@ mod tests {
             supersedes_id: None,
             pinned: false,
             faded_at: None,
+            commitment_id: None,
         }
     }
 

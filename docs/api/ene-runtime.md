@@ -40,7 +40,7 @@ sequenceDiagram
 
     U->>H: EneCommand::Run { input }
     H->>A: mpsc send
-    A->>M: search(query_embedding)
+    A->>M: search(embedding)
     M-->>A: recalled summaries / key facts
     A->>L: stream chat.completion
     A-->>H: broadcast EneEvent::TextDelta
@@ -218,7 +218,7 @@ pub struct MemoryQueryHandle { /* opaque */ }
 
 | Method | Signature | Description |
 |---|---|---|
-| `search_summaries` | `async fn search_summaries(&self, query_embedding: &[f32], card_name: &str, limit: usize, threshold: f32) -> Result<Vec<RecalledSummary>, EneRuntimeError>` | Vector-similarity search over conversation summaries. |
+| `search_summaries` | `async fn search_summaries(&self, embedding: &[f32], card_name: &str, limit: usize, threshold: f32) -> Result<Vec<RecalledSummary>, EneRuntimeError>` | Vector-similarity search over conversation summaries. |
 | `list_recent_summaries` | `async fn list_recent_summaries(&self, card_name: &str, limit: usize) -> Result<Vec<ConversationSummary>, EneRuntimeError>` | Most recent summaries for a character card, in recency order. |
 | `get_all_keyfacts` | `async fn get_all_keyfacts(&self, card_name: &str) -> Result<Vec<KeyFact>, EneRuntimeError>` | All legacy key facts stored for a character card. |
 
@@ -237,7 +237,7 @@ pub struct MemoryQueryHandle { /* opaque */ }
 |---|---|---|
 | `list_typed_memories` | `async fn list_typed_memories(&self, character_id: &str, kind: Option<MemoryKind>, limit: usize) -> Result<Vec<MemoryItem>, EneRuntimeError>` | Lists typed memories for a character, optionally filtered by `MemoryKind`. |
 | `inspect_typed_memory` | `async fn inspect_typed_memory(&self, id: i64) -> Result<Option<MemoryItem>, EneRuntimeError>` | Fetches a single typed memory by row id. |
-| `search_typed_memories_hybrid` | `async fn search_typed_memories_hybrid(&self, character_id: &str, user_id: Option<&str>, query_text: &str, limit: usize) -> Result<Vec<ScoredMemory>, EneRuntimeError>` | Embeds `query_text` and runs `ene-store`'s hybrid (vector + recency + salience + confidence) search with the CLI's default weights/thresholds. |
+| `search_typed_memories_hybrid` | `async fn search_typed_memories_hybrid(...) -> Result<Vec<ScoredMemory>, EneRuntimeError>` | Embeds `query_text` and runs scored search via `ene_mind::MemoryJournal` using `mind.memory.*` weights/thresholds (#123). |
 | `pin_typed_memory` | `async fn pin_typed_memory(&self, id: i64, pinned: bool) -> Result<bool, EneRuntimeError>` | Sets or clears the pinned flag on a typed memory. |
 | `transition_typed_memory_status` | `async fn transition_typed_memory_status(&self, id: i64, status: MemoryStatus) -> Result<bool, EneRuntimeError>` | Manually transitions a typed memory's lifecycle status (e.g. to `Archived`). |
 

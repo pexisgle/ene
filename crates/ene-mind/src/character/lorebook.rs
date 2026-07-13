@@ -98,6 +98,7 @@ fn compile_entry(
         supersedes_id: None,
         pinned: constant,
         created_at: None,
+        commitment_id: None,
     }
 }
 

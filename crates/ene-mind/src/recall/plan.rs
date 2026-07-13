@@ -42,7 +42,7 @@ pub struct RecallBudgetHints {
     pub result_limit: usize,
 }
 
-/// Search options that map onto `ene_store::MemorySearchOptions`.
+/// Search options that map onto `ene_store::Query`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecallSearchHints {
     /// Primary natural-language query for lexical and vector search.

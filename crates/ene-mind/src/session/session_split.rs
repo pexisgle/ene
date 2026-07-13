@@ -406,7 +406,7 @@ pub async fn execute_split(
     let session_id_clone = session_id.to_string();
     let card_name_clone = card_name.to_string();
 
-    let mut existing_facts = Vec::new();
+    let existing_facts = Vec::new();
     for entry in &history_clone {
         if let Err(e) = store
             .insert_log(
@@ -420,9 +420,8 @@ pub async fn execute_split(
             tracing::error!(component = "Session", error = %e, "Failed to save log");
         }
     }
-    if let Ok(facts) = store.get_all_keyfacts(&card_name_clone).await {
-        existing_facts = facts;
-    }
+    // Legacy keyfacts are retired from the product path (#125); summarizer
+    // runs without prior keyfact context. Prefer compression / scene spans.
 
     let provider_messages: Vec<ene_ai::LlmMessage> = history
         .iter()
@@ -451,12 +450,8 @@ pub async fn execute_split(
     )
     .await?;
 
-    let summary_embedding = embed_session_messages(embedder.as_ref(), history).await?;
-
-    let session_id_clone = session_id.to_string();
-    let card_name_clone = card_name.to_string();
-
-    // Append the split reason to the summary
+    // Append the split reason to the summary (returned in SplitResult only;
+    // no conversation_summaries / keyfacts write — #125).
     let reason_str = match &reason {
         SplitReason::Timeout { elapsed_minutes } => prompts
             .split()
@@ -471,24 +466,12 @@ pub async fn execute_split(
         SplitReason::Manual => prompts.split().reason_manual.to_string(),
     };
 
-    let summary = if reason_str.is_empty() {
+    let _annotated_summary = if reason_str.is_empty() {
         summary_result.summary.clone()
     } else {
         format!("{} {}", summary_result.summary, reason_str)
     };
-
-    let facts = summary_result.key_facts.clone();
-
-    store
-        .insert_summary(
-            &session_id_clone,
-            &card_name_clone,
-            &summary,
-            &facts,
-            &summary_embedding,
-            ended_at,
-        )
-        .await?;
+    let _ = (ended_at, _annotated_summary, embedder);
 
     let new_session_id = generate_session_id();
     let snapshot_len = history.len();

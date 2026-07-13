@@ -40,5 +40,6 @@ pub fn summary_to_typed_memory(
         supersedes_id: None,
         pinned: false,
         created_at: None,
+        commitment_id: None,
     }
 }
