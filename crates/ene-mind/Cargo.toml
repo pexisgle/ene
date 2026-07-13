@@ -1,0 +1,39 @@
+[package]
+name = "ene-mind"
+version = "0.1.0"
+edition = "2024"
+description = "Mind runtime for the ene AI companion — session, memory extraction, recall, emotion, context, and prompt composition"
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+ene-common = { workspace = true }
+ene-config = { workspace = true }
+ene-store = { workspace = true }
+ene-ai = { workspace = true }
+
+chrono = { workspace = true }
+
+schemars = { workspace = true }
+ctor = { workspace = true }
+regex = { workspace = true }
+unicode-normalization = { workspace = true }
+once_cell = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tokio-stream = { workspace = true }
+ene-tool-proto = { workspace = true }
+chrono = { workspace = true }
+
+[lints]
+workspace = true

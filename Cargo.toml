@@ -44,15 +44,14 @@ base64 = { version = "0.22", default-features = false }
 blake3 = "1.8"
 
 # --- Internal libraries ---
-ene-cognition = { path = "crates/ene-cognition" }
+ene-mind = { path = "crates/ene-mind" }
 ene-common = { path = "crates/ene-common" }
 ene-config = { path = "crates/ene-config" }
-ene-core = { path = "crates/ene-core" }
-ene-embedding = { path = "crates/ene-embedding" }
-ene-memory = { path = "crates/ene-memory" }
-ene-session = { path = "crates/ene-session" }
-ene-provider = { path = "crates/ene-provider" }
+ene-runtime = { path = "crates/ene-runtime" }
+ene-ai = { path = "crates/ene-ai" }
+ene-store = { path = "crates/ene-store" }
 ene-tool-host = { path = "crates/ene-tool-host" }
+ene-tool = { path = "crates/ene-tool" }
 ene-tool-proto = { path = "crates/ene-tool-proto" }
 ene-tool-common = { path = "crates/ene-tool-common" }
 ene-tool-derive = { path = "crates/ene-tool-derive" }
@@ -132,7 +131,7 @@ run-for-all = true
 [profile.dev.package."*"]
 opt-level = 3
 
-[profile.dev.package.ene-embedding]
+[profile.dev.package.ene-ai]
 opt-level = 3
 
 [workspace.lints.clippy]

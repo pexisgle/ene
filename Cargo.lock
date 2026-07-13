@@ -2703,6 +2703,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 
 [[package]]
+name = "ene-ai"
+version = "0.1.0"
+dependencies = [
+ "accelerate-src",
+ "async-openai",
+ "async-trait",
+ "candle-core",
+ "candle-nn",
+ "ctor 1.0.7",
+ "ene-config",
+ "ene-tool-proto",
+ "hf-hub",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokenizers 0.23.1",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
 name = "ene-cli"
 version = "0.1.0"
 dependencies = [
@@ -2710,8 +2733,9 @@ dependencies = [
  "console",
  "dialoguer",
  "ene-config",
- "ene-core",
- "ene-memory",
+ "ene-mind",
+ "ene-runtime",
+ "ene-store",
  "ene-tool-host",
  "futures-core",
  "i18n-embed",
@@ -2722,30 +2746,6 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "ene-cognition"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "ctor 1.0.7",
- "ene-common",
- "ene-config",
- "ene-memory",
- "ene-provider",
- "ene-tool-proto",
- "once_cell",
- "regex",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tracing",
- "unicode-normalization",
 ]
 
 [[package]]
@@ -2777,35 +2777,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ene-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "blake3",
- "chrono",
- "ene-cognition",
- "ene-common",
- "ene-config",
- "ene-embedding",
- "ene-memory",
- "ene-provider",
- "ene-session",
- "ene-tool-db",
- "ene-tool-host",
- "ene-tool-proto",
- "regex",
- "sea-orm",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "ene-desktop"
 version = "0.1.0"
 dependencies = [
@@ -2818,10 +2789,10 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "egui-winit",
- "ene-cognition",
  "ene-config",
- "ene-core",
- "ene-memory",
+ "ene-mind",
+ "ene-runtime",
+ "ene-store",
  "ene-tool-proto",
  "ene-vrm",
  "glam 0.33.2",
@@ -2850,31 +2821,66 @@ dependencies = [
 ]
 
 [[package]]
-name = "ene-embedding"
+name = "ene-mind"
 version = "0.1.0"
 dependencies = [
- "accelerate-src",
  "async-trait",
- "candle-core",
- "candle-nn",
+ "chrono",
+ "ctor 1.0.7",
+ "ene-ai",
+ "ene-common",
  "ene-config",
- "ene-provider",
- "hf-hub",
+ "ene-store",
+ "ene-tool-proto",
+ "once_cell",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
- "tokenizers 0.23.1",
  "tokio",
+ "tokio-stream",
  "tracing",
+ "unicode-normalization",
+ "uuid",
 ]
 
 [[package]]
-name = "ene-memory"
+name = "ene-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "chrono",
+ "ene-ai",
+ "ene-common",
+ "ene-config",
+ "ene-mind",
+ "ene-store",
+ "ene-tool-db",
+ "ene-tool-host",
+ "ene-tool-proto",
+ "regex",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "ene-store"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "ctor 1.0.7",
  "ene-common",
  "ene-config",
- "ene-provider",
  "libsqlite3-sys",
  "sea-orm",
  "sea-orm-migration",
@@ -2888,41 +2894,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "ene-provider"
+name = "ene-tool"
 version = "0.1.0"
 dependencies = [
- "async-openai",
- "async-trait",
- "ctor 1.0.7",
- "ene-config",
+ "ene-tool-common",
+ "ene-tool-derive",
  "ene-tool-proto",
- "reqwest 0.13.4",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tracing",
-]
-
-[[package]]
-name = "ene-session"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "ctor 1.0.7",
- "ene-common",
- "ene-config",
- "ene-memory",
- "ene-provider",
- "indexmap",
- "rand 0.10.2",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -3046,9 +3023,9 @@ dependencies = [
  "blake3",
  "ctor 1.0.7",
  "dashmap",
+ "ene-ai",
  "ene-config",
- "ene-memory",
- "ene-provider",
+ "ene-store",
  "ene-tool-proto",
  "rmcp",
  "schemars",

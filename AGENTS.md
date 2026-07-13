@@ -38,12 +38,16 @@ This project is an AI assistant application written in Rust that merges VTuber-l
 ## 4. Architecture & Philosophy
 
 ### 4.1 Crate Splits
-The workspace is highly granularly split to enforce strict boundaries and prevent circular dependencies.
-* **`ene-core`**: The central crate tying together memory, tools, AI providers, and the memory and emotion systems.
-* **`ene-memory`**: Exclusively owns `sea-orm` SQLite operations.
+The workspace is highly granularly split to enforce strict boundaries and prevent circular dependencies (API v2).
+* **`ene-runtime`**: Host facade (`EneHandle::open`, `TurnId`, chat events, diagnostics). Ties together mind, store, AI providers, and tool host.
+* **`ene-mind`**: Cognitive turn pipeline (session, recall, affect, Performance arbitration, memory writing). Does **not** depend on `ene-runtime` or `ene-tool-host`.
+* **`ene-store`**: Exclusively owns `sea-orm` SQLite operations. Does **not** depend on `ene-ai` or `ene-mind`.
+* **`ene-ai`**: LLM + embedding providers (absorbs former `ene-provider` / `ene-embedding`).
+* **`ene-tool`**: Facade re-exporting `ene-tool-proto` + `ene-tool-common` + `ene-tool-derive`. Preferred import for new tool binaries. Does **not** depend on runtime / mind / store.
 * **`ene-tool-proto`**: Defines the IPC ABI (Requests/Responses). *Must not contain business or DB logic.*
-* **`ene-tool-host`**: Orchestrates tools and IPC. Depends on proto.
-* **Rule:** Do not merge crates arbitrarily. Tool binaries must be kept extremely lightweight and only link what is absolutely necessary (typically just `ene-tool-proto` and `ene-tool-derive`).
+* **`ene-tool-host`**: Orchestrates tools and IPC. Depends on the tool ABI crates.
+* **`ene-vrm`**: VRM rendering for desktop. Does **not** depend on mind / runtime.
+* **Rule:** Do not merge crates arbitrarily. Tool binaries must be kept extremely lightweight and only link what is absolutely necessary (prefer `ene-tool`, or at most `ene-tool-proto` + `ene-tool-derive`).
 * **Rule: Dependency Centralization:** All external dependencies used by crates under `crates/` must be declared in the root `[workspace.dependencies]` table and referenced via `{ workspace = true }` in each crate's `Cargo.toml`. Do not pin version numbers directly in individual crate manifests.
 
 ### 4.2 Asset Distribution Strategy
@@ -67,7 +71,7 @@ The workspace is highly granularly split to enforce strict boundaries and preven
   - Use the `tracing` crate (`info!`, `warn!`, `error!`, `debug!`). **Never use `println!`.**
   - Always include structured context fields when appropriate to maintain machine-readable logs (e.g., `tracing::error!(component = "ToolHost", error = %e, "Failed to start")`).
 * **Concurrency:** Prefer `parking_lot::RwLock` or `parking_lot::Mutex` over standard library primitives to avoid lock poisoning. Use `std::sync::OnceLock` for lazy static initializations.
-* **Events & i18n:** Backend crates (`ene-core`, `ene-session`) must emit events and status messages in **English** (as static constants or Enums). Localization is the responsibility of the frontend/UI layer:
+* **Events & i18n:** Backend crates (`ene-runtime`, `ene-mind`) must emit events and status messages in **English** (as static constants or Enums). Localization is the responsibility of the frontend/UI layer:
   - `ene-desktop` translations are managed under `apps/ene-desktop/i18n/`.
   - `ene-cli` translations are managed locally within the CLI under `apps/ene-cli/i18n/`.
 * **Visibility:** Default to `pub(crate)`. Only use `pub` when external consumers need it.
@@ -77,8 +81,8 @@ The workspace is highly granularly split to enforce strict boundaries and preven
 
 ### R1. Add a new tool
 1. **Create:** `cargo new --bin tools/<name>`
-2. **Implement:** `#[derive(ene_tool_derive::ToolSpec)]` on the args struct, then wrap one or more `ToolAction`s in a `ToolProvider` — use `ene_tool_common::{ActionSetProvider, SingleActionProvider}` instead of hand-writing the dispatch loop.
-3. **Wire up:** Call `run_tool_server(Box::new(provider)).await` from `ene-tool-proto` inside `main`. This is **not generic** — there is no `run_tool_server::<MyAction>()`; it always takes a boxed `dyn ToolProvider`.
+2. **Implement:** `#[derive(ene_tool_derive::ToolSpec)]` on the args struct, then wrap one or more `ToolAction`s in a `ToolProvider` — use `ene_tool::{ActionSetProvider, SingleActionProvider}` (or `ene_tool::prelude::*`) instead of hand-writing the dispatch loop.
+3. **Wire up:** Call `run_tool_server(Box::new(provider)).await` from `ene-tool` / `ene-tool-proto` inside `main`. This is **not generic** — there is no `run_tool_server::<MyAction>()`; it always takes a boxed `dyn ToolProvider`.
 4. **Document:** Add to a category in `docs/tools/` and `docs/ja/tools/`.
 5. **Verify:** Run `cargo run -p ene-cli` -> `/tool list`.
 
@@ -115,7 +119,7 @@ Loaded by `figment` in the following order: 1. Compile-time defaults -> 2. OS-st
 
 ### 8.1 Pre-commit Hooks (cargo-husky)
 
-* `cargo-husky` is declared as a regular dependency on `ene-core` and auto-installs hooks from `.cargo-husky/hooks/` into `.git/hooks/` on the first `cargo build`.
+* `cargo-husky` is declared in the workspace (`Cargo.toml` / `.cargo-husky/hooks/`) and auto-installs hooks into `.git/hooks/` on the first `cargo build` that pulls it in.
 * **`pre-commit`** runs `cargo fmt --all` against staged `.rs` files and re-stages the changes. Use `git commit --no-verify` to skip per-commit, or use `HUSKY=0 cargo build` to skip all hooks.
 
 ### PR Verification Checklist

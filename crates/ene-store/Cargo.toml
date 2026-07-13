@@ -1,0 +1,28 @@
+[package]
+name = "ene-store"
+version = "0.1.0"
+edition = "2024"
+description = "Persistence-only SQLite-vec store with vector similarity search, key facts, and conversation history"
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+sea-orm = { workspace = true }
+sea-orm-migration = { workspace = true }
+sqlite-vec = { workspace = true }
+libsqlite3-sys = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+ene-common = { workspace = true }
+ene-config = { workspace = true }
+serde = { workspace = true }
+ctor = { workspace = true }
+
+[lints]
+workspace = true

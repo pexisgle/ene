@@ -15,9 +15,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 egui = { workspace = true }
 egui-wgpu = { workspace = true }
 egui-winit = { workspace = true }
-ene-core = { workspace = true }
-ene-cognition = { workspace = true }
-ene-memory = { workspace = true }
+ene-runtime = { workspace = true }
+ene-mind = { workspace = true }
+ene-store = { workspace = true }
 ene-config = { workspace = true }
 ene-tool-proto = { workspace = true }
 ene-vrm = { workspace = true }

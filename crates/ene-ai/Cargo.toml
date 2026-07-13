@@ -1,0 +1,41 @@
+[package]
+name = "ene-ai"
+version = "0.1.0"
+edition = "2024"
+description = "LLM and embedding providers for the ene platform"
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+async-openai = { workspace = true, default-features = false }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+ene-config = { workspace = true }
+ene-tool-proto = { workspace = true }
+ctor = { workspace = true }
+thiserror = { workspace = true }
+candle-core = { workspace = true }
+candle-nn = { workspace = true }
+tokenizers = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { workspace = true, features = ["accelerate"] }
+accelerate-src = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+async-openai = { workspace = true, default-features = false, features = ["rustls", "byot"] }
+reqwest = { workspace = true, features = ["rustls", "json"] }
+hf-hub = { workspace = true, features = ["rustls-tls"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+async-openai = { workspace = true, default-features = false, features = ["native-tls", "byot"] }
+reqwest = { workspace = true, features = ["native-tls", "json"] }
+hf-hub = { workspace = true }
+
+[lints]
+workspace = true

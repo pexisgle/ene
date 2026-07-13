@@ -1,0 +1,159 @@
+//! API v2 contract tests for the ready-handle facade (#111).
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use ene_config::CharacterCardV3;
+use ene_runtime::{CancelError, EneConfig, EneEvent, EneHandle, RunError, TerminalReason, TurnId};
+
+fn test_card() -> CharacterCardV3 {
+    let mut card = CharacterCardV3::default();
+    card.data.name = "ContractTest".into();
+    card.data.system_prompt = "Be brief.".into();
+    card
+}
+
+fn test_config_memory_off() -> EneConfig {
+    let mut config = EneConfig::default();
+    let mut store = ene_store::StoreConfig::default();
+    store.enabled = false;
+    config.set_section(&store).expect("store config");
+    let mut tools = ene_tool_host::ToolConfig::default();
+    tools.enabled = false;
+    tools.rag.enabled = false;
+    let _ = config.set_section(&tools);
+    let mut provider = ene_ai::ProviderConfig::default();
+    provider.embedding.backend = "cloud".into();
+    let _ = config.set_section(&provider);
+    config
+}
+
+#[tokio::test]
+async fn open_returns_ready_handle() {
+    let handle = EneHandle::open(test_config_memory_off(), test_card())
+        .await
+        .expect("open");
+    let snapshot = handle.diagnostics().get_snapshot().await.expect("snapshot");
+    assert!(
+        snapshot.character_card.is_some(),
+        "card must be loaded before open returns"
+    );
+    assert_eq!(
+        snapshot.character_card.as_ref().unwrap().data.name,
+        "ContractTest"
+    );
+    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn second_run_returns_busy() {
+    let handle = EneHandle::open(test_config_memory_off(), test_card())
+        .await
+        .expect("open");
+
+    let turn1 = handle.run("hello").expect("first run");
+    let busy = handle.run("again");
+    assert!(
+        matches!(busy, Err(RunError::Busy)),
+        "expected Busy while turn {turn1} active, got {busy:?}"
+    );
+
+    // Free the gate.
+    let _ = handle.cancel(&turn1);
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+    // After cancel, a new run should be accepted (may immediately Terminal).
+    let turn2 = handle.run("third");
+    assert!(
+        turn2.is_ok() || matches!(turn2, Err(RunError::Busy)),
+        "unexpected error: {turn2:?}"
+    );
+    if let Ok(t) = turn2 {
+        let _ = handle.cancel(&t);
+    }
+
+    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+}
+
+#[tokio::test]
+async fn cancel_wrong_turn_returns_mismatch() {
+    let handle = EneHandle::open(test_config_memory_off(), test_card())
+        .await
+        .expect("open");
+    let wrong = TurnId::new();
+    let err = handle.cancel(&wrong);
+    assert!(
+        matches!(err, Err(CancelError::TurnMismatch)),
+        "expected TurnMismatch, got {err:?}"
+    );
+    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancel_emits_terminal_exactly_once_with_matching_turn() {
+    let handle = EneHandle::open(test_config_memory_off(), test_card())
+        .await
+        .expect("open");
+    let mut rx = handle.subscribe();
+    let turn = handle.run("cancel me").expect("run");
+    handle.cancel(&turn).expect("cancel");
+
+    // Yield so the actor processes Run + Cancel (and any stream race).
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+
+    let mut terminals = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if let EneEvent::Terminal {
+            turn: ref t,
+            reason,
+        } = ev
+        {
+            assert_eq!(t, &turn);
+            terminals.push(reason);
+        }
+    }
+    assert_eq!(
+        terminals.len(),
+        1,
+        "expected exactly one Terminal, got {terminals:?}"
+    );
+
+    let err = handle.cancel(&turn);
+    assert!(matches!(err, Err(CancelError::TurnMismatch)));
+
+    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+}
+
+#[tokio::test]
+async fn memory_enabled_without_embedder_fails_closed_on_open() {
+    let mut config = EneConfig::default();
+    let mut store = ene_store::StoreConfig::default();
+    store.enabled = true;
+    config.set_section(&store).unwrap();
+    let mut tools = ene_tool_host::ToolConfig::default();
+    tools.enabled = false;
+    tools.rag.enabled = false;
+    let _ = config.set_section(&tools);
+    // Cloud embedder with no base URL → init fails → open fails closed.
+    let mut provider = ene_ai::ProviderConfig::default();
+    provider.embedding.backend = "cloud".into();
+    let _ = config.set_section(&provider);
+
+    let err = EneHandle::open(config, test_card()).await;
+    assert!(err.is_err(), "expected open to fail closed, got {err:?}");
+}
+
+#[tokio::test]
+async fn marker_tokens_become_performance_not_text() {
+    // Unit-level: special token splitter used by stream path.
+    let mut carry = String::new();
+    let (text, tokens) =
+        ene_mind::split_text_and_special_tokens(&mut carry, "Hi <|emo:happy|> there");
+    assert_eq!(text.join(""), "Hi  there");
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(
+        ene_mind::extract_emotion_from_token(&tokens[0]).as_deref(),
+        Some("happy")
+    );
+}

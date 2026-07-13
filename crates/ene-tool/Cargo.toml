@@ -1,0 +1,13 @@
+[package]
+name = "ene-tool"
+version = "0.1.0"
+edition = "2024"
+description = "Unified tool ABI facade — re-exports wire (proto), common adapters, and derive macros"
+
+[dependencies]
+ene-tool-proto = { workspace = true }
+ene-tool-common = { workspace = true }
+ene-tool-derive = { workspace = true }
+
+[lints]
+workspace = true

@@ -5,9 +5,10 @@ edition = "2024"
 description = "Interactive CLI REPL for chatting with AI characters, testing tools, and managing memory/sessions"
 
 [dependencies]
-ene-core = { workspace = true }
+ene-runtime = { workspace = true }
+ene-mind = { workspace = true }
 ene-config = { workspace = true }
-ene-memory = { workspace = true }
+ene-store = { workspace = true }
 ene-tool-host = { workspace = true }
 tokio = { workspace = true, features = ["signal"] }
 tokio-stream = { workspace = true }

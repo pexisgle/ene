@@ -18,8 +18,8 @@ tracing = { workspace = true }
 dashmap = { workspace = true }
 rmcp = { workspace = true }
 ene-config = { workspace = true }
-ene-provider = { workspace = true }
-ene-memory = { workspace = true }
+ene-ai = { workspace = true }
+ene-store = { workspace = true }
 ene-tool-proto = { workspace = true }
 ctor = { workspace = true }
 schemars = { workspace = true }
