@@ -11,7 +11,7 @@
 
 ## Cognitive Runtime 時の挙動
 
-`cognition.enabled=true` では、セッション状態は `CognitionEngine` と組み合わせて処理されます。
+mind ランタイムでは、セッション状態を `CognitionEngine` と組み合わせて処理します。
 
 1. `before_turn` で recall 計画と affect 更新
 2. `compose_prompt_packet` でセクション化プロンプト生成
@@ -24,8 +24,8 @@
 - `session_id` はセッション開始時に生成され、以下の結び付けに使われます。
   - raw conversation logs
   - compression spans（`memory_spans`）
-  - cognition tracing/debug
-- cognitive compression モードでは、古いターンを圧縮しても `session_id` は維持されます。
+  - mind tracing/debug
+- mind compression モードでは、古いターンを圧縮しても `session_id` は維持されます。
 
 ## セッション内の CharacterCardV3
 

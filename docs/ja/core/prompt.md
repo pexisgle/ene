@@ -7,7 +7,7 @@
 ```
 build_messages(
     ctx: &MessageBuildContext<'_>,
-) -> Result<Vec<LlmMessage>, EneCoreError>
+) -> Result<Vec<LlmMessage>, EneRuntimeError>
 
 MessageBuildContext {
     card: &CharacterCardV3,
@@ -83,7 +83,7 @@ MessageBuildContext {
 
 ## Cognitive Runtime PromptPacket（#87 / Phase 6）
 
-`cognition.enabled` が true のとき、`ene-core::streaming_cognitive` は Context Budget Manager（`ene-cognition::context::pack_prompt`）付きの `CognitionEngine::compose_prompt_packet` を使う。system 内容の組み立て順:
+mind ストリーミングパスでは、`ene-runtime::streaming_cognitive` が Context Budget Manager（`ene-mind::context::pack_prompt`）付きの `CognitionEngine::compose_prompt_packet` を使う。system 内容の組み立て順:
 
 | # | セクション | ソース | 予算 / truncate |
 |---|-----------|--------|-----------------|

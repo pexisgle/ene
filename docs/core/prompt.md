@@ -7,7 +7,7 @@
 ```
 build_messages(
     ctx: &MessageBuildContext<'_>,
-) -> Result<Vec<LlmMessage>, EneCoreError>
+) -> Result<Vec<LlmMessage>, EneRuntimeError>
 
 MessageBuildContext {
     card: &CharacterCardV3,
@@ -83,14 +83,14 @@ Tool specifications (`Vec<ToolSpec>`) are selected via `select_relevant_tools()`
 
 ## Cognitive Runtime PromptPacket (#87 / Phase 6)
 
-When `cognition.enabled` is true, `ene-core::streaming_cognitive` uses `CognitionEngine::compose_prompt_packet` with the Context Budget Manager (`ene-cognition::context::pack_prompt`). System content is assembled in this deterministic order:
+The mind streaming path uses `CognitionEngine::compose_prompt_packet` with the Context Budget Manager (`ene-mind::context::pack_prompt`). System content is assembled in this deterministic order:
 
 | # | Section | Source | Budget / Truncation |
 |---|---------|--------|---------------------|
 | 1 | **Platform Contract** | `PromptLibrary` mascot context | Required |
 | 2 | **Identity Kernel** | `CharacterCompiler` (#82) | Required; never dropped |
 | 3 | **Behavior Contract** | Card creator notes / runtime rules | Optional |
-| 4 | **Current Mood** | `AffectState` summary | Droppable; `cognition.context` budget |
+| 4 | **Current Mood** | `AffectState` summary | Droppable; `mind.context` budget |
 | 5 | **Current Scene** | Active `memory_spans` scene summary (#79) | Droppable; `scene_summary_tokens` |
 | 6 | **Semantic Context** | Lorebook / semantic recall (#83) | Droppable; `semantic_budget_tokens` |
 | 7 | **User Profile** | Preference / relationship recall | Droppable; memory budget share |

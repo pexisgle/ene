@@ -11,7 +11,7 @@
 
 ## Cognitive Runtime Behavior
 
-When `cognition.enabled` is true, session state is used together with `CognitionEngine`:
+The mind runtime uses session state together with `CognitionEngine`:
 
 1. `before_turn` computes recall plan + affect updates.
 2. `compose_prompt_packet` builds sectioned prompt context.
@@ -24,8 +24,8 @@ This keeps one continuous session identity while context pressure is handled by 
 - `session_id` is generated at session creation and used for:
   - raw conversation logs
   - compression spans (`memory_spans`)
-  - traceability/debugging in cognition events
-- Under cognitive compression mode, old turns are compacted while keeping the same session ID.
+  - traceability/debugging in mind events
+- Under mind compression mode, old turns are compacted while keeping the same session ID.
 
 ## CharacterCardV3 in Session
 
