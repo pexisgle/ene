@@ -291,7 +291,7 @@ pub struct UiState {
 
 #[derive(Clone, Debug)]
 pub struct PendingPermission {
-    pub request_id: ene_core::RequestId,
+    pub request_id: ene_runtime::RequestId,
     pub action: String,
     pub target: String,
     /// Human-readable rationale shown to the user in the
@@ -302,7 +302,7 @@ pub struct PendingPermission {
 
 #[derive(Clone, Debug)]
 pub struct PendingUserInput {
-    pub request_id: ene_core::RequestId,
+    pub request_id: ene_runtime::RequestId,
     pub prompt: ene_tool_proto::UserInputPrompt,
 }
 
@@ -656,9 +656,9 @@ impl CharacterSettings {
             Language::En => "en",
             Language::Ja => "ja",
         };
-        if let Ok(mut cognition) = self.ai.ai.get_section::<ene_core::CognitionConfig>() {
-            cognition.emotion.classifier_language = lang.into();
-            let _ = self.ai.ai.set_section(&cognition);
+        if let Ok(mut mind) = self.ai.ai.get_section::<ene_mind::MindConfig>() {
+            mind.emotion.classifier_language = lang.into();
+            let _ = self.ai.ai.set_section(&mind);
             *self.store.write() = ene_config::ConfigStore::from_config(self.ai.ai.clone());
         }
     }
@@ -856,7 +856,7 @@ mod tests {
     #[test]
     fn pending_dialog_types_constructible() {
         let _perm = PendingPermission {
-            request_id: ene_core::RequestId::new("test"),
+            request_id: ene_runtime::RequestId::new("test"),
             action: "fs.write".to_string(),
             target: "/tmp/example.txt".to_string(),
             description: Some("Write a 4 KB file".to_string()),

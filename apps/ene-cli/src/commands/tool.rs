@@ -22,7 +22,7 @@ impl CliCommand for ToolCommand {
     async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), String> {
         let subparts: Vec<&str> = arg.splitn(3, ' ').collect();
         match subparts.first().copied() {
-            Some("list") => match ctx.handle.list_tools().await {
+            Some("list") => match ctx.handle.diagnostics().list_tools().await {
                 Ok(tools) => {
                     if tools.is_empty() {
                         println!("No tools registered.");
@@ -57,7 +57,7 @@ impl CliCommand for ToolCommand {
             Some("help") => {
                 if subparts.len() >= 2 {
                     let name = subparts[1];
-                    match ctx.handle.list_tools().await {
+                    match ctx.handle.diagnostics().list_tools().await {
                         Ok(tools) => {
                             if let Some(tool) = tools.iter().find(|t| t.name.as_str() == name) {
                                 println!(
@@ -90,6 +90,7 @@ impl CliCommand for ToolCommand {
                     println!("Calling tool {name} with arguments: {arguments}");
                     match ctx
                         .handle
+                        .diagnostics()
                         .call_tool(name.to_string(), arguments.to_string())
                         .await
                     {
@@ -106,6 +107,7 @@ impl CliCommand for ToolCommand {
                     println!("Calling tool {name} with empty arguments");
                     match ctx
                         .handle
+                        .diagnostics()
                         .call_tool(name.to_string(), "{}".to_string())
                         .await
                     {

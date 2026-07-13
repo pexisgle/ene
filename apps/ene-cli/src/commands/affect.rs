@@ -26,6 +26,7 @@ impl CliCommand for AffectCommand {
         let sub = parse_subcommand(arg);
         let snapshot = ctx
             .handle
+            .diagnostics()
             .get_snapshot()
             .await
             .map_err(|e| format!("Failed to get actor state: {e}"))?;

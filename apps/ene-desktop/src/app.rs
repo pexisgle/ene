@@ -14,15 +14,18 @@
 //! [`build_app`] ordering is stable across phases.
 use bevy_app::{App, Plugin, PluginGroup, PluginGroupBuilder};
 
+use crate::event::chat::OpenChat;
 use crate::event::{
-    ai::{AiPermissionRequested, AiStreamFinished, AiTextDelta, AiUserInputRequested, EmoteToken},
+    ai::{
+        AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
+        EmoteToken,
+    },
     input::{KeyboardKey, PointerButton, PointerMoved},
     lifecycle::{TickGtk, WindowCloseRequested, WindowResized},
     settings::OpenSettings,
     ui_action::SettingsActionEvent,
 };
 use crate::events::AppEventReceiver;
-use crate::event::chat::OpenChat;
 use crate::plugin::ai_plugin::AiPlugin;
 use crate::plugin::character_plugin::CharacterPlugin;
 use crate::plugin::chat_plugin::ChatPlugin;
@@ -99,6 +102,7 @@ pub fn build_app(
     app.add_message::<WindowCloseRequested>();
     app.add_message::<AiTextDelta>();
     app.add_message::<AiStreamFinished>();
+    app.add_message::<AiStreamError>();
     app.add_message::<AiPermissionRequested>();
     app.add_message::<AiUserInputRequested>();
     app.add_message::<EmoteToken>();

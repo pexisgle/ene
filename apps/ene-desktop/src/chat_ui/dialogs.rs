@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
-use ene_core::UserInputResponse;
+use ene_runtime::UserInputResponse;
 use ene_tool_proto::{MultiAnswer, QuestionItem};
 
 use crate::ai_bridge::AiBridge;
@@ -54,21 +54,21 @@ pub fn render_permission_dialog(
                     if ui.button(crate::i18n::yes()).clicked() {
                         let _ = ai.answer_permission(
                             request_id.clone(),
-                            ene_core::PermissionDecision::AllowOnce,
+                            ene_runtime::PermissionDecision::AllowOnce,
                         );
                         clear_pending_permission(world, chat_entity);
                     }
                     if ui.button(crate::i18n::no()).clicked() {
                         let _ = ai.answer_permission(
                             request_id.clone(),
-                            ene_core::PermissionDecision::Deny,
+                            ene_runtime::PermissionDecision::Deny,
                         );
                         clear_pending_permission(world, chat_entity);
                     }
                     if ui.button(crate::i18n::always()).clicked() {
                         let _ = ai.answer_permission(
                             request_id.clone(),
-                            ene_core::PermissionDecision::AllowSession,
+                            ene_runtime::PermissionDecision::AllowSession,
                         );
                         clear_pending_permission(world, chat_entity);
                     }
@@ -76,7 +76,7 @@ pub fn render_permission_dialog(
             });
         });
     if !open {
-        let _ = ai.answer_permission(request_id, ene_core::PermissionDecision::Deny);
+        let _ = ai.answer_permission(request_id, ene_runtime::PermissionDecision::Deny);
         clear_pending_permission(world, chat_entity);
     }
 }

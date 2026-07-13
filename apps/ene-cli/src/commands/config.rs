@@ -1,7 +1,8 @@
 use crate::commands::CliCommand;
 use crate::context::AppContext;
 use async_trait::async_trait;
-use ene_core::{MemoryConfig, SessionConfig};
+use ene_mind::MindConfig;
+use ene_store::StoreConfig;
 
 pub struct ConfigCommand;
 
@@ -22,21 +23,22 @@ impl CliCommand for ConfigCommand {
     async fn execute(&self, _arg: &str, ctx: &mut AppContext) -> Result<(), String> {
         let snapshot = ctx
             .handle
+            .diagnostics()
             .get_snapshot()
             .await
             .map_err(|e| format!("Failed to get actor state: {e}"))?;
 
         let mem_config = snapshot
             .config
-            .get_section::<MemoryConfig>()
+            .get_section::<StoreConfig>()
             .unwrap_or_default();
-        let session_config = snapshot
+        let mind = snapshot
             .config
-            .get_section::<SessionConfig>()
+            .get_section::<MindConfig>()
             .unwrap_or_default();
         let provider_config = snapshot
             .config
-            .get_section::<ene_core::ProviderConfig>()
+            .get_section::<ene_runtime::ProviderConfig>()
             .unwrap_or_default();
 
         println!("--- Current Config ---");
@@ -71,8 +73,11 @@ impl CliCommand for ConfigCommand {
                     .resolve_memory_db_path(&snapshot.config.character)
                     .display()
             );
-            println!("Summary Recall Limit: {}", session_config.recall_limit);
-            println!("Similarity Threshold: {}", mem_config.similarity_threshold);
+            println!("Typed Recall Limit: {}", mind.memory.recall_result_limit);
+            println!(
+                "Recall Similarity Threshold: {}",
+                mind.memory.recall_similarity_threshold
+            );
         }
         println!("----------------------");
 

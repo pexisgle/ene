@@ -27,6 +27,7 @@ impl CliCommand for CommitmentsCommand {
         let sub = parts.first().copied().unwrap_or("");
         let snapshot = ctx
             .handle
+            .diagnostics()
             .get_snapshot()
             .await
             .map_err(|e| format!("Failed to get actor state: {e}"))?;

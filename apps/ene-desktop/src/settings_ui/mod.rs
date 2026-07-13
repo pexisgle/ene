@@ -145,36 +145,37 @@ impl Default for SettingsUi {
 
 fn noto_sans_jp_font_definitions() -> Option<&'static egui::FontDefinitions> {
     static FONTS: OnceLock<Option<egui::FontDefinitions>> = OnceLock::new();
-    FONTS.get_or_init(|| {
-        let assets_dir = ene_config::paths::assets_dir();
-        let font_path = assets_dir.join("fonts").join("NotoSansJP-Regular.ttf");
-        if !font_path.exists() {
-            tracing::warn!("Font file does not exist at {:?}", font_path);
-            return None;
-        }
-        let font_data = match std::fs::read(&font_path) {
-            Ok(data) => data,
-            Err(error) => {
-                tracing::warn!(%error, path = ?font_path, "Failed to read font file");
+    FONTS
+        .get_or_init(|| {
+            let assets_dir = ene_config::paths::assets_dir();
+            let font_path = assets_dir.join("fonts").join("NotoSansJP-Regular.ttf");
+            if !font_path.exists() {
+                tracing::warn!("Font file does not exist at {:?}", font_path);
                 return None;
             }
-        };
+            let font_data = match std::fs::read(&font_path) {
+                Ok(data) => data,
+                Err(error) => {
+                    tracing::warn!(%error, path = ?font_path, "Failed to read font file");
+                    return None;
+                }
+            };
 
-        let mut fonts = egui::FontDefinitions::default();
-        fonts.font_data.insert(
-            "NotoSansJP".to_owned(),
-            Arc::new(egui::FontData::from_owned(font_data)),
-        );
-        if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-            prop.insert(0, "NotoSansJP".to_owned());
-        }
-        if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-            mono.insert(0, "NotoSansJP".to_owned());
-        }
-        tracing::info!("Successfully loaded NotoSansJP-Regular.ttf for egui");
-        Some(fonts)
-    })
-    .as_ref()
+            let mut fonts = egui::FontDefinitions::default();
+            fonts.font_data.insert(
+                "NotoSansJP".to_owned(),
+                Arc::new(egui::FontData::from_owned(font_data)),
+            );
+            if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                prop.insert(0, "NotoSansJP".to_owned());
+            }
+            if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+                mono.insert(0, "NotoSansJP".to_owned());
+            }
+            tracing::info!("Successfully loaded NotoSansJP-Regular.ttf for egui");
+            Some(fonts)
+        })
+        .as_ref()
 }
 
 /// Install NotoSansJP into a dedicated egui context. Each winit window

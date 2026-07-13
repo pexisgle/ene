@@ -7,9 +7,9 @@ use bevy_ecs::world::World;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
+use crate::acquire_error::AcquireError;
 use crate::ai_bridge::AiBridge;
 use crate::chat_ui::render::ChatUi;
-use crate::acquire_error::AcquireError;
 
 pub struct ChatEguiWindow {
     pub window: Arc<Window>,
@@ -193,8 +193,7 @@ impl ChatEguiWindow {
         for id in to_free_now {
             self.egui_renderer.free_texture(&id);
         }
-        self.textures_to_free
-            .push(full_output.textures_delta.free);
+        self.textures_to_free.push(full_output.textures_delta.free);
 
         frame.present();
         Ok(())

@@ -1,6 +1,7 @@
 use crate::commands::CliCommand;
 use crate::context::AppContext;
 use async_trait::async_trait;
+use ene_config::load_character_card;
 
 pub struct CardCommand;
 
@@ -23,15 +24,9 @@ impl CliCommand for CardCommand {
             return Err("Usage: /card <name>".to_string());
         }
 
-        // Await the character load before returning
-        // so the prompt does not reappear mid-swap and
-        // a subsequent message cannot race the reload.
-        // The previous form spawned a detached
-        // tokio::task, returned Ok(()) immediately, and
-        // let the next user input run on the old
-        // character.
         let name = arg.to_string();
-        match ctx.handle.load_character(&name).await {
+        let card = load_character_card(&name).map_err(|e| e.to_string())?;
+        match ctx.handle.diagnostics().set_character(card).await {
             Ok(()) => {
                 println!("Character card loaded: {name}");
                 Ok(())

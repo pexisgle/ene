@@ -1,7 +1,8 @@
 use crate::commands::CliCommand;
 use crate::context::AppContext;
 use async_trait::async_trait;
-use ene_core::{MemoryConfig, SessionConfig};
+use ene_mind::MindConfig;
+use ene_store::StoreConfig;
 
 pub struct PromptCommand;
 
@@ -22,13 +23,14 @@ impl CliCommand for PromptCommand {
     async fn execute(&self, _arg: &str, ctx: &mut AppContext) -> Result<(), String> {
         let snapshot = ctx
             .handle
+            .diagnostics()
             .get_snapshot()
             .await
             .map_err(|e| format!("Failed to get actor state: {e}"))?;
 
         if let Some(card) = &snapshot.character_card {
             let prompts = ene_config::PromptLibrary::load("en");
-            let sys = ene_core::message_builder::build_system_prompt(
+            let sys = ene_runtime::message_builder::build_system_prompt(
                 card,
                 &snapshot.config.runtime_rules,
                 &snapshot.config.user_name,
@@ -53,32 +55,40 @@ impl CliCommand for PromptCommand {
 
             let mem_config = snapshot
                 .config
-                .get_section::<MemoryConfig>()
+                .get_section::<StoreConfig>()
                 .unwrap_or_default();
-            let session_config = snapshot
+            let mind = snapshot
                 .config
-                .get_section::<SessionConfig>()
+                .get_section::<MindConfig>()
                 .unwrap_or_default();
             if mem_config.enabled {
-                println!("--- Recalled Summaries ---");
+                println!("--- Typed Memory Recall ---");
                 println!(
-                    "Up to {} past conversation summaries will be injected dynamically based on embedding similarity.",
-                    session_config.recall_limit
+                    "Up to {} typed memories will be selected by hybrid recall.",
+                    mind.memory.recall_result_limit
                 );
-                println!("----------------------------");
+                println!("--------------------------------");
             }
 
-            if snapshot.memory.is_enabled() {
-                let card_name = card.data.get_character_name();
-                if let Ok(facts) = snapshot.memory.get_all_keyfacts(card_name).await
-                    && !facts.is_empty()
-                {
-                    println!("--- Known Facts about {} ---", snapshot.config.user_name);
-                    for f in facts {
-                        println!("• {}: {}", f.key, f.value);
-                    }
-                    println!("-----------------------------");
+            if snapshot.memory.is_enabled()
+                && let Ok(memories) = snapshot
+                    .memory
+                    .list_typed_memories(
+                        snapshot.card_name.as_str(),
+                        None,
+                        mind.memory.recall_result_limit,
+                    )
+                    .await
+                && !memories.is_empty()
+            {
+                println!(
+                    "--- Known Typed Memories about {} ---",
+                    snapshot.config.user_name
+                );
+                for memory in memories {
+                    println!("• {}: {}", memory.title, memory.content);
                 }
+                println!("-----------------------------");
             }
 
             if !snapshot.history.is_empty() {
@@ -90,7 +100,7 @@ impl CliCommand for PromptCommand {
                 println!("----------------------------------------");
             }
 
-            if let Some(phi) = ene_core::message_builder::build_expression_phi(card, &prompts) {
+            if let Some(phi) = ene_runtime::message_builder::build_expression_phi(card, &prompts) {
                 let phi_expanded = ene_config::expand_cbs_macros(
                     &phi,
                     card.data.get_character_name(),

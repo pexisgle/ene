@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
-use ene_core::Role;
+use ene_runtime::Role;
 
 use crate::ai_bridge::AiBridge;
 use crate::chat_state::ChatState;
@@ -137,11 +137,7 @@ fn render_message_bubble(ui: &mut egui::Ui, message: &crate::chat_state::ChatMes
             if text.is_empty() && message.is_streaming {
                 ui.weak(crate::i18n::waiting_for_ai());
             } else {
-                ui.add(
-                    egui::Label::new(text)
-                        .wrap()
-                        .selectable(true),
-                );
+                ui.add(egui::Label::new(text).wrap().selectable(true));
             }
         });
     });

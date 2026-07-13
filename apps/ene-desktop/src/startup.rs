@@ -4,7 +4,7 @@
 //! |-------|----------|------|
 //! | 1 — First launch | [`first_launch_setup`] | Once per install (release asset copy) |
 //! | 2 — App launch | [`load_desktop_settings`], [`init_app_state`] | Every process start (sync) |
-//! | 3 — Runtime warmup | [`AiBridge`] background task via `ene_core::bootstrap_runtime` | Every start (async) |
+//! | 3 — Runtime warmup | [`AiBridge`] background task via `ene_runtime::bootstrap_runtime` | Every start (async) |
 //! | 4 — Graphics ready | [`crate::runtime::Runtime::resumed`] | After winit surface exists |
 
 use std::path::PathBuf;

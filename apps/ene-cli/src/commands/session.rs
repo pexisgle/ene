@@ -1,7 +1,7 @@
 use crate::commands::CliCommand;
 use crate::{context::AppContext, style};
 use async_trait::async_trait;
-use ene_core::{SessionConfig, Truncate};
+use ene_runtime::{SessionConfig, Truncate};
 
 pub struct SessionCommand;
 
@@ -25,6 +25,7 @@ impl CliCommand for SessionCommand {
 
         let snapshot = ctx
             .handle
+            .diagnostics()
             .get_snapshot()
             .await
             .map_err(|e| format!("Failed to get actor state: {e}"))?;
@@ -46,7 +47,7 @@ impl CliCommand for SessionCommand {
     }
 }
 
-fn handle_info(snapshot: &ene_core::EneStateSnapshot) {
+fn handle_info(snapshot: &ene_runtime::EneStateSnapshot) {
     println!("--- Session Info ---");
     println!("Session ID: {}", snapshot.session_id);
     println!(
@@ -69,7 +70,7 @@ fn handle_info(snapshot: &ene_core::EneStateSnapshot) {
     println!("--------------------");
 }
 
-async fn handle_split(ctx: &AppContext, snapshot: &ene_core::EneStateSnapshot) {
+async fn handle_split(ctx: &AppContext, snapshot: &ene_runtime::EneStateSnapshot) {
     if snapshot.history.is_empty() {
         println!(
             "{}",
@@ -82,21 +83,21 @@ async fn handle_split(ctx: &AppContext, snapshot: &ene_core::EneStateSnapshot) {
         return;
     }
 
-    let cognition_enabled = snapshot
+    let compression_enabled = snapshot
         .config
-        .get_section::<ene_core::CognitionConfig>()
-        .map(|c| c.enabled && c.context.compression_enabled)
+        .get_section::<ene_mind::MindConfig>()
+        .map(|c| c.context.compression_enabled)
         .unwrap_or(false);
 
     println!(
         "{}",
-        style::header(if cognition_enabled {
+        style::header(if compression_enabled {
             "[Session] Manually triggering context compression..."
         } else {
             "[Session] Manually splitting session..."
         })
     );
-    match ctx.handle.manual_split().await {
+    match ctx.handle.diagnostics().manual_split().await {
         Ok(result) => {
             println!(
                 "{}",
@@ -105,7 +106,7 @@ async fn handle_split(ctx: &AppContext, snapshot: &ene_core::EneStateSnapshot) {
                     Truncate::simple(&result.summary, 120)
                 ))
             );
-            if cognition_enabled {
+            if compression_enabled {
                 println!(
                     "{}",
                     style::warning(format!(
@@ -127,7 +128,7 @@ async fn handle_split(ctx: &AppContext, snapshot: &ene_core::EneStateSnapshot) {
             }
             println!(
                 "{}",
-                style::warning(if cognition_enabled {
+                style::warning(if compression_enabled {
                     "[Session] Context compression completed."
                 } else {
                     "[Session] Session split completed."
@@ -140,7 +141,7 @@ async fn handle_split(ctx: &AppContext, snapshot: &ene_core::EneStateSnapshot) {
     }
 }
 
-async fn handle_summaries(snapshot: &ene_core::EneStateSnapshot) {
+async fn handle_summaries(snapshot: &ene_runtime::EneStateSnapshot) {
     if !snapshot.memory.is_enabled() {
         println!("{}", style::warning("[Session] Memory is not enabled."));
         return;

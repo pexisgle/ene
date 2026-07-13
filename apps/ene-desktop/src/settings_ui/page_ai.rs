@@ -22,12 +22,12 @@ pub fn render(
     let mut provider = settings
         .ai
         .ai
-        .get_section::<ene_core::ProviderConfig>()
+        .get_section::<ene_runtime::ProviderConfig>()
         .unwrap_or_default();
     let mut memory = settings
         .ai
         .ai
-        .get_section::<ene_core::MemoryConfig>()
+        .get_section::<ene_store::StoreConfig>()
         .unwrap_or_default();
 
     ui.vertical(|ui| {

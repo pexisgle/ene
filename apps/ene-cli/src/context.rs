@@ -1,4 +1,4 @@
-use ene_core::EneHandle;
+use ene_runtime::EneHandle;
 
 pub struct AppContext {
     pub handle: EneHandle,

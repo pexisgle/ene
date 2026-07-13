@@ -55,14 +55,14 @@ impl SettingsInputState {
         let provider = settings
             .ai
             .ai
-            .get_section::<ene_core::ProviderConfig>()
+            .get_section::<ene_runtime::ProviderConfig>()
             .unwrap_or_default();
         self.ai_base_url = provider.base_url.clone();
         self.ai_api_key = provider.api_key.inline.clone();
         let mem = settings
             .ai
             .ai
-            .get_section::<ene_core::MemoryConfig>()
+            .get_section::<ene_store::StoreConfig>()
             .unwrap_or_default();
         self.ai_memory_enabled = mem.enabled;
         self.ai_embedding_provider = provider.embedding.backend.clone();

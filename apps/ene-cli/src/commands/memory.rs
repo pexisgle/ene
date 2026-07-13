@@ -28,14 +28,15 @@ impl CliCommand for MemoryCommand {
     async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), String> {
         let (subcmd, tail) = parse_subcommand_and_tail(arg);
 
-        let snapshot = ctx
-            .handle
+        let diag = ctx.handle.diagnostics();
+        let snapshot = diag
             .get_snapshot()
             .await
             .map_err(|e| format!("Failed to get actor state: {e}"))?;
+        let memory = diag.memory();
 
         match subcmd {
-            "search" => handle_search(tail, &snapshot).await,
+            "search" => handle_search(tail, memory, &snapshot).await,
             "list" => handle_list(tail, &snapshot).await,
             "inspect" => handle_inspect(tail, &snapshot).await,
             "why" => handle_why(tail, &snapshot).await,
@@ -44,7 +45,7 @@ impl CliCommand for MemoryCommand {
                 handle_transition(
                     tail,
                     &snapshot,
-                    ene_memory::MemoryStatus::Archived,
+                    ene_store::MemoryStatus::Archived,
                     "archived",
                 )
                 .await
@@ -54,7 +55,7 @@ impl CliCommand for MemoryCommand {
                 handle_transition(
                     tail,
                     &snapshot,
-                    ene_memory::MemoryStatus::Disputed,
+                    ene_store::MemoryStatus::Disputed,
                     "disputed",
                 )
                 .await
@@ -89,7 +90,11 @@ impl CliCommand for MemoryCommand {
     }
 }
 
-async fn handle_search(query: &str, snapshot: &ene_core::EneStateSnapshot) {
+async fn handle_search(
+    query: &str,
+    memory: &ene_runtime::MemoryQueryHandle,
+    snapshot: &ene_runtime::EneStateSnapshot,
+) {
     if query.is_empty() {
         println!(
             "{}",
@@ -97,13 +102,12 @@ async fn handle_search(query: &str, snapshot: &ene_core::EneStateSnapshot) {
         );
         return;
     }
-    if !snapshot.memory.is_enabled() {
+    if !memory.is_enabled() {
         println!("{}", style::warning("[Memory] Memory is not enabled."));
         return;
     }
     let card_name = snapshot.card_name.as_str();
-    match snapshot
-        .memory
+    match memory
         .search_typed_memories_hybrid(card_name, Some(&snapshot.config.user_name), query, 10)
         .await
     {
@@ -142,7 +146,7 @@ async fn handle_search(query: &str, snapshot: &ene_core::EneStateSnapshot) {
     }
 }
 
-async fn handle_list(args: &str, snapshot: &ene_core::EneStateSnapshot) {
+async fn handle_list(args: &str, snapshot: &ene_runtime::EneStateSnapshot) {
     if !snapshot.memory.is_enabled() {
         println!("{}", style::warning("[Memory] Memory is not enabled."));
         return;
@@ -175,7 +179,7 @@ async fn handle_list(args: &str, snapshot: &ene_core::EneStateSnapshot) {
     }
 }
 
-async fn handle_inspect(id_arg: &str, snapshot: &ene_core::EneStateSnapshot) {
+async fn handle_inspect(id_arg: &str, snapshot: &ene_runtime::EneStateSnapshot) {
     let Some(id) = parse_id(id_arg) else {
         println!("{}", style::warning("[Memory] Usage: /memory inspect <id>"));
         return;
@@ -210,7 +214,7 @@ async fn handle_inspect(id_arg: &str, snapshot: &ene_core::EneStateSnapshot) {
     }
 }
 
-async fn handle_why(id_arg: &str, snapshot: &ene_core::EneStateSnapshot) {
+async fn handle_why(id_arg: &str, snapshot: &ene_runtime::EneStateSnapshot) {
     let Some(id) = parse_id(id_arg) else {
         println!("{}", style::warning("[Memory] Usage: /memory why <id>"));
         return;
@@ -235,7 +239,7 @@ async fn handle_why(id_arg: &str, snapshot: &ene_core::EneStateSnapshot) {
     }
 }
 
-async fn handle_pin(id_arg: &str, snapshot: &ene_core::EneStateSnapshot) {
+async fn handle_pin(id_arg: &str, snapshot: &ene_runtime::EneStateSnapshot) {
     let Some(id) = parse_id(id_arg) else {
         println!("{}", style::warning("[Memory] Usage: /memory pin <id>"));
         return;
@@ -247,7 +251,7 @@ async fn handle_pin(id_arg: &str, snapshot: &ene_core::EneStateSnapshot) {
     }
 }
 
-async fn handle_forget(id_arg: &str, snapshot: &ene_core::EneStateSnapshot) {
+async fn handle_forget(id_arg: &str, snapshot: &ene_runtime::EneStateSnapshot) {
     let Some(id) = parse_id(id_arg) else {
         println!("{}", style::warning("[Memory] Usage: /memory forget <id>"));
         return;
@@ -259,7 +263,7 @@ async fn handle_forget(id_arg: &str, snapshot: &ene_core::EneStateSnapshot) {
     }
 }
 
-async fn handle_restore(id_arg: &str, snapshot: &ene_core::EneStateSnapshot) {
+async fn handle_restore(id_arg: &str, snapshot: &ene_runtime::EneStateSnapshot) {
     let Some(id) = parse_id(id_arg) else {
         println!("{}", style::warning("[Memory] Usage: /memory restore <id>"));
         return;
@@ -273,8 +277,8 @@ async fn handle_restore(id_arg: &str, snapshot: &ene_core::EneStateSnapshot) {
 
 async fn handle_transition(
     id_arg: &str,
-    snapshot: &ene_core::EneStateSnapshot,
-    status: ene_memory::MemoryStatus,
+    snapshot: &ene_runtime::EneStateSnapshot,
+    status: ene_store::MemoryStatus,
     label: &str,
 ) {
     let Some(id) = parse_id(id_arg) else {
@@ -299,26 +303,26 @@ fn parse_id(raw: &str) -> Option<i64> {
     raw.trim().parse::<i64>().ok()
 }
 
-fn parse_kind_arg(args: &str) -> Option<ene_memory::MemoryKind> {
+fn parse_kind_arg(args: &str) -> Option<ene_store::MemoryKind> {
     let tokens: Vec<&str> = args.split_whitespace().collect();
     if tokens.len() < 2 || tokens[0] != "--kind" {
         return None;
     }
     match tokens[1] {
-        "episodic" => Some(ene_memory::MemoryKind::Episodic),
-        "semantic" => Some(ene_memory::MemoryKind::Semantic),
-        "user_profile" => Some(ene_memory::MemoryKind::UserProfile),
-        "relationship" => Some(ene_memory::MemoryKind::Relationship),
-        "affective" => Some(ene_memory::MemoryKind::Affective),
-        "commitment" => Some(ene_memory::MemoryKind::Commitment),
-        "preference" => Some(ene_memory::MemoryKind::Preference),
-        "procedure" => Some(ene_memory::MemoryKind::Procedure),
-        "reflection" => Some(ene_memory::MemoryKind::Reflection),
+        "episodic" => Some(ene_store::MemoryKind::Episodic),
+        "semantic" => Some(ene_store::MemoryKind::Semantic),
+        "user_profile" => Some(ene_store::MemoryKind::UserProfile),
+        "relationship" => Some(ene_store::MemoryKind::Relationship),
+        "affective" => Some(ene_store::MemoryKind::Affective),
+        "commitment" => Some(ene_store::MemoryKind::Commitment),
+        "preference" => Some(ene_store::MemoryKind::Preference),
+        "procedure" => Some(ene_store::MemoryKind::Procedure),
+        "reflection" => Some(ene_store::MemoryKind::Reflection),
         _ => None,
     }
 }
 
-async fn handle_status(snapshot: &ene_core::EneStateSnapshot) {
+async fn handle_status(snapshot: &ene_runtime::EneStateSnapshot) {
     if !snapshot.memory.is_enabled() {
         println!("{}", style::warning("[Memory] Memory is not enabled."));
         return;
@@ -346,7 +350,7 @@ async fn handle_status(snapshot: &ene_core::EneStateSnapshot) {
     }
 }
 
-async fn handle_migrate(args: &str, snapshot: &ene_core::EneStateSnapshot) {
+async fn handle_migrate(args: &str, snapshot: &ene_runtime::EneStateSnapshot) {
     if args != "legacy" && args != "legacy --dry-run" {
         println!(
             "{}",
@@ -384,7 +388,7 @@ async fn handle_migrate(args: &str, snapshot: &ene_core::EneStateSnapshot) {
     }
 }
 
-async fn handle_reset(args: &str, snapshot: &ene_core::EneStateSnapshot) {
+async fn handle_reset(args: &str, snapshot: &ene_runtime::EneStateSnapshot) {
     if args != "legacy --yes" {
         println!(
             "{}",
@@ -436,7 +440,7 @@ mod tests {
     fn parse_kind_arg_reads_kind_flag_value_pair() {
         assert_eq!(
             parse_kind_arg("--kind preference"),
-            Some(ene_memory::MemoryKind::Preference)
+            Some(ene_store::MemoryKind::Preference)
         );
     }
 }

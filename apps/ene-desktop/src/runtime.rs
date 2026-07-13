@@ -62,7 +62,7 @@ pub struct Runtime {
     /// initialization). The two clocks do not need to agree
     /// because the settings UI drains through the bevy
     /// `UiEmotionQueue` resource and the AI bridge drains
-    /// through `EmoteToken` messages; both ultimately push
+    /// through `PerformanceCue` / `EmoteToken` messages; both ultimately push
     /// into `EmotionPipelineState::pending`.
     emotion_clock: Option<Instant>,
     device_state: device_query::DeviceState,
@@ -161,7 +161,8 @@ impl Runtime {
             let height = 600.0;
             let x = monitor_size.width as f64 - width - 16.0;
             let y = monitor_size.height as f64 - height - 48.0;
-            chat_attrs = chat_attrs.with_position(PhysicalPosition::new(x.max(0.0) as i32, y.max(0.0) as i32));
+            chat_attrs = chat_attrs
+                .with_position(PhysicalPosition::new(x.max(0.0) as i32, y.max(0.0) as i32));
         }
         let chat_w = match event_loop.create_window(chat_attrs) {
             Ok(w) => Arc::new(w),
@@ -431,7 +432,7 @@ impl Runtime {
             .settings
             .ai
             .ai
-            .get_section::<ene_core::CognitionConfig>()
+            .get_section::<ene_mind::MindConfig>()
             .map(|c| c.emotion.expression_hysteresis_seconds)
             .unwrap_or(4.0);
         if let Some(mut pipeline) =

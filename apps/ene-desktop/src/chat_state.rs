@@ -1,6 +1,6 @@
 //! Chat window state: message list, input draft, and in-flight dialogs.
 
-use ene_core::{ConversationEntry, Role};
+use ene_runtime::{ConversationEntry, Role};
 
 use crate::settings::{PendingPermission, PendingUserInput, QuestionDraft};
 
@@ -67,6 +67,30 @@ impl ChatState {
         if let Some(last) = self.messages.last_mut() {
             last.is_streaming = false;
         }
+        self.needs_history_reconcile = true;
+    }
+
+    /// End a failed stream, optionally appending an error note to the
+    /// in-flight assistant bubble so the user sees why processing stopped.
+    pub fn finish_streaming_with_error(&mut self, message: &str) {
+        if let Some(last) = self.messages.last_mut()
+            && last.role == Role::Assistant
+            && last.is_streaming
+        {
+            if last.content.is_empty() {
+                last.content = format!("[Error] {message}");
+            } else {
+                last.content.push_str(&format!("\n[Error] {message}"));
+            }
+            last.is_streaming = false;
+        } else {
+            self.messages.push(ChatMessage {
+                role: Role::Assistant,
+                content: format!("[Error] {message}"),
+                is_streaming: false,
+            });
+        }
+        self.scroll_to_bottom = true;
         self.needs_history_reconcile = true;
     }
 

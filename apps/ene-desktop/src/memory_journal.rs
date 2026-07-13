@@ -1,6 +1,6 @@
 //! Memory Journal presenter: browse rows, action gating, and recall debug mapping.
 
-use ene_memory::{MemoryItem, MemoryStatus};
+use ene_store::{MemoryItem, MemoryStatus};
 
 use crate::settings::{MemoryJournalRecallRow, MemoryJournalRow};
 
