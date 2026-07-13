@@ -59,12 +59,11 @@ impl MemoryQueryHandle {
     /// Embed a text query for similarity search.
     pub async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EneRuntimeError> {
         let embedder = self.embedder.as_ref().ok_or_else(|| {
-            EneRuntimeError::Embedding(ene_ai::EmbeddingError::Init(
+            EneRuntimeError::from(ene_ai::EmbeddingError::Init(
                 "Embedding provider not available".into(),
             ))
         })?;
-        embedder
-            .embed_query(text)
+        ene_ai::embed_query(embedder.as_ref(), text)
             .await
             .map_err(EneRuntimeError::from)
     }
@@ -157,7 +156,7 @@ impl MemoryQueryHandle {
             .embedder
             .as_ref()
             .ok_or_else(|| {
-                EneRuntimeError::Embedding(ene_ai::EmbeddingError::Init(
+                EneRuntimeError::from(ene_ai::EmbeddingError::Init(
                     "Embedding provider not available".into(),
                 ))
             })?
@@ -232,11 +231,11 @@ impl MemoryQueryHandle {
     ) -> Result<Vec<ene_store::ScoredMemory>, EneRuntimeError> {
         let store = self.require_store()?;
         let embedder = self.embedder.as_ref().ok_or_else(|| {
-            EneRuntimeError::Embedding(ene_ai::EmbeddingError::Init(
+            EneRuntimeError::from(ene_ai::EmbeddingError::Init(
                 "Embedding provider not available".into(),
             ))
         })?;
-        let query_embedding = embedder.embed_query(query_text).await?;
+        let query_embedding = ene_ai::embed_query(embedder.as_ref(), query_text).await?;
         let options = ene_store::MemorySearchOptions {
             query_text,
             query_embedding: &query_embedding,

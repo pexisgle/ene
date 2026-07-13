@@ -73,6 +73,20 @@ pub enum LlmProviderError {
     Provider(String),
 }
 
+/// Single public error type for the `ene-ai` crate boundary (API v2 / #118).
+///
+/// Domain-specific [`LlmProviderError`] and [`EmbeddingError`] remain available
+/// as nested payloads for typed matching via `AiError` variants.
+#[derive(Debug, Error)]
+pub enum AiError {
+    /// Chat / completion provider failure.
+    #[error(transparent)]
+    Llm(#[from] LlmProviderError),
+    /// Embedding provider failure.
+    #[error(transparent)]
+    Embedding(#[from] crate::traits::EmbeddingError),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

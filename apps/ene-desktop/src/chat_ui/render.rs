@@ -76,12 +76,20 @@ impl ChatUi {
                 let send_clicked = ui
                     .add_enabled(!processing, egui::Button::new(crate::i18n::send()))
                     .clicked();
+                let cancel_clicked = ui
+                    .add_enabled(processing, egui::Button::new(crate::i18n::cancel()))
+                    .clicked();
 
                 // Multiline TextEdit inserts a newline on Enter; detect send
                 // while focused instead of waiting for lost_focus.
                 let enter_send = !processing
                     && response.has_focus()
                     && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+                let escape_cancel = processing && ui.input(|i| i.key_pressed(egui::Key::Escape));
+
+                if cancel_clicked || escape_cancel {
+                    ai.cancel();
+                }
 
                 if let Some(mut chat) = world.get_mut::<ChatStateComponent>(chat_entity) {
                     chat.0.input_draft = draft;

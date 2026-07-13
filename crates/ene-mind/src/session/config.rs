@@ -81,7 +81,9 @@ ene_config::define_config!(
     /// Configuration for session auto-splitting and summarization behavior.
     pub struct SessionConfig {
         /// Whether to enable automatic session splitting.
-        pub auto_split: bool = true,
+        /// Deprecated product path: hard session split is disabled. Prefer
+        /// `mind.context.compression_enabled`. Default is `false`.
+        pub auto_split: bool = false,
         /// Time-based split threshold (minutes) — contributes to the time factor.
         /// A full score of 1.0 is reached once this many minutes have elapsed.
         pub timeout_minutes: u64 = 30,

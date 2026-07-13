@@ -3,7 +3,7 @@
 > **Crate:** `ene-ai`
 > **Path:** `crates/ene-ai`
 
-`ene-ai` is the unified LLM and embedding provider layer (API v2 merge of the former `ene-provider` + `ene-embedding` crates). Chat completions and embeddings flow through `LlmProvider` and `EmbeddingProvider`. Failures use typed errors (`LlmProviderError`, `EmbeddingError`).
+`ene-ai` is the unified LLM and embedding provider layer (API v2 merge of the former `ene-provider` + `ene-embedding` crates). Chat completions and embeddings flow through `LlmProvider` and `EmbeddingProvider`. The crate-boundary error is [`AiError`](#aierror); nested provider failures use typed payloads (`LlmProviderError`, `EmbeddingError`).
 
 ```mermaid
 flowchart LR
@@ -17,7 +17,7 @@ flowchart LR
 
 ## `EmbeddingProvider` Trait
 
-Batch-only on the trait. Single-text / query helpers are free functions (also available as default methods that call those free functions).
+**Only `embed_batch` (plus metadata) is on the trait.** Single-text / query helpers are **free functions only** — not trait methods.
 
 ```rust
 #[async_trait]
@@ -45,9 +45,9 @@ pub async fn embed_query(
 
 | Method / fn | Notes |
 |---|---|
-| `embed_batch(items)` | Required. Output order matches input. Empty batch → empty `Vec`. Empty/whitespace text → `EmptyInput`. Dim mismatch → `DimensionMismatch`. |
-| `dimensions()` / `model_name()` | Provider metadata. |
-| `embed` / `embed_query` | Free functions (or default trait methods) over `embed_batch`. |
+| `embed_batch(items)` | Required trait method. Output order matches input. Empty batch → empty `Vec`. Empty/whitespace text → `EmptyInput`. Dim mismatch → `DimensionMismatch`. |
+| `dimensions()` / `model_name()` | Provider metadata on the trait. |
+| `embed` / `embed_query` | **Free functions only** over `embed_batch` (not methods on the trait). |
 
 **Not** on the trait: `hyde`, `has_reranker`, `rerank`. Those live in pipeline helpers:
 
@@ -70,13 +70,17 @@ pub fn create_local_provider(
 
 Requires a **multi-thread** tokio runtime (`block_in_place`). Supported Hub fetch families are the Jina v5 retrieval models; other GGUF layouts need direct `GgufEmbeddingProvider::load`.
 
-## `Role`
+## `Role` / `HistoryEntry`
 
 ```rust
 pub enum Role { System, User, Assistant }
 ```
 
-Used by mind `HistoryEntry { role: Role, content: String }` and runtime `ConversationEntry`.
+Used by the single history type `HistoryEntry { role: Role, content: String }` (owned by `ene-mind`, re-exported by `ene-runtime`). There is no separate `ConversationEntry`.
+
+## `AiError`
+
+Crate-boundary error enum (`thiserror`). Prefer matching on `AiError` at host/mind call sites; nested `LlmProviderError` / `EmbeddingError` remain available as payloads for typed matching.
 
 ## Related
 

@@ -44,7 +44,7 @@ The library surface grew dual streaming pipelines (legacy + cognitive), an unrea
 - `ene-store` ↛ `ene-ai` / `ene-mind` (no LLM, no embedding provider handle)
 - `ene-tool` ↛ runtime / mind / store
 - **`PerformanceCue` lives in `ene-mind`**; runtime re-exports; **`ene-vrm` does not depend on mind/runtime**
-- Fold `ene-common` into tool/config; drop `schema_link` (runtime depends on mind normally)
+- Fold `ene-common` into `ene-config` (`Truncate` / `TruncateResult` live in `ene_config::truncate`) and `ene-tool-common` (re-export); drop `schema_link` (runtime depends on mind normally)
 
 ### Config ownership
 
@@ -71,12 +71,14 @@ flowchart TD
   runtime --> toolHost["ene-tool-host"]
   mind --> store
   mind --> ai
-  ai --> tool["ene-tool"]
-  toolHost --> tool
+  ai --> toolProto["ene-tool-proto"]
+  toolHost --> tool["ene-tool"]
   store --> config["ene-config"]
   ai --> config
   mind --> config
 ```
+
+Chat works with `store.enabled=false` (no SQLite memory). Memory features (recall, spans, typed memory) require `store.enabled=true` and a configured embedder.
 
 ## Host Contract (summary)
 
@@ -118,10 +120,10 @@ Removed from chat: `SpecialToken`, standalone `Expression`, `SessionSplit`, `Pip
 ## Migration Notes
 
 - No dual-pipeline fallback: missing embedder with memory features → fail closed
-- Compression-only context boundary (no hard session-ID minting as product path)
+- **Compression-only context boundary:** rolling compression (`mind.context.compression_*`) is the product path. Hard session-ID minting / hard-split is not; keep `session.auto_split` off (default `false`) and prefer compression
 - Single `HistoryEntry { role: Role, content: String }` across mind + runtime snapshots
 - No public compatibility aliases or migration feature flags — callers update in the same change
-
+- Chat without store is supported; enabling memory without store + embedder fails closed
 ## Acceptance
 
 - [ ] Sub-issues #112–#118 closed or explicitly deferred

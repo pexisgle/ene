@@ -175,7 +175,7 @@ A read-only, point-in-time capture of actor state, returned by `handle.diagnosti
 ```rust
 pub struct EneStateSnapshot {
     pub character_card: Option<CharacterCardV3>,
-    pub history: Vec<ConversationEntry>,
+    pub history: Vec<HistoryEntry>,
     pub config: EneConfig,
     pub session_id: SessionId,
     pub card_name: CardName,
@@ -188,7 +188,7 @@ pub struct EneStateSnapshot {
 | Field | Description |
 |---|---|
 | `character_card` | The loaded character card, if any. |
-| `history` | Conversation history as `ConversationEntry` pairs (role + content). |
+| `history` | Conversation history as `HistoryEntry` pairs (role + content). |
 | `config` | A clone of the currently active `EneConfig`. |
 | `session_id` | The current session's unique identifier. |
 | `card_name` | The active character card's name. |
@@ -290,7 +290,7 @@ Assembles an LLM message list for compatibility and debugging callers. `MessageB
 pub struct MessageBuildContext<'a> {
     pub card: &'a CharacterCardV3,
     pub user_input: &'a str,
-    pub history: &'a [ConversationEntry],
+    pub history: &'a [HistoryEntry],
     pub runtime_context: Option<&'a str>,
     pub runtime_rules: &'a str,
     pub user_name: &'a str,
@@ -374,15 +374,14 @@ Maps to `ene_tool_db::DbResponse::Error { code, message }` via `DbErrorCode` (`P
 
 `ene-runtime` re-exports items from every crate below it in the dependency graph so consumers only need `ene_runtime::*` for the common path. All re-exports are annotated `#[doc(no_inline)]` except where noted, so rustdoc links point back to the source crate.
 
-As of the [API refactor](../architecture/api-refactor-plan.md), this list is curated: it keeps only types that appear in `EneHandle`'s own public signatures (`EneStateSnapshot`, `EneEvent`, `ConversationEntry`, …) or that are otherwise high-traffic across `ene-cli`/`ene-desktop`. Types unused outside `ene-runtime` (e.g. the embedding-provider sub-configs, `ene_tool_host::ToolRegistry`, `ene_mind::split_text_and_special_tokens`) were dropped from the root — import them from their owning crate directly if you need them.
+As of [API v2](../architecture/api-v2.md), this list is curated: it keeps only types that appear in `EneHandle`'s own public signatures (`EneStateSnapshot`, `EneEvent`, `HistoryEntry`, …) or that are otherwise high-traffic across `ene-cli`/`ene-desktop`. Types unused outside `ene-runtime` were dropped from the root — import them from their owning crate directly if you need them.
 
 | Source crate | Re-exported items |
 |---|---|
 | `ene_config` | `EneConfig`, `CharacterCardV3` |
 | `ene_ai` | `LlmMessage`, `LlmProvider`, `ProviderConfig`, `Role` |
 | `ene_store` | `StoreConfig` |
-| `ene_common` | `Truncate` |
-| `ene_mind` | `CardName`, `SessionId`, `SplitReason`, `SplitResult`, `extract_emotion_from_token`, `SessionConfig`, `SummarizationConfig` |
+| `ene_mind` | `CardName`, `SessionId`, `HistoryEntry`, `CueSource`, `PerformanceCue` |
 | `ene_tool_proto` | `ToolSpec` |
 
 Mind configuration types are owned by and imported directly from `ene-mind`. `ene-runtime`
@@ -395,15 +394,16 @@ These are the crate's own types, re-exported at the root from their defining mod
 
 | Module | Items |
 |---|---|
-| `handle` | `ActorDeadError`, `ConversationEntry`, `EneCommand` *(module-local, not re-exported)*, `EneEvent`, `EneEventReceiver`, `EneHandle`, `EneStateSnapshot`, `EneStatus`, `MemoryQueryHandle`, `TerminalReason` |
+| `handle` | `ActorDeadError`, `EneCommand` *(module-local, not re-exported)*, `EneEvent`, `EneEventReceiver`, `EneHandle`, `EneStateSnapshot`, `EneStatus`, `ShutdownTimeout`, `TerminalReason` |
+| `diagnostics` | `DiagnosticEvent`, `DiagnosticEventReceiver`, `EneDiagnostics`, `MemoryQueryHandle` |
 | `error` | `EneRuntimeError` |
 | `streaming` | `MultiAnswer` *(re-exported from `ene_tool_proto`, `#[doc(no_inline)]`)*, `PermissionDecision`, `UserInputResponse` |
 | `message_builder` | `MessageBuildContext`, `build_messages` |
-| `types` | `RequestId` |
+| `types` | `RequestId`, `TurnId`, `RunError`, `CancelError` |
 
 `EneCommand` itself is `pub` from the `handle` module but is **not** re-exported at the crate root — consumers reach it only indirectly through `EneHandle`'s command-sending methods.
 
-`streaming` and `message_builder` are the two modules kept `pub` (not `pub(crate)`) for reasons other than "apps need this": `streaming::{StreamContext, run_stream}` is exercised directly by `ene-runtime`'s own `tests/cognitive_streaming_integration.rs`, and `message_builder`'s module-scoped prompt builders (`build_system_prompt`, `build_expression_phi`, …) are called directly by `ene-cli`'s `/prompt` debug command. Application code should still prefer `EneHandle` for normal use — these two modules are not part of the `EneHandle` facade and may change without a deprecation cycle.
+`streaming` and `message_builder` are the two modules kept `pub` (not `pub(crate)`) for reasons other than "apps need this": `streaming::{StreamContext, run_stream}` is exercised directly by `ene-runtime`'s own integration tests, and `message_builder`'s module-scoped prompt builders (`build_system_prompt`, `build_expression_phi`, …) are called directly by `ene-cli`'s `/prompt` debug command. Application code should still prefer `EneHandle` for normal use — these two modules are not part of the `EneHandle` facade and may change without a deprecation cycle.
 
 ---
 
@@ -414,7 +414,7 @@ These are the crate's own types, re-exported at the root from their defining mod
 | `ActorDeadError` | `thiserror` struct | Returned by sync `EneHandle` methods when the actor's `mpsc` channel is closed (actor task has exited). `#[error("Actor is no longer running")]`. |
 | `ShutdownTimeout` | `thiserror` struct (`pub std::time::Duration`) | Returned by `EneHandle::shutdown` when the actor did not finish draining within the given timeout. `#[error("Actor did not shut down within {0:?}")]`. |
 | `EneEventReceiver` | Wrapper struct | Wraps a `broadcast::Receiver<EneEvent>`. Exposes `try_recv(&mut self) -> Result<EneEvent, TryRecvError>` (non-blocking) and `async fn recv(&mut self) -> Result<EneEvent, RecvError>`. |
-| `ConversationEntry` | `Debug, Clone` struct | One history entry: `{ role: Role, content: String }`. |
+| `HistoryEntry` | `Debug, Clone` struct (from `ene-mind`) | One history entry: `{ role: Role, content: String }`. Replaces the former `ConversationEntry` name. |
 | `EneStateSnapshot` | See [above](#enestatesnapshot). | |
 | `EneStatus` | See [above](#enestatus). | |
 | `PermissionDecision` | See [above](#permissiondecision--userinputresponse--multianswer). | |

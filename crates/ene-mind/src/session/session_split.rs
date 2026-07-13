@@ -185,7 +185,7 @@ pub async fn check_boundary(
     // Compute topic similarity by embedding the current user input and comparing
     // with the previous turn's embedding. Skip if no embedder or prior embedding.
     let topic_similarity: Option<f32> = if let Some(prev_embedding) = last_input_embedding {
-        match embedder.embed_query(user_input).await {
+        match ene_ai::embed_query(embedder, user_input).await {
             Ok(current_embedding) => Some(cosine_similarity(prev_embedding, &current_embedding)),
             Err(e) => {
                 tracing::warn!(component = "Session", error = %e, "Embedding error during boundary check");
@@ -294,7 +294,7 @@ pub async fn embed_session_messages(
 
     let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(messages.len());
     for content in &messages {
-        match embedder.embed(content, EmbeddingKind::Summary).await {
+        match ene_ai::embed(embedder, content, EmbeddingKind::Summary).await {
             Ok(emb) => all_embeddings.push(emb),
             Err(e) => {
                 tracing::warn!(component = "Session", error = %e, "Failed to embed message (skipping)");

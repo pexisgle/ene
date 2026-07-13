@@ -4,7 +4,7 @@
 //! Replaces the inline RAG logic previously embedded in
 //! [`CompositeToolRegistry`](crate::CompositeToolRegistry).
 
-use ene_ai::{EmbeddingError, EmbeddingProvider, cosine_similarity, embed};
+use ene_ai::{EmbeddingError, EmbeddingProvider, cosine_similarity, embed, embed_query};
 use ene_store::MemoryStore;
 use ene_tool_proto::{EmbeddingField, ToolName, ToolSpec};
 use std::collections::HashMap;
@@ -309,10 +309,12 @@ impl ToolRag {
                 );
                 let hash = field_version_hash("description", &desc_text);
                 if !is_cached(&cached, &key, &hash, &model_name) {
-                    let emb = self
-                        .embedder
-                        .embed(&desc_text, ene_ai::EmbeddingKind::Description)
-                        .await?;
+                    let emb = embed(
+                        self.embedder.as_ref(),
+                        &desc_text,
+                        ene_ai::EmbeddingKind::Description,
+                    )
+                    .await?;
                     persist(
                         &store,
                         spec.name.as_str(),
@@ -338,10 +340,12 @@ impl ToolRag {
                 );
                 let hash = field_version_hash("negative", &neg_text);
                 if !is_cached(&cached, &key, &hash, &model_name) {
-                    let emb = self
-                        .embedder
-                        .embed(&neg_text, ene_ai::EmbeddingKind::Negative)
-                        .await?;
+                    let emb = embed(
+                        self.embedder.as_ref(),
+                        &neg_text,
+                        ene_ai::EmbeddingKind::Negative,
+                    )
+                    .await?;
                     persist(
                         &store,
                         spec.name.as_str(),
@@ -407,7 +411,7 @@ impl ToolRag {
     /// Pipeline: embed query → optional HyDE → per-tool weighted field
     /// similarity → hard filters → optional rerank → top-N + forced tools.
     pub async fn select(&self, query: &str) -> Vec<ToolSpec> {
-        let query_vec = match self.embedder.embed_query(query).await {
+        let query_vec = match embed_query(self.embedder.as_ref(), query).await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(component = "ToolRag", error = %e, "Query embedding failed");

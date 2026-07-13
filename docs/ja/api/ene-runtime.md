@@ -171,7 +171,7 @@ pub enum EneStatus {
 ```rust
 pub struct EneStateSnapshot {
     pub character_card: Option<CharacterCardV3>,
-    pub history: Vec<ConversationEntry>,
+    pub history: Vec<HistoryEntry>,
     pub config: EneConfig,
     pub session_id: SessionId,
     pub card_name: CardName,
@@ -184,7 +184,7 @@ pub struct EneStateSnapshot {
 | フィールド | 説明 |
 |---|---|
 | `character_card` | 読み込まれているキャラクターカード（存在する場合）。 |
-| `history` | `ConversationEntry`（ロール＋内容）のペアとしての会話履歴。 |
+| `history` | `HistoryEntry`（ロール＋内容）のペアとしての会話履歴。 |
 | `config` | 現在アクティブな `EneConfig` のクローン。 |
 | `session_id` | 現在のセッションの一意な識別子。 |
 | `card_name` | アクティブなキャラクターカードの名前。 |
@@ -286,7 +286,7 @@ pub enum UserInputResponse {
 pub struct MessageBuildContext<'a> {
     pub card: &'a CharacterCardV3,
     pub user_input: &'a str,
-    pub history: &'a [ConversationEntry],
+    pub history: &'a [HistoryEntry],
     pub runtime_context: Option<&'a str>,
     pub runtime_rules: &'a str,
     pub user_name: &'a str,
@@ -370,15 +370,14 @@ pub enum DbServerError {
 
 `ene-runtime` は依存関係グラフ上で下位にある各クレートのアイテムを再エクスポートしており、コンシューマーは一般的な用途では `ene_runtime::*` だけで済みます。特記のない限りすべての再エクスポートには `#[doc(no_inline)]` が付与されており、rustdocのリンクは元のクレートを指します。
 
-[API リファクタリング計画](../../architecture/api-refactor-plan.md) 以降、この一覧は厳選されています。`EneHandle` 自身の公開シグネチャ（`EneStateSnapshot`、`EneEvent`、`ConversationEntry` など）に現れる型、または `ene-cli`/`ene-desktop` 全体で使用頻度の高い型のみを残しています。`ene-runtime` の外では使用されていなかった型（埋め込みプロバイダーのサブ設定、`ene_tool_host::ToolRegistry`、`ene_mind::split_text_and_special_tokens` など）はルートから削除しました — 必要な場合は所有クレートから直接インポートしてください。
+[API v2](../architecture/api-v2.md) 以降、この一覧は厳選されています。`EneHandle` 自身の公開シグネチャ（`EneStateSnapshot`、`EneEvent`、`HistoryEntry` など）に現れる型、または `ene-cli`/`ene-desktop` 全体で使用頻度の高い型のみを残しています。`ene-runtime` の外では使用されていない型はルートから削除しました — 必要な場合は所有クレートから直接インポートしてください。
 
 | ソースクレート | 再エクスポートされるアイテム |
 |---|---|
 | `ene_config` | `EneConfig`、`CharacterCardV3` |
 | `ene_ai` | `LlmMessage`、`LlmProvider`、`ProviderConfig`、`Role` |
 | `ene_store` | `StoreConfig` |
-| `ene_common` | `Truncate` |
-| `ene_mind` | `CardName`、`SessionId`、`SplitReason`、`SplitResult`、`extract_emotion_from_token`、`SessionConfig`、`SummarizationConfig` |
+| `ene_mind` | `CardName`、`SessionId`、`HistoryEntry`、`CueSource`、`PerformanceCue` |
 | `ene_tool_proto` | `ToolSpec` |
 
 Mind 設定型は `ene-mind` が所有するため、そこから直接インポートします。
@@ -391,15 +390,16 @@ Mind 設定型は `ene-mind` が所有するため、そこから直接インポ
 
 | モジュール | アイテム |
 |---|---|
-| `handle` | `ActorDeadError`、`ConversationEntry`、`EneCommand`（*モジュールローカルで、再エクスポートされない*）、`EneEvent`、`EneEventReceiver`、`EneHandle`、`EneStateSnapshot`、`EneStatus`、`MemoryQueryHandle`、`TerminalReason` |
+| `handle` | `ActorDeadError`、`EneCommand`（*モジュールローカルで、再エクスポートされない*）、`EneEvent`、`EneEventReceiver`、`EneHandle`、`EneStateSnapshot`、`EneStatus`、`ShutdownTimeout`、`TerminalReason` |
+| `diagnostics` | `DiagnosticEvent`、`DiagnosticEventReceiver`、`EneDiagnostics`、`MemoryQueryHandle` |
 | `error` | `EneRuntimeError` |
 | `streaming` | `MultiAnswer`（*`ene_tool_proto` から再エクスポート、`#[doc(no_inline)]`*）、`PermissionDecision`、`UserInputResponse` |
 | `message_builder` | `MessageBuildContext`、`build_messages` |
-| `types` | `RequestId` |
+| `types` | `RequestId`、`TurnId`、`RunError`、`CancelError` |
 
 `EneCommand` 自体は `handle` モジュールから `pub` ですが、クレートルートでは再エクスポートされません — コンシューマーは `EneHandle` のコマンド送信メソッドを介して間接的にのみこれに到達します。
 
-`streaming` と `message_builder` は、「アプリが必要としているから」以外の理由で `pub`（`pub(crate)` ではなく）に保たれている2つのモジュールです。`streaming::{StreamContext, run_stream}` は `ene-runtime` 自身の `tests/cognitive_streaming_integration.rs` から直接呼び出されており、`message_builder` のモジュールスコープのプロンプトビルダー（`build_system_prompt`、`build_expression_phi` など）は `ene-cli` の `/prompt` デバッグコマンドから直接呼び出されています。通常の用途ではアプリケーションコードは依然として `EneHandle` を優先すべきです — これら2つのモジュールは `EneHandle` ファサードの一部ではなく、非推奨サイクルを経ずに変更される可能性があります。
+`streaming` と `message_builder` は、「アプリが必要としているから」以外の理由で `pub`（`pub(crate)` ではなく）に保たれている2つのモジュールです。`streaming::{StreamContext, run_stream}` は `ene-runtime` 自身の統合テストから直接呼び出されており、`message_builder` のモジュールスコープのプロンプトビルダー（`build_system_prompt`、`build_expression_phi` など）は `ene-cli` の `/prompt` デバッグコマンドから直接呼び出されています。通常の用途ではアプリケーションコードは依然として `EneHandle` を優先すべきです — これら2つのモジュールは `EneHandle` ファサードの一部ではなく、非推奨サイクルを経ずに変更される可能性があります。
 
 ---
 
@@ -410,7 +410,7 @@ Mind 設定型は `ene-mind` が所有するため、そこから直接インポ
 | `ActorDeadError` | `thiserror` struct | アクターの `mpsc` チャネルがクローズされている（アクタータスクが終了している）場合に、同期版の `EneHandle` メソッドが返す。`#[error("Actor is no longer running")]`。 |
 | `ShutdownTimeout` | `thiserror` struct（`pub std::time::Duration`） | 指定したタイムアウト内にアクターのドレインが完了しなかった場合に `EneHandle::shutdown` が返す。`#[error("Actor did not shut down within {0:?}")]`。 |
 | `EneEventReceiver` | ラッパー struct | `broadcast::Receiver<EneEvent>` をラップする。`try_recv(&mut self) -> Result<EneEvent, TryRecvError>`（非ブロッキング）と `async fn recv(&mut self) -> Result<EneEvent, RecvError>` を公開する。 |
-| `ConversationEntry` | `Debug, Clone` struct | 1件の履歴エントリ: `{ role: Role, content: String }`。 |
+| `HistoryEntry` | `Debug, Clone` struct（`ene-mind` 由来） | 1件の履歴エントリ: `{ role: Role, content: String }`。旧 `ConversationEntry` 名を置換。 |
 | `EneStateSnapshot` | [上記参照](#enestatesnapshot)。 | |
 | `EneStatus` | [上記参照](#enestatus)。 | |
 | `PermissionDecision` | [上記参照](#permissiondecision--userinputresponse--multianswer)。 | |

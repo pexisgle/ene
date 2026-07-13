@@ -277,8 +277,7 @@ async fn build_semantic_matches(
 
     for (idx, candidate) in candidates.iter().enumerate() {
         let query_text = format!("{} {}", candidate.title, candidate.content);
-        let query_embedding = embedder
-            .embed_query(query_text.trim())
+        let query_embedding = ene_ai::embed_query(embedder, query_text.trim())
             .await
             .map_err(CognitionError::Embedding)?;
         let options = ene_store::MemorySearchOptions {

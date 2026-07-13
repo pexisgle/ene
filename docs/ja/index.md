@@ -61,8 +61,7 @@ LLM 駆動の会話、アニメーションする VRM キャラクター、ツ�
 | `ene-tool-derive` | Proc-macro | `#[derive(ToolSpec)]` によるツールスペック自動生成 |
 | `ene-tool-host` | Library | ツールプロセス管理, MCP 対応, Tool RAG |
 | `ene-tool-db` | Library | ツール別 DB IPC クライアント (ツールバイナリが使用) |
-| `ene-tool-common` | Library | 共通ユーティリティ (`ToolAction` トレイト, HTML 抽出) |
-| `ene-common` | Library | 共有ユーティリティ (`Truncate`) |
+| `ene-tool-common` | Library | 共通ユーティリティ (`ToolAction` トレイト, HTML 抽出); `Truncate` を `ene-config` から再エクスポート |
 | `ene-vrm` | Library | VRM 1.0 モデルローダーと MToon レンダラー (mind/runtime 依存なし) |
 | `ene-tool-utility` | Binary | ユーティリティツール (question, todo, 時刻, システム情報) |
 | `ene-tool-fs` | Binary | ファイルシステムツール (read, write, edit, shell, undo) |

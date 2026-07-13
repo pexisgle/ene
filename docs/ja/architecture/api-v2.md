@@ -44,7 +44,7 @@
 - `ene-store` ↛ `ene-ai` / `ene-mind`（LLM・埋め込みプロバイダなし）
 - `ene-tool` ↛ runtime / mind / store
 - **`PerformanceCue` は `ene-mind` 所有**；runtime が再エクスポート；**`ene-vrm` は mind/runtime に依存しない**
-- `ene-common` は tool/config へ吸収；`schema_link` 削除（runtime が mind を通常依存）
+- `ene-common` は `ene-config`（`Truncate` / `TruncateResult` は `ene_config::truncate`）と `ene-tool-common`（再エクスポート）へ吸収；`schema_link` 削除（runtime が mind を通常依存）
 
 ### 設定所有
 
@@ -71,12 +71,14 @@ flowchart TD
   runtime --> toolHost["ene-tool-host"]
   mind --> store
   mind --> ai
-  ai --> tool["ene-tool"]
-  toolHost --> tool
+  ai --> toolProto["ene-tool-proto"]
+  toolHost --> tool["ene-tool"]
   store --> config["ene-config"]
   ai --> config
   mind --> config
 ```
+
+チャットは `store.enabled=false` でも動作する（SQLite メモリなし）。メモリ機能（recall / spans / 型付きメモリ）には `store.enabled=true` と設定済み embedder が必要。
 
 ## ホスト契約（要約）
 
@@ -116,10 +118,10 @@ handle.diagnostics() -> &EneDiagnostics;
 ## 移行メモ
 
 - 二重パイプライン fallback なし: 埋め込み未初期化で memory 機能が必要な場合は fail closed
-- 文脈境界は compression-only（製品経路で hard session-ID 発行しない）
+- **文脈境界は compression-only:** rolling compression（`mind.context.compression_*`）が製品経路。hard session-ID 発行 / hard-split は製品経路ではない。`session.auto_split` はオフ（デフォルト `false`）のまま、圧縮を優先する
 - 単一の `HistoryEntry { role: Role, content: String }` を mind + runtime snapshot で共有
 - 公開互換 alias や移行用 feature/config は作らない — 呼び出し側を同一変更で更新
-
+- ストア無しチャットはサポート；メモリ有効化時に store + embedder が無ければ fail closed
 ## 受入
 
 - [ ] サブ issue #112–#118 がクローズまたは明示延期

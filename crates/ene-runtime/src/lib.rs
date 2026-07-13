@@ -40,8 +40,8 @@ pub use bootstrap::{open_from_disk, open_ready, open_with_config};
 // ── Actor types ──
 /// Actor handle, events, status, and state snapshot.
 pub use handle::{
-    ActorDeadError, ConversationEntry, EneEvent, EneEventReceiver, EneHandle, EneStateSnapshot,
-    EneStatus, ShutdownTimeout, TerminalReason,
+    ActorDeadError, EneEvent, EneEventReceiver, EneHandle, EneStateSnapshot, EneStatus,
+    ShutdownTimeout, TerminalReason,
 };
 
 // ── Diagnostics ──
@@ -71,37 +71,25 @@ pub use ene_ai::ProviderConfig;
 #[doc(no_inline)]
 pub use ene_store::StoreConfig;
 
-// ── Session types ──
+// ── Session / history ──
 /// Role enum for conversation history (re-exported from `ene-ai`).
 #[doc(no_inline)]
 pub use ene_ai::Role;
-/// Truncate text utility (re-exported from `ene-common`).
-#[doc(no_inline)]
-pub use ene_common::Truncate;
 /// Character card type (re-exported from `ene-config`).
 #[doc(no_inline)]
 pub use ene_config::CharacterCardV3;
 /// Character card name (re-exported from `ene-mind`).
 #[doc(no_inline)]
 pub use ene_mind::CardName;
+/// Unified history entry (re-exported from `ene-mind`).
+#[doc(no_inline)]
+pub use ene_mind::HistoryEntry;
 /// Unique session identifier (re-exported from `ene-mind`).
 #[doc(no_inline)]
 pub use ene_mind::SessionId;
-/// Session split reason (re-exported from `ene-mind`).
-#[doc(no_inline)]
-pub use ene_mind::SplitReason;
-/// Session split result (re-exported from `ene-mind`).
-#[doc(no_inline)]
-pub use ene_mind::SplitResult;
-/// Extract emotion name from special token (re-exported from `ene-mind`).
-#[doc(no_inline)]
-pub use ene_mind::extract_emotion_from_token;
 /// Performance cues (re-exported from `ene-mind`).
 #[doc(no_inline)]
 pub use ene_mind::{CueSource, PerformanceCue};
-/// Session configuration (re-exported from `ene-mind`).
-#[doc(no_inline)]
-pub use ene_mind::{SessionConfig, SummarizationConfig};
 /// Unique permission request identifier.
 pub use types::RequestId;
 /// Turn identity and run/cancel errors.

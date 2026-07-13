@@ -1,7 +1,8 @@
 use crate::commands::CliCommand;
 use crate::{context::AppContext, style};
 use async_trait::async_trait;
-use ene_runtime::{SessionConfig, Truncate};
+use ene_config::Truncate;
+use ene_mind::SessionConfig;
 
 pub struct SessionCommand;
 

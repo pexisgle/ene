@@ -12,7 +12,7 @@
 - ツールのメタデータを記述する **`ToolSpecArgs`** トレイト（`#[derive(ToolSpec)]`/`#[derive(ToolAction)]` によって実装される）と、すべてのツールアクションがディスパッチ可能になるために実装する **`ToolAction`** トレイト。
 - 1 行の `use` 文で必要なものをすべて取り込める **`prelude`** モジュール。
 - Web コンテンツを扱うツール向けの HTML→Markdown 変換とコンテンツ抽出ヘルパー。
-- `ene-common` の `Truncate`/`TruncateResult` 構造体 API の再エクスポート。
+- `ene-config` の `Truncate`/`TruncateResult` 構造体 API の再エクスポート。
 
 `ToolAction` は意図的に `ToolSpecArgs` のスーパートレイトに**なっていません** — その理由は [`ToolAction` トレイト](#toolaction-トレイト) を参照してください — これにより、ツールバイナリのディスパッチテーブルは単純な `Vec<Box<dyn ToolAction>>` を保持できます。
 
@@ -102,15 +102,15 @@ use ene_tool_common::prelude::*;
 
 ## `truncate` モジュール
 
-ツールの出力フォーマットに使用する `Truncate` 構造体 API を `ene-common` から再エクスポートします：
+ツールの出力フォーマットに使用する `Truncate` 構造体 API を `ene-config` から再エクスポートします：
 
 ```rust
 pub mod truncate {
-    pub use ene_common::truncate::{Truncate, TruncateResult};
+    pub use ene_config::truncate::{Truncate, TruncateResult};
 }
 ```
 
-`Truncate` は**静的メソッドを持つユニット構造体**です — トレイトではなく、`&str`/`String` に対して直接呼び出せるものはありません。完全なメソッドリファレンス（`Truncate::simple`、`Truncate::detailed`、`Truncate::chars`、`Truncate::output`、`Truncate::tail`）と [`TruncateResult`](./ene-common.md#truncateresult)（`content: String`、`truncated: bool`）については [`ene-common`](./ene-common.md) を参照してください。
+`Truncate` は**静的メソッドを持つユニット構造体**です — トレイトではなく、`&str`/`String` に対して直接呼び出せるものはありません。所有は [`ene-config`](./ene-config.md)（旧 [`ene-common`](./ene-common.md) スタブも参照）。メソッドは `Truncate::simple`、`Truncate::detailed`、`Truncate::chars`、`Truncate::output`、`Truncate::tail`、および `TruncateResult`（`content: String`、`truncated: bool`）です。
 
 ツールでの典型的な使用例：
 
@@ -256,6 +256,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 - [`ene-tool-derive`](./ene-tool-derive.md) — プロシージャルマクロ：`#[derive(ToolAction)]`、`#[derive(ToolSpec)]`、`#[tool_action(args = T)]`
 - [`ene-tool-proto`](./ene-tool-proto.md) — `ToolSpec`、`ToolError`、`ToolProvider`、`run_tool_server`、`IpcRequest`/`IpcResponse`
-- [`ene-common`](./ene-common.md) — `Truncate`/`TruncateResult`
+- [`ene-config`](./ene-config.md) — `Truncate`/`TruncateResult` の所有者（[`ene-common`](./ene-common.md) スタブも参照）
 - [`ene-tool-host`](./ene-tool-host.md) — ホスト側のプロセス管理と `ToolRegistry`
 - [ツールの作成方法](../tools/sdk.md)

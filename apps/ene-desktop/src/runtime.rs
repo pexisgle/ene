@@ -780,16 +780,11 @@ impl Runtime {
                     let view_pos =
                         glam::Vec3::new(ndc_x as f32 * half_w, ndc_y as f32 * half_h, 0.0);
                     let world_3d = view.inverse().transform_point3(view_pos);
-                    let ray_origin =
-                        rapier3d::prelude::Point::new(world_3d.x, world_3d.y, world_3d.z);
-                    let ray_dir = rapier3d::prelude::Vector::new(
-                        target[0] - eye[0],
-                        target[1] - eye[1],
-                        target[2] - eye[2],
-                    );
+                    let ray_dir =
+                        glam::Vec3::new(target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]);
                     physics_world
                         .world
-                        .cast_ray(ray_origin, ray_dir, 100.0)
+                        .cast_ray(world_3d, ray_dir, 100.0)
                         .is_some()
                 };
                 #[cfg(not(target_os = "windows"))]
@@ -1048,7 +1043,7 @@ impl Runtime {
                 let camera_distance = (camera_eye - camera_target).length();
                 #[cfg_attr(target_os = "windows", expect(unused_variables))]
                 let view_z = -camera_distance;
-                let cam_view = glam::camera::rh::view::look_at_mat4(
+                let _cam_view = glam::camera::rh::view::look_at_mat4(
                     camera_eye,
                     camera_target,
                     ene_vrm::camera::DEFAULT_UP.into(),
@@ -1475,13 +1470,9 @@ fn update_char_window_cursor_and_hittest(
             );
             let view_pos = glam::Vec3::new(ndc.x * half_w, ndc.y * half_h, 0.0);
             let world_3d = view.inverse().transform_point3(view_pos);
-            let ray_origin = rapier3d::prelude::Point::new(world_3d.x, world_3d.y, world_3d.z);
-            let ray_dir = rapier3d::prelude::Vector::new(
-                target[0] - eye[0],
-                target[1] - eye[1],
-                target[2] - eye[2],
-            );
-            state.physics_world().cast_ray(ray_origin, ray_dir, 100.0)
+            let ray_dir =
+                glam::Vec3::new(target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]);
+            state.physics_world().cast_ray(world_3d, ray_dir, 100.0)
         } else {
             None
         };

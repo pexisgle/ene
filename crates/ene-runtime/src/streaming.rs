@@ -98,59 +98,17 @@ pub struct StreamContext {
     pub turn: TurnId,
 }
 
-/// Runs the full AI streaming completion loop with tool calling, memory
+/// Runs the full AI streaming completion loop with tool calling, optional memory
 /// retrieval, and session management. Sends events through the broadcast channel.
 ///
-/// Requires an enabled store and a configured embedder. Missing prerequisites
-/// fail closed with a typed [`crate::error::EneRuntimeError`] and a
-/// [`TerminalReason::Failed`] event — there is no legacy streaming fallback.
+/// Chat works with `store.enabled = false` (text + tools only). When the store
+/// and embedder are present, recall/write run on the cognitive path. There is
+/// no legacy streaming fallback. Opening with memory enabled still fails closed
+/// if the embedder cannot be initialized.
 #[doc(hidden)]
 pub async fn run_stream(
     ctx: StreamContext,
 ) -> Result<ConversationSession, crate::error::EneRuntimeError> {
-    let mem_config = ctx.config.get_section::<ene_store::StoreConfig>()?;
-    if !mem_config.enabled {
-        emit_terminal(
-            &ctx.event_tx,
-            &ctx.terminal_emitted,
-            &ctx.turn,
-            TerminalReason::Failed {
-                message: "Mind streaming requires store.enabled = true".into(),
-            },
-        );
-        return Err(crate::error::EneRuntimeError::MindPrerequisite(
-            "store.enabled",
-        ));
-    }
-
-    if ctx.session.memory.memory_store.is_none() {
-        emit_terminal(
-            &ctx.event_tx,
-            &ctx.terminal_emitted,
-            &ctx.turn,
-            TerminalReason::Failed {
-                message: "Mind streaming requires an initialized memory store".into(),
-            },
-        );
-        return Err(crate::error::EneRuntimeError::MindPrerequisite(
-            "initialized memory store",
-        ));
-    }
-
-    if ctx.embedder.is_none() {
-        emit_terminal(
-            &ctx.event_tx,
-            &ctx.terminal_emitted,
-            &ctx.turn,
-            TerminalReason::Failed {
-                message: "Mind streaming requires a configured embedding provider".into(),
-            },
-        );
-        return Err(crate::error::EneRuntimeError::MindPrerequisite(
-            "embedding provider",
-        ));
-    }
-
     Ok(crate::streaming_cognitive::run_stream_cognitive(ctx).await)
 }
 

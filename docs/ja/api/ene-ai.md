@@ -3,7 +3,7 @@
 > **クレート:** `ene-ai`
 > **パス:** `crates/ene-ai`
 
-`ene-ai` は LLM と埋め込みプロバイダーの統合レイヤーです（API v2 で旧 `ene-provider` + `ene-embedding` を統合）。チャット完了と埋め込みは `LlmProvider` / `EmbeddingProvider` 経由で流れ、失敗は型付きエラー（`LlmProviderError`、`EmbeddingError`）で報告されます。
+`ene-ai` は LLM と埋め込みプロバイダーの統合レイヤーです（API v2 で旧 `ene-provider` + `ene-embedding` を統合）。チャット完了と埋め込みは `LlmProvider` / `EmbeddingProvider` 経由で流れます。クレート境界のエラーは [`AiError`](#aierror) です。入れ子のプロバイダ失敗は型付きペイロード（`LlmProviderError`、`EmbeddingError`）で報告されます。
 
 ```mermaid
 flowchart LR
@@ -17,7 +17,7 @@ flowchart LR
 
 ## `EmbeddingProvider` トレイト
 
-トレイト上の必須操作はバッチのみ。単一テキスト／クエリはフリー関数（デフォルトメソッドとしても提供）。
+**トレイト上の必須操作は `embed_batch`（とメタデータ）のみ。** 単一テキスト／クエリは**フリー関数のみ** — トレイトメソッドではない。
 
 ```rust
 #[async_trait]
@@ -30,12 +30,24 @@ pub trait EmbeddingProvider: Send + Sync {
     fn dimensions(&self) -> usize;
     fn model_name(&self) -> &str;
 }
+
+pub async fn embed(
+    provider: &dyn EmbeddingProvider,
+    text: &str,
+    kind: EmbeddingKind,
+) -> Result<Vec<f32>, EmbeddingError>;
+
+pub async fn embed_query(
+    provider: &dyn EmbeddingProvider,
+    text: &str,
+) -> Result<Vec<f32>, EmbeddingError>;
 ```
 
 | メソッド / 関数 | 備考 |
 |---|---|
-| `embed_batch(items)` | 必須。出力順は入力順。空バッチは空 `Vec`。空白のみは `EmptyInput`。次元不一致は `DimensionMismatch`。 |
-| `embed` / `embed_query` | `embed_batch` 上のフリー関数（またはデフォルトメソッド） |
+| `embed_batch(items)` | 必須のトレイトメソッド。出力順は入力順。空バッチは空 `Vec`。空白のみは `EmptyInput`。次元不一致は `DimensionMismatch`。 |
+| `dimensions()` / `model_name()` | トレイト上のプロバイダメタデータ。 |
+| `embed` / `embed_query` | `embed_batch` 上の**フリー関数のみ**（トレイトメソッドではない）。 |
 
 **トレイトに含めないもの:** `hyde`、`has_reranker`、`rerank`。パイプラインヘルパーへ移動済み:
 
@@ -53,16 +65,20 @@ pub fn create_local_provider(...) -> Result<Box<dyn EmbeddingProvider>, EneEmbed
 
 **マルチスレッド** tokio ランタイムが必要（`block_in_place`）。
 
-## `Role`
+## `Role` / `HistoryEntry`
 
 ```rust
 pub enum Role { System, User, Assistant }
 ```
 
-mind の `HistoryEntry { role: Role, content: String }` とランタイムの `ConversationEntry` で使用。
+履歴型は単一の `HistoryEntry { role: Role, content: String }`（`ene-mind` 所有、`ene-runtime` が再エクスポート）。別途の `ConversationEntry` はない。
+
+## `AiError`
+
+クレート境界のエラー列挙（`thiserror`）。ホスト／mind の呼び出し側では `AiError` でマッチすることを推奨。入れ子の `LlmProviderError` / `EmbeddingError` は型付きマッチ用のペイロードとして利用できる。
 
 ## 関連
 
-- [`ene-mind`](./ene-mind.md)
+- [`ene-mind`](./ene-mind.md) — `HistoryEntry`、recall / compression
 - [`ene-tool-host`](./ene-tool-host.md)
 - [API v2 ADR](../architecture/api-v2.md)

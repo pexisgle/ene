@@ -113,7 +113,7 @@ pub struct EneConfig {
 ```json
 {
   "session": {
-    "auto_split": true,
+    "auto_split": false,
     "timeout_minutes": 30,
     "topic_similarity_threshold": 0.5,
     "min_turns_before_split": 3,
@@ -127,7 +127,7 @@ pub struct EneConfig {
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `auto_split` | bool | `true` | Enable automatic session splitting |
+| `auto_split` | bool | `false` | **Deprecated hard-split path.** Default is off. Prefer rolling compression via `mind.context.compression_*` (see below). When `true`, composite scoring may mint a new session ID — not the product path. |
 | `timeout_minutes` | int | `30` | Idle timeout before split |
 | `topic_similarity_threshold` | float | `0.5` | Cosine similarity threshold for topic drift detection (0.0–1.0) |
 | `min_turns_before_split` | int | `3` | Minimum turns before any split can occur |
@@ -421,7 +421,7 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 | `memory_budget_tokens` | int | `1800` | Token budget for recalled memories |
 | `semantic_budget_tokens` | int | `1200` | Token budget for semantic (lorebook) memory |
 | `style_example_budget_tokens` | int | `600` | Token budget for style examples from CCv3 lorebook |
-| `compression_enabled` | bool | `true` | Enable rolling context compression instead of session splits |
+| `compression_enabled` | bool | `true` | **Preferred context boundary.** Enable rolling context compression instead of hard session splits |
 | `scene_turn_threshold` | int | `12` | Turn count before scene-level compression is triggered |
 | `chapter_span_threshold` | int | `5` | Number of scene spans before chapter rollup |
 | `arc_span_threshold` | int | `3` | Number of chapter spans before arc rollup |

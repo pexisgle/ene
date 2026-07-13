@@ -6,37 +6,57 @@ pub enum EneRuntimeError {
     /// No character card has been loaded.
     #[error("Character card not loaded")]
     NoCharacterCard,
-    /// LLM provider creation or initialization failed. Callers can
-    /// downcast to `LlmProviderError` to dispatch on the underlying cause
-    /// (auth, rate limit, network, truncated, content filter, provider).
+    /// LLM or embedding provider failure.
     #[error(transparent)]
-    Provider(#[from] ene_ai::LlmProviderError),
+    Ai(#[from] ene_ai::AiError),
     /// Configuration error.
     #[error(transparent)]
     Config(#[from] ene_config::EneConfigError),
     /// Memory store error.
     #[error(transparent)]
     Memory(#[from] ene_store::EneMemoryError),
-    /// Session error.
+    /// Mind (cognition / session) error.
     #[error(transparent)]
-    Session(#[from] ene_mind::EneSessionError),
+    Mind(#[from] ene_mind::MindError),
     /// Tool host error.
     #[error(transparent)]
     Tool(#[from] ene_tool_host::EneToolHostError),
-    /// Embedding error (init or transport). Callers can downcast to
-    /// `EmbeddingError` to dispatch on the variant.
-    #[error(transparent)]
-    Embedding(#[from] ene_ai::EmbeddingError),
     /// Task channel closed.
     #[error("Task channel closed")]
     ChannelClosed,
     /// A required mind-streaming dependency is unavailable.
     #[error("Mind streaming prerequisite missing: {0}")]
     MindPrerequisite(&'static str),
-    /// Cognitive runtime error.
-    #[error(transparent)]
-    Cognition(#[from] ene_mind::CognitionError),
+    /// Context boundary requires compression; hard session split is not a product path.
+    #[error(
+        "Context compression is disabled; enable mind.context.compression_enabled (hard session split is not available)"
+    )]
+    CompressionRequired,
     /// Bootstrap misconfiguration or internal failure.
     #[error("Bootstrap error: {0}")]
     Bootstrap(String),
+}
+
+impl From<ene_ai::LlmProviderError> for EneRuntimeError {
+    fn from(value: ene_ai::LlmProviderError) -> Self {
+        Self::Ai(value.into())
+    }
+}
+
+impl From<ene_ai::EmbeddingError> for EneRuntimeError {
+    fn from(value: ene_ai::EmbeddingError) -> Self {
+        Self::Ai(value.into())
+    }
+}
+
+impl From<ene_mind::EneSessionError> for EneRuntimeError {
+    fn from(value: ene_mind::EneSessionError) -> Self {
+        Self::Mind(value.into())
+    }
+}
+
+impl From<ene_mind::CognitionError> for EneRuntimeError {
+    fn from(value: ene_mind::CognitionError) -> Self {
+        Self::Mind(value.into())
+    }
 }

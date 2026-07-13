@@ -20,7 +20,7 @@
 //! and [AGENTS.md §4.1](../../AGENTS.md); see the
 //! [API v2 ADR](../../docs/architecture/api-v2.md) for the target crate map.
 //!
-//! - Depends on: `ene-store`, `ene-config`, `ene-ai`, `ene-common`
+//! - Depends on: `ene-store`, `ene-config`, `ene-ai`
 //! - Does NOT depend on: `ene-runtime` (prevents circular dependencies)
 //! - Calls `ene-store` only through its public `MemoryStore` methods — never issues
 //!   raw SQL or `sea-orm` queries directly. `ene-store` remains the sole SQLite owner.
@@ -95,7 +95,7 @@ pub use ene_store::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCom
 /// Central cognitive engine facade.
 pub use engine::CognitionEngine;
 /// Cognitive runtime error type.
-pub use error::{CognitionError, EneCognitionError};
+pub use error::{CognitionError, EneCognitionError, MindError};
 /// Turn lifecycle types for streaming integration.
 pub use lifecycle::{
     ComposedPrompt, HistoryEntry, PostTurnInput, PreTurnOutput, PromptPacketMeta, TurnContext,

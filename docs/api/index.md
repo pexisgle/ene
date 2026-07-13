@@ -17,9 +17,8 @@ The host contract is **API v2**: `EneHandle::open`, mandatory `TurnId`, single-f
 | [`ene-mind`](ene-mind.md) | Mind runtime — session, Identity Kernel, typed memory, affect, Performance arbitration, prompt packets, commitments. | [→](ene-mind.md) |
 | [`ene-ai`](ene-ai.md) | LLM and embedding provider traits, OpenAI + local GGUF. | [→](ene-ai.md) |
 | [`ene-store`](ene-store.md) | SQLite vector memory store (summaries, facts, tool index). | [→](ene-store.md) |
-| [`ene-config`](ene-config.md) | Configuration loading, character cards, CBS macros. | [→](ene-config.md) |
+| [`ene-config`](ene-config.md) | Configuration loading, character cards, CBS macros, `Truncate`. | [→](ene-config.md) |
 | [`ene-vrm`](ene-vrm.md) | VRM 1.0 model loader + MToon renderer for `ene-desktop` (wgpu). No mind/runtime dependency. | [→](ene-vrm.md) |
-| [`ene-common`](ene-common.md) | Low-level shared utilities (`Truncate` unit struct). | [→](ene-common.md) |
 | [`ene-tool`](ene-tool.md) | Tool ABI facade (proto + common + derive re-exports). Preferred import for new tools. | [→](ene-tool.md) |
 | [`ene-tool-host`](ene-tool-host.md) | Tool process lifecycle, IPC client, and Tool RAG pipeline. | [→](ene-tool-host.md) |
 | [`ene-tool-proto`](ene-tool-proto.md) | IPC wire protocol — `ToolSpec`, `IpcRequest`/`IpcResponse`, `ToolError`. | [→](ene-tool-proto.md) |
@@ -34,6 +33,7 @@ The host contract is **API v2**: `EneHandle::open`, mandatory `TurnId`, single-f
 | [`ene-provider`](ene-provider.md) | Merged into [`ene-ai`](ene-ai.md) |
 | [`ene-embedding`](ene-embedding.md) | Merged into [`ene-ai`](ene-ai.md) |
 | [`ene-session`](ene-session.md) | Absorbed into [`ene-mind`](ene-mind.md) |
+| [`ene-common`](ene-common.md) | Folded into [`ene-config`](ene-config.md) (`truncate`) + [`ene-tool-common`](ene-tool-common.md) re-export |
 
 `ene-core` was renamed/replaced by [`ene-runtime`](ene-runtime.md). There is no separate `ene-cognition` / `ene-memory` crate; cognition lives in `ene-mind`, persistence in `ene-store`.
 
@@ -59,12 +59,11 @@ flowchart TD
   Mind --> Store
   Mind --> Config
   Mind --> Ai
-  Mind --> Common[ene-common]
 
   ToolHost --> Tool[ene-tool]
   ToolHost --> Ai
   Ai --> Config
-  Ai --> Tool
+  Ai --> ToolProto[ene-tool-proto]
   Store --> Config
 
   Tool --> Proto[ene-tool-proto]
@@ -123,7 +122,7 @@ See also [API v2](../architecture/api-v2.md) and the historical [API refactor pl
 ### Errors
 
 - Library boundaries return `Result<T, E>` where `E` is a `thiserror`-derived enum, not `anyhow::Error`, `String`, or `Box<dyn Error>`. `anyhow` is a dev-dependency only.
-- One public error name per crate, matching the crate: e.g. `EneRuntimeError`, `EneMemoryError` (`ene-store`), `CognitionError` / `EneSessionError` (`ene-mind`), `EneToolHostError`, `ToolError` (`ene-tool-proto`), `EneConfigError`, `LlmProviderError`, `EmbeddingError`.
+- One public error name per crate, matching the crate: e.g. `EneRuntimeError`, `EneMemoryError` (`ene-store`), `CognitionError` / `EneSessionError` (`ene-mind`), `EneToolHostError`, `ToolError` (`ene-tool-proto`), `EneConfigError`, `AiError` (`ene-ai`; nested `LlmProviderError` / `EmbeddingError`).
 - Narrower purpose-specific errors are fine alongside the crate-wide enum (`ActorDeadError`, `ShutdownTimeout`, `RunError`, `CancelError`, `DbServerError`).
 - Avoid `unwrap()`/`expect()` outside tests — the workspace lints for this.
 

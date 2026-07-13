@@ -32,10 +32,10 @@ pub mod provider;
 pub use action::{ToolAction, ToolSpecArgs};
 pub use provider::{ActionSetProvider, SingleActionProvider};
 
-/// Re-exports of smart truncation from ene-common.
+/// Re-exports of smart truncation from `ene-config` (former `ene-common`).
 pub mod truncate {
     #[doc(no_inline)]
-    pub use ene_common::truncate::{Truncate, TruncateResult};
+    pub use ene_config::truncate::{Truncate, TruncateResult};
 }
 
 /// Common imports for tool action files.

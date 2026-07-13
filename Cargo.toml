@@ -45,7 +45,6 @@ blake3 = "1.8"
 
 # --- Internal libraries ---
 ene-mind = { path = "crates/ene-mind" }
-ene-common = { path = "crates/ene-common" }
 ene-config = { path = "crates/ene-config" }
 ene-runtime = { path = "crates/ene-runtime" }
 ene-ai = { path = "crates/ene-ai" }

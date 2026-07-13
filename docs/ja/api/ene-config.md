@@ -7,7 +7,7 @@
 
 ## 概要
 
-`ene-config` は [`figment`](https://docs.rs/figment) のレイヤー型設定システムを使用してすべてのランタイム設定を管理します。`EneConfig` 型、型付きセクションを宣言するための `define_config!` マクロ、グローバル設定状態、そしてキャラクターカードのフォーマットを定義します。
+`ene-config` は [`figment`](https://docs.rs/figment) のレイヤー型設定システムを使用してすべてのランタイム設定を管理します。`EneConfig` 型、型付きセクションを宣言するための `define_config!` マクロ、グローバル設定状態、そしてキャラクターカードのフォーマットを定義します。旧 `ene-common` から吸収した `Truncate` / `TruncateResult`（`ene_config::truncate`）も所有します。ツールは通常 [`ene-tool-common`](./ene-tool-common.md) の再エクスポートを使います。
 
 ### 読み込み優先順位
 

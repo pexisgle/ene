@@ -59,8 +59,7 @@ ene is a local AI character platform implemented as a Rust workspace. It provide
 | `ene-tool-derive` | Proc-macro | `#[derive(ToolSpec)]` for auto-generated tool specs |
 | `ene-tool-host` | Library | Tool process manager, MCP support, Tool RAG |
 | `ene-tool-db` | Library | Per-tool DB IPC client (used by tool binaries) |
-| `ene-tool-common` | Library | Shared utilities (`ToolAction` trait, HTML extraction) |
-| `ene-common` | Library | Shared utilities (`Truncate`) |
+| `ene-tool-common` | Library | Shared utilities (`ToolAction` trait, HTML extraction); re-exports `Truncate` from `ene-config` |
 | `ene-vrm` | Library | VRM 1.0 model loader and MToon renderer (no mind/runtime dep) |
 | `ene-tool-utility` | Binary | Utility tools (question, todo, time, system info) |
 | `ene-tool-fs` | Binary | Filesystem tools (read, write, edit, shell, undo) |

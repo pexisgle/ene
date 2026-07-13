@@ -15,7 +15,7 @@ async-trait = { workspace = true }
 schemars = { workspace = true }
 ene-tool-proto = { workspace = true }
 ene-tool-derive = { workspace = true }
-ene-common = { workspace = true }
+ene-config = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

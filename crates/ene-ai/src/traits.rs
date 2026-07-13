@@ -102,7 +102,7 @@ pub enum EmbeddingError {
 
 /// Trait for generating vector embeddings from text (used by memory search and Tool RAG).
 ///
-/// The only required embedding operation is [`embed_batch`]. Single-text and
+/// The only embedding operation on this trait is [`embed_batch`]. Single-text and
 /// query helpers are free functions ([`embed`], [`embed_query`]) that call
 /// batch. HyDE and rerank live in pipeline helpers (`ene_ai::hybrid`,
 /// tool-host RAG), not on this trait.
@@ -115,16 +115,6 @@ pub trait EmbeddingProvider: Send + Sync {
         &self,
         items: &[(&str, EmbeddingKind)],
     ) -> Result<Vec<Vec<f32>>, EmbeddingError>;
-
-    /// Embed one item using the batch operation.
-    async fn embed(&self, text: &str, kind: EmbeddingKind) -> Result<Vec<f32>, EmbeddingError> {
-        embed(self, text, kind).await
-    }
-
-    /// Embed one query using the batch operation.
-    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
-        embed_query(self, text).await
-    }
 
     /// The dimensionality of the embedding vectors produced by this provider.
     fn dimensions(&self) -> usize;

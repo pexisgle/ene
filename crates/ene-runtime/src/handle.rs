@@ -6,7 +6,6 @@ use crate::streaming::{self, PermissionDecision, UserInputResponse};
 use crate::types::{CancelError, RequestId, RunError, TurnId};
 use chrono::{DateTime, Utc};
 use ene_ai::LlmProviderRegistry;
-use ene_ai::Role;
 use ene_config::CharacterCardV3;
 use ene_config::EneConfig;
 use ene_mind::PendingSplitTask;
@@ -208,8 +207,8 @@ pub enum TerminalReason {
 pub struct EneStateSnapshot {
     /// The loaded character card, if any.
     pub character_card: Option<CharacterCardV3>,
-    /// Conversation history.
-    pub history: Vec<ConversationEntry>,
+    /// Conversation history (`ene_mind::HistoryEntry`).
+    pub history: Vec<ene_mind::HistoryEntry>,
     /// A copy of the current configuration.
     pub config: EneConfig,
     /// Current session ID.
@@ -246,15 +245,6 @@ pub struct ActorDeadError;
 #[derive(Debug, thiserror::Error)]
 #[error("Actor did not shut down within {0:?}")]
 pub struct ShutdownTimeout(pub std::time::Duration);
-
-/// A single entry in the conversation history.
-#[derive(Debug, Clone)]
-pub struct ConversationEntry {
-    /// Who produced this message.
-    pub role: Role,
-    /// The message content.
-    pub content: String,
-}
 
 /// Event receiver handle obtained from [`EneHandle::subscribe`].
 ///
@@ -386,7 +376,7 @@ impl EneHandle {
         let mind = config
             .get_section::<ene_mind::MindConfig>()
             .unwrap_or_default();
-        ene_mind::CognitionEngine::validate_config(&mind).map_err(EneRuntimeError::Cognition)?;
+        ene_mind::CognitionEngine::validate_config(&mind).map_err(EneRuntimeError::from)?;
 
         let mem_config = config.get_section::<ene_store::StoreConfig>()?;
         let tool_config = config
@@ -744,10 +734,32 @@ impl EneActor {
                     return true;
                 }
                 self.cancel_token.cancel();
+
+                // Prefer cooperative completion: join briefly before aborting so
+                // a finishing turn can still deliver its session update.
+                const CANCEL_JOIN_TIMEOUT: std::time::Duration =
+                    std::time::Duration::from_millis(250);
                 if let Some(handle) = self.stream_handle.take() {
-                    handle.abort();
+                    let abort = handle.abort_handle();
+                    match tokio::time::timeout(CANCEL_JOIN_TIMEOUT, handle).await {
+                        Ok(_) => {}
+                        Err(_elapsed) => {
+                            abort.abort();
+                        }
+                    }
                 }
-                self.stream_session_rx = None;
+
+                if let Some(rx) = self.stream_session_rx.take() {
+                    match tokio::time::timeout(CANCEL_JOIN_TIMEOUT, rx).await {
+                        Ok(Ok(Ok(updated_session))) => {
+                            self.session = updated_session;
+                        }
+                        Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
+                            // Failed turn, sender dropped, or timeout after abort.
+                        }
+                    }
+                }
+
                 self.drain_pending().await;
                 self.cancel_token = CancellationToken::new();
                 let cancelled_turn = turn.clone();
@@ -809,15 +821,7 @@ impl EneActor {
                 true
             }
             EneCommand::GetSnapshot { reply } => {
-                let history: Vec<ConversationEntry> = self
-                    .session
-                    .history()
-                    .iter()
-                    .map(|entry| ConversationEntry {
-                        role: entry.role,
-                        content: entry.content.clone(),
-                    })
-                    .collect();
+                let history = self.session.history().to_vec();
                 let snapshot = EneStateSnapshot {
                     character_card: self.session.character_card.clone(),
                     history,
@@ -911,6 +915,9 @@ impl EneActor {
                 }
                 self.active_turn = None;
                 self.turn_gate.end();
+                let _ = self.event_tx.send(EneEvent::StatusChanged {
+                    status: EneStatus::Idle,
+                });
                 return;
             }
         };
@@ -966,55 +973,22 @@ impl EneActor {
     // ── Split management ──
 
     async fn handle_manual_split(&mut self) -> Result<SplitResult, EneRuntimeError> {
-        if self.session.history().is_empty() {
-            return Err(EneRuntimeError::Session(EneSessionError::SplitNotNeeded));
-        }
         let mind = self
             .config
             .get_section::<ene_mind::MindConfig>()
             .unwrap_or_default();
-        if mind.context.compression_enabled {
-            return self.handle_manual_compression().await;
+        if !mind.context.compression_enabled {
+            return Err(EneRuntimeError::CompressionRequired);
         }
-
-        let Some(store) = &self.session.memory.memory_store else {
-            return Err(EneRuntimeError::Session(EneSessionError::SplitNotNeeded));
-        };
-        let Some(embedder) = &self.session.memory.embedding_provider else {
-            return Err(EneRuntimeError::Session(EneSessionError::SplitNotNeeded));
-        };
-        let provider = self.create_provider()?;
-
-        let reason = ene_mind::SplitReason::Manual;
-        let result = ene_mind::execute_split(
-            self.session.history(),
-            self.session.memory.session_id.as_str(),
-            self.session.card_name(),
-            &self.config.user_name,
-            store,
-            embedder,
-            provider.as_ref(),
-            reason,
-        )
-        .await
-        .map_err(EneRuntimeError::Session)?;
-
-        // Emit the split event and update the actor's session state
-        // Hard-split detail stays off the chat bus; emit thin ContextCompressed if a turn is active.
-        if let Some(turn) = self.active_turn.clone() {
-            let _ = self.event_tx.send(EneEvent::ContextCompressed {
-                turn,
-                level: "split".into(),
-            });
+        if self.session.history().is_empty() {
+            return Err(EneRuntimeError::from(EneSessionError::SplitNotNeeded));
         }
-        self.session.apply_split_result(&result);
-
-        Ok(result)
+        self.handle_manual_compression().await
     }
 
     async fn handle_manual_compression(&mut self) -> Result<SplitResult, EneRuntimeError> {
         let Some(store) = self.session.memory.memory_store.clone() else {
-            return Err(EneRuntimeError::Session(EneSessionError::SplitNotNeeded));
+            return Err(EneRuntimeError::from(EneSessionError::SplitNotNeeded));
         };
         let provider = self.create_provider()?;
         let mind = self
@@ -1071,49 +1045,14 @@ impl EneActor {
         }
     }
 
-    fn check_and_perform_split(&mut self, user_input: &str) {
+    fn check_and_perform_split(&mut self, _user_input: &str) {
         let mind = self
             .config
             .get_section::<ene_mind::MindConfig>()
             .unwrap_or_default();
+        // Product path is compression-only; hard session-ID minting is not used.
         if mind.context.compression_enabled {
             self.check_and_trigger_compression();
-            return;
-        }
-
-        let mem_config = match self.config.get_section::<ene_store::StoreConfig>() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        let session_config = match self.config.get_section::<ene_mind::SessionConfig>() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-
-        if !mem_config.enabled || !session_config.auto_split {
-            return;
-        }
-
-        if self.pending_split.is_none() {
-            let provider_config = match self.config.get_section::<ene_ai::ProviderConfig>() {
-                Ok(c) => c,
-                Err(_) => return,
-            };
-            let provider =
-                match LlmProviderRegistry::create_provider(&provider_config.name, &self.config) {
-                    Ok(p) => Arc::from(p),
-                    Err(_) => return,
-                };
-
-            if let Some(input) = self.session.prepare_split_input(
-                &self.config,
-                user_input,
-                &self.config.user_name.clone(),
-                provider,
-            ) {
-                self.session.mark_split_pending();
-                ene_mind::spawn_split_task(&mut self.pending_split, input);
-            }
         }
     }
 

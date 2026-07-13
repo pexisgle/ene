@@ -1,12 +1,14 @@
 # API Refactor Plan
 
-- **Status:** In progress
+- **Status:** **Superseded by [api-v2.md](api-v2.md)**
 - **Date:** 2026-07-09
-- **Last updated:** 2026-07-09 (P0–P3 initial pass landed; see [Completed](#completed-2026-07-09))
+- **Last updated:** 2026-07-13 (status superseded; host/crate map lives in API v2)
+
+> **Read [API v2](api-v2.md) for the current host contract and crate map.** This page is historical notes from the 2026-07 audit / first implementation pass. Do not treat items below (including any mention of `schema_link`) as the live public surface.
 
 ## Context
 
-The 2026-07 API documentation audit refreshed every library crate page and added missing pages for `ene-mind` and `ene-vrm`. A first implementation pass (2026-07-09) addressed the highest-leverage items below. This document tracks **remaining** work only.
+The 2026-07 API documentation audit refreshed every library crate page and added missing pages for `ene-mind` and `ene-vrm`. A first implementation pass (2026-07-09) addressed high-leverage items. Remaining work was absorbed into the [API v2](api-v2.md) redesign.
 
 ## Goals
 
@@ -28,7 +30,7 @@ The 2026-07 API documentation audit refreshed every library crate page and added
 
 | Area | Delivered |
 |---|---|
-| **Public surface** | `ene-core::schema_link` for cognition ctor linking (#95); contributor-only notes on `streaming` / `message_builder` |
+| **Public surface** | Contributor-only notes on `streaming` / `message_builder` (the temporary `schema_link` ctor hook was removed under API v2; runtime depends on mind normally) |
 | **Async / errors** | Error & async conventions in [`docs/api/index.md`](../api/index.md); `run_tool_server` returns `Result<(), ToolError>` |
 | **Boundaries** | ADR guardrail module docs on `ene-mind`, `ene-store`, `ene-tool-proto` |
 | **Tool ABI** | `ActionSetProvider` / `SingleActionProvider` in `ene-tool-common`; ABI table in [`docs/tools/sdk.md`](../tools/sdk.md); `AGENTS.md` R1 wiring fix; `tools/utility` migrated |
@@ -97,6 +99,7 @@ The 2026-07 API documentation audit refreshed every library crate page and added
 
 ## Related documentation
 
+- **[API v2](api-v2.md)** (authoritative)
 - [API Index](../api/index.md)
 - [Streaming Events](../core/streaming-events.md)
 - [Cognitive Runtime ADR](cognitive-runtime.md)

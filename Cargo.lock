@@ -2749,15 +2749,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ene-common"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "ene-config"
 version = "0.1.0"
 dependencies = [
@@ -2828,7 +2819,6 @@ dependencies = [
  "chrono",
  "ctor 1.0.7",
  "ene-ai",
- "ene-common",
  "ene-config",
  "ene-store",
  "ene-tool-proto",
@@ -2853,7 +2843,6 @@ dependencies = [
  "blake3",
  "chrono",
  "ene-ai",
- "ene-common",
  "ene-config",
  "ene-mind",
  "ene-store",
@@ -2879,7 +2868,6 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "ctor 1.0.7",
- "ene-common",
  "ene-config",
  "libsqlite3-sys",
  "sea-orm",
@@ -2951,7 +2939,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "ego-tree 0.11.0",
- "ene-common",
+ "ene-config",
  "ene-tool-derive",
  "ene-tool-proto",
  "htmd",

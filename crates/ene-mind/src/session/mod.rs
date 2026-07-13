@@ -63,7 +63,7 @@ pub use config::{SessionConfig, SplitScoreWeights, SummarizationConfig};
 #[doc(no_inline)]
 pub use ene_ai::Role;
 /// Truncation utility.
-pub use ene_common::truncate::Truncate;
+pub use ene_config::truncate::Truncate;
 /// Character-card types re-exported from `ene-config`.
 #[doc(no_inline)]
 pub use ene_config::{

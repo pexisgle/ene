@@ -54,7 +54,7 @@ Ene will explicitly manage:
 
 ### Dependency Rules
 
-- `ene-mind` **depends on** `ene-store`, `ene-config`, `ene-ai`, `ene-common`
+- `ene-mind` **depends on** `ene-store`, `ene-config`, `ene-ai`
 - `ene-mind` **does NOT depend on** `ene-runtime` or `ene-tool-host` (prevents circular dependencies)
 - `ene-runtime` depends on `ene-mind` and integrates the mind runtime into `ene-runtime::streaming.rs`; missing store/embedder prerequisites fail closed with a typed error
 - `ene-store` remains the exclusive owner of `sea-orm` SQLite operations — extraction, arbitration, and recall planning logic lives in `ene-mind`, not `ene-store`

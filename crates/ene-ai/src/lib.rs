@@ -32,7 +32,7 @@ pub use config::{
 pub use embedding::{
     EneEmbeddingError, GgufEmbeddingProvider, create_local_provider, resolve_gguf_paths,
 };
-pub use error::LlmProviderError;
+pub use error::{AiError, LlmProviderError};
 pub use hybrid::{HybridRerankProvider, hyde_document, rerank_tool_specs};
 pub use message::{LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart};
 pub use openai::{

@@ -15,7 +15,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
-ene-common = { workspace = true }
 ene-config = { workspace = true }
 ene-store = { workspace = true }
 ene-ai = { workspace = true }

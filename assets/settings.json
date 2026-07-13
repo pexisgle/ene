@@ -109,7 +109,7 @@
     "name": "openai-compatible"
   },
   "session": {
-    "auto_split": true,
+    "auto_split": false,
     "min_turns_before_split": 3,
     "summarization": {
       "base_url": "",

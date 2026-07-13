@@ -1,12 +1,14 @@
 # API リファクタリング計画
 
-- **Status:** 進行中
+- **Status:** **[api-v2.md](api-v2.md) により superseded**
 - **Date:** 2026-07-09
-- **最終更新:** 2026-07-09（P0–P3 の初回実装を反映。[完了分](#完了-2026-07-09) を参照）
+- **最終更新:** 2026-07-13（ステータスを superseded に更新。ホスト契約・クレートマップは API v2 を参照）
+
+> **現行のホスト契約とクレートマップは [API v2](api-v2.md) を読んでください。** 本ページは 2026-07 監査／第一弾実装の歴史的メモです。下記（`schema_link` への言及を含む）を現行の公開面として扱わないでください。
 
 ## 背景
 
-2026-07 の API ドキュメント監査で全ライブラリクレートのページを刷新し、`ene-mind` と `ene-vrm` を追加した。2026-07-09 に第一弾の実装を行った。本ドキュメントは**残作業**のみを追跡する。
+2026-07 の API ドキュメント監査で全ライブラリクレートのページを刷新し、`ene-mind` と `ene-vrm` を追加した。2026-07-09 に第一弾の実装を行った。残作業は [API v2](api-v2.md) の再設計に吸収された。
 
 ## 目標
 
@@ -28,7 +30,7 @@
 
 | 領域 | 成果物 |
 |---|---|
-| **公開面** | `ene-core::schema_link`（認知 ctor リンク #95）; `streaming` / `message_builder` にコントリビュータ向け注記 |
+| **公開面** | `streaming` / `message_builder` にコントリビュータ向け注記（一時的な `schema_link` ctor フックは API v2 で削除。runtime は mind を通常依存） |
 | **Async / エラー** | [`docs/api/index.md`](../api/index.md) の Error & async 規約; `run_tool_server` が `Result<(), ToolError>` を返す |
 | **境界** | `ene-mind` / `ene-store` / `ene-tool-proto` の ADR ガードレール module docs |
 | **ツール ABI** | `ene-tool-common` の `ActionSetProvider` / `SingleActionProvider`; [`docs/tools/sdk.md`](../tools/sdk.md) の ABI 表; `AGENTS.md` R1 修正; `tools/utility` 移行 |
@@ -97,6 +99,7 @@
 
 ## 関連ドキュメント
 
+- **[API v2](api-v2.md)**（権威）
 - [API 索引](../api/index.md)
 - [ストリーミングイベント](../core/streaming-events.md)
 - [認知ランタイム ADR](cognitive-runtime.md)

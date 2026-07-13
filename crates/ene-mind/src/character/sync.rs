@@ -101,8 +101,7 @@ pub async fn sync_character_memories(
             .is_some_and(|r| r.starts_with(LOREBOOK_SOURCE_PREFIX));
 
         let content = item.content.clone();
-        let embedding = embedder
-            .embed(&content, EmbeddingKind::Summary)
+        let embedding = ene_ai::embed(embedder.as_ref(), &content, EmbeddingKind::Summary)
             .await
             .map_err(|e| CognitionError::Other(format!("CCv3 memory embedding failed: {e}")))?;
 

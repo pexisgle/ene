@@ -54,7 +54,7 @@ Ene が明示的に管理するもの：
 
 ### 依存ルール
 
-- `ene-mind` は `ene-store`, `ene-config`, `ene-ai`, `ene-common` に依存する
+- `ene-mind` は `ene-store`, `ene-config`, `ene-ai` に依存する
 - `ene-mind` は `ene-runtime` / `ene-tool-host` に依存しない（循環依存防止）
 - `ene-runtime` は `ene-mind` に依存し、`ene-runtime::streaming.rs` で mind ランタイムを統合する。store/embedder 前提条件が欠ける場合は型付きエラーでフェイルクローズする
 - `ene-store` は引き続き `sea-orm` SQLite 操作の排他的所有者。抽出・調停・想起計画のロジックは `ene-mind` に置く

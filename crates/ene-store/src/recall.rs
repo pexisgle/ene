@@ -5,8 +5,8 @@
 
 use super::store::RecalledSummary;
 use chrono::Utc;
-use ene_common::truncate::Truncate;
 use ene_config::PromptLibrary;
+use ene_config::truncate::Truncate;
 
 /// Formats past conversation summaries into a text block for prompt injection.
 ///

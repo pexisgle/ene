@@ -12,7 +12,7 @@ build_messages(
 MessageBuildContext {
     card: &CharacterCardV3,
     user_input: &str,
-    history: &[ConversationEntry],
+    history: &[HistoryEntry],
     runtime_context: Option<&str>,
     runtime_rules: &str,
     user_name: &str,

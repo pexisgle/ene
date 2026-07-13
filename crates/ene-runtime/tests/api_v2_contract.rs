@@ -157,3 +157,119 @@ async fn marker_tokens_become_performance_not_text() {
         Some("happy")
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn store_off_run_emits_terminal() {
+    // Without a live LLM the turn fails or cancels, but it must still Terminal
+    // (chat is allowed with store.enabled=false).
+    let handle = EneHandle::open(test_config_memory_off(), test_card())
+        .await
+        .expect("open");
+    let mut rx = handle.subscribe();
+    let turn = handle.run("hello with memory off").expect("run");
+
+    let mut saw_terminal = false;
+    for _ in 0..200 {
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                EneEvent::Terminal {
+                    turn: ref t,
+                    reason: TerminalReason::Done | TerminalReason::Failed { .. },
+                } if t == &turn => {
+                    saw_terminal = true;
+                }
+                EneEvent::Terminal {
+                    turn: ref t,
+                    reason: TerminalReason::Cancelled,
+                } if t == &turn => {
+                    saw_terminal = true;
+                }
+                _ => {}
+            }
+        }
+        if saw_terminal {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    if !saw_terminal {
+        let _ = handle.cancel(&turn);
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        while let Ok(ev) = rx.try_recv() {
+            if let EneEvent::Terminal { turn: ref t, .. } = ev
+                && t == &turn
+            {
+                saw_terminal = true;
+            }
+        }
+    }
+
+    assert!(
+        saw_terminal,
+        "store.enabled=false must still complete a turn with Terminal"
+    );
+    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+}
+
+#[tokio::test]
+async fn snapshot_history_is_history_entry() {
+    let handle = EneHandle::open(test_config_memory_off(), test_card())
+        .await
+        .expect("open");
+    let snapshot = handle.diagnostics().get_snapshot().await.expect("snapshot");
+    // Type-level: Vec<HistoryEntry> — compile-time check via annotation.
+    let _: &Vec<ene_mind::HistoryEntry> = &snapshot.history;
+    assert!(snapshot.history.is_empty());
+    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+}
+
+#[tokio::test]
+async fn manual_split_requires_compression() {
+    let mut config = test_config_memory_off();
+    let mut mind = ene_mind::MindConfig::default();
+    mind.context.compression_enabled = false;
+    config.set_section(&mind).expect("mind");
+
+    let handle = EneHandle::open(config, test_card()).await.expect("open");
+    let err = handle.diagnostics().manual_split().await;
+    assert!(
+        matches!(err, Err(ene_runtime::EneRuntimeError::CompressionRequired)),
+        "expected CompressionRequired, got {err:?}"
+    );
+    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cancel_frees_gate_for_next_run() {
+    let handle = EneHandle::open(test_config_memory_off(), test_card())
+        .await
+        .expect("open");
+    let turn1 = handle.run("first").expect("run1");
+    handle.cancel(&turn1).expect("cancel");
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+    // Gate must be free; Busy is only acceptable briefly while cancel drains.
+    let mut accepted = false;
+    for _ in 0..20 {
+        match handle.run("second") {
+            Ok(t) => {
+                accepted = true;
+                let _ = handle.cancel(&t);
+                break;
+            }
+            Err(RunError::Busy) => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(e) => panic!("unexpected run error: {e}"),
+        }
+    }
+    assert!(
+        accepted,
+        "cancel must free the turn gate for a subsequent run"
+    );
+    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+}

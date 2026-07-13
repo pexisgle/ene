@@ -113,7 +113,7 @@ pub struct EneConfig {
 ```json
 {
   "session": {
-    "auto_split": true,
+    "auto_split": false,
     "timeout_minutes": 30,
     "topic_similarity_threshold": 0.5,
     "min_turns_before_split": 3,
@@ -127,7 +127,7 @@ pub struct EneConfig {
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
-| `auto_split` | bool | `true` | 自動セッション分割を有効化 |
+| `auto_split` | bool | `false` | **非推奨の hard-split 経路。** デフォルトはオフ。文脈管理は `mind.context.compression_*`（下記）の rolling compression を優先。`true` のとき複合スコアで新しい session ID を発行しうるが、製品経路ではない。 |
 | `timeout_minutes` | int | `30` | 分割前のアイドルタイムアウト |
 | `topic_similarity_threshold` | float | `0.5` | 話題変化検出のコサイン類似度しきい値 (0.0–1.0) |
 | `min_turns_before_split` | int | `3` | 分割が発生する最小ターン数 |
@@ -420,7 +420,7 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 | `memory_budget_tokens` | int | `1800` | 想起記憶のトークン予算 |
 | `semantic_budget_tokens` | int | `1200` | 意味記憶（lorebook）のトークン予算 |
 | `style_example_budget_tokens` | int | `600` | CCv3 lorebook からのスタイル例のトークン予算 |
-| `compression_enabled` | bool | `true` | セッション分割の代わりに rolling context compression を使う |
+| `compression_enabled` | bool | `true` | **推奨の文脈境界。** ハードなセッション分割の代わりに rolling context compression を使う |
 | `scene_turn_threshold` | int | `12` | シーンレベル圧縮を開始するターン数 |
 | `chapter_span_threshold` | int | `5` | チャプター rollup 前のシーン span 数 |
 | `arc_span_threshold` | int | `3` | アーク rollup 前のチャプター span 数 |

@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ene_ai::{
     EmbeddingKind, EmbeddingProvider, LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk,
+    embed_query,
 };
 use ene_config::CharacterCardV3;
 use ene_mind::{CognitionEngine, HistoryEntry, MindConfig, TurnContext};
@@ -122,7 +123,7 @@ async fn run_before_turn(
     user_input: &str,
     history: &[HistoryEntry],
 ) -> ene_mind::PreTurnOutput {
-    let query = embedder.embed_query(user_input).await.unwrap();
+    let query = embed_query(embedder.as_ref(), user_input).await.unwrap();
     let ctx = TurnContext {
         config,
         card,
@@ -239,7 +240,7 @@ async fn scenario_identity_kernel_survives_long_history() {
         &history,
     )
     .await;
-    let query = embedder.embed_query("quick check").await.unwrap();
+    let query = embed_query(embedder.as_ref(), "quick check").await.unwrap();
     let compose = engine
         .compose_prompt_packet(
             TurnContext {

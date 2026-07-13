@@ -5,6 +5,7 @@
 use async_trait::async_trait;
 use ene_ai::{
     EmbeddingKind, EmbeddingProvider, LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk,
+    embed_query,
 };
 use ene_config::{CharacterCardV3, PromptLibrary, expand_cbs_macros};
 use ene_mind::{CognitionEngine, HistoryEntry, MindConfig, TurnContext};
@@ -103,7 +104,7 @@ async fn cognitive_lifecycle_compose_prompt_includes_identity_kernel_and_recall(
     let engine = CognitionEngine::new();
     let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbedder);
     let llm: Arc<dyn LlmProvider> = Arc::new(MockLlm);
-    let query_emb = embedder.embed_query("matcha").await.unwrap();
+    let query_emb = embed_query(embedder.as_ref(), "matcha").await.unwrap();
 
     let turn_ctx = TurnContext {
         config: &mind,
@@ -194,7 +195,7 @@ async fn cognitive_compose_includes_post_history_phi_block() {
     let engine = CognitionEngine::new();
     let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbedder);
     let llm: Arc<dyn LlmProvider> = Arc::new(MockLlm);
-    let query_emb = embedder.embed_query("hello").await.unwrap();
+    let query_emb = embed_query(embedder.as_ref(), "hello").await.unwrap();
 
     let prompts = PromptLibrary::load("en");
     let phi =
@@ -271,7 +272,7 @@ async fn cognitive_compose_includes_active_scene_summary() {
     let engine = CognitionEngine::new();
     let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbedder);
     let llm: Arc<dyn LlmProvider> = Arc::new(MockLlm);
-    let query_emb = embedder.embed_query("hello").await.unwrap();
+    let query_emb = embed_query(embedder.as_ref(), "hello").await.unwrap();
 
     let pre_ctx = TurnContext {
         config: &mind,

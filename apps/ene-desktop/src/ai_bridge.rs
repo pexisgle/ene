@@ -104,7 +104,6 @@ impl AiBridge {
     }
 
     /// Forward a cancel command for the active turn.
-    #[expect(dead_code)]
     pub fn cancel(&self) {
         let turn = self.active_turn.lock().ok().and_then(|g| g.clone());
         let Some(turn) = turn else {
@@ -310,6 +309,17 @@ fn recall_reason_key(reason: ene_mind::RecallReason) -> String {
     }
 }
 
+fn turn_matches(active_turn: &Mutex<Option<TurnId>>, event_turn: &TurnId) -> bool {
+    match active_turn.lock() {
+        Ok(guard) => match guard.as_ref() {
+            // No active turn yet (race before run sets it): accept events.
+            None => true,
+            Some(active) => active == event_turn,
+        },
+        Err(_) => true,
+    }
+}
+
 async fn pump_events(
     mut receiver: EneEventReceiver,
     event_tx: AppEventSender,
@@ -318,10 +328,16 @@ async fn pump_events(
 ) {
     loop {
         match receiver.recv().await {
-            Ok(EneEvent::TextDelta { delta, .. }) => {
+            Ok(EneEvent::TextDelta { turn, delta }) => {
+                if !turn_matches(&active_turn, &turn) {
+                    continue;
+                }
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::TextDelta(delta)));
             }
-            Ok(EneEvent::Performance { cues, .. }) => {
+            Ok(EneEvent::Performance { turn, cues, .. }) => {
+                if !turn_matches(&active_turn, &turn) {
+                    continue;
+                }
                 // Map Performance → desktop VRM playback (cue name → morph).
                 // ene-vrm does not depend on mind/runtime types.
                 for cue in cues {
@@ -329,26 +345,37 @@ async fn pump_events(
                 }
             }
             Ok(EneEvent::ToolCallStart {
-                name, arguments, ..
+                turn,
+                name,
+                arguments,
             }) => {
+                if !turn_matches(&active_turn, &turn) {
+                    continue;
+                }
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::ToolCallStart {
                     name,
                     arguments,
                 }));
             }
-            Ok(EneEvent::ToolCallResult { name, result, .. }) => {
+            Ok(EneEvent::ToolCallResult { turn, name, result }) => {
+                if !turn_matches(&active_turn, &turn) {
+                    continue;
+                }
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::ToolCallResult {
                     name,
                     result,
                 }));
             }
             Ok(EneEvent::PermissionRequired {
+                turn,
                 request_id,
                 action,
                 target,
                 description,
-                ..
             }) => {
+                if !turn_matches(&active_turn, &turn) {
+                    continue;
+                }
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::PermissionRequired {
                     request_id,
                     action,
@@ -357,8 +384,13 @@ async fn pump_events(
                 }));
             }
             Ok(EneEvent::UserInputRequired {
-                request_id, prompt, ..
+                turn,
+                request_id,
+                prompt,
             }) => {
+                if !turn_matches(&active_turn, &turn) {
+                    continue;
+                }
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::UserInputRequired {
                     request_id,
                     prompt,
@@ -373,6 +405,9 @@ async fn pump_events(
                 turn,
                 reason: ene_runtime::TerminalReason::Cancelled,
             }) => {
+                if !turn_matches(&active_turn, &turn) {
+                    continue;
+                }
                 clear_active_turn(&active_turn, &turn);
                 processing.store(false, Ordering::Relaxed);
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Finished));
@@ -381,12 +416,21 @@ async fn pump_events(
                 turn,
                 reason: ene_runtime::TerminalReason::Failed { message },
             }) => {
+                if !turn_matches(&active_turn, &turn) {
+                    continue;
+                }
                 clear_active_turn(&active_turn, &turn);
                 processing.store(false, Ordering::Relaxed);
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Error(message)));
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!("[Ene] Dropped {n} events (broadcast lag)");
+                tracing::warn!("[Ene] Dropped {n} events (broadcast lag); unlocking chat input");
+                // Avoid sticky UI if Terminal was among the dropped events.
+                processing.store(false, Ordering::Relaxed);
+                if let Ok(mut guard) = active_turn.lock() {
+                    *guard = None;
+                }
+                let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Finished));
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
@@ -421,5 +465,21 @@ mod tests {
         let processing = Arc::new(AtomicBool::new(true));
         processing.store(false, Ordering::Relaxed);
         assert!(!processing.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn turn_matches_accepts_when_no_active_turn() {
+        let active = Mutex::new(None);
+        let turn = TurnId::new();
+        assert!(turn_matches(&active, &turn));
+    }
+
+    #[test]
+    fn turn_matches_rejects_mismatched_turn() {
+        let active_id = TurnId::new();
+        let other = TurnId::new();
+        let active = Mutex::new(Some(active_id.clone()));
+        assert!(turn_matches(&active, &active_id));
+        assert!(!turn_matches(&active, &other));
     }
 }

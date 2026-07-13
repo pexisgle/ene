@@ -1,6 +1,6 @@
 //! Chat window state: message list, input draft, and in-flight dialogs.
 
-use ene_runtime::{ConversationEntry, Role};
+use ene_runtime::{HistoryEntry, Role};
 
 use crate::settings::{PendingPermission, PendingUserInput, QuestionDraft};
 
@@ -32,7 +32,7 @@ impl ChatState {
         }
     }
 
-    pub fn sync_from_history(&mut self, history: &[ConversationEntry]) {
+    pub fn sync_from_history(&mut self, history: &[HistoryEntry]) {
         self.messages = history
             .iter()
             .filter(|entry| entry.role != Role::System)
@@ -164,15 +164,15 @@ mod tests {
     fn sync_from_history_skips_system_messages() {
         let mut state = ChatState::default();
         state.sync_from_history(&[
-            ConversationEntry {
+            HistoryEntry {
                 role: Role::System,
                 content: "hidden".into(),
             },
-            ConversationEntry {
+            HistoryEntry {
                 role: Role::User,
                 content: "hi".into(),
             },
-            ConversationEntry {
+            HistoryEntry {
                 role: Role::Assistant,
                 content: "hello".into(),
             },

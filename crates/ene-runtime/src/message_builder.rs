@@ -10,7 +10,7 @@ pub struct MessageBuildContext<'a> {
     /// The user's current input text.
     pub user_input: &'a str,
     /// Conversation history entries.
-    pub history: &'a [crate::handle::ConversationEntry],
+    pub history: &'a [ene_mind::HistoryEntry],
     /// Optional runtime context appended to the user input (`None` is treated as empty).
     pub runtime_context: Option<&'a str>,
     /// Runtime rules prepended to the system prompt.
@@ -336,7 +336,7 @@ fn format_summaries(summaries: &[RecalledSummary], prompts: &PromptLibrary) -> S
     let mut lines = vec![header.to_string()];
     for s in summaries {
         let age = format_age(now - s.entry.ended_at);
-        let text = ene_common::truncate::Truncate::simple(&s.entry.summary, 300);
+        let text = ene_config::truncate::Truncate::simple(&s.entry.summary, 300);
         let line = if item_tpl.is_empty() {
             format!("[{age}] {text}")
         } else {

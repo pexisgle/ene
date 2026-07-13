@@ -17,9 +17,8 @@
 | [`ene-mind`](ene-mind.md) | マインドランタイム — セッション、Identity Kernel、型付きメモリ、感情、Performance 調停、プロンプトパケット、コミットメント。 | [→](ene-mind.md) |
 | [`ene-ai`](ene-ai.md) | LLM および埋め込みプロバイダーのトレイトと実装（OpenAI + ローカル GGUF）。 | [→](ene-ai.md) |
 | [`ene-store`](ene-store.md) | SQLite ベクターメモリストア（サマリー、ファクト、ツールインデックス）。 | [→](ene-store.md) |
-| [`ene-config`](ene-config.md) | 設定の読み込み、キャラクターカード、CBS マクロ。 | [→](ene-config.md) |
+| [`ene-config`](ene-config.md) | 設定の読み込み、キャラクターカード、CBS マクロ、`Truncate`。 | [→](ene-config.md) |
 | [`ene-vrm`](ene-vrm.md) | `ene-desktop` 向けのVRM 1.0モデルローダー + MToonレンダラー（wgpu）。mind/runtime 依存なし。 | [→](ene-vrm.md) |
-| [`ene-common`](ene-common.md) | 低レベルな共有ユーティリティ（`Truncate` ユニット構造体）。 | [→](ene-common.md) |
 | [`ene-tool`](ene-tool.md) | ツール ABI ファサード（proto + common + derive の再エクスポート）。新ツールの推奨 import。 | [→](ene-tool.md) |
 | [`ene-tool-host`](ene-tool-host.md) | ツールプロセスのライフサイクル管理、IPC クライアント、Tool RAG パイプライン。 | [→](ene-tool-host.md) |
 | [`ene-tool-proto`](ene-tool-proto.md) | IPC ワイヤープロトコル — `ToolSpec`、`IpcRequest`/`IpcResponse`、`ToolError`。 | [→](ene-tool-proto.md) |
@@ -34,6 +33,7 @@
 | [`ene-provider`](ene-provider.md) | [`ene-ai`](ene-ai.md) に統合 |
 | [`ene-embedding`](ene-embedding.md) | [`ene-ai`](ene-ai.md) に統合 |
 | [`ene-session`](ene-session.md) | [`ene-mind`](ene-mind.md) に吸収 |
+| [`ene-common`](ene-common.md) | [`ene-config`](ene-config.md)（`truncate`）+ [`ene-tool-common`](ene-tool-common.md) 再エクスポートへ吸収 |
 
 `ene-core` は [`ene-runtime`](ene-runtime.md) に置換されました。独立した `ene-cognition` / `ene-memory` クレートはありません。認知は `ene-mind`、永続化は `ene-store` です。
 
@@ -59,12 +59,11 @@ flowchart TD
   Mind --> Store
   Mind --> Config
   Mind --> Ai
-  Mind --> Common[ene-common]
 
   ToolHost --> Tool[ene-tool]
   ToolHost --> Ai
   Ai --> Config
-  Ai --> Tool
+  Ai --> ToolProto[ene-tool-proto]
   Store --> Config
 
   Tool --> Proto[ene-tool-proto]
@@ -123,7 +122,7 @@ pub use ene_tool_proto::{ToolSpec, ToolError, IpcRequest, IpcResponse};
 ### エラー
 
 - ライブラリの境界は `Result<T, E>` を返し、`E` は `thiserror` 由来の列挙型です（`anyhow::Error`、`String`、`Box<dyn Error>` ではない）。`anyhow` はdev依存のみです。
-- クレート名に対応する公開エラー名を1つ持ちます（例: `EneRuntimeError`、`EneMemoryError`（`ene-store`）、`CognitionError` / `EneSessionError`（`ene-mind`）、`EneToolHostError`、`ToolError`、`EneConfigError`、`LlmProviderError`、`EmbeddingError`）。
+- クレート名に対応する公開エラー名を1つ持ちます（例: `EneRuntimeError`、`EneMemoryError`（`ene-store`）、`CognitionError` / `EneSessionError`（`ene-mind`）、`EneToolHostError`、`ToolError`、`EneConfigError`、`AiError`（`ene-ai`；入れ子の `LlmProviderError` / `EmbeddingError`））。
 - より狭い目的のエラー型も許容されます（`ActorDeadError`、`ShutdownTimeout`、`RunError`、`CancelError`、`DbServerError`）。
 - テスト以外での `unwrap()`/`expect()` は避けてください。
 

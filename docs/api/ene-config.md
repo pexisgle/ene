@@ -7,7 +7,7 @@
 
 ## Overview
 
-`ene-config` manages all runtime configuration using the [`figment`](https://docs.rs/figment) layered configuration system. It defines the `EneConfig` type, the `define_config!` macro for declaring typed sections, global config state, and the character card format.
+`ene-config` manages all runtime configuration using the [`figment`](https://docs.rs/figment) layered configuration system. It defines the `EneConfig` type, the `define_config!` macro for declaring typed sections, global config state, and the character card format. It also owns `Truncate` / `TruncateResult` (`ene_config::truncate`), folded from the former `ene-common` crate; tools typically use the re-export in [`ene-tool-common`](./ene-tool-common.md).
 
 ### Loading Order
 

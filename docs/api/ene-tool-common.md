@@ -12,7 +12,7 @@
 - The **`ToolSpecArgs`** trait (implemented by `#[derive(ToolSpec)]`/`#[derive(ToolAction)]`) and the **`ToolAction`** trait that every tool action implements to be dispatchable.
 - A **`prelude`** module re-exporting everything a tool author needs in one `use` statement.
 - HTML-to-Markdown conversion and content-extraction helpers for web-content tools.
-- Re-exports of the `Truncate`/`TruncateResult` struct API from `ene-common`.
+- Re-exports of the `Truncate`/`TruncateResult` struct API from `ene-config`.
 
 `ToolAction` is deliberately **not** a supertrait of `ToolSpecArgs` — see [`ToolAction` Trait](#toolaction-trait) for why — so a tool binary's dispatch table can hold a plain `Vec<Box<dyn ToolAction>>`.
 
@@ -103,15 +103,15 @@ This re-exports:
 
 ## `truncate` Module
 
-Re-exports the `Truncate` struct API from `ene-common` for use in tool output formatting:
+Re-exports the `Truncate` struct API from `ene-config` for use in tool output formatting:
 
 ```rust
 pub mod truncate {
-    pub use ene_common::truncate::{Truncate, TruncateResult};
+    pub use ene_config::truncate::{Truncate, TruncateResult};
 }
 ```
 
-`Truncate` is a **unit struct with static methods** — it is not a trait, and there is nothing to call directly on `&str`/`String`. See [`ene-common`](./ene-common.md) for the full method reference (`Truncate::simple`, `Truncate::detailed`, `Truncate::chars`, `Truncate::output`, `Truncate::tail`) and [`TruncateResult`](./ene-common.md#truncateresult) (`content: String`, `truncated: bool`).
+`Truncate` is a **unit struct with static methods** — it is not a trait, and there is nothing to call directly on `&str`/`String`. See [`ene-config`](./ene-config.md) / the former [`ene-common`](./ene-common.md) stub for ownership; methods are `Truncate::simple`, `Truncate::detailed`, `Truncate::chars`, `Truncate::output`, `Truncate::tail`, and `TruncateResult` (`content: String`, `truncated: bool`).
 
 Typical usage in a tool:
 
@@ -257,6 +257,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 - [`ene-tool-derive`](./ene-tool-derive.md) — Proc-macros: `#[derive(ToolAction)]`, `#[derive(ToolSpec)]`, `#[tool_action(args = T)]`
 - [`ene-tool-proto`](./ene-tool-proto.md) — `ToolSpec`, `ToolError`, `ToolProvider`, `run_tool_server`, `IpcRequest`/`IpcResponse`
-- [`ene-common`](./ene-common.md) — `Truncate`/`TruncateResult`
+- [`ene-config`](./ene-config.md) — owns `Truncate`/`TruncateResult` (see also [`ene-common`](./ene-common.md) stub)
 - [`ene-tool-host`](./ene-tool-host.md) — Host-side process management and `ToolRegistry`
 - [Writing a Tool](../tools/sdk.md)

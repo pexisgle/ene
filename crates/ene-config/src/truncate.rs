@@ -1,3 +1,5 @@
+//! Smart content truncation helpers (folded from former `ene-common`).
+
 /// Helper struct for high-performance and detailed string truncation.
 pub struct Truncate;
 
