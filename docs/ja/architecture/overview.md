@@ -1,61 +1,59 @@
 # アーキテクチャ概要
 
-ene は `ene-core` の実行オーケストレーションと `ene-cognition` の認知ランタイムを中心に構成されたモジュラー Rust ワークスペースです。
+ene は API v2 ホスト契約（`ene-runtime`）と `ene-mind` 認知ターンパイプラインを中心としたモジュール型 Rust ワークスペースです。
 
-## ランタイム構成
+## ランタイムアーキテクチャ
 
-実行シェルは引き続きアクターモデル（`EneHandle` / `EneActor`）ですが、ターンごとの知的処理は cognition コンポーネントが担当します。
+実行シェルはアクターモデル（`EneHandle` / actor）のまま、ターン知能は `ene-mind` が所有します。
 
-### ターン処理フロー
+### コアターンフロー
 
 ```text
-ユーザー入力
-  -> before_turn（recall 計画 + affect 更新）
-  -> compose_prompt_packet（セクション化文脈 + 予算管理）
-  -> LLM ストリーミング
-  -> output arbitration（エンジン管理表情）
-  -> after_turn（memory 書き込み + 忘却 + affect 永続化）
+User input
+  -> before_turn (recall planning + affect update)
+  -> compose_prompt_packet (sectioned context + budgeting)
+  -> LLM streaming
+  -> output arbitration (Performance cues)
+  -> after_turn (memory write + forgetting + affect persist)
+  -> Terminal（after_turn 完了後のチャットイベント）
 ```
 
-`ene-core` はこのフローを streaming lifecycle に統合し、desktop/CLI へイベントを配信します。
+`ene-runtime` がこのフローを統合し、**最小**のチャットイベントバスを発行します。診断は別経路です。
 
-## 主要クレート
+## 目標クレートマップ（API v2）
 
-- `ene-core`: アクターランタイム、ストリーミング、イベント、ツール実行。
-- `ene-cognition`: recall planner、prompt packet、emotion engine、output arbiter、memory writer、context compression。
-- `ene-memory`: typed memory 永続化、hybrid search、commitment/affect ストア。
-- `ene-session`: 会話セッション状態と互換 split/compression フック。
-- `ene-provider`: LLM/埋め込みプロバイダ抽象。
-- `ene-tool-*`: サンドボックス化されたツール実行と IPC プロトコル。
+| クレート | 役割 |
+|---|---|
+| `ene-runtime` | Ready `EneHandle::open`、`TurnId`、single-flight Busy、チャットイベント、diagnostics facade |
+| `ene-mind` | Identity、型付きメモリ方針、affect、Performance 調停、compression、セッション状態 |
+| `ene-store` | SQLite-vec 永続化のみ（`store.enabled` / `store.db_path`） |
+| `ene-ai` | LLM + batch-only 埋め込みプロバイダ |
+| `ene-tool` / `ene-tool-host` | wire/host ツール ABI とプロセス管理 |
+| `ene-config` | 設定、キャラクターカード、パス |
+| `ene-vrm` | VRM レンダリング（mind/runtime 依存なし） |
+
+ロック事項と依存グラフは [API v2](api-v2.md) を参照。
 
 ## メモリモデル
 
-typed memory（`episodic`、`semantic`、`preference`、`commitment` など）を使用し、状態は `active` / `faded` / `archived` / `disputed` / `superseded` / `user_deleted` で管理されます。
-
-hybrid recall は以下を合成します。
-
-- ベクトル類似度
-- 語彙一致
-- 時間減衰
-- salience / confidence
-- affect / commitment シグナル
+型付きメモリ（`episodic`、`semantic`、`preference`、`commitment` など）とライフサイクル状態。コミットメントは ledger が唯一の SoT。ハイブリッド recall は **mind** が計画・実行し、**store** はテキスト / 任意の事前計算ベクトル / フィルタのみを受け取る。
 
 ## プロンプトモデル
 
-プロンプトは `PromptPacket` としてセクション化され、明示的なトークン予算で管理されます。Identity と output contract は予算超過時にも保持されます。
+`PromptPacket` によるセクション分割と明示予算。予算圧下でも Identity / output-contract は保護される。
 
-## 感情・表情モデル
+## 感情と Performance
 
-- Affect state はエンジン側で永続化
-- LLM 分類器は任意かつ advisory
-- 最終表情は Output Arbiter がヒステリシス付きで決定
-- UI 側は `EneEvent::Expression` を受信して反映
+- Affect 状態はエンジン側で永続化。
+- 最終的な提示 cue は `EneEvent::Performance`（単独の `SpecialToken` / `Expression` ではない）。
+- `PerformanceCue` は `ene-mind` 所有；desktop が VRM 再生へ変換し、`ene-vrm` に mind 型を持ち込まない。
 
 ## アプリケーション
 
-- `ene-cli`: メモリ/感情/コミットメントのデバッグコマンドを含む REPL。
-- `ene-desktop`: `winit` + `wgpu` + `egui` + VRM 表示、認知デバッグ UI を提供。
+- `ene-cli`: `ConfigStore::try_load` → card → `EneHandle::open`；REPL + diagnostics。
+- `ene-desktop`: 必要時 soft config load → `open`；VRM + Performance 消費。
 
 ## 参照
 
-設計詳細は `docs/ja/architecture/cognitive-runtime.md` を参照してください。
+- [API v2 ADR](api-v2.md)
+- [認知ランタイム ADR](cognitive-runtime.md)

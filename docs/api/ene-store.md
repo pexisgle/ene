@@ -1,22 +1,22 @@
-# `ene-memory` — API Reference
+# `ene-store` — API Reference
 
-> **Crate:** `ene-memory`
+> **Crate:** `ene-store`
 > **Role:** Persistent long-term memory store — legacy summaries/key-facts/logs, typed memory (episodic/semantic/affective/etc.), affect state, companion commitments, and the tool-embedding index.
 
 ---
 
 ## Overview
 
-`ene-memory` is Ene's long-term memory subsystem. It uses **SQLite** as the storage backend, **`sea-orm`** (async, `sqlx-sqlite` backed) for all SQL access, and **`sqlite-vec`** for cosine-similarity vector search.
+`ene-store` is Ene's long-term memory subsystem. It uses **SQLite** as the storage backend, **`sea-orm`** (async, `sqlx-sqlite` backed) for all SQL access, and **`sqlite-vec`** for cosine-similarity vector search.
 
-> **Architecture constraint:** This crate uses `sea-orm` + `sqlite-vec` for **all** database access. It does **not** use Diesel or raw `rusqlite`. Tool binaries must not link `ene-memory` directly — they access the database through the `DbIpcServer` / `ene-tool-db` IPC client instead.
+> **Architecture constraint:** This crate uses `sea-orm` + `sqlite-vec` for **all** database access. It does **not** use Diesel or raw `rusqlite`. Tool binaries must not link `ene-store` directly — they access the database through the `DbIpcServer` / `ene-tool-db` IPC client instead.
 
 Each character has a separate namespace within the shared database, keyed by `card_name` (legacy tables) or `character_id` (typed memory / affect / commitments). The crate stores several kinds of data, layered from oldest to newest:
 
 | Layer | Tables | Status |
 |---|---|---|
 | **Legacy** | `conversation_summaries`, `conversation_keyfacts`, `conversation_logs` | Read/write by default; becomes read-only once the cognitive runtime migrates a card |
-| **Typed memory** | `typed_memories`, `memory_embeddings` | Primary store when `cognition.enabled = true` |
+| **Typed memory** | `typed_memories`, `memory_embeddings` | Primary store for the mind runtime |
 | **Affect** | `affect_states` | Per-character PAD (pleasure/arousal/dominance) emotional state |
 | **Commitments** | `commitments` | Companion promises / follow-ups ledger |
 | **Memory spans** | `memory_spans` | Rolling scene/chapter compression over raw logs |
@@ -160,7 +160,7 @@ pub type ToolEmbeddingFieldRow = (String, String, String, String, String, Vec<f3
 
 ## Typed Memory
 
-The typed memory model is the primary store when the cognitive runtime (`cognition.enabled = true`) is active. Each row has a `MemoryKind`, `MemoryStatus`, `MemorySource`, and independent confidence/salience scores, replacing the flat legacy summary/key-fact model with something queryable and lifecycle-aware.
+The typed memory model is the primary store for the mind runtime. Each row has a `MemoryKind`, `MemoryStatus`, `MemorySource`, and independent confidence/salience scores, replacing the flat legacy summary/key-fact model with something queryable and lifecycle-aware.
 
 ### `MemoryKind`
 
@@ -636,7 +636,7 @@ pub struct MigrationStatus {
 
 ## Memory Spans & Scene Summaries
 
-Rolling compression over raw conversation logs — one **span** per user/assistant exchange (or a run of them), optionally rolled up into higher compression levels (scene → chapter → arc) with an LLM-generated `compressed_summary`.
+Rolling compression over raw conversation logs — one **span** per user/assistant exchange (or a run of them), optionally rolled up into higher compression levels (scene → chapter → arc). The store persists summaries produced by `ene-mind`; it does not call an LLM.
 
 ```rust
 pub struct NewMemorySpan {
@@ -665,30 +665,11 @@ pub struct ActiveSceneSummaryRow {
 | `list_memory_spans_by_session` | `async fn list_memory_spans_by_session(&self, session_id: &str) -> Result<Vec<NewMemorySpan>, MemoryError>` | All spans for a session. |
 | `list_memory_spans_by_session_and_level` | `async fn list_memory_spans_by_session_and_level(&self, session_id: &str, compression_level: i32) -> Result<Vec<NewMemorySpan>, MemoryError>` | Filtered by compression level. |
 | `get_active_scene_summary` | `async fn get_active_scene_summary(&self, session_id: &str) -> Result<Option<ActiveSceneSummaryRow>, MemoryError>` | Fetches the summary injected into the prompt's **Current Scene** section. |
-| `update_span_summary` | `async fn update_span_summary(&self, span_id: i64, summary: &str) -> Result<(), MemoryError>` | Writes the LLM-generated `compressed_summary` for a span, once compression has run. |
+| `update_span_summary` | `async fn update_span_summary(&self, span_id: i64, summary: &str) -> Result<(), MemoryError>` | Writes the mind-generated `compressed_summary` for a span, once compression has run. |
 
 ---
 
-## Summarizer
-
-Calls the LLM to produce a structured end-of-session summary and key facts.
-
-```rust
-pub struct ConversationSummaryResult {
-    pub summary: String,
-    pub key_facts: Vec<KeyFact>,
-}
-
-pub async fn summarize_conversation(
-    provider: &dyn ene_provider::LlmProvider,
-    history: &[ene_provider::LlmMessage],
-    character_name: &str,
-    user_name: &str,
-    existing_facts: &[KeyFact],
-) -> Result<ConversationSummaryResult, MemoryError>
-```
-
-Called internally by `execute_split` in `ene-session` when a session boundary is crossed. A dedicated summarization model can be configured via `memory.summarization_model` / `memory.summarization_base_url` (falls back to the main chat model when empty).
+LLM-based conversation summarization lives in `ene-mind::summarizer`; `ene-store` only persists and recalls the resulting summaries.
 
 ---
 
@@ -716,25 +697,20 @@ Jaccard similarity over tokenized `title + content` pairs. Used both inside `sea
 
 ---
 
-## Configuration: `MemoryConfig`
+## Configuration: `StoreConfig`
 
 ```rust
-pub struct MemoryConfig {
+pub struct StoreConfig {
     pub enabled: bool = false,
     pub db_path: String,
-    pub recall_limit: usize = 5,
-    pub similarity_threshold: f32 = 0.5,
-    pub time_decay_hours: f64 = 24.0,
-    pub similarity_weight: f64 = 0.7,
-    pub recency_weight: f64 = 0.3,
 }
 
-impl MemoryConfig {
+impl StoreConfig {
     pub fn resolve_memory_db_path(&self, character_name: &str) -> std::path::PathBuf;
 }
 ```
 
-Loaded via `ene_config::define_config!` under the `memory` settings section (see [`ene-config`](./ene-config.md)).
+Loaded via `ene_config::define_config!` under the `store` settings section (see [`ene-config`](./ene-config.md)). Recall and decay policy belongs to `MindMemoryConfig`.
 
 ---
 
@@ -774,7 +750,7 @@ pub type MemoryError = EneMemoryError;
 
 ```rust,no_run
 use chrono::Utc;
-use ene_memory::{KeyFact, MemoryStore, RecalledSummary};
+use ene_store::{KeyFact, MemoryStore, RecalledSummary};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -826,8 +802,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## See Also
 
 - [Cognitive Runtime](../architecture/cognitive-runtime.md) — Memory Arbiter, recall planning, and reranking that build on typed memory
-- `ene-cognition` — Owns the Memory Arbiter, `RecallPlanner`, and post-turn memory writer that call into this crate
-- [`ene-core`](./ene-core.md) — `MemoryQueryHandle` for external access and actor-level wiring
-- [`ene-session`](./ene-session.md) — Drives session splits that create legacy summaries via `execute_split`
-- [`ene-embedding`](./ene-embedding.md) — Provides embeddings for storage and search
+- `ene-mind` — Owns the Memory Arbiter, `RecallPlanner`, and post-turn memory writer that call into this crate
+- [`ene-runtime`](./ene-runtime.md) — `MemoryQueryHandle` for external access and actor-level wiring
+- [`ene-mind`](./ene-mind.md) — Drives session splits that create legacy summaries via `execute_split`
+- [`ene-ai`](./ene-ai.md) — Provides embeddings for storage and search
 - [Memory System](../memory/memory.md) — Full design doc: hybrid scoring, MMR diversification, migration, commitment ledger
+- [API v2](../architecture/api-v2.md) — Store ownership (`store.*` only; policy under `mind.*`)
+

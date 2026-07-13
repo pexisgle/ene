@@ -87,21 +87,21 @@ The schedule (`apps/ene-desktop/src/schedule.rs`) has six sets:
 
 ## AI Bridge
 
-The desktop app uses the upstream `ene-core` actor (`EneHandle` /
+The desktop app uses the upstream `ene-runtime` actor (`EneHandle` /
 `EneEvent`) through a thin `AiBridge` shim
 (`apps/ene-desktop/src/ai_bridge.rs`). The bridge:
 
-1. Spawns an `EneHandle` on the current tokio runtime and
+1. Opens a ready `EneHandle` via `EneHandle::open` on the current tokio runtime and
    subscribes to its broadcast `EneEvent` stream.
 2. Spawns a background drain task that maps `EneEvent` →
-   `AppEvent` (`AiStreamUpdate`, `EmoteToken`, `SessionSplit`,
+   `AppEvent` (`AiStreamUpdate`, `PerformanceCue` / `EmoteToken`,
    `StatusChanged`, etc.) and pushes them into the cross-subsystem
    `AppEventSender`.
 3. Owns a `processing: Arc<AtomicBool>` flag, set on
-   `EneCommand::Run` and cleared on `Done` / `Failed`.
+   `run` and cleared on `Terminal`.
 
 User input flows back through `AiBridge::run` /
-`AiBridge::cancel` (fire-and-forget mpsc sends).
+`AiBridge::cancel` (turn-scoped; `cancel` takes the active `TurnId`).
 
 `EventChannels` (a bevy `Resource`) holds the receiver half of
 the `AppEvent` bus. `system::event_pump::pump_legacy_events`
@@ -111,7 +111,7 @@ drains it in `First` / `EventDispatch` and writes the typed
 that the per-frame `system::ui_consumers` systems then read.
 
 ```
-tokio EneActor (ene-core)
+tokio EneActor (ene-runtime)
   → EneEvent (broadcast)
     → AiBridge background task
       → AppEvent (mpsc)

@@ -6,7 +6,7 @@
 
 ## 背景
 
-2026-07 の API ドキュメント監査で全ライブラリクレートのページを刷新し、`ene-cognition` と `ene-vrm` を追加した。2026-07-09 に第一弾の実装を行った。本ドキュメントは**残作業**のみを追跡する。
+2026-07 の API ドキュメント監査で全ライブラリクレートのページを刷新し、`ene-mind` と `ene-vrm` を追加した。2026-07-09 に第一弾の実装を行った。本ドキュメントは**残作業**のみを追跡する。
 
 ## 目標
 
@@ -20,7 +20,7 @@
 
 - クレート統合や、ツールバイナリのサンドボックスモデルの廃止。
 - API 変更に追従する以外のアプリ UX（`ene-cli` / `ene-desktop`）の作り直し。
-- sea-orm による SQLite 所有権の変更（引き続き `ene-memory` 専有）。
+- sea-orm による SQLite 所有権の変更（引き続き `ene-store` 専有）。
 
 ---
 
@@ -30,11 +30,11 @@
 |---|---|
 | **公開面** | `ene-core::schema_link`（認知 ctor リンク #95）; `streaming` / `message_builder` にコントリビュータ向け注記 |
 | **Async / エラー** | [`docs/api/index.md`](../api/index.md) の Error & async 規約; `run_tool_server` が `Result<(), ToolError>` を返す |
-| **境界** | `ene-cognition` / `ene-memory` / `ene-tool-proto` の ADR ガードレール module docs |
+| **境界** | `ene-mind` / `ene-store` / `ene-tool-proto` の ADR ガードレール module docs |
 | **ツール ABI** | `ene-tool-common` の `ActionSetProvider` / `SingleActionProvider`; [`docs/tools/sdk.md`](../tools/sdk.md) の ABI 表; `AGENTS.md` R1 修正; `tools/utility` 移行 |
 | **イベント / セッション** | [`docs/core/streaming-events.md`](../core/streaming-events.md); 分割 API への圧縮優先 doc コメント |
 | **VRM** | `ene_vrm::prelude`; 内部ローダー等の `#[doc(hidden)]`; [`docs/api/ene-vrm.md`](../api/ene-vrm.md) の Supported vs Internal |
-| **API ドキュメント** | 14 ライブラリクレート + `ene-cognition` / `ene-vrm` の EN+JA 全面刷新 |
+| **API ドキュメント** | 14 ライブラリクレート + `ene-mind` / `ene-vrm` の EN+JA 全面刷新 |
 
 ---
 
@@ -43,19 +43,19 @@
 ### 1. 公開面の縮小（フォローアップ）
 
 - 偶発的な `ene-core` ルート再エクスポートを整理し、アプリは所有クレートから import する方針へ。
-- 可視性パス: `ene-cognition`, `ene-memory`, `ene-session`, `ene-tool-host` で未使用の `pub` を `pub(crate)` に。
+- 可視性パス: `ene-mind`, `ene-store`, `ene-mind`, `ene-tool-host` で未使用の `pub` を `pub(crate)` に。
 - クレートごとに `cargo doc --no-deps` で確認。
 
-**影響クレート:** `ene-core`, `ene-cognition`, `ene-memory`, `ene-session`, `ene-tool-host`
+**影響クレート:** `ene-core`, `ene-mind`, `ene-store`, `ene-mind`, `ene-tool-host`
 
 ---
 
 ### 2. クレート境界の一貫性（フォローアップ）
 
 - cognition 有効時、残っているレガシープロンプト組み立てを `CognitionEngine` へ移行。
-- ADR 違反の新規依存を入れない（`cargo tree -p ene-cognition -p ene-tool-proto`）。
+- ADR 違反の新規依存を入れない（`cargo tree -p ene-mind -p ene-tool-proto`）。
 
-**影響クレート:** `ene-core`, `ene-cognition`, `ene-session`
+**影響クレート:** `ene-core`, `ene-mind`, `ene-mind`
 
 ---
 
@@ -75,7 +75,7 @@
 - `ene-cli` / `ene-desktop` が `EneEvent::Terminal` と `Expression` をすべて処理しているか確認。
 - 任意: 圧縮が権威のとき分割スコアリングを無効化する feature / 設定。
 
-**影響クレート:** `ene-core`, `ene-session`, `ene-cognition`, `ene-cli`, `ene-desktop`
+**影響クレート:** `ene-core`, `ene-mind`, `ene-mind`, `ene-cli`, `ene-desktop`
 
 ---
 
@@ -92,7 +92,7 @@
 
 - コード変更 + `direnv exec .` 配下でテスト / clippy が緑
 - 同一変更内で `docs/api/` と `docs/ja/api/`（および関連チュートリアル）を更新
-- 新規の循環依存なし。`ene-memory` が唯一の sea-orm 所有者のまま
+- 新規の循環依存なし。`ene-store` が唯一の sea-orm 所有者のまま
 - ツールのワイヤー変更は additive、または `PROTOCOL_VERSION` 上げを伴う
 
 ## 関連ドキュメント

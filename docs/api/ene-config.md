@@ -472,7 +472,7 @@ pub struct MotionEntry {
 
 `PromptLibrary` loads the LLM-facing prompt strings (system prompt
 framing, emotion rules, memory/summarizer/extractor/affect-classifier
-templates) used throughout `ene-core`, keeping user-facing prose out of
+templates) used throughout `ene-runtime`, keeping user-facing prose out of
 compiled code and giving each string a stable, localisable home.
 
 ```rust
@@ -578,5 +578,5 @@ Follow **Recipe R2** from `AGENTS.md`:
 
 ## See Also
 
-- [`ene-core`](./ene-core.md) — Consumes `EneConfig` at runtime
+- [`ene-runtime`](./ene-runtime.md) — Consumes `EneConfig` at runtime
 - [Configuration Guide](../configuration/settings.md) — End-user settings reference

@@ -1,13 +1,13 @@
-# `ene-memory` — APIリファレンス
+# `ene-store` — APIリファレンス
 
-> **クレート:** `ene-memory`
+> **クレート:** `ene-store`
 > **役割:** 長期記憶の永続化ストア — レガシーな要約/キーファクト/ログ、タイプ付きメモリ（エピソード記憶/意味記憶/感情記憶など）、感情状態、コンパニオンのコミットメント、およびツール埋め込みインデックス。
 
 ---
 
 ## 概要
 
-`ene-memory` はEneの長期記憶サブシステムです。ストレージバックエンドには **SQLite** を使用し、すべてのSQLアクセスには **`sea-orm`**（`sqlx-sqlite` バックエンドの非同期ORM）を、コサイン類似度によるベクトル検索には **`sqlite-vec`** を使用しています。
+`ene-store` はEneの長期記憶サブシステムです。ストレージバックエンドには **SQLite** を使用し、すべてのSQLアクセスには **`sea-orm`**（`sqlx-sqlite` バックエンドの非同期ORM）を、コサイン類似度によるベクトル検索には **`sqlite-vec`** を使用しています。
 
 > **アーキテクチャ上の制約:** このクレートはすべてのデータベースアクセスに `sea-orm` + `sqlite-vec` を使用します。Dieselや生の `rusqlite` は使用しません。ツールバイナリはこのクレートに直接リンクしてはいけません — `DbIpcServer` / `ene-tool-db` のIPCクライアント経由でデータベースにアクセスします。
 
@@ -16,7 +16,7 @@
 | レイヤー | テーブル | 状態 |
 |---|---|---|
 | **レガシー** | `conversation_summaries`, `conversation_keyfacts`, `conversation_logs` | 既定では読み書き可能。カードが認知runtimeに移行されると読み取り専用になる |
-| **タイプ付きメモリ** | `typed_memories`, `memory_embeddings` | `cognition.enabled = true` の場合の主ストア |
+| **タイプ付きメモリ** | `typed_memories`, `memory_embeddings` | mind ランタイムの主ストア |
 | **感情** | `affect_states` | キャラクターごとのPAD（快-不快/覚醒/支配性）感情状態 |
 | **コミットメント** | `commitments` | コンパニオンの約束・フォローアップの台帳 |
 | **メモリスパン** | `memory_spans` | 生ログに対するローリングなシーン/チャプター圧縮 |
@@ -160,7 +160,7 @@ pub type ToolEmbeddingFieldRow = (String, String, String, String, String, Vec<f3
 
 ## タイプ付きメモリ
 
-タイプ付きメモリモデルは、認知runtime（`cognition.enabled = true`）が有効な場合の主ストアです。各行は `MemoryKind`、`MemoryStatus`、`MemorySource`、および独立した確信度/顕著性スコアを持ち、フラットなレガシー要約/キーファクトモデルを、クエリ可能でライフサイクルを意識したものに置き換えます。
+タイプ付きメモリモデルは mind ランタイムの主ストアです。各行は `MemoryKind`、`MemoryStatus`、`MemorySource`、および独立した確信度/顕著性スコアを持ち、フラットなレガシー要約/キーファクトモデルを、クエリ可能でライフサイクルを意識したものに置き換えます。
 
 ### `MemoryKind`
 
@@ -636,7 +636,7 @@ pub struct MigrationStatus {
 
 ## メモリスパン & シーン要約
 
-生の会話ログに対するローリング圧縮 — ユーザー/アシスタントのやり取り（またはその連続）ごとに1つの**スパン**があり、オプションでLLM生成の `compressed_summary` を持つより高い圧縮レベル（シーン → チャプター → アーク）へロールアップされます。
+生の会話ログに対するローリング圧縮 — ユーザー/アシスタントのやり取り（またはその連続）ごとに1つの**スパン**があり、オプションでより高い圧縮レベル（シーン → チャプター → アーク）へロールアップされます。ストアは `ene-mind` が生成した要約を永続化するだけで、LLMは呼び出しません。
 
 ```rust
 pub struct NewMemorySpan {
@@ -665,30 +665,11 @@ pub struct ActiveSceneSummaryRow {
 | `list_memory_spans_by_session` | `async fn list_memory_spans_by_session(&self, session_id: &str) -> Result<Vec<NewMemorySpan>, MemoryError>` | セッションの全スパン。 |
 | `list_memory_spans_by_session_and_level` | `async fn list_memory_spans_by_session_and_level(&self, session_id: &str, compression_level: i32) -> Result<Vec<NewMemorySpan>, MemoryError>` | 圧縮レベルでフィルタしたもの。 |
 | `get_active_scene_summary` | `async fn get_active_scene_summary(&self, session_id: &str) -> Result<Option<ActiveSceneSummaryRow>, MemoryError>` | プロンプトの**現在のシーン**セクションに注入される要約を取得する。 |
-| `update_span_summary` | `async fn update_span_summary(&self, span_id: i64, summary: &str) -> Result<(), MemoryError>` | 圧縮処理が実行された後、スパンのLLM生成 `compressed_summary` を書き込む。 |
+| `update_span_summary` | `async fn update_span_summary(&self, span_id: i64, summary: &str) -> Result<(), MemoryError>` | 圧縮処理が実行された後、mind ランタイムが生成したスパンの `compressed_summary` を書き込む。 |
 
 ---
 
-## サマライザー
-
-LLMを呼び出して、構造化されたセッション終了時の要約とキーファクトを生成します。
-
-```rust
-pub struct ConversationSummaryResult {
-    pub summary: String,
-    pub key_facts: Vec<KeyFact>,
-}
-
-pub async fn summarize_conversation(
-    provider: &dyn ene_provider::LlmProvider,
-    history: &[ene_provider::LlmMessage],
-    character_name: &str,
-    user_name: &str,
-    existing_facts: &[KeyFact],
-) -> Result<ConversationSummaryResult, MemoryError>
-```
-
-セッション境界を越えた際に `ene-session` の `execute_split` から内部的に呼び出されます。専用のサマライズモデルは `memory.summarization_model` / `memory.summarization_base_url` で設定可能です（空の場合はメインのチャットモデルにフォールバックします）。
+LLMベースの会話要約は `ene-mind::summarizer` が担当し、`ene-store` は生成された要約の永続化と回想だけを担当します。
 
 ---
 
@@ -716,25 +697,20 @@ pub fn document_lexical_similarity(
 
 ---
 
-## 設定: `MemoryConfig`
+## 設定: `StoreConfig`
 
 ```rust
-pub struct MemoryConfig {
+pub struct StoreConfig {
     pub enabled: bool = false,
     pub db_path: String,
-    pub recall_limit: usize = 5,
-    pub similarity_threshold: f32 = 0.5,
-    pub time_decay_hours: f64 = 24.0,
-    pub similarity_weight: f64 = 0.7,
-    pub recency_weight: f64 = 0.3,
 }
 
-impl MemoryConfig {
+impl StoreConfig {
     pub fn resolve_memory_db_path(&self, character_name: &str) -> std::path::PathBuf;
 }
 ```
 
-`ene_config::define_config!` を通じて `memory` 設定セクション配下でロードされます（[`ene-config`](./ene-config.md) 参照）。
+`ene_config::define_config!` を通じて `store` 設定セクション配下でロードされます（[`ene-config`](./ene-config.md) 参照）。回想と減衰のポリシーは `MindMemoryConfig` が所有します。
 
 ---
 
@@ -774,7 +750,7 @@ pub type MemoryError = EneMemoryError;
 
 ```rust,no_run
 use chrono::Utc;
-use ene_memory::{KeyFact, MemoryStore, RecalledSummary};
+use ene_store::{KeyFact, MemoryStore, RecalledSummary};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -826,8 +802,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## 関連項目
 
 - [認知Runtime](../architecture/cognitive-runtime.md) — タイプ付きメモリの上に構築されるMemory Arbiter、回想計画、リランキング
-- `ene-cognition` — このクレートを呼び出すMemory Arbiter、`RecallPlanner`、ターン後メモリライターを所有する
-- [`ene-core`](./ene-core.md) — 外部アクセス用の `MemoryQueryHandle` とアクターレベルの結線
-- [`ene-session`](./ene-session.md) — `execute_split` を通じてレガシー要約を作成するセッション分割を駆動する
-- [`ene-embedding`](./ene-embedding.md) — ストレージと検索のための埋め込みを提供する
+- `ene-mind` — このクレートを呼び出すMemory Arbiter、`RecallPlanner`、ターン後メモリライターを所有する
+- [`ene-runtime`](./ene-runtime.md) — 外部アクセス用の `MemoryQueryHandle` とアクターレベルの結線
+- [`ene-mind`](./ene-mind.md) — `execute_split` を通じてレガシー要約を作成するセッション分割を駆動する
+- [`ene-ai`](./ene-ai.md) — ストレージと検索のための埋め込みを提供する
 - [メモリシステム](../memory/memory.md) — 完全な設計ドキュメント: ハイブリッドスコアリング、MMR多様化、移行、コミットメント台帳
+- [API v2](../architecture/api-v2.md) — ストア所有（`store.*` のみ；方針は `mind.*`）

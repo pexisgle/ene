@@ -1,10 +1,10 @@
 # Architecture Overview
 
-ene is a modular Rust workspace centered on `ene-core` orchestration and the `ene-cognition` cognitive runtime.
+ene is a modular Rust workspace centered on the API v2 host contract (`ene-runtime`) and the `ene-mind` cognitive turn pipeline.
 
 ## Runtime Architecture
 
-The actor model remains the execution shell (`EneHandle` / `EneActor`), while turn intelligence is handled by cognitive components.
+The actor model remains the execution shell (`EneHandle` / actor), while turn intelligence is owned by `ene-mind`.
 
 ### Core Turn Flow
 
@@ -13,49 +13,47 @@ User input
   -> before_turn (recall planning + affect update)
   -> compose_prompt_packet (sectioned context + budgeting)
   -> LLM streaming
-  -> output arbitration (engine-managed expression)
+  -> output arbitration (Performance cues)
   -> after_turn (memory write + forgetting + affect persist)
+  -> Terminal (chat event after after_turn completes)
 ```
 
-`ene-core` integrates this flow in the streaming lifecycle and emits runtime events for desktop/CLI consumers.
+`ene-runtime` integrates this flow and emits a **minimal** chat event bus; diagnostics are separate.
 
-## Key Crates
+## Target Crate Map (API v2)
 
-- `ene-core`: actor runtime, streaming lifecycle, event bus, tool orchestration.
-- `ene-cognition`: recall planner, prompt packet composer, emotion engine, output arbiter, memory writer, context compression.
-- `ene-memory`: typed-memory persistence, hybrid search scoring, commitment and affect state storage.
-- `ene-session`: conversation state container and compatibility split/compression hooks.
-- `ene-provider`: LLM and embedding provider abstractions.
-- `ene-tool-*`: sandboxed tool runtime and IPC protocol.
+| Crate | Role |
+|---|---|
+| `ene-runtime` | Ready `EneHandle::open`, `TurnId`, single-flight Busy, chat events, diagnostics facade |
+| `ene-mind` | Identity, typed memory policy, affect, Performance arbitration, compression, session state |
+| `ene-store` | SQLite-vec persistence only (`store.enabled` / `store.db_path`) |
+| `ene-ai` | LLM + batch-only embedding providers |
+| `ene-tool` / `ene-tool-host` | Wire/host tool ABI and process orchestration |
+| `ene-config` | Settings, character cards, paths |
+| `ene-vrm` | VRM rendering (no mind/runtime dependency) |
+
+See [API v2](api-v2.md) for locked decisions and the dependency graph.
 
 ## Memory Model
 
-The system uses typed memory (`episodic`, `semantic`, `preference`, `commitment`, etc.) with lifecycle statuses (`active`, `faded`, `archived`, `disputed`, `superseded`, `user_deleted`).
-
-Hybrid recall combines:
-
-- vector similarity
-- lexical overlap
-- recency decay
-- salience/confidence
-- affect and commitment signals
+Typed memory (`episodic`, `semantic`, `preference`, `commitment`, …) with lifecycle statuses. The commitment ledger is the sole source of truth for commitments. Hybrid recall (vector + lexical + recency + salience) is planned and executed by **mind**; **store** accepts text / optional precomputed vectors / filters only.
 
 ## Prompt Model
 
-Prompt construction is sectioned (`PromptPacket`) with explicit budgets. Identity and output-contract sections are protected from dropping under budget pressure.
+Prompt construction is sectioned (`PromptPacket`) with explicit budgets. Identity and output-contract sections are protected under budget pressure.
 
-## Emotion and Expression
+## Emotion and Performance
 
 - Affect state is persisted engine-side.
-- Optional LLM classification is advisory.
-- Final expression is selected by Output Arbiter with hysteresis.
-- Consumers receive `EneEvent::Expression` for rendering/UI.
+- Final presentation cues are emitted as `EneEvent::Performance` (not standalone `SpecialToken` / `Expression`).
+- `PerformanceCue` is owned by `ene-mind`; desktop maps cues to VRM playback without importing mind types into `ene-vrm`.
 
 ## Applications
 
-- `ene-cli`: REPL + debug commands for memory/affect/commitments.
-- `ene-desktop`: `winit` + `wgpu` + `egui` shell with VRM rendering and cognitive debug UI.
+- `ene-cli`: `ConfigStore::try_load` → card → `EneHandle::open`; REPL + diagnostics commands.
+- `ene-desktop`: soft config load when needed → `open`; VRM + Performance consumption.
 
 ## Reference
 
-For full design details and terminology, see `docs/architecture/cognitive-runtime.md`.
+- [API v2 ADR](api-v2.md)
+- [Cognitive Runtime ADR](cognitive-runtime.md)

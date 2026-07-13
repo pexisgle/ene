@@ -7,9 +7,10 @@ LLM 駆動の会話、アニメーションする VRM キャラクター、ツ�
 ## はじめに
 
 - [アーキテクチャ概要](architecture/overview.md) — クレートマップと依存関係グラフ
+- [API v2](architecture/api-v2.md) — ロック済みホスト契約: `EneHandle::open`、`TurnId`、single-flight Busy、最小イベント
 - [起動フロー](architecture/startup.md) — デスクトップ (winit+wgpu+egui) と CLI のブートシーケンス
 - [認知ランタイムアーキテクチャ](architecture/cognitive-runtime.md) — Identity Kernel、型付きメモリ、感情、表情調停の設計に関するADR
-- [API リファクタリング計画](architecture/api-refactor-plan.md) — クレートAPI表面の再構成に関する進行中の計画
+- [API リファクタリング計画](architecture/api-refactor-plan.md) — 歴史的な再構成メモ（ホスト/クレートマップは API v2 が優先）
 - [設定](configuration/settings.md) — settings.json の全スキーマリファレンス
 - [API リファレンス](api/index.md) — すべてのライブラリクレートの公開APIドキュメント
 
@@ -18,7 +19,7 @@ LLM 駆動の会話、アニメーションする VRM キャラクター、ツ�
 | ドキュメント | トピック |
 |-------------|---------|
 | [ストリーミングエンジン](core/streaming.md) | アクターベースアーキテクチャ, `EneHandle`, `EneEvent`, ツール呼び出しループ |
-| [ストリーミングイベント](core/streaming-events.md) | レガシー vs 認知ストリーミングパスで発生する `EneEvent` バリアントの違い |
+| [ストリーミングイベント](core/streaming-events.md) | mind ストリーミングパスが発行する `EneEvent` バリアント |
 | [プロンプト構築](core/prompt.md) | メッセージ構築順序, システムプロンプト, 感情プロトコル, 関数呼び出し |
 | [セッション管理](core/session.md) | `ConversationSession`, `CharacterCardV3`, CBS 式展開 |
 | [セッション分割](core/session-split.md) | タイムアウト, 話題変化検出, 手動分割, 非同期ライフサイクル |
@@ -51,18 +52,18 @@ LLM 駆動の会話、アニメーションする VRM キャラクター、ツ�
 | クレート | 種別 | 説明 |
 |---------|------|------|
 | `ene-config` | Library | 設定管理, スキーマ生成, キャラクターカード, マクロ |
-| `ene-core` | Library | アクターベースランタイム, LLM ストリーミング, ツール統合, 記憶統合 |
-| `ene-cognition` | Library | 認知ランタイム — Identity Kernel, 型付きメモリ, 感情, 表情調停, コミットメント |
-| `ene-embedding` | Library | 埋め込みプロバイダ (API + ローカル GGUF) |
-| `ene-memory` | Library | SQLite-vec 記憶ストア |
-| `ene-session` | Library | 会話履歴, セッション分割 |
-| `ene-provider` | Library | LLM・埋め込みプロバイダトレイト, OpenAI 実装 |
+| `ene-runtime` | Library | API v2 ホスト: 準備済み `EneHandle::open`, `TurnId`, ストリーミング, ツール, 記憶統合 |
+| `ene-mind` | Library | 認知ランタイム — セッション, Identity Kernel, 型付きメモリ, 感情, Performance 調停, コミットメント |
+| `ene-ai` | Library | LLM + 埋め込みプロバイダ (API + ローカル GGUF) |
+| `ene-store` | Library | SQLite-vec 記憶ストア (`store.enabled` / `store.db_path`) |
+| `ene-tool` | Library | ツール ABI ファサード (proto + common + derive を再エクスポート) |
 | `ene-tool-proto` | Library | IPC プロトコル, `ToolProvider` トレイト, `ToolSpec`, `ToolError` |
 | `ene-tool-derive` | Proc-macro | `#[derive(ToolSpec)]` によるツールスペック自動生成 |
 | `ene-tool-host` | Library | ツールプロセス管理, MCP 対応, Tool RAG |
 | `ene-tool-db` | Library | ツール別 DB IPC クライアント (ツールバイナリが使用) |
 | `ene-tool-common` | Library | 共通ユーティリティ (`ToolAction` トレイト, HTML 抽出) |
-| `ene-vrm` | Library | VRM 1.0 モデルローダーと MToon レンダラー (`ene-desktop` が使用) |
+| `ene-common` | Library | 共有ユーティリティ (`Truncate`) |
+| `ene-vrm` | Library | VRM 1.0 モデルローダーと MToon レンダラー (mind/runtime 依存なし) |
 | `ene-tool-utility` | Binary | ユーティリティツール (question, todo, 時刻, システム情報) |
 | `ene-tool-fs` | Binary | ファイルシステムツール (read, write, edit, shell, undo) |
 | `ene-tool-web` | Binary | Web ツール (fetch, search) |

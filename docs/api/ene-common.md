@@ -205,11 +205,11 @@ fn read_log_file() -> String {
 `ene-common::Truncate` (and `TruncateResult`) is re-exported by several consumer crates so they do not need to depend on `ene-common` directly:
 
 ```rust,no_run
-// crates/ene-core/src/lib.rs
+// crates/ene-runtime/src/lib.rs
 #[doc(no_inline)]
 pub use ene_common::Truncate;
 
-// crates/ene-session/src/lib.rs
+// crates/ene-mind/src/lib.rs
 pub use ene_common::truncate::Truncate;
 
 // crates/ene-tool-common/src/lib.rs
@@ -235,5 +235,5 @@ When adding a new utility to `ene-common`:
 ## See Also
 
 - [`ene-tool-common`](./ene-tool-common.md) — Re-exports `Truncate`/`TruncateResult` for use in tool implementations
-- [`ene-session`](./ene-session.md) — Re-exports `Truncate`
-- [`ene-core`](./ene-core.md) — Workspace entry point
+- [`ene-mind`](./ene-mind.md) — Re-exports `Truncate`
+- [`ene-runtime`](./ene-runtime.md) — Workspace entry point

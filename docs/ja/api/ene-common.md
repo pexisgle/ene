@@ -205,11 +205,11 @@ fn read_log_file() -> String {
 `ene-common::Truncate`（および `TruncateResult`）は、`ene-common` に直接依存する必要がないよう、複数のコンシューマークレートから再エクスポートされています。
 
 ```rust,no_run
-// crates/ene-core/src/lib.rs
+// crates/ene-runtime/src/lib.rs
 #[doc(no_inline)]
 pub use ene_common::Truncate;
 
-// crates/ene-session/src/lib.rs
+// crates/ene-mind/src/lib.rs
 pub use ene_common::truncate::Truncate;
 
 // crates/ene-tool-common/src/lib.rs
@@ -235,5 +235,5 @@ pub mod truncate {
 ## 関連項目
 
 - [`ene-tool-common`](./ene-tool-common.md) — ツール実装向けに `Truncate`/`TruncateResult` を再エクスポートしている
-- [`ene-session`](./ene-session.md) — `Truncate` を再エクスポートしている
-- [`ene-core`](./ene-core.md) — ワークスペースのエントリーポイント
+- [`ene-mind`](./ene-mind.md) — `Truncate` を再エクスポートしている
+- [`ene-runtime`](./ene-runtime.md) — ワークスペースのエントリーポイント

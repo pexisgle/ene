@@ -12,14 +12,14 @@ cargo run -p ene-cli
 
 ```
 main.rs → clap 引数解析
-  → config::init() → 設定読み込み, EneHandle::new()
+  → config::init() → ConfigStore::try_load, EneHandle::open(config, card)
   → AppContext { handle: EneHandle, commands: Vec<Arc<dyn CliCommand>> }
   → repl::run() → dialoguer 入力ループ
-      → stream::process_stream() → EneEvent バリアント処理
+      → stream::process_stream() → EneEvent バリアント処理（TurnId 範囲）
       → commands::execute() → CliCommand トレイト経由の / コマンドディスパッチ
 ```
 
-CLI は起動時に `EneHandle`（アクター）を作成。ユーザー入力は `handle.run()` で送信し、イベントは `handle.subscribe()` で受信。
+CLI は起動時に準備済み `EneHandle`（`open`）を作成。ユーザー入力は `handle.run()` → `TurnId` で送信し、イベントは `handle.subscribe()` で受信。
 
 ### CliCommand トレイト
 

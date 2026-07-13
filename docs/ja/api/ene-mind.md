@@ -1,13 +1,13 @@
-# `ene-cognition` — APIリファレンス
+# `ene-mind` — APIリファレンス
 
-> **クレート:** `ene-cognition`
+> **クレート:** `ene-mind`
 > **役割:** Ene AIコンパニオンの認知ランタイム — Identity Kernel、型付きメモリの書き込み/リコール、感情、表情の調停、プロンプト構成、コミットメント。
 
 ---
 
 ## 概要
 
-`ene-cognition` は [Ene 認知ランタイム](../architecture/cognitive-runtime.md) を実装します。LLM を「暗黙的に人格と記憶を保持する存在」としてではなく、「明示的に管理された認知状態を操作する発話生成器」として扱います。このクレートが担うのは:
+`ene-mind` は [Ene 認知ランタイム](../architecture/cognitive-runtime.md) を実装します。LLM を「暗黙的に人格と記憶を保持する存在」としてではなく、「明示的に管理された認知状態を操作する発話生成器」として扱います。このクレートが担うのは:
 
 - **Identity Kernel**（不変のキャラクターアイデンティティ。常にプロンプトに含まれる）
 - **型付きメモリ** の抽出・調停・ハイブリッドリコール
@@ -19,18 +19,18 @@
 
 ### クレートの境界
 
-- 依存先: `ene-memory`、`ene-config`、`ene-provider`、`ene-common`
-- 依存**しない**: `ene-core`、`ene-session`（循環依存を防ぐため）
-- `ene-core` が `ene-cognition` に依存します（逆ではありません）。これにより、`cognition.enabled` フラグの背後でストリーミングのライフサイクルに認知ランタイムを統合します。
+- 依存先: `ene-store`、`ene-config`、`ene-ai`、`ene-common`
+- 依存**しない**: `ene-runtime`（循環依存を防ぐため）
+- `ene-runtime` が `ene-mind` に依存します（逆ではありません）。これにより mind ランタイムをストリーミングのライフサイクルに統合します。
 
 ### ターンライフサイクル
 
-`CognitionEngine` 自体はLLM呼び出しを実行しません — それは `ene-core` のストリーミングループの中で、`compose_prompt_packet` と `resolve_expression_turn` の間で行われます。
+`CognitionEngine` 自体はLLM呼び出しを実行しません — それは `ene-runtime` のストリーミングループの中で、`compose_prompt_packet` と `resolve_expression_turn` の間で行われます。
 
 ```mermaid
 flowchart LR
     A["before_turn\n(アフェクト更新 + リコール)"] --> B["compose_prompt_packet\n(PromptPacket → LlmMessage[])"]
-    B --> C["LLM生成\n(ene-core ストリーミング)"]
+    B --> C["LLM生成\n(ene-runtime ストリーミング)"]
     C --> D["resolve_expression_turn\n(OutputArbiter)"]
     D --> E["after_turn\n(MemoryWriter + ForgettingLifecycle)"]
     E -.アフェクトを永続化.-> A
@@ -38,27 +38,23 @@ flowchart LR
 
 1. **`before_turn`** — `AffectState` をロードし、感情エンジン（減衰 + 評価 + オプションのLLM分類器）を実行し、ハイブリッドメモリリコールを計画・実行し、アクティブなコミットメントを収集します。
 2. **`compose_prompt_packet`** — Identity Kernel をコンパイルし、スタイル例を選択し、アクティブなシーンサマリーをロードし、それらすべてをトークン予算内の `PromptPacket` → `Vec<LlmMessage>` にパッキングします。
-3. **LLM生成** — `ene-core` が構成済みメッセージを使って補完をストリーミングします。このクレートの範囲外です。
+3. **LLM生成** — `ene-runtime` が構成済みメッセージを使って補完をストリーミングします。このクレートの範囲外です。
 4. **`resolve_expression_turn`** — ターン後の `AffectState`（+ 任意のLLM表情ヒント）を `OutputArbiter` を介してキャラクター表情にマッピングします。
 5. **`after_turn`** — `MemoryCandidate`（決定論的抽出 + ツール結果のグラウンディング）を抽出し、`MemoryArbiter` を実行し、`CommitmentLedger` を同期し、`ForgettingLifecycle` を適用し、アフェクト状態を永続化します。
 
 ---
 
-## `CognitionConfig`
+## `MindConfig`
 
-トップレベルの設定で、`settings.json` の `cognition` キー配下に登録されます（[`ene-config`](./ene-config.md) 参照）。
+トップレベルの設定で、`settings.json` の `mind` キー配下に登録されます（[`ene-config`](./ene-config.md) 参照）。
 
 ```rust
-pub struct CognitionConfig {
-    /// 認知ランタイムを有効化する。無効の場合、レガシーなストリーミング
-    /// パイプラインにフォールバックする。
-    pub enabled: bool, // デフォルト: true
-
+pub struct MindConfig {
     /// コンテキストとトークン予算の管理。
     pub context: ContextConfig,
 
     /// メモリの抽出、検索、保持設定。
-    pub memory: CognitionMemoryConfig,
+    pub memory: MindMemoryConfig,
 
     /// 感情と表情処理の設定。
     pub emotion: EmotionConfig,
@@ -86,7 +82,7 @@ pub struct CognitionConfig {
 | `arc_span_threshold` | `usize` | `3` | アークロールアップ前のチャプタースパン数 |
 | `compression_timeout_secs` | `u64` | `60` | 1回の圧縮要約呼び出しのタイムアウト |
 
-### `CognitionMemoryConfig`
+### `MindMemoryConfig`
 
 メモリ抽出、ハイブリッド検索、保持、MMR多様化に関する設定。
 
@@ -185,13 +181,13 @@ pub struct CognitionEngine {
 | メソッド | シグネチャ | 説明 |
 |---|---|---|
 | `new` | `fn new() -> Self` | デフォルトのサブプロセッサーでエンジンを構築する。`Default` 経由でも利用可能。 |
-| `validate_config` | `fn validate_config(config: &CognitionConfig) -> Result<(), CognitionError>` | `context` のサブ予算の合計が `max_prompt_tokens` 以下であることを検証する。 |
+| `validate_config` | `fn validate_config(config: &MindConfig) -> Result<(), CognitionError>` | `context` のサブ予算の合計が `max_prompt_tokens` 以下であることを検証する。 |
 | `sync_character_memories` | `async fn sync_character_memories(&self, ctx: TurnContext<'_>, previous_hash: Option<u64>) -> Result<(CharacterMemorySyncReport, u64), CognitionError>` | カードのコンテンツハッシュが変化した際にCCv3ロアブック/スタイルエントリを型付きメモリに再インデックスする。`ctx.store` と `ctx.embedder` が必要。 |
 | `before_turn` | `async fn before_turn(&self, ctx: TurnContext<'_>) -> Result<PreTurnOutput, CognitionError>` | アフェクトをロードし、感情エンジンを実行し、ハイブリッドリコールを計画・実行し、アクティブなコミットメントを収集する。 |
 | `persist_affect_snapshot` | `async fn persist_affect_snapshot(store: &MemoryStore, affect: &AffectState) -> Result<(), CognitionError>` | プレターン更新の直後にアフェクト状態を永続化する（ストリームのキャンセル/失敗時にも生き残る）。 |
 | `compose_prompt_packet` | `async fn compose_prompt_packet(&self, ctx: TurnContext<'_>, pre: &PreTurnOutput) -> Result<ComposedPrompt, CognitionError>` | Identity Kernelをコンパイルし、スタイル例を選択し、シーンサマリーをロードし、予算内にすべてをパッキングして `Vec<LlmMessage>` に変換する。 |
-| `after_turn` | `async fn after_turn(&self, store: &MemoryStore, config: &CognitionConfig, input: PostTurnInput<'_>) -> Result<(), CognitionError>` | `MemoryWriter::after_turn` に委譲する — 抽出、調停、忘却ライフサイクル、アフェクト永続化。 |
-| `resolve_expression_turn` | `fn resolve_expression_turn(&self, config: &CognitionConfig, card: &CharacterCardV3, affect: &AffectState, response_text: &str, llm_proposal: Option<&str>, previous_expression: &str, elapsed_since_change: Option<Duration>) -> (ExpressionDecision, AffectState)` | 完了したアシスタントターンの最終的なキャラクター表情を `OutputArbiter` 経由で解決する。判定結果と、`last_expression` が更新された `AffectState` を返す。 |
+| `after_turn` | `async fn after_turn(&self, store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>) -> Result<(), CognitionError>` | `MemoryWriter::after_turn` に委譲する — 抽出、調停、忘却ライフサイクル、アフェクト永続化。 |
+| `resolve_expression_turn` | `fn resolve_expression_turn(&self, config: &MindConfig, card: &CharacterCardV3, affect: &AffectState, response_text: &str, llm_proposal: Option<&str>, previous_expression: &str, elapsed_since_change: Option<Duration>) -> (ExpressionDecision, AffectState)` | 完了したアシスタントターンの最終的なキャラクター表情を `OutputArbiter` 経由で解決する。判定結果と、`last_expression` が更新された `AffectState` を返す。 |
 
 ---
 
@@ -203,8 +199,8 @@ pub struct CognitionEngine {
 
 ```rust
 pub struct HistoryEntry {
-    /// 発言者ロールラベル（`user`、`assistant`、`system`）。
-    pub role: String,
+    /// 発言者ロール（`ene-ai` の `Role`）。
+    pub role: Role,
     /// メッセージ本文。
     pub content: String,
 }
@@ -216,7 +212,7 @@ pub struct HistoryEntry {
 
 ```rust
 pub struct TurnContext<'a> {
-    pub config: &'a CognitionConfig,
+    pub config: &'a MindConfig,
     pub card: &'a CharacterCardV3,
     pub character_id: &'a str,
     pub user_name: &'a str,
@@ -587,10 +583,10 @@ pub struct RecallPlan {
 | メソッド | シグネチャ | 説明 |
 |---|---|---|
 | `plan` | `fn plan(input: &RecallPlannerInput<'_>, options: &RecallPlannerOptions) -> Result<RecallPlan, CognitionError>` | トピック/アフェクトから `RecallIntent` を推論し、セマンティック/エピソードクエリのバリアントを構築し、予算/検索ヒントを埋める。空のターンテキストではエラーになる。 |
-| `to_memory_search_options` | `fn to_memory_search_options<'a>(plan: &'a RecallPlan, query_embedding: &'a [f32], model_name: &'a str, now: DateTime<Utc>) -> MemorySearchOptions<'a>` | プランのプライマリクエリを `ene-memory` のハイブリッド検索オプションにマッピングする。 |
+| `to_memory_search_options` | `fn to_memory_search_options<'a>(plan: &'a RecallPlan, query_embedding: &'a [f32], model_name: &'a str, now: DateTime<Utc>) -> MemorySearchOptions<'a>` | プランのプライマリクエリを `ene-store` のハイブリッド検索オプションにマッピングする。 |
 | `explain_results` | `fn explain_results(scored: Vec<ScoredMemory>) -> Vec<RecalledMemory>` | 各ハイブリッド検索結果に `RecallReason` とスコアの詳細を付加する。 |
 
-`RecallPlannerOptions::from_config(context: &ContextConfig, memory: &CognitionMemoryConfig) -> Self` は、この2つの設定セクションからプランナーオプション（予算、しきい値、`use_hyde`）を導出します。
+`RecallPlannerOptions::from_config(context: &ContextConfig, memory: &MindMemoryConfig) -> Self` は、この2つの設定セクションからプランナーオプション（予算、しきい値、`use_hyde`）を導出します。
 
 ### `RecalledMemory` / `RecallReason`
 
@@ -619,12 +615,12 @@ pub enum RecallReason {
 
 ```rust
 pub async fn execute_hybrid_recall(
-    config: &CognitionConfig,
+    config: &MindConfig,
     input: &ExecuteRecallInput<'_>,
 ) -> Result<(RecallPlan, Vec<RecalledMemory>), CognitionError>
 ```
 
-`CognitionEngine::before_turn` から使用されるエンドツーエンドのパイプラインです: 計画 → （`hybrid_search` が有効なら）ハイブリッドベクトル＋字句検索 → MMR多様化（`MemoryDiversifyPipeline`、`mmr_enabled` でゲート） → オプションのLLM再ランク（`MemoryRerankPipeline`、`rerank_enabled` でゲート） → `RecalledMemory` へのマッピング → 未移行のレガシー行のマージ → ロアブックのキー/定数マッチのマージ → アクセスカウンターの更新。`config.enabled` が `false` の場合は空のリコールリスト（プランのみ）を返します。
+`CognitionEngine::before_turn` から使用されるエンドツーエンドのパイプラインです: 計画 → （`hybrid_search` が有効なら）ハイブリッドベクトル＋字句検索 → MMR多様化（`MemoryDiversifyPipeline`、`mmr_enabled` でゲート） → オプションのLLM再ランク（`MemoryRerankPipeline`、`rerank_enabled` でゲート） → `RecalledMemory` へのマッピング → ロアブックのキー/定数マッチのマージ → アクセスカウンターの更新。レガシーの要約とキーファクトはマージせず、必要な場合は store/CLI の移行 API を明示的に実行します。
 
 ---
 
@@ -636,13 +632,13 @@ pub async fn execute_hybrid_recall(
 pub struct MemoryWriter;
 
 impl MemoryWriter {
-    pub async fn write_memories(store: &MemoryStore, config: &CognitionConfig, input: &PostTurnInput<'_>) -> Result<(), CognitionError>;
-    pub async fn finalize_turn(store: &MemoryStore, config: &CognitionConfig, input: &PostTurnInput<'_>) -> Result<(), CognitionError>;
-    pub async fn after_turn(store: &MemoryStore, config: &CognitionConfig, input: PostTurnInput<'_>) -> Result<(), CognitionError>;
+    pub async fn write_memories(store: &MemoryStore, config: &MindConfig, input: &PostTurnInput<'_>) -> Result<(), CognitionError>;
+    pub async fn finalize_turn(store: &MemoryStore, config: &MindConfig, input: &PostTurnInput<'_>) -> Result<(), CognitionError>;
+    pub async fn after_turn(store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>) -> Result<(), CognitionError>;
 }
 ```
 
-`after_turn` = `write_memories`（決定論的抽出、ツールグラウンディングを含む → `MemoryArbiter` → `CommitmentLedger` 同期）に続いて `finalize_turn`（`ForgettingLifecycle::apply` → `upsert_affect_state`）です。`config.memory.write_every_turn` が `false` の場合、抽出のみがスキップされます（`finalize_turn` は `after_turn` から常に実行されます）。
+`after_turn` = `write_memories`（決定論的抽出、ツールグラウンディングを含む → `MemoryArbiter` → `CommitmentLedger` 同期）に続いて `finalize_turn`（`ForgettingLifecycle::apply` → `upsert_affect_state`）です。`mind.memory.write_every_turn` が `false` の場合、抽出のみがスキップされます（`finalize_turn` は `after_turn` から常に実行されます）。
 
 ### `MemoryCandidate`
 
@@ -694,7 +690,7 @@ pub struct MemoryCandidate {
 pub struct ForgettingLifecycle;
 
 impl ForgettingLifecycle {
-    pub async fn apply(store: &MemoryStore, ctx: &ForgettingContext<'_>, config: &CognitionMemoryConfig) -> Result<ForgettingReport, CognitionError>;
+    pub async fn apply(store: &MemoryStore, ctx: &ForgettingContext<'_>, config: &MindMemoryConfig) -> Result<ForgettingReport, CognitionError>;
 }
 
 pub struct ForgettingReport {
@@ -717,7 +713,7 @@ pub struct ForgettingReport {
 
 ## `commitments` — コンパニオン・コミットメント台帳
 
-約束、タスク、フォローアップを専用の `commitments` テーブル（`ene-memory`）で追跡し、`source_memory_id` を介して型付きメモリ（`MemoryKind::Commitment`）にリンクします。ベクトルリコールの類似度とは**独立して**プロンプトに表示されます。
+約束、タスク、フォローアップを専用の `commitments` テーブル（`ene-store`）で追跡し、`source_memory_id` を介して型付きメモリ（`MemoryKind::Commitment`）にリンクします。ベクトルリコールの類似度とは**独立して**プロンプトに表示されます。
 
 ```rust
 pub struct CommitmentLedger;
@@ -732,7 +728,7 @@ pub struct CommitmentLedger;
 | `complete` / `cancel` | `async fn complete(store, id) -> Result<bool, CognitionError>` / `async fn cancel(...)` | 手動でのライフサイクル遷移。 |
 | `mark_stale_overdue` | `async fn mark_stale_overdue(store: &MemoryStore, now: DateTime<Utc>) -> Result<usize, CognitionError>` | 期限切れのアクティブな行（パース済みの `due_at`）を `Stale` にする。 |
 
-**ライフサイクル:** `Active → Done \| Cancelled \| Stale`。`Commitment`/`CommitmentStatus`/`NewCommitment`/`ActiveCommitmentPrompt` は `ene-memory` が所有するドメイン型であり、クレートのルートで再エクスポートされています。
+**ライフサイクル:** `Active → Done \| Cancelled \| Stale`。`Commitment`/`CommitmentStatus`/`NewCommitment`/`ActiveCommitmentPrompt` は `ene-store` が所有するドメイン型であり、クレートのルートで再エクスポートされています。
 
 ---
 
@@ -742,10 +738,10 @@ pub struct CommitmentLedger;
 
 ```rust
 pub enum EneCognitionError {
-    Memory(#[from] ene_memory::EneMemoryError),
+    Memory(#[from] ene_store::EneMemoryError),
     Config(#[from] ene_config::EneConfigError),
-    Provider(#[from] ene_provider::LlmProviderError),
-    Embedding(#[from] ene_provider::EmbeddingError),
+    Provider(#[from] ene_ai::LlmProviderError),
+    Embedding(#[from] ene_ai::EmbeddingError),
     ExtractionFailed(String),
     ArbitrationFailed(String),
     RecallFailed(String),
@@ -775,12 +771,12 @@ pub struct PreTurnAnalyzer;
 
 ```rust,no_run
 use std::time::Duration;
-use ene_cognition::{CognitionEngine, CognitionConfig};
-use ene_cognition::lifecycle::{TurnContext, HistoryEntry, PostTurnInput};
+use ene_mind::{CognitionEngine, MindConfig};
+use ene_mind::lifecycle::{TurnContext, HistoryEntry, PostTurnInput};
 
 async fn run_turn(
     engine: &CognitionEngine,
-    config: &CognitionConfig,
+    config: &MindConfig,
     ctx: TurnContext<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. プレターン: アフェクト更新 + リコールの計画・実行。
@@ -789,7 +785,7 @@ async fn run_turn(
     // 2. セクション化されたプロンプトパケットをLLMメッセージに構成する。
     let composed = engine.compose_prompt_packet(TurnContext { ..ctx }, &pre).await?;
 
-    // 3. ene-core が `composed.messages` を使ってLLM補完をストリーミングする
+    // 3. ene-runtime が `composed.messages` を使ってLLM補完をストリーミングする
     //    （このクレートの範囲外）。
     let response_text = "..."; // ストリーミングループから得られる
 
@@ -812,7 +808,7 @@ async fn run_turn(
             store,
             config,
             PostTurnInput {
-                turn: ene_cognition::memory_writer::candidate::TurnInput {
+                turn: ene_mind::memory_writer::candidate::TurnInput {
                     user_message: ctx.user_input,
                     assistant_message: Some(response_text),
                     tool_results: &[],
@@ -833,6 +829,6 @@ async fn run_turn(
 ## 関連項目
 
 - [認知ランタイムアーキテクチャ（ADR）](../architecture/cognitive-runtime.md) — 設計思想全体、ターンライフサイクル、用語集
-- [`ene-memory`](./ene-memory.md) — 型付きメモリストア、ハイブリッド検索、コミットメント永続化
-- [`ene-core`](./ene-core.md) — ターンライフサイクル全体を統括し、このクレートを呼び出す
-- [`ene-session`](./ene-session.md) — `TurnContext::history` に渡される会話履歴
+- [`ene-store`](./ene-store.md) — 型付きメモリストア、ハイブリッド検索、コミットメント永続化
+- [`ene-runtime`](./ene-runtime.md) — ターンライフサイクル全体を統括し、このクレートを呼び出す
+- [`ene-mind`](./ene-mind.md) — `TurnContext::history` に渡される会話履歴

@@ -88,22 +88,22 @@ fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
 
 ## AI ブリッジ
 
-デスクトップアプリは upstream の `ene-core` アクター
+デスクトップアプリは upstream の `ene-runtime` アクター
 (`EneHandle` / `EneEvent`) を薄い `AiBridge` シム
 (`apps/ene-desktop/src/ai_bridge.rs`) 経由で使います。
 ブリッジは:
 
-1. 現在の tokio ランタイム上で `EneHandle` を spawn し、
+1. 現在の tokio ランタイム上で `EneHandle::open` により準備済みハンドルを開き、
    ブロードキャスト `EneEvent` ストリームを購読。
-2. `EneEvent` → `AppEvent` (`AiStreamUpdate`, `EmoteToken`,
-   `SessionSplit`, `StatusChanged`, …) にマップして
+2. `EneEvent` → `AppEvent` (`AiStreamUpdate`, `PerformanceCue` / `EmoteToken`,
+   `StatusChanged`, …) にマップして
    クロスサブシステム `AppEventSender` に push するバックグラ
    ウンドドレインタスクを spawn。
 3. `processing: Arc<AtomicBool>` フラグを所有
-   (`EneCommand::Run` でセット、`Done` / `Failed` でクリア)。
+   (`run` でセット、`Terminal` でクリア)。
 
 ユーザー入力は `AiBridge::run` / `AiBridge::cancel` 経由で
-返送されます (fire-and-forget mpsc 送信)。
+返送されます（ターン範囲。`cancel` はアクティブな `TurnId` を取る）。
 
 `EventChannels` (bevy `Resource`) は `AppEvent` バスの
 レシーバー側を保持します。`system::event_pump::pump_legacy_events`
@@ -114,7 +114,7 @@ fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
 システムが読みます。
 
 ```
-tokio EneActor (ene-core)
+tokio EneActor (ene-runtime)
   → EneEvent (broadcast)
     → AiBridge バックグラウンドタスク
       → AppEvent (mpsc)

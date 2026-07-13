@@ -12,10 +12,10 @@ cargo run -p ene-cli
 
 ```
 main.rs → clap args
-  → config::init() → settings load, EneHandle::new()
+  → config::init() → ConfigStore::try_load, EneHandle::open(config, card)
   → AppContext { handle: EneHandle, commands: Vec<Arc<dyn CliCommand>> }
   → repl::run() → dialoguer input loop
-      → stream::process_stream() → EneEvent dispatch
+      → stream::process_stream() → EneEvent dispatch (TurnId-scoped)
       → commands::execute() → / command dispatch via CliCommand trait
 ```
 

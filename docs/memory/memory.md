@@ -7,7 +7,7 @@ SQLite + sqlite-vec + Diesel powered episodic memory with vector similarity sear
 The `EneActor` initializes memory during `reconfigure()`:
 
 1. Create embedding provider from `embedding` config
-2. If `memory.enabled == true`, call `MemoryStore::open()`
+2. If `store.enabled == true`, call `MemoryStore::open()`
 3. Register sqlite-vec extension and run migrations
 4. Attach store and embedder to `session.memory`
 
@@ -118,12 +118,12 @@ Each tool has multiple embedding rows (one per field: `summary`, `description`, 
 
 ## Tool DB IPC Server
 
-Tools that need persistent storage (e.g. `ene-tool-fs` for undo, `ene-tool-utility` for todos) access the database through a per-tool IPC server rather than linking `ene-memory` directly.
+Tools that need persistent storage (e.g. `ene-tool-fs` for undo, `ene-tool-utility` for todos) access the database through a per-tool IPC server rather than linking `ene-store` directly.
 
 ### Architecture
 
 ```
-Core (ene-core)                     Tool binary (e.g. ene-tool-fs)
+Core (ene-runtime)                     Tool binary (e.g. ene-tool-fs)
 ┌─────────────────────┐             ┌──────────────────────┐
 │ DbIpcServer         │  Unix sock  │ DbClient             │
 │  - listens on       │◄───────────►│  - connect()         │
@@ -200,7 +200,7 @@ Implementations:
 
 ## Summarization
 
-`summarize_conversation()` calls the LLM to produce a structured summary:
+`ene-mind::summarizer::summarize_conversation()` calls the LLM to produce a structured summary:
 
 ```rust
 pub struct ConversationSummaryResult {
@@ -210,7 +210,7 @@ pub struct ConversationSummaryResult {
 }
 ```
 
-A dedicated summarization model can be configured via `memory.summarization_model` and `memory.summarization_base_url` (falls back to main LLM if empty).
+The resulting summary and key facts are persisted by `ene-store`; the store itself has no LLM or embedding-provider dependency.
 
 ## Prompt Injection Format
 
@@ -226,7 +226,7 @@ A dedicated summarization model can be configured via `memory.summarization_mode
 
 The cognitive runtime stores long-term facts in `typed_memories` with explicit `MemoryKind` and `MemoryStatus` lifecycle (`active`, `faded`, `archived`, `disputed`, `superseded`, `user_deleted`).
 
-After each turn, deterministic and LLM extractors produce `MemoryCandidate` items. The **Memory Arbiter** (`ene-cognition::memory_writer::MemoryArbiter`) validates each candidate against existing memories before calling `MemoryStore::insert_typed_memory` or `MemoryStore::supersede_typed_memory`.
+After each turn, deterministic and LLM extractors produce `MemoryCandidate` items. The **Memory Arbiter** (`ene-mind::memory_writer::MemoryArbiter`) validates each candidate against existing memories before calling `MemoryStore::insert_typed_memory` or `MemoryStore::supersede_typed_memory`.
 
 Key store APIs:
 
@@ -246,7 +246,7 @@ See [Cognitive Runtime ADR](../architecture/cognitive-runtime.md#memory-arbiter)
 
 ### Recall Plan Generation (#72)
 
-`ene-cognition::recall::RecallPlanner` turns the current turn context into a deterministic `RecallPlan`. The planner does not query SQLite or call an embedding provider; it prepares search intent for later stages.
+`ene-mind::recall::RecallPlanner` turns the current turn context into a deterministic `RecallPlan`. The planner does not query SQLite or call an embedding provider; it prepares search intent for later stages.
 
 Inputs:
 
@@ -263,7 +263,7 @@ Outputs:
 - `episodic_queries` for past conversations and recent-turn context
 - `required_kinds`, always including `Semantic` / `Episodic`, and including `Commitment` whenever active commitments exist
 - `RecallScopeFilter` for character/user scoping
-- `RecallBudgetHints` from `cognition.context`
+- `RecallBudgetHints` from `mind.context`
 - `RecallSearchHints` compatible with `MemorySearchOptions` (`similarity_threshold`, `min_score`, recency half-life, optional query affect)
 
 `RecallPlanner::to_memory_search_options` is a helper that maps a plan plus a single query embedding into `MemorySearchOptions` for `MemoryStore::search_typed_memories_hybrid`. It uses only `plan.search.primary_query_text` (the first semantic query). `semantic_queries`, `episodic_queries`, `required_kinds`, and `use_hyde` remain plan hints for downstream recall execution, which is responsible for multi-query expansion, kind filtering, and HyDE embedding calls.
@@ -310,7 +310,7 @@ Behavior:
 
 ### Explainable Recall Reasons (#74)
 
-`MemoryStore::search_typed_memories_hybrid` returns raw [`ScoredMemory`](../../crates/ene-memory/src/typed_memory.rs) values. Reason assignment lives in `ene-cognition::recall`: downstream recall execution converts those results into `RecalledMemory` DTOs. Each result includes:
+`MemoryStore::search_typed_memories_hybrid` returns raw [`ScoredMemory`](../../crates/ene-store/src/typed_memory.rs) values. Reason assignment lives in `ene-mind::recall`: downstream recall execution converts those results into `RecalledMemory` DTOs. Each result includes:
 
 - `item` — the typed memory row
 - `reason` — a single primary `RecallReason` for UX, debug, and prompt introspection
@@ -335,7 +335,7 @@ Reason priority (first match wins): `ActivePromise` → `CharacterLore` → `Use
 
 ### CCv3 Character Memory Index (#82–#84)
 
-When `cognition.enabled` is true, `CognitionEngine::sync_character_memories` compiles CCv3 card data into character-scoped typed memories:
+The mind runtime's `CognitionEngine::sync_character_memories` compiles CCv3 card data into character-scoped typed memories:
 
 | Source | `source_ref` prefix | `MemoryKind` | Notes |
 |--------|----------------------|--------------|-------|
@@ -361,7 +361,7 @@ This keeps memory useful for recall while preventing large raw tool outputs from
 After hybrid search, downstream recall execution may optionally rerank the top candidates before mapping to `RecalledMemory`:
 
 1. `MemoryStore::search_typed_memories_hybrid` returns `ScoredMemory` rows ordered by hybrid `total`.
-2. When `cognition.memory.rerank_enabled` is `false` (default), order is unchanged.
+2. When `mind.memory.rerank_enabled` is `false` (default), order is unchanged.
 3. When enabled, `MemoryRerankPipeline` sends up to `rerank_candidate_limit` top candidates to an LLM reranker. The prompt includes only the recall question and each candidate's `content` — no title, source, kind, or user metadata. Candidates beyond the limit keep their original hybrid order and are appended after the reranked head.
 4. On timeout, provider error, or malformed structured output, the pipeline falls back to the hybrid search order.
 5. `RecallResultMapper::map` converts the (possibly reranked) list into explainable `RecalledMemory` values.
@@ -380,7 +380,7 @@ After hybrid search and before optional LLM reranking, downstream recall executi
 2. **Cluster dedup** merges near-duplicate candidates (lexical Jaccard similarity on title + content ≥ `mmr_duplicate_cluster_threshold`), keeping the highest-scoring representative per cluster.
 3. **Greedy MMR** selects up to `RecallPlan.budget.result_limit` items using `λ * relevance - (1-λ) * max_similarity_to_selected`, where `relevance` is `score_breakdown.total` normalized to the pool maximum and pairwise similarity uses the same lexical metric. A small `mmr_source_diversity_bonus` is added when a candidate introduces a recall source type not yet present in the selected set.
 4. **Kind quotas** reserve minimum slots for semantic, episodic, user profile, and commitment memories (`mmr_min_slots_*`). Kinds listed in `RecallPlan.required_kinds` (including `preference`, `relationship`, `affective`, and `procedure`) receive at least one slot when budget allows. When the sum of minimums exceeds `result_limit`, slots are allocated by priority: commitment → user profile → preference → semantic → episodic → relationship → affective → procedure → reflection.
-5. When `cognition.memory.mmr_enabled` is `false`, the pipeline truncates to `result_limit` without reordering.
+5. When `mind.memory.mmr_enabled` is `false`, the pipeline truncates to `result_limit` without reordering.
 6. Optional LLM reranking (#77) runs on the diversified list. Hybrid scores on each `ScoredMemory` are never modified.
 
 **Order vs scores:** MMR and reranking change list order only. Each result's `score_breakdown.total` remains the hybrid-search score.
@@ -391,7 +391,7 @@ After hybrid search and before optional LLM reranking, downstream recall executi
 
 Typed memories age through explicit status transitions instead of hard delete. Natural decay and user explicit forget are separate paths.
 
-**Allowed single-step transitions** (`ene-memory::forgetting::validate_transition`):
+**Allowed single-step transitions** (`ene-store::forgetting::validate_transition`):
 
 | From | To |
 |------|-----|
@@ -414,7 +414,7 @@ retention =
 
 - **Active fade decisions:** `age_days` from `active_decay_anchor` (`last_accessed_at`, else `updated_at`).
 - **Faded archive decisions:** `age_days` from `faded_decay_anchor` (`faded_at`, else `created_at`).
-- `half_life` comes from `cognition.memory.default_forgetting_half_life_days`.
+- `half_life` comes from `mind.memory.default_forgetting_half_life_days`.
 - `pinned` memories return retention `1.0` and are skipped.
 
 **Thresholds (defaults):**
@@ -431,16 +431,16 @@ retention =
 
 Post-turn `ForgettingLifecycle::apply` runs from `streaming_cognitive.rs` after each assistant turn when memory is enabled. Recall bumps `last_accessed_at` via `bump_typed_memory_access` for surfaced memories.
 
-**Prompt uncertain markers:** When typed recall maps to legacy `KeyFact` rows, `format_recalled_content` prefixes:
+**Prompt uncertain markers:** When typed recall maps a `RecalledMemory` into prompt text, `format_recalled_content` prefixes:
 
 - `[uncertain] ` for `faded` memories (and low-confidence `active` memories)
 - `[disputed] ` for `disputed` memories
 
-Legacy `conversation_keyfacts` from `recall_context` receive the same uncertain/disputed markers when the cognitive runtime is enabled (#98).
+Legacy `conversation_keyfacts` receive these markers only when explicitly converted by the migration tooling; normal mind recall does not merge `recall_context` rows.
 
 ## Migration from Legacy Tables
 
-When the cognitive runtime is enabled (`cognition.enabled = true`), **new memory writes go to typed memory only**. Legacy tables (`conversation_summaries`, `conversation_keyfacts`) become **read-only** until you migrate or reset.
+The mind runtime writes new memories to typed memory only. Legacy tables (`conversation_summaries`, `conversation_keyfacts`) are **read-only** until you migrate or reset.
 
 ### Mapping rules (one-shot migration)
 
@@ -450,19 +450,19 @@ When the cognitive runtime is enabled (`cognition.enabled = true`), **new memory
 | `conversation_keyfacts` | `UserProfile` or `Preference` | Keys matching `pref_*`, `like`, or `dislike` → `Preference`; otherwise → `UserProfile`; `title` = key, `content` = value; `source_ref = legacy:keyfact:{id}` |
 | `conversation_logs` | `memory_spans` | One span per user/assistant pair (or single message when unpaired); `raw_excerpt` holds message text; `compressed_summary` filled by rolling compression (#79) at runtime |
 
-At runtime (cognitive path), `ene-cognition::context::compression` writes scene-level spans when turn count or context pressure exceeds `cognition.context` thresholds. Active scene summaries are injected into the **Current Scene** section of `PromptPacket` via `MemoryStore::get_active_scene_summary`. Raw `conversation_logs` are always preserved.
+At runtime (cognitive path), `ene-mind::context::compression` writes scene-level spans when turn count or context pressure exceeds `mind.context` thresholds. Active scene summaries are injected into the **Current Scene** section of `PromptPacket` via `MemoryStore::get_active_scene_summary`. Raw `conversation_logs` are always preserved.
 
 Migration progress is recorded in `memory_migration_meta` per character card.
 
 ### User options
 
-1. **Do nothing (read-only fallback)** — Until you migrate, legacy summaries and key facts are merged into cognitive recall (typed search + legacy `recall_context`). New extracted memories go to typed tables only. Raw conversation logs continue to append to `conversation_logs` on each turn.
+1. **Do nothing (read-only legacy data)** — Until you migrate, legacy summaries and key facts remain outside normal mind recall. New extracted memories go to typed tables only. Raw conversation logs continue to append to `conversation_logs` on each turn.
 2. **`/memory migrate legacy`** — One-shot conversion inside a single transaction; sets the migration marker. After migration, recall uses typed memory only for that card.
 3. **`/memory reset legacy --yes`** — Truncates legacy tables and clears typed memory for the card (destructive; requires confirmation). Memory spans are removed only for sessions linked to that card's logs.
 
 ### Strict mode
 
-Set `cognition.memory.require_migration = true` to block recall when **legacy summaries or keyfacts** exist but migration has not completed. Ongoing `conversation_logs` from normal chat do **not** trigger this gate. The store returns `LegacyMemoryNotMigrated` with reset/migrate guidance.
+Set `mind.memory.require_migration = true` to block recall when **legacy summaries or keyfacts** exist but migration has not completed. Ongoing `conversation_logs` from normal chat do **not** trigger this gate. The store returns `LegacyMemoryNotMigrated` with reset/migrate guidance.
 
 ### Reset guidance
 
@@ -508,7 +508,7 @@ commitments (
 
 **Due dates:** Extractors populate `MemoryCandidate::commitment_due`, which is stored as `due_label` on the ledger row. Natural-language due-date parsing into `due_at` is not implemented yet (see Memory Arbiter notes in [Cognitive Runtime ADR](../architecture/cognitive-runtime.md#companion-commitment-ledger)), so `mark_stale_commitments` only affects rows with an explicit `due_at`.
 
-**Runtime wiring:** `CommitmentLedger::arbitrate_apply_and_sync` runs the Memory Arbiter and syncs commitment rows in one call. `active_prompt_candidates` produces lightweight DTOs for the Active Commitments `PromptPacket` section (#87). `MemoryWriter::write_memories` calls sync after each turn when `cognition.memory.write_every_turn` is enabled. CLI list/complete commands are available via `/commitments` (#94).
+**Runtime wiring:** `CommitmentLedger::arbitrate_apply_and_sync` runs the Memory Arbiter and syncs commitment rows in one call. `active_prompt_candidates` produces lightweight DTOs for the Active Commitments `PromptPacket` section (#87). `MemoryWriter::write_memories` calls sync after each turn when `mind.memory.write_every_turn` is enabled. CLI list/complete commands are available via `/commitments` (#94).
 
 ## Memory Journal (Desktop UX)
 
@@ -533,5 +533,5 @@ The desktop **Memory Journal** page (`ene-desktop` Settings → Memory) exposes 
 
 | Layer | Method |
 |-------|--------|
-| `ene-memory` | `list_journal_memories`, `user_restore_typed_memory`, `user_forget_typed_memory` |
-| `ene-core` | `MemoryQueryHandle::list_journal_memories`, `user_restore_typed_memory`, `search_typed_memories_explained` |
+| `ene-store` | `list_journal_memories`, `user_restore_typed_memory`, `user_forget_typed_memory` |
+| `ene-runtime` | `MemoryQueryHandle::list_journal_memories`, `user_restore_typed_memory`, `search_typed_memories_explained` |

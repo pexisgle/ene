@@ -5,9 +5,10 @@ ene is a local AI character platform implemented as a Rust workspace. It provide
 ## Getting Started
 
 - [Architecture Overview](architecture/overview.md) — Crate map and dependency graph
+- [API v2](architecture/api-v2.md) — Locked host contract: `EneHandle::open`, `TurnId`, single-flight Busy, minimal events
 - [Startup Flow](architecture/startup.md) — Desktop (winit+wgpu+egui) and CLI boot sequences
 - [Cognitive Runtime Architecture](architecture/cognitive-runtime.md) — ADR for the Identity Kernel, typed memory, affect, and expression arbitration design
-- [API Refactor Plan](architecture/api-refactor-plan.md) — Ongoing plan for restructuring the crate API surface
+- [API Refactor Plan](architecture/api-refactor-plan.md) — Historical restructuring notes (superseded by API v2 for host/crate map)
 - [Configuration](configuration/settings.md) — Full settings.json schema reference
 - [API Reference](api/index.md) — Public API documentation for every library crate
 
@@ -16,7 +17,7 @@ ene is a local AI character platform implemented as a Rust workspace. It provide
 | Document | Topic |
 |----------|-------|
 | [Streaming Engine](core/streaming.md) | Actor-based architecture, `EneHandle`, `EneEvent`, tool calling loop |
-| [Streaming Events](core/streaming-events.md) | Which `EneEvent` variants fire on the legacy vs. cognitive streaming path |
+| [Streaming Events](core/streaming-events.md) | `EneEvent` variants emitted by the mind streaming path |
 | [Prompt Construction](core/prompt.md) | Message assembly order, system prompt, emotion protocol, function calling |
 | [Session Management](core/session.md) | `ConversationSession`, `CharacterCardV3`, CBS macro expansion |
 | [Session Splitting](core/session-split.md) | Timeout, topic change detection, manual split, async lifecycle |
@@ -49,18 +50,18 @@ ene is a local AI character platform implemented as a Rust workspace. It provide
 | Crate | Type | Description |
 |-------|------|-------------|
 | `ene-config` | Library | Configuration, schemas, character cards, macros |
-| `ene-core` | Library | Actor-based runtime, LLM streaming, tool orchestration, memory integration |
-| `ene-cognition` | Library | Cognitive runtime — Identity Kernel, typed memory, affect, expression arbitration, commitments |
-| `ene-embedding` | Library | Embedding providers (API + local GGUF) |
-| `ene-memory` | Library | SQLite-vec memory store |
-| `ene-session` | Library | Conversation history, session splitting |
-| `ene-provider` | Library | LLM and embedding provider traits, OpenAI implementation |
+| `ene-runtime` | Library | API v2 host: ready `EneHandle::open`, `TurnId`, streaming, tools, memory integration |
+| `ene-mind` | Library | Cognitive runtime — session, Identity Kernel, typed memory, affect, Performance arbitration, commitments |
+| `ene-ai` | Library | LLM + embedding providers (API + local GGUF) |
+| `ene-store` | Library | SQLite-vec memory store (`store.enabled` / `store.db_path`) |
+| `ene-tool` | Library | Tool ABI facade (re-exports proto + common + derive) |
 | `ene-tool-proto` | Library | IPC protocol, `ToolProvider` trait, `ToolSpec`, `ToolError` |
 | `ene-tool-derive` | Proc-macro | `#[derive(ToolSpec)]` for auto-generated tool specs |
 | `ene-tool-host` | Library | Tool process manager, MCP support, Tool RAG |
 | `ene-tool-db` | Library | Per-tool DB IPC client (used by tool binaries) |
 | `ene-tool-common` | Library | Shared utilities (`ToolAction` trait, HTML extraction) |
-| `ene-vrm` | Library | VRM 1.0 model loader and MToon renderer (used by `ene-desktop`) |
+| `ene-common` | Library | Shared utilities (`Truncate`) |
+| `ene-vrm` | Library | VRM 1.0 model loader and MToon renderer (no mind/runtime dep) |
 | `ene-tool-utility` | Binary | Utility tools (question, todo, time, system info) |
 | `ene-tool-fs` | Binary | Filesystem tools (read, write, edit, shell, undo) |
 | `ene-tool-web` | Binary | Web tools (fetch, search) |

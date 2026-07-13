@@ -7,7 +7,7 @@ SQLite + sqlite-vec + Diesel ベースのエピソディック記憶。ベクト
 `EneActor` が `reconfigure()` 中に記憶を初期化:
 
 1. `embedding` 設定から埋め込みプロバイダを作成
-2. `memory.enabled == true` なら `MemoryStore::open()` を呼び出し
+2. `store.enabled == true` なら `MemoryStore::open()` を呼び出し
 3. sqlite-vec 拡張を登録しマイグレーションを実行
 4. ストアと埋め込みを `session.memory` にアタッチ
 
@@ -118,12 +118,12 @@ __tool_schemas (
 
 ## ツール DB IPC サーバー
 
-永続ストレージを必要とするツール (例: undo 用の `ene-tool-fs`、todo 用の `ene-tool-utility`) は、`ene-memory` を直接リンクするのではなく、ツールごとの IPC サーバー経由でデータベースにアクセスします。
+永続ストレージを必要とするツール (例: undo 用の `ene-tool-fs`、todo 用の `ene-tool-utility`) は、`ene-store` を直接リンクするのではなく、ツールごとの IPC サーバー経由でデータベースにアクセスします。
 
 ### アーキテクチャ
 
 ```
-Core (ene-core)                     ツールバイナリ (例: ene-tool-fs)
+Core (ene-runtime)                     ツールバイナリ (例: ene-tool-fs)
 ┌─────────────────────┐             ┌──────────────────────┐
 │ DbIpcServer         │  Unix sock  │ DbClient             │
 │  - リッスン:        │◄───────────►│  - connect()         │
@@ -193,7 +193,7 @@ pub enum EmbeddingError {
 
 ## 要約
 
-`summarize_conversation()` が LLM を呼び出して構造化された要約を生成:
+`ene-mind::summarizer::summarize_conversation()` が LLM を呼び出して構造化された要約を生成:
 
 ```rust
 pub struct ConversationSummaryResult {
@@ -203,7 +203,7 @@ pub struct ConversationSummaryResult {
 }
 ```
 
-専用の要約モデルは `memory.summarization_model` と `memory.summarization_base_url` で設定可能 (空の場合はメイン LLM にフォールバック)。
+生成された要約とキーファクトは `ene-store` が永続化します。ストア自体は LLM や埋め込みプロバイダーに依存しません。
 
 ## プロンプト注入形式
 
@@ -219,7 +219,7 @@ pub struct ConversationSummaryResult {
 
 Cognitive Runtime は長期事実を `typed_memories` に保存し、明示的な `MemoryKind` と `MemoryStatus` ライフサイクル（`active`, `faded`, `archived`, `disputed`, `superseded`, `user_deleted`）を持つ。
 
-各ターン後、決定論的/LLM 抽出器が `MemoryCandidate` を生成する。**Memory Arbiter**（`ene-cognition::memory_writer::MemoryArbiter`）は、既存記憶と照合してから `MemoryStore::insert_typed_memory` または `MemoryStore::supersede_typed_memory` を呼ぶ。
+各ターン後、決定論的/LLM 抽出器が `MemoryCandidate` を生成する。**Memory Arbiter**（`ene-mind::memory_writer::MemoryArbiter`）は、既存記憶と照合してから `MemoryStore::insert_typed_memory` または `MemoryStore::supersede_typed_memory` を呼ぶ。
 
 主要なストア API：
 
@@ -239,7 +239,7 @@ Cognitive Runtime は長期事実を `typed_memories` に保存し、明示的�
 
 ### Recall Plan 生成（#72）
 
-`ene-cognition::recall::RecallPlanner` は、現在のターン文脈から決定論的に `RecallPlan` を生成します。planner 自体は SQLite 検索や埋め込み provider 呼び出しを行わず、後続段階に渡す検索意図を準備します。
+`ene-mind::recall::RecallPlanner` は、現在のターン文脈から決定論的に `RecallPlan` を生成します。planner 自体は SQLite 検索や埋め込み provider 呼び出しを行わず、後続段階に渡す検索意図を準備します。
 
 入力:
 
@@ -256,7 +256,7 @@ Cognitive Runtime は長期事実を `typed_memories` に保存し、明示的�
 - 過去会話や直近ターン文脈向けの `episodic_queries`
 - `required_kinds`（常に `Semantic` / `Episodic` を含み、active commitment がある場合は `Commitment` を含む）
 - character/user scope 用の `RecallScopeFilter`
-- `cognition.context` 由来の `RecallBudgetHints`
+- `mind.context` 由来の `RecallBudgetHints`
 - `MemorySearchOptions` 互換の `RecallSearchHints`（`similarity_threshold`, `min_score`, recency half-life, optional query affect）
 
 `RecallPlanner::to_memory_search_options` は、plan と単一の query embedding から `MemoryStore::search_typed_memories_hybrid` 用の `MemorySearchOptions` を組み立てる helper です。使用するのは `plan.search.primary_query_text`（最初の semantic query）のみです。`semantic_queries` / `episodic_queries` / `required_kinds` / `use_hyde` は plan hints として残り、multi-query 展開・kind フィルタ・HyDE embedding 呼び出しは後続の recall execution が担当します。
@@ -303,7 +303,7 @@ score =
 
 ### 説明可能な想起理由（#74）
 
-`MemoryStore::search_typed_memories_hybrid` は生の `ScoredMemory` を返します。理由付けは `ene-cognition::recall` の責務で、後続の recall execution がそれを `RecalledMemory` DTO に変換します。各結果には次が含まれます。
+`MemoryStore::search_typed_memories_hybrid` は生の `ScoredMemory` を返します。理由付けは `ene-mind::recall` の責務で、後続の recall execution がそれを `RecalledMemory` DTO に変換します。各結果には次が含まれます。
 
 - `item` — 型付き記憶行
 - `reason` — UX / debug / prompt 向けの単一 `RecallReason`
@@ -328,7 +328,7 @@ score =
 
 ### CCv3 キャラクタ記憶インデックス（#82–#84）
 
-`cognition.enabled` が true のとき、`CognitionEngine::sync_character_memories` が CCv3 カードデータをキャラクタスコープ typed memory にコンパイルする:
+mind ランタイムの `CognitionEngine::sync_character_memories` が CCv3 カードデータをキャラクタスコープ typed memory にコンパイルする:
 
 | ソース | `source_ref` プレフィックス | `MemoryKind` | 備考 |
 |--------|---------------------------|--------------|------|
@@ -354,7 +354,7 @@ score =
 ハイブリッド検索の後、downstream recall execution は `RecalledMemory` への変換前に optional な rerank を実行できます。
 
 1. `MemoryStore::search_typed_memories_hybrid` が hybrid `total` 順の `ScoredMemory` を返す。
-2. `cognition.memory.rerank_enabled` が `false`（既定）の場合、順序は変更されない。
+2. `mind.memory.rerank_enabled` が `false`（既定）の場合、順序は変更されない。
 3. 有効時、`MemoryRerankPipeline` が上位 `rerank_candidate_limit` 件を LLM reranker に渡す。prompt には recall question と各候補の `content` のみを含め、title / source / kind / user metadata は含めない。limit を超える候補は hybrid 順序のまま rerank 対象の末尾に追加される。
 4. timeout、provider error、structured output の不正時は hybrid search 順序にフォールバックする。
 5. `RecallResultMapper::map` が（rerank 後の）リストを説明可能な `RecalledMemory` に変換する。
@@ -373,7 +373,7 @@ score =
 2. **クラスタ dedup** で近傍重複候補（title + content の lexical Jaccard 類似度 ≥ `mmr_duplicate_cluster_threshold`）をマージし、クラスタ内最高スコアの代表 1 件のみを残す。
 3. **Greedy MMR** で `RecallPlan.budget.result_limit` 件まで選択する。`λ * relevance - (1-λ) * max_similarity_to_selected` を用い、`relevance` は pool 内最大値で正規化した `score_breakdown.total`、pairwise 類似度は同じ lexical 指標。selected set に未登場の recall source 種別を持つ候補には `mmr_source_diversity_bonus` を小幅加算する。
 4. **Kind quota** で semantic / episodic / user profile / commitment の最低枠（`mmr_min_slots_*`）を確保する。`RecallPlan.required_kinds` に含まれる kind（`preference` / `relationship` / `affective` / `procedure` など）も予算が許せば最低 1 枠を確保する。minimum の合計が `result_limit` を超える場合は、commitment → user profile → preference → semantic → episodic → relationship → affective → procedure → reflection の優先順で枠を割り当てる。
-5. `cognition.memory.mmr_enabled` が `false` の場合、`result_limit` で truncate するのみで順序は変更しない。
+5. `mind.memory.mmr_enabled` が `false` の場合、`result_limit` で truncate するのみで順序は変更しない。
 6. optional LLM rerank（#77）は多様化後のリストに対して実行される。各 `ScoredMemory` の hybrid スコアは変更されない。
 
 **順序とスコア:** MMR と rerank はリスト順序のみを変更する。各結果の `score_breakdown.total` は hybrid-search スコアのまま。
@@ -384,7 +384,7 @@ score =
 
 typed memory はハードデリートではなく明示的なステータス遷移で経年変化する。自然減衰とユーザーの明示的忘却は別パス。
 
-**許可される単一ステップ遷移**（`ene-memory::forgetting::validate_transition`）:
+**許可される単一ステップ遷移**（`ene-store::forgetting::validate_transition`）:
 
 | From | To |
 |------|-----|
@@ -407,7 +407,7 @@ retention =
 
 - **active の fade 判定:** `active_decay_anchor`（`last_accessed_at` → `updated_at`）から `age_days`。
 - **faded の archive 判定:** `faded_decay_anchor`（`faded_at` → `created_at`）から `age_days`。
-- `half_life` は `cognition.memory.default_forgetting_half_life_days`。
+- `half_life` は `mind.memory.default_forgetting_half_life_days`。
 - `pinned` 記憶は retention `1.0` を返し、自然減衰の対象外。
 
 **閾値（デフォルト）:**
@@ -424,16 +424,16 @@ retention =
 
 `ForgettingLifecycle::apply` はメモリ有効時、各アシスタントターン後に `streaming_cognitive.rs` から実行される。recall 時は表示された記憶に `bump_typed_memory_access` で `last_accessed_at` を更新する。
 
-**プロンプトの不確実性マーカー:** typed recall を legacy `KeyFact` にマップする際、`format_recalled_content` が以下を付与:
+**プロンプトの不確実性マーカー:** typed recall の `RecalledMemory` をプロンプト文字列に変換する際、`format_recalled_content` が以下を付与:
 
 - `faded` 記憶（および低信頼度の `active`）に `[uncertain] `
 - `disputed` 記憶に `[disputed] `
 
-`recall_context` のレガシー `conversation_keyfacts` にも、cognitive runtime 有効時は同じ uncertain/disputed マーカーが付く（#98）。
+レガシー `conversation_keyfacts` には、明示的な移行で typed memory に変換した場合のみ同じ uncertain/disputed マーカーが付く。通常の mind recall は `recall_context` 行をマージしない。
 
 ## レガシーテーブルからの移行
 
-cognitive runtime を有効にした場合（`cognition.enabled = true`）、**新規 memory 書き込みは typed memory のみ**です。移行またはリセットを行うまで、レガシーテーブル（`conversation_summaries`, `conversation_keyfacts`）は **read-only** です。
+mind ランタイムは **新規 memory を typed memory のみに書き込みます**。移行またはリセットを行うまで、レガシーテーブル（`conversation_summaries`, `conversation_keyfacts`）は **read-only** です。
 
 ### マッピング規則（one-shot migration）
 
@@ -443,19 +443,19 @@ cognitive runtime を有効にした場合（`cognition.enabled = true`）、**�
 | `conversation_keyfacts` | `UserProfile` または `Preference` | `pref_*`, `like`, `dislike` に一致 → `Preference`; それ以外 → `UserProfile`; `title` = key, `content` = value |
 | `conversation_logs` | `memory_spans` | user/assistant ペアごとに span; `raw_excerpt` に本文; `compressed_summary` は rolling compression（#79）でランタイム更新 |
 
-ランタイム（認知パス）では、`ene-cognition::context::compression` が `cognition.context` の閾値超過時にシーンレベル span を書き込む。アクティブなシーン要約は `MemoryStore::get_active_scene_summary` 経由で `PromptPacket` の **Current Scene** セクションに注入される。`conversation_logs` は常に保持される。
+ランタイム（認知パス）では、`ene-mind::context::compression` が `mind.context` の閾値超過時にシーンレベル span を書き込む。アクティブなシーン要約は `MemoryStore::get_active_scene_summary` 経由で `PromptPacket` の **Current Scene** セクションに注入される。`conversation_logs` は常に保持される。
 
 移行状態はキャラクターごとに `memory_migration_meta` に記録されます。
 
 ### ユーザー選択肢
 
-1. **何もしない（read-only fallback）** — 移行完了まで、typed recall にレガシー `recall_context` の summaries/keyfacts をマージ。新規抽出 memory は typed のみ。各ターンの raw log は引き続き `conversation_logs` に追記。
+1. **何もしない（read-only レガシーデータ）** — 移行完了まで、レガシー summaries/keyfacts は通常の mind recall の外に残ります。新規抽出 memory は typed のみ。各ターンの raw log は引き続き `conversation_logs` に追記。
 2. **`/memory migrate legacy`** — 単一トランザクションで one-shot 変換 + migration marker 設定。以降 typed-only recall。
 3. **`/memory reset legacy --yes`** — レガシーテーブル truncate + typed memory クリア（破壊的操作、確認必須）。memory span は当該カードの log に紐づく session のみ削除。
 
 ### strict モード
 
-`cognition.memory.require_migration = true` にすると、**レガシー summaries または keyfacts** が残り migration 未完了の場合 recall をブロックします。通常チャットで増える `conversation_logs` だけではブロックされません。`LegacyMemoryNotMigrated` と reset/migrate ガイダンスを返します。
+`mind.memory.require_migration = true` にすると、**レガシー summaries または keyfacts** が残り migration 未完了の場合 recall をブロックします。通常チャットで増える `conversation_logs` だけではブロックされません。`LegacyMemoryNotMigrated` と reset/migrate ガイダンスを返します。
 
 ### リセット手順
 
@@ -501,7 +501,7 @@ commitments (
 
 **期限:** 抽出器は `MemoryCandidate::commitment_due` を生成し、ledger 行では `due_label` として保存する。自然言語の期限を `due_at` に parse する処理は未実装のため（[Cognitive Runtime ADR](../architecture/cognitive-runtime.md#companion-commitment-ledger) 参照）、`mark_stale_commitments` が対象にするのは `due_at` が明示的に入っている行のみ。
 
-**ランタイム接続:** `ene-cognition::CommitmentLedger::arbitrate_apply_and_sync` は Memory Arbiter の実行と commitment 行の同期を一括で行う。`active_prompt_candidates` は Active Commitments `PromptPacket` セクション（#87）向けの軽量 DTO を生成する。`cognition.memory.write_every_turn` が有効なとき `MemoryWriter::write_memories` が各ターン後に sync を呼ぶ。CLI の list/complete コマンドは `/commitments`（#94）で利用できる。
+**ランタイム接続:** `ene-mind::CommitmentLedger::arbitrate_apply_and_sync` は Memory Arbiter の実行と commitment 行の同期を一括で行う。`active_prompt_candidates` は Active Commitments `PromptPacket` セクション（#87）向けの軽量 DTO を生成する。`mind.memory.write_every_turn` が有効なとき `MemoryWriter::write_memories` が各ターン後に sync を呼ぶ。CLI の list/complete コマンドは `/commitments`（#94）で利用できる。
 
 ## メモリージャーナル（Desktop UX）
 
@@ -526,5 +526,5 @@ Desktop の **メモリージャーナル** ページ（`ene-desktop` 設定 →
 
 | 層 | メソッド |
 |----|----------|
-| `ene-memory` | `list_journal_memories`, `user_restore_typed_memory`, `user_forget_typed_memory` |
-| `ene-core` | `MemoryQueryHandle::list_journal_memories`, `user_restore_typed_memory`, `search_typed_memories_explained` |
+| `ene-store` | `list_journal_memories`, `user_restore_typed_memory`, `user_forget_typed_memory` |
+| `ene-runtime` | `MemoryQueryHandle::list_journal_memories`, `user_restore_typed_memory`, `search_typed_memories_explained` |

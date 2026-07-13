@@ -1,13 +1,13 @@
-# `ene-cognition` — API Reference
+# `ene-mind` — API Reference
 
-> **Crate:** `ene-cognition`
+> **Crate:** `ene-mind`
 > **Role:** Cognitive runtime for the Ene AI companion — Identity Kernel, typed memory write/recall, affect, expression arbitration, prompt composition, and commitments.
 
 ---
 
 ## Overview
 
-`ene-cognition` implements the [Ene Cognitive Runtime](../architecture/cognitive-runtime.md). It treats the LLM as an utterance generator operating on explicitly managed cognitive state, rather than as the entity that implicitly holds personality and memory. The crate owns:
+`ene-mind` implements the [Ene Cognitive Runtime](../architecture/cognitive-runtime.md). It treats the LLM as an utterance generator operating on explicitly managed cognitive state, rather than as the entity that implicitly holds personality and memory. The crate owns:
 
 - The **Identity Kernel** (immutable character identity, always in the prompt)
 - **Typed memory** extraction, arbitration, and hybrid recall
@@ -19,18 +19,18 @@
 
 ### Crate Boundaries
 
-- Depends on: `ene-memory`, `ene-config`, `ene-provider`, `ene-common`
-- Does **NOT** depend on: `ene-core`, `ene-session` (prevents circular dependencies)
-- `ene-core` depends on `ene-cognition` (not the other way around) to integrate the cognitive runtime into the streaming lifecycle, gated behind `cognition.enabled`.
+- Depends on: `ene-store`, `ene-config`, `ene-ai`, `ene-common`
+- Does **NOT** depend on: `ene-runtime` (prevents circular dependencies)
+- `ene-runtime` depends on `ene-mind` (not the other way around) to integrate the mind runtime into the streaming lifecycle.
 
 ### Turn Lifecycle
 
-`CognitionEngine` does not run the LLM call itself — that step happens in `ene-core`'s streaming loop, between `compose_prompt_packet` and `resolve_expression_turn`.
+`CognitionEngine` does not run the LLM call itself — that step happens in `ene-runtime`'s streaming loop, between `compose_prompt_packet` and `resolve_expression_turn`.
 
 ```mermaid
 flowchart LR
     A["before_turn\n(affect update + recall)"] --> B["compose_prompt_packet\n(PromptPacket → LlmMessage[])"]
-    B --> C["LLM generation\n(ene-core streaming)"]
+    B --> C["LLM generation\n(ene-runtime streaming)"]
     C --> D["resolve_expression_turn\n(OutputArbiter)"]
     D --> E["after_turn\n(MemoryWriter + ForgettingLifecycle)"]
     E -.persist affect.-> A
@@ -38,27 +38,23 @@ flowchart LR
 
 1. **`before_turn`** — loads `AffectState`, runs the Emotion Engine (decay + appraisal + optional LLM classifier), plans and executes hybrid memory recall, and gathers active commitments.
 2. **`compose_prompt_packet`** — compiles the Identity Kernel, selects style examples, loads the active scene summary, and packs everything into a token-budgeted `PromptPacket` → `Vec<LlmMessage>`.
-3. **LLM generation** — `ene-core` streams the completion using the composed messages. Not part of this crate.
+3. **LLM generation** — `ene-runtime` streams the completion using the composed messages. Not part of this crate.
 4. **`resolve_expression_turn`** — maps the post-turn `AffectState` (+ optional LLM expression hint) to a character expression via the `OutputArbiter`.
 5. **`after_turn`** — extracts `MemoryCandidate`s (deterministic + tool-grounded), runs the `MemoryArbiter`, syncs the `CommitmentLedger`, applies the `ForgettingLifecycle`, and persists the affect state.
 
 ---
 
-## `CognitionConfig`
+## `MindConfig`
 
-Top-level configuration, registered under the `cognition` key in `settings.json` (see [`ene-config`](./ene-config.md)).
+Top-level configuration, registered under the `mind` key in `settings.json` (see [`ene-config`](./ene-config.md)).
 
 ```rust
-pub struct CognitionConfig {
-    /// Enable the cognitive runtime. When disabled, the system falls back
-    /// to the legacy streaming pipeline.
-    pub enabled: bool, // default: true
-
+pub struct MindConfig {
     /// Context and token budget management.
     pub context: ContextConfig,
 
     /// Memory extraction, search, and retention settings.
-    pub memory: CognitionMemoryConfig,
+    pub memory: MindMemoryConfig,
 
     /// Emotion and expression processing settings.
     pub emotion: EmotionConfig,
@@ -86,7 +82,7 @@ Token budget allocation, compression triggers, and rolling summarization. Sub-bu
 | `arc_span_threshold` | `usize` | `3` | Chapter spans before an arc rollup |
 | `compression_timeout_secs` | `u64` | `60` | Timeout for one compression summarization call |
 
-### `CognitionMemoryConfig`
+### `MindMemoryConfig`
 
 Memory extraction, hybrid search, retention, and MMR diversification settings.
 
@@ -185,13 +181,13 @@ pub struct CognitionEngine {
 | Method | Signature | Description |
 |---|---|---|
 | `new` | `fn new() -> Self` | Constructs the engine with default sub-processors. Also available via `Default`. |
-| `validate_config` | `fn validate_config(config: &CognitionConfig) -> Result<(), CognitionError>` | Validates `context` sub-budgets sum to ≤ `max_prompt_tokens`. |
+| `validate_config` | `fn validate_config(config: &MindConfig) -> Result<(), CognitionError>` | Validates `context` sub-budgets sum to ≤ `max_prompt_tokens`. |
 | `sync_character_memories` | `async fn sync_character_memories(&self, ctx: TurnContext<'_>, previous_hash: Option<u64>) -> Result<(CharacterMemorySyncReport, u64), CognitionError>` | Re-indexes CCv3 lorebook/style entries into typed memory when the card's content hash changes. Requires `ctx.store` and `ctx.embedder`. |
 | `before_turn` | `async fn before_turn(&self, ctx: TurnContext<'_>) -> Result<PreTurnOutput, CognitionError>` | Loads affect, runs the Emotion Engine, plans + executes hybrid recall, and gathers active commitments. |
 | `persist_affect_snapshot` | `async fn persist_affect_snapshot(store: &MemoryStore, affect: &AffectState) -> Result<(), CognitionError>` | Persists the affect state immediately after pre-turn update (survives stream cancel/failure). |
 | `compose_prompt_packet` | `async fn compose_prompt_packet(&self, ctx: TurnContext<'_>, pre: &PreTurnOutput) -> Result<ComposedPrompt, CognitionError>` | Compiles the Identity Kernel, selects style examples, loads the scene summary, packs everything under budget, and converts to `Vec<LlmMessage>`. |
-| `after_turn` | `async fn after_turn(&self, store: &MemoryStore, config: &CognitionConfig, input: PostTurnInput<'_>) -> Result<(), CognitionError>` | Delegates to `MemoryWriter::after_turn` — extraction, arbitration, forgetting lifecycle, affect persistence. |
-| `resolve_expression_turn` | `fn resolve_expression_turn(&self, config: &CognitionConfig, card: &CharacterCardV3, affect: &AffectState, response_text: &str, llm_proposal: Option<&str>, previous_expression: &str, elapsed_since_change: Option<Duration>) -> (ExpressionDecision, AffectState)` | Resolves the final character expression for a completed assistant turn via the `OutputArbiter`. Returns the decision plus an `AffectState` with `last_expression` updated. |
+| `after_turn` | `async fn after_turn(&self, store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>) -> Result<(), CognitionError>` | Delegates to `MemoryWriter::after_turn` — extraction, arbitration, forgetting lifecycle, affect persistence. |
+| `resolve_expression_turn` | `fn resolve_expression_turn(&self, config: &MindConfig, card: &CharacterCardV3, affect: &AffectState, response_text: &str, llm_proposal: Option<&str>, previous_expression: &str, elapsed_since_change: Option<Duration>) -> (ExpressionDecision, AffectState)` | Resolves the final character expression for a completed assistant turn via the `OutputArbiter`. Returns the decision plus an `AffectState` with `last_expression` updated. |
 
 ---
 
@@ -203,8 +199,8 @@ Turn input/output types shared across the engine's public methods.
 
 ```rust
 pub struct HistoryEntry {
-    /// Speaker role label (`user`, `assistant`, `system`).
-    pub role: String,
+    /// Speaker role (`Role` from `ene-ai`).
+    pub role: Role,
     /// Message text.
     pub content: String,
 }
@@ -216,7 +212,7 @@ Input context for a single conversation turn. Passed by value (borrowed fields) 
 
 ```rust
 pub struct TurnContext<'a> {
-    pub config: &'a CognitionConfig,
+    pub config: &'a MindConfig,
     pub card: &'a CharacterCardV3,
     pub character_id: &'a str,
     pub user_name: &'a str,
@@ -587,10 +583,10 @@ pub struct RecallPlan {
 | Method | Signature | Description |
 |---|---|---|
 | `plan` | `fn plan(input: &RecallPlannerInput<'_>, options: &RecallPlannerOptions) -> Result<RecallPlan, CognitionError>` | Infers `RecallIntent`s from the topic/affect, builds semantic/episodic query variants, and fills budget/search hints. Errors on empty turn text. |
-| `to_memory_search_options` | `fn to_memory_search_options<'a>(plan: &'a RecallPlan, query_embedding: &'a [f32], model_name: &'a str, now: DateTime<Utc>) -> MemorySearchOptions<'a>` | Maps the plan's primary query onto `ene-memory`'s hybrid search options. |
+| `to_memory_search_options` | `fn to_memory_search_options<'a>(plan: &'a RecallPlan, query_embedding: &'a [f32], model_name: &'a str, now: DateTime<Utc>) -> MemorySearchOptions<'a>` | Maps the plan's primary query onto `ene-store`'s hybrid search options. |
 | `explain_results` | `fn explain_results(scored: Vec<ScoredMemory>) -> Vec<RecalledMemory>` | Attaches a `RecallReason` and score breakdown to each hybrid-search result. |
 
-`RecallPlannerOptions::from_config(context: &ContextConfig, memory: &CognitionMemoryConfig) -> Self` derives planner options (budgets, thresholds, `use_hyde`) from the two config sections.
+`RecallPlannerOptions::from_config(context: &ContextConfig, memory: &MindMemoryConfig) -> Self` derives planner options (budgets, thresholds, `use_hyde`) from the two config sections.
 
 ### `RecalledMemory` / `RecallReason`
 
@@ -619,12 +615,12 @@ pub enum RecallReason {
 
 ```rust
 pub async fn execute_hybrid_recall(
-    config: &CognitionConfig,
+    config: &MindConfig,
     input: &ExecuteRecallInput<'_>,
 ) -> Result<(RecallPlan, Vec<RecalledMemory>), CognitionError>
 ```
 
-End-to-end pipeline used by `CognitionEngine::before_turn`: plan → (if `hybrid_search`) hybrid vector+lexical search → MMR diversification (`MemoryDiversifyPipeline`, gated by `mmr_enabled`) → optional LLM rerank (`MemoryRerankPipeline`, gated by `rerank_enabled`) → map to `RecalledMemory` → merge unmigrated legacy rows → merge lorebook key/constant matches → bump access counters. Returns an empty recall list (plan only) when `config.enabled` is `false`.
+End-to-end pipeline used by `CognitionEngine::before_turn`: plan → (if `hybrid_search`) hybrid vector+lexical search → MMR diversification (`MemoryDiversifyPipeline`, gated by `mmr_enabled`) → optional LLM rerank (`MemoryRerankPipeline`, gated by `rerank_enabled`) → map to `RecalledMemory` → merge lorebook key/constant matches → bump access counters. Legacy summaries and key facts are not merged; migrate them explicitly through the store/CLI migration API.
 
 ---
 
@@ -636,13 +632,13 @@ End-to-end pipeline used by `CognitionEngine::before_turn`: plan → (if `hybrid
 pub struct MemoryWriter;
 
 impl MemoryWriter {
-    pub async fn write_memories(store: &MemoryStore, config: &CognitionConfig, input: &PostTurnInput<'_>) -> Result<(), CognitionError>;
-    pub async fn finalize_turn(store: &MemoryStore, config: &CognitionConfig, input: &PostTurnInput<'_>) -> Result<(), CognitionError>;
-    pub async fn after_turn(store: &MemoryStore, config: &CognitionConfig, input: PostTurnInput<'_>) -> Result<(), CognitionError>;
+    pub async fn write_memories(store: &MemoryStore, config: &MindConfig, input: &PostTurnInput<'_>) -> Result<(), CognitionError>;
+    pub async fn finalize_turn(store: &MemoryStore, config: &MindConfig, input: &PostTurnInput<'_>) -> Result<(), CognitionError>;
+    pub async fn after_turn(store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>) -> Result<(), CognitionError>;
 }
 ```
 
-`after_turn` = `write_memories` (deterministic extraction incl. tool grounding → `MemoryArbiter` → `CommitmentLedger` sync) then `finalize_turn` (`ForgettingLifecycle::apply` → `upsert_affect_state`). Skipped entirely when `config.memory.write_every_turn` is `false` (extraction only — `finalize_turn` still runs from `after_turn`).
+`after_turn` = `write_memories` (deterministic extraction incl. tool grounding → `MemoryArbiter` → `CommitmentLedger` sync) then `finalize_turn` (`ForgettingLifecycle::apply` → `upsert_affect_state`). Extraction is skipped when `mind.memory.write_every_turn` is `false` (`finalize_turn` still runs from `after_turn`).
 
 ### `MemoryCandidate`
 
@@ -694,7 +690,7 @@ Validates, deduplicates, and resolves contradictions before persistence.
 pub struct ForgettingLifecycle;
 
 impl ForgettingLifecycle {
-    pub async fn apply(store: &MemoryStore, ctx: &ForgettingContext<'_>, config: &CognitionMemoryConfig) -> Result<ForgettingReport, CognitionError>;
+    pub async fn apply(store: &MemoryStore, ctx: &ForgettingContext<'_>, config: &MindMemoryConfig) -> Result<ForgettingReport, CognitionError>;
 }
 
 pub struct ForgettingReport {
@@ -717,7 +713,7 @@ Handles only time-based `Active → Faded → Archived` decay (via `MemoryStore:
 
 ## `commitments` — Companion Commitment Ledger
 
-Promises, tasks, and follow-ups tracked in a dedicated `commitments` table (`ene-memory`), linked to typed memories (`MemoryKind::Commitment`) via `source_memory_id`. Surfaced in the prompt **independently** of vector recall similarity.
+Promises, tasks, and follow-ups tracked in a dedicated `commitments` table (`ene-store`), linked to typed memories (`MemoryKind::Commitment`) via `source_memory_id`. Surfaced in the prompt **independently** of vector recall similarity.
 
 ```rust
 pub struct CommitmentLedger;
@@ -732,7 +728,7 @@ pub struct CommitmentLedger;
 | `complete` / `cancel` | `async fn complete(store, id) -> Result<bool, CognitionError>` / `async fn cancel(...)` | Manual lifecycle transitions. |
 | `mark_stale_overdue` | `async fn mark_stale_overdue(store: &MemoryStore, now: DateTime<Utc>) -> Result<usize, CognitionError>` | Marks overdue active rows (parsed `due_at`) as `Stale`. |
 
-**Lifecycle:** `Active → Done \| Cancelled \| Stale`. `Commitment`/`CommitmentStatus`/`NewCommitment`/`ActiveCommitmentPrompt` are domain types owned by `ene-memory` and re-exported at the crate root.
+**Lifecycle:** `Active → Done \| Cancelled \| Stale`. `Commitment`/`CommitmentStatus`/`NewCommitment`/`ActiveCommitmentPrompt` are domain types owned by `ene-store` and re-exported at the crate root.
 
 ---
 
@@ -742,10 +738,10 @@ pub struct CommitmentLedger;
 
 ```rust
 pub enum EneCognitionError {
-    Memory(#[from] ene_memory::EneMemoryError),
+    Memory(#[from] ene_store::EneMemoryError),
     Config(#[from] ene_config::EneConfigError),
-    Provider(#[from] ene_provider::LlmProviderError),
-    Embedding(#[from] ene_provider::EmbeddingError),
+    Provider(#[from] ene_ai::LlmProviderError),
+    Embedding(#[from] ene_ai::EmbeddingError),
     ExtractionFailed(String),
     ArbitrationFailed(String),
     RecallFailed(String),
@@ -775,12 +771,12 @@ Reserved entry point for dedicated turn-intent classification and input analysis
 
 ```rust,no_run
 use std::time::Duration;
-use ene_cognition::{CognitionEngine, CognitionConfig};
-use ene_cognition::lifecycle::{TurnContext, HistoryEntry, PostTurnInput};
+use ene_mind::{CognitionEngine, MindConfig};
+use ene_mind::lifecycle::{TurnContext, HistoryEntry, PostTurnInput};
 
 async fn run_turn(
     engine: &CognitionEngine,
-    config: &CognitionConfig,
+    config: &MindConfig,
     ctx: TurnContext<'_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Pre-turn: affect update + recall planning + execution.
@@ -789,7 +785,7 @@ async fn run_turn(
     // 2. Compose the sectioned prompt packet into LLM messages.
     let composed = engine.compose_prompt_packet(TurnContext { ..ctx }, &pre).await?;
 
-    // 3. ene-core streams the LLM completion using `composed.messages`
+    // 3. ene-runtime streams the LLM completion using `composed.messages`
     //    (not part of this crate).
     let response_text = "..."; // from the streaming loop
 
@@ -812,7 +808,7 @@ async fn run_turn(
             store,
             config,
             PostTurnInput {
-                turn: ene_cognition::memory_writer::candidate::TurnInput {
+                turn: ene_mind::memory_writer::candidate::TurnInput {
                     user_message: ctx.user_input,
                     assistant_message: Some(response_text),
                     tool_results: &[],
@@ -833,6 +829,6 @@ async fn run_turn(
 ## See Also
 
 - [Cognitive Runtime Architecture (ADR)](../architecture/cognitive-runtime.md) — Full design rationale, turn lifecycle, and terminology
-- [`ene-memory`](./ene-memory.md) — Typed memory store, hybrid search, commitment persistence
-- [`ene-core`](./ene-core.md) — Orchestrates the full turn lifecycle and calls into this crate
-- [`ene-session`](./ene-session.md) — Conversation history feeding `TurnContext::history`
+- [`ene-store`](./ene-store.md) — Typed memory store, hybrid search, commitment persistence
+- [`ene-runtime`](./ene-runtime.md) — Orchestrates the full turn lifecycle and calls into this crate
+- [`ene-mind`](./ene-mind.md) — Conversation history feeding `TurnContext::history`

@@ -484,7 +484,7 @@ pub struct MotionEntry {
 
 ## プロンプトテンプレート: `PromptLibrary`
 
-`PromptLibrary` は、`ene-core` 全体で使用される LLM 向けのプロンプト
+`PromptLibrary` は、`ene-runtime` 全体で使用される LLM 向けのプロンプト
 文字列（システムプロンプトのフレーミング、感情ルール、
 メモリ/サマライザー/エクストラクター/感情分類器のテンプレート）を
 読み込みます。ユーザー向けの文章をコンパイル済みコードから分離し、
@@ -594,5 +594,5 @@ fn update_model_via_store(store: &ConfigStore, new_model: &str) {
 
 ## 関連項目
 
-- [`ene-core`](./ene-core.md) — ランタイムで `EneConfig` を消費する
+- [`ene-runtime`](./ene-runtime.md) — ランタイムで `EneConfig` を消費する
 - [設定ガイド](../configuration/settings.md) — エンドユーザー向け設定リファレンス
