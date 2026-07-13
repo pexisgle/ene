@@ -18,11 +18,11 @@
 |---------|-----------|------|---------|
 | **1 — 初回起動** | インストールごとに 1 回 (release) | `startup::first_launch_setup` → `ene_config::ensure_resource_dirs` | 同梱デフォルトアセットを OS アプリデータディレクトリへコピー |
 | **2 — アプリ起動** | プロセス起動ごと (同期) | `startup::load_desktop_settings`, `startup::init_app_state`, `Runtime::new` の eager Startup | `settings.json` を 1 回ロード (schema も 1 回)、キャラクター探索、GPU + ECS 初期化 |
-| **3 — ランタイムウォームアップ** | 起動ごと (非同期) | `AiBridge` → `ene_core::bootstrap_runtime` | `reconfigure`、キャラクターカード読み込み、ツール embedding バックグラウンド index (#108)、CCv3 character-memory sync |
+| **3 — ランタイムウォームアップ** | 起動ごと (非同期) | `AiBridge` → `ene_runtime::bootstrap_runtime` | `reconfigure`、キャラクターカード読み込み、ツール embedding バックグラウンド index (#108)、CCv3 character-memory sync |
 | **4 — グラフィックス準備** | winit サーフェス作成後 | `Runtime::resumed` | トレイ、ウィンドウ、VRM GPU 初期化、クリックスルー |
 
 CLI も `apps/ene-cli/src/config.rs` 内の
-`ene_core::bootstrap_runtime` で同じフェーズ 3 を使用します
+`ene_runtime::bootstrap_runtime` で同じフェーズ 3 を使用します
 (bootstrap 内でディスクから config をロード)。
 
 ### 起動シーケンス
@@ -112,27 +112,27 @@ bevy `App` は `apps/ene-desktop/src/app.rs` で構成されます:
 
 ### AI 統合 (`AiBridge`)
 
-`ene-desktop` は `ene-core` アクター (`EneHandle` /
+`ene-desktop` は `ene-runtime` アクター (`EneHandle` /
 `EneEvent`) を薄い shim (`apps/ene-desktop/src/ai_bridge.rs`)
 経由で消費します。ブリッジは:
 
-1. 現在の tokio ランタイム上で `EneHandle` を生成し、
+1. 現在の tokio ランタイム上で `EneHandle::open` により準備済みハンドルを開き、
    broadcast `EneEvent` ストリームを購読する。
 2. バックグラウンドのドレインタスクを生成し、`EneEvent` →
-   `AppEvent` (`AiStreamUpdate`, `EmoteToken`,
-   `SessionSplit`, `StatusChanged` 等) にマッピングして
+   `AppEvent` (`AiStreamUpdate`, `PerformanceCue` / `EmoteToken`,
+   `StatusChanged` 等) にマッピングして
    クロスサブシステムの `AppEventSender` に push する。
 3. フェーズ 3 のランタイムウォームアップを
-   [`ene_core::bootstrap_runtime`](../../crates/ene-core/src/bootstrap.rs)
+   [`ene_runtime::bootstrap_runtime`](../../crates/ene-runtime/src/bootstrap.rs)
    経由で非同期実行する (`CharacterSettings::discover` で既に
    ロード済みの config を渡す — ディスクの二重ロードや schema の
    重複書き込みなし)。
 4. `processing: Arc<AtomicBool>` フラグを所有し、
-   `EneCommand::Run` でセット、`Done` / `Failed` で
+   `run` でセット、`Terminal` で
    クリアする。
 
-ユーザー入力は `AiBridge::run` / `AiBridge::cancel` (fire-and-forget
-mpsc 送信) 経由で逆流する。
+ユーザー入力は `AiBridge::run` / `AiBridge::cancel`（ターン範囲。
+`cancel` はアクティブな `TurnId` を取る）経由で逆流する。
 
 `EventChannels` (bevy `Resource`) は `AppEvent` バスの受信機
 半分を保持する。`system::event_pump::pump_legacy_events` が
@@ -143,7 +143,7 @@ mpsc 送信) 経由で逆流する。
 それを読む。
 
 ```
-tokio EneActor (ene-core)
+tokio EneActor (ene-runtime)
   → EneEvent (broadcast)
     → AiBridge バックグラウンドタスク
       → AppEvent (mpsc)
@@ -196,9 +196,9 @@ tokio EneActor (ene-core)
 ### 表情適用
 
 ```
-EneEvent::SpecialToken → AiBridge → AppEvent::EmoteToken
+EneEvent::Performance → AiBridge → AppEvent::PerformanceCue
   → pump_legacy_events → Message<EmoteToken>
-    → apply_emotions_system (4秒ホールド + フェードアウト)
+    → apply_emotions_system (保持 + フェードアウト)
       → SetExpressions → VRM ブレンドシェイプ更新 (ene-vrm)
 ```
 
@@ -219,10 +219,8 @@ EneEvent::SpecialToken → AiBridge → AppEvent::EmoteToken
 main()
   ├── clap: Args 解析
   ├── config::init()
-  │   ├── EneHandle::new() → アクターを生成
-  │   └── ene_core::bootstrap_runtime (config ロード、reconfigure、
-  │       キャラクター読み込み、ツール index ウォームアップ、
-  │       CCv3 memory sync)
+  │   ├── ConfigStore::try_load → card
+  │   └── EneHandle::open(config, card) → 準備済みハンドル
   └── 通常モード:
       ├── AppContext { handle: EneHandle, commands: Vec<Arc<dyn CliCommand>> }
       └── repl::run(ctx) → 対話ループ
@@ -232,13 +230,13 @@ main()
 
 1. `dialoguer::Input` でプロンプト表示
 2. `/` コマンドは `commands::execute()` で処理
-3. 通常入力: `handle.run()` + `process_stream()` でイベント表示
+3. 通常入力: `handle.run()` → `TurnId` + `process_stream()` でイベント表示
 
 **イベントサブスクリプションパターン:**
 ```rust
 let mut rx = ctx.handle.subscribe();  // コマンド送信前に受信機を取得
-ctx.handle.run(&input);               // Run コマンドを送信
-stream::process_stream(&mut rx, &ctx.handle).await;  // イベントを処理
+let turn = ctx.handle.run(&input)?;   // TurnId を返す（Busy の場合あり）
+stream::process_stream(&mut rx, &ctx.handle, turn).await;  // イベントを処理
 ```
 
 これにより `run()` 呼び出しと最初の `recv()` の間のイベントロストを防ぐ。
@@ -268,9 +266,9 @@ stream::process_stream(&mut rx, &ctx.handle).await;  // イベントを処理
 
 | イベント | 出力スタイル |
 |---------|-------------|
-| テキスト | デフォルト stdout |
-| `SpecialToken(emo)` | `[Emotion: name]` マゼンタ |
+| `TextDelta` | デフォルト stdout |
+| `Performance` | `[Performance: name]`（cue 表示） |
 | `ToolCallStart` | `[Tool Calling: name(args)]` シアン |
 | `ToolCallResult` | `[Tool Result: ...]` 緑 |
-| `SessionSplit` | 理由 + 要約 黄色 |
-| `Error` | 赤字 |
+| `ContextCompressed` | 薄い圧縮通知（任意） |
+| `Terminal` / 失敗理由 | `Failed` 時は赤字 |

@@ -36,35 +36,37 @@ Ene will explicitly manage:
 
 | Component | Crate | Responsibility |
 |---|---|---|
-| Identity Kernel | `ene-cognition::character` | Compile CCv3 into an immutable character identity block always present in the prompt |
-| Typed Memory Store | `ene-memory` | CRUD + hybrid search for typed memories (kind, confidence, recency, salience, vector) |
-| Memory Extraction (Deterministic) | `ene-cognition::memory_writer` | Rule-based extraction of facts, preferences, commitments, and procedure memories |
-| Memory Extraction (LLM) | `ene-cognition::memory_writer` | LLM-driven extraction producing `MemoryCandidate` items |
-| Memory Arbiter | `ene-cognition::memory_writer` | Validate candidates against existing memories, compute confidence, deduplicate, resolve contradictions |
-| Recall Planner | `ene-cognition::recall` | Generate a `RecallPlan` with search intent and budget hints for downstream recall execution |
-| Hybrid Search Scoring | `ene-memory` | Score memories by vector similarity + recency + salience + confidence + affect + commitments |
-| Emotion Engine | `ene-cognition::emotion` | Deterministic affect computation from conversation dynamics + optional LLM classifier |
-| Expression Arbiter | `ene-cognition::output` | Map `AffectState` to character expressions with hysteresis and configured constraints |
-| Context Budget Manager | `ene-cognition::context` | Allocate token budgets across `PromptPacket` sections |
-| Context Compression | `ene-cognition::context` | Rolling compression of old conversation turns into memory spans |
-| PromptPacket Composer | `ene-cognition::prompt_packet` | Assemble sectioned prompt packets with independent budget per section |
-| Companion Commitment Ledger | `ene-cognition::commitments` | Track promises, tasks, and follow-ups the companion has made |
-| Conversation History | `ene-session` | Maintain turn history; session splits are phased out in favor of compression triggers |
-| Streaming Integration | `ene-core` | Orchestrate the full turn lifecycle and emit events |
+| Identity Kernel | `ene-mind::character` | Compile CCv3 into an immutable character identity block always present in the prompt |
+| Typed Memory Store | `ene-store` | CRUD + hybrid search for typed memories (kind, confidence, recency, salience, vector) |
+| Memory Extraction (Deterministic) | `ene-mind::memory_writer` | Rule-based extraction of facts, preferences, commitments, and procedure memories |
+| Memory Extraction (LLM) | `ene-mind::memory_writer` | LLM-driven extraction producing `MemoryCandidate` items |
+| Memory Arbiter | `ene-mind::memory_writer` | Validate candidates against existing memories, compute confidence, deduplicate, resolve contradictions |
+| Recall Planner | `ene-mind::recall` | Generate a `RecallPlan` with search intent and budget hints for downstream recall execution |
+| Hybrid Search Scoring | `ene-store` | Score memories by vector similarity + recency + salience + confidence + affect + commitments |
+| Emotion Engine | `ene-mind::emotion` | Deterministic affect computation from conversation dynamics + optional LLM classifier |
+| Expression Arbiter | `ene-mind::output` | Map `AffectState` to character expressions with hysteresis and configured constraints |
+| Context Budget Manager | `ene-mind::context` | Allocate token budgets across `PromptPacket` sections |
+| Context Compression | `ene-mind::context` | Rolling compression of old conversation turns into memory spans |
+| PromptPacket Composer | `ene-mind::prompt_packet` | Assemble sectioned prompt packets with independent budget per section |
+| Companion Commitment Ledger | `ene-mind::commitments` | Track promises, tasks, and follow-ups the companion has made |
+| Conversation History | `ene-mind` | Maintain turn history; session splits are phased out in favor of compression triggers |
+| Streaming Integration | `ene-runtime` | Orchestrate the full turn lifecycle and emit events |
 
 ### Dependency Rules
 
-- `ene-cognition` **depends on** `ene-memory`, `ene-config`, `ene-provider`, `ene-common`
-- `ene-cognition` **does NOT depend on** `ene-core` or `ene-session` (prevents circular dependencies)
-- `ene-core` depends on `ene-cognition` and integrates the cognitive runtime into `ene-core::streaming.rs` behind `cognition.enabled` (falls back to the legacy pipeline when no embedding provider is configured)
-- `ene-memory` remains the exclusive owner of `sea-orm` SQLite operations — extraction, arbitration, and recall planning logic lives in `ene-cognition`, not `ene-memory`
+- `ene-mind` **depends on** `ene-store`, `ene-config`, `ene-ai`, `ene-common`
+- `ene-mind` **does NOT depend on** `ene-runtime` or `ene-tool-host` (prevents circular dependencies)
+- `ene-runtime` depends on `ene-mind` and integrates the mind runtime into `ene-runtime::streaming.rs`; missing store/embedder prerequisites fail closed with a typed error
+- `ene-store` remains the exclusive owner of `sea-orm` SQLite operations — extraction, arbitration, and recall planning logic lives in `ene-mind`, not `ene-store`
+- `ene-store` **does NOT depend on** `ene-ai` or `ene-mind`
+- `ene-vrm` **does NOT depend on** `ene-mind` or `ene-runtime`
 
 ## Turn Lifecycle
 
 ```mermaid
 sequenceDiagram
     participant User
-    participant Streaming as ene-core (streaming)
+    participant Streaming as ene-runtime (streaming)
     participant PreTurn as Pre-turn Analyzer
     participant Recall as Recall Planner
     participant Emotion as Emotion Engine
@@ -110,7 +112,7 @@ sequenceDiagram
 ## Key Terminology
 
 ### Identity Kernel
-The immutable character identity block compiled from CCv3 character card data by `ene-cognition::character::CharacterCompiler` (#82). Always placed at the top of every prompt packet. Contains structured header lines (name, role, core personality, speech style, hard instruction) plus optional sections from `system_prompt`, `description`, `scenario`, and `creator_notes`. CBS macros (`{{char}}`, `{{user}}`, …) are expanded at compile time. **Core header lines must never be truncated**; optional sections respect `cognition.character.identity_kernel_max_tokens`.
+The immutable character identity block compiled from CCv3 character card data by `ene-mind::character::CharacterCompiler` (#82). Always placed at the top of every prompt packet. Contains structured header lines (name, role, core personality, speech style, hard instruction) plus optional sections from `system_prompt`, `description`, `scenario`, and `creator_notes`. CBS macros (`{{char}}`, `{{user}}`, …) are expanded at compile time. **Core header lines must never be truncated**; optional sections respect `mind.character.identity_kernel_max_tokens`.
 
 ### CCv3 Semantic Memory (#83)
 `character_book` entries compile into character-scoped typed memories (`MemoryKind::Semantic`, `MemorySource::Ccv3`) with stable `source_ref` values under `ccv3:lorebook:*`. Constant entries are pinned; key-triggered entries include `Triggers: …` at the start of the stored **content** (not the title). `CognitionEngine::sync_character_memories` reindexes on card change: removed entries are archived; changed content for the same `source_ref` is **superseded** and re-embedded.
@@ -164,9 +166,9 @@ A query plan generated by the Recall Planner that specifies:
 
 Downstream recall execution maps `MemoryStore::search_typed_memories_hybrid` output to `RecalledMemory` values via `RecallResultMapper::map` or `RecallPlanner::explain_results`, attaching a primary `RecallReason` and score breakdown for debug, UX, and prompt introspection (#74).
 
-When `cognition.memory.rerank_enabled` is true, an optional LLM rerank stage (`MemoryRerankPipeline`) may reorder the top hybrid-search candidates before mapping. Disabled or failed rerank falls back to hybrid search order without changing `MemoryScoreBreakdown::total` (#77).
+When `mind.memory.rerank_enabled` is true, an optional LLM rerank stage (`MemoryRerankPipeline`) may reorder the top hybrid-search candidates before mapping. Disabled or failed rerank falls back to hybrid search order without changing `MemoryScoreBreakdown::total` (#77).
 
-When `cognition.memory.mmr_enabled` is true (default), a deterministic MMR diversification stage (`MemoryDiversifyPipeline`) runs after hybrid search and before optional reranking. It merges near-duplicate clusters, applies greedy MMR selection, enforces per-kind minimum slots, and rewards recall-source diversity. Hybrid scores are preserved unchanged (#78).
+When `mind.memory.mmr_enabled` is true (default), a deterministic MMR diversification stage (`MemoryDiversifyPipeline`) runs after hybrid search and before optional reranking. It merges near-duplicate clusters, applies greedy MMR selection, enforces per-kind minimum slots, and rewards recall-source diversity. Hybrid scores are preserved unchanged (#78).
 
 ### Expression Arbiter
 Receives the current `AffectState`, optional LLM expression hints, and character expression definitions. Outputs a resolved expression with:
@@ -174,7 +176,7 @@ Receives the current `AffectState`, optional LLM expression hints, and character
 - **Advisory mode** — LLM hints are treated as suggestions, not commands, when configured
 
 ### Memory Arbiter
-Sits between memory extractors and the typed memory store in `ene-cognition::memory_writer::arbiter`. For each `MemoryCandidate` it emits a traceable decision:
+Sits between memory extractors and the typed memory store in `ene-mind::memory_writer::arbiter`. For each `MemoryCandidate` it emits a traceable decision:
 
 | Decision | When |
 |----------|------|
@@ -186,7 +188,7 @@ Sits between memory extractors and the typed memory store in `ene-cognition::mem
 | `AskConfirmationLater` | Ambiguous contradiction deferred until user confirmation |
 
 Validation gates:
-- `min_confidence_to_persist` from `CognitionMemoryConfig` (default `0.65`)
+- `min_confidence_to_persist` from `MindMemoryConfig` (default `0.65`)
 - Non-empty title/content
 - `source_quote` must appear in the turn text (procedure memories from tool results are exempt when `source_quote` is empty)
 - Deletion candidates require `deletion_target_key`
@@ -197,8 +199,8 @@ Deduplication uses normalized exact match first; optional pre-computed semantic 
 
 Phase 8 grounds tool-call outcomes into typed memory with explicit safety constraints:
 
-- `ene-core::streaming::perform_tool_executions` emits bounded `ToolResultSummary` entries for each call.
-- `ene-cognition::memory_writer::tool_grounding` sanitizes/truncates raw outputs (`max_summary_chars`) and masks screenshot payloads so large blobs are not persisted verbatim.
+- `ene-runtime::streaming::perform_tool_executions` emits bounded `ToolResultSummary` entries for each call.
+- `ene-mind::memory_writer::tool_grounding` sanitizes/truncates raw outputs (`max_summary_chars`) and masks screenshot payloads so large blobs are not persisted verbatim.
 - Success paths produce `Procedure` candidates and short user-visible outcomes can produce `Episodic` candidates.
 - Failure paths produce `Reflection` candidates so repeated failed actions can be avoided in later turns.
 - The cognitive streaming path now forwards per-turn `tool_results` into `PostTurnInput`, enabling Memory Writer + Arbiter persistence with `source_ref` prefix `tool:`.
@@ -209,9 +211,9 @@ Promises, tasks, and follow-ups (e.g. “let’s discuss this next time”) are 
 
 | Concept | Location |
 |---------|----------|
-| Domain types (`Commitment`, `CommitmentStatus`) | `ene-memory` |
-| Persistence (`insert_commitment`, `list_active_commitments`, …) | `ene-memory::MemoryStore` |
-| Sync from arbiter results | `ene-cognition::commitments::CommitmentLedger` |
+| Domain types (`Commitment`, `CommitmentStatus`) | `ene-store` |
+| Persistence (`insert_commitment`, `list_active_commitments`, …) | `ene-store::MemoryStore` |
+| Sync from arbiter results | `ene-mind::commitments::CommitmentLedger` |
 
 **Relationship to `MemoryKind::Commitment`:** Extractors produce `MemoryCandidate { kind: Commitment, commitment_due }`. The Memory Arbiter persists these as typed memories. `CommitmentLedger::sync_from_applied_decisions` (or `arbitrate_apply_and_sync`) then creates an active ledger row linked via `source_memory_id`.
 
@@ -234,16 +236,15 @@ Rolling compression that summarizes old conversation turns into compact memory s
 - **Natural forgetting** — Faded / archived / superseded lifecycle instead of hard delete
 
 ### Migration Path
-- **Phase 0–10** are implemented — `ene-cognition` is integrated into `ene-core::streaming.rs` behind `cognition.enabled` (falls back to the legacy pipeline when no embedding provider is configured)
-- **#98 (hybrid policy)** — When cognition is enabled:
+- **Phase 0–10** are implemented — `ene-mind` is the sole streaming implementation in `ene-runtime::streaming.rs`
+- **#98 (migration policy)**:
   - Legacy summary/keyfact tables are **read-only** (no new summaries/keyfacts)
-  - Unmigrated legacy summaries/keyfacts are merged into cognitive recall until `/memory migrate legacy` completes
+  - Unmigrated legacy summaries/keyfacts are not merged into normal mind recall; use `/memory migrate legacy` explicitly
   - Optional one-shot CLI migration maps summaries → `Episodic`, keyfacts → `UserProfile`/`Preference`, logs → `memory_spans` (transactional)
   - After migration, recall uses typed memory only; legacy rows remain for audit unless reset
-  - `cognition.memory.require_migration` blocks recall when summaries/keyfacts remain unmigrated (logs alone do not block)
+  - `mind.memory.require_migration` blocks recall when summaries/keyfacts remain unmigrated (logs alone do not block)
   - Affect **persistence** runs each turn; affect **computation** is implemented by `EmotionEngine` (#86) with optional LLM classifier (#88) and `OutputArbiter` expression resolution (#89, #91)
 - **#80** replaces automatic session splits with rolling context compression triggers
-- **`cognition.enabled = false`** keeps the legacy streaming pipeline unchanged
 
 ## References
 

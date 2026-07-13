@@ -17,10 +17,10 @@ Desktop startup is split into four explicit phases
 |-------|------|-------|------|
 | **1 — First launch** | Once per install (release) | `startup::first_launch_setup` → `ene_config::ensure_resource_dirs` | Copy bundled default assets into the OS app-data directory |
 | **2 — App launch** | Every process start (sync) | `startup::load_desktop_settings`, `startup::init_app_state`, eager `Runtime::new` Startup schedule | Load `settings.json` once (schema write once), discover characters, init GPU + ECS |
-| **3 — Runtime warmup** | Every start (async) | `AiBridge` → `ene_core::bootstrap_runtime` | `reconfigure`, load character card, background tool embedding index (#108), CCv3 character-memory sync |
+| **3 — Runtime warmup** | Every start (async) | `AiBridge` → `ene_runtime::bootstrap_runtime` | `reconfigure`, load character card, background tool embedding index (#108), CCv3 character-memory sync |
 | **4 — Graphics ready** | After winit surface exists | `Runtime::resumed` | Tray, windows, VRM GPU init, platform click-through |
 
-CLI uses the same Phase 3 path via `ene_core::bootstrap_runtime` in
+CLI uses the same Phase 3 path via `ene_runtime::bootstrap_runtime` in
 `apps/ene-cli/src/config.rs` (loads config from disk inside bootstrap).
 
 ### Boot Sequence
@@ -105,25 +105,25 @@ The schedule (`apps/ene-desktop/src/schedule.rs`) has six sets:
 
 ### AI Integration (`AiBridge`)
 
-`ene-desktop` consumes the upstream `ene-core` actor (`EneHandle` /
+`ene-desktop` consumes the upstream `ene-runtime` actor (`EneHandle` /
 `EneEvent`) through a thin shim
 (`apps/ene-desktop/src/ai_bridge.rs`). The bridge:
 
-1. Spawns an `EneHandle` on the current tokio runtime and
+1. Opens a ready `EneHandle` via `EneHandle::open` on the current tokio runtime and
    subscribes to its broadcast `EneEvent` stream.
 2. Spawns a background drain task that maps `EneEvent` →
-   `AppEvent` (`AiStreamUpdate`, `EmoteToken`, `SessionSplit`,
+   `AppEvent` (`AiStreamUpdate`, `PerformanceCue` / `EmoteToken`,
    `StatusChanged`, etc.) and pushes them into the cross-subsystem
    `AppEventSender`.
 3. Spawns Phase 3 runtime warmup via
-   [`ene_core::bootstrap_runtime`](../../crates/ene-core/src/bootstrap.rs)
+   [`ene_runtime::bootstrap_runtime`](../../crates/ene-runtime/src/bootstrap.rs)
    using the config already loaded by `CharacterSettings::discover`
    (no second disk load, no duplicate schema write).
 4. Owns a `processing: Arc<AtomicBool>` flag, set on
-   `EneCommand::Run` and cleared on `Done` / `Failed`.
+   `run` and cleared on `Terminal`.
 
 User input flows back through `AiBridge::run` /
-`AiBridge::cancel` (fire-and-forget mpsc sends).
+`AiBridge::cancel` (turn-scoped; `cancel` takes the active `TurnId`).
 
 `EventChannels` (a bevy `Resource`) holds the receiver half of
 the `AppEvent` bus. `system::event_pump::pump_legacy_events`
@@ -133,7 +133,7 @@ drains it in `First` / `EventDispatch` and writes the typed
 that the per-frame `system::ui_consumers` systems then read.
 
 ```
-tokio EneActor (ene-core)
+tokio EneActor (ene-runtime)
   → EneEvent (broadcast)
     → AiBridge background task
       → AppEvent (mpsc)
@@ -186,9 +186,9 @@ tokio EneActor (ene-core)
 ### Emotion Application
 
 ```
-EneEvent::SpecialToken → AiBridge → AppEvent::EmoteToken
+EneEvent::Performance → AiBridge → AppEvent::PerformanceCue
   → pump_legacy_events → Message<EmoteToken>
-    → apply_emotions_system (4s hold + fade out)
+    → apply_emotions_system (hold + fade out)
       → SetExpressions → VRM blendshape update (ene-vrm)
 ```
 
@@ -209,9 +209,8 @@ and the full file layout in
 main()
   ├── clap: Args parse
   ├── config::init()
-  │   ├── EneHandle::new() → spawns actor
-  │   └── ene_core::bootstrap_runtime (load config, reconfigure,
-  │       load character, tool index warmup, CCv3 memory sync)
+  │   ├── ConfigStore::try_load → card
+  │   └── EneHandle::open(config, card) → ready handle
   └── Normal mode:
       ├── AppContext { handle: EneHandle, commands: Vec<Arc<dyn CliCommand>> }
       └── repl::run(ctx) → interactive loop
@@ -221,13 +220,13 @@ main()
 
 1. Display prompt with `dialoguer::Input`
 2. `/` commands handled by `commands::execute()` via `CliCommand` trait
-3. Regular input: `handle.run()` + `process_stream()` to display events
+3. Regular input: `handle.run()` → `TurnId` + `process_stream()` to display events
 
 **Event subscription pattern:**
 ```rust
 let mut rx = ctx.handle.subscribe();  // Get receiver before sending command
-ctx.handle.run(&input);               // Send Run command
-stream::process_stream(&mut rx, &ctx.handle).await;  // Process events
+let turn = ctx.handle.run(&input)?;   // Returns TurnId (or Busy)
+stream::process_stream(&mut rx, &ctx.handle, turn).await;  // Process events
 ```
 
 This ensures no events are lost between the `run()` call and the first `recv()`.
@@ -258,8 +257,8 @@ This ensures no events are lost between the `run()` call and the first `recv()`.
 | Event | Output Style |
 |-------|-------------|
 | `TextDelta` | stdout (flush) |
-| `SpecialToken(emo)` | `[Emotion: name]` in magenta |
+| `Performance` | `[Performance: name]` (cue display) |
 | `ToolCallStart` | `[Tool Calling: name(args)]` in cyan |
 | `ToolCallResult` | `[Tool Result: ...]` in green |
-| `SessionSplit` | Reason + summary in yellow |
-| `Error` | Red text |
+| `ContextCompressed` | Thin compression notice (optional) |
+| `Terminal` / failed reason | Error text in red when `Failed` |

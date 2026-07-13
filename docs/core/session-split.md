@@ -1,14 +1,14 @@
 # Session Split and Compression
 
-Session splitting is now a compatibility path. The preferred context-management path is rolling compression in the cognitive runtime.
+Session splitting is now an explicit hard-boundary path. The preferred context-management path is rolling compression in the mind runtime.
 
 ## Current Policy
 
-- **Cognitive mode (`cognition.enabled=true` + `compression_enabled=true`)**
+- **Mind compression mode (`compression_enabled=true`)**
   - Automatic split is bypassed.
   - Old turns are compressed into `memory_spans`.
   - Session ID remains stable for continuity.
-- **Legacy mode (cognition disabled, or compression disabled)**
+- **Hard-split mode (`compression_enabled=false`)**
   - Composite split scoring can trigger automatic split.
   - Manual `/session split` remains available.
 

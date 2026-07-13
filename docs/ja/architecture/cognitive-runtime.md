@@ -36,35 +36,37 @@ Ene が明示的に管理するもの：
 
 | コンポーネント | クレート | 責務 |
 |---|---|---|
-| Identity Kernel | `ene-cognition::character` | CCv3 を不変の人格定義ブロックにコンパイル。常にプロンプト最上位に配置 |
-| Typed Memory Store | `ene-memory` | 型付き記憶の CRUD + ハイブリッド検索（kind, confidence, recency, salience, vector） |
-| Memory Extraction (決定論的) | `ene-cognition::memory_writer` | ルールベースで facts, preferences, commitments, procedure 記憶を抽出 |
-| Memory Extraction (LLM) | `ene-cognition::memory_writer` | LLM による `MemoryCandidate` 生成 |
-| Memory Arbiter | `ene-cognition::memory_writer` | 候補を既存記憶と照合し、信頼度計算・重複排除・矛盾解決 |
-| Recall Planner | `ene-cognition::recall` | 検索意図と予算ヒントを含む `RecallPlan` を生成し、後続の recall execution に渡す |
-| Hybrid Search Scoring | `ene-memory` | vector 類似度 + recency + salience + confidence + affect + commitments の多要素スコアリング |
-| Emotion Engine | `ene-cognition::emotion` | 会話ダイナミクスからの決定論的感情計算 + オプション LLM 分類器 |
-| Expression Arbiter | `ene-cognition::output` | `AffectState` をキャラクター表情にマッピング。ヒステリシスと設定制約を適用 |
-| Context Budget Manager | `ene-cognition::context` | `PromptPacket` の各セクションにトークン予算を割り当て |
-| Context Compression | `ene-cognition::context` | 古い会話ターンを記憶スパンに圧縮する rolling compression |
-| PromptPacket Composer | `ene-cognition::prompt_packet` | セクション化されたプロンプトパケットを構築 |
-| Companion Commitment Ledger | `ene-cognition::commitments` | コンパニオンが行った約束・タスク・フォローアップを追跡 |
-| Conversation History | `ene-session` | ターン履歴の管理。セッション分割は圧縮トリガーに段階的に置き換え |
-| Streaming Integration | `ene-core` | 全ターンライフサイクルの統合とイベント発行 |
+| Identity Kernel | `ene-mind::character` | CCv3 を不変の人格定義ブロックにコンパイル。常にプロンプト最上位に配置 |
+| Typed Memory Store | `ene-store` | 型付き記憶の CRUD + ハイブリッド検索（kind, confidence, recency, salience, vector） |
+| Memory Extraction (決定論的) | `ene-mind::memory_writer` | ルールベースで facts, preferences, commitments, procedure 記憶を抽出 |
+| Memory Extraction (LLM) | `ene-mind::memory_writer` | LLM による `MemoryCandidate` 生成 |
+| Memory Arbiter | `ene-mind::memory_writer` | 候補を既存記憶と照合し、信頼度計算・重複排除・矛盾解決 |
+| Recall Planner | `ene-mind::recall` | 検索意図と予算ヒントを含む `RecallPlan` を生成し、後続の recall execution に渡す |
+| Hybrid Search Scoring | `ene-store` | vector 類似度 + recency + salience + confidence + affect + commitments の多要素スコアリング |
+| Emotion Engine | `ene-mind::emotion` | 会話ダイナミクスからの決定論的感情計算 + オプション LLM 分類器 |
+| Expression Arbiter | `ene-mind::output` | `AffectState` をキャラクター表情にマッピング。ヒステリシスと設定制約を適用 |
+| Context Budget Manager | `ene-mind::context` | `PromptPacket` の各セクションにトークン予算を割り当て |
+| Context Compression | `ene-mind::context` | 古い会話ターンを記憶スパンに圧縮する rolling compression |
+| PromptPacket Composer | `ene-mind::prompt_packet` | セクション化されたプロンプトパケットを構築 |
+| Companion Commitment Ledger | `ene-mind::commitments` | コンパニオンが行った約束・タスク・フォローアップを追跡 |
+| Conversation History | `ene-mind` | ターン履歴の管理。セッション分割は圧縮トリガーに段階的に置き換え |
+| Streaming Integration | `ene-runtime` | 全ターンライフサイクルの統合とイベント発行 |
 
 ### 依存ルール
 
-- `ene-cognition` は `ene-memory`, `ene-config`, `ene-provider`, `ene-common` に依存する
-- `ene-cognition` は `ene-core` および `ene-session` に依存しない（循環依存防止）
-- `ene-core` は `ene-cognition` に依存し、`cognition.enabled` で `ene-core::streaming.rs` に認知ランタイムを統合する（embedding provider 未設定時はレガシーパイプラインにフォールバック）
-- `ene-memory` は引き続き `sea-orm` SQLite 操作の排他的所有者。抽出・調停・想起計画のロジックは `ene-cognition` に置く
+- `ene-mind` は `ene-store`, `ene-config`, `ene-ai`, `ene-common` に依存する
+- `ene-mind` は `ene-runtime` / `ene-tool-host` に依存しない（循環依存防止）
+- `ene-runtime` は `ene-mind` に依存し、`ene-runtime::streaming.rs` で mind ランタイムを統合する。store/embedder 前提条件が欠ける場合は型付きエラーでフェイルクローズする
+- `ene-store` は引き続き `sea-orm` SQLite 操作の排他的所有者。抽出・調停・想起計画のロジックは `ene-mind` に置く
+- `ene-store` は `ene-ai` / `ene-mind` に依存しない
+- `ene-vrm` は `ene-mind` / `ene-runtime` に依存しない
 
 ## ターンライフサイクル
 
 ```mermaid
 sequenceDiagram
     participant User
-    participant Streaming as ene-core (streaming)
+    participant Streaming as ene-runtime (streaming)
     participant PreTurn as Pre-turn Analyzer
     participant Recall as Recall Planner
     participant Emotion as Emotion Engine
@@ -110,7 +112,7 @@ sequenceDiagram
 ## 主要用語
 
 ### Identity Kernel（人格核）
-CCv3 キャラクターカードから `ene-cognition::character::CharacterCompiler`（#82）がコンパイルする不変の人格定義ブロック。常に prompt packet の最上位に配置。構造化ヘッダー行（名前・役割・コア人格・話し方・ hard instruction）と、`system_prompt` / `description` / `scenario` / `creator_notes` 由来の任意セクションを含む。CBS マクロはコンパイル時に展開。**コアヘッダー行は truncate しない**。任意セクションは `cognition.character.identity_kernel_max_tokens` を尊重。
+CCv3 キャラクターカードから `ene-mind::character::CharacterCompiler`（#82）がコンパイルする不変の人格定義ブロック。常に prompt packet の最上位に配置。構造化ヘッダー行（名前・役割・コア人格・話し方・ hard instruction）と、`system_prompt` / `description` / `scenario` / `creator_notes` 由来の任意セクションを含む。CBS マクロはコンパイル時に展開。**コアヘッダー行は truncate しない**。任意セクションは `mind.character.identity_kernel_max_tokens` を尊重。
 
 ### CCv3 意味記憶（#83）
 `character_book` エントリは `MemoryKind::Semantic` / `MemorySource::Ccv3` の typed memory として `ccv3:lorebook:*` の安定 `source_ref` で index 化。constant エントリは pinned。キートリガーは保存 **content** の先頭に `Triggers: …` として含まれる（タイトルではない）。`CognitionEngine::sync_character_memories` がカード変更時に reindex し、削除されたエントリは archive、同一 `source_ref` で内容が変わった行は **supersede** して再埋め込みする。
@@ -164,9 +166,9 @@ Recall Planner が生成するクエリ計画：
 
 後続の recall execution は `MemoryStore::search_typed_memories_hybrid` の結果を `RecallResultMapper::map` または `RecallPlanner::explain_results` 経由で、主 `RecallReason` と score breakdown 付きの `RecalledMemory` に変換し、debug / UX / prompt introspection に使う（#74）。
 
-`cognition.memory.rerank_enabled` が true の場合、マッピング前に optional な LLM rerank stage（`MemoryRerankPipeline`）が上位 hybrid-search 候補の順序を調整することがあります。無効時または rerank 失敗時は hybrid search の順序にフォールバックし、`MemoryScoreBreakdown::total` は変更しません（#77）。
+`mind.memory.rerank_enabled` が true の場合、マッピング前に optional な LLM rerank stage（`MemoryRerankPipeline`）が上位 hybrid-search 候補の順序を調整することがあります。無効時または rerank 失敗時は hybrid search の順序にフォールバックし、`MemoryScoreBreakdown::total` は変更しません（#77）。
 
-`cognition.memory.mmr_enabled` が true（既定）の場合、hybrid search の後・optional rerank の前に決定論的 MMR 多様化 stage（`MemoryDiversifyPipeline`）が実行されます。近傍重複クラスタのマージ、greedy MMR 選択、kind 別 minimum slot の確保、recall source 多様性ボーナスを行います。hybrid スコアは変更されません（#78）。
+`mind.memory.mmr_enabled` が true（既定）の場合、hybrid search の後・optional rerank の前に決定論的 MMR 多様化 stage（`MemoryDiversifyPipeline`）が実行されます。近傍重複クラスタのマージ、greedy MMR 選択、kind 別 minimum slot の確保、recall source 多様性ボーナスを行います。hybrid スコアは変更されません（#78）。
 
 ### Expression Arbiter（表現調停器）
 現在の `AffectState`、オプションの LLM 表情ヒント、キャラクター表情定義を受け取り、解決された表情を出力する：
@@ -174,7 +176,7 @@ Recall Planner が生成するクエリ計画：
 - **アドバイザリモード** — 設定時、LLM ヒントはコマンドではなく提案として扱われる
 
 ### Memory Arbiter（記憶調停器）
-`ene-cognition::memory_writer::arbiter` にあり、記憶抽出器と型付き記憶ストアの間に位置する。各 `MemoryCandidate` に対して追跡可能な判断を返す：
+`ene-mind::memory_writer::arbiter` にあり、記憶抽出器と型付き記憶ストアの間に位置する。各 `MemoryCandidate` に対して追跡可能な判断を返す：
 
 | 判断 | 条件 |
 |------|------|
@@ -186,7 +188,7 @@ Recall Planner が生成するクエリ計画：
 | `AskConfirmationLater` | 曖昧な矛盾 — ユーザー確認まで保留 |
 
 検証ゲート：
-- `CognitionMemoryConfig::min_confidence_to_persist`（デフォルト `0.65`）
+- `MindMemoryConfig::min_confidence_to_persist`（デフォルト `0.65`）
 - title/content が非空
 - `source_quote` がターン内テキストに含まれる（tool result 由来の procedure 記憶で `source_quote` が空の場合は例外）
 - 削除候補には `deletion_target_key` が必須
@@ -197,8 +199,8 @@ Recall Planner が生成するクエリ計画：
 
 Phase 8 では、ツール呼び出し結果を安全に typed memory へ接続する:
 
-- `ene-core::streaming::perform_tool_executions` が各呼び出しごとに境界付き `ToolResultSummary` を生成する。
-- `ene-cognition::memory_writer::tool_grounding` が生の出力を sanitize/truncate（`max_summary_chars`）し、スクリーンショット payload などの巨大データをそのまま保存しない。
+- `ene-runtime::streaming::perform_tool_executions` が各呼び出しごとに境界付き `ToolResultSummary` を生成する。
+- `ene-mind::memory_writer::tool_grounding` が生の出力を sanitize/truncate（`max_summary_chars`）し、スクリーンショット payload などの巨大データをそのまま保存しない。
 - 成功結果は `Procedure` 候補になり、短くユーザー向けの結果は `Episodic` 候補として追加できる。
 - 失敗結果は `Reflection` 候補になり、同じ失敗行動の反復を将来ターンで避けられるようにする。
 - cognitive streaming path がターン単位の `tool_results` を `PostTurnInput` に渡すことで、Memory Writer / Arbiter が `tool:` プレフィックス付き `source_ref` で永続化できる。
@@ -209,9 +211,9 @@ Phase 8 では、ツール呼び出し結果を安全に typed memory へ接続�
 
 | 概念 | 所在 |
 |------|------|
-| ドメイン型（`Commitment`, `CommitmentStatus`） | `ene-memory` |
-| 永続化（`insert_commitment`, `list_active_commitments` など） | `ene-memory::MemoryStore` |
-| Arbiter 結果からの同期 | `ene-cognition::commitments::CommitmentLedger` |
+| ドメイン型（`Commitment`, `CommitmentStatus`） | `ene-store` |
+| 永続化（`insert_commitment`, `list_active_commitments` など） | `ene-store::MemoryStore` |
+| Arbiter 結果からの同期 | `ene-mind::commitments::CommitmentLedger` |
 
 **`MemoryKind::Commitment` との関係:** 抽出器は `MemoryCandidate { kind: Commitment, commitment_due }` を生成する。Memory Arbiter が typed memory として保存した後、`CommitmentLedger::sync_from_applied_decisions`（または `arbitrate_apply_and_sync`）が `source_memory_id` で紐づく active な ledger 行を作成する。
 
@@ -234,16 +236,15 @@ Phase 8 では、ツール呼び出し結果を安全に typed memory へ接続�
 - **自然な忘却** — ハードデリートではなく faded / archived / superseded ライフサイクル
 
 ### 移行パス
-- **Phase 0–10** は実装済み — `ene-cognition` は `cognition.enabled` で `ene-core::streaming.rs` に統合される（embedding provider 未設定時はレガシーパイプラインにフォールバック）
-- **#98（ハイブリッド方針）** — cognition 有効時:
+- **Phase 0–10** は実装済み — `ene-mind` は `ene-runtime::streaming.rs` の唯一のストリーミング実装
+- **#98（移行方針）**:
   - レガシー summary/keyfact テーブルは **read-only**（新規 summary/keyfact 書き込みなし）
-  - 未移行の summaries/keyfacts は `/memory migrate legacy` 完了まで cognitive recall にマージ
+  - 未移行の summaries/keyfacts は通常の mind recall にマージせず、`/memory migrate legacy` を明示的に実行する
   - 任意 one-shot CLI migration（トランザクション）で summaries → `Episodic`、keyfacts → `UserProfile`/`Preference`、logs → `memory_spans`
   - migration 完了後は typed-only recall。レガシー行は reset まで監査用に残る
-  - `cognition.memory.require_migration` は summaries/keyfacts 未移行時のみ recall をブロック（logs のみではブロックしない）
+  - `mind.memory.require_migration` は summaries/keyfacts 未移行時のみ recall をブロック（logs のみではブロックしない）
   - affect **永続化**は毎ターン実行。affect **計算**は `EmotionEngine`（#86）、オプション LLM 分類器（#88）、`OutputArbiter` による表情解決（#89, #91）で実装済み
 - **#80** で自動セッション分割を rolling context compression トリガーに置き換え
-- **`cognition.enabled = false`** のときはレガシー streaming パイプラインを維持
 
 ## 参照
 
