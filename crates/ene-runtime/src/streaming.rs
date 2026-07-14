@@ -10,7 +10,7 @@ use ene_tool_proto::ToolError;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{Mutex, broadcast, oneshot};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 /// Phase name for vectorization (embedding generation).
@@ -96,6 +96,9 @@ pub struct StreamContext {
     pub terminal_emitted: Arc<std::sync::atomic::AtomicBool>,
     /// Active turn id for all turn-scoped events.
     pub turn: TurnId,
+    /// Sender for classifier JoinHandles spawned after Terminal emission.
+    /// The actor drains this into its classifier JoinSet for lifecycle management.
+    pub classifier_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
 }
 
 /// Runs the full AI streaming completion loop with tool calling, optional memory

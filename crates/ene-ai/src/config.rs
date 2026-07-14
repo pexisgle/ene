@@ -81,8 +81,14 @@ impl ProviderConfig {
         if !self.base_url.trim().is_empty() {
             return Ok(self.base_url.clone());
         }
+        // Fall back to OPENAI_BASE_URL env var for cloud API providers.
+        if let Ok(url) = std::env::var("OPENAI_BASE_URL")
+            && !url.trim().is_empty()
+        {
+            return Ok(url);
+        }
         Err(ene_config::ConfigError::MissingBaseUrl {
-            env_var: String::new(),
+            env_var: "OPENAI_BASE_URL".to_string(),
         })
     }
 

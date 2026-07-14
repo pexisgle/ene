@@ -6,7 +6,7 @@ use std::sync::Arc;
 use candle_core::Device;
 use candle_core::quantized::gguf_file;
 
-use crate::embedding::error::{EmbeddingError, EneEmbeddingError};
+use crate::embedding::error::EneEmbeddingError;
 
 use super::attention::AttentionBlock;
 use super::layer::LayerBlock;
@@ -19,7 +19,7 @@ fn load_tensor<R: Read + Seek>(
     reader: &mut R,
     name: &str,
     device: &Device,
-) -> Result<candle_core::Tensor, EmbeddingError> {
+) -> Result<candle_core::Tensor, EneEmbeddingError> {
     let qtensor = ct
         .tensor(reader, name, device)
         .map_err(super::candle_err(&format!("Tensor {name} not found")))?;
@@ -31,14 +31,14 @@ fn load_tensor<R: Read + Seek>(
 pub fn load_model(
     gguf_path: &str,
     device: &Device,
-) -> Result<(EmbeddingModel, HashMap<String, gguf_file::Value>), EmbeddingError> {
+) -> Result<(EmbeddingModel, HashMap<String, gguf_file::Value>), EneEmbeddingError> {
     let mut file = std::fs::File::open(gguf_path).map_err(super::candle_err("Cannot open GGUF"))?;
     let ct =
         gguf_file::Content::read(&mut file).map_err(super::candle_err("Failed to read GGUF"))?;
 
     let metadata = ct.metadata.clone();
 
-    let md_get = |s: &str| -> Result<&gguf_file::Value, EmbeddingError> {
+    let md_get = |s: &str| -> Result<&gguf_file::Value, EneEmbeddingError> {
         metadata
             .get(s)
             .ok_or_else(|| EneEmbeddingError::CandleError(format!("Missing metadata: {s}")))
@@ -197,7 +197,7 @@ pub fn resolve_gguf_paths(
     model_name: &str,
     quantization: &str,
     model_dir: PathBuf,
-) -> Result<(PathBuf, PathBuf), EmbeddingError> {
+) -> Result<(PathBuf, PathBuf), EneEmbeddingError> {
     let model_name_owned = model_name.to_string();
     let quant_owned = quantization.to_string();
 

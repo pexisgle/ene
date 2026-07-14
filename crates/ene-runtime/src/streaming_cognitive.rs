@@ -64,6 +64,7 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::Conver
         pending_user_inputs,
         terminal_emitted,
         turn,
+        classifier_tx,
     } = ctx;
 
     session.reset_display_buffer();
@@ -526,7 +527,8 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::Conver
                 );
 
                 // Fire-and-forget: must not delay Terminal (already emitted).
-                tokio::spawn(async move {
+                // The JoinHandle is sent to the actor for lifecycle management.
+                let classifier_handle = tokio::spawn(async move {
                     tracing::info!(
                         component = "EmotionEngine",
                         turn_id = classifier_turn_id,
@@ -600,6 +602,11 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::Conver
                         }
                     }
                 });
+                // Send handle to actor for lifecycle management.
+                // A send failure means the actor has shut down; the
+                // classifier task runs as a detached orphan until
+                // completion, which is acceptable at shutdown.
+                let _ = classifier_tx.send(classifier_handle);
             }
 
             return session;

@@ -264,6 +264,12 @@ fn expand_tool_spec(ast: DeriveInput) -> syn::Result<TokenStream2> {
     // remain parsed so existing `#[tool(...)]` annotations keep compiling,
     // but they are intentionally not emitted on the LLM-facing `ToolSpec`
     // (#135 / #137 — ToolRagProfile deferred).
+    //
+    // The suppression is deliberate: these fields were part of an earlier
+    // profiling schema that was removed from the wire format. Keeping the
+    // parser arms ensures backwards-compatible attribute usage — existing
+    // tool definitions do not have to be rewritten — while the discarded
+    // values are a no-op.
     let _ = (
         struct_attrs.category_path(),
         struct_attrs.side_effects_path(),

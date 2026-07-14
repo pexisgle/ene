@@ -8,14 +8,16 @@
 use ene_store::{
     ActiveCommitmentPrompt, Commitment, CommitmentStatus, MemoryKind, MemoryStore, NewCommitment,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::error::CognitionError;
 use crate::memory_writer::candidate::MemoryCandidate;
 use crate::memory_writer::{AppliedDecision, ArbiterContext, MemoryArbiter};
 
 /// Maximum active commitments to consider for title-matching dedup / deletion.
-const MAX_ACTIVE_MATCH_CHECK: usize = 256;
+/// Set to 4096 — well above any plausible concurrent active‑commitment count.
+/// A warning is emitted when the cap is hit so operators can tune if needed.
+const MAX_ACTIVE_MATCH_CHECK: usize = 4096;
 
 /// Companion Commitment Ledger: promises, tasks, follow-ups.
 #[derive(Debug, Default)]
@@ -55,7 +57,11 @@ impl CommitmentLedger {
 
             let title_key = normalize_title(&candidate.title);
             let active = store
-                .list_active_commitments(ctx.character_id, Some(ctx.user_id), MAX_ACTIVE_MATCH_CHECK)
+                .list_active_commitments(
+                    ctx.character_id,
+                    Some(ctx.user_id),
+                    MAX_ACTIVE_MATCH_CHECK,
+                )
                 .await
                 .map_err(CognitionError::Memory)?;
             if let Some(existing) = active
@@ -64,7 +70,8 @@ impl CommitmentLedger {
             {
                 // Same title exists — supersede (update description/due_label) if content differs.
                 let content_changed = existing.description != candidate.content;
-                let due_changed = existing.due_label.as_deref() != candidate.commitment_due.as_deref();
+                let due_changed =
+                    existing.due_label.as_deref() != candidate.commitment_due.as_deref();
                 if content_changed || due_changed {
                     if let Some(id) = existing.id {
                         store
@@ -218,6 +225,14 @@ impl CommitmentLedger {
             .await
             .map_err(CognitionError::Memory)?;
 
+        if active.len() == MAX_ACTIVE_MATCH_CHECK {
+            warn!(
+                component = "CommitmentLedger",
+                limit = MAX_ACTIVE_MATCH_CHECK,
+                "list_active_commitments returned exactly the limit; results may be truncated"
+            );
+        }
+
         let matching: Vec<(i64, &str)> = active
             .iter()
             .filter_map(|row| row.id.map(|id| (id, row.title.as_str())))
@@ -225,7 +240,7 @@ impl CommitmentLedger {
             .collect();
 
         if matching.len() > 1 {
-            tracing::warn!(
+            warn!(
                 component = "CommitmentLedger",
                 title = %key,
                 count = matching.len(),
@@ -234,28 +249,19 @@ impl CommitmentLedger {
             );
         }
 
-        let mut first_error: Option<CognitionError> = None;
-        for (id, _) in matching {
-            if let Err(e) = store
-                .cancel_commitment(id)
-                .await
-                .map_err(CognitionError::Memory)
-            {
-                tracing::warn!(
-                    component = "CommitmentLedger",
-                    commitment_id = id,
-                    error = %e,
-                    "failed to cancel commitment by title (continuing)"
-                );
-                if first_error.is_none() {
-                    first_error = Some(e);
-                }
+        // Accumulate errors across all rows so a single failure
+        // does not leave the caller in a partially-cancelled state.
+        let mut errors: Vec<String> = Vec::new();
+        for (id, _) in &matching {
+            if let Err(e) = store.cancel_commitment(*id).await {
+                errors.push(format!("commitment {id}: {e}"));
             }
         }
 
-        match first_error {
-            Some(e) => Err(e),
-            None => Ok(()),
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(CognitionError::Aggregate(errors.join("; ")))
         }
     }
 }
@@ -361,9 +367,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(active.len(), 1);
-        assert_eq!(
-            active[0].description, "Let's discuss the UI design instead"
-        );
+        assert_eq!(active[0].description, "Let's discuss the UI design instead");
         assert_eq!(active[0].due_label.as_deref(), Some("Tomorrow"));
     }
 

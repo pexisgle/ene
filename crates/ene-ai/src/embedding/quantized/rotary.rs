@@ -1,13 +1,17 @@
 use candle_core::{Device, Tensor};
 use candle_nn::rotary_emb::rope;
 
-use crate::embedding::error::EmbeddingError;
+use crate::embedding::error::EneEmbeddingError;
 
-pub fn rope_precomputed(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor, EmbeddingError> {
+pub fn rope_precomputed(
+    x: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+) -> Result<Tensor, EneEmbeddingError> {
     rope(x, cos, sin).map_err(super::candle_err("RoPE failed"))
 }
 
-pub fn repeat_kv(x: &Tensor, n_rep: usize) -> Result<Tensor, EmbeddingError> {
+pub fn repeat_kv(x: &Tensor, n_rep: usize) -> Result<Tensor, EneEmbeddingError> {
     if n_rep == 1 {
         return Ok(x.clone());
     }
@@ -35,7 +39,7 @@ impl RotaryEmbedding {
         max_position_embeddings: usize,
         rope_theta: f64,
         device: &Device,
-    ) -> Result<Self, EmbeddingError> {
+    ) -> Result<Self, EneEmbeddingError> {
         let inv_freq: Vec<f32> = (0..head_dim)
             .step_by(2)
             .map(|i| 1.0_f32 / rope_theta.powf(i as f64 / head_dim as f64) as f32)
@@ -57,7 +61,7 @@ impl RotaryEmbedding {
         Ok(Self { cos, sin })
     }
 
-    pub fn apply(&self, q: &Tensor, k: &Tensor) -> Result<(Tensor, Tensor), EmbeddingError> {
+    pub fn apply(&self, q: &Tensor, k: &Tensor) -> Result<(Tensor, Tensor), EneEmbeddingError> {
         let (_b, _num_heads, seq_len, _head_dim) =
             q.dims4().map_err(super::candle_err("RoPE q dims"))?;
         let cos = self

@@ -1,8 +1,5 @@
 //! Local GGUF quantized vector embedding provider using Candle.
 
-#[cfg(target_os = "macos")]
-extern crate accelerate_src;
-
 mod error;
 mod quantized;
 

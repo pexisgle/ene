@@ -11,9 +11,6 @@ pub enum EneEmbeddingError {
     Provider(#[from] crate::EmbeddingError),
 }
 
-/// Type alias for internal module usages.
-pub type EmbeddingError = EneEmbeddingError;
-
 impl From<EneEmbeddingError> for crate::EmbeddingError {
     fn from(e: EneEmbeddingError) -> Self {
         match e {

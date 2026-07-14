@@ -447,6 +447,7 @@ impl EneHandle {
         };
 
         let turn_gate = Arc::new(TurnGate::new());
+        let (classifier_tx, classifier_rx) = mpsc::unbounded_channel();
 
         let actor = EneActor {
             cmd_rx,
@@ -465,7 +466,10 @@ impl EneHandle {
             pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
             pending_compression: None,
             call_tool_tasks: tokio::task::JoinSet::new(),
+            classifier_tasks: tokio::task::JoinSet::new(),
+            classifier_rx,
             terminal_emitted: Arc::new(AtomicBool::new(false)),
+            classifier_tx,
         };
         let join = tokio::spawn(actor.run());
 
@@ -606,6 +610,10 @@ struct EneActor {
     pending_user_inputs: Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
     pending_compression: Option<PendingCompressionTask>,
     call_tool_tasks: tokio::task::JoinSet<()>,
+    classifier_tasks: tokio::task::JoinSet<()>,
+    classifier_rx: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
+    /// Sender for classifier JoinHandles from the stream task.
+    classifier_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
     /// Shared with the running stream task; first party to flip emits Terminal.
     terminal_emitted: Arc<AtomicBool>,
 }
@@ -621,6 +629,22 @@ impl EneActor {
                 // The reply oneshot is sent from inside the
                 // task itself; we just drop the JoinError
                 // here (it's already been logged by Tokio).
+            }
+
+            // Reap completed classifier tasks.
+            while let Some(_joined) = self.classifier_tasks.try_join_next() {}
+
+            // Drain classifier JoinHandles sent from the stream.
+            while let Ok(handle) = self.classifier_rx.try_recv() {
+                self.classifier_tasks.spawn(async move {
+                    if let Err(e) = handle.await {
+                        tracing::error!(
+                            component = "EmotionEngine",
+                            error = %e,
+                            "Post-turn affect classifier panicked"
+                        );
+                    }
+                });
             }
 
             if let Some(rx) = self.stream_session_rx.as_mut() {
@@ -688,8 +712,9 @@ impl EneActor {
         if let Some(handle) = self.stream_handle.take() {
             handle.abort();
         }
-        // Abort any in-flight direct CallTool tasks and clear
+        // Abort any in-flight direct CallTool and classifier tasks, and clear
         // any pending prompt oneshot senders.
+        self.classifier_tasks.abort_all();
         self.call_tool_tasks.abort_all();
         self.drain_pending().await;
     }
@@ -737,10 +762,32 @@ impl EneActor {
                 }
                 self.cancel_token.cancel();
 
-                // Abort immediately so the actor loop is not blocked on join.
-                // Cancel discards in-flight session updates by design.
+                // Cooperative join: give the stream up to 250ms to notice the
+                // CancellationToken and shut down gracefully (preserving in-flight
+                // session updates). If the timeout fires, hard-abort.
                 if let Some(handle) = self.stream_handle.take() {
-                    handle.abort();
+                    tokio::pin!(handle);
+                    tokio::select! {
+                        res = &mut handle => {
+                            if let Err(e) = res {
+                                tracing::warn!(
+                                    component = "EneActor",
+                                    error = %e,
+                                    "Stream task join failed during cooperative cancel"
+                                );
+                            }
+                            // Peek the session result non-blockingly.
+                            if let Some(rx) = self.stream_session_rx.as_mut()
+                                && let Ok(Ok(updated)) = rx.try_recv()
+                            {
+                                self.session = updated;
+                            }
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+                            handle.as_mut().abort();
+                            _ = handle.await;
+                        }
+                    }
                 }
                 let _ = self.stream_session_rx.take();
 
@@ -770,6 +817,7 @@ impl EneActor {
                 true
             }
             EneCommand::Shutdown => {
+                self.classifier_tasks.abort_all();
                 self.call_tool_tasks.abort_all();
                 self.drain_pending().await;
                 false
@@ -916,6 +964,7 @@ impl EneActor {
         let pending_user_inputs = self.pending_user_inputs.clone();
         let terminal_emitted = self.terminal_emitted.clone();
         let turn_for_stream = turn;
+        let classifier_tx = self.classifier_tx.clone();
 
         let (session_tx, session_rx) = oneshot::channel();
         self.stream_session_rx = Some(session_rx);
@@ -936,6 +985,7 @@ impl EneActor {
                 pending_user_inputs,
                 terminal_emitted,
                 turn: turn_for_stream,
+                classifier_tx,
             })
             .await;
             let _ = session_tx.send(result);

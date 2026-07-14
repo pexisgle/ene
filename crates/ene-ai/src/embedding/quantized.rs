@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use candle_core::{Device, Tensor};
 use tokenizers::Tokenizer;
 
-use crate::embedding::error::{EmbeddingError, EneEmbeddingError};
+use crate::embedding::error::EneEmbeddingError;
 use crate::{EmbeddingKind, EmbeddingProvider};
 
 pub use loader::resolve_gguf_paths;
@@ -20,7 +20,9 @@ pub use loader::resolve_gguf_paths;
 use loader::load_model;
 use model::EmbeddingModel;
 
-pub(crate) fn candle_err<E: std::fmt::Display>(msg: &str) -> impl FnOnce(E) -> EmbeddingError + '_ {
+pub(crate) fn candle_err<E: std::fmt::Display>(
+    msg: &str,
+) -> impl FnOnce(E) -> EneEmbeddingError + '_ {
     move |e| EneEmbeddingError::CandleError(format!("{msg}: {e}"))
 }
 
@@ -46,7 +48,7 @@ impl GgufEmbeddingProvider {
         tokenizer_path: &str,
         max_length: usize,
         quantization: &str,
-    ) -> Result<Self, EmbeddingError> {
+    ) -> Result<Self, EneEmbeddingError> {
         let start = Instant::now();
 
         let device = Device::Cpu;
@@ -81,7 +83,11 @@ impl GgufEmbeddingProvider {
         })
     }
 
-    fn embed_internal(&self, text: &str, kind: EmbeddingKind) -> Result<Vec<f32>, EmbeddingError> {
+    fn embed_internal(
+        &self,
+        text: &str,
+        kind: EmbeddingKind,
+    ) -> Result<Vec<f32>, EneEmbeddingError> {
         let t_start = Instant::now();
         let prefix = match kind {
             EmbeddingKind::Query | EmbeddingKind::Hyde => "Query: ",
@@ -108,7 +114,9 @@ impl GgufEmbeddingProvider {
             // `vec![0.0; dims]`-normalized outputs
             // contaminate every recall scan. Surface a
             // typed error instead.
-            return Err(EmbeddingError::Provider(crate::EmbeddingError::EmptyInput));
+            return Err(EneEmbeddingError::Provider(
+                crate::EmbeddingError::EmptyInput,
+            ));
         }
 
         let t_tensor_start = Instant::now();

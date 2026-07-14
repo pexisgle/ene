@@ -1,7 +1,7 @@
 use candle_core::{Module, Tensor};
 use candle_nn::ops;
 
-use crate::embedding::error::EmbeddingError;
+use crate::embedding::error::EneEmbeddingError;
 
 use super::layer::LayerBlock;
 
@@ -14,7 +14,7 @@ pub struct EmbeddingModel {
 }
 
 impl EmbeddingModel {
-    pub fn forward(&self, input_ids: &Tensor) -> Result<Vec<f32>, EmbeddingError> {
+    pub fn forward(&self, input_ids: &Tensor) -> Result<Vec<f32>, EneEmbeddingError> {
         let t_start = std::time::Instant::now();
         let (_b, _l) = input_ids
             .dims2()

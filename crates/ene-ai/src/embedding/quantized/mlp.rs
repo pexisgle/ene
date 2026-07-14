@@ -1,7 +1,7 @@
 use candle_core::{Module, Tensor};
 use candle_nn::ops;
 
-use crate::embedding::error::EmbeddingError;
+use crate::embedding::error::EneEmbeddingError;
 
 pub struct MlpBlock {
     pub gate_proj: candle_nn::Linear,
@@ -10,7 +10,7 @@ pub struct MlpBlock {
 }
 
 impl MlpBlock {
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor, EmbeddingError> {
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor, EneEmbeddingError> {
         let gate = self
             .gate_proj
             .forward(x)

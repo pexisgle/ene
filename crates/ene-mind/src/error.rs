@@ -54,6 +54,10 @@ pub enum EneCognitionError {
     /// Catch-all for other errors.
     #[error("Other error: {0}")]
     Other(String),
+
+    /// Aggregated error from multiple operations (e.g. batch cancellation).
+    #[error("Aggregated error: {0}")]
+    Aggregate(String),
 }
 
 /// Type alias for internal module usage.

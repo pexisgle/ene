@@ -3086,61 +3086,64 @@ impl MemoryStore {
         id: i64,
         new_status: crate::CommitmentStatus,
     ) -> Result<bool, MemoryError> {
-        use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{EntityTrait, QueryFilter};
 
         let now = Utc::now();
-        let maybe_model = entities::commitments::Entity::find_by_id(id)
-            .one(&self.db)
-            .await?;
-
-        let Some(model) = maybe_model else {
-            return Ok(false);
-        };
-
-        if crate::CommitmentStatus::from_db_str(&model.status) != crate::CommitmentStatus::Active {
-            return Ok(false);
-        }
-
-        let mut active: entities::commitments::ActiveModel = model.into();
-        active.status = Set(new_status.as_str().to_string());
-        active.updated_at = Set(now);
+        let mut stmt = entities::commitments::Entity::update_many()
+            .col_expr(
+                entities::commitments::Column::Status,
+                Expr::value(new_status.as_str().to_string()),
+            )
+            .col_expr(entities::commitments::Column::UpdatedAt, Expr::value(now))
+            .filter(entities::commitments::Column::Id.eq(id))
+            .filter(
+                entities::commitments::Column::Status.eq(crate::CommitmentStatus::Active.as_str()),
+            );
         if new_status == crate::CommitmentStatus::Done {
-            active.completed_at = Set(Some(now));
+            stmt = stmt.col_expr(
+                entities::commitments::Column::CompletedAt,
+                Expr::value(Some(now)),
+            );
         }
-        active.update(&self.db).await?;
-        Ok(true)
+        let result = stmt.exec(&self.db).await?;
+        Ok(result.rows_affected > 0)
     }
 
     /// Update an active commitment's description and due label in-place.
     ///
     /// Only succeeds when the row exists and is `Active`. Returns `Ok(false)`
     /// when the row does not exist or is no longer active.
+    ///
+    /// Uses a single atomic `UPDATE ... WHERE status = 'active'` to prevent
+    /// TOCTOU races between the former find→check→update round trips.
     pub async fn supersede_commitment(
         &self,
         id: i64,
         description: &str,
         due_label: Option<&str>,
     ) -> Result<bool, MemoryError> {
-        use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{EntityTrait, QueryFilter};
 
-        let maybe_model = entities::commitments::Entity::find_by_id(id)
-            .one(&self.db)
+        let now = Utc::now();
+        let result = entities::commitments::Entity::update_many()
+            .col_expr(
+                entities::commitments::Column::Description,
+                Expr::value(description.to_string()),
+            )
+            .col_expr(
+                entities::commitments::Column::DueLabel,
+                Expr::value(due_label.map(ToOwned::to_owned)),
+            )
+            .col_expr(entities::commitments::Column::UpdatedAt, Expr::value(now))
+            .filter(entities::commitments::Column::Id.eq(id))
+            .filter(
+                entities::commitments::Column::Status.eq(crate::CommitmentStatus::Active.as_str()),
+            )
+            .exec(&self.db)
             .await?;
-
-        let Some(model) = maybe_model else {
-            return Ok(false);
-        };
-
-        if crate::CommitmentStatus::from_db_str(&model.status) != crate::CommitmentStatus::Active {
-            return Ok(false);
-        }
-
-        let mut active: entities::commitments::ActiveModel = model.into();
-        active.description = Set(description.to_string());
-        active.due_label = Set(due_label.map(ToOwned::to_owned));
-        active.updated_at = Set(Utc::now());
-        active.update(&self.db).await?;
-        Ok(true)
+        Ok(result.rows_affected > 0)
     }
 
     /// Mark a commitment as done.

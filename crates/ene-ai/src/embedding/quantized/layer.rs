@@ -1,7 +1,7 @@
 use candle_core::Tensor;
 use candle_nn::ops;
 
-use crate::embedding::error::EmbeddingError;
+use crate::embedding::error::EneEmbeddingError;
 
 use super::attention::AttentionBlock;
 use super::mlp::MlpBlock;
@@ -15,7 +15,7 @@ pub struct LayerBlock {
 }
 
 impl LayerBlock {
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor, EmbeddingError> {
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor, EneEmbeddingError> {
         let h = ops::rms_norm(x, &self.ln1_weight, self.ln_eps)
             .map_err(super::candle_err("layer ln1"))?;
         let h = self

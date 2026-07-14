@@ -131,6 +131,7 @@ async fn run_stream_cognitive_path_completes_with_logs() {
         pending_user_inputs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         terminal_emitted,
         turn: turn.clone(),
+        classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
     };
 
     let _session = run_stream(ctx).await;

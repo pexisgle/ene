@@ -3,7 +3,7 @@ use std::sync::Arc;
 use candle_core::{D, Module, Tensor};
 use candle_nn::ops;
 
-use crate::embedding::error::EmbeddingError;
+use crate::embedding::error::EneEmbeddingError;
 
 use super::rotary::{RotaryEmbedding, repeat_kv};
 
@@ -24,7 +24,7 @@ pub struct AttentionBlock {
 }
 
 impl AttentionBlock {
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor, EmbeddingError> {
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor, EneEmbeddingError> {
         let (b, l, _h) = x.dims3().map_err(super::candle_err("attn dims3"))?;
 
         let q = self

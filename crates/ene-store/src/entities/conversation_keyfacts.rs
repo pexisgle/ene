@@ -1,3 +1,12 @@
+//! Legacy `conversation_keyfacts` entity.
+//!
+//! Retained for backward compatibility during migration from the old
+//! summary/keyfact storage model to the typed memory system (#121).
+//! New code paths in `ene-mind` write to `typed_memories` instead.
+//! This table and `conversation_summaries` are read-only after migration
+//! and will be removed in a future schema version once all users have
+//! completed the transition.
+
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
