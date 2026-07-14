@@ -33,7 +33,7 @@ pub struct MemoryWriteProviders<'a> {
     pub embedder: Option<&'a dyn EmbeddingProvider>,
 }
 
-#[allow(clippy::derivable_impls)]
+#[expect(clippy::derivable_impls)]
 impl<'a> Default for MemoryWriteProviders<'a> {
     fn default() -> Self {
         Self {

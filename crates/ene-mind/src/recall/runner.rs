@@ -172,7 +172,7 @@ mod tests {
     use ene_store::{MemoryConfidence, MemoryKind, MemorySalience, MemorySource, MemoryStatus};
     use ene_store::{MemoryScope, NewMemoryItem};
 
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     struct MockEmbedder;
 
     #[async_trait::async_trait]

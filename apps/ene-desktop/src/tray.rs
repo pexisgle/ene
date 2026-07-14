@@ -192,7 +192,7 @@ fn synthetic_icon() -> Icon {
     // quadruples), so `Icon::from_rgba` can only fail via a `tray-icon`
     // internal bug. Panicking surfaces that bug rather than silently
     // dropping the tray icon.
-    #[allow(
+    #[expect(
         clippy::expect_used,
         reason = "synthetic RGBA is valid by construction"
     )]
@@ -216,7 +216,7 @@ fn install_event_pump(event_tx: AppEventSender) {
             // can't lift the `Result` out of the closure. If the
             // builder itself fails on Windows the only sensible
             // action is to panic and surface the bug.
-            #[allow(
+            #[expect(
                 clippy::expect_used,
                 reason = "tray icon builder must succeed on Windows"
             )]

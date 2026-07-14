@@ -19,6 +19,5 @@ pub struct CursorState {
     /// Last observed physical cursor position, in window-local
     /// pixel space. `None` until the first `CursorMoved` event
     /// arrives.
-    #[allow(dead_code)]
     pub physical: Option<PhysicalPosition<f64>>,
 }

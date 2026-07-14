@@ -178,14 +178,14 @@ impl AppState {
         // entity is spawned by the first `app.update()` and the component
         // is inserted at spawn time. Violating either is a programmer bug
         // and panicking with a clear message is the right behaviour.
-        #[allow(
+        #[expect(
             clippy::expect_used,
             reason = "UI entity is spawned by app.update() and carries UiStateComponent; violation is a programmer bug"
         )]
         let entity = self
             .ui_bevy_entity()
             .expect("UI bevy entity not spawned; call app.update() first");
-        #[allow(
+        #[expect(
             clippy::expect_used,
             reason = "UI entity is spawned by app.update() and carries UiStateComponent; violation is a programmer bug"
         )]
@@ -242,14 +242,14 @@ impl AppState {
         // entity is spawned by the first `app.update()` and the component
         // is inserted at spawn time. Violating either is a programmer bug
         // and panicking with a clear message is the right behaviour.
-        #[allow(
+        #[expect(
             clippy::expect_used,
             reason = "UI entity is spawned by app.update() and carries UiStateComponent; violation is a programmer bug"
         )]
         let entity = self
             .ui_bevy_entity()
             .expect("UI bevy entity not spawned; call app.update() first");
-        #[allow(
+        #[expect(
             clippy::expect_used,
             reason = "UI entity is spawned by app.update() and carries UiStateComponent; violation is a programmer bug"
         )]
@@ -262,11 +262,11 @@ impl AppState {
     pub fn chat_bevy_state_mut(
         &mut self,
     ) -> bevy_ecs::change_detection::Mut<'_, crate::component::chat::ChatStateComponent> {
-        #[allow(clippy::expect_used)]
+        #[expect(clippy::expect_used)]
         let entity = self
             .chat_bevy_entity()
             .expect("Chat bevy entity not spawned; call app.update() first");
-        #[allow(clippy::expect_used)]
+        #[expect(clippy::expect_used)]
         self.app
             .world_mut()
             .get_mut::<crate::component::chat::ChatStateComponent>(entity)
@@ -274,11 +274,11 @@ impl AppState {
     }
 
     pub fn chat_bevy_state(&mut self) -> &crate::component::chat::ChatStateComponent {
-        #[allow(clippy::expect_used)]
+        #[expect(clippy::expect_used)]
         let entity = self
             .chat_bevy_entity()
             .expect("Chat bevy entity not spawned; call app.update() first");
-        #[allow(clippy::expect_used)]
+        #[expect(clippy::expect_used)]
         self.app
             .world()
             .get::<crate::component::chat::ChatStateComponent>(entity)

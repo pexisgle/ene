@@ -133,6 +133,6 @@ pub struct CharacterTransform {
     pub translation: Vec3,
     #[expect(dead_code, reason = "Read by transform system in Phase 4")]
     pub rotation: Quat,
-    #[allow(dead_code, reason = "Test reads `scale` in `bundle_defaults_are_safe`")]
+    #[expect(dead_code, reason = "Test reads `scale` in `bundle_defaults_are_safe`")]
     pub scale: f32,
 }

@@ -124,7 +124,7 @@ pub(crate) fn push_lines(
     }
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub(crate) fn unused_collider_set_marker(_cs: &ColliderSet) {}
 
 #[cfg(test)]

@@ -865,7 +865,6 @@ enum MemorySpans {
 }
 
 #[derive(Iden)]
-#[allow(dead_code)]
 enum AffectStates {
     #[iden = "affect_states"]
     Table,

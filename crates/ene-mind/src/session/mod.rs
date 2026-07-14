@@ -48,7 +48,7 @@ pub mod config;
 /// Session error types.
 pub mod error;
 /// Core session holder.
-#[allow(clippy::module_inception)]
+#[expect(clippy::module_inception)]
 pub mod session;
 /// Session split lifecycle (boundary check, async split, polling).
 pub mod session_split;

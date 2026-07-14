@@ -884,7 +884,7 @@ impl VrmRenderer {
         // only builds a view-proj matrix from already-validated fields and
         // has no `Err` return path. The `VrmResult` wrapper exists for API
         // symmetry with fallible camera accessors.
-        #[allow(
+        #[expect(
             clippy::expect_used,
             reason = "Camera::uniform is infallible by construction"
         )]

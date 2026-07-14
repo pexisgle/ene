@@ -35,7 +35,7 @@ pub struct PromptLibraryData {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct RawPromptLibraryData {
     system: RawSystemPrompts,
     emotion: RawEmotionPrompts,
@@ -67,7 +67,7 @@ pub struct SystemPrompts {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct RawSystemPrompts {
     mascot_context_path: String,
     behavior_rules_header: String,
@@ -113,7 +113,7 @@ pub struct EmotionPrompts {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct RawEmotionPrompts {
     header: String,
     rule_path: String,
@@ -164,7 +164,7 @@ pub struct SummarizerPrompts {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct RawSummarizerPrompts {
     system_path: String,
     user_prompt_path: String,
@@ -236,7 +236,7 @@ pub struct ExtractorPrompts {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct RawExtractorPrompts {
     system_path: String,
     user_prompt_path: String,
@@ -260,7 +260,7 @@ pub struct AffectClassifierPrompts {
 }
 
 #[derive(Debug, Deserialize, Default)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct RawAffectClassifierPrompts {
     #[serde(default = "default_affect_classifier_system_path")]
     system_path: String,
@@ -343,7 +343,7 @@ impl PromptLibrary {
         // The bundled JSON is checked into the repository and is part of the
         // build artifact. A parse failure here is a release-blocker bug, not
         // a runtime condition we can recover from.
-        #[allow(
+        #[expect(
             clippy::expect_used,
             reason = "bundled JSON is validated at build time; parse failure is a release-blocker"
         )]
@@ -448,7 +448,7 @@ impl PromptLibrary {
         // The bundled JSON is checked into the repository and is part of the
         // build artifact. A parse failure here is a release-blocker bug, not
         // a runtime condition we can recover from.
-        #[allow(
+        #[expect(
             clippy::expect_used,
             reason = "bundled JSON is validated at build time; parse failure is a release-blocker"
         )]

@@ -371,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)]
+    #[expect(clippy::assertions_on_constants)]
     fn threshold_filters_low_alpha() {
         assert!(PIXEL_THRESHOLD > 0);
         assert!(17 > PIXEL_THRESHOLD);
@@ -379,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)]
+    #[expect(clippy::assertions_on_constants)]
     fn mask_target_format_is_rgba8unorm() {
         assert_eq!(MASK_TARGET_FORMAT, wgpu::TextureFormat::Rgba8Unorm);
         assert_eq!(BYTES_PER_PIXEL, 4);

@@ -9,12 +9,12 @@ use bevy_ecs::prelude::*;
 /// space. `logical` is the post-DPI position passed to winit.
 #[derive(Message, Debug, Clone, Copy)]
 pub struct PointerMoved {
-    #[allow(
+    #[expect(
         dead_code,
         reason = "Phase 8: device_query is the cursor source of truth; PointerMoved is reserved for a future migration"
     )]
     pub logical_x: f32,
-    #[allow(
+    #[expect(
         dead_code,
         reason = "Phase 8: device_query is the cursor source of truth; PointerMoved is reserved for a future migration"
     )]
