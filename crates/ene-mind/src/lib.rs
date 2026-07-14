@@ -114,7 +114,7 @@ pub use memory_writer::{
 };
 /// Performance cue types for chat presentation (#126, #128).
 #[doc(no_inline)]
-pub use output::{CueSource, MotionLayer, PerfKind, PerformanceCue};
+pub use output::{CueSource, MotionLayer, PerfKind, PerformanceCue, cue_source_priority};
 /// Expression arbiter types.
 #[doc(no_inline)]
 pub use output::{

@@ -43,6 +43,8 @@ pub struct CharacterRenderer {
     vrma: Option<VrmaAsset>,
     vrma_player: VrmaPlayer,
     vrma_path: Option<PathBuf>,
+    /// Resolved asset directory for motion clip lookups (#133).
+    assets_dir: Option<PathBuf>,
     active_bone_nodes: Vec<usize>,
     /// Spring-bone simulator. `None` for models without `VRMC_springBone`.
     spring_bone_sim: Option<SpringBoneSimulator>,
@@ -81,6 +83,7 @@ impl CharacterRenderer {
             vrma: None,
             vrma_player: VrmaPlayer::default(),
             vrma_path: None,
+            assets_dir: Some(assets_dir.to_path_buf()),
             active_bone_nodes: Vec::new(),
         }
     }
@@ -166,6 +169,43 @@ impl CharacterRenderer {
                 );
             }
         }
+    }
+
+    /// Look up a motion clip by name and load it from
+    /// `{assets_dir}/motions/{name}.vrma`. Returns `true` on success.
+    pub fn play_motion_by_name(&mut self, name: &str) -> bool {
+        let Some(ref assets_dir) = self.assets_dir else {
+            return false;
+        };
+        let path = assets_dir.join("motions").join(format!("{name}.vrma"));
+        self.play_motion(&path);
+        self.vrma.is_some()
+    }
+
+    /// Returns the name (file stem) of the currently-playing motion, if any.
+    pub fn active_motion_name(&self) -> Option<&str> {
+        self.vrma_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+    }
+
+    /// Returns the duration of the currently-loaded motion clip,
+    /// keyed by clip name. Used by [`LayerComposer::tick`](#133).
+    pub fn clip_durations(&self) -> std::collections::HashMap<String, f32> {
+        let mut durations = std::collections::HashMap::new();
+        if let Some(ref asset) = self.vrma
+            && let Some(path) = self.vrma_path.as_ref()
+        {
+            let motion_name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown");
+            if let Some(clip) = asset.clips.first() {
+                durations.insert(motion_name.to_string(), clip.duration);
+            }
+        }
+        durations
     }
 
     /// Load a `.vrma` from disk and store the asset. Safe to call

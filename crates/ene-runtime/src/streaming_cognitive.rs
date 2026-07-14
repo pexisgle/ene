@@ -15,7 +15,7 @@ use crate::streaming::{
     accumulate_tool_calls, emit_terminal, finalize_tool_calls, perform_tool_executions,
     select_relevant_tools,
 };
-use ene_mind::{CueSource, PerfKind, PerformanceCue};
+use ene_mind::{CueSource, PerfKind, PerformanceArbiter, PerformanceCue};
 
 fn build_turn_context<'a>(
     mind: &'a MindConfig,
@@ -338,6 +338,7 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::Conver
         let mut current_tool_calls: Vec<LlmToolCallChunk> = Vec::new();
         let mut assistant_content = String::new();
         let mut accumulated_emotion_tokens: Vec<String> = Vec::new();
+        let mut perf_arbiter = PerformanceArbiter::default();
         let suppress_stream_tokens =
             mind.emotion.enabled && mind.emotion.llm_expression_is_advisory;
 
@@ -381,6 +382,9 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::Conver
                                         }
                                         PerfKind::Cancel => CueSource::LlmCommand,
                                     };
+                                    // Accept into arbiter for turn-end consolidation (#129).
+                                    perf_arbiter.accept(cue.clone(), source);
+                                    // Emit immediately for mid-turn responsiveness.
                                     let _ = event_tx.send(EneEvent::Performance {
                                         turn: turn.clone(),
                                         cues: vec![cue],
@@ -395,9 +399,11 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::Conver
                                     } else {
                                         CueSource::LlmCommand
                                     };
+                                    let cue = PerformanceCue::expression(name);
+                                    perf_arbiter.accept(cue.clone(), source);
                                     let _ = event_tx.send(EneEvent::Performance {
                                         turn: turn.clone(),
-                                        cues: vec![PerformanceCue::expression(name)],
+                                        cues: vec![cue],
                                         source,
                                     });
                                 }
@@ -464,11 +470,32 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::Conver
                     source = %decision.source.as_str(),
                     "Expression arbiter selected expression"
                 );
-                let _ = event_tx.send(EneEvent::Performance {
-                    turn: turn.clone(),
-                    cues: vec![PerformanceCue::expression(decision.expression.clone())],
-                    source: CueSource::from(decision.source),
-                });
+                // Feed the final expression decision into arbiter
+                // and consolidate with mid-turn cue accumulations (#129).
+                let expr_cue = PerformanceCue::expression(decision.expression.clone());
+                let expr_source = CueSource::from(decision.source);
+                perf_arbiter.accept(expr_cue, expr_source);
+                // Fill any gaps with the affect-derived default.
+                perf_arbiter.set_affect_default(&turn_affect);
+                let resolved = perf_arbiter.resolve(&mind.emotion);
+                if !resolved.is_empty() {
+                    let (cues, sources): (Vec<_>, Vec<_>) = resolved.into_iter().unzip();
+                    // Use the highest-priority source for the consolidated event.
+                    let primary_source = sources.into_iter().max_by_key(|s| match s {
+                        CueSource::LlmCommand => 5,
+                        CueSource::LlmAdvisory => 4,
+                        CueSource::Affect => 3,
+                        CueSource::Hysteresis => 2,
+                        CueSource::Fallback => 1,
+                    });
+                    if let Some(source) = primary_source {
+                        let _ = event_tx.send(EneEvent::Performance {
+                            turn: turn.clone(),
+                            cues,
+                            source,
+                        });
+                    }
+                }
             }
 
             if let Some(store) = mem_store.as_deref() {

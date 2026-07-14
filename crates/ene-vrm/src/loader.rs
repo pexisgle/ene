@@ -606,7 +606,6 @@ fn load_all_meshes(
 /// `scale` matches the normalization the renderer's vertex
 /// buffer applied, so the resulting offsets can be summed
 /// directly with the base position in the vertex shader.
-#[allow(clippy::too_many_arguments)]
 fn load_primitive_morph_targets(
     primitive: &gltf::Primitive,
     gltf: &gltf::Gltf,

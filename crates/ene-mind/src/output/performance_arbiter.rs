@@ -27,7 +27,8 @@ impl CueSlot {
     }
 }
 
-fn cue_source_priority(source: CueSource) -> u8 {
+/// Map a [`CueSource`] to its numeric priority (higher = more important).
+pub fn cue_source_priority(source: CueSource) -> u8 {
     match source {
         CueSource::LlmCommand => 5,
         CueSource::LlmAdvisory => 4,
@@ -70,13 +71,21 @@ impl PerformanceArbiter {
     }
 
     /// Set the affect-default expression if no LLM-driven expression is active.
+    ///
+    /// Also re-evaluates when the existing slot is itself an `Affect`-sourced
+    /// cue (handles affect state changes across the turn).
     pub fn set_affect_default(&mut self, affect: &AffectState) {
         let name = affect_to_expression(affect).to_string();
-        if self
-            .expression
-            .as_ref()
-            .is_none_or(|s| matches!(s.source, CueSource::Fallback | CueSource::Hysteresis))
-        {
+        let needs_update = match &self.expression {
+            None => true,
+            Some(s) => {
+                matches!(
+                    s.source,
+                    CueSource::Fallback | CueSource::Hysteresis | CueSource::Affect
+                )
+            }
+        };
+        if needs_update {
             let cue = PerformanceCue::expression(name);
             self.expression = Some(CueSlot::new(cue, CueSource::Affect));
         }
@@ -87,7 +96,7 @@ impl PerformanceArbiter {
     ///
     /// Clears internal state after resolution (ready for next turn).
     #[must_use]
-    pub fn resolve(&mut self, config: &EmotionConfig) -> Vec<(PerformanceCue, CueSource)> {
+    pub fn resolve(&mut self, _config: &EmotionConfig) -> Vec<(PerformanceCue, CueSource)> {
         let mut result: Vec<(PerformanceCue, CueSource)> = Vec::with_capacity(3);
 
         for slot in [
@@ -99,20 +108,16 @@ impl PerformanceArbiter {
         .flatten()
         {
             let express_val = slot.cue.name.clone();
-            let source = &slot.source;
-            let _config = config;
+            let source = slot.source;
             let resolved_source = if matches!(source, CueSource::Affect) && express_val == "neutral"
             {
                 CueSource::Fallback
             } else {
-                *source
+                source
             };
             result.push((slot.cue, resolved_source));
         }
 
-        self.expression = None;
-        self.motion = None;
-        self.lookat = None;
         result
     }
 
@@ -129,8 +134,11 @@ impl PerformanceArbiter {
     }
 
     fn set_slot(target: &mut Option<CueSlot>, slot: CueSlot) {
+        let kind = slot.cue.kind;
+        let name = slot.cue.name.clone();
+        let incoming_source = slot.source;
         let replaced = match target {
-            Some(existing) if existing.should_replace(slot.source) => {
+            Some(existing) if existing.should_replace(incoming_source) => {
                 *target = Some(slot);
                 true
             }
@@ -140,13 +148,23 @@ impl PerformanceArbiter {
             }
             _ => false,
         };
-        tracing::debug!(
-            component = "PerformanceArbiter",
-            replaced,
-            kind = ?target.as_ref().map(|s| s.cue.kind),
-            name = target.as_ref().map(|s| s.cue.name.as_str()),
-            "Cue accepted"
-        );
+        if replaced {
+            tracing::debug!(
+                component = "PerformanceArbiter",
+                kind = ?kind,
+                name = %name,
+                source = ?incoming_source,
+                "Cue accepted"
+            );
+        } else {
+            tracing::debug!(
+                component = "PerformanceArbiter",
+                kind = ?kind,
+                name = %name,
+                source = ?incoming_source,
+                "Cue rejected (lower priority)"
+            );
+        }
     }
 
     fn apply_cancel(&mut self, cue: &PerformanceCue) {

@@ -9,7 +9,7 @@ use crate::component::chat::{ChatStateComponent, ChatWindow};
 use crate::component::ui::{UiStateComponent, UiWindow};
 use crate::event::ai::{
     AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
-    EmoteToken, MotionCommand,
+    CancelCommand, EmoteToken, ExpressionCommand, LookAtTarget, MotionCommand,
 };
 use crate::event::chat::OpenChat;
 use crate::event::settings::OpenSettings;
@@ -154,6 +154,58 @@ pub fn apply_emote_tokens_system(
             hold_secs,
             weight: 1.0,
         });
+    }
+}
+
+/// Feeds [`ExpressionCommand`] messages into the [`EmotionPipelineState`] (#132).
+pub fn apply_expression_commands_system(
+    mut events: MessageReader<ExpressionCommand>,
+    mut pipeline: ResMut<EmotionPipelineState>,
+) {
+    for cmd in events.read() {
+        pipeline.pending.push_back(EmotionCommand {
+            emotion: cmd.name.clone(),
+            target_time: 0.0,
+            hold_secs: cmd.hold_secs,
+            weight: cmd.weight,
+        });
+    }
+}
+
+/// Feeds [`LookAtTarget`] messages into the motion layer (#132).
+///
+/// Look-at is handled by the existing per-frame look-at evaluator
+/// in `Runtime::render_char_frame`. This system is a placeholder
+/// for future explicit look-at cue routing.
+pub fn apply_lookat_system(mut events: MessageReader<LookAtTarget>) {
+    for _cmd in events.read() {
+        // LookAtTarget(target, priority) — routed per-frame by
+        // Runtime::update_look_at when cursor tracking is active.
+    }
+}
+
+/// Applies [`CancelCommand`] to clear expression or motion state (#132).
+pub fn apply_cancel_system(
+    mut events: MessageReader<CancelCommand>,
+    mut pipeline: ResMut<EmotionPipelineState>,
+    mut state: ResMut<MotionLayerState>,
+) {
+    for cmd in events.read() {
+        match cmd.0.as_str() {
+            "expr" | "expression" => {
+                pipeline.pending.clear();
+                pipeline.active = None;
+            }
+            "motion" => {
+                state.0.cancel_all_motions();
+            }
+            "all" => {
+                pipeline.pending.clear();
+                pipeline.active = None;
+                state.0.cancel_all_motions();
+            }
+            _ => {}
+        }
     }
 }
 

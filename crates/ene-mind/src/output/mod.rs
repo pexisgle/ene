@@ -8,7 +8,7 @@ pub mod types;
 pub use arbiter::{affect_to_expression, normalize_expression};
 pub use performance::{CueSource, MotionLayer, PerfKind, PerformanceCue};
 #[doc(no_inline)]
-pub use performance_arbiter::PerformanceArbiter;
+pub use performance_arbiter::{PerformanceArbiter, cue_source_priority};
 pub use types::{ExpressionDecision, ExpressionInput, ExpressionSource};
 
 use crate::config::EmotionConfig;

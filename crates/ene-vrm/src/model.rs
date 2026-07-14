@@ -424,7 +424,6 @@ impl VrmModel {
     /// target test attaches a minimal synthetic model so it can
     /// mutate `nodes.world_positions` and assert the camera
     /// target is unaffected by animation).
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         meshes: Vec<VrmMesh>,
         skeleton: Skeleton,

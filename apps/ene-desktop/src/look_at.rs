@@ -63,7 +63,6 @@ pub fn neutral_target(head_world: Vec3) -> Vec3 {
 /// `1/seconds`). The VRM 1.0 spec does not declare a smoothing
 /// value, so callers pass
 /// [`ene_vrm::LookAtProperties::DEFAULT_SMOOTHING`] by default.
-#[allow(clippy::too_many_arguments)]
 pub fn compute_world_target(
     cursor_logical: Vec2,
     viewport_size: (u32, u32),

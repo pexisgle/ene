@@ -231,7 +231,6 @@ pub fn render(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_numeric_row<F, C>(
     ui: &mut egui::Ui,
     label: &str,

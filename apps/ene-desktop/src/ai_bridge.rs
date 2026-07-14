@@ -317,13 +317,7 @@ fn recall_reason_key(reason: ene_mind::RecallReason) -> String {
 }
 
 fn cue_source_to_u8(source: ene_runtime::CueSource) -> u8 {
-    match source {
-        ene_runtime::CueSource::LlmCommand => 5,
-        ene_runtime::CueSource::LlmAdvisory => 4,
-        ene_runtime::CueSource::Affect => 3,
-        ene_runtime::CueSource::Hysteresis => 2,
-        ene_runtime::CueSource::Fallback => 1,
-    }
+    ene_mind::cue_source_priority(source)
 }
 
 fn turn_matches(active_turn: &Mutex<Option<TurnId>>, event_turn: &TurnId) -> bool {
@@ -371,8 +365,26 @@ async fn pump_events(
                                 priority,
                             });
                         }
-                        _ => {
-                            let _ = event_tx.send(AppEvent::PerformanceCue(cue.name));
+                        ene_mind::PerfKind::Expression => {
+                            let weight = cue.weight.unwrap_or(1.0);
+                            let hold_secs = cue.hold_secs.unwrap_or(4.0);
+                            let priority = cue_source_to_u8(source);
+                            let _ = event_tx.send(AppEvent::ExpressionCue {
+                                name: cue.name,
+                                weight,
+                                hold_secs,
+                                priority,
+                            });
+                        }
+                        ene_mind::PerfKind::LookAt => {
+                            let priority = cue_source_to_u8(source);
+                            let _ = event_tx.send(AppEvent::LookAtCue {
+                                target: cue.name,
+                                priority,
+                            });
+                        }
+                        ene_mind::PerfKind::Cancel => {
+                            let _ = event_tx.send(AppEvent::CancelCue { scope: cue.name });
                         }
                     }
                 }

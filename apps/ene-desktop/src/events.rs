@@ -25,6 +25,7 @@ pub enum AppEvent {
     /// Raw performance cue name from [`ene_runtime::EneEvent::Performance`].
     /// Desktop maps this to VRM playback; do not forward SpecialToken /
     /// Expression events (removed in API v2).
+    #[expect(dead_code, reason = "kept for backward-compat test coverage")]
     PerformanceCue(String),
     /// Motion cue with layer routing information (#133).
     MotionCue {
@@ -32,6 +33,17 @@ pub enum AppEvent {
         layer: String,
         priority: u8,
     },
+    /// Expression cue with weight and hold duration (#132).
+    ExpressionCue {
+        name: String,
+        weight: f32,
+        hold_secs: f64,
+        priority: u8,
+    },
+    /// Look-at cue (#132).
+    LookAtCue { target: String, priority: u8 },
+    /// Cancel cue (#132).
+    CancelCue { scope: String },
     /// Request the event loop to exit.
     Quit,
 }
