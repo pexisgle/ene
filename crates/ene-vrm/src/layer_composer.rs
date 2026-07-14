@@ -27,17 +27,7 @@
 use std::collections::HashMap;
 
 use crate::animation::VrmaPlayer;
-
-/// Motion body layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum MotionLayer {
-    /// Upper-body gesture + expression (arms, head, torso).
-    Upper,
-    /// Lower-body idle loop (legs, hips).
-    Lower,
-    /// Full-body override — preempts upper and lower.
-    Full,
-}
+use ene_config::MotionLayer;
 
 /// A motion slot tracking a playing animation on one layer.
 #[derive(Debug, Clone)]
@@ -48,6 +38,8 @@ struct MotionSlot {
     pub player: VrmaPlayer,
     /// Priority (higher = more important).
     pub priority: u8,
+    /// Clip duration in seconds.
+    pub duration: f32,
 }
 
 /// An expression entry with weight and priority.
@@ -84,11 +76,13 @@ impl LayerComposer {
     ///
     /// `priority` should follow the convention: 5 = command, 4 = advisory,
     /// 3 = affect, 2 = hysteresis, 1 = fallback.
-    pub fn accept_motion(&mut self, name: String, layer: MotionLayer, priority: u8) {
+    pub fn accept_motion(&mut self, name: String, layer: MotionLayer, priority: u8, duration: f32) {
+        let player = VrmaPlayer::default();
         let slot = MotionSlot {
             name,
-            player: VrmaPlayer::default(),
+            player,
             priority,
+            duration,
         };
 
         match layer {
@@ -154,16 +148,13 @@ impl LayerComposer {
     }
 
     /// Tick all active motion players by `dt` seconds.
-    ///
-    /// `clip_durations` maps clip name → duration in seconds.
-    pub fn tick(&mut self, dt: f32, clip_durations: &HashMap<String, f32>) {
+    pub fn tick(&mut self, dt: f32) {
         for slot in [&mut self.upper, &mut self.lower, &mut self.full]
             .into_iter()
             .flatten()
         {
-            let duration = clip_durations.get(&slot.name).copied().unwrap_or(0.0);
-            if duration > 0.0 {
-                slot.player.advance(dt, duration);
+            if slot.duration > 0.0 {
+                slot.player.advance(dt, slot.duration);
             }
         }
     }
@@ -276,9 +267,9 @@ mod tests {
     #[test]
     fn full_preempts_upper_and_lower() {
         let mut lc = LayerComposer::default();
-        lc.accept_motion("wave".into(), MotionLayer::Upper, 5);
-        lc.accept_motion("idle".into(), MotionLayer::Lower, 3);
-        lc.accept_motion("dance".into(), MotionLayer::Full, 5);
+        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 0.0);
+        lc.accept_motion("idle".into(), MotionLayer::Lower, 3, 0.0);
+        lc.accept_motion("dance".into(), MotionLayer::Full, 5, 0.0);
         let frame = lc.compose();
         assert!(frame.full_body_active);
         assert_eq!(frame.active_motions, vec!["dance"]);
@@ -287,8 +278,8 @@ mod tests {
     #[test]
     fn upper_and_lower_coexist() {
         let mut lc = LayerComposer::default();
-        lc.accept_motion("wave".into(), MotionLayer::Upper, 5);
-        lc.accept_motion("idle".into(), MotionLayer::Lower, 3);
+        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 0.0);
+        lc.accept_motion("idle".into(), MotionLayer::Lower, 3, 0.0);
         let frame = lc.compose();
         assert!(!frame.full_body_active);
         assert_eq!(frame.active_motions.len(), 2);
@@ -299,8 +290,8 @@ mod tests {
     #[test]
     fn higher_priority_replaces_same_layer() {
         let mut lc = LayerComposer::default();
-        lc.accept_motion("wave".into(), MotionLayer::Upper, 3);
-        lc.accept_motion("point".into(), MotionLayer::Upper, 5);
+        lc.accept_motion("wave".into(), MotionLayer::Upper, 3, 0.0);
+        lc.accept_motion("point".into(), MotionLayer::Upper, 5, 0.0);
         let names = lc.active_motion_names();
         assert_eq!(names, vec!["point"]);
     }
@@ -308,8 +299,8 @@ mod tests {
     #[test]
     fn lower_priority_does_not_replace_same_layer() {
         let mut lc = LayerComposer::default();
-        lc.accept_motion("wave".into(), MotionLayer::Upper, 5);
-        lc.accept_motion("point".into(), MotionLayer::Upper, 3);
+        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 0.0);
+        lc.accept_motion("point".into(), MotionLayer::Upper, 3, 0.0);
         let names = lc.active_motion_names();
         assert_eq!(names, vec!["wave"]);
     }
@@ -317,8 +308,8 @@ mod tests {
     #[test]
     fn equal_priority_latest_wins() {
         let mut lc = LayerComposer::default();
-        lc.accept_motion("wave".into(), MotionLayer::Upper, 5);
-        lc.accept_motion("point".into(), MotionLayer::Upper, 5);
+        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 0.0);
+        lc.accept_motion("point".into(), MotionLayer::Upper, 5, 0.0);
         let names = lc.active_motion_names();
         assert_eq!(names, vec!["point"]);
     }
@@ -326,7 +317,7 @@ mod tests {
     #[test]
     fn cancel_clears_layer() {
         let mut lc = LayerComposer::default();
-        lc.accept_motion("wave".into(), MotionLayer::Upper, 5);
+        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 0.0);
         lc.cancel_motion(MotionLayer::Upper);
         assert!(lc.compose().active_motions.is_empty());
     }
@@ -334,8 +325,8 @@ mod tests {
     #[test]
     fn cancel_all_clears_everything() {
         let mut lc = LayerComposer::default();
-        lc.accept_motion("wave".into(), MotionLayer::Upper, 5);
-        lc.accept_motion("idle".into(), MotionLayer::Lower, 3);
+        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 0.0);
+        lc.accept_motion("idle".into(), MotionLayer::Lower, 3, 0.0);
         lc.cancel_all_motions();
         assert!(lc.compose().active_motions.is_empty());
     }
@@ -371,10 +362,8 @@ mod tests {
     #[test]
     fn tick_advances_playing_motions() {
         let mut lc = LayerComposer::default();
-        lc.accept_motion("wave".into(), MotionLayer::Upper, 5);
-        let mut durations = HashMap::new();
-        durations.insert("wave".to_string(), 2.0);
-        lc.tick(0.5, &durations);
+        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 2.0);
+        lc.tick(0.5);
         let player = lc.upper_player().unwrap();
         assert!((player.time - 0.5).abs() < 1e-5);
         assert!(player.playing);

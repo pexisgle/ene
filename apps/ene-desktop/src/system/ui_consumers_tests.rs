@@ -7,7 +7,7 @@ use crate::component::chat::{ChatStateComponent, ChatUiBundle, ChatWindow};
 use crate::component::ui::{SettingsUiBundle, UiStartedAt, UiStateComponent, UiWindow};
 use crate::event::ai::{
     AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
-    CancelCommand, EmoteToken, ExpressionCommand, LookAtTarget, MotionCommand,
+    CancelCommand, EmoteToken, ExpressionCommand, MotionCommand,
 };
 use crate::event::chat::OpenChat;
 use crate::event::input::PointerMoved;
@@ -51,7 +51,6 @@ fn init_messages(world: &mut World) {
     world.init_resource::<Messages<AiUserInputRequested>>();
     world.init_resource::<Messages<MotionCommand>>();
     world.init_resource::<Messages<ExpressionCommand>>();
-    world.init_resource::<Messages<LookAtTarget>>();
     world.init_resource::<Messages<CancelCommand>>();
     world.init_resource::<Messages<PointerMoved>>();
 }
@@ -269,7 +268,6 @@ fn emote_token_emits_message_via_pump() {
     world.init_resource::<Messages<EmoteToken>>();
     world.init_resource::<Messages<MotionCommand>>();
     world.init_resource::<Messages<ExpressionCommand>>();
-    world.init_resource::<Messages<LookAtTarget>>();
     world.init_resource::<Messages<CancelCommand>>();
     world.init_resource::<Messages<OpenSettings>>();
     world.init_resource::<Messages<OpenChat>>();

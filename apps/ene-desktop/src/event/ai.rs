@@ -48,6 +48,7 @@ pub struct MotionCommand {
     pub name: String,
     pub layer: String,
     pub priority: u8,
+    pub duration: f32,
 }
 
 /// Expression cue with weight and hold duration from [`ene_runtime::EneEvent::Performance`]
@@ -57,18 +58,7 @@ pub struct ExpressionCommand {
     pub name: String,
     pub weight: f32,
     pub hold_secs: f64,
-    #[expect(
-        dead_code,
-        reason = "reserved for future priority-based expression scheduling"
-    )]
-    pub priority: u8,
 }
-
-/// Look-at cue from [`ene_runtime::EneEvent::Performance`] when the cue kind
-/// is [`PerfKind::LookAt`] (#132).
-#[derive(Message, Debug, Clone)]
-#[expect(dead_code, reason = "reserved for future look-at cue scheduling")]
-pub struct LookAtTarget(pub String, pub u8);
 
 /// Cancel cue from [`ene_runtime::EneEvent::Performance`] when the cue kind
 /// is [`PerfKind::Cancel`] (#132).

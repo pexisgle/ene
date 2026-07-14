@@ -4,7 +4,6 @@
 //! and resolves the final set of cues at turn-end. Priority ordering:
 //! `LlmCommand > LlmAdvisory > Affect > Hysteresis > Fallback`.
 
-use crate::config::EmotionConfig;
 use crate::output::arbiter::affect_to_expression;
 use crate::output::{CueSource, PerfKind, PerformanceCue};
 use ene_store::AffectState;
@@ -97,7 +96,7 @@ impl PerformanceArbiter {
     ///
     /// Clears internal state after resolution (ready for next turn).
     #[must_use]
-    pub fn resolve(&mut self, _config: &EmotionConfig) -> Vec<(PerformanceCue, CueSource)> {
+    pub fn resolve(&mut self) -> Vec<(PerformanceCue, CueSource)> {
         let mut result: Vec<(PerformanceCue, CueSource)> = Vec::with_capacity(3);
 
         for slot in [
@@ -213,8 +212,7 @@ mod tests {
         let mut arbiter = PerformanceArbiter::default();
         arbiter.accept(expr_cue("sad"), CueSource::LlmAdvisory);
         arbiter.accept(expr_cue("angry"), CueSource::LlmCommand);
-        let config = EmotionConfig::default();
-        let result = arbiter.resolve(&config);
+        let result = arbiter.resolve();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0.name, "angry");
         assert_eq!(result[0].1, CueSource::LlmCommand);
@@ -225,8 +223,7 @@ mod tests {
         let mut arbiter = PerformanceArbiter::default();
         arbiter.accept(expr_cue("angry"), CueSource::LlmCommand);
         arbiter.accept(expr_cue("happy"), CueSource::LlmAdvisory);
-        let config = EmotionConfig::default();
-        let result = arbiter.resolve(&config);
+        let result = arbiter.resolve();
         assert_eq!(result[0].0.name, "angry");
         assert_eq!(result[0].1, CueSource::LlmCommand);
     }
@@ -236,8 +233,7 @@ mod tests {
         let mut arbiter = PerformanceArbiter::default();
         arbiter.accept(expr_cue("happy"), CueSource::LlmCommand);
         arbiter.accept(PerformanceCue::cancel("expr"), CueSource::LlmCommand);
-        let config = EmotionConfig::default();
-        let result = arbiter.resolve(&config);
+        let result = arbiter.resolve();
         assert!(result.is_empty());
     }
 
@@ -247,8 +243,7 @@ mod tests {
         arbiter.accept(expr_cue("happy"), CueSource::LlmCommand);
         arbiter.accept(motion_cue("wave"), CueSource::LlmCommand);
         arbiter.accept(PerformanceCue::cancel("all"), CueSource::LlmCommand);
-        let config = EmotionConfig::default();
-        let result = arbiter.resolve(&config);
+        let result = arbiter.resolve();
         assert!(result.is_empty());
     }
 
@@ -259,8 +254,7 @@ mod tests {
         state.valence = 0.5;
         state.arousal = 0.3;
         arbiter.set_affect_default(&state);
-        let config = EmotionConfig::default();
-        let result = arbiter.resolve(&config);
+        let result = arbiter.resolve();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0.name, "happy");
     }
@@ -271,8 +265,7 @@ mod tests {
         arbiter.accept(expr_cue("happy"), CueSource::LlmCommand);
         arbiter.accept(motion_cue("wave"), CueSource::LlmCommand);
         arbiter.accept(PerformanceCue::look_at("user"), CueSource::LlmAdvisory);
-        let config = EmotionConfig::default();
-        let result = arbiter.resolve(&config);
+        let result = arbiter.resolve();
         assert_eq!(result.len(), 3);
     }
 
@@ -281,8 +274,7 @@ mod tests {
         let mut arbiter = PerformanceArbiter::default();
         arbiter.accept(expr_cue("happy"), CueSource::LlmCommand);
         arbiter.accept(expr_cue("sad"), CueSource::LlmCommand);
-        let config = EmotionConfig::default();
-        let result = arbiter.resolve(&config);
+        let result = arbiter.resolve();
         assert_eq!(result[0].0.name, "sad");
     }
 
@@ -290,9 +282,8 @@ mod tests {
     fn resolve_clears_state() {
         let mut arbiter = PerformanceArbiter::default();
         arbiter.accept(expr_cue("happy"), CueSource::LlmCommand);
-        let config = EmotionConfig::default();
-        let _ = arbiter.resolve(&config);
-        let result2 = arbiter.resolve(&config);
+        let _ = arbiter.resolve();
+        let result2 = arbiter.resolve();
         assert!(result2.is_empty());
     }
 }

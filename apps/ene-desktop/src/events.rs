@@ -32,16 +32,14 @@ pub enum AppEvent {
         name: String,
         layer: String,
         priority: u8,
+        duration: f32,
     },
     /// Expression cue with weight and hold duration (#132).
     ExpressionCue {
         name: String,
         weight: f32,
         hold_secs: f64,
-        priority: u8,
     },
-    /// Look-at cue (#132).
-    LookAtCue { target: String, priority: u8 },
     /// Cancel cue (#132).
     CancelCue { scope: String },
     /// Request the event loop to exit.

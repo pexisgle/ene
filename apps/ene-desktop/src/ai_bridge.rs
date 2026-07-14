@@ -362,29 +362,22 @@ async fn pump_events(
                                 name: cue.name,
                                 layer,
                                 priority,
+                                duration: 0.0,
                             });
                         }
                         ene_mind::PerfKind::Expression => {
                             let weight = cue.weight.unwrap_or(1.0);
                             let hold_secs = cue.hold_secs.unwrap_or(4.0);
-                            let priority = cue_source_to_u8(source);
                             let _ = event_tx.send(AppEvent::ExpressionCue {
                                 name: cue.name,
                                 weight,
                                 hold_secs,
-                                priority,
-                            });
-                        }
-                        ene_mind::PerfKind::LookAt => {
-                            let priority = cue_source_to_u8(source);
-                            let _ = event_tx.send(AppEvent::LookAtCue {
-                                target: cue.name,
-                                priority,
                             });
                         }
                         ene_mind::PerfKind::Cancel => {
                             let _ = event_tx.send(AppEvent::CancelCue { scope: cue.name });
                         }
+                        ene_mind::PerfKind::LookAt => {}
                     }
                 }
             }

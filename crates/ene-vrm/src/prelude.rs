@@ -23,7 +23,7 @@ pub use crate::expression::{ExpressionLayer, ExpressionName};
 #[doc(no_inline)]
 pub use crate::expression_compositor::{CardExpression, ExpressionCompositor};
 #[doc(no_inline)]
-pub use crate::layer_composer::{ComposedFrame, LayerComposer, MotionLayer};
+pub use crate::layer_composer::{ComposedFrame, LayerComposer};
 #[doc(no_inline)]
 pub use crate::loader::load_vrm;
 #[doc(no_inline)]
@@ -32,3 +32,4 @@ pub use crate::look_at::{LookAtBoneOutput, LookAtEvaluator, LookAtOutput, LookAt
 pub use crate::model::VrmModel;
 #[doc(no_inline)]
 pub use crate::renderer::VrmRenderer;
+pub use ene_config::MotionLayer;

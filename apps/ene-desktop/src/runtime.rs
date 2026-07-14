@@ -987,16 +987,20 @@ impl Runtime {
             let motion_layer =
                 world.get_resource_mut::<crate::resource::motion_layer::MotionLayerState>();
             if let Some(mut motion_layer) = motion_layer {
-                let durations = character.clip_durations();
-                motion_layer.0.tick(dt_secs, &durations);
+                motion_layer.0.tick(dt_secs);
                 let frame = motion_layer.0.compose();
 
                 // If the active motion name changed, load the new clip.
                 if let Some(motion_name) = frame.active_motions.first() {
                     let should_switch =
                         character.active_motion_name() != Some(motion_name.as_str());
-                    if should_switch {
-                        character.play_motion_by_name(motion_name);
+                    if should_switch && let Err(e) = character.play_motion_by_name(motion_name) {
+                        tracing::warn!(
+                            component = "MotionLayer",
+                            motion = %motion_name,
+                            error = %e,
+                            "Failed to load motion clip"
+                        );
                     }
                 }
             }

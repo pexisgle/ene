@@ -12,7 +12,7 @@ use bevy_ecs::prelude::*;
 
 use crate::event::ai::{
     AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
-    CancelCommand, EmoteToken, ExpressionCommand, LookAtTarget, MotionCommand,
+    CancelCommand, EmoteToken, ExpressionCommand, MotionCommand,
 };
 use crate::event::chat::OpenChat;
 #[cfg(target_os = "linux")]
@@ -41,7 +41,6 @@ pub fn pump_legacy_events(
     mut emote: MessageWriter<EmoteToken>,
     mut motion: MessageWriter<MotionCommand>,
     mut expression: MessageWriter<ExpressionCommand>,
-    mut lookat: MessageWriter<LookAtTarget>,
     mut cancel: MessageWriter<CancelCommand>,
     mut open_settings: MessageWriter<OpenSettings>,
     mut open_chat: MessageWriter<OpenChat>,
@@ -59,7 +58,6 @@ pub fn pump_legacy_events(
             &mut emote,
             &mut motion,
             &mut expression,
-            &mut lookat,
             &mut cancel,
             &mut open_settings,
             &mut open_chat,
@@ -84,7 +82,6 @@ fn translate_event(
     emote: &mut MessageWriter<EmoteToken>,
     motion: &mut MessageWriter<MotionCommand>,
     expression: &mut MessageWriter<ExpressionCommand>,
-    lookat: &mut MessageWriter<LookAtTarget>,
     cancel: &mut MessageWriter<CancelCommand>,
     open_settings: &mut MessageWriter<OpenSettings>,
     open_chat: &mut MessageWriter<OpenChat>,
@@ -131,17 +128,12 @@ fn translate_event(
             name,
             weight,
             hold_secs,
-            priority,
         } => {
             expression.write(ExpressionCommand {
                 name,
                 weight,
                 hold_secs,
-                priority,
             });
-        }
-        AppEvent::LookAtCue { target, priority } => {
-            lookat.write(LookAtTarget(target, priority));
         }
         AppEvent::CancelCue { scope } => {
             cancel.write(CancelCommand(scope));
@@ -150,11 +142,13 @@ fn translate_event(
             name,
             layer,
             priority,
+            duration,
         } => {
             motion.write(MotionCommand {
                 name,
                 layer,
                 priority,
+                duration,
             });
         }
         AppEvent::Ai(
@@ -198,7 +192,6 @@ mod tests {
         world.init_resource::<Messages<EmoteToken>>();
         world.init_resource::<Messages<MotionCommand>>();
         world.init_resource::<Messages<ExpressionCommand>>();
-        world.init_resource::<Messages<LookAtTarget>>();
         world.init_resource::<Messages<CancelCommand>>();
         world.init_resource::<Messages<OpenSettings>>();
         world.init_resource::<Messages<OpenChat>>();

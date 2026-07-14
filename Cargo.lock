@@ -3080,6 +3080,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "bytemuck",
+ "ene-config",
  "glam 0.33.2",
  "gltf",
  "image",

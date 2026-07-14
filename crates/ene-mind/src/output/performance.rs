@@ -5,6 +5,7 @@
 //! intentionally absent until an explicit `perform` API exists.
 
 use super::types::ExpressionSource;
+pub use ene_config::MotionLayer;
 
 /// Origin of a [`PerformanceCue`] batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,29 +61,6 @@ pub enum PerfKind {
     Cancel,
 }
 
-/// Motion body layer (#131).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MotionLayer {
-    /// Upper-body gesture + expression.
-    Upper,
-    /// Lower-body idle loop.
-    Lower,
-    /// Full-body override (preempts upper/lower).
-    Full,
-}
-
-impl MotionLayer {
-    /// Stable display / log label.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Upper => "upper",
-            Self::Lower => "lower",
-            Self::Full => "full",
-        }
-    }
-}
-
 /// A single presentation cue (expression / motion / look-at / cancel).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PerformanceCue {
@@ -117,8 +95,8 @@ impl PerformanceCue {
         Self {
             kind: PerfKind::Expression,
             name: name.into(),
-            weight: Some(weight),
-            hold_secs: Some(hold_secs),
+            weight: Some(weight.clamp(0.0, 1.0)),
+            hold_secs: Some(hold_secs.max(0.0)),
             motion_layer: None,
         }
     }

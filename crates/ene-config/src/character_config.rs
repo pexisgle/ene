@@ -17,6 +17,18 @@ pub enum MotionLayer {
     Full,
 }
 
+impl MotionLayer {
+    /// Stable display / log label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Upper => "upper",
+            Self::Lower => "lower",
+            Self::Full => "full",
+        }
+    }
+}
+
 /// A single motion entry with a display name and relative file path.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(crate = "crate::serde")]

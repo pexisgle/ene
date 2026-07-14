@@ -9,7 +9,7 @@ use crate::component::chat::{ChatStateComponent, ChatWindow};
 use crate::component::ui::{UiStateComponent, UiWindow};
 use crate::event::ai::{
     AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
-    CancelCommand, EmoteToken, ExpressionCommand, LookAtTarget, MotionCommand,
+    CancelCommand, EmoteToken, ExpressionCommand, MotionCommand,
 };
 use crate::event::chat::OpenChat;
 use crate::event::settings::OpenSettings;
@@ -172,18 +172,6 @@ pub fn apply_expression_commands_system(
     }
 }
 
-/// Feeds [`LookAtTarget`] messages into the motion layer (#132).
-///
-/// Look-at is handled by the existing per-frame look-at evaluator
-/// in `Runtime::render_char_frame`. This system is a placeholder
-/// for future explicit look-at cue routing.
-pub fn apply_lookat_system(mut events: MessageReader<LookAtTarget>) {
-    for _cmd in events.read() {
-        // LookAtTarget(target, priority) — routed per-frame by
-        // Runtime::update_look_at when cursor tracking is active.
-    }
-}
-
 /// Applies [`CancelCommand`] to clear expression or motion state (#132).
 pub fn apply_cancel_system(
     mut events: MessageReader<CancelCommand>,
@@ -216,11 +204,13 @@ pub fn apply_motion_commands_system(
 ) {
     for cmd in events.read() {
         let layer = match cmd.layer.as_str() {
-            "upper" => ene_vrm::layer_composer::MotionLayer::Upper,
-            "lower" => ene_vrm::layer_composer::MotionLayer::Lower,
-            _ => ene_vrm::layer_composer::MotionLayer::Full,
+            "upper" => ene_config::MotionLayer::Upper,
+            "lower" => ene_config::MotionLayer::Lower,
+            _ => ene_config::MotionLayer::Full,
         };
-        state.0.accept_motion(cmd.name.clone(), layer, cmd.priority);
+        state
+            .0
+            .accept_motion(cmd.name.clone(), layer, cmd.priority, cmd.duration);
     }
 }
 

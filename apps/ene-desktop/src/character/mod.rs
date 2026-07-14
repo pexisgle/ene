@@ -172,14 +172,17 @@ impl CharacterRenderer {
     }
 
     /// Look up a motion clip by name and load it from
-    /// `{assets_dir}/motions/{name}.vrma`. Returns `true` on success.
-    pub fn play_motion_by_name(&mut self, name: &str) -> bool {
+    /// `{assets_dir}/motions/{name}.vrma`.
+    pub fn play_motion_by_name(&mut self, name: &str) -> Result<(), String> {
         let Some(ref assets_dir) = self.assets_dir else {
-            return false;
+            return Err("assets_dir not set".into());
         };
         let path = assets_dir.join("motions").join(format!("{name}.vrma"));
         self.play_motion(&path);
-        self.vrma.is_some()
+        self.vrma
+            .as_ref()
+            .map(|_| ())
+            .ok_or_else(|| format!("motion '{name}' failed to load"))
     }
 
     /// Returns the name (file stem) of the currently-playing motion, if any.
@@ -188,24 +191,6 @@ impl CharacterRenderer {
             .as_ref()
             .and_then(|p| p.file_stem())
             .and_then(|s| s.to_str())
-    }
-
-    /// Returns the duration of the currently-loaded motion clip,
-    /// keyed by clip name. Used by [`LayerComposer::tick`](#133).
-    pub fn clip_durations(&self) -> std::collections::HashMap<String, f32> {
-        let mut durations = std::collections::HashMap::new();
-        if let Some(ref asset) = self.vrma
-            && let Some(path) = self.vrma_path.as_ref()
-        {
-            let motion_name = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown");
-            if let Some(clip) = asset.clips.first() {
-                durations.insert(motion_name.to_string(), clip.duration);
-            }
-        }
-        durations
     }
 
     /// Load a `.vrma` from disk and store the asset. Safe to call
