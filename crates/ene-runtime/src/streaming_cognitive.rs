@@ -15,7 +15,7 @@ use crate::streaming::{
     accumulate_tool_calls, emit_terminal, finalize_tool_calls, perform_tool_executions,
     select_relevant_tools,
 };
-use ene_mind::{CueSource, PerformanceCue};
+use ene_mind::{CueSource, PerfKind, PerformanceCue};
 
 fn build_turn_context<'a>(
     mind: &'a MindConfig,
@@ -365,19 +365,42 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::Conver
                         }
                         for token in special_tokens {
                             accumulated_emotion_tokens.push(token.clone());
-                            if !suppress_stream_tokens
-                                && let Some(name) = ene_mind::extract_emotion_from_token(&token)
-                            {
-                                let source = if mind.emotion.llm_expression_is_advisory {
-                                    CueSource::LlmAdvisory
-                                } else {
-                                    CueSource::LlmCommand
-                                };
-                                let _ = event_tx.send(EneEvent::Performance {
-                                    turn: turn.clone(),
-                                    cues: vec![PerformanceCue::expression(name)],
-                                    source,
-                                });
+
+                            if !suppress_stream_tokens {
+                                // Try `<|perf:…|>` first (#128).
+                                if let Some(cue) = ene_mind::parse_performance_marker(&token) {
+                                    let source = match cue.kind {
+                                        PerfKind::Expression
+                                        | PerfKind::Motion
+                                        | PerfKind::LookAt => {
+                                            if mind.emotion.llm_expression_is_advisory {
+                                                CueSource::LlmAdvisory
+                                            } else {
+                                                CueSource::LlmCommand
+                                            }
+                                        }
+                                        PerfKind::Cancel => CueSource::LlmCommand,
+                                    };
+                                    let _ = event_tx.send(EneEvent::Performance {
+                                        turn: turn.clone(),
+                                        cues: vec![cue],
+                                        source,
+                                    });
+                                } else if let Some(name) =
+                                    ene_mind::extract_emotion_from_token(&token)
+                                {
+                                    // Backward compat: `<|emo:NAME|>`.
+                                    let source = if mind.emotion.llm_expression_is_advisory {
+                                        CueSource::LlmAdvisory
+                                    } else {
+                                        CueSource::LlmCommand
+                                    };
+                                    let _ = event_tx.send(EneEvent::Performance {
+                                        turn: turn.clone(),
+                                        cues: vec![PerformanceCue::expression(name)],
+                                        source,
+                                    });
+                                }
                             }
                         }
                     }

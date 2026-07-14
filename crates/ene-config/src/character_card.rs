@@ -395,8 +395,13 @@ fn default_ene_expressions() -> Option<Vec<ExpressionDefinition>> {
 #[serde(crate = "crate::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "crate::schemars")]
 pub struct EneExtension {
-    /// Motions list
+    /// Motions list (backward-compat; prefer `motion_catalog`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub motions: Vec<crate::character_config::MotionEntry>,
+    /// Structured motion catalog with layer classification (#130).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub motion_catalog: Option<crate::character_config::MotionCatalog>,
     /// Optional expressions list
     #[schemars(default = "default_ene_expressions")]
     pub expressions: Option<Vec<ExpressionDefinition>>,

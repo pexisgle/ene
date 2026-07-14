@@ -9,15 +9,15 @@
     "examples_header": "会話例:"
   },
   "emotion": {
-    "header": "## 感情出力ルール",
+    "header": "## パフォーマンス出力ルール",
     "rule_path": "ja/emotion/rule.md",
     "natural_dialogue_contract_path": "ja/emotion/natural_dialogue_contract.md",
-    "token_header": "使用可能なトークン:",
+    "token_header": "使用可能な表情:",
     "examples_header": "常にこのフォーマットに従ってください（トークンが先頭、その後に文章）:",
-    "example_happy": "<|emo:happy|> それはすごく楽しみだね、もっと聞かせて！",
-    "example_sad": "<|emo:sad|> そっか、それは大変だったね…",
-    "example_angry": "<|emo:angry|> もう、本当にイライラしちゃうね！",
-    "example_neutral": "<|emo:neutral|> うーん、それについて考えてみるね。"
+    "example_happy": "<|perf:expr=happy|> それはすごく楽しみだね、もっと聞かせて！",
+    "example_sad": "<|perf:expr=sad|> そっか、それは大変だったね…",
+    "example_angry": "<|perf:expr=angry|> もう、本当にイライラしちゃうね！",
+    "example_neutral": "<|perf:expr=neutral|> うーん、それについて考えてみるね。"
   },
   "memory": {
     "summaries_header": "## 過去の会話（関連度順に想起）",

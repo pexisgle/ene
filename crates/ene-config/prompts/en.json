@@ -9,15 +9,15 @@
     "examples_header": "Example Messages:"
   },
   "emotion": {
-    "header": "## Emotion Output Rule",
+    "header": "## Performance Output Rule",
     "rule_path": "en/emotion/rule.md",
     "natural_dialogue_contract_path": "en/emotion/natural_dialogue_contract.md",
-    "token_header": "Available tokens:",
+    "token_header": "Available expressions:",
     "examples_header": "Always follow this format (token FIRST, then the sentence):",
-    "example_happy": "<|emo:happy|> That's so exciting, tell me more!",
-    "example_sad": "<|emo:sad|> Aww, that sounds rough...",
-    "example_angry": "<|emo:angry|> Ugh, that's really frustrating!",
-    "example_neutral": "<|emo:neutral|> Hmm, let me think about that."
+    "example_happy": "<|perf:expr=happy|> That's so exciting, tell me more!",
+    "example_sad": "<|perf:expr=sad|> Aww, that sounds rough...",
+    "example_angry": "<|perf:expr=angry|> Ugh, that's really frustrating!",
+    "example_neutral": "<|perf:expr=neutral|> Hmm, let me think about that."
   },
   "memory": {
     "summaries_header": "## Past Conversations (recalled by relevance)",

@@ -12,7 +12,7 @@ use bevy_ecs::prelude::*;
 
 use crate::event::ai::{
     AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
-    EmoteToken,
+    EmoteToken, MotionCommand,
 };
 use crate::event::chat::OpenChat;
 #[cfg(target_os = "linux")]
@@ -39,6 +39,7 @@ pub fn pump_legacy_events(
     mut finished: MessageWriter<AiStreamFinished>,
     mut stream_error: MessageWriter<AiStreamError>,
     mut emote: MessageWriter<EmoteToken>,
+    mut motion: MessageWriter<MotionCommand>,
     mut open_settings: MessageWriter<OpenSettings>,
     mut open_chat: MessageWriter<OpenChat>,
     #[cfg(target_os = "linux")] mut tick_gtk: MessageWriter<TickGtk>,
@@ -53,6 +54,7 @@ pub fn pump_legacy_events(
             &mut finished,
             &mut stream_error,
             &mut emote,
+            &mut motion,
             &mut open_settings,
             &mut open_chat,
         );
@@ -75,6 +77,7 @@ fn translate_event(
     finished: &mut MessageWriter<AiStreamFinished>,
     stream_error: &mut MessageWriter<AiStreamError>,
     emote: &mut MessageWriter<EmoteToken>,
+    motion: &mut MessageWriter<MotionCommand>,
     open_settings: &mut MessageWriter<OpenSettings>,
     open_chat: &mut MessageWriter<OpenChat>,
 ) {
@@ -118,6 +121,17 @@ fn translate_event(
         }
         AppEvent::PerformanceCue(name) => {
             emote.write(EmoteToken(name));
+        }
+        AppEvent::MotionCue {
+            name,
+            layer,
+            priority,
+        } => {
+            motion.write(MotionCommand {
+                name,
+                layer,
+                priority,
+            });
         }
         AppEvent::Ai(
             AiStreamUpdate::ToolCallStart { .. } | AiStreamUpdate::ToolCallResult { .. },

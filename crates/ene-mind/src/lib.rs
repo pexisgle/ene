@@ -112,12 +112,14 @@ pub use memory_writer::{
     ArbiterReasonCode, CandidateDecision, CandidateProvenance, ForgettingContext,
     ForgettingLifecycle, ForgettingReport, MemoryArbiter, MemoryWriteProviders, SemanticMatch,
 };
-/// Performance cue types for chat presentation (#126).
+/// Performance cue types for chat presentation (#126, #128).
 #[doc(no_inline)]
-pub use output::{CueSource, PerformanceCue};
+pub use output::{CueSource, MotionLayer, PerfKind, PerformanceCue};
 /// Expression arbiter types.
 #[doc(no_inline)]
-pub use output::{ExpressionDecision, ExpressionInput, ExpressionSource, OutputArbiter};
+pub use output::{
+    ExpressionDecision, ExpressionInput, ExpressionSource, OutputArbiter, PerformanceArbiter,
+};
 /// Prompt packet section types.
 #[doc(no_inline)]
 pub use prompt_packet::{PromptPacket, PromptSection, PromptSectionKind};
@@ -139,8 +141,8 @@ pub use session::{
     SessionBoundary, SessionConfig, SessionId, SplitReason, SplitResult, SplitScore,
     SplitScoreWeights, SplitTaskInput, SummarizationConfig, Truncate, check_boundary,
     compute_split_score, execute_split, expand_cbs_macros, extract_emotion_from_token,
-    generate_session_id, poll_split_result, resolve_expressions, spawn_split_task,
-    split_text_and_special_tokens,
+    generate_session_id, parse_performance_marker, poll_split_result, resolve_expressions,
+    spawn_split_task, split_text_and_special_tokens, strip_markers,
 };
 /// Conversation summary result and LLM summarization entry point.
 #[doc(no_inline)]

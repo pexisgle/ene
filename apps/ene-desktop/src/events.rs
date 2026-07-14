@@ -26,6 +26,12 @@ pub enum AppEvent {
     /// Desktop maps this to VRM playback; do not forward SpecialToken /
     /// Expression events (removed in API v2).
     PerformanceCue(String),
+    /// Motion cue with layer routing information (#133).
+    MotionCue {
+        name: String,
+        layer: String,
+        priority: u8,
+    },
     /// Request the event loop to exit.
     Quit,
 }

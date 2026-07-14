@@ -34,7 +34,7 @@ pub use character_card::{
     Lorebook, LorebookEntry, ResolvedExpression, expand_cbs_macros, resolve_expressions,
 };
 
-pub use character_config::{CharacterConfig, MotionEntry};
+pub use character_config::{CharacterConfig, MotionCatalog, MotionEntry, MotionLayer};
 pub use config::{
     __register_schema, __register_tool_schema, ConfigTarget, EneConfig, HasConfigKey,
     generate_character_schema_json, generate_schema_json, get_global_config, get_global_section,

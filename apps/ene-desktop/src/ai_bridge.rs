@@ -316,6 +316,16 @@ fn recall_reason_key(reason: ene_mind::RecallReason) -> String {
     }
 }
 
+fn cue_source_to_u8(source: ene_runtime::CueSource) -> u8 {
+    match source {
+        ene_runtime::CueSource::LlmCommand => 5,
+        ene_runtime::CueSource::LlmAdvisory => 4,
+        ene_runtime::CueSource::Affect => 3,
+        ene_runtime::CueSource::Hysteresis => 2,
+        ene_runtime::CueSource::Fallback => 1,
+    }
+}
+
 fn turn_matches(active_turn: &Mutex<Option<TurnId>>, event_turn: &TurnId) -> bool {
     match active_turn.lock() {
         Ok(guard) => match guard.as_ref() {
@@ -343,14 +353,28 @@ async fn pump_events(
                 }
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::TextDelta(delta)));
             }
-            Ok(EneEvent::Performance { turn, cues, .. }) => {
+            Ok(EneEvent::Performance { turn, cues, source }) => {
                 if !turn_matches(&active_turn, &turn) {
                     continue;
                 }
-                // Map Performance → desktop VRM playback (cue name → morph).
-                // ene-vrm does not depend on mind/runtime types.
                 for cue in cues {
-                    let _ = event_tx.send(AppEvent::PerformanceCue(cue.name));
+                    match cue.kind {
+                        ene_mind::PerfKind::Motion => {
+                            let layer = cue
+                                .motion_layer
+                                .map(|l| l.as_str().to_string())
+                                .unwrap_or_else(|| "full".to_string());
+                            let priority = cue_source_to_u8(source);
+                            let _ = event_tx.send(AppEvent::MotionCue {
+                                name: cue.name,
+                                layer,
+                                priority,
+                            });
+                        }
+                        _ => {
+                            let _ = event_tx.send(AppEvent::PerformanceCue(cue.name));
+                        }
+                    }
                 }
             }
             Ok(EneEvent::ToolCallStart {

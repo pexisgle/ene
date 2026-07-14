@@ -2,6 +2,21 @@ use crate::error::EneConfigError;
 use crate::{ConfigTarget, HasConfigKey};
 use std::collections::BTreeMap;
 
+/// Motion body layer classification.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(crate = "crate::serde", rename_all = "lowercase")]
+#[schemars(crate = "crate::schemars")]
+pub enum MotionLayer {
+    /// Upper-body gesture + expression.
+    Upper,
+    /// Lower-body idle loop.
+    Lower,
+    /// Full-body override (preempts upper/lower).
+    Full,
+}
+
 /// A single motion entry with a display name and relative file path.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(crate = "crate::serde")]
@@ -11,6 +26,22 @@ pub struct MotionEntry {
     pub name: String,
     /// Relative path to the motion file (e.g. `"motions/VRMA_01.vrma"`).
     pub path: String,
+    /// Body layer this motion targets (#130).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layer: Option<MotionLayer>,
+}
+
+/// Structured motion catalog for a character (#130).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, Default)]
+#[serde(crate = "crate::serde")]
+#[schemars(crate = "crate::schemars")]
+pub struct MotionCatalog {
+    /// Name of the idle lower-body animation loop (matches a `MotionEntry.name`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_lower: Option<String>,
+    /// Registered motions indexed by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub motions: Vec<MotionEntry>,
 }
 
 /// Per-character visual config used by the desktop GUI.

@@ -89,7 +89,7 @@ pub use ene_mind::HistoryEntry;
 pub use ene_mind::SessionId;
 /// Performance cues (re-exported from `ene-mind`).
 #[doc(no_inline)]
-pub use ene_mind::{CueSource, PerformanceCue};
+pub use ene_mind::{CueSource, MotionLayer, PerfKind, PerformanceCue};
 /// Unique permission request identifier.
 pub use types::RequestId;
 /// Turn identity and run/cancel errors.

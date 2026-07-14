@@ -134,11 +134,11 @@ pub fn build_system_prompt(
     expand_cbs_macros(&combined, char_name, user_name)
 }
 
-/// Builds the Emotion Expression Protocol (PHI) block.
+/// Builds the Performance Output Protocol (PHI) block.
 ///
 /// Produces a concise, command-tone instruction with concrete examples
-/// so that even lower-capability models reliably output the `<|emo:NAME|>`
-/// token in the right position.
+/// so that even lower-capability models reliably output the `<|perf:expr=NAME|>`
+/// or `<|emo:NAME|>` (shorthand) token in the right position.
 #[must_use]
 pub fn build_expression_phi(card: &CharacterCardV3, prompts: &PromptLibrary) -> Option<String> {
     let char_name = card.data.get_character_name();
@@ -147,14 +147,13 @@ pub fn build_expression_phi(card: &CharacterCardV3, prompts: &PromptLibrary) -> 
     let auto_phi: Option<String> = if resolved.is_empty() {
         None
     } else {
-        // Token list: "- <|emo:happy|> — Feeling joyful, excited, or pleased"
         let list: Vec<String> = resolved
             .iter()
             .map(|e| {
                 if e.description.is_empty() {
-                    format!("- `<|emo:{}|>`", e.name)
+                    format!("- `<|perf:expr={}|>`", e.name)
                 } else {
-                    format!("- `<|emo:{}|>` — {}", e.name, e.description)
+                    format!("- `<|perf:expr={}|>` — {}", e.name, e.description)
                 }
             })
             .collect();
@@ -365,7 +364,7 @@ mod tests {
         let card = test_card("", "", "", "");
         let phi = build_expression_phi(&card, &lib).expect("phi should be Some");
         assert!(
-            phi.contains("<|emo:happy|>"),
+            phi.contains("<|perf:expr=happy|>"),
             "phi should list happy token: {phi}"
         );
         assert!(

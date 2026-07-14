@@ -39,6 +39,7 @@ pub mod emotion_pipeline;
 pub mod event_channels;
 pub mod exit;
 pub mod frame_state;
+pub mod motion_layer;
 pub mod physics;
 pub mod platform_state;
 pub mod tokio;

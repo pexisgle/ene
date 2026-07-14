@@ -18,7 +18,7 @@ use crate::event::chat::OpenChat;
 use crate::event::{
     ai::{
         AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
-        EmoteToken,
+        EmoteToken, MotionCommand,
     },
     input::{KeyboardKey, PointerButton, PointerMoved},
     lifecycle::{TickGtk, WindowCloseRequested, WindowResized},
@@ -35,7 +35,7 @@ use crate::plugin::tray_plugin::TrayPlugin;
 use crate::plugin::ui_plugin::UiPlugin;
 use crate::resource::{
     emotion_pipeline::EmotionPipelineState, event_channels::EventChannels, exit::ExitRequested,
-    frame_state::FrameState, tokio::TokioHandle,
+    frame_state::FrameState, motion_layer::MotionLayerState, tokio::TokioHandle,
 };
 use crate::schedule::{configure_schedule, configure_startup};
 
@@ -91,6 +91,7 @@ pub fn build_app(
     app.insert_resource(ExitRequested::default());
     app.insert_resource(TokioHandle(tokio));
     app.insert_resource(EmotionPipelineState::default());
+    app.insert_resource(MotionLayerState::default());
     app.insert_resource(EventChannels {
         tx: event_tx,
         rx: event_rx,
@@ -106,6 +107,7 @@ pub fn build_app(
     app.add_message::<AiPermissionRequested>();
     app.add_message::<AiUserInputRequested>();
     app.add_message::<EmoteToken>();
+    app.add_message::<MotionCommand>();
     app.add_message::<OpenSettings>();
     app.add_message::<OpenChat>();
     app.add_message::<SettingsActionEvent>();

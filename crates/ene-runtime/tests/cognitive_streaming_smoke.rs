@@ -334,7 +334,12 @@ fn cognitive_output_contract_uses_phi_when_emotion_disabled() {
     let contract = build_cognitive_output_contract(&card, &prompts, false, "Alice");
     // Default card includes built-in expressions via resolve_expressions.
     if let Some(phi) = contract {
-        assert!(phi.contains("<|emo:") || phi.contains("Emotion") || phi.contains("emotion"));
+        assert!(
+            phi.contains("<|perf:")
+                || phi.contains("<|emo:")
+                || phi.contains("Emotion")
+                || phi.contains("emotion")
+        );
     }
 }
 

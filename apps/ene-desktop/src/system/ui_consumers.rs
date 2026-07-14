@@ -9,11 +9,12 @@ use crate::component::chat::{ChatStateComponent, ChatWindow};
 use crate::component::ui::{UiStateComponent, UiWindow};
 use crate::event::ai::{
     AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
-    EmoteToken,
+    EmoteToken, MotionCommand,
 };
 use crate::event::chat::OpenChat;
 use crate::event::settings::OpenSettings;
 use crate::resource::emotion_pipeline::EmotionPipelineState;
+use crate::resource::motion_layer::MotionLayerState;
 use crate::settings::QuestionDraft;
 
 pub fn open_settings_system(
@@ -153,6 +154,21 @@ pub fn apply_emote_tokens_system(
             hold_secs,
             weight: 1.0,
         });
+    }
+}
+
+/// Feeds [`MotionCommand`] messages into the [`MotionLayerState`] (#133).
+pub fn apply_motion_commands_system(
+    mut events: MessageReader<MotionCommand>,
+    mut state: ResMut<MotionLayerState>,
+) {
+    for cmd in events.read() {
+        let layer = match cmd.layer.as_str() {
+            "upper" => ene_vrm::layer_composer::MotionLayer::Upper,
+            "lower" => ene_vrm::layer_composer::MotionLayer::Lower,
+            _ => ene_vrm::layer_composer::MotionLayer::Full,
+        };
+        state.0.accept_motion(cmd.name.clone(), layer, cmd.priority);
     }
 }
 

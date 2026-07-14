@@ -1,12 +1,11 @@
 {
   "character_position": [
-    1.3736666,
-    -0.4658333,
+    1.4603332,
+    -0.21666665,
     0.0
   ],
   "model_scale": 0.64999986,
   "look_at_strength": 1.0,
   "default_motion": "VRMA_03",
-  "default_expression": "neutral",
-  "$schema": "../../schema/character_settings.schema.json"
+  "default_expression": "neutral"
 }

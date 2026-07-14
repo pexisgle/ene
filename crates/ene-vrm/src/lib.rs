@@ -38,8 +38,10 @@ pub mod camera;
 pub mod debug_renderer;
 pub mod error;
 pub mod expression;
+pub mod expression_compositor;
 pub mod expression_override;
 pub mod humanoid;
+pub mod layer_composer;
 pub mod loader;
 pub mod look_at;
 

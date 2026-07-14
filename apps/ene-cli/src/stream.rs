@@ -1,6 +1,6 @@
 use ene_runtime::{
-    CueSource, EneEvent, EneEventReceiver, EneHandle, MultiAnswer, PermissionDecision, TurnId,
-    UserInputResponse,
+    CueSource, EneEvent, EneEventReceiver, EneHandle, MultiAnswer, PerfKind, PermissionDecision,
+    TurnId, UserInputResponse,
 };
 use std::io::{self, Write};
 
@@ -36,7 +36,13 @@ pub async fn process_stream(
                         CueSource::Hysteresis => "hysteresis",
                         CueSource::Fallback => "fallback",
                     };
-                    print!("\n[Performance: {} ({label})]", cue.name);
+                    let kind_label = match cue.kind {
+                        PerfKind::Expression => "expr",
+                        PerfKind::Motion => "motion",
+                        PerfKind::LookAt => "lookat",
+                        PerfKind::Cancel => "cancel",
+                    };
+                    print!("\n[Performance: {} ({kind_label}) ({label})]", cue.name);
                 }
                 let _ = io::stdout().flush();
             }

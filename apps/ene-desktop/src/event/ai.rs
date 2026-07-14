@@ -40,3 +40,12 @@ pub struct PerformanceCue(pub String);
 
 /// Compatibility alias for older call sites (same type).
 pub use PerformanceCue as EmoteToken;
+
+/// Motion cue routed from [`ene_runtime::EneEvent::Performance`] when
+/// the cue kind is [`PerfKind::Motion`] (#133).
+#[derive(Message, Debug, Clone)]
+pub struct MotionCommand {
+    pub name: String,
+    pub layer: String,
+    pub priority: u8,
+}

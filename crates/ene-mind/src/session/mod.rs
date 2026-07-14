@@ -81,6 +81,9 @@ pub use session_split::{
     spawn_split_task,
 };
 /// Emotion-token parsing utilities.
-pub use special_token::{extract_emotion_from_token, split_text_and_special_tokens};
+pub use special_token::{
+    extract_emotion_from_token, parse_performance_marker, split_text_and_special_tokens,
+    strip_markers,
+};
 /// Type-safe identifiers.
 pub use types::{CardName, SessionId};
