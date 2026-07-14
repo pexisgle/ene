@@ -992,6 +992,29 @@ impl Runtime {
             .clamp(0.0, 0.1);
         self.last_frame_instant = Some(now);
 
+        // Tick and compose the motion layer state (#133).
+        {
+            let world = app.world_mut();
+            let motion_layer =
+                world.get_resource_mut::<crate::resource::motion_layer::MotionLayerState>();
+            if let Some(mut motion_layer) = motion_layer {
+                let durations = character.clip_durations();
+                motion_layer.0.tick(dt_secs, &durations);
+                let frame = motion_layer.0.compose();
+
+                // If the active motion name changed, load the new clip.
+                if let Some(motion_name) = frame.active_motions.first() {
+                    let should_switch = character
+                        .active_motion_name()
+                        .map(|current| current != motion_name.as_str())
+                        .unwrap_or(true);
+                    if should_switch {
+                        character.play_motion_by_name(motion_name);
+                    }
+                }
+            }
+        }
+
         if let Some(palette) = character.update_motion(dt_secs) {
             character.update_skin_palette_gpu(queue, &palette);
         }
@@ -1189,7 +1212,7 @@ impl Runtime {
                         // `camera_uniform_dbg` returns `Option` for API symmetry with
                         // the debug pipeline, but `Camera::uniform` is infallible by
                         // construction (see `ene_vrm::camera::OrthographicCamera::uniform`).
-                        #[allow(
+                        #[expect(
                             clippy::expect_used,
                             reason = "Camera::uniform is infallible by construction"
                         )]
@@ -1413,7 +1436,6 @@ fn cursor_world_2d_for_char_window(
 }
 
 /// Per-frame click-through update for the character window.
-#[allow(clippy::too_many_arguments)]
 fn update_char_window_cursor_and_hittest(
     state: &mut AppState,
     device_state: &device_query::DeviceState,

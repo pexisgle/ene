@@ -12,7 +12,7 @@ use bevy_ecs::prelude::*;
 
 use crate::event::ai::{
     AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
-    EmoteToken, MotionCommand,
+    CancelCommand, EmoteToken, ExpressionCommand, LookAtTarget, MotionCommand,
 };
 use crate::event::chat::OpenChat;
 #[cfg(target_os = "linux")]
@@ -40,6 +40,9 @@ pub fn pump_legacy_events(
     mut stream_error: MessageWriter<AiStreamError>,
     mut emote: MessageWriter<EmoteToken>,
     mut motion: MessageWriter<MotionCommand>,
+    mut expression: MessageWriter<ExpressionCommand>,
+    mut lookat: MessageWriter<LookAtTarget>,
+    mut cancel: MessageWriter<CancelCommand>,
     mut open_settings: MessageWriter<OpenSettings>,
     mut open_chat: MessageWriter<OpenChat>,
     #[cfg(target_os = "linux")] mut tick_gtk: MessageWriter<TickGtk>,
@@ -55,6 +58,9 @@ pub fn pump_legacy_events(
             &mut stream_error,
             &mut emote,
             &mut motion,
+            &mut expression,
+            &mut lookat,
+            &mut cancel,
             &mut open_settings,
             &mut open_chat,
         );
@@ -67,7 +73,6 @@ pub fn pump_legacy_events(
     tick_gtk.write(TickGtk);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn translate_event(
     event: AppEvent,
     exit: &mut ExitRequested,
@@ -78,6 +83,9 @@ fn translate_event(
     stream_error: &mut MessageWriter<AiStreamError>,
     emote: &mut MessageWriter<EmoteToken>,
     motion: &mut MessageWriter<MotionCommand>,
+    expression: &mut MessageWriter<ExpressionCommand>,
+    lookat: &mut MessageWriter<LookAtTarget>,
+    cancel: &mut MessageWriter<CancelCommand>,
     open_settings: &mut MessageWriter<OpenSettings>,
     open_chat: &mut MessageWriter<OpenChat>,
 ) {
@@ -122,6 +130,25 @@ fn translate_event(
         AppEvent::PerformanceCue(name) => {
             emote.write(EmoteToken(name));
         }
+        AppEvent::ExpressionCue {
+            name,
+            weight,
+            hold_secs,
+            priority,
+        } => {
+            expression.write(ExpressionCommand {
+                name,
+                weight,
+                hold_secs,
+                priority,
+            });
+        }
+        AppEvent::LookAtCue { target, priority } => {
+            lookat.write(LookAtTarget(target, priority));
+        }
+        AppEvent::CancelCue { scope } => {
+            cancel.write(CancelCommand(scope));
+        }
         AppEvent::MotionCue {
             name,
             layer,
@@ -143,7 +170,7 @@ fn translate_event(
 /// should run this frame. Phase 7.5: replaced by the
 /// `Messages<TickGtk>` queue; the consumer system
 /// `tick_gtk_system` (Phase 7.4) handles the tick.
-#[allow(
+#[expect(
     dead_code,
     reason = "Replaced by Messages<TickGtk>; kept for API symmetry"
 )]
@@ -172,6 +199,10 @@ mod tests {
         world.init_resource::<Messages<AiPermissionRequested>>();
         world.init_resource::<Messages<AiUserInputRequested>>();
         world.init_resource::<Messages<EmoteToken>>();
+        world.init_resource::<Messages<MotionCommand>>();
+        world.init_resource::<Messages<ExpressionCommand>>();
+        world.init_resource::<Messages<LookAtTarget>>();
+        world.init_resource::<Messages<CancelCommand>>();
         world.init_resource::<Messages<OpenSettings>>();
         world.init_resource::<Messages<OpenChat>>();
         #[cfg(target_os = "linux")]
