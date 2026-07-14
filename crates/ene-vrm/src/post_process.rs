@@ -48,6 +48,7 @@ pub struct PostUniforms {
     /// step`.
     pub inv_size: [f32; 2],
     /// Padding for 16-byte alignment.
+    #[expect(clippy::pub_underscore_fields)]
     pub _pad: [f32; 2],
 }
 
@@ -68,6 +69,7 @@ impl PostProcessor {
     /// Build a new post-processor. The intermediate texture
     /// matches the swapchain format so the depth-and-color
     /// interaction stays identical to the no-FXAA path.
+    #[must_use]
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -165,7 +167,7 @@ impl PostProcessor {
             vertex: wgpu::VertexState {
                 module: shader,
                 entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<PostVertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
@@ -175,7 +177,7 @@ impl PostProcessor {
             fragment: Some(wgpu::FragmentState {
                 module: shader,
                 entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: swapchain_format,
                     blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
@@ -306,12 +308,14 @@ impl PostProcessor {
     /// The view the model must be rendered into. Returned by
     /// value; the runtime passes it to the model's
     /// `renderer.render` call as the colour attachment.
-    pub fn intermediate_view(&self) -> &wgpu::TextureView {
+    #[must_use]
+    pub const fn intermediate_view(&self) -> &wgpu::TextureView {
         &self.intermediate_view
     }
 
     /// The size the intermediate texture was built at.
-    pub fn size(&self) -> (u32, u32) {
+    #[must_use]
+    pub const fn size(&self) -> (u32, u32) {
         self.intermediate_size
     }
 }
@@ -319,6 +323,7 @@ impl PostProcessor {
 /// Helper: 1/Vec2 inverse for the `inv_size` uniform. The
 /// shader reads `vec2<f32> inv_size`; a typed accessor keeps
 /// the post-process `init` and `resize` paths symmetric.
+#[must_use]
 pub fn inv_size(size: (u32, u32)) -> Vec2 {
     Vec2::new(1.0 / size.0 as f32, 1.0 / size.1 as f32)
 }

@@ -120,6 +120,7 @@ pub struct ToolConfigAccessor {
 
 impl ToolConfigAccessor {
     /// Create a new accessor.
+    #[must_use]
     pub fn new(initial_config: serde_json::Value) -> Self {
         Self {
             config: std::sync::Arc::new(tokio::sync::RwLock::new(initial_config)),
@@ -142,12 +143,14 @@ impl ToolConfigAccessor {
     }
 
     /// Sets the tool configuration.
+    #[expect(clippy::future_not_send)]
     pub async fn set<T: serde::Serialize>(&self, config: &T) -> Result<(), ToolError> {
         let val = serde_json::to_value(config).map_err(|e| ToolError::InvalidArguments {
             message: format!("Failed to serialize config: {e}"),
         })?;
         let mut guard = self.config.write().await;
         *guard = val;
+        drop(guard);
         Ok(())
     }
 }

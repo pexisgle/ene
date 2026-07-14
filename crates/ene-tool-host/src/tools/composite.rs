@@ -50,6 +50,7 @@ impl CompositeToolRegistry {
     /// # Panics
     /// Panics when two registries expose the same public tool name.
     /// Prefer [`try_new`](Self::try_new) at fallible call sites.
+    #[must_use]
     pub fn new(registries: Vec<Arc<dyn ToolRegistry>>) -> Self {
         match Self::try_new(registries) {
             Ok(composite) => composite,
@@ -62,13 +63,19 @@ impl CompositeToolRegistry {
 
     /// Read-locks state and calls `f` with a reference to the registries slice.
     fn with_registries<R>(&self, f: impl FnOnce(&[Arc<dyn ToolRegistry>]) -> R) -> R {
-        let guard = self.state.read().unwrap_or_else(|e| e.into_inner());
+        let guard = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         f(&guard.registries)
     }
 
     /// Write-locks state and calls `f` with a mutable reference to `CompositeState`.
     fn with_state_mut<R>(&self, f: impl FnOnce(&mut CompositeState) -> R) -> R {
-        let mut guard = self.state.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         f(&mut guard)
     }
 
@@ -121,7 +128,10 @@ impl ToolRegistry for CompositeToolRegistry {
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolHostError> {
         let registry = {
-            let guard = self.state.read().unwrap_or_else(|e| e.into_inner());
+            let guard = self
+                .state
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             match guard.tool_index.get(name) {
                 Some(&idx) => Arc::clone(&guard.registries[idx]),
                 None => {
@@ -137,14 +147,14 @@ impl ToolRegistry for CompositeToolRegistry {
     }
 
     async fn set_session_id(&self, session_id: &str) {
-        let registries = self.with_registries(|r| r.to_vec());
+        let registries = self.with_registries(<[std::sync::Arc<dyn ToolRegistry>]>::to_vec);
         for registry in &registries {
             registry.set_session_id(session_id).await;
         }
     }
 
     async fn config_schema(&self) -> Option<serde_json::Value> {
-        let registries = self.with_registries(|r| r.to_vec());
+        let registries = self.with_registries(<[std::sync::Arc<dyn ToolRegistry>]>::to_vec);
         for registry in &registries {
             if let Some(schema) = registry.config_schema().await {
                 return Some(schema);
@@ -154,14 +164,14 @@ impl ToolRegistry for CompositeToolRegistry {
     }
 
     async fn approve_permission(&self, request_id: &str) {
-        let registries = self.with_registries(|r| r.to_vec());
+        let registries = self.with_registries(<[std::sync::Arc<dyn ToolRegistry>]>::to_vec);
         for registry in &registries {
             registry.approve_permission(request_id).await;
         }
     }
 
     async fn allow_pattern(&self, action: &str, target_pattern: &str) {
-        let registries = self.with_registries(|r| r.to_vec());
+        let registries = self.with_registries(<[std::sync::Arc<dyn ToolRegistry>]>::to_vec);
         for registry in &registries {
             registry.allow_pattern(action, target_pattern).await;
         }

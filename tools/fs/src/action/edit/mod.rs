@@ -1,4 +1,4 @@
-use crate::utils::sandbox::Sandbox;
+use crate::utils::sandbox::{Sandbox, SandboxConfig};
 use ene_tool_common::prelude::*;
 use std::collections::HashMap;
 use std::path::Path;
@@ -154,11 +154,8 @@ pub async fn edit(
         found
     };
 
-    let new_content = if let Some(c) = result {
-        c
-    } else {
-        let simple_matches: Vec<_> = normalized_content.match_indices(&normalized_old).collect();
-        if simple_matches.len() > 1 && !replace_all {
+    let Some(new_content) = result else {
+        if normalized_content.match_indices(&normalized_old).count() > 1 && !replace_all {
             return Err(ToolError::ExecutionFailed { message:
                 "Found multiple matches for oldString. Provide more surrounding context to make the match unique.".to_string()
             });
@@ -290,7 +287,7 @@ pub struct FsEditAction {
 }
 
 impl FsEditAction {
-    pub fn new(sandbox: SandboxRef) -> Self {
+    pub const fn new(sandbox: SandboxRef) -> Self {
         Self {
             file_path: String::new(),
             old_string: String::new(),
@@ -307,7 +304,7 @@ impl FsEditAction {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.clone().unwrap_or_else(|| {
-                Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
+                Arc::new(crate::utils::sandbox::Sandbox::new(SandboxConfig::default()))
             })
         };
 

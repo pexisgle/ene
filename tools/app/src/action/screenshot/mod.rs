@@ -95,7 +95,7 @@ impl ScreenshotAction {
                 })?
         }?;
 
-        let data_uri = crate::utils::encode_image_to_data_uri(image)?;
+        let data_uri = crate::utils::encode_image_to_data_uri(&image)?;
         let result = serde_json::json!({
             "type": "screenshot",
             "data": data_uri

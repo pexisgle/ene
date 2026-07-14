@@ -24,7 +24,7 @@ pub enum CueSource {
 impl CueSource {
     /// Stable debug / log label.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Affect => "affect",
             Self::LlmAdvisory => "llm_advisory",
@@ -74,7 +74,7 @@ pub enum MotionLayer {
 impl MotionLayer {
     /// Stable display / log label.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Upper => "upper",
             Self::Lower => "lower",

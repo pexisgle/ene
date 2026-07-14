@@ -35,7 +35,7 @@ impl CliCommand for SessionCommand {
             "split" => {
                 handle_split(ctx, &snapshot).await;
             }
-            "summaries" => handle_summaries(&snapshot).await,
+            "summaries" => handle_summaries(&snapshot),
             _ => {
                 println!(
                     "{}",
@@ -113,7 +113,7 @@ async fn handle_split(ctx: &AppContext, snapshot: &ene_runtime::EneStateSnapshot
     }
 }
 
-async fn handle_summaries(_snapshot: &ene_runtime::EneStateSnapshot) {
+fn handle_summaries(_snapshot: &ene_runtime::EneStateSnapshot) {
     println!(
         "{}",
         style::warning(

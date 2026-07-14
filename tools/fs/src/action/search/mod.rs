@@ -6,12 +6,13 @@ use ene_tool_proto::ToolError;
 
 pub const MAX_RESULTS: usize = 100;
 
+#[expect(clippy::unused_async)]
 pub async fn glob_search(
     pattern: &str,
     path: Option<&str>,
     sandbox: &SandboxConfig,
 ) -> Result<String, ToolError> {
-    search_glob::glob_search(pattern, path, sandbox).await
+    search_glob::glob_search(pattern, path, sandbox)
 }
 
 pub async fn grep_search(

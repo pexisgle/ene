@@ -2,7 +2,7 @@ use ene_store::{AffectState, MemoryKind};
 
 /// Heuristic recall intents inferred from the current turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RecallIntent {
+pub enum RecallIntent {
     Semantic,
     Episodic,
     Preference,
@@ -11,7 +11,7 @@ pub(crate) enum RecallIntent {
     Procedure,
 }
 
-pub(crate) fn infer_intents(topic: &str, affect: Option<&AffectState>) -> Vec<RecallIntent> {
+pub fn infer_intents(topic: &str, affect: Option<&AffectState>) -> Vec<RecallIntent> {
     let mut intents = vec![RecallIntent::Semantic];
     let lower = topic.to_lowercase();
 
@@ -115,10 +115,7 @@ pub(crate) fn infer_intents(topic: &str, affect: Option<&AffectState>) -> Vec<Re
     intents
 }
 
-pub(crate) fn kinds_for_intents(
-    intents: &[RecallIntent],
-    has_commitments: bool,
-) -> Vec<MemoryKind> {
+pub fn kinds_for_intents(intents: &[RecallIntent], has_commitments: bool) -> Vec<MemoryKind> {
     let mut kinds = vec![MemoryKind::Semantic, MemoryKind::Episodic];
 
     for intent in intents {
@@ -139,7 +136,7 @@ pub(crate) fn kinds_for_intents(
     kinds
 }
 
-pub(crate) fn contains_any(text: &str, needles: &[&str]) -> bool {
+pub fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
 }
 

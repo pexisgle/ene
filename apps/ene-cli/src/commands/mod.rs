@@ -76,8 +76,7 @@ pub async fn execute(input: &str, ctx: &mut AppContext) -> CommandOutcome {
                 eprintln!(
                     "{}",
                     crate::style::error(format!(
-                        "Actor did not shut down within {:?}: {e}",
-                        SHUTDOWN_TIMEOUT
+                        "Actor did not shut down within {SHUTDOWN_TIMEOUT:?}: {e}"
                     ))
                 );
             }

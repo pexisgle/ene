@@ -131,19 +131,18 @@ impl CharacterConfig {
                     obj.insert(key.to_string(), val);
                 }
                 break;
-            } else {
-                if !cur.is_object() {
-                    *cur = serde_json::Value::Object(serde_json::Map::new());
-                }
-                let Some(obj) = cur.as_object_mut() else {
-                    return Err(EneConfigError::GenericConfigError(
-                        "Internal error: expected JSON object".to_string(),
-                    ));
-                };
-                cur = obj
-                    .entry(key.to_string())
-                    .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
             }
+            if !cur.is_object() {
+                *cur = serde_json::Value::Object(serde_json::Map::new());
+            }
+            let Some(obj) = cur.as_object_mut() else {
+                return Err(EneConfigError::GenericConfigError(
+                    "Internal error: expected JSON object".to_string(),
+                ));
+            };
+            cur = obj
+                .entry(key.to_string())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
         }
         if let serde_json::Value::Object(obj) = root {
             self.extra = obj.into_iter().collect();

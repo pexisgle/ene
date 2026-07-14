@@ -3,6 +3,19 @@
 //! Winit + wgpu shell for the ene AI character platform. Owns the
 //! `AiBridge`, system tray, character renderer, and the cross-subsystem
 //! [`AppEvent`] bus.
+#![allow(
+    clippy::option_if_let_else,
+    clippy::unused_self,
+    clippy::needless_pass_by_ref_mut,
+    clippy::collapsible_match,
+    clippy::match_same_arms,
+    clippy::significant_drop_tightening,
+    clippy::branches_sharing_code,
+    clippy::needless_pass_by_value,
+    clippy::unnecessary_wraps,
+    clippy::allow_attributes,
+    clippy::semicolon_if_nothing_returned
+)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod acquire_error;
@@ -52,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     let handle = runtime.handle().clone();
-    let _guard = runtime.enter();
+    let guard = runtime.enter();
 
     let paths = startup::first_launch_setup()?;
     tracing::info!(
@@ -75,7 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (AI bridge pump, bootstrap load) can exit cleanly. Dropping
     // `runtime` outright cancels them and any pending
     // `tokio::time::Timeout` future panics on drop.
-    drop(_guard);
+    drop(guard);
     runtime.shutdown_timeout(std::time::Duration::from_millis(500));
 
     Ok(())

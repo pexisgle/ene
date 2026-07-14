@@ -65,7 +65,7 @@ pub struct TurnAffectInput<'a> {
     pub llm_only: bool,
 }
 
-impl<'a> TurnAffectInput<'a> {
+impl TurnAffectInput<'_> {
     /// Attach a classifier proposal to this input.
     #[must_use]
     pub fn with_proposal(mut self, proposal: AffectProposal) -> Self {

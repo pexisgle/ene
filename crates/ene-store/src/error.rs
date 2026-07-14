@@ -9,7 +9,7 @@ pub enum EneMemoryError {
         /// The environment variable name for the base URL.
         env_var: String,
     },
-    /// SeaORM error from the memory store.
+    /// `SeaORM` error from the memory store.
     #[error("Memory store error: {0}")]
     MemoryStoreError(#[from] sea_orm::DbErr),
     /// Failed to connect to the memory store.

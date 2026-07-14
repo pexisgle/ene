@@ -8,7 +8,7 @@ use super::types::AffectProposal;
 use crate::engine::ClassifierContext;
 use crate::error::CognitionError;
 
-/// Default OpenRouter model for post-turn affect classification.
+/// Default `OpenRouter` model for post-turn affect classification.
 pub const DEFAULT_CLASSIFIER_MODEL: &str = "google/gemini-2.5-flash-lite";
 
 pub(crate) const DEFAULT_CLASSIFIER_TIMEOUT_SECS: u64 = 30;
@@ -82,14 +82,14 @@ pub async fn classify_for_config(
 
 /// Map a classifier error to a short failure-reason label for logging.
 #[must_use]
-pub fn classify_failure_reason(error: &CognitionError) -> &'static str {
+pub const fn classify_failure_reason(error: &CognitionError) -> &'static str {
     match error {
         CognitionError::Classifier(classifier_error) => classifier_failure_reason(classifier_error),
         _ => "other",
     }
 }
 
-fn classifier_failure_reason(error: &ClassifierError) -> &'static str {
+const fn classifier_failure_reason(error: &ClassifierError) -> &'static str {
     match error {
         ClassifierError::TimedOut(_) => "timeout",
         ClassifierError::EmptyResponse => "empty_response",
@@ -259,7 +259,7 @@ fn parse_proposal_json(raw: &str) -> Result<AffectProposal, ClassifierError> {
 
     let confidence = value
         .get("confidence")
-        .and_then(|v| v.as_f64())
+        .and_then(serde_json::Value::as_f64)
         .unwrap_or(0.0) as f32;
 
     Ok(AffectProposal {
@@ -274,19 +274,25 @@ fn parse_proposal_json(raw: &str) -> Result<AffectProposal, ClassifierError> {
             .unwrap_or("")
             .to_string(),
         valence: clamp_absolute(
-            value.get("valence").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            value
+                .get("valence")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0) as f32,
             -1.0,
             1.0,
         ),
         arousal: clamp_absolute(
-            value.get("arousal").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            value
+                .get("arousal")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0) as f32,
             -1.0,
             1.0,
         ),
         irritation: clamp_absolute(
             value
                 .get("irritation")
-                .and_then(|v| v.as_f64())
+                .and_then(serde_json::Value::as_f64)
                 .unwrap_or(0.0) as f32,
             0.0,
             1.0,
@@ -294,7 +300,7 @@ fn parse_proposal_json(raw: &str) -> Result<AffectProposal, ClassifierError> {
         affinity: clamp_absolute(
             value
                 .get("affinity")
-                .and_then(|v| v.as_f64())
+                .and_then(serde_json::Value::as_f64)
                 .unwrap_or(0.0) as f32,
             -1.0,
             1.0,
@@ -317,7 +323,7 @@ fn parse_proposal_json(raw: &str) -> Result<AffectProposal, ClassifierError> {
     })
 }
 
-fn clamp_absolute(v: f32, min: f32, max: f32) -> f32 {
+const fn clamp_absolute(v: f32, min: f32, max: f32) -> f32 {
     if v.is_finite() {
         v.clamp(min, max)
     } else {

@@ -1,4 +1,4 @@
-//! Identity Kernel types compiled from CCv3 character cards (#82).
+//! Identity Kernel types compiled from `CCv3` character cards (#82).
 
 /// Compiled immutable identity block for prompt injection.
 #[derive(Debug, Clone)]

@@ -80,7 +80,7 @@ pub struct LayerShellContext {
 
 impl LayerShellContext {
     /// Create a fresh context with no detection result cached.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { cached: None }
     }
 
@@ -122,7 +122,7 @@ impl LayerShellContext {
     /// probe. Returns `None` if the probe has not run yet.
     /// The runtime uses this for the first-dispatch log so
     /// the log carries whether the cache has been populated.
-    pub fn cached(&self) -> Option<&LayerShellStatus> {
+    pub const fn cached(&self) -> Option<&LayerShellStatus> {
         self.cached.as_ref()
     }
 }

@@ -69,6 +69,7 @@ pub const GAZE_TARGET_NAMES: &[&str] = &["lookUp", "lookDown", "lookLeft", "look
 ///
 /// Used internally by [`apply_overrides`]; hidden from the "Supported API" docs.
 #[doc(hidden)]
+#[must_use]
 pub fn is_procedural(name: &str) -> bool {
     MOUTH_TARGET_NAMES.contains(&name)
         || BLINK_TARGET_NAMES.contains(&name)
@@ -94,6 +95,7 @@ impl ExpressionOverrideType {
     /// `"blend"`). Unknown strings silently fall back to `None`
     /// (the spec default) so a malformed file does not blow up
     /// the loader.
+    #[must_use]
     pub fn from_json_str(s: &str) -> Self {
         match s {
             "block" => Self::Block,
@@ -226,7 +228,7 @@ pub fn apply_overrides(weights: &mut BTreeMap<ExpressionName, f32>, defs: &[Expr
                 ExpressionOverrideType::None => continue,
                 ExpressionOverrideType::Block | ExpressionOverrideType::Blend => {}
             }
-            for target in target_set.iter() {
+            for target in *target_set {
                 // Same-kind override (e.g. blink → blink) is
                 // invalid per spec — skip.
                 if def.name.as_str() == *target {
@@ -264,7 +266,7 @@ pub fn apply_overrides(weights: &mut BTreeMap<ExpressionName, f32>, defs: &[Expr
             // overridden by other expressions, the expression
             // MUST be completely suppressed if the effect
             // received is greater than 0.0."
-            if target_def.map(|d| d.is_binary).unwrap_or(false) {
+            if target_def.is_some_and(|d| d.is_binary) {
                 0.0
             } else {
                 original * (1.0 - blend_sum)
@@ -328,7 +330,7 @@ pub fn load_expression_overrides(gltf: &gltf::Gltf) -> Vec<ExpressionDefinition>
 
             def.is_binary = expr
                 .get("isBinary")
-                .and_then(|v| v.as_bool())
+                .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
 
             def.overrides.mouth = expr
@@ -353,14 +355,16 @@ pub fn load_expression_overrides(gltf: &gltf::Gltf) -> Vec<ExpressionDefinition>
                 for bind in binds {
                     if let (Some(node), Some(index)) = (
                         bind.get("node")
-                            .and_then(|v| v.as_u64())
+                            .and_then(serde_json::Value::as_u64)
                             .map(|v| v as usize),
                         bind.get("index")
-                            .and_then(|v| v.as_u64())
+                            .and_then(serde_json::Value::as_u64)
                             .map(|v| v as usize),
                     ) {
-                        let weight =
-                            bind.get("weight").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+                        let weight = bind
+                            .get("weight")
+                            .and_then(serde_json::Value::as_f64)
+                            .unwrap_or(1.0) as f32;
                         def.morph_target_binds.push(MorphTargetBind {
                             node,
                             index,

@@ -7,6 +7,7 @@
 //! a global provider registry, the built-in OpenAI-compatible implementation,
 //! and local GGUF embedding via Candle.
 #![warn(missing_docs)]
+#![allow(clippy::option_if_let_else)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 /// Configuration types for providers and embedding.

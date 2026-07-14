@@ -14,7 +14,7 @@ pub enum EneEmbeddingError {
 impl From<EneEmbeddingError> for crate::EmbeddingError {
     fn from(e: EneEmbeddingError) -> Self {
         match e {
-            EneEmbeddingError::CandleError(msg) => crate::EmbeddingError::Init(msg),
+            EneEmbeddingError::CandleError(msg) => Self::Init(msg),
             EneEmbeddingError::Provider(inner) => inner,
         }
     }

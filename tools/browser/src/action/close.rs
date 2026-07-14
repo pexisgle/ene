@@ -21,10 +21,11 @@ pub struct CloseAction {
 }
 
 impl CloseAction {
-    pub fn new(store: Arc<crate::utils::session::BrowserSessionStore>) -> Self {
+    pub const fn new(store: Arc<crate::utils::session::BrowserSessionStore>) -> Self {
         Self { store }
     }
 
+    #[expect(clippy::unused_async)]
     async fn run(&self) -> Result<String, ToolError> {
         self.store.close("default");
         Ok("Browser session closed.".to_string())

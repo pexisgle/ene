@@ -213,13 +213,11 @@ pub fn build_natural_dialogue_contract(
         user_name,
     );
 
-    if manual.is_empty() {
-        Some(contract)
-    } else {
+    if !manual.is_empty() {
         contract.push_str("\n\n");
         contract.push_str(&expand_cbs_macros(manual, char_name, user_name));
-        Some(contract)
     }
+    Some(contract)
 }
 
 /// Selects the post-history output block for the cognitive streaming path.

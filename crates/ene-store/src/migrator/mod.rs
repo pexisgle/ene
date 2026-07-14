@@ -27,7 +27,7 @@ impl MigratorTrait for Migrator {
 pub struct Migration;
 
 impl MigrationName for Migration {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "m20250628_000000_initial_schema"
     }
 }
@@ -431,7 +431,7 @@ enum ToolSchemas {
 pub struct Migration2;
 
 impl MigrationName for Migration2 {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "m20250629_000000_typed_memory_schema"
     }
 }
@@ -889,7 +889,7 @@ enum AffectStates {
 pub struct Migration3;
 
 impl MigrationName for Migration3 {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "m20250629_000001_affect_state_fields"
     }
 }
@@ -1013,7 +1013,7 @@ impl MigrationTrait for Migration3 {
 pub struct Migration4;
 
 impl MigrationName for Migration4 {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "m20250703_000000_commitments"
     }
 }
@@ -1124,7 +1124,7 @@ enum Commitments {
 pub struct Migration5;
 
 impl MigrationName for Migration5 {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "m20250705_000000_typed_memory_pinned"
     }
 }
@@ -1158,7 +1158,7 @@ impl MigrationTrait for Migration5 {
 pub struct Migration6;
 
 impl MigrationName for Migration6 {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "m20250705_000001_typed_memory_faded_at"
     }
 }
@@ -1196,7 +1196,7 @@ impl MigrationTrait for Migration6 {
 pub struct Migration7;
 
 impl MigrationName for Migration7 {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "m20250705_000002_memory_migration_meta"
     }
 }
@@ -1271,7 +1271,7 @@ enum MemoryMigrationMeta {
 pub struct Migration8;
 
 impl MigrationName for Migration8 {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "m20260709_000000_pending_affect_proposals"
     }
 }
@@ -1349,7 +1349,7 @@ enum PendingAffectProposals {
 pub struct Migration9;
 
 impl MigrationName for Migration9 {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "m20260714_000000_typed_memory_commitment_id"
     }
 }
@@ -1380,7 +1380,7 @@ impl MigrationTrait for Migration9 {
         // Backfill: commitments.source_memory_id → typed_memories.commitment_id
         let db = manager.get_connection();
         db.execute_unprepared(
-            r#"
+            r"
             UPDATE typed_memories
             SET commitment_id = (
                 SELECT c.id FROM commitments c
@@ -1391,13 +1391,13 @@ impl MigrationTrait for Migration9 {
                 SELECT 1 FROM commitments c
                 WHERE c.source_memory_id = typed_memories.id
             )
-            "#,
+            ",
         )
         .await?;
 
         // Fade unlinked typed Commitment bodies (ledger is now SoT).
         db.execute_unprepared(
-            r#"
+            r"
             UPDATE typed_memories
             SET status = 'faded',
                 faded_at = COALESCE(faded_at, CURRENT_TIMESTAMP),
@@ -1405,7 +1405,7 @@ impl MigrationTrait for Migration9 {
             WHERE kind = 'commitment'
               AND commitment_id IS NULL
               AND status = 'active'
-            "#,
+            ",
         )
         .await?;
 

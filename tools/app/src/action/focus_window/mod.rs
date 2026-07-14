@@ -19,6 +19,7 @@ pub struct FocusWindowAction {
 }
 
 impl FocusWindowAction {
+    #[expect(clippy::unused_async)]
     async fn run(&self) -> Result<String, ToolError> {
         let title = &self.window_title;
         if crate::utils::portal::detect_wayland() {

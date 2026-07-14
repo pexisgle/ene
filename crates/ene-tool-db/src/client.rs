@@ -206,7 +206,10 @@ impl DbClient {
             self.send_request(&DbRequest::Upsert {
                 table: table.to_string(),
                 row,
-                conflict_columns: conflict_columns.iter().map(|s| s.to_string()).collect(),
+                conflict_columns: conflict_columns
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
             })
             .await?,
         )?;
@@ -230,7 +233,10 @@ impl DbClient {
         let resp = Self::check_error(
             self.send_request(&DbRequest::Select {
                 table: table.to_string(),
-                columns: columns.iter().map(|s| s.to_string()).collect(),
+                columns: columns
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
                 filter,
                 order_by,
                 limit,

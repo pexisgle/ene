@@ -1,4 +1,4 @@
-fn default_string() -> String {
+const fn default_string() -> String {
     String::new()
 }
 
@@ -93,44 +93,28 @@ impl ProviderConfig {
     }
 
     /// Resolves the API key from the configured source (inline or env).
+    #[must_use]
     pub fn resolve_api_key(&self) -> String {
-        match self.api_key.source.as_str() {
-            "inline" => {
-                if !self.api_key.inline.trim().is_empty() {
-                    return self.api_key.inline.clone();
-                }
-                #[cfg(debug_assertions)]
+        if self.api_key.source.as_str() == "env" {
+            let var_name = if self.api_key.env.trim().is_empty() {
+                "OPENAI_API_KEY"
+            } else {
+                self.api_key.env.trim()
+            };
+            std::env::var(var_name).unwrap_or_default()
+        } else {
+            if !self.api_key.inline.trim().is_empty() {
+                return self.api_key.inline.clone();
+            }
+            #[cfg(debug_assertions)]
+            {
+                if let Ok(token) = std::env::var("API_TOKEN")
+                    && !token.trim().is_empty()
                 {
-                    if let Ok(token) = std::env::var("API_TOKEN")
-                        && !token.trim().is_empty()
-                    {
-                        return token;
-                    }
+                    return token;
                 }
-                String::new()
             }
-            "env" => {
-                let var_name = if self.api_key.env.trim().is_empty() {
-                    "OPENAI_API_KEY"
-                } else {
-                    self.api_key.env.trim()
-                };
-                std::env::var(var_name).unwrap_or_default()
-            }
-            _ => {
-                if !self.api_key.inline.trim().is_empty() {
-                    return self.api_key.inline.clone();
-                }
-                #[cfg(debug_assertions)]
-                {
-                    if let Ok(token) = std::env::var("API_TOKEN")
-                        && !token.trim().is_empty()
-                    {
-                        return token;
-                    }
-                }
-                String::new()
-            }
+            String::new()
         }
     }
 }

@@ -31,7 +31,7 @@ pub async fn execute_shell_command(
     cwd: &str,
     timeout_duration: Duration,
 ) -> Result<std::process::Output, std::io::Error> {
-    let mut child = build_command(command, cwd)?
+    let mut child = build_command(command, cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
@@ -75,45 +75,42 @@ pub async fn execute_shell_command(
         })
     });
 
-    match timeout_fut.await {
-        Ok(result) => {
-            // If either stream hit the byte cap, surface that as a
-            // clear error rather than a silent truncated result.
-            if let Ok(out) = &result
-                && (out.stdout.len() as u64 >= MAX_OUTPUT_BYTES
-                    || out.stderr.len() as u64 >= MAX_OUTPUT_BYTES)
-            {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                return Err(std::io::Error::other(format!(
-                    "Command output exceeded {MAX_OUTPUT_BYTES} bytes; killed"
-                )));
-            }
-            result
-        }
-        Err(_) => {
-            // Timeout: `kill_on_drop` is also set so the child dies
-            // when `child` is dropped, but be explicit to be safe.
+    if let Ok(result) = timeout_fut.await {
+        // If either stream hit the byte cap, surface that as a
+        // clear error rather than a silent truncated result.
+        if let Ok(out) = &result
+            && (out.stdout.len() as u64 >= MAX_OUTPUT_BYTES
+                || out.stderr.len() as u64 >= MAX_OUTPUT_BYTES)
+        {
             let _ = child.start_kill();
             let _ = child.wait().await;
-            Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "Command timed out",
-            ))
+            return Err(std::io::Error::other(format!(
+                "Command output exceeded {MAX_OUTPUT_BYTES} bytes; killed"
+            )));
         }
+        result
+    } else {
+        // Timeout: `kill_on_drop` is also set so the child dies
+        // when `child` is dropped, but be explicit to be safe.
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "Command timed out",
+        ))
     }
 }
 
 #[cfg(unix)]
-fn build_command(command: &str, cwd: &str) -> std::io::Result<Command> {
+fn build_command(command: &str, cwd: &str) -> Command {
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(command).current_dir(cwd);
-    Ok(cmd)
+    cmd
 }
 
 #[cfg(windows)]
-fn build_command(command: &str, cwd: &str) -> std::io::Result<Command> {
+fn build_command(command: &str, cwd: &str) -> Command {
     let mut cmd = Command::new("cmd");
     cmd.arg("/C").arg(command).current_dir(cwd);
-    Ok(cmd)
+    cmd
 }

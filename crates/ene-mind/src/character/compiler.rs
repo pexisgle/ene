@@ -1,4 +1,4 @@
-//! Deterministic CCv3 → Identity Kernel compilation (#82).
+//! Deterministic `CCv3` → Identity Kernel compilation (#82).
 
 use ene_config::{CharacterCardV3, expand_cbs_macros};
 
@@ -7,7 +7,7 @@ use super::kernel::IdentityKernel;
 /// Default maximum kernel size in approximate tokens (4 chars/token heuristic).
 pub const DEFAULT_IDENTITY_KERNEL_MAX_TOKENS: usize = 400;
 
-/// Compiles CCv3 character fields into a compact Identity Kernel.
+/// Compiles `CCv3` character fields into a compact Identity Kernel.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CharacterCompiler;
 

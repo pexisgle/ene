@@ -3,7 +3,7 @@ use super::input::RecallTurn;
 const MAX_TOPIC_CHARS: usize = 240;
 const MAX_SCENE_CHARS: usize = 160;
 
-pub(crate) fn current_topic(
+pub fn current_topic(
     user_input: &str,
     recent_turns: &[RecallTurn<'_>],
     scene_summary: Option<&str>,
@@ -22,7 +22,7 @@ pub(crate) fn current_topic(
     }
 }
 
-pub(crate) fn normalize_text(text: &str) -> Option<String> {
+pub fn normalize_text(text: &str) -> Option<String> {
     let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if normalized.is_empty() {
         None
@@ -31,7 +31,7 @@ pub(crate) fn normalize_text(text: &str) -> Option<String> {
     }
 }
 
-pub(crate) fn recent_user_turn(recent_turns: &[RecallTurn<'_>]) -> Option<String> {
+pub fn recent_user_turn(recent_turns: &[RecallTurn<'_>]) -> Option<String> {
     recent_turns
         .iter()
         .rev()

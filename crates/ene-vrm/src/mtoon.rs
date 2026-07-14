@@ -212,10 +212,16 @@ pub fn load_mtoon_materials(gltf: &gltf::Gltf) -> Vec<Option<MToonMaterial>> {
         let mut mat = MToonMaterial::default();
 
         // Rendering
-        if let Some(v) = obj.get("transparentWithZWrite").and_then(|v| v.as_bool()) {
+        if let Some(v) = obj
+            .get("transparentWithZWrite")
+            .and_then(serde_json::Value::as_bool)
+        {
             mat.transparent_with_z_write = v;
         }
-        if let Some(v) = obj.get("renderQueueOffsetNumber").and_then(|v| v.as_i64()) {
+        if let Some(v) = obj
+            .get("renderQueueOffsetNumber")
+            .and_then(serde_json::Value::as_i64)
+        {
             mat.render_queue_offset = v.clamp(-9, 9) as i32;
         }
 
@@ -224,21 +230,30 @@ pub fn load_mtoon_materials(gltf: &gltf::Gltf) -> Vec<Option<MToonMaterial>> {
             mat.shade_color = parse_vec3(arr);
         }
         mat.shade_multiply_texture = parse_texture_ref(obj.get("shadeMultiplyTexture"));
-        if let Some(v) = obj.get("shadingShiftFactor").and_then(|v| v.as_f64()) {
+        if let Some(v) = obj
+            .get("shadingShiftFactor")
+            .and_then(serde_json::Value::as_f64)
+        {
             mat.shading_shift_factor = v as f32;
         }
         if let Some(shift_tex) = obj.get("shadingShiftTexture").and_then(|v| v.as_object()) {
             mat.shading_shift_texture = parse_texture_ref_from_obj(shift_tex);
-            if let Some(scale) = shift_tex.get("scale").and_then(|v| v.as_f64()) {
+            if let Some(scale) = shift_tex.get("scale").and_then(serde_json::Value::as_f64) {
                 mat.shading_shift_texture_scale = scale as f32;
             }
         }
-        if let Some(v) = obj.get("shadingToonyFactor").and_then(|v| v.as_f64()) {
+        if let Some(v) = obj
+            .get("shadingToonyFactor")
+            .and_then(serde_json::Value::as_f64)
+        {
             mat.shading_toony_factor = v as f32;
         }
 
         // GI
-        if let Some(v) = obj.get("giEqualizationFactor").and_then(|v| v.as_f64()) {
+        if let Some(v) = obj
+            .get("giEqualizationFactor")
+            .and_then(serde_json::Value::as_f64)
+        {
             mat.gi_equalization_factor = v as f32;
         }
 
@@ -265,15 +280,21 @@ pub fn load_mtoon_materials(gltf: &gltf::Gltf) -> Vec<Option<MToonMaterial>> {
         }
         if let Some(v) = obj
             .get("parametricRimFresnelPowerFactor")
-            .and_then(|v| v.as_f64())
+            .and_then(serde_json::Value::as_f64)
         {
             mat.parametric_rim_fresnel_power = v as f32;
         }
-        if let Some(v) = obj.get("parametricRimLiftFactor").and_then(|v| v.as_f64()) {
+        if let Some(v) = obj
+            .get("parametricRimLiftFactor")
+            .and_then(serde_json::Value::as_f64)
+        {
             mat.parametric_rim_lift = v as f32;
         }
         mat.rim_multiply_texture = parse_texture_ref(obj.get("rimMultiplyTexture"));
-        if let Some(v) = obj.get("rimLightingMixFactor").and_then(|v| v.as_f64()) {
+        if let Some(v) = obj
+            .get("rimLightingMixFactor")
+            .and_then(serde_json::Value::as_f64)
+        {
             mat.rim_lighting_mix = v as f32;
         }
 
@@ -281,7 +302,10 @@ pub fn load_mtoon_materials(gltf: &gltf::Gltf) -> Vec<Option<MToonMaterial>> {
         if let Some(s) = obj.get("outlineWidthMode").and_then(|v| v.as_str()) {
             mat.outline_width_mode = OutlineWidthMode::from_json_str(s);
         }
-        if let Some(v) = obj.get("outlineWidthFactor").and_then(|v| v.as_f64()) {
+        if let Some(v) = obj
+            .get("outlineWidthFactor")
+            .and_then(serde_json::Value::as_f64)
+        {
             mat.outline_width_factor = v as f32;
         }
         mat.outline_width_multiply_texture =
@@ -289,7 +313,10 @@ pub fn load_mtoon_materials(gltf: &gltf::Gltf) -> Vec<Option<MToonMaterial>> {
         if let Some(arr) = obj.get("outlineColorFactor").and_then(|v| v.as_array()) {
             mat.outline_color = parse_vec3(arr);
         }
-        if let Some(v) = obj.get("outlineLightingMixFactor").and_then(|v| v.as_f64()) {
+        if let Some(v) = obj
+            .get("outlineLightingMixFactor")
+            .and_then(serde_json::Value::as_f64)
+        {
             mat.outline_lighting_mix = v as f32;
         }
 
@@ -297,19 +324,19 @@ pub fn load_mtoon_materials(gltf: &gltf::Gltf) -> Vec<Option<MToonMaterial>> {
         mat.uv_animation_mask_texture = parse_texture_ref(obj.get("uvAnimationMaskTexture"));
         if let Some(v) = obj
             .get("uvAnimationScrollXSpeedFactor")
-            .and_then(|v| v.as_f64())
+            .and_then(serde_json::Value::as_f64)
         {
             mat.uv_animation_scroll_x_speed = v as f32;
         }
         if let Some(v) = obj
             .get("uvAnimationScrollYSpeedFactor")
-            .and_then(|v| v.as_f64())
+            .and_then(serde_json::Value::as_f64)
         {
             mat.uv_animation_scroll_y_speed = v as f32;
         }
         if let Some(v) = obj
             .get("uvAnimationRotationSpeedFactor")
-            .and_then(|v| v.as_f64())
+            .and_then(serde_json::Value::as_f64)
         {
             mat.uv_animation_rotation_speed = v as f32;
         }
@@ -356,7 +383,7 @@ pub mod flags {
     pub const SHADING_SHIFT_TEXTURE: u32 = 1 << 2;
     /// Emissive texture present.
     pub const EMISSIVE_TEXTURE: u32 = 1 << 3;
-    /// MatCap texture present.
+    /// `MatCap` texture present.
     pub const MATCAP_TEXTURE: u32 = 1 << 4;
     /// Rim multiply texture present.
     pub const RIM_MULTIPLY_TEXTURE: u32 = 1 << 5;
@@ -366,7 +393,7 @@ pub mod flags {
     pub const UV_ANIMATION_MASK_TEXTURE: u32 = 1 << 7;
 }
 
-/// GPU-side MToon textures. The loader creates these from the
+/// GPU-side `MToon` textures. The loader creates these from the
 /// glTF texture indices in [`MToonMaterial`]. All textures share
 /// the same bind group layout (bind group 6 in the shader).
 ///
@@ -380,7 +407,7 @@ pub struct MToonGpuTextures {
     pub shading_shift: wgpu::BindGroup,
     /// Emissive texture bind group.
     pub emissive: wgpu::BindGroup,
-    /// MatCap texture bind group.
+    /// `MatCap` texture bind group.
     pub matcap: wgpu::BindGroup,
     /// Rim multiply texture bind group.
     pub rim_multiply: wgpu::BindGroup,
@@ -388,7 +415,7 @@ pub struct MToonGpuTextures {
     pub outline_width: wgpu::BindGroup,
     /// UV animation mask texture bind group.
     pub uv_mask: wgpu::BindGroup,
-    /// Combined bind group for all MToon textures (bind group 6).
+    /// Combined bind group for all `MToon` textures (bind group 6).
     pub combined_bind_group: wgpu::BindGroup,
 }
 
@@ -403,7 +430,8 @@ impl std::fmt::Debug for MToonGpuTextures {
 ///
 /// Called internally by [`crate::renderer::VrmRenderer`]; hidden from the "Supported API" docs.
 #[doc(hidden)]
-pub fn texture_flags(mat: &MToonMaterial, has_base_color: bool) -> u32 {
+#[must_use]
+pub const fn texture_flags(mat: &MToonMaterial, has_base_color: bool) -> u32 {
     let mut f = 0u32;
     if has_base_color {
         f |= flags::BASE_COLOR_TEXTURE;
@@ -440,21 +468,21 @@ pub fn texture_flags(mat: &MToonMaterial, has_base_color: bool) -> u32 {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MToonUniform {
-    /// Row 0: shade_color (rgb) + shading_shift_factor
+    /// Row 0: `shade_color` (rgb) + `shading_shift_factor`
     pub shade_color_and_shift: [f32; 4],
-    /// Row 1: shading_toony + gi_equalization + rim_lighting_mix + outline_lighting_mix
+    /// Row 1: `shading_toony` + `gi_equalization` + `rim_lighting_mix` + `outline_lighting_mix`
     pub lighting_params: [f32; 4],
-    /// Row 2: emissive_factor (rgb) + matcap_factor.r
+    /// Row 2: `emissive_factor` (rgb) + `matcap_factor.r`
     pub emissive_and_matcap_r: [f32; 4],
-    /// Row 3: matcap_factor.gb + parametric_rim_color.rg
+    /// Row 3: `matcap_factor.gb` + `parametric_rim_color.rg`
     pub matcap_gb_and_rim_r: [f32; 4],
-    /// Row 4: parametric_rim_color.b + parametric_rim_fresnel + parametric_rim_lift + outline_width_factor
+    /// Row 4: `parametric_rim_color.b` + `parametric_rim_fresnel` + `parametric_rim_lift` + `outline_width_factor`
     pub rim_params: [f32; 4],
-    /// Row 5: outline_color (rgb) + shading_shift_texture_scale
+    /// Row 5: `outline_color` (rgb) + `shading_shift_texture_scale`
     pub outline_color_and_shift_scale: [f32; 4],
-    /// Row 6: uv_animation speeds (x, y, rotation, 0)
+    /// Row 6: `uv_animation` speeds (x, y, rotation, 0)
     pub uv_animation_speeds: [f32; 4],
-    /// Row 7: texture_flags + outline_mode + transparent_with_z_write + render_queue_offset
+    /// Row 7: `texture_flags` + `outline_mode` + `transparent_with_z_write` + `render_queue_offset`
     pub flags_and_mode: [f32; 4],
     /// Row 8: time (seconds since load)
     pub time: [f32; 4],
@@ -478,10 +506,11 @@ impl Default for MToonUniform {
 
 impl MToonUniform {
     /// Size in bytes.
-    pub const SIZE: usize = std::mem::size_of::<MToonUniform>();
+    pub const SIZE: usize = std::mem::size_of::<Self>();
 
     /// Build a uniform from a material + flags + time.
-    pub fn from_material(mat: &MToonMaterial, tex_flags: u32, time: f32) -> Self {
+    #[must_use]
+    pub const fn from_material(mat: &MToonMaterial, tex_flags: u32, time: f32) -> Self {
         Self {
             shade_color_and_shift: [
                 mat.shade_color[0],

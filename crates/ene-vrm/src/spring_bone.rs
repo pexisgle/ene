@@ -10,7 +10,7 @@
 //! defines:
 //!
 //! - **Colliders**: sphere or capsule shapes attached to nodes.
-//! - **ColliderGroups**: named groups of collider indices.
+//! - **`ColliderGroups`**: named groups of collider indices.
 //! - **Springs**: chains of joints connected head-to-tail.
 //!   Each joint has `stiffness`, `gravityPower`, `gravityDir`,
 //!   `dragForce`, and `hitRadius`.
@@ -146,6 +146,7 @@ pub struct SpringBoneProperties {
 /// Called internally by [`crate::loader::load_vrm`]; hidden from the "Supported API" docs —
 /// hosts get the result via [`VrmModel::spring_bones`](crate::model::VrmModel).
 #[doc(hidden)]
+#[must_use]
 pub fn load_spring_bones(gltf: &gltf::Gltf) -> Option<SpringBoneProperties> {
     let ext = gltf.document.extensions()?;
     let value = ext.get("VRMC_springBone")?;
@@ -169,9 +170,8 @@ pub fn load_spring_bones(gltf: &gltf::Gltf) -> Option<SpringBoneProperties> {
 }
 
 fn parse_colliders(value: &Value) -> Vec<SpringBoneCollider> {
-    let arr = match value.get("colliders").and_then(|v| v.as_array()) {
-        Some(a) => a,
-        None => return Vec::new(),
+    let Some(arr) = value.get("colliders").and_then(|v| v.as_array()) else {
+        return Vec::new();
     };
 
     arr.iter()
@@ -181,13 +181,16 @@ fn parse_colliders(value: &Value) -> Vec<SpringBoneCollider> {
 
             let shape = if let Some(sphere) = shape_obj.get("sphere") {
                 let offset = parse_vec3(sphere.get("offset")?).unwrap_or([0.0, 0.0, 0.0]);
-                let radius = sphere.get("radius").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                let radius = sphere
+                    .get("radius")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(0.0) as f32;
                 SpringBoneShape::Sphere { offset, radius }
             } else if let Some(capsule) = shape_obj.get("capsule") {
                 let offset = parse_vec3(capsule.get("offset")?).unwrap_or([0.0, 0.0, 0.0]);
                 let radius = capsule
                     .get("radius")
-                    .and_then(|v| v.as_f64())
+                    .and_then(serde_json::Value::as_f64)
                     .unwrap_or(0.0) as f32;
                 let tail = parse_vec3(capsule.get("tail")?).unwrap_or([0.0, 0.0, 0.0]);
                 SpringBoneShape::Capsule {
@@ -206,9 +209,8 @@ fn parse_colliders(value: &Value) -> Vec<SpringBoneCollider> {
 }
 
 fn parse_collider_groups(value: &Value) -> Vec<SpringBoneColliderGroup> {
-    let arr = match value.get("colliderGroups").and_then(|v| v.as_array()) {
-        Some(a) => a,
-        None => return Vec::new(),
+    let Some(arr) = value.get("colliderGroups").and_then(|v| v.as_array()) else {
+        return Vec::new();
     };
 
     arr.iter()
@@ -232,9 +234,8 @@ fn parse_collider_groups(value: &Value) -> Vec<SpringBoneColliderGroup> {
 }
 
 fn parse_springs(value: &Value) -> Vec<SpringBoneChain> {
-    let arr = match value.get("springs").and_then(|v| v.as_array()) {
-        Some(a) => a,
-        None => return Vec::new(),
+    let Some(arr) = value.get("springs").and_then(|v| v.as_array()) else {
+        return Vec::new();
     };
 
     arr.iter()
@@ -249,18 +250,18 @@ fn parse_springs(value: &Value) -> Vec<SpringBoneChain> {
                             let node = j.get("node")?.as_u64()? as usize;
                             let hit_radius = j
                                 .get("hitRadius")
-                                .and_then(|v| v.as_f64())
-                                .unwrap_or(DEFAULT_HIT_RADIUS as f64)
+                                .and_then(serde_json::Value::as_f64)
+                                .unwrap_or_else(|| f64::from(DEFAULT_HIT_RADIUS))
                                 as f32;
                             let stiffness = j
                                 .get("stiffness")
-                                .and_then(|v| v.as_f64())
-                                .unwrap_or(DEFAULT_STIFFNESS as f64)
+                                .and_then(serde_json::Value::as_f64)
+                                .unwrap_or_else(|| f64::from(DEFAULT_STIFFNESS))
                                 as f32;
                             let gravity_power = j
                                 .get("gravityPower")
-                                .and_then(|v| v.as_f64())
-                                .unwrap_or(DEFAULT_GRAVITY_POWER as f64)
+                                .and_then(serde_json::Value::as_f64)
+                                .unwrap_or_else(|| f64::from(DEFAULT_GRAVITY_POWER))
                                 as f32;
                             let gravity_dir = j
                                 .get("gravityDir")
@@ -268,8 +269,8 @@ fn parse_springs(value: &Value) -> Vec<SpringBoneChain> {
                                 .unwrap_or(DEFAULT_GRAVITY_DIR);
                             let drag_force = j
                                 .get("dragForce")
-                                .and_then(|v| v.as_f64())
-                                .unwrap_or(DEFAULT_DRAG_FORCE as f64)
+                                .and_then(serde_json::Value::as_f64)
+                                .unwrap_or_else(|| f64::from(DEFAULT_DRAG_FORCE))
                                 as f32;
                             Some(SpringBoneJoint {
                                 node,
@@ -292,7 +293,10 @@ fn parse_springs(value: &Value) -> Vec<SpringBoneChain> {
                         .collect()
                 })
                 .unwrap_or_default();
-            let center = s.get("center").and_then(|v| v.as_u64()).map(|i| i as usize);
+            let center = s
+                .get("center")
+                .and_then(serde_json::Value::as_u64)
+                .map(|i| i as usize);
             SpringBoneChain {
                 name,
                 joints,
@@ -361,6 +365,7 @@ impl SpringBoneSimulator {
     ///
     /// `node_local_rotations` maps glTF node index to the node's
     /// rest-pose local rotation (from the glTF file).
+    #[must_use]
     pub fn new(
         props: &SpringBoneProperties,
         node_world_positions: &HashMap<usize, Vec3>,

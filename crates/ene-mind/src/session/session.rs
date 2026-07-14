@@ -55,7 +55,7 @@ pub struct MemoryContext {
     pub session_started_at: chrono::DateTime<chrono::Utc>,
     /// Embedding of the pending user input.
     pub pending_embedding: Option<Vec<f32>>,
-    /// Cached hash of the last synced CCv3 character memory index.
+    /// Cached hash of the last synced `CCv3` character memory index.
     pub ccv3_memory_hash: Option<u64>,
 }
 
@@ -110,7 +110,7 @@ impl std::fmt::Debug for ConversationSession {
             .field("memory_enabled", &self.memory.memory_store.is_some())
             .field("session_id", &self.memory.session_id)
             .field("turn_count", &self.state.current_turn_count)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -164,12 +164,12 @@ impl ConversationSession {
     ///
     /// Preferred by [`ene_runtime::EneHandle::open`]: config file I/O stays in
     /// the host / `ene-config`; the session only receives the card value.
-    pub fn set_card(&mut self, card: CharacterCardV3) -> Vec<ResolvedExpression> {
+    pub fn set_card(&mut self, card: &CharacterCardV3) -> Vec<ResolvedExpression> {
         self.character_card = Some(card.clone());
         self.current_card_path.clear();
         self.history.conversation_history.clear();
         self.memory.ccv3_memory_hash = None;
-        resolve_expressions(&card)
+        resolve_expressions(card)
     }
 
     /// Loads a character card from `path`, merges `character_settings.json` expressions,
@@ -233,20 +233,20 @@ impl ConversationSession {
     /// [`Self::apply_split_result`] to discard only the entries that were in
     /// the split snapshot, keeping the triggering turn and any messages
     /// added while the split was in flight.
-    pub fn mark_split_pending(&mut self) {
+    pub const fn mark_split_pending(&mut self) {
         self.state.pending_split_snapshot_len = Some(self.history.conversation_history.len());
     }
 
     /// Returns `true` if a session split is currently in flight.
     #[must_use]
-    pub fn is_split_pending(&self) -> bool {
+    pub const fn is_split_pending(&self) -> bool {
         self.state.pending_split_snapshot_len.is_some()
     }
 
     /// Clears the split-pending marker without applying a result. Used when
     /// the split task reports a non-fatal error (e.g. `SplitNotNeeded`) so
     /// history trimming can resume.
-    pub fn clear_split_pending(&mut self) {
+    pub const fn clear_split_pending(&mut self) {
         self.state.pending_split_snapshot_len = None;
     }
 
@@ -287,12 +287,13 @@ impl ConversationSession {
     /// Finalizes the current response: flushes any remaining token carry, commits the
     /// display buffer as an assistant message, and returns any lingering token fragment.
     pub fn finalize_response(&mut self) -> Option<String> {
-        let mut tail = None;
-        if !self.display.token_carry.is_empty() {
+        let tail = if self.display.token_carry.is_empty() {
+            None
+        } else {
             let t = std::mem::take(&mut self.display.token_carry);
             self.display.display_buffer.push_str(&t);
-            tail = Some(t);
-        }
+            Some(t)
+        };
 
         let assistant_text = self.display.display_buffer.clone();
         self.add_assistant_message(&assistant_text);
@@ -413,19 +414,19 @@ impl ConversationSession {
 
     /// Returns the current session ID.
     #[must_use]
-    pub fn session_id(&self) -> &SessionId {
+    pub const fn session_id(&self) -> &SessionId {
         &self.memory.session_id
     }
 
     /// Returns when the session started (UTC).
     #[must_use]
-    pub fn session_started_at(&self) -> DateTime<Utc> {
+    pub const fn session_started_at(&self) -> DateTime<Utc> {
         self.memory.session_started_at
     }
 
     /// Returns the current conversation turn count.
     #[must_use]
-    pub fn current_turn_count(&self) -> usize {
+    pub const fn current_turn_count(&self) -> usize {
         self.state.current_turn_count
     }
 
@@ -439,7 +440,7 @@ impl ConversationSession {
 
     /// Returns the timestamp of the last received message, if any.
     #[must_use]
-    pub fn last_message_time(&self) -> Option<DateTime<Utc>> {
+    pub const fn last_message_time(&self) -> Option<DateTime<Utc>> {
         self.state.last_message_time
     }
 

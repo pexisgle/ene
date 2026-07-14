@@ -76,7 +76,7 @@ mod imp {
                 layer_shell_freeze: freeze.0,
                 mask_capture: mask.as_ref().and_then(|m| m.0.as_ref()),
                 drag_is_dragging,
-                scale_factor: scale_factor.map(|s| s.0).unwrap_or(1.0),
+                scale_factor: scale_factor.map_or(1.0, |s| s.0),
             },
             allows_input,
             cursor_over,

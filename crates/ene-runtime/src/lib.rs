@@ -4,6 +4,7 @@
 //! long-term memory, and session management through an actor-based
 //! message-passing architecture.
 #![warn(missing_docs)]
+#![allow(clippy::option_if_let_else)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 /// Shared runtime bootstrap helpers (folded into [`EneHandle::open`]).
@@ -34,7 +35,7 @@ mod streaming_cognitive;
 pub mod types;
 
 // ── Bootstrap helpers ──
-/// Host helpers for ConfigStore → card → [`EneHandle::open`].
+/// Host helpers for `ConfigStore` → card → [`EneHandle::open`].
 pub use bootstrap::{open_from_disk, open_ready, open_with_config};
 
 // ── Actor types ──

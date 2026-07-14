@@ -3,6 +3,7 @@ mod read_binary;
 use self::read_binary::is_binary_file;
 use crate::utils::sandbox::SandboxConfig;
 use ene_tool_common::prelude::*;
+use std::fmt::Write;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
@@ -19,7 +20,7 @@ pub async fn read(
     let resolved = sandbox.resolve_and_check(path, false)?;
 
     if !resolved.exists() {
-        let dir = resolved.parent().unwrap_or(Path::new("."));
+        let dir = resolved.parent().unwrap_or_else(|| Path::new("."));
         let base = resolved.file_name().and_then(|s| s.to_str()).unwrap_or("");
         let mut suggestions = Vec::new();
         if let Ok(entries) = tokio::fs::read_dir(dir).await {
@@ -94,15 +95,16 @@ pub async fn read(
             } else {
                 line.to_string()
             };
-            output.push_str(&format!("{line_num}: {truncated}\n"));
+            let _ = writeln!(output, "{line_num}: {truncated}");
         }
-        output.push_str(&format!(
+        let _ = write!(
+            output,
             "\n(Output capped at {}KB. Showing lines {}-{}. Use offset={} to continue.)\n</content>",
             sandbox.max_read_bytes / 1024,
             start + 1,
             end,
             end + 1
-        ));
+        );
         return Ok(output);
     }
 
@@ -134,25 +136,27 @@ pub async fn read(
         } else {
             line.to_string()
         };
-        output.push_str(&format!("{line_num}: {truncated}\n"));
+        let _ = writeln!(output, "{line_num}: {truncated}");
     }
 
     let last = start + sliced.len();
     let next = last + 1;
     let truncated = end < lines.len();
     if truncated {
-        output.push_str(&format!(
+        let _ = write!(
+            output,
             "\n(Showing lines {}-{} of {}. Use offset={} to continue.)\n</content>",
             start + 1,
             last,
             lines.len(),
             next
-        ));
+        );
     } else {
-        output.push_str(&format!(
+        let _ = write!(
+            output,
             "\n(End of file - total {} lines)\n</content>",
             lines.len()
-        ));
+        );
     }
 
     Ok(output)
@@ -194,17 +198,18 @@ async fn read_directory(
         path.display()
     );
     for item in sliced {
-        output.push_str(&format!("{item}\n"));
+        let _ = writeln!(output, "{item}");
     }
     if truncated {
-        output.push_str(&format!(
+        let _ = write!(
+            output,
             "\n(Showing {} of {} entries. Use 'offset' parameter to read beyond entry {}.)\n</entries>",
             sliced.len(),
             items.len(),
             start + sliced.len() + 1
-        ));
+        );
     } else {
-        output.push_str(&format!("\n({} entries)\n</entries>", items.len()));
+        let _ = write!(output, "\n({} entries)\n</entries>", items.len());
     }
 
     Ok(output)
@@ -242,7 +247,7 @@ pub struct FsReadAction {
 }
 
 impl FsReadAction {
-    pub fn new(sandbox: SandboxRef) -> Self {
+    pub const fn new(sandbox: SandboxRef) -> Self {
         Self {
             file_path: String::new(),
             offset: None,
@@ -258,7 +263,7 @@ impl FsReadAction {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.clone().unwrap_or_else(|| {
-                Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
+                Arc::new(crate::utils::sandbox::Sandbox::new(SandboxConfig::default()))
             })
         };
 

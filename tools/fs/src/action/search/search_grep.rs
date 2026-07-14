@@ -39,9 +39,8 @@ pub async fn grep_search(
         .max_depth(10);
 
     for entry in walker {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
+        let Ok(entry) = entry else {
+            continue;
         };
 
         if !entry.file_type().is_file() {
@@ -57,17 +56,15 @@ pub async fn grep_search(
             }
         }
 
-        let metadata = match tokio::fs::metadata(file_path).await {
-            Ok(m) => m,
-            Err(_) => continue,
+        let Ok(metadata) = tokio::fs::metadata(file_path).await else {
+            continue;
         };
         if metadata.len() > 1024 * 1024 {
             continue;
         }
 
-        let content = match tokio::fs::read_to_string(file_path).await {
-            Ok(c) => c,
-            Err(_) => continue,
+        let Ok(content) = tokio::fs::read_to_string(file_path).await else {
+            continue;
         };
 
         for (line_num, line) in content.lines().enumerate() {
@@ -168,7 +165,7 @@ pub struct FsGrepAction {
 }
 
 impl FsGrepAction {
-    pub fn new(sandbox: SandboxRef) -> Self {
+    pub const fn new(sandbox: SandboxRef) -> Self {
         Self {
             pattern: String::new(),
             path: None,
@@ -184,7 +181,7 @@ impl FsGrepAction {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.clone().unwrap_or_else(|| {
-                Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
+                Arc::new(crate::utils::sandbox::Sandbox::new(SandboxConfig::default()))
             })
         };
 

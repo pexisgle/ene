@@ -134,7 +134,7 @@ impl MaskReadbackWorker {
         thread::Builder::new()
             .name("ene.mask_readback.frame".into())
             .spawn(move || {
-                run_single_readback(mask, device, queue, generation, gen_id, in_flight);
+                run_single_readback(&mask, &device, &queue, &generation, gen_id, &in_flight);
             })
             .ok();
     }
@@ -144,7 +144,7 @@ impl MaskReadbackWorker {
     /// `target_view` / `encode_readback` / `width` /
     /// `height` / `downsample` on the main thread.
     #[expect(dead_code)]
-    pub fn mask(&self) -> &Arc<Mutex<MaskCaptureCamera>> {
+    pub const fn mask(&self) -> &Arc<Mutex<MaskCaptureCamera>> {
         &self.mask
     }
 }
@@ -167,12 +167,12 @@ fn run_readback_loop(
 }
 
 fn run_single_readback(
-    mask: Arc<Mutex<MaskCaptureCamera>>,
-    device: Arc<wgpu::Device>,
-    queue: Arc<wgpu::Queue>,
-    _generation: Arc<AtomicU64>,
+    mask: &Arc<Mutex<MaskCaptureCamera>>,
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    _generation: &Arc<AtomicU64>,
     captured_gen: u64,
-    in_flight: Arc<AtomicBool>,
+    in_flight: &Arc<AtomicBool>,
 ) {
     let (tx, rx) = mpsc::channel::<()>();
     {

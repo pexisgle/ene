@@ -36,7 +36,7 @@ pub enum DbServerError {
     /// JSON serialization/deserialization error.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
-    /// SeaORM database error.
+    /// `SeaORM` database error.
     #[error("Database error: {0}")]
     Db(#[from] sea_orm::DbErr),
     /// The tool does not have permission to access the resource.
@@ -95,7 +95,8 @@ impl DbIpcServer {
     /// open, has had its PRAGMAs applied, and has had migrations run.
     /// The caller is responsible for providing a connection from
     /// the same pool that `MemoryStore` uses.
-    pub fn new(
+    #[must_use]
+    pub const fn new(
         db: DatabaseConnection,
         socket_path: PathBuf,
         tool_name: String,
@@ -352,9 +353,9 @@ impl DbIpcServer {
             .unwrap_or_else(|e| e.to_error_response()),
             DbRequest::Insert { table, row } => {
                 let res = Self::validate_table_access(declared_tables, &table)
-                    .and_then(|_| Self::validate_row_columns(declared_columns, &table, &row));
+                    .and_then(|()| Self::validate_row_columns(declared_columns, &table, &row));
                 match res {
-                    Ok(_) => match Self::handle_insert(db, &table, row).await {
+                    Ok(()) => match Self::handle_insert(db, &table, row).await {
                         Ok(id) => {
                             // Record the rowid for the
                             // connection-scoped
@@ -375,9 +376,9 @@ impl DbIpcServer {
                 conflict_columns,
             } => {
                 let res = Self::validate_table_access(declared_tables, &table)
-                    .and_then(|_| Self::validate_row_columns(declared_columns, &table, &row));
+                    .and_then(|()| Self::validate_row_columns(declared_columns, &table, &row));
                 match res {
-                    Ok(_) => match Self::handle_upsert(db, &table, row, conflict_columns).await {
+                    Ok(()) => match Self::handle_upsert(db, &table, row, conflict_columns).await {
                         Ok(rowid) => DbResponse::Upsert { rowid },
                         Err(e) => e.to_error_response(),
                     },
@@ -409,10 +410,12 @@ impl DbIpcServer {
             }
             DbRequest::Update { table, set, filter } => {
                 let res = Self::validate_table_access(declared_tables, &table)
-                    .and_then(|_| Self::validate_row_columns(declared_columns, &table, &set))
-                    .and_then(|_| Self::validate_filter_columns(declared_columns, &table, &filter));
+                    .and_then(|()| Self::validate_row_columns(declared_columns, &table, &set))
+                    .and_then(|()| {
+                        Self::validate_filter_columns(declared_columns, &table, &filter)
+                    });
                 match res {
-                    Ok(_) => match Self::handle_update(db, &table, set, filter).await {
+                    Ok(()) => match Self::handle_update(db, &table, set, filter).await {
                         Ok(affected) => DbResponse::Update { affected },
                         Err(e) => e.to_error_response(),
                     },
@@ -420,10 +423,11 @@ impl DbIpcServer {
                 }
             }
             DbRequest::Delete { table, filter } => {
-                let res = Self::validate_table_access(declared_tables, &table)
-                    .and_then(|_| Self::validate_filter_columns(declared_columns, &table, &filter));
+                let res = Self::validate_table_access(declared_tables, &table).and_then(|()| {
+                    Self::validate_filter_columns(declared_columns, &table, &filter)
+                });
                 match res {
-                    Ok(_) => match Self::handle_delete(db, &table, filter).await {
+                    Ok(()) => match Self::handle_delete(db, &table, filter).await {
                         Ok(affected) => DbResponse::Delete { affected },
                         Err(e) => e.to_error_response(),
                     },
@@ -431,10 +435,11 @@ impl DbIpcServer {
                 }
             }
             DbRequest::Count { table, filter } => {
-                let res = Self::validate_table_access(declared_tables, &table)
-                    .and_then(|_| Self::validate_filter_columns(declared_columns, &table, &filter));
+                let res = Self::validate_table_access(declared_tables, &table).and_then(|()| {
+                    Self::validate_filter_columns(declared_columns, &table, &filter)
+                });
                 match res {
-                    Ok(_) => match Self::handle_count(db, &table, filter).await {
+                    Ok(()) => match Self::handle_count(db, &table, filter).await {
                         Ok(count) => DbResponse::Count { count },
                         Err(e) => e.to_error_response(),
                     },
@@ -732,11 +737,10 @@ impl DbIpcServer {
             sql.push_str(&col.name);
             sql.push(' ');
             sql.push_str(match col.ty {
-                ene_tool_db::DbType::Integer => "INTEGER",
+                ene_tool_db::DbType::Integer | ene_tool_db::DbType::Boolean => "INTEGER",
                 ene_tool_db::DbType::Real => "REAL",
                 ene_tool_db::DbType::Text => "TEXT",
                 ene_tool_db::DbType::Blob => "BLOB",
-                ene_tool_db::DbType::Boolean => "INTEGER",
             });
 
             if !col.nullable {
@@ -772,12 +776,16 @@ impl DbIpcServer {
             DbValue::Int(i) => i.to_string(),
             DbValue::Float(f) => f.to_string(),
             DbValue::Text(s) => format!("'{}'", s.replace('\'', "''")),
-            DbValue::Blob(b) => format!(
-                "X'{}'",
-                b.iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>()
-            ),
+            DbValue::Blob(b) => {
+                use std::fmt::Write;
+                let mut hex = String::with_capacity(b.len() * 2 + 3);
+                hex.push_str("X'");
+                for byte in b {
+                    let _ = write!(hex, "{byte:02x}");
+                }
+                hex.push('\'');
+                hex
+            }
         }
     }
 

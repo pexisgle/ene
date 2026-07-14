@@ -162,7 +162,7 @@ pub struct OpenAiProvider {
     model: String,
     /// When set, caps completion length for short structured outputs (e.g. affect classifier).
     chat_max_tokens: Option<u32>,
-    /// Disable MiMo / reasoning-model thinking so JSON lands in `content`.
+    /// Disable `MiMo` / reasoning-model thinking so JSON lands in `content`.
     thinking_disabled: bool,
 }
 
@@ -182,14 +182,14 @@ impl OpenAiProvider {
 
     /// Limit completion tokens for short JSON-style responses.
     #[must_use]
-    pub fn with_chat_max_tokens(mut self, max_tokens: u32) -> Self {
+    pub const fn with_chat_max_tokens(mut self, max_tokens: u32) -> Self {
         self.chat_max_tokens = Some(max_tokens);
         self
     }
 
     /// Send `thinking: { type: disabled }` for models that otherwise fill `reasoning_content`.
     #[must_use]
-    pub fn with_thinking_disabled(mut self, disabled: bool) -> Self {
+    pub const fn with_thinking_disabled(mut self, disabled: bool) -> Self {
         self.thinking_disabled = disabled;
         self
     }
@@ -293,7 +293,7 @@ fn byot_http_client() -> Result<&'static reqwest::Client, LlmProviderError> {
 
 /// Non-stream BYOT chat completion via direct HTTP.
 ///
-/// `async-openai`'s `create_byot` can hang on OpenRouter MiMo with `thinking: disabled`;
+/// `async-openai`'s `create_byot` can hang on `OpenRouter` `MiMo` with `thinking: disabled`;
 /// a plain POST matches the reliable direct-HTTP path used in classifier benchmarks.
 async fn post_chat_byot_via_http(
     api_base: &str,

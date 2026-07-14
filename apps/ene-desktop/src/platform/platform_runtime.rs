@@ -103,7 +103,7 @@ pub fn apply_linux_click_through(
     let ClickThroughInputs {
         wayland,
         x11,
-        layer_shell: _layer_shell,
+        layer_shell,
         layer_shell_freeze: _layer_shell_freeze,
         mask_capture,
         drag_is_dragging,
@@ -126,7 +126,7 @@ pub fn apply_linux_click_through(
         if extracted.is_empty() {
             (Vec::new(), InputRegionSource::Empty)
         } else {
-            let factor = guard.downsample() as i64;
+            let factor = i64::from(guard.downsample());
             let scaled: Vec<Rect> = extracted
                 .into_iter()
                 .map(|(x, y, w, h)| Rect {
@@ -154,10 +154,10 @@ pub fn apply_linux_click_through(
             let logical_rects: Vec<Rect> = rects
                 .iter()
                 .map(|r| Rect {
-                    x: (r.x as f64 / scale).round() as i32,
-                    y: (r.y as f64 / scale).round() as i32,
-                    w: (r.w as f64 / scale).round().max(1.0) as i32,
-                    h: (r.h as f64 / scale).round().max(1.0) as i32,
+                    x: (f64::from(r.x) / scale).round() as i32,
+                    y: (f64::from(r.y) / scale).round() as i32,
+                    w: (f64::from(r.w) / scale).round().max(1.0) as i32,
+                    h: (f64::from(r.h) / scale).round().max(1.0) as i32,
                 })
                 .collect();
             guard.set_rects(logical_rects);
@@ -176,7 +176,7 @@ pub fn apply_linux_click_through(
     }
 
     if !FIRST_DISPATCH_LOGGED.swap(true, Ordering::Relaxed) {
-        let layer_shell_cached = _layer_shell.is_some_and(|ctx| ctx.lock().cached().is_some());
+        let layer_shell_cached = layer_shell.is_some_and(|ctx| ctx.lock().cached().is_some());
         let x11_path = if x11.is_some() {
             Some(super::x11_taskbar::X11Path::decide(
                 allows_input,

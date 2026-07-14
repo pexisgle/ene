@@ -77,7 +77,7 @@ pub const MORPH_META_F32_COUNT: usize = 8 + MAX_WEIGHT_SLOTS * 4;
 ///
 /// Mirrors the WGSL `MorphMeta` struct in
 /// `shaders/mtoon_lite.wgsl` byte-for-byte: 8 f32 header
-/// (vertex_count, target_count, two `pad` u32s reinterpreted as
+/// (`vertex_count`, `target_count`, two `pad` u32s reinterpreted as
 /// f32) followed by `MAX_WEIGHT_SLOTS` packed `vec4<f32>`
 /// weight slots.
 #[repr(C)]
@@ -91,8 +91,10 @@ pub struct PrimitiveMorphMeta {
     pub target_count: u32,
     /// Padding to align the next field to 16 bytes (vec4
     /// alignment).
+    #[expect(clippy::pub_underscore_fields)]
     pub _pad0: u32,
     /// Padding to keep `weights` 16-byte aligned. Always zero.
+    #[expect(clippy::pub_underscore_fields)]
     pub _pad1: u32,
     /// Packed weights, 4 per `vec4`. Slot `i` corresponds to
     /// morph target `i`.
@@ -142,7 +144,7 @@ pub struct MorphTarget {
 pub struct PrimitiveId(pub usize);
 
 /// Expression / blend-shape name. Kept as a thin newtype so the
-/// BTreeMap key is unambiguous across the loader, the renderer
+/// `BTreeMap` key is unambiguous across the loader, the renderer
 /// and the runtime.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExpressionName(pub String);
@@ -157,6 +159,7 @@ impl ExpressionName {
     }
 
     /// Borrow the inner string.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -204,7 +207,8 @@ pub struct PrimitiveMorphs {
 
 impl PrimitiveMorphs {
     /// Build a `PrimitiveMorphs` from a list of morph targets.
-    pub fn from_targets(
+    #[must_use]
+    pub const fn from_targets(
         primitive_id: PrimitiveId,
         node_index: usize,
         vertex_count: u32,
@@ -252,6 +256,7 @@ pub struct ExpressionLayer {
 impl ExpressionLayer {
     /// Build a fresh layer from per-primitive data. The model
     /// has zero expressions if `per_primitive` is empty.
+    #[must_use]
     pub fn new(
         per_primitive: Vec<Option<PrimitiveMorphs>>,
         overrides: Option<&[crate::expression_override::ExpressionDefinition]>,
@@ -274,6 +279,7 @@ impl ExpressionLayer {
     /// primitive of the model. De-duplicated. Used by the
     /// settings UI's "Manual Expressions (Test)" buttons and by
     /// the AI bridge to look up the next emotion's name.
+    #[must_use]
     pub fn expression_names(&self) -> Vec<ExpressionName> {
         self.weights.keys().cloned().collect()
     }
@@ -315,6 +321,7 @@ impl ExpressionLayer {
     }
 
     /// Number of primitives that have at least one morph target.
+    #[must_use]
     pub fn morphic_primitive_count(&self) -> usize {
         self.per_primitive.iter().filter(|p| p.is_some()).count()
     }

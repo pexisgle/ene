@@ -23,7 +23,7 @@ pub enum AppEvent {
     /// Streamed AI events mirrored from [`ene_runtime::EneEvent`].
     Ai(AiStreamUpdate),
     /// Raw performance cue name from [`ene_runtime::EneEvent::Performance`].
-    /// Desktop maps this to VRM playback; do not forward SpecialToken /
+    /// Desktop maps this to VRM playback; do not forward `SpecialToken` /
     /// Expression events (removed in API v2).
     #[expect(dead_code, reason = "kept for backward-compat test coverage")]
     PerformanceCue(String),

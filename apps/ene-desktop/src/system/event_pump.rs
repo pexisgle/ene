@@ -90,10 +90,7 @@ fn translate_event(
     open_chat: &mut MessageWriter<OpenChat>,
 ) {
     match event {
-        AppEvent::Quit => {
-            exit.0 = true;
-        }
-        AppEvent::Tray(crate::events::TrayAction::Quit) => {
+        AppEvent::Quit | AppEvent::Tray(crate::events::TrayAction::Quit) => {
             exit.0 = true;
         }
         AppEvent::Tray(crate::events::TrayAction::OpenSettings { page }) => {
@@ -174,10 +171,10 @@ fn translate_event(
     dead_code,
     reason = "Replaced by Messages<TickGtk>; kept for API symmetry"
 )]
-pub fn mark_gtk_tick() {}
+pub const fn mark_gtk_tick() {}
 
 /// Suppress unused-imports for the `Instant` import in non-tray builds.
-fn _force_link(_: Instant) {}
+const fn _force_link(_: Instant) {}
 
 #[cfg(test)]
 mod tests {

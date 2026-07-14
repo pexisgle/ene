@@ -45,7 +45,7 @@ pub struct PermissionGate {
 }
 
 impl PermissionGate {
-    pub fn new(auto_approve: bool) -> Self {
+    pub const fn new(auto_approve: bool) -> Self {
         Self { auto_approve }
     }
 
@@ -64,7 +64,7 @@ impl PermissionGate {
     /// signature preserves the call sites that pass a sandbox handle
     /// (so a future change can re-introduce sandbox-aware policy without
     /// touching every caller) and documents intent.
-    pub fn default_with_sandbox(_sandbox: &SandboxConfig) -> Self {
+    pub const fn default_with_sandbox(_sandbox: &SandboxConfig) -> Self {
         Self {
             auto_approve: false,
         }

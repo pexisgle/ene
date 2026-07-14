@@ -49,8 +49,7 @@ pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entit
 
     let recall_debug = world
         .get::<UiStateComponent>(ui_entity)
-        .map(|s| s.0.memory_journal_recall_debug)
-        .unwrap_or(false);
+        .is_some_and(|s| s.0.memory_journal_recall_debug);
 
     if recall_debug {
         ui.separator();
@@ -297,14 +296,13 @@ fn recall_reason_label(reason_key: &str) -> String {
 fn refresh_journal(ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
     let filters = world
         .get::<UiStateComponent>(ui_entity)
-        .map(|s| {
+        .map_or((false, false, false), |s| {
             (
                 s.0.memory_journal_show_deleted,
                 s.0.memory_journal_show_archived,
                 s.0.memory_journal_show_superseded,
             )
-        })
-        .unwrap_or((false, false, false));
+        });
 
     match ai.refresh_memory_journal(48, filters.0, filters.1, filters.2) {
         Ok((memories, affect, commitments)) => {

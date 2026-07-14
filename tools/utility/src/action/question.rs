@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use ene_tool_common::prelude::*;
 use ene_tool_proto::{MultiAnswer, QuestionItem, UserInputPrompt};
 use uuid::Uuid;
@@ -23,12 +25,12 @@ pub struct AskQuestionAction {
     /// first call. The LLM must not populate this field.
     #[arg(internal)]
     #[serde(default)]
-    _user_answers: Option<Vec<MultiAnswer>>,
+    user_answers: Option<Vec<MultiAnswer>>,
 }
 
 impl AskQuestionAction {
     async fn run(&self) -> Result<String, ToolError> {
-        if let Some(answers) = &self._user_answers {
+        if let Some(answers) = &self.user_answers {
             return Ok(format_user_response(&self.questions, answers));
         }
 
@@ -52,7 +54,7 @@ fn format_user_response(questions: &[QuestionItem], answers: &[MultiAnswer]) -> 
         let rendered = answers
             .get(i)
             .map_or_else(|| "(no answer)".to_string(), format_answer);
-        out.push_str(&format!("{}. {} -> {}\n", i + 1, q.question, rendered));
+        let _ = writeln!(out, "{}. {} -> {}", i + 1, q.question, rendered);
     }
     out
 }
@@ -76,7 +78,7 @@ mod tests {
         assert_eq!(a.questions.len(), 1);
         assert_eq!(a.questions[0].options, vec!["a", "b"]);
         assert!(!a.questions[0].allow_free_text);
-        assert!(a._user_answers.is_none());
+        assert!(a.user_answers.is_none());
     }
 
     #[test]
@@ -133,8 +135,8 @@ mod tests {
             .get("properties")
             .and_then(|p| p.as_object());
         assert!(
-            props.is_none_or(|p| !p.contains_key("_user_answers")),
-            "schema must not expose the host-injected `_user_answers` field"
+            props.is_none_or(|p| !p.contains_key("user_answers")),
+            "schema must not expose the host-injected `user_answers` field"
         );
     }
 
@@ -150,13 +152,13 @@ mod tests {
     fn args_deserialize_with_user_answers() {
         let json = r#"{
             "questions":[{"question":"Q1"},{"question":"Q2"}],
-            "_user_answers":[
+            "user_answers":[
                 {"kind":"answer","text":"hello"},
                 {"kind":"skip"}
             ]
         }"#;
         let a: AskQuestionAction = serde_json::from_str(json).unwrap();
-        let answers = a._user_answers.unwrap();
+        let answers = a.user_answers.unwrap();
         assert_eq!(answers.len(), 2);
         assert!(matches!(&answers[0], MultiAnswer::Answer { text } if text == "hello"));
         assert!(matches!(&answers[1], MultiAnswer::Skip));

@@ -23,7 +23,7 @@ pub enum ExpressionSource {
 impl ExpressionSource {
     /// Debug string for event emission (#91).
     #[must_use]
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::AffectMapping => "affect",
             Self::LlmAdvisory => "llm_advisory",
@@ -53,7 +53,7 @@ pub struct ExpressionInput<'a> {
 }
 
 /// Resolved expression output.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpressionDecision {
     /// Normalized expression name.
     pub expression: String,

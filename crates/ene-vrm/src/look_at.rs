@@ -103,6 +103,7 @@ impl LookAtRangeMap {
     /// [`LookAtRangeMapSet::apply_horizontal`] /
     /// [`LookAtRangeMapSet::apply_vertical`] for the
     /// direction-aware wrappers.
+    #[must_use]
     pub fn apply(&self, input_degrees: f32) -> f32 {
         let sign = input_degrees.signum();
         let abs = input_degrees.abs();
@@ -149,6 +150,7 @@ impl LookAtRangeMapSet {
     /// Apply the appropriate horizontal range map to a signed
     /// yaw angle. The caller passes which side wins (the
     /// convergent or the divergent eye); we just pick the map.
+    #[must_use]
     pub fn apply_horizontal(&self, yaw_degrees: f32, outer: bool) -> f32 {
         if outer {
             self.horizontal_outer.apply(yaw_degrees)
@@ -160,6 +162,7 @@ impl LookAtRangeMapSet {
     /// Apply the appropriate vertical range map to a signed
     /// pitch angle. The convention matches the spec:
     /// `pitch > 0` = looking down, `pitch < 0` = looking up.
+    #[must_use]
     pub fn apply_vertical(&self, pitch_degrees: f32) -> f32 {
         if pitch_degrees >= 0.0 {
             self.vertical_down.apply(pitch_degrees)
@@ -318,7 +321,8 @@ impl LookAtEvaluator {
     /// `None` for an unset `None` so the runtime can chain
     /// `model.look_at().map(LookAtEvaluator::new)` without
     /// nested `if let`s.
-    pub fn new(props: &LookAtProperties) -> Self {
+    #[must_use]
+    pub const fn new(props: &LookAtProperties) -> Self {
         Self {
             offset_from_head_bone: props.offset_from_head_bone,
             range_map: props.range_map,
@@ -347,6 +351,7 @@ impl LookAtEvaluator {
     /// For a target at the head's own position the
     /// decomposition is the zero vector and the result is the
     /// default (identity deltas / zero expression weights).
+    #[must_use]
     pub fn evaluate(
         &self,
         head_world: Vec3,
@@ -495,6 +500,7 @@ fn yaw_pitch_to_delta(
 /// decomposition happens in the head bone's local frame
 /// so a model whose head was authored with a non-identity
 /// rest rotation gets the right sign.
+#[must_use]
 pub fn calc_yaw_pitch(
     head_world: Vec3,
     target_world: Vec3,
@@ -514,7 +520,7 @@ pub fn calc_yaw_pitch(
     let x = dir_local.x;
     let yaw = x.atan2(z).to_degrees();
 
-    let xz = (x * x + z * z).sqrt();
+    let xz = x.hypot(z);
     let y = dir_local.y;
     // The `-y` flips the "look up = negative pitch" sign
     // into the spec's "look up = negative pitch,
@@ -563,15 +569,14 @@ pub fn load_look_at(gltf: &gltf::Gltf) -> Option<LookAtProperties> {
             let mut out = [0.0f32; 3];
             let mut ok = true;
             for (i, item) in arr.iter().enumerate() {
-                match item.as_f64() {
-                    Some(f) => out[i] = f as f32,
-                    None => {
-                        ok = false;
-                        tracing::warn!(
-                            "VRMC_vrm.lookAt.offsetFromHeadBone[{i}] is not a number; keeping default"
-                        );
-                        break;
-                    }
+                if let Some(f) = item.as_f64() {
+                    out[i] = f as f32;
+                } else {
+                    ok = false;
+                    tracing::warn!(
+                        "VRMC_vrm.lookAt.offsetFromHeadBone[{i}] is not a number; keeping default"
+                    );
+                    break;
                 }
             }
             if ok {
@@ -648,27 +653,25 @@ fn parse_range_map(
         );
         return default;
     };
-    let input = match obj.get("inputMaxValue").and_then(|v| v.as_f64()) {
-        Some(f) => f as f32,
-        None => {
-            tracing::warn!(
-                "VRMC_vrm.lookAt.{}.inputMaxValue is not a number; keeping default {:?}",
-                field,
-                default
-            );
-            return default;
-        }
+    let input = if let Some(f) = obj.get("inputMaxValue").and_then(serde_json::Value::as_f64) {
+        f as f32
+    } else {
+        tracing::warn!(
+            "VRMC_vrm.lookAt.{}.inputMaxValue is not a number; keeping default {:?}",
+            field,
+            default
+        );
+        return default;
     };
-    let scale = match obj.get("outputScale").and_then(|v| v.as_f64()) {
-        Some(f) => f as f32,
-        None => {
-            tracing::warn!(
-                "VRMC_vrm.lookAt.{}.outputScale is not a number; keeping default {:?}",
-                field,
-                default
-            );
-            return default;
-        }
+    let scale = if let Some(f) = obj.get("outputScale").and_then(serde_json::Value::as_f64) {
+        f as f32
+    } else {
+        tracing::warn!(
+            "VRMC_vrm.lookAt.{}.outputScale is not a number; keeping default {:?}",
+            field,
+            default
+        );
+        return default;
     };
     LookAtRangeMap {
         input_max_value: input,

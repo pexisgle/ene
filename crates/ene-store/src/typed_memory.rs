@@ -30,9 +30,9 @@ pub enum MemoryKind {
 }
 
 impl MemoryKind {
-    /// Returns the snake_case string representation for storage/DB use.
+    /// Returns the `snake_case` string representation for storage/DB use.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Episodic => "episodic",
             Self::Semantic => "semantic",
@@ -46,7 +46,7 @@ impl MemoryKind {
         }
     }
 
-    /// Parse from a snake_case string, logging a warning on unrecognized values.
+    /// Parse from a `snake_case` string, logging a warning on unrecognized values.
     pub(crate) fn from_db_str(s: &str) -> Self {
         match s {
             "episodic" => Self::Episodic,
@@ -88,9 +88,9 @@ pub enum MemoryStatus {
 }
 
 impl MemoryStatus {
-    /// Returns the snake_case string representation for storage/DB use.
+    /// Returns the `snake_case` string representation for storage/DB use.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Active => "active",
             Self::Faded => "faded",
@@ -101,7 +101,7 @@ impl MemoryStatus {
         }
     }
 
-    /// Parse from a snake_case string, logging a warning on unrecognized values.
+    /// Parse from a `snake_case` string, logging a warning on unrecognized values.
     pub(crate) fn from_db_str(s: &str) -> Self {
         match s {
             "active" => Self::Active,
@@ -134,9 +134,9 @@ pub enum MemoryScope {
 }
 
 impl MemoryScope {
-    /// Returns the snake_case string representation for storage/DB use.
+    /// Returns the `snake_case` string representation for storage/DB use.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Character => "character",
             Self::User => "user",
@@ -144,7 +144,7 @@ impl MemoryScope {
         }
     }
 
-    /// Parse from a snake_case string, logging a warning on unrecognized values.
+    /// Parse from a `snake_case` string, logging a warning on unrecognized values.
     pub(crate) fn from_db_str(s: &str) -> Self {
         match s {
             "character" => Self::Character,
@@ -175,14 +175,14 @@ pub enum MemorySource {
     Inferred,
     /// Imported from external data.
     Imported,
-    /// Derived from CCv3 character card data.
+    /// Derived from `CCv3` character card data.
     Ccv3,
 }
 
 impl MemorySource {
-    /// Returns the snake_case string representation for storage/DB use.
+    /// Returns the `snake_case` string representation for storage/DB use.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Conversation => "conversation",
             Self::UserStated => "user_stated",
@@ -193,7 +193,7 @@ impl MemorySource {
         }
     }
 
-    /// Parse from a snake_case string, logging a warning on unrecognized values.
+    /// Parse from a `snake_case` string, logging a warning on unrecognized values.
     pub(crate) fn from_db_str(s: &str) -> Self {
         match s {
             "conversation" => Self::Conversation,
@@ -224,13 +224,13 @@ impl MemoryConfidence {
 
     /// Create a new confidence value, clamping to [0.0, 1.0].
     #[must_use]
-    pub fn new(raw: f32) -> Self {
+    pub const fn new(raw: f32) -> Self {
         Self(raw.clamp(0.0, 1.0))
     }
 
     /// Return the inner `f32`.
     #[must_use]
-    pub fn get(self) -> f32 {
+    pub const fn get(self) -> f32 {
         self.0
     }
 }
@@ -252,13 +252,13 @@ impl MemorySalience {
 
     /// Create a new salience value, clamping to [0.0, 1.0].
     #[must_use]
-    pub fn new(raw: f32) -> Self {
+    pub const fn new(raw: f32) -> Self {
         Self(raw.clamp(0.0, 1.0))
     }
 
     /// Return the inner `f32`.
     #[must_use]
-    pub fn get(self) -> f32 {
+    pub const fn get(self) -> f32 {
         self.0
     }
 }
@@ -310,7 +310,7 @@ pub struct MemoryItem {
     pub content: String,
     /// Provenance of the memory.
     pub source: MemorySource,
-    /// Optional reference to the source (e.g. session_id or turn sequence).
+    /// Optional reference to the source (e.g. `session_id` or turn sequence).
     pub source_ref: Option<String>,
     /// Confidence score.
     pub confidence: MemoryConfidence,

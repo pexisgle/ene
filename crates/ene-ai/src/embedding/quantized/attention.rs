@@ -24,6 +24,7 @@ pub struct AttentionBlock {
 }
 
 impl AttentionBlock {
+    #[expect(clippy::many_single_char_names)]
     pub fn forward(&self, x: &Tensor) -> Result<Tensor, EneEmbeddingError> {
         let (b, l, _h) = x.dims3().map_err(super::candle_err("attn dims3"))?;
 

@@ -5,6 +5,7 @@
 //! Re-exports `serde`, `schemars`, and `ctor` for use by downstream crates.
 #![warn(missing_docs)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![allow(clippy::option_if_let_else)]
 extern crate self as ene_config;
 
 /// V3-format character card models with CBS macro expansion.

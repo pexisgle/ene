@@ -24,6 +24,7 @@
 //! in the `tool_embeddings` table. The RAG pipeline performs
 //! cosine-similarity filtering based on the user's current query embedding.
 #![warn(missing_docs)]
+#![allow(clippy::option_if_let_else)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 /// Tool and MCP configuration types.
@@ -41,12 +42,12 @@ pub mod mcp_registry;
 pub mod rag;
 /// Tool process lifecycle manager.
 pub mod tool_host_manager;
-/// Tool registry types (Composite, ToolRegistry trait, etc.).
+/// Tool registry types (Composite, `ToolRegistry` trait, etc.).
 pub mod tools;
 
 /// Tool configuration types.
 pub use config::{FieldWeightsConfig, ToolConfig, ToolEntry, ToolRagConfig};
-/// ToolSpec type (re-exported from `ene-tool-proto`).
+/// `ToolSpec` type (re-exported from `ene-tool-proto`).
 #[doc(no_inline)]
 pub use ene_tool_proto::ToolSpec;
 /// Tool host error types
@@ -61,5 +62,5 @@ pub use mcp_registry::McpToolRegistry;
 pub use rag::{FieldWeights, ToolRag, ToolRagOptions, ToolRagStats};
 /// Tool process lifecycle manager.
 pub use tool_host_manager::ToolHostManager;
-/// Registry types and the ToolRegistry trait.
+/// Registry types and the `ToolRegistry` trait.
 pub use tools::{CompositeToolRegistry, ToolCategory, ToolRegistry, compute_tool_version_hash};

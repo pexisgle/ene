@@ -8,6 +8,7 @@ use std::sync::{Arc, RwLock};
 /// Configuration for web search providers (Tavily, Brave, Exa).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, rename_all = "snake_case")]
+#[expect(clippy::struct_field_names)]
 pub struct WebSearchConfig {
     /// Tavily Search API Key
     pub tavily_api_key: String,

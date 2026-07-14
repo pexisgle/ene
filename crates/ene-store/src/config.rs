@@ -1,4 +1,4 @@
-fn default_string() -> String {
+const fn default_string() -> String {
     String::new()
 }
 

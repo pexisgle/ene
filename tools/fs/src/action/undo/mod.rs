@@ -11,6 +11,8 @@ pub async fn undo(sandbox: &crate::utils::sandbox::Sandbox) -> Result<String, To
     Ok(format!("Undo successful:\n{logs}"))
 }
 
+use crate::utils::sandbox::SandboxConfig;
+
 type SandboxRef = Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>;
 
 fn default_sandbox() -> SandboxRef {
@@ -34,7 +36,7 @@ pub struct UndoAction {
 }
 
 impl UndoAction {
-    pub fn new(sandbox: SandboxRef) -> Self {
+    pub const fn new(sandbox: SandboxRef) -> Self {
         Self { sandbox }
     }
 
@@ -45,7 +47,7 @@ impl UndoAction {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.clone().unwrap_or_else(|| {
-                Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
+                Arc::new(crate::utils::sandbox::Sandbox::new(SandboxConfig::default()))
             })
         };
         undo(&sandbox).await

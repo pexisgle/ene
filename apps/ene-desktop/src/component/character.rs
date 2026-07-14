@@ -66,7 +66,7 @@ impl std::fmt::Debug for MotionState {
         f.debug_struct("MotionState")
             .field("asset_loaded", &self.asset.is_some())
             .field("path", &self.path)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

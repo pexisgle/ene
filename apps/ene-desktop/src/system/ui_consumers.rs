@@ -1,4 +1,4 @@
-//! OpenSettings / AI consumer systems.
+//! `OpenSettings` / AI consumer systems.
 //!
 //! Chat-related consumers target the [`ChatWindow`] entity (#109).
 //! Settings visibility is handled separately via [`UiWindow`].

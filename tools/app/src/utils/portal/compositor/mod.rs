@@ -12,7 +12,7 @@ use ene_tool_proto::ToolError;
 // ==================== Compositor trait ====================
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) trait WlCompositor {
+pub trait WlCompositor {
     fn list_windows(&self) -> Result<String, ToolError>;
     fn focus_window(&self, title: &str) -> Result<String, ToolError>;
 }
@@ -20,7 +20,7 @@ pub(crate) trait WlCompositor {
 // ==================== Detection ====================
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) fn dispatch() -> Option<Box<dyn WlCompositor>> {
+pub fn dispatch() -> Option<Box<dyn WlCompositor>> {
     #[cfg(target_os = "linux")]
     {
         if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
@@ -63,14 +63,13 @@ fn unescape_gvariant(s: &str) -> String {
                 Some('n') => result.push('\n'),
                 Some('t') => result.push('\t'),
                 Some('r') => result.push('\r'),
-                Some('\\') => result.push('\\'),
+                Some('\\') | None => result.push('\\'),
                 Some('\'') => result.push('\''),
                 Some('"') => result.push('"'),
                 Some(c2) => {
                     result.push('\\');
                     result.push(c2);
                 }
-                None => result.push('\\'),
             }
         } else {
             result.push(c);

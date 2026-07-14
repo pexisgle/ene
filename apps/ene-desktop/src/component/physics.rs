@@ -20,7 +20,7 @@ pub struct PhysicsBody(
 
 /// One Rapier `ColliderHandle` per bone of the character. Mirrors
 /// the data that the legacy `PhysicsWorld::entity_to_colliders`
-/// HashMap used to provide.
+/// `HashMap` used to provide.
 #[derive(Component, Debug, Default, Clone)]
 pub struct PhysicsColliders(
     #[expect(dead_code, reason = "Read by step/update systems")] pub Vec<ColliderHandle>,
@@ -37,7 +37,7 @@ pub struct PhysicsColliderStaticOffsets(
 /// the rest pose).
 #[derive(Component, Debug, Default, Clone)]
 pub struct PhysicsColliderStaticRotations(
-    #[expect(dead_code, reason = "Read by update_bone_positions system")] pub Vec<Quat>,
+    #[allow(dead_code, reason = "Read by update_bone_positions system")] pub Vec<Quat>,
 );
 
 /// Per-bone rest world rotation (used to compute `r_delta`).

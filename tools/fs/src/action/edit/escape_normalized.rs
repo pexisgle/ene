@@ -13,7 +13,7 @@ pub fn escape_normalized_replace(
                     Some('n') => result.push('\n'),
                     Some('t') => result.push('\t'),
                     Some('r') => result.push('\r'),
-                    Some('\\') => result.push('\\'),
+                    Some('\\') | None => result.push('\\'),
                     Some('"') => result.push('"'),
                     Some('\'') => result.push('\''),
                     Some('`') => result.push('`'),
@@ -22,7 +22,6 @@ pub fn escape_normalized_replace(
                         result.push('\\');
                         result.push(other);
                     }
-                    None => result.push('\\'),
                 }
             } else {
                 result.push(c);

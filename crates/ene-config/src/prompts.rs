@@ -552,43 +552,43 @@ impl PromptLibrary {
 
     /// Returns reference to system prompts.
     #[must_use]
-    pub fn system(&self) -> &SystemPrompts {
+    pub const fn system(&self) -> &SystemPrompts {
         &self.data.system
     }
 
     /// Returns reference to emotion prompts.
     #[must_use]
-    pub fn emotion(&self) -> &EmotionPrompts {
+    pub const fn emotion(&self) -> &EmotionPrompts {
         &self.data.emotion
     }
 
     /// Returns reference to memory prompts.
     #[must_use]
-    pub fn memory(&self) -> &MemoryPrompts {
+    pub const fn memory(&self) -> &MemoryPrompts {
         &self.data.memory
     }
 
     /// Returns reference to summarizer prompts.
     #[must_use]
-    pub fn summarizer(&self) -> &SummarizerPrompts {
+    pub const fn summarizer(&self) -> &SummarizerPrompts {
         &self.data.summarizer
     }
 
     /// Returns reference to split prompts.
     #[must_use]
-    pub fn split(&self) -> &SplitPrompts {
+    pub const fn split(&self) -> &SplitPrompts {
         &self.data.split
     }
 
     /// Returns reference to extractor prompts.
     #[must_use]
-    pub fn extractor(&self) -> &ExtractorPrompts {
+    pub const fn extractor(&self) -> &ExtractorPrompts {
         &self.data.extractor
     }
 
     /// Returns reference to affect classifier prompts.
     #[must_use]
-    pub fn affect_classifier(&self) -> &AffectClassifierPrompts {
+    pub const fn affect_classifier(&self) -> &AffectClassifierPrompts {
         &self.data.affect_classifier
     }
 }
@@ -599,7 +599,7 @@ impl PromptLibrary {
 pub fn substitute(template: &str, vars: &[(&str, &str)]) -> String {
     let mut result = template.to_string();
     for (name, value) in vars {
-        result = result.replace(&format!("{{{}}}", name), value);
+        result = result.replace(&format!("{{{name}}}"), value);
     }
     result
 }

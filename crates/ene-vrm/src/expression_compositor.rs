@@ -110,7 +110,10 @@ impl ExpressionCompositor {
     /// Returns the names of all loaded card expressions.
     #[must_use]
     pub fn loaded_expression_names(&self) -> Vec<&str> {
-        self.card_expressions.keys().map(|k| k.as_str()).collect()
+        self.card_expressions
+            .keys()
+            .map(std::string::String::as_str)
+            .collect()
     }
 }
 

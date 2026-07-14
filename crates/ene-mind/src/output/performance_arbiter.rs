@@ -17,18 +17,19 @@ struct CueSlot {
 }
 
 impl CueSlot {
-    fn new(cue: PerformanceCue, source: CueSource) -> Self {
+    const fn new(cue: PerformanceCue, source: CueSource) -> Self {
         Self { cue, source }
     }
 
     /// Returns `true` if `incoming` should replace this slot.
-    fn should_replace(&self, incoming: CueSource) -> bool {
+    const fn should_replace(&self, incoming: CueSource) -> bool {
         cue_source_priority(incoming) >= cue_source_priority(self.source)
     }
 }
 
 /// Map a [`CueSource`] to its numeric priority (higher = more important).
-pub fn cue_source_priority(source: CueSource) -> u8 {
+#[must_use]
+pub const fn cue_source_priority(source: CueSource) -> u8 {
     match source {
         CueSource::LlmCommand => 5,
         CueSource::LlmAdvisory => 4,

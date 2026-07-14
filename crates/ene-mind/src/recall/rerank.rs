@@ -160,7 +160,7 @@ impl LlmMemoryReranker {
         .map_err(|e| MemoryRerankError::Provider(e.to_string()))?;
 
         let scores = parse_rerank_scores(&raw, candidates.len())?;
-        Ok(reorder_by_scores(candidates, &scores))
+        Ok(reorder_by_scores(&candidates, &scores))
     }
 }
 
@@ -302,7 +302,7 @@ impl MemoryRerankPipeline {
 ///
 /// Only the recall question and candidate `content` strings are included.
 #[must_use]
-pub(crate) fn build_rerank_messages(
+pub fn build_rerank_messages(
     recall_question: &str,
     candidates: &[ScoredMemory],
 ) -> Vec<LlmMessage> {
@@ -383,7 +383,7 @@ fn parse_rerank_scores(raw: &str, expected_len: usize) -> Result<Vec<f32>, Memor
 /// Reorder candidates by descending LLM score while preserving hybrid breakdowns.
 ///
 /// Ties break on the original hybrid-search index so ordering stays stable.
-fn reorder_by_scores(candidates: Vec<ScoredMemory>, scores: &[f32]) -> Vec<ScoredMemory> {
+fn reorder_by_scores(candidates: &[ScoredMemory], scores: &[f32]) -> Vec<ScoredMemory> {
     let mut indexed: Vec<(usize, f32)> = scores.iter().copied().enumerate().collect();
     indexed.sort_by(|left, right| {
         right
@@ -740,7 +740,7 @@ mod tests {
             sample_item(1, "first", "content-a", 0.9),
             sample_item(2, "second", "content-b", 0.5),
         ];
-        let reordered = reorder_by_scores(candidates, &[0.1, 0.9]);
+        let reordered = reorder_by_scores(&candidates, &[0.1, 0.9]);
         assert_eq!(reordered[0].item.id, Some(2));
         assert_eq!(reordered[1].item.id, Some(1));
     }
@@ -751,7 +751,7 @@ mod tests {
             sample_item(1, "first", "content-a", 0.9),
             sample_item(2, "second", "content-b", 0.5),
         ];
-        let reordered = reorder_by_scores(candidates, &[0.5, 0.5]);
+        let reordered = reorder_by_scores(&candidates, &[0.5, 0.5]);
         assert_eq!(reordered[0].item.id, Some(1));
         assert_eq!(reordered[1].item.id, Some(2));
     }

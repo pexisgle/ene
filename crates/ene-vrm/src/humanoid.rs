@@ -28,7 +28,7 @@
 //!   VRM files still load, but the registry key is always
 //!   the spec form.
 //! - **Unknown bone names are dropped with a warning.** A
-//!   typo or a VRoid extension bone ends up as a `tracing::warn!`
+//!   typo or a `VRoid` extension bone ends up as a `tracing::warn!`
 //!   line and the entry is not added to the registry.
 //! - **The registry is a `BTreeMap` so iteration order is
 //!   stable** for diagnostics dumps and snapshot tests.
@@ -148,6 +148,7 @@ pub struct VrmBone(pub String);
 
 impl VrmBone {
     /// Borrow the inner canonical string.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -175,7 +176,7 @@ impl From<String> for VrmBone {
 /// load time. The translation / rotation are read straight
 /// from the glTF `Node` transform (which is local to the
 /// node's parent, not global). Per-bone (one entry per bone)
-/// so consumers (LookAt, SpringBone, VRMA, NodeConstraint)
+/// so consumers (`LookAt`, `SpringBone`, VRMA, `NodeConstraint`)
 /// can read it without re-walking the glTF node hierarchy.
 ///
 /// Scale is intentionally omitted: the loader's
@@ -203,7 +204,7 @@ impl Default for BoneRestTransform {
 /// One entry in the humanoid registry. `node` is the glTF
 /// `Node` index (always set — a humanoid bone with no node
 /// is malformed and the loader drops it). `joint` is the
-/// optional index into `Skeleton::inverse_bind` so LookAt /
+/// optional index into `Skeleton::inverse_bind` so `LookAt` /
 /// VRMA can find the joint matrix in O(1) without re-walking
 /// the skin.
 #[derive(Clone, Debug)]
@@ -221,7 +222,7 @@ pub struct HumanoidBoneEntry {
 
 /// The humanoid bone registry. Stores one entry per
 /// `humanBones.<name>` the loader found. Iteration is
-/// deterministic (BTreeMap, sorted by canonical bone name).
+/// deterministic (`BTreeMap`, sorted by canonical bone name).
 #[derive(Clone, Debug, Default)]
 pub struct HumanoidBoneRegistry {
     entries: BTreeMap<VrmBone, HumanoidBoneEntry>,
@@ -230,6 +231,7 @@ pub struct HumanoidBoneRegistry {
 impl HumanoidBoneRegistry {
     /// Build an empty registry. Most code paths should use
     /// [`load_humanoid_bones`] instead.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -250,6 +252,7 @@ impl HumanoidBoneRegistry {
     /// Look up an entry by its canonical (lower-case) bone
     /// name. Use [`Self::by_name`] to accept the spec's
     /// mixed-case form too.
+    #[must_use]
     pub fn lookup(&self, bone: &VrmBone) -> Option<&HumanoidBoneEntry> {
         self.entries.get(bone)
     }
@@ -257,18 +260,21 @@ impl HumanoidBoneRegistry {
     /// Look up an entry by a possibly-mixed-case / mixed-
     /// separator bone name. `canonicalize_bone_name` does
     /// the heavy lifting; unknown names return `None`.
+    #[must_use]
     pub fn by_name(&self, raw_name: &str) -> Option<&HumanoidBoneEntry> {
         let bone = canonicalize_bone_name(raw_name)?;
         self.entries.get(&bone)
     }
 
     /// Convenience accessor for the `head` bone.
+    #[must_use]
     pub fn head(&self) -> Option<&HumanoidBoneEntry> {
         self.by_name("head")
     }
 
     /// Convenience accessor for the `hips` bone (the root
     /// of the humanoid chain).
+    #[must_use]
     pub fn hips(&self) -> Option<&HumanoidBoneEntry> {
         self.by_name("hips")
     }
@@ -276,21 +282,25 @@ impl HumanoidBoneRegistry {
     /// Convenience accessor for the `chest` bone. Used as the
     /// body-center fallback when the model has no `head` bone
     /// (see `apps/ene-desktop-v2::character::body_center_world`).
+    #[must_use]
     pub fn chest(&self) -> Option<&HumanoidBoneEntry> {
         self.by_name("chest")
     }
 
     /// Convenience accessor for the `jaw` bone.
+    #[must_use]
     pub fn jaw(&self) -> Option<&HumanoidBoneEntry> {
         self.by_name("jaw")
     }
 
     /// Convenience accessor for the `leftEye` bone.
+    #[must_use]
     pub fn left_eye(&self) -> Option<&HumanoidBoneEntry> {
         self.by_name("lefteye")
     }
 
     /// Convenience accessor for the `rightEye` bone.
+    #[must_use]
     pub fn right_eye(&self) -> Option<&HumanoidBoneEntry> {
         self.by_name("righteye")
     }
@@ -301,16 +311,19 @@ impl HumanoidBoneRegistry {
     }
 
     /// Sorted list of registered canonical bone names.
+    #[must_use]
     pub fn names(&self) -> Vec<VrmBone> {
         self.entries.keys().cloned().collect()
     }
 
     /// Number of registered bones.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// `true` when no bones are registered.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -333,6 +346,7 @@ impl HumanoidBoneRegistry {
 /// `HumanoidBoneRegistry::by_name` lookup; hidden from the "Supported API" docs since
 /// `ene-desktop` never needs to canonicalize a raw bone name itself.
 #[doc(hidden)]
+#[must_use]
 pub fn canonicalize_bone_name(raw: &str) -> Option<VrmBone> {
     // First normalise: drop separators and lowercase. This
     // collapses "Hips" / "hips" / "HIPS" / "left_upper_arm" /
@@ -404,7 +418,7 @@ pub fn load_humanoid_bones(gltf: &gltf::Gltf, skel: &Skeleton) -> HumanoidBoneRe
         };
         let Some(node_idx) = value
             .get("node")
-            .and_then(|n| n.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .map(|n| n as usize)
         else {
             tracing::warn!(
@@ -422,25 +436,22 @@ pub fn load_humanoid_bones(gltf: &gltf::Gltf, skel: &Skeleton) -> HumanoidBoneRe
         // 4. Capture the local rest transform from the glTF
         //    node. A missing / out-of-range node is logged
         //    and we fall back to the identity transform.
-        let rest = match gltf.document.nodes().nth(node_idx) {
-            Some(node) => {
-                // gltf 1.4's `Transform` exposes
-                // `decomposed() -> ([f32;3], [f32;4], [f32;3])`
-                // (translation, rotation quaternion, scale).
-                let (translation, rotation, _scale) = node.transform().decomposed();
-                BoneRestTransform {
-                    translation: Vec3::from(translation),
-                    rotation: Quat::from_array(rotation),
-                }
+        let rest = if let Some(node) = gltf.document.nodes().nth(node_idx) {
+            // gltf 1.4's `Transform` exposes
+            // `decomposed() -> ([f32;3], [f32;4], [f32;3])`
+            // (translation, rotation quaternion, scale).
+            let (translation, rotation, _scale) = node.transform().decomposed();
+            BoneRestTransform {
+                translation: Vec3::from(translation),
+                rotation: Quat::from_array(rotation),
             }
-            None => {
-                tracing::warn!(
-                    "VRM humanoid.humanBones['{}'] references out-of-range node {} (rest transform = identity)",
-                    raw_name,
-                    node_idx
-                );
-                BoneRestTransform::default()
-            }
+        } else {
+            tracing::warn!(
+                "VRM humanoid.humanBones['{}'] references out-of-range node {} (rest transform = identity)",
+                raw_name,
+                node_idx
+            );
+            BoneRestTransform::default()
         };
 
         let entry = HumanoidBoneEntry {

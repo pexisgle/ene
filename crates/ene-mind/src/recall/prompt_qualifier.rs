@@ -5,6 +5,7 @@ use ene_store::MemoryStatus;
 use crate::recall::RecalledMemory;
 
 /// Prefix recalled memory content for prompt injection when uncertainty applies.
+#[must_use]
 pub fn format_recalled_content(memory: &RecalledMemory) -> String {
     let qualifier = recall_content_qualifier(memory);
     match qualifier {
@@ -14,6 +15,7 @@ pub fn format_recalled_content(memory: &RecalledMemory) -> String {
 }
 
 /// Return a prompt prefix for uncertain or disputed memories, if any.
+#[must_use]
 pub fn recall_content_qualifier(memory: &RecalledMemory) -> Option<&'static str> {
     if memory.item.status == MemoryStatus::Faded {
         return Some("[uncertain] ");

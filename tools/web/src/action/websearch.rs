@@ -1,4 +1,5 @@
 use ene_tool_common::prelude::*;
+use std::fmt::Write;
 use std::sync::{Arc, RwLock};
 
 use crate::provider::WebSearchConfig;
@@ -41,7 +42,7 @@ pub struct WebSearchAction {
 }
 
 impl WebSearchAction {
-    pub fn new(config: Arc<RwLock<WebSearchConfig>>) -> Self {
+    pub const fn new(config: Arc<RwLock<WebSearchConfig>>) -> Self {
         Self {
             config,
             query: String::new(),
@@ -125,12 +126,13 @@ impl WebSearchAction {
         );
         for (i, result) in results.iter().enumerate() {
             let snippet = result.snippet.as_deref().unwrap_or("");
-            output.push_str(&format!(
+            let _ = write!(
+                output,
                 "{}. {}\n   {snippet}\n   URL: {}\n\n",
                 i + 1,
                 result.title,
                 result.url,
-            ));
+            );
         }
         Ok(output)
     }

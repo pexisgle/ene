@@ -15,7 +15,6 @@
 
 #![allow(clippy::unwrap_used)]
 
-use once_cell::sync::Lazy;
 use regex::Regex;
 
 use super::candidate::{Locale, MemoryCandidate, ToolResultSummary, TurnInput};
@@ -67,7 +66,7 @@ fn is_en_question(msg: &str) -> bool {
             && !head[q.len()..]
                 .chars()
                 .next()
-                .is_some_and(|c| c.is_alphanumeric())
+                .is_some_and(char::is_alphanumeric)
     })
 }
 
@@ -134,13 +133,15 @@ fn ja_explicit_remember(
     // precedes the keyword: `X を覚えて(おいて)`. Capturing group 1 is the
     // object. `教えて` ("tell me") is deliberately excluded because it is a
     // request for information, not a memory instruction.
-    static RE_WO: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(.+?)を(覚えて|記憶して|メモして|保存して)").unwrap());
+    static RE_WO: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"(.+?)を(覚えて|記憶して|メモして|保存して)").unwrap()
+    });
     // Explicit colon annotation `覚えて: X`, where the content follows the
     // keyword. The colon is required so a trailing verb continuation such as
     // `覚えておいて` is not mis-captured as content (`おいて`).
-    static RE_COLON: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?i)(覚えて|記憶して|メモして|保存して)[:：]\s*(.+)").unwrap());
+    static RE_COLON: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"(?i)(覚えて|記憶して|メモして|保存して)[:：]\s*(.+)").unwrap()
+    });
 
     let content = RE_WO
         .captures(user_msg)
@@ -157,7 +158,7 @@ fn ja_explicit_remember(
     let title: String = content.chars().take(20).collect();
     Some(MemoryCandidate {
         kind: MemoryKind::Semantic,
-        title: format!("{}...", title),
+        title: format!("{title}..."),
         content,
         source_quote: user_msg.to_string(),
         confidence: 0.85,
@@ -173,19 +174,20 @@ fn ja_forget_request(
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
     // Pattern 1: content + を + keyword (e.g., "プロジェクトを忘れて")
-    static RE_WO: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(.+?)を(忘れて|消して|削除して|やめて)").unwrap());
+    static RE_WO: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"(.+?)を(忘れて|消して|削除して|やめて)").unwrap());
     // Pattern 2: keyword + content (e.g., "忘れて プロジェクトの話")
-    static RE_AFTER: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?i)(忘れて|消して|削除して|やめて)[:：]?\s*(.+)").unwrap());
+    static RE_AFTER: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"(?i)(忘れて|消して|削除して|やめて)[:：]?\s*(.+)").unwrap()
+    });
 
     if let Some(cap) = RE_WO.captures(user_msg) {
         let target = cap[1].trim().to_string();
         let title_trunc: String = target.chars().take(20).collect();
         return Some(MemoryCandidate {
             kind: MemoryKind::Semantic,
-            title: format!("forget: {}", title_trunc),
-            content: format!("User requested to forget: {}", target),
+            title: format!("forget: {title_trunc}"),
+            content: format!("User requested to forget: {target}"),
             source_quote: user_msg.to_string(),
             confidence: 0.90,
             should_persist: false,
@@ -203,8 +205,8 @@ fn ja_forget_request(
         let title_trunc: String = target.chars().take(20).collect();
         Some(MemoryCandidate {
             kind: MemoryKind::Semantic,
-            title: format!("forget: {}", title_trunc),
-            content: format!("User requested to forget: {}", target),
+            title: format!("forget: {title_trunc}"),
+            content: format!("User requested to forget: {target}"),
             source_quote: user_msg.to_string(),
             confidence: 0.90,
             should_persist: false,
@@ -219,8 +221,9 @@ fn ja_preference(
     _asst_msg: &str,
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
-    static RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?i)(好き|嫌い|苦手|大好き|大嫌い)[:：]?\s*(.+)").unwrap());
+    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"(?i)(好き|嫌い|苦手|大好き|大嫌い)[:：]?\s*(.+)").unwrap()
+    });
     RE.captures(user_msg).map(|cap| {
         let pref = cap[2].trim().to_string();
         let title_trunc: String = pref.chars().take(20).collect();
@@ -242,7 +245,8 @@ fn ja_nickname(
     _asst_msg: &str,
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
-    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(.+?)って呼んで").unwrap());
+    static RE: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"(.+?)って呼んで").unwrap());
     RE.captures(user_msg).and_then(|cap| {
         let name = trim_ja_callsign(cap[1].trim()).to_string();
         if name.is_empty() {
@@ -250,8 +254,8 @@ fn ja_nickname(
         }
         Some(MemoryCandidate {
             kind: MemoryKind::UserProfile,
-            title: format!("呼び方: {}", name),
-            content: format!("User wants to be called '{}'", name),
+            title: format!("呼び方: {name}"),
+            content: format!("User wants to be called '{name}'"),
             source_quote: user_msg.to_string(),
             confidence: 0.75,
             should_persist: true,
@@ -266,7 +270,7 @@ fn ja_ng_instruction(
     _asst_msg: &str,
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
-    static RE: Lazy<Regex> = Lazy::new(|| {
+    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r"(?i)(もう|これ以上|二度と).{0,6}(しないで|やめて|やめろ|禁止)").unwrap()
     });
     RE.captures(user_msg).map(|_cap| MemoryCandidate {
@@ -286,14 +290,14 @@ fn ja_commitment(
     _asst_msg: &str,
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
-    static RE: Lazy<Regex> = Lazy::new(|| {
+    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r"(?i)(あとで|次回|明日|来週|今度|今夜).{0,10}(して|確認|やる|話|連絡)").unwrap()
     });
     RE.captures(user_msg).map(|cap| {
         let due = cap[1].to_string();
         MemoryCandidate {
             kind: MemoryKind::Commitment,
-            title: format!("commitment: {}", due),
+            title: format!("commitment: {due}"),
             content: user_msg.to_string(),
             source_quote: user_msg.to_string(),
             confidence: 0.50,
@@ -316,7 +320,7 @@ fn en_explicit_remember(
     if is_en_question(user_msg) {
         return None;
     }
-    static RE: Lazy<Regex> = Lazy::new(|| {
+    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(
             r"(?i)(please\s+)?(remember|note|keep in mind|don't forget)[:：]?\s+(?:that\s+)?(.+)",
         )
@@ -348,7 +352,7 @@ fn en_forget_request(
     if is_en_question(user_msg) {
         return None;
     }
-    static RE: Lazy<Regex> = Lazy::new(|| {
+    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r"(?i)(forget|erase|drop|stop remembering)\s+(?:about\s+)?(.+)").unwrap()
     });
     RE.captures(user_msg).map(|cap| {
@@ -356,7 +360,7 @@ fn en_forget_request(
         MemoryCandidate {
             kind: MemoryKind::Semantic,
             title: format!("forget: {}", target.chars().take(20).collect::<String>()),
-            content: format!("User requested to forget: {}", target),
+            content: format!("User requested to forget: {target}"),
             source_quote: user_msg.to_string(),
             confidence: 0.90,
             should_persist: false,
@@ -371,7 +375,7 @@ fn en_preference(
     _asst_msg: &str,
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
-    static RE: Lazy<Regex> = Lazy::new(|| {
+    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r"(?i)(I\s+(?:really\s+)?(?:don't\s+like|hate|dislike|love|like|prefer))\s+(.+)")
             .unwrap()
     });
@@ -395,7 +399,7 @@ fn en_nickname(
     _asst_msg: &str,
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
-    static RE: Lazy<Regex> = Lazy::new(|| {
+    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r#"(?i)(?:call|refer to|address)\s+me\s+(?:as\s+)?["']?([^"',.]+?)["']?\s*$"#)
             .unwrap()
     });
@@ -403,8 +407,8 @@ fn en_nickname(
         let name = cap[1].trim().to_string();
         MemoryCandidate {
             kind: MemoryKind::UserProfile,
-            title: format!("nickname: {}", name),
-            content: format!("User wants to be called '{}'", name),
+            title: format!("nickname: {name}"),
+            content: format!("User wants to be called '{name}'"),
             source_quote: user_msg.to_string(),
             confidence: 0.75,
             should_persist: true,
@@ -419,7 +423,7 @@ fn en_ng_instruction(
     _asst_msg: &str,
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
-    static RE: Lazy<Regex> = Lazy::new(|| {
+    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(
             r"(?i)(never|don't|stop|no\s+more)\s+(do\s+that|say\s+that|mention|suggest|recommend)",
         )
@@ -442,14 +446,14 @@ fn en_commitment(
     _asst_msg: &str,
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
-    static RE: Lazy<Regex> = Lazy::new(|| {
+    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r"(?i)(next\s+time|later|tomorrow|next\s+week|tonight)\s*[,.]?\s*(?:let'?s|we\s+should|I'?ll|can\s+you)\s+(.+)").unwrap()
     });
     RE.captures(user_msg).map(|cap| {
         let due = cap[1].to_string();
         MemoryCandidate {
             kind: MemoryKind::Commitment,
-            title: format!("commitment: {}", due),
+            title: format!("commitment: {due}"),
             content: user_msg.to_string(),
             source_quote: user_msg.to_string(),
             confidence: 0.50,

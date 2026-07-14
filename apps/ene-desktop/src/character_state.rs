@@ -12,11 +12,11 @@ pub struct AnimationControl {
 }
 
 impl AnimationControl {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { playing: true }
     }
 
-    pub fn toggle_playing(&mut self) {
+    pub const fn toggle_playing(&mut self) {
         self.playing = !self.playing;
     }
 }

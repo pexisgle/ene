@@ -157,12 +157,12 @@ pub enum DbErrorCode {
 impl std::fmt::Display for DbErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DbErrorCode::PermissionDenied => write!(f, "PERMISSION_DENIED"),
-            DbErrorCode::UnknownTable => write!(f, "UNKNOWN_TABLE"),
-            DbErrorCode::UnknownColumn => write!(f, "UNKNOWN_COLUMN"),
-            DbErrorCode::TypeMismatch => write!(f, "TYPE_MISMATCH"),
-            DbErrorCode::InvalidFilter => write!(f, "INVALID_FILTER"),
-            DbErrorCode::Internal => write!(f, "INTERNAL"),
+            Self::PermissionDenied => write!(f, "PERMISSION_DENIED"),
+            Self::UnknownTable => write!(f, "UNKNOWN_TABLE"),
+            Self::UnknownColumn => write!(f, "UNKNOWN_COLUMN"),
+            Self::TypeMismatch => write!(f, "TYPE_MISMATCH"),
+            Self::InvalidFilter => write!(f, "INVALID_FILTER"),
+            Self::Internal => write!(f, "INTERNAL"),
         }
     }
 }

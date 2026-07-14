@@ -6,6 +6,8 @@
 //! Prompt templates are loaded from the `PromptLibrary` so all user-facing strings
 //! stay out of compiled code and can be localised without recompilation.
 
+use std::fmt::Write;
+
 use ene_config::PromptLibrary;
 use ene_store::{KeyFact, MemoryError};
 use serde::{Deserialize, Serialize};
@@ -54,14 +56,14 @@ pub async fn summarize_conversation(
                         text.push_str(t);
                     }
                 }
-                conversation_text.push_str(&format!("{user_name}: {text}\n"));
+                let _ = writeln!(conversation_text, "{user_name}: {text}");
             }
             ene_ai::LlmMessage::Assistant { content, .. } => {
                 let text = content.as_deref().unwrap_or("");
-                conversation_text.push_str(&format!("{character_name}: {text}\n"));
+                let _ = writeln!(conversation_text, "{character_name}: {text}");
             }
             ene_ai::LlmMessage::System { content } => {
-                conversation_text.push_str(&format!("System: {content}\n"));
+                let _ = writeln!(conversation_text, "System: {content}");
             }
             // Tool responses are intentionally excluded from the summary:
             // their content was already attributed to the assistant turn that
@@ -74,7 +76,7 @@ pub async fn summarize_conversation(
 
     let no_facts_placeholder = &prompts.summarizer().no_facts_placeholder;
     let existing_facts_str = if existing_facts.is_empty() {
-        no_facts_placeholder.to_string()
+        no_facts_placeholder.clone()
     } else {
         existing_facts
             .iter()

@@ -34,7 +34,7 @@ const BYTES_PER_PIXEL: u64 = 4;
 /// `bytes_per_row * height`; the trailing per-row padding bytes
 /// are unread by the CPU (`extract_rectangles` walks per-pixel
 /// using `width`, not the stride).
-pub(crate) const fn aligned_bytes_per_row(width: u32) -> u32 {
+pub const fn aligned_bytes_per_row(width: u32) -> u32 {
     (width as u64 * BYTES_PER_PIXEL).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as u64)
         as u32
 }
@@ -121,7 +121,7 @@ impl MaskCaptureCamera {
         // Round `width * BYTES_PER_PIXEL` up to the next
         // multiple and size the staging buffer accordingly.
         let bytes_per_row = aligned_bytes_per_row(width);
-        let readback_size = (bytes_per_row as u64) * (height as u64);
+        let readback_size = u64::from(bytes_per_row) * u64::from(height);
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mask.readback"),
             size: readback_size,
@@ -169,24 +169,24 @@ impl MaskCaptureCamera {
 
     /// View into which the mask shader writes. The runtime
     /// renders the model into this view once per frame.
-    pub fn target_view(&self) -> &wgpu::TextureView {
+    pub const fn target_view(&self) -> &wgpu::TextureView {
         &self.target_view
     }
 
     #[expect(dead_code)]
-    pub fn width(&self) -> u32 {
+    pub const fn width(&self) -> u32 {
         self.width
     }
 
     #[expect(dead_code)]
-    pub fn height(&self) -> u32 {
+    pub const fn height(&self) -> u32 {
         self.height
     }
 
     /// `extract_rectangles` returns rectangles in target pixel
     /// space; the runtime scales them by this factor to convert
     /// back to window-pixel space.
-    pub fn downsample(&self) -> u32 {
+    pub const fn downsample(&self) -> u32 {
         self.downsample
     }
 

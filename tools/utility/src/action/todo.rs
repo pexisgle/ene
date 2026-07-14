@@ -33,7 +33,8 @@ pub struct TodoListAction {
 
 impl TodoListAction {
     /// Creates a new `TodoListAction`.
-    pub fn new(state: Arc<UtilityState>) -> Self {
+    #[must_use]
+    pub const fn new(state: Arc<UtilityState>) -> Self {
         Self { state }
     }
 
@@ -93,7 +94,8 @@ pub struct TodoAddAction {
 
 impl TodoAddAction {
     /// Creates a new `TodoAddAction`.
-    pub fn new(state: Arc<UtilityState>) -> Self {
+    #[must_use]
+    pub const fn new(state: Arc<UtilityState>) -> Self {
         Self {
             state,
             content: String::new(),
@@ -168,7 +170,8 @@ where
 
 impl TodoUpdateAction {
     /// Creates a new `TodoUpdateAction`.
-    pub fn new(state: Arc<UtilityState>) -> Self {
+    #[must_use]
+    pub const fn new(state: Arc<UtilityState>) -> Self {
         Self {
             state,
             id: 0,
@@ -222,7 +225,8 @@ pub struct TodoCompleteAction {
 
 impl TodoCompleteAction {
     /// Creates a new `TodoCompleteAction`.
-    pub fn new(state: Arc<UtilityState>) -> Self {
+    #[must_use]
+    pub const fn new(state: Arc<UtilityState>) -> Self {
         Self { state, id: 0 }
     }
 
@@ -267,7 +271,8 @@ pub struct TodoDeleteAction {
 
 impl TodoDeleteAction {
     /// Creates a new `TodoDeleteAction`.
-    pub fn new(state: Arc<UtilityState>) -> Self {
+    #[must_use]
+    pub const fn new(state: Arc<UtilityState>) -> Self {
         Self { state, id: 0 }
     }
 

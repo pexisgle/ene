@@ -58,7 +58,7 @@ where
 pub enum ConfigTarget {
     /// Config belongs to settings.json
     Settings,
-    /// Config belongs to character_settings.json
+    /// Config belongs to `character_settings.json`
     Character,
 }
 
@@ -173,7 +173,7 @@ impl EneConfig {
     /// Refuses types whose `TARGET` is `Character`; those
     /// sections live in `CharacterConfig::extra` and must
     /// go through [`CharacterConfig::get_section`]. The
-    /// previous debug_assert silently read from the wrong
+    /// previous `debug_assert` silently read from the wrong
     /// map in release builds.
     pub fn get_section<T>(&self) -> Result<T, EneConfigError>
     where
@@ -221,7 +221,7 @@ impl EneConfig {
     /// Refuses types whose `TARGET` is `Character`; those
     /// sections live in `CharacterConfig::extra` and must
     /// go through [`CharacterConfig::set_section`]. The
-    /// previous debug_assert silently wrote to the wrong
+    /// previous `debug_assert` silently wrote to the wrong
     /// map in release builds.
     pub fn set_section<T>(&mut self, section: &T) -> Result<(), EneConfigError>
     where
@@ -405,19 +405,17 @@ pub fn generate_schema_json() -> Result<String, serde_json::Error> {
                         );
                     }
                 }
-            } else {
-                if let Some(properties) = root_obj
-                    .entry("properties".to_string())
-                    .or_insert_with(|| serde_json::json!({}))
-                    .as_object_mut()
-                {
-                    let mut clean_entry = entry_val.clone();
-                    if let Some(obj) = clean_entry.as_object_mut() {
-                        obj.remove("definitions");
-                        obj.remove("$schema");
-                    }
-                    properties.insert(key.clone(), clean_entry);
+            } else if let Some(properties) = root_obj
+                .entry("properties".to_string())
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+            {
+                let mut clean_entry = entry_val.clone();
+                if let Some(obj) = clean_entry.as_object_mut() {
+                    obj.remove("definitions");
+                    obj.remove("$schema");
                 }
+                properties.insert(key.clone(), clean_entry);
             }
         }
     }
@@ -426,7 +424,7 @@ pub fn generate_schema_json() -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(&root_schema)
 }
 
-/// Generates the JSON representation of the JSON Schema for character_settings.json
+/// Generates the JSON representation of the JSON Schema for `character_settings.json`
 pub fn generate_character_schema_json() -> Result<String, serde_json::Error> {
     let schema_gen = schemars::SchemaGenerator::default();
     let root_schema = schema_gen.into_root_schema_for::<crate::character_config::CharacterConfig>();
@@ -482,7 +480,7 @@ pub fn generate_character_schema_json() -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(&root_schema)
 }
 
-/// Generates the JSON representation of the JSON Schema for character.json (CharacterCardV3)
+/// Generates the JSON representation of the JSON Schema for character.json (`CharacterCardV3`)
 pub fn generate_character_card_schema_json() -> Result<String, serde_json::Error> {
     let schema_gen = schemars::SchemaGenerator::default();
     let root_schema = schema_gen.into_root_schema_for::<crate::character_card::CharacterCardV3>();

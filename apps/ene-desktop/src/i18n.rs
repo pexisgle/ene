@@ -35,4 +35,9 @@ pub fn select_language(lang: Language) {
     }
 }
 
-include!(concat!(env!("OUT_DIR"), "/i18n_keys.rs"));
+#[allow(dead_code)]
+mod __generated_i18n_keys {
+    use super::loader;
+    include!(concat!(env!("OUT_DIR"), "/i18n_keys.rs"));
+}
+pub use __generated_i18n_keys::*;

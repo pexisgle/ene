@@ -238,7 +238,7 @@ impl LayerComposer {
 
     /// Returns whether any motion is playing.
     #[must_use]
-    pub fn has_active_motion(&self) -> bool {
+    pub const fn has_active_motion(&self) -> bool {
         self.upper.is_some() || self.lower.is_some() || self.full.is_some()
     }
 

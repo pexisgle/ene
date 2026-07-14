@@ -14,7 +14,7 @@ pub fn estimate_tokens(text: &str) -> usize {
 
 /// Convert a token budget to an approximate character budget.
 #[must_use]
-pub fn tokens_to_chars(tokens: usize) -> usize {
+pub const fn tokens_to_chars(tokens: usize) -> usize {
     tokens.saturating_mul(CHARS_PER_TOKEN)
 }
 

@@ -32,8 +32,8 @@ impl GpuContext {
             },
             backend_options: backend_options(),
             flags: wgpu::InstanceFlags::default(),
-            display: std::default::Default::default(),
-            memory_budget_thresholds: std::default::Default::default(),
+            display: Option::default(),
+            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
         });
 
         let adapter = instance

@@ -240,7 +240,10 @@ impl Sandbox {
 
     async fn ensure_undo_manager(&self) -> Result<Arc<UndoManager>, ToolError> {
         {
-            let guard = self.undo_manager.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = self
+                .undo_manager
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(mgr) = guard.as_ref() {
                 return Ok(mgr.clone());
             }
@@ -266,16 +269,21 @@ impl Sandbox {
         })?;
 
         let mgr = Arc::new(mgr);
-        let mut guard = self.undo_manager.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(existing) = guard.as_ref() {
-            Ok(existing.clone())
+        let mut guard = self
+            .undo_manager
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(existing) = guard.clone() {
+            drop(guard);
+            Ok(existing)
         } else {
             *guard = Some(mgr.clone());
+            drop(guard);
             Ok(mgr)
         }
     }
 
-    pub fn config(&self) -> &SandboxConfig {
+    pub const fn config(&self) -> &SandboxConfig {
         &self.config
     }
 
@@ -295,7 +303,10 @@ impl Sandbox {
         // Reset undo manager so it reconnects with new session_id.
         // Use standard sync Mutex lock so we can block safely from
         // both sync and async contexts without panicking the Tokio runtime.
-        let mut guard = self.undo_manager.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .undo_manager
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *guard = None;
     }
 
@@ -452,13 +463,10 @@ impl Sandbox {
             message: format!("Undo failed: {e}"),
         })?;
 
-        let entry = match entry {
-            Some(e) => e,
-            None => {
-                return Err(ToolError::ExecutionFailed {
-                    message: "No operations to undo".to_string(),
-                });
-            }
+        let Some(entry) = entry else {
+            return Err(ToolError::ExecutionFailed {
+                message: "No operations to undo".to_string(),
+            });
         };
 
         // Apply every operation before touching the DB.

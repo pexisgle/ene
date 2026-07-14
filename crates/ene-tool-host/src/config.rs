@@ -23,7 +23,7 @@ impl Default for ToolEntry {
     fn default() -> Self {
         Self {
             enable: true,
-            config: serde_json::Value::Object(Default::default()),
+            config: serde_json::Value::Object(serde_json::Map::default()),
         }
     }
 }
@@ -91,20 +91,20 @@ pub struct FieldWeightsConfig {
     pub example: f32,
     /// Weight for the negative/unwanted embedding (penalizes matches).
     pub negative: f32,
-    /// Weight for the HyDE (hypothetical document embedding).
+    /// Weight for the `HyDE` (hypothetical document embedding).
     pub hyde: f32,
-    /// Weight for the HyDE blend factor — the fraction
-    /// of the final score contributed by the HyDE
+    /// Weight for the `HyDE` blend factor — the fraction
+    /// of the final score contributed by the `HyDE`
     /// similarity, with the remainder from the direct
     /// per-field cosine similarity. Range `[0.0, 1.0]`;
-    /// 0.0 disables HyDE blending, 1.0 uses only the
-    /// HyDE similarity. Replaces the previously
+    /// 0.0 disables `HyDE` blending, 1.0 uses only the
+    /// `HyDE` similarity. Replaces the previously
     /// hardcoded 0.6 factor.
     #[serde(default = "default_hyde_blend")]
     pub hyde_blend: f32,
 }
 
-fn default_hyde_blend() -> f32 {
+const fn default_hyde_blend() -> f32 {
     0.6
 }
 

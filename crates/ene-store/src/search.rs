@@ -29,6 +29,7 @@ pub(crate) fn tokenize(text: &str) -> HashSet<String> {
 /// Jaccard similarity between two memory documents (title + content tokens).
 ///
 /// Used for duplicate clustering and MMR pairwise diversity (#78).
+#[must_use]
 pub fn document_lexical_similarity(
     title_a: &str,
     content_a: &str,
@@ -100,14 +101,14 @@ pub(crate) fn emotional_match_score(
     };
     let dv = query.valence - item_affect.valence;
     let da = query.arousal - item_affect.arousal;
-    let dist = (dv * dv + da * da).sqrt();
+    let dist = dv.hypot(da);
     // Max distance in unit square diagonals ~2.83; map to similarity.
     (1.0 - (dist / 2.83)).clamp(0.0, 1.0)
 }
 
 /// Normalize relationship impact `[-1, 1]` to `[0, 1]`.
-pub(crate) fn relationship_score(impact: f32) -> f32 {
-    ((impact + 1.0) / 2.0).clamp(0.0, 1.0)
+pub(crate) const fn relationship_score(impact: f32) -> f32 {
+    f32::midpoint(impact, 1.0).clamp(0.0, 1.0)
 }
 
 /// Diminishing returns boost from prior accesses.
@@ -146,7 +147,7 @@ pub(crate) fn stale_penalty(
 }
 
 /// Whether a memory status is eligible for normal hybrid recall.
-pub(crate) fn is_recallable_status(status: MemoryStatus) -> bool {
+pub(crate) const fn is_recallable_status(status: MemoryStatus) -> bool {
     matches!(
         status,
         MemoryStatus::Active | MemoryStatus::Faded | MemoryStatus::Disputed
@@ -170,14 +171,25 @@ pub(crate) fn score_candidate(
     let stale = stale_penalty(item.status, options.now, item.valid_until);
 
     let w = &options.weights;
-    let weighted = candidate.vector_similarity * w.vector
-        + lexical * w.lexical
-        + recency * w.recency
-        + salience * w.salience
-        + confidence * w.confidence
-        + emotional * w.emotional_match
-        + relationship * w.relationship
-        + access * w.access_boost;
+    let weighted = access.mul_add(
+        w.access_boost,
+        relationship.mul_add(
+            w.relationship,
+            emotional.mul_add(
+                w.emotional_match,
+                confidence.mul_add(
+                    w.confidence,
+                    salience.mul_add(
+                        w.salience,
+                        recency.mul_add(
+                            w.recency,
+                            lexical.mul_add(w.lexical, candidate.vector_similarity * w.vector),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    );
 
     let commitment_boost = if candidate
         .sources

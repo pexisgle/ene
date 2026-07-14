@@ -1,11 +1,11 @@
-//! Map legacy keyfacts to typed UserProfile / Preference memories.
+//! Map legacy keyfacts to typed `UserProfile` / Preference memories.
 
 use crate::typed_memory::{
     AffectAnnotation, MemoryConfidence, MemoryKind, MemorySalience, MemoryScope, MemorySource,
     MemoryStatus, NewMemoryItem,
 };
 
-/// Classify a legacy keyfact key into UserProfile or Preference.
+/// Classify a legacy keyfact key into `UserProfile` or Preference.
 #[must_use]
 pub fn keyfact_kind_for_key(key: &str) -> MemoryKind {
     let lower = key.to_lowercase();

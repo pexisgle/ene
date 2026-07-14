@@ -27,10 +27,7 @@ impl MouseScrollAction {
         let dir_str = direction.clone();
         let is_horizontal = direction == "left" || direction == "right";
         let scroll_amount = match direction.as_str() {
-            "up" => -amount,
-            "down" => amount,
-            "left" => -amount,
-            "right" => amount,
+            "up" | "left" => -amount,
             _ => amount,
         };
         let axis = if is_horizontal {

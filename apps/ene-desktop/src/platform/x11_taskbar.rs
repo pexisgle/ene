@@ -6,7 +6,7 @@
 //! `wl_surface::set_input_region`; X11 uses the shape extension
 //! (`shape::rectangles(SK::Input, SO::Set, …)` — empty list =
 //! pass-through) plus the EWMH `_NET_WM_STATE_SKIP_TASKBAR |
-//! _SKIP_PAGER` ClientMessage so the character never steals
+//! _SKIP_PAGER` `ClientMessage` so the character never steals
 //! focus on alt-tab.
 //!
 //! The winit raw handles are only used to **detect** X11; the
@@ -92,13 +92,17 @@ pub enum X11Path {
 impl X11Path {
     /// Pure decision function. Mirrors the Wayland branch in
     /// [`crate::platform::apply_linux_click_through`].
-    pub fn decide(allows_input: bool, cursor_on_silhouette: bool, freeze_forced: bool) -> Self {
+    pub const fn decide(
+        allows_input: bool,
+        cursor_on_silhouette: bool,
+        freeze_forced: bool,
+    ) -> Self {
         if freeze_forced {
-            X11Path::Frozen
+            Self::Frozen
         } else if allows_input && cursor_on_silhouette {
-            X11Path::Full
+            Self::Full
         } else {
-            X11Path::Empty
+            Self::Empty
         }
     }
 }

@@ -72,7 +72,7 @@ pub fn build_collider_lines(
 /// Pure version of [`build_collider_lines`] that doesn't draw
 /// the hit cross; useful for tests and for callers that need
 /// the wireframe only.
-pub(crate) fn push_lines(
+pub fn push_lines(
     out: &mut Vec<DebugLine>,
     physics: &PhysicsWorld,
     colliders: &[ColliderHandle],
@@ -125,7 +125,7 @@ pub(crate) fn push_lines(
 }
 
 #[expect(dead_code)]
-pub(crate) fn unused_collider_set_marker(_cs: &ColliderSet) {}
+pub const fn unused_collider_set_marker(_cs: &ColliderSet) {}
 
 #[cfg(test)]
 mod tests {

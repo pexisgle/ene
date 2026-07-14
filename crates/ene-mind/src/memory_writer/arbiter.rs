@@ -124,7 +124,7 @@ pub enum ArbiterReasonCode {
 }
 
 /// Human-readable decision reason with structured code.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArbiterReason {
     /// Structured reason code.
     pub code: ArbiterReasonCode,
@@ -680,14 +680,14 @@ fn source_quote_valid(candidate: &MemoryCandidate, turn: &TurnInput<'_>) -> bool
     false
 }
 
-fn is_arbitration_visible(status: MemoryStatus) -> bool {
+const fn is_arbitration_visible(status: MemoryStatus) -> bool {
     matches!(
         status,
         MemoryStatus::Active | MemoryStatus::Faded | MemoryStatus::Disputed
     )
 }
 
-fn is_contradiction_kind(kind: MemoryKind) -> bool {
+const fn is_contradiction_kind(kind: MemoryKind) -> bool {
     matches!(
         kind,
         MemoryKind::Preference
@@ -697,7 +697,7 @@ fn is_contradiction_kind(kind: MemoryKind) -> bool {
     )
 }
 
-fn kind_label(kind: MemoryKind) -> &'static str {
+const fn kind_label(kind: MemoryKind) -> &'static str {
     kind.as_str()
 }
 

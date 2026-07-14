@@ -17,7 +17,7 @@ pub struct TodoItem {
     pub parent_id: Option<i64>,
     /// Task description.
     pub content: String,
-    /// Status: pending, in_progress, completed, cancelled.
+    /// Status: pending, `in_progress`, completed, cancelled.
     pub status: String,
     /// Priority: high, medium, low.
     pub priority: String,
@@ -104,6 +104,7 @@ impl TodoStore {
                 None,
             )
             .await?;
+        drop(client);
         Ok(rows.iter().map(TodoItem::from_row).collect())
     }
 
@@ -145,6 +146,7 @@ impl TodoStore {
         let rows = client
             .select("utility_todo_items", &[], filter, vec![], Some(1))
             .await?;
+        drop(client);
         rows.first()
             .map(TodoItem::from_row)
             .ok_or_else(|| "inserted row not found".into())
@@ -191,6 +193,7 @@ impl TodoStore {
             }
             let mut client = self.client.lock().await;
             Self::check_ancestor_chain(&mut client, session_id, id, new_parent).await?;
+            drop(client);
         }
 
         let now = chrono::Utc::now().to_rfc3339();
@@ -224,6 +227,7 @@ impl TodoStore {
         let rows = client
             .select("utility_todo_items", &[], filter, vec![], Some(1))
             .await?;
+        drop(client);
         rows.first()
             .map(TodoItem::from_row)
             .ok_or_else(|| "updated row not found".into())
@@ -274,6 +278,7 @@ impl TodoStore {
                 None,
             )
             .await?;
+        drop(client);
         Ok(rows.iter().map(TodoItem::from_row).collect())
     }
 
@@ -296,6 +301,7 @@ impl TodoStore {
         let rows = client
             .select("utility_todo_items", &[], filter, vec![], Some(1))
             .await?;
+        drop(client);
         rows.first()
             .map(TodoItem::from_row)
             .ok_or_else(|| "deleted row not found".into())
@@ -352,7 +358,6 @@ impl TodoStore {
             };
             match row.get("parent_id") {
                 Some(DbValue::Int(p)) => current = *p,
-                Some(DbValue::Null) | None => return Ok(()),
                 _ => return Ok(()),
             }
         }

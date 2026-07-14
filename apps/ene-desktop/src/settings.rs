@@ -371,7 +371,7 @@ impl std::fmt::Debug for CharacterSettings {
             .field("language", &self.language)
             .field("character_state", &self.character_state)
             .field("ai", &self.ai)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -381,7 +381,7 @@ impl std::fmt::Debug for CharacterSettings {
 impl CharacterSettings {
     /// Build the initial settings: discover characters on disk,
     /// load the persisted JSON, clamp runtime values.
-    pub fn discover(assets_dir: &Path, default_vrm: String) -> Self {
+    pub fn discover(assets_dir: &Path, default_vrm: &str) -> Self {
         let mut characters = discover_characters(assets_dir);
         if characters.is_empty() {
             characters.push(CharacterEntry {
@@ -397,7 +397,7 @@ impl CharacterSettings {
 
         let selected_character = characters
             .iter()
-            .position(|c| c.vrm_paths.iter().any(|v| v == &default_vrm))
+            .position(|c| c.vrm_paths.iter().any(|v| v == default_vrm))
             .unwrap_or(0);
 
         let default_card = format!("characters/{DEFAULT_CHARACTER_NAME}/character.json");
@@ -497,6 +497,7 @@ impl CharacterSettings {
         let store = self.store.read();
         store.load_character_config(&char_name);
         let per = store.character_config();
+        drop(store);
 
         self.character_state.character_position = Vec3::new(
             per.character_position[0],
@@ -695,7 +696,7 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
             continue;
         }
         let (name, default_motion_name, card_motions) =
-            read_character_json_meta(&card_path).unwrap_or((folder.clone(), None, None));
+            read_character_json_meta(&card_path).unwrap_or_else(|| (folder.clone(), None, None));
 
         let mut vrm_paths = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&path) {

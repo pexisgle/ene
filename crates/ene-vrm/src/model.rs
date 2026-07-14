@@ -64,10 +64,10 @@ pub struct VrmPrimitive {
     /// for materials without the extension (the renderer falls
     /// back to the half-Lambert lite shader in that case).
     pub mtoon: Option<MToonMaterial>,
-    /// GPU textures for MToon (shade multiply, shading
+    /// GPU textures for `MToon` (shade multiply, shading
     /// shift, emissive, matcap, rim multiply, outline width,
-    /// UV animation mask). `None` when the material has no MToon
-    /// extension or no MToon textures.
+    /// UV animation mask). `None` when the material has no `MToon`
+    /// extension or no `MToon` textures.
     pub mtoon_textures: Option<std::sync::Arc<MToonGpuTextures>>,
 }
 
@@ -96,7 +96,8 @@ impl AlphaMode {
     /// - `0` — opaque / mask (depth write on, drawn first).
     /// - `1` — blend (depth write off, drawn after opaque).
     #[inline]
-    pub fn render_phase(self) -> u8 {
+    #[must_use]
+    pub const fn render_phase(self) -> u8 {
         match self {
             Self::Opaque | Self::Mask => 0,
             Self::Blend => 1,
@@ -106,7 +107,7 @@ impl AlphaMode {
 
 /// A single glTF mesh object, as a list of primitives. loads
 /// every `Mesh` in the glTF document — a VRM 1.0 has ~12 of these
-/// (body, hair_front, hair_back, face, clothes_top, clothes_bottom,
+/// (body, `hair_front`, `hair_back`, face, `clothes_top`, `clothes_bottom`,
 /// etc.), one per body part. Earlier PRs that only loaded
 /// `meshes[0]` therefore rendered the head/face area only.
 #[derive(Debug, Default)]
@@ -132,6 +133,7 @@ pub struct VrmTexture {
 }
 
 /// Skeleton metadata loaded from the first skin in the glTF.
+///
 /// rendered with **identity** skinning; exposes the full
 /// joint list plus the per-joint `inverse_bind` so the runtime
 /// can build the `mat4x4[]` skin palette via the standard glTF
@@ -166,7 +168,8 @@ pub struct Skeleton {
 
 impl Skeleton {
     /// Number of joints in the skeleton. Zero for models with no skin.
-    pub fn joint_count(&self) -> usize {
+    #[must_use]
+    pub const fn joint_count(&self) -> usize {
         self.inverse_bind.len()
     }
 }
@@ -243,13 +246,15 @@ pub struct NodeHierarchy {
 
 impl NodeHierarchy {
     /// Number of glTF nodes captured.
-    pub fn len(&self) -> usize {
+    #[must_use]
+    pub const fn len(&self) -> usize {
         self.local_rotations.len()
     }
 
     /// `true` when no nodes were captured (the model file
     /// had zero glTF `Node` objects — malformed).
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.local_rotations.is_empty()
     }
 
@@ -317,8 +322,8 @@ pub struct VrmModel {
     /// Humanoid bone registry (this struct). Built from the
     /// `VRMC_vrm.humanoid.humanBones` block — empty for
     /// models without humanoid metadata (e.g. legacy
-    /// VRM 0.x). Consumers (#11 LookAt, #13 SpringBone,
-    /// #14 VRMA, #15 NodeConstraint) use this to map bone
+    /// VRM 0.x). Consumers (#11 `LookAt`, #13 `SpringBone`,
+    /// #14 VRMA, #15 `NodeConstraint`) use this to map bone
     /// names to glTF node / Skeleton joint indices.
     pub humanoid: HumanoidBoneRegistry,
     /// Full glTF node hierarchy (this struct). Captured at
@@ -357,21 +362,24 @@ impl VrmModel {
     /// Raw glTF AABB `(min, max)` of every vertex, in model-local
     /// space. The runtime's auto-fit scale and the
     /// `model.model` matrix both consume this.
-    pub fn aabb(&self) -> ([f32; 3], [f32; 3]) {
+    #[must_use]
+    pub const fn aabb(&self) -> ([f32; 3], [f32; 3]) {
         (self.aabb_min, self.aabb_max)
     }
 
     /// AABB center in raw glTF space. The runtime subtracts
     /// this from every vertex (via the model matrix) so the
     /// character pivots around its own midpoint.
-    pub fn center(&self) -> [f32; 3] {
+    #[must_use]
+    pub const fn center(&self) -> [f32; 3] {
         self.center
     }
 
     /// `1.5 / max_extent` — the uniform scale the runtime
     /// applies to map the longest AABB axis to the canonical
     /// 1.5 m model size.
-    pub fn normalize_scale(&self) -> f32 {
+    #[must_use]
+    pub const fn normalize_scale(&self) -> f32 {
         self.normalize_scale
     }
 
@@ -381,6 +389,7 @@ impl VrmModel {
     /// longest extent equal to 1.5. The auto-fit helper
     /// consumes this; tests use it to avoid having to
     /// hard-code the raw AABB.
+    #[must_use]
     pub fn normalized_aabb(&self) -> ([f32; 3], [f32; 3]) {
         let s = self.normalize_scale;
         let c = self.center;
@@ -390,13 +399,15 @@ impl VrmModel {
     }
 
     /// Number of joints in the skeleton. Zero for models with no skin.
-    pub fn joint_count(&self) -> usize {
+    #[must_use]
+    pub const fn joint_count(&self) -> usize {
         self.skeleton.joint_count()
     }
 
     /// Borrow the expression layer. The runtime writes into
     /// `expressions.weights` every frame; the renderer reads it.
-    pub fn expressions(&self) -> &ExpressionLayer {
+    #[must_use]
+    pub const fn expressions(&self) -> &ExpressionLayer {
         &self.expressions
     }
 
@@ -404,7 +415,7 @@ impl VrmModel {
     /// `CharacterRenderer::apply_emotions` in
     /// `apps/ene-desktop-v2` to push the latest emotion weights
     /// into the model.
-    pub fn expressions_mut(&mut self) -> &mut ExpressionLayer {
+    pub const fn expressions_mut(&mut self) -> &mut ExpressionLayer {
         &mut self.expressions
     }
 
@@ -413,7 +424,8 @@ impl VrmModel {
     /// VRM 0.x). The desktop runtime supplies the spec
     /// default in that case via
     /// [`LookAtProperties::default`].
-    pub fn look_at(&self) -> Option<&LookAtProperties> {
+    #[must_use]
+    pub const fn look_at(&self) -> Option<&LookAtProperties> {
         self.look_at.as_ref()
     }
 
@@ -424,7 +436,8 @@ impl VrmModel {
     /// target test attaches a minimal synthetic model so it can
     /// mutate `nodes.world_positions` and assert the camera
     /// target is unaffected by animation).
-    pub fn new(
+    #[must_use]
+    pub const fn new(
         meshes: Vec<VrmMesh>,
         skeleton: Skeleton,
         aabb_min: [f32; 3],
@@ -477,12 +490,12 @@ impl VrmModel {
     ///    local rotation of `nodes.local_rotations[entry.node]`
     ///    with the VRMA's bone rotation. Bones that aren't
     ///    in the humanoid registry are silently dropped.
-    /// 2. **Apply LookAt bone deltas** (this struct): for the
+    /// 2. **Apply `LookAt` bone deltas** (this struct): for the
     ///    `head` / `leftEye` / `rightEye` humanoid bones
     ///    whose [`LookAtBoneOutput`] carries a non-identity
     ///    delta, overwrite the local rotation with
     ///    `rest_local_rotations[node] * look_at_delta`. The
-    ///    spec defines the LookAt delta as a rotation
+    ///    spec defines the `LookAt` delta as a rotation
     ///    applied to the bone's *rest* rotation, so a
     ///    LookAt-active head/eye wins over the VRMA's
     ///    contribution for the same bone (this matches the
@@ -490,7 +503,7 @@ impl VrmModel {
     ///    active motion" behaviour). Bones missing from
     ///    the humanoid registry are silently dropped, so
     ///    the call is a no-op on models without humanoid
-    ///    metadata. The LookAt step runs **after** the
+    ///    metadata. The `LookAt` step runs **after** the
     ///    VRMA step so head/eye bones that the motion also
     ///    animates end up looking at the cursor rather than
     ///    blending the two sources.
@@ -523,9 +536,9 @@ impl VrmModel {
     /// helper is re-exported so the runtime can use it once
     /// the per-frame rest-pose comparison is available.
     ///
-    /// **LookAt semantics** (this struct): `look_at` is the
+    /// **`LookAt` semantics** (this struct): `look_at` is the
     /// [`LookAtBoneOutput`] of the current frame, or `None`
-    /// when the model is `"expression"`-type (the LookAt
+    /// when the model is `"expression"`-type (the `LookAt`
     /// signal then routes into morph weights via
     /// [`crate::expression::ExpressionLayer`], not into bone
     /// rotations) or when no cursor sample has been
@@ -738,7 +751,7 @@ impl MeshVertex {
     /// - `3` = joints (`vec4<u32>`, uploaded as `Uint32x4`)
     /// - `4` = weights (`vec4<f32>`)
     pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<MeshVertex>() as wgpu::BufferAddress,
+        array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &wgpu::vertex_attr_array![
             0 => Float32x3,
@@ -750,7 +763,8 @@ impl MeshVertex {
     };
 
     /// Reinterpret a slice of vertices as `&[u8]` for buffer upload.
-    pub fn as_bytes(vertices: &[MeshVertex]) -> &[u8] {
+    #[must_use]
+    pub fn as_bytes(vertices: &[Self]) -> &[u8] {
         bytemuck::cast_slice(vertices)
     }
 }

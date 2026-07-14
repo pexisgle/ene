@@ -1,4 +1,4 @@
-use crate::utils::sandbox::Sandbox;
+use crate::utils::sandbox::{Sandbox, SandboxConfig};
 use ene_tool_common::prelude::*;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
@@ -78,7 +78,7 @@ pub struct FsDeleteAction {
 }
 
 impl FsDeleteAction {
-    pub fn new(sandbox: SandboxRef) -> Self {
+    pub const fn new(sandbox: SandboxRef) -> Self {
         Self {
             file_path: String::new(),
             recursive: None,
@@ -94,7 +94,7 @@ impl FsDeleteAction {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard
                 .clone()
-                .unwrap_or_else(|| Arc::new(Sandbox::new(Default::default())))
+                .unwrap_or_else(|| Arc::new(Sandbox::new(SandboxConfig::default())))
         };
 
         sandbox.check_permission(

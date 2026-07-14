@@ -31,6 +31,7 @@
 //! (some are unavoidably part of other supported types' public fields).
 
 #![warn(missing_docs)]
+#![allow(clippy::option_if_let_else)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod animation;
@@ -105,7 +106,8 @@ pub use spring_bone::{
 };
 
 /// Returns the crate version. Useful for diagnostics and the `about` panel.
-pub fn version() -> &'static str {
+#[must_use]
+pub const fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 

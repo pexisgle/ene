@@ -60,7 +60,11 @@ pub fn render(
                     .desired_width(f32::INFINITY),
             );
             if response.changed() {
-                settings.ai.ai.runtime_rules = input.ai_runtime_rules.clone();
+                settings
+                    .ai
+                    .ai
+                    .runtime_rules
+                    .clone_from(&input.ai_runtime_rules);
                 settings.mark_dirty();
             }
         });
@@ -175,16 +179,20 @@ pub fn render(
                     );
                 });
             if current_provider != input.ai_embedding_provider {
-                input.ai_embedding_provider = current_provider.clone();
-                provider.embedding.backend = current_provider.clone();
+                input.ai_embedding_provider.clone_from(&current_provider);
+                provider.embedding.backend.clone_from(&current_provider);
                 if current_provider.as_str() == "local" {
                     provider.embedding.local.model = "jina-embeddings-v5-text-small".to_string();
-                    input.ai_embedding_model = provider.embedding.local.model.clone();
+                    input
+                        .ai_embedding_model
+                        .clone_from(&provider.embedding.local.model);
                     input.ai_embedding_dimensions = "auto".to_string();
                 } else {
                     provider.embedding.cloud.model = "text-embedding-3-small".to_string();
                     provider.embedding.cloud.dimensions = 1536;
-                    input.ai_embedding_model = provider.embedding.cloud.model.clone();
+                    input
+                        .ai_embedding_model
+                        .clone_from(&provider.embedding.cloud.model);
                     input.ai_embedding_dimensions = provider.embedding.cloud.dimensions.to_string();
                 }
                 let _ = settings.ai.ai.set_section(&provider);
@@ -200,9 +208,17 @@ pub fn render(
             );
             if response.changed() {
                 if input.ai_embedding_provider == "local" {
-                    provider.embedding.local.model = input.ai_embedding_model.clone();
+                    provider
+                        .embedding
+                        .local
+                        .model
+                        .clone_from(&input.ai_embedding_model);
                 } else {
-                    provider.embedding.cloud.model = input.ai_embedding_model.clone();
+                    provider
+                        .embedding
+                        .cloud
+                        .model
+                        .clone_from(&input.ai_embedding_model);
                 }
                 let _ = settings.ai.ai.set_section(&provider);
                 settings.mark_dirty();

@@ -1,12 +1,12 @@
-//! CCv3 lorebook → semantic memory compilation (#83).
+//! `CCv3` lorebook → semantic memory compilation (#83).
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use ene_config::{CharacterCardV3, LorebookEntry, expand_cbs_macros};
 use ene_store::{
-    MemoryConfidence, MemoryKind, MemorySalience, MemoryScope, MemorySource, MemoryStatus,
-    NewMemoryItem,
+    AffectAnnotation, MemoryConfidence, MemoryKind, MemorySalience, MemoryScope, MemorySource,
+    MemoryStatus, NewMemoryItem,
 };
 
 /// Prefix for lorebook-derived `source_ref` values.
@@ -90,7 +90,7 @@ fn compile_entry(
         )),
         confidence: MemoryConfidence::new(1.0),
         salience: MemorySalience::new(if constant { 1.0 } else { salience_base }),
-        affect: Default::default(),
+        affect: AffectAnnotation::default(),
         relationship_impact: 0.0,
         valid_from: None,
         valid_until: None,
@@ -127,6 +127,7 @@ pub fn entry_keys_match(entry: &LorebookEntry, scan_text: &str) -> bool {
 
 /// Match lorebook trigger keys, optionally using a precompiled regex cache.
 #[must_use]
+#[expect(clippy::implicit_hasher)]
 pub fn entry_keys_match_with_cache(
     entry: &LorebookEntry,
     entry_index: usize,
@@ -160,8 +161,7 @@ pub fn entry_keys_match_with_cache(
             regex::RegexBuilder::new(key)
                 .case_insensitive(!case_sensitive)
                 .build()
-                .map(|re| re.is_match(scan_text))
-                .unwrap_or(false)
+                .is_ok_and(|re| re.is_match(scan_text))
         } else if case_sensitive {
             haystack.contains(key)
         } else {

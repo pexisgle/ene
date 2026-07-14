@@ -33,7 +33,7 @@ pub struct CommitmentSyncContext<'a> {
 }
 
 impl CommitmentLedger {
-    /// Persist commitment candidates to the ledger first (sole SoT).
+    /// Persist commitment candidates to the ledger first (sole `SoT`).
     ///
     /// Does **not** insert typed `MemoryKind::Commitment` bodies. Deletion-style
     /// candidates (`should_persist = false`) cancel matching active ledger rows

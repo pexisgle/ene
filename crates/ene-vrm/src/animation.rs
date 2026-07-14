@@ -71,7 +71,7 @@ pub enum Interpolation {
 }
 
 impl Interpolation {
-    fn from_gltf(mode: gltf::animation::Interpolation) -> Self {
+    const fn from_gltf(mode: gltf::animation::Interpolation) -> Self {
         match mode {
             gltf::animation::Interpolation::Step => Self::Step,
             gltf::animation::Interpolation::Linear => Self::Linear,
@@ -98,12 +98,14 @@ pub struct Sampler<T: Clone> {
 
 impl<T: Clone> Sampler<T> {
     /// Duration of this sampler (last timestamp, or 0 if empty).
+    #[must_use]
     pub fn duration(&self) -> f32 {
         self.times.last().copied().unwrap_or(0.0)
     }
 
     /// Number of keyframes.
-    pub fn keyframe_count(&self) -> usize {
+    #[must_use]
+    pub const fn keyframe_count(&self) -> usize {
         self.times.len()
     }
 }
@@ -140,7 +142,7 @@ pub struct LookAtChannel {
 }
 
 /// A single VRMA animation clip. Contains all channels that
-/// target nodes defined in the VRMC_vrm_animation extension.
+/// target nodes defined in the `VRMC_vrm_animation` extension.
 #[derive(Clone, Debug)]
 pub struct VrmaClip {
     /// Clip name (from glTF `animation.name`, or `"clip_<i>"`).
@@ -246,23 +248,23 @@ impl Default for VrmaPlayer {
 
 impl VrmaPlayer {
     /// Start or resume playback.
-    pub fn play(&mut self) {
+    pub const fn play(&mut self) {
         self.playing = true;
     }
 
     /// Pause playback (preserves current time).
-    pub fn pause(&mut self) {
+    pub const fn pause(&mut self) {
         self.playing = false;
     }
 
     /// Stop playback and reset to the beginning.
-    pub fn stop(&mut self) {
+    pub const fn stop(&mut self) {
         self.playing = false;
         self.time = 0.0;
     }
 
     /// Seek to a specific time in seconds.
-    pub fn seek(&mut self, time: f32) {
+    pub const fn seek(&mut self, time: f32) {
         self.time = time.max(0.0);
     }
 
@@ -274,7 +276,7 @@ impl VrmaPlayer {
         if !self.playing || duration <= 0.0 {
             return;
         }
-        self.time += dt * self.speed;
+        self.time = dt.mul_add(self.speed, self.time);
         match self.repeat {
             RepeatMode::Loop => {
                 self.time %= duration;
@@ -333,9 +335,7 @@ fn sample_quat(sampler: &Sampler<Quat>, t: f32) -> Quat {
 }
 
 fn sample_step<T: Clone>(times: &[f32], values: &[T], t: f32) -> T {
-    if values.is_empty() {
-        panic!("sample_step called with empty values");
-    }
+    assert!(!values.is_empty(), "sample_step called with empty values");
     if times.is_empty() {
         return values[0].clone();
     }
@@ -366,9 +366,10 @@ fn find_keyframe_index(times: &[f32], t: f32) -> usize {
 }
 
 fn sample_keyframes<T: Clone>(sampler: &Sampler<T>, t: f32, lerp: impl Fn(&T, &T, f32) -> T) -> T {
-    if sampler.values.is_empty() {
-        panic!("sample_keyframes called with empty sampler values");
-    }
+    assert!(
+        !sampler.values.is_empty(),
+        "sample_keyframes called with empty sampler values"
+    );
     if sampler.times.is_empty() {
         return sampler.values[0].clone();
     }
@@ -400,9 +401,10 @@ fn sample_cubic_spline<T: Clone>(
     t: f32,
     lerp: &impl Fn(&T, &T, f32) -> T,
 ) -> T {
-    if values.is_empty() {
-        panic!("sample_cubic_spline called with empty values");
-    }
+    assert!(
+        !values.is_empty(),
+        "sample_cubic_spline called with empty values"
+    );
     if times.is_empty() {
         return values[0].clone();
     }
@@ -416,15 +418,15 @@ fn sample_cubic_spline<T: Clone>(
     let s = ((t - t0) / dt).clamp(0.0, 1.0);
     let s2 = s * s;
     let s3 = s2 * s;
-    let h00 = 2.0 * s3 - 3.0 * s2 + 1.0;
-    let h10 = s3 - 2.0 * s2 + s;
-    let h01 = -2.0 * s3 + 3.0 * s2;
+    let h00 = 3.0f32.mul_add(-s2, 2.0 * s3) + 1.0;
+    let h10 = 2.0f32.mul_add(-s2, s3) + s;
+    let h01 = 3.0f32.mul_add(s2, -2.0 * s3);
     let h11 = s3 - s2;
     let base = idx * 3;
-    let _v0 = &values[base + 1];
-    let _m0 = &values[base];
-    let _v1 = &values[base + 4];
-    let _m1 = &values[base + 3];
+    let _ = &values[base + 1];
+    let _ = &values[base];
+    let _ = &values[base + 4];
+    let _ = &values[base + 3];
     let _ = (h00, h10, h01, h11, dt, lerp);
     values[base + 1].clone()
 }
@@ -445,9 +447,9 @@ fn sample_cubic_spline_quat(sampler: &Sampler<Quat>, t: f32) -> Quat {
     let s = ((t - t0) / dt).clamp(0.0, 1.0);
     let s2 = s * s;
     let s3 = s2 * s;
-    let h00 = 2.0 * s3 - 3.0 * s2 + 1.0;
-    let h10 = (s3 - 2.0 * s2 + s) * dt;
-    let h01 = -2.0 * s3 + 3.0 * s2;
+    let h00 = 3.0f32.mul_add(-s2, 2.0 * s3) + 1.0;
+    let h10 = (2.0f32.mul_add(-s2, s3) + s) * dt;
+    let h01 = 3.0f32.mul_add(s2, -2.0 * s3);
     let h11 = (s3 - s2) * dt;
     let base = idx * 3;
     let v0 = values[base + 1];
@@ -476,6 +478,7 @@ fn sample_cubic_spline_quat(sampler: &Sampler<Quat>, t: f32) -> Quat {
 /// API" docs (see `docs/api/ene-vrm.md`) pending a consumer, but kept `pub` for other hosts
 /// that need cross-skeleton retargeting.
 #[doc(hidden)]
+#[must_use]
 pub fn retarget_rotation(
     src_pose: Quat,
     src_rest_local: Quat,
@@ -498,6 +501,7 @@ pub fn retarget_rotation(
 /// See [`retarget_rotation`]'s note — not currently called by `ene-desktop`, hidden from the
 /// "Supported API" docs but kept `pub` for other hosts.
 #[doc(hidden)]
+#[must_use]
 pub fn retarget_hips_translation(
     src_pose: Vec3,
     src_rest_local: Vec3,
@@ -523,6 +527,7 @@ pub fn retarget_hips_translation(
 /// from the "Supported API" docs since `ene-desktop` consumes the resulting `VrmaFrame` field
 /// rather than calling this directly.
 #[doc(hidden)]
+#[must_use]
 pub fn quat_to_yaw_pitch(q: Quat) -> (f32, f32) {
     let (yaw, pitch, _roll) = q.to_euler(glam::EulerRot::ZXY);
     (yaw.to_degrees(), pitch.to_degrees())
@@ -538,6 +543,7 @@ pub fn quat_to_yaw_pitch(q: Quat) -> (f32, f32) {
 /// expression weights. The consumer is responsible for retargeting
 /// bone rotations onto the target VRM model's skeleton using
 /// [`retarget_rotation`] and [`retarget_hips_translation`].
+#[must_use]
 pub fn evaluate_clip(clip: &VrmaClip, t: f32) -> VrmaFrame {
     let mut frame = VrmaFrame::default();
 
@@ -637,7 +643,7 @@ fn parse_vrma_properties(gltf: &gltf::Gltf) -> VrmaProperties {
             if let Some(bone) = canonicalize_bone_name(bone_name)
                 && let Some(node_idx) = entry
                     .get("node")
-                    .and_then(|v| v.as_u64())
+                    .and_then(serde_json::Value::as_u64)
                     .map(|v| v as usize)
             {
                 props.humanoid_bones.insert(bone.0, node_idx);
@@ -651,7 +657,7 @@ fn parse_vrma_properties(gltf: &gltf::Gltf) -> VrmaProperties {
                 for (name, entry) in cat {
                     if let Some(node_idx) = entry
                         .get("node")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .map(|v| v as usize)
                     {
                         props.expressions.insert(name.clone(), node_idx);
@@ -664,7 +670,7 @@ fn parse_vrma_properties(gltf: &gltf::Gltf) -> VrmaProperties {
     if let Some(look_at) = vrma_ext.get("lookAt").and_then(|v| v.as_object()) {
         if let Some(node_idx) = look_at
             .get("node")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .map(|v| v as usize)
         {
             props.look_at_node = Some(node_idx);
@@ -752,8 +758,7 @@ fn parse_animation(
 ) -> VrmaClip {
     let name = anim
         .name()
-        .map(String::from)
-        .unwrap_or_else(|| format!("clip_{index}"));
+        .map_or_else(|| format!("clip_{index}"), String::from);
 
     let mut bone_channels: HashMap<String, BoneChannel> = HashMap::new();
     let mut expression_channels: HashMap<String, ExpressionChannel> = HashMap::new();

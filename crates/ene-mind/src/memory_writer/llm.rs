@@ -14,6 +14,8 @@
 //! - Confidence capping at 0.9
 //! - Unknown `kind` fallback to `Semantic`
 
+use std::fmt::Write;
+
 use ene_ai::{LlmMessage, LlmProvider, UserMessagePart};
 use ene_config::PromptLibrary;
 
@@ -119,11 +121,12 @@ fn build_conversation_text(turn: &TurnInput<'_>) -> String {
         out.push('\n');
     }
     for tr in turn.tool_results {
-        out.push_str(&format!(
-            "Tool({}): {}\n",
+        let _ = writeln!(
+            out,
+            "Tool({}): {}",
             tr.tool_name,
             if tr.success { "success" } else { "failed" }
-        ));
+        );
         if !tr.summary.is_empty() {
             out.push_str(&tr.summary);
             out.push('\n');

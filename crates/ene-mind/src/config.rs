@@ -63,7 +63,9 @@ ene_config::define_label_enum!(
 /// NOTE: Allocation logic validates that the sub-budget fields
 /// (`scene_summary_tokens`, `memory_budget_tokens`, `semantic_budget_tokens`,
 /// `style_example_budget_tokens`) sum to ≤ `max_prompt_tokens` at startup.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
+)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct ContextConfig {
@@ -77,7 +79,7 @@ pub struct ContextConfig {
     pub memory_budget_tokens: usize,
     /// Token budget for semantic (lorebook) memory.
     pub semantic_budget_tokens: usize,
-    /// Token budget for style examples from CCv3 lorebook.
+    /// Token budget for style examples from `CCv3` lorebook.
     pub style_example_budget_tokens: usize,
     /// Enable rolling context compression instead of session splits (#79).
     pub compression_enabled: bool,
@@ -139,7 +141,7 @@ pub struct MindMemoryConfig {
     pub extraction_timeout_secs: u64,
     /// Tool-result grounding and guardrail settings (#92).
     pub tool_grounding: ToolGroundingConfig,
-    /// Use HyDE query expansion for cognitive memory recall. The planner only
+    /// Use `HyDE` query expansion for cognitive memory recall. The planner only
     /// records this hint; downstream recall execution performs the provider call.
     pub use_hyde: bool,
     /// Maximum number of typed memories requested by recall planning.
@@ -348,16 +350,19 @@ impl Default for EmotionConfig {
     }
 }
 
+#[expect(clippy::unnecessary_wraps)]
 fn default_classifier_model() -> Option<String> {
     Some(crate::emotion::classifier::DEFAULT_CLASSIFIER_MODEL.to_owned())
 }
 
 /// Character card compilation settings.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
+)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct CharacterMemoryConfig {
-    /// Compile CCv3 lorebook entries into the semantic memory index.
+    /// Compile `CCv3` lorebook entries into the semantic memory index.
     pub compile_ccv3_to_semantic_memory: bool,
     /// Always include the Identity Kernel at the top of every prompt.
     pub always_include_identity_kernel: bool,

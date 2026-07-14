@@ -207,7 +207,7 @@ pub struct LorebookEntry {
     pub position: Option<String>,
 }
 
-fn default_enabled() -> bool {
+const fn default_enabled() -> bool {
     true
 }
 
@@ -269,7 +269,7 @@ fn default_expressions() -> Vec<ResolvedExpression> {
     .map(|(name, desc, vrm_key)| ResolvedExpression {
         name: name.to_string(),
         description: desc.to_string(),
-        vrm: [(vrm_key.to_string(), 1.0f32)].into_iter().collect(),
+        vrm: std::iter::once((vrm_key.to_string(), 1.0f32)).collect(),
     })
     .collect()
 }
@@ -290,14 +290,14 @@ pub fn resolve_expressions(card: &CharacterCardV3) -> Vec<ResolvedExpression> {
         }
         if let Some(existing) = map.get_mut(&ovr.name) {
             if !ovr.description.is_empty() {
-                existing.description = ovr.description.clone();
+                existing.description.clone_from(&ovr.description);
             }
             if !ovr.vrm.is_empty() {
-                existing.vrm = ovr.vrm.clone();
+                existing.vrm.clone_from(&ovr.vrm);
             }
         } else {
             let vrm = if ovr.vrm.is_empty() {
-                [(ovr.name.clone(), 1.0f32)].into_iter().collect()
+                std::iter::once((ovr.name.clone(), 1.0f32)).collect()
             } else {
                 ovr.vrm.clone()
             };
@@ -329,7 +329,7 @@ impl CharacterCardData {
         }
     }
 
-    /// Returns the EneExtension object if defined under `extensions.ene`.
+    /// Returns the `EneExtension` object if defined under `extensions.ene`.
     #[must_use]
     pub fn get_ene_extension(&self) -> Option<EneExtension> {
         self.extensions.ene.clone()
@@ -349,42 +349,43 @@ impl CharacterCardData {
 }
 
 /// Default expressions for the schema.
+#[expect(clippy::unnecessary_wraps)]
 fn default_ene_expressions() -> Option<Vec<ExpressionDefinition>> {
     Some(vec![
         ExpressionDefinition {
             name: "neutral".to_string(),
             description: "Default resting expression".to_string(),
-            vrm: [("neutral".to_string(), 1.0)].into_iter().collect(),
+            vrm: std::iter::once(("neutral".to_string(), 1.0)).collect(),
             enabled: true,
         },
         ExpressionDefinition {
             name: "happy".to_string(),
             description: "Feeling joyful, excited, or pleased".to_string(),
-            vrm: [("happy".to_string(), 1.0)].into_iter().collect(),
+            vrm: std::iter::once(("happy".to_string(), 1.0)).collect(),
             enabled: true,
         },
         ExpressionDefinition {
             name: "sad".to_string(),
             description: "Feeling down, disappointed, or sorrowful".to_string(),
-            vrm: [("sad".to_string(), 1.0)].into_iter().collect(),
+            vrm: std::iter::once(("sad".to_string(), 1.0)).collect(),
             enabled: true,
         },
         ExpressionDefinition {
             name: "angry".to_string(),
             description: "Feeling frustrated or upset".to_string(),
-            vrm: [("angry".to_string(), 1.0)].into_iter().collect(),
+            vrm: std::iter::once(("angry".to_string(), 1.0)).collect(),
             enabled: true,
         },
         ExpressionDefinition {
             name: "relaxed".to_string(),
             description: "Feeling calm, content, or at ease".to_string(),
-            vrm: [("relaxed".to_string(), 1.0)].into_iter().collect(),
+            vrm: std::iter::once(("relaxed".to_string(), 1.0)).collect(),
             enabled: true,
         },
         ExpressionDefinition {
             name: "surprised".to_string(),
             description: "Feeling shocked or caught off guard".to_string(),
-            vrm: [("surprised".to_string(), 1.0)].into_iter().collect(),
+            vrm: std::iter::once(("surprised".to_string(), 1.0)).collect(),
             enabled: true,
         },
     ])

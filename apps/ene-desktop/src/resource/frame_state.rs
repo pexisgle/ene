@@ -28,14 +28,14 @@ impl FrameState {
     /// Returns the previous tick's [`Instant`], if any.
     #[must_use]
     #[expect(dead_code, reason = "Consumed by the frame system added in Phase 2")]
-    pub fn last_instant(&self) -> Option<Instant> {
+    pub const fn last_instant(&self) -> Option<Instant> {
         self.last_instant
     }
 
     /// Records a new `last_instant` value. Called by the frame system
     /// added in Phase 2.
     #[expect(dead_code, reason = "Consumed by the frame system added in Phase 2")]
-    pub fn set_last_instant(&mut self, instant: Instant) {
+    pub const fn set_last_instant(&mut self, instant: Instant) {
         self.last_instant = Some(instant);
     }
 }

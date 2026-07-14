@@ -34,7 +34,7 @@ pub struct MemoryWriteProviders<'a> {
 }
 
 #[expect(clippy::derivable_impls)]
-impl<'a> Default for MemoryWriteProviders<'a> {
+impl Default for MemoryWriteProviders<'_> {
     fn default() -> Self {
         Self {
             llm: None,

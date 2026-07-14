@@ -25,7 +25,7 @@ pub enum LegacyWriteMode {
 }
 
 impl LegacyWriteMode {
-    fn from_u8(v: u8) -> Self {
+    const fn from_u8(v: u8) -> Self {
         match v {
             1 => Self::ReadOnly,
             _ => Self::ReadWrite,
@@ -218,6 +218,7 @@ pub struct NaturalDecayReport {
 }
 
 /// Convert a typed memory model row to a [`crate::MemoryItem`].
+#[expect(clippy::unnecessary_wraps)]
 fn model_to_memory_item(
     m: entities::typed_memories::Model,
 ) -> Result<crate::MemoryItem, MemoryError> {
@@ -253,6 +254,7 @@ fn model_to_memory_item(
 }
 
 /// Convert a commitment model row to a [`crate::Commitment`].
+#[expect(clippy::unnecessary_wraps)]
 fn model_to_commitment(m: entities::commitments::Model) -> Result<crate::Commitment, MemoryError> {
     Ok(crate::Commitment {
         id: Some(m.id),
@@ -286,7 +288,7 @@ fn str_to_status(s: &str) -> crate::MemoryStatus {
     crate::MemoryStatus::from_db_str(s)
 }
 
-fn is_supersedeable_status(status: crate::MemoryStatus) -> bool {
+const fn is_supersedeable_status(status: crate::MemoryStatus) -> bool {
     matches!(
         status,
         crate::MemoryStatus::Active | crate::MemoryStatus::Faded | crate::MemoryStatus::Disputed
@@ -311,9 +313,8 @@ fn merge_hybrid_candidate(
     {
         return;
     }
-    let id = match item.id {
-        Some(id) => id,
-        None => return,
+    let Some(id) = item.id else {
+        return;
     };
     gathered
         .entry(id)
@@ -323,7 +324,7 @@ fn merge_hybrid_candidate(
                 candidate.sources.push(source);
             }
         })
-        .or_insert(GatheredCandidate {
+        .or_insert_with(|| GatheredCandidate {
             item,
             vector_similarity,
             sources: vec![source],
@@ -545,7 +546,7 @@ async fn mark_migration_complete_on<C: ConnectionTrait>(
 }
 
 impl MemoryStore {
-    fn init(db: DatabaseConnection, embedding_dim: usize) -> Self {
+    const fn init(db: DatabaseConnection, embedding_dim: usize) -> Self {
         Self {
             db,
             embedding_dim,
@@ -579,13 +580,13 @@ impl MemoryStore {
 
     /// Returns the database connection handle.
     #[must_use]
-    pub fn connection(&self) -> &DatabaseConnection {
+    pub const fn connection(&self) -> &DatabaseConnection {
         &self.db
     }
 
     /// Returns the dimensionality of the embedding vectors.
     #[must_use]
-    pub fn embedding_dim(&self) -> usize {
+    pub const fn embedding_dim(&self) -> usize {
         self.embedding_dim
     }
 
@@ -605,7 +606,7 @@ impl MemoryStore {
             .to_str()
             .ok_or_else(|| MemoryError::MemoryStoreConnectionError("Invalid path".to_string()))?;
         init_sqlite_vec();
-        let opt = ConnectOptions::new(format!("sqlite:{}?mode=rwc", path_str));
+        let opt = ConnectOptions::new(format!("sqlite:{path_str}?mode=rwc"));
         let db = Database::connect(opt).await?;
 
         apply_pragmas(&db).await?;
@@ -860,7 +861,7 @@ impl MemoryStore {
             .all(&self.db)
             .await?;
 
-        let mut seen_keys: std::collections::HashSet<String> = Default::default();
+        let mut seen_keys = std::collections::HashSet::<String>::default();
         Ok(rows
             .into_iter()
             .filter_map(|row| {

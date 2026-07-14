@@ -40,29 +40,29 @@ pub enum SplitReason {
 impl std::fmt::Display for SplitReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SplitReason::Timeout { elapsed_minutes } => {
+            Self::Timeout { elapsed_minutes } => {
                 write!(
                     f,
                     "Session split due to {elapsed_minutes} minutes of inactivity"
                 )
             }
-            SplitReason::TopicChange { similarity } => {
+            Self::TopicChange { similarity } => {
                 write!(
                     f,
                     "Session split due to topic change (similarity: {similarity:.2})"
                 )
             }
-            SplitReason::ContextPressure { context_ratio } => {
+            Self::ContextPressure { context_ratio } => {
                 write!(
                     f,
                     "Session split due to context pressure ({:.0}% full)",
                     context_ratio * 100.0
                 )
             }
-            SplitReason::Composite { score } => {
+            Self::Composite { score } => {
                 write!(f, "Session split with composite score {score:.2}")
             }
-            SplitReason::Manual => write!(f, "Session split manually"),
+            Self::Manual => write!(f, "Session split manually"),
         }
     }
 }
@@ -178,9 +178,8 @@ pub async fn check_boundary(
     }
 
     // Time elapsed since the last message (0 if no prior message).
-    let elapsed_minutes = last_message_time
-        .map(|t| (Utc::now() - t).num_minutes().max(0) as f64)
-        .unwrap_or(0.0);
+    let elapsed_minutes =
+        last_message_time.map_or(0.0, |t| (Utc::now() - t).num_minutes().max(0) as f64);
 
     // Compute topic similarity by embedding the current user input and comparing
     // with the previous turn's embedding. Skip if no embedder or prior embedding.

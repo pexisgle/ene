@@ -101,7 +101,7 @@ pub fn render_user_input_dialog(
     }
     let mut drafts = drafts;
     let request_id = prompt_snapshot.request_id;
-    let items = prompt_snapshot.prompt.items.clone();
+    let items = prompt_snapshot.prompt.items;
     let mut open = true;
     egui::Window::new(crate::i18n::user_input_requested())
         .open(&mut open)

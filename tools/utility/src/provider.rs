@@ -56,7 +56,10 @@ impl UtilityState {
     /// perspective: the socket write is visible to subsequent readers
     /// only after the old store has been dropped.
     pub fn set_db_socket(&self, socket: String) {
-        *self.todo_store.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self
+            .todo_store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         *self
             .db_socket
             .write()
@@ -74,7 +77,10 @@ impl UtilityState {
     /// Lazily connects to the DB IPC server and returns the `TodoStore`.
     pub async fn ensure_todo_store(&self) -> Result<Arc<TodoStore>, ToolError> {
         {
-            let guard = self.todo_store.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = self
+                .todo_store
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(store) = guard.as_ref() {
                 return Ok(store.clone());
             }
@@ -108,11 +114,16 @@ impl UtilityState {
             })?;
         let store = Arc::new(store);
 
-        let mut guard = self.todo_store.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(existing) = guard.as_ref() {
-            Ok(existing.clone())
+        let mut guard = self
+            .todo_store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(existing) = guard.clone() {
+            drop(guard);
+            Ok(existing)
         } else {
             *guard = Some(store.clone());
+            drop(guard);
             Ok(store)
         }
     }

@@ -9,7 +9,7 @@ const USER_INPUT_LOG_CHARS: usize = 200;
 const RAW_CONTENT_PREVIEW_CHARS: usize = 200;
 
 /// Inputs for [`log_empty_response_if_needed`].
-pub(crate) struct EmptyResponseContext<'a> {
+pub struct EmptyResponseContext<'a> {
     pub pipeline: &'static str,
     pub config: &'a EneConfig,
     pub session_id: &'a str,
@@ -27,7 +27,7 @@ pub(crate) struct EmptyResponseContext<'a> {
 
 /// Emits structured warnings (and a debug prompt dump) when the user-visible
 /// assistant text is empty after a completed stream round.
-pub(crate) fn log_empty_response_if_needed(ctx: EmptyResponseContext<'_>) {
+pub fn log_empty_response_if_needed(ctx: &EmptyResponseContext<'_>) {
     if !ctx.display_buffer.trim().is_empty() {
         return;
     }
@@ -35,8 +35,10 @@ pub(crate) fn log_empty_response_if_needed(ctx: EmptyResponseContext<'_>) {
     let (provider_name, model) = ctx
         .config
         .get_section::<ene_ai::ProviderConfig>()
-        .map(|provider| (provider.name.clone(), provider.model.clone()))
-        .unwrap_or_else(|_| ("unknown".to_string(), "unknown".to_string()));
+        .map_or_else(
+            |_| ("unknown".to_string(), "unknown".to_string()),
+            |provider| (provider.name.clone(), provider.model),
+        );
 
     let (system_chars, system_preview) = system_prompt_excerpt(ctx.messages);
     let outline = message_outline(ctx.messages);
@@ -110,7 +112,9 @@ fn truncate_for_log(text: &str, max_chars: usize) -> String {
 
 fn message_content_len(message: &LlmMessage) -> usize {
     match message {
-        LlmMessage::System { content } => content.chars().count(),
+        LlmMessage::System { content } | LlmMessage::Tool { content, .. } => {
+            content.chars().count()
+        }
         LlmMessage::User { parts } => parts
             .iter()
             .map(|part| match part {
@@ -122,7 +126,6 @@ fn message_content_len(message: &LlmMessage) -> usize {
             .as_deref()
             .map(str::chars)
             .map_or(0, Iterator::count),
-        LlmMessage::Tool { content, .. } => content.chars().count(),
     }
 }
 
@@ -192,7 +195,7 @@ mod tests {
     #[test]
     fn log_skips_when_display_buffer_has_text() {
         let config = EneConfig::default();
-        log_empty_response_if_needed(EmptyResponseContext {
+        log_empty_response_if_needed(&EmptyResponseContext {
             pipeline: "legacy",
             config: &config,
             session_id: "sess",

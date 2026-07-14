@@ -211,7 +211,7 @@ impl KeywordSet {
 
     /// Returns true if no keywords are present.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.primary.is_empty()
             && self.secondary.is_empty()
             && self.domain.is_empty()
@@ -300,18 +300,18 @@ pub enum ToolCategory {
 impl ToolCategory {
     /// Human-readable label used in the embedding text for this category.
     #[must_use]
-    pub fn label(&self) -> &'static str {
+    pub const fn label(&self) -> &'static str {
         match self {
-            ToolCategory::Filesystem => "filesystem_tools",
-            ToolCategory::Shell => "shell_tools",
-            ToolCategory::Browser => "browser_tools",
-            ToolCategory::App => "app_tools",
-            ToolCategory::WebSearch => "websearch_tools",
-            ToolCategory::WebFetch => "webfetch_tools",
-            ToolCategory::Utility => "utility_tools",
-            ToolCategory::Memory => "memory_tools",
-            ToolCategory::Search => "search_tools",
-            ToolCategory::Meta => "meta_tools",
+            Self::Filesystem => "filesystem_tools",
+            Self::Shell => "shell_tools",
+            Self::Browser => "browser_tools",
+            Self::App => "app_tools",
+            Self::WebSearch => "websearch_tools",
+            Self::WebFetch => "webfetch_tools",
+            Self::Utility => "utility_tools",
+            Self::Memory => "memory_tools",
+            Self::Search => "search_tools",
+            Self::Meta => "meta_tools",
         }
     }
 }
@@ -443,7 +443,7 @@ pub enum EmbeddingField {
 impl EmbeddingField {
     /// Returns the string label persisted in the index.
     #[must_use]
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Summary => "summary",
             Self::Description => "description",

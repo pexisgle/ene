@@ -4,6 +4,7 @@ use self::shell_platform::execute_shell_command;
 use crate::utils::sandbox::SandboxConfig;
 use ene_tool_common::prelude::*;
 use ene_tool_common::truncate::Truncate;
+use std::fmt::Write;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -80,11 +81,12 @@ pub async fn shell_exec(
     }
 
     if truncated.truncated {
-        output_text.push_str(&format!(
+        let _ = write!(
+            output_text,
             "\n\n(Shell output was truncated. Full output: {} bytes, {} lines)",
             full_output.len(),
             full_output.lines().count()
-        ));
+        );
     }
 
     let final_output = format!("# {description}\n{output_text}");
@@ -127,7 +129,7 @@ pub struct ShellAction {
 }
 
 impl ShellAction {
-    pub fn new(sandbox: SandboxRef) -> Self {
+    pub const fn new(sandbox: SandboxRef) -> Self {
         Self {
             command: String::new(),
             description: None,
@@ -144,7 +146,7 @@ impl ShellAction {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.clone().unwrap_or_else(|| {
-                Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
+                Arc::new(crate::utils::sandbox::Sandbox::new(SandboxConfig::default()))
             })
         };
 

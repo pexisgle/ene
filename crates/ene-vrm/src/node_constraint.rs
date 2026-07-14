@@ -32,7 +32,7 @@ use glam::{Quat, Vec3};
 use serde_json::Value;
 
 /// Roll axis for [`NodeConstraint::Roll`].
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RollAxis {
     /// Local X axis.
     X,
@@ -43,7 +43,7 @@ pub enum RollAxis {
 }
 
 impl RollAxis {
-    fn as_vec3(self) -> Vec3 {
+    const fn as_vec3(self) -> Vec3 {
         match self {
             Self::X => Vec3::X,
             Self::Y => Vec3::Y,
@@ -62,7 +62,7 @@ impl RollAxis {
 }
 
 /// Aim axis for [`NodeConstraint::Aim`].
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AimAxis {
     /// World +X direction.
     PositiveX,
@@ -137,7 +137,8 @@ pub enum NodeConstraint {
 
 impl NodeConstraint {
     /// The glTF node index of the source (driver) bone.
-    pub fn source_node(&self) -> usize {
+    #[must_use]
+    pub const fn source_node(&self) -> usize {
         match self {
             Self::Rotation { source_node, .. }
             | Self::Roll { source_node, .. }
@@ -146,7 +147,8 @@ impl NodeConstraint {
     }
 
     /// Constraint weight in `[0.0, 1.0]`.
-    pub fn weight(&self) -> f32 {
+    #[must_use]
+    pub const fn weight(&self) -> f32 {
         match self {
             Self::Rotation { weight, .. }
             | Self::Roll { weight, .. }
@@ -177,12 +179,14 @@ pub struct NodeConstraintRegistry {
 
 impl NodeConstraintRegistry {
     /// Number of constraints in the registry.
-    pub fn len(&self) -> usize {
+    #[must_use]
+    pub const fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Whether the registry is empty.
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
@@ -210,6 +214,7 @@ impl NodeConstraintRegistry {
     /// the updated rotations for every constrained destination.
     /// The caller is responsible for applying these to the
     /// skeleton / skin palette.
+    #[must_use]
     pub fn evaluate(
         &self,
         node_local_rotations: &HashMap<usize, Quat>,
@@ -380,7 +385,7 @@ fn parse_constraint(json: &Value) -> Option<NodeConstraint> {
         let source = rotation_obj.get("source")?.as_u64()? as usize;
         let weight = rotation_obj
             .get("weight")
-            .and_then(|w| w.as_f64())
+            .and_then(serde_json::Value::as_f64)
             .unwrap_or(1.0) as f32;
         return Some(NodeConstraint::Rotation {
             source_node: source,
@@ -395,7 +400,7 @@ fn parse_constraint(json: &Value) -> Option<NodeConstraint> {
         let roll_axis = RollAxis::from_json_str(roll_axis_str)?;
         let weight = roll_obj
             .get("weight")
-            .and_then(|w| w.as_f64())
+            .and_then(serde_json::Value::as_f64)
             .unwrap_or(1.0) as f32;
         return Some(NodeConstraint::Roll {
             source_node: source,
@@ -411,7 +416,7 @@ fn parse_constraint(json: &Value) -> Option<NodeConstraint> {
         let aim_axis = AimAxis::from_json_str(aim_axis_str)?;
         let weight = aim_obj
             .get("weight")
-            .and_then(|w| w.as_f64())
+            .and_then(serde_json::Value::as_f64)
             .unwrap_or(1.0) as f32;
         return Some(NodeConstraint::Aim {
             source_node: source,

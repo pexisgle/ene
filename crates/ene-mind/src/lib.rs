@@ -1,4 +1,5 @@
 #![warn(missing_docs)]
+#![allow(clippy::option_if_let_else)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 //! # ene-mind

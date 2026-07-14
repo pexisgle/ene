@@ -12,7 +12,7 @@ pub struct StringList(pub Vec<String>);
 
 impl FromMeta for StringList {
     fn from_string(value: &str) -> darling::Result<Self> {
-        Ok(StringList(
+        Ok(Self(
             value
                 .split(',')
                 .map(|s| s.trim().to_string())
@@ -28,7 +28,7 @@ pub struct SemiList(pub Vec<String>);
 
 impl FromMeta for SemiList {
     fn from_string(value: &str) -> darling::Result<Self> {
-        Ok(SemiList(
+        Ok(Self(
             value
                 .split(';')
                 .map(|s| s.trim().to_string())
@@ -105,7 +105,7 @@ pub struct ArgAttrs {
 }
 
 impl ArgAttrs {
-    pub fn is_hidden(&self) -> bool {
+    pub const fn is_hidden(&self) -> bool {
         self.internal || self.hidden || self.skip
     }
 }

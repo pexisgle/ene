@@ -81,13 +81,11 @@ fn is_blocked_address(ip: IpAddr) -> bool {
                 // IPv4-mapped (::ffff:a.b.c.d) — recurse into v4
                 || v6
                     .to_ipv4_mapped()
-                    .map(|v4| is_blocked_address(IpAddr::V4(v4)))
-                    .unwrap_or(false)
+                    .is_some_and(|v4| is_blocked_address(IpAddr::V4(v4)))
                 // IPv4-compatible (deprecated but still routable): ::a.b.c.d
                 || v6
                     .to_ipv4()
-                    .map(|v4| is_blocked_address(IpAddr::V4(v4)))
-                    .unwrap_or(false)
+                    .is_some_and(|v4| is_blocked_address(IpAddr::V4(v4)))
         }
     }
 }
@@ -123,7 +121,7 @@ pub struct WebFetchAction {
 }
 
 impl WebFetchAction {
-    pub fn new(client: reqwest::Client) -> Self {
+    pub const fn new(client: reqwest::Client) -> Self {
         Self {
             client,
             url: String::new(),

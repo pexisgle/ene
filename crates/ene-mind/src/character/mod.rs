@@ -29,7 +29,7 @@ use crate::config::CharacterMemoryConfig;
 use crate::error::CognitionError;
 use crate::lifecycle::HistoryEntry;
 
-/// Character processing: CCv3 compilation, lorebook indexing, style retrieval.
+/// Character processing: `CCv3` compilation, lorebook indexing, style retrieval.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CharacterProcessor;
 
@@ -50,7 +50,7 @@ impl CharacterProcessor {
         Self::compile_kernel(card, user_name, DEFAULT_IDENTITY_KERNEL_MAX_TOKENS)
     }
 
-    /// Synchronize CCv3 lorebook and style indices into typed memory.
+    /// Synchronize `CCv3` lorebook and style indices into typed memory.
     pub async fn sync_card_memories(
         store: &MemoryStore,
         embedder: &Arc<dyn EmbeddingProvider>,

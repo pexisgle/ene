@@ -26,7 +26,7 @@ pub struct InvalidTransition {
 
 /// Statuses that a user may restore to [`MemoryStatus::Active`] via journal/CLI UX.
 #[must_use]
-pub fn user_restorable_statuses() -> &'static [MemoryStatus] {
+pub const fn user_restorable_statuses() -> &'static [MemoryStatus] {
     &[
         MemoryStatus::Faded,
         MemoryStatus::Archived,
@@ -49,15 +49,22 @@ pub fn validate_user_restore(from: MemoryStatus) -> Result<(), InvalidTransition
 }
 
 /// Validate whether a single-step lifecycle transition is permitted.
-pub fn validate_transition(from: MemoryStatus, to: MemoryStatus) -> Result<(), InvalidTransition> {
+pub const fn validate_transition(
+    from: MemoryStatus,
+    to: MemoryStatus,
+) -> Result<(), InvalidTransition> {
     let allowed = matches!(
         (from, to),
-        (MemoryStatus::Active, MemoryStatus::Faded)
-            | (MemoryStatus::Active, MemoryStatus::Superseded)
-            | (MemoryStatus::Active, MemoryStatus::UserDeleted)
-            | (MemoryStatus::Active, MemoryStatus::Disputed)
-            | (MemoryStatus::Faded, MemoryStatus::Archived)
-            | (MemoryStatus::Faded, MemoryStatus::Disputed)
+        (
+            MemoryStatus::Active,
+            MemoryStatus::Faded
+                | MemoryStatus::Superseded
+                | MemoryStatus::UserDeleted
+                | MemoryStatus::Disputed
+        ) | (
+            MemoryStatus::Faded,
+            MemoryStatus::Archived | MemoryStatus::Disputed
+        )
     );
     if allowed {
         Ok(())
@@ -67,8 +74,9 @@ pub fn validate_transition(from: MemoryStatus, to: MemoryStatus) -> Result<(), I
 }
 
 /// Normalize affect magnitude to `[0.0, 1.0]` for decay retention.
+#[must_use]
 pub fn emotional_impact(affect: AffectAnnotation) -> f32 {
-    let dist = (affect.valence * affect.valence + affect.arousal * affect.arousal).sqrt();
+    let dist = affect.valence.hypot(affect.arousal);
     (dist / 2.83).clamp(0.0, 1.0)
 }
 
@@ -87,6 +95,7 @@ pub fn faded_decay_anchor(item: &MemoryItem) -> DateTime<Utc> {
 /// Compute lifecycle retention score in `[0.0, 1.0]` (higher = retain longer).
 ///
 /// Pinned memories always return `1.0` and are exempt from natural decay transitions.
+#[must_use]
 pub fn decay_score(item: &MemoryItem, now: DateTime<Utc>, half_life_days: f64) -> f32 {
     if item.pinned {
         return 1.0;
@@ -105,14 +114,15 @@ pub fn decay_score(item: &MemoryItem, now: DateTime<Utc>, half_life_days: f64) -
         (-lambda * age_days).exp() as f32
     };
 
-    let salience_factor = 0.5 + 0.5 * item.salience.get();
-    let confidence_factor = 0.5 + 0.5 * item.confidence.get();
-    let emotional_factor = 0.7 + 0.3 * emotional_impact(item.affect);
+    let salience_factor = 0.5f32.mul_add(item.salience.get(), 0.5);
+    let confidence_factor = 0.5f32.mul_add(item.confidence.get(), 0.5);
+    let emotional_factor = 0.3f32.mul_add(emotional_impact(item.affect), 0.7);
 
     (base * salience_factor * confidence_factor * emotional_factor).clamp(0.0, 1.0)
 }
 
 /// Return the natural-decay target status for a memory, if any.
+#[must_use]
 pub fn target_status_after_decay(current: MemoryStatus, score: f32) -> Option<MemoryStatus> {
     match current {
         MemoryStatus::Active if score < FADE_THRESHOLD => Some(MemoryStatus::Faded),

@@ -5,6 +5,9 @@
 //!
 //! See `docs/tools/derive-macro.md` for the full attribute reference.
 
+#![allow(clippy::needless_continue)]
+#![allow(clippy::option_if_let_else)]
+
 use darling::{FromDeriveInput, FromField};
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -38,7 +41,7 @@ use attr::{ArgAttrs, ToolSpecAttrs, has_tool_skip};
 #[proc_macro_derive(ToolSpec, attributes(tool, arg, tool_meta))]
 pub fn derive_tool_spec(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
-    expand_tool_spec(ast)
+    expand_tool_spec(&ast)
         .unwrap_or_else(|err| err.to_compile_error())
         .into()
 }
@@ -91,32 +94,29 @@ pub fn derive_tool_spec(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(ToolAction, attributes(tool, arg, tool_meta))]
 pub fn derive_tool_action(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
-    match expand_tool_action_derive(ast) {
+    match expand_tool_action_derive(&ast) {
         Ok(ts) => ts.into(),
         Err(err) => err.to_compile_error().into(),
     }
 }
 
-fn expand_tool_action_derive(ast: DeriveInput) -> syn::Result<TokenStream2> {
-    let spec_output = expand_tool_spec(ast.clone())?;
+fn expand_tool_action_derive(ast: &DeriveInput) -> syn::Result<TokenStream2> {
+    let spec_output = expand_tool_spec(ast)?;
 
     let ident = &ast.ident;
     let (impl_generics, ty_generics, where_clause) = ast.generics.split_for_impl();
 
-    let data = match &ast.data {
-        syn::Data::Struct(s) => s,
-        _ => {
-            return Err(syn::Error::new_spanned(
-                &ast,
-                "ToolAction can only be derived on structs",
-            ));
-        }
+    let syn::Data::Struct(data) = &ast.data else {
+        return Err(syn::Error::new_spanned(
+            ast,
+            "ToolAction can only be derived on structs",
+        ));
     };
     let fields = match &data.fields {
         syn::Fields::Named(named) => &named.named,
         _ => {
             return Err(syn::Error::new_spanned(
-                &ast,
+                ast,
                 "ToolAction requires a struct with named fields",
             ));
         }
@@ -192,10 +192,8 @@ fn expand_tool_action_derive(ast: DeriveInput) -> syn::Result<TokenStream2> {
 pub fn tool_action(attr: TokenStream, input: TokenStream) -> TokenStream {
     let args_ty: ToolActionAttr = parse_macro_input!(attr as ToolActionAttr);
     let mut item = parse_macro_input!(input as syn::ItemImpl);
-    match expand_tool_action(&mut item, &args_ty.0) {
-        Ok(()) => quote! { #item }.into(),
-        Err(err) => err.to_compile_error().into(),
-    }
+    expand_tool_action(&mut item, &args_ty.0);
+    quote! { #item }.into()
 }
 
 /// Parses `args = MyArgs` from the attribute tokens.
@@ -209,11 +207,11 @@ impl Parse for ToolActionAttr {
         }
         let _eq: syn::Token![=] = input.parse()?;
         let ty: syn::Type = input.parse()?;
-        Ok(ToolActionAttr(ty))
+        Ok(Self(ty))
     }
 }
 
-fn expand_tool_action(item: &mut syn::ItemImpl, args_ty: &syn::Type) -> syn::Result<()> {
+fn expand_tool_action(item: &mut syn::ItemImpl, args_ty: &syn::Type) {
     let name_fn: syn::ImplItem = syn::parse_quote! {
         fn name(&self) -> &'static str {
             <#args_ty as ::ene_tool_common::ToolSpecArgs>::TOOL_NAME
@@ -226,31 +224,26 @@ fn expand_tool_action(item: &mut syn::ItemImpl, args_ty: &syn::Type) -> syn::Res
     };
     item.items.push(name_fn);
     item.items.push(def_fn);
-
-    Ok(())
 }
 
-fn expand_tool_spec(ast: DeriveInput) -> syn::Result<TokenStream2> {
-    let struct_attrs = ToolSpecAttrs::from_derive_input(&ast)
-        .map_err(|e| syn::Error::new_spanned(&ast, e.to_string()))?;
+fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
+    let struct_attrs = ToolSpecAttrs::from_derive_input(ast)
+        .map_err(|e| syn::Error::new_spanned(ast, e.to_string()))?;
 
     let ident = &ast.ident;
     let (impl_generics, ty_generics, where_clause) = ast.generics.split_for_impl();
 
-    let data = match &ast.data {
-        syn::Data::Struct(s) => s,
-        _ => {
-            return Err(syn::Error::new_spanned(
-                &ast,
-                "ToolSpec can only be derived on structs",
-            ));
-        }
+    let syn::Data::Struct(data) = &ast.data else {
+        return Err(syn::Error::new_spanned(
+            ast,
+            "ToolSpec can only be derived on structs",
+        ));
     };
     let fields = match &data.fields {
         syn::Fields::Named(named) => &named.named,
         _ => {
             return Err(syn::Error::new_spanned(
-                &ast,
+                ast,
                 "ToolSpec requires a struct with named fields",
             ));
         }

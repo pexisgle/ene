@@ -138,6 +138,7 @@ impl UndoManager {
             client.insert("fs_undo_operations", op_row).await?;
         }
 
+        drop(client);
         Ok(())
     }
 
@@ -216,6 +217,7 @@ impl UndoManager {
             )
             .await?;
 
+        drop(client);
         let mut undo_ops = Vec::new();
         for op_row in &operations {
             let op_type = match op_row.get("op_type") {
@@ -285,6 +287,7 @@ impl UndoManager {
             .delete("fs_undo_entries", DbFilter::eq("id", entry_id.to_string()))
             .await?;
 
+        drop(client);
         Ok(())
     }
 
@@ -298,6 +301,7 @@ impl UndoManager {
             )
             .await?;
 
+        drop(client);
         Ok(())
     }
 }

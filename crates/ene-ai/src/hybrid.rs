@@ -37,6 +37,7 @@ impl HybridRerankProvider {
 
     /// Attaches LLM providers for `HyDE` and rerank. Pass `None`
     /// for either to keep the default fallback path for that task.
+    #[must_use]
     pub fn with_llm(
         mut self,
         hyde_llm: Option<Arc<dyn LlmProvider>>,
@@ -175,7 +176,7 @@ pub async fn rerank_tool_specs(
     let cand_text: Vec<String> = candidates
         .iter()
         .enumerate()
-        .map(|(i, s)| format!("{}. Tool `{}`: {}", i, s.name, s.description,))
+        .map(|(i, s)| format!("{}. Tool `{}`: {}", i, s.name, s.description))
         .collect();
 
     let system = format!(

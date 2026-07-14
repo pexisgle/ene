@@ -24,7 +24,7 @@ pub struct NavigateAction {
 }
 
 impl NavigateAction {
-    pub fn new(store: Arc<crate::utils::session::BrowserSessionStore>) -> Self {
+    pub const fn new(store: Arc<crate::utils::session::BrowserSessionStore>) -> Self {
         Self {
             url: String::new(),
             store,
@@ -37,8 +37,10 @@ impl NavigateAction {
         })?;
 
         let session = self.store.get_or_create("default", chrome_path).await?;
-        let session_guard = session.lock().await;
-        let page = &session_guard.page;
+        let page = {
+            let session_guard = session.lock().await;
+            session_guard.page.clone()
+        };
 
         page.goto(&self.url)
             .await

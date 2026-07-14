@@ -1,4 +1,4 @@
-//! CCv3 character memory index synchronization (#83 / #84).
+//! `CCv3` character memory index synchronization (#83 / #84).
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -24,7 +24,7 @@ pub struct CharacterMemorySyncReport {
     pub style_inserted: usize,
     /// Style example rows superseded after content change.
     pub style_updated: usize,
-    /// Stale CCv3 rows archived.
+    /// Stale `CCv3` rows archived.
     pub archived: usize,
     /// Whether sync was skipped (unchanged card hash or disabled).
     pub skipped: bool,
@@ -178,7 +178,7 @@ fn ccv3_item_matches(existing: &MemoryItem, desired: &NewMemoryItem) -> bool {
     existing.content == desired.content
         && existing.title == desired.title
         && existing.pinned == desired.pinned
-        && existing.salience.get() == desired.salience.get()
+        && (existing.salience.get() - desired.salience.get()).abs() < f32::EPSILON
         && existing.kind == desired.kind
 }
 
@@ -190,6 +190,6 @@ fn style_content_hash(card: &CharacterCardV3) -> u64 {
     hasher.finish()
 }
 
-fn card_memory_hash_combined(lore: u64, style: u64) -> u64 {
+const fn card_memory_hash_combined(lore: u64, style: u64) -> u64 {
     lore ^ style.rotate_left(17)
 }

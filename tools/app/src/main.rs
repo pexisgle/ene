@@ -3,6 +3,7 @@
 //! IPC tool binary providing desktop application control:
 //! window management, input simulation, and portal overlay.
 #![warn(missing_docs)]
+#![allow(clippy::unused_async, clippy::unused_async_trait_impl)]
 
 mod action;
 mod config;

@@ -22,7 +22,7 @@ impl CharacterDragState {
     /// dragging the character. The Windows click-through hook reads
     /// this so a drag in progress keeps the window receiving input
     /// even when the cursor has left the silhouette.
-    pub fn is_dragging(&self) -> bool {
+    pub const fn is_dragging(&self) -> bool {
         self.last_cursor_world_pos.is_some()
     }
 }
@@ -36,7 +36,7 @@ pub enum DragButtonEvent {
 }
 
 /// What the runtime should do after feeding the state machine.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DragAction {
     /// No state change. The runtime should not touch
     /// `settings.character_state.character_position` or call
@@ -150,7 +150,7 @@ pub fn cursor_logical_to_world_2d(
 /// - `Released` while dragging → clear state, return
 ///   `DragAction::Ended` so the runtime can call `mark_dirty()`.
 /// - `Released` while not dragging → no change.
-pub fn on_press_or_release(
+pub const fn on_press_or_release(
     state: &mut CharacterDragState,
     event: DragButtonEvent,
     cursor_world_2d: Option<Vec2>,

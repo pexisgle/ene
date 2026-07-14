@@ -22,10 +22,7 @@ impl ListMonitorsAction {
             for monitor in monitors {
                 let name = monitor.name().unwrap_or_else(|_| "Unknown".to_string());
                 let id = monitor.id();
-                let id_str = match id {
-                    Ok(v) => v.to_string(),
-                    Err(_) => "?".to_string(),
-                };
+                let id_str = id.map_or_else(|_| "?".to_string(), |v| v.to_string());
                 let is_primary = monitor.is_primary().unwrap_or(false);
                 let width = monitor.width().unwrap_or(0);
                 let height = monitor.height().unwrap_or(0);

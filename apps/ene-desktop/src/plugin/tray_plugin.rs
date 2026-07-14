@@ -21,13 +21,17 @@ use bevy_app::{App, Plugin};
 pub struct TrayPlugin;
 
 impl Plugin for TrayPlugin {
-    fn build(&self, _app: &mut App) {
+    fn build(&self, app: &mut App) {
         #[cfg(target_os = "linux")]
         {
             use crate::schedule::AppSet;
             use crate::system::tray_tick::tick_gtk_system;
             use bevy_ecs::schedule::IntoScheduleConfigs;
-            _app.add_systems(bevy_app::Last, tick_gtk_system.in_set(AppSet::Present));
+            app.add_systems(bevy_app::Last, tick_gtk_system.in_set(AppSet::Present));
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = app;
         }
     }
 }

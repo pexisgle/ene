@@ -159,8 +159,8 @@ impl Runtime {
             let monitor_size = monitor.size();
             let width = 400.0;
             let height = 600.0;
-            let x = monitor_size.width as f64 - width - 16.0;
-            let y = monitor_size.height as f64 - height - 48.0;
+            let x = f64::from(monitor_size.width) - width - 16.0;
+            let y = f64::from(monitor_size.height) - height - 48.0;
             chat_attrs = chat_attrs
                 .with_position(PhysicalPosition::new(x.max(0.0) as i32, y.max(0.0) as i32));
         }
@@ -364,6 +364,7 @@ impl ApplicationHandler for Runtime {
         }
     }
 
+    #[expect(clippy::similar_names)]
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -373,18 +374,15 @@ impl ApplicationHandler for Runtime {
         let is_char = self
             .char_window
             .as_ref()
-            .map(|w| w.window.id() == window_id)
-            .unwrap_or(false);
+            .is_some_and(|w| w.window.id() == window_id);
         let is_ui = self
             .ui_window
             .as_ref()
-            .map(|w| w.window.id() == window_id)
-            .unwrap_or(false);
+            .is_some_and(|w| w.window.id() == window_id);
         let is_chat = self
             .chat_egui_window
             .as_ref()
-            .map(|w| w.window.id() == window_id)
-            .unwrap_or(false);
+            .is_some_and(|w| w.window.id() == window_id);
 
         if is_ui {
             self.handle_ui_window_event(event_loop, event);
@@ -433,8 +431,7 @@ impl Runtime {
             .ai
             .ai
             .get_section::<ene_mind::MindConfig>()
-            .map(|c| c.emotion.expression_hysteresis_seconds)
-            .unwrap_or(4.0);
+            .map_or(4.0, |c| c.emotion.expression_hysteresis_seconds);
         if let Some(mut pipeline) =
             self.state
                 .app
@@ -527,14 +524,7 @@ impl Runtime {
         // Drive the char window and, on Fatal, exit the
         // event loop so the app does not silently loop
         // on a dead surface.
-        match self.render_char_frame() {
-            Ok(()) => {}
-            Err(AcquireError::Fatal) => {
-                tracing::error!("[ene-desktop] char surface hit a fatal error; exiting event loop");
-                event_loop.exit();
-            }
-            Err(AcquireError::Reconfigure | AcquireError::Timeout) => {}
-        }
+        self.render_char_frame();
 
         self.render_chat_frame(event_loop);
         self.render_settings_frame(event_loop);
@@ -574,7 +564,7 @@ impl Runtime {
         } = self.state;
         let bevy_world = app.world_mut();
         match cw.render_frame(&gpu.device, &gpu.queue, ai, bevy_world, chat_entity) {
-            Ok(_) => {}
+            Ok(()) => {}
             Err(e) => match e {
                 AcquireError::Reconfigure => {
                     cw.reconfigure(&self.state.gpu.device, cw.window.inner_size());
@@ -628,7 +618,7 @@ impl Runtime {
                 ui_entity,
                 now_secs,
             ) {
-                Ok(_) => {}
+                Ok(()) => {}
                 Err(e) => match e {
                     AcquireError::Reconfigure => {
                         uw.reconfigure(&self.state.gpu.device, uw.window.inner_size());
@@ -882,19 +872,18 @@ impl Runtime {
                     }
                 }
             }
-            WindowEvent::RedrawRequested => {}
             _ => {}
         }
     }
 
-    /// Render the character window directly from about_to_wait.
+    /// Render the character window directly from `about_to_wait`.
     ///
     /// Returns `Err(AcquireError::Fatal)` only on a fatal
     /// surface error; `Reconfigure` and `Timeout` are handled
     /// inline and return `Ok(())`.
-    fn render_char_frame(&mut self) -> Result<(), AcquireError> {
+    fn render_char_frame(&mut self) {
         let Some(cw) = self.char_window.as_mut() else {
-            return Ok(());
+            return;
         };
         let transparent = self.transparent;
         let (show_collider_debug, show_mask_gizmo, show_input_region_debug) = {
@@ -961,7 +950,7 @@ impl Runtime {
                     };
                     // First reset all expression weights so a previous
                     // expression doesn't linger after a new one starts.
-                    for en in layer.expression_names().into_iter() {
+                    for en in layer.expression_names() {
                         layer.set_expression(&en, 0.0);
                     }
                     for name_str in names {
@@ -976,7 +965,7 @@ impl Runtime {
                 }
             }
         }
-        self.emotion_clock = self.emotion_clock.or(Some(Instant::now()));
+        self.emotion_clock = self.emotion_clock.or_else(|| Some(Instant::now()));
 
         let cs = &settings.character_state;
         let actual_scale = character.auto_fit_scale(0.9) * cs.model_scale;
@@ -1004,10 +993,8 @@ impl Runtime {
 
                 // If the active motion name changed, load the new clip.
                 if let Some(motion_name) = frame.active_motions.first() {
-                    let should_switch = character
-                        .active_motion_name()
-                        .map(|current| current != motion_name.as_str())
-                        .unwrap_or(true);
+                    let should_switch =
+                        character.active_motion_name() != Some(motion_name.as_str());
                     if should_switch {
                         character.play_motion_by_name(motion_name);
                     }
@@ -1267,17 +1254,14 @@ impl Runtime {
             }
         }
         match result {
-            Ok(()) => Ok(()),
             Err(AcquireError::Reconfigure) => {
                 tracing::warn!("Character Surface acquire Outdated/Lost; reconfiguring");
                 cw.reconfigure(device, cw.window.inner_size());
-                Ok(())
             }
-            Err(AcquireError::Timeout) => Ok(()),
+            Ok(()) | Err(AcquireError::Timeout) => {}
             Err(AcquireError::Fatal) => {
                 tracing::error!("Character Surface acquire failed fatally; exiting");
                 self.char_surface_fatal = true;
-                Ok(())
             }
         }
     }
@@ -1294,7 +1278,7 @@ impl Runtime {
             return;
         };
 
-        if let WindowEvent::CloseRequested = event {
+        if event == WindowEvent::CloseRequested {
             self.hide_settings_window();
             return;
         }
@@ -1315,11 +1299,10 @@ impl Runtime {
                 uw.window.request_redraw();
             }
             WindowEvent::KeyboardInput { .. } => {
-                if let Some(NamedKey::Escape) = key_pressed(&event) {
+                if key_pressed(&event) == Some(NamedKey::Escape) {
                     self.hide_settings_window();
                 }
             }
-            WindowEvent::RedrawRequested => {}
             _ => {}
         }
     }
@@ -1329,7 +1312,7 @@ impl Runtime {
             return;
         };
 
-        if let WindowEvent::CloseRequested = event {
+        if event == WindowEvent::CloseRequested {
             self.hide_chat_window();
             return;
         }
@@ -1347,11 +1330,10 @@ impl Runtime {
                 cw.window.request_redraw();
             }
             WindowEvent::KeyboardInput { .. } => {
-                if let Some(NamedKey::Escape) = key_pressed(&event) {
+                if key_pressed(&event) == Some(NamedKey::Escape) {
                     self.hide_chat_window();
                 }
             }
-            WindowEvent::RedrawRequested => {}
             _ => {}
         }
     }
@@ -1449,8 +1431,8 @@ fn update_char_window_cursor_and_hittest(
 
     let mut local_cursor = None;
     let hit = if let Ok(outer) = cw.window.outer_position() {
-        let local_physical_x = gx as f64 - outer.x as f64;
-        let local_physical_y = gy as f64 - outer.y as f64;
+        let local_physical_x = f64::from(gx) - f64::from(outer.x);
+        let local_physical_y = f64::from(gy) - f64::from(outer.y);
 
         local_cursor = Some(winit::dpi::PhysicalPosition::new(
             local_physical_x,
@@ -1527,7 +1509,10 @@ fn update_char_window_cursor_and_hittest(
     hit
 }
 
-fn char_settings_hotkey_from_event(event: &WindowEvent, has_focus: bool) -> Option<SettingsAction> {
+const fn char_settings_hotkey_from_event(
+    event: &WindowEvent,
+    has_focus: bool,
+) -> Option<SettingsAction> {
     if !has_focus {
         return None;
     }
@@ -1553,7 +1538,7 @@ fn char_settings_hotkey_from_event(event: &WindowEvent, has_focus: bool) -> Opti
     }
 }
 
-fn key_pressed(event: &WindowEvent) -> Option<NamedKey> {
+const fn key_pressed(event: &WindowEvent) -> Option<NamedKey> {
     if let WindowEvent::KeyboardInput {
         event:
             KeyEvent {
@@ -1570,7 +1555,7 @@ fn key_pressed(event: &WindowEvent) -> Option<NamedKey> {
     }
 }
 
-fn key_code_pressed(event: &WindowEvent) -> Option<winit::keyboard::KeyCode> {
+const fn key_code_pressed(event: &WindowEvent) -> Option<winit::keyboard::KeyCode> {
     if let WindowEvent::KeyboardInput {
         event:
             KeyEvent {

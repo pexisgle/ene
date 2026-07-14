@@ -53,7 +53,7 @@ impl EmotionEngine {
 
         input.state.clamp();
         let mood_label = compute_mood_label(input.state);
-        input.state.mood_label = mood_label.clone();
+        input.state.mood_label.clone_from(&mood_label);
 
         tracing::debug!(
             component = "EmotionEngine",
@@ -140,7 +140,7 @@ fn apply_weighted_blend(
     match field {
         "valence" => {
             let old = state.valence;
-            state.valence += (target - state.valence) * weight;
+            state.valence = (target - state.valence).mul_add(weight, state.valence);
             let applied = state.valence - old;
             if applied.abs() >= f32::EPSILON {
                 deltas.push(AffectDelta {
@@ -151,7 +151,7 @@ fn apply_weighted_blend(
         }
         "arousal" => {
             let old = state.arousal;
-            state.arousal += (target - state.arousal) * weight;
+            state.arousal = (target - state.arousal).mul_add(weight, state.arousal);
             let applied = state.arousal - old;
             if applied.abs() >= f32::EPSILON {
                 deltas.push(AffectDelta {
@@ -162,7 +162,7 @@ fn apply_weighted_blend(
         }
         "irritation" => {
             let old = state.irritation;
-            state.irritation += (target - state.irritation) * weight;
+            state.irritation = (target - state.irritation).mul_add(weight, state.irritation);
             let applied = state.irritation - old;
             if applied.abs() >= f32::EPSILON {
                 deltas.push(AffectDelta {
@@ -173,7 +173,7 @@ fn apply_weighted_blend(
         }
         "affinity" => {
             let old = state.affinity;
-            state.affinity += (target - state.affinity) * weight;
+            state.affinity = (target - state.affinity).mul_add(weight, state.affinity);
             let applied = state.affinity - old;
             if applied.abs() >= f32::EPSILON {
                 deltas.push(AffectDelta {

@@ -16,7 +16,7 @@ const RECONNECT_MAX_RETRIES: u32 = 5;
 const RECONNECT_BASE_DELAY_MS: u64 = 200;
 const RECONNECT_MAX_DELAY_MS: u64 = 10_000;
 
-/// A ToolRegistry implementation that communicates with tool binaries via IPC
+/// A `ToolRegistry` implementation that communicates with tool binaries via IPC
 ///
 /// Automatically retries connection with exponential backoff when disconnected
 pub struct IpcToolRegistry {
@@ -151,7 +151,7 @@ impl IpcToolRegistry {
         }
     }
 
-    /// Sends an IpcRequest and receives an IpcResponse. Retries connection once on disconnect.
+    /// Sends an `IpcRequest` and receives an `IpcResponse`. Retries connection once on disconnect.
     ///
     /// The response read is bounded by `self.timeout_ms`. A hung
     /// tool binary (deadlock / infinite loop in `execute()`) will
@@ -162,11 +162,8 @@ impl IpcToolRegistry {
     async fn do_request(&self, req: IpcRequest) -> Result<IpcResponse, ToolHostError> {
         let result = {
             let mut guard = self.stream.lock().await;
-            let stream = match guard.as_mut() {
-                Some(s) => s,
-                None => {
-                    return Err(ToolHostError::ipc("Not connected to tool host"));
-                }
+            let Some(stream) = guard.as_mut() else {
+                return Err(ToolHostError::ipc("Not connected to tool host"));
             };
 
             if let Err(e) = write_ipc_request(stream, &req).await {
@@ -213,6 +210,7 @@ impl IpcToolRegistry {
                     .lock()
                     .map_err(|e| ToolHostError::ipc(format!("Tools lock poisoned: {e}")))?;
                 *tools_guard = tools;
+                drop(tools_guard);
                 Ok(())
             }
             Some(IpcResponse::Error { message }) => Err(ToolHostError::ipc(message)),
@@ -222,10 +220,15 @@ impl IpcToolRegistry {
 
     async fn do_refresh_tools(&self) -> Result<(), ToolHostError> {
         let mut guard = self.stream.lock().await;
-        let stream = guard
-            .as_mut()
-            .ok_or_else(|| ToolHostError::ipc("Not connected"))?;
-        self.do_refresh_tools_with_stream(stream).await
+        let _ = self
+            .do_refresh_tools_with_stream(
+                guard
+                    .as_mut()
+                    .ok_or_else(|| ToolHostError::ipc("Not connected"))?,
+            )
+            .await;
+        drop(guard);
+        Ok(())
     }
 
     /// Refreshes the cached tool definitions from the tool binary.
@@ -234,7 +237,7 @@ impl IpcToolRegistry {
     }
 
     /// Returns the socket path this client is connected to.
-    pub fn socket_path(&self) -> &PathBuf {
+    pub const fn socket_path(&self) -> &PathBuf {
         &self.socket_path
     }
 
@@ -337,12 +340,11 @@ impl IpcToolRegistry {
     async fn send_with_reconnect(&self, req: IpcRequest) -> Result<IpcResponse, ToolHostError> {
         let result = self.do_request(req.clone()).await;
 
-        match result {
-            Ok(resp) => Ok(resp),
-            Err(_) => {
-                self.ensure_connected().await?;
-                self.do_request(req).await
-            }
+        if let Ok(resp) = result {
+            Ok(resp)
+        } else {
+            self.ensure_connected().await?;
+            self.do_request(req).await
         }
     }
 }

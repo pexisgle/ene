@@ -25,6 +25,7 @@ pub struct McpToolRegistry {
 
 impl McpToolRegistry {
     /// Creates a new empty MCP tool registry.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -83,12 +84,14 @@ impl McpToolRegistry {
             ));
         }
 
-        let mut servers = self.servers.write().unwrap_or_else(|e| e.into_inner());
-        servers.push(McpServerConnection {
-            name: name.to_string(),
-            client: Arc::new(client.peer().clone()),
-            tools,
-        });
+        self.servers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(McpServerConnection {
+                name: name.to_string(),
+                client: Arc::new(client.peer().clone()),
+                tools,
+            });
 
         Ok(())
     }
@@ -100,16 +103,23 @@ impl McpToolRegistry {
 impl ToolRegistry for McpToolRegistry {
     fn list_tools(&self) -> Vec<ToolSpec> {
         let mut res = Vec::new();
-        let servers = self.servers.read().unwrap_or_else(|e| e.into_inner());
+        let servers = self
+            .servers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for s in servers.iter() {
             res.extend(s.tools.clone());
         }
+        drop(servers);
         res
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolHostError> {
         let client_opt = {
-            let servers = self.servers.read().unwrap_or_else(|e| e.into_inner());
+            let servers = self
+                .servers
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut found = None;
             for s in servers.iter() {
                 if s.tools.iter().any(|t| t.name.as_str() == name) {
@@ -117,6 +127,7 @@ impl ToolRegistry for McpToolRegistry {
                     break;
                 }
             }
+            drop(servers);
             found
         };
 

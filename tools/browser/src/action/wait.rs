@@ -24,7 +24,7 @@ pub struct WaitAction {
 }
 
 impl WaitAction {
-    pub fn new(store: Arc<crate::utils::session::BrowserSessionStore>) -> Self {
+    pub const fn new(store: Arc<crate::utils::session::BrowserSessionStore>) -> Self {
         Self {
             wait_ms: None,
             _store: store,

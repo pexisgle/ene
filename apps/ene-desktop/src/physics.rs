@@ -7,7 +7,7 @@
 //!
 //! ## ECS integration (Phase 4+)
 //!
-//! The legacy `entity_to_*` HashMaps that previously mapped an
+//! The legacy `entity_to_*` `HashMaps` that previously mapped an
 //! `hecs::Entity` to Rapier handles have been removed. The bevy
 //! `Component`s in [`crate::component::physics`] now carry the
 //! mapping:
@@ -67,7 +67,7 @@ pub struct CharacterColliderRegistration {
     pub rest_rotations: Vec<Quat>,
 }
 
-/// Wrapper for Rapier3D state.
+/// Wrapper for `Rapier3D` state.
 pub struct PhysicsWorld {
     pub gravity: Vec3,
     pub integration_parameters: IntegrationParameters,
@@ -258,8 +258,8 @@ fn build_collider_for_shape(spec: &BoneShapeSpec) -> ColliderBuilder {
         crate::character::collider::BoneShape::CapsuleY {
             half_height,
             radius,
-        } => ColliderBuilder::capsule_y(half_height, radius),
-        crate::character::collider::BoneShape::Capsule {
+        }
+        | crate::character::collider::BoneShape::Capsule {
             half_height,
             radius,
         } => ColliderBuilder::capsule_y(half_height, radius),

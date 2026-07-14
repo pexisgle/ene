@@ -1,4 +1,5 @@
 use std::env;
+use std::fmt::Write;
 use std::fs;
 use std::path::Path;
 
@@ -49,20 +50,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             || rust_name == "use"
             || rust_name == "pub"
         {
-            format!("{}_", rust_name)
+            format!("{rust_name}_")
         } else {
             rust_name
         };
 
-        code.push_str(&format!(
-            "#[allow(dead_code)]\n\
-             #[must_use]\n\
+        let _ = write!(
+            code,
+            "#[must_use]\n\
              pub fn {sanitized_name}() -> String {{\n\
                  i18n_embed_fl::fl!(loader(), \"{key}\")\n\
-             }}\n\n",
-            sanitized_name = sanitized_name,
-            key = key
-        ));
+             }}\n\n"
+        );
     }
 
     let out_dir = env::var("OUT_DIR")?;

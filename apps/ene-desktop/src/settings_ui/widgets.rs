@@ -233,7 +233,7 @@ pub fn apply_action(
     settings.save();
 }
 
-fn cycle_index(index: usize, len: usize, step: isize) -> usize {
+const fn cycle_index(index: usize, len: usize, step: isize) -> usize {
     if len == 0 {
         return 0;
     }

@@ -17,9 +17,9 @@ pub enum CommitmentStatus {
 }
 
 impl CommitmentStatus {
-    /// Returns the snake_case string representation for storage/DB use.
+    /// Returns the `snake_case` string representation for storage/DB use.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Active => "active",
             Self::Done => "done",
@@ -28,7 +28,7 @@ impl CommitmentStatus {
         }
     }
 
-    /// Parse from a snake_case string, logging a warning on unrecognized values.
+    /// Parse from a `snake_case` string, logging a warning on unrecognized values.
     pub(crate) fn from_db_str(s: &str) -> Self {
         match s {
             "active" => Self::Active,
@@ -47,7 +47,7 @@ impl CommitmentStatus {
 }
 
 /// A tracked companion promise, task, or follow-up.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Commitment {
     /// Primary key (`None` until persisted).
     pub id: Option<i64>,
@@ -97,7 +97,7 @@ pub struct NewCommitment {
 }
 
 /// Lightweight DTO for prompt injection (independent of vector recall).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActiveCommitmentPrompt {
     /// Commitment id.
     pub id: i64,

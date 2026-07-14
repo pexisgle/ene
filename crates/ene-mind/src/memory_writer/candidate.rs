@@ -53,7 +53,7 @@ pub struct MemoryCandidate {
     /// Whether this candidate should be persisted as a new memory.
     /// `false` for deletion-request candidates.
     pub should_persist: bool,
-    /// For deletion requests: the key to look up the memory to mark as UserDeleted.
+    /// For deletion requests: the key to look up the memory to mark as `UserDeleted`.
     pub deletion_target_key: Option<String>,
     /// For commitment candidates: due date or time reference (e.g. "明日", "next week").
     pub commitment_due: Option<String>,

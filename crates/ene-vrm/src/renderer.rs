@@ -8,7 +8,7 @@
 //!   space (kept fixed even when the model translates, since the
 //!   light direction is now sourced from `world_pos`).
 //! - Alpha-blend output (pre-multiplied) so transparent textures
-//!   (e.g. MToon's outline-transparent pass) composite correctly.
+//!   (e.g. `MToon`'s outline-transparent pass) composite correctly.
 //! - ****: per-frame `ModelUniform` (bind group 1) is applied
 //!   between view-proj and the vertex position. The runtime
 //!   composes it from `CharacterState::character_position` +
@@ -30,7 +30,7 @@
 //!   `weights[t / 4][t % 4]` lookup always matches the
 //!   corresponding row in the offsets storage buffer.
 //!
-//! The full MToon shader (rim / matcap / outline / emission) is a
+//! The full `MToon` shader (rim / matcap / outline / emission) is a
 //! follow-up PR.
 use wgpu::util::DeviceExt;
 
@@ -160,13 +160,13 @@ pub struct VrmRenderer {
     /// will rewrite this every frame to drive look-at
     /// rotations.
     skin: SkinGpu,
-    /// MToon per-material uniform buffer (group 5).
-    /// One buffer per primitive that has MToon; `None` for
+    /// `MToon` per-material uniform buffer (group 5).
+    /// One buffer per primitive that has `MToon`; `None` for
     /// primitives that use the lite shader.
     mtoon_uniforms: Vec<Option<MToonUniformGpu>>,
-    /// MToon opaque pipeline.
+    /// `MToon` opaque pipeline.
     pipeline_mtoon_opaque: wgpu::RenderPipeline,
-    /// MToon transparent pipeline.
+    /// `MToon` transparent pipeline.
     pipeline_mtoon_transparent: wgpu::RenderPipeline,
     /// Mask render pipeline. Compiles against `mask_format` if provided,
     /// otherwise `None`.
@@ -178,6 +178,7 @@ impl VrmRenderer {
     /// base-color texture (if any) is bound at group `(2)`.
     /// Morph-target data is bound at group `(3)` on a
     /// per-primitive basis.
+    #[must_use]
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -817,7 +818,7 @@ impl VrmRenderer {
                     module: &shader,
                     entry_point: Some("vs_main"),
                     buffers: &[crate::model::MeshVertex::LAYOUT],
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
@@ -827,7 +828,7 @@ impl VrmRenderer {
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
                 }),
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
@@ -1020,9 +1021,8 @@ impl VrmRenderer {
         camera_uniform: &CameraUniform,
         model_uniform: &ModelUniform,
     ) {
-        let pipeline = match &self.pipeline_mask {
-            Some(p) => p,
-            None => return,
+        let Some(pipeline) = &self.pipeline_mask else {
+            return;
         };
 
         // We can overwrite the camera and model uniforms here because
@@ -1052,13 +1052,12 @@ impl VrmRenderer {
         rp.set_bind_group(1, &self.model_bind_group, &[]);
         rp.set_bind_group(4, &self.skin.bind_group, &[]);
 
-        let all_prims: Vec<&_> = model
+        for (idx, prim) in model
             .meshes
             .iter()
             .flat_map(|m| m.primitives.iter())
-            .collect();
-
-        for (idx, prim) in all_prims.into_iter().enumerate() {
+            .enumerate()
+        {
             if let Some(morph) = self.morph_gpu.get(idx).and_then(Option::as_ref) {
                 if let Some(prim_morphs) = model
                     .expressions()
@@ -1197,7 +1196,8 @@ impl VrmRenderer {
     /// the joint count of the renderer's skin
     /// palette. Zero for models built with the identity
     /// one-element palette (no skin).
-    pub fn skin_joint_count(&self) -> u32 {
+    #[must_use]
+    pub const fn skin_joint_count(&self) -> u32 {
         self.skin.joint_count
     }
 }

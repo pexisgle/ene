@@ -24,9 +24,9 @@ pub enum DbValue {
 impl DbValue {
     /// Returns the value as an `i64` if it is an integer.
     #[must_use]
-    pub fn as_i64(&self) -> Option<i64> {
+    pub const fn as_i64(&self) -> Option<i64> {
         match self {
-            DbValue::Int(v) => Some(*v),
+            Self::Int(v) => Some(*v),
             _ => None,
         }
     }
@@ -35,25 +35,25 @@ impl DbValue {
     #[must_use]
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            DbValue::Text(v) => Some(v),
+            Self::Text(v) => Some(v),
             _ => None,
         }
     }
 
     /// Returns the value as a `bool` if it is a boolean.
     #[must_use]
-    pub fn as_bool(&self) -> Option<bool> {
+    pub const fn as_bool(&self) -> Option<bool> {
         match self {
-            DbValue::Bool(v) => Some(*v),
+            Self::Bool(v) => Some(*v),
             _ => None,
         }
     }
 
     /// Returns the value as an `f64` if it is a float.
     #[must_use]
-    pub fn as_f64(&self) -> Option<f64> {
+    pub const fn as_f64(&self) -> Option<f64> {
         match self {
-            DbValue::Float(v) => Some(*v),
+            Self::Float(v) => Some(*v),
             _ => None,
         }
     }
@@ -62,7 +62,7 @@ impl DbValue {
     #[must_use]
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
-            DbValue::Blob(v) => Some(v),
+            Self::Blob(v) => Some(v),
             _ => None,
         }
     }
@@ -70,49 +70,49 @@ impl DbValue {
 
 impl From<bool> for DbValue {
     fn from(v: bool) -> Self {
-        DbValue::Bool(v)
+        Self::Bool(v)
     }
 }
 
 impl From<i32> for DbValue {
     fn from(v: i32) -> Self {
-        DbValue::Int(i64::from(v))
+        Self::Int(i64::from(v))
     }
 }
 
 impl From<i64> for DbValue {
     fn from(v: i64) -> Self {
-        DbValue::Int(v)
+        Self::Int(v)
     }
 }
 
 impl From<f64> for DbValue {
     fn from(v: f64) -> Self {
-        DbValue::Float(v)
+        Self::Float(v)
     }
 }
 
 impl From<String> for DbValue {
     fn from(v: String) -> Self {
-        DbValue::Text(v)
+        Self::Text(v)
     }
 }
 
 impl From<&str> for DbValue {
     fn from(v: &str) -> Self {
-        DbValue::Text(v.to_string())
+        Self::Text(v.to_string())
     }
 }
 
 impl From<Vec<u8>> for DbValue {
     fn from(v: Vec<u8>) -> Self {
-        DbValue::Blob(v)
+        Self::Blob(v)
     }
 }
 
 impl From<&[u8]> for DbValue {
     fn from(v: &[u8]) -> Self {
-        DbValue::Blob(v.to_vec())
+        Self::Blob(v.to_vec())
     }
 }
 
@@ -122,11 +122,11 @@ pub enum DbFilter {
     /// Matches all rows.
     Always,
     /// Logical AND of multiple filters.
-    And(Vec<DbFilter>),
+    And(Vec<Self>),
     /// Logical OR of multiple filters.
-    Or(Vec<DbFilter>),
+    Or(Vec<Self>),
     /// Logical NOT of a filter.
-    Not(Box<DbFilter>),
+    Not(Box<Self>),
     /// Column equals value.
     Eq {
         /// Column name.
@@ -199,7 +199,7 @@ impl DbFilter {
     /// Creates an equality filter.
     #[must_use]
     pub fn eq(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
-        DbFilter::Eq {
+        Self::Eq {
             column: column.into(),
             value: value.into(),
         }
@@ -208,7 +208,7 @@ impl DbFilter {
     /// Creates a not-equal filter.
     #[must_use]
     pub fn ne(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
-        DbFilter::Ne {
+        Self::Ne {
             column: column.into(),
             value: value.into(),
         }
@@ -217,7 +217,7 @@ impl DbFilter {
     /// Creates a less-than filter.
     #[must_use]
     pub fn lt(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
-        DbFilter::Lt {
+        Self::Lt {
             column: column.into(),
             value: value.into(),
         }
@@ -226,7 +226,7 @@ impl DbFilter {
     /// Creates a less-than-or-equal filter.
     #[must_use]
     pub fn le(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
-        DbFilter::Le {
+        Self::Le {
             column: column.into(),
             value: value.into(),
         }
@@ -235,7 +235,7 @@ impl DbFilter {
     /// Creates a greater-than filter.
     #[must_use]
     pub fn gt(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
-        DbFilter::Gt {
+        Self::Gt {
             column: column.into(),
             value: value.into(),
         }
@@ -244,7 +244,7 @@ impl DbFilter {
     /// Creates a greater-than-or-equal filter.
     #[must_use]
     pub fn ge(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
-        DbFilter::Ge {
+        Self::Ge {
             column: column.into(),
             value: value.into(),
         }
@@ -253,7 +253,7 @@ impl DbFilter {
     /// Creates an IS NULL filter.
     #[must_use]
     pub fn is_null(column: impl Into<String>) -> Self {
-        DbFilter::IsNull {
+        Self::IsNull {
             column: column.into(),
         }
     }
@@ -261,52 +261,53 @@ impl DbFilter {
     /// Creates an IS NOT NULL filter.
     #[must_use]
     pub fn is_not_null(column: impl Into<String>) -> Self {
-        DbFilter::IsNotNull {
+        Self::IsNotNull {
             column: column.into(),
         }
     }
 
     /// Combines two filters with AND, flattening nested ANDs.
     #[must_use]
-    pub fn and(self, other: DbFilter) -> Self {
+    pub fn and(self, other: Self) -> Self {
         match (self, other) {
-            (DbFilter::And(mut a), DbFilter::And(b)) => {
+            (Self::And(mut a), Self::And(b)) => {
                 a.extend(b);
-                DbFilter::And(a)
+                Self::And(a)
             }
-            (DbFilter::And(mut a), b) => {
+            (Self::And(mut a), b) => {
                 a.push(b);
-                DbFilter::And(a)
+                Self::And(a)
             }
-            (a, DbFilter::And(mut b)) => {
+            (a, Self::And(mut b)) => {
                 b.insert(0, a);
-                DbFilter::And(b)
+                Self::And(b)
             }
-            (a, b) => DbFilter::And(vec![a, b]),
+            (a, b) => Self::And(vec![a, b]),
         }
     }
 
     /// Combines two filters with OR, flattening nested ORs.
     #[must_use]
-    pub fn or(self, other: DbFilter) -> Self {
+    pub fn or(self, other: Self) -> Self {
         match (self, other) {
-            (DbFilter::Or(mut a), DbFilter::Or(b)) => {
+            (Self::Or(mut a), Self::Or(b)) => {
                 a.extend(b);
-                DbFilter::Or(a)
+                Self::Or(a)
             }
-            (DbFilter::Or(mut a), b) => {
+            (Self::Or(mut a), b) => {
                 a.push(b);
-                DbFilter::Or(a)
+                Self::Or(a)
             }
-            (a, DbFilter::Or(mut b)) => {
+            (a, Self::Or(mut b)) => {
                 b.insert(0, a);
-                DbFilter::Or(b)
+                Self::Or(b)
             }
-            (a, b) => DbFilter::Or(vec![a, b]),
+            (a, b) => Self::Or(vec![a, b]),
         }
     }
 
     /// Returns all column names referenced by this filter.
+    #[must_use]
     pub fn columns_referenced(&self) -> Vec<&str> {
         let mut cols = Vec::new();
         self.collect_columns(&mut cols);
@@ -315,23 +316,23 @@ impl DbFilter {
 
     fn collect_columns<'a>(&'a self, out: &mut Vec<&'a str>) {
         match self {
-            DbFilter::Always => {}
-            DbFilter::And(filters) | DbFilter::Or(filters) => {
+            Self::Always => {}
+            Self::And(filters) | Self::Or(filters) => {
                 for f in filters {
                     f.collect_columns(out);
                 }
             }
-            DbFilter::Not(f) => f.collect_columns(out),
-            DbFilter::Eq { column, .. }
-            | DbFilter::Ne { column, .. }
-            | DbFilter::Lt { column, .. }
-            | DbFilter::Le { column, .. }
-            | DbFilter::Gt { column, .. }
-            | DbFilter::Ge { column, .. }
-            | DbFilter::In { column, .. }
-            | DbFilter::Like { column, .. }
-            | DbFilter::IsNull { column }
-            | DbFilter::IsNotNull { column } => {
+            Self::Not(f) => f.collect_columns(out),
+            Self::Eq { column, .. }
+            | Self::Ne { column, .. }
+            | Self::Lt { column, .. }
+            | Self::Le { column, .. }
+            | Self::Gt { column, .. }
+            | Self::Ge { column, .. }
+            | Self::In { column, .. }
+            | Self::Like { column, .. }
+            | Self::IsNull { column }
+            | Self::IsNotNull { column } => {
                 out.push(column);
             }
         }
@@ -339,7 +340,7 @@ impl DbFilter {
 }
 
 /// Sort direction for ORDER BY clauses.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DbOrderDirection {
     /// Ascending order.
     Asc,
@@ -348,7 +349,7 @@ pub enum DbOrderDirection {
 }
 
 /// An ORDER BY clause element.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DbOrderBy {
     /// Column name to sort by.
     pub column: String,
@@ -377,7 +378,7 @@ impl DbOrderBy {
 }
 
 /// SQLite column type.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DbType {
     /// 64-bit signed integer.
     Integer,
@@ -428,7 +429,7 @@ pub struct DbTable {
 }
 
 /// Index definition for schema declaration.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct DbIndex {
     /// Index name.
     pub name: String,

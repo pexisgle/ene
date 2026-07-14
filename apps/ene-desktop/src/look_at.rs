@@ -126,7 +126,7 @@ pub struct BodyTracking {
 pub fn body_tracking_for_strength(strength: f32) -> BodyTracking {
     let s = strength.clamp(0.0, 1.0);
     let influence = s;
-    let angle_scale = 0.20 + 0.80 * s;
+    let angle_scale = 0.80f32.mul_add(s, 0.20);
     BodyTracking {
         head_weight: 0.24 * influence,
         neck_weight: 0.14 * influence,
@@ -142,9 +142,9 @@ pub fn body_tracking_for_strength(strength: f32) -> BodyTracking {
         spine_yaw_max: 5.0 * angle_scale,
         spine_pitch_max: 2.0 * angle_scale,
 
-        smoothing: 4.5 + 5.5 * s,
-        output_smoothing: 6.5 + 7.5 * s,
-        reference_depth: (1.20 + (1.0 - s) * 0.45).clamp(1.0, 1.8),
+        smoothing: 5.5f32.mul_add(s, 4.5),
+        output_smoothing: 7.5f32.mul_add(s, 6.5),
+        reference_depth: (1.0 - s).mul_add(0.45, 1.20).clamp(1.0, 1.8),
     }
 }
 

@@ -19,7 +19,7 @@
 //!
 //! ##.x deliberately does **not** support
 //!
-//! - MToon's full PBR parameters (rim / matcap / outline /
+//! - `MToon`'s full PBR parameters (rim / matcap / outline /
 //!   emission). The shader applies a simple diffuse + lit + base
 //!   color. The MToon-flavored `KHR_materials_unlit` flag is
 //!   *read* so the loader can log a warning if it is set, but
@@ -71,7 +71,7 @@ const TARGET_MODEL_SIZE: f32 = 1.5;
 /// Load a `.vrm` file from disk and upload every primitive of the
 /// first mesh to the GPU.
 ///
-/// `path` is the on-disk `.vrm` (a glTF binary with the VRMC_vrm
+/// `path` is the on-disk `.vrm` (a glTF binary with the `VRMC_vrm`
 /// extension). `device` and `queue` are used to allocate the
 /// vertex / index / texture buffers.
 pub fn load_vrm(
@@ -164,7 +164,7 @@ pub fn load_vrm(
     let expression_count: usize = expression_layer
         .per_primitive
         .iter()
-        .map(|p| p.as_ref().map(|m| m.targets.len()).unwrap_or(0))
+        .map(|p| p.as_ref().map_or(0, |m| m.targets.len()))
         .sum();
     if expression_count > 0 {
         tracing::info!(
@@ -250,7 +250,7 @@ pub fn load_vrm(
 ///
 /// `expression_names` is the resolver map produced by
 /// [`resolve_expression_names`]; the loader uses it to rename
-/// each primitive's morph targets to the real VRMC_vrm
+/// each primitive's morph targets to the real `VRMC_vrm`
 /// expression name (e.g. `happy`, `sad`) instead of the
 /// synthetic `morph_target_<i>` fallback.
 type Aabb = ([f32; 3], [f32; 3]);
@@ -319,9 +319,9 @@ fn load_all_meshes(
     ];
     let max_extent = extent.iter().copied().fold(0.0f32, f32::max);
     let center: [f32; 3] = [
-        (bb_min[0] + bb_max[0]) * 0.5,
-        (bb_min[1] + bb_max[1]) * 0.5,
-        (bb_min[2] + bb_max[2]) * 0.5,
+        f32::midpoint(bb_min[0], bb_max[0]),
+        f32::midpoint(bb_min[1], bb_max[1]),
+        f32::midpoint(bb_min[2], bb_max[2]),
     ];
     let scale = if max_extent > 0.0001 {
         TARGET_MODEL_SIZE / max_extent
@@ -385,23 +385,22 @@ fn load_all_meshes(
             }
             let reader = primitive.reader(|_buffer| gltf.blob.as_deref());
 
-            let positions: Vec<[f32; 3]> = match reader.read_positions() {
-                Some(p) => p.collect(),
-                None => {
-                    tracing::warn!(
-                        "VRM mesh[{mesh_idx}].primitive[{prim_idx}] has no POSITION; skipping"
-                    );
-                    continue;
-                }
+            let positions: Vec<[f32; 3]> = if let Some(p) = reader.read_positions() {
+                p.collect()
+            } else {
+                tracing::warn!(
+                    "VRM mesh[{mesh_idx}].primitive[{prim_idx}] has no POSITION; skipping"
+                );
+                continue;
             };
-            let normals: Vec<[f32; 3]> = reader
-                .read_normals()
-                .map(|n| n.collect())
-                .unwrap_or_else(|| vec![[0.0, 0.0, 1.0]; positions.len()]);
-            let uvs: Vec<[f32; 2]> = reader
-                .read_tex_coords(0)
-                .map(|tc| tc.into_f32().collect())
-                .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
+            let normals: Vec<[f32; 3]> = reader.read_normals().map_or_else(
+                || vec![[0.0, 0.0, 1.0]; positions.len()],
+                std::iter::Iterator::collect,
+            );
+            let uvs: Vec<[f32; 2]> = reader.read_tex_coords(0).map_or_else(
+                || vec![[0.0, 0.0]; positions.len()],
+                |tc| tc.into_f32().collect(),
+            );
             // `JOINTS_0` is a u8/u16 accessor; the gltf 1.4
             // `ReadJoints` enum exposes `into_u16` (handles both
             // uniformly via a `CastingIter`). Promote to `u32` so
@@ -417,13 +416,12 @@ fn load_all_meshes(
             let remap_for_this_prim: &[u32] = primitive_joint_remap
                 .get(mesh_idx)
                 .and_then(|m| m.get(prim_idx))
-                .map(|v| v.as_slice())
-                .unwrap_or(&[]);
+                .map_or(&[], std::vec::Vec::as_slice);
             let remap_one =
                 |slot: u16| -> u32 { remap_for_this_prim.get(slot as usize).copied().unwrap_or(0) };
-            let joints: Vec<[u32; 4]> = reader
-                .read_joints(0)
-                .map(|js| {
+            let joints: Vec<[u32; 4]> = reader.read_joints(0).map_or_else(
+                || vec![[0, 0, 0, 0]; positions.len()],
+                |js| {
                     js.into_u16()
                         .map(|j| {
                             [
@@ -434,8 +432,8 @@ fn load_all_meshes(
                             ]
                         })
                         .collect()
-                })
-                .unwrap_or_else(|| vec![[0, 0, 0, 0]; positions.len()]);
+                },
+            );
             // A primitive carrying `JOINTS_0` without a skin
             // means a malformed model (most likely a VRM 0.x file
             // that lost its skin during export). Flag it once
@@ -443,18 +441,17 @@ fn load_all_meshes(
             if !has_nonzero_joints && joints.iter().any(|j| j.iter().any(|x| *x != 0)) {
                 has_nonzero_joints = true;
             }
-            let weights: Vec<[f32; 4]> = reader
-                .read_weights(0)
-                .map(|ws| ws.into_f32().collect())
-                .unwrap_or_else(|| vec![[1.0, 0.0, 0.0, 0.0]; positions.len()]);
-            let indices: Vec<u32> = match reader.read_indices() {
-                Some(i) => i.into_u32().collect(),
-                None => {
-                    tracing::warn!(
-                        "VRM mesh[{mesh_idx}].primitive[{prim_idx}] has no index buffer; skipping"
-                    );
-                    continue;
-                }
+            let weights: Vec<[f32; 4]> = reader.read_weights(0).map_or_else(
+                || vec![[1.0, 0.0, 0.0, 0.0]; positions.len()],
+                |ws| ws.into_f32().collect(),
+            );
+            let indices: Vec<u32> = if let Some(i) = reader.read_indices() {
+                i.into_u32().collect()
+            } else {
+                tracing::warn!(
+                    "VRM mesh[{mesh_idx}].primitive[{prim_idx}] has no index buffer; skipping"
+                );
+                continue;
             };
             if indices.is_empty() {
                 continue;
@@ -721,7 +718,7 @@ fn load_merged_skeleton_and_remaps(gltf: &gltf::Gltf) -> (Skeleton, Vec<Vec<Vec<
     // model ~5x vertically.
     let skel = Skeleton {
         inverse_bind: merged_ibms.clone(),
-        bind_matrices: merged_ibms.iter().map(|m| m.inverse()).collect(),
+        bind_matrices: merged_ibms.iter().map(glam::Mat4::inverse).collect(),
         joint_to_node: merged_joints,
     };
 
@@ -732,7 +729,7 @@ fn load_merged_skeleton_and_remaps(gltf: &gltf::Gltf) -> (Skeleton, Vec<Vec<Vec<
         std::collections::HashMap::new();
     for node in gltf.document.nodes() {
         if let Some(mesh) = node.mesh() {
-            let skin_idx = node.skin().map(|s| s.index()).unwrap_or(0);
+            let skin_idx = node.skin().map_or(0, |s| s.index());
             mesh_to_skin.entry(mesh.index()).or_insert(skin_idx);
         }
     }
@@ -851,8 +848,7 @@ fn load_primitive_base_color_texture(
         return Ok(Some(cached.clone()));
     }
 
-    let image =
-        load_image_data(&texture, gltf).map_err(|e| VrmError::TextureDecode(e.to_string()))?;
+    let image = load_image_data(&texture, gltf).map_err(VrmError::TextureDecode)?;
 
     let (width, height) = (image.width, image.height);
     let gpu_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -987,7 +983,7 @@ fn load_image_data(
             let start = view.offset();
             let end = start + view.length();
             blob.get(start..end)
-                .ok_or_else(|| format!("buffer view out of range: {}..{}", start, end))?
+                .ok_or_else(|| format!("buffer view out of range: {start}..{end}"))?
                 .to_vec()
         }
     };
@@ -1019,13 +1015,13 @@ fn load_image_data(
 /// forward-compat — a future model that bakes normalisation
 /// into the vertices could reintroduce the linear pass
 /// without touching call sites.
-fn normalize_morph_offset(raw: [f32; 3], _scale: f32) -> [f32; 3] {
+const fn normalize_morph_offset(raw: [f32; 3], _scale: f32) -> [f32; 3] {
     raw
 }
 
-/// Load all MToon textures referenced by a material and
+/// Load all `MToon` textures referenced by a material and
 /// create the combined GPU bind group. Returns `Ok(None)` if the
-/// material has no MToon textures at all.
+/// material has no `MToon` textures at all.
 fn load_mtoon_gpu_textures(
     mat_index: usize,
     mat: &mtoon::MToonMaterial,
@@ -1345,7 +1341,7 @@ fn load_mtoon_gpu_textures(
     Ok(Some(gpu_tex))
 }
 
-/// A single GPU texture + sampler for MToon.
+/// A single GPU texture + sampler for `MToon`.
 struct MToonGpuTexture {
     #[expect(dead_code)]
     texture: wgpu::Texture,
@@ -1365,9 +1361,8 @@ fn load_mtoon_texture_or_dummy(
     if let Some(idx) = index {
         let texture = gltf.document.textures().nth(idx);
         if let Some(tex) = texture {
-            let image =
-                load_image_data(&tex, gltf).map_err(|e| VrmError::TextureDecode(e.to_string()))?;
-            return upload_mtoon_texture(image, device, queue, label);
+            let image = load_image_data(&tex, gltf).map_err(VrmError::TextureDecode)?;
+            return upload_mtoon_texture(&image, device, queue, label);
         }
     }
     // 1×1 white dummy.
@@ -1376,11 +1371,12 @@ fn load_mtoon_texture_or_dummy(
         height: 1,
         rgba: vec![255, 255, 255, 255],
     };
-    upload_mtoon_texture(white, device, queue, label)
+    upload_mtoon_texture(&white, device, queue, label)
 }
 
+#[expect(clippy::unnecessary_wraps)]
 fn upload_mtoon_texture(
-    image: DecodedImage,
+    image: &DecodedImage,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     label: &str,

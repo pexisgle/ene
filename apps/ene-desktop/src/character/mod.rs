@@ -37,7 +37,7 @@ pub struct CharacterRenderer {
     depth_size: (u32, u32),
     default_vrm: Option<PathBuf>,
     look_at: LookAtState,
-    /// Per-bone LookAt output for `"bone"`-type models.
+    /// Per-bone `LookAt` output for `"bone"`-type models.
     look_at_bone_output: Option<LookAtBoneOutput>,
     pub drag: CharacterDragState,
     vrma: Option<VrmaAsset>,
@@ -237,7 +237,7 @@ impl CharacterRenderer {
         }
     }
 
-    /// Advance the VrmaPlayer by `dt_secs`, evaluate the active
+    /// Advance the `VrmaPlayer` by `dt_secs`, evaluate the active
     /// clip, push expression weights into the morph layer, step
     /// the spring-bone simulator, and recompute the skin palette.
     /// Returns the new palette for the runtime to forward to
@@ -509,12 +509,11 @@ impl CharacterRenderer {
             self.fxaa_shader = Some(shader);
         }
         // Re-build when the swapchain format or size changes.
-        let needs_rebuild = self.fxaa_format.map(|f| f != format).unwrap_or(true)
+        let needs_rebuild = (self.fxaa_format != Some(format))
             || self
                 .post_processor
                 .as_ref()
-                .map(|p| p.size() != swapchain_size)
-                .unwrap_or(true);
+                .is_none_or(|p| p.size() != swapchain_size);
         if !needs_rebuild {
             return;
         }
@@ -733,12 +732,12 @@ impl CharacterRenderer {
     }
 
     /// Returns the current camera eye position.
-    pub fn camera_eye(&self) -> [f32; 3] {
+    pub const fn camera_eye(&self) -> [f32; 3] {
         self.camera.eye()
     }
 
     /// Returns the current camera target position.
-    pub fn camera_target(&self) -> [f32; 3] {
+    pub const fn camera_target(&self) -> [f32; 3] {
         self.camera.target()
     }
 
@@ -753,13 +752,13 @@ impl CharacterRenderer {
     /// inside [`Self::update_motion`]; the accessor is kept for
     /// diagnostics.
     #[expect(dead_code)]
-    pub fn look_at_bone_output(&self) -> Option<&LookAtBoneOutput> {
+    pub const fn look_at_bone_output(&self) -> Option<&LookAtBoneOutput> {
         self.look_at_bone_output.as_ref()
     }
 
     /// The most recent smoothed world target (or `None`).
     #[expect(dead_code)]
-    pub fn look_at_target(&self) -> Option<Vec3> {
+    pub const fn look_at_target(&self) -> Option<Vec3> {
         self.look_at.smoothed_world_target
     }
 
@@ -770,9 +769,9 @@ impl CharacterRenderer {
         crate::look_at::body_tracking_for_strength(strength)
     }
 
-    /// Diagnostic: (aspect_ratio, eye, target, viewport_height).
+    /// Diagnostic: (`aspect_ratio`, eye, target, `viewport_height`).
     #[expect(dead_code)]
-    pub fn camera_dbg(&self) -> (f32, [f32; 3], [f32; 3], f32) {
+    pub const fn camera_dbg(&self) -> (f32, [f32; 3], [f32; 3], f32) {
         let (eye, target, viewport_height, aspect) = self.camera.debug();
         (aspect, eye, target, viewport_height)
     }
@@ -807,20 +806,20 @@ impl CharacterRenderer {
             * Mat4::from_translation(Vec3::from(center) * -1.0)
     }
 
-    /// Diagnostic: (depth_width, depth_height).
+    /// Diagnostic: (`depth_width`, `depth_height`).
     #[expect(dead_code)]
-    pub fn depth_size_dbg(&self) -> (u32, u32) {
+    pub const fn depth_size_dbg(&self) -> (u32, u32) {
         self.depth_size
     }
 
     /// Hand the depth attachment to the debug overlay so it can
     /// `LoadOp::Load` the depth the main VRM pass wrote. Returns
     /// `None` before `init` / `resize` produces a depth texture.
-    pub fn depth_view(&self) -> Option<&wgpu::TextureView> {
+    pub const fn depth_view(&self) -> Option<&wgpu::TextureView> {
         self.depth_view.as_ref()
     }
 
-    pub fn model(&self) -> Option<&VrmModel> {
+    pub const fn model(&self) -> Option<&VrmModel> {
         self.model.as_ref()
     }
 
@@ -829,7 +828,7 @@ impl CharacterRenderer {
     /// (`expressions_mut().set_expression`) after
     /// `app.update()` has drained the `EmotionPipelineState`
     /// queue.
-    pub fn model_mut(&mut self) -> Option<&mut VrmModel> {
+    pub const fn model_mut(&mut self) -> Option<&mut VrmModel> {
         self.model.as_mut()
     }
 
@@ -838,7 +837,7 @@ impl CharacterRenderer {
     /// not symmetric, that's a bug.
     #[expect(dead_code)]
     pub fn model_aabb_dbg(&self) -> Option<([f32; 3], [f32; 3])> {
-        self.model.as_ref().map(|m| m.aabb())
+        self.model.as_ref().map(ene_vrm::VrmModel::aabb)
     }
 
     /// Diagnostic: the loader-captured AABB centre. The
@@ -847,7 +846,9 @@ impl CharacterRenderer {
     /// the AABB) the model will be shifted out of the viewport.
     #[expect(dead_code)]
     pub fn model_dbg_center(&self) -> [f32; 3] {
-        self.model.as_ref().map(|m| m.center()).unwrap_or([0.0; 3])
+        self.model
+            .as_ref()
+            .map_or([0.0; 3], ene_vrm::VrmModel::center)
     }
 
     /// Diagnostic: the loader's `1.5 / max_extent` scale.
@@ -858,8 +859,7 @@ impl CharacterRenderer {
     pub fn model_dbg_normalize_scale(&self) -> f32 {
         self.model
             .as_ref()
-            .map(|m| m.normalize_scale())
-            .unwrap_or(1.0)
+            .map_or(1.0, ene_vrm::VrmModel::normalize_scale)
     }
 
     /// Diagnostic: the merged skeleton joint count after
@@ -867,17 +867,14 @@ impl CharacterRenderer {
     /// of every skin's joint list.
     #[expect(dead_code)]
     pub fn model_dbg_merged_skel_joints(&self) -> Option<usize> {
-        self.model.as_ref().map(|m| m.joint_count())
+        self.model.as_ref().map(ene_vrm::VrmModel::joint_count)
     }
 
     /// Diagnostic: camera `view_proj` matrix in column-major
     /// format.
     #[expect(dead_code)]
     pub fn camera_view_proj_dbg(&self) -> [[f32; 4]; 4] {
-        self.camera
-            .uniform()
-            .map(|u| u.view_proj)
-            .unwrap_or([[0.0; 4]; 4])
+        self.camera.uniform().map_or([[0.0; 4]; 4], |u| u.view_proj)
     }
 
     /// Diagnostic: just the view matrix.
@@ -900,11 +897,7 @@ impl CharacterRenderer {
         actual_scale: f32,
     ) -> [[f32; 4]; 4] {
         let model = self.model_matrix(character_position.into(), actual_scale);
-        let view_proj = self
-            .camera
-            .uniform()
-            .map(|u| u.view_proj)
-            .unwrap_or([[0.0; 4]; 4]);
+        let view_proj = self.camera.uniform().map_or([[0.0; 4]; 4], |u| u.view_proj);
         let vp = glam::Mat4::from_cols_array_2d(&view_proj);
         (vp * model).to_cols_array_2d()
     }

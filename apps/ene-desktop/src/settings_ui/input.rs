@@ -50,22 +50,24 @@ impl SettingsInputState {
         self.character_pos_x = format!("{:+.2}", settings.character_state.character_position.x);
         self.character_pos_y = format!("{:+.2}", settings.character_state.character_position.y);
         self.character_pos_z = format!("{:+.2}", settings.character_state.character_position.z);
-        self.ai_user_name = settings.ai.ai.user_name.clone();
-        self.ai_runtime_rules = settings.ai.ai.runtime_rules.clone();
+        self.ai_user_name.clone_from(&settings.ai.ai.user_name);
+        self.ai_runtime_rules
+            .clone_from(&settings.ai.ai.runtime_rules);
         let provider = settings
             .ai
             .ai
             .get_section::<ene_runtime::ProviderConfig>()
             .unwrap_or_default();
-        self.ai_base_url = provider.base_url.clone();
-        self.ai_api_key = provider.api_key.inline.clone();
+        self.ai_base_url.clone_from(&provider.base_url);
+        self.ai_api_key.clone_from(&provider.api_key.inline);
         let mem = settings
             .ai
             .ai
             .get_section::<ene_store::StoreConfig>()
             .unwrap_or_default();
         self.ai_memory_enabled = mem.enabled;
-        self.ai_embedding_provider = provider.embedding.backend.clone();
+        self.ai_embedding_provider
+            .clone_from(&provider.embedding.backend);
         self.ai_embedding_model = if provider.embedding.backend == "local" {
             provider.embedding.local.model.clone()
         } else {
@@ -76,8 +78,8 @@ impl SettingsInputState {
         } else {
             provider.embedding.cloud.dimensions.to_string()
         };
-        self.ai_provider_name = provider.name.clone();
-        self.ai_model = provider.model.clone();
-        self.ai_api_key_env = provider.api_key.env.clone();
+        self.ai_provider_name.clone_from(&provider.name);
+        self.ai_model.clone_from(&provider.model);
+        self.ai_api_key_env = provider.api_key.env;
     }
 }

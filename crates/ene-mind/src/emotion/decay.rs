@@ -84,8 +84,7 @@ pub fn apply_decay(
     Some(AffectUpdateReason {
         category: "decay",
         detail: format!(
-            "decayed toward neutral over {:.1} min (factor={factor:.3})",
-            elapsed_minutes
+            "decayed toward neutral over {elapsed_minutes:.1} min (factor={factor:.3})"
         ),
         deltas,
     })

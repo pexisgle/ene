@@ -37,7 +37,7 @@ pub struct MemoryDiversifyOptions {
 impl MemoryDiversifyOptions {
     /// Build options from mind memory config.
     #[must_use]
-    pub fn from_config(config: &MindMemoryConfig) -> Self {
+    pub const fn from_config(config: &MindMemoryConfig) -> Self {
         Self {
             enabled: config.mmr_enabled,
             lambda: config.mmr_lambda.clamp(0.0, 1.0),
@@ -196,7 +196,7 @@ fn mmr_score(
             .fold(0.0_f32, f32::max)
     };
     let source_bonus = source_diversity_bonus(candidate, selected, options.source_diversity_bonus);
-    options.lambda * relevance - (1.0 - options.lambda) * max_sim + source_bonus
+    (1.0 - options.lambda).mul_add(-max_sim, options.lambda * relevance) + source_bonus
 }
 
 fn source_diversity_bonus(candidate: &ScoredMemory, selected: &[ScoredMemory], bonus: f32) -> f32 {
@@ -335,10 +335,7 @@ fn lowest_scoring_swappable_index(
     mins: &[(MemoryKind, usize)],
 ) -> Option<usize> {
     let min_for = |kind: MemoryKind| -> usize {
-        mins.iter()
-            .find(|(k, _)| *k == kind)
-            .map(|(_, n)| *n)
-            .unwrap_or(0)
+        mins.iter().find(|(k, _)| *k == kind).map_or(0, |(_, n)| *n)
     };
 
     let mut kind_counts: std::collections::HashMap<MemoryKind, usize> =

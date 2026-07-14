@@ -37,7 +37,7 @@ impl Default for SplitScoreWeights {
 
 /// Configuration for conversation summarization.
 #[derive(
-    Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, Default, PartialEq,
+    Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, Default, PartialEq, Eq,
 )]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]

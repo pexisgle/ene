@@ -71,9 +71,9 @@ impl AiBridge {
 
         bootstrap_handle.spawn(pump_events(
             receiver,
-            event_tx.clone(),
-            handle.clone(),
-            processing.clone(),
+            event_tx,
+            handle,
+            processing,
             active_turn,
         ));
 
@@ -126,7 +126,7 @@ impl AiBridge {
     /// True while a turn id is still tracked (may outlive `processing`
     /// after broadcast lag so Cancel remains available).
     pub fn has_active_turn(&self) -> bool {
-        self.active_turn.lock().ok().is_some_and(|g| g.is_some())
+        self.active_turn.lock().is_ok_and(|g| g.is_some())
     }
 
     /// Forward a `PermissionDecision` for the request
@@ -316,7 +316,7 @@ fn recall_reason_key(reason: ene_mind::RecallReason) -> String {
     }
 }
 
-fn cue_source_to_u8(source: ene_runtime::CueSource) -> u8 {
+const fn cue_source_to_u8(source: ene_runtime::CueSource) -> u8 {
     ene_mind::cue_source_priority(source)
 }
 
@@ -356,8 +356,7 @@ async fn pump_events(
                         ene_mind::PerfKind::Motion => {
                             let layer = cue
                                 .motion_layer
-                                .map(|l| l.as_str().to_string())
-                                .unwrap_or_else(|| "full".to_string());
+                                .map_or_else(|| "full".to_string(), |l| l.as_str().to_string());
                             let priority = cue_source_to_u8(source);
                             let _ = event_tx.send(AppEvent::MotionCue {
                                 name: cue.name,
@@ -441,14 +440,10 @@ async fn pump_events(
                     prompt,
                 }));
             }
-            Ok(EneEvent::ContextCompressed { .. }) | Ok(EneEvent::StatusChanged { .. }) => {}
+            Ok(EneEvent::ContextCompressed { .. } | EneEvent::StatusChanged { .. }) => {}
             Ok(EneEvent::Terminal {
                 turn,
-                reason: ene_runtime::TerminalReason::Done,
-            })
-            | Ok(EneEvent::Terminal {
-                turn,
-                reason: ene_runtime::TerminalReason::Cancelled,
+                reason: ene_runtime::TerminalReason::Done | ene_runtime::TerminalReason::Cancelled,
             }) => {
                 if !turn_matches(&active_turn, &turn) {
                     continue;

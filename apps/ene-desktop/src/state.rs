@@ -101,24 +101,23 @@ impl AppState {
         if self.tray.is_some() {
             return;
         }
-        match TrayHandle::new(event_tx.clone()) {
-            Some(handle) => {
-                self.tray = Some(handle);
-                // Flip the `GtkReady` bevy resource so the GTK pump
-                // systems in `Update` / `Last` stop early-returning.
-                // `TrayHandle::new` calls `gtk::init` on Linux, so
-                // pumping before this point would panic with
-                // `"GTK has not been initialized. Call gtk::init first."`
-                #[cfg(target_os = "linux")]
-                {
-                    let mut ready = self
-                        .app
-                        .world_mut()
-                        .resource_mut::<crate::resource::tray::GtkReady>();
-                    ready.0 = true;
-                }
+        if let Some(handle) = TrayHandle::new(event_tx.clone()) {
+            self.tray = Some(handle);
+            // Flip the `GtkReady` bevy resource so the GTK pump
+            // systems in `Update` / `Last` stop early-returning.
+            // `TrayHandle::new` calls `gtk::init` on Linux, so
+            // pumping before this point would panic with
+            // `"GTK has not been initialized. Call gtk::init first."`
+            #[cfg(target_os = "linux")]
+            {
+                let mut ready = self
+                    .app
+                    .world_mut()
+                    .resource_mut::<crate::resource::tray::GtkReady>();
+                ready.0 = true;
             }
-            None => tracing::warn!("System tray failed to initialise; running headless"),
+        } else {
+            tracing::warn!("System tray failed to initialise; running headless")
         }
     }
 

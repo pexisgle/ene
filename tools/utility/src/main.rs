@@ -3,6 +3,11 @@
 //! IPC tool binary providing utility operations:
 //! question prompting, todo list management, time, and system info.
 #![warn(missing_docs)]
+#![allow(
+    clippy::unused_async,
+    clippy::unused_async_trait_impl,
+    clippy::option_option
+)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 /// Action modules for each tool.

@@ -15,15 +15,15 @@ pub fn repeat_kv(x: &Tensor, n_rep: usize) -> Result<Tensor, EneEmbeddingError> 
     if n_rep == 1 {
         return Ok(x.clone());
     }
-    let (_b, _n_kv_heads, _seq_len, _head_dim) = x
+    let (b, n_kv_heads, seq_len, head_dim) = x
         .dims4()
         .map_err(super::candle_err("repeat_kv dims4 failed"))?;
     let expanded = x
         .unsqueeze(2)
         .map_err(super::candle_err("repeat_kv unsqueeze failed"))?
-        .expand((_b, _n_kv_heads, n_rep, _seq_len, _head_dim))
+        .expand((b, n_kv_heads, n_rep, seq_len, head_dim))
         .map_err(super::candle_err("repeat_kv expand failed"))?
-        .reshape((_b, _n_kv_heads * n_rep, _seq_len, _head_dim))
+        .reshape((b, n_kv_heads * n_rep, seq_len, head_dim))
         .map_err(super::candle_err("repeat_kv reshape failed"))?;
     Ok(expanded)
 }

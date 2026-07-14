@@ -57,11 +57,11 @@ impl BoneShape {
     /// Effective radius of the primitive (used by the
     /// `MIN_BONE_RADIUS` filter — fingers produce a small
     /// capsule that the filter drops).
-    pub fn radius(&self) -> f32 {
+    pub const fn radius(&self) -> f32 {
         match self {
-            Self::Sphere { radius } => *radius,
-            Self::CapsuleY { radius, .. } => *radius,
-            Self::Capsule { radius, .. } => *radius,
+            Self::Sphere { radius }
+            | Self::CapsuleY { radius, .. }
+            | Self::Capsule { radius, .. } => *radius,
         }
     }
 }
@@ -126,7 +126,7 @@ pub struct BonePose {
 /// collider matches the rendered mesh even when the user has
 /// not set `model_scale = 1.0`.
 ///
-/// The order is deterministic (BTreeMap iteration on the
+/// The order is deterministic (`BTreeMap` iteration on the
 /// humanoid registry); [`crate::character::CharacterRenderer::current_bone_poses`]
 /// returns poses in the same order so the runtime can
 /// zip the two lists without re-keying.
@@ -271,7 +271,7 @@ fn compute_bone_spec(
         &model.humanoid,
         model,
         normalize_scale * actual_scale,
-    )?;
+    );
     if shape.radius() < MIN_BONE_RADIUS {
         return None;
     }
@@ -318,14 +318,14 @@ fn collect_weighted_world_positions(
 /// fixture without constructing a full `VrmModel` /
 /// `VrmPrimitive` pair (which needs a `wgpu::Device` for
 /// the GPU buffers).
-pub(crate) fn collect_weighted_world_positions_into(
+pub fn collect_weighted_world_positions_into(
     vertices: &[MeshVertex],
     target_joint: usize,
     inverse_bind: &Mat4,
     joint_world_rest: &Mat4,
     out: &mut Vec<Vec3>,
 ) {
-    for v in vertices.iter() {
+    for v in vertices {
         // Take the maximum weight to `target_joint` across
         // the four slots (the same joint can appear in
         // multiple slots when the exporter duplicates a
@@ -355,9 +355,8 @@ pub(crate) fn collect_weighted_world_positions_into(
 /// so we walk the parent chain to compose it: at rest,
 /// `joint_world = Π (parent_local_rotation, parent_local_translation)`.
 fn rest_joint_world(model: &VrmModel, joint_idx: usize) -> Mat4 {
-    let node_idx = match model.skeleton.joint_to_node.get(joint_idx) {
-        Some(&n) => n,
-        None => return Mat4::IDENTITY,
+    let Some(&node_idx) = model.skeleton.joint_to_node.get(joint_idx) else {
+        return Mat4::IDENTITY;
     };
     let mut chain: Vec<usize> = Vec::new();
     let mut cur = node_idx as i32;
@@ -380,7 +379,7 @@ fn rest_joint_world(model: &VrmModel, joint_idx: usize) -> Mat4 {
 /// bones; calling this once at model-load time and re-using
 /// the result for every `compute_bone_spec` call is far
 /// cheaper than re-walking the chain per bone.
-pub(crate) fn compute_rest_world_positions(model: &VrmModel) -> Vec<Vec3> {
+pub fn compute_rest_world_positions(model: &VrmModel) -> Vec<Vec3> {
     let mut world_positions = model.nodes.rest_local_positions.clone();
     let n = model.nodes.len();
     for i in 0..n {
@@ -449,7 +448,7 @@ fn fit_bone_shape(
     humanoid: &HumanoidBoneRegistry,
     _model: &VrmModel,
     scale: f32,
-) -> Option<(BoneShape, Quat, Vec3)> {
+) -> (BoneShape, Quat, Vec3) {
     let bone_world = rest_world[bone_node];
     match bone_name {
         "head" => {
@@ -462,12 +461,11 @@ fn fit_bone_shape(
             let offset_y = 0.5 * height_raw * scale;
             let static_offset = Vec3::new(0.0, offset_y, 0.0);
 
-            Some((BoneShape::Sphere { radius }, Quat::IDENTITY, static_offset))
+            (BoneShape::Sphere { radius }, Quat::IDENTITY, static_offset)
         }
         "jaw" | "lefteye" | "righteye" | "leftshoulder" | "rightshoulder" | "lefthand"
         | "righthand" | "lefttoes" | "righttoes" => {
             let default_radius = match bone_name {
-                "jaw" => 0.05,
                 "lefteye" | "righteye" => 0.015,
                 "leftshoulder" | "rightshoulder" => 0.055,
                 "lefthand" | "righthand" => 0.045,
@@ -485,7 +483,7 @@ fn fit_bone_shape(
             // But we also bound it from below by the default_radius to handle empty/small clouds.
             let radius = max_r.max(default_radius) * scale;
 
-            Some((BoneShape::Sphere { radius }, Quat::IDENTITY, Vec3::ZERO))
+            (BoneShape::Sphere { radius }, Quat::IDENTITY, Vec3::ZERO)
         }
 
         "hips" | "spine" | "chest" | "upperchest" | "neck" | "leftupperarm" | "leftlowerarm"
@@ -495,12 +493,11 @@ fn fit_bone_shape(
                 "hips" => 0.13,
                 "spine" => 0.11,
                 "chest" | "upperchest" => 0.12,
-                "neck" => 0.045,
                 "leftupperarm" | "rightupperarm" => 0.05,
                 "leftlowerarm" | "rightlowerarm" => 0.04,
                 "leftupperleg" | "rightupperleg" => 0.075,
                 "leftlowerleg" | "rightlowerleg" => 0.06,
-                "leftfoot" | "rightfoot" => 0.045,
+                "neck" | "leftfoot" | "rightfoot" => 0.045,
                 _ => 0.05,
             };
 
@@ -525,14 +522,14 @@ fn fit_bone_shape(
                     }
 
                     let radius = max_perp.max(default_radius) * scale;
-                    return Some((
+                    return (
                         BoneShape::Capsule {
                             half_height,
                             radius,
                         },
                         rotation,
                         offset,
-                    ));
+                    );
                 }
             }
 
@@ -542,7 +539,7 @@ fn fit_bone_shape(
                 max_r = max_r.max((p - bone_world).length());
             }
             let radius = max_r.max(default_radius) * scale;
-            Some((BoneShape::Sphere { radius }, Quat::IDENTITY, Vec3::ZERO))
+            (BoneShape::Sphere { radius }, Quat::IDENTITY, Vec3::ZERO)
         }
 
         _ => {
@@ -551,7 +548,7 @@ fn fit_bone_shape(
                 max_r = max_r.max((p - bone_world).length());
             }
             let radius = max_r.max(0.01) * scale;
-            Some((BoneShape::Sphere { radius }, Quat::IDENTITY, Vec3::ZERO))
+            (BoneShape::Sphere { radius }, Quat::IDENTITY, Vec3::ZERO)
         }
     }
 }
@@ -567,9 +564,8 @@ fn strip_side_prefix(name: &str) -> &str {
 
 /// Bounding-sphere fit: radius is the max distance from the
 /// bone's rest world position to any weighted vertex, then
-/// scaled. Returns `None` only when the input is empty (the
-/// caller guarantees non-empty by checking earlier).
-fn fit_sphere(weighted_world: &[Vec3], bone_world: Vec3, scale: f32) -> Option<f32> {
+/// scaled.
+fn fit_sphere(weighted_world: &[Vec3], bone_world: Vec3, scale: f32) -> f32 {
     let mut max_d2 = 0.0f32;
     for &p in weighted_world {
         let d2 = (p - bone_world).length_squared();
@@ -577,14 +573,11 @@ fn fit_sphere(weighted_world: &[Vec3], bone_world: Vec3, scale: f32) -> Option<f
             max_d2 = d2;
         }
     }
-    Some(max_d2.sqrt() * scale)
+    max_d2.sqrt() * scale
 }
 
 /// Get the expected child bone node index for standard humanoid joints.
-pub(crate) fn get_humanoid_child_node(
-    bone_name: &str,
-    humanoid: &HumanoidBoneRegistry,
-) -> Option<usize> {
+pub fn get_humanoid_child_node(bone_name: &str, humanoid: &HumanoidBoneRegistry) -> Option<usize> {
     let child_name = match bone_name {
         "hips" => "spine",
         "spine" => "chest",
@@ -626,8 +619,8 @@ fn fit_segment_capsule(
     let axis = child_world - bone_world;
     let axis_len = axis.length();
     if axis_len < 1e-6 {
-        return fit_sphere(weighted_world, bone_world, scale)
-            .map(|r| (BoneShape::Sphere { radius: r }, Quat::IDENTITY, Vec3::ZERO));
+        let radius = fit_sphere(weighted_world, bone_world, scale);
+        return Some((BoneShape::Sphere { radius }, Quat::IDENTITY, Vec3::ZERO));
     }
     let axis_dir = axis / axis_len;
 
@@ -685,6 +678,7 @@ fn fit_bone_axis_capsule_y(
 /// Project a bone-local vertex cloud onto local +Y and
 /// return a `CapsuleY` covering the span (with the max
 /// XZ-distance as the radius).
+#[expect(clippy::similar_names)]
 fn fit_y_capsule(local: &[Vec3], scale: f32) -> Option<(BoneShape, Vec3)> {
     if local.is_empty() {
         return None;
@@ -699,12 +693,12 @@ fn fit_y_capsule(local: &[Vec3], scale: f32) -> Option<(BoneShape, Vec3)> {
         if p.y > max_y {
             max_y = p.y;
         }
-        let r2 = p.x * p.x + p.z * p.z;
+        let r2 = p.z.mul_add(p.z, p.x * p.x);
         if r2 > max_r2 {
             max_r2 = r2;
         }
     }
-    let mid_y = (min_y + max_y) * 0.5;
+    let mid_y = f32::midpoint(min_y, max_y);
     let half_height = ((max_y - min_y) * 0.5 * scale).max(0.0);
     let radius = (max_r2.sqrt() * scale).max(MIN_BONE_RADIUS);
     let local_offset = Vec3::new(0.0, mid_y * scale, 0.0);

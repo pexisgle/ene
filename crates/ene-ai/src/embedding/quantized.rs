@@ -20,9 +20,7 @@ pub use loader::resolve_gguf_paths;
 use loader::load_model;
 use model::EmbeddingModel;
 
-pub(crate) fn candle_err<E: std::fmt::Display>(
-    msg: &str,
-) -> impl FnOnce(E) -> EneEmbeddingError + '_ {
+pub fn candle_err<E: std::fmt::Display>(msg: &str) -> impl FnOnce(E) -> EneEmbeddingError + '_ {
     move |e| EneEmbeddingError::CandleError(format!("{msg}: {e}"))
 }
 
@@ -101,6 +99,7 @@ impl GgufEmbeddingProvider {
         let encoding = tokenizer
             .encode(prefixed.as_str(), true)
             .map_err(|e| EneEmbeddingError::CandleError(format!("Tokenization failed: {e}")))?;
+        drop(tokenizer);
         let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&x| i64::from(x)).collect();
         let t_tokenize = t_start.elapsed();
 
@@ -131,11 +130,11 @@ impl GgufEmbeddingProvider {
         let t_tensor = t_tensor_start.elapsed();
 
         let t_forward_start = Instant::now();
-        let model = self
+        let result = self
             .model
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let result = model.forward(&input_tensor);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .forward(&input_tensor);
         let t_forward = t_forward_start.elapsed();
 
         tracing::debug!(

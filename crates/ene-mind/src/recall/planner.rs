@@ -34,7 +34,7 @@ pub struct RecallPlannerOptions {
     pub min_score: f32,
     /// Half-life in days for recency decay.
     pub decay_half_life_days: f64,
-    /// Whether the downstream recall executor should run HyDE expansion.
+    /// Whether the downstream recall executor should run `HyDE` expansion.
     pub use_hyde: bool,
 }
 
@@ -110,7 +110,7 @@ impl RecallPlanner {
     ///
     /// Maps [`RecallSearchHints`] and scope fields onto [`Query`], filling
     /// hybrid weights / commitment boost from [`MindMemoryConfig`] (#123).
-    /// Multi-query expansion, `required_kinds` filtering, and HyDE embedding
+    /// Multi-query expansion, `required_kinds` filtering, and `HyDE` embedding
     /// calls remain the responsibility of downstream recall execution.
     #[must_use]
     pub fn to_query<'a>(
@@ -174,25 +174,25 @@ fn semantic_queries(
     let lower = topic.to_lowercase();
 
     if intents.contains(&RecallIntent::Preference) {
-        push_query(&mut queries, format!("{topic} preference"));
+        push_query(&mut queries, &format!("{topic} preference"));
     }
     if intents.contains(&RecallIntent::Relationship) {
-        push_query(&mut queries, format!("{topic} relationship context"));
+        push_query(&mut queries, &format!("{topic} relationship context"));
     }
     if intents.contains(&RecallIntent::Procedure) {
-        push_query(&mut queries, format!("{topic} procedure steps"));
+        push_query(&mut queries, &format!("{topic} procedure steps"));
     }
     if contains_any(
         &lower,
         &["what do you know", "tell me about", "とは", "について"],
     ) {
-        push_query(&mut queries, format!("{topic} facts"));
+        push_query(&mut queries, &format!("{topic} facts"));
     }
 
     for commitment in commitments.iter().take(3) {
         push_query(
             &mut queries,
-            format!("active commitment: {}", commitment.title),
+            &format!("active commitment: {}", commitment.title),
         );
     }
 
@@ -207,13 +207,13 @@ fn episodic_queries(
     let mut queries = vec![topic.to_string()];
 
     if intents.contains(&RecallIntent::Episodic) {
-        push_query(&mut queries, format!("past conversation about {topic}"));
+        push_query(&mut queries, &format!("past conversation about {topic}"));
     }
 
     if let Some(recent) = recent_user_turn(recent_turns)
         && recent != topic
     {
-        push_query(&mut queries, recent);
+        push_query(&mut queries, &recent);
     }
 
     queries
@@ -229,7 +229,7 @@ fn query_affect(state: &AffectState) -> Option<AffectAnnotation> {
     }
 }
 
-fn clamp_unit_signed(value: f32) -> f32 {
+const fn clamp_unit_signed(value: f32) -> f32 {
     if value.is_finite() {
         value.clamp(-1.0, 1.0)
     } else {
@@ -237,8 +237,8 @@ fn clamp_unit_signed(value: f32) -> f32 {
     }
 }
 
-fn push_query(queries: &mut Vec<String>, query: String) {
-    if let Some(normalized) = normalize_text(&query)
+fn push_query(queries: &mut Vec<String>, query: &str) {
+    if let Some(normalized) = normalize_text(query)
         && !queries.iter().any(|existing| existing == &normalized)
     {
         queries.push(normalized);

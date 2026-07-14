@@ -2,7 +2,7 @@ mod patch_parser;
 
 use self::patch_parser::PatchOperation;
 use crate::undo::UndoEntry;
-use crate::utils::sandbox::Sandbox;
+use crate::utils::sandbox::{Sandbox, SandboxConfig};
 use ene_tool_common::prelude::*;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
@@ -251,7 +251,7 @@ pub struct FsPatchAction {
 }
 
 impl FsPatchAction {
-    pub fn new(sandbox: SandboxRef) -> Self {
+    pub const fn new(sandbox: SandboxRef) -> Self {
         Self {
             patch_text: String::new(),
             sandbox,
@@ -265,7 +265,7 @@ impl FsPatchAction {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.clone().unwrap_or_else(|| {
-                Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
+                Arc::new(crate::utils::sandbox::Sandbox::new(SandboxConfig::default()))
             })
         };
 

@@ -5,8 +5,8 @@ use std::sync::Arc;
 use ene_ai::EmbeddingProvider;
 use ene_config::{CharacterCardV3, expand_cbs_macros};
 use ene_store::{
-    MemoryConfidence, MemoryKind, MemoryScope, MemorySource, MemoryStatus, MemoryStore,
-    NewMemoryItem,
+    AffectAnnotation, MemoryConfidence, MemoryKind, MemoryScope, MemorySource, MemoryStatus,
+    MemoryStore, NewMemoryItem,
 };
 
 use crate::config::CharacterMemoryConfig;
@@ -32,7 +32,7 @@ pub enum StyleIntent {
 }
 
 impl StyleIntent {
-    fn tag(self) -> &'static str {
+    const fn tag(self) -> &'static str {
         match self {
             Self::Greeting => "greeting",
             Self::Comforting => "comforting",
@@ -53,7 +53,7 @@ pub struct StyleExample {
     pub intent: StyleIntent,
 }
 
-/// Compiles and selects CCv3 dialogue style examples.
+/// Compiles and selects `CCv3` dialogue style examples.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StyleExampleSelector;
 
@@ -84,7 +84,8 @@ impl StyleExampleSelector {
             .into_iter()
             .enumerate()
             .map(|(idx, block)| {
-                let intent = infer_style_intent(block).unwrap_or(default_intent_for_index(idx));
+                let intent =
+                    infer_style_intent(block).unwrap_or_else(|| default_intent_for_index(idx));
                 (intent, block.trim().to_string())
             })
             .filter(|(_, text)| !text.is_empty())
@@ -110,7 +111,7 @@ impl StyleExampleSelector {
                 source_ref: Some(format!("{STYLE_SOURCE_PREFIX}{index}")),
                 confidence: MemoryConfidence::new(1.0),
                 salience: ene_store::MemorySalience::new(0.8),
-                affect: Default::default(),
+                affect: AffectAnnotation::default(),
                 relationship_impact: 0.0,
                 valid_from: None,
                 valid_until: None,
@@ -221,7 +222,7 @@ async fn select_from_store(
         .collect())
 }
 
-fn default_intent_for_index(index: usize) -> StyleIntent {
+const fn default_intent_for_index(index: usize) -> StyleIntent {
     match index % 3 {
         0 => StyleIntent::Greeting,
         1 => StyleIntent::Comforting,

@@ -26,7 +26,7 @@ pub struct TypeAction {
 }
 
 impl TypeAction {
-    pub fn new(store: Arc<crate::utils::session::BrowserSessionStore>) -> Self {
+    pub const fn new(store: Arc<crate::utils::session::BrowserSessionStore>) -> Self {
         Self {
             selector: String::new(),
             text: String::new(),
@@ -40,8 +40,10 @@ impl TypeAction {
         })?;
 
         let session = self.store.get_or_create("default", chrome_path).await?;
-        let session_guard = session.lock().await;
-        let page = &session_guard.page;
+        let page = {
+            let session_guard = session.lock().await;
+            session_guard.page.clone()
+        };
 
         page.find_element(&self.selector)
             .await

@@ -12,6 +12,8 @@ pub(super) async fn capture_window_portal(scale_percent: u32) -> Result<DynamicI
             message: format!("Failed to create Screencast proxy: {e}"),
         })?;
 
+    // `CreateSessionOptions` is private; can't name it, so use Default::default()
+    #[expect(clippy::default_trait_access)]
     let session = proxy
         .create_session(Default::default())
         .await
@@ -137,9 +139,9 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
                 return;
             }
 
-            let (media_type, media_subtype) = match spa::param::format_utils::parse_format(param) {
-                Ok(v) => v,
-                Err(_) => return,
+            let Ok((media_type, media_subtype)) = spa::param::format_utils::parse_format(param)
+            else {
+                return;
             };
 
             if media_type != spa::param::format::MediaType::Video
@@ -148,7 +150,7 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
                 return;
             }
 
-            let mut format: spa::param::video::VideoInfoRaw = Default::default();
+            let mut format = spa::param::video::VideoInfoRaw::default();
             if format.parse(param).is_err() {
                 return;
             }
@@ -162,10 +164,6 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
             );
 
             let bpp = match fmt {
-                spa::param::video::VideoFormat::RGBA
-                | spa::param::video::VideoFormat::BGRA
-                | spa::param::video::VideoFormat::RGBx
-                | spa::param::video::VideoFormat::BGRx => 4,
                 spa::param::video::VideoFormat::RGB | spa::param::video::VideoFormat::BGR => 3,
                 _ => 4,
             };
@@ -175,9 +173,8 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
             s.is_bgr = is_bgr;
         })
         .process(|stream, state| {
-            let mut buffer = match stream.dequeue_buffer() {
-                Some(b) => b,
-                None => return,
+            let Some(mut buffer) = stream.dequeue_buffer() else {
+                return;
             };
 
             let datas = buffer.datas_mut();
@@ -205,6 +202,8 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
             s.height = (data_size as u32) / stride;
 
             let mut pixels = vec![0u8; data_size];
+            // SAFETY: `raw_data` is a valid pointer from the PipeWire stream.
+            // `pixels` was just allocated with the exact same size.
             unsafe {
                 std::ptr::copy_nonoverlapping(raw_data.as_ptr(), pixels.as_mut_ptr(), data_size);
             }

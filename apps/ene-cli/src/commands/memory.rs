@@ -48,7 +48,7 @@ impl CliCommand for MemoryCommand {
                     ene_store::MemoryStatus::Archived,
                     "archived",
                 )
-                .await
+                .await;
             }
             "forget" => handle_forget(tail, &snapshot).await,
             "dispute" => {
@@ -58,7 +58,7 @@ impl CliCommand for MemoryCommand {
                     ene_store::MemoryStatus::Disputed,
                     "disputed",
                 )
-                .await
+                .await;
             }
             "restore" => handle_restore(tail, &snapshot).await,
             "status" => handle_status(&snapshot).await,
@@ -204,8 +204,7 @@ async fn handle_inspect(id_arg: &str, snapshot: &ene_runtime::EneStateSnapshot) 
             println!(
                 "last_accessed={} access_count={}",
                 m.last_accessed_at
-                    .map(|ts| ts.to_rfc3339())
-                    .unwrap_or_else(|| "-".to_string()),
+                    .map_or_else(|| "-".to_string(), |ts| ts.to_rfc3339()),
                 m.access_count
             );
         }
@@ -229,8 +228,7 @@ async fn handle_why(id_arg: &str, snapshot: &ene_runtime::EneStateSnapshot) {
                 m.salience.get(),
                 m.source.as_str(),
                 m.last_accessed_at
-                    .map(|ts| ts.to_rfc3339())
-                    .unwrap_or_else(|| "never".to_string())
+                    .map_or_else(|| "never".to_string(), |ts| ts.to_rfc3339())
             );
             println!("  note: live recall score breakdown is shown by `/memory search <query>`");
         }

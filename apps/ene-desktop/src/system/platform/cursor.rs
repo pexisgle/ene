@@ -26,14 +26,7 @@ use crate::resource::cursor_state::CursorState;
 /// and slot in `AppSet::Input` so the migration is local: a
 /// future Phase can re-introduce the `PointerMoved` reader
 /// without changing the plugin wiring.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "Slot reserved for the future PointerMoved-based cursor source; Phase 8 uses device_query"
-    )
-)]
-pub fn update_cursor_state_system(
+pub const fn update_cursor_state_system(
     _events: MessageReader<PointerMoved>,
     _cursor: ResMut<CursorState>,
 ) {

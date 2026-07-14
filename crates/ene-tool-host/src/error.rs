@@ -30,7 +30,7 @@ pub enum EneToolHostError {
 }
 
 impl EneToolHostError {
-    /// Creates a protocol IpcClient error with the given message.
+    /// Creates a protocol `IpcClient` error with the given message.
     pub fn ipc(message: impl Into<String>) -> Self {
         Self::Protocol(ene_tool_proto::ToolError::IpcClient {
             message: message.into(),

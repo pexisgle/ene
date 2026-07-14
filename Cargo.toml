@@ -136,11 +136,27 @@ opt-level = 3
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
-allow_attributes = "warn"
-allow_attributes_without_reason = "warn"
 undocumented_unsafe_blocks = "deny"
 missing_safety_doc = "warn"
 unwrap_used = "warn"
 expect_used = "warn"
 todo = "deny"
 unimplemented = "deny"
+allow_attributes = "warn"
+
+# --- Cast lints: intentional in systems programming and rendering code ---
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+
+# --- Subjective style lints: legitimate use cases exist in this codebase ---
+too_many_lines = "allow"
+items_after_statements = "allow"
+too_long_first_doc_paragraph = "allow"
+
+# --- Domain-appropriate lints ---
+struct_excessive_bools = "allow"
+large_futures = "allow"
+missing_panics_doc = "allow"
+missing_errors_doc = "allow"

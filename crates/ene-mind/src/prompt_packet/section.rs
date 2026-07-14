@@ -24,7 +24,7 @@ pub enum PromptSectionKind {
     ActiveCommitments,
     /// Episodic and other recalled memories.
     EpisodicMemories,
-    /// CCv3 style example anchors (#84).
+    /// `CCv3` style example anchors (#84).
     StyleExamples,
     /// Expression PHI / output contract (required).
     OutputContract,
@@ -46,8 +46,10 @@ impl PromptSectionKind {
     #[must_use]
     pub const fn heading(self) -> Option<&'static str> {
         match self {
-            Self::PlatformContract => None,
-            Self::IdentityKernel => None,
+            Self::PlatformContract
+            | Self::IdentityKernel
+            | Self::OutputContract
+            | Self::UserInput => None,
             Self::BehaviorContract => Some("## Behavior Contract"),
             Self::CharacterState => Some("## Current Mood"),
             Self::SceneState => Some("## Current Scene"),
@@ -56,14 +58,12 @@ impl PromptSectionKind {
             Self::ActiveCommitments => Some("## Active Commitments"),
             Self::EpisodicMemories => Some("## Relevant Episodic Memories"),
             Self::StyleExamples => Some("## Style Examples"),
-            Self::OutputContract => None,
-            Self::UserInput => None,
         }
     }
 
     /// All kinds in deterministic render order.
     #[must_use]
-    pub fn render_order() -> &'static [Self] {
+    pub const fn render_order() -> &'static [Self] {
         &[
             Self::PlatformContract,
             Self::IdentityKernel,

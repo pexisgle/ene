@@ -67,7 +67,7 @@ impl CognitionEngine {
         validate_context_config(&config.context)
     }
 
-    /// Sync CCv3 lorebook and style indices when the card or config changes.
+    /// Sync `CCv3` lorebook and style indices when the card or config changes.
     pub async fn sync_character_memories(
         &self,
         ctx: TurnContext<'_>,
@@ -106,15 +106,12 @@ impl CognitionEngine {
         let mut classifier_expression_hint = None;
 
         if ctx.config.emotion.enabled {
-            let elapsed = affect
-                .updated_at
-                .map(|ts| {
-                    Utc::now()
-                        .signed_duration_since(ts)
-                        .to_std()
-                        .unwrap_or(Duration::ZERO)
-                })
-                .unwrap_or(Duration::ZERO);
+            let elapsed = affect.updated_at.map_or(Duration::ZERO, |ts| {
+                Utc::now()
+                    .signed_duration_since(ts)
+                    .to_std()
+                    .unwrap_or(Duration::ZERO)
+            });
 
             let recent_turn_count = ctx
                 .history
@@ -355,7 +352,7 @@ impl CognitionEngine {
             ContextBudget::from_config_and_hints(&ctx.config.context, &pre.recall_plan.budget);
         let packed = pack_prompt(pack_input, &budget);
         let (messages, mut meta) = packed.packet.to_llm_messages();
-        meta.dropped_sections = packed.meta.dropped.clone();
+        meta.dropped_sections.clone_from(&packed.meta.dropped);
         meta.packed_tokens = packed.meta.packed_tokens;
         tracing::debug!(
             component = "CognitionEngine",
@@ -411,7 +408,7 @@ impl CognitionEngine {
         };
         let decision = self.output.resolve(&config.emotion, &input);
         let mut updated = affect.clone();
-        updated.last_expression = decision.expression.clone();
+        updated.last_expression.clone_from(&decision.expression);
         (decision, updated)
     }
 }

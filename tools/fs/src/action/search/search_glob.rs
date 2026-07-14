@@ -4,7 +4,7 @@ use ene_tool_common::prelude::*;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-pub async fn glob_search(
+pub fn glob_search(
     pattern: &str,
     path: Option<&str>,
     sandbox: &SandboxConfig,
@@ -92,7 +92,7 @@ pub struct FsGlobAction {
 }
 
 impl FsGlobAction {
-    pub fn new(sandbox: SandboxRef) -> Self {
+    pub const fn new(sandbox: SandboxRef) -> Self {
         Self {
             pattern: String::new(),
             path: None,
@@ -107,10 +107,10 @@ impl FsGlobAction {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.clone().unwrap_or_else(|| {
-                Arc::new(crate::utils::sandbox::Sandbox::new(Default::default()))
+                Arc::new(crate::utils::sandbox::Sandbox::new(SandboxConfig::default()))
             })
         };
 
-        glob_search(&self.pattern, self.path.as_deref(), sandbox.config()).await
+        glob_search(&self.pattern, self.path.as_deref(), sandbox.config())
     }
 }

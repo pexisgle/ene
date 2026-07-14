@@ -25,7 +25,7 @@ impl IpcStream {
     #[cfg(unix)]
     pub async fn connect(path: &Path) -> io::Result<Self> {
         let stream = tokio::net::UnixStream::connect(path).await?;
-        Ok(IpcStream::Unix(stream))
+        Ok(Self::Unix(stream))
     }
 
     #[cfg(windows)]
@@ -141,7 +141,7 @@ impl IpcListener {
     pub async fn accept(&mut self) -> io::Result<IpcStream> {
         match self {
             #[cfg(unix)]
-            IpcListener::Unix(listener) => {
+            Self::Unix(listener) => {
                 let (stream, _) = listener.accept().await?;
                 Ok(IpcStream::Unix(stream))
             }

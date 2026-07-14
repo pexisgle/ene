@@ -50,7 +50,7 @@ pub fn resolve_expression(
         if config.llm_expression_is_advisory {
             // Adopt LLM hint only when affect is neutral or agrees with the proposal.
             if candidate == "neutral" && normalized != "neutral" {
-                candidate = normalized.clone();
+                candidate = normalized;
                 source = ExpressionSource::LlmAdvisory;
                 reason = format!("LLM advisory proposal `{proposal}` (affect neutral)");
             } else if normalized == candidate {
@@ -164,7 +164,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
     for (i, ca) in a.iter().enumerate() {
         let mut curr = vec![i + 1];
         for (j, cb) in b.iter().enumerate() {
-            let cost = if ca == cb { 0 } else { 1 };
+            let cost = usize::from(ca != cb);
             curr.push((prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost));
         }
         prev = curr;

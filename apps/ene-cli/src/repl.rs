@@ -23,7 +23,7 @@ async fn read_line() -> Option<String> {
 /// and Ctrl-C paths so the process does not abort with
 /// `std::process::exit(0)` while pending memory writes, session
 /// splits, and tool processes are still in flight.
-async fn drain_and_exit(ctx: &mut AppContext, code: i32) -> i32 {
+async fn drain_and_exit(ctx: &AppContext, code: i32) -> i32 {
     match ctx.handle.shutdown(SHUTDOWN_TIMEOUT).await {
         Ok(()) => {}
         Err(e) => {

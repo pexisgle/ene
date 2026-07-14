@@ -39,7 +39,7 @@ pub fn first_launch_setup() -> Result<FirstLaunchPaths, AppStateError> {
 
 /// Phase 2a: discover characters on disk and load persisted settings once.
 pub fn load_desktop_settings(paths: &FirstLaunchPaths) -> CharacterSettings {
-    CharacterSettings::discover(&paths.assets_dir, paths.default_vrm.clone())
+    CharacterSettings::discover(&paths.assets_dir, &paths.default_vrm)
 }
 
 /// Phase 2b: construct [`AppState`] with GPU context and the AI bridge.

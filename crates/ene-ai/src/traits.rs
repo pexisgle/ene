@@ -34,7 +34,7 @@ pub trait LlmProvider: Send + Sync {
 
 /// Collect a full assistant reply from a streaming chat completion.
 ///
-/// OpenRouter and some OpenAI-compatible models respond reliably to streaming
+/// `OpenRouter` and some OpenAI-compatible models respond reliably to streaming
 /// requests but may hang or exceed budgets on non-streaming `chat().create()`.
 pub async fn collect_chat_completion(
     provider: &dyn LlmProvider,
@@ -104,7 +104,7 @@ pub enum EmbeddingError {
 ///
 /// The only embedding operation on this trait is [`embed_batch`]. Single-text and
 /// query helpers are free functions ([`embed`], [`embed_query`]) that call
-/// batch. HyDE and rerank live in pipeline helpers (`ene_ai::hybrid`,
+/// batch. `HyDE` and rerank live in pipeline helpers (`ene_ai::hybrid`,
 /// tool-host RAG), not on this trait.
 #[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
@@ -155,7 +155,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let mut na = 0.0_f64;
     let mut nb = 0.0_f64;
     for (x, y) in a.iter().zip(b.iter()) {
-        dot += f64::from(*x) * f64::from(*y);
+        dot = f64::from(*x).mul_add(f64::from(*y), dot);
         na += f64::from(*x).powi(2);
         nb += f64::from(*y).powi(2);
     }

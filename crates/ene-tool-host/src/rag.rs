@@ -7,7 +7,7 @@
 use ene_ai::{EmbeddingError, EmbeddingProvider, cosine_similarity, embed, embed_query};
 use ene_store::MemoryStore;
 use ene_tool_proto::{EmbeddingField, ToolName, ToolSpec};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -26,10 +26,10 @@ pub struct FieldWeights {
     pub example: f32,
     /// Weight for the negative/unwanted embedding (penalizes matches).
     pub negative: f32,
-    /// Weight for the HyDE (hypothetical document embedding).
+    /// Weight for the `HyDE` (hypothetical document embedding).
     pub hyde: f32,
-    /// Weight for the HyDE blend factor — the fraction
-    /// of the final score contributed by the HyDE
+    /// Weight for the `HyDE` blend factor — the fraction
+    /// of the final score contributed by the `HyDE`
     /// similarity, with the remainder from the direct
     /// per-field cosine similarity. Replaces the
     /// previously hardcoded 0.6 factor.
@@ -64,7 +64,7 @@ impl From<super::config::FieldWeightsConfig> for FieldWeights {
 
 // ── Runtime options (derived from config) ─────────────────────────────────
 
-/// Runtime options for the ToolRag pipeline, resolved from
+/// Runtime options for the `ToolRag` pipeline, resolved from
 /// [`super::config::ToolRagConfig`].
 #[derive(Debug, Clone)]
 pub struct ToolRagOptions {
@@ -74,7 +74,7 @@ pub struct ToolRagOptions {
     pub top_k: usize,
     /// Number of final tools to return after reranking.
     pub final_n: usize,
-    /// Whether to use HyDE (hypothetical document embeddings).
+    /// Whether to use `HyDE` (hypothetical document embeddings).
     pub use_hyde: bool,
     /// Whether to rerank candidates with a cross-encoder.
     pub use_rerank: bool,
@@ -148,19 +148,19 @@ impl TryFrom<super::config::ToolRagConfig> for ToolRagOptions {
 
 // ── Pipeline ──────────────────────────────────────────────────────────────
 
-/// The Tool RAG pipeline: embed → HyDE → weighted field similarity →
+/// The Tool RAG pipeline: embed → `HyDE` → weighted field similarity →
 /// optional rerank → top-N.
 pub struct ToolRag {
     embedder: Arc<dyn EmbeddingProvider>,
     store: Option<Arc<MemoryStore>>,
     opts: ToolRagOptions,
-    /// Last-known ToolSpecs, used when returning results from [`select`].
+    /// Last-known `ToolSpecs`, used when returning results from [`select`].
     specs: RwLock<HashMap<ToolName, ToolSpec>>,
     /// Blake3 hash of the last indexed specs set.
-    /// Used to fast-path ensure_index when specs haven't changed.
+    /// Used to fast-path `ensure_index` when specs haven't changed.
     last_specs_hash: AtomicU64,
     /// In-memory cache of tool embedding vectors.
-    /// Populated by ensure_index, used by select. Avoids
+    /// Populated by `ensure_index`, used by select. Avoids
     /// deserializing all f32 vecs from SQLite every turn.
     cached_field_rows: RwLock<Vec<CachedFieldRow>>,
 }
@@ -198,12 +198,12 @@ impl ToolRag {
     }
 
     /// Returns a reference to the runtime options.
-    pub fn opts(&self) -> &ToolRagOptions {
+    pub const fn opts(&self) -> &ToolRagOptions {
         &self.opts
     }
 
     /// Whether the pipeline has a backing memory store.
-    pub fn has_store(&self) -> bool {
+    pub const fn has_store(&self) -> bool {
         self.store.is_some()
     }
 
@@ -220,28 +220,35 @@ impl ToolRag {
             let cache = self
                 .cached_field_rows
                 .read()
-                .unwrap_or_else(|e| e.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if prev_hash == specs_hash && !cache.is_empty() {
-                let mut map = self.specs.write().unwrap_or_else(|e| e.into_inner());
+                let mut map = self
+                    .specs
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 map.clear();
                 for spec in specs {
                     map.insert(spec.name.clone(), spec.clone());
                 }
+                drop(map);
                 return Ok(());
             }
         }
 
-        let store = match &self.store {
-            Some(s) => Arc::clone(s),
-            None => {
-                // Still cache specs even without a store.
-                let mut map = self.specs.write().unwrap_or_else(|e| e.into_inner());
-                map.clear();
-                for spec in specs {
-                    map.insert(spec.name.clone(), spec.clone());
-                }
-                return Ok(());
+        let store = if let Some(s) = &self.store {
+            Arc::clone(s)
+        } else {
+            // Still cache specs even without a store.
+            let mut map = self
+                .specs
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            map.clear();
+            for spec in specs {
+                map.insert(spec.name.clone(), spec.clone());
             }
+            drop(map);
+            return Ok(());
         };
 
         // Load existing hashes from DB. We use the
@@ -363,7 +370,10 @@ impl ToolRag {
 
         // Update cached spec map.
         {
-            let mut map = self.specs.write().unwrap_or_else(|e| e.into_inner());
+            let mut map = self
+                .specs
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             map.clear();
             for spec in specs {
                 map.insert(spec.name.clone(), spec.clone());
@@ -388,7 +398,7 @@ impl ToolRag {
                 let mut cache_write = self
                     .cached_field_rows
                     .write()
-                    .unwrap_or_else(|e| e.into_inner());
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 *cache_write = mapped;
             }
             Err(e) => {
@@ -408,14 +418,17 @@ impl ToolRag {
 
     /// Select the most relevant tools for the given query.
     ///
-    /// Pipeline: embed query → optional HyDE → per-tool weighted field
+    /// Pipeline: embed query → optional `HyDE` → per-tool weighted field
     /// similarity → hard filters → optional rerank → top-N + forced tools.
     pub async fn select(&self, query: &str) -> Vec<ToolSpec> {
         let query_vec = match embed_query(self.embedder.as_ref(), query).await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(component = "ToolRag", error = %e, "Query embedding failed");
-                let map = self.specs.read().unwrap_or_else(|e| e.into_inner());
+                let map = self
+                    .specs
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 return map.values().cloned().collect();
             }
         };
@@ -430,13 +443,13 @@ impl ToolRag {
         query_embedding: &[f32],
     ) -> Vec<ToolSpec> {
         let t_start = std::time::Instant::now();
-        let store = match &self.store {
-            Some(s) => s,
-            None => {
-                // No store — return all known specs.
-                let map = self.specs.read().unwrap_or_else(|e| e.into_inner());
-                return map.values().cloned().collect();
-            }
+        let Some(store) = &self.store else {
+            // No store — return all known specs.
+            let map = self
+                .specs
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            return map.values().cloned().collect();
         };
 
         let query_vec = query_embedding.to_vec();
@@ -472,11 +485,11 @@ impl ToolRag {
             let cache = self
                 .cached_field_rows
                 .read()
-                .unwrap_or_else(|e| e.into_inner());
-            if !cache.is_empty() {
-                Some(cache.clone())
-            } else {
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if cache.is_empty() {
                 None
+            } else {
+                Some(cache.clone())
             }
         };
 
@@ -499,8 +512,8 @@ impl ToolRag {
                     let mut cache_write = self
                         .cached_field_rows
                         .write()
-                        .unwrap_or_else(|e| e.into_inner());
-                    *cache_write = mapped.clone();
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    cache_write.clone_from(&mapped);
                     mapped
                 }
                 Err(e) => {
@@ -525,7 +538,7 @@ impl ToolRag {
             let blended = if let Some(ref hv) = hyde_vec {
                 let hyde_sim = cosine_similarity(hv, &row.embedding);
                 let blend = w.hyde_blend.clamp(0.0, 1.0);
-                (sim * (1.0 - blend)) + (hyde_sim * w.hyde * blend)
+                (hyde_sim * w.hyde).mul_add(blend, sim * (1.0 - blend))
             } else {
                 sim
             };
@@ -562,7 +575,10 @@ impl ToolRag {
 
         // Extract candidate ToolSpecs for reranking.
         let all_specs = {
-            let map = self.specs.read().unwrap_or_else(|e| e.into_inner());
+            let map = self
+                .specs
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             map.clone()
         };
 
@@ -583,7 +599,7 @@ impl ToolRag {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(component = "ToolRag", error = %e, "Skipping invalid tool name in RAG index")
+                    tracing::warn!(component = "ToolRag", error = %e, "Skipping invalid tool name in RAG index");
                 }
             }
         }
@@ -617,7 +633,7 @@ impl ToolRag {
         //    populated; the field has been removed.)
         let mut result: Vec<ToolSpec> = Vec::with_capacity(self.opts.final_n);
 
-        for (spec, _score) in candidates.iter() {
+        for (spec, _score) in &candidates {
             if result.len() >= self.opts.final_n {
                 break;
             }
@@ -628,9 +644,9 @@ impl ToolRag {
         println!(
             "\n[ToolRag Debug] Timings: hyde={:?}, load={:?}, score={:?}, rerank={:?}",
             t_hyde,
-            t_load - t_hyde,
-            t_score - t_load,
-            t_rerank - t_score
+            t_load.checked_sub(t_hyde).unwrap_or_default(),
+            t_score.checked_sub(t_load).unwrap_or_default(),
+            t_rerank.checked_sub(t_score).unwrap_or_default()
         );
 
         // 8. Union with forced_tools (no duplicates, prepended).
@@ -662,7 +678,7 @@ impl ToolRag {
                     specs.len()
                 ),
                 Err(e) => {
-                    tracing::warn!(component = "ToolRag", error = %e, "Background indexer failed")
+                    tracing::warn!(component = "ToolRag", error = %e, "Background indexer failed");
                 }
             }
         });
@@ -670,7 +686,7 @@ impl ToolRag {
 
     // ── Debug ──────────────────────────────────────────────────────────
 
-    /// Returns a per-query ToolRagStats summary. The
+    /// Returns a per-query `ToolRagStats` summary. The
     /// returned struct matches the public API documented
     /// in docs/api/ene-tool-host.md (`hits`, `total`,
     /// `top_similarity`).
@@ -683,22 +699,19 @@ impl ToolRag {
     /// in-memory fallback used by the CLI), all three
     /// are zero.
     pub async fn stats(&self) -> ToolRagStats {
-        let store = match &self.store {
-            Some(s) => s,
-            None => {
-                return ToolRagStats {
-                    hits: 0,
-                    total: 0,
-                    top_similarity: 0.0,
-                };
-            }
+        let Some(store) = &self.store else {
+            return ToolRagStats {
+                hits: 0,
+                total: 0,
+                top_similarity: 0.0,
+            };
         };
 
         let hashes = store.list_tool_embedding_hashes().await.unwrap_or_default();
         let mut total: usize = 0;
-        let mut seen: HashMap<String, ()> = HashMap::new();
+        let mut seen: HashSet<String> = HashSet::new();
         for (name, _field, _fkey, _hash, _model) in hashes {
-            if seen.insert(name.clone(), ()).is_none() {
+            if seen.insert(name.clone()) {
                 total += 1;
             }
         }

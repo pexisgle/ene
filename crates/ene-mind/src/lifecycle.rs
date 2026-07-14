@@ -22,7 +22,7 @@ pub struct HistoryEntry {
 impl HistoryEntry {
     /// Stable string label for recall / logging (`user`, `assistant`, `system`).
     #[must_use]
-    pub fn role_label(&self) -> &'static str {
+    pub const fn role_label(&self) -> &'static str {
         match self.role {
             Role::User => "user",
             Role::Assistant => "assistant",

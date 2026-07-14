@@ -17,6 +17,7 @@ use crate::streaming::{
 };
 use ene_mind::{CueSource, PerfKind, PerformanceArbiter, PerformanceCue};
 
+#[expect(clippy::ref_option)]
 fn build_turn_context<'a>(
     mind: &'a MindConfig,
     card: &'a ene_config::CharacterCardV3,
@@ -48,7 +49,7 @@ fn build_turn_context<'a>(
 }
 
 /// Run the streaming loop using the cognitive runtime lifecycle.
-pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationSession {
+pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationSession {
     let StreamContext {
         config,
         mut session,
@@ -445,7 +446,7 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::Conver
                 let llm_proposal = accumulated_emotion_tokens
                     .iter()
                     .find_map(|token| ene_mind::extract_emotion_from_token(token))
-                    .or(pre_turn.classifier_expression_hint.clone());
+                    .or_else(|| pre_turn.classifier_expression_hint.clone());
                 let (previous_expression, elapsed_since_change) =
                     session.expression_context(&turn_affect);
                 let (decision, updated_affect) = engine.resolve_expression_turn(
@@ -518,7 +519,7 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::Conver
                         post,
                         ene_mind::MemoryWriteProviders {
                             llm: Some(provider.as_ref()),
-                            embedder: embedder.as_ref().map(|arc| arc.as_ref()),
+                            embedder: embedder.as_ref().map(std::convert::AsRef::as_ref),
                         },
                     )
                     .await
@@ -531,7 +532,7 @@ pub(crate) async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::Conver
                 }
             }
 
-            log_empty_response_if_needed(EmptyResponseContext {
+            log_empty_response_if_needed(&EmptyResponseContext {
                 pipeline: "cognitive",
                 config: &config,
                 session_id: session_id.as_str(),

@@ -32,7 +32,7 @@ impl CompressionLevel {
 
     /// Parse from database value.
     #[must_use]
-    pub fn from_i32(value: i32) -> Option<Self> {
+    pub const fn from_i32(value: i32) -> Option<Self> {
         match value {
             0 => Some(Self::Scene),
             1 => Some(Self::Chapter),
@@ -350,8 +350,8 @@ pub async fn maybe_roll_up_chapter(
     )
     .await;
 
-    let turn_start = scenes.first().map(|s| s.turn_start).unwrap_or(0);
-    let turn_end = scenes.last().map(|s| s.turn_end).unwrap_or(0);
+    let turn_start = scenes.first().map_or(0, |s| s.turn_start);
+    let turn_end = scenes.last().map_or(0, |s| s.turn_end);
     let span = NewMemorySpan {
         session_id: session_id.to_string(),
         turn_start,

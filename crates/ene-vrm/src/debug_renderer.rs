@@ -68,7 +68,7 @@ impl DebugVertex {
     ];
 
     pub(crate) const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<DebugVertex>() as wgpu::BufferAddress,
+        array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &Self::ATTRIBUTES,
     };
@@ -141,9 +141,9 @@ pub fn sphere_wireframe_lines_into(
         }
     }
 
-    for j in 0..(SPHERE_LATITUDES + 1) {
-        let y = -radius + (2.0 * radius) * (j as f32 / SPHERE_LATITUDES as f32);
-        let ring_r = (radius * radius - y * y).max(0.0).sqrt();
+    for j in 0..=SPHERE_LATITUDES {
+        let y = (2.0 * radius).mul_add(j as f32 / SPHERE_LATITUDES as f32, -radius);
+        let ring_r = radius.mul_add(radius, -(y * y)).max(0.0).sqrt();
         for i in 0..SPHERE_LONGITUDES {
             let t0 = (i as f32 / SPHERE_LONGITUDES as f32) * std::f32::consts::TAU;
             let t1 = ((i + 1) as f32 / SPHERE_LONGITUDES as f32) * std::f32::consts::TAU;
@@ -158,8 +158,8 @@ pub fn sphere_wireframe_lines_into(
 /// capsule is a cylinder of `half_height` capped by two
 /// hemispheres of `radius`. Wireframe elements:
 ///
-/// - top cap (a circle of `radius` at y = +half_height),
-/// - bottom cap (a circle of `radius` at y = -half_height),
+/// - top cap (a circle of `radius` at y = +`half_height`),
+/// - bottom cap (a circle of `radius` at y = -`half_height`),
 /// - `SPHERE_LONGITUDES` meridians running from the
 ///   bottom cap through the cylindrical section to the
 ///   top cap (each meridian is a single straight line
@@ -285,6 +285,7 @@ impl DebugRenderer {
     /// format. The depth format is fixed at `Depth32Float`
     /// to match the main VRM pass; mixing depth formats
     /// would cause the GPU to reject the depth attachment.
+    #[must_use]
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("debug.camera_buf"),
@@ -400,7 +401,8 @@ impl DebugRenderer {
 
     /// Number of lines currently buffered (not yet flushed
     /// to the GPU).
-    pub fn line_count(&self) -> usize {
+    #[must_use]
+    pub const fn line_count(&self) -> usize {
         self.lines.len()
     }
 

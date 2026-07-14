@@ -95,23 +95,23 @@ impl PromptPacket {
 
         let semantic_count = self
             .section(PromptSectionKind::SemanticContext)
-            .map(|s| s.content.lines().filter(|l| l.starts_with("- ")).count())
-            .unwrap_or(0);
-        let profile_count = self
-            .section(PromptSectionKind::UserProfile)
-            .map(|s| s.content.lines().filter(|l| l.starts_with("- ")).count())
-            .unwrap_or(0);
+            .map_or(0, |s| {
+                s.content.lines().filter(|l| l.starts_with("- ")).count()
+            });
+        let profile_count = self.section(PromptSectionKind::UserProfile).map_or(0, |s| {
+            s.content.lines().filter(|l| l.starts_with("- ")).count()
+        });
         let episodic_count = self
             .section(PromptSectionKind::EpisodicMemories)
-            .map(|s| s.content.lines().filter(|l| l.starts_with("- ")).count())
-            .unwrap_or(0);
+            .map_or(0, |s| {
+                s.content.lines().filter(|l| l.starts_with("- ")).count()
+            });
 
         let meta = PromptPacketMeta {
             identity_kernel_included: self.section_included(PromptSectionKind::IdentityKernel),
             style_example_count: if self.section_included(PromptSectionKind::StyleExamples) {
                 self.section(PromptSectionKind::StyleExamples)
-                    .map(|s| s.content.split("\n\n").count())
-                    .unwrap_or(0)
+                    .map_or(0, |s| s.content.split("\n\n").count())
             } else {
                 0
             },
@@ -130,8 +130,8 @@ impl PromptPacket {
     pub fn compose(
         kernel: IdentityKernel,
         style_examples: Vec<StyleExample>,
-        recalled: Vec<RecalledMemory>,
-        commitments: Vec<ActiveCommitmentPrompt>,
+        recalled: &[RecalledMemory],
+        commitments: &[ActiveCommitmentPrompt],
         affect_summary: Option<String>,
         history: Vec<HistoryEntry>,
         post_history_block: Option<String>,
@@ -139,7 +139,7 @@ impl PromptPacket {
         max_prompt_tokens: usize,
         style_example_budget_tokens: usize,
     ) -> Self {
-        let (semantic, profile, episodic) = classify_recalled_memories(&recalled);
+        let (semantic, profile, episodic) = classify_recalled_memories(recalled);
         let mut sections = Vec::new();
 
         sections.push(PromptSection::new(
@@ -187,7 +187,7 @@ impl PromptPacket {
         if !commitments.is_empty() {
             sections.push(PromptSection::new(
                 PromptSectionKind::ActiveCommitments,
-                render_commitments_block(&commitments),
+                render_commitments_block(commitments),
                 400,
             ));
         }
@@ -309,8 +309,8 @@ mod tests {
         let packet = PromptPacket::compose(
             kernel,
             styles,
-            vec![],
-            vec![],
+            &[],
+            &[],
             Some("mood=calm".into()),
             vec![],
             Some("PHI_MARKER".into()),
@@ -353,8 +353,8 @@ mod tests {
         let packet = PromptPacket::compose(
             kernel,
             vec![],
-            vec![],
-            vec![],
+            &[],
+            &[],
             None,
             vec![],
             None,
@@ -384,8 +384,8 @@ mod tests {
         let packet = PromptPacket::compose(
             kernel,
             vec![],
-            vec![],
-            vec![],
+            &[],
+            &[],
             None,
             history,
             Some("PHI_MARKER".into()),
@@ -466,8 +466,8 @@ mod tests {
         let packet = PromptPacket::compose(
             kernel,
             vec![],
-            recalled,
-            vec![],
+            &recalled,
+            &[],
             None,
             vec![],
             None,

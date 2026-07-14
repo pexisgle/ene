@@ -90,13 +90,13 @@ pub fn extract_emotion_from_token(token: &str) -> Option<String> {
 pub fn strip_markers(text: &str) -> String {
     let mut carry = String::new();
     let (text_deltas, _tokens) = split_text_and_special_tokens(&mut carry, text);
-    if !carry.is_empty() {
+    if carry.is_empty() {
+        text_deltas.concat()
+    } else {
         text_deltas
             .into_iter()
             .chain(std::iter::once(carry))
             .collect()
-    } else {
-        text_deltas.concat()
     }
 }
 

@@ -84,7 +84,7 @@ pub enum EneCommand {
     },
     /// Invalidate the Tool RAG index, forcing re-embedding on next query.
     InvalidateToolIndex,
-    /// Persist the CCv3 character-memory content hash after startup warmup.
+    /// Persist the `CCv3` character-memory content hash after startup warmup.
     SetCcv3MemoryHash {
         /// Combined lorebook + style content hash.
         hash: u64,
@@ -169,7 +169,7 @@ pub enum EneEvent {
         /// Compression level label (e.g. "scene").
         level: String,
     },
-    /// Terminal event for a run: emitted exactly once after after_turn completes.
+    /// Terminal event for a run: emitted exactly once after `after_turn` completes.
     Terminal {
         /// Active turn.
         turn: TurnId,
@@ -276,7 +276,7 @@ struct TurnGate {
 }
 
 impl TurnGate {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             busy: AtomicBool::new(false),
             active: std::sync::Mutex::new(None),
@@ -391,7 +391,7 @@ impl EneHandle {
         };
 
         let mut session = ConversationSession::new();
-        session.set_card(card);
+        session.set_card(&card);
         if let Some(ref emb) = embedder {
             session.memory.embedding_provider = Some(emb.clone());
         }
@@ -443,7 +443,7 @@ impl EneHandle {
         let diagnostics = crate::diagnostics::EneDiagnostics {
             cmd_tx: Arc::clone(&cmd_tx),
             diag_tx: diag_tx.clone(),
-            memory: memory.clone(),
+            memory,
         };
 
         let turn_gate = Arc::new(TurnGate::new());
@@ -491,7 +491,7 @@ impl EneHandle {
 
     /// Concrete diagnostics facade (pipeline detail, memory, tools).
     #[must_use]
-    pub fn diagnostics(&self) -> &crate::diagnostics::EneDiagnostics {
+    pub const fn diagnostics(&self) -> &crate::diagnostics::EneDiagnostics {
         &self.diagnostics
     }
 
@@ -533,21 +533,25 @@ impl EneHandle {
             if let Some(join) = guard.take() {
                 let _ = join.await;
             }
+            drop(guard);
             return Ok(());
         }
 
         let mut guard = self.actor_handle.lock().await;
         let Some(join) = guard.as_mut() else {
+            drop(guard);
             return Ok(());
         };
         match tokio::time::timeout(timeout, &mut *join).await {
             Ok(Ok(())) => {
                 guard.take();
+                drop(guard);
                 Ok(())
             }
             Ok(Err(join_err)) => {
                 tracing::warn!(component = "EneHandle", error = %join_err, "Actor task ended with error");
                 guard.take();
+                drop(guard);
                 Ok(())
             }
             Err(_elapsed) => Err(ShutdownTimeout(timeout)),
@@ -612,7 +616,7 @@ struct EneActor {
     call_tool_tasks: tokio::task::JoinSet<()>,
     classifier_tasks: tokio::task::JoinSet<()>,
     classifier_rx: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
-    /// Sender for classifier JoinHandles from the stream task.
+    /// Sender for classifier `JoinHandles` from the stream task.
     classifier_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
     /// Shared with the running stream task; first party to flip emits Terminal.
     terminal_emitted: Arc<AtomicBool>,
@@ -720,7 +724,7 @@ impl EneActor {
     }
 
     /// Drops every pending permission and user-input
-    /// oneshot::Sender, releasing the receiver futures that
+    /// `oneshot::Sender`, releasing the receiver futures that
     /// were awaiting them. Called on `Run` (to clear entries
     /// left by the previous run after a cancel), `Cancel`,
     /// and `Shutdown` so the maps do not grow unboundedly
@@ -752,7 +756,7 @@ impl EneActor {
                 let _ = self.event_tx.send(EneEvent::StatusChanged {
                     status: EneStatus::Running,
                 });
-                self.start_stream(input, turn).await;
+                self.start_stream(input, turn);
                 true
             }
             EneCommand::Cancel { turn } => {
@@ -783,7 +787,7 @@ impl EneActor {
                                 self.session = updated;
                             }
                         }
-                        _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+                        () = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
                             handle.as_mut().abort();
                             _ = handle.await;
                         }
@@ -823,7 +827,7 @@ impl EneActor {
                 false
             }
             EneCommand::SetCharacter { card, reply } => {
-                self.session.set_card(*card);
+                self.session.set_card(&card);
                 let _ = reply.send(Ok(()));
                 true
             }
@@ -835,6 +839,7 @@ impl EneActor {
                 if let Some(tx) = guard.remove(&request_id) {
                     let _ = tx.send(decision);
                 }
+                drop(guard);
                 true
             }
             EneCommand::UserInputResponse {
@@ -845,6 +850,7 @@ impl EneActor {
                 if let Some(tx) = guard.remove(&request_id) {
                     let _ = tx.send(response);
                 }
+                drop(guard);
                 true
             }
             EneCommand::ManualSplit { reply } => {
@@ -913,7 +919,7 @@ impl EneActor {
         }
     }
 
-    async fn start_stream(&mut self, user_input: String, turn: TurnId) {
+    fn start_stream(&mut self, user_input: String, turn: TurnId) {
         // Create the provider before mutating history so a failed open leaves
         // the session unchanged.
         let provider = match self.create_provider() {
@@ -930,7 +936,7 @@ impl EneActor {
                     .is_ok()
                 {
                     let _ = self.event_tx.send(EneEvent::Terminal {
-                        turn: turn.clone(),
+                        turn,
                         reason: TerminalReason::Failed {
                             message: e.to_string(),
                         },
@@ -1058,13 +1064,11 @@ impl EneActor {
     }
 
     fn check_and_trigger_compression(&mut self) {
-        let mem_config = match self.config.get_section::<ene_store::StoreConfig>() {
-            Ok(c) => c,
-            Err(_) => return,
+        let Ok(mem_config) = self.config.get_section::<ene_store::StoreConfig>() else {
+            return;
         };
-        let mind = match self.config.get_section::<ene_mind::MindConfig>() {
-            Ok(c) => c,
-            Err(_) => return,
+        let Ok(mind) = self.config.get_section::<ene_mind::MindConfig>() else {
+            return;
         };
         if !mem_config.enabled || !mind.context.compression_enabled {
             return;
@@ -1082,9 +1086,8 @@ impl EneActor {
         let Some(store) = self.session.memory.memory_store.clone() else {
             return;
         };
-        let provider = match self.create_provider() {
-            Ok(p) => p,
-            Err(_) => return,
+        let Ok(provider) = self.create_provider() else {
+            return;
         };
 
         let recent_cap = mind.context.recent_turns.saturating_mul(2).max(2);
@@ -1108,7 +1111,7 @@ impl EneActor {
             turn_start,
             turn_end,
             level: CompressionLevel::Scene,
-            config: mind.context.clone(),
+            config: mind.context,
         };
         spawn_compression_task(&mut self.pending_compression, store, provider, input);
     }
@@ -1150,8 +1153,7 @@ impl EneActor {
         let recent_cap = self
             .config
             .get_section::<ene_mind::MindConfig>()
-            .map(|c| c.context.recent_turns.saturating_mul(2).max(2))
-            .unwrap_or(16);
+            .map_or(16, |c| c.context.recent_turns.saturating_mul(2).max(2));
         let history_len = self.session.history().len();
         if history_len > recent_cap {
             self.session.trim_history_keep_last(recent_cap);
@@ -1159,9 +1161,8 @@ impl EneActor {
     }
 
     fn spawn_chapter_rollup_if_needed(&self) {
-        let mind = match self.config.get_section::<ene_mind::MindConfig>() {
-            Ok(c) => c,
-            Err(_) => return,
+        let Ok(mind) = self.config.get_section::<ene_mind::MindConfig>() else {
+            return;
         };
         let Some(store) = self.session.memory.memory_store.clone() else {
             return;
@@ -1172,7 +1173,7 @@ impl EneActor {
         let session_id = self.session.memory.session_id.to_string();
         let character_name = self.session.card_name().to_string();
         let user_name = self.config.user_name.clone();
-        let context = mind.context.clone();
+        let context = mind.context;
         tokio::spawn(async move {
             if let Err(error) = maybe_roll_up_chapter(
                 store.as_ref(),

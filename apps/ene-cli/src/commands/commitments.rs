@@ -64,14 +64,14 @@ impl CliCommand for CommitmentsCommand {
                 };
                 match snapshot.memory.complete_commitment(id).await {
                     Ok(true) => {
-                        println!("{}", style::success(format!("[Commitments] done id={id}")))
+                        println!("{}", style::success(format!("[Commitments] done id={id}")));
                     }
                     Ok(false) => println!(
                         "{}",
                         style::warning(format!("[Commitments] id={id} not found or not active"))
                     ),
                     Err(e) => {
-                        println!("{}", style::error(format!("[Commitments] Done error: {e}")))
+                        println!("{}", style::error(format!("[Commitments] Done error: {e}")));
                     }
                 }
             }

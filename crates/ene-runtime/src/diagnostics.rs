@@ -52,7 +52,7 @@ impl MemoryQueryHandle {
 
     /// Returns the backing memory store when memory is configured.
     #[must_use]
-    pub fn store(&self) -> Option<&Arc<ene_store::MemoryStore>> {
+    pub const fn store(&self) -> Option<&Arc<ene_store::MemoryStore>> {
         self.store.as_ref()
     }
 
@@ -374,14 +374,14 @@ impl std::fmt::Debug for EneDiagnostics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EneDiagnostics")
             .field("memory_enabled", &self.memory.is_enabled())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
 impl EneDiagnostics {
     /// Memory / journal query surface.
     #[must_use]
-    pub fn memory(&self) -> &MemoryQueryHandle {
+    pub const fn memory(&self) -> &MemoryQueryHandle {
         &self.memory
     }
 

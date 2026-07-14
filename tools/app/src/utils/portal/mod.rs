@@ -1,4 +1,4 @@
-pub(crate) mod compositor;
+pub mod compositor;
 
 #[cfg(target_os = "linux")]
 pub fn detect_wayland() -> bool {

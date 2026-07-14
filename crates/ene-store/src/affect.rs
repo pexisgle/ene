@@ -130,7 +130,7 @@ impl AffectState {
     ///
     /// NaN and infinite inputs are replaced with 0.0.
     pub fn clamp(&mut self) {
-        fn clamp_finite(v: &mut f32, min: f32, max: f32) {
+        const fn clamp_finite(v: &mut f32, min: f32, max: f32) {
             if v.is_finite() {
                 *v = v.clamp(min, max);
             } else {

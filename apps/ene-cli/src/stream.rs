@@ -145,7 +145,7 @@ pub async fn process_stream(
                             .items(&choices)
                             .default(0)
                             .interact()
-                            .unwrap_or(choices.len().saturating_sub(1));
+                            .unwrap_or_else(|_| choices.len().saturating_sub(1));
 
                         let chosen = &choices[selection];
                         if chosen == "(cancel all)" {

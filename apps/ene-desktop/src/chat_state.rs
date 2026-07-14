@@ -1,5 +1,7 @@
 //! Chat window state: message list, input draft, and in-flight dialogs.
 
+use std::fmt::Write as _;
+
 use ene_runtime::{HistoryEntry, Role};
 
 use crate::settings::{PendingPermission, PendingUserInput, QuestionDraft};
@@ -80,7 +82,7 @@ impl ChatState {
             if last.content.is_empty() {
                 last.content = format!("[Error] {message}");
             } else {
-                last.content.push_str(&format!("\n[Error] {message}"));
+                let _ = write!(last.content, "\n[Error] {message}");
             }
             last.is_streaming = false;
         } else {

@@ -72,6 +72,7 @@ impl ConfigStore {
     }
 
     /// Creates a store from an already-loaded [`EneConfig`].
+    #[must_use]
     pub fn from_config(config: EneConfig) -> Self {
         Self {
             config: RwLock::new(config),
@@ -148,7 +149,7 @@ impl ConfigStore {
         self.character_dirty.store(true, Ordering::Release);
     }
 
-    /// character_settings の extra セクションを型安全に取得（新規）
+    /// `character_settings` の extra セクションを型安全に取得（新規）
     pub fn get_character_section<T>(&self) -> T
     where
         T: serde::de::DeserializeOwned + Default + crate::HasConfigKey,
@@ -158,7 +159,7 @@ impl ConfigStore {
             .unwrap_or_default()
     }
 
-    /// character_settings の extra セクションを型安全に書き込み（新規）
+    /// `character_settings` の extra セクションを型安全に書き込み（新規）
     pub fn set_character_section<T>(&self, section: &T)
     where
         T: serde::Serialize + crate::HasConfigKey,
@@ -175,15 +176,15 @@ impl ConfigStore {
     ///
     /// Returns `Ok(true)` if any write occurred, `Ok(false)` if nothing was dirty.
     pub fn flush_if_dirty(&self, character_name: Option<&str>) -> std::io::Result<bool> {
-        let mut saved = false;
-
-        if self.global_dirty.swap(false, Ordering::AcqRel) {
+        let global_saved = if self.global_dirty.swap(false, Ordering::AcqRel) {
             let config = self.config.read();
             save_full_config(&config)?;
-            saved = true;
-        }
+            true
+        } else {
+            false
+        };
 
-        if self.character_dirty.swap(false, Ordering::AcqRel) {
+        let char_saved = if self.character_dirty.swap(false, Ordering::AcqRel) {
             if let Some(name) = character_name {
                 let char_config = self.character_config.read();
                 let path = crate::character_settings_path(name);
@@ -193,11 +194,14 @@ impl ConfigStore {
                 let json = serde_json::to_string_pretty(&*char_config)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
                 std::fs::write(&path, json)?;
+                drop(char_config);
             }
-            saved = true;
-        }
+            true
+        } else {
+            false
+        };
 
-        Ok(saved)
+        Ok(global_saved || char_saved)
     }
 
     /// Forces a save of both global and per-character config regardless of dirty state.

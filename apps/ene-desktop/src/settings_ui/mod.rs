@@ -118,7 +118,7 @@ impl SettingsUi {
                 ui_entity,
             ),
             PageKind::Graphics => {
-                page_graphics::render(ui, settings, &mut self.animation, ai, world, ui_entity)
+                page_graphics::render(ui, settings, &mut self.animation, ai, world, ui_entity);
             }
             PageKind::Ai => page_ai::render(
                 ui,
@@ -131,7 +131,7 @@ impl SettingsUi {
             ),
             PageKind::Memory => page_memory::render(ui, ai, world, ui_entity),
             PageKind::Debug => {
-                page_debug::render(ui, settings, &mut self.animation, ai, world, ui_entity)
+                page_debug::render(ui, settings, &mut self.animation, ai, world, ui_entity);
             }
         }
     }
@@ -178,7 +178,7 @@ fn noto_sans_jp_font_definitions() -> Option<&'static egui::FontDefinitions> {
         .as_ref()
 }
 
-/// Install NotoSansJP into a dedicated egui context. Each winit window
+/// Install `NotoSansJP` into a dedicated egui context. Each winit window
 /// owns its own [`egui::Context`], so fonts must be applied per context
 /// (not once process-wide).
 pub fn apply_egui_fonts(ctx: &egui::Context) {

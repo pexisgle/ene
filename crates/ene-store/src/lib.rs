@@ -40,6 +40,7 @@
 //! }
 //! ```
 #![warn(missing_docs)]
+#![allow(clippy::option_if_let_else)]
 #![cfg_attr(
     test,
     allow(clippy::unwrap_used, clippy::expect_used, clippy::clone_on_copy)
@@ -51,7 +52,7 @@ pub mod affect;
 pub mod commitment;
 /// Store configuration types.
 pub mod config;
-/// SeaORM entities representation.
+/// `SeaORM` entities representation.
 pub mod entities;
 /// Memory-related error types.
 pub mod error;
@@ -59,7 +60,7 @@ pub mod error;
 pub mod forgetting;
 /// Legacy memory table migration (#98).
 pub mod legacy_migration;
-/// SeaORM schema migrations.
+/// `SeaORM` schema migrations.
 pub mod migrator;
 /// Hybrid memory search scoring.
 pub mod search;

@@ -73,10 +73,10 @@ impl MemoryJournalPresenter {
                 actions.push(MemoryJournalAction::Dispute);
                 actions.push(MemoryJournalAction::Restore);
             }
-            MemoryStatus::Archived | MemoryStatus::UserDeleted | MemoryStatus::Superseded => {
-                actions.push(MemoryJournalAction::Restore);
-            }
-            MemoryStatus::Disputed => {
+            MemoryStatus::Archived
+            | MemoryStatus::UserDeleted
+            | MemoryStatus::Superseded
+            | MemoryStatus::Disputed => {
                 actions.push(MemoryJournalAction::Restore);
             }
         }

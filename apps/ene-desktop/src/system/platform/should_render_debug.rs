@@ -37,7 +37,7 @@ pub struct TransparentWindow(pub bool);
 pub struct ShouldRenderDebug(pub bool);
 
 #[derive(Resource, Debug, Default)]
-pub(crate) struct LastDebugUpdate(Option<Instant>);
+pub struct LastDebugUpdate(Option<Instant>);
 
 /// Decide whether the per-frame debug overlay work should run.
 ///

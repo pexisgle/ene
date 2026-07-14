@@ -63,12 +63,12 @@ impl Rect {
     /// whatever size remains. Used by the F9 debug overlay to keep
     /// the wireframe inside the window even when the OS input
     /// region overflows.
-    pub fn clamp_to(&self, window_w: i32, window_h: i32) -> Rect {
+    pub fn clamp_to(&self, window_w: i32, window_h: i32) -> Self {
         let min_x = self.x.max(0);
         let min_y = self.y.max(0);
         let max_x = (self.x + self.w).min(window_w).max(min_x);
         let max_y = (self.y + self.h).min(window_h).max(min_y);
-        Rect {
+        Self {
             x: min_x,
             y: min_y,
             w: max_x - min_x,
@@ -129,7 +129,7 @@ impl std::fmt::Debug for WaylandInputRegionContext {
             .field("compositor_bound", &self.compositor.is_some())
             .field("connection_alive", &self.connection.is_some())
             .field("winit_surface_bound", &self.winit_surface.is_some())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -161,9 +161,11 @@ impl WaylandInputRegionContext {
 
         // Wrap winit's display pointer as a Connection.
         // Operating in guest mode means we don't close the display when connection is dropped.
+        // SAFETY: The display pointer comes from winit's valid Wayland window handle.
+        // Guest mode ensures the display won't be closed when Connection is dropped.
         let connection = unsafe {
             let backend = wayland_client::backend::Backend::from_foreign_display(
-                wl_display_handle.display.as_ptr() as *mut _,
+                wl_display_handle.display.as_ptr().cast(),
             );
             Connection::from_backend(backend)
         };
@@ -189,10 +191,12 @@ impl WaylandInputRegionContext {
 
         // Recover the winit window's wl_surface proxy.
         let raw_surface_ptr = wl_window_handle.surface.as_ptr();
+        // SAFETY: `raw_surface_ptr` comes from winit's Wayland window handle,
+        // which guarantees it is a valid wl_surface proxy.
         let object_id = unsafe {
             wayland_client::backend::ObjectId::from_ptr(
                 <WlSurface as Proxy>::interface(),
-                raw_surface_ptr as *mut _,
+                raw_surface_ptr.cast(),
             )
         }
         .ok()?;
@@ -234,7 +238,7 @@ impl WaylandInputRegionContext {
     /// Latest cached state. Read by the X11 fallback dispatcher
     /// and the F9 debug overlay.
     #[cfg_attr(not(test), expect(dead_code, reason = "Test-only helper"))]
-    pub fn state(&self) -> &InputRegionState {
+    pub const fn state(&self) -> &InputRegionState {
         &self.state
     }
 
@@ -301,7 +305,7 @@ impl WaylandInputRegionContext {
         }
     }
 
-    /// Apply the cached policy to the winit window's wl_surface.
+    /// Apply the cached policy to the winit window's `wl_surface`.
     pub fn apply_to_winit_surface(&mut self) {
         if let Some(surface) = self.winit_surface.clone() {
             self.apply_to_surface(&surface);
@@ -382,11 +386,11 @@ impl Dispatch<WlSurface, ()> for AppData {
     }
 }
 
-fn is_wayland_display(handle: &RawDisplayHandle) -> bool {
+const fn is_wayland_display(handle: &RawDisplayHandle) -> bool {
     matches!(handle, RawDisplayHandle::Wayland(_))
 }
 
-fn is_wayland_window(handle: &RawWindowHandle) -> bool {
+const fn is_wayland_window(handle: &RawWindowHandle) -> bool {
     matches!(handle, RawWindowHandle::Wayland(_))
 }
 

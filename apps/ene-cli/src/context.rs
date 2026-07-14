@@ -5,7 +5,7 @@ pub struct AppContext {
 }
 
 impl AppContext {
-    pub fn new(handle: EneHandle) -> Self {
+    pub const fn new(handle: EneHandle) -> Self {
         Self { handle }
     }
 }

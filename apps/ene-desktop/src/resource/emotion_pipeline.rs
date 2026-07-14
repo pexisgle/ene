@@ -61,7 +61,7 @@ pub struct AppliedEmotion {
 ///
 /// `now_secs` is the current wall-clock seconds-since-epoch as
 /// used by every producer of [`EmotionCommand`]
-/// (page_character.rs, widgets.rs, the AI bridge). Keeping the
+/// (`page_character.rs`, widgets.rs, the AI bridge). Keeping the
 /// units on the producer side means the only clock the producers
 /// and consumer must agree on is "monotonic seconds since
 /// startup", which is trivial to provide via `Instant::now()`.
@@ -98,9 +98,8 @@ pub fn tick_emotions(state: &mut EmotionPipelineState, now_secs: f64) -> Applied
             _ => break,
         };
         let cmd = state.pending.pop_front();
-        let cmd = match cmd {
-            Some(cmd) => cmd,
-            None => break,
+        let Some(cmd) = cmd else {
+            break;
         };
         state.active = Some(ActiveEmotion {
             name: cmd.emotion.clone(),

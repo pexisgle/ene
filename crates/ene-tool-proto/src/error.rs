@@ -206,32 +206,32 @@ pub enum EneToolProtoError {
 impl std::fmt::Display for EneToolProtoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EneToolProtoError::NotFound { tool_name } => write!(f, "Tool not found: {tool_name}"),
-            EneToolProtoError::InvalidName { reason } => {
+            Self::NotFound { tool_name } => write!(f, "Tool not found: {tool_name}"),
+            Self::InvalidName { reason } => {
                 write!(f, "Invalid tool name: {reason}")
             }
-            EneToolProtoError::DuplicateName { tool_name } => {
+            Self::DuplicateName { tool_name } => {
                 write!(f, "Duplicate tool name: {tool_name}")
             }
-            EneToolProtoError::InvalidArguments { message } => {
+            Self::InvalidArguments { message } => {
                 write!(f, "Invalid arguments: {message}")
             }
-            EneToolProtoError::ExecutionFailed { message } => {
+            Self::ExecutionFailed { message } => {
                 write!(f, "Execution failed: {message}")
             }
-            EneToolProtoError::SandboxViolation { message } => {
+            Self::SandboxViolation { message } => {
                 write!(f, "Sandbox violation: {message}")
             }
-            EneToolProtoError::PermissionDenied { message } => {
+            Self::PermissionDenied { message } => {
                 write!(f, "Permission denied: {message}")
             }
-            EneToolProtoError::IoError { message } => write!(f, "I/O error: {message}"),
-            EneToolProtoError::Timeout { message } => write!(f, "Timeout: {message}"),
-            EneToolProtoError::Internal { message } => write!(f, "Internal error: {message}"),
-            EneToolProtoError::IpcTransport { message } => {
+            Self::IoError { message } => write!(f, "I/O error: {message}"),
+            Self::Timeout { message } => write!(f, "Timeout: {message}"),
+            Self::Internal { message } => write!(f, "Internal error: {message}"),
+            Self::IpcTransport { message } => {
                 write!(f, "IPC transport error: {message}")
             }
-            EneToolProtoError::PermissionRequired {
+            Self::PermissionRequired {
                 request_id,
                 action,
                 target,
@@ -242,7 +242,7 @@ impl std::fmt::Display for EneToolProtoError {
                     "Permission required [id: {request_id}]: {action} on {target} ({description})"
                 )
             }
-            EneToolProtoError::UserInputRequired { request_id, prompt } => {
+            Self::UserInputRequired { request_id, prompt } => {
                 write!(
                     f,
                     "User input required [id: {}]: {} item(s)",
@@ -250,16 +250,16 @@ impl std::fmt::Display for EneToolProtoError {
                     prompt.items.len(),
                 )
             }
-            EneToolProtoError::FileNotFound { path } => {
+            Self::FileNotFound { path } => {
                 write!(f, "File not found: {path}")
             }
-            EneToolProtoError::FileTooLarge { path, size, limit } => {
+            Self::FileTooLarge { path, size, limit } => {
                 write!(f, "File too large: {path} ({size} bytes, max: {limit})")
             }
-            EneToolProtoError::CommandBlocked { command, reason } => {
+            Self::CommandBlocked { command, reason } => {
                 write!(f, "Command blocked: {command} ({reason})")
             }
-            EneToolProtoError::ShellTimeout {
+            Self::ShellTimeout {
                 command,
                 timeout_ms,
             } => {
@@ -268,17 +268,17 @@ impl std::fmt::Display for EneToolProtoError {
                     "Shell execution timed out after {timeout_ms} ms: {command}"
                 )
             }
-            EneToolProtoError::ShellOutputTooLarge { size, limit } => {
+            Self::ShellOutputTooLarge { size, limit } => {
                 write!(
                     f,
                     "Shell output exceeded max size ({size} bytes, limit: {limit})"
                 )
             }
 
-            EneToolProtoError::IpcClient { message } => {
+            Self::IpcClient { message } => {
                 write!(f, "IPC client error: {message}")
             }
-            EneToolProtoError::Other { message } => {
+            Self::Other { message } => {
                 write!(f, "Other error: {message}")
             }
         }
@@ -289,7 +289,7 @@ impl std::error::Error for EneToolProtoError {}
 
 impl From<std::io::Error> for EneToolProtoError {
     fn from(e: std::io::Error) -> Self {
-        EneToolProtoError::IoError {
+        Self::IoError {
             message: e.to_string(),
         }
     }

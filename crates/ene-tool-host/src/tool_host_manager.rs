@@ -104,7 +104,7 @@ impl ToolRegistry for SupervisedIpcRegistry {
         let reg = self
             .registry
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         reg.list_tools()
     }
@@ -118,7 +118,7 @@ impl ToolRegistry for SupervisedIpcRegistry {
         let reg = self
             .registry
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let first_result = reg.call_tool(name, arguments).await;
         if first_result.is_ok() {
@@ -131,6 +131,7 @@ impl ToolRegistry for SupervisedIpcRegistry {
                 );
                 guard.restart_count = 0;
             }
+            drop(guard);
             return first_result;
         }
 
@@ -166,6 +167,7 @@ impl ToolRegistry for SupervisedIpcRegistry {
         let socket_path = guard.socket_path.clone();
         let sandbox = guard.sandbox.clone();
         let tool_config = guard.tool_config.clone();
+        drop(guard);
 
         let new_registry = ToolHostManager::connect_with_retry(
             &socket_path,
@@ -179,7 +181,10 @@ impl ToolRegistry for SupervisedIpcRegistry {
 
         let new_reg_arc = Arc::new(new_registry);
         {
-            let mut reg_guard = self.registry.write().unwrap_or_else(|e| e.into_inner());
+            let mut reg_guard = self
+                .registry
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *reg_guard = Arc::clone(&new_reg_arc);
         }
 
@@ -195,7 +200,7 @@ impl ToolRegistry for SupervisedIpcRegistry {
         let reg = self
             .registry
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         reg.config_schema().await
     }
@@ -204,7 +209,7 @@ impl ToolRegistry for SupervisedIpcRegistry {
         let reg = self
             .registry
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         reg.set_session_id(session_id).await;
     }
@@ -213,7 +218,7 @@ impl ToolRegistry for SupervisedIpcRegistry {
         let reg = self
             .registry
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         reg.approve_permission(request_id).await;
     }
@@ -222,7 +227,7 @@ impl ToolRegistry for SupervisedIpcRegistry {
         let reg = self
             .registry
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         reg.allow_pattern(action, target_pattern).await;
     }
@@ -306,7 +311,7 @@ impl ToolHostManager {
             match Self::start_tool(name, &sandbox, tool_config, timeout_ms, db_token).await {
                 Ok(supervised_entry) => {
                     if let Some(schema) = supervised_entry.config_schema().await {
-                        let schema_key = format!("{}_config", name);
+                        let schema_key = format!("{name}_config");
                         register_runtime_schema(&schema_key, schema);
                     }
                     supervised_registries.push(supervised_entry);
@@ -364,7 +369,8 @@ impl ToolHostManager {
                 }
                 match &server.transport {
                     crate::mcp_config::McpTransport::Stdio { command, args } => {
-                        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                        let args_ref: Vec<&str> =
+                            args.iter().map(std::string::String::as_str).collect();
                         if let Err(err) = mcp.connect_stdio(&server.name, command, &args_ref).await
                         {
                             tracing::warn!(
@@ -412,6 +418,7 @@ impl ToolHostManager {
     }
 
     /// Consume the manager and return a unified [`CompositeToolRegistry`] containing all added registries.
+    #[must_use]
     pub fn into_registry(self) -> Arc<dyn ToolRegistry> {
         Arc::new(self)
     }
@@ -431,7 +438,7 @@ impl ToolHostManager {
         let socket_path: PathBuf = {
             #[cfg(unix)]
             {
-                let p = paths::tool_socket_dir().join(format!("ene-tool-{}.sock", name));
+                let p = paths::tool_socket_dir().join(format!("ene-tool-{name}.sock"));
                 if p.exists() {
                     let _ = std::fs::remove_file(&p);
                 }
@@ -446,7 +453,7 @@ impl ToolHostManager {
         let db_socket_path: PathBuf = {
             #[cfg(unix)]
             {
-                paths::tool_socket_dir().join(format!("ene-db-{}.sock", name))
+                paths::tool_socket_dir().join(format!("ene-db-{name}.sock"))
             }
             #[cfg(windows)]
             {
@@ -502,10 +509,10 @@ impl ToolHostManager {
         let user_dir = paths::user_tools_dir();
 
         let candidates = [
-            builtin_dir.join(format!("ene-tool-{}{}", name, exe_suffix)),
-            builtin_dir.join(format!("{}{}", name, exe_suffix)),
-            user_dir.join(format!("ene-tool-{}{}", name, exe_suffix)),
-            user_dir.join(format!("{}{}", name, exe_suffix)),
+            builtin_dir.join(format!("ene-tool-{name}{exe_suffix}")),
+            builtin_dir.join(format!("{name}{exe_suffix}")),
+            user_dir.join(format!("ene-tool-{name}{exe_suffix}")),
+            user_dir.join(format!("{name}{exe_suffix}")),
         ];
 
         for candidate in &candidates {
