@@ -40,7 +40,9 @@ impl CompositeToolRegistry {
                 if tool_index.contains_key(name) {
                     let prefixed = format!("{idx}:{name}");
                     if tool_index.contains_key(&prefixed) {
-                        return Err(ToolHostError::DuplicateToolName { name: prefixed });
+                        return Err(ToolHostError::DuplicateToolName {
+                            tool_name: prefixed,
+                        });
                     }
                     tool_index.insert(prefixed, idx);
                     renamed.insert((idx, name.to_string()));
@@ -67,8 +69,8 @@ impl CompositeToolRegistry {
     pub fn new(registries: Vec<Arc<dyn ToolRegistry>>) -> Self {
         match Self::try_new(registries) {
             Ok(composite) => composite,
-            Err(ToolHostError::DuplicateToolName { name }) => {
-                panic!("Duplicate tool name in CompositeToolRegistry::new: {name}");
+            Err(ToolHostError::DuplicateToolName { tool_name }) => {
+                panic!("Duplicate tool name in CompositeToolRegistry::new: {tool_name}");
             }
             Err(e) => panic!("CompositeToolRegistry::new failed: {e}"),
         }
@@ -108,7 +110,9 @@ impl CompositeToolRegistry {
                 if state.tool_index.contains_key(&name) {
                     let prefixed = format!("{idx}:{name}");
                     if state.tool_index.contains_key(&prefixed) {
-                        return Err(ToolHostError::DuplicateToolName { name: prefixed });
+                        return Err(ToolHostError::DuplicateToolName {
+                            tool_name: prefixed,
+                        });
                     }
                     pending.push(prefixed);
                     state.renamed.insert((idx, name));
@@ -129,8 +133,12 @@ impl CompositeToolRegistry {
     /// # Panics
     /// Panics on name collision. Prefer [`try_add_registry`](Self::try_add_registry).
     pub fn add_registry(&self, registry: Arc<dyn ToolRegistry>) {
-        if let Err(e) = self.try_add_registry(registry) {
-            panic!("CompositeToolRegistry::add_registry failed: {e}");
+        match self.try_add_registry(registry) {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::error!(component = "CompositeToolRegistry", error = %e, "Failed to add registry");
+                panic!("CompositeToolRegistry::add_registry failed: {e}");
+            }
         }
     }
 }

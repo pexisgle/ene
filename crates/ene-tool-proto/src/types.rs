@@ -370,6 +370,11 @@ impl ActionSpec {
 /// `name`, `description`, and `parameters` (JSON Schema). Host-side RAG
 /// indexes from description (+ parameters text); a separate
 /// `ToolRagProfile` is deferred.
+///
+/// # Embedding note
+/// Changing `embedding_text` output invalidates all cached embeddings
+/// for the affected tools. After an update, re-index tools manually
+/// or rely on the version-hash mechanism to regenerate on next access.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ToolSpec {
     /// Unique, validated tool name.
@@ -378,6 +383,12 @@ pub struct ToolSpec {
     pub description: String,
     /// JSON Schema (auto-derived by `schemars` from the args struct).
     pub parameters: serde_json::Value,
+    /// Negative keywords for RAG disambiguation — when present in the
+    /// user query, these terms *penalize* the tool's relevance score.
+    /// Re-instated after #135 slim-down so `#[tool(keywords_negative = "...")]`
+    /// authoring data is not lost until `ToolRagProfile` lands (#137).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub negative_keywords: Vec<String>,
 }
 
 impl ToolSpec {
@@ -392,6 +403,7 @@ impl ToolSpec {
             name: name.into(),
             description: description.into(),
             parameters,
+            negative_keywords: Vec::new(),
         }
     }
 
@@ -404,7 +416,7 @@ impl ToolSpec {
                 let first_line = self
                     .description
                     .lines()
-                    .next()
+                    .find(|l| !l.trim().is_empty())
                     .unwrap_or(self.description.as_str())
                     .trim();
                 if first_line.is_empty() {
@@ -415,15 +427,45 @@ impl ToolSpec {
             }
             EmbeddingField::Description => {
                 let mut out = format!("{}\n{}", self.name.as_str(), self.description);
-                let params = self.parameters.to_string();
-                if params != "null" && params != "{}" {
+                let summary = extract_schema_summary(&self.parameters);
+                if !summary.is_empty() {
                     out.push('\n');
-                    out.push_str(&params);
+                    out.push_str(&summary);
                 }
                 out
             }
+            EmbeddingField::Negative => self.negative_keywords.join(", "),
         }
     }
+}
+
+/// Extract a human-readable summary from a JSON Schema, suitable for
+/// embedding. Returns property names and their descriptions only —
+/// the full schema is omitted to keep embeddings concise and
+/// high-signal.
+fn extract_schema_summary(params: &serde_json::Value) -> String {
+    let Some(props) = params.get("properties").and_then(|p| p.as_object()) else {
+        return String::new();
+    };
+    let mut parts = Vec::new();
+    for (key, val) in props {
+        let desc = val
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("");
+        let typ = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if typ.is_empty() && desc.is_empty() {
+            continue;
+        }
+        if desc.is_empty() {
+            parts.push(format!("{key} ({typ})"));
+        } else if typ.is_empty() {
+            parts.push(format!("{key}: {desc}"));
+        } else {
+            parts.push(format!("{key} ({typ}): {desc}"));
+        }
+    }
+    parts.join(". ")
 }
 
 /// Which subset of a `ToolSpec`'s text content to embed.
@@ -434,6 +476,8 @@ pub enum EmbeddingField {
     Summary,
     /// Embed the full description + parameters JSON (ranking refinement).
     Description,
+    /// Embed negative keywords for RAG penalty scoring.
+    Negative,
 }
 
 impl EmbeddingField {
@@ -443,6 +487,7 @@ impl EmbeddingField {
         match self {
             Self::Summary => "summary",
             Self::Description => "description",
+            Self::Negative => "negative",
         }
     }
 }
@@ -522,17 +567,85 @@ mod tests {
     }
 
     #[test]
-    fn tool_spec_embedding_text_description_and_summary() {
+    fn tool_spec_embedding_text_summary_skips_blank_lines() {
+        let s = ToolSpec::new(
+            ToolName::new("shell.exec"),
+            "\n\n  Run a command  \nMore details here.",
+            serde_json::json!({}),
+        );
+        let t = s.embedding_text(EmbeddingField::Summary);
+        assert_eq!(t, "shell.exec: Run a command");
+    }
+
+    #[test]
+    fn tool_spec_embedding_text_summary_empty_falls_back_to_name() {
+        let s = ToolSpec::new(ToolName::new("no_desc"), "\n\n", serde_json::json!({}));
+        let t = s.embedding_text(EmbeddingField::Summary);
+        assert_eq!(t, "no_desc");
+    }
+
+    #[test]
+    fn tool_spec_embedding_text_description_schema_summary() {
+        let s = ToolSpec::new(
+            ToolName::new("filesystem.read"),
+            "Read a file from disk.",
+            serde_json::json!({
+                "properties": {
+                    "path": {"type": "string", "description": "File path to read"},
+                    "max_bytes": {"type": "integer", "description": "Maximum bytes to read"}
+                }
+            }),
+        );
+        let t = s.embedding_text(EmbeddingField::Description);
+        assert!(t.contains("filesystem.read"));
+        assert!(t.contains("Read a file from disk."));
+        assert!(t.contains("path (string): File path to read"));
+        assert!(t.contains("max_bytes (integer): Maximum bytes to read"));
+        // Should NOT contain raw JSON format.
+        assert!(!t.contains("\"properties\""));
+    }
+
+    #[test]
+    fn tool_spec_embedding_text_description_empty_params() {
+        let s = ToolSpec::new(
+            ToolName::new("utility.time"),
+            "Get current time.",
+            serde_json::json!({}),
+        );
+        let t = s.embedding_text(EmbeddingField::Description);
+        assert_eq!(t, "utility.time\nGet current time.");
+    }
+
+    #[test]
+    fn tool_spec_embedding_text_description_no_properties() {
+        let s = ToolSpec::new(
+            ToolName::new("utility.null_params"),
+            "Null params.",
+            serde_json::json!(null),
+        );
+        let t = s.embedding_text(EmbeddingField::Description);
+        assert_eq!(t, "utility.null_params\nNull params.");
+    }
+
+    #[test]
+    fn tool_spec_embedding_text_negative() {
+        let s = ToolSpec {
+            name: ToolName::new("filesystem.read"),
+            description: "Read a file".into(),
+            parameters: serde_json::json!({}),
+            negative_keywords: vec!["write".into(), "delete".into()],
+        };
+        assert_eq!(s.embedding_text(EmbeddingField::Negative), "write, delete");
+    }
+
+    #[test]
+    fn tool_spec_embedding_text_negative_empty() {
         let s = ToolSpec::new(
             ToolName::new("filesystem.read"),
             "Read a file",
             serde_json::json!({"type": "object"}),
         );
-        let desc = s.embedding_text(EmbeddingField::Description);
-        assert!(desc.contains("filesystem.read"));
-        assert!(desc.contains("Read a file"));
-        let sum = s.embedding_text(EmbeddingField::Summary);
-        assert_eq!(sum, "filesystem.read: Read a file");
+        assert!(s.embedding_text(EmbeddingField::Negative).is_empty());
     }
 
     #[test]

@@ -217,4 +217,20 @@ mod tests {
         });
         assert!(seen.load(Ordering::SeqCst));
     }
+
+    #[tokio::test]
+    async fn action_set_provider_config_schema_delegates() {
+        let provider = ActionSetProvider::new(vec![Box::new(EchoAction)])
+            .with_config_schema_hook(|| {
+                Some(serde_json::json!({"type": "object", "properties": {"threshold": {"type": "number"}}}))
+            });
+        let schema = provider.config_schema();
+        assert!(schema.is_some());
+        let s = schema.unwrap();
+        assert!(
+            s.get("properties")
+                .and_then(|p| p.get("threshold"))
+                .is_some()
+        );
+    }
 }

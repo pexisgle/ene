@@ -68,4 +68,6 @@ fn spec_embedding_text_from_description() {
     let text = s.embedding_text(ene_tool_proto::types::EmbeddingField::Description);
     assert!(text.contains("filesystem.read"));
     assert!(text.contains("Reads the contents"));
+    let neg = s.embedding_text(ene_tool_proto::types::EmbeddingField::Negative);
+    assert_eq!(neg, "write, delete");
 }

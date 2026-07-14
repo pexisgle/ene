@@ -253,6 +253,9 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
     let display_name = struct_attrs.display_name_value(ident.to_string());
     let summary = struct_attrs.summary_value()?;
     let description = struct_attrs.description_value();
+    // ═══ Negative keywords — live on ToolSpec ═══
+    let negative_keywords = struct_attrs.keywords_list("negative");
+
     // Extra metadata attrs (category, keywords, side_effects, examples, …)
     // remain parsed so existing `#[tool(...)]` annotations keep compiling,
     // but they are intentionally not emitted on the LLM-facing `ToolSpec`
@@ -269,7 +272,6 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
         struct_attrs.keywords_list("primary"),
         struct_attrs.keywords_list("secondary"),
         struct_attrs.keywords_list("domain"),
-        struct_attrs.keywords_list("negative"),
         struct_attrs.examples_value(),
         struct_attrs.string_list("caveats"),
         struct_attrs.string_list("preconditions"),
@@ -296,10 +298,14 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
 
             /// Construct a `ToolSpec` for this args type.
             ///
-            /// Emits the LLM-facing contract only (`name`, `description`,
-            /// `parameters`). Extra `#[tool(...)]` metadata attrs remain
-            /// accepted for authoring convenience but are not stored on
-            /// the wire `ToolSpec` (#135 / #137).
+            /// Emits the LLM-facing fields (`name`, `description`,
+            /// `parameters`) plus `negative_keywords` for RAG
+            /// disambiguation. Extra `#[tool(...)]` metadata attrs
+            /// (category, side_effects, primary/secondary/domain
+            /// keywords, examples, caveats, preconditions, related,
+            /// version) remain accepted for authoring convenience
+            /// but are not stored on the wire `ToolSpec` until
+            /// `ToolRagProfile` lands (#137).
             pub fn spec() -> ::ene_tool_proto::ToolSpec {
                 use ::ene_tool_proto::{ToolSpec, ToolName};
                 use ::schemars::JsonSchema as _;
@@ -331,6 +337,7 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
                     name: ToolName::new(#tool_name_str),
                     description,
                     parameters: schema,
+                    negative_keywords: vec![#(#negative_keywords.into()),*],
                 }
             }
         }

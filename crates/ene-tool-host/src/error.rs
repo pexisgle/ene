@@ -22,10 +22,10 @@ pub enum EneToolHostError {
     ///
     /// Name collision is a hard error at composite build / `add_registry`
     /// time — first-wins silent overwrite is not allowed (#135).
-    #[error("Duplicate tool name: {name}")]
+    #[error("Duplicate tool name: {tool_name}")]
     DuplicateToolName {
         /// Colliding tool name.
-        name: String,
+        tool_name: String,
     },
 
     // ── MCP-specific errors ──────────────────────────────────────────

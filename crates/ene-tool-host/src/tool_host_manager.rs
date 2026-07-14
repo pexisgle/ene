@@ -412,8 +412,12 @@ impl ToolHostManager {
     /// # Panics
     /// Panics on name collision. Prefer [`try_add_registry`](Self::try_add_registry).
     pub fn add_registry(&mut self, registry: Arc<dyn ToolRegistry>) {
-        if let Err(e) = self.try_add_registry(registry) {
-            panic!("ToolHostManager::add_registry failed: {e}");
+        match self.try_add_registry(registry) {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::error!(component = "ToolHostManager", error = %e, "Failed to add registry");
+                panic!("ToolHostManager::add_registry failed: {e}");
+            }
         }
     }
 

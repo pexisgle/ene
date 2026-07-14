@@ -50,10 +50,17 @@ impl HostRegistry {
     /// Register a tool provider.
     ///
     /// # Panics
-    /// Panics on name collision. Prefer [`try_add_provider`](Self::try_add_provider).
+    /// Panics on name collision. Prefer [`try_add_provider`](Self::try_add_provider)
+    /// at call sites where graceful error propagation is expected.
+    ///
+    /// See [`try_add_provider`](Self::try_add_provider) for the fallible variant.
     pub fn add_provider(&mut self, provider: Box<dyn ToolProvider>) {
-        if let Err(e) = self.try_add_provider(provider) {
-            panic!("HostRegistry::add_provider failed: {e}");
+        match self.try_add_provider(provider) {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::error!(component = "HostRegistry", error = %e, "Failed to add provider");
+                panic!("HostRegistry::add_provider failed: {e}");
+            }
         }
     }
 

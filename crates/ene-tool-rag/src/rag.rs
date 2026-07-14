@@ -312,6 +312,43 @@ impl ToolRag {
                     .await?;
                 }
             }
+
+            let neg_text = spec.embedding_text(EmbeddingField::Negative);
+            if !neg_text.is_empty() {
+                let key = (
+                    spec.name.as_str().to_string(),
+                    "negative".into(),
+                    String::new(),
+                );
+                let hash = field_version_hash("negative", &neg_text);
+                if !is_cached(&cached, &key, &hash, &model_name) {
+                    let emb = embed(
+                        self.embedder.as_ref(),
+                        &neg_text,
+                        ene_ai::EmbeddingKind::Negative,
+                    )
+                    .await?;
+                    persist(
+                        &store,
+                        spec.name.as_str(),
+                        "negative",
+                        "",
+                        &hash,
+                        &model_name,
+                        &emb,
+                        &neg_text,
+                    )
+                    .await?;
+                }
+            }
+
+            // TODO(#137): Re-enable per-example embeddings via ToolRagProfile.
+            // Previously this block iterated over `spec.examples` and embedded
+            // each `ToolExample` individually for fine-grained RAG retrieval.
+            // After the ToolSpec slim-down (#135), examples live only on
+            // `ActionSpec` (not `ToolSpec`), so example-level embedding is
+            // paused until `ToolRagProfile` provides a proper data-source path.
+            // See git history at c448c63^ for the original looping logic.
         }
 
         {
