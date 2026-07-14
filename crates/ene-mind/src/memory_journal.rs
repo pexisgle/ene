@@ -66,6 +66,12 @@ impl MemoryJournal {
     }
 
     /// Build a store [`Query`] from mind memory policy (embedding optional).
+    ///
+    /// Uses **journal-specific** thresholds (`journal_similarity_threshold`,
+    /// `journal_min_score`) which differ from the cognitive recall thresholds
+    /// (`recall_similarity_threshold`, `recall_min_score`). This is intentional:
+    /// journal search is user-facing diagnostics (broader sweep, lower score
+    /// floor), while recall is cognitive (stricter quality for LLM context).
     #[must_use]
     pub fn to_query<'a>(
         mind_memory: &MindMemoryConfig,

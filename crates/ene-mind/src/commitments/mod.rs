@@ -14,6 +14,9 @@ use crate::error::CognitionError;
 use crate::memory_writer::candidate::MemoryCandidate;
 use crate::memory_writer::{AppliedDecision, ArbiterContext, MemoryArbiter};
 
+/// Maximum active commitments to consider for title-matching dedup / deletion.
+const MAX_ACTIVE_MATCH_CHECK: usize = 256;
+
 /// Companion Commitment Ledger: promises, tasks, follow-ups.
 #[derive(Debug, Default)]
 pub struct CommitmentLedger;
@@ -52,18 +55,41 @@ impl CommitmentLedger {
 
             let title_key = normalize_title(&candidate.title);
             let active = store
-                .list_active_commitments(ctx.character_id, Some(ctx.user_id), 64)
+                .list_active_commitments(ctx.character_id, Some(ctx.user_id), MAX_ACTIVE_MATCH_CHECK)
                 .await
                 .map_err(CognitionError::Memory)?;
-            if active
+            if let Some(existing) = active
                 .iter()
-                .any(|c| normalize_title(&c.title) == title_key)
+                .find(|c| normalize_title(&c.title) == title_key)
             {
-                debug!(
-                    component = "CommitmentLedger",
-                    title = %candidate.title,
-                    "active commitment with same title exists, skipping"
-                );
+                // Same title exists — supersede (update description/due_label) if content differs.
+                let content_changed = existing.description != candidate.content;
+                let due_changed = existing.due_label.as_deref() != candidate.commitment_due.as_deref();
+                if content_changed || due_changed {
+                    if let Some(id) = existing.id {
+                        store
+                            .supersede_commitment(
+                                id,
+                                &candidate.content,
+                                candidate.commitment_due.as_deref(),
+                            )
+                            .await
+                            .map_err(CognitionError::Memory)?;
+                        debug!(
+                            component = "CommitmentLedger",
+                            commitment_id = id,
+                            title = %candidate.title,
+                            "superseded active commitment (description/due_label updated)"
+                        );
+                        inserted.push(id);
+                    }
+                } else {
+                    debug!(
+                        component = "CommitmentLedger",
+                        title = %candidate.title,
+                        "active commitment unchanged, skipping"
+                    );
+                }
                 continue;
             }
 
@@ -188,20 +214,49 @@ impl CommitmentLedger {
     ) -> Result<(), CognitionError> {
         let key = normalize_title(title);
         let active = store
-            .list_active_commitments(ctx.character_id, Some(ctx.user_id), 64)
+            .list_active_commitments(ctx.character_id, Some(ctx.user_id), MAX_ACTIVE_MATCH_CHECK)
             .await
             .map_err(CognitionError::Memory)?;
-        for row in active {
-            if normalize_title(&row.title) == key
-                && let Some(id) = row.id
+
+        let matching: Vec<(i64, &str)> = active
+            .iter()
+            .filter_map(|row| row.id.map(|id| (id, row.title.as_str())))
+            .filter(|(_, t)| normalize_title(t) == key)
+            .collect();
+
+        if matching.len() > 1 {
+            tracing::warn!(
+                component = "CommitmentLedger",
+                title = %key,
+                count = matching.len(),
+                ids = ?matching.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                "cancel_matching_by_title matched multiple active commitments; ambiguity may cause unintended cancellation"
+            );
+        }
+
+        let mut first_error: Option<CognitionError> = None;
+        for (id, _) in matching {
+            if let Err(e) = store
+                .cancel_commitment(id)
+                .await
+                .map_err(CognitionError::Memory)
             {
-                store
-                    .cancel_commitment(id)
-                    .await
-                    .map_err(CognitionError::Memory)?;
+                tracing::warn!(
+                    component = "CommitmentLedger",
+                    commitment_id = id,
+                    error = %e,
+                    "failed to cancel commitment by title (continuing)"
+                );
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
             }
         }
-        Ok(())
+
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 }
 
@@ -278,6 +333,38 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(active.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn apply_supersedes_existing_with_changed_content() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+
+        // Insert the initial commitment
+        let candidates = [commitment_candidate(0.9)];
+        let ids1 = CommitmentLedger::apply_commitment_candidates(&store, &sync_ctx(), &candidates)
+            .await
+            .unwrap();
+        assert_eq!(ids1.len(), 1);
+
+        // Same title, different content and due_label → supersede
+        let mut updated = commitment_candidate(0.9);
+        updated.content = "Let's discuss the UI design instead".to_string();
+        updated.commitment_due = Some("Tomorrow".to_string());
+
+        let ids2 = CommitmentLedger::apply_commitment_candidates(&store, &sync_ctx(), &[updated])
+            .await
+            .unwrap();
+        assert_eq!(ids2.len(), 1);
+        assert_eq!(ids2[0], ids1[0], "superseded row should keep the same id");
+
+        let active = CommitmentLedger::list_active(&store, "ene", Some("user1"), 10)
+            .await
+            .unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(
+            active[0].description, "Let's discuss the UI design instead"
+        );
+        assert_eq!(active[0].due_label.as_deref(), Some("Tomorrow"));
     }
 
     #[tokio::test]

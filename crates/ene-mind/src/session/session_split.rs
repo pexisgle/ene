@@ -3,7 +3,7 @@ use super::types::{CardName, SessionId};
 use crate::summarizer;
 use chrono::{DateTime, Utc};
 use ene_ai::EmbeddingProvider;
-use ene_ai::{EmbeddingKind, Role, cosine_similarity};
+use ene_ai::{Role, cosine_similarity};
 use ene_store::{KeyFact, MemoryStore};
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -262,68 +262,7 @@ fn dominant_reason(
 
 // ── Session embedding ────────────────────────────────────────────────────────
 
-/// Embeds all conversation history messages (User + Assistant) individually
-/// and merges via max-pooling.
-///
-/// - Includes Assistant messages: captures new topics/words introduced by the AI,
-///   improving semantic matching accuracy with subsequent search queries.
-/// - Max-pooling: adopts the strongest feature per dimension. Prevents dilution
-///   by zero-information messages like greetings.
-/// - Each message is embedded individually, avoiding model `max_length` limits.
-pub async fn embed_session_messages(
-    embedder: &dyn EmbeddingProvider,
-    history: &[crate::lifecycle::HistoryEntry],
-) -> Result<Vec<f32>, EneSessionError> {
-    let dims = embedder.dimensions();
-    let messages: Vec<&str> = history
-        .iter()
-        .filter_map(|entry| {
-            if matches!(entry.role, Role::User | Role::Assistant)
-                && !entry.content.trim().is_empty()
-            {
-                Some(entry.content.as_str())
-            } else {
-                None
-            }
-        })
-        .collect();
 
-    if messages.is_empty() {
-        return Ok(vec![0.0; dims]);
-    }
-
-    let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(messages.len());
-    for content in &messages {
-        match ene_ai::embed(embedder, content, EmbeddingKind::Summary).await {
-            Ok(emb) => all_embeddings.push(emb),
-            Err(e) => {
-                tracing::warn!(component = "Session", error = %e, "Failed to embed message (skipping)");
-            }
-        }
-    }
-
-    if all_embeddings.is_empty() {
-        return Ok(vec![0.0; dims]);
-    }
-
-    let mut max_pooled = all_embeddings[0].clone();
-    for emb in all_embeddings.iter().skip(1) {
-        for (m, &v) in max_pooled.iter_mut().zip(emb.iter()) {
-            if v > *m {
-                *m = v;
-            }
-        }
-    }
-
-    let norm: f32 = max_pooled.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for x in &mut max_pooled {
-            *x /= norm;
-        }
-    }
-
-    Ok(max_pooled)
-}
 
 // ── Split execution ──────────────────────────────────────────────────────────
 
@@ -395,13 +334,9 @@ pub async fn execute_split(
     card_name: &str,
     user_name: &str,
     store: &Arc<MemoryStore>,
-    embedder: &Arc<dyn EmbeddingProvider>,
     provider: &dyn ene_ai::LlmProvider,
     reason: SplitReason,
 ) -> Result<SplitResult, EneSessionError> {
-    let prompts = ene_config::PromptLibrary::load("en");
-    let ended_at = Utc::now();
-
     let history_clone = history.to_vec();
     let session_id_clone = session_id.to_string();
     let card_name_clone = card_name.to_string();
@@ -449,29 +384,6 @@ pub async fn execute_split(
         &existing_facts,
     )
     .await?;
-
-    // Append the split reason to the summary (returned in SplitResult only;
-    // no conversation_summaries / keyfacts write — #125).
-    let reason_str = match &reason {
-        SplitReason::Timeout { elapsed_minutes } => prompts
-            .split()
-            .render_reason_timeout(&elapsed_minutes.to_string()),
-        SplitReason::TopicChange { similarity } => prompts
-            .split()
-            .render_reason_topic(&format!("{similarity:.2}")),
-        SplitReason::ContextPressure { .. } => prompts.split().reason_context.to_string(),
-        SplitReason::Composite { score } => prompts
-            .split()
-            .render_reason_composite(&format!("{score:.2}")),
-        SplitReason::Manual => prompts.split().reason_manual.to_string(),
-    };
-
-    let _annotated_summary = if reason_str.is_empty() {
-        summary_result.summary.clone()
-    } else {
-        format!("{} {}", summary_result.summary, reason_str)
-    };
-    let _ = (ended_at, _annotated_summary, embedder);
 
     let new_session_id = generate_session_id();
     let snapshot_len = history.len();
@@ -529,7 +441,6 @@ pub fn spawn_split_task(pending_split: &mut Option<PendingSplitTask>, input: Spl
                     card_name.as_str(),
                     &user_name,
                     &store,
-                    &embedder,
                     provider.as_ref(),
                     reason,
                 )

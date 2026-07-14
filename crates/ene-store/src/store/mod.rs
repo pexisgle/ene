@@ -3111,6 +3111,38 @@ impl MemoryStore {
         Ok(true)
     }
 
+    /// Update an active commitment's description and due label in-place.
+    ///
+    /// Only succeeds when the row exists and is `Active`. Returns `Ok(false)`
+    /// when the row does not exist or is no longer active.
+    pub async fn supersede_commitment(
+        &self,
+        id: i64,
+        description: &str,
+        due_label: Option<&str>,
+    ) -> Result<bool, MemoryError> {
+        use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
+
+        let maybe_model = entities::commitments::Entity::find_by_id(id)
+            .one(&self.db)
+            .await?;
+
+        let Some(model) = maybe_model else {
+            return Ok(false);
+        };
+
+        if crate::CommitmentStatus::from_db_str(&model.status) != crate::CommitmentStatus::Active {
+            return Ok(false);
+        }
+
+        let mut active: entities::commitments::ActiveModel = model.into();
+        active.description = Set(description.to_string());
+        active.due_label = Set(due_label.map(ToOwned::to_owned));
+        active.updated_at = Set(Utc::now());
+        active.update(&self.db).await?;
+        Ok(true)
+    }
+
     /// Mark a commitment as done.
     pub async fn complete_commitment(&self, id: i64) -> Result<bool, MemoryError> {
         self.update_commitment_status(id, crate::CommitmentStatus::Done)

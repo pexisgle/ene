@@ -144,9 +144,17 @@ pub struct MindMemoryConfig {
     pub use_hyde: bool,
     /// Maximum number of typed memories requested by recall planning.
     pub recall_result_limit: usize,
-    /// Minimum vector similarity for vector-sourced recall candidates.
+    /// Minimum vector similarity for cognitive recall candidates.
+    ///
+    /// Distinct from `journal_similarity_threshold` — recall uses a more
+    /// lenient similarity gate (default 0.35 vs 0.45 for journal) paired with
+    /// a stricter hybrid score floor (default 0.20 vs 0.10 for journal).
     pub recall_similarity_threshold: f32,
-    /// Minimum hybrid score required for recalled memory results.
+    /// Minimum hybrid score required for cognitive recall results.
+    ///
+    /// Distinct from `journal_min_score` — the recall path uses a stricter
+    /// cutoff (default 0.20 vs 0.10 for journal) to ensure high-quality
+    /// memories for LLM context injection.
     pub recall_min_score: f32,
     /// Enable optional LLM reranking of hybrid recall candidates.
     pub rerank_enabled: bool,
@@ -185,8 +193,17 @@ pub struct MindMemoryConfig {
     /// Candidate pool size multiplier base for journal / diagnostics search.
     pub journal_candidate_pool_size: usize,
     /// Minimum vector similarity for journal / diagnostics search (#123).
+    ///
+    /// Distinct from `recall_similarity_threshold` — journal search is
+    /// user-facing and uses a stricter similarity gate (default 0.45 vs 0.35
+    /// for recall) while accepting a lower hybrid score floor (default 0.10 vs
+    /// 0.20 for recall).
     pub journal_similarity_threshold: f32,
     /// Minimum hybrid score for journal / diagnostics search (#123).
+    ///
+    /// Distinct from `recall_min_score`. The journal defaults to a lower floor
+    /// (0.10 vs 0.20 for recall) so user-facing search returns broader results
+    /// while the cognitive recall path applies a stricter quality cutoff.
     pub journal_min_score: f32,
 }
 

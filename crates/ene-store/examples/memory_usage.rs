@@ -1,84 +1,84 @@
 //! Memory store usage example.
 //!
-//! Demonstrates opening an in-memory store, inserting a summary with
-//! key facts, searching by embedding similarity, and retrieving facts.
+//! Demonstrates the current typed-memory API: inserting memories via
+//! `NewMemoryItem`, searching via `Query`, and lifecycle management.
+//! The legacy `search_summaries` / `get_all_keyfacts` APIs have been
+//! retired from the product path (#125).
 
 use chrono::Utc;
-use ene_store::{KeyFact, MemoryStore, RecalledSummary};
+use ene_store::{
+    AffectAnnotation, HybridSearchWeights, MemoryConfidence, MemoryKind, MemorySalience,
+    MemoryScope, MemorySource, MemoryStatus, MemoryStore, NewMemoryItem, Query,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open an in-memory store with 4-dimensional embeddings
     let store = MemoryStore::open_in_memory(4).await?;
 
-    let card_name = "Alicia";
-
-    // Insert a conversation summary with key facts
-    let embedding = vec![1.0_f32, 0.0, 0.0, 0.0];
-    let key_facts = vec![
-        KeyFact {
-            key: "user_name".into(),
-            value: "Alice".into(),
+    // Insert a typed memory (Semantic kind — the modern persistence path).
+    let memory = NewMemoryItem {
+        scope: MemoryScope::Shared,
+        character_id: "Ene".to_string(),
+        user_id: "user1".to_string(),
+        kind: MemoryKind::Semantic,
+        title: "user_name".to_string(),
+        content: "Alice is a designer who loves the color blue.".to_string(),
+        source: MemorySource::Conversation,
+        source_ref: Some("session-001".to_string()),
+        confidence: MemoryConfidence::new(0.9),
+        salience: MemorySalience::new(0.7),
+        affect: AffectAnnotation {
+            valence: 0.5,
+            arousal: 0.0,
         },
-        KeyFact {
-            key: "favorite_color".into(),
-            value: "blue".into(),
-        },
-    ];
+        relationship_impact: 0.0,
+        valid_from: None,
+        valid_until: None,
+        status: MemoryStatus::Active,
+        supersedes_id: None,
+        pinned: false,
+        created_at: None,
+        commitment_id: None,
+    };
 
-    let summary_id = store
-        .insert_summary(
-            "session-001",
-            card_name,
-            "User Alice said she loves blue and works as a designer.",
-            &key_facts,
-            &embedding,
-            Utc::now(),
-        )
+    let id = store.insert_typed_memory(&memory).await?;
+    println!("Inserted typed memory with ID: {id}");
+
+    // Search with a Query (no embedding — lexical/recency-only match).
+    let results = store
+        .search(&Query {
+            query_text: "Alice loves blue",
+            embedding: None,
+            character_id: "Ene",
+            user_id: Some("user1"),
+            model_name: "test",
+            limit: 5,
+            similarity_threshold: 0.0,
+            candidate_pool_size: 16,
+            query_affect: None,
+            weights: HybridSearchWeights::default(),
+            decay_half_life_days: 30.0,
+            now: Utc::now(),
+            min_score: 0.0,
+            commitment_boost: 0.0,
+            recent_fallback_limit: 5,
+        })
         .await?;
 
-    println!("Inserted summary with ID: {summary_id}");
-
-    // Search for related summaries
-    let query_emb = vec![0.9_f32, 0.1, 0.0, 0.0];
-    let results: Vec<RecalledSummary> = store
-        .search_summaries(&query_emb, card_name, 5, 0.5)
-        .await?;
-
-    println!("\nFound {} related summaries:", results.len());
-    for (i, rs) in results.iter().enumerate() {
+    println!("\nSearch results (lexical-only):");
+    for (i, scored) in results.iter().enumerate() {
         println!(
-            "  {}. [score: {:.3}] {}",
+            "  {}. [total: {:.3}] {}",
             i + 1,
-            rs.similarity,
-            rs.entry.summary
+            scored.breakdown.total,
+            scored.item.content
         );
     }
 
-    // Retrieve all key facts
-    let facts = store.get_all_keyfacts(card_name).await?;
-    println!("\nKey facts:");
-    for fact in &facts {
-        println!("  {} = {}", fact.key, fact.value);
-    }
-
-    // Upsert a fact
-    store
-        .upsert_keyfact(card_name, "favorite_color", "green")
-        .await?;
-    let facts = store.get_all_keyfacts(card_name).await?;
-    println!(
-        "\nAfter upsert - favorite_color = {}",
-        facts
-            .iter()
-            .find(|f| f.key == "favorite_color")
-            .map_or("?", |f| f.value.as_str())
-    );
-
-    // Delete a fact
-    store.delete_keyfact(card_name, "favorite_color").await?;
-    let facts = store.get_all_keyfacts(card_name).await?;
-    println!("\nAfter delete - {} facts remain", facts.len());
+    // Mark the memory as faded (lifecycle transition).
+    store.update_typed_memory_status(id, MemoryStatus::Faded).await?;
+    println!("\nMemory {id} marked as faded.");
 
     Ok(())
 }
