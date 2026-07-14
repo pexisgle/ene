@@ -262,8 +262,6 @@ fn dominant_reason(
 
 // ── Session embedding ────────────────────────────────────────────────────────
 
-
-
 // ── Split execution ──────────────────────────────────────────────────────────
 
 /// The result of a session split operation.
