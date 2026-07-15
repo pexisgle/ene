@@ -109,11 +109,11 @@ pub struct RecalledSummary {
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `insert_summary` | `async fn insert_summary(&self, session_id: &str, card_name: &str, summary: &str, key_facts: &[KeyFact], embedding: &[f32], ended_at: DateTime<Utc>) -> Result<i64, MemoryError>` | Inserts a summary and its key facts in one transaction. Rejected with `LegacyWriteForbidden` in `ReadOnly` mode. |
-| `search_summaries` | `async fn search_summaries(&self, query_embedding: &[f32], card_name: &str, limit: usize, similarity_threshold: f32) -> Result<Vec<RecalledSummary>, MemoryError>` | Cosine-similarity search via `vec_distance_cosine`. |
+| `search_summaries` | `async fn search_summaries(&self, query_embedding: &[f32], card_name: &str, limit: usize, similarity_threshold: f32) -> Result<Vec<RecalledSummary>, MemoryError>` | **Deprecated.** Cosine-similarity search via `vec_distance_cosine`. Prefer typed memory `Query::search()` instead. |
 | `list_recent_summaries` | `async fn list_recent_summaries(&self, card_name: &str, limit: usize) -> Result<Vec<ConversationSummary>, MemoryError>` | Most recent summaries by `created_at DESC`. |
 | `count_summaries` | `async fn count_summaries(&self, card_name: &str) -> Result<i64, MemoryError>` | Total summaries for a character. |
 | `delete_summary` | `async fn delete_summary(&self, id: i64) -> Result<usize, MemoryError>` | Cascading delete (removes associated key facts too). |
-| `recall_context` | `async fn recall_context(&self, card_name: &str, query_embedding: &[f32], limit: usize, similarity_threshold: f32) -> Result<(Vec<RecalledSummary>, Vec<KeyFact>), MemoryError>` | Convenience call combining a summary search with all key facts. Returns empty vectors once the card has been migrated to typed memory. |
+| `recall_context` | `async fn recall_context(&self, card_name: &str, query_embedding: &[f32], limit: usize, similarity_threshold: f32) -> Result<(Vec<RecalledSummary>, Vec<KeyFact>), MemoryError>` | **Deprecated.** Convenience call combining a summary search with all key facts. Returns empty vectors once the card has been migrated to typed memory. Prefer typed `Query::search()`. |
 
 ### Key-fact methods
 

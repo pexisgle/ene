@@ -47,7 +47,7 @@ impl ToolProvider for BrowserToolProvider {
         self.inner.call_tool(name, arguments).await
     }
 
-    fn set_session_id(&self, session_id: &str) {
-        self.inner.set_session_id(session_id);
+    fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
+        self.inner.set_call_context(ctx);
     }
 }

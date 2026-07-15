@@ -30,7 +30,7 @@ pub mod action;
 pub mod provider;
 
 pub use action::{ToolAction, ToolSpecArgs};
-pub use provider::{ActionSetProvider, SingleActionProvider};
+pub use provider::ActionSetProvider;
 
 /// Re-exports of smart truncation from `ene-config` (former `ene-common`).
 pub mod truncate {
@@ -55,7 +55,7 @@ pub mod prelude {
     pub use serde::Deserialize;
 
     #[doc(no_inline)]
-    pub use crate::ToolAction as _;
+    pub use crate::ActionSetProvider;
     #[doc(no_inline)]
-    pub use crate::{ActionSetProvider, SingleActionProvider};
+    pub use crate::ToolAction as _;
 }

@@ -371,7 +371,7 @@ impl EneHandle {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let cmd_tx = Arc::new(cmd_tx);
         let (event_tx, _event_rx) = broadcast::channel(1024);
-        let (diag_tx, _diag_rx) = broadcast::channel(256);
+        let (diag_tx, diag_rx) = broadcast::channel(256);
 
         LlmProviderRegistry::register(Arc::new(ene_ai::OpenAiProviderFactory));
 
@@ -473,6 +473,7 @@ impl EneHandle {
             classifier_rx,
             terminal_emitted: Arc::new(AtomicBool::new(false)),
             classifier_tx,
+            _diag_rx: diag_rx,
         };
         let join = tokio::spawn(actor.run());
 
@@ -623,6 +624,9 @@ struct EneActor {
     classifier_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
     /// Shared with the running stream task; first party to flip emits Terminal.
     terminal_emitted: Arc<AtomicBool>,
+    /// Held so the broadcast channel retains buffered diagnostic events until the
+    /// first subscriber attaches via [`EneHandle::diagnostics().subscribe()`].
+    _diag_rx: broadcast::Receiver<DiagnosticEvent>,
 }
 
 impl EneActor {
@@ -632,14 +636,26 @@ impl EneActor {
             // does not grow without bound. Bounded by the
             // call rate from `EneCommand::CallTool`, which
             // is interactive.
-            while let Some(_joined) = self.call_tool_tasks.try_join_next() {
-                // The reply oneshot is sent from inside the
-                // task itself; we just drop the JoinError
-                // here (it's already been logged by Tokio).
+            while let Some(joined) = self.call_tool_tasks.try_join_next() {
+                if let Err(e) = joined {
+                    tracing::error!(
+                        component = "CallToolReaper",
+                        error = %e,
+                        "CallTool task panicked"
+                    );
+                }
             }
 
             // Reap completed classifier tasks.
-            while let Some(_joined) = self.classifier_tasks.try_join_next() {}
+            while let Some(joined) = self.classifier_tasks.try_join_next() {
+                if let Err(e) = joined {
+                    tracing::error!(
+                        component = "ClassifierReaper",
+                        error = %e,
+                        "Classifier task panicked"
+                    );
+                }
+            }
 
             // Drain classifier JoinHandles sent from the stream.
             while let Ok(handle) = self.classifier_rx.try_recv() {

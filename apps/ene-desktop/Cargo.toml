@@ -11,7 +11,7 @@ pollster = { workspace = true }
 bytemuck = { workspace = true }
 glam = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 egui = { workspace = true }
 egui-wgpu = { workspace = true }
 egui-winit = { workspace = true }
@@ -32,13 +32,13 @@ thiserror = { workspace = true }
 rapier3d = { workspace = true }
 bevy_ecs = { workspace = true }
 bevy_app = { workspace = true }
-device_query = "4"
+device_query = { workspace = true }
 rust-embed = { workspace = true }
 i18n-embed = { workspace = true }
 i18n-embed-fl = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-gtk = "0.18.2"
+gtk = { workspace = true }
 tray-icon = { workspace = true, default-features = false, features = ["gtk"] }
 wayland-client = { workspace = true }
 wayland-protocols = { workspace = true }
@@ -47,11 +47,7 @@ x11rb = { workspace = true }
 bitflags = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61.2", features = [
-    "Win32_Foundation",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_Graphics_Gdi",
-] }
+windows-sys = { workspace = true }
 
 [lints]
 workspace = true

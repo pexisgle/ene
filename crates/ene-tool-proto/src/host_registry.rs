@@ -81,13 +81,6 @@ impl HostRegistry {
         }
     }
 
-    /// Broadcasts the session ID to all registered providers.
-    pub fn set_session_id(&self, session_id: &str) {
-        for provider in &self.providers {
-            provider.set_session_id(session_id);
-        }
-    }
-
     /// Broadcasts call context to all registered providers.
     pub fn set_call_context(&self, ctx: &CallContext) {
         for provider in &self.providers {
@@ -119,12 +112,6 @@ impl ToolProvider for HostRegistry {
         self.call_tool(&n, arguments).await
     }
 
-    fn set_session_id(&self, session_id: &str) {
-        for provider in &self.providers {
-            provider.set_session_id(session_id);
-        }
-    }
-
     fn set_call_context(&self, ctx: &CallContext) {
         for provider in &self.providers {
             provider.set_call_context(ctx);
@@ -146,7 +133,7 @@ mod tests {
 
     struct MockProvider {
         name: String,
-        session_id: Arc<Mutex<Option<String>>>,
+        call_ctx: Arc<Mutex<Option<CallContext>>>,
         sandbox: Arc<Mutex<Option<SandboxConfigData>>>,
     }
 
@@ -154,7 +141,7 @@ mod tests {
         fn new(name: &str) -> Self {
             Self {
                 name: name.to_string(),
-                session_id: Arc::new(Mutex::new(None)),
+                call_ctx: Arc::new(Mutex::new(None)),
                 sandbox: Arc::new(Mutex::new(None)),
             }
         }
@@ -178,8 +165,8 @@ mod tests {
             Ok(format!("{name} called with {arguments}"))
         }
 
-        fn set_session_id(&self, session_id: &str) {
-            *self.session_id.lock().unwrap() = Some(session_id.to_string());
+        fn set_call_context(&self, ctx: &CallContext) {
+            *self.call_ctx.lock().unwrap() = Some(ctx.clone());
         }
 
         fn set_sandbox(&self, sandbox: &SandboxConfigData) {
@@ -250,13 +237,20 @@ mod tests {
     }
 
     #[test]
-    fn host_registry_set_session_id_broadcasts() {
+    fn host_registry_set_call_context_broadcasts() {
         let mut reg = HostRegistry::new();
         let p1 = MockProvider::new("alpha");
-        let session_ref = Arc::clone(&p1.session_id);
+        let ctx_ref = Arc::clone(&p1.call_ctx);
         reg.add_provider(Box::new(p1));
-        reg.set_session_id("sess_xyz");
-        assert_eq!(session_ref.lock().unwrap().as_deref(), Some("sess_xyz"));
+        let ctx = CallContext {
+            conversation_id: "conv_xyz".into(),
+            turn_id: "turn_1".into(),
+        };
+        reg.set_call_context(&ctx);
+        assert_eq!(
+            ctx_ref.lock().unwrap().as_ref().unwrap().conversation_id,
+            "conv_xyz"
+        );
     }
 
     #[test]

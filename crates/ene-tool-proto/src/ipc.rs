@@ -15,19 +15,30 @@ const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 /// - `IpcRequest::CallTool` `name` field accepts the new `ToolName` (still
 ///   a string on the wire)
 /// - `IpcRequest::SetCallContext` carries both conversation and turn identifiers
-pub const IPC_PROTOCOL_VERSION: u32 = 2;
+///
+/// Version 3:
+/// - `IpcRequest::Handshake` folded `Initialize`: `Handshake` now carries
+///   `sandbox` + `tool_config`, eliminating a second round-trip.
+/// - Removed `IpcRequest::SetSessionId` — `SetCallContext` supersedes it.
+/// - Removed `IpcRequest::GetMyConfig`, `SetMyConfig` — runtime config is
+///   pushed through `Handshake` only.
+/// - Removed `IpcResponse::MyConfig`.
+/// - `IpcRequest::GetConfigSchema` is a **documented exception** (#150)
+///   retained for config schema discovery by `tool_host_manager`.
+///   Tool host still uses six primary variants: Handshake, List, Call,
+///   Permission, `UserInput`, Shutdown.
+pub const IPC_PROTOCOL_VERSION: u32 = 3;
 
 /// IPC request — core → host
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum IpcRequest {
-    /// Handshake to negotiate protocol version.
+    /// Handshake to negotiate protocol version, exchange sandbox config,
+    /// and push tool-specific configuration (folded from v2 `Initialize`).
     Handshake {
         /// Client's supported protocol version.
         version: u32,
-    },
-    /// Initialise the tool with sandbox and config data.
-    Initialize {
         /// Sandbox configuration to apply.
+        #[serde(default)]
         sandbox: SandboxConfigData,
         /// Tool-specific configuration JSON.
         tool_config: Option<serde_json::Value>,
@@ -36,7 +47,7 @@ pub enum IpcRequest {
     ListTools,
     /// List per-action specs (mega-tool capability metadata).
     ListActionSpecs,
-    /// Request the tool's config JSON Schema.
+    /// Request the tool's config JSON Schema (documented exception, #150).
     GetConfigSchema,
     /// Execute a tool by name with JSON arguments.
     CallTool {
@@ -45,12 +56,10 @@ pub enum IpcRequest {
         /// JSON-encoded arguments.
         arguments: String,
     },
-    /// Set the current session ID.
-    SetSessionId {
-        /// Session identifier.
-        session_id: String,
-    },
     /// Set the call context (conversation + turn identifiers).
+    ///
+    /// Supersedes v2 `SetSessionId`; tool-side session scoping should
+    /// derive from `conversation_id`.
     SetCallContext {
         /// Conversation-level identifier (session ID).
         conversation_id: String,
@@ -69,10 +78,6 @@ pub enum IpcRequest {
         /// Target glob pattern.
         target_pattern: String,
     },
-    /// Get tool configuration.
-    GetMyConfig,
-    /// Set tool configuration.
-    SetMyConfig(serde_json::Value),
     /// Health-check ping.
     Ping,
     /// Graceful shutdown.
@@ -87,7 +92,7 @@ pub enum IpcResponse {
         /// Agreed protocol version.
         version: u32,
     },
-    /// Acknowledgment (for Initialize, `SetSessionId`, etc.).
+    /// Acknowledgment (for `ApprovePermission`, `AllowPattern`, etc.).
     Ack,
     /// List of tool specs (v2).
     Tools {
@@ -109,8 +114,6 @@ pub enum IpcResponse {
         /// The result, or an error.
         result: Result<String, ToolError>,
     },
-    /// Tool configuration.
-    MyConfig(serde_json::Value),
     /// Pong response to Ping.
     Pong,
     /// Error response.
@@ -289,7 +292,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ipc_request_initialize_roundtrip() {
+    async fn ipc_request_handshake_v3_roundtrip() {
         let sandbox = SandboxConfigData {
             enabled: true,
             allowed_directories: vec![],
@@ -303,7 +306,8 @@ mod tests {
             db_socket: None,
             db_auth_token: None,
         };
-        let req = IpcRequest::Initialize {
+        let req = IpcRequest::Handshake {
+            version: IPC_PROTOCOL_VERSION,
             sandbox: sandbox.clone(),
             tool_config: None,
         };
@@ -320,11 +324,21 @@ mod tests {
 
     #[tokio::test]
     async fn ipc_request_handshake_v2_roundtrip() {
-        let req = IpcRequest::Handshake {
-            version: IPC_PROTOCOL_VERSION,
-        };
-        let got = send_recv_request(&req).await;
-        assert_eq!(got, req);
+        // v2 wire format is deserialisable as v3 — new fields deserialise
+        // as their serde defaults (SandboxConfigData::default() via
+        // #[serde(default)] + None for Option).
+        let v2_json = serde_json::json!({
+            "Handshake": { "version": 3 }
+        });
+        let req: IpcRequest = serde_json::from_value(v2_json).unwrap();
+        assert!(matches!(
+            req,
+            IpcRequest::Handshake {
+                version: 3,
+                sandbox: _,
+                tool_config: None,
+            }
+        ));
     }
 
     #[tokio::test]

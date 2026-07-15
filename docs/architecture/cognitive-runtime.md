@@ -193,7 +193,7 @@ Validation gates:
 - `source_quote` must appear in the turn text (procedure memories from tool results are exempt when `source_quote` is empty)
 - Deletion candidates require `deletion_target_key`
 
-Deduplication uses normalized exact match first; optional pre-computed semantic matches (vector search) can collapse near-duplicates or trigger supersede/dispute logic. Until MemoryWriter orchestration (#100) wires embedding search, callers must populate `ArbiterContext::semantic_matches` themselves (e.g. from `MemoryStore::search_typed_memories`).
+Deduplication uses normalized exact match first; optional pre-computed semantic matches (vector search) can collapse near-duplicates or trigger supersede/dispute logic. Until MemoryWriter orchestration (#100) wires embedding search, callers must populate `ArbiterContext::semantic_matches` themselves (e.g. from `MemoryJournal` scored search).
 
 ### Tool Result Grounding (#92)
 

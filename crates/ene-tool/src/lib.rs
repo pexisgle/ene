@@ -5,7 +5,7 @@
 //! | Layer | Trait / types | Source crate |
 //! |---|---|---|
 //! | Wire (IPC / sandbox) | [`ToolProvider`], [`IpcRequest`] / [`IpcResponse`], [`ToolSpec`] | `ene-tool-proto` |
-//! | Host adapters | [`ActionSetProvider`], [`SingleActionProvider`], [`ToolAction`] | `ene-tool-common` |
+//! | Host adapters | [`ActionSetProvider`], [`ToolAction`] | `ene-tool-common` |
 //! | Derive | `#[derive(ToolSpec)]`, `#[derive(ToolAction)]` | `ene-tool-derive` |
 //!
 //! Host aggregation (`ToolRegistry`, MCP, composite, RAG) stays in
@@ -30,7 +30,7 @@
 /// Re-exports of the most common tool-authoring items.
 pub mod prelude {
     #[doc(no_inline)]
-    pub use ene_tool_common::{ActionSetProvider, SingleActionProvider, ToolAction, ToolSpecArgs};
+    pub use ene_tool_common::{ActionSetProvider, ToolAction, ToolSpecArgs};
     #[doc(no_inline)]
     pub use ene_tool_derive::{ToolAction as DeriveToolAction, ToolSpec as DeriveToolSpec};
     #[doc(no_inline)]
@@ -40,12 +40,11 @@ pub mod prelude {
 }
 
 #[doc(no_inline)]
-pub use ene_tool_common::{ActionSetProvider, SingleActionProvider, ToolAction, ToolSpecArgs};
+pub use ene_tool_common::{ActionSetProvider, ToolAction, ToolSpecArgs};
 #[doc(no_inline)]
 pub use ene_tool_derive::{ToolAction as DeriveToolAction, ToolSpec as DeriveToolSpec};
 #[doc(no_inline)]
 pub use ene_tool_proto::{
-    ActionSpec, EmbeddingField, HostRegistry, IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse,
-    KeywordSet, SandboxConfigData, SideEffects, ToolCategory, ToolError, ToolExample, ToolName,
-    ToolProvider, ToolSpec, ToolVersion, run_tool_server,
+    ActionSpec, HostRegistry, IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, SandboxConfigData,
+    ToolError, ToolName, ToolProvider, ToolSpec, ToolVersion, run_tool_server,
 };

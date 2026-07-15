@@ -214,7 +214,7 @@ pub struct MemoryQueryHandle { /* 非公開 */ }
 
 | メソッド | シグネチャ | 説明 |
 |---|---|---|
-| `search_summaries` | `async fn search_summaries(&self, embedding: &[f32], card_name: &str, limit: usize, threshold: f32) -> Result<Vec<RecalledSummary>, EneRuntimeError>` | 会話サマリーへのベクトル類似度検索。 |
+| `search_summaries` (削除済) | — | `MemoryQueryHandle` はこのメソッドを提供していません。必要な場合は `MemoryStore` の `search_summaries` を直接使ってください（非推奨、型付き `Query::search` を推奨）。 |
 | `list_recent_summaries` | `async fn list_recent_summaries(&self, card_name: &str, limit: usize) -> Result<Vec<ConversationSummary>, EneRuntimeError>` | キャラクターカードの最近のサマリーを新しい順で返す。 |
 | `get_all_keyfacts` | `async fn get_all_keyfacts(&self, card_name: &str) -> Result<Vec<KeyFact>, EneRuntimeError>` | キャラクターカードに保存されている全レガシーキーファクト。 |
 

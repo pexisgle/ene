@@ -65,9 +65,7 @@ fn spec_parameters_is_json_schema() {
 #[test]
 fn spec_embedding_text_from_description() {
     let s = ReadArgs::spec();
-    let text = s.embedding_text(ene_tool_proto::EmbeddingField::Description);
+    let text = s.embedding_text(ene_tool_proto::types::EmbeddingField::Description);
     assert!(text.contains("filesystem.read"));
     assert!(text.contains("Reads the contents"));
-    let neg = s.embedding_text(ene_tool_proto::EmbeddingField::Negative);
-    assert!(neg.is_empty());
 }

@@ -66,7 +66,7 @@ impl PerformanceArbiter {
             PerfKind::Expression => Self::set_slot(&mut self.expression, slot),
             PerfKind::Motion => Self::set_slot(&mut self.motion, slot),
             PerfKind::LookAt => Self::set_slot(&mut self.lookat, slot),
-            PerfKind::Cancel => unreachable!("cancel handled above"),
+            PerfKind::Cancel => { /* handled above */ }
         }
     }
 

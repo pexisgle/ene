@@ -177,7 +177,7 @@ impl ToolProvider for CalculatorProvider {
         }
     }
 
-    fn set_session_id(&self, _session_id: &str) {}
+    fn set_call_context(&self, _ctx: &ene_tool_proto::CallContext) {}
 }
 
 // ──────────────────────────── Main ────────────────────────────────────

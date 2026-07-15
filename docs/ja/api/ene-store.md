@@ -109,11 +109,11 @@ pub struct RecalledSummary {
 | メソッド | シグネチャ | 説明 |
 |--------|-----------|-------------|
 | `insert_summary` | `async fn insert_summary(&self, session_id: &str, card_name: &str, summary: &str, key_facts: &[KeyFact], embedding: &[f32], ended_at: DateTime<Utc>) -> Result<i64, MemoryError>` | 要約とキーファクトを1つのトランザクションで挿入する。`ReadOnly` モードでは `LegacyWriteForbidden` で拒否される。 |
-| `search_summaries` | `async fn search_summaries(&self, embedding: &[f32], card_name: &str, limit: usize, similarity_threshold: f32) -> Result<Vec<RecalledSummary>, MemoryError>` | `vec_distance_cosine` によるコサイン類似度検索。 |
+| `search_summaries` | `async fn search_summaries(&self, embedding: &[f32], card_name: &str, limit: usize, similarity_threshold: f32) -> Result<Vec<RecalledSummary>, MemoryError>` | **非推奨。** `vec_distance_cosine` によるコサイン類似度検索。代わりに型付き `Query::search()` を使ってください。 |
 | `list_recent_summaries` | `async fn list_recent_summaries(&self, card_name: &str, limit: usize) -> Result<Vec<ConversationSummary>, MemoryError>` | `created_at DESC` で最新の要約を取得する。 |
 | `count_summaries` | `async fn count_summaries(&self, card_name: &str) -> Result<i64, MemoryError>` | キャラクターの要約総数。 |
 | `delete_summary` | `async fn delete_summary(&self, id: i64) -> Result<usize, MemoryError>` | カスケード削除（関連するキーファクトも削除される）。 |
-| `recall_context` | `async fn recall_context(&self, card_name: &str, embedding: &[f32], limit: usize, similarity_threshold: f32) -> Result<(Vec<RecalledSummary>, Vec<KeyFact>), MemoryError>` | 要約検索とすべてのキーファクトの取得を1回でまとめて行う便利メソッド。カードがタイプ付きメモリへ移行済みの場合は空のベクトルを返す。 |
+| `recall_context` | `async fn recall_context(&self, card_name: &str, embedding: &[f32], limit: usize, similarity_threshold: f32) -> Result<(Vec<RecalledSummary>, Vec<KeyFact>), MemoryError>` | **非推奨。** 要約検索とすべてのキーファクトの取得を1回でまとめて行う便利メソッド。カードがタイプ付きメモリへ移行済みの場合は空のベクトルを返す。代わりに型付き `Query::search()` を使ってください。 |
 
 ### キーファクトメソッド
 

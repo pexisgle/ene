@@ -724,6 +724,16 @@ impl MemoryStore {
     ///
     /// Uses `vec_distance_cosine` for fast approximate matching.
     /// Results are filtered by `card_name` and `similarity_threshold`.
+    ///
+    /// # Deprecated
+    ///
+    /// Use `MemoryStore::search(&Query::...)` for typed-memory search.
+    /// This legacy API reads from `conversation_summaries`, which is
+    /// retired after migration (#119).
+    #[deprecated(
+        since = "0.1.0",
+        note = "use `search(&Query::...)` for typed-memory search"
+    )]
     pub async fn search_summaries(
         &self,
         query_embedding: &[f32],
@@ -1239,6 +1249,14 @@ impl MemoryStore {
     ///
     /// Combines [`search_summaries`](Self::search_summaries) and
     /// [`get_all_keyfacts`](Self::get_all_keyfacts) for convenient prompt context assembly.
+    ///
+    /// # Deprecated
+    ///
+    /// Use `MemoryStore::search(&Query::...)` for typed-memory search.
+    #[deprecated(
+        since = "0.1.0",
+        note = "use `search(&Query::...)` for typed-memory search"
+    )]
     pub async fn recall_context(
         &self,
         card_name: &str,

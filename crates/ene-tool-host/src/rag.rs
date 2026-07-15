@@ -6,7 +6,8 @@
 
 use ene_ai::{EmbeddingError, EmbeddingProvider, cosine_similarity, embed, embed_query};
 use ene_store::MemoryStore;
-use ene_tool_proto::{EmbeddingField, ToolName, ToolSpec};
+use ene_tool_proto::types::EmbeddingField;
+use ene_tool_proto::{ToolName, ToolSpec};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -335,37 +336,6 @@ impl ToolRag {
                     .await?;
                 }
             }
-
-            // (3) Negative — deferred with ToolRagProfile (#135); embedding_text
-            // returns empty, so this block is a no-op until a profile lands.
-            let neg_text = spec.embedding_text(EmbeddingField::Negative);
-            if !neg_text.is_empty() {
-                let key = (
-                    spec.name.as_str().to_string(),
-                    "negative".into(),
-                    String::new(),
-                );
-                let hash = field_version_hash("negative", &neg_text);
-                if !is_cached(&cached, &key, &hash, &model_name) {
-                    let emb = embed(
-                        self.embedder.as_ref(),
-                        &neg_text,
-                        ene_ai::EmbeddingKind::Negative,
-                    )
-                    .await?;
-                    persist(
-                        &store,
-                        spec.name.as_str(),
-                        "negative",
-                        "",
-                        &hash,
-                        &model_name,
-                        &emb,
-                        &neg_text,
-                    )
-                    .await?;
-                }
-            }
         }
 
         // Update cached spec map.
@@ -641,8 +611,9 @@ impl ToolRag {
         }
 
         let t_rerank = t_start.elapsed();
-        println!(
-            "\n[ToolRag Debug] Timings: hyde={:?}, load={:?}, score={:?}, rerank={:?}",
+        tracing::debug!(
+            component = "ToolRag",
+            "Timings: hyde={:?}, load={:?}, score={:?}, rerank={:?}",
             t_hyde,
             t_load.checked_sub(t_hyde).unwrap_or_default(),
             t_score.checked_sub(t_load).unwrap_or_default(),

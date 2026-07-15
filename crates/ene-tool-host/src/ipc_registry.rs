@@ -15,6 +15,8 @@ use tokio::sync::Mutex as TokioMutex;
 const RECONNECT_MAX_RETRIES: u32 = 5;
 const RECONNECT_BASE_DELAY_MS: u64 = 200;
 const RECONNECT_MAX_DELAY_MS: u64 = 10_000;
+/// Timeout for permission/pattern approval IPC calls (30s).
+const PERMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A `ToolRegistry` implementation that communicates with tool binaries via IPC
 ///
@@ -47,11 +49,13 @@ impl IpcToolRegistry {
     ) -> Result<Self, ToolHostError> {
         let mut stream = Self::connect_with_retry(&socket_path, RECONNECT_MAX_RETRIES).await?;
 
-        // Perform handshake
+        // Perform handshake (v3: folds Initialize sandbox+tool_config into a single RT)
         write_ipc_request(
             &mut stream,
             &IpcRequest::Handshake {
                 version: IPC_PROTOCOL_VERSION,
+                sandbox: sandbox.clone(),
+                tool_config: tool_config.clone(),
             },
         )
         .await
@@ -63,16 +67,6 @@ impl IpcToolRegistry {
 
         match resp {
             Some(IpcResponse::HandshakeAck { version }) => {
-                // The previous match arm destructured
-                // HandshakeAck with `..` and ignored the
-                // version field, so a server claiming
-                // any version (including 0) was accepted.
-                // Verify the acked version matches what
-                // we sent. A mismatch indicates either
-                // a stale binary, a malicious server, or
-                // a network MITM, and must terminate the
-                // connection rather than silently
-                // continuing on an unsupported protocol.
                 if version != IPC_PROTOCOL_VERSION {
                     return Err(ToolHostError::ipc(format!(
                         "Handshake version mismatch: server acked {version}, client requires {IPC_PROTOCOL_VERSION}"
@@ -84,30 +78,6 @@ impl IpcToolRegistry {
             }
             _ => {
                 return Err(ToolHostError::ipc("Unexpected response to Handshake"));
-            }
-        }
-
-        write_ipc_request(
-            &mut stream,
-            &IpcRequest::Initialize {
-                sandbox: sandbox.clone(),
-                tool_config: tool_config.clone(),
-            },
-        )
-        .await
-        .map_err(|e| ToolHostError::ipc(format!("Failed to send Initialize: {e}")))?;
-
-        let resp = read_ipc_response(&mut stream)
-            .await
-            .map_err(|e| ToolHostError::ipc(format!("Failed to read Initialize response: {e}")))?;
-
-        match resp {
-            Some(IpcResponse::Ack) => {}
-            Some(IpcResponse::Error { message }) => {
-                return Err(ToolHostError::ipc(message));
-            }
-            _ => {
-                return Err(ToolHostError::ipc("Unexpected response to Initialize"));
             }
         }
 
@@ -265,11 +235,13 @@ impl IpcToolRegistry {
 
         let mut stream = Self::connect_with_retry(&self.socket_path, RECONNECT_MAX_RETRIES).await?;
 
-        // Re-handshake after reconnect
+        // Re-handshake (v3: folds Initialize into single RT)
         write_ipc_request(
             &mut stream,
             &IpcRequest::Handshake {
                 version: IPC_PROTOCOL_VERSION,
+                sandbox: self.sandbox.clone(),
+                tool_config: self.tool_config.clone(),
             },
         )
         .await
@@ -291,34 +263,6 @@ impl IpcToolRegistry {
             _ => {
                 return Err(ToolHostError::ipc(
                     "Unexpected response to Handshake on reconnect",
-                ));
-            }
-        }
-
-        write_ipc_request(
-            &mut stream,
-            &IpcRequest::Initialize {
-                sandbox: self.sandbox.clone(),
-                tool_config: self.tool_config.clone(),
-            },
-        )
-        .await
-        .map_err(|e| ToolHostError::ipc(format!("Failed to send Initialize on reconnect: {e}")))?;
-
-        let resp = read_ipc_response(&mut stream).await.map_err(|e| {
-            ToolHostError::ipc(format!(
-                "Failed to read Initialize response on reconnect: {e}"
-            ))
-        })?;
-
-        match resp {
-            Some(IpcResponse::Ack) => {}
-            Some(IpcResponse::Error { message }) => {
-                return Err(ToolHostError::ipc(format!("Reconnect rejected: {message}")));
-            }
-            _ => {
-                return Err(ToolHostError::ipc(
-                    "Unexpected response to Initialize on reconnect",
                 ));
             }
         }
@@ -380,13 +324,6 @@ impl ToolRegistry for IpcToolRegistry {
         self.get_config_schema().await
     }
 
-    async fn set_session_id(&self, session_id: &str) {
-        let req = IpcRequest::SetSessionId {
-            session_id: session_id.to_string(),
-        };
-        let _ = self.send_with_reconnect(req).await;
-    }
-
     async fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
         let req = IpcRequest::SetCallContext {
             conversation_id: ctx.conversation_id.clone(),
@@ -399,7 +336,8 @@ impl ToolRegistry for IpcToolRegistry {
         let req = IpcRequest::ApprovePermission {
             request_id: request_id.to_string(),
         };
-        let _ = self.send_with_reconnect(req).await;
+        let send = self.send_with_reconnect(req);
+        let _ = tokio::time::timeout(PERMISSION_TIMEOUT, send).await;
     }
 
     async fn allow_pattern(&self, action: &str, target_pattern: &str) {
@@ -407,6 +345,7 @@ impl ToolRegistry for IpcToolRegistry {
             action: action.to_string(),
             target_pattern: target_pattern.to_string(),
         };
-        let _ = self.send_with_reconnect(req).await;
+        let send = self.send_with_reconnect(req);
+        let _ = tokio::time::timeout(PERMISSION_TIMEOUT, send).await;
     }
 }

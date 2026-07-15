@@ -12,7 +12,7 @@ pub enum EneToolHostError {
     /// I/O error during tool spawning or socket management.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    /// Execution failed (e.g. tool binary not found, MCP client failed to start).
+    /// Execution failed (e.g. tool binary not found).
     #[error("Execution failed: {message}")]
     ExecutionFailed {
         /// A descriptive message about the failure.
@@ -27,6 +27,20 @@ pub enum EneToolHostError {
         /// Colliding tool name.
         name: String,
     },
+
+    // ── MCP-specific errors ──────────────────────────────────────────
+    /// MCP server process could not be spawned or connected to.
+    #[error("MCP Connect error: {0}")]
+    McpConnect(String),
+    /// MCP handshake failed (protocol version mismatch, etc.).
+    #[error("MCP Handshake error: {0}")]
+    McpHandshake(String),
+    /// MCP RPC call failed (e.g. method not found, server error).
+    #[error("MCP RPC error: {0}")]
+    McpRpc(String),
+    /// MCP server advertised an invalid tool name.
+    #[error("MCP invalid tool name: {0}")]
+    McpInvalidName(String),
 }
 
 impl EneToolHostError {

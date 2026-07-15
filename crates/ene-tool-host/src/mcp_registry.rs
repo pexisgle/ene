@@ -43,39 +43,25 @@ impl McpToolRegistry {
             }
         });
 
-        let to_execution_failed = |e: std::io::Error| ToolHostError::ExecutionFailed {
-            message: e.to_string(),
-        };
-
         let client = serve_client(
             (),
-            TokioChildProcess::new(cmd).map_err(to_execution_failed)?,
+            TokioChildProcess::new(cmd).map_err(|e| ToolHostError::McpConnect(e.to_string()))?,
         )
         .await
-        .map_err(|e| ToolHostError::ExecutionFailed {
-            message: e.to_string(),
-        })?;
+        .map_err(|e| ToolHostError::McpHandshake(e.to_string()))?;
 
-        let mcp_tools_resp =
-            client
-                .list_tools(None)
-                .await
-                .map_err(|e| ToolHostError::ExecutionFailed {
-                    message: e.to_string(),
-                })?;
+        let mcp_tools_resp = client
+            .list_tools(None)
+            .await
+            .map_err(|e| ToolHostError::McpRpc(e.to_string()))?;
 
         let mut tools = Vec::new();
         for t in mcp_tools_resp.tools {
             let desc = t.description.map(|d| d.to_string()).unwrap_or_default();
-            // MCP tool names are untrusted (they come from a
-            // child process's JSON response). Reject invalid
-            // names with a structured error rather than
-            // panicking, so a hostile MCP server cannot crash
-            // the host.
             let name = ToolName::try_new(t.name.to_string()).map_err(|e| {
-                ToolHostError::ExecutionFailed {
-                    message: format!("MCP server advertised an invalid tool name: {e}"),
-                }
+                ToolHostError::McpInvalidName(format!(
+                    "MCP server advertised an invalid tool name: {e}"
+                ))
             })?;
             tools.push(ToolSpec::new(
                 name,
@@ -146,13 +132,10 @@ impl ToolRegistry for McpToolRegistry {
             params = params.with_arguments(obj.clone());
         }
 
-        let result =
-            client
-                .call_tool(params)
-                .await
-                .map_err(|e| ToolHostError::ExecutionFailed {
-                    message: e.to_string(),
-                })?;
+        let result = client
+            .call_tool(params)
+            .await
+            .map_err(|e| ToolHostError::McpRpc(e.to_string()))?;
 
         serde_json::to_string(&result.content).map_err(|e| ToolHostError::ExecutionFailed {
             message: e.to_string(),

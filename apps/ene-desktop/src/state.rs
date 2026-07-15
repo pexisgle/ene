@@ -261,11 +261,17 @@ impl AppState {
     pub fn chat_bevy_state_mut(
         &mut self,
     ) -> bevy_ecs::change_detection::Mut<'_, crate::component::chat::ChatStateComponent> {
-        #[expect(clippy::expect_used)]
+        #[expect(
+            clippy::expect_used,
+            reason = "Chat bevy entity is spawned by init; missing entity is a programmer bug"
+        )]
         let entity = self
             .chat_bevy_entity()
             .expect("Chat bevy entity not spawned; call app.update() first");
-        #[expect(clippy::expect_used)]
+        #[expect(
+            clippy::expect_used,
+            reason = "ChatStateComponent is added on entity spawn; missing component is a programmer bug"
+        )]
         self.app
             .world_mut()
             .get_mut::<crate::component::chat::ChatStateComponent>(entity)
@@ -273,11 +279,17 @@ impl AppState {
     }
 
     pub fn chat_bevy_state(&mut self) -> &crate::component::chat::ChatStateComponent {
-        #[expect(clippy::expect_used)]
+        #[expect(
+            clippy::expect_used,
+            reason = "Chat bevy entity is spawned by init; missing entity is a programmer bug"
+        )]
         let entity = self
             .chat_bevy_entity()
             .expect("Chat bevy entity not spawned; call app.update() first");
-        #[expect(clippy::expect_used)]
+        #[expect(
+            clippy::expect_used,
+            reason = "ChatStateComponent is added on entity spawn; missing component is a programmer bug"
+        )]
         self.app
             .world()
             .get::<crate::component::chat::ChatStateComponent>(entity)

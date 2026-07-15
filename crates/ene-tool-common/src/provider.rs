@@ -3,7 +3,7 @@
 //! Every hand-written `ToolProvider` in the `tools/` binaries re-implements
 //! the same dispatch loop: match `call_tool`'s `name` against each action's
 //! `name()`, forward to `execute`, and return [`ToolError::NotFound`] on a
-//! miss. [`ActionSetProvider`] and [`SingleActionProvider`] factor that loop
+//! miss. [`ActionSetProvider`] factors that loop
 //! out so new tool binaries don't have to hand-write a `ToolProvider` impl
 //! just to dispatch a fixed action list — see the ABI compatibility table in
 //! `docs/tools/sdk.md` for how this fits into the wider tool ABI.
@@ -125,9 +125,9 @@ impl ToolProvider for ActionSetProvider {
         })
     }
 
-    fn set_session_id(&self, session_id: &str) {
+    fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
         if let Some(hook) = &self.on_session_id {
-            hook(session_id);
+            hook(&ctx.conversation_id);
         }
     }
 
@@ -157,80 +157,6 @@ impl ToolProvider for ActionSetProvider {
 
     fn config_schema(&self) -> Option<serde_json::Value> {
         self.config_schema.as_ref().and_then(|hook| hook())
-    }
-}
-
-/// Adapts a single [`ToolAction`] into a [`ToolProvider`].
-///
-/// Convenience wrapper for the individual-tool pattern (one binary, one
-/// action) — equivalent to `ActionSetProvider::new(vec![Box::new(action)])`
-/// but avoids the `Vec` boilerplate at the call site. Supports the same
-/// hooks as [`ActionSetProvider`].
-pub struct SingleActionProvider {
-    inner: ActionSetProvider,
-}
-
-impl SingleActionProvider {
-    /// Creates a provider dispatching to a single action.
-    #[must_use]
-    pub fn new(action: impl ToolAction + 'static) -> Self {
-        Self {
-            inner: ActionSetProvider::new(vec![Box::new(action)]),
-        }
-    }
-
-    /// Registers a callback invoked on `ToolProvider::set_session_id`.
-    #[must_use]
-    pub fn with_session_id_hook(self, hook: impl Fn(&str) + Send + Sync + 'static) -> Self {
-        Self {
-            inner: self.inner.with_session_id_hook(hook),
-        }
-    }
-
-    /// Registers a callback invoked on `ToolProvider::set_sandbox`.
-    #[must_use]
-    pub fn with_sandbox_hook(
-        self,
-        hook: impl Fn(&SandboxConfigData) + Send + Sync + 'static,
-    ) -> Self {
-        Self {
-            inner: self.inner.with_sandbox_hook(hook),
-        }
-    }
-}
-
-#[async_trait]
-impl ToolProvider for SingleActionProvider {
-    fn list_specs(&self) -> Vec<ToolSpec> {
-        self.inner.list_specs()
-    }
-
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
-        self.inner.call_tool(name, arguments).await
-    }
-
-    fn set_session_id(&self, session_id: &str) {
-        self.inner.set_session_id(session_id);
-    }
-
-    fn set_sandbox(&self, sandbox: &SandboxConfigData) {
-        self.inner.set_sandbox(sandbox);
-    }
-
-    fn approve_permission(&self, request_id: &str) {
-        self.inner.approve_permission(request_id);
-    }
-
-    fn allow_pattern(&self, action: &str, target_pattern: &str) {
-        self.inner.allow_pattern(action, target_pattern);
-    }
-
-    fn set_config(&self, config: &serde_json::Value) {
-        self.inner.set_config(config);
-    }
-
-    fn config_schema(&self) -> Option<serde_json::Value> {
-        self.inner.config_schema()
     }
 }
 
@@ -282,15 +208,10 @@ mod tests {
         let seen2 = seen.clone();
         let provider = ActionSetProvider::new(vec![Box::new(EchoAction)])
             .with_session_id_hook(move |_sid| seen2.store(true, Ordering::SeqCst));
-        provider.set_session_id("abc");
+        provider.set_call_context(&ene_tool_proto::CallContext {
+            conversation_id: "abc".to_string(),
+            turn_id: String::new(),
+        });
         assert!(seen.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn single_action_provider_dispatches() {
-        let provider = SingleActionProvider::new(EchoAction);
-        let result = provider.call_tool("echo", "hey").await.unwrap();
-        assert_eq!(result, "hey");
-        assert!(provider.call_tool("nope", "").await.is_err());
     }
 }

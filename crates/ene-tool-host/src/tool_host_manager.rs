@@ -205,13 +205,13 @@ impl ToolRegistry for SupervisedIpcRegistry {
         reg.config_schema().await
     }
 
-    async fn set_session_id(&self, session_id: &str) {
+    async fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
         let reg = self
             .registry
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        reg.set_session_id(session_id).await;
+        reg.set_call_context(ctx).await;
     }
 
     async fn approve_permission(&self, request_id: &str) {
@@ -230,15 +230,6 @@ impl ToolRegistry for SupervisedIpcRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         reg.allow_pattern(action, target_pattern).await;
-    }
-
-    async fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
-        let reg = self
-            .registry
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        reg.set_call_context(ctx).await;
     }
 }
 
@@ -268,8 +259,8 @@ impl ToolRegistry for ToolHostManager {
         self.composite.config_schema().await
     }
 
-    async fn set_session_id(&self, session_id: &str) {
-        self.composite.set_session_id(session_id).await;
+    async fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
+        self.composite.set_call_context(ctx).await;
     }
 
     async fn approve_permission(&self, request_id: &str) {
@@ -278,10 +269,6 @@ impl ToolRegistry for ToolHostManager {
 
     async fn allow_pattern(&self, action: &str, target_pattern: &str) {
         self.composite.allow_pattern(action, target_pattern).await;
-    }
-
-    async fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
-        self.composite.set_call_context(ctx).await;
     }
 }
 

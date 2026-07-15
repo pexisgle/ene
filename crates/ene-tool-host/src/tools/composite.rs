@@ -183,13 +183,6 @@ impl ToolRegistry for CompositeToolRegistry {
         registry.call_tool(&dispatch_name, arguments).await
     }
 
-    async fn set_session_id(&self, session_id: &str) {
-        let registries = self.with_registries(<[std::sync::Arc<dyn ToolRegistry>]>::to_vec);
-        for registry in &registries {
-            registry.set_session_id(session_id).await;
-        }
-    }
-
     async fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
         let registries = self.with_registries(<[std::sync::Arc<dyn ToolRegistry>]>::to_vec);
         for registry in &registries {
@@ -258,8 +251,8 @@ mod tests {
             Ok(format!("{name} executed"))
         }
 
-        async fn set_session_id(&self, session_id: &str) {
-            *self.session_id.lock().unwrap() = Some(session_id.to_string());
+        async fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
+            *self.session_id.lock().unwrap() = Some(ctx.conversation_id.clone());
         }
     }
 
@@ -350,19 +343,6 @@ mod tests {
             result.unwrap_err(),
             ToolHostError::Protocol(ene_tool_proto::ToolError::NotFound { .. })
         ));
-    }
-
-    #[tokio::test]
-    async fn composite_set_session_id_propagates() {
-        let mock1 = MockRegistry::new(vec![make_tool("a")]);
-        let mock2 = MockRegistry::new(vec![make_tool("b")]);
-        let sid1 = Arc::clone(&mock1.session_id);
-        let sid2 = Arc::clone(&mock2.session_id);
-        let composite =
-            CompositeToolRegistry::try_new(vec![Arc::new(mock1), Arc::new(mock2)]).unwrap();
-        composite.set_session_id("sess_main").await;
-        assert_eq!(sid1.lock().unwrap().as_deref(), Some("sess_main"));
-        assert_eq!(sid2.lock().unwrap().as_deref(), Some("sess_main"));
     }
 
     #[tokio::test]

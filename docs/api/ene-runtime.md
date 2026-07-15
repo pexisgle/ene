@@ -218,7 +218,7 @@ pub struct MemoryQueryHandle { /* opaque */ }
 
 | Method | Signature | Description |
 |---|---|---|
-| `search_summaries` | `async fn search_summaries(&self, embedding: &[f32], card_name: &str, limit: usize, threshold: f32) -> Result<Vec<RecalledSummary>, EneRuntimeError>` | Vector-similarity search over conversation summaries. |
+| `search_summaries` (removed) | — | `MemoryQueryHandle` no longer exposes this method. Use `search_summaries` on `MemoryStore` directly if needed (deprecated, prefer typed `Query::search`). |
 | `list_recent_summaries` | `async fn list_recent_summaries(&self, card_name: &str, limit: usize) -> Result<Vec<ConversationSummary>, EneRuntimeError>` | Most recent summaries for a character card, in recency order. |
 | `get_all_keyfacts` | `async fn get_all_keyfacts(&self, card_name: &str) -> Result<Vec<KeyFact>, EneRuntimeError>` | All legacy key facts stored for a character card. |
 

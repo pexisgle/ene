@@ -43,7 +43,8 @@ async fn test_ipc_list_tools_and_call_tool() {
             matches!(
                 req,
                 IpcRequest::Handshake {
-                    version: IPC_PROTOCOL_VERSION
+                    version: IPC_PROTOCOL_VERSION,
+                    ..
                 }
             ),
             "Expected Handshake, got {req:?}"
@@ -57,20 +58,7 @@ async fn test_ipc_list_tools_and_call_tool() {
         .await
         .unwrap();
 
-        // 2. Initialize
-        let req = read_ipc_request(&mut stream)
-            .await
-            .unwrap()
-            .expect("Expected Initialize request");
-        assert!(
-            matches!(req, IpcRequest::Initialize { .. }),
-            "Expected Initialize, got {req:?}"
-        );
-        write_ipc_response(&mut stream, &IpcResponse::Ack)
-            .await
-            .unwrap();
-
-        // 3. ListTools (refresh_tools is called inside IpcToolRegistry::new)
+        // 2. ListTools (refresh_tools is called inside IpcToolRegistry::new)
         let req = read_ipc_request(&mut stream)
             .await
             .unwrap()

@@ -66,8 +66,6 @@
 //!             .map_err(|e| ToolError::InvalidArguments { message: e.to_string() })?;
 //!         Ok(format!("Hello, {}!", v["name"].as_str().unwrap_or("world")))
 //!     }
-//!
-//!     fn set_session_id(&self, _sid: &str) {}
 //! }
 //! ```
 #![warn(missing_docs)]
@@ -106,8 +104,7 @@ pub use sandbox::SandboxConfigData;
 pub use server::run_tool_server;
 /// Shared tool types.
 pub use types::{
-    ActionSpec, EmbeddingField, KeywordSet, SideEffects, ToolCategory, ToolExample, ToolName,
-    ToolSpec, ToolVersion,
+    ActionSpec, SideEffects, ToolCategory, ToolExample, ToolName, ToolSpec, ToolVersion,
 };
 
 use async_trait::async_trait;
@@ -133,19 +130,12 @@ pub trait ToolProvider: Send + Sync {
     /// Executes a tool by name with the given JSON arguments.
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>;
 
-    /// Sets the current session ID (used for undo tracking, session-scoped state, etc.).
-    fn set_session_id(&self, session_id: &str);
-
     /// Sets the call context (conversation + turn identifiers).
     ///
-    /// Default implementation forwards `conversation_id` to
-    /// [`set_session_id`](ToolProvider::set_session_id) so existing tools
-    /// that only implement `set_session_id` continue to work.
-    /// Tools that want per-turn scoping (e.g. undo checkpoints) can
-    /// override this method and use `conversation_id` *and* `turn_id`.
-    fn set_call_context(&self, ctx: &crate::ipc::CallContext) {
-        self.set_session_id(&ctx.conversation_id);
-    }
+    /// Tools that want session-scoped state (e.g. undo checkpoints)
+    /// should override this method and use `conversation_id` and/or
+    /// `turn_id` as appropriate.
+    fn set_call_context(&self, _ctx: &crate::ipc::CallContext) {}
 
     /// Receives sandbox configuration (used by filesystem tools; default is no-op).
     fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
@@ -156,13 +146,8 @@ pub trait ToolProvider: Send + Sync {
     /// Adds a session-wide permission allow pattern (action + target glob).
     fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
 
-    /// Receives tool-specific configuration (called once during Initialize).
+    /// Receives tool-specific configuration (called once during Handshake).
     fn set_config(&self, _config: &serde_json::Value) {}
-
-    /// Returns the tool's current configuration.
-    fn get_config(&self) -> serde_json::Value {
-        serde_json::Value::Null
-    }
 
     /// Returns the JSON Schema for the configuration this tool accepts.
     fn config_schema(&self) -> Option<serde_json::Value> {

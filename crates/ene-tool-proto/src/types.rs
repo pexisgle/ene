@@ -397,9 +397,6 @@ impl ToolSpec {
 
     /// Build a text representation of this spec for RAG embedding. The
     /// `field` parameter controls which fields are included.
-    ///
-    /// Negative-keyword embeddings are deferred with `ToolRagProfile`
-    /// (#135) and always return an empty string.
     #[must_use]
     pub fn embedding_text(&self, field: EmbeddingField) -> String {
         match field {
@@ -425,7 +422,6 @@ impl ToolSpec {
                 }
                 out
             }
-            EmbeddingField::Negative => String::new(),
         }
     }
 }
@@ -438,8 +434,6 @@ pub enum EmbeddingField {
     Summary,
     /// Embed the full description + parameters JSON (ranking refinement).
     Description,
-    /// Reserved for a future negative-keyword / `ToolRagProfile` channel (#135).
-    Negative,
 }
 
 impl EmbeddingField {
@@ -449,7 +443,6 @@ impl EmbeddingField {
         match self {
             Self::Summary => "summary",
             Self::Description => "description",
-            Self::Negative => "negative",
         }
     }
 }
@@ -529,13 +522,17 @@ mod tests {
     }
 
     #[test]
-    fn tool_spec_embedding_text_negative_deferred() {
+    fn tool_spec_embedding_text_description_and_summary() {
         let s = ToolSpec::new(
             ToolName::new("filesystem.read"),
             "Read a file",
-            serde_json::json!({}),
+            serde_json::json!({"type": "object"}),
         );
-        assert!(s.embedding_text(EmbeddingField::Negative).is_empty());
+        let desc = s.embedding_text(EmbeddingField::Description);
+        assert!(desc.contains("filesystem.read"));
+        assert!(desc.contains("Read a file"));
+        let sum = s.embedding_text(EmbeddingField::Summary);
+        assert_eq!(sum, "filesystem.read: Read a file");
     }
 
     #[test]

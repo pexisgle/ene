@@ -20,7 +20,7 @@
 //!   binaries) opens its own database connection or issues raw SQL against
 //!   `memory.db`; they call into `MemoryStore` (or, for tool binaries, the IPC-based
 //!   `ene-tool-db` client backed by `ene-runtime`'s `db_server`) instead.
-//! - Depends on: `ene-common`, `ene-config`. The store has no LLM, embedding
+//! - Depends on: `ene-config`. The store has no LLM, embedding
 //!   provider, or prompt-assembly dependency; callers supply vectors and the mind
 //!   runtime owns summarization and prompt formatting.
 //!   It does NOT depend on `ene-runtime`, `ene-ai`, `ene-mind`, or
@@ -35,12 +35,13 @@
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let store = MemoryStore::open(std::path::Path::new(":memory:"), 768).await?;
-//!     // Use store.search_summaries(), store.insert_summary(), etc.
+//!     // Typed-memory search is the primary API — see `typed_memory::Query`.
 //!     Ok(())
 //! }
 //! ```
 #![warn(missing_docs)]
 #![allow(clippy::option_if_let_else)]
+#![allow(deprecated)]
 #![cfg_attr(
     test,
     allow(clippy::unwrap_used, clippy::expect_used, clippy::clone_on_copy)

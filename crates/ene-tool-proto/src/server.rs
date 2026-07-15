@@ -105,15 +105,11 @@ pub async fn run_tool_server(provider: Box<dyn ToolProvider>) -> Result<(), Tool
 
 async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse {
     match req {
-        IpcRequest::Handshake { version } => {
-            // Strict version match. The previous form
-            // silently downgraded to
-            // version.min(IPC_PROTOCOL_VERSION), which
-            // would have accepted a tool reporting
-            // version 0 (or 99) with no complaint and
-            // no record of the negotiated version. The
-            // docs and the client both expect a hard
-            // reject on mismatch.
+        IpcRequest::Handshake {
+            version,
+            sandbox,
+            tool_config,
+        } => {
             if *version != IPC_PROTOCOL_VERSION {
                 tracing::error!(
                     "[tool-server] Handshake version mismatch: client sent {version}, server requires {IPC_PROTOCOL_VERSION}"
@@ -124,19 +120,13 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
                     ),
                 };
             }
-            IpcResponse::HandshakeAck {
-                version: IPC_PROTOCOL_VERSION,
-            }
-        }
-        IpcRequest::Initialize {
-            sandbox,
-            tool_config,
-        } => {
             provider.set_sandbox(sandbox);
             if let Some(config) = tool_config {
                 provider.set_config(config);
             }
-            IpcResponse::Ack
+            IpcResponse::HandshakeAck {
+                version: IPC_PROTOCOL_VERSION,
+            }
         }
         IpcRequest::GetConfigSchema => IpcResponse::ConfigSchema {
             schema: provider.config_schema(),
@@ -152,10 +142,6 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
             Ok(result) => IpcResponse::CallResult { result: Ok(result) },
             Err(e) => IpcResponse::CallResult { result: Err(e) },
         },
-        IpcRequest::SetSessionId { session_id } => {
-            provider.set_session_id(session_id);
-            IpcResponse::Ack
-        }
         IpcRequest::SetCallContext {
             conversation_id,
             turn_id,
@@ -175,11 +161,6 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
             target_pattern,
         } => {
             provider.allow_pattern(action, target_pattern);
-            IpcResponse::Ack
-        }
-        IpcRequest::GetMyConfig => IpcResponse::MyConfig(provider.get_config()),
-        IpcRequest::SetMyConfig(config) => {
-            provider.set_config(config);
             IpcResponse::Ack
         }
         IpcRequest::Ping => IpcResponse::Pong,

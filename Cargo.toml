@@ -85,6 +85,25 @@ htmd = "0.5"
 scraper = "0.27"
 ego-tree = "0.11"
 
+# --- App / tool dependencies (centralized per AGENTS.md §4.1) ---
+device_query = "4"
+gtk = "0.18.2"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+dialoguer = "0.12"
+console = "0.16.3"
+futures-core = "0.3"
+websearch = "0.1.1"
+enigo = "0.6"
+xcap = "0.9.6"
+active-win-pos-rs = "0.11.0"
+ashpd = { version = "0.13", default-features = false }
+pipewire = "0.9"
+walkdir = "2"
+glob = "0.3"
+strsim = "0.11"
+flate2 = "1"
+chromiumoxide = "0.9"
+
 # --- Cross-cutting (used by 2+ crates) ---
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 parking_lot = "0.12"

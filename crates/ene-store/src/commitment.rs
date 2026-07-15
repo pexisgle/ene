@@ -66,6 +66,16 @@ pub struct Commitment {
     /// Raw due hint from extraction (e.g. "tomorrow", "次回").
     pub due_label: Option<String>,
     /// Linked typed memory row (`MemoryKind::Commitment`).
+    ///
+    /// # Deprecated
+    ///
+    /// New rows always set this to `None` (#119 typed-memory policy).
+    /// The inverse link (`typed_memories.commitment_id`) is the
+    /// authoritative reference.
+    #[deprecated(
+        since = "0.1.0",
+        note = "new rows are always `None`; use `typed_memories.commitment_id` for the inverse link"
+    )]
     pub source_memory_id: Option<i64>,
     /// When the commitment was created.
     pub created_at: DateTime<Utc>,

@@ -13,8 +13,6 @@
 //! - Tool-grounded procedure/reflection/episodic: 0.60–0.70
 //! - Soft signals (implicit): 0.30–0.50
 
-#![allow(clippy::unwrap_used)]
-
 use regex::Regex;
 
 use super::candidate::{Locale, MemoryCandidate, ToolResultSummary, TurnInput};
@@ -133,12 +131,14 @@ fn ja_explicit_remember(
     // precedes the keyword: `X を覚えて(おいて)`. Capturing group 1 is the
     // object. `教えて` ("tell me") is deliberately excluded because it is a
     // request for information, not a memory instruction.
+    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
     static RE_WO: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r"(.+?)を(覚えて|記憶して|メモして|保存して)").unwrap()
     });
     // Explicit colon annotation `覚えて: X`, where the content follows the
     // keyword. The colon is required so a trailing verb continuation such as
     // `覚えておいて` is not mis-captured as content (`おいて`).
+    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
     static RE_COLON: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r"(?i)(覚えて|記憶して|メモして|保存して)[:：]\s*(.+)").unwrap()
     });
@@ -174,9 +174,11 @@ fn ja_forget_request(
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
     // Pattern 1: content + を + keyword (e.g., "プロジェクトを忘れて")
+    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
     static RE_WO: std::sync::LazyLock<Regex> =
         std::sync::LazyLock::new(|| Regex::new(r"(.+?)を(忘れて|消して|削除して|やめて)").unwrap());
     // Pattern 2: keyword + content (e.g., "忘れて プロジェクトの話")
+    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
     static RE_AFTER: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r"(?i)(忘れて|消して|削除して|やめて)[:：]?\s*(.+)").unwrap()
     });
@@ -221,6 +223,7 @@ fn ja_preference(
     _asst_msg: &str,
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
+    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
     static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r"(?i)(好き|嫌い|苦手|大好き|大嫌い)[:：]?\s*(.+)").unwrap()
     });
@@ -245,6 +248,7 @@ fn ja_nickname(
     _asst_msg: &str,
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
+    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
     static RE: std::sync::LazyLock<Regex> =
         std::sync::LazyLock::new(|| Regex::new(r"(.+?)って呼んで").unwrap());
     RE.captures(user_msg).and_then(|cap| {
@@ -270,6 +274,7 @@ fn ja_ng_instruction(
     _asst_msg: &str,
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
+    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
     static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r"(?i)(もう|これ以上|二度と).{0,6}(しないで|やめて|やめろ|禁止)").unwrap()
     });
@@ -290,6 +295,7 @@ fn ja_commitment(
     _asst_msg: &str,
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
+    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
     static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r"(?i)(あとで|次回|明日|来週|今度|今夜).{0,10}(して|確認|やる|話|連絡)").unwrap()
     });
@@ -320,6 +326,7 @@ fn en_explicit_remember(
     if is_en_question(user_msg) {
         return None;
     }
+    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
     static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(
             r"(?i)(please\s+)?(remember|note|keep in mind|don't forget)[:：]?\s+(?:that\s+)?(.+)",
@@ -352,6 +359,7 @@ fn en_forget_request(
     if is_en_question(user_msg) {
         return None;
     }
+    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
     static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r"(?i)(forget|erase|drop|stop remembering)\s+(?:about\s+)?(.+)").unwrap()
     });
@@ -375,6 +383,7 @@ fn en_preference(
     _asst_msg: &str,
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
+    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
     static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r"(?i)(I\s+(?:really\s+)?(?:don't\s+like|hate|dislike|love|like|prefer))\s+(.+)")
             .unwrap()
@@ -399,6 +408,7 @@ fn en_nickname(
     _asst_msg: &str,
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
+    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
     static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r#"(?i)(?:call|refer to|address)\s+me\s+(?:as\s+)?["']?([^"',.]+?)["']?\s*$"#)
             .unwrap()
@@ -423,6 +433,7 @@ fn en_ng_instruction(
     _asst_msg: &str,
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
+    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
     static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(
             r"(?i)(never|don't|stop|no\s+more)\s+(do\s+that|say\s+that|mention|suggest|recommend)",
@@ -446,6 +457,7 @@ fn en_commitment(
     _asst_msg: &str,
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
+    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
     static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r"(?i)(next\s+time|later|tomorrow|next\s+week|tonight)\s*[,.]?\s*(?:let'?s|we\s+should|I'?ll|can\s+you)\s+(.+)").unwrap()
     });
