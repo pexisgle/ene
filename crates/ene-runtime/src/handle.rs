@@ -79,6 +79,8 @@ pub enum EneCommand {
         name: String,
         /// JSON-encoded arguments.
         arguments: String,
+        /// Active turn for call-context propagation.
+        turn: TurnId,
         /// Reply channel.
         reply: oneshot::Sender<Result<String, EneRuntimeError>>,
     },
@@ -888,17 +890,17 @@ impl EneActor {
             EneCommand::CallTool {
                 name,
                 arguments,
+                turn,
                 reply,
             } => {
                 let registry = self.registry.clone();
-                // Track the spawned task in `call_tool_tasks`
-                // so it can be aborted on `Shutdown` and
-                // reaped on completion. The reply oneshot
-                // send is no longer silent on send-failure:
-                // the task is dropped alongside the JoinSet
-                // entry, so the caller is implicitly notified
-                // (the receiver sees `Closed`).
+                let session_id = self.session.memory.session_id.to_string();
+                let call_ctx = ene_tool_proto::CallContext {
+                    conversation_id: session_id,
+                    turn_id: turn.to_string(),
+                };
                 self.call_tool_tasks.spawn(async move {
+                    registry.set_call_context(&call_ctx).await;
                     let result = registry
                         .call_tool(&name, &arguments)
                         .await

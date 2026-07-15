@@ -176,7 +176,12 @@ pub(crate) async fn perform_tool_executions(
         tool_calls: Some(tool_calls.clone()),
     });
 
-    registry.set_session_id(session_id).await;
+    registry
+        .set_call_context(&ene_tool_proto::CallContext {
+            conversation_id: session_id.to_string(),
+            turn_id: turn.to_string(),
+        })
+        .await;
 
     for call in tool_calls {
         let name = call.name.clone();

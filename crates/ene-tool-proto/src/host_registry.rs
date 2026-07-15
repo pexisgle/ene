@@ -1,4 +1,4 @@
-use crate::{SandboxConfigData, ToolError, ToolName, ToolProvider, ToolSpec};
+use crate::{CallContext, SandboxConfigData, ToolError, ToolName, ToolProvider, ToolSpec};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
@@ -88,6 +88,13 @@ impl HostRegistry {
         }
     }
 
+    /// Broadcasts call context to all registered providers.
+    pub fn set_call_context(&self, ctx: &CallContext) {
+        for provider in &self.providers {
+            provider.set_call_context(ctx);
+        }
+    }
+
     /// Broadcasts sandbox configuration to all registered providers.
     pub fn set_sandbox(&self, sandbox: &SandboxConfigData) {
         for provider in &self.providers {
@@ -115,6 +122,12 @@ impl ToolProvider for HostRegistry {
     fn set_session_id(&self, session_id: &str) {
         for provider in &self.providers {
             provider.set_session_id(session_id);
+        }
+    }
+
+    fn set_call_context(&self, ctx: &CallContext) {
+        for provider in &self.providers {
+            provider.set_call_context(ctx);
         }
     }
 

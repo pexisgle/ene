@@ -31,9 +31,9 @@ impl JsonSchema for ToolName {
 }
 
 impl ToolName {
-    /// Valid characters for a tool name: alphanumeric, `_`, `.`
+    /// Valid characters for a tool name: alphanumeric, `_`, `.`, `:`
     const fn valid_char(c: u8) -> bool {
-        c.is_ascii_alphanumeric() || c == b'_' || c == b'.'
+        c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c == b':'
     }
 
     /// Returns `true` if the name is non-empty and contains only valid characters.
@@ -48,7 +48,7 @@ impl ToolName {
     ///
     /// # Panics
     /// Panics if the name is empty or contains invalid characters.
-    /// Accepts alphanumeric, `_`, and `.` (no leading/trailing dots).
+    /// Accepts alphanumeric, `_`, `.`, and `:` (no leading/trailing dots).
     ///
     /// Only use for trusted compile-time-validated inputs (e.g.
     /// string literals, `#[tool]` attribute names). For untrusted
@@ -58,7 +58,7 @@ impl ToolName {
         let s = name.into();
         assert!(
             Self::is_valid(&s),
-            "Invalid ToolName: '{s}' — must be non-empty and contain only alphanumeric, '_', or '.' characters"
+            "Invalid ToolName: '{s}' — must be non-empty and contain only alphanumeric, '_', '.', or ':' characters"
         );
         Self(s)
     }
@@ -78,7 +78,7 @@ impl ToolName {
             Ok(Self(s))
         } else {
             Err(format!(
-                "Invalid ToolName: '{s}' — must be non-empty and contain only alphanumeric, '_', or '.' characters"
+                "Invalid ToolName: '{s}' — must be non-empty and contain only alphanumeric, '_', '.', or ':' characters"
             ))
         }
     }
@@ -550,6 +550,8 @@ mod tests {
         assert!(ToolName::is_valid("utility.get_current_time"));
         assert!(ToolName::is_valid("a"));
         assert!(ToolName::is_valid("a.b.c"));
+        assert!(ToolName::is_valid("0:filesystem.read"));
+        assert!(ToolName::is_valid("prefix:name"));
     }
 
     #[test]

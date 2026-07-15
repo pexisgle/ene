@@ -387,6 +387,14 @@ impl ToolRegistry for IpcToolRegistry {
         let _ = self.send_with_reconnect(req).await;
     }
 
+    async fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
+        let req = IpcRequest::SetCallContext {
+            conversation_id: ctx.conversation_id.clone(),
+            turn_id: ctx.turn_id.clone(),
+        };
+        let _ = self.send_with_reconnect(req).await;
+    }
+
     async fn approve_permission(&self, request_id: &str) {
         let req = IpcRequest::ApprovePermission {
             request_id: request_id.to_string(),

@@ -9,12 +9,13 @@ const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 
 /// Current IPC protocol version.
 ///
-/// Version 1 (reset):
+/// Version 2:
 /// - `IpcResponse::Tools` carries `Vec<ToolSpec>`
 /// - `IpcResponse::ActionSpecs` returns per-action metadata for embedding
 /// - `IpcRequest::CallTool` `name` field accepts the new `ToolName` (still
 ///   a string on the wire)
-/// - `SandboxConfigData::db_socket` replaces old `db_path`
+/// - `IpcRequest::SetCallContext` carries both conversation and turn identifiers;
+///   `SandboxConfigData::db_socket` replaces old `db_path`
 pub const IPC_PROTOCOL_VERSION: u32 = 2;
 
 /// IPC request — core → host
@@ -49,6 +50,13 @@ pub enum IpcRequest {
     SetSessionId {
         /// Session identifier.
         session_id: String,
+    },
+    /// Set the call context (conversation + turn identifiers).
+    SetCallContext {
+        /// Conversation-level identifier (session ID).
+        conversation_id: String,
+        /// Turn-level identifier within the conversation.
+        turn_id: String,
     },
     /// Approve a pending permission request.
     ApprovePermission {
@@ -111,6 +119,19 @@ pub enum IpcResponse {
         /// Error description.
         message: String,
     },
+}
+
+/// Call context identifying the conversation and turn for which
+/// a tool is being invoked. Carried from the runtime to every tool
+/// via [`crate::ToolProvider::set_call_context`] so tool-side logic
+/// can implement per-turn scoping (e.g. undo checkpoints, ephemeral
+/// scratch directories, per-turn access counters).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CallContext {
+    /// Conversation-level identifier (session ID).
+    pub conversation_id: String,
+    /// Turn-level identifier within the conversation.
+    pub turn_id: String,
 }
 
 /// Accessor for tool configuration.

@@ -97,8 +97,8 @@ pub use error::{MultiAnswer, QuestionItem, UserInputPrompt};
 pub use host_registry::HostRegistry;
 /// IPC message types and serialisation helpers.
 pub use ipc::{
-    IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, ToolConfigAccessor, read_ipc_request,
-    read_ipc_response, write_ipc_request, write_ipc_response,
+    CallContext, IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, ToolConfigAccessor,
+    read_ipc_request, read_ipc_response, write_ipc_request, write_ipc_response,
 };
 /// Sandbox configuration data sent from the host.
 pub use sandbox::SandboxConfigData;
@@ -135,6 +135,17 @@ pub trait ToolProvider: Send + Sync {
 
     /// Sets the current session ID (used for undo tracking, session-scoped state, etc.).
     fn set_session_id(&self, session_id: &str);
+
+    /// Sets the call context (conversation + turn identifiers).
+    ///
+    /// Default implementation forwards `conversation_id` to
+    /// [`set_session_id`](ToolProvider::set_session_id) so existing tools
+    /// that only implement `set_session_id` continue to work.
+    /// Tools that want per-turn scoping (e.g. undo checkpoints) can
+    /// override this method and use `conversation_id` *and* `turn_id`.
+    fn set_call_context(&self, ctx: &crate::ipc::CallContext) {
+        self.set_session_id(&ctx.conversation_id);
+    }
 
     /// Receives sandbox configuration (used by filesystem tools; default is no-op).
     fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}

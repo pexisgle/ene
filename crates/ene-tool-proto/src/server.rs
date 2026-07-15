@@ -156,6 +156,16 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
             provider.set_session_id(session_id);
             IpcResponse::Ack
         }
+        IpcRequest::SetCallContext {
+            conversation_id,
+            turn_id,
+        } => {
+            provider.set_call_context(&crate::CallContext {
+                conversation_id: conversation_id.clone(),
+                turn_id: turn_id.clone(),
+            });
+            IpcResponse::Ack
+        }
         IpcRequest::ApprovePermission { request_id } => {
             provider.approve_permission(request_id);
             IpcResponse::Ack

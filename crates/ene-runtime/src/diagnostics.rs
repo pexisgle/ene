@@ -420,6 +420,7 @@ impl EneDiagnostics {
             .send(EneCommand::CallTool {
                 name,
                 arguments,
+                turn: TurnId::new(),
                 reply: tx,
             })
             .map_err(|_| EneRuntimeError::ChannelClosed)?;
