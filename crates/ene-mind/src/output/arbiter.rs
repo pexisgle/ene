@@ -264,6 +264,28 @@ mod tests {
     }
 
     #[test]
+    fn llm_advisory_bypasses_hysteresis() {
+        let config = EmotionConfig {
+            llm_expression_is_advisory: true,
+            ..Default::default()
+        };
+        let state = AffectState::neutral("ene");
+        let available = default_available();
+        let input = ExpressionInput {
+            affect: &state,
+            available: &available,
+            llm_proposal: Some("angry"),
+            previous_expression: "sad",
+            elapsed_since_change: Some(std::time::Duration::from_secs(1)),
+            response_text: "",
+            irritation_spike: false,
+        };
+        let decision = resolve_expression(&config, &input);
+        assert_eq!(decision.expression, "angry");
+        assert_eq!(decision.source, ExpressionSource::LlmAdvisory);
+    }
+
+    #[test]
     fn advisory_llm_does_not_override_strong_affect() {
         let config = EmotionConfig::default();
         let mut state = AffectState::neutral("ene");

@@ -243,7 +243,7 @@ pub fn build_cognitive_output_contract(
 /// 1. `System` — mascot-aware system prompt (rules + character identity + scene)
 /// 2. `System` — example messages (first turn only)
 /// 3. History — alternating `User` / `Assistant` turns
-/// 4. `System` — Expression PHI (emotion token protocol + post-history instructions)
+/// 4. `System` — Post-history output contract (marker PHI or natural-dialogue, based on `emotion_enabled`)
 /// 5. `User`   — current user input (+ optional runtime context)
 ///
 /// Legacy recalled summaries / keyfacts are no longer injected (#125).

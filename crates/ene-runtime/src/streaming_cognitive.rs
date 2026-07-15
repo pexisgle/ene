@@ -419,7 +419,11 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
             }
         }
 
-        let clean_content = strip_markers(&assistant_content);
+        let clean_content = if !mind.emotion.enabled && !assistant_content.is_empty() {
+            strip_markers(&assistant_content)
+        } else {
+            assistant_content.clone()
+        };
 
         if current_tool_calls.is_empty() {
             if !assistant_content.is_empty()
@@ -445,7 +449,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                     &mind,
                     &card,
                     &turn_affect,
-                    &assistant_content,
+                    &clean_content,
                     llm_proposal.as_deref(),
                     previous_expression.as_ref(),
                     elapsed_since_change,
