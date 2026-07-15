@@ -42,6 +42,8 @@ impl ToolName {
             && name.bytes().all(Self::valid_char)
             && !name.starts_with('.')
             && !name.ends_with('.')
+            && !name.starts_with(':')
+            && !name.ends_with(':')
     }
 
     /// Construct a new `ToolName` from a string.
@@ -58,7 +60,7 @@ impl ToolName {
         let s = name.into();
         assert!(
             Self::is_valid(&s),
-            "Invalid ToolName: '{s}' — must be non-empty and contain only alphanumeric, '_', '.', or ':' characters"
+            "Invalid ToolName: '{s}' — must be non-empty, contain only alphanumeric/_/./:, and not start/end with '.' or ':'"
         );
         Self(s)
     }
@@ -78,7 +80,7 @@ impl ToolName {
             Ok(Self(s))
         } else {
             Err(format!(
-                "Invalid ToolName: '{s}' — must be non-empty and contain only alphanumeric, '_', '.', or ':' characters"
+                "Invalid ToolName: '{s}' — must be non-empty, contain only alphanumeric/_/./:, and not start/end with '.' or ':'"
             ))
         }
     }
@@ -559,6 +561,8 @@ mod tests {
         assert!(!ToolName::is_valid(""));
         assert!(!ToolName::is_valid(".leading_dot"));
         assert!(!ToolName::is_valid("trailing_dot."));
+        assert!(!ToolName::is_valid(":leading_colon"));
+        assert!(!ToolName::is_valid("trailing_colon:"));
         assert!(!ToolName::is_valid("has space"));
         assert!(!ToolName::is_valid("has-dash"));
         assert!(!ToolName::is_valid("has/slash"));

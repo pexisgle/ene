@@ -79,8 +79,9 @@ pub enum EneCommand {
         name: String,
         /// JSON-encoded arguments.
         arguments: String,
-        /// Active turn for call-context propagation.
-        turn: TurnId,
+        /// Active turn for call-context propagation. `None` for
+        /// diagnostic / background tool calls outside a turn.
+        turn: Option<TurnId>,
         /// Reply channel.
         reply: oneshot::Sender<Result<String, EneRuntimeError>>,
     },
@@ -895,12 +896,14 @@ impl EneActor {
             } => {
                 let registry = self.registry.clone();
                 let session_id = self.session.memory.session_id.to_string();
-                let call_ctx = ene_tool_proto::CallContext {
-                    conversation_id: session_id,
-                    turn_id: turn.to_string(),
-                };
                 self.call_tool_tasks.spawn(async move {
-                    registry.set_call_context(&call_ctx).await;
+                    if let Some(ref turn) = turn {
+                        let call_ctx = ene_tool_proto::CallContext {
+                            conversation_id: session_id,
+                            turn_id: turn.to_string(),
+                        };
+                        registry.set_call_context(&call_ctx).await;
+                    }
                     let result = registry
                         .call_tool(&name, &arguments)
                         .await

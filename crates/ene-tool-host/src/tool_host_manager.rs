@@ -231,6 +231,15 @@ impl ToolRegistry for SupervisedIpcRegistry {
             .clone();
         reg.allow_pattern(action, target_pattern).await;
     }
+
+    async fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
+        let reg = self
+            .registry
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        reg.set_call_context(ctx).await;
+    }
 }
 
 /// Orchestrates the lifecycle of all tool processes.
@@ -269,6 +278,10 @@ impl ToolRegistry for ToolHostManager {
 
     async fn allow_pattern(&self, action: &str, target_pattern: &str) {
         self.composite.allow_pattern(action, target_pattern).await;
+    }
+
+    async fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
+        self.composite.set_call_context(ctx).await;
     }
 }
 

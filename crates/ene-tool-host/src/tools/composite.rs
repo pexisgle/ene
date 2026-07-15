@@ -138,47 +138,49 @@ impl CompositeToolRegistry {
 #[async_trait]
 impl ToolRegistry for CompositeToolRegistry {
     fn list_tools(&self) -> Vec<ToolSpec> {
+        let guard = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut tools = Vec::new();
-        self.with_registries(|registries| {
-            for (idx, registry) in registries.iter().enumerate() {
-                for mut tool in registry.list_tools() {
-                    let guard = self
-                        .state
-                        .read()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if guard
-                        .renamed
-                        .contains(&(idx, tool.name.as_str().to_string()))
-                    {
-                        let prefixed = format!("{idx}:{}", tool.name.as_str());
-                        tool.name = ene_tool_proto::ToolName::new(prefixed);
-                    }
-                    drop(guard);
-                    tools.push(tool);
+        for (idx, registry) in guard.registries.iter().enumerate() {
+            for mut tool in registry.list_tools() {
+                if guard
+                    .renamed
+                    .contains(&(idx, tool.name.as_str().to_string()))
+                {
+                    let prefixed = format!("{idx}:{}", tool.name.as_str());
+                    tool.name = ene_tool_proto::ToolName::new(prefixed);
                 }
+                tools.push(tool);
             }
-        });
+        }
+        drop(guard);
         tools
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolHostError> {
-        let registry = {
+        let (registry, dispatch_name) = {
             let guard = self
                 .state
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match guard.tool_index.get(name) {
-                Some(&idx) => Arc::clone(&guard.registries[idx]),
-                None => {
-                    return Err(ToolHostError::Protocol(
-                        ene_tool_proto::ToolError::NotFound {
-                            tool_name: name.to_string(),
-                        },
-                    ));
-                }
-            }
+            let Some(&idx) = guard.tool_index.get(name) else {
+                return Err(ToolHostError::Protocol(
+                    ene_tool_proto::ToolError::NotFound {
+                        tool_name: name.to_string(),
+                    },
+                ));
+            };
+            let prefix = format!("{idx}:");
+            let stripped = if name.starts_with(&prefix) {
+                &name[prefix.len()..]
+            } else {
+                name
+            };
+            (Arc::clone(&guard.registries[idx]), stripped.to_string())
         };
-        registry.call_tool(name, arguments).await
+        registry.call_tool(&dispatch_name, arguments).await
     }
 
     async fn set_session_id(&self, session_id: &str) {
@@ -378,5 +380,40 @@ mod tests {
         composite.set_call_context(&ctx).await;
         assert_eq!(sid1.lock().unwrap().as_deref(), Some("conv-1"));
         assert_eq!(sid2.lock().unwrap().as_deref(), Some("conv-1"));
+    }
+
+    #[tokio::test]
+    async fn composite_call_tool_with_prefixed_name_dispatches() {
+        let mock1 = MockRegistry::new(vec![make_tool("dup")]);
+        let mock2 = MockRegistry::new(vec![make_tool("dup")]);
+        let log1 = Arc::clone(&mock1.call_log);
+        let log2 = Arc::clone(&mock2.call_log);
+        let composite =
+            CompositeToolRegistry::try_new(vec![Arc::new(mock1), Arc::new(mock2)]).unwrap();
+
+        let result = composite.call_tool("dup", r#"{"v":1}"#).await;
+        assert_eq!(result.unwrap(), "dup executed");
+        assert_eq!(log1.lock().unwrap().len(), 1);
+        assert_eq!(log1.lock().unwrap()[0].0, "dup");
+
+        let result = composite.call_tool("1:dup", r#"{"v":2}"#).await;
+        assert_eq!(result.unwrap(), "dup executed");
+        assert_eq!(log2.lock().unwrap().len(), 1);
+        assert_eq!(log2.lock().unwrap()[0].0, "dup");
+    }
+
+    #[test]
+    fn composite_triple_duplicate_gets_distinct_prefixes() {
+        let r0 = MockRegistry::new(vec![make_tool("dup")]);
+        let r1 = MockRegistry::new(vec![make_tool("dup")]);
+        let r2 = MockRegistry::new(vec![make_tool("dup")]);
+        let composite =
+            CompositeToolRegistry::try_new(vec![Arc::new(r0), Arc::new(r1), Arc::new(r2)]).unwrap();
+        let all = composite.list_tools();
+        assert_eq!(all.len(), 3);
+        let names: Vec<&str> = all.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"dup"));
+        assert!(names.contains(&"1:dup"));
+        assert!(names.contains(&"2:dup"));
     }
 }

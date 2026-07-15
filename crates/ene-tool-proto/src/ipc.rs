@@ -14,8 +14,7 @@ const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 /// - `IpcResponse::ActionSpecs` returns per-action metadata for embedding
 /// - `IpcRequest::CallTool` `name` field accepts the new `ToolName` (still
 ///   a string on the wire)
-/// - `IpcRequest::SetCallContext` carries both conversation and turn identifiers;
-///   `SandboxConfigData::db_socket` replaces old `db_path`
+/// - `IpcRequest::SetCallContext` carries both conversation and turn identifiers
 pub const IPC_PROTOCOL_VERSION: u32 = 2;
 
 /// IPC request — core → host
