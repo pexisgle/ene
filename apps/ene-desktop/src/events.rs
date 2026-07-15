@@ -42,6 +42,9 @@ pub enum AppEvent {
     },
     /// Cancel cue (#132).
     CancelCue { scope: String },
+    /// LookAt cue — gaze target hint from LLM performance markers.
+    /// Forwarded to VRM gaze when the gaze system is implemented.
+    LookAtCue { target: String },
     /// Request the event loop to exit.
     Quit,
 }

@@ -18,6 +18,8 @@ pub struct MessageBuildContext<'a> {
     pub user_name: &'a str,
     /// Prompt template library (caller provides; defaults to built-in English).
     pub prompts: &'a PromptLibrary,
+    /// Whether emotion processing is enabled (selects marker PHI vs natural-dialogue contract).
+    pub emotion_enabled: bool,
 }
 
 fn sys_msg(content: impl Into<String>) -> LlmMessage {
@@ -270,7 +272,9 @@ pub fn build_messages(
         }
     }
 
-    if let Some(phi) = build_expression_phi(ctx.card, ctx.prompts) {
+    if let Some(phi) =
+        build_cognitive_output_contract(ctx.card, ctx.prompts, ctx.emotion_enabled, ctx.user_name)
+    {
         let phi_expanded = expand_cbs_macros(&phi, char_name, ctx.user_name);
         messages.push(sys_msg(phi_expanded));
     }

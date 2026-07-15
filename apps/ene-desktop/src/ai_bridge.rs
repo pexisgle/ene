@@ -377,7 +377,11 @@ async fn pump_events(
                         ene_mind::PerfKind::Cancel => {
                             let _ = event_tx.send(AppEvent::CancelCue { scope: cue.name });
                         }
-                        ene_mind::PerfKind::LookAt => {}
+                        ene_mind::PerfKind::LookAt => {
+                            let _ = event_tx.send(AppEvent::LookAtCue {
+                                target: cue.name.clone(),
+                            });
+                        }
                     }
                 }
             }

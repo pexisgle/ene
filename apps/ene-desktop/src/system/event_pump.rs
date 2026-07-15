@@ -154,6 +154,13 @@ fn translate_event(
         AppEvent::Ai(
             AiStreamUpdate::ToolCallStart { .. } | AiStreamUpdate::ToolCallResult { .. },
         ) => {}
+        AppEvent::LookAtCue { ref target } => {
+            tracing::debug!(
+                component = "AiBridge",
+                target = %target,
+                "LookAt cue received (gaze system pending)"
+            );
+        }
     }
 }
 

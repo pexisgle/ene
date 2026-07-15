@@ -15,7 +15,9 @@ use crate::streaming::{
     accumulate_tool_calls, emit_terminal, finalize_tool_calls, perform_tool_executions,
     select_relevant_tools,
 };
-use ene_mind::{CueSource, PerfKind, PerformanceArbiter, PerformanceCue, cue_source_priority};
+use ene_mind::{
+    CueSource, PerfKind, PerformanceArbiter, PerformanceCue, cue_source_priority, strip_markers,
+};
 
 #[expect(clippy::ref_option)]
 fn build_turn_context<'a>(
@@ -417,6 +419,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
             }
         }
 
+        let clean_content = strip_markers(&assistant_content);
+
         if current_tool_calls.is_empty() {
             if !assistant_content.is_empty()
                 && let Some(store) = &mem_store
@@ -426,7 +430,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                     session_id.as_str(),
                     &card_name,
                     "assistant",
-                    &assistant_content,
+                    &clean_content,
                 );
             }
 
@@ -466,18 +470,18 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                 perf_arbiter.accept(expr_cue, expr_source);
                 // Fill any gaps with the affect-derived default.
                 perf_arbiter.set_affect_default(&turn_affect);
-                let resolved = perf_arbiter.resolve();
-                if !resolved.is_empty() {
-                    let (cues, sources): (Vec<_>, Vec<_>) = resolved.into_iter().unzip();
-                    let primary_source =
-                        sources.into_iter().max_by_key(|s| cue_source_priority(*s));
-                    if let Some(source) = primary_source {
-                        let _ = event_tx.send(EneEvent::Performance {
-                            turn: turn.clone(),
-                            cues,
-                            source,
-                        });
-                    }
+            }
+
+            let resolved = perf_arbiter.resolve();
+            if !resolved.is_empty() {
+                let (cues, sources): (Vec<_>, Vec<_>) = resolved.into_iter().unzip();
+                let primary_source = sources.into_iter().max_by_key(|s| cue_source_priority(*s));
+                if let Some(source) = primary_source {
+                    let _ = event_tx.send(EneEvent::Performance {
+                        turn: turn.clone(),
+                        cues,
+                        source,
+                    });
                 }
             }
 
@@ -485,7 +489,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                 let post = PostTurnInput {
                     turn: TurnInput {
                         user_message: &user_input,
-                        assistant_message: Some(&assistant_content),
+                        assistant_message: Some(&clean_content),
                         tool_results: &turn_tool_results,
                     },
                     affect: turn_affect,
@@ -554,7 +558,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                     ene_mind::engine::completed_user_turn_at_post_turn(&history);
                 let classifier_context = ene_mind::engine::build_classifier_context(
                     &history,
-                    &assistant_content,
+                    &clean_content,
                     &pre_turn.affect,
                     mind.context.recent_turns,
                 );

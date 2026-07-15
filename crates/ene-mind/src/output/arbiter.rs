@@ -83,12 +83,19 @@ pub fn resolve_expression(
         }
     }
 
-    // Hysteresis: hold previous expression unless irritation spike.
+    // Hysteresis: hold previous expression unless irritation spike
+    // or the current candidate comes from an authoritative source
+    // (LLM command/advisory).  Hysteresis only gates affect-driven
+    // and fallback choices (#152 / #126 decision #5).
     if !input.irritation_spike
         && !input.previous_expression.is_empty()
         && candidate != input.previous_expression
         && let Some(elapsed) = input.elapsed_since_change
         && elapsed.as_secs_f64() < config.expression_hysteresis_seconds
+        && matches!(
+            source,
+            ExpressionSource::AffectMapping | ExpressionSource::FallbackNeutral
+        )
     {
         let held = normalize_expression(input.previous_expression, &available_names);
         return ExpressionDecision {
@@ -230,6 +237,30 @@ mod tests {
         let decision = resolve_expression(&config, &input);
         assert_eq!(decision.expression, "sad");
         assert_eq!(decision.source, ExpressionSource::HysteresisHold);
+    }
+
+    #[test]
+    fn llm_command_bypasses_hysteresis() {
+        let config = EmotionConfig {
+            llm_expression_is_advisory: false,
+            ..Default::default()
+        };
+        let mut state = AffectState::neutral("ene");
+        state.valence = 0.6;
+        state.arousal = 0.3;
+        let available = default_available();
+        let input = ExpressionInput {
+            affect: &state,
+            available: &available,
+            llm_proposal: Some("angry"),
+            previous_expression: "sad",
+            elapsed_since_change: Some(std::time::Duration::from_secs(1)),
+            response_text: "",
+            irritation_spike: false,
+        };
+        let decision = resolve_expression(&config, &input);
+        assert_eq!(decision.expression, "angry");
+        assert_eq!(decision.source, ExpressionSource::LlmCommand);
     }
 
     #[test]
