@@ -192,7 +192,21 @@ pub fn apply_cancel_system(
                 pipeline.active = None;
                 state.0.cancel_all_motions();
             }
-            _ => {}
+            scope if scope.starts_with("motion:") => {
+                let layer = match scope.strip_prefix("motion:") {
+                    Some("upper") => ene_config::MotionLayer::Upper,
+                    Some("lower") => ene_config::MotionLayer::Lower,
+                    _ => ene_config::MotionLayer::Full,
+                };
+                state.0.cancel_motion(layer);
+            }
+            _ => {
+                tracing::debug!(
+                    component = "ApplyCancel",
+                    scope = %cmd.0,
+                    "Unknown cancel scope; ignoring"
+                );
+            }
         }
     }
 }
@@ -208,9 +222,13 @@ pub fn apply_motion_commands_system(
             "lower" => ene_config::MotionLayer::Lower,
             _ => ene_config::MotionLayer::Full,
         };
+        let repeat = match layer {
+            ene_config::MotionLayer::Lower => ene_vrm::RepeatMode::Loop,
+            _ => ene_vrm::RepeatMode::Once,
+        };
         state
             .0
-            .accept_motion(cmd.name.clone(), layer, cmd.priority, cmd.duration);
+            .accept_motion(cmd.name.clone(), layer, cmd.priority, cmd.duration, repeat);
     }
 }
 

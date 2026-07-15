@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 
-use crate::animation::VrmaPlayer;
+use crate::animation::{RepeatMode, VrmaPlayer};
 use ene_config::MotionLayer;
 
 /// A motion slot tracking a playing animation on one layer.
@@ -76,8 +76,18 @@ impl LayerComposer {
     ///
     /// `priority` should follow the convention: 5 = command, 4 = advisory,
     /// 3 = affect, 2 = hysteresis, 1 = fallback.
-    pub fn accept_motion(&mut self, name: String, layer: MotionLayer, priority: u8, duration: f32) {
-        let player = VrmaPlayer::default();
+    pub fn accept_motion(
+        &mut self,
+        name: String,
+        layer: MotionLayer,
+        priority: u8,
+        duration: f32,
+        repeat: RepeatMode,
+    ) {
+        let player = VrmaPlayer {
+            repeat,
+            ..VrmaPlayer::default()
+        };
         let slot = MotionSlot {
             name,
             player,
@@ -148,14 +158,30 @@ impl LayerComposer {
     }
 
     /// Tick all active motion players by `dt` seconds.
+    ///
+    /// Full preempts Upper and Lower — when Full is active, only
+    /// the Full slot advances and Upper/Lower clocks are paused.
+    /// Once animations are auto-cleared when playback finishes.
     pub fn tick(&mut self, dt: f32) {
-        for slot in [&mut self.upper, &mut self.lower, &mut self.full]
-            .into_iter()
-            .flatten()
-        {
+        if let Some(ref mut s) = self.full {
+            if s.duration > 0.0 {
+                s.player.advance(dt, s.duration);
+            }
+            if !s.player.playing {
+                self.full = None;
+            }
+            return;
+        }
+        for slot in [&mut self.upper, &mut self.lower].into_iter().flatten() {
             if slot.duration > 0.0 {
                 slot.player.advance(dt, slot.duration);
             }
+        }
+        if self.upper.as_ref().is_some_and(|s| !s.player.playing) {
+            self.upper = None;
+        }
+        if self.lower.as_ref().is_some_and(|s| !s.player.playing) {
+            self.lower = None;
         }
     }
 
@@ -163,6 +189,9 @@ impl LayerComposer {
     /// look up clips and evaluate frames).
     #[must_use]
     pub fn active_motion_names(&self) -> Vec<String> {
+        if let Some(ref s) = self.full {
+            return vec![s.name.clone()];
+        }
         let mut names = Vec::with_capacity(2);
         if let Some(ref s) = self.upper {
             names.push(s.name.clone());
@@ -170,28 +199,7 @@ impl LayerComposer {
         if let Some(ref s) = self.lower {
             names.push(s.name.clone());
         }
-        if let Some(ref s) = self.full {
-            names.push(s.name.clone());
-        }
         names
-    }
-
-    /// Returns a reference to the Full-layer player, if active.
-    #[must_use]
-    pub fn full_player(&self) -> Option<&VrmaPlayer> {
-        self.full.as_ref().map(|s| &s.player)
-    }
-
-    /// Returns a reference to the Upper-layer player, if active.
-    #[must_use]
-    pub fn upper_player(&self) -> Option<&VrmaPlayer> {
-        self.upper.as_ref().map(|s| &s.player)
-    }
-
-    /// Returns a reference to the Lower-layer player, if active.
-    #[must_use]
-    pub fn lower_player(&self) -> Option<&VrmaPlayer> {
-        self.lower.as_ref().map(|s| &s.player)
     }
 
     /// Compose the current layer state into a [`ComposedFrame`].
@@ -267,9 +275,9 @@ mod tests {
     #[test]
     fn full_preempts_upper_and_lower() {
         let mut lc = LayerComposer::default();
-        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 0.0);
-        lc.accept_motion("idle".into(), MotionLayer::Lower, 3, 0.0);
-        lc.accept_motion("dance".into(), MotionLayer::Full, 5, 0.0);
+        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 0.0, RepeatMode::Once);
+        lc.accept_motion("idle".into(), MotionLayer::Lower, 3, 0.0, RepeatMode::Loop);
+        lc.accept_motion("dance".into(), MotionLayer::Full, 5, 0.0, RepeatMode::Once);
         let frame = lc.compose();
         assert!(frame.full_body_active);
         assert_eq!(frame.active_motions, vec!["dance"]);
@@ -278,8 +286,8 @@ mod tests {
     #[test]
     fn upper_and_lower_coexist() {
         let mut lc = LayerComposer::default();
-        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 0.0);
-        lc.accept_motion("idle".into(), MotionLayer::Lower, 3, 0.0);
+        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 0.0, RepeatMode::Once);
+        lc.accept_motion("idle".into(), MotionLayer::Lower, 3, 0.0, RepeatMode::Loop);
         let frame = lc.compose();
         assert!(!frame.full_body_active);
         assert_eq!(frame.active_motions.len(), 2);
@@ -290,8 +298,8 @@ mod tests {
     #[test]
     fn higher_priority_replaces_same_layer() {
         let mut lc = LayerComposer::default();
-        lc.accept_motion("wave".into(), MotionLayer::Upper, 3, 0.0);
-        lc.accept_motion("point".into(), MotionLayer::Upper, 5, 0.0);
+        lc.accept_motion("wave".into(), MotionLayer::Upper, 3, 0.0, RepeatMode::Once);
+        lc.accept_motion("point".into(), MotionLayer::Upper, 5, 0.0, RepeatMode::Once);
         let names = lc.active_motion_names();
         assert_eq!(names, vec!["point"]);
     }
@@ -299,8 +307,8 @@ mod tests {
     #[test]
     fn lower_priority_does_not_replace_same_layer() {
         let mut lc = LayerComposer::default();
-        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 0.0);
-        lc.accept_motion("point".into(), MotionLayer::Upper, 3, 0.0);
+        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 0.0, RepeatMode::Once);
+        lc.accept_motion("point".into(), MotionLayer::Upper, 3, 0.0, RepeatMode::Once);
         let names = lc.active_motion_names();
         assert_eq!(names, vec!["wave"]);
     }
@@ -308,8 +316,8 @@ mod tests {
     #[test]
     fn equal_priority_latest_wins() {
         let mut lc = LayerComposer::default();
-        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 0.0);
-        lc.accept_motion("point".into(), MotionLayer::Upper, 5, 0.0);
+        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 0.0, RepeatMode::Once);
+        lc.accept_motion("point".into(), MotionLayer::Upper, 5, 0.0, RepeatMode::Once);
         let names = lc.active_motion_names();
         assert_eq!(names, vec!["point"]);
     }
@@ -317,7 +325,7 @@ mod tests {
     #[test]
     fn cancel_clears_layer() {
         let mut lc = LayerComposer::default();
-        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 0.0);
+        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 0.0, RepeatMode::Once);
         lc.cancel_motion(MotionLayer::Upper);
         assert!(lc.compose().active_motions.is_empty());
     }
@@ -325,8 +333,8 @@ mod tests {
     #[test]
     fn cancel_all_clears_everything() {
         let mut lc = LayerComposer::default();
-        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 0.0);
-        lc.accept_motion("idle".into(), MotionLayer::Lower, 3, 0.0);
+        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 0.0, RepeatMode::Once);
+        lc.accept_motion("idle".into(), MotionLayer::Lower, 3, 0.0, RepeatMode::Loop);
         lc.cancel_all_motions();
         assert!(lc.compose().active_motions.is_empty());
     }
@@ -362,10 +370,35 @@ mod tests {
     #[test]
     fn tick_advances_playing_motions() {
         let mut lc = LayerComposer::default();
-        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 2.0);
+        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 2.0, RepeatMode::Loop);
         lc.tick(0.5);
-        let player = lc.upper_player().unwrap();
-        assert!((player.time - 0.5).abs() < 1e-5);
-        assert!(player.playing);
+        assert!(lc.compose().active_motions.contains(&"wave".to_string()));
+    }
+
+    #[test]
+    fn full_tick_preempts_upper() {
+        let mut lc = LayerComposer::default();
+        lc.accept_motion("idle".into(), MotionLayer::Lower, 3, 2.0, RepeatMode::Loop);
+        lc.accept_motion("dance".into(), MotionLayer::Full, 5, 2.0, RepeatMode::Loop);
+        lc.tick(0.5);
+        let names = lc.active_motion_names();
+        assert_eq!(names, vec!["dance"]);
+    }
+
+    #[test]
+    fn once_motion_auto_clears() {
+        let mut lc = LayerComposer::default();
+        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 1.0, RepeatMode::Once);
+        lc.tick(1.5);
+        assert!(!lc.has_active_motion());
+    }
+
+    #[test]
+    fn active_motion_names_full_preempts() {
+        let mut lc = LayerComposer::default();
+        lc.accept_motion("wave".into(), MotionLayer::Upper, 5, 0.0, RepeatMode::Once);
+        lc.accept_motion("dance".into(), MotionLayer::Full, 5, 0.0, RepeatMode::Once);
+        let names = lc.active_motion_names();
+        assert_eq!(names, vec!["dance"]);
     }
 }

@@ -23,7 +23,7 @@ pub use crate::expression::{ExpressionLayer, ExpressionName};
 #[doc(no_inline)]
 pub use crate::expression_compositor::{CardExpression, ExpressionCompositor};
 #[doc(no_inline)]
-pub use crate::layer_composer::{ComposedFrame, LayerComposer};
+pub use crate::layer_composer::ComposedFrame;
 #[doc(no_inline)]
 pub use crate::loader::load_vrm;
 #[doc(no_inline)]

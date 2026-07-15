@@ -5,7 +5,7 @@
 //! `LlmCommand > LlmAdvisory > Affect > Hysteresis > Fallback`.
 
 use crate::output::arbiter::affect_to_expression;
-use crate::output::{CueSource, PerfKind, PerformanceCue};
+use crate::output::{CueSource, MotionLayer, PerfKind, PerformanceCue};
 use ene_store::AffectState;
 
 /// Tracks a single cue slot with priority semantics.
@@ -42,11 +42,14 @@ pub const fn cue_source_priority(source: CueSource) -> u8 {
 ///
 /// Buffers incoming [`PerformanceCue`]s from various sources
 /// (stream markers, affect engine, etc.) and resolves the final
-/// set at turn-end.
+/// set at turn-end. Motion cues are routed to per-layer slots
+/// so that Upper and Lower body motions can coexist (#148).
 #[derive(Debug, Default)]
 pub struct PerformanceArbiter {
     expression: Option<CueSlot>,
-    motion: Option<CueSlot>,
+    motion_upper: Option<CueSlot>,
+    motion_lower: Option<CueSlot>,
+    motion_full: Option<CueSlot>,
     lookat: Option<CueSlot>,
 }
 
@@ -64,7 +67,14 @@ impl PerformanceArbiter {
         let slot = CueSlot::new(cue, source);
         match slot.cue.kind {
             PerfKind::Expression => Self::set_slot(&mut self.expression, slot),
-            PerfKind::Motion => Self::set_slot(&mut self.motion, slot),
+            PerfKind::Motion => {
+                let layer = slot.cue.motion_layer.unwrap_or(MotionLayer::Full);
+                match layer {
+                    MotionLayer::Upper => Self::set_slot(&mut self.motion_upper, slot),
+                    MotionLayer::Lower => Self::set_slot(&mut self.motion_lower, slot),
+                    MotionLayer::Full => Self::set_slot(&mut self.motion_full, slot),
+                }
+            }
             PerfKind::LookAt => Self::set_slot(&mut self.lookat, slot),
             PerfKind::Cancel => {
                 tracing::warn!(
@@ -102,11 +112,13 @@ impl PerformanceArbiter {
     /// Clears internal state after resolution (ready for next turn).
     #[must_use]
     pub fn resolve(&mut self) -> Vec<(PerformanceCue, CueSource)> {
-        let mut result: Vec<(PerformanceCue, CueSource)> = Vec::with_capacity(3);
+        let mut result: Vec<(PerformanceCue, CueSource)> = Vec::with_capacity(5);
 
         for slot in [
             self.expression.take(),
-            self.motion.take(),
+            self.motion_upper.take(),
+            self.motion_lower.take(),
+            self.motion_full.take(),
             self.lookat.take(),
         ]
         .into_iter()
@@ -133,9 +145,15 @@ impl PerformanceArbiter {
     }
 
     /// Returns the current motion name, if any.
+    ///
+    /// Searches Full → Upper → Lower in priority order.
     #[must_use]
     pub fn current_motion(&self) -> Option<&str> {
-        self.motion.as_ref().map(|s| s.cue.name.as_str())
+        self.motion_full
+            .as_ref()
+            .map(|s| s.cue.name.as_str())
+            .or_else(|| self.motion_upper.as_ref().map(|s| s.cue.name.as_str()))
+            .or_else(|| self.motion_lower.as_ref().map(|s| s.cue.name.as_str()))
     }
 
     fn set_slot(target: &mut Option<CueSlot>, slot: CueSlot) {
@@ -180,12 +198,16 @@ impl PerformanceArbiter {
                 tracing::debug!(component = "PerformanceArbiter", "Expression cancelled");
             }
             "motion" => {
-                self.motion = None;
-                tracing::debug!(component = "PerformanceArbiter", "Motion cancelled");
+                self.motion_upper = None;
+                self.motion_lower = None;
+                self.motion_full = None;
+                tracing::debug!(component = "PerformanceArbiter", "All motions cancelled");
             }
             "all" => {
                 self.expression = None;
-                self.motion = None;
+                self.motion_upper = None;
+                self.motion_lower = None;
+                self.motion_full = None;
                 self.lookat = None;
                 tracing::debug!(component = "PerformanceArbiter", "All cues cancelled");
             }
@@ -208,8 +230,8 @@ mod tests {
         PerformanceCue::expression(name)
     }
 
-    fn motion_cue(name: &str) -> PerformanceCue {
-        PerformanceCue::motion(name, None)
+    fn motion_cue(name: &str, layer: Option<MotionLayer>) -> PerformanceCue {
+        PerformanceCue::motion(name, layer)
     }
 
     #[test]
@@ -246,7 +268,10 @@ mod tests {
     fn cancel_all_clears_everything() {
         let mut arbiter = PerformanceArbiter::default();
         arbiter.accept(expr_cue("happy"), CueSource::LlmCommand);
-        arbiter.accept(motion_cue("wave"), CueSource::LlmCommand);
+        arbiter.accept(
+            motion_cue("wave", Some(MotionLayer::Upper)),
+            CueSource::LlmCommand,
+        );
         arbiter.accept(PerformanceCue::cancel("all"), CueSource::LlmCommand);
         let result = arbiter.resolve();
         assert!(result.is_empty());
@@ -268,7 +293,10 @@ mod tests {
     fn multiple_kinds_coexist() {
         let mut arbiter = PerformanceArbiter::default();
         arbiter.accept(expr_cue("happy"), CueSource::LlmCommand);
-        arbiter.accept(motion_cue("wave"), CueSource::LlmCommand);
+        arbiter.accept(
+            motion_cue("wave", Some(MotionLayer::Upper)),
+            CueSource::LlmCommand,
+        );
         arbiter.accept(PerformanceCue::look_at("user"), CueSource::LlmAdvisory);
         let result = arbiter.resolve();
         assert_eq!(result.len(), 3);
@@ -290,5 +318,43 @@ mod tests {
         let _ = arbiter.resolve();
         let result2 = arbiter.resolve();
         assert!(result2.is_empty());
+    }
+
+    #[test]
+    fn upper_and_lower_motion_coexist() {
+        let mut arbiter = PerformanceArbiter::default();
+        arbiter.accept(
+            motion_cue("wave", Some(MotionLayer::Upper)),
+            CueSource::LlmCommand,
+        );
+        arbiter.accept(
+            motion_cue("idle", Some(MotionLayer::Lower)),
+            CueSource::LlmAdvisory,
+        );
+        let result = arbiter.resolve();
+        let motion_names: Vec<&str> = result
+            .iter()
+            .filter(|(cue, _)| cue.kind == PerfKind::Motion)
+            .map(|(cue, _)| cue.name.as_str())
+            .collect();
+        assert_eq!(motion_names.len(), 2);
+        assert!(motion_names.contains(&"wave"));
+        assert!(motion_names.contains(&"idle"));
+    }
+
+    #[test]
+    fn cancel_motion_clears_all_layers() {
+        let mut arbiter = PerformanceArbiter::default();
+        arbiter.accept(
+            motion_cue("wave", Some(MotionLayer::Upper)),
+            CueSource::LlmCommand,
+        );
+        arbiter.accept(
+            motion_cue("idle", Some(MotionLayer::Lower)),
+            CueSource::LlmAdvisory,
+        );
+        arbiter.accept(PerformanceCue::cancel("motion"), CueSource::LlmCommand);
+        let result = arbiter.resolve();
+        assert!(result.is_empty());
     }
 }
