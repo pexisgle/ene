@@ -44,6 +44,7 @@ struct MotionSlot {
 
 /// An expression entry with weight and priority.
 #[derive(Debug, Clone)]
+#[expect(dead_code)]
 struct ExpressionEntry {
     pub weight: f32,
     pub priority: u8,
@@ -122,7 +123,8 @@ impl LayerComposer {
     ///
     /// Higher-priority updates replace lower-priority ones for the
     /// same expression name.
-    pub fn set_expression(&mut self, name: String, weight: f32, priority: u8) {
+    #[expect(dead_code)]
+    pub(crate) fn set_expression(&mut self, name: String, weight: f32, priority: u8) {
         let clamped = weight.clamp(0.0, 1.0);
         match self.expressions.get(&name) {
             Some(existing) if existing.priority <= priority => {
@@ -147,13 +149,13 @@ impl LayerComposer {
         }
     }
 
-    /// Remove a single expression by name.
-    pub fn remove_expression(&mut self, name: &str) {
+    #[expect(dead_code)]
+    pub(crate) fn remove_expression(&mut self, name: &str) {
         self.expressions.remove(name);
     }
 
-    /// Clear all expressions.
-    pub fn clear_expressions(&mut self) {
+    #[expect(dead_code)]
+    pub(crate) fn clear_expressions(&mut self) {
         self.expressions.clear();
     }
 
@@ -185,10 +187,9 @@ impl LayerComposer {
         }
     }
 
-    /// Returns the active motion names per layer (for the consumer to
-    /// look up clips and evaluate frames).
     #[must_use]
-    pub fn active_motion_names(&self) -> Vec<String> {
+    #[expect(dead_code)]
+    pub(crate) fn active_motion_names(&self) -> Vec<String> {
         if let Some(ref s) = self.full {
             return vec![s.name.clone()];
         }
@@ -235,9 +236,9 @@ impl LayerComposer {
         }
     }
 
-    /// Returns whether any motion is playing.
     #[must_use]
-    pub const fn has_active_motion(&self) -> bool {
+    #[expect(dead_code)]
+    pub(crate) const fn has_active_motion(&self) -> bool {
         self.upper.is_some() || self.lower.is_some() || self.full.is_some()
     }
 

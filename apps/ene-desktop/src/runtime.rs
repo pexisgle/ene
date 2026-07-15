@@ -987,8 +987,8 @@ impl Runtime {
             let motion_layer =
                 world.get_resource_mut::<crate::resource::motion_layer::MotionLayerState>();
             if let Some(mut motion_layer) = motion_layer {
-                motion_layer.0.tick(dt_secs);
-                let frame = motion_layer.0.compose();
+                motion_layer.tick(dt_secs);
+                let frame = motion_layer.compose();
 
                 // If the active motion name changed, load the new clip.
                 if let Some(motion_name) = frame.active_motions.first() {

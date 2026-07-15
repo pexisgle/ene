@@ -185,12 +185,12 @@ pub fn apply_cancel_system(
                 pipeline.active = None;
             }
             "motion" => {
-                state.0.cancel_all_motions();
+                state.cancel_all_motions();
             }
             "all" => {
                 pipeline.pending.clear();
                 pipeline.active = None;
-                state.0.cancel_all_motions();
+                state.cancel_all_motions();
             }
             scope if scope.starts_with("motion:") => {
                 let layer = match scope.strip_prefix("motion:") {
@@ -198,7 +198,7 @@ pub fn apply_cancel_system(
                     Some("lower") => ene_config::MotionLayer::Lower,
                     _ => ene_config::MotionLayer::Full,
                 };
-                state.0.cancel_motion(layer);
+                state.cancel_motion(layer);
             }
             _ => {
                 tracing::debug!(
@@ -226,9 +226,7 @@ pub fn apply_motion_commands_system(
             ene_config::MotionLayer::Lower => ene_vrm::RepeatMode::Loop,
             _ => ene_vrm::RepeatMode::Once,
         };
-        state
-            .0
-            .accept_motion(cmd.name.clone(), layer, cmd.priority, cmd.duration, repeat);
+        state.accept_motion(cmd.name.clone(), layer, cmd.priority, cmd.duration, repeat);
     }
 }
 
