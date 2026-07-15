@@ -165,7 +165,7 @@ impl UtilityToolProvider {
         let session_state = state.clone();
         let sandbox_state = state;
         let inner = ActionSetProvider::new(actions)
-            .with_session_id_hook(move |session_id| session_state.set_session_id(session_id))
+            .with_set_call_context_hook(move |conv_id| session_state.set_session_id(conv_id))
             .with_sandbox_hook(move |sandbox: &SandboxConfigData| {
                 if let Some(socket) = &sandbox.db_socket {
                     sandbox_state.set_db_socket(socket.clone());

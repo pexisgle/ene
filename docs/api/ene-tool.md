@@ -13,7 +13,7 @@
 | Layer | Types | Source crate |
 |---|---|---|
 | Wire (IPC / sandbox) | `ToolProvider`, `IpcRequest` / `IpcResponse`, `ToolSpec`, `run_tool_server` | `ene-tool-proto` |
-| Host adapters | `ActionSetProvider`, `SingleActionProvider`, `ToolAction` | `ene-tool-common` |
+| Host adapters | `ActionSetProvider`, `ToolAction` | `ene-tool-common` |
 | Derive | `#[derive(ToolSpec)]`, `#[derive(ToolAction)]` | `ene-tool-derive` |
 
 Host aggregation (`ToolRegistry`, MCP, composite tools, Tool RAG) stays in [`ene-tool-host`](ene-tool-host.md). A full physical merge of the leaf crates into this facade is a follow-up; until then, the leaf crates remain in the workspace and this facade is the supported import path.

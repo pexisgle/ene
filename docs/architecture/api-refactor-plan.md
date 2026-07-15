@@ -33,7 +33,7 @@ The 2026-07 API documentation audit refreshed every library crate page and added
 | **Public surface** | Contributor-only notes on `streaming` / `message_builder` (the temporary `schema_link` ctor hook was removed under API v2; runtime depends on mind normally) |
 | **Async / errors** | Error & async conventions in [`docs/api/index.md`](../api/index.md); `run_tool_server` returns `Result<(), ToolError>` |
 | **Boundaries** | ADR guardrail module docs on `ene-mind`, `ene-store`, `ene-tool-proto` |
-| **Tool ABI** | `ActionSetProvider` / `SingleActionProvider` in `ene-tool-common`; ABI table in [`docs/tools/sdk.md`](../tools/sdk.md); `AGENTS.md` R1 wiring fix; `tools/utility` migrated |
+| **Tool ABI** | `ActionSetProvider` in `ene-tool-common`; ABI table in [`docs/tools/sdk.md`](../tools/sdk.md); `AGENTS.md` R1 wiring fix; `tools/utility` migrated |
 | **Events / session** | [`docs/core/streaming-events.md`](../core/streaming-events.md) (legacy vs cognitive); compression-preference doc comments on split APIs |
 | **VRM** | `ene_vrm::prelude`; `#[doc(hidden)]` on internal loaders/helpers; Supported vs Internal section in [`docs/api/ene-vrm.md`](../api/ene-vrm.md) |
 | **API docs** | Full EN+JA refresh for all 14 library crates + `ene-mind` / `ene-vrm` pages |

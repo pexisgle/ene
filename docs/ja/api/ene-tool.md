@@ -13,7 +13,7 @@
 | 層 | 型 | 元クレート |
 |---|---|---|
 | ワイヤー（IPC / サンドボックス） | `ToolProvider`、`IpcRequest` / `IpcResponse`、`ToolSpec`、`run_tool_server` | `ene-tool-proto` |
-| ホストアダプタ | `ActionSetProvider`、`SingleActionProvider`、`ToolAction` | `ene-tool-common` |
+| ホストアダプタ | `ActionSetProvider`、`ToolAction` | `ene-tool-common` |
 | Derive | `#[derive(ToolSpec)]`、`#[derive(ToolAction)]` | `ene-tool-derive` |
 
 ホスト集約（`ToolRegistry`、MCP、複合ツール、Tool RAG）は [`ene-tool-host`](ene-tool-host.md) に残ります。リーフクレートをこのファサードへ物理統合するのは follow-up です。それまではリーフはワークスペースに残り、本ファサードがサポートされる import パスです。

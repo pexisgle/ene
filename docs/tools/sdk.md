@@ -54,15 +54,15 @@ impl HelloAction {
 
 ### 3. Implement ToolProvider
 
-For a single stateless action, use [`SingleActionProvider`](#toolprovider-adapters) instead of hand-writing a `ToolProvider` — this is the recommended default:
+For a single stateless action, use [`ActionSetProvider`](#toolprovider-adapters) with a single-element vec instead of hand-writing a `ToolProvider` — this is the recommended default:
 
 ```rust
-use ene_tool_common::SingleActionProvider;
+use ene_tool_common::ActionSetProvider;
 
-let provider = SingleActionProvider::new(HelloAction::default());
+let provider = ActionSetProvider::new(vec![Box::new(HelloAction::default())]);
 ```
 
-If you need custom `set_session_id`/`set_sandbox` behavior, or want full control, implement `ToolProvider` by hand instead:
+If you need custom `set_call_context`/`set_sandbox` behavior, or want full control, implement `ToolProvider` by hand instead:
 
 ```rust
 use ene_tool_proto::{ToolError, ToolProvider, ToolSpec};
@@ -243,10 +243,9 @@ impl ToolProvider for CalculatorProvider {
 
 | Adapter | Use for | Session/sandbox hooks |
 |---|---|---|
-| `SingleActionProvider::new(action)` | One action per binary (the individual-tool pattern used by `ene-tool-web`) | `.with_session_id_hook(...)`, `.with_sandbox_hook(...)` |
-| `ActionSetProvider::new(vec![...])` | Multiple actions per binary (the mega-tool pattern used by `ene-tool-fs`, `ene-tool-app`, `ene-tool-browser`) | `.with_session_id_hook(...)`, `.with_sandbox_hook(...)` |
+| `ActionSetProvider::new(vec![...])` | One or more actions per binary (the mega-tool pattern used by `ene-tool-fs`, `ene-tool-app`, `ene-tool-browser`) | `.with_set_call_context_hook(...)`, `.with_sandbox_hook(...)` |
 
-Both dispatch `call_tool` by matching `ToolAction::name()` against the requested tool name and return `ToolError::NotFound` on a miss — the same behavior every hand-written provider in this codebase used to reimplement. If an action needs to react to `set_session_id`/`set_sandbox` (e.g. to thread a session ID or a DB socket into shared state), register a hook instead of dropping down to a manual `ToolProvider` impl:
+Both dispatch `call_tool` by matching `ToolAction::name()` against the requested tool name and return `ToolError::NotFound` on a miss — the same behavior every hand-written provider in this codebase used to reimplement. If an action needs to react to `set_call_context`/`set_sandbox` (e.g. to thread a conversation ID or a DB socket into shared state), register a hook instead of dropping down to a manual `ToolProvider` impl:
 
 ```rust
 use ene_tool_common::ActionSetProvider;
@@ -256,7 +255,7 @@ let state = Arc::new(MyState::default());
 let session_state = state.clone();
 
 let provider = ActionSetProvider::new(vec![Box::new(MyAction::new(state))])
-    .with_session_id_hook(move |session_id| session_state.set_session_id(session_id));
+    .with_set_call_context_hook(move |conv_id| session_state.set_session_id(conv_id));
 ```
 
 See `tools/utility/src/provider.rs` for a full worked example (session ID + DB sandbox socket/token both threaded through hooks).

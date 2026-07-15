@@ -54,15 +54,15 @@ impl HelloAction {
 
 ### 3. ToolProvider を実装
 
-単一のステートレスなアクションの場合は、`ToolProvider` を手書きする代わりに [`SingleActionProvider`](#toolprovider-アダプタ) を使うことを推奨します:
+単一のステートレスなアクションの場合は、`ToolProvider` を手書きする代わりに [`ActionSetProvider`](#toolprovider-アダプタ) を単一要素の vec で使うことを推奨します:
 
 ```rust
-use ene_tool_common::SingleActionProvider;
+use ene_tool_common::ActionSetProvider;
 
-let provider = SingleActionProvider::new(HelloAction::default());
+let provider = ActionSetProvider::new(vec![Box::new(HelloAction::default())]);
 ```
 
-カスタムの `set_session_id`/`set_sandbox` の動作が必要な場合、または完全な制御が必要な場合は、代わりに `ToolProvider` を手書きします:
+カスタムの `set_call_context`/`set_sandbox` の動作が必要な場合、または完全な制御が必要な場合は、代わりに `ToolProvider` を手書きします:
 
 ```rust
 use ene_tool_proto::{ToolError, ToolProvider, ToolSpec};
@@ -239,14 +239,13 @@ impl ToolProvider for CalculatorProvider {
 
 ## ToolProvider アダプタ
 
-`ene-tool-common` は `ToolProvider` を実装する2つのアダプタを提供しており、ほとんどのツールは `list_specs`/`call_tool` のディスパッチループを手書きする必要がありません:
+`ene-tool-common` は `ToolProvider` を実装するアダプタを提供しており、ほとんどのツールは `list_specs`/`call_tool` のディスパッチループを手書きする必要がありません:
 
 | アダプタ | 使用場面 | セッション/サンドボックスフック |
 |---|---|---|
-| `SingleActionProvider::new(action)` | バイナリあたり1アクション（`ene-tool-web` で使われている個別ツールパターン） | `.with_session_id_hook(...)`、`.with_sandbox_hook(...)` |
-| `ActionSetProvider::new(vec![...])` | バイナリあたり複数アクション（`ene-tool-fs`、`ene-tool-app`、`ene-tool-browser` で使われているメガツールパターン） | `.with_session_id_hook(...)`、`.with_sandbox_hook(...)` |
+| `ActionSetProvider::new(vec![...])` | バイナリあたり1つ以上のアクション（`ene-tool-fs`、`ene-tool-app`、`ene-tool-browser` で使われているメガツールパターン） | `.with_set_call_context_hook(...)`、`.with_sandbox_hook(...)` |
 
-両方とも、リクエストされたツール名と `ToolAction::name()` を照合して `call_tool` をディスパッチし、一致しない場合は `ToolError::NotFound` を返します — これは、このコードベース内のすべての手書きプロバイダーがこれまで再実装してきたのと同じ動作です。アクションが `set_session_id`/`set_sandbox` に反応する必要がある場合（例: セッションIDやDBソケットを共有状態に伝える）は、手動の `ToolProvider` 実装に切り替える代わりにフックを登録してください:
+リクエストされたツール名と `ToolAction::name()` を照合して `call_tool` をディスパッチし、一致しない場合は `ToolError::NotFound` を返します — これは、このコードベース内のすべての手書きプロバイダーがこれまで再実装してきたのと同じ動作です。アクションが `set_call_context`/`set_sandbox` に反応する必要がある場合（例: 会話IDやDBソケットを共有状態に伝える）は、手動の `ToolProvider` 実装に切り替える代わりにフックを登録してください:
 
 ```rust
 use ene_tool_common::ActionSetProvider;
@@ -256,7 +255,7 @@ let state = Arc::new(MyState::default());
 let session_state = state.clone();
 
 let provider = ActionSetProvider::new(vec![Box::new(MyAction::new(state))])
-    .with_session_id_hook(move |session_id| session_state.set_session_id(session_id));
+    .with_set_call_context_hook(move |conv_id| session_state.set_session_id(conv_id));
 ```
 
 完全な実例は `tools/utility/src/provider.rs` を参照してください（セッションIDとDBサンドボックスのソケット/トークンの両方がフック経由で伝えられています）。

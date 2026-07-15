@@ -33,7 +33,7 @@
 | **公開面** | `streaming` / `message_builder` にコントリビュータ向け注記（一時的な `schema_link` ctor フックは API v2 で削除。runtime は mind を通常依存） |
 | **Async / エラー** | [`docs/api/index.md`](../api/index.md) の Error & async 規約; `run_tool_server` が `Result<(), ToolError>` を返す |
 | **境界** | `ene-mind` / `ene-store` / `ene-tool-proto` の ADR ガードレール module docs |
-| **ツール ABI** | `ene-tool-common` の `ActionSetProvider` / `SingleActionProvider`; [`docs/tools/sdk.md`](../tools/sdk.md) の ABI 表; `AGENTS.md` R1 修正; `tools/utility` 移行 |
+| **ツール ABI** | `ene-tool-common` の `ActionSetProvider`; [`docs/tools/sdk.md`](../tools/sdk.md) の ABI 表; `AGENTS.md` R1 修正; `tools/utility` 移行 |
 | **イベント / セッション** | [`docs/core/streaming-events.md`](../core/streaming-events.md); 分割 API への圧縮優先 doc コメント |
 | **VRM** | `ene_vrm::prelude`; 内部ローダー等の `#[doc(hidden)]`; [`docs/api/ene-vrm.md`](../api/ene-vrm.md) の Supported vs Internal |
 | **API ドキュメント** | 14 ライブラリクレート + `ene-mind` / `ene-vrm` の EN+JA 全面刷新 |

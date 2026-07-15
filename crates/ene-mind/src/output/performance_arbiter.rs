@@ -66,7 +66,12 @@ impl PerformanceArbiter {
             PerfKind::Expression => Self::set_slot(&mut self.expression, slot),
             PerfKind::Motion => Self::set_slot(&mut self.motion, slot),
             PerfKind::LookAt => Self::set_slot(&mut self.lookat, slot),
-            PerfKind::Cancel => { /* handled above */ }
+            PerfKind::Cancel => {
+                tracing::warn!(
+                    component = "PerformanceArbiter",
+                    "Cancel variant reached match arm (should be handled by early return above)"
+                );
+            }
         }
     }
 

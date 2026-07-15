@@ -12,7 +12,7 @@ use crate::ToolAction;
 use async_trait::async_trait;
 use ene_tool_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec};
 
-type SessionIdHook = Box<dyn Fn(&str) + Send + Sync>;
+type SetCallContextHook = Box<dyn Fn(&str) + Send + Sync>;
 type SandboxHook = Box<dyn Fn(&SandboxConfigData) + Send + Sync>;
 type PermissionHook = Box<dyn Fn(&str) + Send + Sync>;
 type AllowPatternHook = Box<dyn Fn(&str, &str) + Send + Sync>;
@@ -22,12 +22,12 @@ type ConfigSchemaHook = Box<dyn Fn() -> Option<serde_json::Value> + Send + Sync>
 /// Adapts a flat `Vec<Box<dyn ToolAction>>` into a [`ToolProvider`].
 ///
 /// `list_specs` and `call_tool` are dispatched generically over the action
-/// list; lifecycle hooks (`set_session_id`, `set_sandbox`, permissions,
+/// list; lifecycle hooks (`set_call_context`, `set_sandbox`, permissions,
 /// config) are no-ops unless registered via the corresponding `with_*`
 /// builders.
 pub struct ActionSetProvider {
     actions: Vec<Box<dyn ToolAction>>,
-    on_session_id: Option<SessionIdHook>,
+    on_set_call_context: Option<SetCallContextHook>,
     on_sandbox: Option<SandboxHook>,
     on_approve_permission: Option<PermissionHook>,
     on_allow_pattern: Option<AllowPatternHook>,
@@ -41,7 +41,7 @@ impl ActionSetProvider {
     pub fn new(actions: Vec<Box<dyn ToolAction>>) -> Self {
         Self {
             actions,
-            on_session_id: None,
+            on_set_call_context: None,
             on_sandbox: None,
             on_approve_permission: None,
             on_allow_pattern: None,
@@ -50,10 +50,13 @@ impl ActionSetProvider {
         }
     }
 
-    /// Registers a callback invoked on `ToolProvider::set_session_id`.
+    /// Registers a callback invoked on `ToolProvider::set_call_context`.
     #[must_use]
-    pub fn with_session_id_hook(mut self, hook: impl Fn(&str) + Send + Sync + 'static) -> Self {
-        self.on_session_id = Some(Box::new(hook));
+    pub fn with_set_call_context_hook(
+        mut self,
+        hook: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Self {
+        self.on_set_call_context = Some(Box::new(hook));
         self
     }
 
@@ -126,7 +129,7 @@ impl ToolProvider for ActionSetProvider {
     }
 
     fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
-        if let Some(hook) = &self.on_session_id {
+        if let Some(hook) = &self.on_set_call_context {
             hook(&ctx.conversation_id);
         }
     }
@@ -207,7 +210,7 @@ mod tests {
         let seen = Arc::new(AtomicBool::new(false));
         let seen2 = seen.clone();
         let provider = ActionSetProvider::new(vec![Box::new(EchoAction)])
-            .with_session_id_hook(move |_sid| seen2.store(true, Ordering::SeqCst));
+            .with_set_call_context_hook(move |_conv_id| seen2.store(true, Ordering::SeqCst));
         provider.set_call_context(&ene_tool_proto::CallContext {
             conversation_id: "abc".to_string(),
             turn_id: String::new(),

@@ -39,12 +39,12 @@ impl FsToolProvider {
         let allow_sandbox = sandbox;
 
         let inner = ActionSetProvider::new(actions)
-            .with_session_id_hook(move |session_id| {
+            .with_set_call_context_hook(move |conv_id| {
                 let guard = session_sandbox
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(s) = guard.as_ref() {
-                    s.set_session_id(session_id);
+                    s.set_session_id(conv_id);
                 }
             })
             .with_sandbox_hook(move |data| {
