@@ -24,6 +24,10 @@ pub struct SandboxConfig {
     /// `SandboxConfigData` wire format; populated by `Default` and
     /// the `From<SandboxConfigData>` impl.
     pub compiled_blocklist: std::sync::Arc<std::sync::OnceLock<Vec<regex::Regex>>>,
+    /// Thread-safe dynamic allowlist patterns shared with Sandbox.
+    pub allowed_patterns: std::sync::Arc<
+        std::sync::RwLock<std::collections::HashSet<(String, String)>>,
+    >,
 }
 
 impl Default for SandboxConfig {
@@ -53,6 +57,9 @@ impl Default for SandboxConfig {
             db_socket: None,
             db_auth_token: None,
             compiled_blocklist: std::sync::Arc::new(std::sync::OnceLock::new()),
+            allowed_patterns: std::sync::Arc::new(std::sync::RwLock::new(
+                std::collections::HashSet::new(),
+            )),
         }
     }
 }
@@ -109,6 +116,37 @@ impl SandboxConfig {
             };
             if check_path.starts_with(&canonical_dir) {
                 return Ok(check_path);
+            }
+        }
+
+        if let Ok(guard) = self.allowed_patterns.read() {
+            for (allowed_action, allowed_target) in guard.iter() {
+                let action_ok = if require_writable {
+                    allowed_action == "FileOverwrite" || allowed_action == "FileDelete"
+                } else {
+                    true
+                };
+                if action_ok {
+                    let prefix = std::path::Path::new(allowed_target);
+                    let canonical_prefix = if prefix.exists() {
+                        std::fs::canonicalize(prefix).unwrap_or_else(|_| prefix.to_path_buf())
+                    } else if let Some(parent) = prefix.parent() {
+                        if parent.exists() {
+                            if let Ok(p) = std::fs::canonicalize(parent) {
+                                p.join(prefix.file_name().unwrap_or_default())
+                            } else {
+                                prefix.to_path_buf()
+                            }
+                        } else {
+                            prefix.to_path_buf()
+                        }
+                    } else {
+                        prefix.to_path_buf()
+                    };
+                    if check_path.starts_with(&canonical_prefix) || check_path.starts_with(prefix) {
+                        return Ok(check_path);
+                    }
+                }
             }
         }
 
@@ -205,6 +243,9 @@ impl From<ene_tool_proto::SandboxConfigData> for SandboxConfig {
             db_socket: data.db_socket.map(PathBuf::from),
             db_auth_token: data.db_auth_token,
             compiled_blocklist: std::sync::Arc::new(std::sync::OnceLock::new()),
+            allowed_patterns: std::sync::Arc::new(std::sync::RwLock::new(
+                std::collections::HashSet::new(),
+            )),
         }
     }
 }
@@ -225,6 +266,7 @@ pub struct Sandbox {
 
 impl Sandbox {
     pub fn new(config: SandboxConfig) -> Self {
+        let allowed_patterns = config.allowed_patterns.clone();
         Self {
             config,
             undo_manager: std::sync::Mutex::new(None),
@@ -232,9 +274,7 @@ impl Sandbox {
             approved_requests: std::sync::Arc::new(std::sync::RwLock::new(
                 std::collections::HashSet::new(),
             )),
-            allowed_patterns: std::sync::Arc::new(std::sync::RwLock::new(
-                std::collections::HashSet::new(),
-            )),
+            allowed_patterns,
         }
     }
 

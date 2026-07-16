@@ -108,7 +108,7 @@ fn convert_message(msg: &LlmMessage) -> Result<ChatCompletionRequestMessage, Llm
                             ChatCompletionMessageToolCall {
                                 id: call.id.clone(),
                                 function: FunctionCall {
-                                    name: call.name.clone(),
+                                    name: sanitize_tool_name(&call.name),
                                     arguments: call.arguments.clone(),
                                 },
                             },
@@ -136,13 +136,17 @@ fn convert_message(msg: &LlmMessage) -> Result<ChatCompletionRequestMessage, Llm
     }
 }
 
+fn sanitize_tool_name(name: &str) -> String {
+    name.replace('.', "_")
+}
+
 fn convert_tools(
     tools: &[ene_tool_proto::ToolSpec],
 ) -> Vec<async_openai::types::chat::ChatCompletionTools> {
     let mut res = Vec::new();
     for t in tools {
         let func = async_openai::types::chat::FunctionObject {
-            name: t.name.to_string(),
+            name: sanitize_tool_name(t.name.as_str()),
             description: Some(t.description.clone()),
             parameters: Some(t.parameters.clone()),
             strict: None,
@@ -331,6 +335,11 @@ impl LlmProvider for OpenAiProvider {
             Some(convert_tools(tools))
         };
 
+        let mut name_mapping = std::collections::HashMap::new();
+        for t in tools {
+            name_mapping.insert(sanitize_tool_name(t.name.as_str()), t.name.to_string());
+        }
+
         let mut req_builder = async_openai::types::chat::CreateChatCompletionRequestArgs::default();
         req_builder.model(self.model.clone()).messages(oa_messages);
         if let Some(t) = oa_tools {
@@ -350,7 +359,7 @@ impl LlmProvider for OpenAiProvider {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
 
         tokio::spawn(async move {
-            if let Err(e) = run_direct_sse_stream(&api_base, &api_key, body, tx.clone()).await {
+            if let Err(e) = run_direct_sse_stream(&api_base, &api_key, body, name_mapping, tx.clone()).await {
                 let _ = tx.send(Err(e)).await;
             }
         });
@@ -707,6 +716,7 @@ async fn run_direct_sse_stream(
     api_base: &str,
     api_key: &str,
     body: serde_json::Value,
+    name_mapping: std::collections::HashMap<String, String>,
     tx: tokio::sync::mpsc::Sender<Result<LlmResponseChunk, LlmProviderError>>,
 ) -> Result<(), LlmProviderError> {
     use tokio_util::io::StreamReader;
@@ -779,7 +789,7 @@ async fn run_direct_sse_stream(
                     tc_list.push(LlmToolCallChunk {
                         index,
                         id,
-                        name,
+                        name: name.map(|n| name_mapping.get(&n).cloned().unwrap_or(n)),
                         arguments,
                     });
                 }
