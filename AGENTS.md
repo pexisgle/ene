@@ -77,8 +77,33 @@ The workspace is highly granularly split to enforce strict boundaries and preven
   - `ene-desktop` translations are managed under `apps/ene-desktop/i18n/`.
   - `ene-cli` translations are managed locally within the CLI under `apps/ene-cli/i18n/`.
 * **Visibility:** Default to `pub(crate)`. Only use `pub` when external consumers need it.
-* **Comments:** Write `rustdoc` comments (`///`) for public APIs and complex logic. Re-exports must use `#[doc(no_inline)]`.
+* **Comments:** Prefer silence. See §5.1.
 * **Clippy / rustfmt / overflow:** Root `Cargo.toml` denies `all`/`pedantic`/`restriction`/`cargo` (no `nursery`). Style-only lints are `allow`ed there — do not mass-rewrite for those; panic-adjacent ones stay denied. Suppress with `#[expect(..., reason = "...")]` (`reason` required). Release has `overflow-checks = true` (use `wrapping_*` for intentional wrap). `rustfmt.toml` is stable-only — do not add nightly/unstable options.
+
+### 5.1 Comment Policy
+
+Comments explain **why**, never **what**. If the code already says it, delete the comment.
+
+* Do not narrate obvious code (`// increment i`, `// return the result`).
+* Do not leave stale comments after a change — update or delete them.
+* Do not leave scratch notes, TODO breadcrumbs for yourself, or step-by-step work logs in committed code.
+* `rustdoc` (`///`) is for public APIs and non-obvious contracts. Re-exports must use `#[doc(no_inline)]`.
+
+```rust
+// BAD — restates the code
+// Fetch the user by id
+let user = store.get_user(id).await?;
+
+// BAD — scratch / work log
+// TODO: maybe cache this later? — checking with team
+// HACK: temporary until I finish the refactor
+
+// GOOD — non-obvious constraint
+// sqlite-vec rejects zero-length vectors
+if query.is_empty() {
+    return Ok(Vec::new());
+}
+```
 
 ## 6. Common Tasks (Recipes)
 
