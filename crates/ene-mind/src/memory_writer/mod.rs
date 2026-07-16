@@ -86,16 +86,15 @@ impl MemoryWriter {
             .into_iter()
             .partition(|c| c.source_quote.is_empty());
 
-        tracing::debug!(
+        tracing::info!(
             component = "MemoryWriter",
-            event = "memory candidates extracted",
             character_id = %input.character_id,
             user_id = %input.user_id,
-            turn_id = 0usize,
-            pattern_count = pattern_candidates.len(),
-            tool_count = tool_candidates.len(),
-            provenance = "deterministic",
-            "Deterministic memory candidates extracted"
+            locale = ?locale,
+            llm_extraction_enabled = config.memory.llm_extraction_enabled,
+            pattern_hint_count = pattern_candidates.len(),
+            tool_candidate_count = tool_candidates.len(),
+            "Post-turn memory extraction starting"
         );
 
         let mut batches: Vec<(Vec<candidate::MemoryCandidate>, CandidateProvenance)> = Vec::new();
@@ -113,19 +112,24 @@ impl MemoryWriter {
                 .await
                 {
                     Ok(llm_candidates) => {
-                        tracing::debug!(
+                        tracing::info!(
                             component = "MemoryWriter",
-                            event = "memory candidates extracted",
                             character_id = %input.character_id,
                             user_id = %input.user_id,
-                            turn_id = 0usize,
                             candidate_count = llm_candidates.len(),
                             pattern_hint_count = pattern_candidates.len(),
-                            provenance = "llm",
-                            "LLM memory candidates extracted"
+                            "LLM memory extraction completed"
                         );
-                        used_llm = true;
-                        if !llm_candidates.is_empty() {
+                        if llm_candidates.is_empty() {
+                            // Leave `used_llm` false so strong pattern hints
+                            // (e.g.「今日は発表会」) still reach the arbiter.
+                            tracing::info!(
+                                component = "MemoryWriter",
+                                character_id = %input.character_id,
+                                "LLM returned no candidates; will use pattern hints if any"
+                            );
+                        } else {
+                            used_llm = true;
                             batches.push((llm_candidates, CandidateProvenance::LlmExtracted));
                         }
                     }
@@ -140,7 +144,7 @@ impl MemoryWriter {
                     }
                 }
             } else {
-                tracing::debug!(
+                tracing::warn!(
                     component = "MemoryWriter",
                     character_id = %input.character_id,
                     "LLM memory extraction enabled but no provider available"
@@ -150,7 +154,20 @@ impl MemoryWriter {
 
         // Patterns go to the arbiter only when LLM did not own the decision.
         if !used_llm && !pattern_candidates.is_empty() {
+            tracing::info!(
+                component = "MemoryWriter",
+                character_id = %input.character_id,
+                candidate_count = pattern_candidates.len(),
+                "Using deterministic pattern candidates (LLM disabled or failed)"
+            );
             batches.push((pattern_candidates, CandidateProvenance::Deterministic));
+        } else if used_llm && !pattern_candidates.is_empty() {
+            tracing::debug!(
+                component = "MemoryWriter",
+                character_id = %input.character_id,
+                hint_count = pattern_candidates.len(),
+                "Deterministic patterns used as LLM hints only (not auto-persisted)"
+            );
         }
 
         if !tool_candidates.is_empty() {
@@ -376,20 +393,43 @@ fn log_arbiter_outcomes(
     applied: &[crate::memory_writer::AppliedDecision],
 ) {
     for outcome in applied {
-        if matches!(
-            outcome.decision.action,
+        match &outcome.decision.action {
+            crate::memory_writer::ArbiterAction::Persist(_)
+            | crate::memory_writer::ArbiterAction::Supersede { .. } => {
+                tracing::info!(
+                    component = "MemoryWriter",
+                    character_id = %input.character_id,
+                    user_id = %input.user_id,
+                    kind = ?outcome.decision.candidate.kind,
+                    title = %outcome.decision.candidate.title,
+                    inserted_id = ?outcome.inserted_id,
+                    reason_code = ?outcome.decision.reason.code,
+                    "Memory candidate persisted"
+                );
+            }
             crate::memory_writer::ArbiterAction::Ignore
-                | crate::memory_writer::ArbiterAction::AskConfirmationLater
-        ) {
-            tracing::debug!(
-                component = "MemoryWriter",
-                event = "memory candidate rejected",
-                character_id = %input.character_id,
-                user_id = %input.user_id,
-                reason_code = ?outcome.decision.reason.code,
-                reason_detail = %outcome.decision.reason.detail,
-                "Memory candidate was not persisted"
-            );
+            | crate::memory_writer::ArbiterAction::AskConfirmationLater => {
+                tracing::info!(
+                    component = "MemoryWriter",
+                    character_id = %input.character_id,
+                    user_id = %input.user_id,
+                    kind = ?outcome.decision.candidate.kind,
+                    title = %outcome.decision.candidate.title,
+                    reason_code = ?outcome.decision.reason.code,
+                    reason_detail = %outcome.decision.reason.detail,
+                    "Memory candidate was not persisted"
+                );
+            }
+            other => {
+                tracing::info!(
+                    component = "MemoryWriter",
+                    character_id = %input.character_id,
+                    user_id = %input.user_id,
+                    action = ?other,
+                    reason_code = ?outcome.decision.reason.code,
+                    "Memory arbiter applied non-insert action"
+                );
+            }
         }
     }
 }
@@ -509,9 +549,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn llm_success_does_not_persist_deterministic_pattern_alone() {
-        // "I like mushrooms" matches EN preference patterns. LLM returns empty
-        // candidates → patterns must not be auto-persisted when LLM owned the turn.
+    async fn llm_success_with_candidates_skips_deterministic_patterns() {
+        // Preference pattern would also match, but LLM returns its own candidate
+        // → only the LLM item should be persisted.
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let mut config = MindConfig::default();
+        config.memory.llm_extraction_enabled = true;
+        config.memory.semantic_dedup_enabled = false;
+        config.emotion.classifier_language = "en".into();
+
+        let json = r#"{
+            "candidates": [{
+                "kind": "Preference",
+                "title": "likes mushrooms",
+                "content": "User likes mushrooms",
+                "source_quote": "I like mushrooms",
+                "confidence": 0.8,
+                "should_persist": true,
+                "deletion_target_key": null,
+                "commitment_due": null
+            }]
+        }"#;
+        let provider = MockProvider::new(json);
+        let post = PostTurnInput {
+            turn: TurnInput {
+                user_message: "I like mushrooms",
+                assistant_message: Some("Nice!"),
+                tool_results: &[],
+            },
+            affect: AffectState::neutral("ene"),
+            character_id: "ene",
+            user_id: "user",
+        };
+
+        MemoryWriter::write_memories(
+            &store,
+            &config,
+            &post,
+            MemoryWriteProviders {
+                llm: Some(&provider),
+                embedder: None,
+            },
+        )
+        .await
+        .expect("write_memories");
+
+        let memories = store
+            .get_typed_memories_by_character("ene", None, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].title, "likes mushrooms");
+        assert_eq!(memories[0].source, ene_store::MemorySource::LlmExtracted);
+    }
+
+    #[tokio::test]
+    async fn llm_empty_falls_back_to_pattern_hints() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
         config.memory.llm_extraction_enabled = true;
@@ -543,9 +636,9 @@ mod tests {
         .expect("write_memories");
 
         let count = store.count_typed_memories("ene", None).await.unwrap();
-        assert_eq!(
-            count, 0,
-            "LLM empty decision must not fall back to patterns"
+        assert!(
+            count >= 1,
+            "empty LLM result should fall back to preference pattern"
         );
     }
 

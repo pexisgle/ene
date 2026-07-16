@@ -18,11 +18,12 @@ Schema: {"candidates": [{"kind": "string", "title": "string", "content": "string
 ## What to keep
 - Information the companion needs in future turns: schedule, personal facts, preferences, commitments, relationship context, lasting procedures
 - Soft signals without explicit "remember this" wording — if it matters long-term, extract it
+- **Time-bound events even when the user also asks a question** (e.g. "Today I have a progress report on ene — what can you do?" → keep an `Episodic`/`Commitment` for the report/event, and still answer the question separately)
 - Pattern hints below are optional assists only: keep, rewrite, re-kind, or discard each hint based on lasting value
 - Important facts that never appear in pattern hints must still be extracted
 
 ## What to drop
-- Greetings, filler, small talk, one-off questions with no lasting value
+- Greetings, filler, small talk, and pure capability questions with **no** schedule/personal fact attached
 - Assistant-only content (do not invent user facts from the assistant)
 - Guesswork: if unsure, either omit or set confidence below 0.5
 

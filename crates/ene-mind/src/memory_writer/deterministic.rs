@@ -314,6 +314,38 @@ fn ja_commitment(
     })
 }
 
+/// Soft assist for time-bound events that rarely use「覚えて」phrasing.
+///
+/// Catches「今日は…進捗報告をします」「明日発表会がある」style lines so the
+/// LLM extractor receives a hint even when the rest of the turn is a question.
+fn ja_temporal_event(
+    user_msg: &str,
+    _asst_msg: &str,
+    _tool_results: &[ToolResultSummary],
+) -> Option<MemoryCandidate> {
+    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
+    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(
+            r"(今日|明日|今夜|今週|来週|今度).{0,48}(進捗報告|報告会|発表会|説明会|プレゼン|会議|予定|がある|があります|をします|を行う)",
+        )
+        .unwrap()
+    });
+    RE.captures(user_msg).map(|cap| {
+        let when = cap[1].to_string();
+        let title: String = format!("event: {when}").chars().take(40).collect();
+        MemoryCandidate {
+            kind: MemoryKind::Episodic,
+            title,
+            content: format!("User mentioned a time-bound event: {}", user_msg.trim()),
+            source_quote: user_msg.to_string(),
+            confidence: 0.70,
+            should_persist: true,
+            deletion_target_key: None,
+            commitment_due: Some(when),
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // English patterns
 // ---------------------------------------------------------------------------
@@ -476,6 +508,34 @@ fn en_commitment(
     })
 }
 
+/// Soft assist for English time-bound events without explicit "remember".
+fn en_temporal_event(
+    user_msg: &str,
+    _asst_msg: &str,
+    _tool_results: &[ToolResultSummary],
+) -> Option<MemoryCandidate> {
+    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
+    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(
+            r"(?i)\b(today|tomorrow|tonight|this\s+week|next\s+week)\b.{0,48}\b(presentation|meeting|demo|standup|progress\s+report|have\s+a|going\s+to)\b",
+        )
+        .unwrap()
+    });
+    RE.captures(user_msg).map(|cap| {
+        let when = cap[1].to_string();
+        MemoryCandidate {
+            kind: MemoryKind::Episodic,
+            title: format!("event: {when}"),
+            content: format!("User mentioned a time-bound event: {}", user_msg.trim()),
+            source_quote: user_msg.to_string(),
+            confidence: 0.70,
+            should_persist: true,
+            deletion_target_key: None,
+            commitment_due: Some(when),
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -488,6 +548,7 @@ const JA_MATCHERS: &[PatternMatcher] = &[
     ja_nickname,
     ja_ng_instruction,
     ja_commitment,
+    ja_temporal_event,
 ];
 
 /// All English message matchers.
@@ -498,6 +559,7 @@ const EN_MATCHERS: &[PatternMatcher] = &[
     en_nickname,
     en_ng_instruction,
     en_commitment,
+    en_temporal_event,
 ];
 
 /// Extract memory candidates deterministically from a conversation turn.
@@ -722,6 +784,36 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, MemoryKind::Commitment);
         assert!(out[0].commitment_due.is_some());
+    }
+
+    #[test]
+    fn ja_temporal_event_progress_report() {
+        let out = extract(
+            &ja_turn(
+                "こんにちは！今日はこのアプリeneのちょっとした進捗報告をします。メリットを教えて",
+            ),
+            Locale::Ja,
+            0.0,
+        )
+        .expect("extract failed");
+        assert!(
+            out.iter().any(|c| c.kind == MemoryKind::Episodic),
+            "expected episodic hint for progress report: {out:?}"
+        );
+    }
+
+    #[test]
+    fn ja_temporal_event_presentation() {
+        let out = extract(
+            &ja_turn("今日はこのアプリeneの軽い発表説明会があります。まとめてみて"),
+            Locale::Ja,
+            0.0,
+        )
+        .expect("extract failed");
+        assert!(
+            out.iter().any(|c| c.kind == MemoryKind::Episodic),
+            "expected episodic hint for presentation: {out:?}"
+        );
     }
 
     // ── English remember ──────────────────────────────────────────────
