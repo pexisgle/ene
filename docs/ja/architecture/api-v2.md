@@ -35,7 +35,8 @@
 | `ene-mind` | 認知エンジン + セッション（旧 `ene-session` を吸収） |
 | `ene-store` | 永続化（旧 memory ストア表面） |
 | `ene-ai` | `ene-provider` + `ene-embedding` |
-| `ene-tool` | `ene-tool-proto` + `ene-tool-common` + `ene-tool-derive`（必要なら tool-db ABI） |
+| `ene-tool` | `ene-tool-proto` + `ene-tool-common` + `ene-tool-derive` |
+| `ene-tool-db` | ツールバイナリ用 IPC CRUD クライアント → `ene-runtime` の `DbIpcServer`；依存は `ene-tool-proto` のみ |
 | `ene-tool-host` / `ene-tool-rag` / `ene-config` / `ene-vrm` | 同様（LayerComposer は vrm/desktop 内） |
 
 ### 依存ルール

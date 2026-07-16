@@ -35,7 +35,8 @@ The library surface grew dual streaming pipelines (legacy + cognitive), an unrea
 | `ene-mind` | Cognitive engine + session (absorbs former `ene-session`) |
 | `ene-store` | Persistence (former memory store surface) |
 | `ene-ai` | `ene-provider` + `ene-embedding` |
-| `ene-tool` | `ene-tool-proto` + `ene-tool-common` + `ene-tool-derive` (+ tool-db ABI types as needed) |
+| `ene-tool` | `ene-tool-proto` + `ene-tool-common` + `ene-tool-derive` |
+| `ene-tool-db` | IPC CRUD client for tool binaries → `ene-runtime`'s `DbIpcServer`; depends only on `ene-tool-proto` |
 | `ene-tool-host` / `ene-tool-rag` / `ene-config` / `ene-vrm` | same (+ LayerComposer internal to vrm/desktop) |
 
 ### Dependency rules

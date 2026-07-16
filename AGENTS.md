@@ -45,6 +45,7 @@ The workspace is highly granularly split to enforce strict boundaries and preven
 * **`ene-ai`**: LLM + embedding providers (absorbs former `ene-provider` / `ene-embedding`).
 * **`ene-tool`**: Facade re-exporting `ene-tool-proto` + `ene-tool-common` + `ene-tool-derive`. Preferred import for new tool binaries. Does **not** depend on runtime / mind / store.
 * **`ene-tool-proto`**: Defines the IPC ABI (Requests/Responses). *Must not contain business or DB logic.*
+* **`ene-tool-db`**: IPC CRUD client for tool binaries → `ene-runtime`'s `DbIpcServer`; replaces direct `ene-store` linkage in stateful tools. Depends only on `ene-tool-proto`.
 * **`ene-tool-host`**: Orchestrates tools and IPC. Depends on the tool ABI crates. Does **not** depend on `ene-ai` or `ene-store` — Tool RAG lives in `ene-tool-rag`.
 * **`ene-tool-rag`**: Tool RAG pipeline — multi-vector embedding, weighted field similarity, optional HyDE, optional LLM rerank. Depends on `ene-ai`, `ene-store`, and `ene-tool-proto`.
 * **`ene-vrm`**: VRM rendering for desktop. Does **not** depend on mind / runtime.

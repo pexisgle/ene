@@ -19,7 +19,7 @@
 
 ### Crate Boundaries
 
-- Depends on: `ene-store`, `ene-config`, `ene-ai`, `ene-common`
+- Depends on: `ene-store`, `ene-config`, `ene-ai`
 - Does **NOT** depend on: `ene-runtime` (prevents circular dependencies)
 - `ene-runtime` depends on `ene-mind` (not the other way around) to integrate the mind runtime into the streaming lifecycle.
 

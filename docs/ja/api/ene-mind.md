@@ -19,7 +19,7 @@
 
 ### クレートの境界
 
-- 依存先: `ene-store`、`ene-config`、`ene-ai`、`ene-common`
+- 依存先: `ene-store`、`ene-config`、`ene-ai`
 - 依存**しない**: `ene-runtime`（循環依存を防ぐため）
 - `ene-runtime` が `ene-mind` に依存します（逆ではありません）。これにより mind ランタイムをストリーミングのライフサイクルに統合します。
 
