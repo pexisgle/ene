@@ -116,9 +116,9 @@ pub struct MindConfig {
 |---|---|---|---|
 | `enabled` | `bool` | `true` | ツール呼び出し結果を認知メモリにグラウンディングする |
 | `max_summary_chars` | `usize` | `500` | ツール要約1件あたりの最大文字数 |
-| `persist_success_procedure` | `bool` | `true` | 成功したツール呼び出しを `Procedure` メモリとして永続化する |
-| `persist_failure_reflection` | `bool` | `true` | 失敗したツール呼び出しを `Reflection` メモリとして永続化する |
-| `persist_user_visible_episodic` | `bool` | `true` | ユーザーに見える短い成功結果を `Episodic` メモリとして永続化する |
+| `persist_success_procedure` | `bool` | `false` | 成功したツール呼び出しを `Procedure` メモリとして永続化する（LLM 抽出フォールバック） |
+| `persist_failure_reflection` | `bool` | `true` | 失敗したツール呼び出しを `Reflection` メモリとして永続化する（LLM 抽出フォールバック） |
+| `persist_user_visible_episodic` | `bool` | `false` | ユーザーに見える短い成功結果を `Episodic` メモリとして永続化する（LLM 抽出フォールバック） |
 | `min_confidence` | `f32` | `0.60` | ツール由来の候補の最小確信度 |
 
 ### `EmotionConfig`

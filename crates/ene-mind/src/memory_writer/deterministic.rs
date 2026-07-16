@@ -923,7 +923,26 @@ mod tests {
     // ── Tool procedure ────────────────────────────────────────────────
 
     #[test]
-    fn tool_success_extracts_procedure() {
+    fn tool_success_extracts_procedure_when_enabled() {
+        let tools = vec![ToolResultSummary {
+            tool_name: "fs".to_string(),
+            success: true,
+            summary: "wrote file.txt".to_string(),
+        }];
+        let turn = TurnInput {
+            user_message: "",
+            assistant_message: None,
+            tool_results: &tools,
+        };
+        let mut cfg = ToolGroundingConfig::default();
+        cfg.persist_success_procedure = true;
+        let out = extract_with_tool_grounding(&turn, Locale::Ja, 0.0, &cfg).expect("extract failed");
+        assert!(out.iter().any(|c| c.kind == MemoryKind::Procedure));
+        assert!(out.iter().any(|c| c.content.contains("fs")));
+    }
+
+    #[test]
+    fn tool_success_skipped_by_default() {
         let tools = vec![ToolResultSummary {
             tool_name: "fs".to_string(),
             success: true,
@@ -935,8 +954,10 @@ mod tests {
             tool_results: &tools,
         };
         let out = extract(&turn, Locale::Ja, 0.0).expect("extract failed");
-        assert!(out.iter().any(|c| c.kind == MemoryKind::Procedure));
-        assert!(out.iter().any(|c| c.content.contains("fs")));
+        assert!(
+            out.is_empty(),
+            "default tool grounding must not auto-keep successes: {out:?}"
+        );
     }
 
     // ── Edge cases ────────────────────────────────────────────────────

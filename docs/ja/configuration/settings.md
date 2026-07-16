@@ -371,9 +371,9 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
       "tool_grounding": {
         "enabled": true,
         "max_summary_chars": 500,
-        "persist_success_procedure": true,
+        "persist_success_procedure": false,
         "persist_failure_reflection": true,
-        "persist_user_visible_episodic": true,
+        "persist_user_visible_episodic": false,
         "min_confidence": 0.60
       },
       "use_hyde": false,
@@ -476,9 +476,9 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 |-----------|------|---------|------|
 | `enabled` | bool | `true` | ツール呼び出し結果を認知記憶へグラウンディングする |
 | `max_summary_chars` | int | `500` | 記憶保存前にツール要約で保持する最大文字数 |
-| `persist_success_procedure` | bool | `true` | 成功したツール呼び出しを `Procedure` 記憶として保存する |
-| `persist_failure_reflection` | bool | `true` | 失敗したツール呼び出しを `Reflection` 記憶として保存する |
-| `persist_user_visible_episodic` | bool | `true` | ユーザー向けに意味のある短い結果を `Episodic` 記憶として保存する |
+| `persist_success_procedure` | bool | `false` | 成功したツール呼び出しを `Procedure` 記憶として保存する（LLM 抽出がターンを担当しないときの決定論的フォールバック。通常の要否判断は LLM 抽出器） |
+| `persist_failure_reflection` | bool | `true` | 失敗したツール呼び出しを `Reflection` 記憶として保存する（LLM 抽出がターンを担当しないときのフォールバック） |
+| `persist_user_visible_episodic` | bool | `false` | ユーザー向けに意味のある短い結果を `Episodic` 記憶として保存する（決定論的フォールバック。通常は LLM 抽出器が判断） |
 | `min_confidence` | float | `0.60` | ツール由来記憶候補の信頼度しきい値（`0.0`–`1.0`） |
 
 #### `mind.emotion` — 感情エンジン

@@ -50,11 +50,11 @@ pub struct MemoryWriter;
 impl MemoryWriter {
     /// Extract and persist memories from the turn when enabled.
     ///
-    /// When LLM extraction is enabled and a provider is available, deterministic
-    /// conversation patterns are passed as hints only; the LLM's candidates are
-    /// what get arbitrated. On LLM failure or when disabled, deterministic
-    /// pattern candidates fall back to the arbiter. Tool-grounded candidates
-    /// always go to the arbiter independently.
+    /// When LLM extraction is enabled and returns candidates, those candidates
+    /// are the sole conversation/tool judgment (deterministic patterns and tool
+    /// grounding are hints / fallback only). On LLM failure, empty result, or
+    /// when disabled, deterministic pattern hints and configured tool-grounding
+    /// fallbacks reach the arbiter.
     pub async fn write_memories(
         store: &MemoryStore,
         config: &MindConfig,
@@ -102,12 +102,26 @@ impl MemoryWriter {
 
         if config.memory.llm_extraction_enabled {
             if let Some(provider) = providers.llm {
+                // Same extraction call judges conversation + tool outcomes.
+                // Soft tool hints include successes even when auto-persist is off.
+                let mut llm_hints = pattern_candidates.clone();
+                let tool_hint_cfg = crate::config::ToolGroundingConfig {
+                    persist_success_procedure: true,
+                    persist_failure_reflection: true,
+                    persist_user_visible_episodic: false,
+                    ..config.memory.tool_grounding.clone()
+                };
+                llm_hints.extend(tool_grounding::extract_tool_candidates(
+                    turn.tool_results,
+                    &tool_hint_cfg,
+                ));
+
                 match llm::extract_with_timeout(
                     provider,
                     &turn,
                     locale,
                     config.memory.extraction_timeout_secs,
-                    &pattern_candidates,
+                    &llm_hints,
                 )
                 .await
                 {
@@ -152,13 +166,13 @@ impl MemoryWriter {
             }
         }
 
-        // Patterns go to the arbiter only when LLM did not own the decision.
+        // Patterns + tool grounding fall back only when LLM did not own the turn.
         if !used_llm && !pattern_candidates.is_empty() {
             tracing::info!(
                 component = "MemoryWriter",
                 character_id = %input.character_id,
                 candidate_count = pattern_candidates.len(),
-                "Using deterministic pattern candidates (LLM disabled or failed)"
+                "Using deterministic pattern candidates (LLM disabled, failed, or empty)"
             );
             batches.push((pattern_candidates, CandidateProvenance::Deterministic));
         } else if used_llm && !pattern_candidates.is_empty() {
@@ -170,8 +184,21 @@ impl MemoryWriter {
             );
         }
 
-        if !tool_candidates.is_empty() {
+        if !used_llm && !tool_candidates.is_empty() {
+            tracing::info!(
+                component = "MemoryWriter",
+                character_id = %input.character_id,
+                candidate_count = tool_candidates.len(),
+                "Using tool-grounding fallback candidates (LLM disabled, failed, or empty)"
+            );
             batches.push((tool_candidates, CandidateProvenance::Deterministic));
+        } else if used_llm && !tool_candidates.is_empty() {
+            tracing::debug!(
+                component = "MemoryWriter",
+                character_id = %input.character_id,
+                tool_candidate_count = tool_candidates.len(),
+                "Tool-grounding candidates skipped; LLM owned tool-result judgment"
+            );
         }
 
         if batches.is_empty() {

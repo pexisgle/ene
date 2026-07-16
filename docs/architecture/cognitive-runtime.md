@@ -201,9 +201,9 @@ Phase 8 grounds tool-call outcomes into typed memory with explicit safety constr
 
 - `ene-runtime::streaming::perform_tool_executions` emits bounded `ToolResultSummary` entries for each call.
 - `ene-mind::memory_writer::tool_grounding` sanitizes/truncates raw outputs (`max_summary_chars`) and masks screenshot payloads so large blobs are not persisted verbatim.
-- Success paths produce `Procedure` candidates and short user-visible outcomes can produce `Episodic` candidates.
-- Failure paths produce `Reflection` candidates so repeated failed actions can be avoided in later turns.
-- The cognitive streaming path now forwards per-turn `tool_results` into `PostTurnInput`, enabling Memory Writer + Arbiter persistence with `source_ref` prefix `tool:`.
+- When LLM extraction owns the turn, tool outcomes are judged in the **same** extractor call (as conversation context + soft hints). Routine successes are not auto-persisted.
+- Deterministic `persist_success_procedure` / `persist_user_visible_episodic` default to `false`; `persist_failure_reflection` remains a fallback when LLM extraction does not own the turn.
+- The cognitive streaming path forwards per-turn `tool_results` into `PostTurnInput`, enabling Memory Writer + Arbiter persistence with `source_ref` prefix `tool:` when a candidate is kept.
 
 ### Companion Commitment Ledger
 

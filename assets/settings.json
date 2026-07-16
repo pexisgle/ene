@@ -40,9 +40,9 @@
       "tool_grounding": {
         "enabled": true,
         "max_summary_chars": 500,
-        "persist_success_procedure": true,
+        "persist_success_procedure": false,
         "persist_failure_reflection": true,
-        "persist_user_visible_episodic": true,
+        "persist_user_visible_episodic": false,
         "min_confidence": 0.6000000238418579
       },
       "use_hyde": false,

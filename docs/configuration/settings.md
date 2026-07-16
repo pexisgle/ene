@@ -367,9 +367,9 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
       "tool_grounding": {
         "enabled": true,
         "max_summary_chars": 500,
-        "persist_success_procedure": true,
+        "persist_success_procedure": false,
         "persist_failure_reflection": true,
-        "persist_user_visible_episodic": true,
+        "persist_user_visible_episodic": false,
         "min_confidence": 0.60
       },
       "use_hyde": false,
@@ -473,9 +473,9 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 |-------|------|---------|-------------|
 | `enabled` | bool | `true` | Enable grounding tool call results into cognitive memory |
 | `max_summary_chars` | int | `500` | Maximum characters retained per tool summary before truncation |
-| `persist_success_procedure` | bool | `true` | Persist successful tool calls as `Procedure` memories |
-| `persist_failure_reflection` | bool | `true` | Persist failed tool calls as `Reflection` memories |
-| `persist_user_visible_episodic` | bool | `true` | Persist concise user-visible tool outcomes as `Episodic` memories |
+| `persist_success_procedure` | bool | `false` | Persist successful tool calls as `Procedure` memories (deterministic fallback when LLM extraction does not own the turn; lasting value is normally judged by the LLM extractor) |
+| `persist_failure_reflection` | bool | `true` | Persist failed tool calls as `Reflection` memories (fallback when LLM extraction does not own the turn) |
+| `persist_user_visible_episodic` | bool | `false` | Persist concise user-visible tool outcomes as `Episodic` memories (deterministic fallback; usually judged by the LLM extractor) |
 | `min_confidence` | float | `0.60` | Confidence threshold for tool-derived memory candidates (`0.0`–`1.0`) |
 
 #### `mind.emotion` — Emotion Engine

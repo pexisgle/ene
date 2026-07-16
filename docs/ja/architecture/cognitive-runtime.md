@@ -201,9 +201,9 @@ Phase 8 では、ツール呼び出し結果を安全に typed memory へ接続�
 
 - `ene-runtime::streaming::perform_tool_executions` が各呼び出しごとに境界付き `ToolResultSummary` を生成する。
 - `ene-mind::memory_writer::tool_grounding` が生の出力を sanitize/truncate（`max_summary_chars`）し、スクリーンショット payload などの巨大データをそのまま保存しない。
-- 成功結果は `Procedure` 候補になり、短くユーザー向けの結果は `Episodic` 候補として追加できる。
-- 失敗結果は `Reflection` 候補になり、同じ失敗行動の反復を将来ターンで避けられるようにする。
-- cognitive streaming path がターン単位の `tool_results` を `PostTurnInput` に渡すことで、Memory Writer / Arbiter が `tool:` プレフィックス付き `source_ref` で永続化できる。
+- LLM 抽出がターンを担当するときは、**同じ**抽出呼び出しでツール結果の要否も判断する（会話文脈 + ソフトヒント）。日常的な成功結果は自動永続化しない。
+- 決定論的な `persist_success_procedure` / `persist_user_visible_episodic` の既定は `false`。`persist_failure_reflection` は LLM 抽出がターンを担当しないときのフォールバック。
+- cognitive streaming path がターン単位の `tool_results` を `PostTurnInput` に渡し、候補が残った場合に Memory Writer / Arbiter が `tool:` プレフィックス付き `source_ref` で永続化できる。
 
 ### Companion Commitment Ledger（約束・タスク台帳）
 

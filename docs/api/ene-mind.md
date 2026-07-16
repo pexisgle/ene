@@ -116,9 +116,9 @@ Memory extraction, hybrid search, retention, and MMR diversification settings.
 |---|---|---|---|
 | `enabled` | `bool` | `true` | Ground tool call results into cognitive memory |
 | `max_summary_chars` | `usize` | `500` | Max characters kept per tool summary |
-| `persist_success_procedure` | `bool` | `true` | Persist successful tool calls as `Procedure` memories |
-| `persist_failure_reflection` | `bool` | `true` | Persist failed tool calls as `Reflection` memories |
-| `persist_user_visible_episodic` | `bool` | `true` | Persist short user-visible outcomes as `Episodic` memories |
+| `persist_success_procedure` | `bool` | `false` | Persist successful tool calls as `Procedure` memories (LLM-extraction fallback) |
+| `persist_failure_reflection` | `bool` | `true` | Persist failed tool calls as `Reflection` memories (LLM-extraction fallback) |
+| `persist_user_visible_episodic` | `bool` | `false` | Persist short user-visible outcomes as `Episodic` memories (LLM-extraction fallback) |
 | `min_confidence` | `f32` | `0.60` | Minimum confidence for tool-derived candidates |
 
 ### `EmotionConfig`

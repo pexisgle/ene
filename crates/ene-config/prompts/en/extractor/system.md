@@ -12,23 +12,26 @@ Schema: {"candidates": [{"kind": "string", "title": "string", "content": "string
 - `Relationship`: how the user relates to the companion or other people
 - `Affective`: emotionally important moments worth remembering
 - `Commitment`: promises, follow-ups, obligations (set `commitment_due` when a deadline is mentioned)
-- `Procedure`: how-to knowledge or reusable procedures
-- `Reflection`: lessons or "avoid repeating X" insights
+- `Procedure`: reusable how-to knowledge (not routine tool chatter)
+- `Reflection`: lessons or "avoid repeating X" insights (including important tool failures)
 
 ## What to keep
 - Information the companion needs in future turns: schedule, personal facts, preferences, commitments, relationship context, lasting procedures
 - Soft signals without explicit "remember this" wording — if it matters long-term, extract it
-- **Time-bound events even when the user also asks a question** (e.g. "Today I have a progress report on ene — what can you do?" → keep an `Episodic`/`Commitment` for the report/event, and still answer the question separately)
-- Pattern hints below are optional assists only: keep, rewrite, re-kind, or discard each hint based on lasting value
-- Important facts that never appear in pattern hints must still be extracted
+- **Time-bound events even when the user also asks a question** (e.g. "Today I have a progress report on ene — what can you do?" → keep an `Episodic`/`Commitment` for the report/event)
+- **Tool results (`Tool(...):` lines and tool hints): keep ONLY lasting value** — e.g. a file the user asked to create, a durable search finding, a failure worth not repeating. Drop routine `ls`/`read`/`glob`/`get_current_time`/todo bookkeeping unless the outcome itself is a lasting user fact
+- Pattern/tool hints below are optional assists only: keep, rewrite, re-kind, or discard each hint based on lasting value
+- Important facts that never appear in hints must still be extracted
 
 ## What to drop
 - Greetings, filler, small talk, and pure capability questions with **no** schedule/personal fact attached
+- Routine successful tool outputs with no future value (directory listings, raw file dumps, clock checks, internal todo updates)
 - Assistant-only content (do not invent user facts from the assistant)
 - Guesswork: if unsure, either omit or set confidence below 0.5
 
 ## Rules
-- Prefer user-stated content; `source_quote` must be exact user text (max 100 chars)
+- Prefer user-stated content; for conversation facts `source_quote` must be exact user text (max 100 chars)
+- For tool-only memories (`Procedure`/`Reflection`/`Episodic` from tool outcomes), set `source_quote` to `""` (empty string)
 - `should_persist`: true for keep candidates; false for forget/delete requests
 - `deletion_target_key`: short id when forgetting, otherwise null
 - `commitment_due`: natural-language deadline when present, otherwise null
