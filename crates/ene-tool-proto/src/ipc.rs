@@ -25,8 +25,11 @@ const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 /// - Removed `IpcResponse::MyConfig`.
 /// - `IpcRequest::GetConfigSchema` is a **documented exception** (#150)
 ///   retained for config schema discovery by `tool_host_manager`.
-///   The v3 protocol carries 10 request variants and 8 response variants
-///   (see `docs/tools/sdk.md` for the full table). `UserInput` is **not**
+/// - v3 carries 10 request variants ([`IpcRequest`]: `Handshake`, `ListTools`,
+///   `ListActionSpecs`, `GetConfigSchema`, `CallTool`, `SetCallContext`,
+///   `ApprovePermission`, `AllowPattern`, `Ping`, `Shutdown`) and 8 response
+///   variants ([`IpcResponse`]: `HandshakeAck`, `Ack`, `Tools`, `ActionSpecs`,
+///   `ConfigSchema`, `CallResult`, `Pong`, `Error`). `UserInput` is **not**
 ///   an IPC variant — it is surfaced through `ToolError::UserInputRequired`.
 pub const IPC_PROTOCOL_VERSION: u32 = 3;
 

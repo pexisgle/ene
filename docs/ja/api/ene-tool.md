@@ -22,8 +22,8 @@
 
 - **ワイヤー:** ツールバイナリは `ToolProvider` を実装し、handshake / list / call / permission・user-input 継続 / shutdown を話す。
 - **ホスト:** `ene-tool-host::ToolRegistry` が IPC + MCP を集約する。
-- **名前衝突**はレジストリ構築 / 追加時にハードエラー。
-- **`ToolSpec`** は LLM 向けのみ: `name`、`description`、`parameters`。
+- **名前衝突:** `HostRegistry` はハードエラー；`CompositeToolRegistry` はプレフィックス付与 (`"<idx>:<name>"`) で両方のツールを呼び出し可能にする。
+- **`ToolSpec`** は LLM 向け: `name`、`description`、`parameters`。内部フィールド（例: `negative_keywords`）はワイヤー ABI から除外 (`#[serde(skip)]`)。
 
 ```rust,ignore
 use ene_tool::prelude::*;

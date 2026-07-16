@@ -14,7 +14,9 @@
 //!
 //! - **Wire:** [`ToolProvider`] in this crate (IPC / sandbox binaries)
 //! - **Host:** `ene_tool_host::ToolRegistry` (IPC + MCP + composite)
-//! - Name collision is a hard error at registry build / add time
+//! - Name collision is a hard error in [`HostRegistry`]; in [`CompositeToolRegistry`]
+//!   collisions are resolved by prefix-renaming (`"<idx>:<name>"`) so that both
+//!   tools remain callable
 //! - Prefer the `ene-tool` facade crate for new tool binaries
 //!
 //! ## Crate Boundaries

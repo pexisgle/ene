@@ -22,8 +22,8 @@ Host aggregation (`ToolRegistry`, MCP, composite tools, Tool RAG) stays in [`ene
 
 - **Wire:** tool binaries implement `ToolProvider` and speak handshake / list / call / permission-user-input continuation / shutdown.
 - **Host:** `ene-tool-host::ToolRegistry` aggregates IPC + MCP.
-- **Name collision** is a hard error at registry build / add time.
-- **`ToolSpec`** is LLM-facing only: `name`, `description`, `parameters`.
+- **Name collision:** `HostRegistry` returns a hard error; `CompositeToolRegistry` resolves collisions by prefix-renaming (`"<idx>:<name>"`) so both tools remain callable.
+- **`ToolSpec`** is LLM-facing: `name`, `description`, `parameters`. Internal fields (e.g. `negative_keywords`) are excluded from the wire ABI (`#[serde(skip)]`).
 
 ```rust,ignore
 use ene_tool::prelude::*;

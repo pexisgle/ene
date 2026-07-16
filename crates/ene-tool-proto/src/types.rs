@@ -385,9 +385,9 @@ pub struct ToolSpec {
     pub parameters: serde_json::Value,
     /// Negative keywords for RAG disambiguation — when present in the
     /// user query, these terms *penalize* the tool's relevance score.
-    /// Re-instated after #135 slim-down so `#[tool(keywords_negative = "...")]`
-    /// authoring data is not lost until `ToolRagProfile` lands (#137).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Internal field (excluded from the wire ABI per #135 slim-down);
+    /// will move to `ToolRagProfile` when #137 lands.
+    #[serde(skip)]
     pub negative_keywords: Vec<String>,
 }
 
