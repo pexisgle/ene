@@ -45,6 +45,6 @@ pub use ene_tool_common::{ActionSetProvider, SingleActionProvider, ToolAction, T
 pub use ene_tool_derive::{ToolAction as DeriveToolAction, ToolSpec as DeriveToolSpec};
 #[doc(no_inline)]
 pub use ene_tool_proto::{
-    ActionSpec, HostRegistry, IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, SandboxConfigData,
-    ToolError, ToolName, ToolProvider, ToolSpec, ToolVersion, run_tool_server,
+    HostRegistry, IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, SandboxConfigData, ToolError,
+    ToolName, ToolProvider, ToolRagProfile, ToolSpec, ToolVersion, run_tool_server,
 };

@@ -45,7 +45,7 @@ pub enum IpcRequest {
     Handshake { version: u32 },
     Initialize { sandbox: SandboxConfigData, tool_config: Option<Value> },
     ListTools,
-    ListActionSpecs,
+    ListRagProfiles,
     GetConfigSchema,
     CallTool { name: String, arguments: String },
     SetSessionId { session_id: String },
@@ -61,7 +61,7 @@ pub enum IpcResponse {
     HandshakeAck { version: u32 },
     Ack,
     Tools { tools: Vec<ToolSpec> },
-    ActionSpecs { specs: Vec<ActionSpec> },
+    RagProfiles { profiles: Vec<ToolRagProfile> },
     ConfigSchema { schema: Option<Value> },
     CallResult { result: Result<String, ToolError> },
     MyConfig(Value),
@@ -127,7 +127,7 @@ pub trait ToolAction: Send + Sync {
 #[async_trait]
 pub trait ToolProvider: Send + Sync {
     fn list_specs(&self) -> Vec<ToolSpec>;
-    fn list_action_specs(&self) -> Vec<ActionSpec> { vec![] }
+    fn list_rag_profiles(&self) -> Vec<ToolRagProfile> { vec![] }
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>;
     fn set_session_id(&self, session_id: &str);
     fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}

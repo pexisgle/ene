@@ -109,6 +109,15 @@ impl ToolRegistry for SupervisedIpcRegistry {
         reg.list_tools()
     }
 
+    fn list_rag_profiles(&self) -> Vec<ene_tool_proto::ToolRagProfile> {
+        let reg = self
+            .registry
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        reg.list_rag_profiles()
+    }
+
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolHostError> {
         // Fast path: a successful call also clears the
         // per-process restart counter so a tool that crashes
@@ -249,6 +258,10 @@ pub struct ToolHostManager {
 impl ToolRegistry for ToolHostManager {
     fn list_tools(&self) -> Vec<ToolSpec> {
         self.composite.list_tools()
+    }
+
+    fn list_rag_profiles(&self) -> Vec<ene_tool_proto::ToolRagProfile> {
+        self.composite.list_rag_profiles()
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolHostError> {

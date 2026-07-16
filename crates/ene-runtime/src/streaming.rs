@@ -131,11 +131,12 @@ pub(crate) async fn select_relevant_tools(
 
     // Use the new ToolRag pipeline if available.
     if let Some(rag) = tool_rag {
-        // Get all tools from the registry.
+        // Get all tools and RAG profiles from the registry.
         let all_tools = registry.list_tools();
+        let profiles = registry.list_rag_profiles();
 
         // Ensure the index is up-to-date (no-op for already-indexed fields).
-        if let Err(e) = rag.ensure_index(&all_tools).await {
+        if let Err(e) = rag.ensure_index(&all_tools, &profiles).await {
             tracing::warn!(component = "ToolRag", error = %e, "ensure_index failed");
         }
 

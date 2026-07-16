@@ -1,4 +1,6 @@
-use crate::{CallContext, SandboxConfigData, ToolError, ToolName, ToolProvider, ToolSpec};
+use crate::{
+    CallContext, SandboxConfigData, ToolError, ToolName, ToolProvider, ToolRagProfile, ToolSpec,
+};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
@@ -74,6 +76,16 @@ impl HostRegistry {
         specs
     }
 
+    /// Returns all RAG profiles from all registered providers.
+    #[must_use]
+    pub fn list_rag_profiles(&self) -> Vec<ToolRagProfile> {
+        let mut profiles = Vec::new();
+        for provider in &self.providers {
+            profiles.extend(provider.list_rag_profiles());
+        }
+        profiles
+    }
+
     /// Call a tool by name, dispatching to the provider that registered it.
     pub async fn call_tool(&self, name: &ToolName, arguments: &str) -> Result<String, ToolError> {
         match self.tool_index.get(name.as_str()) {
@@ -107,6 +119,10 @@ impl HostRegistry {
 impl ToolProvider for HostRegistry {
     fn list_specs(&self) -> Vec<ToolSpec> {
         self.list_specs()
+    }
+
+    fn list_rag_profiles(&self) -> Vec<ToolRagProfile> {
+        self.list_rag_profiles()
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {

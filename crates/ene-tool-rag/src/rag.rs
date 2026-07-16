@@ -4,7 +4,7 @@
 use ene_ai::{EmbeddingError, EmbeddingProvider, cosine_similarity, embed, embed_query};
 use ene_store::MemoryStore;
 use ene_tool_proto::types::EmbeddingField;
-use ene_tool_proto::{ToolName, ToolSpec};
+use ene_tool_proto::{ToolName, ToolRagProfile, ToolSpec};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -20,6 +20,8 @@ pub struct FieldWeights {
     pub summary: f32,
     /// Weight for the tool description embedding.
     pub description: f32,
+    /// Weight for the capability embedding.
+    pub capability: f32,
     /// Weight for the tool example embedding.
     pub example: f32,
     /// Weight for the negative/unwanted embedding (penalizes matches).
@@ -39,6 +41,7 @@ impl Default for FieldWeights {
         Self {
             summary: 1.0,
             description: 0.6,
+            capability: 0.8,
             example: 0.4,
             negative: -0.5,
             hyde: 0.7,
@@ -52,6 +55,7 @@ impl From<crate::config::FieldWeightsConfig> for FieldWeights {
         Self {
             summary: c.summary,
             description: c.description,
+            capability: c.capability,
             example: c.example,
             negative: c.negative,
             hyde: c.hyde,
@@ -68,7 +72,7 @@ impl From<crate::config::FieldWeightsConfig> for FieldWeights {
 pub struct ToolRagOptions {
     /// Whether the RAG pipeline is enabled.
     pub enabled: bool,
-    /// Number of top candidates to retrieve from vector search.
+    /// Number of top candidates to retrieve from vector search (pre-rerank).
     pub top_k: usize,
     /// Number of final tools to return after reranking.
     pub final_n: usize,
@@ -86,6 +90,8 @@ pub struct ToolRagOptions {
     pub forced: Vec<ToolName>,
     /// Per-field embedding weights used for scoring.
     pub weights: FieldWeights,
+    /// Cap how many tools per category may appear (`ToolCategory::config_key`).
+    pub per_category_limits: HashMap<String, usize>,
 }
 
 impl Default for ToolRagOptions {
@@ -105,6 +111,7 @@ impl Default for ToolRagOptions {
                 ToolName::new("utility.get_current_time"),
             ],
             weights: FieldWeights::default(),
+            per_category_limits: HashMap::new(),
         }
     }
 }
@@ -130,6 +137,7 @@ impl TryFrom<crate::config::ToolRagConfig> for ToolRagOptions {
             background_index_on_startup: c.background_index_on_startup,
             forced,
             weights: FieldWeights::from(c.weights),
+            per_category_limits: c.per_category_limits,
         })
     }
 }
@@ -144,8 +152,10 @@ pub struct ToolRag {
     opts: ToolRagOptions,
     /// Last-known `ToolSpecs`, used when returning results from [`select`].
     specs: RwLock<HashMap<ToolName, ToolSpec>>,
-    /// Blake3 hash of the last indexed specs set.
-    /// Used to fast-path `ensure_index` when specs haven't changed.
+    /// Last-known RAG profiles (for category limits).
+    profiles: RwLock<HashMap<ToolName, ToolRagProfile>>,
+    /// Blake3 hash of the last indexed specs+profiles set.
+    /// Used to fast-path `ensure_index` when inputs haven't changed.
     last_specs_hash: AtomicU64,
     /// In-memory cache of tool embedding vectors.
     /// Populated by `ensure_index`, used by select. Avoids
@@ -165,6 +175,7 @@ impl ToolRag {
             store,
             opts,
             specs: RwLock::new(HashMap::new()),
+            profiles: RwLock::new(HashMap::new()),
             last_specs_hash: AtomicU64::new(0),
             cached_field_rows: RwLock::new(Vec::new()),
         }
@@ -195,37 +206,8 @@ impl ToolRag {
         self.store.is_some()
     }
 
-    // ── Indexing ───────────────────────────────────────────────────────
-
-    /// Ensures every spec is embedded and stored.
-    ///
-    /// Only re-embeds fields whose text-derived version hash has changed.
-    /// Called by the streaming engine before each [`select`](Self::select).
-    pub async fn ensure_index(&self, specs: &[ToolSpec]) -> Result<(), EmbeddingError> {
-        let specs_hash = compute_specs_hash(specs);
-        let prev_hash = self.last_specs_hash.load(Ordering::Acquire);
+    fn store_specs_and_profiles(&self, specs: &[ToolSpec], profiles: &[ToolRagProfile]) {
         {
-            let cache = self
-                .cached_field_rows
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if prev_hash == specs_hash && !cache.is_empty() {
-                let mut map = self
-                    .specs
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                map.clear();
-                for spec in specs {
-                    map.insert(spec.name.clone(), spec.clone());
-                }
-                drop(map);
-                return Ok(());
-            }
-        }
-
-        let store = if let Some(s) = &self.store {
-            Arc::clone(s)
-        } else {
             let mut map = self
                 .specs
                 .write()
@@ -234,9 +216,56 @@ impl ToolRag {
             for spec in specs {
                 map.insert(spec.name.clone(), spec.clone());
             }
-            drop(map);
+        }
+        {
+            let mut map = self
+                .profiles
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            map.clear();
+            for profile in profiles {
+                map.insert(profile.name.clone(), profile.clone());
+            }
+            // Fill gaps with synthesized profiles from specs.
+            for spec in specs {
+                map.entry(spec.name.clone())
+                    .or_insert_with(|| ToolRagProfile::from_tool_spec(spec));
+            }
+        }
+    }
+
+    // ── Indexing ───────────────────────────────────────────────────────
+
+    /// Ensures every tool is embedded and stored using matching profiles.
+    ///
+    /// Specs without a profile are indexed from a synthesized
+    /// [`ToolRagProfile::from_tool_spec`]. Only re-embeds fields whose
+    /// text-derived version hash has changed.
+    pub async fn ensure_index(
+        &self,
+        specs: &[ToolSpec],
+        profiles: &[ToolRagProfile],
+    ) -> Result<(), EmbeddingError> {
+        let specs_hash = compute_index_hash(specs, profiles);
+        let prev_hash = self.last_specs_hash.load(Ordering::Acquire);
+        {
+            let cache = self
+                .cached_field_rows
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if prev_hash == specs_hash && !cache.is_empty() {
+                self.store_specs_and_profiles(specs, profiles);
+                return Ok(());
+            }
+        }
+
+        let Some(store) = self.store.as_ref().map(Arc::clone) else {
+            self.store_specs_and_profiles(specs, profiles);
             return Ok(());
         };
+
+        let profile_by_name: HashMap<&str, &ToolRagProfile> =
+            profiles.iter().map(|p| (p.name.as_str(), p)).collect();
 
         let cached = match store.list_tool_embedding_hashes().await {
             Ok(entries) => {
@@ -255,112 +284,79 @@ impl ToolRag {
         let model_name = self.embedder.model_name().to_string();
 
         for spec in specs {
-            let summary_text = spec.embedding_text(EmbeddingField::Summary);
-            if !summary_text.is_empty() {
-                let key = (
-                    spec.name.as_str().to_string(),
-                    "summary".into(),
-                    String::new(),
-                );
-                let hash = field_version_hash("summary", &summary_text);
-                if !is_cached(&cached, &key, &hash, &model_name) {
-                    let emb = embed(
-                        self.embedder.as_ref(),
-                        &summary_text,
-                        ene_ai::EmbeddingKind::Summary,
-                    )
-                    .await?;
-                    persist(
-                        &store,
-                        spec.name.as_str(),
-                        "summary",
-                        "",
-                        &hash,
-                        &model_name,
-                        &emb,
-                        &summary_text,
-                    )
-                    .await?;
-                }
-            }
+            let owned;
+            let profile = if let Some(p) = profile_by_name.get(spec.name.as_str()) {
+                *p
+            } else {
+                owned = ToolRagProfile::from_tool_spec(spec);
+                &owned
+            };
 
-            let desc_text = spec.embedding_text(EmbeddingField::Description);
-            if !desc_text.is_empty() {
-                let key = (
-                    spec.name.as_str().to_string(),
-                    "description".into(),
-                    String::new(),
-                );
-                let hash = field_version_hash("description", &desc_text);
-                if !is_cached(&cached, &key, &hash, &model_name) {
-                    let emb = embed(
-                        self.embedder.as_ref(),
-                        &desc_text,
-                        ene_ai::EmbeddingKind::Description,
-                    )
-                    .await?;
-                    persist(
-                        &store,
-                        spec.name.as_str(),
-                        "description",
-                        "",
-                        &hash,
-                        &model_name,
-                        &emb,
-                        &desc_text,
-                    )
-                    .await?;
-                }
-            }
+            self.index_field(
+                &store,
+                &cached,
+                &model_name,
+                profile,
+                EmbeddingField::Summary,
+                "",
+                None,
+                Some(&spec.parameters),
+            )
+            .await?;
 
-            let neg_text = spec.embedding_text(EmbeddingField::Negative);
-            if !neg_text.is_empty() {
-                let key = (
-                    spec.name.as_str().to_string(),
-                    "negative".into(),
-                    String::new(),
-                );
-                let hash = field_version_hash("negative", &neg_text);
-                if !is_cached(&cached, &key, &hash, &model_name) {
-                    let emb = embed(
-                        self.embedder.as_ref(),
-                        &neg_text,
-                        ene_ai::EmbeddingKind::Negative,
-                    )
-                    .await?;
-                    persist(
-                        &store,
-                        spec.name.as_str(),
-                        "negative",
-                        "",
-                        &hash,
-                        &model_name,
-                        &emb,
-                        &neg_text,
-                    )
-                    .await?;
-                }
-            }
+            self.index_field(
+                &store,
+                &cached,
+                &model_name,
+                profile,
+                EmbeddingField::Description,
+                "",
+                None,
+                Some(&spec.parameters),
+            )
+            .await?;
 
-            // TODO(#137): Re-enable per-example embeddings via ToolRagProfile.
-            // Previously this block iterated over `spec.examples` and embedded
-            // each `ToolExample` individually for fine-grained RAG retrieval.
-            // After the ToolSpec slim-down (#135), examples live only on
-            // `ActionSpec` (not `ToolSpec`), so example-level embedding is
-            // paused until `ToolRagProfile` provides a proper data-source path.
-            // See git history at c448c63^ for the original looping logic.
-        }
+            self.index_field(
+                &store,
+                &cached,
+                &model_name,
+                profile,
+                EmbeddingField::Capability,
+                "",
+                None,
+                None,
+            )
+            .await?;
 
-        {
-            let mut map = self
-                .specs
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            map.clear();
-            for spec in specs {
-                map.insert(spec.name.clone(), spec.clone());
+            self.index_field(
+                &store,
+                &cached,
+                &model_name,
+                profile,
+                EmbeddingField::Negative,
+                "",
+                None,
+                None,
+            )
+            .await?;
+
+            for i in 0..profile.examples.len() {
+                let field_key = format!("ex_{i}");
+                self.index_field(
+                    &store,
+                    &cached,
+                    &model_name,
+                    profile,
+                    EmbeddingField::Example,
+                    &field_key,
+                    Some(i),
+                    None,
+                )
+                .await?;
             }
         }
+
+        self.store_specs_and_profiles(specs, profiles);
 
         match store.list_tool_embedding_fields().await {
             Ok(rows) => {
@@ -395,12 +391,58 @@ impl ToolRag {
         Ok(())
     }
 
+    async fn index_field(
+        &self,
+        store: &Arc<MemoryStore>,
+        cached: &HashMap<(String, String, String), (String, String)>,
+        model_name: &str,
+        profile: &ToolRagProfile,
+        field: EmbeddingField,
+        field_key: &str,
+        example_index: Option<usize>,
+        parameters: Option<&serde_json::Value>,
+    ) -> Result<(), EmbeddingError> {
+        let text = profile.embedding_text(field, parameters, example_index);
+        if text.is_empty() {
+            return Ok(());
+        }
+        let field_name = field.as_str();
+        let key = (
+            profile.name.as_str().to_string(),
+            field_name.to_string(),
+            field_key.to_string(),
+        );
+        let hash = field_version_hash(field_name, &text);
+        if is_cached(cached, &key, &hash, model_name) {
+            return Ok(());
+        }
+        let kind = match field {
+            EmbeddingField::Summary => ene_ai::EmbeddingKind::Summary,
+            EmbeddingField::Description => ene_ai::EmbeddingKind::Description,
+            EmbeddingField::Capability => ene_ai::EmbeddingKind::Capability,
+            EmbeddingField::Example => ene_ai::EmbeddingKind::Example,
+            EmbeddingField::Negative => ene_ai::EmbeddingKind::Negative,
+        };
+        let emb = embed(self.embedder.as_ref(), &text, kind).await?;
+        persist(
+            store,
+            profile.name.as_str(),
+            field_name,
+            field_key,
+            &hash,
+            model_name,
+            &emb,
+            &text,
+        )
+        .await
+    }
+
     // ── Selection ──────────────────────────────────────────────────────
 
     /// Select the most relevant tools for the given query.
     ///
     /// Pipeline: embed query → optional `HyDE` → per-tool weighted field
-    /// similarity → hard filters → optional rerank → top-N + forced tools.
+    /// similarity → category limits → `top_k` → optional rerank → `final_n` + forced.
     pub async fn select(&self, query: &str) -> Vec<ToolSpec> {
         let query_vec = match embed_query(self.embedder.as_ref(), query).await {
             Ok(v) => v,
@@ -500,7 +542,7 @@ impl ToolRag {
         let t_load = t_start.elapsed();
 
         let w = &self.opts.weights;
-        let mut per_tool: HashMap<String, (f32, Vec<FieldScore>)> = HashMap::new();
+        let mut per_tool: HashMap<String, f32> = HashMap::new();
 
         for row in &field_rows {
             let sim = cosine_similarity(&query_vec, &row.embedding);
@@ -515,31 +557,54 @@ impl ToolRag {
             let weight = match row.field.as_str() {
                 "summary" => w.summary,
                 "description" => w.description,
+                "capability" => w.capability,
                 "example" => w.example,
                 "negative" => w.negative,
                 "hyde" => w.hyde,
                 _ => 1.0,
             };
 
-            let weighted = blended * weight;
-            let entry = per_tool
-                .entry(row.tool_name.clone())
-                .or_insert((0.0, Vec::new()));
-            entry.0 += weighted;
-            entry.1.push(FieldScore {
-                field: row.field.clone(),
-                similarity: sim,
-                weighted,
-            });
+            *per_tool.entry(row.tool_name.clone()).or_insert(0.0) += blended * weight;
         }
 
-        let mut scored: Vec<(String, f32, Vec<FieldScore>)> = per_tool
+        let mut scored: Vec<(String, f32)> = per_tool
             .into_iter()
-            .map(|(name, (score, fields))| (name, score, fields))
-            .filter(|(_, s, _)| *s >= self.opts.min_similarity)
+            .filter(|(_, s)| *s >= self.opts.min_similarity)
             .collect();
 
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Apply per-category limits (drop lowest-scoring extras).
+        if !self.opts.per_category_limits.is_empty() {
+            let profiles = self
+                .profiles
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut category_counts: HashMap<String, usize> = HashMap::new();
+            scored.retain(|(name, _)| {
+                let Ok(tn) = ToolName::try_new(name.clone()) else {
+                    return false;
+                };
+                let Some(profile) = profiles.get(&tn) else {
+                    return true;
+                };
+                let key = profile.category.config_key().to_string();
+                let Some(&limit) = self.opts.per_category_limits.get(&key) else {
+                    return true;
+                };
+                let count = category_counts.entry(key).or_insert(0);
+                if *count >= limit {
+                    return false;
+                }
+                *count += 1;
+                true
+            });
+        }
+
+        // Cap to top_k before rerank.
+        if scored.len() > self.opts.top_k {
+            scored.truncate(self.opts.top_k);
+        }
 
         let all_specs = {
             let map = self
@@ -549,9 +614,9 @@ impl ToolRag {
             map.clone()
         };
 
-        let mut candidates: Vec<(ToolSpec, f32)> =
-            Vec::with_capacity(scored.len().min(self.opts.rerank_candidates));
-        for (name, score, _fields) in scored.iter().take(self.opts.rerank_candidates) {
+        let take_n = self.opts.rerank_candidates.min(scored.len());
+        let mut candidates: Vec<(ToolSpec, f32)> = Vec::with_capacity(take_n);
+        for (name, score) in scored.iter().take(take_n) {
             match ToolName::try_new(name.clone()) {
                 Ok(tn) => {
                     if let Some(spec) = all_specs.get(&tn) {
@@ -621,12 +686,16 @@ impl ToolRag {
 
     // ── Background indexing ─────────────────────────────────────────────
 
-    /// Spawns a background task that warms the index with the given specs.
+    /// Spawns a background task that warms the index with the given specs and profiles.
     /// Returns immediately; the indexing runs asynchronously.
-    pub fn start_background_indexer(self: &Arc<Self>, specs: Vec<ToolSpec>) {
+    pub fn start_background_indexer(
+        self: &Arc<Self>,
+        specs: Vec<ToolSpec>,
+        profiles: Vec<ToolRagProfile>,
+    ) {
         let rag = Arc::clone(self);
         tokio::spawn(async move {
-            match rag.ensure_index(&specs).await {
+            match rag.ensure_index(&specs, &profiles).await {
                 Ok(()) => tracing::info!(
                     "[ToolRag] Background indexer completed for {} specs",
                     specs.len()
@@ -674,14 +743,6 @@ struct CachedFieldRow {
     tool_name: String,
     field: String,
     embedding: Vec<f32>,
-}
-
-#[derive(Debug, Clone, Default)]
-#[expect(dead_code)]
-struct FieldScore {
-    field: String,
-    similarity: f32,
-    weighted: f32,
 }
 
 /// Compute a content-based version hash for a single field.
@@ -748,7 +809,7 @@ pub struct ToolRagStats {
     pub top_similarity: f32,
 }
 
-fn compute_specs_hash(specs: &[ToolSpec]) -> u64 {
+fn compute_index_hash(specs: &[ToolSpec], profiles: &[ToolRagProfile]) -> u64 {
     let mut hasher = blake3::Hasher::new();
     for spec in specs {
         if let Ok(bytes) = serde_json::to_vec(spec) {
@@ -757,9 +818,61 @@ fn compute_specs_hash(specs: &[ToolSpec]) -> u64 {
             hasher.update(spec.name.as_str().as_bytes());
         }
     }
+    hasher.update(b"|profiles|");
+    for profile in profiles {
+        if let Ok(bytes) = serde_json::to_vec(profile) {
+            hasher.update(&bytes);
+        } else {
+            hasher.update(profile.name.as_str().as_bytes());
+        }
+    }
     let hash = hasher.finalize();
     let bytes = hash.as_bytes();
     let mut array = [0u8; 8];
     array.copy_from_slice(&bytes[0..8]);
     u64::from_le_bytes(array)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ene_tool_proto::types::KeywordSet;
+    use ene_tool_proto::{ToolCategory, ToolExample, ToolVersion};
+
+    fn profile(name: &str, category: ToolCategory) -> ToolRagProfile {
+        ToolRagProfile {
+            name: ToolName::new(name),
+            display_name: name.into(),
+            summary: format!("summary for {name}"),
+            description: format!("description for {name}"),
+            category,
+            keywords: KeywordSet::default(),
+            examples: vec![ToolExample {
+                description: "ex".into(),
+                input: serde_json::json!({}),
+                output: None,
+            }],
+            caveats: Vec::new(),
+            preconditions: Vec::new(),
+            side_effects: ene_tool_proto::SideEffects::ReadOnly,
+            related: Vec::new(),
+            version: ToolVersion::default(),
+        }
+    }
+
+    #[test]
+    fn index_hash_includes_profiles() {
+        let specs = vec![ToolSpec::new(
+            ToolName::new("a"),
+            "desc",
+            serde_json::json!({}),
+        )];
+        let p1 = vec![profile("a", ToolCategory::Utility)];
+        let mut p2 = p1.clone();
+        p2[0].keywords.negative.push("nope".into());
+        assert_ne!(
+            compute_index_hash(&specs, &p1),
+            compute_index_hash(&specs, &p2)
+        );
+    }
 }

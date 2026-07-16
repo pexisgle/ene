@@ -13,7 +13,7 @@ The crate has three responsibilities:
 
 1. **The `ToolProvider` trait** — the interface every tool binary implements to describe and execute its tools.
 2. **The wire protocol** — `IpcRequest` / `IpcResponse`, framed length-prefixed JSON over a Unix Domain Socket (Unix) or Named Pipe (Windows), plus the [`run_tool_server`](#run_tool_server) helper that turns a `ToolProvider` into a running IPC server.
-3. **Shared metadata types** — `ToolSpec`, `ActionSpec`, `ToolName`, `ToolVersion`, `ToolCategory`, `KeywordSet`, `SideEffects`, and `ToolError`, used by the Tool RAG pipeline and passed to LLMs as part of the tool list.
+3. **Shared metadata types** — `ToolSpec` (LLM-facing), `ToolRagProfile` (host/RAG, #137), `ToolName`, `ToolVersion`, `ToolCategory`, `KeywordSet`, `SideEffects`, and `ToolError`.
 
 See also: [`ene-tool-host`](./ene-tool-host.md) for the host-side connection management, [`ene-tool-common`](./ene-tool-common.md) for the tool-side `ToolAction`/`ToolSpecArgs` traits, and [`ene-tool-derive`](./ene-tool-derive.md) for the proc-macros that generate `ToolSpec`s.
 
@@ -22,10 +22,10 @@ See also: [`ene-tool-host`](./ene-tool-host.md) for the host-side connection man
 ## Protocol Version
 
 ```rust
-pub const IPC_PROTOCOL_VERSION: u32 = 2;
+pub const IPC_PROTOCOL_VERSION: u32 = 4;
 ```
 
-Both parties send their version in the `Handshake` / `HandshakeAck` messages. The server (`run_tool_server`) **strictly rejects** a mismatched version — it does not downgrade or negotiate — closing the connection with an `IpcResponse::Error`. Bump this constant only when the wire format changes in a backward-incompatible way (see [AGENTS.md §6 R3](../../AGENTS.md)). Version **2** reflects the slim LLM-facing `ToolSpec` (`name` / `description` / `parameters` only).
+Both parties send their version in the `Handshake` / `HandshakeAck` messages. The server (`run_tool_server`) **strictly rejects** a mismatched version — it does not downgrade or negotiate — closing the connection with an `IpcResponse::Error`. Bump this constant only when the wire format changes in a backward-incompatible way (see [AGENTS.md §6 R3](../../AGENTS.md)). Version **4** adds `ListRagProfiles` / `RagProfiles` for [`ToolRagProfile`](#toolragprofile) (#137). `ToolSpec` remains LLM-facing only (`name` / `description` / `parameters`).
 
 ---
 
@@ -38,7 +38,7 @@ The interface each tool binary implements. The host-side `IpcToolRegistry` (in `
 pub trait ToolProvider: Send + Sync {
     fn list_specs(&self) -> Vec<ToolSpec>;
 
-    fn list_action_specs(&self) -> Vec<ActionSpec> {
+    fn list_rag_profiles(&self) -> Vec<ToolRagProfile> {
         Vec::new()
     }
 
@@ -69,7 +69,7 @@ pub trait ToolProvider: Send + Sync {
 | Method | Required? | Default | Description |
 |---|---|---|---|
 | `list_specs(&self) -> Vec<ToolSpec>` | **Required** | — | Full metadata for every tool this provider exposes. Mega-tools return N specs, one per action (e.g. `filesystem.read`, `filesystem.write`, ...). |
-| `list_action_specs(&self) -> Vec<ActionSpec>` | Optional | `Vec::new()` | Per-action metadata used for Tool RAG embedding. Only meaningful for mega-tools; individual tools leave this empty. |
+| `list_rag_profiles(&self) -> Vec<ToolRagProfile>` | Optional | `Vec::new()` | Host/RAG metadata for Tool RAG indexing (#137). Prefer emitting from `#[derive(ToolSpec)]` / `ActionSetProvider`. |
 | `call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>` | **Required** | — | Executes a tool by name with JSON-encoded `arguments`. `async`. |
 | `set_session_id(&self, session_id: &str)` | **Required** | — | Sets the current session ID (used for undo tracking, session-scoped state, etc.). |
 | `set_sandbox(&self, sandbox: &SandboxConfigData)` | Optional | no-op | Receives sandbox configuration (used by filesystem/shell tools). |
@@ -139,51 +139,45 @@ A composite registry that aggregates multiple `ToolProvider`s and dispatches cal
 
 ### `ToolSpec`
 
-The structured, LLM-facing description of a single callable tool. This is the primary metadata type used by the Tool RAG pipeline and passed to LLMs as part of the tool list.
+The structured, LLM-facing description of a single callable tool (`name`, `description`, `parameters` only — #135).
 
 ```rust
 pub struct ToolSpec {
     pub name: ToolName,
-    pub version: ToolVersion,
+    pub description: String,
+    pub parameters: serde_json::Value,  // JSON Schema, auto-derived by schemars
+}
+```
+
+| Method | Signature | Description |
+|---|---|---|
+| `new` | `fn new(name, description, parameters) -> Self` | Construct an LLM-facing tool spec. |
+
+### `ToolRagProfile`
+
+Host/RAG-only metadata for a callable tool (#137). Never passed to the LLM tool list — exchanged via `IpcResponse::RagProfiles` and consumed by `ene-tool-rag`.
+
+```rust
+pub struct ToolRagProfile {
+    pub name: ToolName,
     pub display_name: String,
     pub summary: String,
     pub description: String,
     pub category: ToolCategory,
     pub keywords: KeywordSet,
-    pub parameters: serde_json::Value,  // JSON Schema, auto-derived by schemars
     pub examples: Vec<ToolExample>,
     pub caveats: Vec<String>,
-    pub side_effects: SideEffects,
     pub preconditions: Vec<String>,
+    pub side_effects: SideEffects,
     pub related: Vec<ToolName>,
+    pub version: ToolVersion,
 }
 ```
 
 | Method | Signature | Description |
 |---|---|---|
-| `embedding_text` | `fn embedding_text(&self, field: EmbeddingField) -> String` | Builds a text representation of the spec for RAG embedding. See [`EmbeddingField`](#embeddingfield) for what each variant includes. |
-
-### `ActionSpec`
-
-One capability within a mega-tool (e.g. `filesystem.read` and `filesystem.write` are two `ActionSpec`s under the `filesystem` tool). Always embedded separately for Tool RAG and surfaced via `IpcResponse::ActionSpecs`.
-
-```rust
-pub struct ActionSpec {
-    pub name: String,
-    pub display_name: String,
-    pub summary: String,
-    pub description: String,
-    pub keywords: KeywordSet,
-    pub examples: Vec<ToolExample>,
-    pub caveats: Vec<String>,
-    pub side_effects: SideEffects,
-    pub preconditions: Vec<String>,
-}
-```
-
-| Method | Signature | Description |
-|---|---|---|
-| `minimal` | `fn minimal(name: impl Into<String>, summary: impl Into<String>) -> Self` | Builds a minimal `ActionSpec` — sets `name`, `display_name` (copy of `name`), and `summary`; every other field is left at its default (`ReadOnly` side effects, empty vecs, `KeywordSet::default()`). Used by simple, non-mega tools that don't need the full descriptor. |
+| `from_tool_spec` | `fn from_tool_spec(spec: &ToolSpec) -> Self` | Synthesize a minimal profile (e.g. MCP tools). |
+| `embedding_text` | `fn embedding_text(&self, field: EmbeddingField, parameters: Option<&Value>, example_index: Option<usize>) -> String` | Builds embedding text for a single index field. |
 
 ### `ToolName`
 
@@ -242,7 +236,7 @@ pub enum ToolCategory {
 }
 ```
 
-Used for classification and RAG filtering. Mega-tools (`Filesystem`, `Shell`, `Browser`, `App`) carry additional per-action specs at the IPC level via `IpcResponse::ActionSpecs`.
+Used for classification and RAG filtering. Category also drives `tools.rag.per_category_limits` via `ToolCategory::config_key()`.
 
 | Method | Signature | Description |
 |---|---|---|
@@ -301,21 +295,25 @@ One example of the tool in use, shown to the LLM and used for example-based RAG 
 pub enum EmbeddingField {
     Summary,
     Description,
+    Capability,
+    Example,
     Negative,
 }
 ```
 
-Controls which subset of a `ToolSpec`'s text content [`ToolSpec::embedding_text`](#toolspec) produces:
+Controls which subset of a [`ToolRagProfile`](#toolragprofile)'s text [`ToolRagProfile::embedding_text`](#toolragprofile) produces:
 
 | Variant | Included text |
 |---|---|
-| `Summary` | `"{name}: {summary}"` — highest-signal, used for fast retrieval. |
-| `Description` | `"{name}\n{description}"` plus a formatted keyword block (`Primary: ... \| Secondary: ... \| Domain: ... \| Negative: ...`) when non-empty — used for ranking refinement. |
-| `Negative` | `"{name} NOT: {negative keywords joined by ", "}"`, or `""` if there are no negative keywords — used for disambiguation. |
+| `Summary` | `"{name}: {summary}"` |
+| `Description` | description + keyword block + optional JSON Schema property summary |
+| `Capability` | category label + summary + primary keywords |
+| `Example` | one worked example (`example_index` selects the row) |
+| `Negative` | `"{name} NOT: {negative keywords}"`, or `""` if empty |
 
 | Method | Signature | Description |
 |---|---|---|
-| `as_str` | `fn as_str(&self) -> &'static str` | The string label persisted in the index (`"summary"`, `"description"`, `"negative"`). |
+| `as_str` | `fn as_str(&self) -> &'static str` | The string label persisted in the index (`"summary"`, `"description"`, `"capability"`, `"example"`, `"negative"`). |
 
 ### `SandboxConfigData`
 
@@ -473,39 +471,32 @@ Messages sent from the **core** (`ene-runtime` / `ene-tool-host`) **to** the too
 
 ```rust
 pub enum IpcRequest {
-    Handshake { version: u32 },
-    Initialize {
+    Handshake {
+        version: u32,
         sandbox: SandboxConfigData,
         tool_config: Option<serde_json::Value>,
     },
     ListTools,
-    ListActionSpecs,
+    ListRagProfiles,
     GetConfigSchema,
     CallTool { name: String, arguments: String },
-    SetSessionId { session_id: String },
+    SetCallContext { conversation_id: String, turn_id: String },
     ApprovePermission { request_id: String },
     AllowPattern { action: String, target_pattern: String },
-    GetMyConfig,
-    SetMyConfig(serde_json::Value),
-    Ping,
     Shutdown,
 }
 ```
 
 | Variant | Purpose |
 |---|---|
-| `Handshake { version }` | Negotiate protocol version. Must be the first message. |
-| `Initialize { sandbox, tool_config }` | Provide sandbox policy and per-tool config. |
-| `ListTools` | Request the tool's full metadata list. |
-| `ListActionSpecs` | Request per-action metadata (for mega-tool embedding). |
-| `GetConfigSchema` | Request the tool's configuration JSON Schema. |
+| `Handshake { version, sandbox, tool_config }` | Negotiate protocol version and push sandbox + tool config (v3+). |
+| `ListTools` | Request the tool's LLM-facing `ToolSpec` list. |
+| `ListRagProfiles` | Request host/RAG `ToolRagProfile` list (#137 / IPC v4). |
+| `GetConfigSchema` | Request the tool's configuration JSON Schema (#150 exception). |
 | `CallTool { name, arguments }` | Invoke a tool by name with JSON arguments. |
-| `SetSessionId { session_id }` | Propagate the active session ID. |
+| `SetCallContext { conversation_id, turn_id }` | Propagate conversation + turn identifiers. |
 | `ApprovePermission { request_id }` | Grant a pending permission request. |
 | `AllowPattern { action, target_pattern }` | Add a pattern to the sandbox allow-list. |
-| `GetMyConfig` | Get the tool's configuration. |
-| `SetMyConfig(value)` | Replace the tool's configuration. |
-| `Ping` | Health-check ping. |
 | `Shutdown` | Graceful shutdown. |
 
 ---
@@ -519,11 +510,9 @@ pub enum IpcResponse {
     HandshakeAck { version: u32 },
     Ack,
     Tools { tools: Vec<ToolSpec> },
-    ActionSpecs { specs: Vec<ActionSpec> },
+    RagProfiles { profiles: Vec<ToolRagProfile> },
     ConfigSchema { schema: Option<serde_json::Value> },
     CallResult { result: Result<String, ToolError> },
-    MyConfig(serde_json::Value),
-    Pong,
     Error { message: String },
 }
 ```
@@ -531,13 +520,11 @@ pub enum IpcResponse {
 | Variant | Purpose |
 |---|---|
 | `HandshakeAck { version }` | Acknowledge the Handshake with the negotiated version. |
-| `Ack` | Generic acknowledgment (for `Initialize`, `SetSessionId`, etc.). |
+| `Ack` | Generic acknowledgment (for `SetCallContext`, permissions, etc.). |
 | `Tools { tools }` | Response to `ListTools`. |
-| `ActionSpecs { specs }` | Response to `ListActionSpecs`. For mega-tools, one entry per action. |
+| `RagProfiles { profiles }` | Response to `ListRagProfiles` (#137). |
 | `ConfigSchema { schema }` | Response to `GetConfigSchema`. |
 | `CallResult { result }` | Response to `CallTool`. |
-| `MyConfig(value)` | Response to `GetMyConfig`. |
-| `Pong` | Response to `Ping`. |
 | `Error { message }` | Unrecoverable tool-side error (outside a specific call), e.g. a handshake version mismatch. |
 
 ### Message sequence diagram
@@ -725,22 +712,24 @@ fn handle_ipc_call_tool(raw_name: &str) -> Result<ToolName, ToolError> {
 }
 ```
 
-### Building an `ActionSpec` for a mega-tool action
+### Building a `ToolRagProfile` from a slim `ToolSpec`
 
 ```rust,no_run
-use ene_tool_proto::ActionSpec;
+use ene_tool_proto::{ToolName, ToolRagProfile, ToolSpec};
 
-let read_action = ActionSpec::minimal("read", "Read a file from disk");
-assert_eq!(read_action.name, "read");
+let spec = ToolSpec::new(ToolName::new("mcp.hello"), "Say hello", serde_json::json!({}));
+let profile = ToolRagProfile::from_tool_spec(&spec);
+assert_eq!(profile.summary, "Say hello");
 ```
 
 ### Computing RAG embedding text
 
 ```rust,no_run
-use ene_tool_proto::{EmbeddingField, ToolSpec};
+use ene_tool_proto::types::EmbeddingField;
+use ene_tool_proto::ToolRagProfile;
 
-fn summary_embedding(spec: &ToolSpec) -> String {
-    spec.embedding_text(EmbeddingField::Summary)
+fn summary_embedding(profile: &ToolRagProfile) -> String {
+    profile.embedding_text(EmbeddingField::Summary, None, None)
 }
 ```
 

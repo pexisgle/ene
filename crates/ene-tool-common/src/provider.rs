@@ -10,7 +10,7 @@
 
 use crate::ToolAction;
 use async_trait::async_trait;
-use ene_tool_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec};
+use ene_tool_proto::{SandboxConfigData, ToolError, ToolProvider, ToolRagProfile, ToolSpec};
 
 type SetCallContextHook = Box<dyn Fn(&str) + Send + Sync>;
 type SandboxHook = Box<dyn Fn(&SandboxConfigData) + Send + Sync>;
@@ -115,6 +115,10 @@ impl ActionSetProvider {
 impl ToolProvider for ActionSetProvider {
     fn list_specs(&self) -> Vec<ToolSpec> {
         self.actions.iter().map(|a| a.definition()).collect()
+    }
+
+    fn list_rag_profiles(&self) -> Vec<ToolRagProfile> {
+        self.actions.iter().map(|a| a.rag_profile()).collect()
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
@@ -260,6 +264,10 @@ impl ToolProvider for SingleActionProvider {
         vec![self.action.definition()]
     }
 
+    fn list_rag_profiles(&self) -> Vec<ToolRagProfile> {
+        vec![self.action.rag_profile()]
+    }
+
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
         if self.action.name() == name {
             self.action.execute(arguments).await
@@ -308,7 +316,7 @@ impl ToolProvider for SingleActionProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ene_tool_proto::{ToolName, ToolSpec};
+    use ene_tool_proto::{ToolName, ToolRagProfile, ToolSpec};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -326,6 +334,10 @@ mod tests {
                 "Echoes the input back unchanged.",
                 serde_json::json!({"type": "object"}),
             )
+        }
+
+        fn rag_profile(&self) -> ToolRagProfile {
+            ToolRagProfile::from_tool_spec(&self.definition())
         }
 
         async fn execute(&self, arguments: &str) -> Result<String, ToolError> {

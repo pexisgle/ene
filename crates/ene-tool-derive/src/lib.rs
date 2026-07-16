@@ -147,6 +147,10 @@ fn expand_tool_action_derive(ast: &DeriveInput) -> syn::Result<TokenStream2> {
                 <Self as ::ene_tool_common::ToolSpecArgs>::spec()
             }
 
+            fn rag_profile(&self) -> ::ene_tool_proto::ToolRagProfile {
+                <Self as ::ene_tool_common::ToolSpecArgs>::rag_profile()
+            }
+
             async fn execute(&self, arguments: &str) -> ::std::result::Result<::std::string::String, ::ene_tool_proto::ToolError> {
                 let mut args: Self = ::serde_json::from_str(arguments).map_err(|e| {
                     ::ene_tool_proto::ToolError::InvalidArguments {
@@ -222,8 +226,14 @@ fn expand_tool_action(item: &mut syn::ItemImpl, args_ty: &syn::Type) {
             <#args_ty as ::ene_tool_common::ToolSpecArgs>::spec()
         }
     };
+    let rag_fn: syn::ImplItem = syn::parse_quote! {
+        fn rag_profile(&self) -> ::ene_tool_proto::ToolRagProfile {
+            <#args_ty as ::ene_tool_common::ToolSpecArgs>::rag_profile()
+        }
+    };
     item.items.push(name_fn);
     item.items.push(def_fn);
+    item.items.push(rag_fn);
 }
 
 fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
@@ -253,31 +263,17 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
     let display_name = struct_attrs.display_name_value(ident.to_string());
     let summary = struct_attrs.summary_value()?;
     let description = struct_attrs.description_value();
-    // ═══ Negative keywords — live on ToolSpec ═══
-    let negative_keywords = struct_attrs.keywords_list("negative");
-
-    // Extra metadata attrs (category, keywords, side_effects, examples, …)
-    // remain parsed so existing `#[tool(...)]` annotations keep compiling,
-    // but they are intentionally not emitted on the LLM-facing `ToolSpec`
-    // (#135 / #137 — ToolRagProfile deferred).
-    //
-    // The suppression is deliberate: these fields were part of an earlier
-    // profiling schema that was removed from the wire format. Keeping the
-    // parser arms ensures backwards-compatible attribute usage — existing
-    // tool definitions do not have to be rewritten — while the discarded
-    // values are a no-op.
-    let _ = (
-        struct_attrs.category_path(),
-        struct_attrs.side_effects_path(),
-        struct_attrs.keywords_list("primary"),
-        struct_attrs.keywords_list("secondary"),
-        struct_attrs.keywords_list("domain"),
-        struct_attrs.examples_value(),
-        struct_attrs.string_list("caveats"),
-        struct_attrs.string_list("preconditions"),
-        struct_attrs.related_list(),
-        struct_attrs.version_tokens(),
-    );
+    let category = struct_attrs.category_path();
+    let side_effects = struct_attrs.side_effects_path();
+    let keywords_primary = struct_attrs.keywords_list("primary");
+    let keywords_secondary = struct_attrs.keywords_list("secondary");
+    let keywords_domain = struct_attrs.keywords_list("domain");
+    let keywords_negative = struct_attrs.keywords_list("negative");
+    let caveats = struct_attrs.string_list("caveats");
+    let preconditions = struct_attrs.string_list("preconditions");
+    let related = struct_attrs.related_list();
+    let version = struct_attrs.version_tokens();
+    let examples = struct_attrs.examples_value();
     let args_const_ident = struct_attrs.args_const_ident(ident);
 
     // Per-field post-processing instructions.
@@ -298,14 +294,9 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
 
             /// Construct a `ToolSpec` for this args type.
             ///
-            /// Emits the LLM-facing fields (`name`, `description`,
-            /// `parameters`) plus `negative_keywords` for RAG
-            /// disambiguation. Extra `#[tool(...)]` metadata attrs
-            /// (category, side_effects, primary/secondary/domain
-            /// keywords, examples, caveats, preconditions, related,
-            /// version) remain accepted for authoring convenience
-            /// but are not stored on the wire `ToolSpec` until
-            /// `ToolRagProfile` lands (#137).
+            /// Emits the LLM-facing fields only (`name`, `description`,
+            /// `parameters`). Rich `#[tool(...)]` metadata is emitted by
+            /// [`Self::rag_profile`] for Tool RAG (#137).
             pub fn spec() -> ::ene_tool_proto::ToolSpec {
                 use ::ene_tool_proto::{ToolSpec, ToolName};
                 use ::schemars::JsonSchema as _;
@@ -337,7 +328,42 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
                     name: ToolName::new(#tool_name_str),
                     description,
                     parameters: schema,
-                    negative_keywords: vec![#(#negative_keywords.into()),*],
+                }
+            }
+
+            /// Construct the host/RAG metadata profile for this args type (#137).
+            pub fn rag_profile() -> ::ene_tool_proto::ToolRagProfile {
+                use ::ene_tool_proto::{
+                    KeywordSet, ToolName, ToolRagProfile, ToolVersion,
+                };
+
+                let description = {
+                    let from_attr = #description;
+                    if from_attr.is_empty() {
+                        #summary.to_string()
+                    } else {
+                        from_attr.to_string()
+                    }
+                };
+
+                ToolRagProfile {
+                    name: ToolName::new(#tool_name_str),
+                    display_name: #display_name.to_string(),
+                    summary: #summary.to_string(),
+                    description,
+                    category: #category,
+                    keywords: KeywordSet {
+                        primary: vec![#(#keywords_primary.into()),*],
+                        secondary: vec![#(#keywords_secondary.into()),*],
+                        domain: vec![#(#keywords_domain.into()),*],
+                        negative: vec![#(#keywords_negative.into()),*],
+                    },
+                    examples: #examples,
+                    caveats: vec![#(#caveats.into()),*],
+                    preconditions: vec![#(#preconditions.into()),*],
+                    side_effects: #side_effects,
+                    related: vec![#(ToolName::new(#related)),*],
+                    version: #version,
                 }
             }
         }
@@ -346,6 +372,9 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
             const TOOL_NAME: &'static str = #tool_name_str;
             fn spec() -> ::ene_tool_proto::ToolSpec {
                 <Self>::spec()
+            }
+            fn rag_profile() -> ::ene_tool_proto::ToolRagProfile {
+                <Self>::rag_profile()
             }
         }
 

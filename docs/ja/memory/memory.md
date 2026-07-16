@@ -59,7 +59,7 @@ tool_embedding_index (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     tool_name TEXT NOT NULL,
     field TEXT NOT NULL CHECK (field IN ('summary','description','capability','example','negative')),
-    field_key TEXT NOT NULL,        -- "" for ToolSpec, action name for ActionSpec
+    field_key TEXT NOT NULL,        -- 単一行フィールドは ""、ToolRagProfile の例行は ex_N
     version_hash TEXT NOT NULL,
     model_name TEXT NOT NULL,
     embedding BLOB NOT NULL,
@@ -107,7 +107,7 @@ __tool_schemas (
 
 ### ツール埋め込み (マルチベクトル)
 
-各ツールはフィールドごとに複数の埋め込み行を持ちます (`summary`, `description`, `capability`, `example`, `negative`)。フィールドごとのアプローチにより、`search_tools` はフィールド間の max-pool で関連性を集約できます。`field_key` はトップレベルの ToolSpec 埋め込みとアクションごとの ActionSpec 埋め込みを区別します。`model_name` により異なるモデルでの再埋め込みが可能です。
+各ツールはフィールドごとに複数の埋め込み行を持ちます (`summary`, `description`, `capability`, `example`, `negative`)。フィールドごとのアプローチにより、`search_tools` はフィールド間の max-pool で関連性を集約できます。`field_key` は単一行フィールドでは `""`、`ToolRagProfile` の例行では `ex_N` です。`model_name` により異なるモデルでの再埋め込みが可能です。
 
 | メソッド | 説明 |
 |---------|------|

@@ -59,7 +59,7 @@ tool_embedding_index (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     tool_name TEXT NOT NULL,
     field TEXT NOT NULL CHECK (field IN ('summary','description','capability','example','negative')),
-    field_key TEXT NOT NULL,        -- "" for ToolSpec, action name for ActionSpec
+    field_key TEXT NOT NULL,        -- "" for single-row fields or ex_N for example rows from ToolRagProfile
     version_hash TEXT NOT NULL,
     model_name TEXT NOT NULL,
     embedding BLOB NOT NULL,
@@ -107,7 +107,7 @@ The `__tool_schemas` table is a metadata registry used by the Tool DB IPC server
 
 ### Tool Embeddings (Multi-Vector)
 
-Each tool has multiple embedding rows (one per field: `summary`, `description`, `capability`, `example`, `negative`). The per-field approach enables `search_tools` to aggregate relevance via max-pool across fields. The `field_key` distinguishes top-level ToolSpec embeddings from per-action ActionSpec embeddings. The `model_name` allows re-embedding with different models.
+Each tool has multiple embedding rows (one per field: `summary`, `description`, `capability`, `example`, `negative`). The per-field approach enables `search_tools` to aggregate relevance via max-pool across fields. The `field_key` is `""` for single-row fields or `ex_N` for example rows from `ToolRagProfile`. The `model_name` allows re-embedding with different models.
 
 | Method | Description |
 |--------|-------------|

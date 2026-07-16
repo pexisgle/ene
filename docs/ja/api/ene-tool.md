@@ -23,7 +23,8 @@
 - **ワイヤー:** ツールバイナリは `ToolProvider` を実装し、handshake / list / call / permission・user-input 継続 / shutdown を話す。
 - **ホスト:** `ene-tool-host::ToolRegistry` が IPC + MCP を集約する。
 - **名前衝突:** 全レジストリ層でハードエラー（`HostRegistry` は `ToolError::DuplicateName`；`CompositeToolRegistry` は `ToolHostError::DuplicateToolName` を返す）。
-- **`ToolSpec`** は LLM 向け: `name`、`description`、`parameters`。内部 RAG フィールド（例: `negative_keywords`）は `#[doc(hidden)]` + `#[serde(skip)]` — 安定 ABI に含まれない。
+- **`ToolSpec`** は LLM 向け: `name`、`description`、`parameters`。
+- **`ToolRagProfile`** はホスト/RAG 専用 (#137): キーワード、例、カテゴリなど — LLM のツールリストには渡されない。
 
 ```rust,ignore
 use ene_tool::prelude::*;

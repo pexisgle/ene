@@ -269,15 +269,14 @@ pub trait ToolProvider: Send + Sync {
     /// Mega-tools return N specs, one per action (e.g. `filesystem.read`, ...).
     fn list_specs(&self) -> Vec<ToolSpec>;
 
-    /// Returns per-action metadata (used for Tool RAG embedding).
-    /// For individual tools, this returns an empty vec.
-    fn list_action_specs(&self) -> Vec<ActionSpec> { Vec::new() }
+    /// Returns host/RAG metadata profiles (#137). Default: empty.
+    fn list_rag_profiles(&self) -> Vec<ToolRagProfile> { Vec::new() }
 
     /// Executes a tool by name with the given JSON arguments.
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>;
 
-    /// Sets the current session ID (for undo tracking, session-scoped state, etc.).
-    fn set_session_id(&self, session_id: &str);
+    /// Sets the call context (conversation + turn identifiers).
+    fn set_call_context(&self, _ctx: &CallContext) {}
 
     /// Receives sandbox configuration (for filesystem tools; default: no-op).
     fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
@@ -288,11 +287,8 @@ pub trait ToolProvider: Send + Sync {
     /// Adds a session-wide permission allow pattern (action + target glob).
     fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
 
-    /// Receives tool-specific configuration (called once during Initialize).
+    /// Receives tool-specific configuration (called once during Handshake).
     fn set_config(&self, _config: &serde_json::Value) {}
-
-    /// Returns the tool's current configuration.
-    fn get_config(&self) -> serde_json::Value { serde_json::Value::Null }
 
     /// Returns the JSON Schema for the configuration this tool accepts.
     fn config_schema(&self) -> Option<serde_json::Value> { None }
@@ -301,23 +297,40 @@ pub trait ToolProvider: Send + Sync {
 
 ## ToolSpec
 
-The structured, LLM-facing tool specification (slimmed at v3):
+The structured, LLM-facing tool specification (slimmed at v3 / #135):
 
 ```rust
 pub struct ToolSpec {
     pub name: ToolName,                     // e.g. "filesystem.read"
-    pub description: String,                // full markdown description (used for RAG embedding)
+    pub description: String,                // full markdown description
     pub parameters: serde_json::Value,      // JSON Schema (auto-derived from schemars)
-    /// Negative keywords for RAG disambiguation — when present in the
-    /// user query, these terms *penalize* the tool's relevance score.
-    /// Interim field re-instated after #135 slim-down until
-    /// `ToolRagProfile` lands (#137). Wire-invisible when empty
-    /// (`skip_serializing_if = "Vec::is_empty"`).
-    pub negative_keywords: Vec<String>,
 }
 ```
 
-The `negative_keywords` field is a temporary vestige of the pre-#135 fat `ToolSpec`. It is retained only so that `#[tool(keywords_negative = "...")]` authoring data in derive macros is not lost before `ToolRagProfile` ships (#137). On the wire, an empty `Vec` is skipped entirely.
+RAG metadata (keywords, examples, category, …) lives on [`ToolRagProfile`](#toolragprofile) (#137), not on `ToolSpec`.
+
+## ToolRagProfile
+
+Host/RAG-only metadata for a callable tool. Never passed to the LLM tool list — exchanged via `IpcResponse::RagProfiles` (IPC v4) and consumed by `ene-tool-rag`.
+
+```rust
+pub struct ToolRagProfile {
+    pub name: ToolName,
+    pub display_name: String,
+    pub summary: String,
+    pub description: String,
+    pub category: ToolCategory,
+    pub keywords: KeywordSet,
+    pub examples: Vec<ToolExample>,
+    pub caveats: Vec<String>,
+    pub preconditions: Vec<String>,
+    pub side_effects: SideEffects,
+    pub related: Vec<ToolName>,
+    pub version: ToolVersion,
+}
+```
+
+`#[derive(ToolSpec)]` emits both `spec() -> ToolSpec` and `rag_profile() -> ToolRagProfile` from the same `#[tool(...)]` attributes. `ActionSetProvider` aggregates profiles via `ToolProvider::list_rag_profiles`.
 
 ## `#[tool(...)]` Attributes
 
@@ -415,7 +428,7 @@ Tool binary starts
 
 ## Protocol Variants
 
-The IPC wire protocol at `IPC_PROTOCOL_VERSION = 3` carries 10 request variants and 8 response variants. `UserInput` is **not** an IPC variant — it is surfaced through `ToolError::UserInputRequired` and handled by `ene-runtime`'s streaming loop.
+The IPC wire protocol at `IPC_PROTOCOL_VERSION = 4` carries 9 request variants and 7 response variants. `UserInput` is **not** an IPC variant — it is surfaced through `ToolError::UserInputRequired` and handled by `ene-runtime`'s streaming loop.
 
 ### Requests (host → tool)
 
@@ -423,13 +436,12 @@ The IPC wire protocol at `IPC_PROTOCOL_VERSION = 3` carries 10 request variants 
 |---|---|---|---|
 | `Handshake` | `version: u32`, `sandbox: SandboxConfigData`, `tool_config: Option<Value>` | Protocol negotiation + sandbox config + tool config push (Initialize folded at v3) | v1 |
 | `ListTools` | — | Fetch all `ToolSpec`s from the provider | v1 |
-| `ListActionSpecs` | — | Fetch per-action specs (mega-tool capability metadata for RAG) | v2 |
-| `GetConfigSchema` | — | Request the tool's config JSON Schema (#150 exception, not part of the "six primary") | v2 |
+| `ListRagProfiles` | — | Fetch `ToolRagProfile`s for Tool RAG indexing (#137) | v4 |
+| `GetConfigSchema` | — | Request the tool's config JSON Schema (#150 exception) | v2 |
 | `CallTool` | `name: String`, `arguments: String` | Execute a tool by name with JSON arguments | v1 |
-| `SetCallContext` | `conversation_id: String`, `turn_id: String` | Thread conversation + turn identifiers into the tool (supersedes v2 `SetSessionId`) | v2 |
+| `SetCallContext` | `conversation_id: String`, `turn_id: String` | Thread conversation + turn identifiers into the tool | v2 |
 | `ApprovePermission` | `request_id: String` | Approve a pending destructive-operation permission request | v1 |
-| `AllowPattern` | `action: String`, `target_pattern: String` | Register a session-wide permission allow pattern (action + target glob) | v1 |
-| `Ping` | — | Health-check ping for liveness monitoring | v2 |
+| `AllowPattern` | `action: String`, `target_pattern: String` | Register a session-wide permission allow pattern | v1 |
 | `Shutdown` | — | Graceful shutdown request | v1 |
 
 ### Responses (tool → host)
@@ -439,20 +451,19 @@ The IPC wire protocol at `IPC_PROTOCOL_VERSION = 3` carries 10 request variants 
 | `HandshakeAck` | `version: u32` | `Handshake` |
 | `Ack` | — | `SetCallContext`, `ApprovePermission`, `AllowPattern`, `Shutdown` |
 | `Tools` | `tools: Vec<ToolSpec>` | `ListTools` |
-| `ActionSpecs` | `specs: Vec<ActionSpec>` | `ListActionSpecs` |
+| `RagProfiles` | `profiles: Vec<ToolRagProfile>` | `ListRagProfiles` |
 | `ConfigSchema` | `schema: Option<Value>` | `GetConfigSchema` |
 | `CallResult` | `result: Result<String, ToolError>` | `CallTool` |
-| `Pong` | — | `Ping` |
-| `Error` | `error: String` | Any request that fails at the IPC level |
+| `Error` | `message: String` | Any request that fails at the IPC level |
 
 ## ABI Compatibility
 
-The wire ABI is everything in `ene-tool-proto`'s IPC surface: `IpcRequest`/`IpcResponse`, `IPC_PROTOCOL_VERSION`, `ToolSpec`/`ActionSpec` fields, `SandboxConfigData`, and `ToolError`. `run_tool_server` **strictly rejects** a handshake with a mismatched `IPC_PROTOCOL_VERSION` — there is no downgrade/negotiation — so version-bump decisions matter.
+The wire ABI is everything in `ene-tool-proto`'s IPC surface: `IpcRequest`/`IpcResponse`, `IPC_PROTOCOL_VERSION`, `ToolSpec`/`ToolRagProfile` fields, `SandboxConfigData`, and `ToolError`. `run_tool_server` **strictly rejects** a handshake with a mismatched `IPC_PROTOCOL_VERSION` — there is no downgrade/negotiation — so version-bump decisions matter.
 
 | Change | Compatible? | Action required |
 |---|---|---|
 | Add a new `IpcRequest`/`IpcResponse` enum variant | ✅ Additive | None — old tool binaries simply never send/receive the new variant. New host code must still handle old tool binaries not sending it. |
-| Add a new optional field to `ToolSpec`/`ActionSpec`/`SandboxConfigData` (with a `#[serde(default)]` or macro-provided default) | ✅ Additive | None. Follow the `define_tool_config!`/`schemars` pattern already used by `SandboxConfigData` so old JSON without the field still deserializes. |
+| Add a new optional field to `ToolSpec`/`ToolRagProfile`/`SandboxConfigData` (with a `#[serde(default)]` or macro-provided default) | ✅ Additive | None. Follow the `define_tool_config!`/`schemars` pattern already used by `SandboxConfigData` so old JSON without the field still deserializes. |
 | Add a new `ToolError` variant | ✅ Additive | None — `ToolError` is `#[serde(tag = "kind" ...)]`-free (plain enum), so new variants deserialize fine as long as old code doesn't exhaustively `match` without a wildcard arm. Prefer adding a `_ => ...` arm in new `match`es over new crates. |
 | Add a new `ToolProvider` trait method | ✅ Additive, if it has a default impl | Give it a default (no-op / empty) implementation, exactly like `set_sandbox`, `approve_permission`, `set_config`, etc. already do — this is what keeps every existing provider (hand-written or adapter-based) compiling. |
 | Remove/rename an existing `IpcRequest`/`IpcResponse` variant, or change a field's type/meaning | ❌ Breaking | Bump `IPC_PROTOCOL_VERSION` in `ene-tool-proto` (see [AGENTS.md §6 R3](../../AGENTS.md)). Update both the host (`ene-tool-host`) and every tool binary in the same change. |

@@ -1,11 +1,10 @@
 use crate::ToolHostError;
 use crate::tools::registry::ToolRegistry;
 use async_trait::async_trait;
-use ene_tool_proto::ToolSpec;
 use ene_tool_proto::transport::IpcStream;
 use ene_tool_proto::{
-    IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, SandboxConfigData, read_ipc_response,
-    write_ipc_request,
+    IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, SandboxConfigData, ToolRagProfile, ToolSpec,
+    read_ipc_response, write_ipc_request,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -27,6 +26,7 @@ pub struct IpcToolRegistry {
     tool_config: Option<serde_json::Value>,
     stream: TokioMutex<Option<IpcStream>>,
     tools: Mutex<Vec<ToolSpec>>,
+    profiles: Mutex<Vec<ToolRagProfile>>,
     /// Per-call timeout applied to every request sent to the tool
     /// binary. Sourced from `ToolConfig::timeout_ms` (default 60s).
     /// Without this, a tool that hangs inside `execute()` blocks
@@ -87,6 +87,7 @@ impl IpcToolRegistry {
             tool_config,
             stream: TokioMutex::new(Some(stream)),
             tools: Mutex::new(Vec::new()),
+            profiles: Mutex::new(Vec::new()),
             timeout_ms: if timeout_ms == 0 { 60_000 } else { timeout_ms },
         };
 
@@ -181,10 +182,33 @@ impl IpcToolRegistry {
                     .map_err(|e| ToolHostError::ipc(format!("Tools lock poisoned: {e}")))?;
                 *tools_guard = tools;
                 drop(tools_guard);
+            }
+            Some(IpcResponse::Error { message }) => return Err(ToolHostError::ipc(message)),
+            _ => return Err(ToolHostError::ipc("Unexpected response for ListTools")),
+        }
+
+        write_ipc_request(stream, &IpcRequest::ListRagProfiles)
+            .await
+            .map_err(|e| ToolHostError::ipc(format!("Failed to send ListRagProfiles: {e}")))?;
+
+        let resp = read_ipc_response(stream).await.map_err(|e| {
+            ToolHostError::ipc(format!("Failed to read ListRagProfiles response: {e}"))
+        })?;
+
+        match resp {
+            Some(IpcResponse::RagProfiles { profiles }) => {
+                let mut profiles_guard = self
+                    .profiles
+                    .lock()
+                    .map_err(|e| ToolHostError::ipc(format!("Profiles lock poisoned: {e}")))?;
+                *profiles_guard = profiles;
+                drop(profiles_guard);
                 Ok(())
             }
             Some(IpcResponse::Error { message }) => Err(ToolHostError::ipc(message)),
-            _ => Err(ToolHostError::ipc("Unexpected response for ListTools")),
+            _ => Err(ToolHostError::ipc(
+                "Unexpected response for ListRagProfiles",
+            )),
         }
     }
 
@@ -300,6 +324,28 @@ impl ToolRegistry for IpcToolRegistry {
             Ok(guard) => guard.clone(),
             Err(e) => {
                 tracing::warn!("[IpcToolRegistry] Failed to lock tools cache: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    fn list_rag_profiles(&self) -> Vec<ToolRagProfile> {
+        match self.profiles.lock() {
+            Ok(guard) => {
+                if guard.is_empty() {
+                    // Fallback: synthesize from tools if profiles were never
+                    // refreshed (should not happen after a successful handshake).
+                    drop(guard);
+                    return self
+                        .list_tools()
+                        .iter()
+                        .map(ToolRagProfile::from_tool_spec)
+                        .collect();
+                }
+                guard.clone()
+            }
+            Err(e) => {
+                tracing::warn!("[IpcToolRegistry] Failed to lock profiles cache: {e}");
                 Vec::new()
             }
         }

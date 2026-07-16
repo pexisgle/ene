@@ -1,6 +1,6 @@
 use crate::error::ToolError;
 use crate::sandbox::SandboxConfigData;
-use crate::types::ToolSpec;
+use crate::types::{ToolRagProfile, ToolSpec};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -11,7 +11,6 @@ const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 ///
 /// Version 2:
 /// - `IpcResponse::Tools` carries `Vec<ToolSpec>`
-/// - `IpcResponse::ActionSpecs` returns per-action metadata for embedding
 /// - `IpcRequest::CallTool` `name` field accepts the new `ToolName` (still
 ///   a string on the wire)
 /// - `IpcRequest::SetCallContext` carries both conversation and turn identifiers
@@ -25,12 +24,12 @@ const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 /// - Removed `IpcResponse::MyConfig`.
 /// - `IpcRequest::GetConfigSchema` is a **documented exception** (#150)
 ///   retained for config schema discovery by `tool_host_manager`.
-/// - v3 carries 8 request variants ([`IpcRequest`]: `Handshake`, `ListTools`,
-///   `GetConfigSchema`, `CallTool`, `SetCallContext`,
-///   `ApprovePermission`, `AllowPattern`, `Shutdown`) and 6 response
-///   variants ([`IpcResponse`]: `HandshakeAck`, `Ack`, `Tools`,
-///   `ConfigSchema`, `CallResult`, `Error`).
-pub const IPC_PROTOCOL_VERSION: u32 = 3;
+///
+/// Version 4:
+/// - Added `IpcRequest::ListRagProfiles` / `IpcResponse::RagProfiles` for
+///   host/RAG metadata ([`ToolRagProfile`], #137).
+/// - `ToolSpec` remains LLM-only (`name`, `description`, `parameters`).
+pub const IPC_PROTOCOL_VERSION: u32 = 4;
 
 /// IPC request — core → host
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -48,6 +47,8 @@ pub enum IpcRequest {
     },
     /// List all available tool specs.
     ListTools,
+    /// List host/RAG metadata profiles for indexed tools (#137).
+    ListRagProfiles,
     /// Request the tool's config JSON Schema (documented exception, #150).
     GetConfigSchema,
     /// Execute a tool by name with JSON arguments.
@@ -97,6 +98,11 @@ pub enum IpcResponse {
     Tools {
         /// The structured tool specs.
         tools: Vec<ToolSpec>,
+    },
+    /// Host/RAG metadata profiles (#137).
+    RagProfiles {
+        /// Per-tool RAG profiles matching `Tools`.
+        profiles: Vec<ToolRagProfile>,
     },
     /// The tool's config JSON Schema.
     ConfigSchema {

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::ToolHostError;
-use ene_tool_proto::ToolSpec;
+use ene_tool_proto::{ToolRagProfile, ToolSpec};
 
 /// Unified tool registry interface — abstracts over both built-in IPC tools and MCP tools.
 ///
@@ -13,6 +13,18 @@ use ene_tool_proto::ToolSpec;
 pub trait ToolRegistry: Send + Sync {
     /// Returns the list of all available tools.
     fn list_tools(&self) -> Vec<ToolSpec>;
+
+    /// Returns host/RAG metadata profiles for indexed tools (#137).
+    ///
+    /// Default synthesizes minimal profiles from [`list_tools`](Self::list_tools)
+    /// so MCP / legacy registries keep working without an IPC round-trip.
+    fn list_rag_profiles(&self) -> Vec<ToolRagProfile> {
+        self.list_tools()
+            .iter()
+            .map(ToolRagProfile::from_tool_spec)
+            .collect()
+    }
+
     /// Executes a tool by name with the given JSON arguments from the LLM.
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolHostError>;
 

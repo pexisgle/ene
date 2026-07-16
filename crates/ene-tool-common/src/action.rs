@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolError, ToolSpec};
+use ene_tool_proto::{ToolError, ToolRagProfile, ToolSpec};
 use serde::de::DeserializeOwned;
 
 /// Marker trait for tool argument structs produced by `#[derive(ToolSpec)]`.
@@ -17,6 +17,9 @@ pub trait ToolSpecArgs: DeserializeOwned + Send + Sync + 'static {
 
     /// Returns the LLM-facing `ToolSpec` for this args type.
     fn spec() -> ToolSpec;
+
+    /// Returns the host/RAG metadata profile for this args type (#137).
+    fn rag_profile() -> ToolRagProfile;
 }
 
 /// A unified trait representing a single executable tool action.
@@ -27,7 +30,7 @@ pub trait ToolSpecArgs: DeserializeOwned + Send + Sync + 'static {
 /// name the same `&'static str` by construction.
 ///
 /// The `#[tool_action]` proc-macro from `ene-tool-derive` auto-fills
-/// `name` and `definition` (and an `ArgsOf` impl) when given an
+/// `name`, `definition`, and `rag_profile` when given an
 /// `impl` block with a `run` method, leaving only the `run` body
 /// to write.
 #[async_trait]
@@ -35,9 +38,13 @@ pub trait ToolAction: Send + Sync {
     /// Returns the canonical tool name. Implement as `MyArgs::TOOL_NAME`.
     fn name(&self) -> &'static str;
 
-    /// Returns the metadata definition of this tool. Implement as
-    /// `MyArgs::spec()`.
+    /// Returns the LLM-facing metadata definition of this tool.
+    /// Implement as `MyArgs::spec()`.
     fn definition(&self) -> ToolSpec;
+
+    /// Returns host/RAG metadata for this tool (#137).
+    /// Implement as `MyArgs::rag_profile()`.
+    fn rag_profile(&self) -> ToolRagProfile;
 
     /// Executes the action with a JSON argument string.
     async fn execute(&self, arguments: &str) -> Result<String, ToolError>;

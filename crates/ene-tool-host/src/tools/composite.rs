@@ -1,7 +1,7 @@
 use super::registry::ToolRegistry;
 use crate::ToolHostError;
 use async_trait::async_trait;
-use ene_tool_proto::ToolSpec;
+use ene_tool_proto::{ToolRagProfile, ToolSpec};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -128,6 +128,19 @@ impl ToolRegistry for CompositeToolRegistry {
         }
         drop(guard);
         tools
+    }
+
+    fn list_rag_profiles(&self) -> Vec<ToolRagProfile> {
+        let guard = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut profiles = Vec::new();
+        for registry in &guard.registries {
+            profiles.extend(registry.list_rag_profiles());
+        }
+        drop(guard);
+        profiles
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolHostError> {

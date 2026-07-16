@@ -13,7 +13,7 @@
 
 1. **`ToolProvider` トレイト** — 各ツールバイナリが自身のツールを記述・実行するために実装するインターフェース。
 2. **ワイヤープロトコル** — `IpcRequest` / `IpcResponse`。Unix ドメインソケット（Unix）または名前付きパイプ（Windows）上でフレーム化された長さプレフィックス付き JSON として送受信され、`ToolProvider` を稼働中の IPC サーバーに変換する [`run_tool_server`](#run_tool_server) ヘルパーが付属します。
-3. **共有メタデータ型** — `ToolSpec`、`ActionSpec`、`ToolName`、`ToolVersion`、`ToolCategory`、`KeywordSet`、`SideEffects`、`ToolError`。Tool RAG パイプラインで使用され、ツールリストの一部として LLM に渡されます。
+3. **共有メタデータ型** — `ToolSpec`（LLM 向け）、`ToolRagProfile`（ホスト/RAG、#137）、`ToolName`、`ToolVersion`、`ToolCategory`、`KeywordSet`、`SideEffects`、`ToolError`。
 
 関連ページ：ホスト側の接続管理については [`ene-tool-host`](./ene-tool-host.md)、ツール側の `ToolAction`/`ToolSpecArgs` トレイトについては [`ene-tool-common`](./ene-tool-common.md)、`ToolSpec` を生成するプロシージャルマクロについては [`ene-tool-derive`](./ene-tool-derive.md) を参照してください。
 
@@ -25,7 +25,7 @@
 pub const IPC_PROTOCOL_VERSION: u32 = 2;
 ```
 
-双方が `Handshake` / `HandshakeAck` メッセージで自分のバージョンを送信します。サーバー（`run_tool_server`）はバージョンの不一致を**厳密に拒否**します — ダウングレードや交渉は行わず、`IpcResponse::Error` で接続を終了します。この定数は、ワイヤーフォーマットが後方互換性のない形で変更された場合にのみバンプしてください（[AGENTS.md §6 R3](../../AGENTS.md) を参照）。バージョン **2** は LLM 向けにスリム化した `ToolSpec`（`name` / `description` / `parameters` のみ）を反映します。
+双方が `Handshake` / `HandshakeAck` メッセージで自分のバージョンを送信します。サーバー（`run_tool_server`）はバージョンの不一致を**厳密に拒否**します — ダウングレードや交渉は行わず、`IpcResponse::Error` で接続を終了します。この定数は、ワイヤーフォーマットが後方互換性のない形で変更された場合にのみバンプしてください（[AGENTS.md §6 R3](../../AGENTS.md) を参照）。バージョン **4** は [`ToolRagProfile`](#toolragprofile) (#137) 用の `ListRagProfiles` / `RagProfiles` を追加します。`ToolSpec` は LLM 向けのみ（`name` / `description` / `parameters`）のままです。
 
 ---
 
@@ -38,7 +38,7 @@ pub const IPC_PROTOCOL_VERSION: u32 = 2;
 pub trait ToolProvider: Send + Sync {
     fn list_specs(&self) -> Vec<ToolSpec>;
 
-    fn list_action_specs(&self) -> Vec<ActionSpec> {
+    fn list_rag_profiles(&self) -> Vec<ToolRagProfile> {
         Vec::new()
     }
 
@@ -69,7 +69,7 @@ pub trait ToolProvider: Send + Sync {
 | メソッド | 必須か | デフォルト | 説明 |
 |---|---|---|---|
 | `list_specs(&self) -> Vec<ToolSpec>` | **必須** | — | このプロバイダーが提供する全ツールの完全なメタデータ。メガツールはアクションごとに1つ、N個のスペックを返す（例：`filesystem.read`、`filesystem.write` など）。 |
-| `list_action_specs(&self) -> Vec<ActionSpec>` | 任意 | `Vec::new()` | Tool RAG 埋め込みに使用されるアクション単位のメタデータ。メガツールの場合のみ意味を持ち、個別ツールでは空のままにする。 |
+| `list_rag_profiles(&self) -> Vec<ToolRagProfile>` | 任意 | `Vec::new()` | Tool RAG インデックス用のホスト/RAG メタデータ (#137)。`#[derive(ToolSpec)]` / `ActionSetProvider` からの出力を推奨。 |
 | `call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>` | **必須** | — | JSON エンコードされた `arguments` を用いて名前でツールを実行する。`async`。 |
 | `set_session_id(&self, session_id: &str)` | **必須** | — | 現在のセッション ID を設定する（アンドゥ追跡、セッション単位の状態などに使用）。 |
 | `set_sandbox(&self, sandbox: &SandboxConfigData)` | 任意 | no-op | サンドボックス設定を受け取る（ファイルシステム／シェルツールで使用）。 |
@@ -139,51 +139,45 @@ impl ToolProvider for HostRegistry { /* ... */ }
 
 ### `ToolSpec`
 
-単一の呼び出し可能なツールに関する、LLM 向けの構造化された記述です。Tool RAG パイプラインで使用される主要なメタデータ型であり、ツールリストの一部として LLM に渡されます。
+単一の呼び出し可能なツールに関する、LLM 向けの構造化された記述（`name`、`description`、`parameters` のみ — #135）。
 
 ```rust
 pub struct ToolSpec {
     pub name: ToolName,
-    pub version: ToolVersion,
+    pub description: String,
+    pub parameters: serde_json::Value,  // schemars によって自動導出される JSON Schema
+}
+```
+
+| メソッド | シグネチャ | 説明 |
+|---|---|---|
+| `new` | `fn new(name, description, parameters) -> Self` | LLM 向けのツール spec を構築する。 |
+
+### `ToolRagProfile`
+
+呼び出し可能なツールのホスト/RAG 専用メタデータ (#137)。LLM のツールリストには渡されません — `IpcResponse::RagProfiles` 経由で交換され、`ene-tool-rag` が消費します。
+
+```rust
+pub struct ToolRagProfile {
+    pub name: ToolName,
     pub display_name: String,
     pub summary: String,
     pub description: String,
     pub category: ToolCategory,
     pub keywords: KeywordSet,
-    pub parameters: serde_json::Value,  // schemars によって自動導出される JSON Schema
     pub examples: Vec<ToolExample>,
     pub caveats: Vec<String>,
-    pub side_effects: SideEffects,
     pub preconditions: Vec<String>,
+    pub side_effects: SideEffects,
     pub related: Vec<ToolName>,
+    pub version: ToolVersion,
 }
 ```
 
 | メソッド | シグネチャ | 説明 |
 |---|---|---|
-| `embedding_text` | `fn embedding_text(&self, field: EmbeddingField) -> String` | RAG 埋め込み用のテキスト表現を構築する。各バリアントに含まれる内容は [`EmbeddingField`](#embeddingfield) を参照。 |
-
-### `ActionSpec`
-
-メガツール内の1つの機能（例：`filesystem` ツールにおける `filesystem.read` と `filesystem.write` はそれぞれ独立した `ActionSpec`）。Tool RAG では常に個別に埋め込まれ、`IpcResponse::ActionSpecs` で公開されます。
-
-```rust
-pub struct ActionSpec {
-    pub name: String,
-    pub display_name: String,
-    pub summary: String,
-    pub description: String,
-    pub keywords: KeywordSet,
-    pub examples: Vec<ToolExample>,
-    pub caveats: Vec<String>,
-    pub side_effects: SideEffects,
-    pub preconditions: Vec<String>,
-}
-```
-
-| メソッド | シグネチャ | 説明 |
-|---|---|---|
-| `minimal` | `fn minimal(name: impl Into<String>, summary: impl Into<String>) -> Self` | 最小限の `ActionSpec` を構築する — `name`、`display_name`（`name` のコピー）、`summary` を設定し、それ以外のフィールドはすべてデフォルト値のまま（`ReadOnly` の副作用、空の Vec、`KeywordSet::default()`）とする。完全な記述子を必要としないシンプルな非メガツールで使用される。 |
+| `from_tool_spec` | `fn from_tool_spec(spec: &ToolSpec) -> Self` | 最小限のプロファイルを合成する（例: MCP ツール）。 |
+| `embedding_text` | `fn embedding_text(&self, field: EmbeddingField, parameters: Option<&Value>, example_index: Option<usize>) -> String` | 単一インデックスフィールド用の埋め込みテキストを構築する。 |
 
 ### `ToolName`
 
@@ -242,7 +236,7 @@ pub enum ToolCategory {
 }
 ```
 
-分類および RAG フィルタリングに使用されます。メガツール（`Filesystem`、`Shell`、`Browser`、`App`）は、`IpcResponse::ActionSpecs` を介して IPC レベルで追加のアクション単位スペックを持ちます。
+分類および RAG フィルタリングに使用されます。メガツール（`Filesystem`、`Shell`、`Browser`、`App`）は IPC レベルで `IpcResponse::RagProfiles` 経由の `ToolRagProfile` を公開します。
 
 | メソッド | シグネチャ | 説明 |
 |---|---|---|
@@ -301,21 +295,25 @@ pub struct ToolExample {
 pub enum EmbeddingField {
     Summary,
     Description,
+    Capability,
+    Example,
     Negative,
 }
 ```
 
-[`ToolSpec::embedding_text`](#toolspec) が生成する `ToolSpec` のテキストコンテンツのうち、どの部分集合を使うかを制御します。
+[`ToolRagProfile::embedding_text`](#toolragprofile) が生成するテキストのうち、どの部分集合を使うかを制御します。
 
 | バリアント | 含まれるテキスト |
 |---|---|
 | `Summary` | `"{name}: {summary}"` — 最もシグナルが強く、高速検索に使用。 |
 | `Description` | `"{name}\n{description}"` に加え、空でない場合はフォーマット済みのキーワードブロック（`Primary: ... \| Secondary: ... \| Domain: ... \| Negative: ...`）— ランキングの精緻化に使用。 |
+| `Capability` | カテゴリラベル + summary + primary keywords — 能力ベースのマッチングに使用。 |
+| `Example` | 1つの使用例（`field_key = ex_N`）— 例ベースのマッチングに使用。 |
 | `Negative` | `"{name} NOT: {ネガティブキーワードを", "で連結}"`。ネガティブキーワードがない場合は `""` — 曖昧性の解消に使用。 |
 
 | メソッド | シグネチャ | 説明 |
 |---|---|---|
-| `as_str` | `fn as_str(&self) -> &'static str` | インデックスに保存される文字列ラベル（`"summary"`、`"description"`、`"negative"`）。 |
+| `as_str` | `fn as_str(&self) -> &'static str` | インデックスに保存される文字列ラベル（`"summary"`、`"description"`、`"capability"`、`"example"`、`"negative"`）。 |
 
 ### `SandboxConfigData`
 
@@ -479,7 +477,7 @@ pub enum IpcRequest {
         tool_config: Option<serde_json::Value>,
     },
     ListTools,
-    ListActionSpecs,
+    ListRagProfiles,
     GetConfigSchema,
     CallTool { name: String, arguments: String },
     SetSessionId { session_id: String },
@@ -497,7 +495,7 @@ pub enum IpcRequest {
 | `Handshake { version }` | プロトコルバージョンを交渉する。必ず最初のメッセージであること。 |
 | `Initialize { sandbox, tool_config }` | サンドボックスポリシーとツールごとの設定を提供する。 |
 | `ListTools` | ツールの完全なメタデータリストをリクエストする。 |
-| `ListActionSpecs` | アクション単位のメタデータをリクエストする（メガツール埋め込み用）。 |
+| `ListRagProfiles` | ホスト/RAG メタデータプロファイルをリクエストする (#137)。 |
 | `GetConfigSchema` | ツールの設定 JSON スキーマをリクエストする。 |
 | `CallTool { name, arguments }` | 名前と JSON 引数でツールを起動する。 |
 | `SetSessionId { session_id }` | アクティブなセッション ID を伝播する。 |
@@ -519,7 +517,7 @@ pub enum IpcResponse {
     HandshakeAck { version: u32 },
     Ack,
     Tools { tools: Vec<ToolSpec> },
-    ActionSpecs { specs: Vec<ActionSpec> },
+    RagProfiles { profiles: Vec<ToolRagProfile> },
     ConfigSchema { schema: Option<serde_json::Value> },
     CallResult { result: Result<String, ToolError> },
     MyConfig(serde_json::Value),
@@ -533,7 +531,7 @@ pub enum IpcResponse {
 | `HandshakeAck { version }` | Handshake を受理し、交渉後のバージョンを返す。 |
 | `Ack` | 汎用の確認応答（`Initialize`、`SetSessionId` などへの応答）。 |
 | `Tools { tools }` | `ListTools` への応答。 |
-| `ActionSpecs { specs }` | `ListActionSpecs` への応答。メガツールの場合はアクションごとに1エントリ。 |
+| `RagProfiles { profiles }` | `ListRagProfiles` への応答。メガツールはアクションごとに1プロファイル。 |
 | `ConfigSchema { schema }` | `GetConfigSchema` への応答。 |
 | `CallResult { result }` | `CallTool` への応答。 |
 | `MyConfig(value)` | `GetMyConfig` への応答。 |
@@ -644,7 +642,7 @@ pub async fn write_ipc_response<W: AsyncWriteExt + Unpin>(
 use async_trait::async_trait;
 use ene_tool_proto::{
     KeywordSet, SideEffects, ToolCategory, ToolError, ToolName, ToolProvider, ToolSpec,
-    ToolVersion, run_tool_server,
+    run_tool_server,
 };
 
 struct MyTool;
@@ -652,27 +650,17 @@ struct MyTool;
 #[async_trait]
 impl ToolProvider for MyTool {
     fn list_specs(&self) -> Vec<ToolSpec> {
-        vec![ToolSpec {
-            name: ToolName::new("hello"),
-            version: ToolVersion::new(1, 0, 0),
-            display_name: "Hello".into(),
-            summary: "Greets the user".into(),
-            description: "Greets the user with a personalised message.".into(),
-            category: ToolCategory::Utility,
-            keywords: KeywordSet::primary_only(["greet", "hello", "greeting"]),
-            parameters: serde_json::json!({
+        vec![ToolSpec::new(
+            ToolName::new("hello"),
+            "Greets the user with a personalised message.",
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "Name to greet"}
                 },
                 "required": ["name"]
             }),
-            examples: vec![],
-            caveats: vec![],
-            side_effects: SideEffects::ReadOnly,
-            preconditions: vec![],
-            related: vec![],
-        }]
+        )]
     }
 
     async fn call_tool(&self, _name: &str, args: &str) -> Result<String, ToolError> {
@@ -725,22 +713,34 @@ fn handle_ipc_call_tool(raw_name: &str) -> Result<ToolName, ToolError> {
 }
 ```
 
-### メガツールのアクション用に `ActionSpec` を構築する
+### メガツールのアクション用に `ToolRagProfile` を構築する
 
 ```rust,no_run
-use ene_tool_proto::ActionSpec;
+use ene_tool_proto::{KeywordSet, SideEffects, ToolCategory, ToolName, ToolRagProfile, ToolVersion};
 
-let read_action = ActionSpec::minimal("read", "Read a file from disk");
-assert_eq!(read_action.name, "read");
+let read_profile = ToolRagProfile {
+    name: ToolName::new("filesystem.read"),
+    display_name: "Read".into(),
+    summary: "Read a file from disk".into(),
+    description: "Reads file contents within the sandbox.".into(),
+    category: ToolCategory::Filesystem,
+    keywords: KeywordSet::primary_only(["read", "file", "open"]),
+    examples: vec![],
+    caveats: vec![],
+    preconditions: vec![],
+    side_effects: SideEffects::ReadOnly,
+    related: vec![],
+    version: ToolVersion::new(1, 0, 0),
+};
 ```
 
 ### RAG 埋め込みテキストの算出
 
 ```rust,no_run
-use ene_tool_proto::{EmbeddingField, ToolSpec};
+use ene_tool_proto::{EmbeddingField, ToolRagProfile};
 
-fn summary_embedding(spec: &ToolSpec) -> String {
-    spec.embedding_text(EmbeddingField::Summary)
+fn summary_embedding(profile: &ToolRagProfile) -> String {
+    profile.embedding_text(EmbeddingField::Summary, None, None)
 }
 ```
 

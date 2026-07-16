@@ -176,8 +176,10 @@ pub struct EneConfig {
         "capability": 0.8,
         "example": 0.4,
         "negative": -0.5,
-        "hyde": 0.7
-      }
+        "hyde": 0.7,
+        "hyde_blend": 0.6
+      },
+      "per_category_limits": {}
     }
   }
 }
@@ -260,8 +262,10 @@ pub struct EneConfig {
       "capability": 0.8,
       "example": 0.4,
       "negative": -0.5,
-      "hyde": 0.7
-    }
+      "hyde": 0.7,
+      "hyde_blend": 0.6
+    },
+    "per_category_limits": {}
   }
 }
 ```
@@ -278,6 +282,7 @@ pub struct EneConfig {
 | `background_index_on_startup` | bool | `true` | ランタイム bootstrap (フェーズ 3) でツール embedding index をウォームアップ |
 | `forced` | string[] | `["utility.question", "utility.todo_add", "utility.get_current_time"]` | 関連性に関わらず常に含めるツール |
 | `weights` | object | (下記参照) | マルチベクトル類似度計算のフィールド別重み |
+| `per_category_limits` | object | `{}` | カテゴリごとの最大ツール数（`ToolCategory::config_key`、例: `"Filesystem": 3`） |
 
 ##### `tools.rag.weights` — フィールド重み
 
@@ -289,6 +294,7 @@ pub struct EneConfig {
 | `example` | float | `0.4` | ツール例埋め込みの重み |
 | `negative` | float | `-0.5` | ネガティブ/不要埋め込みの重み (一致をペナルティ) |
 | `hyde` | float | `0.7` | HyDE (假説文書埋め込み) の重み |
+| `hyde_blend` | float | `0.6` | HyDE と直接類似度のスコア配分（`0.0`–`1.0`） |
 
 ### `web_config` — ウェブ検索プロバイダ
 

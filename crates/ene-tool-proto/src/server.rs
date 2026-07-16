@@ -134,6 +134,9 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
         IpcRequest::ListTools => IpcResponse::Tools {
             tools: provider.list_specs(),
         },
+        IpcRequest::ListRagProfiles => IpcResponse::RagProfiles {
+            profiles: provider.list_rag_profiles(),
+        },
         IpcRequest::CallTool { name, arguments } => match provider.call_tool(name, arguments).await
         {
             Ok(result) => IpcResponse::CallResult { result: Ok(result) },

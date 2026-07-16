@@ -423,8 +423,9 @@ impl EneHandle {
             .and_then(|emb| init_tool_rag(&config, emb, &session));
         if let Some(rag) = &tool_rag {
             let specs = registry.list_tools();
+            let profiles = registry.list_rag_profiles();
             tracing::info!(component = "Bootstrap", "Warming up Tool RAG index...");
-            if let Err(e) = rag.ensure_index(&specs).await {
+            if let Err(e) = rag.ensure_index(&specs, &profiles).await {
                 tracing::warn!(
                     component = "Bootstrap",
                     error = %e,

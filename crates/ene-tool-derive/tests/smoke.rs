@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use ene_tool_derive::ToolSpec;
-use ene_tool_proto::ToolName;
+use ene_tool_proto::{ToolCategory, ToolName, types::EmbeddingField};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -63,11 +63,28 @@ fn spec_parameters_is_json_schema() {
 }
 
 #[test]
-fn spec_embedding_text_from_description() {
-    let s = ReadArgs::spec();
-    let text = s.embedding_text(ene_tool_proto::types::EmbeddingField::Description);
+fn rag_profile_carries_rich_metadata() {
+    let p = ReadArgs::rag_profile();
+    assert_eq!(p.name, ToolName::new("filesystem.read"));
+    assert_eq!(p.summary, "Read a file from disk");
+    assert_eq!(p.category, ToolCategory::Filesystem);
+    assert_eq!(p.keywords.primary, vec!["read", "open", "cat", "load"]);
+    assert_eq!(p.keywords.negative, vec!["write", "delete"]);
+    assert_eq!(p.examples.len(), 2);
+    assert_eq!(p.version.to_string(), "1.2.0");
+    assert_eq!(
+        p.related,
+        vec![
+            ToolName::new("filesystem.write"),
+            ToolName::new("filesystem.glob")
+        ]
+    );
+
+    let text = p.embedding_text(EmbeddingField::Description, None, None);
     assert!(text.contains("filesystem.read"));
     assert!(text.contains("Reads the contents"));
-    let neg = s.embedding_text(ene_tool_proto::types::EmbeddingField::Negative);
-    assert_eq!(neg, "write, delete");
+    assert!(text.contains("keywords: read, open, cat, load"));
+
+    let neg = p.embedding_text(EmbeddingField::Negative, None, None);
+    assert_eq!(neg, "filesystem.read NOT: write, delete");
 }

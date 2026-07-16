@@ -2,6 +2,8 @@
 
 Tool RAG (Retrieval-Augmented Generation) selects the most relevant tools for a given user query using vector embeddings. Instead of sending all tools to the LLM, only the top-N most relevant tools are included in the prompt.
 
+Indexing text comes from [`ToolRagProfile`](./sdk.md#toolragprofile) (#137). The LLM still receives slim [`ToolSpec`](./sdk.md#toolspec) values (`name`, `description`, `parameters` only).
+
 ## How It Works
 
 ```
@@ -12,27 +14,27 @@ User query
   ↓
 2. For each tool, compute weighted similarity:
    score = Σ (weight_i × cosine_sim(query_embedding, tool_field_i))
-   where fields are: summary, description, negative, hyde
+   where fields are: summary, description, capability, example, negative, hyde
   ↓
-3. Apply per-category limits (e.g. max 3 filesystem tools)
+3. Apply per-category limits (e.g. max 3 Filesystem tools)
   ↓
 4. Sort by score, take top_k candidates
   ↓
 5. (optional) LLM rerank the top_k → pick final_n
   ↓
-6. Always include forced_tools regardless of score
+6. Always include forced tools regardless of score
   ↓
 Vec<ToolSpec> → passed to LLM
 ```
 
 ## Configuration
 
-In `settings.json` under `tools`:
+In `settings.json` under `tools.rag` (config key `rag`, path `["tools", "rag"]`):
 
 ```json
 {
   "tools": {
-    "tool_rag": {
+    "rag": {
       "enabled": true,
       "top_k": 12,
       "final_n": 6,
@@ -41,7 +43,7 @@ In `settings.json` under `tools`:
       "rerank_candidates": 24,
       "min_similarity": 0.25,
       "background_index_on_startup": true,
-      "forced_tools": [
+      "forced": [
         "utility.question",
         "utility.todo_add",
         "utility.get_current_time"
@@ -52,9 +54,12 @@ In `settings.json` under `tools`:
         "capability": 0.8,
         "example": 0.4,
         "negative": -0.5,
-        "hyde": 0.7
+        "hyde": 0.7,
+        "hyde_blend": 0.6
       },
-      "per_category_limits": {}
+      "per_category_limits": {
+        "Filesystem": 3
+      }
     }
   }
 }
@@ -71,27 +76,30 @@ In `settings.json` under `tools`:
 | `use_rerank` | bool | `true` | Use LLM reranking on top candidates |
 | `rerank_candidates` | int | `24` | Number of candidates for LLM reranking |
 | `min_similarity` | float | `0.25` | Minimum similarity threshold |
-| `background_index_on_startup` | bool | `true` | Warm the tool embedding index in a background task during runtime bootstrap (Phase 3). Avoids first-turn latency (#108). |
-| `forced_tools` | string[] | `["utility.question", "utility.todo_add", "utility.get_current_time"]` | Always include these tools |
+| `background_index_on_startup` | bool | `true` | Warm the tool embedding index during runtime bootstrap |
+| `forced` | string[] | `["utility.question", "utility.todo_add", "utility.get_current_time"]` | Always include these tools |
+| `per_category_limits` | map | `{}` | Max tools per `ToolCategory::config_key` (e.g. `"Filesystem"`) |
 
 ## Multi-Vector Embedding
 
-Each tool is embedded across multiple fields, stored separately in `tool_embedding_index`:
+Each tool is embedded across multiple fields from its `ToolRagProfile`, stored in `tool_embedding_index`:
 
 | Field | Content | Default Weight |
 |-------|---------|---------------|
-| `summary` | `"tool.name: one-line summary"` | 1.0 |
-| `description` | Full description + keywords | 0.6 |
-| `negative` | `"tool.name NOT: negative, keywords"` | -0.5 (penalty) |
+| `summary` | `"{name}: {summary}"` | 1.0 |
+| `description` | description + keywords + JSON Schema property summary | 0.6 |
+| `capability` | category label + summary + primary keywords | 0.8 |
+| `example` | one row per example (`field_key = ex_N`) | 0.4 |
+| `negative` | `"{name} NOT: {negative keywords}"` | -0.5 (penalty) |
 
-The version hash is derived from the text content, so tools are only re-embedded when their content changes.
+The version hash is derived from the text content, so tools are only re-embedded when their content changes. `ensure_index(specs, profiles)` hashes both inputs.
 
 ## HyDE (Hypothetical Document Embeddings)
 
 When `use_hyde = true`, the pipeline:
 1. Generates a hypothetical answer to the user query using the LLM
 2. Embeds the hypothetical answer
-3. Uses both the query embedding and HyDE embedding for scoring
+3. Blends query and HyDE similarity via `weights.hyde` and `weights.hyde_blend`
 
 This improves recall for queries that describe what they want to achieve rather than naming the tool directly.
 
@@ -101,54 +109,41 @@ This improves recall for queries that describe what they want to achieve rather 
 |--------|-------------|
 | `summary` | How much the tool's summary contributes |
 | `description` | How much the full description contributes |
-| `capability` | Reserved for capability-based matching |
+| `capability` | How much the capability embedding contributes |
 | `example` | How much examples contribute |
-| `negative` | Penalty for negative keyword matches (negative = soft penalty) |
+| `negative` | Soft penalty for negative keyword matches (default `-0.5`) |
 | `hyde` | How much the HyDE embedding contributes |
-
-Set `negative < 0` for soft penalty (tool still appears, ranked lower). Set `negative > 0` for hard exclusion (tool is dropped).
+| `hyde_blend` | Fraction of score from HyDE vs direct similarity (`0.0`–`1.0`) |
 
 ## Per-Category Limits
 
-Limit how many tools from each category can appear in the final set:
+Limit how many tools from each category can appear after scoring (lowest scores dropped first):
 
 ```json
 {
   "per_category_limits": {
-    "filesystem": 3,
-    "browser": 2
+    "Filesystem": 3,
+    "Browser": 2
   }
 }
 ```
 
+Keys must match `ToolCategory::config_key()` (`Filesystem`, `Shell`, `Browser`, `App`, `WebSearch`, `WebFetch`, `Utility`, `Memory`, `Search`, `Meta`).
+
 ## Forced Tools
 
-Tools listed in `forced_tools` are always included regardless of similarity scores. Default forced tools are general-purpose utilities that the LLM should always have access to.
+Tools listed in `forced` are always included regardless of similarity scores. Default forced tools are general-purpose utilities that the LLM should always have access to.
 
 ## Architecture
 
 ```
-ToolRag
-  ├── embedder: Arc<dyn EmbeddingProvider>
-  ├── store: Option<Arc<MemoryStore>>
-  ├── opts: ToolRagOptions
-  └── specs: RwLock<HashMap<ToolName, ToolSpec>>
-
-MemoryStore.tool_embedding_index
-  ├── tool_name (TEXT)
-  ├── field (TEXT: "summary" | "description" | "negative")
-  ├── field_key (TEXT: "" for ToolSpec, action name for ActionSpec)
-  ├── version_hash (TEXT: content-derived)
-  ├── model_name (TEXT)
-  └── embedding (f32 blob)
+Tool binaries
+  → ToolProvider::list_specs / list_rag_profiles
+  → IpcToolRegistry (ListTools + ListRagProfiles, IPC v4)
+  → CompositeToolRegistry
+  → ToolRag::ensure_index(specs, profiles)
+  → tool_embedding_index (SQLite)
+  → ToolRag::select → Vec<ToolSpec> for the LLM
 ```
 
-## Debugging
-
-Use the CLI `/memory search` command to test tool embeddings:
-
-```
-/memory search "read a file"
-```
-
-This shows which tools match the query and their similarity scores.
+MCP tools have no authoring profile; the host synthesizes a minimal `ToolRagProfile` from each `ToolSpec`.

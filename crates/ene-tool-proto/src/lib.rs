@@ -106,7 +106,8 @@ pub use sandbox::SandboxConfigData;
 pub use server::run_tool_server;
 /// Shared tool types.
 pub use types::{
-    ActionSpec, SideEffects, ToolCategory, ToolExample, ToolName, ToolSpec, ToolVersion,
+    KeywordSet, SideEffects, ToolCategory, ToolExample, ToolName, ToolRagProfile, ToolSpec,
+    ToolVersion,
 };
 
 use async_trait::async_trait;
@@ -123,9 +124,11 @@ pub trait ToolProvider: Send + Sync {
     /// `filesystem.write`, ...).
     fn list_specs(&self) -> Vec<ToolSpec>;
 
-    /// Returns the per-action metadata (used for Tool RAG embedding).
-    /// For individual tools, this returns an empty vec.
-    fn list_action_specs(&self) -> Vec<ActionSpec> {
+    /// Returns host/RAG metadata for each callable tool (#137).
+    ///
+    /// Default is empty so hand-written providers keep compiling; prefer
+    /// emitting profiles from `#[derive(ToolSpec)]` / `ActionSetProvider`.
+    fn list_rag_profiles(&self) -> Vec<crate::ToolRagProfile> {
         Vec::new()
     }
 

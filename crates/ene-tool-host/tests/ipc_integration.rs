@@ -84,7 +84,25 @@ async fn test_ipc_list_tools_and_call_tool() {
         .await
         .unwrap();
 
-        // 3. CallTool
+        // 3. ListRagProfiles (also part of refresh_tools in IpcToolRegistry::new)
+        let req = read_ipc_request(&mut stream)
+            .await
+            .unwrap()
+            .expect("Expected ListRagProfiles request");
+        assert!(
+            matches!(req, IpcRequest::ListRagProfiles),
+            "Expected ListRagProfiles, got {req:?}"
+        );
+        write_ipc_response(
+            &mut stream,
+            &IpcResponse::RagProfiles {
+                profiles: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // 4. CallTool
         let req = read_ipc_request(&mut stream)
             .await
             .unwrap()

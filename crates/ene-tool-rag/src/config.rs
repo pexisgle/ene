@@ -1,4 +1,5 @@
 use ene_config::{ConfigTarget, HasConfigKey};
+use std::collections::HashMap;
 
 fn default_forced() -> Vec<String> {
     vec![
@@ -14,7 +15,7 @@ fn default_forced() -> Vec<String> {
 pub struct ToolRagConfig {
     /// Whether Tool RAG is enabled.
     pub enabled: bool,
-    /// Number of candidates to retrieve from the vector index.
+    /// Number of candidates to retrieve from the vector index (pre-rerank).
     pub top_k: usize,
     /// Final number of tools returned after reranking and filtering.
     pub final_n: usize,
@@ -32,6 +33,11 @@ pub struct ToolRagConfig {
     pub forced: Vec<String>,
     /// Per-field weighting for the multi-vector similarity computation.
     pub weights: FieldWeightsConfig,
+    /// Cap how many tools per category may appear in the result set.
+    /// Keys are [`ToolCategory::config_key`](ene_tool_proto::ToolCategory::config_key)
+    /// values (e.g. `"Filesystem"`).
+    #[serde(default)]
+    pub per_category_limits: HashMap<String, usize>,
 }
 
 impl Default for ToolRagConfig {
@@ -47,6 +53,7 @@ impl Default for ToolRagConfig {
             background_index_on_startup: true,
             forced: default_forced(),
             weights: FieldWeightsConfig::default(),
+            per_category_limits: HashMap::new(),
         }
     }
 }
@@ -59,6 +66,8 @@ pub struct FieldWeightsConfig {
     pub summary: f32,
     /// Weight for the tool description embedding.
     pub description: f32,
+    /// Weight for the capability embedding (category + summary + primary keywords).
+    pub capability: f32,
     /// Weight for the tool example embedding.
     pub example: f32,
     /// Weight for the negative/unwanted embedding (penalizes matches).
@@ -84,6 +93,7 @@ impl Default for FieldWeightsConfig {
         Self {
             summary: 1.0,
             description: 0.6,
+            capability: 0.8,
             example: 0.4,
             negative: -0.5,
             hyde: 0.7,

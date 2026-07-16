@@ -260,8 +260,10 @@ Tool RAG dynamically selects only user-input-relevant tools to reduce token cons
       "capability": 0.8,
       "example": 0.4,
       "negative": -0.5,
-      "hyde": 0.7
-    }
+      "hyde": 0.7,
+      "hyde_blend": 0.6
+    },
+    "per_category_limits": {}
   }
 }
 ```

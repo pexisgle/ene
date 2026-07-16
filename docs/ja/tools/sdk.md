@@ -269,15 +269,14 @@ pub trait ToolProvider: Send + Sync {
     /// メガツールはアクションごとに 1 スペック返す (例: `filesystem.read`, ...)。
     fn list_specs(&self) -> Vec<ToolSpec>;
 
-    /// アクションごとのメタデータを返す (Tool RAG 埋め込み用)。
-    /// 個別ツールは空ベクタを返す。
-    fn list_action_specs(&self) -> Vec<ActionSpec> { Vec::new() }
+    /// ホスト/RAG メタデータプロファイルを返す (#137)。デフォルト: 空。
+    fn list_rag_profiles(&self) -> Vec<ToolRagProfile> { Vec::new() }
 
     /// ツール名と JSON 引数でツールを実行
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>;
 
-    /// 現在のセッション ID を設定 (Undo 追跡やセッションスコープ状態用)
-    fn set_session_id(&self, session_id: &str);
+    /// 呼び出しコンテキスト (会話 + ターン識別子) を設定
+    fn set_call_context(&self, _ctx: &CallContext) {}
 
     /// サンドボックス設定を受信 (ファイルシステムツール用; デフォルト: no-op)
     fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
@@ -288,11 +287,8 @@ pub trait ToolProvider: Send + Sync {
     /// セッション全体の権限許可パターンを追加 (アクション + ターゲットグロブ)
     fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
 
-    /// ツール固有設定を受信 (Initialize 時に 1 回呼び出される)
+    /// ツール固有設定を受信 (Handshake 時に 1 回呼び出される)
     fn set_config(&self, _config: &serde_json::Value) {}
-
-    /// ツールの現在の設定を返す
-    fn get_config(&self) -> serde_json::Value { serde_json::Value::Null }
 
     /// このツールが受け付ける設定の JSON Schema を返す
     fn config_schema(&self) -> Option<serde_json::Value> { None }
@@ -301,23 +297,40 @@ pub trait ToolProvider: Send + Sync {
 
 ## ToolSpec
 
-LLM 向けの構造化されたツール仕様（v3 で slim 化）:
+LLM 向けの構造化されたツール仕様（v3 / #135 で slim 化）:
 
 ```rust
 pub struct ToolSpec {
     pub name: ToolName,                     // 例: "filesystem.read"
-    pub description: String,                // 完全なマークダウン（RAG 埋め込みに使用）
+    pub description: String,                // 完全なマークダウン説明
     pub parameters: serde_json::Value,      // JSON Schema (schemars による自動生成)
-    /// RAG 曖昧性解消のためのネガティブキーワード — ユーザークエリに
-    /// 含まれる場合、ツールの関連性スコアを*減点*する。
-    /// #135 slim-down 後に復元された暫定フィールド。
-    /// `ToolRagProfile` (#137) が完了するまで保持。
-    /// 空の場合は wire 上で不可視（`skip_serializing_if = "Vec::is_empty"`）。
-    pub negative_keywords: Vec<String>,
 }
 ```
 
-`negative_keywords` フィールドは、#135 以前の fat `ToolSpec` の一時的な名残です。`#[tool(keywords_negative = "...")]` の authoring データが `ToolRagProfile` (#137) の完成前に失われないようにするためだけに保持されています。wire 上では空の `Vec` は完全にスキップされます。
+RAG メタデータ（キーワード、例、カテゴリなど）は [`ToolRagProfile`](#toolragprofile) (#137) にあり、`ToolSpec` には含まれません。
+
+## ToolRagProfile
+
+呼び出し可能なツールのホスト/RAG 専用メタデータ。LLM のツールリストには渡されません — `IpcResponse::RagProfiles`（IPC v4）経由で交換され、`ene-tool-rag` が消費します。
+
+```rust
+pub struct ToolRagProfile {
+    pub name: ToolName,
+    pub display_name: String,
+    pub summary: String,
+    pub description: String,
+    pub category: ToolCategory,
+    pub keywords: KeywordSet,
+    pub examples: Vec<ToolExample>,
+    pub caveats: Vec<String>,
+    pub preconditions: Vec<String>,
+    pub side_effects: SideEffects,
+    pub related: Vec<ToolName>,
+    pub version: ToolVersion,
+}
+```
+
+`#[derive(ToolSpec)]` は同じ `#[tool(...)]` 属性から `spec() -> ToolSpec` と `rag_profile() -> ToolRagProfile` の両方を生成します。`ActionSetProvider` は `ToolProvider::list_rag_profiles` 経由でプロファイルを集約します。
 
 ## `#[tool(...)]` 属性
 
@@ -415,7 +428,7 @@ pub enum ToolError {
 
 ## プロトコルバリアント
 
-`IPC_PROTOCOL_VERSION = 3` の IPC ワイヤープロトコルは、10 種類のリクエストバリアントと 8 種類のレスポンスバリアントを持ちます。`UserInput` は IPC バリアントでは**ありません** — `ToolError::UserInputRequired` を通じて表面化され、`ene-runtime` のストリーミングループで処理されます。
+`IPC_PROTOCOL_VERSION = 4` の IPC ワイヤープロトコルは、9 種類のリクエストバリアントと 7 種類のレスポンスバリアントを持ちます。`UserInput` は IPC バリアントでは**ありません** — `ToolError::UserInputRequired` を通じて表面化され、`ene-runtime` のストリーミングループで処理されます。
 
 ### リクエスト（ホスト → ツール）
 
@@ -423,13 +436,12 @@ pub enum ToolError {
 |---|---|---|---|
 | `Handshake` | `version: u32`, `sandbox: SandboxConfigData`, `tool_config: Option<Value>` | プロトコル交渉 + サンドボックス設定 + ツール設定プッシュ（Initialize は v3 で吸収） | v1 |
 | `ListTools` | — | プロバイダから全 `ToolSpec` を取得 | v1 |
-| `ListActionSpecs` | — | アクション単位のスペックを取得（RAG 用メガツールメタデータ） | v2 |
-| `GetConfigSchema` | — | ツール設定の JSON Schema をリクエスト（#150 例外） | v2 |
+| `ListRagProfiles` | — | ホスト/RAG 用 `ToolRagProfile` メタデータを取得 (#137) | v4 |
+| `GetConfigSchema` | — | ツール設定の JSON Schema をリクエスト（#150 例外、「6 つの主要」リクエストには含まれない） | v2 |
 | `CallTool` | `name: String`, `arguments: String` | ツール名と JSON 引数でツールを実行 | v1 |
 | `SetCallContext` | `conversation_id: String`, `turn_id: String` | 会話・ターン識別子をツールに伝達（v2 `SetSessionId` を置換） | v2 |
 | `ApprovePermission` | `request_id: String` | ペンディング中の破壊的操作の権限リクエストを承認 | v1 |
 | `AllowPattern` | `action: String`, `target_pattern: String` | セッション全体の権限許可パターンを登録（アクション + ターゲットグロブ） | v1 |
-| `Ping` | — | 生存監視用のヘルスチェック ping | v2 |
 | `Shutdown` | — | 正常終了リクエスト | v1 |
 
 ### レスポンス（ツール → ホスト）
@@ -439,20 +451,19 @@ pub enum ToolError {
 | `HandshakeAck` | `version: u32` | `Handshake` |
 | `Ack` | — | `SetCallContext`, `ApprovePermission`, `AllowPattern`, `Shutdown` |
 | `Tools` | `tools: Vec<ToolSpec>` | `ListTools` |
-| `ActionSpecs` | `specs: Vec<ActionSpec>` | `ListActionSpecs` |
+| `RagProfiles` | `profiles: Vec<ToolRagProfile>` | `ListRagProfiles` |
 | `ConfigSchema` | `schema: Option<Value>` | `GetConfigSchema` |
 | `CallResult` | `result: Result<String, ToolError>` | `CallTool` |
-| `Pong` | — | `Ping` |
 | `Error` | `error: String` | IPC レベルで失敗した任意のリクエスト |
 
 ## ABI 互換性
 
-ワイヤーABIは `ene-tool-proto` のIPC表面すべてを指します: `IpcRequest`/`IpcResponse`、`IPC_PROTOCOL_VERSION`、`ToolSpec`/`ActionSpec` のフィールド、`SandboxConfigData`、`ToolError`。`run_tool_server` は `IPC_PROTOCOL_VERSION` の不一致を**厳密に拒否**します — ダウングレードや交渉は行いません — そのため、バージョンアップの判断は重要です。
+ワイヤーABIは `ene-tool-proto` のIPC表面すべてを指します: `IpcRequest`/`IpcResponse`、`IPC_PROTOCOL_VERSION`、`ToolSpec`/`ToolRagProfile` のフィールド、`SandboxConfigData`、`ToolError`。`run_tool_server` は `IPC_PROTOCOL_VERSION` の不一致を**厳密に拒否**します — ダウングレードや交渉は行いません — そのため、バージョンアップの判断は重要です。
 
 | 変更 | 互換性あり? | 必要な対応 |
 |---|---|---|
 | `IpcRequest`/`IpcResponse` に新しいenumバリアントを追加 | ✅ 追加的 | 不要 — 古いツールバイナリは新しいバリアントを単に送受信しません。新しいホストコードは、古いツールバイナリがそれを送らないケースも処理する必要があります。 |
-| `ToolSpec`/`ActionSpec`/`SandboxConfigData` に新しい任意フィールドを追加（`#[serde(default)]` またはマクロ提供のデフォルト付き） | ✅ 追加的 | 不要。`SandboxConfigData` が既に使っている `define_tool_config!`/`schemars` のパターンに従えば、フィールドのない古いJSONもそのままデシリアライズできます。 |
+| `ToolSpec`/`ToolRagProfile`/`SandboxConfigData` に新しい任意フィールドを追加（`#[serde(default)]` またはマクロ提供のデフォルト付き） | ✅ 追加的 | 不要。`SandboxConfigData` が既に使っている `define_tool_config!`/`schemars` のパターンに従えば、フィールドのない古いJSONもそのままデシリアライズできます。 |
 | `ToolError` に新しいバリアントを追加 | ✅ 追加的 | 不要 — `ToolError` は（タグ付き列挙体ではあるが）単純な列挙型なので、古いコードがワイルドカードアームなしで網羅的に `match` していない限り、新しいバリアントは問題なくデシリアライズされます。新しい `match` にはワイルドカード（`_ => ...`）アームを追加することを推奨します。 |
 | `ToolProvider` トレイトに新しいメソッドを追加 | ✅ 追加的（デフォルト実装がある場合） | `set_sandbox`、`approve_permission`、`set_config` などが既にそうしているように、デフォルト（no-op / 空）実装を与えてください — これにより、既存のすべてのプロバイダー（手書きでもアダプタベースでも）がコンパイルされ続けます。 |
 | 既存の `IpcRequest`/`IpcResponse` バリアントを削除・改名、またはフィールドの型/意味を変更 | ❌ 破壊的 | `ene-tool-proto` で `IPC_PROTOCOL_VERSION` をバンプする（[AGENTS.md §6 R3](../../AGENTS.md) を参照）。同じ変更でホスト（`ene-tool-host`）とすべてのツールバイナリを更新してください。 |
