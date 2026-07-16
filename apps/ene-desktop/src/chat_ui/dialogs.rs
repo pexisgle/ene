@@ -4,12 +4,41 @@ use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
+use ene_config::truncate::Truncate;
 use ene_runtime::UserInputResponse;
 use ene_tool_proto::{MultiAnswer, QuestionItem};
 
 use crate::ai_bridge::AiBridge;
 use crate::component::chat::ChatStateComponent;
 use crate::settings::QuestionDraft;
+
+/// Hard cap so long shell commands / paths cannot push the dialog
+/// off-screen. Applied to every permission field before display.
+const PERMISSION_FIELD_MAX_CHARS: usize = 160;
+/// Secondary cap for multi-line payloads (e.g. heredoc-style commands).
+const PERMISSION_FIELD_MAX_LINES: usize = 6;
+
+/// Truncate permission dialog field text for display.
+///
+/// Caps both line count and Unicode character count, appending `...`
+/// when either limit is exceeded.
+fn truncate_permission_field(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let capped = if lines.len() > PERMISSION_FIELD_MAX_LINES {
+        format!("{}\n...", lines[..PERMISSION_FIELD_MAX_LINES].join("\n"))
+    } else {
+        text.to_string()
+    };
+    Truncate::simple(&capped, PERMISSION_FIELD_MAX_CHARS)
+}
+
+fn permission_field_label(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.add(
+        egui::Label::new(format!("{label}: {}", truncate_permission_field(value)))
+            .wrap()
+            .selectable(true),
+    );
+}
 
 pub fn render_permission_dialog(
     ui: &mut egui::Ui,
@@ -29,25 +58,16 @@ pub fn render_permission_dialog(
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
+        .default_width(420.0)
+        .max_width(480.0)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ui.ctx(), |ui| {
             ui.vertical(|ui| {
-                ui.label(format!(
-                    "{}: {}",
-                    crate::i18n::action_label(),
-                    pending.action
-                ));
-                ui.label(format!(
-                    "{}: {}",
-                    crate::i18n::target_label(),
-                    pending.target
-                ));
+                ui.set_max_width(440.0);
+                permission_field_label(ui, &crate::i18n::action_label(), &pending.action);
+                permission_field_label(ui, &crate::i18n::target_label(), &pending.target);
                 if let Some(description) = &pending.description {
-                    ui.label(format!(
-                        "{}: {}",
-                        crate::i18n::description_label(),
-                        description
-                    ));
+                    permission_field_label(ui, &crate::i18n::description_label(), description);
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -200,5 +220,52 @@ fn clear_pending_user_input(world: &mut World, chat_entity: Entity) {
     if let Some(mut chat) = world.get_mut::<ChatStateComponent>(chat_entity) {
         chat.0.pending_user_input = None;
         chat.0.user_input_drafts.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_field_is_unchanged() {
+        assert_eq!(truncate_permission_field("ls -la"), "ls -la");
+    }
+
+    #[test]
+    fn long_field_is_char_truncated() {
+        let long = "a".repeat(PERMISSION_FIELD_MAX_CHARS + 40);
+        let truncated = truncate_permission_field(&long);
+        assert!(truncated.ends_with("..."));
+        assert_eq!(
+            truncated.chars().count(),
+            PERMISSION_FIELD_MAX_CHARS + 3,
+            "max chars plus ellipsis"
+        );
+    }
+
+    #[test]
+    fn many_lines_are_line_truncated() {
+        let many_lines = (0..PERMISSION_FIELD_MAX_LINES + 4)
+            .map(|i| format!("line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let truncated = truncate_permission_field(&many_lines);
+        assert!(truncated.ends_with("..."));
+        assert_eq!(
+            truncated.lines().count(),
+            PERMISSION_FIELD_MAX_LINES + 1,
+            "capped lines plus ellipsis line"
+        );
+        assert!(truncated.contains("line-0"));
+        assert!(!truncated.contains(&format!("line-{}", PERMISSION_FIELD_MAX_LINES)));
+    }
+
+    #[test]
+    fn unicode_char_limit_is_respected() {
+        let long = "あ".repeat(PERMISSION_FIELD_MAX_CHARS + 10);
+        let truncated = truncate_permission_field(&long);
+        assert!(truncated.ends_with("..."));
+        assert_eq!(truncated.chars().count(), PERMISSION_FIELD_MAX_CHARS + 3);
     }
 }
