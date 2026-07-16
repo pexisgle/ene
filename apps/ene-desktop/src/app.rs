@@ -18,7 +18,7 @@ use crate::event::chat::OpenChat;
 use crate::event::{
     ai::{
         AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
-        EmoteToken, MotionCommand,
+        CancelCommand, EmoteToken, ExpressionCommand, MotionCommand,
     },
     input::{KeyboardKey, PointerButton, PointerMoved},
     lifecycle::{TickGtk, WindowCloseRequested, WindowResized},
@@ -108,9 +108,38 @@ pub fn build_app(
     app.add_message::<AiUserInputRequested>();
     app.add_message::<EmoteToken>();
     app.add_message::<MotionCommand>();
+    app.add_message::<ExpressionCommand>();
+    app.add_message::<CancelCommand>();
     app.add_message::<OpenSettings>();
     app.add_message::<OpenChat>();
     app.add_message::<SettingsActionEvent>();
     app.add_message::<TickGtk>();
     app
+}
+
+#[cfg(test)]
+mod message_registration {
+    use super::*;
+    use crate::events::AppEvent;
+    use bevy_ecs::message::Messages;
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn expression_and_cancel_messages_are_registered() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
+        let app = build_app(rt.handle().clone(), rx, tx);
+        let world = app.world();
+        assert!(
+            world.contains_resource::<Messages<ExpressionCommand>>(),
+            "ExpressionCommand must be registered via add_message"
+        );
+        assert!(
+            world.contains_resource::<Messages<CancelCommand>>(),
+            "CancelCommand must be registered via add_message"
+        );
+    }
 }
