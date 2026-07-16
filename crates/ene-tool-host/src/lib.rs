@@ -23,8 +23,6 @@
 //! Tool RAG is handled by the [`ene_tool_rag`] crate. See its documentation for the
 //! multi-vector embedding pipeline, `HyDE`, and LLM rerank details.
 #![warn(missing_docs)]
-#![allow(clippy::option_if_let_else)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 /// Tool and MCP configuration types.
 pub mod config;

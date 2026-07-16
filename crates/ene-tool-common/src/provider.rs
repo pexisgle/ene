@@ -314,6 +314,10 @@ impl ToolProvider for SingleActionProvider {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "provider registry lookup uses infallible test fixture"
+)]
 mod tests {
     use super::*;
     use ene_tool_proto::{ToolName, ToolRagProfile, ToolSpec};
@@ -409,7 +413,7 @@ mod tests {
         let provider = SingleActionProvider::new(Box::new(EchoAction));
         let specs = provider.list_specs();
         assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].name.as_str(), "echo");
+        assert_eq!(specs.first().map(|spec| spec.name.as_str()), Some("echo"));
     }
 
     #[tokio::test]

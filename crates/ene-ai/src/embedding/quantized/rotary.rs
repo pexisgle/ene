@@ -23,7 +23,7 @@ pub fn repeat_kv(x: &Tensor, n_rep: usize) -> Result<Tensor, EneEmbeddingError> 
         .map_err(super::candle_err("repeat_kv unsqueeze failed"))?
         .expand((b, n_kv_heads, n_rep, seq_len, head_dim))
         .map_err(super::candle_err("repeat_kv expand failed"))?
-        .reshape((b, n_kv_heads * n_rep, seq_len, head_dim))
+        .reshape((b, n_kv_heads.saturating_mul(n_rep), seq_len, head_dim))
         .map_err(super::candle_err("repeat_kv reshape failed"))?;
     Ok(expanded)
 }

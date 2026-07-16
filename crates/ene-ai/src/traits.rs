@@ -224,7 +224,11 @@ impl LlmProviderRegistry {
 }
 
 #[cfg(test)]
-#[allow(clippy::float_cmp)]
+#[expect(
+    clippy::float_cmp,
+    clippy::indexing_slicing,
+    reason = "tests assert exact float equality and fixed mock embedder indices"
+)]
 mod tests {
     use super::*;
 
@@ -244,8 +248,8 @@ mod tests {
                     return Err(EmbeddingError::EmptyInput);
                 }
                 let mut v = vec![0.0_f32; self.dims];
-                if let Some(c) = text.chars().next() {
-                    v[0] = f32::from(c as u8);
+                if let (Some(slot), Some(c)) = (v.first_mut(), text.chars().next()) {
+                    *slot = f32::from(c as u8);
                 }
                 out.push(v);
             }

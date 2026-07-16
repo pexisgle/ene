@@ -1,6 +1,11 @@
 //! Integration smoke test for cognitive streaming via `run_stream` (#100).
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::field_reassign_with_default)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default,
+    reason = "integration tests use unwrap/expect and default-then-assign test fixtures"
+)]
 
 use async_trait::async_trait;
 use ene_ai::{

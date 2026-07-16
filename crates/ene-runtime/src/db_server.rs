@@ -1137,7 +1137,11 @@ impl DbIpcServer {
 }
 
 #[cfg(test)]
-#[allow(clippy::similar_names, clippy::iter_on_single_items)]
+#[expect(
+    clippy::similar_names,
+    clippy::iter_on_single_items,
+    reason = "IPC test fixtures use paired request/response names and single-item iterators"
+)]
 mod tests {
     use super::*;
 

@@ -37,7 +37,7 @@ pub struct PhysicsColliderStaticOffsets(
 /// the rest pose).
 #[derive(Component, Debug, Default, Clone)]
 pub struct PhysicsColliderStaticRotations(
-    #[allow(dead_code, reason = "Read by update_bone_positions system")] pub Vec<Quat>,
+    #[expect(dead_code, reason = "Read by update_bone_positions system")] pub Vec<Quat>,
 );
 
 /// Per-bone rest world rotation (used to compute `r_delta`).

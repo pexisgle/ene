@@ -53,7 +53,7 @@ fn convert_message(msg: &LlmMessage) -> Result<ChatCompletionRequestMessage, Llm
             };
 
             if parts.len() == 1
-                && let UserMessagePart::Text { text } = &parts[0]
+                && let Some(UserMessagePart::Text { text }) = parts.first()
             {
                 let m = ChatCompletionRequestUserMessageArgs::default()
                     .content(text.clone())

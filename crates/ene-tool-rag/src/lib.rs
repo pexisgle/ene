@@ -25,8 +25,18 @@
 //! # }
 //! ```
 #![warn(missing_docs)]
-#![allow(clippy::option_if_let_else)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![expect(
+    clippy::option_if_let_else,
+    reason = "nursery style; match/if-let clarity preferred locally"
+)]
+#![expect(
+    clippy::arithmetic_side_effects,
+    reason = "RAG scoring and timing deltas use intentional arithmetic"
+)]
+#![expect(
+    clippy::indexing_slicing,
+    reason = "ranked tool selection indexes into scored candidate lists"
+)]
 
 /// Tool RAG configuration types.
 pub mod config;

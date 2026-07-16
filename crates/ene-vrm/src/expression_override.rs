@@ -244,7 +244,7 @@ pub fn apply_overrides(weights: &mut BTreeMap<ExpressionName, f32>, defs: &[Expr
                     ExpressionOverrideType::Blend => {
                         entry.0 = (entry.0 + effective).min(1.0);
                     }
-                    ExpressionOverrideType::None => unreachable!(),
+                    ExpressionOverrideType::None => {}
                 }
             }
         }
@@ -428,6 +428,10 @@ impl ExpressionLayer {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::default_trait_access,
+    reason = "explicit Default for test fixture clarity"
+)]
 mod tests {
     use super::*;
 
@@ -1008,11 +1012,11 @@ mod tests {
     /// Wrap a `VRMC_vrm` extension block in a minimal glTF 2.0
     /// document and parse it. Mirrors the pattern in
     /// `look_at.rs` tests (this struct).
-    fn gltf_from_vrmc(vrmc: serde_json::Value) -> gltf::Gltf {
+    fn gltf_from_vrmc(vrmc: &serde_json::Value) -> gltf::Gltf {
         let json = serde_json::json!({
             "asset": { "version": "2.0" },
             "extensionsUsed": ["VRMC_vrm"],
-            "extensions": vrmc,
+            "extensions": vrmc.clone(),
         });
         let bytes = serde_json::to_vec(&json).unwrap();
         gltf::Gltf::from_slice(&bytes).expect("gltf parse")
@@ -1052,7 +1056,7 @@ mod tests {
                 }
             }
         });
-        let gltf = gltf_from_vrmc(vrmc);
+        let gltf = gltf_from_vrmc(&vrmc);
         let defs = load_expression_overrides(&gltf);
         assert_eq!(defs.len(), 3);
 
@@ -1088,7 +1092,7 @@ mod tests {
                 }
             }
         });
-        let gltf = gltf_from_vrmc(vrmc);
+        let gltf = gltf_from_vrmc(&vrmc);
         let defs = load_expression_overrides(&gltf);
         assert_eq!(defs.len(), 1);
         let d = &defs[0];
@@ -1101,7 +1105,7 @@ mod tests {
     fn load_expression_overrides_missing_block_returns_empty() {
         use serde_json::json;
         let vrmc = json!({ "VRMC_vrm": {} });
-        let gltf = gltf_from_vrmc(vrmc);
+        let gltf = gltf_from_vrmc(&vrmc);
         let defs = load_expression_overrides(&gltf);
         assert!(defs.is_empty());
     }
@@ -1122,7 +1126,7 @@ mod tests {
                 }
             }
         });
-        let gltf = gltf_from_vrmc(vrmc);
+        let gltf = gltf_from_vrmc(&vrmc);
         let defs = load_expression_overrides(&gltf);
         assert_eq!(defs[0].overrides.blink, ExpressionOverrideType::None);
     }
@@ -1142,7 +1146,7 @@ mod tests {
                 }
             }
         });
-        let gltf = gltf_from_vrmc(vrmc);
+        let gltf = gltf_from_vrmc(&vrmc);
         let defs = load_expression_overrides(&gltf);
         assert!(defs[0].is_binary);
     }

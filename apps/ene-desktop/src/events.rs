@@ -25,7 +25,13 @@ pub enum AppEvent {
     /// Raw performance cue name from [`ene_runtime::EneEvent::Performance`].
     /// Desktop maps this to VRM playback; do not forward `SpecialToken` /
     /// Expression events (removed in API v2).
-    #[allow(dead_code)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "PerformanceCue retained for motion playback wiring"
+        )
+    )]
     PerformanceCue(String),
     /// Motion cue with layer routing information (#133).
     MotionCue {
@@ -68,15 +74,15 @@ pub enum TrayAction {
 pub enum AiStreamUpdate {
     TextDelta(String),
     ToolCallStart {
-        #[expect(dead_code)]
+        #[expect(dead_code, reason = "tool call fields consumed by future UI rendering")]
         name: String,
-        #[expect(dead_code)]
+        #[expect(dead_code, reason = "tool call fields consumed by future UI rendering")]
         arguments: String,
     },
     ToolCallResult {
-        #[expect(dead_code)]
+        #[expect(dead_code, reason = "tool call fields consumed by future UI rendering")]
         name: String,
-        #[expect(dead_code)]
+        #[expect(dead_code, reason = "tool call fields consumed by future UI rendering")]
         result: String,
     },
     PermissionRequired {

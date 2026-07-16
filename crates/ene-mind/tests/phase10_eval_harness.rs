@@ -1,4 +1,9 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "integration tests use unwrap, fixed indices, and panic on invariant violations"
+)]
 
 use async_trait::async_trait;
 use chrono::Utc;

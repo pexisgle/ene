@@ -143,7 +143,10 @@ impl MaskReadbackWorker {
     /// the runtime to read `extract_rectangles` /
     /// `target_view` / `encode_readback` / `width` /
     /// `height` / `downsample` on the main thread.
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mask accessor retained for future readback diagnostics"
+    )]
     pub const fn mask(&self) -> &Arc<Mutex<MaskCaptureCamera>> {
         &self.mask
     }

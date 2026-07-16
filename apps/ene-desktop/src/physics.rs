@@ -24,7 +24,10 @@
 //! [`register_character_colliders`](PhysicsWorld::register_character_colliders)
 //! returns a [`CharacterColliderRegistration`] that the bevy plugin
 //! stores directly on the entity as those components.
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "physics types are consumed by character registration systems"
+)]
 use glam::{Quat, Vec3};
 use rapier3d::prelude::*;
 

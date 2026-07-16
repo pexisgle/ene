@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn orthographic_rh_diag_640x480() {
         let half_h = 2.6 * 0.5;
-        let half_w = half_h * 1.3333333;
+        let half_w = half_h * 1.333_333_3;
         let p = glam::camera::rh::proj::directx::orthographic(
             -half_w, half_w, -half_h, half_h, 0.1, 100.0,
         );

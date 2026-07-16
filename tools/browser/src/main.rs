@@ -3,7 +3,6 @@
 //! IPC tool binary providing browser automation capabilities:
 //! Chrome `DevTools` Protocol integration for web scraping and interaction.
 #![warn(missing_docs)]
-#![allow(clippy::unused_async)]
 
 mod action;
 mod provider;

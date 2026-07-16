@@ -1,3 +1,12 @@
+#![expect(
+    clippy::arithmetic_side_effects,
+    reason = "CLI stream/memory helpers use intentional counter arithmetic"
+)]
+#![expect(
+    clippy::indexing_slicing,
+    reason = "CLI command parsers index into argv and message buffers"
+)]
+
 mod commands;
 mod config;
 mod context;

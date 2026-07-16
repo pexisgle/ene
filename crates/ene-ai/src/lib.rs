@@ -7,8 +7,18 @@
 //! a global provider registry, the built-in OpenAI-compatible implementation,
 //! and local GGUF embedding via Candle.
 #![warn(missing_docs)]
-#![allow(clippy::option_if_let_else)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![expect(
+    clippy::option_if_let_else,
+    reason = "nursery style; match/if-let clarity preferred locally"
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        reason = "unit/integration tests use unwrap/expect for assertions"
+    )
+)]
 
 /// Configuration types for providers and embedding.
 pub mod config;

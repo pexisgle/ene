@@ -770,25 +770,25 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "Invalid ToolName:")]
     fn tool_name_new_panics_on_empty() {
         let _ = ToolName::new("");
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "Invalid ToolName:")]
     fn tool_name_new_panics_on_invalid() {
         let _ = ToolName::new("has space");
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "Invalid ToolName:")]
     fn tool_name_from_str_panics_on_invalid() {
         let _ = ToolName::from("bad/name");
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "Invalid ToolName:")]
     fn tool_name_from_string_panics_on_invalid() {
         let _ = ToolName::from(String::from("bad/name"));
     }

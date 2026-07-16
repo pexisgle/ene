@@ -138,7 +138,7 @@ impl CharacterConfig {
         let mut cur = &mut root;
         let path = T::path();
         for (i, &key) in path.iter().enumerate() {
-            if i == path.len() - 1 {
+            if i == path.len().saturating_sub(1) {
                 if let Some(obj) = cur.as_object_mut() {
                     obj.insert(key.to_string(), val);
                 }

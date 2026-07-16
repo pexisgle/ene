@@ -173,12 +173,18 @@ impl MaskCaptureCamera {
         &self.target_view
     }
 
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mask dimensions exposed for future debug overlays"
+    )]
     pub const fn width(&self) -> u32 {
         self.width
     }
 
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "mask dimensions exposed for future debug overlays"
+    )]
     pub const fn height(&self) -> u32 {
         self.height
     }
@@ -371,7 +377,10 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::assertions_on_constants)]
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "test documents compile-time alpha threshold invariants"
+    )]
     fn threshold_filters_low_alpha() {
         assert!(PIXEL_THRESHOLD > 0);
         assert!(17 > PIXEL_THRESHOLD);
@@ -379,7 +388,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::assertions_on_constants)]
     fn mask_target_format_is_rgba8unorm() {
         assert_eq!(MASK_TARGET_FORMAT, wgpu::TextureFormat::Rgba8Unorm);
         assert_eq!(BYTES_PER_PIXEL, 4);

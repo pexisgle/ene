@@ -3,11 +3,23 @@
 //! IPC tool binary providing utility operations:
 //! question prompting, todo list management, time, and system info.
 #![warn(missing_docs)]
-#![allow(
+#![expect(
     clippy::unused_async,
-    clippy::option_option
+    clippy::option_option,
+    reason = "tool IPC handlers are async for uniform provider dispatch; nested options match schema"
 )]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![expect(
+    clippy::arithmetic_side_effects,
+    reason = "question numbering uses simple counter arithmetic"
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        reason = "unit tests use unwrap and fixed option indices"
+    )
+)]
 
 /// Action modules for each tool.
 pub mod action;

@@ -97,11 +97,20 @@ pub use GraphicsSection as GraphicsSettings;
 pub const DEFAULT_CHARACTER_NAME: &str = "Alicia";
 pub const DEFAULT_VRM_PATH: &str = "characters/Alicia/AliciaSolid.vrm";
 pub const DEFAULT_VRMA_PATH: &str = "characters/Alicia/motions/VRMA_01.vrma";
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "legacy window constants retained for transitional callers"
+)]
 pub const APP_ID: &str = "dev.pexisgle.ene";
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "legacy window constants retained for transitional callers"
+)]
 pub const WINDOW_WIDTH: u32 = 560;
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "legacy window constants retained for transitional callers"
+)]
 pub const WINDOW_HEIGHT: u32 = 980;
 pub const MASK_RENDER_DOWNSAMPLE_CHOICES: [u32; 3] = [4, 6, 8];
 pub const DEFAULT_MASK_RENDER_DOWNSAMPLE: u32 = 8;
@@ -192,7 +201,10 @@ pub fn read_cli_paths() -> (String, String) {
 #[derive(Debug, Clone)]
 pub struct CharacterEntry {
     pub name: String,
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "character folder path retained for future character browser UI"
+    )]
     pub folder: String,
     pub vrm_paths: Vec<String>,
     pub motion_paths: Vec<String>,

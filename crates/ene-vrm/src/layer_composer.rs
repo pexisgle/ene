@@ -46,6 +46,13 @@ struct MotionSlot {
 #[derive(Debug, Clone)]
 struct ExpressionEntry {
     pub weight: f32,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "field retained for API completeness / future phases"
+        )
+    )]
     pub priority: u8,
 }
 
@@ -122,7 +129,13 @@ impl LayerComposer {
     ///
     /// Higher-priority updates replace lower-priority ones for the
     /// same expression name.
-    #[expect(dead_code)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "field retained for API completeness / future phases"
+        )
+    )]
     pub(crate) fn set_expression(&mut self, name: String, weight: f32, priority: u8) {
         let clamped = weight.clamp(0.0, 1.0);
         match self.expressions.get(&name) {
@@ -148,12 +161,18 @@ impl LayerComposer {
         }
     }
 
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "layer composer API retained for future expression editing"
+    )]
     pub(crate) fn remove_expression(&mut self, name: &str) {
         self.expressions.remove(name);
     }
 
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "layer composer API retained for future expression editing"
+    )]
     pub(crate) fn clear_expressions(&mut self) {
         self.expressions.clear();
     }
@@ -187,7 +206,13 @@ impl LayerComposer {
     }
 
     #[must_use]
-    #[expect(dead_code)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "field retained for API completeness / future phases"
+        )
+    )]
     pub(crate) fn active_motion_names(&self) -> Vec<String> {
         if let Some(ref s) = self.full {
             return vec![s.name.clone()];
@@ -236,7 +261,13 @@ impl LayerComposer {
     }
 
     #[must_use]
-    #[expect(dead_code)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "field retained for API completeness / future phases"
+        )
+    )]
     pub(crate) const fn has_active_motion(&self) -> bool {
         self.upper.is_some() || self.lower.is_some() || self.full.is_some()
     }

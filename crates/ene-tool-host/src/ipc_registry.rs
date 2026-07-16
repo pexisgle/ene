@@ -100,12 +100,12 @@ impl IpcToolRegistry {
         socket_path: &Path,
         max_retries: u32,
     ) -> Result<IpcStream, ToolHostError> {
-        let mut attempts = 0;
+        let mut attempts = 0_u32;
         loop {
             match IpcStream::connect(socket_path).await {
                 Ok(stream) => return Ok(stream),
                 Err(e) => {
-                    attempts += 1;
+                    attempts = attempts.saturating_add(1);
                     if attempts >= max_retries {
                         return Err(ToolHostError::ipc(format!(
                             "Failed to connect to tool at {} after {} attempts: {e}",
@@ -113,8 +113,8 @@ impl IpcToolRegistry {
                             attempts
                         )));
                     }
-                    let delay =
-                        RECONNECT_BASE_DELAY_MS * 2u64.saturating_pow(attempts.saturating_sub(1));
+                    let delay = RECONNECT_BASE_DELAY_MS
+                        .saturating_mul(2u64.saturating_pow(attempts.saturating_sub(1)));
                     tokio::time::sleep(Duration::from_millis(delay.min(RECONNECT_MAX_DELAY_MS)))
                         .await;
                 }

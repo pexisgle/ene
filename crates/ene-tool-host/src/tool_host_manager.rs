@@ -35,7 +35,7 @@ impl ToolProcess {
     }
 
     fn restart(&mut self) -> Result<(), ToolHostError> {
-        self.restart_count += 1;
+        self.restart_count = self.restart_count.saturating_add(1);
         if self.restart_count > MAX_RESTARTS {
             return Err(ToolHostError::ExecutionFailed {
                 message: format!(
@@ -78,7 +78,7 @@ impl ToolProcess {
 /// schedule without having to construct a `ToolProcess`
 /// (which owns an unconstructible-by-mem-zero `Child`).
 fn delay_for_restart(restart_count: usize) -> Duration {
-    let delay_ms = BASE_DELAY_MS * 2u64.saturating_pow(restart_count as u32);
+    let delay_ms = BASE_DELAY_MS.saturating_mul(2u64.saturating_pow(restart_count as u32));
     Duration::from_millis(delay_ms.min(MAX_DELAY_MS))
 }
 
@@ -424,6 +424,10 @@ impl ToolHostManager {
     ///
     /// # Panics
     /// Panics on name collision. Prefer [`try_add_registry`](Self::try_add_registry).
+    #[expect(
+        clippy::panic,
+        reason = "legacy infallible API; prefer try_add_registry for fallible registration"
+    )]
     pub fn add_registry(&mut self, registry: Arc<dyn ToolRegistry>) {
         match self.try_add_registry(registry) {
             Ok(()) => {}
@@ -550,7 +554,7 @@ impl ToolHostManager {
         delay_ms: u64,
         timeout_ms: u64,
     ) -> Result<IpcToolRegistry, ToolError> {
-        let mut attempts = 0;
+        let mut attempts = 0_u32;
         loop {
             match IpcToolRegistry::new(
                 socket_path.to_path_buf(),
@@ -562,7 +566,7 @@ impl ToolHostManager {
             {
                 Ok(registry) => return Ok(registry),
                 Err(e) => {
-                    attempts += 1;
+                    attempts = attempts.saturating_add(1);
                     if attempts >= max_retries {
                         return Err(ToolError::ExecutionFailed {
                             message: format!(

@@ -70,7 +70,11 @@ pub fn load_model(
             .to_f32()
             .map_err(super::candle_err("freq_base"))?,
     );
-    let num_kv_groups = num_heads / num_kv_heads;
+    let num_kv_groups = num_heads.checked_div(num_kv_heads).ok_or_else(|| {
+        EneEmbeddingError::CandleError(format!(
+            "qwen3.attention.head_count ({num_heads}) must divide head_count_kv ({num_kv_heads})"
+        ))
+    })?;
 
     tracing::info!(
         "[Embedding] GGUF config: {} layers, {} heads ({} kv), {} dim, {} head_dim",

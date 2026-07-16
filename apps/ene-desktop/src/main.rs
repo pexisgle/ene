@@ -3,7 +3,7 @@
 //! Winit + wgpu shell for the ene AI character platform. Owns the
 //! `AiBridge`, system tray, character renderer, and the cross-subsystem
 //! [`AppEvent`] bus.
-#![allow(
+#![expect(
     clippy::option_if_let_else,
     clippy::unused_self,
     clippy::needless_pass_by_ref_mut,
@@ -12,11 +12,21 @@
     clippy::significant_drop_tightening,
     clippy::branches_sharing_code,
     clippy::needless_pass_by_value,
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    clippy::panic,
     clippy::unnecessary_wraps,
-    clippy::allow_attributes,
-    clippy::semicolon_if_nothing_returned
+    reason = "desktop UI/render loop favors local clarity; graphics math uses intentional arithmetic"
 )]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        reason = "unit/integration tests use unwrap/expect for assertions"
+    )
+)]
 
 mod acquire_error;
 mod ai_bridge;

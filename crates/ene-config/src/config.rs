@@ -246,19 +246,15 @@ fn set_nested(
     path: &[&str],
     value: serde_json::Value,
 ) -> Result<(), EneConfigError> {
-    if path.is_empty() {
-        return Err(EneConfigError::GenericConfigError(
-            "Empty path for nested config".to_string(),
-        ));
-    }
-
     // Descend through the BTreeMap, mutating the path
     // in place. The previous form rebuilt the entire
     // `extra` map into a JSON object (O(n) on every
     // write) and silently dropped the write if `cur`
     // ever landed on a non-object leaf.
-    let [head, rest @ ..] = path else {
-        unreachable!("path is non-empty by the guard above")
+    let Some((head, rest)) = path.split_first() else {
+        return Err(EneConfigError::GenericConfigError(
+            "Empty path for nested config".to_string(),
+        ));
     };
     if rest.is_empty() {
         extra.insert((*head).to_string(), value);
@@ -270,7 +266,7 @@ fn set_nested(
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
 
     for (i, key) in rest.iter().enumerate() {
-        let is_last = i + 1 == rest.len();
+        let is_last = i.saturating_add(1) == rest.len();
         if is_last {
             // The final key may either replace an
             // existing value or be inserted as a new
@@ -642,7 +638,10 @@ where
 }
 
 #[cfg(test)]
-#[expect(clippy::undocumented_unsafe_blocks)]
+#[expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test-only set_var/remove_var under a process-global mutex"
+)]
 mod tests {
     use super::*;
     use figment::{
@@ -688,7 +687,9 @@ mod tests {
     /// it up under `provider` (lowercase) and silently got nothing.
     #[test]
     fn env_uppercase_folds_to_lowercase_path() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
         unsafe {
             std::env::set_var("ENE_TEST_PROVIDER__API_KEY", "sk-test-1234");
@@ -719,7 +720,9 @@ mod tests {
     /// idempotent for already-lowercase input.
     #[test]
     fn env_lowercase_works() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         unsafe {
             std::env::set_var("ENE_TEST_provider__api_key", "sk-lowercase");
         }

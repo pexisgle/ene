@@ -444,7 +444,10 @@ fn inject_user_answers(args_json: &str, answers: &[MultiAnswer]) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::significant_drop_tightening)]
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "test intentionally keeps lock held across helper calls"
+)]
 mod tests {
     use super::*;
 
@@ -770,10 +773,7 @@ mod tests {
                         }
                         answered_perm = true;
                     }
-                    EneEvent::UserInputRequired {
-                        request_id,
-                        ..
-                    } => {
+                    EneEvent::UserInputRequired { request_id, .. } => {
                         let mut guard = consumer_inputs.lock().await;
                         if let Some(tx) = guard.remove(&request_id) {
                             let _ = tx.send(UserInputResponse::Multi(vec![MultiAnswer::Answer {

@@ -1,7 +1,5 @@
 //! Phase 7 emotion engine integration tests (#86, #88).
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 use std::time::Duration;
 
 use ene_mind::{AffectProposal, EmotionConfig, EmotionEngine, TurnAffectInput};

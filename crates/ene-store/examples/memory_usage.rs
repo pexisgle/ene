@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (i, scored) in results.iter().enumerate() {
         println!(
             "  {}. [total: {:.3}] {}",
-            i + 1,
+            i.saturating_add(1),
             scored.breakdown.total,
             scored.item.content
         );

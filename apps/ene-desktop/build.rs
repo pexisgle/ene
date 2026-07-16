@@ -23,10 +23,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Match keys. FTL keys look like: key-name = value
         if let Some(pos) = trimmed.find('=') {
-            let key = trimmed[..pos].trim();
-            if !key.is_empty() {
-                keys.push(key.to_string());
-            }
+            let Some(key) = trimmed.get(..pos).map(str::trim).filter(|k| !k.is_empty()) else {
+                continue;
+            };
+            keys.push(key.to_string());
         }
     }
 

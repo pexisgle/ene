@@ -24,7 +24,10 @@ pub struct AttentionBlock {
 }
 
 impl AttentionBlock {
-    #[expect(clippy::many_single_char_names)]
+    #[expect(
+        clippy::many_single_char_names,
+        reason = "attention head indices follow paper notation"
+    )]
     pub fn forward(&self, x: &Tensor) -> Result<Tensor, EneEmbeddingError> {
         let (b, l, _h) = x.dims3().map_err(super::candle_err("attn dims3"))?;
 
@@ -94,7 +97,7 @@ impl AttentionBlock {
         let ctx = ctx
             .transpose(1, 2)
             .map_err(super::candle_err("attn transpose back"))?
-            .reshape((b, l, self.num_heads * self.head_dim))
+            .reshape((b, l, self.num_heads.saturating_mul(self.head_dim)))
             .map_err(super::candle_err("attn reshape back"))?;
 
         self.o_proj

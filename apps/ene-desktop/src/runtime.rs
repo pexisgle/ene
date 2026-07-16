@@ -364,7 +364,10 @@ impl ApplicationHandler for Runtime {
         }
     }
 
-    #[expect(clippy::similar_names)]
+    #[expect(
+        clippy::similar_names,
+        reason = "window_event matches winit callback parameter names"
+    )]
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -1100,7 +1103,10 @@ impl Runtime {
                 let camera_eye = glam::Vec3::from(character.camera_eye());
                 let camera_target = glam::Vec3::from(character.camera_target());
                 let camera_distance = (camera_eye - camera_target).length();
-                #[cfg_attr(target_os = "windows", expect(unused_variables))]
+                #[cfg_attr(
+                    target_os = "windows",
+                    expect(unused_variables, reason = "documented exception for this lint")
+                )]
                 let view_z = -camera_distance;
                 let cam_view = glam::camera::rh::view::look_at_mat4(
                     camera_eye,
@@ -1538,7 +1544,10 @@ fn update_char_window_cursor_and_hittest(
     };
 
     let cursor_over = hit.is_some();
-    #[cfg_attr(not(target_os = "windows"), expect(unused_variables))]
+    #[cfg_attr(
+        not(target_os = "windows"),
+        expect(unused_variables, reason = "documented exception for this lint")
+    )]
     let allows_input = !transparent || cursor_over || drag_is_dragging;
 
     if let Some(lc) = local_cursor {

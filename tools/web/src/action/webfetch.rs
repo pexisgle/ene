@@ -214,6 +214,10 @@ impl WebFetchAction {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "URL safety unit tests use unwrap for fixture construction"
+)]
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;

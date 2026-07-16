@@ -40,11 +40,22 @@
 //! }
 //! ```
 #![warn(missing_docs)]
-#![allow(clippy::option_if_let_else)]
-#![allow(deprecated)]
+#![expect(
+    clippy::option_if_let_else,
+    reason = "nursery style; match/if-let clarity preferred locally"
+)]
+#![expect(
+    deprecated,
+    reason = "sea-orm migration API still uses deprecated items"
+)]
 #![cfg_attr(
     test,
-    allow(clippy::unwrap_used, clippy::expect_used, clippy::clone_on_copy)
+    expect(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::clone_on_copy,
+        reason = "unit/integration tests use unwrap/expect for assertions",
+    )
 )]
 
 /// Affect state domain model.

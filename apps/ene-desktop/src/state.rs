@@ -117,12 +117,15 @@ impl AppState {
                 ready.0 = true;
             }
         } else {
-            tracing::warn!("System tray failed to initialise; running headless")
+            tracing::warn!("System tray failed to initialise; running headless");
         }
     }
 
     /// Forward a one-shot user input string into the AI bridge.
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "transitional AI bridge entry point for external callers"
+    )]
     pub fn ai_run(&self, input: impl Into<String>) {
         self.ai.run(input);
     }
@@ -134,7 +137,10 @@ impl AppState {
 
     /// Forward `Quit` into the bus. The runtime observes the next
     /// `about_to_wait` and calls `event_loop.exit()`.
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "transitional AI bridge entry point for external callers"
+    )]
     pub fn request_quit(&self, event_tx: &AppEventSender) {
         let _ = event_tx.send(AppEvent::Quit);
     }

@@ -1,6 +1,12 @@
 //! Integration smoke tests for cognitive runtime streaming (#100).
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "integration tests use unwrap/expect, fixed indices, and panic on invariant violations"
+)]
 
 use async_trait::async_trait;
 use ene_ai::{

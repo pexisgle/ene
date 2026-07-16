@@ -1,4 +1,8 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "integration tests use unwrap/expect for assertions"
+)]
 
 use ene_tool_host::ToolRegistry;
 use ene_tool_proto::transport::IpcListener;
@@ -112,7 +116,10 @@ async fn test_ipc_list_tools_and_call_tool() {
                 assert_eq!(name, "utility.get_current_time");
                 assert_eq!(arguments, "{}");
             }
-            _ => panic!("Expected CallTool, got {req:?}"),
+            other => assert!(
+                matches!(other, IpcRequest::CallTool { .. }),
+                "Expected CallTool, got {other:?}"
+            ),
         }
         write_ipc_response(
             &mut stream,
@@ -146,7 +153,10 @@ async fn test_ipc_list_tools_and_call_tool() {
     // Verify list_tools
     let tools = registry.list_tools();
     assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0].name.as_str(), "utility.get_current_time");
+    assert_eq!(
+        tools.first().map(|tool| tool.name.as_str()),
+        Some("utility.get_current_time")
+    );
 
     // Verify call_tool
     let result = registry

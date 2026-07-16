@@ -911,6 +911,7 @@ fn parse_animation(
 }
 
 #[cfg(test)]
+#[expect(clippy::float_cmp, reason = "test asserts exact float equality")]
 mod tests {
     use super::*;
 

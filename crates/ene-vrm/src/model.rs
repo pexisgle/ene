@@ -1073,8 +1073,8 @@ mod tests {
     }
 
     /// With no bone rotations and no hips translation, the
-    /// per-joint palette must equal the rest-pose `joint_world
-    /// * bind_matrices[j]`. For a single-joint model with
+    /// per-joint palette must equal the rest-pose `joint_world`
+    /// \* `bind_matrices[j]`. For a single-joint model with
     /// identity `bind_matrices` and a single node at the
     /// origin, that is `Mat4::IDENTITY` for every joint.
     #[test]

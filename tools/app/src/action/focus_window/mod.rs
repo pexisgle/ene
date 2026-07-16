@@ -19,7 +19,10 @@ pub struct FocusWindowAction {
 }
 
 impl FocusWindowAction {
-    #[expect(clippy::unused_async)]
+    #[expect(
+        clippy::unused_async,
+        reason = "tool IPC handlers are async for uniform provider dispatch"
+    )]
     async fn run(&self) -> Result<String, ToolError> {
         let title = &self.window_title;
         if crate::utils::portal::detect_wayland() {

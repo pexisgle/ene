@@ -806,7 +806,7 @@ mod tests {
                     .iter()
                     .filter_map(|p| match p {
                         UserMessagePart::Text { text } => Some(text.as_str()),
-                        _ => None,
+                        UserMessagePart::Image { .. } => None,
                     })
                     .collect::<Vec<_>>()
                     .join("\n");

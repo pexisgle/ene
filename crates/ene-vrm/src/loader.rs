@@ -1343,7 +1343,10 @@ fn load_mtoon_gpu_textures(
 
 /// A single GPU texture + sampler for `MToon`.
 struct MToonGpuTexture {
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "texture handle kept alive while view/sampler are bound"
+    )]
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     sampler: wgpu::Sampler,
@@ -1374,7 +1377,10 @@ fn load_mtoon_texture_or_dummy(
     upload_mtoon_texture(&white, device, queue, label)
 }
 
-#[expect(clippy::unnecessary_wraps)]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "default factory must return Option to match field type"
+)]
 fn upload_mtoon_texture(
     image: &DecodedImage,
     device: &wgpu::Device,
@@ -1525,7 +1531,7 @@ mod tests {
         // wrist + fingertip vertex exercises the upper half of
         // the range.
         let high_index: u32 = 511;
-        let joints: [u32; 4] = [u32::from(high_index), 0, 0, 0];
+        let joints: [u32; 4] = [high_index, 0, 0, 0];
         // The WGSL palette index is `u32` so a `Uint32x4`
         // attribute is the only correct upload format. The
         // `[u8; 4]` packing (this struct) would have saturated

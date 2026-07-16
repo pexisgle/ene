@@ -255,6 +255,10 @@ async fn bump_recalled_memory_access(store: &MemoryStore, recalled: &[RecalledMe
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::default_trait_access,
+    reason = "explicit Default for test fixture clarity"
+)]
 mod tests {
     use super::*;
     use crate::config::{CharacterMemoryConfig, MindConfig};

@@ -108,13 +108,25 @@ fn normalize_text(text: &str) -> String {
     static RE_LEADING_SPACE: OnceLock<regex::Regex> = OnceLock::new();
 
     let re_multispace = RE_MULTISPACE.get_or_init(|| {
-        regex::Regex::new(r"[ \t]+").unwrap_or_else(|e| panic!("invalid regex: {e}"))
+        #[expect(
+            clippy::expect_used,
+            reason = "constant regex pattern compiled once at first use"
+        )]
+        regex::Regex::new(r"[ \t]+").expect("invalid constant regex")
     });
     let re_multiline = RE_MULTILINE.get_or_init(|| {
-        regex::Regex::new(r"\n[ \t]*\n[ \t\n]*").unwrap_or_else(|e| panic!("invalid regex: {e}"))
+        #[expect(
+            clippy::expect_used,
+            reason = "constant regex pattern compiled once at first use"
+        )]
+        regex::Regex::new(r"\n[ \t]*\n[ \t\n]*").expect("invalid constant regex")
     });
     let re_leading_space = RE_LEADING_SPACE.get_or_init(|| {
-        regex::Regex::new(r"[ \t]*\n[ \t]*").unwrap_or_else(|e| panic!("invalid regex: {e}"))
+        #[expect(
+            clippy::expect_used,
+            reason = "constant regex pattern compiled once at first use"
+        )]
+        regex::Regex::new(r"[ \t]*\n[ \t]*").expect("invalid constant regex")
     });
 
     let step1 = re_multispace.replace_all(text, " ");

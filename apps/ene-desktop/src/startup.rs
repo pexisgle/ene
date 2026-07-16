@@ -21,7 +21,10 @@ pub struct FirstLaunchPaths {
     /// Default VRM path (CLI arg 1 or built-in default).
     pub default_vrm: String,
     /// Default VRMA path (CLI arg 2 or built-in default).
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "default VRMA path retained for CLI override API completeness"
+    )]
     pub default_vrma: String,
 }
 

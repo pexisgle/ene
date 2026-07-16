@@ -1,6 +1,9 @@
 //! Phase 7 expression arbiter integration tests (#89).
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::default_trait_access,
+    reason = "tests use explicit Default::default for clarity"
+)]
 
 use std::time::Duration;
 

@@ -14,8 +14,10 @@ fn context_config_validation_accepts_default_budgets() {
 
 #[test]
 fn compression_trigger_respects_enabled_flag() {
-    let mut config = ContextConfig::default();
-    config.compression_enabled = false;
+    let config = ContextConfig {
+        compression_enabled: false,
+        ..Default::default()
+    };
     assert!(evaluate_compression_trigger(&config, 100, 100).is_none());
 }
 

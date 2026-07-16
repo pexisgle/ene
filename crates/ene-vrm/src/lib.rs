@@ -31,8 +31,26 @@
 //! (some are unavoidably part of other supported types' public fields).
 
 #![warn(missing_docs)]
-#![allow(clippy::option_if_let_else)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![expect(
+    clippy::option_if_let_else,
+    reason = "nursery style; match/if-let clarity preferred locally"
+)]
+#![expect(
+    clippy::arithmetic_side_effects,
+    reason = "VRM/graphics math uses intentional f32 and mesh-index arithmetic"
+)]
+#![expect(
+    clippy::indexing_slicing,
+    reason = "mesh/bone/keyframe indices are validated at load or bounded by prior checks"
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        reason = "unit/integration tests use unwrap/expect for assertions"
+    )
+)]
 
 pub mod animation;
 pub mod camera;

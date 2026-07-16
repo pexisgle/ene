@@ -85,7 +85,7 @@ pub(crate) fn recency_score(
         .last_accessed_at
         .or(Some(item.updated_at))
         .unwrap_or(item.created_at);
-    let age_secs = (reference - anchor).num_seconds().max(0) as f64;
+    let age_secs = reference.signed_duration_since(anchor).num_seconds().max(0) as f64;
     let age_days = age_secs / 86_400.0;
     let lambda = std::f64::consts::LN_2 / half_life_days;
     (-lambda * age_days).exp() as f32

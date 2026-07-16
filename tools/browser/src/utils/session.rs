@@ -5,7 +5,10 @@ use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
 
 pub struct BrowserSession {
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "session fields retained for future browser state restore"
+    )]
     pub browser: chromiumoxide::browser::Browser,
     pub page: chromiumoxide::page::Page,
     pub handler_task: tokio::task::JoinHandle<()>,

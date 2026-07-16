@@ -127,7 +127,10 @@ pub fn entry_keys_match(entry: &LorebookEntry, scan_text: &str) -> bool {
 
 /// Match lorebook trigger keys, optionally using a precompiled regex cache.
 #[must_use]
-#[expect(clippy::implicit_hasher)]
+#[expect(
+    clippy::implicit_hasher,
+    reason = "HashMap key type is fixed to String in lorebook API"
+)]
 pub fn entry_keys_match_with_cache(
     entry: &LorebookEntry,
     entry_index: usize,
@@ -233,6 +236,10 @@ pub fn build_lorebook_scan_text(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::default_trait_access,
+    reason = "explicit Default for test fixture clarity"
+)]
 mod tests {
     use super::*;
     use ene_config::Lorebook;

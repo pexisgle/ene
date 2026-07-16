@@ -450,16 +450,19 @@ mod tests {
             }"#,
         );
         let c = parse_constraint(&json).unwrap();
-        match c {
-            NodeConstraint::Rotation {
-                source_node,
-                weight,
-            } => {
-                assert_eq!(source_node, 5);
-                assert!((weight - 0.8).abs() < 1e-6);
-            }
-            _ => panic!("expected Rotation"),
-        }
+        assert!(
+            matches!(c, NodeConstraint::Rotation { .. }),
+            "expected Rotation, got {c:?}"
+        );
+        let NodeConstraint::Rotation {
+            source_node,
+            weight,
+        } = c
+        else {
+            return;
+        };
+        assert_eq!(source_node, 5);
+        assert!((weight - 0.8).abs() < 1e-6);
     }
 
     #[test]
@@ -477,18 +480,21 @@ mod tests {
             }"#,
         );
         let c = parse_constraint(&json).unwrap();
-        match c {
-            NodeConstraint::Roll {
-                source_node,
-                roll_axis,
-                weight,
-            } => {
-                assert_eq!(source_node, 3);
-                assert_eq!(roll_axis, RollAxis::Y);
-                assert!((weight - 1.0).abs() < 1e-6);
-            }
-            _ => panic!("expected Roll"),
-        }
+        assert!(
+            matches!(c, NodeConstraint::Roll { .. }),
+            "expected Roll, got {c:?}"
+        );
+        let NodeConstraint::Roll {
+            source_node,
+            roll_axis,
+            weight,
+        } = c
+        else {
+            return;
+        };
+        assert_eq!(source_node, 3);
+        assert_eq!(roll_axis, RollAxis::Y);
+        assert!((weight - 1.0).abs() < 1e-6);
     }
 
     #[test]
@@ -506,18 +512,21 @@ mod tests {
             }"#,
         );
         let c = parse_constraint(&json).unwrap();
-        match c {
-            NodeConstraint::Aim {
-                source_node,
-                aim_axis,
-                weight,
-            } => {
-                assert_eq!(source_node, 7);
-                assert_eq!(aim_axis, AimAxis::PositiveZ);
-                assert!((weight - 0.5).abs() < 1e-6);
-            }
-            _ => panic!("expected Aim"),
-        }
+        assert!(
+            matches!(c, NodeConstraint::Aim { .. }),
+            "expected Aim, got {c:?}"
+        );
+        let NodeConstraint::Aim {
+            source_node,
+            aim_axis,
+            weight,
+        } = c
+        else {
+            return;
+        };
+        assert_eq!(source_node, 7);
+        assert_eq!(aim_axis, AimAxis::PositiveZ);
+        assert!((weight - 0.5).abs() < 1e-6);
     }
 
     #[test]

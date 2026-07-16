@@ -23,7 +23,7 @@ impl Truncate {
                 .char_indices()
                 .nth(max_chars)
                 .map_or(text.len(), |(i, _)| i);
-            format!("{}...", &text[..end])
+            format!("{}...", text.get(..end).unwrap_or(text))
         }
     }
 
@@ -40,7 +40,7 @@ impl Truncate {
                 .map_or(text.len(), |(i, _)| i);
             format!(
                 "{}\n\n[... truncated, total {} chars ...]",
-                &text[..byte_end],
+                text.get(..byte_end).unwrap_or(text),
                 char_count
             )
         }
@@ -70,19 +70,19 @@ impl Truncate {
         let mut hit_bytes = false;
 
         for line in lines.iter().take(max_lines) {
-            let size = line.len() + usize::from(!out.is_empty());
-            if bytes + size > max_bytes {
+            let size = line.len().saturating_add(usize::from(!out.is_empty()));
+            if bytes.saturating_add(size) > max_bytes {
                 hit_bytes = true;
                 break;
             }
             out.push(*line);
-            bytes += size;
+            bytes = bytes.saturating_add(size);
         }
 
         let removed = if hit_bytes {
-            total_bytes - bytes
+            total_bytes.saturating_sub(bytes)
         } else {
-            text.len() - out.join("\n").len()
+            text.len().saturating_sub(out.join("\n").len())
         };
 
         let preview = out.join("\n");
@@ -114,19 +114,19 @@ impl Truncate {
         let mut hit_bytes = false;
 
         for line in lines.iter().rev().take(max_lines) {
-            let size = line.len() + usize::from(!out.is_empty());
-            if bytes + size > max_bytes {
+            let size = line.len().saturating_add(usize::from(!out.is_empty()));
+            if bytes.saturating_add(size) > max_bytes {
                 hit_bytes = true;
                 break;
             }
             out.insert(0, *line);
-            bytes += size;
+            bytes = bytes.saturating_add(size);
         }
 
         let removed = if hit_bytes {
-            total_bytes - bytes
+            total_bytes.saturating_sub(bytes)
         } else {
-            text.len() - out.join("\n").len()
+            text.len().saturating_sub(out.join("\n").len())
         };
 
         let preview = out.join("\n");

@@ -25,7 +25,10 @@ impl CloseAction {
         Self { store }
     }
 
-    #[expect(clippy::unused_async)]
+    #[expect(
+        clippy::unused_async,
+        reason = "tool IPC handlers are async for uniform provider dispatch"
+    )]
     async fn run(&self) -> Result<String, ToolError> {
         self.store.close("default");
         Ok("Browser session closed.".to_string())

@@ -28,7 +28,7 @@ impl CompositeToolRegistry {
     /// Returns [`ToolHostError::DuplicateToolName`] when two or more
     /// sub-registries expose a tool with the same name.
     pub fn try_new(registries: Vec<Arc<dyn ToolRegistry>>) -> Result<Self, ToolHostError> {
-        let mut tool_index = HashMap::with_capacity(registries.len() * 4);
+        let mut tool_index = HashMap::with_capacity(registries.len().saturating_mul(4));
         for (idx, registry) in registries.iter().enumerate() {
             for tool in registry.list_tools() {
                 let name = tool.name.as_str().to_string();
@@ -52,6 +52,10 @@ impl CompositeToolRegistry {
     /// Panics when two registries expose the same public tool name.
     /// Prefer [`try_new`](Self::try_new) at fallible call sites.
     #[must_use]
+    #[expect(
+        clippy::panic,
+        reason = "legacy infallible constructor; prefer try_new for fallible construction"
+    )]
     pub fn new(registries: Vec<Arc<dyn ToolRegistry>>) -> Self {
         match Self::try_new(registries) {
             Ok(composite) => composite,
@@ -104,6 +108,10 @@ impl CompositeToolRegistry {
     ///
     /// # Panics
     /// Panics on name collision. Prefer [`try_add_registry`](Self::try_add_registry).
+    #[expect(
+        clippy::panic,
+        reason = "legacy infallible API; prefer try_add_registry for fallible registration"
+    )]
     pub fn add_registry(&self, registry: Arc<dyn ToolRegistry>) {
         match self.try_add_registry(registry) {
             Ok(()) => {}
@@ -156,7 +164,15 @@ impl ToolRegistry for CompositeToolRegistry {
                     },
                 ));
             };
-            Arc::clone(&guard.registries[idx])
+            let Some(registry) = guard.registries.get(idx).map(Arc::clone) else {
+                return Err(ToolHostError::Protocol(
+                    ene_tool_proto::ToolError::NotFound {
+                        tool_name: name.to_string(),
+                    },
+                ));
+            };
+            drop(guard);
+            registry
         };
         registry.call_tool(name, arguments).await
     }
@@ -194,7 +210,11 @@ impl ToolRegistry for CompositeToolRegistry {
 }
 
 #[cfg(test)]
-#[allow(clippy::significant_drop_tightening)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "composite registry unit tests use unwrap and fixed indices"
+)]
 mod tests {
     use super::*;
     use ene_tool_proto::ToolName;
@@ -320,6 +340,7 @@ mod tests {
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].0, "find");
         assert_eq!(log[0].1, r#"{"pattern":"*.rs"}"#);
+        drop(log);
     }
 
     #[tokio::test]

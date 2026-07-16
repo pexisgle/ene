@@ -369,7 +369,10 @@ fn kind_counts(selected: &[ScoredMemory]) -> std::collections::HashMap<&'static 
 }
 
 #[cfg(test)]
-#[cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp))]
+#[cfg_attr(
+    test,
+    expect(clippy::float_cmp, reason = "test asserts exact float equality")
+)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
@@ -826,9 +829,7 @@ mod tests {
 
         let mins = effective_min_slots(&plan, options, 3);
         let slots_for = |kind: MemoryKind| -> usize {
-            mins.iter()
-                .find(|(k, _)| *k == kind)
-                .map_or(0, |(_, n)| *n)
+            mins.iter().find(|(k, _)| *k == kind).map_or(0, |(_, n)| *n)
         };
 
         assert_eq!(slots_for(MemoryKind::Commitment), 1);

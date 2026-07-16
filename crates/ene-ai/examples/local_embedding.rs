@@ -71,10 +71,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nText 3: \"{text3}\"");
     println!("Cosine similarity (cat vs stocks): {similarity_unrelated:.4}");
 
-    assert!(
-        similarity > similarity_unrelated,
-        "Related texts should be more similar than unrelated ones"
-    );
+    if similarity <= similarity_unrelated {
+        return Err("Related texts should be more similar than unrelated ones".into());
+    }
 
     println!("\nEmbeddings work correctly!");
 

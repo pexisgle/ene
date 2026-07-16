@@ -13,7 +13,10 @@ pub(super) async fn capture_window_portal(scale_percent: u32) -> Result<DynamicI
         })?;
 
     // `CreateSessionOptions` is private; can't name it, so use Default::default()
-    #[expect(clippy::default_trait_access)]
+    #[expect(
+        clippy::default_trait_access,
+        reason = "explicit Default for portal capture test fixtures"
+    )]
     let session = proxy
         .create_session(Default::default())
         .await

@@ -349,7 +349,10 @@ impl CharacterCardData {
 }
 
 /// Default expressions for the schema.
-#[expect(clippy::unnecessary_wraps)]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "schemars default factory must return Option to match field type"
+)]
 fn default_ene_expressions() -> Option<Vec<ExpressionDefinition>> {
     Some(vec![
         ExpressionDefinition {
@@ -429,14 +432,17 @@ pub fn expand_cbs_macros(text: &str, char_name: &str, user_name: &str) -> String
 
     fn expand_template_macro(result: &mut String, prefix: &str, handler: impl Fn(&str) -> String) {
         while let Some(start) = result.find(prefix) {
-            if let Some(end_rel) = result[start..].find("}}") {
-                let end = start + end_rel;
-                let inner = &result[start + prefix.len()..end];
-                let replacement = handler(inner);
-                result.replace_range(start..end + 2, &replacement);
-            } else {
+            let Some(end_rel) = result.get(start..).and_then(|tail| tail.find("}}")) else {
                 break;
-            }
+            };
+            let end = start.saturating_add(end_rel);
+            let inner_start = start.saturating_add(prefix.len());
+            let Some(inner) = result.get(inner_start..end) else {
+                break;
+            };
+            let replacement = handler(inner);
+            let range_end = end.saturating_add(2);
+            result.replace_range(start..range_end, &replacement);
         }
     }
 
@@ -446,7 +452,10 @@ pub fn expand_cbs_macros(text: &str, char_name: &str, user_name: &str) -> String
             String::new()
         } else {
             let idx = rand::random_range(0..options.len());
-            options[idx].to_string()
+            options
+                .get(idx)
+                .map(|s| (*s).to_string())
+                .unwrap_or_default()
         }
     };
 

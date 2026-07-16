@@ -1,6 +1,29 @@
 #![warn(missing_docs)]
-#![allow(clippy::option_if_let_else)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![expect(
+    clippy::option_if_let_else,
+    reason = "nursery style; match/if-let clarity preferred locally"
+)]
+#![expect(
+    clippy::arithmetic_side_effects,
+    reason = "mind turn pipeline uses intentional turn/score/index arithmetic"
+)]
+#![expect(
+    clippy::indexing_slicing,
+    reason = "history/token helpers index into bounds-checked conversational buffers"
+)]
+#![expect(
+    clippy::string_slice,
+    reason = "special-token and summarizer parsers slice at known ASCII delimiters"
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        reason = "unit/integration tests use unwrap/expect/panic for concise assertions"
+    )
+)]
 
 //! # ene-mind
 //!

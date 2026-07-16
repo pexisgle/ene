@@ -27,7 +27,7 @@ pub struct ChatState {
 
 impl ChatState {
     #[cfg(test)]
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "test-only constructor for chat state fixtures")]
     pub fn new() -> Self {
         Self {
             chat_window_visible: true,

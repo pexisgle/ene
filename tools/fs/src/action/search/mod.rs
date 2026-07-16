@@ -6,7 +6,10 @@ use ene_tool_proto::ToolError;
 
 pub const MAX_RESULTS: usize = 100;
 
-#[expect(clippy::unused_async)]
+#[expect(
+    clippy::unused_async,
+    reason = "tool IPC handlers are async for uniform provider dispatch"
+)]
 pub async fn glob_search(
     pattern: &str,
     path: Option<&str>,

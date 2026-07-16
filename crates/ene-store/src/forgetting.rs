@@ -105,7 +105,7 @@ pub fn decay_score(item: &MemoryItem, now: DateTime<Utc>, half_life_days: f64) -
         MemoryStatus::Faded => faded_decay_anchor(item),
         _ => active_decay_anchor(item),
     };
-    let age_secs = (now - anchor).num_seconds().max(0) as f64;
+    let age_secs = now.signed_duration_since(anchor).num_seconds().max(0) as f64;
     let age_days = age_secs / 86_400.0;
     let base = if half_life_days <= 0.0 {
         1.0_f32
@@ -140,7 +140,9 @@ mod tests {
 
     fn sample_item(status: MemoryStatus, pinned: bool, days_ago: i64) -> MemoryItem {
         let now = Utc::now();
-        let anchor = now - chrono::Duration::days(days_ago);
+        let anchor = now
+            .checked_sub_signed(chrono::Duration::days(days_ago))
+            .unwrap_or(now);
         MemoryItem {
             id: Some(1),
             scope: MemoryScope::Character,

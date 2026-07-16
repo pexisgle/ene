@@ -1,9 +1,5 @@
 [workspace]
-members = [
-    "crates/*",
-    "tools/*",
-    "apps/*",
-]
+members = [ "crates/*", "tools/*", "apps/*" ]
 resolver = "2"
 
 [workspace.package]
@@ -11,72 +7,26 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
-# --- Internal Libraries (ene-* crates) ---
-ene-ai = { path = "crates/ene-ai" }
-ene-config = { path = "crates/ene-config" }
-ene-mind = { path = "crates/ene-mind" }
-ene-runtime = { path = "crates/ene-runtime" }
-ene-store = { path = "crates/ene-store" }
-ene-tool = { path = "crates/ene-tool" }
-ene-tool-common = { path = "crates/ene-tool-common" }
-ene-tool-db = { path = "crates/ene-tool-db" }
-ene-tool-derive = { path = "crates/ene-tool-derive" }
-ene-tool-host = { path = "crates/ene-tool-host" }
-ene-tool-proto = { path = "crates/ene-tool-proto" }
-ene-tool-rag = { path = "crates/ene-tool-rag" }
-ene-vrm = { path = "crates/ene-vrm" }
-
-# --- AI / ML Providers & Local Embedding ---
-async-openai = { version = "0.41", default-features = false, features = ["chat-completion", "embedding", "byot"] }
 candle-core = "0.11"
 candle-nn = "0.11"
-hf-hub = { version = "1.0.0-rc.1", default-features = false }
 tokenizers = "0.23"
-
-# --- Database ---
-libsqlite3-sys = { version = "0.37", features = ["bundled"] }
-sea-orm = { version = "2.0.0-rc.43", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros", "with-chrono"] }
-sea-orm-migration = { version = "2.0.0-rc.43", features = ["runtime-tokio-rustls", "sqlx-sqlite"] }
 sqlite-vec = "0.1"
-
-# --- GUI, ECS & Graphics ---
-bevy_app = { version = "0.19", default-features = false }
-bevy_ecs = { version = "0.19", default-features = false }
-bytemuck = { version = "1", features = ["derive"] }
 egui = "0.35"
 egui-wgpu = "0.35"
 egui-winit = "0.35"
-glam = { version = "0.33", features = ["bytemuck"] }
-gltf = { version = "1.4", default-features = false }
-rapier3d = { version = "0.34", features = ["simd-stable"] }
 wgpu = "29"
 winit = "0.30"
-
-# --- OS / Display Integrations ---
 active-win-pos-rs = "0.11.0"
-arboard = { version = "3.6", features = ["wayland-data-control"] }
-ashpd = { version = "0.13", default-features = false }
 device_query = "4"
 enigo = "0.6"
 gtk = "0.18.2"
-pipewire = "0.9" # Note: Kept at 0.9 because xcap v0.9.6 relies on 0.9. Cannot upgrade to 0.10.
-tray-icon = { version = "0.24", default-features = false }
-wayland-client = { version = "0.31", default-features = false }
-wayland-protocols = { version = "0.32", default-features = false, features = ["staging", "client"] }
-wayland-protocols-wlr = { version = "0.3", default-features = false, features = ["client"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
-x11rb = { version = "0.13", default-features = false }
+pipewire = "0.9"
 xcap = "0.9.6"
 websearch = "0.1.1"
-
-# --- Common & Utilities ---
 async-trait = "0.1"
-base64 = { version = "0.22", default-features = false }
 bitflags = "2"
 blake3 = "1.8"
-cargo-husky = { version = "1.5", default-features = false, features = ["user-hooks", "run-for-all"] }
 chromiumoxide = "0.9"
-chrono = { version = "0.4", features = ["serde"] }
 console = "0.16.3"
 ctor = "1.0"
 darling = "0.23"
@@ -84,14 +34,11 @@ dashmap = "6"
 dialoguer = "0.12"
 directories = "6"
 ego-tree = "0.11"
-figment = { version = "0.10", features = ["json", "env"] }
 flate2 = "1"
 futures-core = "0.3"
 glob = "0.3"
 htmd = "0.5"
-i18n-embed = { version = "0.16", features = ["fluent-system", "fluent", "desktop-requester"] }
 i18n-embed-fl = "0.10"
-image = { version = "0.25", default-features = false }
 indexmap = "2"
 once_cell = "1"
 parking_lot = "0.12"
@@ -102,29 +49,249 @@ quote = "1"
 rand = "0.10"
 rayon = "1.12"
 regex = "1"
-reqwest = { version = "0.13", default-features = false }
-rmcp = { version = "2", features = ["client", "transport-child-process", "transport-streamable-http-client"] }
 rust-embed = "8.11"
-schemars = { version = "1.2", features = ["preserve_order"] }
 scraper = "0.27"
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 strsim = "0.11"
-syn = { version = "2", features = ["full", "extra-traits"] }
 tempfile = "3"
 thiserror = "2.0"
-tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 tokio-stream = "0.1"
 tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 unicode-normalization = "0.1"
-uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
-zip = { version = "8", default-features = false }
+
+[workspace.dependencies.ene-ai]
+path = "crates/ene-ai"
+
+[workspace.dependencies.ene-config]
+path = "crates/ene-config"
+
+[workspace.dependencies.ene-mind]
+path = "crates/ene-mind"
+
+[workspace.dependencies.ene-runtime]
+path = "crates/ene-runtime"
+
+[workspace.dependencies.ene-store]
+path = "crates/ene-store"
+
+[workspace.dependencies.ene-tool]
+path = "crates/ene-tool"
+
+[workspace.dependencies.ene-tool-common]
+path = "crates/ene-tool-common"
+
+[workspace.dependencies.ene-tool-db]
+path = "crates/ene-tool-db"
+
+[workspace.dependencies.ene-tool-derive]
+path = "crates/ene-tool-derive"
+
+[workspace.dependencies.ene-tool-host]
+path = "crates/ene-tool-host"
+
+[workspace.dependencies.ene-tool-proto]
+path = "crates/ene-tool-proto"
+
+[workspace.dependencies.ene-tool-rag]
+path = "crates/ene-tool-rag"
+
+[workspace.dependencies.ene-vrm]
+path = "crates/ene-vrm"
+
+[workspace.dependencies.async-openai]
+version = "0.41"
+default-features = false
+features = [ "chat-completion", "embedding", "byot" ]
+
+[workspace.dependencies.hf-hub]
+version = "1.0.0-rc.1"
+default-features = false
+
+[workspace.dependencies.libsqlite3-sys]
+version = "0.37"
+features = [ "bundled" ]
+
+[workspace.dependencies.sea-orm]
+version = "2.0.0-rc.43"
+features = [
+"sqlx-sqlite",
+"runtime-tokio-rustls",
+"macros",
+"with-chrono"
+]
+
+[workspace.dependencies.sea-orm-migration]
+version = "2.0.0-rc.43"
+features = [ "runtime-tokio-rustls", "sqlx-sqlite" ]
+
+[workspace.dependencies.bevy_app]
+version = "0.19"
+default-features = false
+
+[workspace.dependencies.bevy_ecs]
+version = "0.19"
+default-features = false
+
+[workspace.dependencies.bytemuck]
+version = "1"
+features = [ "derive" ]
+
+[workspace.dependencies.glam]
+version = "0.33"
+features = [ "bytemuck" ]
+
+[workspace.dependencies.gltf]
+version = "1.4"
+default-features = false
+
+[workspace.dependencies.rapier3d]
+version = "0.34"
+features = [ "simd-stable" ]
+
+[workspace.dependencies.arboard]
+version = "3.6"
+features = [ "wayland-data-control" ]
+
+[workspace.dependencies.ashpd]
+version = "0.13"
+default-features = false
+
+[workspace.dependencies.tray-icon]
+version = "0.24"
+default-features = false
+
+[workspace.dependencies.wayland-client]
+version = "0.31"
+default-features = false
+
+[workspace.dependencies.wayland-protocols]
+version = "0.32"
+default-features = false
+features = [ "staging", "client" ]
+
+[workspace.dependencies.wayland-protocols-wlr]
+version = "0.3"
+default-features = false
+features = [ "client" ]
+
+[workspace.dependencies.windows-sys]
+version = "0.61"
+features = [
+"Win32_Foundation",
+"Win32_UI_WindowsAndMessaging",
+"Win32_Graphics_Gdi"
+]
+
+[workspace.dependencies.x11rb]
+version = "0.13"
+default-features = false
+
+[workspace.dependencies.base64]
+version = "0.22"
+default-features = false
+
+[workspace.dependencies.cargo-husky]
+version = "1.5"
+default-features = false
+features = [ "user-hooks", "run-for-all" ]
+
+[workspace.dependencies.chrono]
+version = "0.4"
+features = [ "serde" ]
+
+[workspace.dependencies.figment]
+version = "0.10"
+features = [ "json", "env" ]
+
+[workspace.dependencies.i18n-embed]
+version = "0.16"
+features = [ "fluent-system", "fluent", "desktop-requester" ]
+
+[workspace.dependencies.image]
+version = "0.25"
+default-features = false
+
+[workspace.dependencies.reqwest]
+version = "0.13"
+default-features = false
+
+[workspace.dependencies.rmcp]
+version = "2"
+features = [
+"client",
+"transport-child-process",
+"transport-streamable-http-client"
+]
+
+[workspace.dependencies.schemars]
+version = "1.2"
+features = [ "preserve_order" ]
+
+[workspace.dependencies.serde]
+version = "1"
+features = [ "derive" ]
+
+[workspace.dependencies.syn]
+version = "2"
+features = [ "full", "extra-traits" ]
+
+[workspace.dependencies.tokio]
+version = "1"
+default-features = false
+features = [ "rt", "rt-multi-thread", "macros", "sync", "time" ]
+
+[workspace.dependencies.uuid]
+version = "1"
+features = [ "v4" ]
+
+[workspace.dependencies.zip]
+version = "8"
+default-features = false
 
 [workspace.metadata.cargo-husky]
 run-for-all = true
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+unwrap_in_result = "deny"
+panic_in_result_fn = "deny"
+string_slice = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "warn"
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+multiple_unsafe_ops_per_block = "warn"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+too_many_lines = "allow"
+items_after_statements = "allow"
+too_long_first_doc_paragraph = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_panics_doc = "allow"
+missing_errors_doc = "allow"
+struct_excessive_bools = "allow"
+large_futures = "allow"
+
+[workspace.lints.clippy.pedantic]
+level = "warn"
+priority = -1
+
+[workspace.lints.clippy.nursery]
+level = "warn"
+priority = -1
 
 [profile.dev.package."*"]
 opt-level = 3
@@ -132,38 +299,9 @@ opt-level = 3
 [profile.dev.package.ene-ai]
 opt-level = 3
 
-[workspace.lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
-undocumented_unsafe_blocks = "deny"
-missing_safety_doc = "warn"
-unwrap_used = "warn"
-expect_used = "warn"
-todo = "deny"
-unimplemented = "deny"
-allow_attributes = "allow"
-
-# --- Cast lints: intentional in systems programming and rendering code ---
-cast_possible_truncation = "allow"
-cast_precision_loss = "allow"
-cast_sign_loss = "allow"
-cast_possible_wrap = "allow"
-
-# --- Subjective style lints: legitimate use cases exist in this codebase ---
-too_many_lines = "allow"
-items_after_statements = "allow"
-too_long_first_doc_paragraph = "allow"
-
-# --- Domain-appropriate lints ---
-struct_excessive_bools = "allow"
-large_futures = "allow"
-missing_panics_doc = "allow"
-missing_errors_doc = "allow"
-
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
-

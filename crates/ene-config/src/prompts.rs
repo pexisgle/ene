@@ -35,7 +35,10 @@ pub struct PromptLibraryData {
 }
 
 #[derive(Debug, Deserialize)]
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "serde intermediate raw structs; fields are only read via destructuring"
+)]
 struct RawPromptLibraryData {
     system: RawSystemPrompts,
     emotion: RawEmotionPrompts,
@@ -67,7 +70,10 @@ pub struct SystemPrompts {
 }
 
 #[derive(Debug, Deserialize)]
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "serde intermediate raw structs; fields are only read via destructuring"
+)]
 struct RawSystemPrompts {
     mascot_context_path: String,
     behavior_rules_header: String,
@@ -113,7 +119,10 @@ pub struct EmotionPrompts {
 }
 
 #[derive(Debug, Deserialize)]
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "serde intermediate raw structs; fields are only read via destructuring"
+)]
 struct RawEmotionPrompts {
     header: String,
     rule_path: String,
@@ -164,7 +173,10 @@ pub struct SummarizerPrompts {
 }
 
 #[derive(Debug, Deserialize)]
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "serde intermediate raw structs; fields are only read via destructuring"
+)]
 struct RawSummarizerPrompts {
     system_path: String,
     user_prompt_path: String,
@@ -236,7 +248,10 @@ pub struct ExtractorPrompts {
 }
 
 #[derive(Debug, Deserialize)]
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "serde intermediate raw structs; fields are only read via destructuring"
+)]
 struct RawExtractorPrompts {
     system_path: String,
     user_prompt_path: String,
@@ -267,7 +282,10 @@ pub struct AffectClassifierPrompts {
 }
 
 #[derive(Debug, Deserialize, Default)]
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "serde intermediate raw structs; fields are only read via destructuring"
+)]
 struct RawAffectClassifierPrompts {
     #[serde(default = "default_affect_classifier_system_path")]
     system_path: String,

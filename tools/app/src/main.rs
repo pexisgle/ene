@@ -3,7 +3,18 @@
 //! IPC tool binary providing desktop application control:
 //! window management, input simulation, and portal overlay.
 #![warn(missing_docs)]
-#![allow(clippy::unused_async)]
+#![expect(
+    clippy::arithmetic_side_effects,
+    reason = "app portal/input tools use intentional coordinate and timing arithmetic"
+)]
+#![expect(
+    clippy::indexing_slicing,
+    reason = "key combo and capture helpers index into validated buffers"
+)]
+#![expect(
+    clippy::string_slice,
+    reason = "portal compositor parsers slice at ASCII delimiters"
+)]
 
 mod action;
 mod config;

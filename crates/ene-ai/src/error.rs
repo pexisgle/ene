@@ -111,7 +111,10 @@ mod tests {
         let mapped = map_openai_error(&err);
         match mapped {
             LlmProviderError::Auth(msg) => assert_eq!(msg, "bad key"),
-            other => panic!("expected Auth, got {other:?}"),
+            other => assert!(
+                matches!(other, LlmProviderError::Auth(_)),
+                "expected Auth, got {other:?}"
+            ),
         }
     }
 
@@ -135,7 +138,10 @@ mod tests {
         let mapped = map_openai_error(&err);
         match mapped {
             LlmProviderError::Provider(msg) => assert!(msg.contains("500") && msg.contains("boom")),
-            other => panic!("expected Provider, got {other:?}"),
+            other => assert!(
+                matches!(other, LlmProviderError::Provider(_)),
+                "expected Provider, got {other:?}"
+            ),
         }
     }
 

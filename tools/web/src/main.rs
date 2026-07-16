@@ -2,7 +2,10 @@
 //!
 //! IPC tool binary providing web fetch and search capabilities.
 #![warn(missing_docs)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![expect(
+    clippy::arithmetic_side_effects,
+    reason = "websearch result ranking uses intentional score arithmetic"
+)]
 
 mod action;
 mod provider;

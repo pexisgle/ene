@@ -22,5 +22,8 @@ pub fn tick_gtk_system(ready: Option<Res<crate::resource::tray::GtkReady>>) {
 }
 
 #[cfg(not(target_os = "linux"))]
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "non-Linux stub kept for uniform system registration"
+)]
 pub fn tick_gtk_system() {}

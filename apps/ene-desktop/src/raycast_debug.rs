@@ -124,7 +124,10 @@ pub fn push_lines(
     }
 }
 
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "marker retained for future collider debug integration"
+)]
 pub const fn unused_collider_set_marker(_cs: &ColliderSet) {}
 
 #[cfg(test)]

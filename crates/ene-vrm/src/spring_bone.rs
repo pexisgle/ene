@@ -635,7 +635,7 @@ impl SpringBoneSimulator {
 mod tests {
     use super::*;
 
-    fn gltf_from_vrmc(vrmc: Value) -> gltf::Gltf {
+    fn gltf_from_vrmc(vrmc: &Value) -> gltf::Gltf {
         let mut root = serde_json::Map::new();
         root.insert("asset".into(), serde_json::json!({"version": "2.0"}));
         root.insert(
@@ -644,7 +644,7 @@ mod tests {
         );
         root.insert(
             "extensions".into(),
-            serde_json::json!({"VRMC_springBone": vrmc}),
+            serde_json::json!({"VRMC_springBone": vrmc.clone()}),
         );
         root.insert("nodes".into(), serde_json::json!([]));
         let bytes = serde_json::to_vec(&root).unwrap();
@@ -659,7 +659,7 @@ mod tests {
             "colliderGroups": [],
             "springs": []
         });
-        let gltf = gltf_from_vrmc(vrmc);
+        let gltf = gltf_from_vrmc(&vrmc);
         let props = load_spring_bones(&gltf).unwrap();
         assert_eq!(props.spec_version, "1.0");
         assert!(props.colliders.is_empty());
@@ -685,19 +685,22 @@ mod tests {
             "colliderGroups": [],
             "springs": []
         });
-        let gltf = gltf_from_vrmc(vrmc);
+        let gltf = gltf_from_vrmc(&vrmc);
         let props = load_spring_bones(&gltf).unwrap();
         assert_eq!(props.colliders.len(), 1);
         assert_eq!(props.colliders[0].node, 5);
-        match &props.colliders[0].shape {
-            SpringBoneShape::Sphere { offset, radius } => {
-                assert!((offset[0] - 0.1).abs() < 1e-6);
-                assert!((offset[1] - 0.2).abs() < 1e-6);
-                assert!((offset[2] - 0.3).abs() < 1e-6);
-                assert!((radius - 0.5).abs() < 1e-6);
-            }
-            _ => panic!("expected Sphere"),
-        }
+        assert!(
+            matches!(&props.colliders[0].shape, SpringBoneShape::Sphere { .. }),
+            "expected Sphere, got {:?}",
+            props.colliders[0].shape
+        );
+        let SpringBoneShape::Sphere { offset, radius } = &props.colliders[0].shape else {
+            return;
+        };
+        assert!((offset[0] - 0.1).abs() < 1e-6);
+        assert!((offset[1] - 0.2).abs() < 1e-6);
+        assert!((offset[2] - 0.3).abs() < 1e-6);
+        assert!((radius - 0.5).abs() < 1e-6);
     }
 
     #[test]
@@ -719,21 +722,25 @@ mod tests {
             "colliderGroups": [],
             "springs": []
         });
-        let gltf = gltf_from_vrmc(vrmc);
+        let gltf = gltf_from_vrmc(&vrmc);
         let props = load_spring_bones(&gltf).unwrap();
         assert_eq!(props.colliders.len(), 1);
-        match &props.colliders[0].shape {
-            SpringBoneShape::Capsule {
-                offset,
-                radius,
-                tail,
-            } => {
-                assert!((radius - 0.1).abs() < 1e-6);
-                assert!((tail[2] - 1.0).abs() < 1e-6);
-                let _ = offset;
-            }
-            _ => panic!("expected Capsule"),
-        }
+        assert!(
+            matches!(&props.colliders[0].shape, SpringBoneShape::Capsule { .. }),
+            "expected Capsule, got {:?}",
+            props.colliders[0].shape
+        );
+        let SpringBoneShape::Capsule {
+            offset,
+            radius,
+            tail,
+        } = &props.colliders[0].shape
+        else {
+            return;
+        };
+        assert!((radius - 0.1).abs() < 1e-6);
+        assert!((tail[2] - 1.0).abs() < 1e-6);
+        let _ = offset;
     }
 
     #[test]
@@ -749,7 +756,7 @@ mod tests {
             ],
             "springs": []
         });
-        let gltf = gltf_from_vrmc(vrmc);
+        let gltf = gltf_from_vrmc(&vrmc);
         let props = load_spring_bones(&gltf).unwrap();
         assert_eq!(props.collider_groups.len(), 1);
         assert_eq!(props.collider_groups[0].name.as_deref(), Some("body"));
@@ -774,7 +781,7 @@ mod tests {
                 }
             ]
         });
-        let gltf = gltf_from_vrmc(vrmc);
+        let gltf = gltf_from_vrmc(&vrmc);
         let props = load_spring_bones(&gltf).unwrap();
         assert_eq!(props.springs.len(), 1);
         assert_eq!(props.springs[0].name.as_deref(), Some("hair_front"));
@@ -813,7 +820,7 @@ mod tests {
                 }
             ]
         });
-        let gltf = gltf_from_vrmc(vrmc);
+        let gltf = gltf_from_vrmc(&vrmc);
         let props = load_spring_bones(&gltf).unwrap();
         let joint = &props.springs[0].joints[0];
         assert!((joint.hit_radius - 0.05).abs() < 1e-6);

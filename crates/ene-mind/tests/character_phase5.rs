@@ -1,6 +1,12 @@
 //! Phase 5 character processing integration tests (#82–#84).
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::default_trait_access,
+    clippy::indexing_slicing,
+    reason = "integration tests use unwrap/expect, Default, and fixed indices"
+)]
 
 use async_trait::async_trait;
 use ene_ai::{EmbeddingKind, EmbeddingProvider};

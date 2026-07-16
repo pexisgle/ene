@@ -1,4 +1,7 @@
-#![cfg_attr(test, allow(clippy::float_cmp))]
+#![cfg_attr(
+    test,
+    expect(clippy::float_cmp, reason = "test asserts exact float equality")
+)]
 
 //! Character rendering. Owns the loaded VRM, depth texture, the
 //! orthographic camera, and per-frame state (look-at, drag, motion
@@ -456,7 +459,13 @@ impl CharacterRenderer {
     /// Forward to the internal VRM renderer's `render_mask`.
     /// No-op if the renderer is uninitialised or was built without
     /// a `mask_format`.
-    #[cfg_attr(target_os = "windows", expect(dead_code))]
+    #[cfg_attr(
+        target_os = "windows",
+        expect(
+            dead_code,
+            reason = "field retained for API completeness / future phases"
+        )
+    )]
     pub fn render_mask(
         &self,
         queue: &wgpu::Queue,
@@ -742,26 +751,26 @@ impl CharacterRenderer {
     /// Latest per-bone output for `"bone"`-type models. Consumed
     /// inside [`Self::update_motion`]; the accessor is kept for
     /// diagnostics.
-    #[expect(dead_code)]
+    #[expect(dead_code, reason = "diagnostic accessor retained for debug overlays")]
     pub const fn look_at_bone_output(&self) -> Option<&LookAtBoneOutput> {
         self.look_at_bone_output.as_ref()
     }
 
     /// The most recent smoothed world target (or `None`).
-    #[expect(dead_code)]
+    #[expect(dead_code, reason = "diagnostic accessor retained for debug overlays")]
     pub const fn look_at_target(&self) -> Option<Vec3> {
         self.look_at.smoothed_world_target
     }
 
     /// Per-bone body-tracking weights for the current
     /// `look_at_strength` slider value.
-    #[expect(dead_code)]
+    #[expect(dead_code, reason = "diagnostic accessor retained for debug overlays")]
     pub fn body_tracking(&self, strength: f32) -> crate::look_at::BodyTracking {
         crate::look_at::body_tracking_for_strength(strength)
     }
 
     /// Diagnostic: (`aspect_ratio`, eye, target, `viewport_height`).
-    #[expect(dead_code)]
+    #[expect(dead_code, reason = "diagnostic accessor retained for debug overlays")]
     pub const fn camera_dbg(&self) -> (f32, [f32; 3], [f32; 3], f32) {
         let (eye, target, viewport_height, aspect) = self.camera.debug();
         (aspect, eye, target, viewport_height)
@@ -798,7 +807,7 @@ impl CharacterRenderer {
     }
 
     /// Diagnostic: (`depth_width`, `depth_height`).
-    #[expect(dead_code)]
+    #[expect(dead_code, reason = "diagnostic accessor retained for debug overlays")]
     pub const fn depth_size_dbg(&self) -> (u32, u32) {
         self.depth_size
     }
@@ -826,7 +835,7 @@ impl CharacterRenderer {
     /// Diagnostic: AABB of the loaded vertex data (min, max).
     /// The loader's normalize centres the AABB on origin; if
     /// not symmetric, that's a bug.
-    #[expect(dead_code)]
+    #[expect(dead_code, reason = "diagnostic accessor retained for debug overlays")]
     pub fn model_aabb_dbg(&self) -> Option<([f32; 3], [f32; 3])> {
         self.model.as_ref().map(ene_vrm::VrmModel::aabb)
     }
@@ -835,7 +844,7 @@ impl CharacterRenderer {
     /// runtime folds `T(-center)` into the model matrix; if the
     /// centre is wildly off (e.g. a hair vertex got included in
     /// the AABB) the model will be shifted out of the viewport.
-    #[expect(dead_code)]
+    #[expect(dead_code, reason = "diagnostic accessor retained for debug overlays")]
     pub fn model_dbg_center(&self) -> [f32; 3] {
         self.model
             .as_ref()
@@ -846,7 +855,7 @@ impl CharacterRenderer {
     /// `actual_scale × normalize_scale` should be ~1.42 for
     /// Alicia; if the runtime sees a different value, the loader
     /// computed the wrong AABB.
-    #[expect(dead_code)]
+    #[expect(dead_code, reason = "diagnostic accessor retained for debug overlays")]
     pub fn model_dbg_normalize_scale(&self) -> f32 {
         self.model
             .as_ref()
@@ -856,32 +865,32 @@ impl CharacterRenderer {
     /// Diagnostic: the merged skeleton joint count after
     /// the multiple-skin merge. Should be the deduplicated total
     /// of every skin's joint list.
-    #[expect(dead_code)]
+    #[expect(dead_code, reason = "diagnostic accessor retained for debug overlays")]
     pub fn model_dbg_merged_skel_joints(&self) -> Option<usize> {
         self.model.as_ref().map(ene_vrm::VrmModel::joint_count)
     }
 
     /// Diagnostic: camera `view_proj` matrix in column-major
     /// format.
-    #[expect(dead_code)]
+    #[expect(dead_code, reason = "diagnostic accessor retained for debug overlays")]
     pub fn camera_view_proj_dbg(&self) -> [[f32; 4]; 4] {
         self.camera.uniform().map_or([[0.0; 4]; 4], |u| u.view_proj)
     }
 
     /// Diagnostic: just the view matrix.
-    #[expect(dead_code)]
+    #[expect(dead_code, reason = "diagnostic accessor retained for debug overlays")]
     pub fn camera_view_dbg(&self) -> [[f32; 4]; 4] {
         self.camera.debug_view().to_cols_array_2d()
     }
 
     /// Diagnostic: just the orthographic projection matrix.
-    #[expect(dead_code)]
+    #[expect(dead_code, reason = "diagnostic accessor retained for debug overlays")]
     pub fn camera_proj_dbg(&self) -> [[f32; 4]; 4] {
         self.camera.debug_proj().to_cols_array_2d()
     }
 
     /// Diagnostic: `view_proj * model` combined matrix.
-    #[expect(dead_code)]
+    #[expect(dead_code, reason = "diagnostic accessor retained for debug overlays")]
     pub fn model_view_proj_dbg(
         &self,
         character_position: [f32; 3],
@@ -894,7 +903,7 @@ impl CharacterRenderer {
     }
 
     /// Diagnostic: the exact matrix the runtime ships to the GPU.
-    #[expect(dead_code)]
+    #[expect(dead_code, reason = "diagnostic accessor retained for debug overlays")]
     pub fn model_matrix_runtime_dbg(
         &self,
         character_position: [f32; 3],
@@ -906,7 +915,7 @@ impl CharacterRenderer {
 
     /// World-space AABB `(min, max)` of the loaded model after
     /// the per-frame `ModelUniform` is applied.
-    #[expect(dead_code)]
+    #[expect(dead_code, reason = "diagnostic accessor retained for debug overlays")]
     pub fn aabb_world(&self, model_uniform: &ModelUniform) -> Option<(Vec3, Vec3)> {
         let model = self.model.as_ref()?;
         let (lo, hi) = model.aabb();
@@ -920,7 +929,13 @@ impl CharacterRenderer {
     /// [`crate::character::collider::compute_bone_specs`]).
     /// `actual_scale = auto_fit_scale × model_scale` and the
     /// returned dimensions are in world units.
-    #[cfg_attr(target_os = "linux", expect(dead_code))]
+    #[cfg_attr(
+        target_os = "linux",
+        expect(
+            dead_code,
+            reason = "field retained for API completeness / future phases"
+        )
+    )]
     pub fn build_character_bone_specs(&mut self, actual_scale: f32) -> Vec<BoneShapeSpec> {
         let Some(model) = self.model.as_ref() else {
             return Vec::new();
@@ -936,7 +951,13 @@ impl CharacterRenderer {
     /// inside `update_motion` updates `model.nodes.world_*` every
     /// frame, so reading them here gives the live post-animation
     /// transforms without GPU readback.
-    #[cfg_attr(target_os = "linux", expect(dead_code))]
+    #[cfg_attr(
+        target_os = "linux",
+        expect(
+            dead_code,
+            reason = "field retained for API completeness / future phases"
+        )
+    )]
     pub fn current_bone_poses(&self) -> Vec<BonePose> {
         let Some(model) = self.model.as_ref() else {
             return Vec::new();
@@ -957,7 +978,13 @@ impl CharacterRenderer {
     }
 
     /// Retrieve the humanoid bone name for an active collider index.
-    #[cfg_attr(target_os = "linux", expect(dead_code))]
+    #[cfg_attr(
+        target_os = "linux",
+        expect(
+            dead_code,
+            reason = "field retained for API completeness / future phases"
+        )
+    )]
     pub fn get_active_bone_name(&self, idx: usize) -> Option<String> {
         let node_idx = *self.active_bone_nodes.get(idx)?;
         let model = self.model.as_ref()?;

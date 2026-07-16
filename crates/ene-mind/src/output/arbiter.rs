@@ -180,6 +180,10 @@ fn levenshtein(a: &str, b: &str) -> usize {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::default_trait_access,
+    reason = "explicit Default for test fixture clarity"
+)]
 mod tests {
     use super::*;
     use ene_config::ResolvedExpression;

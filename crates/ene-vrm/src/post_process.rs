@@ -48,7 +48,10 @@ pub struct PostUniforms {
     /// step`.
     pub inv_size: [f32; 2],
     /// Padding for 16-byte alignment.
-    #[expect(clippy::pub_underscore_fields)]
+    #[expect(
+        clippy::pub_underscore_fields,
+        reason = "wgpu bind group fields mirror shader naming"
+    )]
     pub _pad: [f32; 2],
 }
 

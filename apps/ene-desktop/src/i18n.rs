@@ -35,7 +35,10 @@ pub fn select_language(lang: Language) {
     }
 }
 
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "generated i18n keys module is referenced via macro expansion"
+)]
 mod __generated_i18n_keys {
     use super::loader;
     include!(concat!(env!("OUT_DIR"), "/i18n_keys.rs"));

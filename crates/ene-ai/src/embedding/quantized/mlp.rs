@@ -3,7 +3,10 @@ use candle_nn::ops;
 
 use crate::embedding::error::EneEmbeddingError;
 
-#[expect(clippy::struct_field_names)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "quantized MLP fields mirror weight tensor names"
+)]
 pub struct MlpBlock {
     pub gate_proj: candle_nn::Linear,
     pub up_proj: candle_nn::Linear,

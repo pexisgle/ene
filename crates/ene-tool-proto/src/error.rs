@@ -58,7 +58,7 @@ impl std::fmt::Display for UserInputPrompt {
             if i > 0 {
                 writeln!(f)?;
             }
-            write!(f, "{}. {}", i + 1, item.question)?;
+            write!(f, "{}. {}", i.saturating_add(1), item.question)?;
             if !item.options.is_empty() {
                 write!(f, " (options: {})", item.options.join(", "))?;
             }
@@ -405,9 +405,10 @@ mod tests {
         let json = r#"{"items":[{"question":"Pick one"}]}"#;
         let p: UserInputPrompt = serde_json::from_str(json).unwrap();
         assert_eq!(p.items.len(), 1);
-        assert_eq!(p.items[0].question, "Pick one");
-        assert!(p.items[0].options.is_empty());
-        assert!(!p.items[0].allow_free_text);
+        let item = p.items.first().unwrap();
+        assert_eq!(item.question, "Pick one");
+        assert!(item.options.is_empty());
+        assert!(!item.allow_free_text);
     }
 
     #[test]

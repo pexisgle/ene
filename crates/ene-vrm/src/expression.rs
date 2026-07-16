@@ -91,10 +91,16 @@ pub struct PrimitiveMorphMeta {
     pub target_count: u32,
     /// Padding to align the next field to 16 bytes (vec4
     /// alignment).
-    #[expect(clippy::pub_underscore_fields)]
+    #[expect(
+        clippy::pub_underscore_fields,
+        reason = "wgpu bind group fields mirror shader naming"
+    )]
     pub _pad0: u32,
     /// Padding to keep `weights` 16-byte aligned. Always zero.
-    #[expect(clippy::pub_underscore_fields)]
+    #[expect(
+        clippy::pub_underscore_fields,
+        reason = "wgpu bind group fields mirror shader naming"
+    )]
     pub _pad1: u32,
     /// Packed weights, 4 per `vec4`. Slot `i` corresponds to
     /// morph target `i`.
@@ -350,7 +356,10 @@ const _: () = {
 mod tests {
     use super::*;
 
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "test helper for constructing PrimitiveId fixtures"
+    )]
     fn prim(id: usize) -> PrimitiveId {
         PrimitiveId(id)
     }
@@ -469,10 +478,7 @@ mod tests {
         // A `Vec` of more targets than the cap must be safe to
         // truncate with `.take(MAX_MORPH_TARGETS_PER_PRIMITIVE)`
         // — the loader does exactly this on both the
-        // displacement-collection and the name-pairing passes.
-        let over: Vec<u32> = (0..(MAX_MORPH_TARGETS_PER_PRIMITIVE as u32 + 10)).collect();
-        let capped: Vec<u32> = over
-            .into_iter()
+        let capped: Vec<u32> = (0..(MAX_MORPH_TARGETS_PER_PRIMITIVE as u32 + 10))
             .take(MAX_MORPH_TARGETS_PER_PRIMITIVE)
             .collect();
         assert_eq!(capped.len(), MAX_MORPH_TARGETS_PER_PRIMITIVE);

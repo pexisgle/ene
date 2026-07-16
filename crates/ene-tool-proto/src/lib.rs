@@ -71,7 +71,13 @@
 //! }
 //! ```
 #![warn(missing_docs)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::unwrap_used,
+        reason = "unit/integration tests use unwrap for assertions"
+    )
+)]
 
 /// Tool error types.
 pub mod error;

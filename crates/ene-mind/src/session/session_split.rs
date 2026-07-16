@@ -477,7 +477,7 @@ pub fn generate_session_id() -> SessionId {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::float_cmp)]
+#[expect(clippy::float_cmp, reason = "test asserts exact float equality")]
 mod tests {
     use super::*;
     use crate::session::{SessionConfig, SplitScoreWeights};

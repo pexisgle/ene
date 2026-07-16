@@ -1,6 +1,9 @@
 //! Phase 8 tool grounding integration tests (#92).
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::expect_used,
+    reason = "integration tests use expect for store setup assertions"
+)]
 
 use ene_mind::memory_writer::MemoryWriteProviders;
 use ene_mind::memory_writer::MemoryWriter;

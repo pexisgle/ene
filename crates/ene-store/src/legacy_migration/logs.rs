@@ -18,23 +18,29 @@ pub struct LegacyLogRow {
 pub fn logs_to_spans(rows: &[LegacyLogRow]) -> Vec<NewMemorySpan> {
     let mut spans = Vec::new();
     let mut turn_index: i32 = 0;
-    let mut i = 0;
+    let mut i = 0usize;
 
     while i < rows.len() {
-        let session_id = rows[i].session_id.clone();
+        let Some(row) = rows.get(i) else {
+            break;
+        };
+        let session_id = row.session_id.clone();
         let turn_start = turn_index;
         let mut excerpt_parts = Vec::new();
 
-        if rows[i].role == "user" {
-            excerpt_parts.push(format!("User: {}", rows[i].content));
-            i += 1;
-            if i < rows.len() && rows[i].session_id == session_id && rows[i].role == "assistant" {
-                excerpt_parts.push(format!("Assistant: {}", rows[i].content));
-                i += 1;
+        if row.role == "user" {
+            excerpt_parts.push(format!("User: {}", row.content));
+            i = i.saturating_add(1);
+            if let Some(assistant) = rows.get(i)
+                && assistant.session_id == session_id
+                && assistant.role == "assistant"
+            {
+                excerpt_parts.push(format!("Assistant: {}", assistant.content));
+                i = i.saturating_add(1);
             }
         } else {
-            excerpt_parts.push(format!("{}: {}", rows[i].role, rows[i].content));
-            i += 1;
+            excerpt_parts.push(format!("{}: {}", row.role, row.content));
+            i = i.saturating_add(1);
         }
 
         let turn_end = turn_index;
@@ -47,7 +53,7 @@ pub fn logs_to_spans(rows: &[LegacyLogRow]) -> Vec<NewMemorySpan> {
             compressed_summary: None,
             compression_level: 0,
         });
-        turn_index += 1;
+        turn_index = turn_index.saturating_add(1);
     }
 
     spans
@@ -73,7 +79,8 @@ mod tests {
         ];
         let spans = logs_to_spans(&rows);
         assert_eq!(spans.len(), 1);
-        assert!(spans[0].raw_excerpt.as_ref().unwrap().contains("hi"));
-        assert!(spans[0].raw_excerpt.as_ref().unwrap().contains("hello"));
+        let span = spans.first().expect("one span");
+        assert!(span.raw_excerpt.as_ref().unwrap().contains("hi"));
+        assert!(span.raw_excerpt.as_ref().unwrap().contains("hello"));
     }
 }

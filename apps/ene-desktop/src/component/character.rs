@@ -128,11 +128,12 @@ pub struct BoneColliders(pub Vec<BoneShapeSpec>);
 /// Position / rotation / scale in the character window's coordinate
 /// space. Updated each frame from `CharacterSettings::character_state`.
 #[derive(Component, Debug, Default, Clone, Copy)]
+#[expect(
+    dead_code,
+    reason = "ECS component fields read by transform systems in later phases"
+)]
 pub struct CharacterTransform {
-    #[allow(dead_code)]
     pub translation: Vec3,
-    #[allow(dead_code)]
     pub rotation: Quat,
-    #[allow(dead_code)]
     pub scale: f32,
 }

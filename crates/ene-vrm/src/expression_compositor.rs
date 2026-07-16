@@ -177,7 +177,7 @@ mod tests {
         c.load_card_expression("happy".into(), happy_card().weights);
         c.load_card_expression(
             "neutral".into(),
-            [("neutral".into(), 0.0)].into_iter().collect(),
+            std::iter::once(("neutral".into(), 0.0)).collect(),
         );
         c.set_active_expression(Some("happy"));
         assert_eq!(c.compose().get("happy"), Some(&0.8));

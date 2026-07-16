@@ -369,7 +369,10 @@ impl Default for EmotionConfig {
     }
 }
 
-#[expect(clippy::unnecessary_wraps)]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "default factory must return Option to match field type"
+)]
 fn default_classifier_model() -> Option<String> {
     Some(crate::emotion::classifier::DEFAULT_CLASSIFIER_MODEL.to_owned())
 }
@@ -403,7 +406,13 @@ impl Default for CharacterMemoryConfig {
 }
 
 #[cfg(test)]
-#[cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#[cfg_attr(
+    test,
+    expect(
+        clippy::expect_used,
+        reason = "unit/integration tests use unwrap/expect for concise assertions"
+    )
+)]
 mod tests {
     use super::*;
 

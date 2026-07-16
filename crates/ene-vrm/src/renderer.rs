@@ -58,7 +58,10 @@ struct MorphGpu {
     /// `(target, vertex)` pair). Uploaded once at
     /// [`VrmRenderer::new`] from the loader's normalized
     /// displacement data.
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "GPU buffer kept alive while bind group references it"
+    )]
     offsets_buf: wgpu::Buffer,
     /// Per-frame uniform that the renderer writes from the
     /// model's global weight map. See [`PrimitiveMorphMeta`].
@@ -83,10 +86,16 @@ struct MorphGpu {
 struct DummyMorphGpu {
     /// Single `vec4` storage entry. Never read by the shader
     /// because the bound `meta_buf` has `target_count = 0`.
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "GPU buffer kept alive while bind group references it"
+    )]
     offsets_buf: wgpu::Buffer,
     /// Meta uniform with `target_count = 0` and zero weights.
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "GPU buffer kept alive while bind group references it"
+    )]
     meta_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
 }

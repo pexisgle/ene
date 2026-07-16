@@ -11,7 +11,10 @@
 //! at construction time (local transform + Rapier shape, already
 //! in world units). `BonePose` is the per-frame delta the runtime
 //! pushes into the matching collider.
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "collider types are consumed by physics registration systems"
+)]
 use glam::{Mat4, Quat, Vec3};
 
 use ene_vrm::{HumanoidBoneEntry, HumanoidBoneRegistry, MeshVertex, VrmModel};
@@ -555,7 +558,10 @@ fn fit_bone_shape(
 
 /// Strip `left` / `right` from the canonical bone name so the
 /// shape table only needs one match arm per central bone.
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "bone name helper retained for future collider tuning"
+)]
 fn strip_side_prefix(name: &str) -> &str {
     name.strip_prefix("left")
         .or_else(|| name.strip_prefix("right"))
@@ -609,7 +615,10 @@ pub fn get_humanoid_child_node(bone_name: &str, humanoid: &HumanoidBoneRegistry)
 }
 
 /// Fit a capsule segment between `bone_world` and `child_world`.
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "bone name helper retained for future collider tuning"
+)]
 fn fit_segment_capsule(
     weighted_world: &[Vec3],
     bone_world: Vec3,
@@ -656,7 +665,10 @@ fn fit_segment_capsule(
 /// collider's local rotation is the bone's rest world
 /// rotation; vertices in the collider-local frame are then
 /// projected onto local +Y to derive the half-height.
-#[expect(dead_code)]
+#[expect(
+    dead_code,
+    reason = "bone name helper retained for future collider tuning"
+)]
 fn fit_bone_axis_capsule_y(
     weighted_world: &[Vec3],
     bone_world: Vec3,
@@ -678,7 +690,10 @@ fn fit_bone_axis_capsule_y(
 /// Project a bone-local vertex cloud onto local +Y and
 /// return a `CapsuleY` covering the span (with the max
 /// XZ-distance as the radius).
-#[expect(clippy::similar_names)]
+#[expect(
+    clippy::similar_names,
+    reason = "bone fitting uses min/max axis names from geometry"
+)]
 fn fit_y_capsule(local: &[Vec3], scale: f32) -> Option<(BoneShape, Vec3)> {
     if local.is_empty() {
         return None;

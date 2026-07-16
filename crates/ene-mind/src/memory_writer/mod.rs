@@ -33,7 +33,10 @@ pub struct MemoryWriteProviders<'a> {
     pub embedder: Option<&'a dyn EmbeddingProvider>,
 }
 
-#[expect(clippy::derivable_impls)]
+#[expect(
+    clippy::derivable_impls,
+    reason = "manual Default keeps non-default field ordering explicit"
+)]
 impl Default for MemoryWriteProviders<'_> {
     fn default() -> Self {
         Self {

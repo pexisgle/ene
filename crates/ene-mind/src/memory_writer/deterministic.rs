@@ -336,7 +336,13 @@ pub fn extract_with_tool_grounding(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#[cfg_attr(
+    test,
+    expect(
+        clippy::expect_used,
+        reason = "unit/integration tests use unwrap/expect for concise assertions"
+    )
+)]
 mod tests {
     use super::*;
 

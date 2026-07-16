@@ -1,4 +1,4 @@
-#![allow(missing_docs)]
+#![expect(missing_docs, reason = "sea-orm migration modules are schema-internal")]
 
 use sea_orm_migration::prelude::*;
 

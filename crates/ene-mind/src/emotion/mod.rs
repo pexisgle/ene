@@ -220,7 +220,7 @@ pub fn compute_mood_label(state: &AffectState) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::float_cmp)]
+#[expect(clippy::float_cmp, reason = "test asserts exact float equality")]
 mod tests {
     use std::time::Duration;
 

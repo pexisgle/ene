@@ -4,7 +4,11 @@ static INDENT_RE: OnceLock<regex::Regex> = OnceLock::new();
 
 fn indent_re() -> &'static regex::Regex {
     INDENT_RE.get_or_init(|| {
-        regex::Regex::new(r"^(\s*)").unwrap_or_else(|e| panic!("invalid regex: {e}"))
+        #[expect(
+            clippy::expect_used,
+            reason = "constant regex pattern compiled once at first use"
+        )]
+        regex::Regex::new(r"^(\s*)").expect("invalid constant regex")
     })
 }
 

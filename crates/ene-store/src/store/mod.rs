@@ -69,24 +69,31 @@ pub fn init_sqlite_vec() {
     use libsqlite3_sys::sqlite3_auto_extension;
     use sqlite_vec::sqlite3_vec_init;
     static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| unsafe {
+    ONCE.call_once(|| {
+        // SAFETY: transmute reinterprets sqlite3_vec_init as the SQLite auto-extension
+        // entry-point signature expected by sqlite3_auto_extension.
+        let init_fn = unsafe {
+            std::mem::transmute::<
+                *const (),
+                unsafe extern "C" fn(
+                    *mut libsqlite3_sys::sqlite3,
+                    *mut *mut i8,
+                    *const libsqlite3_sys::sqlite3_api_routines,
+                ) -> i32,
+            >(sqlite3_vec_init as *const ())
+        };
         // SAFETY: sqlite3_auto_extension expects a function pointer cast to a void pointer.
         // sqlite3_vec_init is a C function with the correct signature (extern "C" fn()),
         // and transmuting it to *const () is a well-known pattern for registering SQLite
         // extensions. The function pointer remains valid for the lifetime of the process.
-        sqlite3_auto_extension(Some(std::mem::transmute::<
-            *const (),
-            unsafe extern "C" fn(
-                *mut libsqlite3_sys::sqlite3,
-                *mut *mut i8,
-                *const libsqlite3_sys::sqlite3_api_routines,
-            ) -> i32,
-        >(sqlite3_vec_init as *const ())));
+        unsafe {
+            sqlite3_auto_extension(Some(init_fn));
+        }
     });
 }
 
 fn embedding_to_bytes(v: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(v.len() * 4);
+    let mut bytes = Vec::with_capacity(v.len().saturating_mul(4));
     for f in v {
         bytes.extend_from_slice(&f.to_le_bytes());
     }
@@ -218,7 +225,10 @@ pub struct NaturalDecayReport {
 }
 
 /// Convert a typed memory model row to a [`crate::MemoryItem`].
-#[expect(clippy::unnecessary_wraps)]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "store helper signature returns Result for uniform error propagation"
+)]
 fn model_to_memory_item(
     m: entities::typed_memories::Model,
 ) -> Result<crate::MemoryItem, MemoryError> {
@@ -254,7 +264,10 @@ fn model_to_memory_item(
 }
 
 /// Convert a commitment model row to a [`crate::Commitment`].
-#[expect(clippy::unnecessary_wraps)]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "store helper signature returns Result for uniform error propagation"
+)]
 fn model_to_commitment(m: entities::commitments::Model) -> Result<crate::Commitment, MemoryError> {
     Ok(crate::Commitment {
         id: Some(m.id),
@@ -1671,7 +1684,7 @@ impl MemoryStore {
                     .await?;
                 self.transition_typed_memory_status(model.id, crate::MemoryStatus::Archived)
                     .await?;
-                archived += 1;
+                archived = archived.saturating_add(1);
             }
         }
         Ok(archived)
@@ -1782,7 +1795,7 @@ impl MemoryStore {
             // Ephemeral MemoryItem keyed by negated commitment id to avoid
             // colliding with typed_memories primary keys in the gather map.
             let item = crate::MemoryItem {
-                id: Some(-cid),
+                id: Some(0_i64.wrapping_sub(cid)),
                 scope: crate::MemoryScope::Character,
                 character_id: commitment.character_id.clone(),
                 user_id: commitment.user_id.clone(),
@@ -1843,7 +1856,7 @@ impl MemoryStore {
                     0.0,
                     MemoryCandidateSource::Recent,
                 );
-                recent_added += 1;
+                recent_added = recent_added.saturating_add(1);
             }
         }
 
@@ -2472,8 +2485,12 @@ impl MemoryStore {
             };
             self.transition_typed_memory_status(id, target).await?;
             match target {
-                crate::MemoryStatus::Faded => report.faded_count += 1,
-                crate::MemoryStatus::Archived => report.archived_count += 1,
+                crate::MemoryStatus::Faded => {
+                    report.faded_count = report.faded_count.saturating_add(1);
+                }
+                crate::MemoryStatus::Archived => {
+                    report.archived_count = report.archived_count.saturating_add(1);
+                }
                 _ => {}
             }
         }
@@ -2495,7 +2512,9 @@ impl MemoryStore {
         let Some(model) = maybe_model else {
             return Ok(false);
         };
-        let anchor = Utc::now() - chrono::Duration::days(days_ago);
+        let anchor = Utc::now()
+            .checked_sub_signed(chrono::Duration::days(days_ago))
+            .unwrap_or_else(Utc::now);
         let mut active: entities::typed_memories::ActiveModel = model.into();
         active.created_at = Set(anchor);
         active.updated_at = Set(anchor);
@@ -2663,7 +2682,7 @@ impl MemoryStore {
                     for row in summary_rows {
                         let source_ref = format!("legacy:summary:{}", row.id);
                         if typed_memory_exists_by_source_ref_on(txn, &source_ref).await? {
-                            report.skipped_existing += 1;
+                            report.skipped_existing = report.skipped_existing.saturating_add(1);
                             continue;
                         }
 
@@ -2688,7 +2707,7 @@ impl MemoryStore {
                             )
                             .await?;
                         }
-                        report.summaries_migrated += 1;
+                        report.summaries_migrated = report.summaries_migrated.saturating_add(1);
                     }
 
                     for row in keyfact_rows {
@@ -2697,7 +2716,7 @@ impl MemoryStore {
                         }
                         let source_ref = format!("legacy:keyfact:{}", row.id);
                         if typed_memory_exists_by_source_ref_on(txn, &source_ref).await? {
-                            report.skipped_existing += 1;
+                            report.skipped_existing = report.skipped_existing.saturating_add(1);
                             continue;
                         }
 
@@ -2706,16 +2725,16 @@ impl MemoryStore {
                         );
                         let memory_id = insert_typed_memory_on(txn, &item).await?;
                         patch_typed_memory_created_at_on(txn, memory_id, row.created_at).await?;
-                        report.keyfacts_migrated += 1;
+                        report.keyfacts_migrated = report.keyfacts_migrated.saturating_add(1);
                     }
 
                     for span in spans {
                         if memory_span_exists_on(txn, &span.session_id, span.turn_start).await? {
-                            report.skipped_existing += 1;
+                            report.skipped_existing = report.skipped_existing.saturating_add(1);
                             continue;
                         }
                         insert_memory_span_on(txn, &span).await?;
-                        report.spans_migrated += 1;
+                        report.spans_migrated = report.spans_migrated.saturating_add(1);
                     }
 
                     mark_migration_complete_on(txn, &card_name, counts, "one_shot").await?;
@@ -3199,7 +3218,7 @@ impl MemoryStore {
                 .update_commitment_status(model.id, crate::CommitmentStatus::Stale)
                 .await?
             {
-                updated += 1;
+                updated = updated.saturating_add(1);
             }
         }
         Ok(updated)
@@ -3240,8 +3259,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].entry.summary, "Summary A");
-        assert!((results[0].similarity - 1.0).abs() < 1e-5);
+        let top = results.first().expect("one summary result");
+        assert_eq!(top.entry.summary, "Summary A");
+        assert!((top.similarity - 1.0).abs() < 1e-5);
     }
 
     #[tokio::test]
@@ -3281,8 +3301,10 @@ mod tests {
 
         let all_facts = store.get_all_keyfacts("char").await.unwrap();
         assert_eq!(all_facts.len(), 2);
-        assert_eq!(all_facts[0].key, "food");
-        assert_eq!(all_facts[1].key, "job");
+        let first_fact = all_facts.first().expect("first keyfact");
+        let second_fact = all_facts.get(1).expect("second keyfact");
+        assert_eq!(first_fact.key, "food");
+        assert_eq!(second_fact.key, "job");
 
         store.upsert_keyfact("char", "food", "sushi").await.unwrap();
         let all_facts = store.get_all_keyfacts("char").await.unwrap();
@@ -3369,8 +3391,9 @@ mod tests {
 
         let all_facts = store.get_all_keyfacts("char").await.unwrap();
         assert_eq!(all_facts.len(), 1);
-        assert_eq!(all_facts[0].key, "job");
-        assert_eq!(all_facts[0].value, "designer");
+        let job_fact = all_facts.first().expect("job keyfact");
+        assert_eq!(job_fact.key, "job");
+        assert_eq!(job_fact.value, "designer");
     }
 
     #[tokio::test]
@@ -3589,10 +3612,12 @@ mod tests {
             .unwrap();
         let logs = store.get_logs_by_session(session_id).await.unwrap();
         assert_eq!(logs.len(), 2);
-        assert_eq!(logs[0].0, "user");
-        assert_eq!(logs[0].1, "Hello");
-        assert_eq!(logs[1].0, "assistant");
-        assert_eq!(logs[1].1, "Hi there!");
+        let user_log = logs.first().expect("user log");
+        let assistant_log = logs.get(1).expect("assistant log");
+        assert_eq!(user_log.0, "user");
+        assert_eq!(user_log.1, "Hello");
+        assert_eq!(assistant_log.0, "assistant");
+        assert_eq!(assistant_log.1, "Hi there!");
         let _ = ids;
     }
 
@@ -3630,8 +3655,9 @@ mod tests {
         assert!((loaded.valence - 0.5).abs() < f32::EPSILON);
         assert!((loaded.arousal + 0.3).abs() < f32::EPSILON);
         assert_eq!(loaded.discrete_emotions.len(), 2);
-        assert_eq!(loaded.discrete_emotions[0].label, "joy");
-        assert!((loaded.discrete_emotions[0].intensity - 0.8).abs() < f32::EPSILON);
+        let joy = loaded.discrete_emotions.first().expect("joy emotion");
+        assert_eq!(joy.label, "joy");
+        assert!((joy.intensity - 0.8).abs() < f32::EPSILON);
 
         state.valence = -0.2;
         state.discrete_emotions = vec![crate::DiscreteEmotion::new("sadness", 0.6)];
@@ -3640,7 +3666,8 @@ mod tests {
         let loaded2 = store.get_affect_state("ene").await.unwrap();
         assert!((loaded2.valence + 0.2).abs() < f32::EPSILON);
         assert_eq!(loaded2.discrete_emotions.len(), 1);
-        assert_eq!(loaded2.discrete_emotions[0].label, "sadness");
+        let sadness = loaded2.discrete_emotions.first().expect("sadness emotion");
+        assert_eq!(sadness.label, "sadness");
     }
 
     #[tokio::test]
@@ -3750,8 +3777,9 @@ mod tests {
             .await
             .unwrap();
         assert!(!results.is_empty());
-        assert!((results[0].1 - 1.0).abs() < f32::EPSILON);
-        assert_eq!(results[0].0.title, "Test memory");
+        let top = results.first().expect("typed memory search result");
+        assert!((top.1 - 1.0).abs() < f32::EPSILON);
+        assert_eq!(top.0.title, "Test memory");
     }
 
     #[tokio::test]
@@ -4124,8 +4152,10 @@ mod tests {
         let options = hybrid_search_options("music preference", &query_emb, now);
         let results = store.search(&options).await.unwrap();
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].item.title, "important fact");
-        assert!(results[0].breakdown.total >= results[1].breakdown.total);
+        let top = results.first().expect("top hybrid result");
+        let second = results.get(1).expect("second hybrid result");
+        assert_eq!(top.item.title, "important fact");
+        assert!(top.breakdown.total >= second.breakdown.total);
     }
 
     #[tokio::test]
@@ -4160,9 +4190,10 @@ mod tests {
         let options = hybrid_search_options("matcha latte", &orthogonal, now);
         let results = store.search(&options).await.unwrap();
         assert_eq!(results.len(), 1);
-        assert!(results[0].breakdown.lexical_score > 0.0);
+        let result = results.first().expect("lexical match result");
+        assert!(result.breakdown.lexical_score > 0.0);
         assert!(
-            results[0]
+            result
                 .sources
                 .contains(&crate::MemoryCandidateSource::Lexical)
         );
@@ -4277,8 +4308,9 @@ mod tests {
         let options = hybrid_search_options("faded memory", &emb, now);
         let results = store.search(&options).await.unwrap();
         assert_eq!(results.len(), 1);
-        assert!(results[0].breakdown.vector_similarity > 0.0);
-        assert!(results[0].breakdown.stale_penalty > 0.0);
+        let result = results.first().expect("faded memory result");
+        assert!(result.breakdown.vector_similarity > 0.0);
+        assert!(result.breakdown.stale_penalty > 0.0);
     }
 
     #[tokio::test]
@@ -4429,8 +4461,10 @@ mod tests {
         let options = hybrid_search_options("shared topic", &query_emb, now);
         let results = store.search(&options).await.unwrap();
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].item.title, "shared topic high");
-        assert!(results[0].breakdown.confidence > results[1].breakdown.confidence);
+        let top = results.first().expect("top confidence result");
+        let second = results.get(1).expect("second confidence result");
+        assert_eq!(top.item.title, "shared topic high");
+        assert!(top.breakdown.confidence > second.breakdown.confidence);
     }
 
     #[tokio::test]
@@ -4473,7 +4507,8 @@ mod tests {
         options.user_id = Some("user1");
         let results = store.search(&options).await.unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].item.user_id, "user1");
+        let result = results.first().expect("scoped search result");
+        assert_eq!(result.item.user_id, "user1");
     }
 
     #[tokio::test]
@@ -4508,7 +4543,8 @@ mod tests {
         let options = hybrid_search_options("pizza tradition", &emb, now);
         let results = store.search(&options).await.unwrap();
         assert_eq!(results.len(), 1);
-        assert!(results[0].sources.len() >= 2);
+        let result = results.first().expect("deduped search result");
+        assert!(result.sources.len() >= 2);
     }
 
     #[tokio::test]
@@ -4795,7 +4831,8 @@ mod tests {
         let options = hybrid_search_options("pinned vector", &emb, now);
         let results = store.search(&options).await.unwrap();
         assert_eq!(results.len(), 1);
-        assert!(results[0].item.pinned);
+        let result = results.first().expect("pinned search result");
+        assert!(result.item.pinned);
     }
 
     #[tokio::test]
@@ -4823,7 +4860,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(typed.len(), 1);
-        assert!(typed[0].content.contains("Legacy summary"));
+        let migrated = typed.first().expect("migrated typed memory");
+        assert!(migrated.content.contains("Legacy summary"));
         assert!(store.is_legacy_migrated("char").await.unwrap());
     }
 
@@ -5003,7 +5041,8 @@ mod tests {
         assert_eq!(report.spans_migrated, 1);
         let spans = store.list_memory_spans_by_session("s1").await.unwrap();
         assert_eq!(spans.len(), 1);
-        let excerpt = spans[0].raw_excerpt.as_ref().unwrap();
+        let span = spans.first().expect("migrated span");
+        let excerpt = span.raw_excerpt.as_ref().unwrap();
         assert!(excerpt.contains("hello"));
         assert!(excerpt.contains("hi there"));
     }

@@ -8,7 +8,11 @@
 //! i.e. when some downstream crate (`ene-runtime`, `ene-cli`, `ene-desktop`)
 //! declares a hard dependency on it.
 //!
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "integration tests use expect/panic for schema wiring assertions"
+)]
 //!
 //! Without this dependency, the JSON schema shipped to users would be
 //! missing the `mind` section even though the struct exists in

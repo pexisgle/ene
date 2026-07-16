@@ -215,10 +215,16 @@ impl X11Context {
             type_: self.atoms.net_wm_state,
             data: ClientMessageData::from([
                 action,
-                #[expect(clippy::useless_conversion)]
+                #[expect(
+                    clippy::useless_conversion,
+                    reason = "Atom to u32 conversion makes X11 client message byte order explicit"
+                )]
                 // `Atom: From<Atom> for u32`; explicit makes the byte order obvious.
                 u32::from(self.atoms.skip_taskbar),
-                #[expect(clippy::useless_conversion)]
+                #[expect(
+                    clippy::useless_conversion,
+                    reason = "Atom to u32 conversion makes X11 client message byte order explicit"
+                )]
                 u32::from(self.atoms.skip_pager),
                 1, // source indication: normal application
                 0,

@@ -680,6 +680,7 @@ fn parse_range_map(
 }
 
 #[cfg(test)]
+#[expect(clippy::float_cmp, reason = "test asserts exact float equality")]
 mod tests {
     use super::*;
 
@@ -834,8 +835,12 @@ mod tests {
         let head = Vec3::new(0.0, 1.0, 0.0);
         let target = Vec3::new(1.0, 2.0, 1.0);
         let out = eval.evaluate(head, target, Quat::IDENTITY);
+        assert!(
+            matches!(out, LookAtOutput::Expression(_)),
+            "expected Expression output, got {out:?}"
+        );
         let LookAtOutput::Expression(e) = out else {
-            panic!("expected Expression output, got {out:?}");
+            return;
         };
         // 45° yaw + 35° pitch. Range map scales the
         // cursor degrees to ±10°. Expression branch
@@ -865,8 +870,12 @@ mod tests {
         let head = Vec3::new(0.0, 1.0, 0.0);
         let target = Vec3::new(2.0, 1.0, 0.0);
         let out = eval.evaluate(head, target, Quat::IDENTITY);
+        assert!(
+            matches!(out, LookAtOutput::Bone(_)),
+            "expected Bone output, got {out:?}"
+        );
         let LookAtOutput::Bone(b) = out else {
-            panic!("expected Bone output, got {out:?}");
+            return;
         };
         assert_ne!(b.head.delta, Quat::IDENTITY);
         // The eye deltas are non-identity too (the eyes

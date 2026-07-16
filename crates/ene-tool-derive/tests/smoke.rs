@@ -1,5 +1,8 @@
 //! Trybuild-style smoke test for the `#[derive(ToolSpec)]` proc-macro.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::expect_used,
+    reason = "proc-macro smoke tests use expect for schema assertions"
+)]
 
 use ene_tool_derive::ToolSpec;
 use ene_tool_proto::{ToolCategory, ToolName, types::EmbeddingField};

@@ -56,6 +56,10 @@ impl HostRegistry {
     /// at call sites where graceful error propagation is expected.
     ///
     /// See [`try_add_provider`](Self::try_add_provider) for the fallible variant.
+    #[expect(
+        clippy::panic,
+        reason = "legacy infallible API; prefer try_add_provider for fallible registration"
+    )]
     pub fn add_provider(&mut self, provider: Box<dyn ToolProvider>) {
         match self.try_add_provider(provider) {
             Ok(()) => {}
@@ -89,11 +93,12 @@ impl HostRegistry {
     /// Call a tool by name, dispatching to the provider that registered it.
     pub async fn call_tool(&self, name: &ToolName, arguments: &str) -> Result<String, ToolError> {
         match self.tool_index.get(name.as_str()) {
-            Some(&idx) => {
-                self.providers[idx]
-                    .call_tool(name.as_str(), arguments)
-                    .await
-            }
+            Some(&idx) => match self.providers.get(idx) {
+                Some(provider) => provider.call_tool(name.as_str(), arguments).await,
+                None => Err(ToolError::NotFound {
+                    tool_name: name.as_str().to_string(),
+                }),
+            },
             None => Err(ToolError::NotFound {
                 tool_name: name.as_str().to_string(),
             }),
@@ -208,7 +213,10 @@ mod tests {
         let mut reg = HostRegistry::new();
         reg.add_provider(Box::new(MockProvider::new("alpha")));
         assert_eq!(reg.list_specs().len(), 1);
-        assert_eq!(reg.list_specs()[0].name.as_str(), "tool_alpha");
+        assert_eq!(
+            reg.list_specs().first().unwrap().name.as_str(),
+            "tool_alpha"
+        );
     }
 
     #[test]

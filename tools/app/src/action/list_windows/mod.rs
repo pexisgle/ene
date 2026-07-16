@@ -15,7 +15,10 @@ mod wayland;
 pub struct ListWindowsAction {}
 
 impl ListWindowsAction {
-    #[expect(clippy::unused_async)]
+    #[expect(
+        clippy::unused_async,
+        reason = "tool IPC handlers are async for uniform provider dispatch"
+    )]
     async fn run(&self) -> Result<String, ToolError> {
         if crate::utils::portal::detect_wayland() {
             #[cfg(target_os = "linux")]

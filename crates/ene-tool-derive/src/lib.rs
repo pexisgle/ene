@@ -5,8 +5,14 @@
 //!
 //! See `docs/tools/derive-macro.md` for the full attribute reference.
 
-#![allow(clippy::needless_continue)]
-#![allow(clippy::option_if_let_else)]
+#![expect(
+    clippy::needless_continue,
+    reason = "proc-macro control flow is clearer with explicit continues"
+)]
+#![expect(
+    clippy::option_if_let_else,
+    reason = "nursery style; match/if-let clarity preferred in derive codegen"
+)]
 
 use darling::{FromDeriveInput, FromField};
 use proc_macro::TokenStream;
@@ -378,7 +384,7 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
 
-    #[expect(dead_code)]
+    #[expect(dead_code, reason = "generated const anchors ToolSpec expansion")]
     const #args_const_ident: () = ();
     };
 

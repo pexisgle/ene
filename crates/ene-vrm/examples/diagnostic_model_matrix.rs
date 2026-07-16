@@ -4,14 +4,21 @@
 //! center / merged-skeleton joint count and the resulting
 //! model matrix without spinning up a winit window.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(
+    clippy::expect_used,
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "diagnostic example parses glb bytes with manual offsets"
+)]
 
 use std::path::PathBuf;
 
 fn main() {
-    let path: PathBuf = std::env::args()
-        .nth(1).map_or_else(|| PathBuf::from("../assets/characters/Alicia/AliciaSolid.vrm"), PathBuf::from);
-    println!("Reading {path:?}");
+    let path: PathBuf = std::env::args().nth(1).map_or_else(
+        || PathBuf::from("../assets/characters/Alicia/AliciaSolid.vrm"),
+        PathBuf::from,
+    );
+    println!("Reading {}", path.display());
 
     let vrm_bytes = std::fs::read(&path).expect("read vrm file");
     let glb_bytes = extract_first_glb(&vrm_bytes).expect("extract .glb from .vrm");
@@ -156,12 +163,39 @@ fn main() {
     );
 
     // Diagonal scale extraction.
-    let scale_x = model_matrix.z_axis.x.mul_add(model_matrix.z_axis.x, model_matrix.y_axis.x.mul_add(model_matrix.y_axis.x, model_matrix.x_axis.x.powi(2)))
-    .sqrt();
-    let scale_y = model_matrix.z_axis.y.mul_add(model_matrix.z_axis.y, model_matrix.y_axis.y.mul_add(model_matrix.y_axis.y, model_matrix.x_axis.y.powi(2)))
-    .sqrt();
-    let scale_z = model_matrix.z_axis.z.mul_add(model_matrix.z_axis.z, model_matrix.y_axis.z.mul_add(model_matrix.y_axis.z, model_matrix.x_axis.z.powi(2)))
-    .sqrt();
+    let scale_x = model_matrix
+        .z_axis
+        .x
+        .mul_add(
+            model_matrix.z_axis.x,
+            model_matrix
+                .y_axis
+                .x
+                .mul_add(model_matrix.y_axis.x, model_matrix.x_axis.x.powi(2)),
+        )
+        .sqrt();
+    let scale_y = model_matrix
+        .z_axis
+        .y
+        .mul_add(
+            model_matrix.z_axis.y,
+            model_matrix
+                .y_axis
+                .y
+                .mul_add(model_matrix.y_axis.y, model_matrix.x_axis.y.powi(2)),
+        )
+        .sqrt();
+    let scale_z = model_matrix
+        .z_axis
+        .z
+        .mul_add(
+            model_matrix.z_axis.z,
+            model_matrix
+                .y_axis
+                .z
+                .mul_add(model_matrix.y_axis.z, model_matrix.x_axis.z.powi(2)),
+        )
+        .sqrt();
     println!("\ndiagonal scale (X, Y, Z) = ({scale_x:.4}, {scale_y:.4}, {scale_z:.4})");
     println!(
         "expected              = ({:.4}, {:.4}, {:.4})  (= auto_fit × normalize)",

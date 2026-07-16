@@ -574,11 +574,11 @@ impl MToonUniform {
 }
 
 #[cfg(test)]
-#[allow(clippy::float_cmp)]
+#[expect(clippy::float_cmp, reason = "test asserts exact float equality")]
 mod tests {
     use super::*;
 
-    fn gltf_from_vrmc(vrmc: serde_json::Value) -> gltf::Gltf {
+    fn gltf_from_vrmc(vrmc: &serde_json::Value) -> gltf::Gltf {
         let root = serde_json::json!({
             "asset": { "version": "2.0" },
             "extensionsUsed": ["VRMC_materials_mtoon", "VRMC_vrm"],
@@ -591,7 +591,7 @@ mod tests {
             },
             "materials": [{
                 "extensions": {
-                    "VRMC_materials_mtoon": vrmc
+                    "VRMC_materials_mtoon": vrmc.clone()
                 }
             }]
         });
@@ -614,7 +614,7 @@ mod tests {
 
     #[test]
     fn defaults_when_extension_present_but_empty() {
-        let gltf = gltf_from_vrmc(serde_json::json!({}));
+        let gltf = gltf_from_vrmc(&serde_json::json!({}));
         let mats = load_mtoon_materials(&gltf);
         assert_eq!(mats.len(), 1);
         let mat = mats[0].as_ref().unwrap();
@@ -629,7 +629,7 @@ mod tests {
 
     #[test]
     fn parse_full_material() {
-        let gltf = gltf_from_vrmc(serde_json::json!({
+        let gltf = gltf_from_vrmc(&serde_json::json!({
             "transparentWithZWrite": true,
             "renderQueueOffsetNumber": 5,
             "shadeColorFactor": [0.1, 0.2, 0.3],
@@ -685,14 +685,14 @@ mod tests {
 
     #[test]
     fn render_queue_offset_clamped() {
-        let gltf = gltf_from_vrmc(serde_json::json!({
+        let gltf = gltf_from_vrmc(&serde_json::json!({
             "renderQueueOffsetNumber": 99
         }));
         let binding = load_mtoon_materials(&gltf);
         let mat = binding[0].as_ref().unwrap();
         assert_eq!(mat.render_queue_offset, 9);
 
-        let gltf = gltf_from_vrmc(serde_json::json!({
+        let gltf = gltf_from_vrmc(&serde_json::json!({
             "renderQueueOffsetNumber": -99
         }));
         let binding = load_mtoon_materials(&gltf);

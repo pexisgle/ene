@@ -164,7 +164,10 @@ impl ToolConfigAccessor {
     }
 
     /// Sets the tool configuration.
-    #[expect(clippy::future_not_send)]
+    #[expect(
+        clippy::future_not_send,
+        reason = "IPC transport uses single-threaded runtime on some targets"
+    )]
     pub async fn set<T: serde::Serialize>(&self, config: &T) -> Result<(), ToolError> {
         let val = serde_json::to_value(config).map_err(|e| ToolError::InvalidArguments {
             message: format!("Failed to serialize config: {e}"),
@@ -435,9 +438,13 @@ mod tests {
         write_ipc_response(&mut a, &resp).await.unwrap();
         drop(a);
         let got = read_ipc_response(&mut b).await.unwrap().unwrap();
-        match got {
-            IpcResponse::CallResult { result } => assert_eq!(result.unwrap(), big_content),
-            _ => panic!("Expected CallResult"),
-        }
+        assert!(
+            matches!(got, IpcResponse::CallResult { .. }),
+            "Expected CallResult, got {got:?}"
+        );
+        let IpcResponse::CallResult { result } = got else {
+            return;
+        };
+        assert_eq!(result.unwrap(), big_content);
     }
 }

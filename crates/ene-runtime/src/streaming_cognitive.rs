@@ -19,7 +19,10 @@ use ene_mind::{
     CueSource, PerfKind, PerformanceArbiter, PerformanceCue, cue_source_priority, strip_markers,
 };
 
-#[expect(clippy::ref_option)]
+#[expect(
+    clippy::ref_option,
+    reason = "optional callback kept as Option reference for zero-copy dispatch"
+)]
 fn build_turn_context<'a>(
     mind: &'a MindConfig,
     card: &'a ene_config::CharacterCardV3,

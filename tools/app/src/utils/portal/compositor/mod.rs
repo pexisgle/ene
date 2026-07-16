@@ -11,7 +11,13 @@ use ene_tool_proto::ToolError;
 
 // ==================== Compositor trait ====================
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        dead_code,
+        reason = "Linux-only compositor dispatch is stubbed on other platforms"
+    )
+)]
 pub trait WlCompositor {
     fn list_windows(&self) -> Result<String, ToolError>;
     fn focus_window(&self, title: &str) -> Result<String, ToolError>;
@@ -19,7 +25,13 @@ pub trait WlCompositor {
 
 // ==================== Detection ====================
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        dead_code,
+        reason = "Linux-only compositor dispatch is stubbed on other platforms"
+    )
+)]
 pub fn dispatch() -> Option<Box<dyn WlCompositor>> {
     #[cfg(target_os = "linux")]
     {

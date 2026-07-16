@@ -13,14 +13,23 @@
 //! Usage:
 //!   cargo run -p ene-vrm --example `inspect_aabb` -- <path/to/model.vrm>
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::type_complexity)]
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::type_complexity,
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "diagnostic example parses glb/vrm bytes with manual offsets"
+)]
 
 use std::path::PathBuf;
 
 fn main() {
-    let path: PathBuf = std::env::args()
-        .nth(1).map_or_else(|| PathBuf::from("../assets/characters/Alicia/AliciaSolid.vrm"), PathBuf::from);
-    println!("Reading {path:?}");
+    let path: PathBuf = std::env::args().nth(1).map_or_else(
+        || PathBuf::from("../assets/characters/Alicia/AliciaSolid.vrm"),
+        PathBuf::from,
+    );
+    println!("Reading {}", path.display());
 
     let vrm_bytes = std::fs::read(&path).expect("read vrm file");
 
