@@ -898,14 +898,59 @@ impl Runtime {
         let AppState {
             ref mut character,
             ref mut debug,
-            ref character_physics_registration,
+            ref mut character_physics_registration,
             ref gpu,
-            ref settings,
+            ref mut settings,
             ref mut app,
             ..
         } = self.state;
         let debug_renderer = &mut debug.debug_renderer;
         let (device, queue) = (&gpu.device, &gpu.queue);
+
+        // If settings requested a character or motion reload, process it dynamically (#133).
+        if settings.character_state.needs_respawn {
+            settings.character_state.needs_respawn = false;
+
+            let new_vrm_rel = settings.current_character();
+            let new_vrm_path = settings.assets_dir.join(new_vrm_rel);
+            let current_vrm_path = character.default_vrm_path();
+
+            if Some(new_vrm_path.as_path()) != current_vrm_path {
+                character.set_default_vrm(new_vrm_path);
+
+                let format = cw.config.format;
+                #[cfg(target_os = "linux")]
+                let mask_format = Some(crate::platform::wayland_mask_capture::MASK_TARGET_FORMAT);
+                #[cfg(not(target_os = "linux"))]
+                let mask_format = None;
+
+                character.init(&gpu.device, &gpu.queue, format, mask_format);
+
+                character.resize(
+                    &gpu.device,
+                    (cw.window.inner_size().width, cw.window.inner_size().height),
+                );
+
+                #[cfg(target_os = "windows")]
+                {
+                    *character_physics_registration = None;
+                    let actual_scale =
+                        character.auto_fit_scale(0.9) * settings.character_state.model_scale;
+                    let specs = character.build_character_bone_specs(actual_scale);
+                    if !specs.is_empty() {
+                        let mut physics_res =
+                            app.world_mut()
+                                .resource_mut::<crate::resource::physics::PhysicsWorldResource>();
+                        let registration = physics_res.world.register_character_colliders(&specs);
+                        *character_physics_registration = Some(registration);
+                    }
+                }
+            }
+
+            let motion_rel = settings.current_motion();
+            let motion_path = settings.assets_dir.join(motion_rel);
+            character.play_motion(&motion_path);
+        }
 
         // Apply pending emotion commands (e.g. from the AI's
         // `<|emo:happy|>` tokens) to the VRM model. The bevy

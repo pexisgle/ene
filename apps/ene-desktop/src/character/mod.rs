@@ -563,9 +563,13 @@ impl CharacterRenderer {
     }
 
     /// Path to the VRM that was loaded (or attempted).
-    #[expect(dead_code)]
     pub fn default_vrm_path(&self) -> Option<&std::path::Path> {
         self.default_vrm.as_deref()
+    }
+
+    /// Update the path of the default VRM model.
+    pub fn set_default_vrm(&mut self, path: std::path::PathBuf) {
+        self.default_vrm = Some(path);
     }
 
     /// Update the cursor-driven head-look-at state. The head

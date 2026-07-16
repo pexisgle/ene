@@ -44,7 +44,6 @@ struct MotionSlot {
 
 /// An expression entry with weight and priority.
 #[derive(Debug, Clone)]
-#[expect(dead_code)]
 struct ExpressionEntry {
     pub weight: f32,
     pub priority: u8,

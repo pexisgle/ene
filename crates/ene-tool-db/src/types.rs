@@ -377,7 +377,7 @@ impl DbOrderBy {
     }
 }
 
-/// SQLite column type.
+/// `SQLite` column type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DbType {
     /// 64-bit signed integer.

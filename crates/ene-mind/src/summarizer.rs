@@ -143,7 +143,7 @@ pub async fn summarize_conversation(
     ];
 
     let content = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
+        std::time::Duration::from_mins(2),
         provider.chat_completion(&messages, Some(schema)),
     )
     .await

@@ -24,7 +24,7 @@
 //! - Depends on: `ene-store`, `ene-config`, `ene-ai`
 //! - Does NOT depend on: `ene-runtime` (prevents circular dependencies)
 //! - Calls `ene-store` only through its public `MemoryStore` methods — never issues
-//!   raw SQL or `sea-orm` queries directly. `ene-store` remains the sole SQLite owner.
+//!   raw SQL or `sea-orm` queries directly. `ene-store` remains the sole `SQLite` owner.
 //! - Owns mind logic exclusively: memory extraction, recall planning, emotion,
 //!   context budgeting, prompt composition, and session state all live here.
 //!   `ene-runtime` only *invokes* [`CognitionEngine`]; it must not reimplement mind

@@ -159,7 +159,7 @@ pub struct ToolRag {
     last_specs_hash: AtomicU64,
     /// In-memory cache of tool embedding vectors.
     /// Populated by `ensure_index`, used by select. Avoids
-    /// deserializing all f32 vecs from SQLite every turn.
+    /// deserializing all f32 vecs from `SQLite` every turn.
     cached_field_rows: RwLock<Vec<CachedFieldRow>>,
 }
 

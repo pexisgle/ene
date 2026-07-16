@@ -93,9 +93,13 @@ pub async fn execute_hybrid_recall(
         .await
         .map_err(CognitionError::Memory)?;
 
-    let search_embedding =
-        resolve_search_embedding(config, input, plan.use_hyde, &plan.search.primary_query_text)
-            .await;
+    let search_embedding = resolve_search_embedding(
+        config,
+        input,
+        plan.use_hyde,
+        &plan.search.primary_query_text,
+    )
+    .await;
     let search_options = RecallPlanner::to_memory_search_options(
         &plan,
         &search_embedding,
@@ -193,11 +197,7 @@ async fn resolve_search_embedding(
         return input.query_embedding.to_vec();
     }
 
-    blend_embeddings(
-        input.query_embedding,
-        &hyde_vec,
-        config.memory.hyde_blend,
-    )
+    blend_embeddings(input.query_embedding, &hyde_vec, config.memory.hyde_blend)
 }
 
 /// Linearly blend query and `HyDE` embeddings, then L2-normalize.
@@ -471,7 +471,9 @@ mod tests {
             card: None,
         };
 
-        let _ = execute_hybrid_recall(&config, &input).await.expect("recall");
+        let _ = execute_hybrid_recall(&config, &input)
+            .await
+            .expect("recall");
         assert_eq!(
             embedder.hyde_calls.load(Ordering::SeqCst),
             0,

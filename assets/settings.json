@@ -46,7 +46,7 @@
         "min_confidence": 0.6000000238418579
       },
       "use_hyde": false,
-      "hyde_blend": 0.6,
+      "hyde_blend": 0.6000000238418579,
       "recall_result_limit": 8,
       "recall_similarity_threshold": 0.3499999940395355,
       "recall_min_score": 0.20000000298023224,
@@ -118,7 +118,7 @@
       "query_prefix": null
     },
     "max_tokens": 8192,
-    "model": "openai/gpt-5.6-luna",
+    "model": "xiaomi/mimo-v2.5",
     "name": "openai-compatible"
   },
   "session": {

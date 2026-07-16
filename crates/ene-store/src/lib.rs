@@ -15,7 +15,7 @@
 //! Enforced by [AGENTS.md §4.1](../../AGENTS.md) and reconfirmed by the
 //! [API refactor plan](../../docs/architecture/api-refactor-plan.md) (item 2):
 //!
-//! - `ene-store` is the **sole owner** of the SQLite / `sea-orm` connection and schema
+//! - `ene-store` is the **sole owner** of the `SQLite` / `sea-orm` connection and schema
 //!   for the entire workspace. No other crate (`ene-mind`, `ene-runtime`, tool
 //!   binaries) opens its own database connection or issues raw SQL against
 //!   `memory.db`; they call into `MemoryStore` (or, for tool binaries, the IPC-based

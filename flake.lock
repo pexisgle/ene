@@ -22,11 +22,11 @@
     "apollo-skills": {
       "flake": false,
       "locked": {
-        "lastModified": 1783098546,
-        "narHash": "sha256-bXaplqSzp3413BznlKUJj/JnIqNUFea6OnG2csB3yyA=",
+        "lastModified": 1784062839,
+        "narHash": "sha256-kpRmr5rJ8K8pNvrf5n8QpQKyLTa4CzQdiaPtp+KmMyI=",
         "owner": "apollographql",
         "repo": "skills",
-        "rev": "7df6a608dd71f937e664b19183fb60d101bb13a1",
+        "rev": "98c99fdf95fa2108786786d7f17d06868be3ebf9",
         "type": "github"
       },
       "original": {
@@ -38,11 +38,11 @@
     "everything-claude-code": {
       "flake": false,
       "locked": {
-        "lastModified": 1783197867,
-        "narHash": "sha256-E/IwTUv7rMfFwTd1d5QmlBAmkCF8T1ujKenYWFK8TZ8=",
+        "lastModified": 1783992672,
+        "narHash": "sha256-wjTw+/X5yIeHmTrWoKLNmcZ6fIeleQM/IYYwweZR7UQ=",
         "owner": "affaan-m",
         "repo": "everything-claude-code",
-        "rev": "4130457d674d2180c5af2c5f634f3cae4cbc6c4f",
+        "rev": "ed387446052dfbc6b52de149406b70efa65edc59",
         "type": "github"
       },
       "original": {
@@ -202,11 +202,11 @@
     "wshobson-agents": {
       "flake": false,
       "locked": {
-        "lastModified": 1782392594,
-        "narHash": "sha256-wgDN0ytDleqyPQtJHSvrzZVSeY+JPI+SNDl3FFliIqM=",
+        "lastModified": 1784050604,
+        "narHash": "sha256-nZci8/AFZFaKPazdnVaUo1LOo51Qjziz1cK+Q3Sxmy0=",
         "owner": "wshobson",
         "repo": "agents",
-        "rev": "5cc2549a50fc672230efd0a0307e2fd27ffba792",
+        "rev": "b6af3711058190e4b5c5274b9758498fe626ec5a",
         "type": "github"
       },
       "original": {

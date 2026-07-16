@@ -205,7 +205,7 @@ fn model_wants_thinking_disabled(model: &str) -> bool {
 
 /// Build a chat provider with model-specific transport tweaks applied.
 ///
-/// `max_tokens`: when `> 0`, sent on chat requests. OpenRouter reserves
+/// `max_tokens`: when `> 0`, sent on chat requests. `OpenRouter` reserves
 /// credits against this ceiling; omitting it can make the provider assume
 /// the model max (often 65536) and return HTTP 402 on modest balances.
 fn new_openai_chat_provider(
@@ -276,7 +276,7 @@ fn byot_http_client() -> Result<&'static reqwest::Client, LlmProviderError> {
     CLIENT
         .get_or_init(|| {
             reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
+                .timeout(std::time::Duration::from_mins(2))
                 .build()
                 .map_err(|e| e.to_string())
         })

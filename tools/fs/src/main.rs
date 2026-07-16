@@ -6,7 +6,6 @@
 #![warn(missing_docs)]
 #![allow(
     clippy::unused_async,
-    clippy::unused_async_trait_impl,
     clippy::unused_peekable,
     clippy::option_if_let_else
 )]

@@ -331,13 +331,13 @@ fn merge_hybrid_candidate(
         });
 }
 
-/// Applies the SQLite PRAGMAs the store depends on to the
+/// Applies the `SQLite` PRAGMAs the store depends on to the
 /// given connection. Idempotent and safe to call from both
 /// `open` and `open_in_memory`.
 ///
 /// * `journal_mode=WAL` lets readers proceed concurrently
 ///   with a writer. WAL is a no-op for in-memory databases
-///   (SQLite returns `memory`), so it is safe to issue
+///   (`SQLite` returns `memory`), so it is safe to issue
 ///   unconditionally.
 /// * `busy_timeout=5000` (5 seconds) makes concurrent
 ///   writers wait for the lock instead of failing with

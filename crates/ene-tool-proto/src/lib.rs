@@ -30,7 +30,7 @@
 //!   [`run_tool_server`] entry point.
 //! - It must NOT gain business logic, database access, or `sea-orm` dependencies —
 //!   those belong to `ene-tool-host` (orchestration) and `ene-store` (the sole
-//!   SQLite owner) respectively. A future "convenience" SQL helper or policy
+//!   `SQLite` owner) respectively. A future "convenience" SQL helper or policy
 //!   decision does not belong here even if it seems locally useful to a tool
 //!   author; it belongs in `ene-tool-host` or the calling tool binary.
 //! - Depends only on `ene-config` (for the `define_tool_config!` macro used by

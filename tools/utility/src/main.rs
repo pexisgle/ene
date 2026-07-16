@@ -5,7 +5,6 @@
 #![warn(missing_docs)]
 #![allow(
     clippy::unused_async,
-    clippy::unused_async_trait_impl,
     clippy::option_option
 )]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
