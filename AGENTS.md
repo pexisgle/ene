@@ -68,7 +68,7 @@ The workspace is highly granularly split to enforce strict boundaries and preven
 * **Async:** `tokio` only. Do not use `async-std` or `smol`.
 * **Error Handling:** 
   - Use `thiserror` for module-level enums (e.g., `ToolHostError`). Do not use `anyhow` at the library boundary.
-  - **Avoid `unwrap()` and `expect()` outside of tests.** The workspace enforces `#![warn(clippy::unwrap_used)]` and `#![warn(clippy::expect_used)]`. Always propagate errors or handle them gracefully using typed errors.
+  - **Avoid `unwrap()` and `expect()` outside of tests.** Workspace Clippy denies `unwrap_used` / `expect_used`. Always propagate errors or handle them gracefully using typed errors.
 * **Logging:** 
   - Use the `tracing` crate (`info!`, `warn!`, `error!`, `debug!`). **Never use `println!`.**
   - Always include structured context fields when appropriate to maintain machine-readable logs (e.g., `tracing::error!(component = "ToolHost", error = %e, "Failed to start")`).
@@ -78,6 +78,7 @@ The workspace is highly granularly split to enforce strict boundaries and preven
   - `ene-cli` translations are managed locally within the CLI under `apps/ene-cli/i18n/`.
 * **Visibility:** Default to `pub(crate)`. Only use `pub` when external consumers need it.
 * **Comments:** Write `rustdoc` comments (`///`) for public APIs and complex logic. Re-exports must use `#[doc(no_inline)]`.
+* **Clippy / rustfmt / overflow:** Root `Cargo.toml` denies `all`/`pedantic`/`restriction`/`cargo` (no `nursery`). Style-only lints are `allow`ed there — do not mass-rewrite for those; panic-adjacent ones stay denied. Suppress with `#[expect(..., reason = "...")]` (`reason` required). Release has `overflow-checks = true` (use `wrapping_*` for intentional wrap). `rustfmt.toml` is stable-only — do not add nightly/unstable options.
 
 ## 6. Common Tasks (Recipes)
 
