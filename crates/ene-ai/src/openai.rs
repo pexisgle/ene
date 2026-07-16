@@ -204,10 +204,22 @@ fn model_wants_thinking_disabled(model: &str) -> bool {
 }
 
 /// Build a chat provider with model-specific transport tweaks applied.
-fn new_openai_chat_provider(base_url: &str, api_key: &str, model: &str) -> OpenAiProvider {
+///
+/// `max_tokens`: when `> 0`, sent on chat requests. OpenRouter reserves
+/// credits against this ceiling; omitting it can make the provider assume
+/// the model max (often 65536) and return HTTP 402 on modest balances.
+fn new_openai_chat_provider(
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    max_tokens: u32,
+) -> OpenAiProvider {
     let mut provider = OpenAiProvider::new(base_url, api_key, model);
     if model_wants_thinking_disabled(model) {
         provider = provider.with_thinking_disabled(true);
+    }
+    if max_tokens > 0 {
+        provider = provider.with_chat_max_tokens(max_tokens);
     }
     provider
 }
@@ -483,6 +495,7 @@ impl LlmProviderFactory for OpenAiProviderFactory {
             &base_url,
             &api_key,
             &provider_config.model,
+            provider_config.max_tokens,
         )))
     }
 }
@@ -509,10 +522,11 @@ pub fn create_openai_compatible_chat_provider(
         .filter(|name| !name.trim().is_empty())
         .unwrap_or(provider_config.model.as_str());
 
-    let mut provider = new_openai_chat_provider(&base_url, &api_key, model);
-    if let Some(max_tokens) = max_tokens.filter(|&n| n > 0) {
-        provider = provider.with_chat_max_tokens(max_tokens);
-    }
+    // Classifier/other overrides win when set; otherwise honor provider.max_tokens.
+    let effective_max = max_tokens
+        .filter(|&n| n > 0)
+        .unwrap_or(provider_config.max_tokens);
+    let provider = new_openai_chat_provider(&base_url, &api_key, model, effective_max);
 
     Ok(Box::new(provider))
 }
@@ -735,6 +749,12 @@ async fn run_direct_sse_stream(
     let status = response.status();
     if !status.is_success() {
         let raw = response.text().await.unwrap_or_default();
+        if status.as_u16() == 402 {
+            return Err(LlmProviderError::Provider(format!(
+                "chat stream HTTP 402 Payment Required (often OpenRouter credit collateral for max_tokens): {}",
+                raw.chars().take(280).collect::<String>()
+            )));
+        }
         return Err(LlmProviderError::Provider(format!(
             "chat stream HTTP {status}: {raw}"
         )));

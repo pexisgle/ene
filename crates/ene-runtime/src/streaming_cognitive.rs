@@ -384,7 +384,11 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
 
             if is_first_chunk {
                 is_first_chunk = false;
-                tracing::info!(%turn, "LLM streaming response started");
+                if chunk_res.is_ok() {
+                    tracing::info!(%turn, "LLM streaming response started");
+                } else {
+                    tracing::warn!(%turn, "LLM streaming response failed on first chunk");
+                }
             }
 
             match chunk_res {

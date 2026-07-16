@@ -32,6 +32,7 @@ pub struct EneConfig {
     "name": "openai-compatible",
     "model": "gpt-4o-mini",
     "base_url": "https://api.openai.com/v1",
+    "max_tokens": 8192,
     "api_key": {
       "source": "inline",
       "inline": "",
@@ -58,6 +59,7 @@ pub struct EneConfig {
 | `name` | string | `"openai-compatible"` | プロバイダ識別子 |
 | `model` | string | `"gpt-4o-mini"` | チャットモデル名 |
 | `base_url` | string | `""` | API ベース URL |
+| `max_tokens` | int | `8192` | チャット完了の最大トークン数（`0` = リクエストから省略）。OpenRouter はこの上限に対してクレジット担保を確保するため、省略するとモデル上限（しばしば 65536）が仮定され、残高が少ないと HTTP 402 になることがある |
 | `api_key` | object | (下記参照) | API キー設定 |
 | `embedding` | object | (下記参照) | 埋め込み設定 |
 

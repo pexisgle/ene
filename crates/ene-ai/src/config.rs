@@ -68,6 +68,9 @@ ene_config::define_config!(
         pub model: String = "gpt-4o-mini".to_string(),
         /// API base URL.
         pub base_url: String = default_string(),
+        /// Max completion tokens for chat (`0` = omit; providers like OpenRouter
+        /// then reserve the model max, which can trigger HTTP 402 on low balance).
+        pub max_tokens: u32 = 8192,
         /// API key configuration.
         pub api_key: ApiKeyConfig,
         /// Embedding configuration.

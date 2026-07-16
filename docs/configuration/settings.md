@@ -32,6 +32,7 @@ pub struct EneConfig {
     "name": "openai-compatible",
     "model": "gpt-4o-mini",
     "base_url": "https://api.openai.com/v1",
+    "max_tokens": 8192,
     "api_key": {
       "source": "inline",
       "inline": "",
@@ -58,6 +59,7 @@ pub struct EneConfig {
 | `name` | string | `"openai-compatible"` | Provider identifier |
 | `model` | string | `"gpt-4o-mini"` | Chat model name |
 | `base_url` | string | `""` | API base URL |
+| `max_tokens` | int | `8192` | Max completion tokens for chat (`0` = omit from the request). OpenRouter reserves credit collateral against this ceiling; omitting it can make the provider assume the model max (often 65536) and return HTTP 402 on modest balances |
 | `api_key` | object | (see below) | API key configuration |
 | `embedding` | object | (see below) | Embedding configuration |
 
