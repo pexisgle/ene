@@ -301,25 +301,23 @@ pub trait ToolProvider: Send + Sync {
 
 ## ToolSpec
 
-The structured, LLM-facing tool specification:
+The structured, LLM-facing tool specification (slimmed at v3):
 
 ```rust
 pub struct ToolSpec {
-    pub name: ToolName,           // e.g. "filesystem.read"
-    pub version: ToolVersion,     // semver (1.0.0)
-    pub display_name: String,     // "Read File"
-    pub summary: String,          // one-line, used for embedding
-    pub description: String,      // full markdown
-    pub category: ToolCategory,   // Filesystem, Utility, etc.
-    pub keywords: KeywordSet,     // structured keyword bag
-    pub parameters: serde_json::Value,  // JSON Schema (auto from schemars)
-    pub examples: Vec<ToolExample>,
-    pub caveats: Vec<String>,
-    pub side_effects: SideEffects,
-    pub preconditions: Vec<String>,
-    pub related: Vec<ToolName>,
+    pub name: ToolName,                     // e.g. "filesystem.read"
+    pub description: String,                // full markdown description (used for RAG embedding)
+    pub parameters: serde_json::Value,      // JSON Schema (auto-derived from schemars)
+    /// Negative keywords for RAG disambiguation — when present in the
+    /// user query, these terms *penalize* the tool's relevance score.
+    /// Interim field re-instated after #135 slim-down until
+    /// `ToolRagProfile` lands (#137). Wire-invisible when empty
+    /// (`skip_serializing_if = "Vec::is_empty"`).
+    pub negative_keywords: Vec<String>,
 }
 ```
+
+The `negative_keywords` field is a temporary vestige of the pre-#135 fat `ToolSpec`. It is retained only so that `#[tool(keywords_negative = "...")]` authoring data in derive macros is not lost before `ToolRagProfile` ships (#137). On the wire, an empty `Vec` is skipped entirely.
 
 ## `#[tool(...)]` Attributes
 
@@ -411,10 +409,41 @@ pub enum ToolError {
 Tool binary starts
   → listens on ENE_TOOL_SOCKET (provided by ToolHostManager as env var)
   → receives IpcRequest::Handshake → responds HandshakeAck
-  → receives IpcRequest::Initialize
-  → tool initialized with sandbox + config
+  → Handshake carries sandbox + tool_config (Initialize folded at v3)
   → ready to handle CallTool requests
 ```
+
+## Protocol Variants
+
+The IPC wire protocol at `IPC_PROTOCOL_VERSION = 3` carries 10 request variants and 8 response variants. `UserInput` is **not** an IPC variant — it is surfaced through `ToolError::UserInputRequired` and handled by `ene-runtime`'s streaming loop.
+
+### Requests (host → tool)
+
+| Variant | Payload | Semantics | Since |
+|---|---|---|---|
+| `Handshake` | `version: u32`, `sandbox: SandboxConfigData`, `tool_config: Option<Value>` | Protocol negotiation + sandbox config + tool config push (Initialize folded at v3) | v1 |
+| `ListTools` | — | Fetch all `ToolSpec`s from the provider | v1 |
+| `ListActionSpecs` | — | Fetch per-action specs (mega-tool capability metadata for RAG) | v2 |
+| `GetConfigSchema` | — | Request the tool's config JSON Schema (#150 exception, not part of the "six primary") | v2 |
+| `CallTool` | `name: String`, `arguments: String` | Execute a tool by name with JSON arguments | v1 |
+| `SetCallContext` | `conversation_id: String`, `turn_id: String` | Thread conversation + turn identifiers into the tool (supersedes v2 `SetSessionId`) | v2 |
+| `ApprovePermission` | `request_id: String` | Approve a pending destructive-operation permission request | v1 |
+| `AllowPattern` | `action: String`, `target_pattern: String` | Register a session-wide permission allow pattern (action + target glob) | v1 |
+| `Ping` | — | Health-check ping for liveness monitoring | v2 |
+| `Shutdown` | — | Graceful shutdown request | v1 |
+
+### Responses (tool → host)
+
+| Variant | Payload | Triggered by |
+|---|---|---|
+| `HandshakeAck` | `version: u32` | `Handshake` |
+| `Ack` | — | `SetCallContext`, `ApprovePermission`, `AllowPattern`, `Shutdown` |
+| `Tools` | `tools: Vec<ToolSpec>` | `ListTools` |
+| `ActionSpecs` | `specs: Vec<ActionSpec>` | `ListActionSpecs` |
+| `ConfigSchema` | `schema: Option<Value>` | `GetConfigSchema` |
+| `CallResult` | `result: Result<String, ToolError>` | `CallTool` |
+| `Pong` | — | `Ping` |
+| `Error` | `error: String` | Any request that fails at the IPC level |
 
 ## ABI Compatibility
 

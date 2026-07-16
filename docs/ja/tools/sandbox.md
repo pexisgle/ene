@@ -5,7 +5,7 @@
 ## 設定の配信
 
 1. `settings.json` → `sandbox` セクションから `SandboxConfigData` を作成
-2. `IpcRequest::Initialize { sandbox, tool_config }` として各ツールバイナリに送信
+2. `IpcRequest::Handshake` として各ツールバイナリに送信（sandbox + `tool_config` は v3 で旧 `Initialize` から吸収）
 3. ツール側の `Sandbox` 型がすべてのアクセス制御を適用
 
 ## SandboxConfigData

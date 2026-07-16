@@ -301,25 +301,23 @@ pub trait ToolProvider: Send + Sync {
 
 ## ToolSpec
 
-LLM 向けの構造化されたツール仕様:
+LLM 向けの構造化されたツール仕様（v3 で slim 化）:
 
 ```rust
 pub struct ToolSpec {
-    pub name: ToolName,           // 例: "filesystem.read"
-    pub version: ToolVersion,     // セマンティックバージョン (1.0.0)
-    pub display_name: String,     // "Read File"
-    pub summary: String,          // 1行 (埋め込みに使用)
-    pub description: String,      // 完全なマークダウン
-    pub category: ToolCategory,   // Filesystem, Utility 等
-    pub keywords: KeywordSet,     // 構造化キーワードバッグ
-    pub parameters: serde_json::Value,  // JSON Schema (schemars による自動生成)
-    pub examples: Vec<ToolExample>,
-    pub caveats: Vec<String>,
-    pub side_effects: SideEffects,
-    pub preconditions: Vec<String>,
-    pub related: Vec<ToolName>,
+    pub name: ToolName,                     // 例: "filesystem.read"
+    pub description: String,                // 完全なマークダウン（RAG 埋め込みに使用）
+    pub parameters: serde_json::Value,      // JSON Schema (schemars による自動生成)
+    /// RAG 曖昧性解消のためのネガティブキーワード — ユーザークエリに
+    /// 含まれる場合、ツールの関連性スコアを*減点*する。
+    /// #135 slim-down 後に復元された暫定フィールド。
+    /// `ToolRagProfile` (#137) が完了するまで保持。
+    /// 空の場合は wire 上で不可視（`skip_serializing_if = "Vec::is_empty"`）。
+    pub negative_keywords: Vec<String>,
 }
 ```
+
+`negative_keywords` フィールドは、#135 以前の fat `ToolSpec` の一時的な名残です。`#[tool(keywords_negative = "...")]` の authoring データが `ToolRagProfile` (#137) の完成前に失われないようにするためだけに保持されています。wire 上では空の `Vec` は完全にスキップされます。
 
 ## `#[tool(...)]` 属性
 
@@ -411,10 +409,41 @@ pub enum ToolError {
 ツールバイナリ起動
   → ENE_TOOL_SOCKET で待機 (ToolHostManager が環境変数として提供)
   → IpcRequest::Handshake を受信 → HandshakeAck を応答
-  → IpcRequest::Initialize を受信
-  → ツールがサンドボックス + 設定で初期化
+  → Handshake が sandbox + tool_config を運ぶ (Initialize は v3 で吸収)
   → CallTool リクエストを処理可能に
 ```
+
+## プロトコルバリアント
+
+`IPC_PROTOCOL_VERSION = 3` の IPC ワイヤープロトコルは、10 種類のリクエストバリアントと 8 種類のレスポンスバリアントを持ちます。`UserInput` は IPC バリアントでは**ありません** — `ToolError::UserInputRequired` を通じて表面化され、`ene-runtime` のストリーミングループで処理されます。
+
+### リクエスト（ホスト → ツール）
+
+| バリアント | ペイロード | セマンティクス | Since |
+|---|---|---|---|
+| `Handshake` | `version: u32`, `sandbox: SandboxConfigData`, `tool_config: Option<Value>` | プロトコル交渉 + サンドボックス設定 + ツール設定プッシュ（Initialize は v3 で吸収） | v1 |
+| `ListTools` | — | プロバイダから全 `ToolSpec` を取得 | v1 |
+| `ListActionSpecs` | — | アクション単位のスペックを取得（RAG 用メガツールメタデータ） | v2 |
+| `GetConfigSchema` | — | ツール設定の JSON Schema をリクエスト（#150 例外） | v2 |
+| `CallTool` | `name: String`, `arguments: String` | ツール名と JSON 引数でツールを実行 | v1 |
+| `SetCallContext` | `conversation_id: String`, `turn_id: String` | 会話・ターン識別子をツールに伝達（v2 `SetSessionId` を置換） | v2 |
+| `ApprovePermission` | `request_id: String` | ペンディング中の破壊的操作の権限リクエストを承認 | v1 |
+| `AllowPattern` | `action: String`, `target_pattern: String` | セッション全体の権限許可パターンを登録（アクション + ターゲットグロブ） | v1 |
+| `Ping` | — | 生存監視用のヘルスチェック ping | v2 |
+| `Shutdown` | — | 正常終了リクエスト | v1 |
+
+### レスポンス（ツール → ホスト）
+
+| バリアント | ペイロード | トリガー |
+|---|---|---|
+| `HandshakeAck` | `version: u32` | `Handshake` |
+| `Ack` | — | `SetCallContext`, `ApprovePermission`, `AllowPattern`, `Shutdown` |
+| `Tools` | `tools: Vec<ToolSpec>` | `ListTools` |
+| `ActionSpecs` | `specs: Vec<ActionSpec>` | `ListActionSpecs` |
+| `ConfigSchema` | `schema: Option<Value>` | `GetConfigSchema` |
+| `CallResult` | `result: Result<String, ToolError>` | `CallTool` |
+| `Pong` | — | `Ping` |
+| `Error` | `error: String` | IPC レベルで失敗した任意のリクエスト |
 
 ## ABI 互換性
 

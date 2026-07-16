@@ -335,7 +335,7 @@ pub struct SandboxConfigData {
 }
 ```
 
-`IpcRequest::Initialize` 時に送信され、`ene_config::define_tool_config!` によって生成される、サンドボックスポリシーのシリアライズ可能な POD 表現です。フィールドの補足：
+`IpcRequest::Handshake` 時に送信され（v3 で旧 `Initialize` から吸収）、`ene_config::define_tool_config!` によって生成される、サンドボックスポリシーのシリアライズ可能な POD 表現です。フィールドの補足：
 
 - `db_socket` — ツールごとの DB IPC ソケット（Unix ドメインソケット）へのパス。ツールバイナリはここに接続して、型付き CRUD 用のコア DB サーバーに到達します（[`ene-tool-db`](./ene-tool-db.md) を参照）。
 - `db_auth_token` — ツールバイナリが最初の `ene_tool_db::DbRequest::Handshake` で提示しなければならない事前共有トークン。`None` の場合、そのツールの DB アクセスは完全に無効化されます。

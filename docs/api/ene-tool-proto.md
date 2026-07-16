@@ -335,7 +335,7 @@ pub struct SandboxConfigData {
 }
 ```
 
-A serializable, POD representation of the sandbox policy, sent during `IpcRequest::Initialize` and generated via `ene_config::define_tool_config!`. Field notes:
+A serializable, POD representation of the sandbox policy, sent during `IpcRequest::Handshake` (folded from former `Initialize` at v3) and generated via `ene_config::define_tool_config!`. Field notes:
 
 - `db_socket` — path to the per-tool DB IPC socket (Unix Domain Socket). Tool binaries connect here to reach the core DB server for typed CRUD (see [`ene-tool-db`](./ene-tool-db.md)).
 - `db_auth_token` — pre-shared token the tool binary must present in its very first `ene_tool_db::DbRequest::Handshake`. `None` disables DB access entirely for that tool.
