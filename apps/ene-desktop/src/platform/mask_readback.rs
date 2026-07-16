@@ -131,12 +131,11 @@ impl MaskReadbackWorker {
         let generation = Arc::clone(&self.generation);
         let in_flight = Arc::clone(&self.in_flight);
 
-        thread::Builder::new()
+        let _ = thread::Builder::new()
             .name("ene.mask_readback.frame".into())
             .spawn(move || {
                 run_single_readback(&mask, &device, &queue, &generation, gen_id, &in_flight);
-            })
-            .ok();
+            });
     }
 
     /// Reference to the underlying `MaskCaptureCamera` for

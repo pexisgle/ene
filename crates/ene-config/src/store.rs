@@ -115,7 +115,7 @@ impl ConfigStore {
     where
         T: serde::Serialize + crate::HasConfigKey,
     {
-        self.config.write().set_section(section).ok();
+        let _ = self.config.write().set_section(section);
         self.global_dirty.store(true, Ordering::Release);
     }
 
@@ -165,7 +165,7 @@ impl ConfigStore {
         T: serde::Serialize + crate::HasConfigKey,
     {
         self.with_character_config_mut(|c| {
-            c.set_section(section).ok();
+            let _ = c.set_section(section);
         });
     }
 

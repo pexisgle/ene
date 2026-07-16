@@ -147,6 +147,10 @@ impl DbIpcServer {
             "DB IPC server listening"
         );
 
+        #[expect(
+            clippy::infinite_loop,
+            reason = "DB IPC accept loop runs until the server task is cancelled"
+        )]
         loop {
             // Continue the accept loop on transient accept
             // errors (EMFILE, ENFILE, EINTR, ...). A

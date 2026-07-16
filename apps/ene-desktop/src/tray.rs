@@ -265,6 +265,10 @@ fn pump_win32_messages() {
 }
 
 fn pump_tray_events(event_tx: &AppEventSender) {
+    #[expect(
+        clippy::infinite_loop,
+        reason = "tray event pump runs until the process exits"
+    )]
     loop {
         while let Ok(event) = TrayIconEvent::receiver().try_recv() {
             if let TrayIconEvent::Click {
