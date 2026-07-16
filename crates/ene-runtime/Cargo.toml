@@ -31,6 +31,7 @@ ene-tool-rag = { workspace = true }
 ene-tool-proto = { workspace = true }
 
 [dev-dependencies]
+cargo-husky = { workspace = true }
 async-trait = { workspace = true }
 tokio-stream = { workspace = true }
 ene-tool-proto = { workspace = true }
