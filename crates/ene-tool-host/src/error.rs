@@ -18,13 +18,12 @@ pub enum EneToolHostError {
         /// A descriptive message about the failure.
         message: String,
     },
-    /// A prefixed fallback name also collided in a composite registry.
+    /// A tool name collision in [`CompositeToolRegistry`].
     ///
-    /// [`CompositeToolRegistry`] resolves primary collisions by prefix-renaming
-    /// (`"<idx>:<name>"`). This error fires only when that prefixed name
-    /// itself collides — a near-impossible edge case. Primary collisions
-    /// in [`HostRegistry`] produce [`ToolError::DuplicateName`] directly
-    /// (hard error, no fallback).
+    /// Per API v2 / #135, name collision is a hard error at every
+    /// registry layer. [`HostRegistry`] returns
+    /// [`ToolError::DuplicateName`]; this variant covers the
+    /// composite-level case.
     #[error("Duplicate tool name: {tool_name}")]
     DuplicateToolName {
         /// Colliding tool name.

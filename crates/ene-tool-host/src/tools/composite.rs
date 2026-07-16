@@ -10,8 +10,8 @@ use std::sync::Arc;
 /// Tool RAG indexing and selection is handled by [`ToolRag`](crate::ToolRag).
 /// This registry only handles dispatch (list, call, config).
 ///
-/// Name collisions across sub-registries are resolved by prefixing the
-/// tool name with `"<source_index>:"` (e.g. `"0:filesystem.read"`).
+/// Name collision across sub-registries is a hard error — per API v2 / #135,
+/// every tool must have a unique public name.
 pub struct CompositeToolRegistry {
     state: std::sync::RwLock<CompositeState>,
 }
@@ -19,43 +19,29 @@ pub struct CompositeToolRegistry {
 struct CompositeState {
     registries: Vec<Arc<dyn ToolRegistry>>,
     tool_index: HashMap<String, usize>,
-    renamed: std::collections::HashSet<(usize, String)>,
 }
 
 impl CompositeToolRegistry {
     /// Creates a new composite tool registry from the given sub-registries.
     ///
-    /// Name collisions are resolved by prefixing with `"<idx>:"` so both
-    /// tools remain callable.
-    ///
     /// # Errors
-    /// Returns [`ToolHostError::DuplicateToolName`] only if the prefixed
-    /// name itself collides (same-name tool at two different indices).
+    /// Returns [`ToolHostError::DuplicateToolName`] when two or more
+    /// sub-registries expose a tool with the same name.
     pub fn try_new(registries: Vec<Arc<dyn ToolRegistry>>) -> Result<Self, ToolHostError> {
         let mut tool_index = HashMap::with_capacity(registries.len() * 4);
-        let mut renamed = std::collections::HashSet::with_capacity(registries.len());
         for (idx, registry) in registries.iter().enumerate() {
             for tool in registry.list_tools() {
-                let name = tool.name.as_str();
-                if tool_index.contains_key(name) {
-                    let prefixed = format!("{idx}:{name}");
-                    if tool_index.contains_key(&prefixed) {
-                        return Err(ToolHostError::DuplicateToolName {
-                            tool_name: prefixed,
-                        });
-                    }
-                    tool_index.insert(prefixed, idx);
-                    renamed.insert((idx, name.to_string()));
-                } else {
-                    tool_index.insert(name.to_string(), idx);
+                let name = tool.name.as_str().to_string();
+                if tool_index.contains_key(&name) {
+                    return Err(ToolHostError::DuplicateToolName { tool_name: name });
                 }
+                tool_index.insert(name, idx);
             }
         }
         Ok(Self {
             state: std::sync::RwLock::new(CompositeState {
                 registries,
                 tool_index,
-                renamed,
             }),
         })
     }
@@ -96,31 +82,17 @@ impl CompositeToolRegistry {
 
     /// Adds a sub-registry to the composite.
     ///
-    /// Name collisions are resolved by prefixing with `"<idx>:"`.
-    ///
     /// # Errors
-    /// Returns [`ToolHostError::DuplicateToolName`] only if the prefixed
-    /// name itself collides.
+    /// Returns [`ToolHostError::DuplicateToolName`] when the new registry
+    /// contains a tool name that already exists.
     pub fn try_add_registry(&self, registry: Arc<dyn ToolRegistry>) -> Result<(), ToolHostError> {
         self.with_state_mut(|state| {
             let idx = state.registries.len();
-            let mut pending = Vec::new();
             for tool in registry.list_tools() {
                 let name = tool.name.as_str().to_string();
                 if state.tool_index.contains_key(&name) {
-                    let prefixed = format!("{idx}:{name}");
-                    if state.tool_index.contains_key(&prefixed) {
-                        return Err(ToolHostError::DuplicateToolName {
-                            tool_name: prefixed,
-                        });
-                    }
-                    pending.push(prefixed);
-                    state.renamed.insert((idx, name));
-                } else {
-                    pending.push(name);
+                    return Err(ToolHostError::DuplicateToolName { tool_name: name });
                 }
-            }
-            for name in pending {
                 state.tool_index.insert(name, idx);
             }
             state.registries.push(registry);
@@ -151,24 +123,15 @@ impl ToolRegistry for CompositeToolRegistry {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut tools = Vec::new();
-        for (idx, registry) in guard.registries.iter().enumerate() {
-            for mut tool in registry.list_tools() {
-                if guard
-                    .renamed
-                    .contains(&(idx, tool.name.as_str().to_string()))
-                {
-                    let prefixed = format!("{idx}:{}", tool.name.as_str());
-                    tool.name = ene_tool_proto::ToolName::new(prefixed);
-                }
-                tools.push(tool);
-            }
+        for registry in &guard.registries {
+            tools.extend(registry.list_tools());
         }
         drop(guard);
         tools
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolHostError> {
-        let (registry, dispatch_name) = {
+        let registry = {
             let guard = self
                 .state
                 .read()
@@ -180,15 +143,9 @@ impl ToolRegistry for CompositeToolRegistry {
                     },
                 ));
             };
-            let prefix = format!("{idx}:");
-            let stripped = if name.starts_with(&prefix) {
-                &name[prefix.len()..]
-            } else {
-                name
-            };
-            (Arc::clone(&guard.registries[idx]), stripped.to_string())
+            Arc::clone(&guard.registries[idx])
         };
-        registry.call_tool(&dispatch_name, arguments).await
+        registry.call_tool(name, arguments).await
     }
 
     async fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
@@ -304,28 +261,38 @@ mod tests {
     }
 
     #[test]
-    fn composite_duplicate_name_gets_prefixed_fallback() {
+    fn composite_duplicate_name_is_hard_error() {
         let r1 = MockRegistry::new(vec![make_tool("dup")]);
         let r2 = MockRegistry::new(vec![make_tool("dup")]);
-        let composite = CompositeToolRegistry::try_new(vec![Arc::new(r1), Arc::new(r2)]).unwrap();
-        let all = composite.list_tools();
-        assert_eq!(all.len(), 2);
-        let names: Vec<&str> = all.iter().map(|t| t.name.as_str()).collect();
-        assert!(names.contains(&"dup"));
-        assert!(names.contains(&"1:dup"));
+        let result = CompositeToolRegistry::try_new(vec![Arc::new(r1), Arc::new(r2)]);
+        assert!(matches!(
+            result,
+            Err(ToolHostError::DuplicateToolName { .. })
+        ));
     }
 
     #[test]
-    fn composite_try_add_registry_resolves_duplicate_with_prefix() {
+    fn composite_try_add_registry_duplicate_name_is_hard_error() {
         let r1 = MockRegistry::new(vec![make_tool("dup")]);
         let composite = CompositeToolRegistry::try_new(vec![Arc::new(r1)]).unwrap();
         let r2 = MockRegistry::new(vec![make_tool("dup")]);
-        composite.try_add_registry(Arc::new(r2)).unwrap();
-        let all = composite.list_tools();
-        assert_eq!(all.len(), 2);
-        let names: Vec<&str> = all.iter().map(|t| t.name.as_str()).collect();
-        assert!(names.contains(&"dup"));
-        assert!(names.contains(&"1:dup"));
+        let result = composite.try_add_registry(Arc::new(r2));
+        assert!(matches!(
+            result,
+            Err(ToolHostError::DuplicateToolName { .. })
+        ));
+    }
+
+    #[test]
+    fn composite_triple_duplicate_is_hard_error() {
+        let r0 = MockRegistry::new(vec![make_tool("dup")]);
+        let r1 = MockRegistry::new(vec![make_tool("dup")]);
+        let r2 = MockRegistry::new(vec![make_tool("dup")]);
+        let result = CompositeToolRegistry::try_new(vec![Arc::new(r0), Arc::new(r1), Arc::new(r2)]);
+        assert!(matches!(
+            result,
+            Err(ToolHostError::DuplicateToolName { .. })
+        ));
     }
 
     #[tokio::test]
@@ -368,40 +335,5 @@ mod tests {
         composite.set_call_context(&ctx).await;
         assert_eq!(sid1.lock().unwrap().as_deref(), Some("conv-1"));
         assert_eq!(sid2.lock().unwrap().as_deref(), Some("conv-1"));
-    }
-
-    #[tokio::test]
-    async fn composite_call_tool_with_prefixed_name_dispatches() {
-        let mock1 = MockRegistry::new(vec![make_tool("dup")]);
-        let mock2 = MockRegistry::new(vec![make_tool("dup")]);
-        let log1 = Arc::clone(&mock1.call_log);
-        let log2 = Arc::clone(&mock2.call_log);
-        let composite =
-            CompositeToolRegistry::try_new(vec![Arc::new(mock1), Arc::new(mock2)]).unwrap();
-
-        let result = composite.call_tool("dup", r#"{"v":1}"#).await;
-        assert_eq!(result.unwrap(), "dup executed");
-        assert_eq!(log1.lock().unwrap().len(), 1);
-        assert_eq!(log1.lock().unwrap()[0].0, "dup");
-
-        let result = composite.call_tool("1:dup", r#"{"v":2}"#).await;
-        assert_eq!(result.unwrap(), "dup executed");
-        assert_eq!(log2.lock().unwrap().len(), 1);
-        assert_eq!(log2.lock().unwrap()[0].0, "dup");
-    }
-
-    #[test]
-    fn composite_triple_duplicate_gets_distinct_prefixes() {
-        let r0 = MockRegistry::new(vec![make_tool("dup")]);
-        let r1 = MockRegistry::new(vec![make_tool("dup")]);
-        let r2 = MockRegistry::new(vec![make_tool("dup")]);
-        let composite =
-            CompositeToolRegistry::try_new(vec![Arc::new(r0), Arc::new(r1), Arc::new(r2)]).unwrap();
-        let all = composite.list_tools();
-        assert_eq!(all.len(), 3);
-        let names: Vec<&str> = all.iter().map(|t| t.name.as_str()).collect();
-        assert!(names.contains(&"dup"));
-        assert!(names.contains(&"1:dup"));
-        assert!(names.contains(&"2:dup"));
     }
 }

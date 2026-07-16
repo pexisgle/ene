@@ -180,7 +180,7 @@ struct CompositeState {
 | `new` | `pub fn new(registries: Vec<Arc<dyn ToolRegistry>>) -> Self` | Builds the composite and its `tool_index` from the given registries in order. |
 | `add_registry` | `pub fn add_registry(&self, registry: Arc<dyn ToolRegistry>)` | Appends a registry and indexes its tools. Takes `&self` (uses an internal `RwLock`), so it can be called after the composite is shared. |
 
-`call_tool` looks up `tool_index.get(name)` to find the owning registry in O(1) rather than scanning every sub-registry's `list_tools()`, then dispatches directly to it — returning `ToolHostError::Protocol(ToolError::NotFound { .. })` if the name isn't indexed. On duplicate tool names across registries, the **first** registration wins (`HashMap::entry(..).or_insert(idx)`).
+`call_tool` looks up `tool_index.get(name)` to find the owning registry in O(1) rather than scanning every sub-registry's `list_tools()`, then dispatches directly to it — returning `ToolHostError::Protocol(ToolError::NotFound { .. })` if the name isn't indexed. Name collision is a hard error — duplicate tool names across registries produce `ToolHostError::DuplicateToolName` at construction time.
 
 ---
 

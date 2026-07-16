@@ -13,7 +13,7 @@
 | 層 | 型 | 元クレート |
 |---|---|---|
 | ワイヤー（IPC / サンドボックス） | `ToolProvider`、`IpcRequest` / `IpcResponse`、`ToolSpec`、`run_tool_server` | `ene-tool-proto` |
-| ホストアダプタ | `ActionSetProvider`、`ToolAction` | `ene-tool-common` |
+| ホストアダプタ | `ActionSetProvider`、`SingleActionProvider`、`ToolAction` | `ene-tool-common` |
 | Derive | `#[derive(ToolSpec)]`、`#[derive(ToolAction)]` | `ene-tool-derive` |
 
 ホスト集約（`ToolRegistry`、MCP、複合ツール、Tool RAG）は [`ene-tool-host`](ene-tool-host.md) に残ります。リーフクレートをこのファサードへ物理統合するのは follow-up です。それまではリーフはワークスペースに残り、本ファサードがサポートされる import パスです。
@@ -22,8 +22,8 @@
 
 - **ワイヤー:** ツールバイナリは `ToolProvider` を実装し、handshake / list / call / permission・user-input 継続 / shutdown を話す。
 - **ホスト:** `ene-tool-host::ToolRegistry` が IPC + MCP を集約する。
-- **名前衝突:** `HostRegistry` はハードエラー；`CompositeToolRegistry` はプレフィックス付与 (`"<idx>:<name>"`) で両方のツールを呼び出し可能にする。
-- **`ToolSpec`** は LLM 向け: `name`、`description`、`parameters`。内部フィールド（例: `negative_keywords`）はワイヤー ABI から除外 (`#[serde(skip)]`)。
+- **名前衝突:** 全レジストリ層でハードエラー（`HostRegistry` は `ToolError::DuplicateName`；`CompositeToolRegistry` は `ToolHostError::DuplicateToolName` を返す）。
+- **`ToolSpec`** は LLM 向け: `name`、`description`、`parameters`。内部 RAG フィールド（例: `negative_keywords`）は `#[doc(hidden)]` + `#[serde(skip)]` — 安定 ABI に含まれない。
 
 ```rust,ignore
 use ene_tool::prelude::*;

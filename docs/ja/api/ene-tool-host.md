@@ -180,7 +180,7 @@ struct CompositeState {
 | `new` | `pub fn new(registries: Vec<Arc<dyn ToolRegistry>>) -> Self` | 与えられたレジストリから順に合成レジストリと `tool_index` を構築する。 |
 | `add_registry` | `pub fn add_registry(&self, registry: Arc<dyn ToolRegistry>)` | レジストリを追加し、そのツールをインデックス化する。`&self` を取る（内部の `RwLock` を使用）ため、合成レジストリが共有された後でも呼び出せる。 |
 
-`call_tool` は、すべてのサブレジストリの `list_tools()` を走査する代わりに `tool_index.get(name)` を参照して所有レジストリをO(1)で見つけ、直接そこへディスパッチします — 名前がインデックスに存在しない場合は `ToolHostError::Protocol(ToolError::NotFound { .. })` を返します。複数のレジストリで同じツール名が重複する場合は、**最初**の登録が優先されます（`HashMap::entry(..).or_insert(idx)`）。
+`call_tool` は、すべてのサブレジストリの `list_tools()` を走査する代わりに `tool_index.get(name)` を参照して所有レジストリをO(1)で見つけ、直接そこへディスパッチします — 名前がインデックスに存在しない場合は `ToolHostError::Protocol(ToolError::NotFound { .. })` を返します。名前衝突はハードエラーです — 複数のレジストリで同じツール名が重複すると、構築時に `ToolHostError::DuplicateToolName` が返ります。
 
 ---
 

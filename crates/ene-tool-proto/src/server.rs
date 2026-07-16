@@ -134,9 +134,6 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
         IpcRequest::ListTools => IpcResponse::Tools {
             tools: provider.list_specs(),
         },
-        IpcRequest::ListActionSpecs => IpcResponse::ActionSpecs {
-            specs: provider.list_action_specs(),
-        },
         IpcRequest::CallTool { name, arguments } => match provider.call_tool(name, arguments).await
         {
             Ok(result) => IpcResponse::CallResult { result: Ok(result) },
@@ -163,7 +160,6 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
             provider.allow_pattern(action, target_pattern);
             IpcResponse::Ack
         }
-        IpcRequest::Ping => IpcResponse::Pong,
         IpcRequest::Shutdown => IpcResponse::Ack,
     }
 }

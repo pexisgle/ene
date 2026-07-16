@@ -367,9 +367,12 @@ impl ActionSpec {
 /// The structured, LLM-facing tool specification.
 ///
 /// Per API v2 / #135 this is limited to the fields the model sees:
-/// `name`, `description`, and `parameters` (JSON Schema). Host-side RAG
-/// indexes from description (+ parameters text); a separate
-/// `ToolRagProfile` is deferred.
+/// `name`, `description`, and `parameters` (JSON Schema).
+///
+/// Internal RAG-only fields (e.g. `negative_keywords`) are
+/// `#[doc(hidden)]` and `#[serde(skip)]` — not part of the stable ABI.
+/// They exist as a transitional stopgap until `ToolRagProfile` (#137)
+/// lands.
 ///
 /// # Embedding note
 /// Changing `embedding_text` output invalidates all cached embeddings
@@ -385,8 +388,9 @@ pub struct ToolSpec {
     pub parameters: serde_json::Value,
     /// Negative keywords for RAG disambiguation — when present in the
     /// user query, these terms *penalize* the tool's relevance score.
-    /// Internal field (excluded from the wire ABI per #135 slim-down);
-    /// will move to `ToolRagProfile` when #137 lands.
+    /// Internal-only field: `#[doc(hidden)]` + `#[serde(skip)]`.
+    /// Will move to `ToolRagProfile` when #137 lands.
+    #[doc(hidden)]
     #[serde(skip)]
     pub negative_keywords: Vec<String>,
 }

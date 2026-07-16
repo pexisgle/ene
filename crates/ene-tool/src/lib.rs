@@ -30,7 +30,7 @@
 /// Re-exports of the most common tool-authoring items.
 pub mod prelude {
     #[doc(no_inline)]
-    pub use ene_tool_common::{ActionSetProvider, ToolAction, ToolSpecArgs};
+    pub use ene_tool_common::{ActionSetProvider, SingleActionProvider, ToolAction, ToolSpecArgs};
     #[doc(no_inline)]
     pub use ene_tool_derive::{ToolAction as DeriveToolAction, ToolSpec as DeriveToolSpec};
     #[doc(no_inline)]
@@ -40,7 +40,7 @@ pub mod prelude {
 }
 
 #[doc(no_inline)]
-pub use ene_tool_common::{ActionSetProvider, ToolAction, ToolSpecArgs};
+pub use ene_tool_common::{ActionSetProvider, SingleActionProvider, ToolAction, ToolSpecArgs};
 #[doc(no_inline)]
 pub use ene_tool_derive::{ToolAction as DeriveToolAction, ToolSpec as DeriveToolSpec};
 #[doc(no_inline)]

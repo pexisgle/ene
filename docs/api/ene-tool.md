@@ -13,7 +13,7 @@
 | Layer | Types | Source crate |
 |---|---|---|
 | Wire (IPC / sandbox) | `ToolProvider`, `IpcRequest` / `IpcResponse`, `ToolSpec`, `run_tool_server` | `ene-tool-proto` |
-| Host adapters | `ActionSetProvider`, `ToolAction` | `ene-tool-common` |
+| Host adapters | `ActionSetProvider`, `SingleActionProvider`, `ToolAction` | `ene-tool-common` |
 | Derive | `#[derive(ToolSpec)]`, `#[derive(ToolAction)]` | `ene-tool-derive` |
 
 Host aggregation (`ToolRegistry`, MCP, composite tools, Tool RAG) stays in [`ene-tool-host`](ene-tool-host.md). A full physical merge of the leaf crates into this facade is a follow-up; until then, the leaf crates remain in the workspace and this facade is the supported import path.
@@ -22,8 +22,8 @@ Host aggregation (`ToolRegistry`, MCP, composite tools, Tool RAG) stays in [`ene
 
 - **Wire:** tool binaries implement `ToolProvider` and speak handshake / list / call / permission-user-input continuation / shutdown.
 - **Host:** `ene-tool-host::ToolRegistry` aggregates IPC + MCP.
-- **Name collision:** `HostRegistry` returns a hard error; `CompositeToolRegistry` resolves collisions by prefix-renaming (`"<idx>:<name>"`) so both tools remain callable.
-- **`ToolSpec`** is LLM-facing: `name`, `description`, `parameters`. Internal fields (e.g. `negative_keywords`) are excluded from the wire ABI (`#[serde(skip)]`).
+- **Name collision:** is a hard error at every registry layer (`HostRegistry` returns `ToolError::DuplicateName`; `CompositeToolRegistry` returns `ToolHostError::DuplicateToolName`).
+- **`ToolSpec`** is LLM-facing: `name`, `description`, `parameters`. Internal RAG fields (e.g. `negative_keywords`) are `#[doc(hidden)]` + `#[serde(skip)` — not part of the stable ABI.
 
 ```rust,ignore
 use ene_tool::prelude::*;

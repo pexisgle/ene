@@ -1,6 +1,6 @@
 use crate::error::ToolError;
 use crate::sandbox::SandboxConfigData;
-use crate::types::{ActionSpec, ToolSpec};
+use crate::types::ToolSpec;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -25,12 +25,11 @@ const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 /// - Removed `IpcResponse::MyConfig`.
 /// - `IpcRequest::GetConfigSchema` is a **documented exception** (#150)
 ///   retained for config schema discovery by `tool_host_manager`.
-/// - v3 carries 10 request variants ([`IpcRequest`]: `Handshake`, `ListTools`,
-///   `ListActionSpecs`, `GetConfigSchema`, `CallTool`, `SetCallContext`,
-///   `ApprovePermission`, `AllowPattern`, `Ping`, `Shutdown`) and 8 response
-///   variants ([`IpcResponse`]: `HandshakeAck`, `Ack`, `Tools`, `ActionSpecs`,
-///   `ConfigSchema`, `CallResult`, `Pong`, `Error`). `UserInput` is **not**
-///   an IPC variant — it is surfaced through `ToolError::UserInputRequired`.
+/// - v3 carries 8 request variants ([`IpcRequest`]: `Handshake`, `ListTools`,
+///   `GetConfigSchema`, `CallTool`, `SetCallContext`,
+///   `ApprovePermission`, `AllowPattern`, `Shutdown`) and 6 response
+///   variants ([`IpcResponse`]: `HandshakeAck`, `Ack`, `Tools`,
+///   `ConfigSchema`, `CallResult`, `Error`).
 pub const IPC_PROTOCOL_VERSION: u32 = 3;
 
 /// IPC request — core → host
@@ -49,8 +48,6 @@ pub enum IpcRequest {
     },
     /// List all available tool specs.
     ListTools,
-    /// List per-action specs (mega-tool capability metadata).
-    ListActionSpecs,
     /// Request the tool's config JSON Schema (documented exception, #150).
     GetConfigSchema,
     /// Execute a tool by name with JSON arguments.
@@ -82,8 +79,6 @@ pub enum IpcRequest {
         /// Target glob pattern.
         target_pattern: String,
     },
-    /// Health-check ping.
-    Ping,
     /// Graceful shutdown.
     Shutdown,
 }
@@ -103,11 +98,6 @@ pub enum IpcResponse {
         /// The structured tool specs.
         tools: Vec<ToolSpec>,
     },
-    /// Per-action specs (v2). For mega-tools, one entry per action.
-    ActionSpecs {
-        /// The action specs.
-        specs: Vec<ActionSpec>,
-    },
     /// The tool's config JSON Schema.
     ConfigSchema {
         /// The schema, or None if not provided.
@@ -118,8 +108,6 @@ pub enum IpcResponse {
         /// The result, or an error.
         result: Result<String, ToolError>,
     },
-    /// Pong response to Ping.
-    Pong,
     /// Error response.
     Error {
         /// Error description.
@@ -279,7 +267,7 @@ pub async fn write_ipc_response<W: AsyncWriteExt + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ActionSpec, SandboxConfigData, ToolName, ToolSpec};
+    use crate::{SandboxConfigData, ToolName, ToolSpec};
 
     async fn send_recv_request(req: &IpcRequest) -> IpcRequest {
         let (mut a, mut b) = tokio::io::duplex(4096);
@@ -346,13 +334,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ipc_request_list_action_specs_roundtrip() {
-        let req = IpcRequest::ListActionSpecs;
-        let got = send_recv_request(&req).await;
-        assert_eq!(got, req);
-    }
-
-    #[tokio::test]
     async fn ipc_request_call_tool_roundtrip() {
         let req = IpcRequest::CallTool {
             name: "read".into(),
@@ -389,14 +370,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ipc_response_action_specs_roundtrip() {
-        let specs = vec![ActionSpec::minimal("read", "Read a file")];
-        let resp = IpcResponse::ActionSpecs { specs };
-        let got = send_recv_response(&resp).await;
-        assert_eq!(got, resp);
-    }
-
-    #[tokio::test]
     async fn ipc_response_call_result_roundtrip() {
         let resp = IpcResponse::CallResult {
             result: Ok("success".into()),
@@ -412,13 +385,6 @@ mod tests {
                 tool_name: "foo".into(),
             }),
         };
-        let got = send_recv_response(&resp).await;
-        assert_eq!(got, resp);
-    }
-
-    #[tokio::test]
-    async fn ipc_response_pong_roundtrip() {
-        let resp = IpcResponse::Pong;
         let got = send_recv_response(&resp).await;
         assert_eq!(got, resp);
     }

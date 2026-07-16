@@ -59,7 +59,9 @@ The library surface grew dual streaming pipelines (legacy + cognitive), an unrea
 
 - [#119](https://github.com/pexisgle/ene/issues/119) Memory — ledger sole SoT; store has no embedder
 - [#126](https://github.com/pexisgle/ene/issues/126) Performance — `PerformanceCue` in mind; no `CueSource::Host` without explicit `perform`
-- [#135](https://github.com/pexisgle/ene/issues/135) Tools — name collision = hard error; wire vs host traits
+- [#135](https://github.com/pexisgle/ene/issues/135) Tools — name collision = hard error at every registry layer; wire vs host traits; `ToolSpec` LLM-facing only (`name`, `description`, `parameters`), internal RAG fields `#[doc(hidden)]` + `#[serde(skip)]`
+- [#138](https://github.com/pexisgle/ene/issues/138) IPC — 8 request / 6 response variants (v3); `UserInput` surfaced through `ToolError`
+- [#158](https://github.com/pexisgle/ene/issues/158) ABI reconciliation — #135 contracts aligned with implementation: `CompositeToolRegistry` hard error, dead IPC variants removed, `SingleActionProvider` added
 
 ## Target Dependency Graph
 

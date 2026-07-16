@@ -59,7 +59,9 @@
 
 - [#119](https://github.com/pexisgle/ene/issues/119) Memory — ledger が唯一の SoT；store に embedder なし
 - [#126](https://github.com/pexisgle/ene/issues/126) Performance — `PerformanceCue` は mind；明示 `perform` なしに `CueSource::Host` は置かない
-- [#135](https://github.com/pexisgle/ene/issues/135) Tools — name 衝突は hard error；wire / host トレイト分離
+- [#135](https://github.com/pexisgle/ene/issues/135) Tools — name 衝突は全レジストリ層で hard error；wire / host トレイト分離；`ToolSpec` は LLM 向けのみ（`name`, `description`, `parameters`）、内部 RAG フィールドは `#[doc(hidden)]` + `#[serde(skip)]`
+- [#138](https://github.com/pexisgle/ene/issues/138) IPC — 8 request / 6 response バリアント（v3）；`UserInput` は `ToolError` 経由で送出
+- [#158](https://github.com/pexisgle/ene/issues/158) ABI 整合 — #135 契約を実装に一致：`CompositeToolRegistry` を hard error 化、dead IPC バリアントを削除、`SingleActionProvider` を追加
 
 ## 目標依存グラフ
 
