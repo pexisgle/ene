@@ -27,6 +27,7 @@ blake3 = { workspace = true }
 uuid = { workspace = true }
 
 ene-tool-host = { workspace = true }
+ene-tool-rag = { workspace = true }
 ene-tool-proto = { workspace = true }
 
 [dev-dependencies]

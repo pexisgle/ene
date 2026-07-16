@@ -19,8 +19,10 @@ fn test_config_memory_off() -> EneConfig {
     config.set_section(&store).expect("store config");
     let mut tools = ene_tool_host::ToolConfig::default();
     tools.enabled = false;
-    tools.rag.enabled = false;
     let _ = config.set_section(&tools);
+    let mut rag = ene_tool_rag::ToolRagConfig::default();
+    rag.enabled = false;
+    let _ = config.set_section(&rag);
     let mut provider = ene_ai::ProviderConfig::default();
     provider.embedding.backend = "cloud".into();
     let _ = config.set_section(&provider);
@@ -133,8 +135,10 @@ async fn memory_enabled_without_embedder_fails_closed_on_open() {
     config.set_section(&store).unwrap();
     let mut tools = ene_tool_host::ToolConfig::default();
     tools.enabled = false;
-    tools.rag.enabled = false;
     let _ = config.set_section(&tools);
+    let mut rag = ene_tool_rag::ToolRagConfig::default();
+    rag.enabled = false;
+    let _ = config.set_section(&rag);
     // Cloud embedder with no base URL → init fails → open fails closed.
     let mut provider = ene_ai::ProviderConfig::default();
     provider.embedding.backend = "cloud".into();

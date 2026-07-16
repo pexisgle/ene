@@ -233,94 +233,7 @@ pub enum McpTransport {
 
 ## Tool RAGパイプライン
 
-利用可能なツールの数がLLMのコンテキスト予算を超える場合、`ToolRag` は検索拡張生成（RAG）による選択ステップを実行します: 埋め込み → オプションのHyDE拡張 → 重み付き多フィールド類似度 → オプションのクロスエンコーダーによるリランク → 上位N件。
-
-### `ToolRag`
-
-```rust
-pub struct ToolRag {
-    embedder: Arc<dyn EmbeddingProvider>,
-    store: Option<Arc<MemoryStore>>,
-    opts: ToolRagOptions,
-    specs: RwLock<HashMap<ToolName, ToolSpec>>,
-    last_specs_hash: AtomicU64,
-    cached_field_rows: RwLock<Vec<CachedFieldRow>>,
-}
-```
-
-| メソッド | シグネチャ | 説明 |
-|--------|-----------|-------------|
-| `new` | `pub fn new(embedder: Arc<dyn EmbeddingProvider>, store: Option<Arc<MemoryStore>>, opts: ToolRagOptions) -> Self` | すでに解決済みの `ToolRagOptions` がある場合の直接コンストラクタ。 |
-| `from_config` | `pub fn from_config(embedder: Arc<dyn EmbeddingProvider>, store: Option<Arc<MemoryStore>>, config: ToolRagConfig) -> Result<Self, ToolHostError>` | 設定向けの `ToolRagConfig` から `ToolRagOptions` を構築する（`forced` 用に `Vec<String>` → `Vec<ToolName>` へ変換）し、パイプラインを構築する。 |
-| `ensure_index` | `pub async fn ensure_index(&self, specs: &[ToolSpec]) -> Result<(), EmbeddingError>` | 仕様セットに対してBLAKE3ハッシュを計算する。前回の呼び出しから変化がなければ高速なno-opになる。変化があれば、変更されたツールを（再）埋め込みし、フィールドごとのベクトルを保存する。 |
-| `select` | `pub async fn select(&self, query: &str) -> Vec<ToolSpec>` | 内部で `query` を埋め込み、`select_with_embedding` に委譲する。 |
-| `select_with_embedding` | `pub async fn select_with_embedding(&self, query: &str, query_embedding: &[f32]) -> Vec<ToolSpec>` | （`query_embedding` を使った）重み付きフィールド単位の類似度スコアリングに加え、オプションのHyDEブレンディングとリランクを実行し、`opts.min_similarity` を上回る上位 `opts.final_n` 件のツールを返す。`opts.forced` のツールは常に含まれる。 |
-| `start_background_indexer` | `pub fn start_background_indexer(self: &Arc<Self>, specs: Vec<ToolSpec>)` | `ensure_index` を呼び出してキャッシュをウォームアップするバックグラウンドタスクを生成する。即座に処理を返す。 |
-| `stats` | `pub async fn stats(&self) -> ToolRagStats` | 直前の `select`/`select_with_embedding` 呼び出しのスナップショット: ヒット数、インデックスサイズ、最高類似度。 |
-| `opts` | `pub fn opts(&self) -> &ToolRagOptions` | 解決済みのオプションを返す。 |
-| `has_store` | `pub fn has_store(&self) -> bool` | 裏付けとなる `MemoryStore` がアタッチされているかどうか（RAGは再起動を超えて埋め込みを永続化するために必要）。 |
-
-### `ToolRagOptions`
-
-```rust
-#[derive(Debug, Clone)]
-pub struct ToolRagOptions {
-    pub enabled: bool,
-    /// ベクトル検索から取得する上位候補数。
-    pub top_k: usize,
-    /// リランク後に返す最終的なツール数。
-    pub final_n: usize,
-    pub use_hyde: bool,
-    pub use_rerank: bool,
-    /// リランク時に考慮する候補数。
-    pub rerank_candidates: usize,
-    /// ツールを含めるための最小類似度スコア。
-    pub min_similarity: f32,
-    /// 起動時にバックグラウンドでインデックスをウォームアップするか。
-    pub background_index_on_startup: bool,
-    /// RAGスコアリングに関わらず常に含めるツール。
-    pub forced: Vec<ToolName>,
-    /// スコアリングに使用するフィールド単位の埋め込み重み。
-    pub weights: FieldWeights,
-}
-```
-
-### `FieldWeights`
-
-各埋め込みフィールドがツールの関連性スコアにどの程度強く寄与するかを制御します。負の重み（例: `negative`）は、完全な除外ではなくソフトなペナルティとして働きます。
-
-```rust
-#[derive(Debug, Clone)]
-pub struct FieldWeights {
-    pub summary: f32,
-    pub description: f32,
-    pub example: f32,
-    /// negative/望ましくない埋め込みの重み（マッチをペナルティ化する）。
-    pub negative: f32,
-    /// HyDE（仮説的文書埋め込み）の重み。
-    pub hyde: f32,
-    /// 最終スコアに対してHyDE類似度が寄与する割合。
-    /// 残りは直接的なフィールド単位のコサイン類似度から寄与する。
-    /// `0.0` はHyDEブレンディングを無効化し、`1.0` はHyDE類似度のみを使用する。
-    pub hyde_blend: f32,
-}
-```
-
-`FieldWeightsConfig`（`config.rs` 内）は `FieldWeights` のシリアライズ可能/スキーマ対応のカウンターパートで、同じフィールドを持ちます — `impl From<FieldWeightsConfig> for FieldWeights` によって相互に変換されます。フィールドを追加する場合は両方を同期させてください。
-
-### `ToolRagStats`
-
-```rust
-#[derive(Debug, Clone, Default)]
-pub struct ToolRagStats {
-    /// 直前の `select` 呼び出しで返されたツール数。
-    pub hits: usize,
-    /// インデックス内の個別ツール総数。
-    pub total: usize,
-    /// 直前の呼び出しにおける最高一致のコサイン類似度。
-    pub top_similarity: f32,
-}
-```
+Tool RAGパイプラインは専用のクレートに切り出されました。`ToolRag`、`ToolRagOptions`、`ToolRagConfig`、`FieldWeights`、`FieldWeightsConfig`、`ToolRagStats`、`ToolRagError` の型とドキュメントについては [`ene-tool-rag`](./ene-tool-rag.md) を参照してください。
 
 ### `compute_tool_version_hash`
 
@@ -328,7 +241,7 @@ pub struct ToolRagStats {
 pub fn compute_tool_version_hash(tool: &ToolSpec) -> String
 ```
 
-ツールの仕様が意味的に変化した際に、キャッシュされたツール埋め込みを無効化するために使われる安定したBLAKE3ハッシュを計算します。このハッシュは `tool.name`、`tool.version`、**`tool.display_name`**、**`tool.summary`**、`tool.description`、`tool.parameters`、および `keywords` の4つの階層（`primary`、`secondary`、`domain`、`negative`）すべてをカバーします。あるツールについてこのハッシュが変化すると（`ene-store` の `list_tool_embedding_hashes` で追跡される）、`ToolRag::ensure_index` はそのツールを再埋め込みします。
+ツールの仕様が意味的に変化した際に、キャッシュされたツール埋め込みを無効化するために使われる安定したBLAKE3ハッシュを計算します。このハッシュは `tool.name`、`tool.version`、`tool.display_name`、`tool.summary`、`tool.description`、`tool.parameters`、および `keywords` の4つの階層（`primary`、`secondary`、`domain`、`negative`）すべてをカバーします。あるツールについてこのハッシュが変化すると（`ene-store` の `list_tool_embedding_hashes` で追跡される）、`ToolRag::ensure_index` はそのツールを再埋め込みします。
 
 ---
 
@@ -346,7 +259,6 @@ pub struct ToolConfig {
     pub timeout_ms: u64 = 60_000,
     pub list: HashMap<String, ToolEntry>,
     pub mcp_servers: Vec<McpServerConfig>,
-    pub rag: ToolRagConfig,
 }
 ```
 
@@ -363,23 +275,6 @@ pub struct ToolEntry {
 impl ToolEntry {
     /// `config` をツール固有の設定構造体へ型安全に逆シリアライズする。
     pub fn deserialize_config<T: DeserializeOwned>(&self) -> Result<T, serde_json::Error>;
-}
-```
-
-### `ToolRagConfig`
-
-```rust
-pub struct ToolRagConfig {
-    pub enabled: bool,
-    pub top_k: usize,
-    pub final_n: usize,
-    pub use_hyde: bool,
-    pub use_rerank: bool,
-    pub rerank_candidates: usize,
-    pub min_similarity: f32,
-    pub background_index_on_startup: bool,
-    pub forced: Vec<String>,
-    pub weights: FieldWeightsConfig,
 }
 ```
 

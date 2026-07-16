@@ -7,6 +7,7 @@ use ene_mind::ConversationSession;
 use ene_mind::memory_writer::{ToolResultSummary, tool_grounding};
 use ene_tool_host::ToolHostError;
 use ene_tool_proto::ToolError;
+use ene_tool_rag::ToolRag;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -85,7 +86,7 @@ pub struct StreamContext {
     pub user_input: String,
     pub embedder: Option<Arc<dyn ene_ai::EmbeddingProvider>>,
     pub registry: Arc<dyn ene_tool_host::ToolRegistry>,
-    pub tool_rag: Option<Arc<ene_tool_host::ToolRag>>,
+    pub tool_rag: Option<Arc<ToolRag>>,
     pub provider: Arc<dyn ene_ai::LlmProvider>,
     pub event_tx: broadcast::Sender<EneEvent>,
     pub diag_tx: broadcast::Sender<DiagnosticEvent>,
@@ -119,7 +120,7 @@ pub async fn run_stream(
 /// otherwise falls back to the registry's `select_tools` or `list_tools`.
 pub(crate) async fn select_relevant_tools(
     registry: &dyn ene_tool_host::ToolRegistry,
-    tool_rag: Option<&ene_tool_host::ToolRag>,
+    tool_rag: Option<&ToolRag>,
     user_input: &str,
     query_embedding: Option<&[f32]>,
     tool_calling_enabled: bool,

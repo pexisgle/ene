@@ -1,8 +1,5 @@
 //! Tool RAG pipeline — multi-vector embedding, field-weighted similarity,
 //! optional HyDE, optional LLM rerank, and per-category limits.
-//!
-//! Replaces the inline RAG logic previously embedded in
-//! [`CompositeToolRegistry`](crate::CompositeToolRegistry).
 
 use ene_ai::{EmbeddingError, EmbeddingProvider, cosine_similarity, embed, embed_query};
 use ene_store::MemoryStore;
@@ -50,8 +47,8 @@ impl Default for FieldWeights {
     }
 }
 
-impl From<super::config::FieldWeightsConfig> for FieldWeights {
-    fn from(c: super::config::FieldWeightsConfig) -> Self {
+impl From<crate::config::FieldWeightsConfig> for FieldWeights {
+    fn from(c: crate::config::FieldWeightsConfig) -> Self {
         Self {
             summary: c.summary,
             description: c.description,
@@ -66,7 +63,7 @@ impl From<super::config::FieldWeightsConfig> for FieldWeights {
 // ── Runtime options (derived from config) ─────────────────────────────────
 
 /// Runtime options for the `ToolRag` pipeline, resolved from
-/// [`super::config::ToolRagConfig`].
+/// [`crate::config::ToolRagConfig`].
 #[derive(Debug, Clone)]
 pub struct ToolRagOptions {
     /// Whether the RAG pipeline is enabled.
@@ -103,9 +100,6 @@ impl Default for ToolRagOptions {
             min_similarity: 0.25,
             background_index_on_startup: true,
             forced: vec![
-                // These are string literals, so `ToolName::new` (which asserts
-                // validity) is the appropriate constructor — a `try_new` +
-                // `expect` chain would be redundant.
                 ToolName::new("utility.question"),
                 ToolName::new("utility.todo_add"),
                 ToolName::new("utility.get_current_time"),
@@ -115,21 +109,14 @@ impl Default for ToolRagOptions {
     }
 }
 
-impl TryFrom<super::config::ToolRagConfig> for ToolRagOptions {
-    type Error = crate::ToolHostError;
+impl TryFrom<crate::config::ToolRagConfig> for ToolRagOptions {
+    type Error = crate::ToolRagError;
 
-    fn try_from(c: super::config::ToolRagConfig) -> Result<Self, Self::Error> {
+    fn try_from(c: crate::config::ToolRagConfig) -> Result<Self, Self::Error> {
         let mut forced = Vec::with_capacity(c.forced.len());
         for name in c.forced {
-            // `forced` is config-driven (settings.json /
-            // ENE_TOOL_RAG__FORCED__...) and therefore
-            // untrusted. Reject invalid names with a
-            // structured error so a typo / hostile config
-            // entry surfaces as `Err`, not `panic!` during
-            // startup.
             forced.push(
-                ToolName::try_new(name)
-                    .map_err(|e| crate::ToolHostError::ExecutionFailed { message: e })?,
+                ToolName::try_new(name).map_err(|e| crate::ToolRagError::Config { message: e })?,
             );
         }
         Ok(Self {
@@ -192,8 +179,8 @@ impl ToolRag {
     pub fn from_config(
         embedder: Arc<dyn EmbeddingProvider>,
         store: Option<Arc<MemoryStore>>,
-        config: super::config::ToolRagConfig,
-    ) -> Result<Self, crate::ToolHostError> {
+        config: crate::config::ToolRagConfig,
+    ) -> Result<Self, crate::ToolRagError> {
         let opts = ToolRagOptions::try_from(config)?;
         Ok(Self::new(embedder, store, opts))
     }
@@ -239,7 +226,6 @@ impl ToolRag {
         let store = if let Some(s) = &self.store {
             Arc::clone(s)
         } else {
-            // Still cache specs even without a store.
             let mut map = self
                 .specs
                 .write()
@@ -252,15 +238,8 @@ impl ToolRag {
             return Ok(());
         };
 
-        // Load existing hashes from DB. We use the
-        // hashes-only query here — the previous form
-        // deserialized every f32 vector on every turn
-        // and then discarded them. The vectors are
-        // reloaded (still once per turn, in `select`)
-        // only when needed for the actual ranking.
         let cached = match store.list_tool_embedding_hashes().await {
             Ok(entries) => {
-                // Key: (tool_name, field, field_key) → (version_hash, model_name)
                 let mut map: HashMap<(String, String, String), (String, String)> = HashMap::new();
                 for (name, field, fkey, hash, model) in entries {
                     map.insert((name, field, fkey), (hash, model));
@@ -275,9 +254,7 @@ impl ToolRag {
 
         let model_name = self.embedder.model_name().to_string();
 
-        // ── Embed ToolSpec fields ──────────────────────────────────────
         for spec in specs {
-            // (1) Summary
             let summary_text = spec.embedding_text(EmbeddingField::Summary);
             if !summary_text.is_empty() {
                 let key = (
@@ -307,7 +284,6 @@ impl ToolRag {
                 }
             }
 
-            // (2) Description
             let desc_text = spec.embedding_text(EmbeddingField::Description);
             if !desc_text.is_empty() {
                 let key = (
@@ -338,7 +314,6 @@ impl ToolRag {
             }
         }
 
-        // Update cached spec map.
         {
             let mut map = self
                 .specs
@@ -350,7 +325,6 @@ impl ToolRag {
             }
         }
 
-        // Cache all tool embeddings in memory
         match store.list_tool_embedding_fields().await {
             Ok(rows) => {
                 let mapped: Vec<CachedFieldRow> = rows
@@ -414,7 +388,6 @@ impl ToolRag {
     ) -> Vec<ToolSpec> {
         let t_start = std::time::Instant::now();
         let Some(store) = &self.store else {
-            // No store — return all known specs.
             let map = self
                 .specs
                 .read()
@@ -424,13 +397,9 @@ impl ToolRag {
 
         let query_vec = query_embedding.to_vec();
 
-        // 2. Optional HyDE — generate a hypothetical document embedding.
         let hyde_vec = if self.opts.use_hyde {
             match ene_ai::hyde_document(None, query).await {
                 Ok(hyde_text) => {
-                    // Fast path: if the provider's hyde implementation just echoes the query
-                    // (e.g. the default local embedding provider), we can reuse the existing
-                    // query_embedding rather than running a second expensive inference pass.
                     if hyde_text == query {
                         Some(query_vec.clone())
                     } else {
@@ -450,7 +419,6 @@ impl ToolRag {
         };
         let t_hyde = t_start.elapsed();
 
-        // 3. Load all tool embeddings (from cache if available)
         let cached_rows = {
             let cache = self
                 .cached_field_rows
@@ -494,17 +462,11 @@ impl ToolRag {
         };
         let t_load = t_start.elapsed();
 
-        // 4. Group by tool, compute weighted similarity.
         let w = &self.opts.weights;
         let mut per_tool: HashMap<String, (f32, Vec<FieldScore>)> = HashMap::new();
 
         for row in &field_rows {
             let sim = cosine_similarity(&query_vec, &row.embedding);
-            // Blend with HyDE embedding if available.
-            // The HyDE blend factor is configurable
-            // via `weights.hyde_blend` (replaces the
-            // previously hardcoded 0.6 factor that was
-            // not present in the documented formula).
             let blended = if let Some(ref hv) = hyde_vec {
                 let hyde_sim = cosine_similarity(hv, &row.embedding);
                 let blend = w.hyde_blend.clamp(0.0, 1.0);
@@ -534,7 +496,6 @@ impl ToolRag {
             });
         }
 
-        // 5. Sort, filter, and apply category limits.
         let mut scored: Vec<(String, f32, Vec<FieldScore>)> = per_tool
             .into_iter()
             .map(|(name, (score, fields))| (name, score, fields))
@@ -543,7 +504,6 @@ impl ToolRag {
 
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Extract candidate ToolSpecs for reranking.
         let all_specs = {
             let map = self
                 .specs
@@ -555,13 +515,6 @@ impl ToolRag {
         let mut candidates: Vec<(ToolSpec, f32)> =
             Vec::with_capacity(scored.len().min(self.opts.rerank_candidates));
         for (name, score, _fields) in scored.iter().take(self.opts.rerank_candidates) {
-            // `name` comes from the local RAG index, which
-            // is populated only from validated `ToolSpec::name`
-            // values. `try_new` here is a defensive belt-
-            // and-suspenders check that surfaces a malformed
-            // entry (e.g. a future DB row that was inserted
-            // without validation) as a logged warning rather
-            // than a panic.
             match ToolName::try_new(name.clone()) {
                 Ok(tn) => {
                     if let Some(spec) = all_specs.get(&tn) {
@@ -575,7 +528,6 @@ impl ToolRag {
         }
         let t_score = t_start.elapsed();
 
-        // 6. Optional rerank.
         if self.opts.use_rerank && candidates.len() > 1 {
             let rerank_specs: Vec<ToolSpec> = candidates.iter().map(|(s, _)| s.clone()).collect();
             match ene_ai::rerank_tool_specs(self.embedder.as_ref(), None, query, &rerank_specs)
@@ -587,7 +539,6 @@ impl ToolRag {
                             candidates[i].1 = *score;
                         }
                     }
-                    // Re-sort.
                     candidates
                         .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 }
@@ -597,10 +548,6 @@ impl ToolRag {
             }
         }
 
-        // 7. Take the top `final_n` candidates. (Per-category
-        //    limiting was previously wired through a
-        //    per_category_limits option that nothing
-        //    populated; the field has been removed.)
         let mut result: Vec<ToolSpec> = Vec::with_capacity(self.opts.final_n);
 
         for (spec, _score) in &candidates {
@@ -620,7 +567,6 @@ impl ToolRag {
             t_rerank.checked_sub(t_score).unwrap_or_default()
         );
 
-        // 8. Union with forced_tools (no duplicates, prepended).
         {
             let result_names: Vec<ToolName> = result.iter().map(|s| s.name.clone()).collect();
             for forced_name in self.opts.forced.iter().rev() {
@@ -657,18 +603,7 @@ impl ToolRag {
 
     // ── Debug ──────────────────────────────────────────────────────────
 
-    /// Returns a per-query `ToolRagStats` summary. The
-    /// returned struct matches the public API documented
-    /// in docs/api/ene-tool-host.md (`hits`, `total`,
-    /// `top_similarity`).
-    ///
-    /// `hits` is the number of tools that would be
-    /// returned by the configured `final_n`; `total`
-    /// is the number of distinct tools in the index;
-    /// `top_similarity` is the cosine similarity of the
-    /// best match. When no store is attached (e.g. the
-    /// in-memory fallback used by the CLI), all three
-    /// are zero.
+    /// Returns a per-query `ToolRagStats` summary.
     pub async fn stats(&self) -> ToolRagStats {
         let Some(store) = &self.store else {
             return ToolRagStats {
@@ -713,7 +648,7 @@ struct FieldScore {
 }
 
 /// Compute a content-based version hash for a single field.
-/// Uses blake3 (same algorithm as [`compute_tool_version_hash`](super::compute_tool_version_hash))
+/// Uses blake3 (same algorithm as `compute_tool_version_hash`)
 /// so that embedding cache keys are consistent across the codebase.
 fn field_version_hash(field_name: &str, text: &str) -> String {
     let mut hasher = blake3::Hasher::new();
@@ -764,10 +699,6 @@ async fn persist(
 // ── Stats ──────────────────────────────────────────────────────────────────
 
 /// Snapshot returned by [`ToolRag::stats`].
-/// Observability summary of a Tool RAG select pass.
-/// Matches the public API documented in
-/// `docs/api/ene-tool-host.md` (`hits`, `total`,
-/// `top_similarity`).
 #[derive(Debug, Clone, Default)]
 pub struct ToolRagStats {
     /// Number of tools returned to the caller in the

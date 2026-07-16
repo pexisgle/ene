@@ -36,13 +36,15 @@
 | `ene-store` | 永続化（旧 memory ストア表面） |
 | `ene-ai` | `ene-provider` + `ene-embedding` |
 | `ene-tool` | `ene-tool-proto` + `ene-tool-common` + `ene-tool-derive`（必要なら tool-db ABI） |
-| `ene-tool-host` / `ene-config` / `ene-vrm` | 同様（LayerComposer は vrm/desktop 内） |
+| `ene-tool-host` / `ene-tool-rag` / `ene-config` / `ene-vrm` | 同様（LayerComposer は vrm/desktop 内） |
 
 ### 依存ルール
 
 - `ene-mind` ↛ `ene-runtime` / `ene-tool-host`
 - `ene-store` ↛ `ene-ai` / `ene-mind`（LLM・埋め込みプロバイダなし）
 - `ene-tool` ↛ runtime / mind / store
+- `ene-tool-host` ↛ `ene-ai` / `ene-store` / `ene-mind` — Tool RAG は `ene-tool-rag` に配置
+- `ene-tool-rag` は `ene-ai`（埋め込み、HyDE、rerank）+ `ene-store`（永続ツール埋め込み）に依存
 - **`PerformanceCue` は `ene-mind` 所有**；runtime が再エクスポート；**`ene-vrm` は mind/runtime に依存しない**
 - `ene-common` は `ene-config`（`Truncate` / `TruncateResult` は `ene_config::truncate`）と `ene-tool-common`（再エクスポート）へ吸収；`schema_link` 削除（runtime が mind を通常依存）
 
@@ -69,10 +71,14 @@ flowchart TD
   runtime --> store["ene-store"]
   runtime --> ai["ene-ai"]
   runtime --> toolHost["ene-tool-host"]
+  runtime --> toolRag["ene-tool-rag"]
   mind --> store
   mind --> ai
   ai --> toolProto["ene-tool-proto"]
   toolHost --> tool["ene-tool"]
+  toolRag --> ai
+  toolRag --> store
+  toolRag --> toolProto
   store --> config["ene-config"]
   ai --> config
   mind --> config

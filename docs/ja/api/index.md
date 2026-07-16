@@ -20,7 +20,8 @@
 | [`ene-config`](ene-config.md) | 設定の読み込み、キャラクターカード、CBS マクロ、`Truncate`。 | [→](ene-config.md) |
 | [`ene-vrm`](ene-vrm.md) | `ene-desktop` 向けのVRM 1.0モデルローダー + MToonレンダラー（wgpu）。mind/runtime 依存なし。 | [→](ene-vrm.md) |
 | [`ene-tool`](ene-tool.md) | ツール ABI ファサード（proto + common + derive の再エクスポート）。新ツールの推奨 import。 | [→](ene-tool.md) |
-| [`ene-tool-host`](ene-tool-host.md) | ツールプロセスのライフサイクル管理、IPC クライアント、Tool RAG パイプライン。 | [→](ene-tool-host.md) |
+| [`ene-tool-host`](ene-tool-host.md) | ツールプロセスのライフサイクル管理、IPC クライアント、MCP サーバー接続。 | [→](ene-tool-host.md) |
+| [`ene-tool-rag`](ene-tool-rag.md) | Tool RAG パイプライン — 多ベクトル埋め込み、HyDE、LLMリランク、重み付きフィールド類似度。 | [→](ene-tool-rag.md) |
 | [`ene-tool-proto`](ene-tool-proto.md) | IPC ワイヤープロトコル — `ToolSpec`、`IpcRequest`/`IpcResponse`、`ToolError`。 | [→](ene-tool-proto.md) |
 | [`ene-tool-common`](ene-tool-common.md) | ツールバイナリ向けの `ToolAction` トレイトとヘルパー。 | [→](ene-tool-common.md) |
 | [`ene-tool-derive`](ene-tool-derive.md) | プロシージャルマクロ: `#[derive(ToolSpec)]`、`#[derive(ToolAction)]`。 | [→](ene-tool-derive.md) |
@@ -53,6 +54,7 @@ flowchart TD
   Runtime --> Store[ene-store]
   Runtime --> Ai[ene-ai]
   Runtime --> ToolHost[ene-tool-host]
+  Runtime --> ToolRag[ene-tool-rag]
   Runtime --> Config[ene-config]
   Runtime -.optional.-> ToolDb[ene-tool-db]
 
@@ -61,9 +63,11 @@ flowchart TD
   Mind --> Ai
 
   ToolHost --> Tool[ene-tool]
-  ToolHost --> Ai
+  ToolRag --> Ai
+  ToolRag --> Store
+  ToolRag --> ToolProto[ene-tool-proto]
   Ai --> Config
-  Ai --> ToolProto[ene-tool-proto]
+  Ai --> ToolProto
   Store --> Config
 
   Tool --> Proto[ene-tool-proto]

@@ -1,0 +1,25 @@
+[package]
+name = "ene-tool-rag"
+version = "0.1.0"
+edition = "2024"
+description = "Tool RAG pipeline — multi-vector tool embedding, weighted field similarity, HyDE, and LLM rerank"
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+ene-ai = { workspace = true }
+ene-store = { workspace = true }
+ene-tool-proto = { workspace = true }
+ene-config = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+blake3 = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+ctor = { workspace = true }
+
+[lints]
+workspace = true

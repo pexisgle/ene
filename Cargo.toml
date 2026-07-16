@@ -50,6 +50,7 @@ ene-runtime = { path = "crates/ene-runtime" }
 ene-ai = { path = "crates/ene-ai" }
 ene-store = { path = "crates/ene-store" }
 ene-tool-host = { path = "crates/ene-tool-host" }
+ene-tool-rag = { path = "crates/ene-tool-rag" }
 ene-tool = { path = "crates/ene-tool" }
 ene-tool-proto = { path = "crates/ene-tool-proto" }
 ene-tool-common = { path = "crates/ene-tool-common" }

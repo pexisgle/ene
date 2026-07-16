@@ -18,6 +18,7 @@ use ene_mind::{
 use ene_mind::{ConversationSession, EneSessionError, SplitResult};
 use ene_tool_host::{ToolHostManager, ToolRegistry};
 use ene_tool_proto::ToolSpec;
+use ene_tool_rag::{ToolRag, ToolRagConfig, ToolRagOptions};
 use std::collections::HashMap;
 static DB_TOKEN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 use std::sync::Arc;
@@ -384,7 +385,8 @@ impl EneHandle {
         let tool_config = config
             .get_section::<ene_tool_host::ToolConfig>()
             .unwrap_or_default();
-        let needs_embedder = mem_config.enabled || (tool_config.enabled && tool_config.rag.enabled);
+        let rag_config = config.get_section::<ToolRagConfig>().unwrap_or_default();
+        let needs_embedder = mem_config.enabled || (tool_config.enabled && rag_config.enabled);
 
         // Fail-closed: memory / tool-RAG features require a working embedder.
         let embedder = if needs_embedder {
@@ -609,7 +611,7 @@ struct EneActor {
     config: EneConfig,
     session: ConversationSession,
     registry: Arc<dyn ToolRegistry>,
-    tool_rag: Option<Arc<ene_tool_host::ToolRag>>,
+    tool_rag: Option<Arc<ToolRag>>,
     cancel_token: CancellationToken,
     stream_handle: Option<tokio::task::JoinHandle<()>>,
     stream_session_rx: Option<oneshot::Receiver<Result<ConversationSession, EneRuntimeError>>>,
@@ -1426,18 +1428,15 @@ fn init_tool_rag(
     config: &EneConfig,
     embedder: &Arc<dyn ene_ai::EmbeddingProvider>,
     session: &ConversationSession,
-) -> Option<Arc<ene_tool_host::ToolRag>> {
-    let rag_config = config
-        .get_section::<ene_tool_host::ToolConfig>()
-        .map(|tc| tc.rag)
-        .unwrap_or_default();
+) -> Option<Arc<ToolRag>> {
+    let rag_config = config.get_section::<ToolRagConfig>().unwrap_or_default();
 
     if !rag_config.enabled {
         return None;
     }
 
     let store = session.memory.memory_store.clone();
-    let opts = match ene_tool_host::ToolRagOptions::try_from(rag_config) {
+    let opts = match ToolRagOptions::try_from(rag_config) {
         Ok(o) => o,
         Err(e) => {
             tracing::error!(
@@ -1446,14 +1445,10 @@ fn init_tool_rag(
             // Build with the default options (which has a
             // sane `forced` set compiled in). The bad name
             // is logged but does not block the pipeline.
-            ene_tool_host::ToolRagOptions::default()
+            ToolRagOptions::default()
         }
     };
-    Some(Arc::new(ene_tool_host::ToolRag::new(
-        embedder.clone(),
-        store,
-        opts,
-    )))
+    Some(Arc::new(ToolRag::new(embedder.clone(), store, opts)))
 }
 
 #[cfg(test)]

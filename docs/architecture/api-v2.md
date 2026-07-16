@@ -36,13 +36,15 @@ The library surface grew dual streaming pipelines (legacy + cognitive), an unrea
 | `ene-store` | Persistence (former memory store surface) |
 | `ene-ai` | `ene-provider` + `ene-embedding` |
 | `ene-tool` | `ene-tool-proto` + `ene-tool-common` + `ene-tool-derive` (+ tool-db ABI types as needed) |
-| `ene-tool-host` / `ene-config` / `ene-vrm` | same (+ LayerComposer internal to vrm/desktop) |
+| `ene-tool-host` / `ene-tool-rag` / `ene-config` / `ene-vrm` | same (+ LayerComposer internal to vrm/desktop) |
 
 ### Dependency rules
 
 - `ene-mind` ↛ `ene-runtime` / `ene-tool-host`
 - `ene-store` ↛ `ene-ai` / `ene-mind` (no LLM, no embedding provider handle)
 - `ene-tool` ↛ runtime / mind / store
+- `ene-tool-host` ↛ `ene-ai` / `ene-store` / `ene-mind` — Tool RAG lives in `ene-tool-rag`
+- `ene-tool-rag` depends on `ene-ai` (embedding, HyDE, rerank) + `ene-store` (persistent tool embeddings)
 - **`PerformanceCue` lives in `ene-mind`**; runtime re-exports; **`ene-vrm` does not depend on mind/runtime**
 - Fold `ene-common` into `ene-config` (`Truncate` / `TruncateResult` live in `ene_config::truncate`) and `ene-tool-common` (re-export); drop `schema_link` (runtime depends on mind normally)
 
@@ -69,10 +71,14 @@ flowchart TD
   runtime --> store["ene-store"]
   runtime --> ai["ene-ai"]
   runtime --> toolHost["ene-tool-host"]
+  runtime --> toolRag["ene-tool-rag"]
   mind --> store
   mind --> ai
   ai --> toolProto["ene-tool-proto"]
   toolHost --> tool["ene-tool"]
+  toolRag --> ai
+  toolRag --> store
+  toolRag --> toolProto
   store --> config["ene-config"]
   ai --> config
   mind --> config

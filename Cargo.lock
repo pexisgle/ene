@@ -2735,6 +2735,7 @@ dependencies = [
  "ene-tool-db",
  "ene-tool-host",
  "ene-tool-proto",
+ "ene-tool-rag",
  "regex",
  "sea-orm",
  "serde",
@@ -2892,14 +2893,11 @@ dependencies = [
 name = "ene-tool-host"
 version = "0.1.0"
 dependencies = [
- "async-openai",
  "async-trait",
  "blake3",
  "ctor 1.0.7",
  "dashmap",
- "ene-ai",
  "ene-config",
- "ene-store",
  "ene-tool-proto",
  "rmcp",
  "schemars",
@@ -2922,6 +2920,24 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ene-tool-rag"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "ctor 1.0.7",
+ "ene-ai",
+ "ene-config",
+ "ene-store",
+ "ene-tool-proto",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]

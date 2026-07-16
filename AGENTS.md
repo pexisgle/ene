@@ -45,7 +45,8 @@ The workspace is highly granularly split to enforce strict boundaries and preven
 * **`ene-ai`**: LLM + embedding providers (absorbs former `ene-provider` / `ene-embedding`).
 * **`ene-tool`**: Facade re-exporting `ene-tool-proto` + `ene-tool-common` + `ene-tool-derive`. Preferred import for new tool binaries. Does **not** depend on runtime / mind / store.
 * **`ene-tool-proto`**: Defines the IPC ABI (Requests/Responses). *Must not contain business or DB logic.*
-* **`ene-tool-host`**: Orchestrates tools and IPC. Depends on the tool ABI crates.
+* **`ene-tool-host`**: Orchestrates tools and IPC. Depends on the tool ABI crates. Does **not** depend on `ene-ai` or `ene-store` — Tool RAG lives in `ene-tool-rag`.
+* **`ene-tool-rag`**: Tool RAG pipeline — multi-vector embedding, weighted field similarity, optional HyDE, optional LLM rerank. Depends on `ene-ai`, `ene-store`, and `ene-tool-proto`.
 * **`ene-vrm`**: VRM rendering for desktop. Does **not** depend on mind / runtime.
 * **Rule:** Do not merge crates arbitrarily. Tool binaries must be kept extremely lightweight and only link what is absolutely necessary (prefer `ene-tool`, or at most `ene-tool-proto` + `ene-tool-derive`).
 * **Rule: Dependency Centralization:** All external dependencies used by crates under `crates/` must be declared in the root `[workspace.dependencies]` table and referenced via `{ workspace = true }` in each crate's `Cargo.toml`. Do not pin version numbers directly in individual crate manifests.

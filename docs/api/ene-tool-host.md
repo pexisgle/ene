@@ -233,102 +233,7 @@ pub enum McpTransport {
 
 ## Tool RAG Pipeline
 
-When the number of available tools exceeds the LLM's context budget, `ToolRag` runs a retrieval-augmented selection step: embed → optional HyDE expansion → weighted multi-field similarity → optional cross-encoder rerank → top-N.
-
-### `ToolRag`
-
-```rust
-pub struct ToolRag {
-    embedder: Arc<dyn EmbeddingProvider>,
-    store: Option<Arc<MemoryStore>>,
-    opts: ToolRagOptions,
-    specs: RwLock<HashMap<ToolName, ToolSpec>>,
-    last_specs_hash: AtomicU64,
-    cached_field_rows: RwLock<Vec<CachedFieldRow>>,
-}
-```
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `new` | `pub fn new(embedder: Arc<dyn EmbeddingProvider>, store: Option<Arc<MemoryStore>>, opts: ToolRagOptions) -> Self` | Direct constructor when you already have a resolved `ToolRagOptions`. |
-| `from_config` | `pub fn from_config(embedder: Arc<dyn EmbeddingProvider>, store: Option<Arc<MemoryStore>>, config: ToolRagConfig) -> Result<Self, ToolHostError>` | Builds `ToolRagOptions` from the settings-facing `ToolRagConfig` (converting `Vec<String>` → `Vec<ToolName>` for `forced`) and constructs the pipeline. |
-| `ensure_index` | `pub async fn ensure_index(&self, specs: &[ToolSpec]) -> Result<(), EmbeddingError>` | Computes a BLAKE3 hash over the spec set; if unchanged since the last call, this is a fast no-op. Otherwise (re-)embeds and stores per-field vectors for changed tools. |
-| `select` | `pub async fn select(&self, query: &str) -> Vec<ToolSpec>` | Embeds `query` internally, then delegates to `select_with_embedding`. |
-| `select_with_embedding` | `pub async fn select_with_embedding(&self, query: &str, query_embedding: &[f32]) -> Vec<ToolSpec>` | Runs weighted per-field similarity scoring (using `query_embedding`) plus optional HyDE blending and reranking, and returns the top `opts.final_n` tools above `opts.min_similarity`, always including any `opts.forced` tools. |
-| `start_background_indexer` | `pub fn start_background_indexer(self: &Arc<Self>, specs: Vec<ToolSpec>)` | Spawns a background task that calls `ensure_index` to warm the cache; returns immediately. |
-| `stats` | `pub async fn stats(&self) -> ToolRagStats` | Snapshot of the last `select`/`select_with_embedding` call: hit count, index size, and top similarity. |
-| `opts` | `pub fn opts(&self) -> &ToolRagOptions` | Returns the resolved options. |
-| `has_store` | `pub fn has_store(&self) -> bool` | Whether a backing `MemoryStore` is attached (RAG requires one to persist embeddings across restarts). |
-
-### `ToolRagOptions`
-
-```rust
-#[derive(Debug, Clone)]
-pub struct ToolRagOptions {
-    pub enabled: bool,
-    /// Number of top candidates retrieved from vector search.
-    pub top_k: usize,
-    /// Number of final tools returned after reranking.
-    pub final_n: usize,
-    pub use_hyde: bool,
-    pub use_rerank: bool,
-    /// Number of candidates considered during reranking.
-    pub rerank_candidates: usize,
-    /// Minimum similarity score for a tool to be included.
-    pub min_similarity: f32,
-    /// Whether to warm the index in the background on startup.
-    pub background_index_on_startup: bool,
-    /// Tools always included regardless of RAG scoring.
-    pub forced: Vec<ToolName>,
-    /// Per-field embedding weights used for scoring.
-    pub weights: FieldWeights,
-}
-```
-
-### `FieldWeights`
-
-Controls how strongly each embedding field contributes to a tool's relevance score. Negative weights (e.g. on `negative`) act as a soft penalty rather than a hard exclusion.
-
-```rust
-#[derive(Debug, Clone)]
-pub struct FieldWeights {
-    pub summary: f32,
-    pub description: f32,
-    pub example: f32,
-    /// Weight for the negative/unwanted embedding (penalizes matches).
-    pub negative: f32,
-    /// Weight for the HyDE (hypothetical document embedding).
-    pub hyde: f32,
-    /// Fraction of the final score contributed by the HyDE similarity,
-    /// with the remainder from the direct per-field cosine similarity.
-    /// `0.0` disables HyDE blending; `1.0` uses only the HyDE similarity.
-    pub hyde_blend: f32,
-}
-```
-
-`FieldWeightsConfig` (in `config.rs`) is the serializable/schema counterpart of `FieldWeights` with the same fields — `impl From<FieldWeightsConfig> for FieldWeights` converts between them. Keep both in sync if you add a field.
-
-### `ToolRagStats`
-
-```rust
-#[derive(Debug, Clone, Default)]
-pub struct ToolRagStats {
-    /// Tools returned in the most recent `select` call.
-    pub hits: usize,
-    /// Total distinct tools in the index.
-    pub total: usize,
-    /// Cosine similarity of the best match in the most recent call.
-    pub top_similarity: f32,
-}
-```
-
-### `compute_tool_version_hash`
-
-```rust
-pub fn compute_tool_version_hash(tool: &ToolSpec) -> String
-```
-
-Computes a stable BLAKE3 hash used to invalidate cached tool embeddings whenever a tool's spec changes meaningfully. The hash covers `tool.name`, `tool.version`, **`tool.display_name`**, **`tool.summary`**, `tool.description`, `tool.parameters`, and all four `keywords` tiers (`primary`, `secondary`, `domain`, `negative`). When this hash changes for a tool (tracked via `list_tool_embedding_hashes` in `ene-store`), `ToolRag::ensure_index` re-embeds it.
+The Tool RAG pipeline has been extracted to its own crate. See [`ene-tool-rag`](./ene-tool-rag.md) for the `ToolRag`, `ToolRagOptions`, `ToolRagConfig`, `FieldWeights`, `FieldWeightsConfig`, `ToolRagStats`, and `ToolRagError` types and documentation.
 
 ---
 
@@ -346,7 +251,6 @@ pub struct ToolConfig {
     pub timeout_ms: u64 = 60_000,
     pub list: HashMap<String, ToolEntry>,
     pub mcp_servers: Vec<McpServerConfig>,
-    pub rag: ToolRagConfig,
 }
 ```
 
@@ -366,22 +270,13 @@ impl ToolEntry {
 }
 ```
 
-### `ToolRagConfig`
+### `compute_tool_version_hash`
 
 ```rust
-pub struct ToolRagConfig {
-    pub enabled: bool,
-    pub top_k: usize,
-    pub final_n: usize,
-    pub use_hyde: bool,
-    pub use_rerank: bool,
-    pub rerank_candidates: usize,
-    pub min_similarity: f32,
-    pub background_index_on_startup: bool,
-    pub forced: Vec<String>,
-    pub weights: FieldWeightsConfig,
-}
+pub fn compute_tool_version_hash(tool: &ToolSpec) -> String
 ```
+
+Computes a stable BLAKE3 hash used to invalidate cached tool embeddings whenever a tool's spec changes meaningfully. The hash covers `tool.name`, `tool.version`, `tool.display_name`, `tool.summary`, `tool.description`, `tool.parameters`, and all four `keywords` tiers (`primary`, `secondary`, `domain`, `negative`). When this hash changes for a tool (tracked via `list_tool_embedding_hashes` in `ene-store`), `ToolRag::ensure_index` re-embeds it.
 
 ---
 
@@ -418,6 +313,7 @@ pub type ToolHostError = EneToolHostError;
 ## See Also
 
 - [`ene-tool-proto`](./ene-tool-proto.md) — IPC wire types (`ToolSpec`, `IpcRequest`/`IpcResponse`, `ToolError`)
+- [`ene-tool-rag`](./ene-tool-rag.md) — Tool RAG pipeline (multi-vector embedding, HyDE, LLM rerank)
 - [`ene-tool-common`](./ene-tool-common.md) — Tool-side `ToolAction` trait and helpers for tool binaries
 - [`ene-tool-derive`](./ene-tool-derive.md) — Proc-macros for tool authors (`#[derive(ToolSpec)]`)
 - [`ene-store`](./ene-store.md) — Backs `ToolRag`'s persistent embedding index (`tool_embedding_index` table)

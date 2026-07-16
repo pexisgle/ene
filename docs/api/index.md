@@ -20,7 +20,8 @@ The host contract is **API v2**: `EneHandle::open`, mandatory `TurnId`, single-f
 | [`ene-config`](ene-config.md) | Configuration loading, character cards, CBS macros, `Truncate`. | [→](ene-config.md) |
 | [`ene-vrm`](ene-vrm.md) | VRM 1.0 model loader + MToon renderer for `ene-desktop` (wgpu). No mind/runtime dependency. | [→](ene-vrm.md) |
 | [`ene-tool`](ene-tool.md) | Tool ABI facade (proto + common + derive re-exports). Preferred import for new tools. | [→](ene-tool.md) |
-| [`ene-tool-host`](ene-tool-host.md) | Tool process lifecycle, IPC client, and Tool RAG pipeline. | [→](ene-tool-host.md) |
+| [`ene-tool-host`](ene-tool-host.md) | Tool process lifecycle, IPC client, MCP server connections. | [→](ene-tool-host.md) |
+| [`ene-tool-rag`](ene-tool-rag.md) | Tool RAG pipeline — multi-vector embedding, HyDE, LLM rerank, weighted field similarity. | [→](ene-tool-rag.md) |
 | [`ene-tool-proto`](ene-tool-proto.md) | IPC wire protocol — `ToolSpec`, `IpcRequest`/`IpcResponse`, `ToolError`. | [→](ene-tool-proto.md) |
 | [`ene-tool-common`](ene-tool-common.md) | `ToolAction` trait and helpers for tool binaries. | [→](ene-tool-common.md) |
 | [`ene-tool-derive`](ene-tool-derive.md) | Proc-macros: `#[derive(ToolSpec)]`, `#[derive(ToolAction)]`. | [→](ene-tool-derive.md) |
@@ -53,6 +54,7 @@ flowchart TD
   Runtime --> Store[ene-store]
   Runtime --> Ai[ene-ai]
   Runtime --> ToolHost[ene-tool-host]
+  Runtime --> ToolRag[ene-tool-rag]
   Runtime --> Config[ene-config]
   Runtime -.optional.-> ToolDb[ene-tool-db]
 
@@ -61,9 +63,11 @@ flowchart TD
   Mind --> Ai
 
   ToolHost --> Tool[ene-tool]
-  ToolHost --> Ai
+  ToolRag --> Ai
+  ToolRag --> Store
+  ToolRag --> ToolProto[ene-tool-proto]
   Ai --> Config
-  Ai --> ToolProto[ene-tool-proto]
+  Ai --> ToolProto
   Store --> Config
 
   Tool --> Proto[ene-tool-proto]
