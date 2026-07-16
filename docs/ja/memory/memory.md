@@ -219,7 +219,7 @@ pub struct ConversationSummaryResult {
 
 Cognitive Runtime は長期事実を `typed_memories` に保存し、明示的な `MemoryKind` と `MemoryStatus` ライフサイクル（`active`, `faded`, `archived`, `disputed`, `superseded`, `user_deleted`）を持つ。
 
-各ターン後、**LLM 抽出器（主経路）** が `MemoryCandidate` を生成する。決定論的パターンはヒントとして渡し、LLM 成功時は自動永続化しない。LLM 失敗時または無効時は決定論的候補がフォールバックする。ツール接地候補は常に対象。**Memory Arbiter**（`ene-mind::memory_writer::MemoryArbiter`）は、既存記憶と照合してから `MemoryStore::insert_typed_memory` または `MemoryStore::supersede_typed_memory` を呼ぶ。
+各ターン後、**LLM 抽出器（主経路）** が `MemoryCandidate` を生成する。決定論的パターンは明示的な「覚えて／忘れて」のみ: 「覚えて」は LLM 成功時はヒント（失敗・空・無効時はフォールバック）、「忘れて」は安全ネットとして常に Arbiter へ渡す。好み・予定・呼び名などのソフトシグナルは LLM のみ。ツール接地候補は LLM がターンを担当しないときの設定付きフォールバック。**Memory Arbiter**（`ene-mind::memory_writer::MemoryArbiter`）は、既存記憶と照合してから `MemoryStore::insert_typed_memory` または `MemoryStore::supersede_typed_memory` を呼ぶ。
 
 主要なストア API：
 

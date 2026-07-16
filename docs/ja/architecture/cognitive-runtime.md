@@ -38,7 +38,7 @@ Ene が明示的に管理するもの：
 |---|---|---|
 | Identity Kernel | `ene-mind::character` | CCv3 を不変の人格定義ブロックにコンパイル。常にプロンプト最上位に配置 |
 | Typed Memory Store | `ene-store` | 型付き記憶の CRUD + ハイブリッド検索（kind, confidence, recency, salience, vector） |
-| Memory Extraction (決定論的) | `ene-mind::memory_writer` | ルールベースのパターンヒント／LLM 失敗時フォールバック |
+| Memory Extraction (決定論的) | `ene-mind::memory_writer` | 明示的な覚えて／忘れて安全ネット + LLM 失敗時フォールバック（ソフトシグナルは LLM のみ） |
 | Memory Extraction (LLM) | `ene-mind::memory_writer` | 重要度・種別選定を含む主経路の `MemoryCandidate` 生成 |
 | Memory Arbiter | `ene-mind::memory_writer` | 候補を既存記憶と照合し、信頼度計算・重複排除・矛盾解決 |
 | Recall Planner | `ene-mind::recall` | 検索意図と予算ヒントを含む `RecallPlan` を生成し、後続の recall execution に渡す |
@@ -92,7 +92,7 @@ sequenceDiagram
     Arbiter-->>Streaming: テキスト + 表情イベント
     Streaming-->>User: 出力を表示
     Streaming->>Writer: ポストターン書き込み(input, response, affect)
-    Writer->>Writer: 候補を抽出 (LLM 主・パターンはヒント)
+    Writer->>Writer: 候補を抽出 (LLM 主・覚えて／忘れて安全ネット)
     Writer->>Store: arbiter が検証 → 型付き記憶を書き込み
     Writer->>Store: 忘却ライフサイクルを実行
     Writer->>Emotion: 感情状態の変化を永続化
@@ -106,7 +106,7 @@ sequenceDiagram
 4. **Context Composition** — `PromptPacket` をセクション化された層で構築: Identity Kernel → Recalled Memories → Commitments → Affect State → Scene → Style Examples → History → Current Input。
 5. **LLM Generation** — `PromptPacket` を LLM プロバイダに送信。LLM はオプションで表情ヒントを提供できる。
 6. **Output Arbitration** — 感情+レスポンスをキャラクター表情にマッピング。表情のちらつきを防ぐヒステリシスを適用。
-7. **Post-turn Writing** — LLM 抽出を主経路とし（決定論的パターンは任意ヒント）、失敗時または無効時は決定論的候補へフォールバック。ツール結果のグラウンディングは独立して候補を生成。Memory Arbiter が既存記憶と照合し、信頼度を計算してストアに書き込む。
+7. **Post-turn Writing** — LLM 抽出を主経路とする。決定論的 matcher は明示的な覚えて／忘れてのみ（覚えては LLM 成功時ヒント、忘れては常に安全ネットとして Arbiter へ）。LLM 失敗・空・無効時は覚えてパターンと設定付きツール接地フォールバックを適用。Memory Arbiter が既存記憶と照合し、信頼度を計算してストアに書き込む。
 8. **Forgetting Lifecycle** — 減衰曲線に従って既存記憶を経年処理。`ForgettingLifecycle::apply` で `active → faded → archived` のステータス遷移を管理。ユーザーの明示的忘却（`user_deleted`）と矛盾解決（`disputed` / `superseded`）は Memory Arbiter が担当。
 
 ## 主要用語

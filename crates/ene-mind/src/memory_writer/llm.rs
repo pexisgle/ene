@@ -63,11 +63,11 @@ pub async fn extract(
 }
 
 /// Same as [`extract`], but with an explicit call-timeout budget and optional
-/// deterministic pattern hints.
+/// remember/forget (and tool) pattern hints.
 ///
 /// This is the entry point the runtime should use so the timeout can be driven
 /// by `MindMemoryConfig::extraction_timeout_secs` (issue #66). Pattern hints
-/// assist the model; they are not auto-persisted.
+/// assist the model; they are not auto-persisted by this function.
 pub async fn extract_with_timeout(
     provider: &dyn LlmProvider,
     turn: &TurnInput<'_>,

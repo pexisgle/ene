@@ -1,17 +1,13 @@
-//! Deterministic memory extractor — pattern-based, no LLM required.
+//! Deterministic memory extractor — minimal pattern safety net.
 //!
-//! Extracts `MemoryCandidate`s from conversation turns using regex patterns
-//! and keyword matching. Supports Japanese and English.
+//! Only explicit remember / forget instructions are pattern-matched.
+//! Preferences, schedules, nicknames, and other soft signals are left to the
+//! LLM extractor. Tool-result grounding remains a separate, configurable path.
 //!
 //! Confidence calibration:
-//! - Explicit「覚えて」: 0.85
+//! - Explicit「覚えて」 / remember: 0.85
 //! - Forget (deletion request): 0.90
-//! - Like/dislike: 0.65
-//! - Nickname: 0.75
-//! - NG instruction: 0.80
-//! - Commitment: 0.50
-//! - Tool-grounded procedure/reflection/episodic: 0.60–0.70
-//! - Soft signals (implicit): 0.30–0.50
+//! - Tool-grounded procedure/reflection/episodic: 0.60–0.70 (when enabled)
 
 use regex::Regex;
 
@@ -77,34 +73,6 @@ fn is_en_question(msg: &str) -> bool {
 fn is_ja_question(msg: &str) -> bool {
     let trimmed = msg.trim();
     trimmed.contains('?') || trimmed.ends_with('か')
-}
-
-/// Trim a captured Japanese callsign down to the bare name.
-///
-/// Drops everything up to and including the last topic/subject particle
-/// (`は` / `が`) so `ボクはレン` → `レン` and `私がミク` → `ミク`; if no
-/// particle is present, a leading first-person pronoun is stripped so
-/// `わたしレン` → `レン` (issue #70). Trimming is skipped when it would
-/// leave an empty callsign, so short names are not over-truncated.
-fn trim_ja_callsign(name: &str) -> &str {
-    let mut token = name.trim();
-    for particle in ["は", "が"] {
-        if let Some(idx) = token.rfind(particle) {
-            let rest = token[idx + particle.len()..].trim();
-            if !rest.is_empty() {
-                token = rest;
-            }
-        }
-    }
-    for pronoun in ["わたし", "私", "ボク", "僕", "俺", "自分"] {
-        if let Some(rest) = token.strip_prefix(pronoun) {
-            let rest = rest.trim();
-            if !rest.is_empty() {
-                token = rest;
-            }
-        }
-    }
-    token
 }
 
 // ---------------------------------------------------------------------------
@@ -218,134 +186,6 @@ fn ja_forget_request(
     })
 }
 
-fn ja_preference(
-    user_msg: &str,
-    _asst_msg: &str,
-    _tool_results: &[ToolResultSummary],
-) -> Option<MemoryCandidate> {
-    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
-    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r"(?i)(好き|嫌い|苦手|大好き|大嫌い)[:：]?\s*(.+)").unwrap()
-    });
-    RE.captures(user_msg).map(|cap| {
-        let pref = cap[2].trim().to_string();
-        let title_trunc: String = pref.chars().take(20).collect();
-        MemoryCandidate {
-            kind: MemoryKind::Preference,
-            title: format!("{}: {}", &cap[1], title_trunc),
-            content: pref,
-            source_quote: user_msg.to_string(),
-            confidence: 0.65,
-            should_persist: true,
-            deletion_target_key: None,
-            commitment_due: None,
-        }
-    })
-}
-
-fn ja_nickname(
-    user_msg: &str,
-    _asst_msg: &str,
-    _tool_results: &[ToolResultSummary],
-) -> Option<MemoryCandidate> {
-    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
-    static RE: std::sync::LazyLock<Regex> =
-        std::sync::LazyLock::new(|| Regex::new(r"(.+?)って呼んで").unwrap());
-    RE.captures(user_msg).and_then(|cap| {
-        let name = trim_ja_callsign(cap[1].trim()).to_string();
-        if name.is_empty() {
-            return None;
-        }
-        Some(MemoryCandidate {
-            kind: MemoryKind::UserProfile,
-            title: format!("呼び方: {name}"),
-            content: format!("User wants to be called '{name}'"),
-            source_quote: user_msg.to_string(),
-            confidence: 0.75,
-            should_persist: true,
-            deletion_target_key: None,
-            commitment_due: None,
-        })
-    })
-}
-
-fn ja_ng_instruction(
-    user_msg: &str,
-    _asst_msg: &str,
-    _tool_results: &[ToolResultSummary],
-) -> Option<MemoryCandidate> {
-    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
-    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r"(?i)(もう|これ以上|二度と).{0,6}(しないで|やめて|やめろ|禁止)").unwrap()
-    });
-    RE.captures(user_msg).map(|_cap| MemoryCandidate {
-        kind: MemoryKind::Procedure,
-        title: "NG instruction".to_string(),
-        content: user_msg.to_string(),
-        source_quote: user_msg.to_string(),
-        confidence: 0.80,
-        should_persist: true,
-        deletion_target_key: None,
-        commitment_due: None,
-    })
-}
-
-fn ja_commitment(
-    user_msg: &str,
-    _asst_msg: &str,
-    _tool_results: &[ToolResultSummary],
-) -> Option<MemoryCandidate> {
-    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
-    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r"(?i)(あとで|次回|明日|来週|今度|今夜).{0,10}(して|確認|やる|話|連絡)").unwrap()
-    });
-    RE.captures(user_msg).map(|cap| {
-        let due = cap[1].to_string();
-        MemoryCandidate {
-            kind: MemoryKind::Commitment,
-            title: format!("commitment: {due}"),
-            content: user_msg.to_string(),
-            source_quote: user_msg.to_string(),
-            confidence: 0.50,
-            should_persist: true,
-            deletion_target_key: None,
-            commitment_due: Some(due),
-        }
-    })
-}
-
-/// Soft assist for time-bound events that rarely use「覚えて」phrasing.
-///
-/// Catches「今日は…進捗報告をします」「明日発表会がある」style lines so the
-/// LLM extractor receives a hint even when the rest of the turn is a question.
-fn ja_temporal_event(
-    user_msg: &str,
-    _asst_msg: &str,
-    _tool_results: &[ToolResultSummary],
-) -> Option<MemoryCandidate> {
-    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
-    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(
-            r"(今日|明日|今夜|今週|来週|今度).{0,48}(進捗報告|報告会|発表会|説明会|プレゼン|会議|予定|がある|があります|をします|を行う)",
-        )
-        .unwrap()
-    });
-    RE.captures(user_msg).map(|cap| {
-        let when = cap[1].to_string();
-        let title: String = format!("event: {when}").chars().take(40).collect();
-        MemoryCandidate {
-            kind: MemoryKind::Episodic,
-            title,
-            content: format!("User mentioned a time-bound event: {}", user_msg.trim()),
-            source_quote: user_msg.to_string(),
-            confidence: 0.70,
-            should_persist: true,
-            deletion_target_key: None,
-            commitment_due: Some(when),
-        }
-    })
-}
-
 // ---------------------------------------------------------------------------
 // English patterns
 // ---------------------------------------------------------------------------
@@ -410,162 +250,22 @@ fn en_forget_request(
     })
 }
 
-fn en_preference(
-    user_msg: &str,
-    _asst_msg: &str,
-    _tool_results: &[ToolResultSummary],
-) -> Option<MemoryCandidate> {
-    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
-    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r"(?i)(I\s+(?:really\s+)?(?:don't\s+like|hate|dislike|love|like|prefer))\s+(.+)")
-            .unwrap()
-    });
-    RE.captures(user_msg).map(|cap| {
-        let pref = cap[0].to_string();
-        MemoryCandidate {
-            kind: MemoryKind::Preference,
-            title: format!("{}...", pref.chars().take(30).collect::<String>()),
-            content: pref,
-            source_quote: user_msg.to_string(),
-            confidence: 0.65,
-            should_persist: true,
-            deletion_target_key: None,
-            commitment_due: None,
-        }
-    })
-}
-
-fn en_nickname(
-    user_msg: &str,
-    _asst_msg: &str,
-    _tool_results: &[ToolResultSummary],
-) -> Option<MemoryCandidate> {
-    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
-    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r#"(?i)(?:call|refer to|address)\s+me\s+(?:as\s+)?["']?([^"',.]+?)["']?\s*$"#)
-            .unwrap()
-    });
-    RE.captures(user_msg).map(|cap| {
-        let name = cap[1].trim().to_string();
-        MemoryCandidate {
-            kind: MemoryKind::UserProfile,
-            title: format!("nickname: {name}"),
-            content: format!("User wants to be called '{name}'"),
-            source_quote: user_msg.to_string(),
-            confidence: 0.75,
-            should_persist: true,
-            deletion_target_key: None,
-            commitment_due: None,
-        }
-    })
-}
-
-fn en_ng_instruction(
-    user_msg: &str,
-    _asst_msg: &str,
-    _tool_results: &[ToolResultSummary],
-) -> Option<MemoryCandidate> {
-    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
-    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(
-            r"(?i)(never|don't|stop|no\s+more)\s+(do\s+that|say\s+that|mention|suggest|recommend)",
-        )
-        .unwrap()
-    });
-    RE.captures(user_msg).map(|_cap| MemoryCandidate {
-        kind: MemoryKind::Procedure,
-        title: "NG instruction".to_string(),
-        content: user_msg.to_string(),
-        source_quote: user_msg.to_string(),
-        confidence: 0.80,
-        should_persist: true,
-        deletion_target_key: None,
-        commitment_due: None,
-    })
-}
-
-fn en_commitment(
-    user_msg: &str,
-    _asst_msg: &str,
-    _tool_results: &[ToolResultSummary],
-) -> Option<MemoryCandidate> {
-    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
-    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r"(?i)(next\s+time|later|tomorrow|next\s+week|tonight)\s*[,.]?\s*(?:let'?s|we\s+should|I'?ll|can\s+you)\s+(.+)").unwrap()
-    });
-    RE.captures(user_msg).map(|cap| {
-        let due = cap[1].to_string();
-        MemoryCandidate {
-            kind: MemoryKind::Commitment,
-            title: format!("commitment: {due}"),
-            content: user_msg.to_string(),
-            source_quote: user_msg.to_string(),
-            confidence: 0.50,
-            should_persist: true,
-            deletion_target_key: None,
-            commitment_due: Some(due),
-        }
-    })
-}
-
-/// Soft assist for English time-bound events without explicit "remember".
-fn en_temporal_event(
-    user_msg: &str,
-    _asst_msg: &str,
-    _tool_results: &[ToolResultSummary],
-) -> Option<MemoryCandidate> {
-    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
-    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(
-            r"(?i)\b(today|tomorrow|tonight|this\s+week|next\s+week)\b.{0,48}\b(presentation|meeting|demo|standup|progress\s+report|have\s+a|going\s+to)\b",
-        )
-        .unwrap()
-    });
-    RE.captures(user_msg).map(|cap| {
-        let when = cap[1].to_string();
-        MemoryCandidate {
-            kind: MemoryKind::Episodic,
-            title: format!("event: {when}"),
-            content: format!("User mentioned a time-bound event: {}", user_msg.trim()),
-            source_quote: user_msg.to_string(),
-            confidence: 0.70,
-            should_persist: true,
-            deletion_target_key: None,
-            commitment_due: Some(when),
-        }
-    })
-}
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// All Japanese message matchers.
-const JA_MATCHERS: &[PatternMatcher] = &[
-    ja_explicit_remember,
-    ja_forget_request,
-    ja_preference,
-    ja_nickname,
-    ja_ng_instruction,
-    ja_commitment,
-    ja_temporal_event,
-];
+/// Japanese message matchers: explicit remember / forget only.
+const JA_MATCHERS: &[PatternMatcher] = &[ja_explicit_remember, ja_forget_request];
 
-/// All English message matchers.
-const EN_MATCHERS: &[PatternMatcher] = &[
-    en_explicit_remember,
-    en_forget_request,
-    en_preference,
-    en_nickname,
-    en_ng_instruction,
-    en_commitment,
-    en_temporal_event,
-];
+/// English message matchers: explicit remember / forget only.
+const EN_MATCHERS: &[PatternMatcher] = &[en_explicit_remember, en_forget_request];
 
 /// Extract memory candidates deterministically from a conversation turn.
 ///
-/// Pattern matching is locale-aware: `Locale::Ja` applies Japanese patterns,
-/// `Locale::En` applies English patterns. The tool-result matcher is always applied.
+/// Pattern matching is locale-aware and limited to explicit remember / forget
+/// instructions. Soft signals (preferences, schedules, nicknames, …) are not
+/// pattern-matched — the LLM extractor owns those. Tool-result grounding is
+/// applied when enabled via [`ToolGroundingConfig`].
 ///
 /// Candidates are deduplicated by (title, kind) when multiple matchers fire on
 /// the same message. Only the first match (by matcher order) is kept.
@@ -682,9 +382,6 @@ mod tests {
 
     #[test]
     fn ja_remember_captures_object_before_keyword() {
-        // Japanese puts the object before the verb; the content is what
-        // precedes を覚えて, not the trailing verb continuation `おいて`
-        // (issue #70 precision guard).
         let out =
             extract(&ja_turn("私の誕生日を覚えておいて"), Locale::Ja, 0.0).expect("extract failed");
         assert_eq!(out.len(), 1);
@@ -697,15 +394,12 @@ mod tests {
 
     #[test]
     fn ja_teach_request_is_not_remembered() {
-        // 教えて ("tell me") is a request for information, not a memory
-        // instruction, so it must not produce a candidate (issue #70).
         let out = extract(&ja_turn("今日の天気を教えて"), Locale::Ja, 0.0).expect("extract failed");
         assert!(out.is_empty(), "教えて must not be captured: {out:?}");
     }
 
     #[test]
     fn ja_remember_question_is_skipped() {
-        // A question about memory must not be captured as an instruction.
         let out =
             extract(&ja_turn("私の誕生日を覚えてますか"), Locale::Ja, 0.0).expect("extract failed");
         assert!(out.is_empty(), "remember question must not match: {out:?}");
@@ -724,96 +418,21 @@ mod tests {
         );
     }
 
-    // ── Japanese preference ───────────────────────────────────────────
-
     #[test]
-    fn ja_preference_like() {
-        let out = extract(&ja_turn("好き: 猫"), Locale::Ja, 0.0).expect("extract failed");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].kind, MemoryKind::Preference);
-        assert_eq!(out[0].confidence, 0.65);
-    }
-
-    #[test]
-    fn ja_preference_dislike() {
-        let out = extract(&ja_turn("嫌い: 納豆"), Locale::Ja, 0.0).expect("extract failed");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].kind, MemoryKind::Preference);
-    }
-
-    // ── Japanese nickname ─────────────────────────────────────────────
-
-    #[test]
-    fn ja_nickname() {
-        let out = extract(&ja_turn("さゆりって呼んで"), Locale::Ja, 0.0).expect("extract failed");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].kind, MemoryKind::UserProfile);
-        assert_eq!(out[0].confidence, 0.75);
-        assert!(out[0].title.contains("さゆり"));
-    }
-
-    #[test]
-    fn ja_nickname_strips_topic_marker() {
-        // The topic marker + first-person pronoun must be dropped so the
-        // captured callsign is レン, not ボクはレン (issue #70).
-        let out =
-            extract(&ja_turn("ボクはレンって呼んで"), Locale::Ja, 0.0).expect("extract failed");
-        assert_eq!(out.len(), 1);
-        assert!(
-            out[0].title.contains("レン") && !out[0].title.contains("ボク"),
-            "expected callsign レン without ボクは prefix, got: {out:?}"
-        );
-    }
-
-    // ── Japanese NG ───────────────────────────────────────────────────
-
-    #[test]
-    fn ja_ng_instruction() {
-        let out = extract(&ja_turn("もう提案しないで"), Locale::Ja, 0.0).expect("extract failed");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].kind, MemoryKind::Procedure);
-        assert_eq!(out[0].confidence, 0.80);
-    }
-
-    // ── Japanese commitment ───────────────────────────────────────────
-
-    #[test]
-    fn ja_commitment() {
-        let out =
-            extract(&ja_turn("あとで X を確認する"), Locale::Ja, 0.0).expect("extract failed");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].kind, MemoryKind::Commitment);
-        assert!(out[0].commitment_due.is_some());
-    }
-
-    #[test]
-    fn ja_temporal_event_progress_report() {
-        let out = extract(
-            &ja_turn(
-                "こんにちは！今日はこのアプリeneのちょっとした進捗報告をします。メリットを教えて",
-            ),
-            Locale::Ja,
-            0.0,
-        )
-        .expect("extract failed");
-        assert!(
-            out.iter().any(|c| c.kind == MemoryKind::Episodic),
-            "expected episodic hint for progress report: {out:?}"
-        );
-    }
-
-    #[test]
-    fn ja_temporal_event_presentation() {
-        let out = extract(
-            &ja_turn("今日はこのアプリeneの軽い発表説明会があります。まとめてみて"),
-            Locale::Ja,
-            0.0,
-        )
-        .expect("extract failed");
-        assert!(
-            out.iter().any(|c| c.kind == MemoryKind::Episodic),
-            "expected episodic hint for presentation: {out:?}"
-        );
+    fn soft_signals_are_not_pattern_matched() {
+        for msg in [
+            "好き: 猫",
+            "さゆりって呼んで",
+            "もう提案しないで",
+            "あとで X を確認する",
+            "今日はこのアプリeneの進捗報告をします。メリットを教えて",
+        ] {
+            let out = extract(&ja_turn(msg), Locale::Ja, 0.0).expect("extract failed");
+            assert!(
+                out.is_empty(),
+                "soft signal must not match pattern: {msg:?} -> {out:?}"
+            );
+        }
     }
 
     // ── English remember ──────────────────────────────────────────────
@@ -833,8 +452,6 @@ mod tests {
 
     #[test]
     fn indirect_question_without_mark_is_skipped() {
-        // No trailing '?' but clearly a question — must not be captured
-        // as a remember instruction.
         let out = extract(&en_turn("do you remember my birthday"), Locale::En, 0.0)
             .expect("extract failed");
         assert!(out.is_empty(), "indirect question must not match: {out:?}");
@@ -842,7 +459,6 @@ mod tests {
 
     #[test]
     fn imperative_remember_still_matches() {
-        // Guard against the question detector being too aggressive.
         let out = extract(
             &en_turn("please remember that I take my coffee black"),
             Locale::En,
@@ -854,8 +470,6 @@ mod tests {
 
     #[test]
     fn en_remember_empty_content_is_rejected() {
-        // A remember keyword with only trailing whitespace must not produce
-        // a persistable candidate with empty content (Bugbot medium finding).
         let out =
             extract(&en_turn("please remember    "), Locale::En, 0.0).expect("extract failed");
         assert!(
@@ -863,8 +477,6 @@ mod tests {
             "empty remember content must not match: {out:?}"
         );
     }
-
-    // ── English forget ────────────────────────────────────────────────
 
     #[test]
     fn en_forget_request_creates_deletion_candidate() {
@@ -878,46 +490,20 @@ mod tests {
         );
     }
 
-    // ── English preference ────────────────────────────────────────────
-
     #[test]
-    fn en_preference_like() {
-        let out = extract(&en_turn("I like mushrooms"), Locale::En, 0.0).expect("extract failed");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].kind, MemoryKind::Preference);
-    }
-
-    #[test]
-    fn en_preference_dislike() {
-        let out =
-            extract(&en_turn("I don't like mushrooms"), Locale::En, 0.0).expect("extract failed");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].kind, MemoryKind::Preference);
-    }
-
-    // ── English nickname ──────────────────────────────────────────────
-
-    #[test]
-    fn en_nickname() {
-        let out = extract(&en_turn("call me Alex"), Locale::En, 0.0).expect("extract failed");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].kind, MemoryKind::UserProfile);
-        assert!(out[0].title.contains("Alex"));
-    }
-
-    // ── English commitment ────────────────────────────────────────────
-
-    #[test]
-    fn en_commitment() {
-        let out = extract(
-            &en_turn("Next time, let's discuss the design"),
-            Locale::En,
-            0.0,
-        )
-        .expect("extract failed");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].kind, MemoryKind::Commitment);
-        assert_eq!(out[0].commitment_due.as_deref(), Some("Next time"));
+    fn en_soft_signals_are_not_pattern_matched() {
+        for msg in [
+            "I like mushrooms",
+            "call me Alex",
+            "Next time, let's discuss the design",
+            "today I have a presentation about ene",
+        ] {
+            let out = extract(&en_turn(msg), Locale::En, 0.0).expect("extract failed");
+            assert!(
+                out.is_empty(),
+                "soft signal must not match pattern: {msg:?} -> {out:?}"
+            );
+        }
     }
 
     // ── Tool procedure ────────────────────────────────────────────────
@@ -936,7 +522,8 @@ mod tests {
         };
         let mut cfg = ToolGroundingConfig::default();
         cfg.persist_success_procedure = true;
-        let out = extract_with_tool_grounding(&turn, Locale::Ja, 0.0, &cfg).expect("extract failed");
+        let out =
+            extract_with_tool_grounding(&turn, Locale::Ja, 0.0, &cfg).expect("extract failed");
         assert!(out.iter().any(|c| c.kind == MemoryKind::Procedure));
         assert!(out.iter().any(|c| c.content.contains("fs")));
     }
@@ -980,17 +567,6 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    // ── Confidence filtering ──────────────────────────────────────────
-
-    #[test]
-    fn respects_min_confidence_threshold() {
-        let out = extract(&ja_turn("好き: 猫"), Locale::Ja, 0.70).expect("extract failed");
-        assert!(
-            out.is_empty(),
-            "confidence 0.65 should be below threshold 0.70"
-        );
-    }
-
     #[test]
     fn confidence_above_threshold_passes() {
         let out =
@@ -998,8 +574,6 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert!(out[0].confidence >= 0.80);
     }
-
-    // ── Assistant message not matched ──────────────────────────────────
 
     #[test]
     fn does_not_extract_from_assistant_message() {
@@ -1012,34 +586,17 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    // ── Deduplication ─────────────────────────────────────────────────
-
     #[test]
     fn deduplicates_by_title_and_kind() {
         let msg = "覚えて: プロジェクトX";
         let out = extract(&ja_turn(msg), Locale::Ja, 0.0).expect("extract failed");
-        // Should not duplicate even though the same pattern fires
         assert_eq!(out.len(), 1);
     }
-
-    // ── Fullwidth / mixed input ───────────────────────────────────────
 
     #[test]
     fn fullwidth_colon_still_matches() {
         let out =
             extract(&ja_turn("覚えて：全角コロンテスト"), Locale::Ja, 0.0).expect("extract failed");
         assert_eq!(out.len(), 1);
-    }
-
-    // ── Min confidence default (from config) ──────────────────────────
-
-    #[test]
-    fn default_min_confidence_is_065() {
-        let out = extract(&ja_turn("好き: 猫"), Locale::Ja, 0.65).expect("extract failed");
-        assert_eq!(
-            out.len(),
-            1,
-            "confidence 0.65 should pass at threshold 0.65"
-        );
     }
 }

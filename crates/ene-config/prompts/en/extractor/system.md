@@ -20,7 +20,8 @@ Schema: {"candidates": [{"kind": "string", "title": "string", "content": "string
 - Soft signals without explicit "remember this" wording — if it matters long-term, extract it
 - **Time-bound events even when the user also asks a question** (e.g. "Today I have a progress report on ene — what can you do?" → keep an `Episodic`/`Commitment` for the report/event)
 - **Tool results (`Tool(...):` lines and tool hints): keep ONLY lasting value** — e.g. a file the user asked to create, a durable search finding, a failure worth not repeating. Drop routine `ls`/`read`/`glob`/`get_current_time`/todo bookkeeping unless the outcome itself is a lasting user fact
-- Pattern/tool hints below are optional assists only: keep, rewrite, re-kind, or discard each hint based on lasting value
+- Pattern hints are only explicit remember/forget matches (plus optional tool hints): keep, rewrite, re-kind, or discard each hint based on lasting value
+- Soft signals (preferences, schedules, nicknames) are not pattern-matched — you must extract them yourself when they matter
 - Important facts that never appear in hints must still be extracted
 
 ## What to drop

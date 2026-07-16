@@ -226,7 +226,7 @@ The resulting summary and key facts are persisted by `ene-store`; the store itse
 
 The cognitive runtime stores long-term facts in `typed_memories` with explicit `MemoryKind` and `MemoryStatus` lifecycle (`active`, `faded`, `archived`, `disputed`, `superseded`, `user_deleted`).
 
-After each turn, the **LLM extractor** (primary) produces `MemoryCandidate` items; deterministic pattern hits are passed as hints and are not auto-persisted when the LLM succeeds. On LLM failure or when disabled, deterministic candidates fall back to the arbiter. Tool-grounded candidates are always considered. The **Memory Arbiter** (`ene-mind::memory_writer::MemoryArbiter`) validates each candidate against existing memories before calling `MemoryStore::insert_typed_memory` or `MemoryStore::supersede_typed_memory`.
+After each turn, the **LLM extractor** (primary) produces `MemoryCandidate` items. Deterministic patterns cover only explicit remember/forget: remember hits are hints when the LLM succeeds (and fall back when it fails/returns empty/is disabled); forget hits always reach the arbiter as a safety net. Soft signals (preferences, schedules, nicknames) are LLM-only. Tool-grounded candidates apply as configured fallbacks when the LLM does not own the turn. The **Memory Arbiter** (`ene-mind::memory_writer::MemoryArbiter`) validates each candidate against existing memories before calling `MemoryStore::insert_typed_memory` or `MemoryStore::supersede_typed_memory`.
 
 Key store APIs:
 

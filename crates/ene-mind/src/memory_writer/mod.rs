@@ -51,10 +51,11 @@ impl MemoryWriter {
     /// Extract and persist memories from the turn when enabled.
     ///
     /// When LLM extraction is enabled and returns candidates, those candidates
-    /// are the sole conversation/tool judgment (deterministic patterns and tool
-    /// grounding are hints / fallback only). On LLM failure, empty result, or
-    /// when disabled, deterministic pattern hints and configured tool-grounding
-    /// fallbacks reach the arbiter.
+    /// are the sole conversation/tool judgment (remember patterns and tool
+    /// grounding are hints / fallback only). Explicit forget patterns are always
+    /// applied as a safety net, even when the LLM owns the turn. On LLM failure,
+    /// empty result, or when disabled, remember patterns and configured
+    /// tool-grounding fallbacks reach the arbiter.
     pub async fn write_memories(
         store: &MemoryStore,
         config: &MindConfig,
@@ -135,12 +136,12 @@ impl MemoryWriter {
                             "LLM memory extraction completed"
                         );
                         if llm_candidates.is_empty() {
-                            // Leave `used_llm` false so strong pattern hints
-                            // (e.g.「今日は発表会」) still reach the arbiter.
+                            // Leave `used_llm` false so remember/forget
+                            // safety-net patterns still reach the arbiter.
                             tracing::info!(
                                 component = "MemoryWriter",
                                 character_id = %input.character_id,
-                                "LLM returned no candidates; will use pattern hints if any"
+                                "LLM returned no candidates; will use remember/forget patterns if any"
                             );
                         } else {
                             used_llm = true;
@@ -166,21 +167,40 @@ impl MemoryWriter {
             }
         }
 
-        // Patterns + tool grounding fall back only when LLM did not own the turn.
-        if !used_llm && !pattern_candidates.is_empty() {
+        // Remember/forget patterns fall back when LLM did not own the turn.
+        // Forget requests are always applied even when LLM owned the turn so
+        // explicit「忘れて」cannot be dropped if the model omits a deletion.
+        let (forget_candidates, other_patterns): (
+            Vec<candidate::MemoryCandidate>,
+            Vec<candidate::MemoryCandidate>,
+        ) = pattern_candidates
+            .into_iter()
+            .partition(|c| !c.should_persist);
+
+        if !forget_candidates.is_empty() {
             tracing::info!(
                 component = "MemoryWriter",
                 character_id = %input.character_id,
-                candidate_count = pattern_candidates.len(),
-                "Using deterministic pattern candidates (LLM disabled, failed, or empty)"
+                candidate_count = forget_candidates.len(),
+                "Applying deterministic forget candidates (safety net)"
             );
-            batches.push((pattern_candidates, CandidateProvenance::Deterministic));
-        } else if used_llm && !pattern_candidates.is_empty() {
+            batches.push((forget_candidates, CandidateProvenance::Deterministic));
+        }
+
+        if !used_llm && !other_patterns.is_empty() {
+            tracing::info!(
+                component = "MemoryWriter",
+                character_id = %input.character_id,
+                candidate_count = other_patterns.len(),
+                "Using deterministic remember candidates (LLM disabled, failed, or empty)"
+            );
+            batches.push((other_patterns, CandidateProvenance::Deterministic));
+        } else if used_llm && !other_patterns.is_empty() {
             tracing::debug!(
                 component = "MemoryWriter",
                 character_id = %input.character_id,
-                hint_count = pattern_candidates.len(),
-                "Deterministic patterns used as LLM hints only (not auto-persisted)"
+                hint_count = other_patterns.len(),
+                "Deterministic remember patterns used as LLM hints only (not auto-persisted)"
             );
         }
 
@@ -466,7 +486,10 @@ mod tests {
     use super::*;
     use crate::memory_writer::candidate::TurnInput;
     use ene_ai::LlmMessage;
-    use ene_store::{AffectState, MemoryStore};
+    use ene_store::{
+        AffectAnnotation, AffectState, MemoryConfidence, MemoryKind, MemorySalience, MemoryScope,
+        MemorySource, MemoryStatus, MemoryStore, NewMemoryItem,
+    };
 
     type StreamResult = std::pin::Pin<
         Box<
@@ -576,9 +599,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn llm_success_with_candidates_skips_deterministic_patterns() {
-        // Preference pattern would also match, but LLM returns its own candidate
-        // → only the LLM item should be persisted.
+    async fn llm_success_with_candidates_skips_deterministic_remember() {
+        // Explicit remember would also match, but LLM returns its own candidate
+        // → only the LLM item should be persisted (remember is hint-only).
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
         config.memory.llm_extraction_enabled = true;
@@ -590,7 +613,7 @@ mod tests {
                 "kind": "Preference",
                 "title": "likes mushrooms",
                 "content": "User likes mushrooms",
-                "source_quote": "I like mushrooms",
+                "source_quote": "Please remember that I like mushrooms",
                 "confidence": 0.8,
                 "should_persist": true,
                 "deletion_target_key": null,
@@ -600,7 +623,7 @@ mod tests {
         let provider = MockProvider::new(json);
         let post = PostTurnInput {
             turn: TurnInput {
-                user_message: "I like mushrooms",
+                user_message: "Please remember that I like mushrooms",
                 assistant_message: Some("Nice!"),
                 tool_results: &[],
             },
@@ -631,7 +654,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn llm_empty_falls_back_to_pattern_hints() {
+    async fn llm_empty_falls_back_to_remember_pattern() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let mut config = MindConfig::default();
+        config.memory.llm_extraction_enabled = true;
+        config.memory.semantic_dedup_enabled = false;
+        config.emotion.classifier_language = "en".into();
+
+        let provider = MockProvider::new(r#"{"candidates": []}"#);
+        let post = PostTurnInput {
+            turn: TurnInput {
+                user_message: "Please remember that I like mushrooms",
+                assistant_message: Some("Nice!"),
+                tool_results: &[],
+            },
+            affect: AffectState::neutral("ene"),
+            character_id: "ene",
+            user_id: "user",
+        };
+
+        MemoryWriter::write_memories(
+            &store,
+            &config,
+            &post,
+            MemoryWriteProviders {
+                llm: Some(&provider),
+                embedder: None,
+            },
+        )
+        .await
+        .expect("write_memories");
+
+        let count = store.count_typed_memories("ene", None).await.unwrap();
+        assert!(
+            count >= 1,
+            "empty LLM result should fall back to explicit remember pattern"
+        );
+    }
+
+    #[tokio::test]
+    async fn llm_empty_does_not_persist_soft_signals_without_remember() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
         config.memory.llm_extraction_enabled = true;
@@ -663,9 +725,9 @@ mod tests {
         .expect("write_memories");
 
         let count = store.count_typed_memories("ene", None).await.unwrap();
-        assert!(
-            count >= 1,
-            "empty LLM result should fall back to preference pattern"
+        assert_eq!(
+            count, 0,
+            "soft preference without remember must not pattern-persist"
         );
     }
 
@@ -723,7 +785,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn llm_failure_falls_back_to_deterministic_patterns() {
+    async fn llm_failure_falls_back_to_remember_pattern() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
         config.memory.llm_extraction_enabled = true;
@@ -733,7 +795,7 @@ mod tests {
         let provider = FailingProvider;
         let post = PostTurnInput {
             turn: TurnInput {
-                user_message: "I like mushrooms",
+                user_message: "Please remember that I like mushrooms",
                 assistant_message: Some("Nice!"),
                 tool_results: &[],
             },
@@ -757,12 +819,12 @@ mod tests {
         let count = store.count_typed_memories("ene", None).await.unwrap();
         assert!(
             count >= 1,
-            "deterministic preference should persist on LLM failure"
+            "deterministic remember should persist on LLM failure"
         );
     }
 
     #[tokio::test]
-    async fn llm_disabled_uses_deterministic_patterns() {
+    async fn llm_disabled_uses_remember_pattern() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
         config.memory.llm_extraction_enabled = false;
@@ -771,7 +833,7 @@ mod tests {
 
         let post = PostTurnInput {
             turn: TurnInput {
-                user_message: "I like mushrooms",
+                user_message: "Please remember that I like mushrooms",
                 assistant_message: Some("Nice!"),
                 tool_results: &[],
             },
@@ -786,5 +848,87 @@ mod tests {
 
         let count = store.count_typed_memories("ene", None).await.unwrap();
         assert!(count >= 1);
+    }
+
+    #[tokio::test]
+    async fn forget_safety_net_applies_when_llm_owns_turn() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let mut config = MindConfig::default();
+        config.memory.llm_extraction_enabled = true;
+        config.memory.semantic_dedup_enabled = false;
+        config.emotion.classifier_language = "en".into();
+
+        let existing_id = store
+            .insert_typed_memory(&NewMemoryItem {
+                scope: MemoryScope::Character,
+                character_id: "ene".to_string(),
+                user_id: "user".to_string(),
+                kind: MemoryKind::Semantic,
+                title: "project X".to_string(),
+                content: "User is working on project X".to_string(),
+                source: MemorySource::Inferred,
+                source_ref: None,
+                confidence: MemoryConfidence::new(0.8),
+                salience: MemorySalience::default(),
+                affect: AffectAnnotation::default(),
+                relationship_impact: 0.0,
+                valid_from: None,
+                valid_until: None,
+                status: MemoryStatus::Active,
+                supersedes_id: None,
+                pinned: false,
+                created_at: None,
+                commitment_id: None,
+            })
+            .await
+            .unwrap();
+
+        // LLM owns the turn with an unrelated candidate and omits deletion.
+        let json = r#"{
+            "candidates": [{
+                "kind": "Semantic",
+                "title": "ack",
+                "content": "User asked to forget something",
+                "source_quote": "Forget about project X",
+                "confidence": 0.8,
+                "should_persist": true,
+                "deletion_target_key": null,
+                "commitment_due": null
+            }]
+        }"#;
+        let provider = MockProvider::new(json);
+        let post = PostTurnInput {
+            turn: TurnInput {
+                user_message: "Forget about project X",
+                assistant_message: Some("Okay, forgotten."),
+                tool_results: &[],
+            },
+            affect: AffectState::neutral("ene"),
+            character_id: "ene",
+            user_id: "user",
+        };
+
+        MemoryWriter::write_memories(
+            &store,
+            &config,
+            &post,
+            MemoryWriteProviders {
+                llm: Some(&provider),
+                embedder: None,
+            },
+        )
+        .await
+        .expect("write_memories");
+
+        let existing = store
+            .get_typed_memory(existing_id)
+            .await
+            .unwrap()
+            .expect("memory row");
+        assert_eq!(
+            existing.status,
+            MemoryStatus::UserDeleted,
+            "forget pattern must mark target deleted even when LLM owns the turn"
+        );
     }
 }

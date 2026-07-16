@@ -40,7 +40,7 @@ flowchart LR
 2. **`compose_prompt_packet`** — Identity Kernel をコンパイルし、スタイル例を選択し、アクティブなシーンサマリーをロードし、それらすべてをトークン予算内の `PromptPacket` → `Vec<LlmMessage>` にパッキングします。
 3. **LLM生成** — `ene-runtime` が構成済みメッセージを使って補完をストリーミングします。このクレートの範囲外です。
 4. **`resolve_expression_turn`** — ターン後の `AffectState`（+ 任意のLLM表情ヒント）を `OutputArbiter` を介してキャラクター表情にマッピングします。
-5. **`after_turn`** — `MemoryCandidate`（LLM 主経路 + 決定論的パターンヒント + ツール結果のグラウンディング。LLM 失敗時は決定論的フォールバック）を抽出し、`MemoryArbiter` を実行し、`CommitmentLedger` を同期し、`ForgettingLifecycle` を適用し、アフェクト状態を永続化します。
+5. **`after_turn`** — `MemoryCandidate`（LLM 主経路 + 覚えて／忘れて安全ネット + ツール接地フォールバック。忘れては常時適用）を抽出し、`MemoryArbiter` を実行し、`CommitmentLedger` を同期し、`ForgettingLifecycle` を適用し、アフェクト状態を永続化します。
 
 ---
 
@@ -641,7 +641,7 @@ impl MemoryWriter {
 }
 ```
 
-`after_turn` = `write_memories`（LLM 主経路、決定論的パターンはヒント、ツールグラウンディングを含む → `MemoryArbiter` → `CommitmentLedger` 同期）に続いて `finalize_turn`（`ForgettingLifecycle::apply` → `upsert_affect_state`）です。`mind.memory.write_every_turn` が `false` の場合、抽出のみがスキップされます（`finalize_turn` は `after_turn` から常に実行されます）。ホスト（`ene-runtime`）は `CognitionEngine::after_turn` のみを呼び、`MemoryWriter` メソッドを直接呼んではなりません（#121）。
+`after_turn` = `write_memories`（LLM 主経路、覚えて／忘れて安全ネット、ツールグラウンディングを含む → `MemoryArbiter` → `CommitmentLedger` 同期）に続いて `finalize_turn`（`ForgettingLifecycle::apply` → `upsert_affect_state`）です。`mind.memory.write_every_turn` が `false` の場合、抽出のみがスキップされます（`finalize_turn` は `after_turn` から常に実行されます）。ホスト（`ene-runtime`）は `CognitionEngine::after_turn` のみを呼び、`MemoryWriter` メソッドを直接呼んではなりません（#121）。
 
 ### `MemoryCandidate`
 

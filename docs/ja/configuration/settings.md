@@ -440,7 +440,7 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
 | `write_every_turn` | bool | `true` | 毎ターン記憶を抽出し永続化する |
-| `llm_extraction_enabled` | bool | `true` | LLM を主経路とする記憶候補抽出を有効化。決定論的パターンはヒントのみ。失敗時は deterministic 候補にフォールバック |
+| `llm_extraction_enabled` | bool | `true` | LLM を主経路とする記憶候補抽出を有効化。決定論的 matcher は覚えて／忘れてのみ（覚えては LLM 失敗・空・無効時フォールバック、忘れては常時適用）。ソフトシグナルは LLM のみ |
 | `semantic_dedup_enabled` | bool | `true` | Arbiter 前の embedding 検索による意味的重複検出（#75） |
 | `hybrid_search` | bool | `true` | ハイブリッド検索（ベクトル + 新しさ + 顕著性 + 信頼度）を使用 |
 | `decay_enabled` | bool | `true` | post-turn の自然減衰（`Active → Faded → Archived`）を `ForgettingLifecycle` で有効化 |
