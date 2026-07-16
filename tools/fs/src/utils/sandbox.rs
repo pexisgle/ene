@@ -25,9 +25,8 @@ pub struct SandboxConfig {
     /// the `From<SandboxConfigData>` impl.
     pub compiled_blocklist: std::sync::Arc<std::sync::OnceLock<Vec<regex::Regex>>>,
     /// Thread-safe dynamic allowlist patterns shared with Sandbox.
-    pub allowed_patterns: std::sync::Arc<
-        std::sync::RwLock<std::collections::HashSet<(String, String)>>,
-    >,
+    pub allowed_patterns:
+        std::sync::Arc<std::sync::RwLock<std::collections::HashSet<(String, String)>>>,
 }
 
 impl Default for SandboxConfig {

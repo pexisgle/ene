@@ -259,7 +259,6 @@ fn text_from_delta_value(delta: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
-
 fn byot_http_client() -> Result<&'static reqwest::Client, LlmProviderError> {
     static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
     CLIENT
@@ -308,7 +307,6 @@ async fn post_chat_byot_via_http(
     serde_json::from_str(&raw)
         .map_err(|e| LlmProviderError::Provider(format!("chat completion JSON parse failed: {e}")))
 }
-
 
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
@@ -359,7 +357,9 @@ impl LlmProvider for OpenAiProvider {
         let (tx, rx) = tokio::sync::mpsc::channel(100);
 
         tokio::spawn(async move {
-            if let Err(e) = run_direct_sse_stream(&api_base, &api_key, body, name_mapping, tx.clone()).await {
+            if let Err(e) =
+                run_direct_sse_stream(&api_base, &api_key, body, name_mapping, tx.clone()).await
+            {
                 let _ = tx.send(Err(e)).await;
             }
         });
@@ -719,8 +719,8 @@ async fn run_direct_sse_stream(
     name_mapping: std::collections::HashMap<String, String>,
     tx: tokio::sync::mpsc::Sender<Result<LlmResponseChunk, LlmProviderError>>,
 ) -> Result<(), LlmProviderError> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio_util::io::StreamReader;
-    use tokio::io::{BufReader, AsyncBufReadExt};
 
     let url = format!("{}/chat/completions", api_base.trim_end_matches('/'));
     let response = byot_http_client()?
@@ -735,12 +735,14 @@ async fn run_direct_sse_stream(
     let status = response.status();
     if !status.is_success() {
         let raw = response.text().await.unwrap_or_default();
-        return Err(LlmProviderError::Provider(format!("chat stream HTTP {status}: {raw}")));
+        return Err(LlmProviderError::Provider(format!(
+            "chat stream HTTP {status}: {raw}"
+        )));
     }
 
-    let bytes_stream = response.bytes_stream().map(|res| {
-        res.map_err(std::io::Error::other)
-    });
+    let bytes_stream = response
+        .bytes_stream()
+        .map(|res| res.map_err(std::io::Error::other));
     let reader = StreamReader::new(bytes_stream);
     let mut lines = BufReader::new(reader).lines();
 
@@ -773,15 +775,28 @@ async fn run_direct_sse_stream(
         {
             text_delta = text_from_delta_value(delta);
 
-            if let Some(tc_deltas) = delta.get("tool_calls").and_then(serde_json::Value::as_array) {
+            if let Some(tc_deltas) = delta
+                .get("tool_calls")
+                .and_then(serde_json::Value::as_array)
+            {
                 let mut tc_list = Vec::new();
                 for tc in tc_deltas {
-                    let index = tc.get("index").and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
-                    let id = tc.get("id").and_then(serde_json::Value::as_str).map(str::to_string);
+                    let index = tc
+                        .get("index")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0) as usize;
+                    let id = tc
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string);
                     let (name, arguments) = if let Some(func) = tc.get("function") {
                         (
-                            func.get("name").and_then(serde_json::Value::as_str).map(str::to_string),
-                            func.get("arguments").and_then(serde_json::Value::as_str).map(str::to_string),
+                            func.get("name")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_string),
+                            func.get("arguments")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_string),
                         )
                     } else {
                         (None, None)
@@ -798,10 +813,12 @@ async fn run_direct_sse_stream(
         }
 
         if text_delta.is_some() || tool_calls_delta.is_some() {
-            let _ = tx.send(Ok(LlmResponseChunk {
-                text_delta,
-                tool_calls_delta,
-            })).await;
+            let _ = tx
+                .send(Ok(LlmResponseChunk {
+                    text_delta,
+                    tool_calls_delta,
+                }))
+                .await;
         }
     }
 
