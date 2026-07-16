@@ -95,7 +95,8 @@ Memory extraction, hybrid search, retention, and MMR diversification settings.
 | `min_confidence_to_persist` | `f64` | `0.65` | Minimum confidence to persist a candidate (clamped to `0.0..=1.0` on load) |
 | `extraction_timeout_secs` | `u64` | `30` | Timeout for one LLM extraction call |
 | `tool_grounding` | `ToolGroundingConfig` | — | Tool-result grounding settings |
-| `use_hyde` | `bool` | `false` | Record a HyDE query-expansion hint for downstream recall |
+| `use_hyde` | `bool` | `false` | When true, `execute_hybrid_recall` generates a HyDE document, embeds it, and blends with the query vector |
+| `hyde_blend` | `f32` | `0.6` | Fraction of the search vector from the HyDE embedding (`0.0..=1.0`) |
 | `recall_result_limit` | `usize` | `8` | Max typed memories requested per plan |
 | `recall_similarity_threshold` | `f32` | `0.35` | Minimum vector similarity |
 | `recall_min_score` | `f32` | `0.20` | Minimum hybrid total score |
@@ -620,7 +621,9 @@ pub async fn execute_hybrid_recall(
 ) -> Result<(RecallPlan, Vec<RecalledMemory>), CognitionError>
 ```
 
-End-to-end pipeline used by `CognitionEngine::before_turn`: plan → (if `hybrid_search`) hybrid vector+lexical search → MMR diversification (`MemoryDiversifyPipeline`, gated by `mmr_enabled`) → optional LLM rerank (`MemoryRerankPipeline`, gated by `rerank_enabled`) → map to `RecalledMemory` → merge lorebook key/constant matches → bump access counters. Legacy summaries and key facts are not merged; migrate them explicitly through the store/CLI migration API.
+End-to-end pipeline used by `CognitionEngine::before_turn`: plan → (if `hybrid_search`) optional HyDE blend when `use_hyde` → hybrid vector+lexical search → MMR diversification (`MemoryDiversifyPipeline`, gated by `mmr_enabled`) → optional LLM rerank (`MemoryRerankPipeline`, gated by `rerank_enabled`) → map to `RecalledMemory` → merge lorebook key/constant matches → bump access counters. Legacy summaries and key facts are not merged; migrate them explicitly through the store/CLI migration API.
+
+`ExecuteRecallInput` carries an optional `embedder` used for HyDE embedding when `plan.use_hyde` is set; without an embedder or LLM the runner falls back to the query embedding.
 
 ---
 

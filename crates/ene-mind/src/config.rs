@@ -142,9 +142,15 @@ pub struct MindMemoryConfig {
     pub extraction_timeout_secs: u64,
     /// Tool-result grounding and guardrail settings (#92).
     pub tool_grounding: ToolGroundingConfig,
-    /// Use `HyDE` query expansion for cognitive memory recall. The planner only
-    /// records this hint; downstream recall execution performs the provider call.
+    /// When true, `execute_hybrid_recall` generates a hypothetical document via
+    /// the LLM (when available), embeds it as [`ene_ai::EmbeddingKind::Hyde`],
+    /// and blends it with the query embedding before hybrid search.
     pub use_hyde: bool,
+    /// Fraction of the search vector taken from the `HyDE` embedding when
+    /// [`Self::use_hyde`] is enabled (`0.0`–`1.0`). `0.0` keeps the query
+    /// embedding only; `1.0` uses the `HyDE` embedding only.
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    pub hyde_blend: f32,
     /// Maximum number of typed memories requested by recall planning.
     pub recall_result_limit: usize,
     /// Minimum vector similarity for cognitive recall candidates.
@@ -264,6 +270,7 @@ impl Default for MindMemoryConfig {
             extraction_timeout_secs: 30,
             tool_grounding: ToolGroundingConfig::default(),
             use_hyde: false,
+            hyde_blend: 0.6,
             recall_result_limit: 8,
             recall_similarity_threshold: 0.35,
             recall_min_score: 0.20,

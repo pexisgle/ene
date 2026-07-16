@@ -95,7 +95,8 @@ pub struct MindConfig {
 | `min_confidence_to_persist` | `f64` | `0.65` | 候補を永続化する最小確信度（ロード時に `0.0..=1.0` にクランプ） |
 | `extraction_timeout_secs` | `u64` | `30` | 1回のLLM抽出呼び出しのタイムアウト |
 | `tool_grounding` | `ToolGroundingConfig` | — | ツール結果のグラウンディング設定 |
-| `use_hyde` | `bool` | `false` | 下流のリコールのためにHyDEクエリ拡張ヒントを記録する |
+| `use_hyde` | `bool` | `false` | true のとき `execute_hybrid_recall` が HyDE 文書を生成・埋め込みし query ベクトルと混合する |
+| `hyde_blend` | `f32` | `0.6` | 検索ベクトルのうち HyDE 埋め込みが占める割合（`0.0..=1.0`） |
 | `recall_result_limit` | `usize` | `8` | 1つの計画で要求される型付きメモリの最大数 |
 | `recall_similarity_threshold` | `f32` | `0.35` | 最小ベクトル類似度 |
 | `recall_min_score` | `f32` | `0.20` | 最小ハイブリッド合計スコア |
@@ -620,7 +621,9 @@ pub async fn execute_hybrid_recall(
 ) -> Result<(RecallPlan, Vec<RecalledMemory>), CognitionError>
 ```
 
-`CognitionEngine::before_turn` から使用されるエンドツーエンドのパイプラインです: 計画 → （`hybrid_search` が有効なら）ハイブリッドベクトル＋字句検索 → MMR多様化（`MemoryDiversifyPipeline`、`mmr_enabled` でゲート） → オプションのLLM再ランク（`MemoryRerankPipeline`、`rerank_enabled` でゲート） → `RecalledMemory` へのマッピング → ロアブックのキー/定数マッチのマージ → アクセスカウンターの更新。レガシーの要約とキーファクトはマージせず、必要な場合は store/CLI の移行 API を明示的に実行します。
+`CognitionEngine::before_turn` から使用されるエンドツーエンドのパイプラインです: 計画 → （`hybrid_search` が有効なら）`use_hyde` 時のオプション HyDE 混合 → ハイブリッドベクトル＋字句検索 → MMR多様化（`MemoryDiversifyPipeline`、`mmr_enabled` でゲート） → オプションのLLM再ランク（`MemoryRerankPipeline`、`rerank_enabled` でゲート） → `RecalledMemory` へのマッピング → ロアブックのキー/定数マッチのマージ → アクセスカウンターの更新。レガシーの要約とキーファクトはマージせず、必要な場合は store/CLI の移行 API を明示的に実行します。
+
+`ExecuteRecallInput` は `plan.use_hyde` 時の HyDE 埋め込み用にオプションの `embedder` を持ちます。embedder または LLM が無い場合は query embedding にフォールバックします。
 
 ---
 

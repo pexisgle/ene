@@ -266,7 +266,7 @@ Outputs:
 - `RecallBudgetHints` from `mind.context`
 - `RecallSearchHints` compatible with `Query` (`similarity_threshold`, `min_score`, recency half-life, optional query affect)
 
-`RecallPlanner::to_memory_search_options` is a helper that maps a plan plus a single query embedding into `Query` for `MemoryStore::search`. It uses only `plan.search.primary_query_text` (the first semantic query). `semantic_queries`, `episodic_queries`, `required_kinds`, and `use_hyde` remain plan hints for downstream recall execution, which is responsible for multi-query expansion, kind filtering, and HyDE embedding calls.
+`RecallPlanner::to_memory_search_options` is a helper that maps a plan plus a single query embedding into `Query` for `MemoryStore::search`. It uses only `plan.search.primary_query_text` (the first semantic query). `semantic_queries`, `episodic_queries`, and `required_kinds` remain plan hints for downstream recall execution (multi-query expansion and kind filtering). When `plan.use_hyde` is true, `execute_hybrid_recall` generates a hypothetical document via `ene_ai::hyde_document`, embeds it as `EmbeddingKind::Hyde`, and blends it with the query embedding using `mind.memory.hyde_blend` before search.
 
 ### Hybrid Memory Search (#73)
 

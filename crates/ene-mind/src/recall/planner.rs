@@ -110,8 +110,9 @@ impl RecallPlanner {
     ///
     /// Maps [`RecallSearchHints`] and scope fields onto [`Query`], filling
     /// hybrid weights / commitment boost from [`MindMemoryConfig`] (#123).
-    /// Multi-query expansion, `required_kinds` filtering, and `HyDE` embedding
-    /// calls remain the responsibility of downstream recall execution.
+    /// Multi-query expansion and `required_kinds` filtering remain the
+    /// responsibility of downstream recall execution. `HyDE` blending is applied
+    /// by [`crate::recall::execute_hybrid_recall`] when `plan.use_hyde` is set.
     #[must_use]
     pub fn to_query<'a>(
         plan: &'a RecallPlan,

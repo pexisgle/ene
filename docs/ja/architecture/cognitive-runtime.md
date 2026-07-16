@@ -162,7 +162,7 @@ Recall Planner が生成するクエリ計画：
 - 記憶種別フィルタ（後続 recall execution 向けの hint）
 - 想起コンテンツに割り当てられたトークン予算
 - vector similarity threshold、minimum total score、recency half-life、optional query affect などのハイブリッド検索ヒント
-- 後続 recall execution 向けの HyDE 拡張 hint（`use_hyde`）
+- `execute_hybrid_recall` が適用するオプションの HyDE クエリ拡張（`use_hyde` / `hyde_blend`）
 
 後続の recall execution は `MemoryStore::search` の結果を `RecallResultMapper::map` または `RecallPlanner::explain_results` 経由で、主 `RecallReason` と score breakdown 付きの `RecalledMemory` に変換し、debug / UX / prompt introspection に使う（#74）。
 

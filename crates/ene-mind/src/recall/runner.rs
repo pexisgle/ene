@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use ene_ai::LlmProvider;
+use ene_ai::{EmbeddingKind, EmbeddingProvider, LlmProvider};
 use ene_config::CharacterCardV3;
 use ene_store::MemoryStore;
 
@@ -33,7 +33,10 @@ pub struct ExecuteRecallInput<'a> {
     pub query_embedding: &'a [f32],
     /// Embedding model name.
     pub embedding_model: &'a str,
-    /// Optional LLM provider for reranking.
+    /// Optional embedder used when [`crate::config::MindMemoryConfig::use_hyde`]
+    /// is enabled to embed the hypothetical document.
+    pub embedder: Option<&'a dyn EmbeddingProvider>,
+    /// Optional LLM provider for `HyDE` document generation and reranking.
     pub llm_provider: Option<Arc<dyn LlmProvider>>,
     /// Loaded affect state (optional).
     pub affect: Option<&'a ene_store::AffectState>,
@@ -90,9 +93,12 @@ pub async fn execute_hybrid_recall(
         .await
         .map_err(CognitionError::Memory)?;
 
+    let search_embedding =
+        resolve_search_embedding(config, input, plan.use_hyde, &plan.search.primary_query_text)
+            .await;
     let search_options = RecallPlanner::to_memory_search_options(
         &plan,
-        input.query_embedding,
+        &search_embedding,
         input.embedding_model,
         Utc::now(),
         &config.memory,
@@ -126,6 +132,90 @@ pub async fn execute_hybrid_recall(
     bump_recalled_memory_access(input.store, &recalled).await;
 
     Ok((plan, recalled))
+}
+
+/// Resolve the embedding used for hybrid search, optionally blending `HyDE`.
+async fn resolve_search_embedding(
+    config: &MindConfig,
+    input: &ExecuteRecallInput<'_>,
+    use_hyde: bool,
+    primary_query: &str,
+) -> Vec<f32> {
+    if !use_hyde {
+        return input.query_embedding.to_vec();
+    }
+
+    let Some(embedder) = input.embedder else {
+        tracing::warn!(
+            component = "RecallRunner",
+            "use_hyde is enabled but no embedder was provided; using query embedding"
+        );
+        return input.query_embedding.to_vec();
+    };
+
+    let llm = input.llm_provider.as_deref();
+    let hyde_text = match ene_ai::hyde_document(llm, primary_query).await {
+        Ok(text) => text,
+        Err(error) => {
+            tracing::warn!(
+                component = "RecallRunner",
+                error = %error,
+                "HyDE document generation failed; using query embedding"
+            );
+            return input.query_embedding.to_vec();
+        }
+    };
+
+    if hyde_text == primary_query {
+        // No LLM (or echo fallback): skip the redundant embed + blend.
+        return input.query_embedding.to_vec();
+    }
+
+    let hyde_vec = match ene_ai::embed(embedder, &hyde_text, EmbeddingKind::Hyde).await {
+        Ok(vec) => vec,
+        Err(error) => {
+            tracing::warn!(
+                component = "RecallRunner",
+                error = %error,
+                "HyDE embedding failed; using query embedding"
+            );
+            return input.query_embedding.to_vec();
+        }
+    };
+
+    if hyde_vec.len() != input.query_embedding.len() {
+        tracing::warn!(
+            component = "RecallRunner",
+            hyde_dims = hyde_vec.len(),
+            query_dims = input.query_embedding.len(),
+            "HyDE embedding dimension mismatch; using query embedding"
+        );
+        return input.query_embedding.to_vec();
+    }
+
+    blend_embeddings(
+        input.query_embedding,
+        &hyde_vec,
+        config.memory.hyde_blend,
+    )
+}
+
+/// Linearly blend query and `HyDE` embeddings, then L2-normalize.
+fn blend_embeddings(query: &[f32], hyde: &[f32], blend: f32) -> Vec<f32> {
+    let blend = blend.clamp(0.0, 1.0);
+    let mut out: Vec<f32> = query
+        .iter()
+        .zip(hyde.iter())
+        .map(|(q, h)| h.mul_add(blend, q * (1.0 - blend)))
+        .collect();
+
+    let norm = out.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > f32::EPSILON {
+        for x in &mut out {
+            *x /= norm;
+        }
+    }
+    out
 }
 
 async fn maybe_merge_lorebook_recall(
@@ -171,9 +261,19 @@ mod tests {
     use ene_config::{CharacterCardV3, Lorebook, LorebookEntry};
     use ene_store::{MemoryConfidence, MemoryKind, MemorySalience, MemorySource, MemoryStatus};
     use ene_store::{MemoryScope, NewMemoryItem};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[expect(dead_code)]
-    struct MockEmbedder;
+    struct MockEmbedder {
+        hyde_calls: AtomicUsize,
+    }
+
+    impl MockEmbedder {
+        fn new() -> Self {
+            Self {
+                hyde_calls: AtomicUsize::new(0),
+            }
+        }
+    }
 
     #[async_trait::async_trait]
     impl ene_ai::EmbeddingProvider for MockEmbedder {
@@ -189,8 +289,194 @@ mod tests {
             &self,
             items: &[(&str, ene_ai::EmbeddingKind)],
         ) -> Result<Vec<Vec<f32>>, ene_ai::EmbeddingError> {
-            Ok(items.iter().map(|_| vec![1.0, 0.0, 0.0, 0.0]).collect())
+            Ok(items
+                .iter()
+                .map(|(_, kind)| match kind {
+                    EmbeddingKind::Hyde => {
+                        self.hyde_calls.fetch_add(1, Ordering::SeqCst);
+                        vec![0.0, 1.0, 0.0, 0.0]
+                    }
+                    _ => vec![1.0, 0.0, 0.0, 0.0],
+                })
+                .collect())
         }
+    }
+
+    struct MockHydeLlm;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for MockHydeLlm {
+        fn name(&self) -> &str {
+            "mock-hyde"
+        }
+
+        async fn create_chat_stream(
+            &self,
+            _messages: &[ene_ai::LlmMessage],
+            _tools: &[ene_tool_proto::ToolSpec],
+        ) -> Result<
+            std::pin::Pin<
+                Box<
+                    dyn tokio_stream::Stream<
+                            Item = Result<ene_ai::LlmResponseChunk, ene_ai::LlmProviderError>,
+                        > + Send,
+                >,
+            >,
+            ene_ai::LlmProviderError,
+        > {
+            Err(ene_ai::LlmProviderError::Provider(
+                "mock: stream not implemented".into(),
+            ))
+        }
+
+        async fn chat_completion(
+            &self,
+            _messages: &[ene_ai::LlmMessage],
+            _json_schema: Option<serde_json::Value>,
+        ) -> Result<String, ene_ai::LlmProviderError> {
+            Ok("A sunny world where friends meet outdoors.".into())
+        }
+    }
+
+    #[test]
+    fn blend_embeddings_mixes_and_normalizes() {
+        let query = [1.0, 0.0, 0.0, 0.0];
+        let hyde = [0.0, 1.0, 0.0, 0.0];
+        let blended = blend_embeddings(&query, &hyde, 0.5);
+        assert!((blended[0] - blended[1]).abs() < 1e-5);
+        let norm: f32 = blended.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-5);
+    }
+
+    #[tokio::test]
+    async fn hyde_blends_when_enabled_with_llm_and_embedder() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        // Memory aligned with HyDE axis [0,1,0,0] so blended search prefers it.
+        let hyde_item = NewMemoryItem {
+            scope: MemoryScope::Character,
+            character_id: "Ene".into(),
+            user_id: "User".into(),
+            kind: MemoryKind::Semantic,
+            title: "Sunny lore".into(),
+            content: "A sunny world where friends meet outdoors.".into(),
+            source: MemorySource::Ccv3,
+            source_ref: Some("test:hyde".into()),
+            confidence: MemoryConfidence::new(1.0),
+            salience: MemorySalience::new(1.0),
+            affect: Default::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            created_at: None,
+            commitment_id: None,
+        };
+        let hyde_id = store.insert_typed_memory(&hyde_item).await.unwrap();
+        store
+            .upsert_memory_embedding(hyde_id, "mock", "content", &[0.0, 1.0, 0.0, 0.0])
+            .await
+            .unwrap();
+
+        let query_item = NewMemoryItem {
+            scope: MemoryScope::Character,
+            character_id: "Ene".into(),
+            user_id: "User".into(),
+            kind: MemoryKind::Semantic,
+            title: "Query-aligned".into(),
+            content: "Something about pizza.".into(),
+            source: MemorySource::Conversation,
+            source_ref: Some("test:query".into()),
+            confidence: MemoryConfidence::new(1.0),
+            salience: MemorySalience::new(1.0),
+            affect: Default::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            created_at: None,
+            commitment_id: None,
+        };
+        let query_id = store.insert_typed_memory(&query_item).await.unwrap();
+        store
+            .upsert_memory_embedding(query_id, "mock", "content", &[1.0, 0.0, 0.0, 0.0])
+            .await
+            .unwrap();
+
+        let embedder = MockEmbedder::new();
+        let mut config = MindConfig::default();
+        config.memory.use_hyde = true;
+        config.memory.hyde_blend = 1.0; // pure HyDE vector
+        config.memory.hybrid_search = true;
+        config.memory.mmr_enabled = false;
+        config.memory.rerank_enabled = false;
+        config.memory.recall_similarity_threshold = 0.0;
+        config.memory.recall_min_score = 0.0;
+
+        let input = ExecuteRecallInput {
+            store: &store,
+            character_id: "Ene",
+            user_id: "User",
+            user_input: "How is the weather?",
+            recent_turns: &[],
+            query_embedding: &[1.0, 0.0, 0.0, 0.0],
+            embedding_model: "mock",
+            embedder: Some(&embedder),
+            llm_provider: Some(Arc::new(MockHydeLlm)),
+            affect: None,
+            card: None,
+        };
+
+        let (_, recalled) = execute_hybrid_recall(&config, &input)
+            .await
+            .expect("recall");
+        assert!(
+            embedder.hyde_calls.load(Ordering::SeqCst) >= 1,
+            "HyDE embedding should be requested"
+        );
+        assert!(
+            recalled
+                .first()
+                .is_some_and(|m| m.item.content.contains("sunny")),
+            "pure HyDE blend should rank the HyDE-aligned memory first, got: {:?}",
+            recalled
+                .iter()
+                .map(|m| m.item.title.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn hyde_skipped_without_llm_echo() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let embedder = MockEmbedder::new();
+        let mut config = MindConfig::default();
+        config.memory.use_hyde = true;
+        config.memory.hybrid_search = true;
+
+        let input = ExecuteRecallInput {
+            store: &store,
+            character_id: "Ene",
+            user_id: "User",
+            user_input: "hello",
+            recent_turns: &[],
+            query_embedding: &[1.0, 0.0, 0.0, 0.0],
+            embedding_model: "mock",
+            embedder: Some(&embedder),
+            llm_provider: None, // hyde_document echoes query → skip embed
+            affect: None,
+            card: None,
+        };
+
+        let _ = execute_hybrid_recall(&config, &input).await.expect("recall");
+        assert_eq!(
+            embedder.hyde_calls.load(Ordering::SeqCst),
+            0,
+            "echo HyDE should not re-embed"
+        );
     }
 
     #[tokio::test]
@@ -261,6 +547,7 @@ mod tests {
             recent_turns: &[],
             query_embedding: &[1.0, 0.0, 0.0, 0.0],
             embedding_model: "mock",
+            embedder: None,
             llm_provider: None,
             affect: None,
             card: Some(&card),

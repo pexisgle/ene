@@ -167,6 +167,10 @@ fn mind_section_defaults_match_macro_definition() {
         "mind.memory.use_hyde should default to false"
     );
     assert!(
+        (mind.memory.hyde_blend - 0.6).abs() < f32::EPSILON,
+        "mind.memory.hyde_blend should default to 0.6"
+    );
+    assert!(
         mind.memory.mmr_enabled,
         "mind.memory.mmr_enabled should default to true"
     );

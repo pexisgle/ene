@@ -46,6 +46,7 @@
         "min_confidence": 0.6000000238418579
       },
       "use_hyde": false,
+      "hyde_blend": 0.6,
       "recall_result_limit": 8,
       "recall_similarity_threshold": 0.3499999940395355,
       "recall_min_score": 0.20000000298023224,

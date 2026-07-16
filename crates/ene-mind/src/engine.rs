@@ -218,6 +218,7 @@ impl CognitionEngine {
             recent_turns: &recent_turns,
             query_embedding: embedding,
             embedding_model: embedder.model_name(),
+            embedder: Some(embedder.as_ref()),
             llm_provider: ctx.llm_provider.clone(),
             affect: Some(&affect),
             card: Some(ctx.card),

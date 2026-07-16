@@ -373,6 +373,7 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
         "min_confidence": 0.60
       },
       "use_hyde": false,
+      "hyde_blend": 0.6,
       "recall_result_limit": 8,
       "recall_similarity_threshold": 0.35,
       "recall_min_score": 0.20,
@@ -442,7 +443,8 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 | `min_confidence_to_persist` | float | `0.65` | Minimum confidence threshold (0.0–1.0) for persisting a memory |
 | `extraction_timeout_secs` | int | `30` | Timeout in seconds for a single LLM memory-extraction call; on timeout the extraction fails and falls back to deterministic candidates |
 | `tool_grounding` | object | (see below) | Tool-result grounding guardrails and candidate extraction controls (#92) |
-| `use_hyde` | bool | `false` | Record a HyDE query-expansion hint in cognitive recall plans; downstream recall execution performs the provider call |
+| `use_hyde` | bool | `false` | When true, generate a hypothetical document via the LLM, embed it as HyDE, and blend with the query embedding before hybrid recall search |
+| `hyde_blend` | float | `0.6` | Fraction of the search vector taken from the HyDE embedding (`0.0`–`1.0`). Ignored when `use_hyde` is false |
 | `recall_result_limit` | int | `8` | Maximum typed-memory results requested by `RecallPlan` |
 | `recall_similarity_threshold` | float | `0.35` | Minimum vector similarity for vector-sourced recall candidates |
 | `recall_min_score` | float | `0.20` | Minimum hybrid score required for recalled memory results |

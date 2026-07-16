@@ -259,7 +259,7 @@ Cognitive Runtime は長期事実を `typed_memories` に保存し、明示的�
 - `mind.context` 由来の `RecallBudgetHints`
 - `Query` 互換の `RecallSearchHints`（`similarity_threshold`, `min_score`, recency half-life, optional query affect）
 
-`RecallPlanner::to_memory_search_options` は、plan と単一の query embedding から `MemoryStore::search` 用の `Query` を組み立てる helper です。使用するのは `plan.search.primary_query_text`（最初の semantic query）のみです。`semantic_queries` / `episodic_queries` / `required_kinds` / `use_hyde` は plan hints として残り、multi-query 展開・kind フィルタ・HyDE embedding 呼び出しは後続の recall execution が担当します。
+`RecallPlanner::to_memory_search_options` は、plan と単一の query embedding から `MemoryStore::search` 用の `Query` を組み立てる helper です。使用するのは `plan.search.primary_query_text`（最初の semantic query）のみです。`semantic_queries` / `episodic_queries` / `required_kinds` は plan hints として残り、multi-query 展開・kind フィルタは後続の recall execution が担当します。`plan.use_hyde` が true のとき、`execute_hybrid_recall` は `ene_ai::hyde_document` で假説文書を生成し `EmbeddingKind::Hyde` で埋め込み、`mind.memory.hyde_blend` で query embedding と線形混合してから検索します。
 
 ### ハイブリッド記憶検索（#73）
 

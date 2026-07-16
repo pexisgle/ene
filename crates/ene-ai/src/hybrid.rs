@@ -112,9 +112,10 @@ pub async fn hyde_document(
 
     let messages = vec![
         LlmMessage::System {
-            content: "You are an assistant that writes hypothetical tool-invocation documents. \
-                      Given a user query, describe in one sentence what tool would help and how \
-                      it would be called. Keep it under 200 characters."
+            content: "You are an assistant that writes a short hypothetical passage that would \
+                      be highly relevant for retrieving information about the user's query. \
+                      Write one or two sentences of content that might appear in a matching \
+                      document. Keep it under 200 characters."
                 .to_string(),
         },
         LlmMessage::User {
