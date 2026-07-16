@@ -42,7 +42,7 @@ async fn test_ipc_list_tools_and_call_tool() {
         let req = read_ipc_request(&mut stream)
             .await
             .unwrap()
-            .expect("Expected Handshake request");
+            .expect("server sends a Handshake request");
         assert!(
             matches!(
                 req,
@@ -66,7 +66,7 @@ async fn test_ipc_list_tools_and_call_tool() {
         let req = read_ipc_request(&mut stream)
             .await
             .unwrap()
-            .expect("Expected ListTools request");
+            .expect("server sends a ListTools request");
         assert!(
             matches!(req, IpcRequest::ListTools),
             "Expected ListTools, got {req:?}"
@@ -92,7 +92,7 @@ async fn test_ipc_list_tools_and_call_tool() {
         let req = read_ipc_request(&mut stream)
             .await
             .unwrap()
-            .expect("Expected ListRagProfiles request");
+            .expect("server sends a ListRagProfiles request");
         assert!(
             matches!(req, IpcRequest::ListRagProfiles),
             "Expected ListRagProfiles, got {req:?}"
@@ -110,7 +110,7 @@ async fn test_ipc_list_tools_and_call_tool() {
         let req = read_ipc_request(&mut stream)
             .await
             .unwrap()
-            .expect("Expected CallTool request");
+            .expect("server sends a CallTool request");
         match &req {
             IpcRequest::CallTool { name, arguments } => {
                 assert_eq!(name, "utility.get_current_time");
@@ -148,7 +148,7 @@ async fn test_ipc_list_tools_and_call_tool() {
 
     let registry = ene_tool_host::IpcToolRegistry::new(socket_path, sandbox, None, 60_000)
         .await
-        .expect("Failed to create IpcToolRegistry");
+        .expect("socket server is reachable");
 
     // Verify list_tools
     let tools = registry.list_tools();
@@ -162,7 +162,7 @@ async fn test_ipc_list_tools_and_call_tool() {
     let result = registry
         .call_tool("utility.get_current_time", "{}")
         .await
-        .expect("call_tool failed");
+        .expect("tool executes successfully");
     assert_eq!(result, "2024-01-01 12:00:00");
 
     // Wait for server to shut down

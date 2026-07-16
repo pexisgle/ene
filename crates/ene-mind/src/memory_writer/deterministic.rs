@@ -379,7 +379,7 @@ mod tests {
             Locale::Ja,
             0.0,
         )
-        .expect("extract failed");
+        .expect("deterministic extraction always succeeds");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, MemoryKind::Semantic);
         assert!(out[0].should_persist);
@@ -388,8 +388,8 @@ mod tests {
 
     #[test]
     fn ja_remember_captures_object_before_keyword() {
-        let out =
-            extract(&ja_turn("私の誕生日を覚えておいて"), Locale::Ja, 0.0).expect("extract failed");
+        let out = extract(&ja_turn("私の誕生日を覚えておいて"), Locale::Ja, 0.0)
+            .expect("deterministic extraction always succeeds");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, MemoryKind::Semantic);
         assert!(
@@ -400,21 +400,22 @@ mod tests {
 
     #[test]
     fn ja_teach_request_is_not_remembered() {
-        let out = extract(&ja_turn("今日の天気を教えて"), Locale::Ja, 0.0).expect("extract failed");
+        let out = extract(&ja_turn("今日の天気を教えて"), Locale::Ja, 0.0)
+            .expect("deterministic extraction always succeeds");
         assert!(out.is_empty(), "教えて must not be captured: {out:?}");
     }
 
     #[test]
     fn ja_remember_question_is_skipped() {
-        let out =
-            extract(&ja_turn("私の誕生日を覚えてますか"), Locale::Ja, 0.0).expect("extract failed");
+        let out = extract(&ja_turn("私の誕生日を覚えてますか"), Locale::Ja, 0.0)
+            .expect("deterministic extraction always succeeds");
         assert!(out.is_empty(), "remember question must not match: {out:?}");
     }
 
     #[test]
     fn ja_forget_request_creates_deletion_candidate() {
         let out = extract(&ja_turn("さっきのプロジェクトを忘れて"), Locale::Ja, 0.0)
-            .expect("extract failed");
+            .expect("deterministic extraction always succeeds");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, MemoryKind::Semantic);
         assert!(!out[0].should_persist);
@@ -433,7 +434,8 @@ mod tests {
             "あとで X を確認する",
             "今日はこのアプリeneの進捗報告をします。メリットを教えて",
         ] {
-            let out = extract(&ja_turn(msg), Locale::Ja, 0.0).expect("extract failed");
+            let out = extract(&ja_turn(msg), Locale::Ja, 0.0)
+                .expect("deterministic extraction always succeeds");
             assert!(
                 out.is_empty(),
                 "soft signal must not match pattern: {msg:?} -> {out:?}"
@@ -450,7 +452,7 @@ mod tests {
             Locale::En,
             0.0,
         )
-        .expect("extract failed");
+        .expect("deterministic extraction always succeeds");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, MemoryKind::Semantic);
         assert!(out[0].content.contains("meeting"));
@@ -459,7 +461,7 @@ mod tests {
     #[test]
     fn indirect_question_without_mark_is_skipped() {
         let out = extract(&en_turn("do you remember my birthday"), Locale::En, 0.0)
-            .expect("extract failed");
+            .expect("deterministic extraction always succeeds");
         assert!(out.is_empty(), "indirect question must not match: {out:?}");
     }
 
@@ -470,14 +472,14 @@ mod tests {
             Locale::En,
             0.0,
         )
-        .expect("extract failed");
+        .expect("deterministic extraction always succeeds");
         assert_eq!(out.len(), 1, "imperative remember must still match");
     }
 
     #[test]
     fn en_remember_empty_content_is_rejected() {
-        let out =
-            extract(&en_turn("please remember    "), Locale::En, 0.0).expect("extract failed");
+        let out = extract(&en_turn("please remember    "), Locale::En, 0.0)
+            .expect("deterministic extraction always succeeds");
         assert!(
             out.is_empty(),
             "empty remember content must not match: {out:?}"
@@ -487,7 +489,7 @@ mod tests {
     #[test]
     fn en_forget_request_creates_deletion_candidate() {
         let out = extract(&en_turn("Forget about my ex-girlfriend"), Locale::En, 0.0)
-            .expect("extract failed");
+            .expect("deterministic extraction always succeeds");
         assert_eq!(out.len(), 1);
         assert!(!out[0].should_persist);
         assert_eq!(
@@ -504,7 +506,8 @@ mod tests {
             "Next time, let's discuss the design",
             "today I have a presentation about ene",
         ] {
-            let out = extract(&en_turn(msg), Locale::En, 0.0).expect("extract failed");
+            let out = extract(&en_turn(msg), Locale::En, 0.0)
+                .expect("deterministic extraction always succeeds");
             assert!(
                 out.is_empty(),
                 "soft signal must not match pattern: {msg:?} -> {out:?}"
@@ -530,8 +533,8 @@ mod tests {
             persist_success_procedure: true,
             ..Default::default()
         };
-        let out =
-            extract_with_tool_grounding(&turn, Locale::Ja, 0.0, &cfg).expect("extract failed");
+        let out = extract_with_tool_grounding(&turn, Locale::Ja, 0.0, &cfg)
+            .expect("deterministic extraction always succeeds");
         assert!(out.iter().any(|c| c.kind == MemoryKind::Procedure));
         assert!(out.iter().any(|c| c.content.contains("fs")));
     }
@@ -548,7 +551,8 @@ mod tests {
             assistant_message: None,
             tool_results: &tools,
         };
-        let out = extract(&turn, Locale::Ja, 0.0).expect("extract failed");
+        let out =
+            extract(&turn, Locale::Ja, 0.0).expect("deterministic extraction always succeeds");
         assert!(
             out.is_empty(),
             "default tool grounding must not auto-keep successes: {out:?}"
@@ -559,26 +563,29 @@ mod tests {
 
     #[test]
     fn empty_input_returns_empty() {
-        let out = extract(&empty_turn(), Locale::Ja, 0.0).expect("extract failed");
+        let out = extract(&empty_turn(), Locale::Ja, 0.0)
+            .expect("deterministic extraction always succeeds");
         assert!(out.is_empty());
     }
 
     #[test]
     fn locale_mismatch_returns_empty() {
-        let out = extract(&ja_turn("覚えて: test"), Locale::En, 0.0).expect("extract failed");
+        let out = extract(&ja_turn("覚えて: test"), Locale::En, 0.0)
+            .expect("deterministic extraction always succeeds");
         assert!(out.is_empty());
     }
 
     #[test]
     fn no_pattern_match_returns_empty() {
-        let out = extract(&ja_turn("今日の天気は？"), Locale::Ja, 0.0).expect("extract failed");
+        let out = extract(&ja_turn("今日の天気は？"), Locale::Ja, 0.0)
+            .expect("deterministic extraction always succeeds");
         assert!(out.is_empty());
     }
 
     #[test]
     fn confidence_above_threshold_passes() {
-        let out =
-            extract(&ja_turn("覚えて: 重要なこと"), Locale::Ja, 0.80).expect("extract failed");
+        let out = extract(&ja_turn("覚えて: 重要なこと"), Locale::Ja, 0.80)
+            .expect("deterministic extraction always succeeds");
         assert_eq!(out.len(), 1);
         assert!(out[0].confidence >= 0.80);
     }
@@ -590,21 +597,23 @@ mod tests {
             assistant_message: Some("覚えて: 私の秘密"),
             tool_results: &[],
         };
-        let out = extract(&turn, Locale::Ja, 0.0).expect("extract failed");
+        let out =
+            extract(&turn, Locale::Ja, 0.0).expect("deterministic extraction always succeeds");
         assert!(out.is_empty());
     }
 
     #[test]
     fn deduplicates_by_title_and_kind() {
         let msg = "覚えて: プロジェクトX";
-        let out = extract(&ja_turn(msg), Locale::Ja, 0.0).expect("extract failed");
+        let out = extract(&ja_turn(msg), Locale::Ja, 0.0)
+            .expect("deterministic extraction always succeeds");
         assert_eq!(out.len(), 1);
     }
 
     #[test]
     fn fullwidth_colon_still_matches() {
-        let out =
-            extract(&ja_turn("覚えて：全角コロンテスト"), Locale::Ja, 0.0).expect("extract failed");
+        let out = extract(&ja_turn("覚えて：全角コロンテスト"), Locale::Ja, 0.0)
+            .expect("deterministic extraction always succeeds");
         assert_eq!(out.len(), 1);
     }
 }

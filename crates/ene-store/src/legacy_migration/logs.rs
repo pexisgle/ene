@@ -79,7 +79,7 @@ mod tests {
         ];
         let spans = logs_to_spans(&rows);
         assert_eq!(spans.len(), 1);
-        let span = spans.first().expect("one span");
+        let span = spans.first().expect("rows merge into one span");
         assert!(span.raw_excerpt.as_ref().unwrap().contains("hi"));
         assert!(span.raw_excerpt.as_ref().unwrap().contains("hello"));
     }

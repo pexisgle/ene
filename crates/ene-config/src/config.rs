@@ -694,12 +694,12 @@ mod tests {
         unsafe {
             std::env::set_var("ENE_TEST_PROVIDER__API_KEY", "sk-test-1234");
         }
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
-        std::fs::write(&path, "{}").expect("write settings");
+        std::fs::write(&path, "{}").expect("write empty settings fixture");
 
         let fig = figment_with_settings_json(&path);
-        let cfg: EneConfig = fig.extract().expect("extract");
+        let cfg: EneConfig = fig.extract().expect("empty settings extracts defaults");
 
         unsafe {
             std::env::remove_var("ENE_TEST_PROVIDER__API_KEY");
@@ -726,12 +726,14 @@ mod tests {
         unsafe {
             std::env::set_var("ENE_TEST_provider__api_key", "sk-lowercase");
         }
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
-        std::fs::write(&path, "{}").expect("write settings");
+        std::fs::write(&path, "{}").expect("write empty settings fixture");
 
         let fig = figment_with_settings_json(&path);
-        let cfg: EneConfig = fig.extract().expect("extract");
+        let cfg: EneConfig = fig
+            .extract()
+            .expect("env-var override merges into defaults");
 
         unsafe {
             std::env::remove_var("ENE_TEST_provider__api_key");
@@ -751,10 +753,10 @@ mod tests {
     /// `EneConfigError::GenericConfigError` instead.
     #[test]
     fn malformed_settings_json_returns_error_not_default() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
         // Not valid JSON for an EneConfig.
-        std::fs::write(&path, "{ this is not valid json }").expect("write");
+        std::fs::write(&path, "{ this is not valid json }").expect("write invalid JSON fixture");
 
         let result = load_full_config_from(tmp.path(), &path);
         assert!(
@@ -768,9 +770,9 @@ mod tests {
     /// stays green after the new `?` propagation.
     #[test]
     fn empty_settings_json_extracts_defaults() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
-        std::fs::write(&path, "{}").expect("write");
+        std::fs::write(&path, "{}").expect("write empty settings fixture");
 
         let result = load_full_config_from(tmp.path(), &path);
         assert!(result.is_ok(), "empty settings.json should extract ok");

@@ -15,7 +15,7 @@ use rapier3d::prelude::{ColliderHandle, RigidBodyHandle};
 /// per-bone specs are turned into Rapier colliders.
 #[derive(Component)]
 pub struct PhysicsBody(
-    #[expect(dead_code, reason = "Read by step/update systems")] pub RigidBodyHandle,
+    #[expect(dead_code, reason = "yet to be wired to step/update systems")] pub RigidBodyHandle,
 );
 
 /// One Rapier `ColliderHandle` per bone of the character. Mirrors
@@ -23,25 +23,25 @@ pub struct PhysicsBody(
 /// `HashMap` used to provide.
 #[derive(Component, Debug, Default, Clone)]
 pub struct PhysicsColliders(
-    #[expect(dead_code, reason = "Read by step/update systems")] pub Vec<ColliderHandle>,
+    #[expect(dead_code, reason = "yet to be wired to step/update systems")] pub Vec<ColliderHandle>,
 );
 
 /// Per-bone static offset (collider centre offset in the bone's
 /// rest pose, in world units).
 #[derive(Component, Debug, Default, Clone)]
 pub struct PhysicsColliderStaticOffsets(
-    #[expect(dead_code, reason = "Read by update_bone_positions system")] pub Vec<Vec3>,
+    #[expect(dead_code, reason = "yet to be wired to update_bone_positions")] pub Vec<Vec3>,
 );
 
 /// Per-bone static rotation (collider local rotation baked from
 /// the rest pose).
 #[derive(Component, Debug, Default, Clone)]
 pub struct PhysicsColliderStaticRotations(
-    #[expect(dead_code, reason = "Read by update_bone_positions system")] pub Vec<Quat>,
+    #[expect(dead_code, reason = "yet to be wired to update_bone_positions")] pub Vec<Quat>,
 );
 
 /// Per-bone rest world rotation (used to compute `r_delta`).
 #[derive(Component, Debug, Default, Clone)]
 pub struct PhysicsColliderRestRotations(
-    #[expect(dead_code, reason = "Read by update_bone_positions system")] pub Vec<Quat>,
+    #[expect(dead_code, reason = "yet to be wired to update_bone_positions")] pub Vec<Quat>,
 );

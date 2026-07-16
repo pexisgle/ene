@@ -101,13 +101,13 @@ impl ExpressionCompositor {
         result
     }
 
-    /// Returns the name of the currently active card expression.
+    /// Name of the currently active base expression, if any.
     #[must_use]
     pub fn active_expression_name(&self) -> Option<&str> {
         self.active_base.as_deref()
     }
 
-    /// Returns the names of all loaded card expressions.
+    /// Names of all loaded card expressions.
     #[must_use]
     pub fn loaded_expression_names(&self) -> Vec<&str> {
         self.card_expressions

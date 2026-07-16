@@ -15,7 +15,7 @@ pub trait ToolSpecArgs: DeserializeOwned + Send + Sync + 'static {
     /// Canonical tool name (e.g. `"app.press_key"`).
     const TOOL_NAME: &'static str;
 
-    /// Returns the LLM-facing `ToolSpec` for this args type.
+    /// LLM-facing tool specification.
     fn spec() -> ToolSpec;
 
     /// Returns the host/RAG metadata profile for this args type (#137).
@@ -38,7 +38,6 @@ pub trait ToolAction: Send + Sync {
     /// Returns the canonical tool name. Implement as `MyArgs::TOOL_NAME`.
     fn name(&self) -> &'static str;
 
-    /// Returns the LLM-facing metadata definition of this tool.
     /// Implement as `MyArgs::spec()`.
     fn definition(&self) -> ToolSpec;
 

@@ -92,12 +92,9 @@ pub fn load_vrm(
     }
 
     let mtoon_materials = mtoon::load_mtoon_materials(&gltf);
-    // walk every skin (not just the first) and
-    // build a merged skeleton + per-primitive JOINTS_0
-    // remap. The remap is applied inside `load_all_meshes`
-    // so each vertex's `JOINTS_0` is translated from its
-    // own skin's index space into the merged-skeleton
-    // index space the runtime updates every frame.
+    // The remap is applied inside `load_all_meshes` so each vertex's
+    // `JOINTS_0` is translated from its own skin's index space into the
+    // merged-skeleton index space the runtime updates every frame.
     let (skeleton, primitive_joint_remap) = load_merged_skeleton_and_remaps(&gltf);
     let (
         mesh,
@@ -175,19 +172,12 @@ pub fn load_vrm(
         );
     }
 
-    // Build the humanoid bone registry from the
-    // `VRMC_vrm.humanoid.humanBones` block. The loader
-    // walks every entry, canonicalises the bone name,
-    // resolves the glTF node + rest transform + Skeleton
-    // joint index, and returns an empty registry for
-    // models without humanoid metadata. The `humanoid`
-    // module logs per-entry warnings itself.
+    // The `humanoid` module logs per-entry warnings itself.
     let humanoid = humanoid::load_humanoid_bones(&gltf, &skeleton);
 
-    // parse the `VRMC_vrm.lookAt` block.
-    // `None` for models without the block (legacy VRM
-    // 0.x, hand-rolled test fixtures) — the runtime falls
-    // back to `LookAtProperties::default()` in that case.
+    // `None` for models without the block (legacy VRM 0.x,
+    // hand-rolled test fixtures) — the runtime falls back to
+    // `LookAtProperties::default()` in that case.
     let look_at = look_at::load_look_at(&gltf);
     if look_at.is_some() {
         tracing::info!(
@@ -198,17 +188,12 @@ pub fn load_vrm(
         );
     }
 
-    // parse per-expression override settings from the
-    // `VRMC_vrm.expressions.{preset,custom}.<name>` tree.
     // Empty for models without the block, in which case the
     // per-frame override pass is a no-op.
 
-    // parse `VRMC_node_constraint` from every glTF
-    // node. Empty for models without the extension.
+    // Empty for models without the extension.
     let node_constraints = node_constraint::load_node_constraints(&gltf);
 
-    // parse `VRMC_springBone` from the glTF root
-    // extensions. `None` for models without the extension.
     let spring_bones = spring_bone::load_spring_bones(&gltf);
     if let Some(ref sb) = spring_bones {
         tracing::info!(
@@ -342,10 +327,9 @@ fn load_all_meshes(
         total_primitive_count
     );
 
-    // Second pass: build one `VrmMesh` per glTF mesh, each holding
-    // its triangle-list primitives. The same `(center, scale)`
-    // transform is applied to every vertex so the whole body
-    // ends up centered on origin and bounded by the target size.
+    // The same `(center, scale)` transform is applied to every vertex
+    // so the whole body ends up centered on origin and bounded by the
+    // target size.
     //
     // also extract morph targets per primitive (position
     // displacements only, normalised by `(center, scale)` so the

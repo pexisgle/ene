@@ -55,12 +55,15 @@ fn spec_llm_facing_only() {
 fn spec_parameters_is_json_schema() {
     let s = ReadArgs::spec();
     // The schema should be a JSON Schema object.
-    let obj = s.parameters.as_object().expect("parameters is an object");
+    let obj = s
+        .parameters
+        .as_object()
+        .expect("spec parameters is a JSON object");
     assert_eq!(obj.get("type").and_then(|v| v.as_str()), Some("object"));
     let props = obj
         .get("properties")
         .and_then(|v| v.as_object())
-        .expect("properties is an object");
+        .expect("parameters has a properties map");
     assert!(props.contains_key("path"));
     assert!(props.contains_key("max_bytes"));
 }

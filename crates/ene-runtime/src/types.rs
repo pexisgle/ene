@@ -5,18 +5,18 @@ use serde::{Deserialize, Serialize};
 pub struct RequestId(String);
 
 impl RequestId {
-    /// Creates a new instance from a string.
+    /// Wraps the given string value.
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
-    /// Returns the inner string slice.
+    /// Borrows the inner string.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// Consumes self and returns the inner String.
+    /// Consumes self and returns the inner string.
     #[must_use]
     pub fn into_inner(self) -> String {
         self.0
@@ -55,7 +55,7 @@ impl TurnId {
         Self(uuid::Uuid::new_v4().to_string())
     }
 
-    /// Returns the inner string slice.
+    /// Borrows the inner string.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0

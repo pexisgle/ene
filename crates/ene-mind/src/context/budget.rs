@@ -506,7 +506,7 @@ mod tests {
         let kernel_section = packed
             .packet
             .section(PromptSectionKind::IdentityKernel)
-            .expect("kernel");
+            .expect("test packet includes identity kernel");
         assert!(kernel_section.content.contains("KERNEL_ALWAYS_PRESENT"));
         assert!(
             packed

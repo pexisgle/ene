@@ -186,8 +186,14 @@ mod tests {
         assert!((state.arousal - back.arousal).abs() < f32::EPSILON);
         assert!((state.dominance - back.dominance).abs() < f32::EPSILON);
         assert_eq!(state.discrete_emotions.len(), back.discrete_emotions.len());
-        let state_joy = state.discrete_emotions.first().expect("state joy emotion");
-        let back_joy = back.discrete_emotions.first().expect("back joy emotion");
+        let state_joy = state
+            .discrete_emotions
+            .first()
+            .expect("fixture has joy emotion");
+        let back_joy = back
+            .discrete_emotions
+            .first()
+            .expect("round-tripped fixture has joy emotion");
         assert_eq!(state_joy.label, back_joy.label);
         assert!((state_joy.intensity - back_joy.intensity).abs() < f32::EPSILON);
     }

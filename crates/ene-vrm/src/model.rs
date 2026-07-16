@@ -1530,5 +1530,5 @@ impl From<Mat4> for SkinMatrix {
 impl SkinMatrix {
     /// Size in bytes of one matrix — used by the loader to size the
     /// storage buffer.
-    pub const SIZE: NonZeroU64 = NonZeroU64::new(64).expect("64 is non-zero");
+    pub const SIZE: NonZeroU64 = NonZeroU64::new(64).expect("const: 64 is non-zero");
 }

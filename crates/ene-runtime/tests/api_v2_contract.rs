@@ -23,7 +23,7 @@ fn test_config_memory_off() -> EneConfig {
     let mut config = EneConfig::default();
     let mut store = ene_store::StoreConfig::default();
     store.enabled = false;
-    config.set_section(&store).expect("store config");
+    config.set_section(&store).expect("store config merges");
     let mut tools = ene_tool_host::ToolConfig::default();
     tools.enabled = false;
     let _ = config.set_section(&tools);
@@ -40,8 +40,12 @@ fn test_config_memory_off() -> EneConfig {
 async fn open_returns_ready_handle() {
     let handle = EneHandle::open(test_config_memory_off(), test_card())
         .await
-        .expect("open");
-    let snapshot = handle.diagnostics().get_snapshot().await.expect("snapshot");
+        .expect("open initializes handle");
+    let snapshot = handle
+        .diagnostics()
+        .get_snapshot()
+        .await
+        .expect("snapshot succeeds");
     assert!(
         snapshot.character_card.is_some(),
         "card must be loaded before open returns"
@@ -57,9 +61,9 @@ async fn open_returns_ready_handle() {
 async fn second_run_returns_busy() {
     let handle = EneHandle::open(test_config_memory_off(), test_card())
         .await
-        .expect("open");
+        .expect("open initializes handle");
 
-    let turn1 = handle.run("hello").expect("first run");
+    let turn1 = handle.run("hello").expect("first run completes");
     let busy = handle.run("again");
     assert!(
         matches!(busy, Err(RunError::Busy)),
@@ -87,7 +91,7 @@ async fn second_run_returns_busy() {
 async fn cancel_wrong_turn_returns_mismatch() {
     let handle = EneHandle::open(test_config_memory_off(), test_card())
         .await
-        .expect("open");
+        .expect("open initializes handle");
     let wrong = TurnId::new();
     let err = handle.cancel(&wrong);
     assert!(
@@ -101,10 +105,10 @@ async fn cancel_wrong_turn_returns_mismatch() {
 async fn cancel_emits_terminal_exactly_once_with_matching_turn() {
     let handle = EneHandle::open(test_config_memory_off(), test_card())
         .await
-        .expect("open");
+        .expect("open initializes handle");
     let mut rx = handle.subscribe();
-    let turn = handle.run("cancel me").expect("run");
-    handle.cancel(&turn).expect("cancel");
+    let turn = handle.run("cancel me").expect("run completes");
+    handle.cancel(&turn).expect("cancel targets running turn");
 
     // Yield so the actor processes Run + Cancel (and any stream race).
     for _ in 0..64 {
@@ -176,9 +180,9 @@ async fn store_off_run_emits_terminal() {
     // not be used as a success path for this contract.
     let handle = EneHandle::open(test_config_memory_off(), test_card())
         .await
-        .expect("open");
+        .expect("open initializes handle");
     let mut rx = handle.subscribe();
-    let turn = handle.run("hello with memory off").expect("run");
+    let turn = handle.run("hello with memory off").expect("run completes");
 
     let mut saw_terminal = false;
     for _ in 0..200 {
@@ -216,8 +220,12 @@ async fn store_off_run_emits_terminal() {
 async fn snapshot_history_is_history_entry() {
     let handle = EneHandle::open(test_config_memory_off(), test_card())
         .await
-        .expect("open");
-    let snapshot = handle.diagnostics().get_snapshot().await.expect("snapshot");
+        .expect("open initializes handle");
+    let snapshot = handle
+        .diagnostics()
+        .get_snapshot()
+        .await
+        .expect("snapshot succeeds");
     // Type-level: Vec<HistoryEntry> — compile-time check via annotation.
     let _: &Vec<ene_mind::HistoryEntry> = &snapshot.history;
     assert!(snapshot.history.is_empty());
@@ -229,7 +237,7 @@ async fn open_rejects_compression_disabled() {
     let mut config = test_config_memory_off();
     let mut mind = ene_mind::MindConfig::default();
     mind.context.compression_enabled = false;
-    config.set_section(&mind).expect("mind");
+    config.set_section(&mind).expect("mind config merges");
 
     let err = EneHandle::open(config, test_card()).await;
     assert!(
@@ -242,9 +250,9 @@ async fn open_rejects_compression_disabled() {
 async fn cancel_frees_gate_for_next_run() {
     let handle = EneHandle::open(test_config_memory_off(), test_card())
         .await
-        .expect("open");
-    let turn1 = handle.run("first").expect("run1");
-    handle.cancel(&turn1).expect("cancel");
+        .expect("open initializes handle");
+    let turn1 = handle.run("first").expect("run completes");
+    handle.cancel(&turn1).expect("cancel targets running turn");
     for _ in 0..64 {
         tokio::task::yield_now().await;
     }

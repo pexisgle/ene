@@ -128,7 +128,10 @@ async fn cognitive_lifecycle_compose_prompt_includes_identity_kernel_and_recall(
         post_history_block: None,
     };
 
-    let pre = engine.before_turn(turn_ctx).await.expect("before_turn");
+    let pre = engine
+        .before_turn(turn_ctx)
+        .await
+        .expect("pre-turn recall succeeds");
     assert!(
         !pre.recalled.is_empty() || pre.recall_plan.search.primary_query_text.contains("matcha")
     );
@@ -154,7 +157,7 @@ async fn cognitive_lifecycle_compose_prompt_includes_identity_kernel_and_recall(
     let composed = engine
         .compose_prompt_packet(compose_ctx, &pre)
         .await
-        .expect("compose");
+        .expect("prompt composition succeeds");
 
     assert!(composed.meta.identity_kernel_included);
     let LlmMessage::System { content } = &composed.messages[0] else {
@@ -185,7 +188,7 @@ async fn cognitive_lifecycle_compose_prompt_includes_identity_kernel_and_recall(
             ene_mind::memory_writer::MemoryWriteProviders::default(),
         )
         .await
-        .expect("after_turn");
+        .expect("post-turn memory write succeeds");
     let loaded = store.get_affect_state("ene").await.unwrap();
     assert_eq!(loaded.character_id, "ene");
     assert_eq!(loaded.mood_label, affect_before.mood_label);
@@ -222,7 +225,10 @@ async fn cognitive_compose_includes_post_history_phi_block() {
         llm_provider: Some(llm.clone()),
         post_history_block: phi.as_deref(),
     };
-    let pre = engine.before_turn(pre_ctx).await.expect("before_turn");
+    let pre = engine
+        .before_turn(pre_ctx)
+        .await
+        .expect("pre-turn recall succeeds");
 
     let compose_ctx = TurnContext {
         config: &mind,
@@ -241,7 +247,7 @@ async fn cognitive_compose_includes_post_history_phi_block() {
     let composed = engine
         .compose_prompt_packet(compose_ctx, &pre)
         .await
-        .expect("compose");
+        .expect("prompt composition succeeds");
 
     assert!(composed.meta.post_history_included);
     let phi_message = composed
@@ -295,7 +301,10 @@ async fn cognitive_compose_includes_active_scene_summary() {
         llm_provider: Some(llm.clone()),
         post_history_block: None,
     };
-    let pre = engine.before_turn(pre_ctx).await.expect("before_turn");
+    let pre = engine
+        .before_turn(pre_ctx)
+        .await
+        .expect("pre-turn recall succeeds");
 
     let compose_ctx = TurnContext {
         config: &mind,
@@ -314,7 +323,7 @@ async fn cognitive_compose_includes_active_scene_summary() {
     let composed = engine
         .compose_prompt_packet(compose_ctx, &pre)
         .await
-        .expect("compose");
+        .expect("prompt composition succeeds");
 
     assert!(composed.meta.scene_summary_included);
     let LlmMessage::System { content } = &composed.messages[0] else {
@@ -414,7 +423,7 @@ async fn post_turn_tool_results_persist_procedure_memory() {
             ene_mind::memory_writer::MemoryWriteProviders::default(),
         )
         .await
-        .expect("after_turn");
+        .expect("post-turn memory write succeeds");
 
     let grounded = store
         .list_typed_memories_by_source_prefix("ene", "tool:", 16)

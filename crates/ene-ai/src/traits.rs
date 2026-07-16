@@ -11,7 +11,7 @@ use crate::message::{LlmMessage, LlmResponseChunk};
 /// Trait implemented by LLM providers to interface with Ene.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
-    /// Returns the unique name of this provider.
+    /// Provider display name (e.g. `"openai"`, `"ollama"`).
     fn name(&self) -> &str;
 
     /// Initiates a chat completion stream with the given messages and tools.
@@ -185,7 +185,6 @@ pub struct LlmProviderRegistry {
 }
 
 impl LlmProviderRegistry {
-    /// Returns the static, thread-safe global registry instance.
     fn global() -> &'static Self {
         static REGISTRY: OnceLock<LlmProviderRegistry> = OnceLock::new();
         REGISTRY.get_or_init(|| Self {

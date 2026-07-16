@@ -12,7 +12,7 @@ use bevy_ecs::prelude::*;
 /// blending, drag integration, FPS counter) or `elapsed` (AI bridge
 /// timeout, emotion queue scheduling).
 #[derive(Resource, Debug, Default)]
-#[expect(dead_code, reason = "Consumed by systems added in Phase 2+")]
+#[expect(dead_code, reason = "yet to be wired to frame systems")]
 pub struct FrameState {
     /// Wall-clock time of the previous tick, used to compute `delta`.
     last_instant: Option<Instant>,
@@ -27,14 +27,14 @@ pub struct FrameState {
 impl FrameState {
     /// Returns the previous tick's [`Instant`], if any.
     #[must_use]
-    #[expect(dead_code, reason = "Consumed by the frame system added in Phase 2")]
+    #[expect(dead_code, reason = "yet to be wired to frame system")]
     pub const fn last_instant(&self) -> Option<Instant> {
         self.last_instant
     }
 
     /// Records a new `last_instant` value. Called by the frame system
     /// added in Phase 2.
-    #[expect(dead_code, reason = "Consumed by the frame system added in Phase 2")]
+    #[expect(dead_code, reason = "yet to be wired to frame system")]
     pub const fn set_last_instant(&mut self, instant: Instant) {
         self.last_instant = Some(instant);
     }

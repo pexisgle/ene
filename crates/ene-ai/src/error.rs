@@ -95,7 +95,7 @@ mod tests {
 
     fn api_error(status: u16, message: &str) -> OpenAIError {
         OpenAIError::ApiError(ApiErrorResponse {
-            status_code: StatusCode::from_u16(status).expect("status"),
+            status_code: StatusCode::from_u16(status).expect("test status code is valid HTTP"),
             api_error: ApiError {
                 message: message.to_string(),
                 r#type: None,

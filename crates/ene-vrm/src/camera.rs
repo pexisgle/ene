@@ -66,13 +66,13 @@ impl OrthographicCamera {
         self.target = target;
     }
 
-    /// Returns the current camera eye position.
+    #[expect(missing_docs, reason = "field name is self-documenting")]
     #[must_use]
     pub const fn eye(&self) -> [f32; 3] {
         self.eye
     }
 
-    /// Returns the current camera target position.
+    #[expect(missing_docs, reason = "field name is self-documenting")]
     #[must_use]
     pub const fn target(&self) -> [f32; 3] {
         self.target

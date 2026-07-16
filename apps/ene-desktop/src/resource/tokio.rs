@@ -8,5 +8,5 @@ use tokio::runtime::Handle;
 
 /// Tokio multi-thread runtime handle.
 #[derive(Resource, Debug, Clone)]
-#[expect(dead_code, reason = "Consumed by AI plugin in Phase 6")]
+#[expect(dead_code, reason = "yet to be wired to AI bridge")]
 pub struct TokioHandle(pub Handle);

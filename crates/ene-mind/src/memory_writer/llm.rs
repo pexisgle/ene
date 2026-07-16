@@ -495,7 +495,7 @@ mod tests {
         let provider = MockProvider::new(json);
         let result = extract(&provider, &ja_turn("I'm working on Ene"), Locale::En)
             .await
-            .expect("extract failed");
+            .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].kind, MemoryKind::Semantic);
         assert_eq!(result[0].title, "project discussion");
@@ -508,7 +508,7 @@ mod tests {
         let provider = MockProvider::new(json);
         let result = extract(&provider, &ja_turn("I love coffee"), Locale::En)
             .await
-            .expect("extract failed");
+            .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].kind, MemoryKind::Preference);
     }
@@ -531,7 +531,7 @@ mod tests {
         let provider = MockProvider::new(json);
         let result = extract(&provider, &ja_turn("just chatting"), Locale::En)
             .await
-            .expect("extract failed");
+            .expect("test fixture produces valid extraction");
         assert!(result.is_empty());
     }
 
@@ -552,7 +552,7 @@ mod tests {
         let provider = MockProvider::new(json);
         let result = extract(&provider, &ja_turn("test"), Locale::En)
             .await
-            .expect("extract failed");
+            .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
         assert!(result[0].confidence <= super::MAX_CONFIDENCE);
     }
@@ -574,7 +574,7 @@ mod tests {
         let provider = MockProvider::new(json);
         let result = extract(&provider, &ja_turn("test"), Locale::En)
             .await
-            .expect("extract failed");
+            .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].kind, MemoryKind::Semantic);
     }
@@ -624,7 +624,7 @@ mod tests {
             Locale::En,
         )
         .await
-        .expect("extract failed");
+        .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
         // Confidence should be reduced due to locale mismatch
         assert!(
@@ -653,7 +653,7 @@ mod tests {
         let provider = MockProvider::new(json);
         let result = extract(&provider, &ja_turn("ゆき"), Locale::En)
             .await
-            .expect("extract failed");
+            .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
         assert!(
             (result[0].confidence - 0.8).abs() < 0.01,
@@ -679,7 +679,7 @@ mod tests {
         let provider = MockProvider::new(json);
         let result = extract(&provider, &ja_turn("Forget about project X"), Locale::En)
             .await
-            .expect("extract failed");
+            .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
         assert!(!result[0].should_persist);
         assert_eq!(result[0].deletion_target_key.as_deref(), Some("project-x"));
@@ -706,7 +706,7 @@ mod tests {
             Locale::En,
         )
         .await
-        .expect("extract failed");
+        .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].commitment_due.as_deref(), Some("tomorrow 15:00"));
     }
@@ -754,7 +754,7 @@ mod tests {
             Locale::En,
         )
         .await
-        .expect("extract failed");
+        .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].kind, MemoryKind::Episodic);
         assert_eq!(result[1].kind, MemoryKind::Relationship);

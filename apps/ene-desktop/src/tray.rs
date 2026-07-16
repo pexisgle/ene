@@ -196,7 +196,7 @@ fn synthetic_icon() -> Icon {
         clippy::expect_used,
         reason = "synthetic RGBA is valid by construction"
     )]
-    Icon::from_rgba(rgba, w, h).expect("32x32 hardcoded RGBA must be a valid tray icon")
+    Icon::from_rgba(rgba, w, h).expect("tray-icon internal bug")
 }
 
 /// Spawn the per-platform event pump that translates

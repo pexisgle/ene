@@ -228,7 +228,7 @@ impl MemoryConfidence {
         Self(raw.clamp(0.0, 1.0))
     }
 
-    /// Return the inner `f32`.
+    /// Unwrap to the raw `f32` value.
     #[must_use]
     pub const fn get(self) -> f32 {
         self.0
@@ -256,7 +256,7 @@ impl MemorySalience {
         Self(raw.clamp(0.0, 1.0))
     }
 
-    /// Return the inner `f32`.
+    /// Unwrap to the raw `f32` value.
     #[must_use]
     pub const fn get(self) -> f32 {
         self.0

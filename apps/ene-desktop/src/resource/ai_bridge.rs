@@ -17,9 +17,9 @@ use bevy_ecs::prelude::Resource;
 use crate::ai_bridge::AiBridge;
 
 #[derive(Resource, Clone)]
-#[expect(dead_code, reason = "Populated by Runtime::resumed in Phase 7")]
+#[expect(dead_code, reason = "yet to be populated by Runtime::resumed")]
 pub struct AiBridgeResource(pub Arc<AiBridge>);
 
 #[derive(Resource, Debug, Default)]
-#[expect(dead_code, reason = "Populated by Runtime::resumed in Phase 7")]
+#[expect(dead_code, reason = "yet to be populated by Runtime::resumed")]
 pub struct ProcessingFlag(pub Arc<AtomicBool>);

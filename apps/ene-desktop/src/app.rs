@@ -129,7 +129,7 @@ mod message_registration {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("tokio runtime");
+            .expect("test runtime builds");
         let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
         let app = build_app(rt.handle().clone(), rx, tx);
         let world = app.world();

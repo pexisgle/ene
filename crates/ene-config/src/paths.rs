@@ -5,7 +5,7 @@ const APP_ID: &str = "dev.pexisgle.ene";
 /// `true` when the binary was compiled in debug mode.
 pub const IS_DEV_BUILD: bool = cfg!(debug_assertions);
 
-/// Returns the OS-standard application data directory for ene.
+/// OS-standard user data directory (`~/.local/share` on Linux, `%APPDATA%` on Windows).
 #[must_use]
 pub fn app_data_dir() -> PathBuf {
     directories::ProjectDirs::from("dev", "pexisgle", "ene").map_or_else(
@@ -32,8 +32,6 @@ fn resolve_assets_dir_impl() -> PathBuf {
     app_data_dir()
 }
 
-/// Returns the assets directory.
-///
 /// In debug builds the source-tree `assets/` is used; in release builds
 /// the app data directory is returned.
 #[must_use]
@@ -42,25 +40,25 @@ pub fn assets_dir() -> PathBuf {
     CACHED.get_or_init(resolve_assets_dir_impl).clone()
 }
 
-/// Returns the models directory (`assets/models`).
+/// VRM model assets directory.
 #[must_use]
 pub fn models_dir() -> PathBuf {
     assets_dir().join("models")
 }
 
-/// Returns the path to `settings.json`.
+/// User-editable settings file.
 #[must_use]
 pub fn config_file_path() -> PathBuf {
     assets_dir().join("settings.json")
 }
 
-/// Returns the path to `settings.schema.json`.
+/// JSON Schema for `settings.json`.
 #[must_use]
 pub fn schema_file_path() -> PathBuf {
     assets_dir().join("schema").join("settings.schema.json")
 }
 
-/// Returns the path to `character_settings.schema.json`.
+/// JSON Schema for character-specific settings.
 #[must_use]
 pub fn character_schema_file_path() -> PathBuf {
     assets_dir()
@@ -68,7 +66,7 @@ pub fn character_schema_file_path() -> PathBuf {
         .join("character_settings.schema.json")
 }
 
-/// Returns the path to `character.schema.json`.
+/// JSON Schema for the character card format.
 #[must_use]
 pub fn character_card_schema_file_path() -> PathBuf {
     assets_dir().join("schema").join("character.schema.json")

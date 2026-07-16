@@ -11,19 +11,19 @@ use bevy_ecs::prelude::*;
 pub struct PointerMoved {
     #[expect(
         dead_code,
-        reason = "Phase 8: device_query is the cursor source of truth; PointerMoved is reserved for a future migration"
+        reason = "reserved for future migration from device_query cursor source"
     )]
     pub logical_x: f32,
     #[expect(
         dead_code,
-        reason = "Phase 8: device_query is the cursor source of truth; PointerMoved is reserved for a future migration"
+        reason = "reserved for future migration from device_query cursor source"
     )]
     pub logical_y: f32,
 }
 
 /// Mouse button state transition.
 #[derive(Message, Debug, Clone, Copy)]
-#[expect(dead_code, reason = "Consumed by input systems in Phase 3+")]
+#[expect(dead_code, reason = "yet to be wired to input systems")]
 pub struct PointerButton {
     pub button: PointerButtonKind,
     pub pressed: bool,
@@ -31,7 +31,7 @@ pub struct PointerButton {
 
 /// Mouse button variants matching the winit names we care about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[expect(dead_code, reason = "Consumed by input systems in Phase 3+")]
+#[expect(dead_code, reason = "yet to be wired to input systems")]
 pub enum PointerButtonKind {
     Left,
     Right,
@@ -41,7 +41,7 @@ pub enum PointerButtonKind {
 
 /// Key press or release, logical key name only.
 #[derive(Message, Debug, Clone, Copy)]
-#[expect(dead_code, reason = "Consumed by input systems in Phase 3+")]
+#[expect(dead_code, reason = "yet to be wired to input systems")]
 pub struct KeyboardKey {
     pub named: Option<NamedKey>,
     pub code: Option<u32>,
@@ -49,7 +49,7 @@ pub struct KeyboardKey {
 
 /// Subset of [`winit::keyboard::NamedKey`] we map explicitly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[expect(dead_code, reason = "Consumed by input systems in Phase 3+")]
+#[expect(dead_code, reason = "yet to be wired to input systems")]
 pub enum NamedKey {
     Escape,
     F1,

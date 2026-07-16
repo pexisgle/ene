@@ -140,7 +140,7 @@ pub struct ToolConfigAccessor {
 }
 
 impl ToolConfigAccessor {
-    /// Create a new accessor.
+    /// Wraps an initial JSON config value for shared read/write access.
     #[must_use]
     pub fn new(initial_config: serde_json::Value) -> Self {
         Self {
@@ -148,8 +148,6 @@ impl ToolConfigAccessor {
         }
     }
 
-    /// Gets the tool configuration.
-    ///
     /// Returns a [`ToolError::InvalidArguments`] when the stored JSON
     /// does not deserialize into `T` — the previous implementation
     /// returned `T::default()` on a deserialize failure, which silently
@@ -163,7 +161,7 @@ impl ToolConfigAccessor {
         })
     }
 
-    /// Sets the tool configuration.
+    /// Overwrite the stored config with a new serializable value.
     #[expect(
         clippy::future_not_send,
         reason = "IPC transport uses single-threaded runtime on some targets"

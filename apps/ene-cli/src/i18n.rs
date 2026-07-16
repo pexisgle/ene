@@ -9,7 +9,6 @@ use std::sync::OnceLock;
 #[folder = "i18n/"]
 struct Localizations;
 
-/// Returns the static language loader for CLI.
 pub fn loader() -> &'static FluentLanguageLoader {
     static LOADER: OnceLock<FluentLanguageLoader> = OnceLock::new();
     LOADER.get_or_init(|| {

@@ -365,7 +365,7 @@ impl ConversationSession {
         }
     }
 
-    /// Returns the last resolved expression name for this session.
+    /// Last expression name resolved during this session.
     #[must_use]
     pub fn last_resolved_expression(&self) -> &str {
         &self.state.last_resolved_expression
@@ -412,19 +412,19 @@ impl ConversationSession {
         &self.history.conversation_history
     }
 
-    /// Returns the current session ID.
+    /// Unique identifier for this session.
     #[must_use]
     pub const fn session_id(&self) -> &SessionId {
         &self.memory.session_id
     }
 
-    /// Returns when the session started (UTC).
+    /// Timestamp when this session was created.
     #[must_use]
     pub const fn session_started_at(&self) -> DateTime<Utc> {
         self.memory.session_started_at
     }
 
-    /// Returns the current conversation turn count.
+    /// Number of turns completed in this session.
     #[must_use]
     pub const fn current_turn_count(&self) -> usize {
         self.state.current_turn_count
@@ -438,13 +438,13 @@ impl ConversationSession {
         }
     }
 
-    /// Returns the timestamp of the last received message, if any.
+    /// Timestamp of the most recent user message.
     #[must_use]
     pub const fn last_message_time(&self) -> Option<DateTime<Utc>> {
         self.state.last_message_time
     }
 
-    /// Returns the number of minutes elapsed since the session started.
+    /// Elapsed minutes since session start.
     #[must_use]
     pub fn session_elapsed_minutes(&self) -> i64 {
         (Utc::now() - self.memory.session_started_at).num_minutes()

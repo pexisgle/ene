@@ -74,15 +74,15 @@ pub enum TrayAction {
 pub enum AiStreamUpdate {
     TextDelta(String),
     ToolCallStart {
-        #[expect(dead_code, reason = "tool call fields consumed by future UI rendering")]
+        #[expect(dead_code, reason = "yet to be wired to tool call UI rendering")]
         name: String,
-        #[expect(dead_code, reason = "tool call fields consumed by future UI rendering")]
+        #[expect(dead_code, reason = "yet to be wired to tool call UI rendering")]
         arguments: String,
     },
     ToolCallResult {
-        #[expect(dead_code, reason = "tool call fields consumed by future UI rendering")]
+        #[expect(dead_code, reason = "yet to be wired to tool call UI rendering")]
         name: String,
-        #[expect(dead_code, reason = "tool call fields consumed by future UI rendering")]
+        #[expect(dead_code, reason = "yet to be wired to tool call UI rendering")]
         result: String,
     },
     PermissionRequired {

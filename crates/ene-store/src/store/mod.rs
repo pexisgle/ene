@@ -591,13 +591,13 @@ impl MemoryStore {
         bytes_to_embedding(bytes)
     }
 
-    /// Returns the database connection handle.
+    /// Raw `sea-orm` connection — used by migration helpers.
     #[must_use]
     pub const fn connection(&self) -> &DatabaseConnection {
         &self.db
     }
 
-    /// Returns the dimensionality of the embedding vectors.
+    /// Vector dimensionality for this store's embedding model.
     #[must_use]
     pub const fn embedding_dim(&self) -> usize {
         self.embedding_dim
@@ -772,12 +772,9 @@ impl MemoryStore {
         let query_bytes = embedding_to_bytes(query_embedding);
         let similarity_expr = cosine_similarity_expr("embedding", &query_bytes);
 
-        // TODO: refactor the threshold filter to reference
-        // the projected `similarity` column once the
-        // SeaORM `expr_as` / `Expr::col` API supports an
-        // `IdenStatic` alias. Today, sea-orm's
-        // `SimpleExpr` lacks a `gte` method, so the
-        // filter has to re-evaluate the expression.
+        // SeaORM's `SimpleExpr` lacks a `gte` method, so the threshold
+        // filter re-evaluates the cosine similarity expression rather
+        // than referencing the projected `similarity` column.
         let select = entities::conversation_summaries::Entity::find()
             .filter(entities::conversation_summaries::Column::CardName.eq(card_name))
             .expr_as(similarity_expr, "similarity")

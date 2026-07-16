@@ -22,7 +22,10 @@ pub enum DbValue {
 }
 
 impl DbValue {
-    /// Returns the value as an `i64` if it is an integer.
+    #[expect(
+        missing_docs,
+        reason = "method name and return type are self-documenting"
+    )]
     #[must_use]
     pub const fn as_i64(&self) -> Option<i64> {
         match self {
@@ -31,7 +34,10 @@ impl DbValue {
         }
     }
 
-    /// Returns the value as a `&str` if it is text.
+    #[expect(
+        missing_docs,
+        reason = "method name and return type are self-documenting"
+    )]
     #[must_use]
     pub fn as_str(&self) -> Option<&str> {
         match self {
@@ -40,7 +46,10 @@ impl DbValue {
         }
     }
 
-    /// Returns the value as a `bool` if it is a boolean.
+    #[expect(
+        missing_docs,
+        reason = "method name and return type are self-documenting"
+    )]
     #[must_use]
     pub const fn as_bool(&self) -> Option<bool> {
         match self {
@@ -49,7 +58,10 @@ impl DbValue {
         }
     }
 
-    /// Returns the value as an `f64` if it is a float.
+    #[expect(
+        missing_docs,
+        reason = "method name and return type are self-documenting"
+    )]
     #[must_use]
     pub const fn as_f64(&self) -> Option<f64> {
         match self {
@@ -58,7 +70,10 @@ impl DbValue {
         }
     }
 
-    /// Returns the value as a byte slice if it is a blob.
+    #[expect(
+        missing_docs,
+        reason = "method name and return type are self-documenting"
+    )]
     #[must_use]
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
@@ -196,7 +211,7 @@ pub enum DbFilter {
 }
 
 impl DbFilter {
-    /// Creates an equality filter.
+    #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
     #[must_use]
     pub fn eq(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
         Self::Eq {
@@ -205,7 +220,7 @@ impl DbFilter {
         }
     }
 
-    /// Creates a not-equal filter.
+    #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
     #[must_use]
     pub fn ne(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
         Self::Ne {
@@ -214,7 +229,7 @@ impl DbFilter {
         }
     }
 
-    /// Creates a less-than filter.
+    #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
     #[must_use]
     pub fn lt(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
         Self::Lt {
@@ -223,7 +238,7 @@ impl DbFilter {
         }
     }
 
-    /// Creates a less-than-or-equal filter.
+    #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
     #[must_use]
     pub fn le(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
         Self::Le {
@@ -232,7 +247,7 @@ impl DbFilter {
         }
     }
 
-    /// Creates a greater-than filter.
+    #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
     #[must_use]
     pub fn gt(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
         Self::Gt {
@@ -241,7 +256,7 @@ impl DbFilter {
         }
     }
 
-    /// Creates a greater-than-or-equal filter.
+    #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
     #[must_use]
     pub fn ge(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
         Self::Ge {
@@ -250,7 +265,7 @@ impl DbFilter {
         }
     }
 
-    /// Creates an IS NULL filter.
+    #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
     #[must_use]
     pub fn is_null(column: impl Into<String>) -> Self {
         Self::IsNull {
@@ -258,7 +273,7 @@ impl DbFilter {
         }
     }
 
-    /// Creates an IS NOT NULL filter.
+    #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
     #[must_use]
     pub fn is_not_null(column: impl Into<String>) -> Self {
         Self::IsNotNull {
@@ -358,7 +373,7 @@ pub struct DbOrderBy {
 }
 
 impl DbOrderBy {
-    /// Creates an ascending ORDER BY clause.
+    #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
     #[must_use]
     pub fn asc(column: impl Into<String>) -> Self {
         Self {
@@ -367,7 +382,7 @@ impl DbOrderBy {
         }
     }
 
-    /// Creates a descending ORDER BY clause.
+    #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
     #[must_use]
     pub fn desc(column: impl Into<String>) -> Self {
         Self {

@@ -54,7 +54,7 @@ pub struct MotionState {
     /// Loaded `.vrma` bytes. Re-loaded by `play_motion`.
     pub asset: Option<Arc<VrmaAsset>>,
     /// Playback machine.
-    #[expect(dead_code, reason = "Read by motion system in Phase 3+")]
+    #[expect(dead_code, reason = "yet to be wired to motion system")]
     pub player: VrmaPlayer,
     /// Path of the current motion file. `None` until first
     /// `play_motion` call.
@@ -88,21 +88,21 @@ impl std::fmt::Debug for SpringBoneState {
 /// helpers can be implemented as trivial conversions.
 #[derive(Component, Debug, Clone, Default)]
 pub struct CharacterCamera(
-    #[expect(dead_code, reason = "Read by render system in Phase 7")] pub OrthographicCamera,
+    #[expect(dead_code, reason = "yet to be wired to render system")] pub OrthographicCamera,
 );
 
 /// Per-character look-at state. `strength = 0` disables the effect.
 #[derive(Component, Debug, Default, Clone)]
 pub struct LookAt {
     /// User-configured strength (0–1). `0` means "no look-at".
-    #[expect(dead_code, reason = "Read by look-at system in Phase 3+")]
+    #[expect(dead_code, reason = "yet to be wired to look-at system")]
     pub strength: f32,
     /// Smoothed world-space target. Updated each frame by
     /// `update_look_at` (Phase 3+ system).
-    #[expect(dead_code, reason = "Read by look-at system in Phase 3+")]
+    #[expect(dead_code, reason = "yet to be wired to look-at system")]
     pub smoothed_world_target: Vec3,
     /// Last known logical cursor position.
-    #[expect(dead_code, reason = "Read by look-at system in Phase 3+")]
+    #[expect(dead_code, reason = "yet to be wired to look-at system")]
     pub last_cursor_logical: Option<Vec2Wrapper>,
 }
 
@@ -115,7 +115,7 @@ pub struct Vec2Wrapper(pub Vec3);
 #[derive(Component, Debug, Default)]
 pub struct EmotionChannel {
     /// Currently-applied emotion, if any.
-    #[expect(dead_code, reason = "Read by emotion system in Phase 3+")]
+    #[expect(dead_code, reason = "yet to be wired to emotion system")]
     pub active: Option<ActiveEmotion>,
 }
 

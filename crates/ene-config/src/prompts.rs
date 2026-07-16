@@ -376,7 +376,7 @@ impl PromptLibrary {
             env!("CARGO_MANIFEST_DIR"),
             "/prompts/en.json"
         )))
-        .expect("built-in en.json is always valid");
+        .expect("bundled en.json is a release-blocker if invalid");
 
         let system = SystemPrompts {
             mascot_context: include_str!(concat!(
@@ -481,7 +481,7 @@ impl PromptLibrary {
             env!("CARGO_MANIFEST_DIR"),
             "/prompts/ja.json"
         )))
-        .expect("built-in ja.json is always valid");
+        .expect("bundled ja.json is a release-blocker if invalid");
 
         let system = SystemPrompts {
             mascot_context: include_str!(concat!(
@@ -569,13 +569,13 @@ impl PromptLibrary {
         }
     }
 
-    /// Returns the language code this library was loaded for.
+    /// Language code (`"en"` or `"ja"`) for this prompt library instance.
     #[must_use]
     pub fn lang(&self) -> &str {
         &self.lang
     }
 
-    /// Returns reference to system prompts.
+    /// System-level prompts for the configured language.
     #[must_use]
     pub const fn system(&self) -> &SystemPrompts {
         &self.data.system

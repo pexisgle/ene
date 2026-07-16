@@ -7,17 +7,17 @@ macro_rules! define_id_type {
         pub struct $name(String);
 
         impl $name {
-            /// Creates a new instance from a string.
+            /// Wraps the given string value.
             pub fn new(id: impl Into<String>) -> Self {
                 Self(id.into())
             }
 
-            /// Returns the inner string slice.
+            /// Borrows the inner string.
             pub fn as_str(&self) -> &str {
                 &self.0
             }
 
-            /// Consumes self and returns the inner String.
+            /// Consumes self and returns the inner string.
             pub fn into_inner(self) -> String {
                 self.0
             }

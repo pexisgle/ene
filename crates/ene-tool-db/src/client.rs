@@ -84,7 +84,7 @@ impl DbClient {
         }
     }
 
-    /// Returns the socket path this client was connected to.
+    /// Path the IPC client connected to.
     #[must_use]
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
@@ -308,7 +308,7 @@ impl DbClient {
         }
     }
 
-    /// Returns the most recently inserted `rowid` on this connection.
+    /// Most recent `rowid` from an INSERT on this connection.
     pub async fn last_insert_rowid(&mut self) -> Result<i64, DbError> {
         let resp = Self::check_error(self.send_request(&DbRequest::LastInsertRowId).await?)?;
         match resp {
@@ -319,7 +319,7 @@ impl DbClient {
         }
     }
 
-    /// Sends a health-check ping to the server.
+    /// Health-check round-trip to the IPC server.
     pub async fn ping(&mut self) -> Result<(), DbError> {
         let resp = Self::check_error(self.send_request(&DbRequest::Ping).await?)?;
         match resp {

@@ -112,8 +112,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
         },
     );
 
-    // Embeddings are optional: without an embedder (typical when store is off),
-    // skip recall/write that needs vectors and continue with chat + tools.
     let query_embedding = if let Some(emb_prov) = &embedder {
         tracing::info!(%turn, "Generating user query embedding...");
         match ene_ai::embed_query(emb_prov.as_ref(), &user_input).await {
@@ -538,8 +536,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                     character_id: &card_name,
                     user_id: &user_name,
                 };
-                // Sole runtime write entry: CognitionEngine::after_turn (#121).
-                // write_every_turn is gated inside mind's after_turn path.
                 if let Err(error) = engine
                     .after_turn(
                         store,

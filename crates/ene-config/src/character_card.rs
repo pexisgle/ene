@@ -317,7 +317,6 @@ pub fn resolve_expressions(card: &CharacterCardV3) -> Vec<ResolvedExpression> {
 
 impl CharacterCardData {
     /// Returns the display name for this character.
-    /// Returns the display name for this character.
     ///
     /// Prefers `nickname` over `name` when `nickname` is non-empty.
     #[must_use]

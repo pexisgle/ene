@@ -98,7 +98,7 @@ impl ToolName {
         self.0.rsplit_once('.').map_or(&self.0, |(_, a)| a)
     }
 
-    /// Returns the inner string as a borrowed `&str`.
+    /// Borrow the fully-qualified name (e.g. `"filesystem.read"`).
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -564,7 +564,7 @@ pub enum EmbeddingField {
 }
 
 impl EmbeddingField {
-    /// Returns the string label persisted in the index.
+    /// The index field name used in the tool RAG embedding store.
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
