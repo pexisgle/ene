@@ -59,8 +59,8 @@ ene-tool-db = { path = "crates/ene-tool-db" }
 ene-vrm = { path = "crates/ene-vrm" }
 
 # --- Database ---
-sea-orm = { version = "2.0.0-rc.41", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros", "with-chrono"] }
-sea-orm-migration = { version = "2.0.0-rc.41", features = ["runtime-tokio-rustls", "sqlx-sqlite"] }
+sea-orm = { version = "2.0.0-rc.43", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros", "with-chrono"] }
+sea-orm-migration = { version = "2.0.0-rc.43", features = ["runtime-tokio-rustls", "sqlx-sqlite"] }
 libsqlite3-sys = { version = "0.37", features = ["bundled"] }
 sqlite-vec = "0.1"
 
@@ -89,7 +89,7 @@ ego-tree = "0.11"
 # --- App / tool dependencies (centralized per AGENTS.md §4.1) ---
 device_query = "4"
 gtk = "0.18.2"
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
 dialoguer = "0.12"
 console = "0.16.3"
 futures-core = "0.3"
@@ -124,9 +124,9 @@ glam = { version = "0.33", features = ["bytemuck"] }
 gltf = { version = "1.4", default-features = false }
 encase = "0.12"
 bytemuck = { version = "1", features = ["derive"] }
-pollster = "0.4"
+pollster = "1.0"
 raw-window-handle = "0.6"
-rapier3d = { version = "0.33", features = ["simd-stable"] }
+rapier3d = { version = "0.34", features = ["simd-stable"] }
 
 # --- bevy_ecs (scheduler-only; no bevy_engine rendering/winit) ---
 bevy_ecs = { version = "0.19", default-features = false }

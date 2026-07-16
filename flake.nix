@@ -5,23 +5,6 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     rust-overlay.url = "github:oxalica/rust-overlay";
     flake-utils.url = "github:numtide/flake-utils";
-    agent-skills.url = "github:Kyure-A/agent-skills-nix";
-    wshobson-agents = {
-      url = "github:wshobson/agents";
-      flake = false;
-    };
-    apollo-skills = {
-      url = "github:apollographql/skills";
-      flake = false;
-    };
-    rust-skills = {
-      url = "github:actionbook/rust-skills";
-      flake = false;
-    };
-    everything-claude-code = {
-      url = "github:affaan-m/everything-claude-code";
-      flake = false;
-    };
   };
 
   outputs =
@@ -29,11 +12,6 @@
       nixpkgs,
       rust-overlay,
       flake-utils,
-      agent-skills,
-      wshobson-agents,
-      apollo-skills,
-      rust-skills,
-      everything-claude-code,
       ...
     }:
     flake-utils.lib.eachDefaultSystem (
@@ -42,48 +20,6 @@
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs {
           inherit system overlays;
-        };
-        agentLib = agent-skills.lib.agent-skills;
-
-        sources = {
-          wshobson = {
-            path = wshobson-agents;
-            subdir = "plugins/systems-programming/skills";
-          };
-          apollo = {
-            path = apollo-skills;
-            subdir = "skills";
-          };
-          rust-skills-src = {
-            path = rust-skills;
-            subdir = "skills";
-          };
-          everything = {
-            path = everything-claude-code;
-            subdir = "skills";
-          };
-        };
-
-        catalog = agentLib.discoverCatalog sources;
-        allowlist = agentLib.allowlistFor {
-          inherit catalog sources;
-          enable = [
-            "rust-async-patterns"
-            "rust-best-practices"
-            "m15-anti-pattern"
-            "rust-testing"
-          ];
-        };
-        selection = agentLib.selectSkills {
-          inherit catalog allowlist sources;
-          skills = { };
-        };
-        bundle = agentLib.mkBundle { inherit pkgs selection; };
-
-        localTargets = {
-          opencode = agentLib.defaultLocalTargets.opencode // {
-            enable = true;
-          };
         };
 
         # Create compatibility symlinks for crates expecting standard libappindicator3.
@@ -172,21 +108,9 @@
             # libxdo (required by enigo)
             NIX_LDFLAGS = "-L${pkgs.xdotool}/lib";
 
-            shellHook =
-              let
-                skillsHook = agentLib.mkShellHook {
-                  inherit pkgs bundle;
-                  targets = localTargets;
-                };
-              in
-              ''
-                export CARGO_TARGET_DIR="$PWD/target"
-                if [[ "$-" == *i* ]]; then
-                  set +e
-                  ${skillsHook}
-                  set -e
-                fi
-              '';
+            shellHook = ''
+              export CARGO_TARGET_DIR="$PWD/target"
+            '';
           };
       }
     );
