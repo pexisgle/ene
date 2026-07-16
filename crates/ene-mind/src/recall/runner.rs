@@ -277,7 +277,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ene_ai::EmbeddingProvider for MockEmbedder {
-        fn model_name(&self) -> &str {
+        fn model_name(&self) -> &'static str {
             "mock"
         }
 
@@ -306,7 +306,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmProvider for MockHydeLlm {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "mock-hyde"
         }
 

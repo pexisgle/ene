@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::float_cmp))]
+
 //! Character rendering. Owns the loaded VRM, depth texture, the
 //! orthographic camera, and per-frame state (look-at, drag, motion
 //! playback, spring bones, FXAA). The runtime calls

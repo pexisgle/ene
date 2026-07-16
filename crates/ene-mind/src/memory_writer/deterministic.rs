@@ -520,8 +520,10 @@ mod tests {
             assistant_message: None,
             tool_results: &tools,
         };
-        let mut cfg = ToolGroundingConfig::default();
-        cfg.persist_success_procedure = true;
+        let cfg = ToolGroundingConfig {
+            persist_success_procedure: true,
+            ..Default::default()
+        };
         let out =
             extract_with_tool_grounding(&turn, Locale::Ja, 0.0, &cfg).expect("extract failed");
         assert!(out.iter().any(|c| c.kind == MemoryKind::Procedure));

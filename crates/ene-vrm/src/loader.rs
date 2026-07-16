@@ -1476,7 +1476,7 @@ mod tests {
         let a = normalize_morph_offset([0.1, 0.0, -0.05], 0.5);
         let b = normalize_morph_offset([0.2, 0.0, -0.10], 0.5);
         for i in 0..3 {
-            assert!((a[i] * 2.0 - b[i]).abs() < 1e-6, "axis {i}");
+            assert!(a[i].mul_add(2.0, -b[i]).abs() < 1e-6, "axis {i}");
         }
     }
 
@@ -1524,19 +1524,19 @@ mod tests {
         // widen to u32, no clamp. A 512-joint model with a
         // wrist + fingertip vertex exercises the upper half of
         // the range.
-        let high_index: u16 = 511;
-        let joints: [u32; 4] = [high_index as u32, 0, 0, 0];
+        let high_index: u32 = 511;
+        let joints: [u32; 4] = [u32::from(high_index), 0, 0, 0];
         // The WGSL palette index is `u32` so a `Uint32x4`
         // attribute is the only correct upload format. The
         // `[u8; 4]` packing (this struct) would have saturated
         // `511` to `255`.
         assert_eq!(joints[0], 511);
         // The cast path must not produce 0 / 255 by truncation.
-        assert_ne!(joints[0] as u8 as u32, 511);
+        assert_ne!(u32::from(joints[0] as u8), 511);
     }
 
     /// the loader flags a malformed model as
-    /// "has_nonzero_joints" when any primitive carries a
+    /// "`has_nonzero_joints`" when any primitive carries a
     /// non-trivial `JOINTS_0` accessor. The predicate is the
     /// one the `load_all_meshes` body uses inline (it is not
     /// pulled into a public function because the glTF
@@ -1557,8 +1557,7 @@ mod tests {
             let has = joints.iter().any(|x| *x != 0);
             assert_eq!(
                 has, expected,
-                "joints {:?} should be flagged = {}",
-                joints, expected
+                "joints {joints:?} should be flagged = {expected}"
             );
         }
     }

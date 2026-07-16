@@ -642,7 +642,7 @@ where
 }
 
 #[cfg(test)]
-#[allow(clippy::undocumented_unsafe_blocks)]
+#[expect(clippy::undocumented_unsafe_blocks)]
 mod tests {
     use super::*;
     use figment::{
@@ -688,7 +688,7 @@ mod tests {
     /// it up under `provider` (lowercase) and silently got nothing.
     #[test]
     fn env_uppercase_folds_to_lowercase_path() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
         unsafe {
             std::env::set_var("ENE_TEST_PROVIDER__API_KEY", "sk-test-1234");
@@ -719,7 +719,7 @@ mod tests {
     /// idempotent for already-lowercase input.
     #[test]
     fn env_lowercase_works() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         unsafe {
             std::env::set_var("ENE_TEST_provider__api_key", "sk-lowercase");
         }
@@ -773,11 +773,11 @@ mod tests {
         assert!(result.is_ok(), "empty settings.json should extract ok");
     }
 
-    /// Regression for #47 (bug 3): set_nested used to
+    /// Regression for #47 (bug 3): `set_nested` used to
     /// silently drop the write when the path crossed
     /// a non-object leaf (e.g. a user's settings.json
     /// has `"provider": "some string"` and the
-    /// set_section path is `["provider", "api_key"]`).
+    /// `set_section` path is `["provider", "api_key"]`).
     /// Now the write returns a typed error.
     #[test]
     fn set_nested_through_non_object_leaf_errors() {

@@ -1,6 +1,6 @@
 //! Diagnostic: print the diagnostic values that
 //! `apps/ene-desktop-v2` would log on the first frame.
-//! Lets us sanity-check the loader's AABB / normalize_scale /
+//! Lets us sanity-check the loader's AABB / `normalize_scale` /
 //! center / merged-skeleton joint count and the resulting
 //! model matrix without spinning up a winit window.
 
@@ -10,9 +10,7 @@ use std::path::PathBuf;
 
 fn main() {
     let path: PathBuf = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("../assets/characters/Alicia/AliciaSolid.vrm"));
+        .nth(1).map_or_else(|| PathBuf::from("../assets/characters/Alicia/AliciaSolid.vrm"), PathBuf::from);
     println!("Reading {path:?}");
 
     let vrm_bytes = std::fs::read(&path).expect("read vrm file");
@@ -158,17 +156,11 @@ fn main() {
     );
 
     // Diagonal scale extraction.
-    let scale_x = (model_matrix.x_axis.x.powi(2)
-        + model_matrix.y_axis.x.powi(2)
-        + model_matrix.z_axis.x.powi(2))
+    let scale_x = model_matrix.z_axis.x.mul_add(model_matrix.z_axis.x, model_matrix.y_axis.x.mul_add(model_matrix.y_axis.x, model_matrix.x_axis.x.powi(2)))
     .sqrt();
-    let scale_y = (model_matrix.x_axis.y.powi(2)
-        + model_matrix.y_axis.y.powi(2)
-        + model_matrix.z_axis.y.powi(2))
+    let scale_y = model_matrix.z_axis.y.mul_add(model_matrix.z_axis.y, model_matrix.y_axis.y.mul_add(model_matrix.y_axis.y, model_matrix.x_axis.y.powi(2)))
     .sqrt();
-    let scale_z = (model_matrix.x_axis.z.powi(2)
-        + model_matrix.y_axis.z.powi(2)
-        + model_matrix.z_axis.z.powi(2))
+    let scale_z = model_matrix.z_axis.z.mul_add(model_matrix.z_axis.z, model_matrix.y_axis.z.mul_add(model_matrix.y_axis.z, model_matrix.x_axis.z.powi(2)))
     .sqrt();
     println!("\ndiagonal scale (X, Y, Z) = ({scale_x:.4}, {scale_y:.4}, {scale_z:.4})");
     println!(

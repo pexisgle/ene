@@ -538,7 +538,7 @@ mod tests {
     }
 
     /// `remove_character_colliders` must free the body and drop
-    /// the entity mapping, so a subsequent cast_ray no longer
+    /// the entity mapping, so a subsequent `cast_ray` no longer
     /// hits.
     #[test]
     fn remove_character_colliders_drops_body() {

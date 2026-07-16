@@ -547,8 +547,10 @@ mod tests {
 
     #[test]
     fn validate_context_config_requires_compression() {
-        let mut config = ContextConfig::default();
-        config.compression_enabled = false;
+        let config = ContextConfig {
+            compression_enabled: false,
+            ..Default::default()
+        };
         assert!(validate_context_config(&config).is_err());
     }
 

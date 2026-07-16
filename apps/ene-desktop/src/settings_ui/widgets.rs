@@ -290,6 +290,7 @@ fn push_default_expression(
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
 

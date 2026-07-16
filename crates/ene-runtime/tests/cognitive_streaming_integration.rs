@@ -1,6 +1,6 @@
 //! Integration smoke test for cognitive streaming via `run_stream` (#100).
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::field_reassign_with_default)]
 
 use async_trait::async_trait;
 use ene_ai::{
@@ -21,7 +21,7 @@ struct MockEmbedder;
 
 #[async_trait]
 impl EmbeddingProvider for MockEmbedder {
-    fn model_name(&self) -> &str {
+    fn model_name(&self) -> &'static str {
         "mock-4d"
     }
 
@@ -43,7 +43,7 @@ struct MockLlm {
 
 #[async_trait]
 impl LlmProvider for MockLlm {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "mock"
     }
 

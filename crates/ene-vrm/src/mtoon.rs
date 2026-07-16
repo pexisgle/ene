@@ -574,6 +574,7 @@ impl MToonUniform {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
 
@@ -730,8 +731,8 @@ mod tests {
         assert!(f & flags::BASE_COLOR_TEXTURE != 0);
         assert!(f & flags::SHADE_MULTIPLY_TEXTURE != 0);
         assert!(f & flags::MATCAP_TEXTURE != 0);
-        assert!(f & flags::EMISSIVE_TEXTURE == 0);
-        assert!(f & flags::RIM_MULTIPLY_TEXTURE == 0);
+        assert_eq!(f & flags::EMISSIVE_TEXTURE, 0);
+        assert_eq!(f & flags::RIM_MULTIPLY_TEXTURE, 0);
     }
 
     #[test]

@@ -379,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::assertions_on_constants)]
+    #[allow(clippy::assertions_on_constants)]
     fn mask_target_format_is_rgba8unorm() {
         assert_eq!(MASK_TARGET_FORMAT, wgpu::TextureFormat::Rgba8Unorm);
         assert_eq!(BYTES_PER_PIXEL, 4);

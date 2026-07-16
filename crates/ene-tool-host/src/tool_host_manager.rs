@@ -591,10 +591,10 @@ mod tests {
     #[test]
     fn delay_for_restart_grows_then_caps() {
         assert_eq!(delay_for_restart(0), Duration::from_millis(500));
-        assert_eq!(delay_for_restart(1), Duration::from_millis(1_000));
-        assert_eq!(delay_for_restart(2), Duration::from_millis(2_000));
-        assert_eq!(delay_for_restart(3), Duration::from_millis(4_000));
-        assert_eq!(delay_for_restart(4), Duration::from_millis(8_000));
+        assert_eq!(delay_for_restart(1), Duration::from_secs(1));
+        assert_eq!(delay_for_restart(2), Duration::from_secs(2));
+        assert_eq!(delay_for_restart(3), Duration::from_secs(4));
+        assert_eq!(delay_for_restart(4), Duration::from_secs(8));
         // Saturates at MAX_DELAY_MS for very high counts.
         assert_eq!(delay_for_restart(30), Duration::from_millis(MAX_DELAY_MS));
     }

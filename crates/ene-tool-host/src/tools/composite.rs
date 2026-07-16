@@ -194,6 +194,7 @@ impl ToolRegistry for CompositeToolRegistry {
 }
 
 #[cfg(test)]
+#[allow(clippy::significant_drop_tightening)]
 mod tests {
     use super::*;
     use ene_tool_proto::ToolName;

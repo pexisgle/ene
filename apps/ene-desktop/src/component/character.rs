@@ -129,10 +129,10 @@ pub struct BoneColliders(pub Vec<BoneShapeSpec>);
 /// space. Updated each frame from `CharacterSettings::character_state`.
 #[derive(Component, Debug, Default, Clone, Copy)]
 pub struct CharacterTransform {
-    #[expect(dead_code, reason = "Read by transform system in Phase 4")]
+    #[allow(dead_code)]
     pub translation: Vec3,
-    #[expect(dead_code, reason = "Read by transform system in Phase 4")]
+    #[allow(dead_code)]
     pub rotation: Quat,
-    #[expect(dead_code, reason = "Test reads `scale` in `bundle_defaults_are_safe`")]
+    #[allow(dead_code)]
     pub scale: f32,
 }

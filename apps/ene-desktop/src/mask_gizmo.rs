@@ -99,6 +99,7 @@ pub fn build_mask_rect_lines(
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
 

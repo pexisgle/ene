@@ -149,6 +149,7 @@ pub fn body_tracking_for_strength(strength: f32) -> BodyTracking {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
 

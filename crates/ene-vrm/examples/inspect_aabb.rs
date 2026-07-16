@@ -11,7 +11,7 @@
 //! false` dependency surface as the lib itself.
 //!
 //! Usage:
-//!   cargo run -p ene-vrm --example inspect_aabb -- <path/to/model.vrm>
+//!   cargo run -p ene-vrm --example `inspect_aabb` -- <path/to/model.vrm>
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::type_complexity)]
 
@@ -19,9 +19,7 @@ use std::path::PathBuf;
 
 fn main() {
     let path: PathBuf = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("../assets/characters/Alicia/AliciaSolid.vrm"));
+        .nth(1).map_or_else(|| PathBuf::from("../assets/characters/Alicia/AliciaSolid.vrm"), PathBuf::from);
     println!("Reading {path:?}");
 
     let vrm_bytes = std::fs::read(&path).expect("read vrm file");
@@ -34,7 +32,7 @@ fn main() {
     }
     let magic = &glb_bytes[0..4];
     if magic != b"glTF" {
-        eprintln!("not a .glb (magic = {:?})", magic);
+        eprintln!("not a .glb (magic = {magic:?})");
         return;
     }
     let total_len = u32::from_le_bytes(glb_bytes[8..12].try_into().unwrap()) as usize;
@@ -58,7 +56,7 @@ fn main() {
             b"JSON" => json = Some(payload.to_vec()),
             b"BIN\0" => bin = Some(payload.to_vec()),
             _ => {
-                eprintln!("unknown chunk type {:?} at offset {cursor}", chunk_type);
+                eprintln!("unknown chunk type {chunk_type:?} at offset {cursor}");
             }
         }
         let padded = (chunk_len + 3) & !3;
@@ -141,13 +139,12 @@ fn main() {
         let ibm_count = skin
             .reader(|_| blob)
             .read_inverse_bind_matrices()
-            .map(|ibm| ibm.count())
-            .unwrap_or(0);
+            .map_or(0, std::iter::Iterator::count);
         let skeleton_root = skin.skeleton().map(|n| n.index());
-        let mismatch = if ibm_count != joints.len() {
-            " ★ MISMATCH"
-        } else {
+        let mismatch = if ibm_count == joints.len() {
             ""
+        } else {
+            " ★ MISMATCH"
         };
         println!(
             "  skin[{skin_idx}]: joints={} ibm={} skeleton_root={:?}{mismatch}",
@@ -196,14 +193,13 @@ fn main() {
             let max_joint_idx = joints
                 .as_ref()
                 .and_then(|v| v.iter().flat_map(|j| j.iter()).max().copied());
-            let nonzero = max_joint_idx.map(|m| m > 0).unwrap_or(false);
+            let nonzero = max_joint_idx.is_some_and(|m| m > 0);
             if nonzero {
                 nonzero_joint_count += 1;
             }
             *skin_ref_counts.entry(mesh_skin).or_insert(0) += 1;
             println!(
-                "  mesh[{mesh_idx}].prim[{prim_idx}]: node_skin={:?}  max_joint_idx={:?}  joints_nonzero={nonzero}",
-                mesh_skin, max_joint_idx
+                "  mesh[{mesh_idx}].prim[{prim_idx}]: node_skin={mesh_skin:?}  max_joint_idx={max_joint_idx:?}  joints_nonzero={nonzero}"
             );
         }
     }
@@ -233,8 +229,7 @@ fn main() {
     for (bone_name, node_idx) in &humanoid {
         let in_skin = all_skin_joint_indices
             .first()
-            .map(|s| s.contains(node_idx))
-            .unwrap_or(false);
+            .is_some_and(|s| s.contains(node_idx));
         let joint = all_skin_joint_indices
             .first()
             .and_then(|s| s.iter().position(|n| n == node_idx));
@@ -367,7 +362,7 @@ fn extract_humanoid_bones(json: &[u8]) -> Vec<(String, usize)> {
     for (raw_name, value) in bones {
         let Some(node_idx) = value
             .get("node")
-            .and_then(|n| n.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .map(|n| n as usize)
         else {
             continue;

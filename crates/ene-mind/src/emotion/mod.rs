@@ -220,6 +220,7 @@ pub fn compute_mood_label(state: &AffectState) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use std::time::Duration;
 
@@ -237,7 +238,7 @@ mod tests {
             let mut input = TurnAffectInput {
                 state: &mut state,
                 user_message: "Thank you!",
-                elapsed_since_update: Duration::from_secs(60),
+                elapsed_since_update: Duration::from_mins(1),
                 recent_turn_count: 4,
                 classifier_proposal: None,
                 classifier_min_confidence: 0.5,

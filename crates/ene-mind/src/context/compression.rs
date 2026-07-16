@@ -389,8 +389,10 @@ mod tests {
 
     #[test]
     fn trigger_disabled_when_compression_off() {
-        let mut config = ContextConfig::default();
-        config.compression_enabled = false;
+        let config = ContextConfig {
+            compression_enabled: false,
+            ..Default::default()
+        };
         assert!(evaluate_compression_trigger(&config, 100, 100).is_none());
     }
 

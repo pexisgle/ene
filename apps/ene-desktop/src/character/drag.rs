@@ -405,7 +405,7 @@ mod tests {
         assert!(delta.x > 0.0, "delta.x = {}", delta.x);
         assert!(delta.y.abs() < 1e-3, "delta.y = {}", delta.y);
         assert!(
-            (delta.x - 10.0 * (2.6 / 480.0)).abs() < 1e-3,
+            10.0f32.mul_add(-(2.6 / 480.0), delta.x).abs() < 1e-3,
             "delta.x = {} (expected ~{})",
             delta.x,
             10.0 * (2.6 / 480.0)

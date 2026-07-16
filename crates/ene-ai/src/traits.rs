@@ -224,6 +224,7 @@ impl LlmProviderRegistry {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
 
@@ -255,7 +256,7 @@ mod tests {
             self.dims
         }
 
-        fn model_name(&self) -> &str {
+        fn model_name(&self) -> &'static str {
             "mock"
         }
     }

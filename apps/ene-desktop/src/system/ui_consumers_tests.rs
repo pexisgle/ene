@@ -307,7 +307,7 @@ fn platform_plugin_provides_cursor_state_and_pointer_moved_is_reserved() {
     schedule.run(app.world_mut());
 
     assert!(app.world().resource::<CursorState>().physical.is_none());
-    assert!(app.world().resource::<Messages<PointerMoved>>().len() == 1);
+    assert_eq!(app.world().resource::<Messages<PointerMoved>>().len(), 1);
 }
 
 #[test]

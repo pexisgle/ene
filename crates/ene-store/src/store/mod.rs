@@ -3553,7 +3553,7 @@ mod tests {
     /// must apply `foreign_keys=ON` (and the other
     /// safety PRAGMAs) on every connection it opens. For
     /// an in-memory store `journal_mode=WAL` is a no-op
-    /// (SQLite returns `memory`), but `foreign_keys` and
+    /// (`SQLite` returns `memory`), but `foreign_keys` and
     /// `busy_timeout` are still meaningful.
     #[tokio::test]
     async fn pragmas_are_applied_on_open() {
@@ -4235,7 +4235,7 @@ mod tests {
             crate::MemoryStatus::UserDeleted,
         ] {
             let mut item = base.clone();
-            item.title = format!("{:?}", status);
+            item.title = format!("{status:?}");
             item.status = status;
             insert_memory_with_embedding(&store, &item, &emb).await;
         }

@@ -99,7 +99,7 @@ mod tests {
     fn decay_moves_valence_toward_zero() {
         let mut state = AffectState::neutral("ene");
         state.valence = 0.8;
-        let reason = apply_decay(&mut state, 30.0, Duration::from_secs(30 * 60)).unwrap();
+        let reason = apply_decay(&mut state, 30.0, Duration::from_mins(30)).unwrap();
         assert!(state.valence < 0.8);
         assert!(state.valence > 0.0);
         assert_eq!(reason.category, "decay");

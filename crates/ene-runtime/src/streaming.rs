@@ -444,6 +444,7 @@ fn inject_user_answers(args_json: &str, answers: &[MultiAnswer]) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::significant_drop_tightening)]
 mod tests {
     use super::*;
 
@@ -771,7 +772,6 @@ mod tests {
                     }
                     EneEvent::UserInputRequired {
                         request_id,
-                        prompt: _,
                         ..
                     } => {
                         let mut guard = consumer_inputs.lock().await;

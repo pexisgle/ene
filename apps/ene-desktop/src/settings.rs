@@ -826,7 +826,7 @@ mod tests {
     /// renderer's `EmotionQueue` stays untouched. The runtime
     /// paths in `page_character::render` and the WASD hotkey
     /// are the integration tests; this test pins the
-    /// out-of-range branch via the cycle_index math used at
+    /// out-of-range branch via the `cycle_index` math used at
     /// call sites (the runtime guards on `len > 0` before
     /// calling `select_character`).
     #[test]

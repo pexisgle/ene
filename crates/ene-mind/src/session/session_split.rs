@@ -477,6 +477,7 @@ pub fn generate_session_id() -> SessionId {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     use crate::session::{SessionConfig, SplitScoreWeights};

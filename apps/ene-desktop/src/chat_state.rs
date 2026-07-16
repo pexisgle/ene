@@ -27,6 +27,7 @@ pub struct ChatState {
 
 impl ChatState {
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             chat_window_visible: true,

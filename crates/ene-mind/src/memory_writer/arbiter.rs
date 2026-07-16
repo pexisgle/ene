@@ -786,7 +786,7 @@ mod tests {
     use crate::memory_writer::candidate::ToolResultSummary;
     use chrono::Utc;
 
-    fn ctx<'a>(turn: TurnInput<'a>) -> ArbiterContext<'a> {
+    fn ctx(turn: TurnInput<'_>) -> ArbiterContext<'_> {
         ArbiterContext {
             turn,
             character_id: "ene",

@@ -1336,8 +1336,8 @@ mod tests {
     /// owned copy of the model and return the palette plus
     /// the (mutated) model. Tests that need to assert
     /// against the world-transform side effects use the
-    /// returned model. The LookAt argument defaults to
-    /// `None`; tests that exercise the LookAt composition
+    /// returned model. The `LookAt` argument defaults to
+    /// `None`; tests that exercise the `LookAt` composition
     /// call `model.update_skin_palette(&frame, look_at)`
     /// directly.
     fn model_palette(mut model: VrmModel, frame: &VrmaFrame) -> (VrmModel, Vec<Mat4>) {
@@ -1349,15 +1349,15 @@ mod tests {
     // VrmModel::update_skin_palette — LookAt composition (this struct)
     // -----------------------------------------------------------------
 
-    /// A LookAt delta on the `head` bone must rotate the
+    /// A `LookAt` delta on the `head` bone must rotate the
     /// head's local transform to `rest * delta` and the
     /// resulting world rotation must reach the palette.
     /// We construct a single-node model with the head as
-    /// the only humanoid bone, drive a 90° Y LookAt delta,
+    /// the only humanoid bone, drive a 90° Y `LookAt` delta,
     /// and assert that the per-joint palette rotates a
     /// +X point to -Z (the same assertion used in
     /// `update_skin_palette_applies_bone_rotation`, which
-    /// proves the LookAt path ends up in the GPU-readable
+    /// proves the `LookAt` path ends up in the GPU-readable
     /// palette, not just the local buffer).
     #[test]
     fn update_skin_palette_applies_look_at_bone_delta_to_head() {
@@ -1398,9 +1398,9 @@ mod tests {
         );
     }
 
-    /// The LookAt step runs **after** the VRMA step, so a
-    /// frame that animates `head` plus an active LookAt
-    /// delta on the same bone must end up with the LookAt
+    /// The `LookAt` step runs **after** the VRMA step, so a
+    /// frame that animates `head` plus an active `LookAt`
+    /// delta on the same bone must end up with the `LookAt`
     /// rotation, not the VRMA rotation. This is the
     /// "head tracking overrides the active motion" rule
     /// from the spec and is what the user expects when a
@@ -1442,12 +1442,12 @@ mod tests {
         );
     }
 
-    /// Identity LookAt deltas must be a no-op (the
+    /// Identity `LookAt` deltas must be a no-op (the
     /// implementation skips them to avoid an unnecessary
     /// `rest * identity` write). A model whose humanoid
     /// registry has none of `head` / `leftEye` / `rightEye`
     /// must produce a palette identical to the
-    /// `None`-LookAt case — the call must not panic on
+    /// `None`-`LookAt` case — the call must not panic on
     /// `by_name` returning `None`.
     #[test]
     fn update_skin_palette_look_at_idempotent_for_zero_delta_or_missing_bones() {
@@ -1481,7 +1481,7 @@ mod tests {
         assert_eq!(palette_lookat, palette_none);
     }
 
-    /// Non-identity LookAt deltas on bones that the
+    /// Non-identity `LookAt` deltas on bones that the
     /// humanoid registry does **not** contain (e.g. a
     /// legacy VRM 0.x model without humanoid metadata,
     /// or a model whose author left the head/eye bones

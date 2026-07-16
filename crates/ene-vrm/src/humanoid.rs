@@ -491,7 +491,7 @@ mod tests {
         // `std` we cannot use here; the linear scan is
         // O(N^2) = 3000 ops, fine for a unit test.
         let mut seen: Vec<&str> = Vec::with_capacity(HUMANOID_BONE_NAMES.len());
-        for name in HUMANOID_BONE_NAMES.iter() {
+        for name in HUMANOID_BONE_NAMES {
             assert!(!seen.contains(name), "duplicate bone name {name}");
             assert!(
                 name.chars().all(|c| c.is_ascii_lowercase()),
@@ -537,7 +537,7 @@ mod tests {
         assert_eq!(canonicalize_bone_name("  hips  ").unwrap().0, "hips");
     }
 
-    /// A typo or VRoid extension bone must return `None`,
+    /// A typo or `VRoid` extension bone must return `None`,
     /// not a silent registry entry.
     #[test]
     fn canonicalize_bone_name_returns_none_for_typo() {
@@ -568,7 +568,7 @@ mod tests {
         };
         assert!(reg.insert(VrmBone("hips".into()), entry.clone()));
         // Duplicate insert returns false; existing entry kept.
-        assert!(!reg.insert(VrmBone("hips".into()), entry.clone()));
+        assert!(!reg.insert(VrmBone("hips".into()), entry));
         // Typed lookup.
         let got = reg.lookup(&VrmBone("hips".into())).unwrap();
         assert_eq!(got.node, 14);
@@ -635,7 +635,7 @@ mod tests {
 
     /// `BoneRestTransform` defaults to identity (the glTF
     /// spec's "no transform applied" semantic). Consumers
-    /// like LookAt use `rest.rotation * yaw_pitch_delta`
+    /// like `LookAt` use `rest.rotation * yaw_pitch_delta`
     /// and expect identity to be the safe baseline.
     #[test]
     fn bone_rest_transform_default_is_identity() {

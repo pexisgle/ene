@@ -494,7 +494,7 @@ fn clear_active_turn(active_turn: &Mutex<Option<TurnId>>, turn: &TurnId) {
 mod tests {
     use super::*;
 
-    /// AtomicBool round-trip.
+    /// `AtomicBool` round-trip.
     #[test]
     fn processing_flag_round_trip() {
         let processing = Arc::new(AtomicBool::new(false));

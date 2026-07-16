@@ -20,7 +20,7 @@ struct EvalEmbedder;
 
 #[async_trait]
 impl EmbeddingProvider for EvalEmbedder {
-    fn model_name(&self) -> &str {
+    fn model_name(&self) -> &'static str {
         "eval-4d"
     }
 
@@ -51,7 +51,7 @@ struct EvalLlm;
 
 #[async_trait]
 impl LlmProvider for EvalLlm {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "eval-llm"
     }
 
@@ -81,7 +81,7 @@ struct PanicLlm;
 
 #[async_trait]
 impl LlmProvider for PanicLlm {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "panic-llm"
     }
 

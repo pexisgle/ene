@@ -258,7 +258,7 @@ mod tests {
             "capped lines plus ellipsis line"
         );
         assert!(truncated.contains("line-0"));
-        assert!(!truncated.contains(&format!("line-{}", PERMISSION_FIELD_MAX_LINES)));
+        assert!(!truncated.contains(&format!("line-{PERMISSION_FIELD_MAX_LINES}")));
     }
 
     #[test]

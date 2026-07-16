@@ -369,7 +369,7 @@ fn kind_counts(selected: &[ScoredMemory]) -> std::collections::HashMap<&'static 
 }
 
 #[cfg(test)]
-#[cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#[cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp))]
 mod tests {
     use super::*;
     use chrono::TimeZone;
@@ -586,7 +586,7 @@ mod tests {
                     MemoryKind::Episodic,
                     &format!("event {i}"),
                     &format!("Something happened on day {i} unrelated topic"),
-                    0.9 - (i as f32 * 0.01),
+                    (i as f32).mul_add(-0.01, 0.9),
                 )
             })
             .collect();
@@ -784,7 +784,7 @@ mod tests {
                     MemoryKind::Episodic,
                     &format!("event {i}"),
                     &format!("Unrelated activity on day {i}"),
-                    0.9 - (i as f32 * 0.01),
+                    (i as f32).mul_add(-0.01, 0.9),
                 )
             })
             .collect();
@@ -828,8 +828,7 @@ mod tests {
         let slots_for = |kind: MemoryKind| -> usize {
             mins.iter()
                 .find(|(k, _)| *k == kind)
-                .map(|(_, n)| *n)
-                .unwrap_or(0)
+                .map_or(0, |(_, n)| *n)
         };
 
         assert_eq!(slots_for(MemoryKind::Commitment), 1);

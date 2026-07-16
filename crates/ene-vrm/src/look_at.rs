@@ -686,7 +686,7 @@ mod tests {
     /// The spec's defaults are an explicit contract. A
     /// regression that changed e.g. the offset from
     /// `(0, 0.06, 0)` would shift every model's eye-line
-    /// by 6 cm and make every VRoid model look slightly
+    /// by 6 cm and make every `VRoid` model look slightly
     /// crosseyed.
     #[test]
     fn default_properties_match_vrm_spec() {

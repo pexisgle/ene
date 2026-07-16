@@ -1,6 +1,6 @@
 //! API v2 contract tests for the ready-handle facade (#111).
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::field_reassign_with_default)]
 
 use ene_config::CharacterCardV3;
 use ene_runtime::{CancelError, EneConfig, EneEvent, EneHandle, RunError, TerminalReason, TurnId};

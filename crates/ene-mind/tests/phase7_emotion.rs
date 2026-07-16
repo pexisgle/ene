@@ -58,7 +58,7 @@ fn decay_reduces_valence_over_time() {
     let mut input = TurnAffectInput {
         state: &mut state,
         user_message: "hello",
-        elapsed_since_update: Duration::from_secs(30 * 60),
+        elapsed_since_update: Duration::from_mins(30),
         recent_turn_count: 1,
         classifier_proposal: None,
         classifier_min_confidence: 0.5,

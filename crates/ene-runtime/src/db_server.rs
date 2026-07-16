@@ -1137,6 +1137,7 @@ impl DbIpcServer {
 }
 
 #[cfg(test)]
+#[allow(clippy::similar_names, clippy::iter_on_single_items)]
 mod tests {
     use super::*;
 
@@ -1221,7 +1222,7 @@ mod tests {
     /// served by a different pooled connection. The
     /// connection-scoped `last_rowid` cell records the
     /// rowid of the most recent Insert on this logical
-    /// handle_connection and the dispatch returns it
+    /// `handle_connection` and the dispatch returns it
     /// verbatim.
     #[tokio::test]
     async fn last_insert_rowid_returns_most_recent_insert() {

@@ -178,7 +178,7 @@ mod tests {
                 allow_free_text: true,
             },
         ];
-        let p = UserInputPrompt { items: qs.clone() };
+        let p = UserInputPrompt { items: qs };
         assert_eq!(p.items.len(), 2);
         assert_eq!(p.items[0].question, "Q1");
         assert_eq!(p.items[1].options, vec![] as Vec<String>);

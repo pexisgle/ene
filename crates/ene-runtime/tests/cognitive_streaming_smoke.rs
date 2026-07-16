@@ -22,7 +22,7 @@ struct MockEmbedder;
 
 #[async_trait]
 impl EmbeddingProvider for MockEmbedder {
-    fn model_name(&self) -> &str {
+    fn model_name(&self) -> &'static str {
         "mock-4d"
     }
 
@@ -42,7 +42,7 @@ struct MockLlm;
 
 #[async_trait]
 impl LlmProvider for MockLlm {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "mock"
     }
 

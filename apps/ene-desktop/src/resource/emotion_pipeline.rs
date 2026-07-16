@@ -139,6 +139,7 @@ pub fn tick_emotions(state: &mut EmotionPipelineState, now_secs: f64) -> Applied
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
 

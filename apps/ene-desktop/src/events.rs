@@ -25,7 +25,7 @@ pub enum AppEvent {
     /// Raw performance cue name from [`ene_runtime::EneEvent::Performance`].
     /// Desktop maps this to VRM playback; do not forward `SpecialToken` /
     /// Expression events (removed in API v2).
-    #[expect(dead_code, reason = "kept for backward-compat test coverage")]
+    #[allow(dead_code)]
     PerformanceCue(String),
     /// Motion cue with layer routing information (#133).
     MotionCue {

@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn blocks_ipv4_loopback() {
-        assert!(is_blocked_address(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
+        assert!(is_blocked_address(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         assert!(is_blocked_address(IpAddr::V4(Ipv4Addr::new(
             127, 255, 255, 254
         ))));
@@ -245,10 +245,8 @@ mod tests {
 
     #[test]
     fn blocks_unspecified_and_broadcast() {
-        assert!(is_blocked_address(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))));
-        assert!(is_blocked_address(IpAddr::V4(Ipv4Addr::new(
-            255, 255, 255, 255
-        ))));
+        assert!(is_blocked_address(IpAddr::V4(Ipv4Addr::UNSPECIFIED)));
+        assert!(is_blocked_address(IpAddr::V4(Ipv4Addr::BROADCAST)));
     }
 
     #[test]

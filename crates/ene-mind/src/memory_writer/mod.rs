@@ -513,7 +513,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ene_ai::LlmProvider for MockProvider {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "mock"
         }
 
@@ -540,7 +540,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ene_ai::LlmProvider for FailingProvider {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "failing-mock"
         }
 

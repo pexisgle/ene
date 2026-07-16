@@ -388,7 +388,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ene_ai::LlmProvider for MockProvider {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "mock"
         }
 
@@ -416,7 +416,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ene_ai::LlmProvider for TimeoutProvider {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "timeout-mock"
         }
 
@@ -447,7 +447,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ene_ai::LlmProvider for GarbageProvider {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "garbage-mock"
         }
 
@@ -782,7 +782,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ene_ai::LlmProvider for RecordingProvider {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "recording-mock"
         }
 

@@ -224,7 +224,7 @@ mod tests {
         c.load_card_expression("happy".into(), HashMap::new());
         c.load_card_expression("neutral".into(), HashMap::new());
         let mut names = c.loaded_expression_names();
-        names.sort();
+        names.sort_unstable();
         assert_eq!(names, vec!["happy", "neutral"]);
     }
 }

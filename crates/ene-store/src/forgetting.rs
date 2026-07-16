@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn faded_decay_anchor_falls_back_to_created_at() {
         let item = sample_item(MemoryStatus::Faded, false, 90);
-        let mut legacy = item.clone();
+        let mut legacy = item;
         legacy.faded_at = None;
         assert_eq!(faded_decay_anchor(&legacy), legacy.created_at);
     }

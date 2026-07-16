@@ -358,7 +358,7 @@ mod tests {
     }
 
     /// `ndc_to_view_pos_with_aspect` scales NDC by half the
-    /// viewport extents and lands at the requested view_z.
+    /// viewport extents and lands at the requested `view_z`.
     #[test]
     fn ndc_to_view_pos_scales_by_viewport_extents() {
         let v = ndc_to_view_pos_with_aspect(Vec2::new(1.0, 1.0), 1.5, -3.0);

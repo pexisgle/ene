@@ -688,44 +688,6 @@ impl EmbeddingProvider for CloudEmbeddingProvider {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn apply_kind_prefix_query_with_prefix() {
-        let out = apply_kind_prefix("hello", EmbeddingKind::Query, Some("Q:"));
-        assert_eq!(out, "Q:hello");
-    }
-
-    #[test]
-    fn apply_kind_prefix_query_without_prefix() {
-        let out = apply_kind_prefix("hello", EmbeddingKind::Query, None);
-        assert_eq!(out, "hello");
-    }
-
-    #[test]
-    fn apply_kind_prefix_non_query_never_prefixed() {
-        let out = apply_kind_prefix("hello", EmbeddingKind::Summary, Some("Q:"));
-        assert_eq!(out, "hello");
-    }
-
-    /// Regression for #34: `embed_query` was prepending the query prefix
-    /// here, then calling `embed` which prepended it again. Asserting the
-    /// single-source-of-truth helper applies the prefix exactly once per
-    /// call is enough — the bug surfaces as "double prefix" only when the
-    /// helper is invoked twice. The test makes the contract explicit.
-    #[test]
-    fn embed_query_does_not_double_prefix() {
-        let once = apply_kind_prefix("hello", EmbeddingKind::Query, Some("Q:"));
-        // If a caller re-prepended the prefix (the original bug), the result
-        // would be "Q:Q:hello". After the fix, only the helper applies the
-        // prefix, and `embed_query` calls `embed` exactly once.
-        assert_ne!(once, "Q:Q:hello");
-        assert_eq!(once, "Q:hello");
-    }
-}
-
 async fn run_direct_sse_stream(
     api_base: &str,
     api_key: &str,
@@ -843,4 +805,42 @@ async fn run_direct_sse_stream(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_kind_prefix_query_with_prefix() {
+        let out = apply_kind_prefix("hello", EmbeddingKind::Query, Some("Q:"));
+        assert_eq!(out, "Q:hello");
+    }
+
+    #[test]
+    fn apply_kind_prefix_query_without_prefix() {
+        let out = apply_kind_prefix("hello", EmbeddingKind::Query, None);
+        assert_eq!(out, "hello");
+    }
+
+    #[test]
+    fn apply_kind_prefix_non_query_never_prefixed() {
+        let out = apply_kind_prefix("hello", EmbeddingKind::Summary, Some("Q:"));
+        assert_eq!(out, "hello");
+    }
+
+    /// Regression for #34: `embed_query` was prepending the query prefix
+    /// here, then calling `embed` which prepended it again. Asserting the
+    /// single-source-of-truth helper applies the prefix exactly once per
+    /// call is enough — the bug surfaces as "double prefix" only when the
+    /// helper is invoked twice. The test makes the contract explicit.
+    #[test]
+    fn embed_query_does_not_double_prefix() {
+        let once = apply_kind_prefix("hello", EmbeddingKind::Query, Some("Q:"));
+        // If a caller re-prepended the prefix (the original bug), the result
+        // would be "Q:Q:hello". After the fix, only the helper applies the
+        // prefix, and `embed_query` calls `embed` exactly once.
+        assert_ne!(once, "Q:Q:hello");
+        assert_eq!(once, "Q:hello");
+    }
 }

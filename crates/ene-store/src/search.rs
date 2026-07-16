@@ -302,7 +302,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 7, 3, 12, 0, 0).unwrap();
         let item = sample_item(MemoryStatus::Active);
         let fresh = recency_score(now, &item, 30.0);
-        let mut old = item.clone();
+        let mut old = item;
         old.updated_at = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         let aged = recency_score(now, &old, 30.0);
         assert!(fresh > aged);

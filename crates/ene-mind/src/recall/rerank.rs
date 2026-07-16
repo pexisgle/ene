@@ -465,7 +465,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmProvider for MockRerankProvider {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "mock-rerank"
         }
 
@@ -492,7 +492,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmProvider for SlowRerankProvider {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "slow-rerank"
         }
 
@@ -520,7 +520,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmProvider for ErrorRerankProvider {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "error-rerank"
         }
 
@@ -727,7 +727,7 @@ mod tests {
     #[test]
     fn parse_error_does_not_leak_full_raw_response() {
         let sentinel = "SECRET_MEMORY_CONTENT_SHOULD_NOT_APPEAR_IN_ERROR";
-        let raw = format!(r#"not json but contains {sentinel}"#);
+        let raw = format!(r"not json but contains {sentinel}");
         let error = parse_rerank_scores(&raw, 1).expect_err("invalid json");
         let message = error.to_string();
         assert!(!message.contains(sentinel));

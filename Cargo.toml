@@ -166,7 +166,7 @@ unwrap_used = "warn"
 expect_used = "warn"
 todo = "deny"
 unimplemented = "deny"
-allow_attributes = "warn"
+allow_attributes = "allow"
 
 # --- Cast lints: intentional in systems programming and rendering code ---
 cast_possible_truncation = "allow"

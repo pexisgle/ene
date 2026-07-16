@@ -395,6 +395,7 @@ const fn is_wayland_window(handle: &RawWindowHandle) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::match_wildcard_for_single_variants, clippy::float_cmp)]
 mod tests {
     use super::*;
 
