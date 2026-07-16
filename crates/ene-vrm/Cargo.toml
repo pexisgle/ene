@@ -1,7 +1,7 @@
 [package]
 name = "ene-vrm"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "VRM 1.0 character renderer for the ene desktop app, built on wgpu 29 and the gltf crate."
 
 [dependencies]

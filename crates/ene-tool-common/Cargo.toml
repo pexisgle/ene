@@ -1,7 +1,7 @@
 [package]
 name = "ene-tool-common"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "Shared utilities for tool crates — HTML-to-Markdown conversion and content truncation"
 
 [dependencies]

@@ -1,7 +1,7 @@
 [package]
 name = "ene-config"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "Configuration management, schema generation, character card models, and path resolution for the ene AI character platform"
 
 [lib]

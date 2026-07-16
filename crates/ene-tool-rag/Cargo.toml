@@ -1,7 +1,7 @@
 [package]
 name = "ene-tool-rag"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "Tool RAG pipeline — multi-vector tool embedding, weighted field similarity, HyDE, and LLM rerank"
 
 [lib]

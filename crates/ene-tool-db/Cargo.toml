@@ -1,7 +1,7 @@
 [package]
 name = "ene-tool-db"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "Feature-agnostic typed CRUD database API for tool binaries, communicating with the core DB server over IPC"
 
 [dependencies]

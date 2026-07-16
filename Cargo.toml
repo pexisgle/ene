@@ -6,6 +6,10 @@ members = [
 ]
 resolver = "2"
 
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
 [workspace.dependencies]
 tokio = { version = "1", default-features = false, features = [
     "rt",
@@ -180,3 +184,11 @@ struct_excessive_bools = "allow"
 large_futures = "allow"
 missing_panics_doc = "allow"
 missing_errors_doc = "allow"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+

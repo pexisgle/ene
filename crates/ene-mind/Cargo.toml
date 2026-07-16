@@ -1,7 +1,7 @@
 [package]
 name = "ene-mind"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "Mind runtime for the ene AI companion — session, memory extraction, recall, emotion, context, and prompt composition"
 
 [lib]

@@ -642,6 +642,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::undocumented_unsafe_blocks)]
 mod tests {
     use super::*;
     use figment::{
