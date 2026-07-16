@@ -243,10 +243,17 @@ struct RawExtractorPrompts {
 }
 
 impl ExtractorPrompts {
-    /// Renders the extractor user prompt replacing `{conversation}` placeholder.
+    /// Renders the extractor user prompt replacing `{conversation}` and
+    /// `{pattern_hints}` placeholders.
     #[must_use]
-    pub fn render_user_prompt(&self, conversation: &str) -> String {
-        substitute(&self.user_prompt, &[("conversation", conversation)])
+    pub fn render_user_prompt(&self, conversation: &str, pattern_hints: &str) -> String {
+        substitute(
+            &self.user_prompt,
+            &[
+                ("conversation", conversation),
+                ("pattern_hints", pattern_hints),
+            ],
+        )
     }
 }
 

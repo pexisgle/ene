@@ -512,7 +512,7 @@ pub struct PromptLibrary { /* 非公開: PromptLibraryData + lang */ }
 | `memory()` | `&MemoryPrompts` | エピソードメモリの想起テンプレート。`render_summary_item(age, text)` と `render_facts_header(user_name)` を持つ。 |
 | `summarizer()` | `&SummarizerPrompts` | LLM サマライザーのシステム/ユーザープロンプトテンプレート。`render_system(user_name, char_name, existing_facts, conversation)` と `render_user_prompt(user_name, existing_facts, conversation)` を持つ。 |
 | `split()` | `&SplitPrompts` | セッション分割理由のメッセージテンプレート（`reason_timeout`、`reason_topic`、`reason_context`、`reason_composite`、`reason_manual`）。`render_reason_timeout(minutes)`、`render_reason_topic(similarity)`、`render_reason_composite(score)` を持つ。 |
-| `extractor()` | `&ExtractorPrompts` | LLM メモリエクストラクターのシステム/ユーザープロンプトテンプレート。`render_user_prompt(conversation)` を持つ。 |
+| `extractor()` | `&ExtractorPrompts` | LLM メモリエクストラクターのシステム/ユーザープロンプトテンプレート。`render_user_prompt(conversation, pattern_hints)` を持つ。 |
 | `affect_classifier()` | `&AffectClassifierPrompts` | LLM 感情分類器のシステム/ユーザープロンプトテンプレート。`render_user_prompt(current_affect, conversation)` を持つ。 |
 
 ### `substitute`

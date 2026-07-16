@@ -355,7 +355,7 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
     },
     "memory": {
       "write_every_turn": true,
-      "llm_extraction_enabled": false,
+      "llm_extraction_enabled": true,
       "semantic_dedup_enabled": true,
       "hybrid_search": true,
       "decay_enabled": true,
@@ -432,7 +432,7 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `write_every_turn` | bool | `true` | Extract and persist memory on every turn |
-| `llm_extraction_enabled` | bool | `false` | Enable optional LLM memory candidate extraction (#66); on failure falls back to deterministic extraction only |
+| `llm_extraction_enabled` | bool | `true` | Enable LLM-first memory candidate extraction; deterministic patterns are hints only, and on failure fall back to deterministic candidates |
 | `semantic_dedup_enabled` | bool | `true` | Pre-arbitration semantic duplicate detection via embedding search (#75) |
 | `hybrid_search` | bool | `true` | Use hybrid search (vector + recency + salience + confidence) |
 | `decay_enabled` | bool | `true` | Enable post-turn natural decay (`Active → Faded → Archived`) via `ForgettingLifecycle` |

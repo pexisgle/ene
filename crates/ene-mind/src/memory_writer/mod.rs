@@ -49,6 +49,12 @@ pub struct MemoryWriter;
 
 impl MemoryWriter {
     /// Extract and persist memories from the turn when enabled.
+    ///
+    /// When LLM extraction is enabled and a provider is available, deterministic
+    /// conversation patterns are passed as hints only; the LLM's candidates are
+    /// what get arbitrated. On LLM failure or when disabled, deterministic
+    /// pattern candidates fall back to the arbiter. Tool-grounded candidates
+    /// always go to the arbiter independently.
     pub async fn write_memories(
         store: &MemoryStore,
         config: &MindConfig,
@@ -59,41 +65,50 @@ impl MemoryWriter {
             return Ok(());
         }
 
+        let locale = locale_from_classifier_language(&config.emotion.classifier_language);
         let turn = candidate::TurnInput {
             user_message: input.turn.user_message,
             assistant_message: input.turn.assistant_message,
             tool_results: input.turn.tool_results,
         };
 
-        let mut batches: Vec<(Vec<candidate::MemoryCandidate>, CandidateProvenance)> = Vec::new();
-
         let deterministic = deterministic::extract_with_tool_grounding(
             &turn,
-            candidate::Locale::En,
+            locale,
             config.memory.min_confidence_to_persist as f32,
             &config.memory.tool_grounding,
         )?;
+
+        let (tool_candidates, pattern_candidates): (
+            Vec<candidate::MemoryCandidate>,
+            Vec<candidate::MemoryCandidate>,
+        ) = deterministic
+            .into_iter()
+            .partition(|c| c.source_quote.is_empty());
+
         tracing::debug!(
             component = "MemoryWriter",
             event = "memory candidates extracted",
             character_id = %input.character_id,
             user_id = %input.user_id,
             turn_id = 0usize,
-            candidate_count = deterministic.len(),
+            pattern_count = pattern_candidates.len(),
+            tool_count = tool_candidates.len(),
             provenance = "deterministic",
             "Deterministic memory candidates extracted"
         );
-        if !deterministic.is_empty() {
-            batches.push((deterministic, CandidateProvenance::Deterministic));
-        }
+
+        let mut batches: Vec<(Vec<candidate::MemoryCandidate>, CandidateProvenance)> = Vec::new();
+        let mut used_llm = false;
 
         if config.memory.llm_extraction_enabled {
             if let Some(provider) = providers.llm {
                 match llm::extract_with_timeout(
                     provider,
                     &turn,
-                    candidate::Locale::En,
+                    locale,
                     config.memory.extraction_timeout_secs,
+                    &pattern_candidates,
                 )
                 .await
                 {
@@ -105,9 +120,11 @@ impl MemoryWriter {
                             user_id = %input.user_id,
                             turn_id = 0usize,
                             candidate_count = llm_candidates.len(),
+                            pattern_hint_count = pattern_candidates.len(),
                             provenance = "llm",
                             "LLM memory candidates extracted"
                         );
+                        used_llm = true;
                         if !llm_candidates.is_empty() {
                             batches.push((llm_candidates, CandidateProvenance::LlmExtracted));
                         }
@@ -118,7 +135,7 @@ impl MemoryWriter {
                             error = %error,
                             character_id = %input.character_id,
                             user_id = %input.user_id,
-                            "LLM memory extraction failed; continuing with deterministic candidates"
+                            "LLM memory extraction failed; falling back to deterministic candidates"
                         );
                     }
                 }
@@ -129,6 +146,15 @@ impl MemoryWriter {
                     "LLM memory extraction enabled but no provider available"
                 );
             }
+        }
+
+        // Patterns go to the arbiter only when LLM did not own the decision.
+        if !used_llm && !pattern_candidates.is_empty() {
+            batches.push((pattern_candidates, CandidateProvenance::Deterministic));
+        }
+
+        if !tool_candidates.is_empty() {
+            batches.push((tool_candidates, CandidateProvenance::Deterministic));
         }
 
         if batches.is_empty() {
@@ -337,6 +363,14 @@ fn sanitize_ref(raw: &str) -> String {
     }
 }
 
+const fn locale_from_classifier_language(lang: &str) -> candidate::Locale {
+    if lang.eq_ignore_ascii_case("ja") {
+        candidate::Locale::Ja
+    } else {
+        candidate::Locale::En
+    }
+}
+
 fn log_arbiter_outcomes(
     input: &PostTurnInput<'_>,
     applied: &[crate::memory_writer::AppliedDecision],
@@ -364,7 +398,89 @@ fn log_arbiter_outcomes(
 mod tests {
     use super::*;
     use crate::memory_writer::candidate::TurnInput;
+    use ene_ai::LlmMessage;
     use ene_store::{AffectState, MemoryStore};
+
+    type StreamResult = std::pin::Pin<
+        Box<
+            dyn tokio_stream::Stream<
+                    Item = Result<ene_ai::LlmResponseChunk, ene_ai::LlmProviderError>,
+                > + Send,
+        >,
+    >;
+
+    struct MockProvider {
+        response: String,
+    }
+
+    impl MockProvider {
+        fn new(response: impl Into<String>) -> Self {
+            Self {
+                response: response.into(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ene_ai::LlmProvider for MockProvider {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        async fn create_chat_stream(
+            &self,
+            _messages: &[LlmMessage],
+            _tools: &[ene_tool_proto::ToolSpec],
+        ) -> Result<StreamResult, ene_ai::LlmProviderError> {
+            Err(ene_ai::LlmProviderError::Provider(
+                "mock: not implemented".to_string(),
+            ))
+        }
+
+        async fn chat_completion(
+            &self,
+            _messages: &[LlmMessage],
+            _json_schema: Option<serde_json::Value>,
+        ) -> Result<String, ene_ai::LlmProviderError> {
+            Ok(self.response.clone())
+        }
+    }
+
+    struct FailingProvider;
+
+    #[async_trait::async_trait]
+    impl ene_ai::LlmProvider for FailingProvider {
+        fn name(&self) -> &str {
+            "failing-mock"
+        }
+
+        async fn create_chat_stream(
+            &self,
+            _messages: &[LlmMessage],
+            _tools: &[ene_tool_proto::ToolSpec],
+        ) -> Result<StreamResult, ene_ai::LlmProviderError> {
+            Err(ene_ai::LlmProviderError::Provider(
+                "failing: not implemented".to_string(),
+            ))
+        }
+
+        async fn chat_completion(
+            &self,
+            _messages: &[LlmMessage],
+            _json_schema: Option<serde_json::Value>,
+        ) -> Result<String, ene_ai::LlmProviderError> {
+            Err(ene_ai::LlmProviderError::Provider(
+                "forced extraction failure".to_string(),
+            ))
+        }
+    }
+
+    #[test]
+    fn locale_from_classifier_language_maps_ja() {
+        assert_eq!(locale_from_classifier_language("ja"), candidate::Locale::Ja);
+        assert_eq!(locale_from_classifier_language("JA"), candidate::Locale::Ja);
+        assert_eq!(locale_from_classifier_language("en"), candidate::Locale::En);
+    }
 
     #[tokio::test]
     async fn finalize_turn_runs_when_write_every_turn_disabled() {
@@ -390,5 +506,165 @@ mod tests {
 
         let loaded = store.get_affect_state("ene").await.unwrap();
         assert_eq!(loaded.character_id, affect.character_id);
+    }
+
+    #[tokio::test]
+    async fn llm_success_does_not_persist_deterministic_pattern_alone() {
+        // "I like mushrooms" matches EN preference patterns. LLM returns empty
+        // candidates → patterns must not be auto-persisted when LLM owned the turn.
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let mut config = MindConfig::default();
+        config.memory.llm_extraction_enabled = true;
+        config.memory.semantic_dedup_enabled = false;
+        config.emotion.classifier_language = "en".into();
+
+        let provider = MockProvider::new(r#"{"candidates": []}"#);
+        let post = PostTurnInput {
+            turn: TurnInput {
+                user_message: "I like mushrooms",
+                assistant_message: Some("Nice!"),
+                tool_results: &[],
+            },
+            affect: AffectState::neutral("ene"),
+            character_id: "ene",
+            user_id: "user",
+        };
+
+        MemoryWriter::write_memories(
+            &store,
+            &config,
+            &post,
+            MemoryWriteProviders {
+                llm: Some(&provider),
+                embedder: None,
+            },
+        )
+        .await
+        .expect("write_memories");
+
+        let count = store.count_typed_memories("ene", None).await.unwrap();
+        assert_eq!(
+            count, 0,
+            "LLM empty decision must not fall back to patterns"
+        );
+    }
+
+    #[tokio::test]
+    async fn llm_success_persists_llm_candidates() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let mut config = MindConfig::default();
+        config.memory.llm_extraction_enabled = true;
+        config.memory.semantic_dedup_enabled = false;
+        config.emotion.classifier_language = "en".into();
+
+        let json = r#"{
+            "candidates": [{
+                "kind": "Episodic",
+                "title": "presentation today",
+                "content": "User has a presentation today",
+                "source_quote": "I have a presentation today",
+                "confidence": 0.8,
+                "should_persist": true,
+                "deletion_target_key": null,
+                "commitment_due": null
+            }]
+        }"#;
+        let provider = MockProvider::new(json);
+        let post = PostTurnInput {
+            turn: TurnInput {
+                user_message: "I have a presentation today",
+                assistant_message: Some("Good luck!"),
+                tool_results: &[],
+            },
+            affect: AffectState::neutral("ene"),
+            character_id: "ene",
+            user_id: "user",
+        };
+
+        MemoryWriter::write_memories(
+            &store,
+            &config,
+            &post,
+            MemoryWriteProviders {
+                llm: Some(&provider),
+                embedder: None,
+            },
+        )
+        .await
+        .expect("write_memories");
+
+        let memories = store
+            .get_typed_memories_by_character("ene", None, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].title, "presentation today");
+        assert_eq!(memories[0].kind, ene_store::MemoryKind::Episodic);
+    }
+
+    #[tokio::test]
+    async fn llm_failure_falls_back_to_deterministic_patterns() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let mut config = MindConfig::default();
+        config.memory.llm_extraction_enabled = true;
+        config.memory.semantic_dedup_enabled = false;
+        config.emotion.classifier_language = "en".into();
+
+        let provider = FailingProvider;
+        let post = PostTurnInput {
+            turn: TurnInput {
+                user_message: "I like mushrooms",
+                assistant_message: Some("Nice!"),
+                tool_results: &[],
+            },
+            affect: AffectState::neutral("ene"),
+            character_id: "ene",
+            user_id: "user",
+        };
+
+        MemoryWriter::write_memories(
+            &store,
+            &config,
+            &post,
+            MemoryWriteProviders {
+                llm: Some(&provider),
+                embedder: None,
+            },
+        )
+        .await
+        .expect("write_memories");
+
+        let count = store.count_typed_memories("ene", None).await.unwrap();
+        assert!(
+            count >= 1,
+            "deterministic preference should persist on LLM failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn llm_disabled_uses_deterministic_patterns() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let mut config = MindConfig::default();
+        config.memory.llm_extraction_enabled = false;
+        config.memory.semantic_dedup_enabled = false;
+        config.emotion.classifier_language = "en".into();
+
+        let post = PostTurnInput {
+            turn: TurnInput {
+                user_message: "I like mushrooms",
+                assistant_message: Some("Nice!"),
+                tool_results: &[],
+            },
+            affect: AffectState::neutral("ene"),
+            character_id: "ene",
+            user_id: "user",
+        };
+
+        MemoryWriter::write_memories(&store, &config, &post, MemoryWriteProviders::default())
+            .await
+            .expect("write_memories");
+
+        let count = store.count_typed_memories("ene", None).await.unwrap();
+        assert!(count >= 1);
     }
 }

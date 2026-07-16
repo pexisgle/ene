@@ -40,7 +40,7 @@ flowchart LR
 2. **`compose_prompt_packet`** — compiles the Identity Kernel, selects style examples, loads the active scene summary, and packs everything into a token-budgeted `PromptPacket` → `Vec<LlmMessage>`.
 3. **LLM generation** — `ene-runtime` streams the completion using the composed messages. Not part of this crate.
 4. **`resolve_expression_turn`** — maps the post-turn `AffectState` (+ optional LLM expression hint) to a character expression via the `OutputArbiter`.
-5. **`after_turn`** — extracts `MemoryCandidate`s (deterministic + tool-grounded), runs the `MemoryArbiter`, syncs the `CommitmentLedger`, applies the `ForgettingLifecycle`, and persists the affect state.
+5. **`after_turn`** — extracts `MemoryCandidate`s (LLM-first with deterministic pattern hints + tool grounding; deterministic fallback on LLM failure), runs the `MemoryArbiter`, syncs the `CommitmentLedger`, applies the `ForgettingLifecycle`, and persists the affect state.
 
 ---
 
@@ -638,7 +638,7 @@ impl MemoryWriter {
 }
 ```
 
-`after_turn` = `write_memories` (deterministic extraction incl. tool grounding → `MemoryArbiter` → `CommitmentLedger` sync) then `finalize_turn` (`ForgettingLifecycle::apply` → `upsert_affect_state`). Extraction is skipped when `mind.memory.write_every_turn` is `false` (`finalize_turn` still runs from `after_turn`). Hosts (`ene-runtime`) must call only `CognitionEngine::after_turn` — not `MemoryWriter` methods directly (#121).
+`after_turn` = `write_memories` (LLM-first with deterministic pattern hints + tool grounding → `MemoryArbiter` → `CommitmentLedger` sync) then `finalize_turn` (`ForgettingLifecycle::apply` → `upsert_affect_state`). Extraction is skipped when `mind.memory.write_every_turn` is `false` (`finalize_turn` still runs from `after_turn`). Hosts (`ene-runtime`) must call only `CognitionEngine::after_turn` — not `MemoryWriter` methods directly (#121).
 
 ### `MemoryCandidate`
 

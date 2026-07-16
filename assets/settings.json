@@ -20,7 +20,7 @@
     },
     "memory": {
       "write_every_turn": true,
-      "llm_extraction_enabled": false,
+      "llm_extraction_enabled": true,
       "semantic_dedup_enabled": true,
       "hybrid_search": true,
       "decay_enabled": true,

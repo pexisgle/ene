@@ -38,8 +38,8 @@ Ene will explicitly manage:
 |---|---|---|
 | Identity Kernel | `ene-mind::character` | Compile CCv3 into an immutable character identity block always present in the prompt |
 | Typed Memory Store | `ene-store` | CRUD + hybrid search for typed memories (kind, confidence, recency, salience, vector) |
-| Memory Extraction (Deterministic) | `ene-mind::memory_writer` | Rule-based extraction of facts, preferences, commitments, and procedure memories |
-| Memory Extraction (LLM) | `ene-mind::memory_writer` | LLM-driven extraction producing `MemoryCandidate` items |
+| Memory Extraction (Deterministic) | `ene-mind::memory_writer` | Rule-based pattern hints / fallback when LLM fails or is disabled |
+| Memory Extraction (LLM) | `ene-mind::memory_writer` | Primary path: importance judgment and kind selection into `MemoryCandidate` items |
 | Memory Arbiter | `ene-mind::memory_writer` | Validate candidates against existing memories, compute confidence, deduplicate, resolve contradictions |
 | Recall Planner | `ene-mind::recall` | Generate a `RecallPlan` with search intent and budget hints for downstream recall execution |
 | Hybrid Search Scoring | `ene-store` | Score memories by vector similarity + recency + salience + confidence + affect + commitments |
@@ -92,7 +92,7 @@ sequenceDiagram
     Arbiter-->>Streaming: text + expression events
     Streaming-->>User: display output
     Streaming->>Writer: post-turn write(input, response, affect)
-    Writer->>Writer: extract candidates (deterministic + LLM)
+    Writer->>Writer: extract candidates (LLM-first; patterns as hints)
     Writer->>Store: arbiter validates → write typed memories
     Writer->>Store: execute forgetting lifecycle
     Writer->>Emotion: persist affect state changes
@@ -106,7 +106,7 @@ sequenceDiagram
 4. **Context Composition** — Build a `PromptPacket` with sectioned layers: Identity Kernel → Recalled Memories → Commitments → Affect State → Scene → Style Examples → History → Current Input.
 5. **LLM Generation** — Send the `PromptPacket` to the LLM provider. The LLM may optionally provide expression hints.
 6. **Output Arbitration** — Validate and map affect+response to character expressions. Apply hysteresis to prevent expression flickering.
-7. **Post-turn Writing** — Run deterministic and LLM extractors to produce `MemoryCandidate` items. The Memory Arbiter validates against existing memories, computes confidence, and writes to the store.
+7. **Post-turn Writing** — Run the LLM extractor as the primary path (deterministic patterns are optional hints). On LLM failure or when disabled, fall back to deterministic candidates. Tool-result grounding still produces independent candidates. The Memory Arbiter validates against existing memories, computes confidence, and writes to the store.
 8. **Forgetting Lifecycle** — Age existing memories according to decay curves via `ForgettingLifecycle::apply`. Transition through `active → faded → archived` statuses. User explicit forget (`user_deleted`) and contradiction paths (`disputed`, `superseded`) remain in the Memory Arbiter.
 
 ## Key Terminology

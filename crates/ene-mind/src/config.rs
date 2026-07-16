@@ -118,8 +118,9 @@ impl Default for ContextConfig {
 pub struct MindMemoryConfig {
     /// Extract and persist memory on every turn.
     pub write_every_turn: bool,
-    /// Enable optional LLM memory candidate extraction (#66). When disabled or
-    /// on provider failure, only deterministic extraction runs.
+    /// Enable LLM memory candidate extraction (primary path). Deterministic
+    /// patterns are passed as hints; on provider failure, deterministic
+    /// candidates fall back to the arbiter.
     pub llm_extraction_enabled: bool,
     /// Pre-arbitration semantic duplicate detection via embedding search (#75).
     pub semantic_dedup_enabled: bool,
@@ -254,7 +255,7 @@ impl Default for MindMemoryConfig {
     fn default() -> Self {
         Self {
             write_every_turn: true,
-            llm_extraction_enabled: false,
+            llm_extraction_enabled: true,
             semantic_dedup_enabled: true,
             hybrid_search: true,
             decay_enabled: true,

@@ -5,8 +5,9 @@
 //! metadata. Falls back to an empty vec when the LLM returns no valid
 //! candidates.
 //!
-//! The extractor is designed to be called after the deterministic extractor
-//! in the memory pipeline. It handles:
+//! Deterministic pattern hits may be passed as optional `pattern_hints`; the
+//! LLM remains the authority on what to keep and which [`MemoryKind`] to use.
+//! It handles:
 //! - Structured output via JSON schema (`additionalProperties: false`)
 //! - A configurable call timeout (see [`extract_with_timeout`]; the default is
 //!   [`DEFAULT_EXTRACTION_TIMEOUT_SECS`])
@@ -58,18 +59,21 @@ pub async fn extract(
     turn: &TurnInput<'_>,
     locale: Locale,
 ) -> Result<Vec<MemoryCandidate>, CognitionError> {
-    extract_with_timeout(provider, turn, locale, DEFAULT_EXTRACTION_TIMEOUT_SECS).await
+    extract_with_timeout(provider, turn, locale, DEFAULT_EXTRACTION_TIMEOUT_SECS, &[]).await
 }
 
-/// Same as [`extract`], but with an explicit call-timeout budget in seconds.
+/// Same as [`extract`], but with an explicit call-timeout budget and optional
+/// deterministic pattern hints.
 ///
 /// This is the entry point the runtime should use so the timeout can be driven
-/// by `MindMemoryConfig::extraction_timeout_secs` (issue #66).
+/// by `MindMemoryConfig::extraction_timeout_secs` (issue #66). Pattern hints
+/// assist the model; they are not auto-persisted.
 pub async fn extract_with_timeout(
     provider: &dyn LlmProvider,
     turn: &TurnInput<'_>,
     locale: Locale,
     timeout_secs: u64,
+    pattern_hints: &[MemoryCandidate],
 ) -> Result<Vec<MemoryCandidate>, CognitionError> {
     let prompts = PromptLibrary::load(match locale {
         Locale::Ja => "ja",
@@ -77,9 +81,12 @@ pub async fn extract_with_timeout(
     });
 
     let conversation = build_conversation_text(turn);
+    let hints_text = format_pattern_hints(pattern_hints);
 
     let system_prompt = prompts.extractor().system.clone();
-    let user_prompt = prompts.extractor().render_user_prompt(&conversation);
+    let user_prompt = prompts
+        .extractor()
+        .render_user_prompt(&conversation, &hints_text);
 
     let schema = extraction_schema();
 
@@ -103,6 +110,28 @@ pub async fn extract_with_timeout(
     .map_err(|e| CognitionError::ExtractionFailed(format!("LLM provider error: {e}")))?;
 
     parse_candidates_json(&raw, locale)
+}
+
+/// Formats deterministic pattern hits for the extractor user prompt.
+fn format_pattern_hints(hints: &[MemoryCandidate]) -> String {
+    if hints.is_empty() {
+        return "(none)".to_string();
+    }
+    let mut out = String::new();
+    for (i, hint) in hints.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "{}. kind={} title={:?} content={:?} confidence={:.2} should_persist={} quote={:?}",
+            i + 1,
+            hint.kind.as_str(),
+            hint.title,
+            hint.content,
+            hint.confidence,
+            hint.should_persist,
+            hint.source_quote
+        );
+    }
+    out
 }
 
 /// Builds a plain-text conversation block from a `TurnInput`.
@@ -147,7 +176,7 @@ fn extraction_schema() -> serde_json::Value {
                     "properties": {
                         "kind": {
                             "type": "string",
-                            "description": "Memory kind: Semantic, UserProfile, Preference, Procedure, Commitment, or Affective"
+                            "description": "Memory kind: Episodic, Semantic, UserProfile, Preference, Relationship, Affective, Commitment, Procedure, or Reflection"
                         },
                         "title": {
                             "type": "string",
@@ -262,12 +291,15 @@ struct RawCandidate {
 /// - Caps confidence at `MAX_CONFIDENCE` (0.9).
 fn raw_to_candidate(raw: RawCandidate, locale: Locale) -> MemoryCandidate {
     let kind = match raw.kind.to_lowercase().as_str() {
+        "episodic" => MemoryKind::Episodic,
         "semantic" => MemoryKind::Semantic,
         "userprofile" | "user_profile" | "user profile" => MemoryKind::UserProfile,
         "preference" => MemoryKind::Preference,
-        "procedure" => MemoryKind::Procedure,
-        "commitment" => MemoryKind::Commitment,
+        "relationship" => MemoryKind::Relationship,
         "affective" => MemoryKind::Affective,
+        "commitment" => MemoryKind::Commitment,
+        "procedure" => MemoryKind::Procedure,
+        "reflection" => MemoryKind::Reflection,
         other => {
             tracing::warn!(
                 raw_kind = other,
@@ -553,7 +585,7 @@ mod tests {
         // `MindMemoryConfig::extraction_timeout_secs`) is honoured and
         // reported in the error message.
         let provider = TimeoutProvider;
-        let result = extract_with_timeout(&provider, &ja_turn("test"), Locale::En, 1).await;
+        let result = extract_with_timeout(&provider, &ja_turn("test"), Locale::En, 1, &[]).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -677,5 +709,154 @@ mod tests {
         .expect("extract failed");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].commitment_due.as_deref(), Some("tomorrow 15:00"));
+    }
+
+    #[tokio::test]
+    async fn episodic_and_relationship_kinds_parsed() {
+        let json = r#"{
+            "candidates": [
+                {
+                    "kind": "Episodic",
+                    "title": "presentation today",
+                    "content": "User has a presentation today",
+                    "source_quote": "I have a presentation today",
+                    "confidence": 0.8,
+                    "should_persist": true,
+                    "deletion_target_key": null,
+                    "commitment_due": null
+                },
+                {
+                    "kind": "Relationship",
+                    "title": "trusts companion",
+                    "content": "User trusts the companion with secrets",
+                    "source_quote": "I trust you with this",
+                    "confidence": 0.75,
+                    "should_persist": true,
+                    "deletion_target_key": null,
+                    "commitment_due": null
+                },
+                {
+                    "kind": "Reflection",
+                    "title": "avoid rushing",
+                    "content": "User prefers not to rush decisions",
+                    "source_quote": "I should not rush next time",
+                    "confidence": 0.7,
+                    "should_persist": true,
+                    "deletion_target_key": null,
+                    "commitment_due": null
+                }
+            ]
+        }"#;
+        let provider = MockProvider::new(json);
+        let result = extract(
+            &provider,
+            &ja_turn("I have a presentation today"),
+            Locale::En,
+        )
+        .await
+        .expect("extract failed");
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].kind, MemoryKind::Episodic);
+        assert_eq!(result[1].kind, MemoryKind::Relationship);
+        assert_eq!(result[2].kind, MemoryKind::Reflection);
+    }
+
+    /// Provider that records the last user message text for hint assertions.
+    struct RecordingProvider {
+        response: String,
+        last_user: std::sync::Mutex<String>,
+    }
+
+    impl RecordingProvider {
+        fn new(response: impl Into<String>) -> Self {
+            Self {
+                response: response.into(),
+                last_user: std::sync::Mutex::new(String::new()),
+            }
+        }
+
+        fn last_user(&self) -> String {
+            self.last_user.lock().expect("lock").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ene_ai::LlmProvider for RecordingProvider {
+        fn name(&self) -> &str {
+            "recording-mock"
+        }
+
+        async fn create_chat_stream(
+            &self,
+            _messages: &[LlmMessage],
+            _tools: &[ene_tool_proto::ToolSpec],
+        ) -> Result<StreamResult, ene_ai::LlmProviderError> {
+            Err(ene_ai::LlmProviderError::Provider(
+                "recording: not implemented".to_string(),
+            ))
+        }
+
+        async fn chat_completion(
+            &self,
+            messages: &[LlmMessage],
+            _json_schema: Option<serde_json::Value>,
+        ) -> Result<String, ene_ai::LlmProviderError> {
+            if let Some(LlmMessage::User { parts }) = messages.last() {
+                let text = parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        UserMessagePart::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                *self.last_user.lock().expect("lock") = text;
+            }
+            Ok(self.response.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn pattern_hints_appear_in_user_prompt() {
+        let provider = RecordingProvider::new(r#"{"candidates": []}"#);
+        let hint = MemoryCandidate {
+            kind: MemoryKind::Preference,
+            title: "likes coffee".into(),
+            content: "User likes coffee".into(),
+            source_quote: "I like coffee".into(),
+            confidence: 0.65,
+            should_persist: true,
+            deletion_target_key: None,
+            commitment_due: None,
+        };
+        extract_with_timeout(&provider, &ja_turn("I like coffee"), Locale::En, 5, &[hint])
+            .await
+            .expect("extract");
+        let user = provider.last_user();
+        assert!(
+            user.contains("likes coffee") && user.contains("kind=preference"),
+            "expected pattern hint in prompt, got: {user}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ja_locale_loads_japanese_system_prompt() {
+        let provider = RecordingProvider::new(r#"{"candidates": []}"#);
+        let _ = extract_with_timeout(
+            &provider,
+            &ja_turn("今日プレゼンがある"),
+            Locale::Ja,
+            5,
+            &[],
+        )
+        .await
+        .expect("extract");
+        // System prompt is not in last_user; re-check via PromptLibrary load path
+        // by asserting empty hints placeholder rendered for ja user prompt.
+        let user = provider.last_user();
+        assert!(
+            user.contains("パターンヒント") || user.contains("会話ターン"),
+            "expected Japanese extractor user prompt, got: {user}"
+        );
     }
 }
