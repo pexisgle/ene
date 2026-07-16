@@ -112,10 +112,12 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
     // Embeddings are optional: without an embedder (typical when store is off),
     // skip recall/write that needs vectors and continue with chat + tools.
     let query_embedding = if let Some(emb_prov) = &embedder {
+        tracing::info!(%turn, "Generating user query embedding...");
         match ene_ai::embed_query(emb_prov.as_ref(), &user_input).await {
             Ok(emb) => {
                 session.set_pending_embedding(emb.clone());
                 session.set_last_input_embedding(emb.clone());
+                tracing::info!(%turn, "User query embedding generated successfully");
                 Some(emb)
             }
             Err(e) => {
@@ -163,12 +165,26 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
             &provider,
             post_history_phi.as_deref(),
         );
+        tracing::info!(%turn, "Synchronizing character card memories...");
         match engine
             .sync_character_memories(sync_ctx, session.memory.ccv3_memory_hash)
             .await
         {
             Ok((report, hash)) => {
                 session.memory.ccv3_memory_hash = Some(hash);
+                if report.skipped {
+                    tracing::info!(%turn, "Character card memories already up-to-date");
+                } else {
+                    tracing::info!(
+                        %turn,
+                        inserted_lorebook = report.lorebook_inserted,
+                        updated_lorebook = report.lorebook_updated,
+                        inserted_style = report.style_inserted,
+                        updated_style = report.style_updated,
+                        archived = report.archived,
+                        "Character card memories synchronization complete"
+                    );
+                }
                 tracing::debug!(
                     component = "CognitionEngine",
                     skipped = report.skipped,
@@ -205,6 +221,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
         post_history_phi.as_deref(),
     );
 
+    tracing::info!(%turn, "Retrieving memory recall context and selecting relevant tools...");
     let (pre_turn_result, tools) = tokio::join!(
         engine.before_turn(turn_ctx),
         select_relevant_tools(
@@ -217,7 +234,10 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
     );
 
     let pre_turn = match pre_turn_result {
-        Ok(v) => v,
+        Ok(v) => {
+            tracing::info!(%turn, tools_selected = tools.len(), "Memory recall and tool selection complete");
+            v
+        }
         Err(e) => {
             emit_terminal(
                 &event_tx,
@@ -279,8 +299,12 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
         post_history_phi.as_deref(),
     );
 
+    tracing::info!(%turn, "Building prompt packet context...");
     let composed = match engine.compose_prompt_packet(compose_ctx, &pre_turn).await {
-        Ok(v) => v,
+        Ok(v) => {
+            tracing::info!(%turn, "Prompt packet context assembled successfully");
+            v
+        }
         Err(e) => {
             emit_terminal(
                 &event_tx,
@@ -323,6 +347,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
             return session;
         }
 
+        tracing::info!(%turn, round, "Requesting LLM response stream...");
         let mut stream = match provider.create_chat_stream(&messages, &tools).await {
             Ok(s) => s,
             Err(e) => {
@@ -345,6 +370,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
         let suppress_stream_tokens =
             mind.emotion.enabled && mind.emotion.llm_expression_is_advisory;
 
+        let mut is_first_chunk = true;
         while let Some(chunk_res) = stream.next().await {
             if cancel_token.is_cancelled() {
                 emit_terminal(
@@ -354,6 +380,11 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                     TerminalReason::Cancelled,
                 );
                 return session;
+            }
+
+            if is_first_chunk {
+                is_first_chunk = false;
+                tracing::info!(%turn, "LLM streaming response started");
             }
 
             match chunk_res {

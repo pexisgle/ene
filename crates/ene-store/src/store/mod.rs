@@ -606,7 +606,8 @@ impl MemoryStore {
             .to_str()
             .ok_or_else(|| MemoryError::MemoryStoreConnectionError("Invalid path".to_string()))?;
         init_sqlite_vec();
-        let opt = ConnectOptions::new(format!("sqlite:{path_str}?mode=rwc"));
+        let mut opt = ConnectOptions::new(format!("sqlite:{path_str}?mode=rwc"));
+        opt.max_connections(32);
         let db = Database::connect(opt).await?;
 
         apply_pragmas(&db).await?;

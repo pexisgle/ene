@@ -421,11 +421,16 @@ impl EneHandle {
         let tool_rag = embedder
             .as_ref()
             .and_then(|emb| init_tool_rag(&config, emb, &session));
-        if let Some(rag) = &tool_rag
-            && rag.opts().background_index_on_startup
-        {
+        if let Some(rag) = &tool_rag {
             let specs = registry.list_tools();
-            rag.start_background_indexer(specs);
+            tracing::info!(component = "Bootstrap", "Warming up Tool RAG index...");
+            if let Err(e) = rag.ensure_index(&specs).await {
+                tracing::warn!(
+                    component = "Bootstrap",
+                    error = %e,
+                    "Failed to warmup tool RAG index"
+                );
+            }
         }
 
         // Warmup character memories before returning Ok.

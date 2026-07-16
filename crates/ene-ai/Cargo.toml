@@ -12,6 +12,7 @@ async-openai = { workspace = true, default-features = false }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 serde = { workspace = true }
+tokio-util = { workspace = true, features = ["io"] }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }

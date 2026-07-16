@@ -255,28 +255,6 @@ fn text_from_delta_value(delta: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn collect_sse_content(sse: &str) -> String {
-    let mut content = String::new();
-
-    for line in sse.lines() {
-        let Some(payload) = line.strip_prefix("data: ") else {
-            continue;
-        };
-        if payload.trim() == "[DONE]" {
-            continue;
-        }
-        let Ok(chunk) = serde_json::from_str::<serde_json::Value>(payload) else {
-            continue;
-        };
-        if let Some(delta) = chunk.pointer("/choices/0/delta")
-            && let Some(text) = text_from_delta_value(delta)
-        {
-            content.push_str(&text);
-        }
-    }
-
-    content
-}
 
 fn byot_http_client() -> Result<&'static reqwest::Client, LlmProviderError> {
     static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
@@ -327,37 +305,6 @@ async fn post_chat_byot_via_http(
         .map_err(|e| LlmProviderError::Provider(format!("chat completion JSON parse failed: {e}")))
 }
 
-/// Stream BYOT chat completion via direct HTTP (buffered SSE).
-async fn post_chat_stream_collect_via_http(
-    api_base: &str,
-    api_key: &str,
-    body: serde_json::Value,
-) -> Result<String, LlmProviderError> {
-    let url = format!("{}/chat/completions", api_base.trim_end_matches('/'));
-    let response = byot_http_client()?
-        .post(url)
-        .bearer_auth(api_key)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| LlmProviderError::Provider(format!("chat stream HTTP failed: {e}")))?;
-
-    let status = response.status();
-    let raw = response
-        .text()
-        .await
-        .map_err(|e| LlmProviderError::Provider(format!("chat stream read failed: {e}")))?;
-
-    if !status.is_success() {
-        return Err(LlmProviderError::Provider(format!(
-            "chat stream HTTP {status}: {}",
-            raw.chars().take(200).collect::<String>()
-        )));
-    }
-
-    Ok(collect_sse_content(&raw))
-}
 
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
@@ -397,82 +344,19 @@ impl LlmProvider for OpenAiProvider {
             .build()
             .map_err(|e| LlmProviderError::Provider(e.to_string()))?;
 
-        if self.thinking_disabled {
-            let body = merge_request_body(request, true, true)?;
-            let api_base = self.api_base.clone();
-            let api_key = self.api_key.clone();
-            let (tx, rx) = tokio::sync::mpsc::channel(1);
-            tokio::spawn(async move {
-                let chunk = post_chat_stream_collect_via_http(&api_base, &api_key, body)
-                    .await
-                    .map(|content| LlmResponseChunk {
-                        text_delta: if content.is_empty() {
-                            None
-                        } else {
-                            Some(content)
-                        },
-                        tool_calls_delta: None,
-                    });
-                let _ = tx.send(chunk).await;
-            });
+        let body = merge_request_body(request, true, self.thinking_disabled)?;
+        let api_base = self.api_base.clone();
+        let api_key = self.api_key.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
 
-            use tokio_stream::wrappers::ReceiverStream;
-            return Ok(Box::pin(ReceiverStream::new(rx))
-                as Pin<
-                    Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>,
-                >);
-        }
-
-        let stream = self
-            .client
-            .chat()
-            .create_stream(request)
-            .await
-            .map_err(|e| map_openai_error(&e))?;
-
-        let mapped_stream = stream.map(|chunk_res| match chunk_res {
-            Ok(chunk) => {
-                let mut text_delta = None;
-                let mut tool_calls_delta = None;
-
-                if let Some(choice) = chunk.choices.first() {
-                    if let Some(content) = &choice.delta.content {
-                        text_delta = Some(content.clone());
-                    }
-
-                    if let Some(tc_deltas) = &choice.delta.tool_calls {
-                        let mut tc_list = Vec::new();
-                        for tc in tc_deltas {
-                            let mut name = None;
-                            let mut arguments = None;
-                            if let Some(func) = &tc.function {
-                                if let Some(n) = &func.name {
-                                    name = Some(n.clone());
-                                }
-                                if let Some(a) = &func.arguments {
-                                    arguments = Some(a.clone());
-                                }
-                            }
-                            tc_list.push(LlmToolCallChunk {
-                                index: tc.index as usize,
-                                id: tc.id.clone(),
-                                name,
-                                arguments,
-                            });
-                        }
-                        tool_calls_delta = Some(tc_list);
-                    }
-                }
-
-                Ok(LlmResponseChunk {
-                    text_delta,
-                    tool_calls_delta,
-                })
+        tokio::spawn(async move {
+            if let Err(e) = run_direct_sse_stream(&api_base, &api_key, body, tx.clone()).await {
+                let _ = tx.send(Err(e)).await;
             }
-            Err(e) => Err(map_openai_error(&e)),
         });
 
-        Ok(Box::pin(mapped_stream)
+        use tokio_stream::wrappers::ReceiverStream;
+        Ok(Box::pin(ReceiverStream::new(rx))
             as Pin<
                 Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>,
             >)
@@ -817,4 +701,99 @@ mod tests {
         assert_ne!(once, "Q:Q:hello");
         assert_eq!(once, "Q:hello");
     }
+}
+
+async fn run_direct_sse_stream(
+    api_base: &str,
+    api_key: &str,
+    body: serde_json::Value,
+    tx: tokio::sync::mpsc::Sender<Result<LlmResponseChunk, LlmProviderError>>,
+) -> Result<(), LlmProviderError> {
+    use tokio_util::io::StreamReader;
+    use tokio::io::{BufReader, AsyncBufReadExt};
+
+    let url = format!("{}/chat/completions", api_base.trim_end_matches('/'));
+    let response = byot_http_client()?
+        .post(url)
+        .bearer_auth(api_key)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| LlmProviderError::Provider(format!("chat stream HTTP failed: {e}")))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let raw = response.text().await.unwrap_or_default();
+        return Err(LlmProviderError::Provider(format!("chat stream HTTP {status}: {raw}")));
+    }
+
+    let bytes_stream = response.bytes_stream().map(|res| {
+        res.map_err(std::io::Error::other)
+    });
+    let reader = StreamReader::new(bytes_stream);
+    let mut lines = BufReader::new(reader).lines();
+
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .map_err(|e| LlmProviderError::Provider(format!("read stream line failed: {e}")))?
+    {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some(payload) = trimmed.strip_prefix("data: ") else {
+            continue;
+        };
+        let payload = payload.trim();
+        if payload == "[DONE]" {
+            break;
+        }
+        let Ok(chunk) = serde_json::from_str::<serde_json::Value>(payload) else {
+            continue;
+        };
+
+        let mut text_delta = None;
+        let mut tool_calls_delta = None;
+
+        if let Some(choices) = chunk.get("choices").and_then(serde_json::Value::as_array)
+            && let Some(choice) = choices.first()
+            && let Some(delta) = choice.get("delta")
+        {
+            text_delta = text_from_delta_value(delta);
+
+            if let Some(tc_deltas) = delta.get("tool_calls").and_then(serde_json::Value::as_array) {
+                let mut tc_list = Vec::new();
+                for tc in tc_deltas {
+                    let index = tc.get("index").and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
+                    let id = tc.get("id").and_then(serde_json::Value::as_str).map(str::to_string);
+                    let (name, arguments) = if let Some(func) = tc.get("function") {
+                        (
+                            func.get("name").and_then(serde_json::Value::as_str).map(str::to_string),
+                            func.get("arguments").and_then(serde_json::Value::as_str).map(str::to_string),
+                        )
+                    } else {
+                        (None, None)
+                    };
+                    tc_list.push(LlmToolCallChunk {
+                        index,
+                        id,
+                        name,
+                        arguments,
+                    });
+                }
+                tool_calls_delta = Some(tc_list);
+            }
+        }
+
+        if text_delta.is_some() || tool_calls_delta.is_some() {
+            let _ = tx.send(Ok(LlmResponseChunk {
+                text_delta,
+                tool_calls_delta,
+            })).await;
+        }
+    }
+
+    Ok(())
 }
