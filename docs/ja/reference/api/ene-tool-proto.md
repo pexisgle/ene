@@ -25,7 +25,7 @@
 pub const IPC_PROTOCOL_VERSION: u32 = 2;
 ```
 
-双方が `Handshake` / `HandshakeAck` メッセージで自分のバージョンを送信します。サーバー（`run_tool_server`）はバージョンの不一致を**厳密に拒否**します — ダウングレードや交渉は行わず、`IpcResponse::Error` で接続を終了します。この定数は、ワイヤーフォーマットが後方互換性のない形で変更された場合にのみバンプしてください（[AGENTS.md §6 R3](../../AGENTS.md) を参照）。バージョン **4** は [`ToolRagProfile`](#toolragprofile) (#137) 用の `ListRagProfiles` / `RagProfiles` を追加します。`ToolSpec` は LLM 向けのみ（`name` / `description` / `parameters`）のままです。
+双方が `Handshake` / `HandshakeAck` メッセージで自分のバージョンを送信します。サーバー（`run_tool_server`）はバージョンの不一致を**厳密に拒否**します — ダウングレードや交渉は行わず、`IpcResponse::Error` で接続を終了します。この定数は、ワイヤーフォーマットが後方互換性のない形で変更された場合にのみバンプしてください（[AGENTS.md §6 R3](../../../../AGENTS.md) を参照）。バージョン **4** は [`ToolRagProfile`](#toolragprofile) (#137) 用の `ListRagProfiles` / `RagProfiles` を追加します。`ToolSpec` は LLM 向けのみ（`name` / `description` / `parameters`）のままです。
 
 ---
 

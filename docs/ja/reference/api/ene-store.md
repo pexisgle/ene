@@ -371,7 +371,7 @@ pub enum MemoryCandidateSource { Vector, Lexical, Recent, Commitment }
 | `get_active_typed_memory_by_source_ref` | `async fn get_active_typed_memory_by_source_ref(&self, character_id: &str, source_ref: &str) -> Result<Option<MemoryItem>, MemoryError>` | 指定した `source_ref` のアクティブな行を取得する。 |
 | `archive_typed_memories_by_source_prefixes` | `async fn archive_typed_memories_by_source_prefixes(&self, character_id: &str, prefixes: &[&str], keep_refs: &HashSet<String>) -> Result<usize, MemoryError>` | 再同期時にもはや存在しない、指定プレフィックス下の行をアーカイブする（例: 削除されたロアブックエントリ）。 |
 | `search_typed_memories` | `async fn search_typed_memories(&self, embedding: &[f32], character_id: &str, model_name: &str, limit: usize, similarity_threshold: f32) -> Result<Vec<(MemoryItem, f32)>, MemoryError>` | レガシーなベクトルのみの検索。コサイン類似度だけが必要な呼び出し元向けに引き続き利用可能。 |
-| `search` | `async fn search(&self, options: &Query<'_>) -> Result<Vec<ScoredMemory>, MemoryError>` | 主要な回想経路 — ベクトル、字句、新近性、顕著性、確信度、感情、関係性、アクセス、コミットメントの各シグナルを組み合わせる。完全なスコアリング式は [`docs/memory/memory.md`](../memory/memory.md#hybrid-memory-search-73) を参照。 |
+| `search` | `async fn search(&self, options: &Query<'_>) -> Result<Vec<ScoredMemory>, MemoryError>` | 主要な回想経路 — ベクトル、字句、新近性、顕著性、確信度、感情、関係性、アクセス、コミットメントの各シグナルを組み合わせる。完全なスコアリング式は [`docs/reference/memory/memory.md`](../memory/memory.md#hybrid-memory-search-73) を参照。 |
 | `list_recallable_typed_memories` | `async fn list_recallable_typed_memories(&self, character_id: &str, user_id: Option<&str>, limit: usize) -> Result<Vec<MemoryItem>, MemoryError>` | キャラクター（およびオプションのユーザースコープ）の `Active`/`Faded`/`Disputed` 行。 |
 | `supersede_typed_memory` | `async fn supersede_typed_memory(&self, new_item: &NewMemoryItem, superseded_id: i64) -> Result<i64, MemoryError>` | 置き換え行をアトミックに挿入し、以前の行を `Superseded` にマークする。 |
 | `update_typed_memory_status` | `async fn update_typed_memory_status(&self, id: i64, new_status: MemoryStatus) -> Result<bool, MemoryError>` | 低レベルのステータス書き込み。内部的には `transition_typed_memory_status` に委譲する。 |
@@ -561,7 +561,7 @@ pub struct InvalidTransition {
 | `decay_score` | `fn decay_score(item: &MemoryItem, now: DateTime<Utc>, half_life_days: f64) -> f32` | ピン留めされたメモリは `1.0` を返す。それ以外は、指数関数的な経過時間による減衰（`exp(-ln2 * age_days / half_life)`）を顕著性・確信度・感情的インパクトでスケーリングし、`[0, 1]` にクランプする。 |
 | `target_status_after_decay` | `fn target_status_after_decay(current: MemoryStatus, score: f32) -> Option<MemoryStatus>` | `Active` かつスコアが `FADE_THRESHOLD` 未満 → `Some(Faded)`；`Faded` かつスコアが `ARCHIVE_THRESHOLD` 未満 → `Some(Archived)`；それ以外は `None`。 |
 
-正確な減衰式と本番で使われるデフォルトの閾値については、[`docs/memory/memory.md`](../memory/memory.md#memory-forgetting-lifecycle-76) を参照してください。
+正確な減衰式と本番で使われるデフォルトの閾値については、[`docs/reference/memory/memory.md`](../memory/memory.md#memory-forgetting-lifecycle-76) を参照してください。
 
 ---
 
@@ -686,7 +686,7 @@ pub fn document_lexical_similarity(
 ) -> f32
 ```
 
-トークン化された `title + content` のペアに対するJaccard類似度。ハイブリッド型付きメモリのスコアリング、および下流のMMR多様化における候補の重複排除の両方で使用されます（[`docs/memory/memory.md`](../memory/memory.md#mmr-diversification-78) 参照）。
+トークン化された `title + content` のペアに対するJaccard類似度。ハイブリッド型付きメモリのスコアリング、および下流のMMR多様化における候補の重複排除の両方で使用されます（[`docs/reference/memory/memory.md`](../memory/memory.md#mmr-diversification-78) 参照）。
 
 ---
 

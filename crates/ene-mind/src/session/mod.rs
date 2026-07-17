@@ -29,7 +29,7 @@
 //! `ene-mind`'s `MindConfig::context.compression_enabled` is set, `ene-runtime`'s actor
 //! (`EneHandle::manual_split()` and the auto-split check) routes to `crate::context::execute_compression`
 //! instead, which keeps the session ID stable and trims history more gradually. See
-//! [Streaming Events: the `SessionSplit` / compression gap](../../docs/core/streaming-events.md#the-sessionsplit--compression-gap)
+//! [Streaming Events: the `SessionSplit` / compression gap](../../docs/reference/runtime/streaming-events.md#the-sessionsplit--compression-gap)
 //! for the event-visibility difference between the two strategies. This module is not being
 //! removed — it remains the active path whenever compression is disabled — but new integrations
 //! should prefer enabling compression rather than relying on hard splits.

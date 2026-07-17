@@ -5,7 +5,7 @@ This project is an AI assistant application written in Rust that merges VTuber-l
 
 ## 0. Crucial Behaviors
 
-* **Check Documentation:** Before planning changes, always read the relevant files in `docs/` or `crates/` to confirm the current design.
+* **Check Documentation:** Before planning changes, always read the relevant files in `docs/reference/` (design & API), `docs/guide/` (human workflows), or `crates/` to confirm the current design.
 * **Verify & Complete:** Before declaring a task finished, run `cargo clippy --workspace` and `cargo test --workspace` (on Linux, use the §3 direnv invocation). Finally, check the PR Verification Checklist (§8) to ensure all requirements are met.
 * **Correct Fixes:** If a test or build fails, read the compiler errors carefully. Always clarify the cause and the reason, and create a fix plan before making corrections. If the error is environment-specific, ask the user how to fix it.
 * **Follow the Recipes:** When asked to add tools, configs, or IPC messages, strictly follow the steps in **§6 Common Tasks**.
@@ -16,7 +16,8 @@ This project is an AI assistant application written in Rust that merges VTuber-l
 | Purpose | Reference |
 |---|---|
 | Platform-specific notes | §3 Platform-Specific Notes |
-| Understanding crate layout and architecture | §4 Architecture & Philosophy |
+| Understanding crate layout and architecture | §4 Architecture & Philosophy; `docs/reference/` |
+| Human how-to (run, configure, tools catalog) | `docs/guide/` |
 | Matching project style, error handling, and logging | §5 Code Style & Safety Guidelines |
 | Adding/modifying tools, configurations, or characters | §6 Common Tasks |
 | Submitting a PR / Git Workflow | §8 Git & PR Policy |
@@ -26,7 +27,8 @@ This project is an AI assistant application written in Rust that merges VTuber-l
 | Scope | Where it lives |
 |---|---|
 | **Project-specific conventions** | **AGENTS.md** (this file) |
-| **Design & architecture tutorials** | `docs/` (English) and `docs/ja/` (Japanese) |
+| **Design & architecture / API (agents)** | `docs/reference/` (EN) and `docs/ja/reference/` (JA) |
+| **Human developer guides** | `docs/guide/` and `docs/ja/guide/` |
 | **End-user quickstart** | `README.md` |
 
 ## 3. Platform-Specific Notes
@@ -111,13 +113,13 @@ if query.is_empty() {
 1. **Create:** `cargo new --bin tools/<name>`
 2. **Implement:** `#[derive(ene_tool_derive::ToolSpec)]` on the args struct, then wrap one or more `ToolAction`s in a `ToolProvider` — use `ene_tool::ActionSetProvider` (or `ene_tool::prelude::*`) instead of hand-writing the dispatch loop.
 3. **Wire up:** Call `run_tool_server(Box::new(provider)).await` from `ene-tool` / `ene-tool-proto` inside `main`. This is **not generic** — there is no `run_tool_server::<MyAction>()`; it always takes a boxed `dyn ToolProvider`.
-4. **Document:** Add to a category in `docs/tools/` and `docs/ja/tools/`.
+4. **Document:** Add to a category in `docs/guide/tools/` and `docs/ja/guide/tools/`.
 5. **Verify:** Run `cargo run -p ene-cli` -> `/tool list`.
 
 ### R2. Add a config field
 1. Edit the struct in `crates/ene-config/src/config.rs` (`define_config!` macro).
 2. Run `cargo run -p ene-cli` once to auto-regenerate `assets/settings.schema.json` and `character_settings.schema.json`. *(Note: These JSON files are gitignored. Do not commit or hand-edit them).*
-3. Document in `docs/configuration/settings.md` (both English and Japanese).
+3. Document in `docs/reference/configuration/settings.md` and `docs/ja/reference/configuration/settings.md`.
 
 ### R3. Add an IPC request/response
 1. Extend `IpcRequest` / `IpcResponse` in `crates/ene-tool-proto/src/ipc.rs`.
@@ -164,4 +166,4 @@ Before submitting a PR or finishing a coding task, verify the following:
 
 ## 9. Further Reading
 
-See `docs/` for deep dives into Architecture, Memory, Tools (RAG, SDK, Sandbox), and Core (Streaming, Prompting).
+See `docs/guide/` and `docs/reference/` (and `docs/ja/guide/` / `docs/ja/reference/`) for developer guides and deep dives into Architecture, Memory, Tools (RAG, SDK, Sandbox), and Runtime (Streaming, Prompting).

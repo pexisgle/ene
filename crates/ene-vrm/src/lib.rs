@@ -1,7 +1,7 @@
 //! VRM 1.0 character renderer for the ene desktop app.
 //!
 //! Platform-agnostic, built on `wgpu` 29 and the `gltf` 1.4 crate.
-//! See `docs/api/ene-vrm.md` for the supported API.
+//! See `docs/reference/api/ene-vrm.md` for the supported API.
 //!
 //! ## Module map
 //!
@@ -20,7 +20,7 @@
 //!
 //! Everything under `pub` remains callable (this crate makes no breaking-removal changes as
 //! part of curating the surface), but not every `pub` item is meant for `ene-desktop` (or other
-//! hosts) to use directly. [`prelude`] and `docs/api/ene-vrm.md` name the intentionally
+//! hosts) to use directly. [`prelude`] and `docs/reference/api/ene-vrm.md` name the intentionally
 //! supported subset — model loading, rendering, animation playback, look-at, and expressions.
 //! Sub-parsers called only from [`loader::load_vrm`] (e.g. `load_humanoid_bones`,
 //! `load_look_at`, `load_spring_bones`, `load_node_constraints`, `load_expression_overrides`,

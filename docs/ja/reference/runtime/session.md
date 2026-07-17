@@ -37,6 +37,6 @@ mind ランタイムでは、セッション状態を `CognitionEngine` と組�
 
 ## 関連ドキュメント
 
-- `docs/ja/architecture/cognitive-runtime.md`
-- `docs/ja/core/prompt.md`
-- `docs/ja/core/session-split.md`
+- `docs/ja/reference/architecture/cognitive-runtime.md`
+- `docs/ja/reference/runtime/prompt.md`
+- `docs/ja/reference/runtime/session-split.md`

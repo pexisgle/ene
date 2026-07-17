@@ -466,7 +466,7 @@ pub enum ToolError {
 | `ToolSpec`/`ToolRagProfile`/`SandboxConfigData` に新しい任意フィールドを追加（`#[serde(default)]` またはマクロ提供のデフォルト付き） | ✅ 追加的 | 不要。`SandboxConfigData` が既に使っている `define_tool_config!`/`schemars` のパターンに従えば、フィールドのない古いJSONもそのままデシリアライズできます。 |
 | `ToolError` に新しいバリアントを追加 | ✅ 追加的 | 不要 — `ToolError` は（タグ付き列挙体ではあるが）単純な列挙型なので、古いコードがワイルドカードアームなしで網羅的に `match` していない限り、新しいバリアントは問題なくデシリアライズされます。新しい `match` にはワイルドカード（`_ => ...`）アームを追加することを推奨します。 |
 | `ToolProvider` トレイトに新しいメソッドを追加 | ✅ 追加的（デフォルト実装がある場合） | `set_sandbox`、`approve_permission`、`set_config` などが既にそうしているように、デフォルト（no-op / 空）実装を与えてください — これにより、既存のすべてのプロバイダー（手書きでもアダプタベースでも）がコンパイルされ続けます。 |
-| 既存の `IpcRequest`/`IpcResponse` バリアントを削除・改名、またはフィールドの型/意味を変更 | ❌ 破壊的 | `ene-tool-proto` で `IPC_PROTOCOL_VERSION` をバンプする（[AGENTS.md §6 R3](../../AGENTS.md) を参照）。同じ変更でホスト（`ene-tool-host`）とすべてのツールバイナリを更新してください。 |
+| 既存の `IpcRequest`/`IpcResponse` バリアントを削除・改名、またはフィールドの型/意味を変更 | ❌ 破壊的 | `ene-tool-proto` で `IPC_PROTOCOL_VERSION` をバンプする（[AGENTS.md §6 R3](../../../../AGENTS.md) を参照）。同じ変更でホスト（`ene-tool-host`）とすべてのツールバイナリを更新してください。 |
 | `ToolProvider` トレイトメソッドを削除、または既存のデフォルト付きメソッドを必須化 | ❌ 破壊的 | 上記と同様 — これは各ツールバイナリが実装すべき内容を変更します。`tools/*` 全体での連携した更新に加え、ワイヤー動作も変わる場合は `PROTOCOL_VERSION` のバンプが必要です。 |
 | `Box::new(provider)` の呼び出し箇所を壊すような形で `run_tool_server` のシグネチャを変更 | ❌ 破壊的（ソースレベル） | それ自体は `PROTOCOL_VERSION` のバンプを必要としません（Rust APIの破壊であり、ワイヤーの破壊ではない）が、同じ変更内ですべての `tools/*/src/main.rs` の呼び出し箇所と `AGENTS.md` §6 R1 のレシピを更新してください。 |
 

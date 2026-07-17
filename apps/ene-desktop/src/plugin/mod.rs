@@ -13,8 +13,8 @@
 //! `!Send + !Sync`, so the per-frame `character.update_*` /
 //! `character.render` / `cw.with_surface_view` calls cannot
 //! live in bevy systems. The render path stays on `Runtime` for that
-//! reason; see `docs/architecture/startup.md` and
-//! `docs/applications/desktop.md`.
+//! reason; see `docs/reference/architecture/startup.md` and
+//! `docs/guide/apps/desktop.md`.
 //!
 //! - `WindowPlugin` (deferred)
 //! - `RenderPlugin` (cancelled — GPU work stays on `Runtime`)

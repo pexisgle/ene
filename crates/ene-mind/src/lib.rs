@@ -32,7 +32,7 @@
 //!
 //! ## Architecture
 //!
-//! The crate implements the [Ene Cognitive Runtime](../../docs/architecture/cognitive-runtime.md)
+//! The crate implements the [Ene Cognitive Runtime](../../docs/reference/architecture/cognitive-runtime.md)
 //! architecture, treating the LLM as an utterance generator from explicitly managed
 //! cognitive state rather than as the entity that implicitly holds personality and memory.
 //! Conversation session state absorbed from the former standalone session crate
@@ -40,9 +40,9 @@
 //!
 //! ## Crate Boundaries
 //!
-//! Enforced by the [Cognitive Runtime ADR](../../docs/architecture/cognitive-runtime.md)
+//! Enforced by the [Cognitive Runtime ADR](../../docs/reference/architecture/cognitive-runtime.md)
 //! and [AGENTS.md §4.1](../../AGENTS.md); see the
-//! [API v2 ADR](../../docs/architecture/api-v2.md) for the target crate map.
+//! [API v2 ADR](../../docs/reference/architecture/api-v2.md) for the target crate map.
 //!
 //! - Depends on: `ene-store`, `ene-config`, `ene-ai`
 //! - Does NOT depend on: `ene-runtime` (prevents circular dependencies)

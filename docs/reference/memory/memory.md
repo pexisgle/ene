@@ -310,7 +310,7 @@ Behavior:
 
 ### Explainable Recall Reasons (#74)
 
-`MemoryStore::search` returns raw [`ScoredMemory`](../../crates/ene-store/src/typed_memory.rs) values. Reason assignment lives in `ene-mind::recall`: downstream recall execution converts those results into `RecalledMemory` DTOs. Each result includes:
+`MemoryStore::search` returns raw [`ScoredMemory`](../../../crates/ene-store/src/typed_memory.rs) values. Reason assignment lives in `ene-mind::recall`: downstream recall execution converts those results into `RecalledMemory` DTOs. Each result includes:
 
 - `item` — the typed memory row
 - `reason` — a single primary `RecallReason` for UX, debug, and prompt introspection

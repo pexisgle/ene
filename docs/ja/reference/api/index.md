@@ -140,4 +140,4 @@ pub use ene_tool_proto::{ToolSpec, ToolError, IpcRequest, IpcResponse};
 - [メモリシステム](../memory/memory.md)
 - [ツールシステム](../tools/overview.md)
 - [設定リファレンス](../configuration/settings.md)
-- [アプリケーション](../applications/cli.md) / [デスクトップ](../applications/desktop.md)
+- [アプリケーション](../../guide/apps/cli.md) / [デスクトップ](../../guide/apps/desktop.md)

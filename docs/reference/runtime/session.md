@@ -37,6 +37,6 @@ Session keeps the loaded `CharacterCardV3` so runtime can:
 
 ## Related Docs
 
-- `docs/architecture/cognitive-runtime.md`
-- `docs/core/prompt.md`
-- `docs/core/session-split.md`
+- `docs/reference/architecture/cognitive-runtime.md`
+- `docs/reference/runtime/prompt.md`
+- `docs/reference/runtime/session-split.md`

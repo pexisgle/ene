@@ -154,6 +154,6 @@ Available expressions:
 
 ## 関連ドキュメント
 
-- [感情と Performance](../core/emotions.md) — アフェクトエンジンと表情マッピング
-- [ストリーミングイベント](../core/streaming-events.md) — チャットイベントバス
+- [感情と Performance](../runtime/emotions.md) — アフェクトエンジンと表情マッピング
+- [ストリーミングイベント](../runtime/streaming-events.md) — チャットイベントバス
 - [API v2 ADR](api-v2.md) — ホスト契約とクレートマップ

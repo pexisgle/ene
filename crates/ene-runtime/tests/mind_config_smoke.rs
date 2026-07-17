@@ -16,7 +16,7 @@
 //!
 //! Without this dependency, the JSON schema shipped to users would be
 //! missing the `mind` section even though the struct exists in
-//! source and the docs (`docs/configuration/settings.md`) already describe
+//! source and the docs (`docs/reference/configuration/settings.md`) already describe
 //! it. The tests below assert both halves of the wiring:
 //!
 //! 1. The generated schema exposes a top-level `mind` property
@@ -130,7 +130,7 @@ fn mind_section_defaults_match_macro_definition() {
     // Reproduce the defaults defined in `ene-mind::config.rs`. If
     // those defaults change, this test must change in lockstep — that
     // is the point: the test pins the contract documented in
-    // `docs/configuration/settings.md`.
+    // `docs/reference/configuration/settings.md`.
     let cfg = EneConfig::default();
     let mind: MindConfig = cfg
         .get_section::<MindConfig>()
@@ -257,7 +257,7 @@ fn mind_section_survives_in_serialised_settings_json() {
         .and_then(|v| v.as_object())
         .expect("`mind` should appear as a top-level object after set_section");
 
-    // The defaults are documented in `docs/configuration/settings.md`;
+    // The defaults are documented in `docs/reference/configuration/settings.md`;
     // pin the contract here as well.
     assert_eq!(
         mind.get("context").and_then(|v| v.get("max_prompt_tokens")),

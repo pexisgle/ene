@@ -1,70 +1,15 @@
 # ene Documentation
 
-ene is a local AI character platform implemented as a Rust workspace. It provides LLM-driven conversations with animated VRM characters, tool-augmented agent capabilities, long-term memory, and automatic session management.
+ene is a local AI character platform implemented as a Rust workspace: LLM chat, optional tools, long-term memory, and animated VRM characters on desktop.
 
-## Getting Started
+[日本語](ja/index.md)
 
-- [Architecture Overview](architecture/overview.md) — Crate map and dependency graph
-- [API v2](architecture/api-v2.md) — Locked host contract: `EneHandle::open`, `TurnId`, single-flight Busy, minimal events
-- [Startup Flow](architecture/startup.md) — Desktop (winit+wgpu+egui) and CLI boot sequences
-- [Cognitive Runtime Architecture](architecture/cognitive-runtime.md) — ADR for the Identity Kernel, typed memory, affect, and expression arbitration design
-- [Avatar Performance](architecture/avatar-performance.md) — ADR for `PerformanceCue` arbitration and VRM presentation
-- [Configuration](configuration/settings.md) — Full settings.json schema reference
-- [API Reference](api/index.md) — Public API documentation for every library crate
+## Choose a path
 
-## Core Engine
+| Path | Audience | Start here |
+|------|----------|------------|
+| **[Developer Guide](guide/index.md)** | Humans building or running ene | [Getting started](guide/getting-started.md) |
+| **[Reference](reference/index.md)** | AI agents and deep implementation work | [API v2](reference/architecture/api-v2.md) |
 
-| Document | Topic |
-|----------|-------|
-| [Streaming Engine](core/streaming.md) | Actor-based architecture, `EneHandle`, `EneEvent`, tool calling loop |
-| [Streaming Events](core/streaming-events.md) | `EneEvent` variants emitted by the mind streaming path |
-| [Prompt Construction](core/prompt.md) | Message assembly order, system prompt, emotion protocol, function calling |
-| [Session Management](core/session.md) | `ConversationSession`, `CharacterCardV3`, CBS macro expansion |
-| [Session Splitting](core/session-split.md) | Timeout, topic change detection, manual split, async lifecycle |
-| [Emotion Tokens](core/emotions.md) | `<\|emo:name\|>` parsing, VRM blendshape mapping |
-
-## Memory
-
-- [Long-Term Memory](memory/memory.md) — `MemoryStore`, embedding, vector search, summarization
-
-## Tools
-
-- [Tool System Overview](tools/overview.md) — IPC architecture, `ToolHostManager`, Tool RAG
-- [Filesystem Tools](tools/fs.md) — `read`, `write`, `edit`, `glob`, `grep`, `patch`, `shell`, `undo`
-- [Web Tools](tools/web.md) — `webfetch`, `websearch`
-- [Utility Tools](tools/utility.md) — `question`, `todo`, `get_current_time`, `get_system_info`
-- [GUI Automation](tools/app.md) — `app` mega-tool (15 actions)
-- [Browser Automation](tools/browser.md) — `browser` mega-tool (8 actions via CDP)
-- [Security Sandbox](tools/sandbox.md) — Path restrictions, blocked commands, undo system
-- [Tool RAG](tools/tool-rag.md) — Embedding-based tool selection, HyDE, reranking
-- [SDK Guide](tools/sdk.md) — Building third-party tools with `ene-tool-proto`
-- [Derive Macro](tools/derive-macro.md) — `#[derive(ToolSpec)]` attribute reference
-
-## Applications
-
-- [CLI Reference](applications/cli.md) — REPL commands, flags, keyboard shortcuts
-- [Desktop App](applications/desktop.md) — winit+wgpu+egui shell, VRM pipeline, overlay behavior
-
-## Crate Index
-
-| Crate | Type | Description |
-|-------|------|-------------|
-| `ene-config` | Library | Configuration, schemas, character cards, macros |
-| `ene-runtime` | Library | API v2 host: ready `EneHandle::open`, `TurnId`, streaming, tools, memory integration |
-| `ene-mind` | Library | Cognitive runtime — session, Identity Kernel, typed memory, affect, Performance arbitration, commitments |
-| `ene-ai` | Library | LLM + embedding providers (API + local GGUF) |
-| `ene-store` | Library | SQLite-vec memory store (`store.enabled` / `store.db_path`) |
-| `ene-tool` | Library | Tool ABI facade (re-exports proto + common + derive) |
-| `ene-tool-proto` | Library | IPC protocol, `ToolProvider` trait, `ToolSpec`, `ToolError` |
-| `ene-tool-derive` | Proc-macro | `#[derive(ToolSpec)]` for auto-generated tool specs |
-| `ene-tool-host` | Library | Tool process manager, MCP support, Tool RAG |
-| `ene-tool-db` | Library | Per-tool DB IPC client (used by tool binaries) |
-| `ene-tool-common` | Library | Shared utilities (`ToolAction` trait, HTML extraction); re-exports `Truncate` from `ene-config` |
-| `ene-vrm` | Library | VRM 1.0 model loader and MToon renderer (no mind/runtime dep) |
-| `ene-tool-utility` | Binary | Utility tools (question, todo, time, system info) |
-| `ene-tool-fs` | Binary | Filesystem tools (read, write, edit, shell, undo) |
-| `ene-tool-web` | Binary | Web tools (fetch, search) |
-| `ene-tool-app` | Binary | GUI automation (keyboard, mouse, screenshot) |
-| `ene-tool-browser` | Binary | Browser automation (Chromium CDP) |
-| `ene-cli` | Binary | Interactive CLI REPL |
-| `ene-desktop` | Binary | winit + wgpu + egui desktop shell with VRM rendering |
+- **Guide** — concepts, how to configure/run apps, tool catalog, practical recipes.
+- **Reference** — locked design (ADRs), crate APIs, runtime internals, IPC, full settings schema.

@@ -6,7 +6,7 @@
 //! miss. [`ActionSetProvider`] factors that loop
 //! out so new tool binaries don't have to hand-write a `ToolProvider` impl
 //! just to dispatch a fixed action list — see the ABI compatibility table in
-//! `docs/tools/sdk.md` for how this fits into the wider tool ABI.
+//! `docs/reference/tools/sdk.md` for how this fits into the wider tool ABI.
 
 use crate::ToolAction;
 use async_trait::async_trait;

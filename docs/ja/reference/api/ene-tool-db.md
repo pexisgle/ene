@@ -11,7 +11,7 @@
 
 すべての接続状態（基盤となるソケットに加え、[`reconnect`](#reconnect) に必要なソケットパスと認証トークン）は `&mut self` の背後にあります。各呼び出しは単一のストリーム上で行われる同期的なリクエスト/レスポンスのラウンドトリップであるため、すべての CRUD メソッドは `&mut DbClient` を取ります。また `reconnect` は、サーバー再起動後にそのストリームを置き換えるために排他アクセスを必要とします。
 
-参照: [AGENTS.md §7.3 メモリシステムのルール](../../AGENTS.md) および [`ene-tool-host`](./ene-tool-host.md)。
+参照: [AGENTS.md §7.3 メモリシステムのルール](../../../../AGENTS.md) および [`ene-tool-host`](./ene-tool-host.md)。
 
 ---
 

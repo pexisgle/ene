@@ -40,7 +40,7 @@ This document focuses on the entry points and types a desktop host actually call
 
 | Category | Symbols | Notes |
 |---|---|---|
-| **Supported (use `prelude`)** | `load_vrm`, `VrmModel`, `VrmRenderer`, `VrmError`, `VrmaAsset`, `VrmaPlayer`, `VrmaFrame`, `evaluate_clip`, `load_vrma`, `LookAtEvaluator`, `LookAtProperties`, `ExpressionLayer`, `ExpressionName` | Curated in [`ene_vrm::prelude`](../../crates/ene-vrm/src/prelude.rs). Start here for new host code. |
+| **Supported (use `prelude`)** | `load_vrm`, `VrmModel`, `VrmRenderer`, `VrmError`, `VrmaAsset`, `VrmaPlayer`, `VrmaFrame`, `evaluate_clip`, `load_vrma`, `LookAtEvaluator`, `LookAtProperties`, `ExpressionLayer`, `ExpressionName` | Curated in [`ene_vrm::prelude`](../../../crates/ene-vrm/src/prelude.rs). Start here for new host code. |
 | **Supported (desktop also uses)** | `camera::*`, `debug_renderer::*`, `humanoid::*`, `spring_bone::SpringBoneSimulator`, `spring_bone::SpringBoneProperties`, `model::{NodeHierarchy, Skeleton, MeshVertex}`, `expression_override::apply_overrides` | Not in `prelude` because they are secondary to the core load→render loop, but `ene-desktop` depends on them. |
 | **Internal (`#[doc(hidden)]`)** | `load_humanoid_bones`, `load_look_at`, `load_spring_bones`, `load_node_constraints`, `load_expression_overrides`, `load_mtoon_materials`, `texture_flags`, `retarget_rotation`, `quat_to_yaw_pitch`, `HUMANOID_BONE_NAMES`, `MOUTH_TARGET_NAMES`, … | Called from `load_vrm` or the renderer; hidden from rustdoc to keep the public index focused. Still `pub` — some types remain reachable as fields of supported structs. |
 
@@ -585,4 +585,4 @@ fn per_frame(
 
 ## See Also
 
-- [`ene-desktop` Application](../applications/desktop.md) — How the desktop runtime drives `ene-vrm` (window/event loop, per-frame update, AI bridge integration)
+- [`ene-desktop` Application](../../guide/apps/desktop.md) — How the desktop runtime drives `ene-vrm` (window/event loop, per-frame update, AI bridge integration)

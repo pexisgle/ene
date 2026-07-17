@@ -8,7 +8,7 @@ calls `app.update()` every frame.
 ## Startup
 
 Boot orchestration lives in `apps/ene-desktop/src/startup.rs`
-(four phases — see [Startup Flow](../architecture/startup.md)).
+(four phases — see [Startup Flow](../../reference/architecture/startup.md)).
 
 ```bash
 cargo run -p ene-desktop
@@ -183,4 +183,4 @@ The messages registered by `CorePlugin` include:
 
 ## File layout
 
-Plugin ordering and the ECS resource layout live under `apps/ene-desktop/src/plugin/` and `apps/ene-desktop/src/resource/`. The render path stays outside bevy systems because `CharacterRenderer` and wgpu types are `!Send + !Sync` — see [Startup Flow](../architecture/startup.md).
+Plugin ordering and the ECS resource layout live under `apps/ene-desktop/src/plugin/` and `apps/ene-desktop/src/resource/`. The render path stays outside bevy systems because `CharacterRenderer` and wgpu types are `!Send + !Sync` — see [Startup Flow](../../reference/architecture/startup.md).

@@ -572,7 +572,7 @@ Follow **Recipe R2** from `AGENTS.md`:
 
 1. Edit the relevant struct in `crates/ene-config/src/config.rs` using `define_config!`.
 2. Run `cargo run -p ene-cli` once to regenerate `assets/settings.schema.json`.
-3. Document the new field in `docs/configuration/settings.md` (English and Japanese).
+3. Document the new field in `docs/reference/configuration/settings.md` and `docs/ja/reference/configuration/settings.md`.
 
 ---
 

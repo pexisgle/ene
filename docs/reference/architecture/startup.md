@@ -116,7 +116,7 @@ The schedule (`apps/ene-desktop/src/schedule.rs`) has six sets:
    `StatusChanged`, etc.) and pushes them into the cross-subsystem
    `AppEventSender`.
 3. Spawns Phase 3 runtime warmup via
-   [`ene_runtime::bootstrap_runtime`](../../crates/ene-runtime/src/bootstrap.rs)
+   [`ene_runtime::bootstrap_runtime`](../../../crates/ene-runtime/src/bootstrap.rs)
    using the config already loaded by `CharacterSettings::discover`
    (no second disk load, no duplicate schema write).
 4. Owns a `processing: Arc<AtomicBool>` flag, set on
@@ -193,7 +193,7 @@ EneEvent::Performance → AiBridge → AppEvent::PerformanceCue
 ```
 
 For more details see the full file layout in
-[`docs/applications/desktop.md`](../applications/desktop.md).
+[`docs/guide/apps/desktop.md`](../../guide/apps/desktop.md).
 
 ---
 

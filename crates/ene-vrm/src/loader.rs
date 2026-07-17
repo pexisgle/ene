@@ -38,7 +38,7 @@
 //!   require the `gltf` crate's `import` feature and ship as a
 //!   follow-up PR.
 //!
-//! See `docs/api/ene-vrm.md` for loader scope and supported formats.
+//! See `docs/reference/api/ene-vrm.md` for loader scope and supported formats.
 
 use std::path::Path;
 

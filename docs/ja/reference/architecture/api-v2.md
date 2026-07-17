@@ -144,4 +144,4 @@ handle.diagnostics() -> &EneDiagnostics;
 - Epic #111 とサブ issue #112–#118
 - [認知ランタイム ADR](cognitive-runtime.md)
 - [API Index](../api/index.md)
-- [ストリーミングイベント](../core/streaming-events.md)
+- [ストリーミングイベント](../runtime/streaming-events.md)

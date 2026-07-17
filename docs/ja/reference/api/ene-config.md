@@ -588,7 +588,7 @@ fn update_model_via_store(store: &ConfigStore, new_model: &str) {
 
 1. `crates/ene-config/src/config.rs` の該当する構造体を `define_config!` で編集する。
 2. `cargo run -p ene-cli` を1回実行して `assets/settings.schema.json` を再生成する。
-3. `docs/configuration/settings.md`（英語および日本語）に新しいフィールドをドキュメント化する。
+3. `docs/reference/configuration/settings.md` および `docs/ja/reference/configuration/settings.md` に新しいフィールドをドキュメント化する。
 
 ---
 

@@ -1,6 +1,8 @@
-# Tool System Overview
+# Tool System (IPC / Host)
 
-Each tool runs as an independent binary process, communicating with core over IPC (Unix Domain Sockets on Linux, Named Pipes on Windows).
+Each tool runs as an independent binary process, communicating with the host over IPC (Unix Domain Sockets on Linux, Named Pipes on Windows).
+
+For the human-facing action catalog, see the [Tool catalog](../../guide/tools/overview.md).
 
 ## Architecture
 
@@ -8,7 +10,7 @@ Each tool runs as an independent binary process, communicating with core over IP
 ToolHostManager (binary discovery, spawning, supervision)
   ├── SupervisedIpcRegistry × N (IPC + restart)
   │   └── IpcToolRegistry (reconnect)
-  │       └── ene-tool-proto protocol (v1)
+  │       └── ene-tool-proto protocol
   ├── extra_registries × N (MCP, etc.)
   │   └── McpToolRegistry
   └── CompositeToolRegistry
@@ -25,18 +27,9 @@ DbIpcServer × N (per-tool database, Unix only)
   └── …
 ```
 
-## Tool Naming Convention
+## Naming
 
-All tools use namespaced names: `<namespace>.<action>`.
-
-| Namespace | Tools | Binary |
-|-----------|-------|--------|
-| `filesystem` | `read`, `write`, `edit`, `delete`, `glob`, `grep`, `patch` | `ene-tool-fs` |
-| `shell` | `execute` | `ene-tool-fs` |
-| `app` | `clipboard_read`, `clipboard_write`, `list_windows`, `focus_window`, `get_active_window`, `list_monitors`, `capture_window`, `type_text`, `press_key`, `key_combo`, `mouse_move`, `mouse_click`, `mouse_drag`, `mouse_scroll`, `screenshot` | `ene-tool-app` |
-| `browser` | `navigate`, `click`, `type`, `wait`, `screenshot`, `get_content`, `scroll`, `close` | `ene-tool-browser` |
-| `web` | `fetch`, `search` | `ene-tool-web` |
-| `utility` | `question`, `todo_list`, `todo_add`, `todo_update`, `todo_complete`, `todo_delete`, `get_system_info`, `get_current_time`, `undo` | `ene-tool-utility` / `ene-tool-fs` |
+All tools use namespaced names: `<namespace>.<action>`. Namespace tables live in the [catalog](../../guide/tools/overview.md).
 
 ## IPC Protocol (`ene-tool-proto`)
 
@@ -70,9 +63,7 @@ pub enum IpcResponse {
 }
 ```
 
-Wire format: 4-byte little-endian length prefix + JSON payload. Max
-message size: 64 MB. Protocol version: `IPC_PROTOCOL_VERSION = 2` (see
-`crates/ene-tool-proto/src/ipc.rs`).
+Wire format: 4-byte little-endian length prefix + JSON payload. Max message size: 64 MB. Protocol version: `IPC_PROTOCOL_VERSION = 2` (see `crates/ene-tool-proto/src/ipc.rs`).
 
 ## ToolHostManager
 
@@ -85,14 +76,12 @@ message size: 64 MB. Protocol version: `IPC_PROTOCOL_VERSION = 2` (see
 | `add_registry(registry)` | Registers external registries (e.g., MCP) |
 | `into_registry()` | Consumes manager, returns `Arc<dyn ToolRegistry>` |
 
-> **Note:** The `with_store(store)` method shown in earlier drafts of
-> this doc no longer exists on `ToolHostManager`. Tool RAG wiring is
-> performed by `EneActor::reconfigure` via `init_tool_rag(config,
-> embedder, session)` (see `crates/ene-runtime/src/handle.rs`).
+> **Note:** The `with_store(store)` method shown in earlier drafts of this doc no longer exists on `ToolHostManager`. Tool RAG wiring is performed by `EneActor::reconfigure` via `init_tool_rag(config, embedder, session)` (see `crates/ene-runtime/src/handle.rs`).
 
 ### Binary Discovery
 
 `find_tool_binary(name)` searches in order:
+
 1. `builtin_tools_dir()` — debug: same dir as exe, release: `exe_dir/tools/`
 2. `user_tools_dir()` — `app_data_dir()/tools/`
 
@@ -154,8 +143,7 @@ pub trait ToolRegistry: Send + Sync {
 }
 ```
 
-Tool RAG is handled separately by the `ToolRag` struct (owned by
-`EneActor`), not by the registry.
+Tool RAG is handled separately by the `ToolRag` struct (owned by `EneActor`), not by the registry.
 
 ## CompositeToolRegistry
 
@@ -176,11 +164,7 @@ Aggregates multiple `ToolRegistry` instances:
 
 ## Custom Tool Registration
 
-1. Implement `ToolProvider` trait from `ene-tool-proto`
-2. Use `#[derive(ToolSpec)]` on args structs for auto-generated specs
-3. Call `run_tool_server()` in your binary's `main()`
-4. Place binary in `~/.local/share/dev.pexisgle.ene/tools/`
-5. Add entry to `settings.json` under `tools.tools`
+Practical steps for humans: [Write a tool](../../guide/tools/write-a-tool.md). Full ABI walkthrough: [SDK Guide](sdk.md).
 
 ```json
 {
@@ -191,5 +175,3 @@ Aggregates multiple `ToolRegistry` instances:
   }
 }
 ```
-
-See [SDK Guide](sdk.md) for a complete walkthrough.

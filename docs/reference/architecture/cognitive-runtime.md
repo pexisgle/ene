@@ -250,8 +250,8 @@ Rolling compression that summarizes old conversation turns into compact memory s
 
 - Epic: #63 — Redesign AI runtime as Ene Cognitive Runtime
 - Full Phase & Dependency Map: `#63` issue body
-- Current architecture: `docs/architecture/overview.md`
-- Memory system: `docs/memory/memory.md`
-- Prompt construction: `docs/core/prompt.md`
-- Session splitting: `docs/core/session-split.md`
-- Emotion handling: `docs/core/emotions.md`
+- Current architecture: `docs/reference/architecture/overview.md`
+- Memory system: `docs/reference/memory/memory.md`
+- Prompt construction: `docs/reference/runtime/prompt.md`
+- Session splitting: `docs/reference/runtime/session-split.md`
+- Emotion handling: `docs/reference/runtime/emotions.md`

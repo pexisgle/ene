@@ -8,7 +8,7 @@ winit + `wgpu` + `bevy_ecs 0.19` + `bevy_app 0.19` アプリ。
 ## 起動
 
 起動オーケストレーションは `apps/ene-desktop/src/startup.rs` に
-あります (4 フェーズ — [起動フロー](../architecture/startup.md) を参照)。
+あります (4 フェーズ — [起動フロー](../../reference/architecture/startup.md) を参照)。
 
 ```bash
 cargo run -p ene-desktop
@@ -168,4 +168,4 @@ tokio EneActor (ene-runtime)
 
 ## ファイル構成
 
-プラグイン順序と ECS リソース構成は `apps/ene-desktop/src/plugin/` および `apps/ene-desktop/src/resource/` にあります。レンダーパスは `CharacterRenderer` と wgpu 型が `!Send + !Sync` のため bevy システム外に残しています — [起動フロー](../architecture/startup.md) を参照。
+プラグイン順序と ECS リソース構成は `apps/ene-desktop/src/plugin/` および `apps/ene-desktop/src/resource/` にあります。レンダーパスは `CharacterRenderer` と wgpu 型が `!Send + !Sync` のため bevy システム外に残しています — [起動フロー](../../reference/architecture/startup.md) を参照。

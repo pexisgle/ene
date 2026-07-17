@@ -60,7 +60,7 @@ cargo test --workspace
 ```
 
 ## 開発メモ
-- ホスト契約は API v2（`EneHandle::open`、必須 `TurnId`）。詳細は `docs/architecture/api-v2.md`。
+- ホスト契約は API v2（`EneHandle::open`、必須 `TurnId`）。詳細は [`docs/index.md`](docs/index.md) および `docs/reference/architecture/api-v2.md`。
 - GUI は `winit` + `wgpu` + `egui`（状態管理に `bevy_ecs`）を利用しています。
 
 ## 資産（assets）

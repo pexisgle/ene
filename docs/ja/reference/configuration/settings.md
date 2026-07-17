@@ -733,7 +733,7 @@ fn auto_save(store: Res<ConfigStore>, character: Res<CharacterName>) {
 1. 適切なクレートで `define_config!(settings, "my_key", ...)` を使って構造体を定義する。
 2. **`cargo build`** を実行 — `#[ctor]` がスキーマを自動登録する。
 3. **`cargo run -p ene-cli`** を1回実行し、`assets/schema/settings.schema.json` を再生成する。
-4. `docs/configuration/settings.md` と `docs/ja/configuration/settings.md` に新しいセクションをドキュメントする。
+4. `docs/reference/configuration/settings.md` と `docs/ja/reference/configuration/settings.md` に新しいセクションをドキュメントする。
 5. `config.get_section::<MyConfig>()` または `store.get_section::<MyConfig>()` でアクセスする。
 
 ## デバッグオーバーレイ (セッション毎、永続化なし)

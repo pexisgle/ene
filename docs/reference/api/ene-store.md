@@ -370,7 +370,7 @@ pub enum MemoryCandidateSource { Vector, Lexical, Recent, Commitment }
 | `typed_memory_exists_by_source_ref` | `async fn typed_memory_exists_by_source_ref(&self, character_id: &str, source_ref: &str) -> Result<bool, MemoryError>` | Existence check for idempotent re-sync. |
 | `get_active_typed_memory_by_source_ref` | `async fn get_active_typed_memory_by_source_ref(&self, character_id: &str, source_ref: &str) -> Result<Option<MemoryItem>, MemoryError>` | Fetch the active row for a given `source_ref`. |
 | `archive_typed_memories_by_source_prefixes` | `async fn archive_typed_memories_by_source_prefixes(&self, character_id: &str, prefixes: &[&str], keep_refs: &HashSet<String>) -> Result<usize, MemoryError>` | Archives rows under the given prefixes that are no longer present on re-sync (e.g. removed lorebook entries). |
-| `search` | `async fn search(&self, query: &Query<'_>) -> Result<Vec<ScoredMemory>, MemoryError>` | **Sole** typed-memory search entry (#123) — combines optional vector, lexical, recency, salience, confidence, affect, relationship, access, and commitment signals. Callers must pre-compute embeddings. See [`docs/memory/memory.md`](../memory/memory.md#hybrid-memory-search-73). |
+| `search` | `async fn search(&self, query: &Query<'_>) -> Result<Vec<ScoredMemory>, MemoryError>` | **Sole** typed-memory search entry (#123) — combines optional vector, lexical, recency, salience, confidence, affect, relationship, access, and commitment signals. Callers must pre-compute embeddings. See [`docs/reference/memory/memory.md`](../memory/memory.md#hybrid-memory-search-73). |
 | `list_recallable_typed_memories` | `async fn list_recallable_typed_memories(&self, character_id: &str, user_id: Option<&str>, limit: usize) -> Result<Vec<MemoryItem>, MemoryError>` | `Active`/`Faded`/`Disputed` rows for a character (and optional user scope). |
 | `supersede_typed_memory` | `async fn supersede_typed_memory(&self, new_item: &NewMemoryItem, superseded_id: i64) -> Result<i64, MemoryError>` | Atomically inserts the replacement row and marks the prior row `Superseded`. |
 | `update_typed_memory_status` | `async fn update_typed_memory_status(&self, id: i64, new_status: MemoryStatus) -> Result<bool, MemoryError>` | Low-level status write; internally delegates to `transition_typed_memory_status`. |
@@ -560,7 +560,7 @@ pub struct InvalidTransition {
 | `decay_score` | `fn decay_score(item: &MemoryItem, now: DateTime<Utc>, half_life_days: f64) -> f32` | Pinned memories return `1.0`. Otherwise: exponential age decay (`exp(-ln2 * age_days / half_life)`) scaled by salience, confidence, and emotional impact, clamped to `[0, 1]`. |
 | `target_status_after_decay` | `fn target_status_after_decay(current: MemoryStatus, score: f32) -> Option<MemoryStatus>` | `Active` + score below `FADE_THRESHOLD` → `Some(Faded)`; `Faded` + score below `ARCHIVE_THRESHOLD` → `Some(Archived)`; otherwise `None`. |
 
-See [`docs/memory/memory.md`](../memory/memory.md#memory-forgetting-lifecycle-76) for the exact decay formula and default thresholds used in production.
+See [`docs/reference/memory/memory.md`](../memory/memory.md#memory-forgetting-lifecycle-76) for the exact decay formula and default thresholds used in production.
 
 ---
 
@@ -685,7 +685,7 @@ pub fn document_lexical_similarity(
 ) -> f32
 ```
 
-Jaccard similarity over tokenized `title + content` pairs. Used both inside hybrid typed-memory scoring and for candidate de-duplication in downstream MMR diversification (see [`docs/memory/memory.md`](../memory/memory.md#mmr-diversification-78)).
+Jaccard similarity over tokenized `title + content` pairs. Used both inside hybrid typed-memory scoring and for candidate de-duplication in downstream MMR diversification (see [`docs/reference/memory/memory.md`](../memory/memory.md#mmr-diversification-78)).
 
 ---
 

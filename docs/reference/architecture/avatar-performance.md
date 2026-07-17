@@ -154,6 +154,6 @@ When the emotion engine is **enabled**, the natural-dialogue contract instructs 
 
 ## Related Documents
 
-- [Emotions](../core/emotions.md) — Affect engine and expression mapping
-- [Streaming Events](../core/streaming-events.md) — Chat event bus
+- [Emotions](../runtime/emotions.md) — Affect engine and expression mapping
+- [Streaming Events](../runtime/streaming-events.md) — Chat event bus
 - [API v2 ADR](api-v2.md) — Host contract and crate map

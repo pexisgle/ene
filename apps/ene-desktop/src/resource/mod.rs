@@ -31,7 +31,7 @@
 //! Phase 7.2-final note: the planned `gpu_resources` / `render_frame`
 //! resources were deleted in Phase 8 cleanup. The per-frame
 //! render parameters stay on `Runtime` because they are GPU-
-//! and `!Send`/`!Sync`-bound; see `docs/architecture/startup.md`.
+//! and `!Send`/`!Sync`-bound; see `docs/reference/architecture/startup.md`.
 pub mod ai_bridge;
 pub mod cursor_state;
 pub mod emotion_pipeline;

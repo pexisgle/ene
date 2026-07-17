@@ -140,4 +140,4 @@ See also [API v2](../architecture/api-v2.md).
 - [Memory System](../memory/memory.md)
 - [Tool System](../tools/overview.md)
 - [Configuration](../configuration/settings.md)
-- [Applications](../applications/cli.md) / [Desktop](../applications/desktop.md)
+- [Applications](../../guide/apps/cli.md) / [Desktop](../../guide/apps/desktop.md)

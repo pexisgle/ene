@@ -40,7 +40,7 @@ flowchart LR
 
 | 区分 | シンボル | 備考 |
 |---|---|---|
-| **サポート（`prelude` を使用）** | `load_vrm`, `VrmModel`, `VrmRenderer`, `VrmError`, `VrmaAsset`, `VrmaPlayer`, `VrmaFrame`, `evaluate_clip`, `load_vrma`, `LookAtEvaluator`, `LookAtProperties`, `ExpressionLayer`, `ExpressionName` | [`ene_vrm::prelude`](../../crates/ene-vrm/src/prelude.rs) に集約。新しいホストコードはここから始める。 |
+| **サポート（`prelude` を使用）** | `load_vrm`, `VrmModel`, `VrmRenderer`, `VrmError`, `VrmaAsset`, `VrmaPlayer`, `VrmaFrame`, `evaluate_clip`, `load_vrma`, `LookAtEvaluator`, `LookAtProperties`, `ExpressionLayer`, `ExpressionName` | [`ene_vrm::prelude`](../../../../crates/ene-vrm/src/prelude.rs) に集約。新しいホストコードはここから始める。 |
 | **サポート（desktop も使用）** | `camera::*`, `debug_renderer::*`, `humanoid::*`, `spring_bone::SpringBoneSimulator`, `spring_bone::SpringBoneProperties`, `model::{NodeHierarchy, Skeleton, MeshVertex}`, `expression_override::apply_overrides` | コアの load→render ループに次点だが `ene-desktop` が依存している。 |
 | **内部（`#[doc(hidden)]`）** | `load_humanoid_bones`, `load_look_at`, `load_spring_bones`, `load_node_constraints`, `load_expression_overrides`, `load_mtoon_materials`, `texture_flags`, `retarget_rotation`, `quat_to_yaw_pitch`, `HUMANOID_BONE_NAMES`, `MOUTH_TARGET_NAMES`, … | `load_vrm` またはレンダラーから呼ばれる。rustdoc の索引を絞るため非表示。型は `pub` のまま — サポート型のフィールドとして到達可能なものもある。 |
 
@@ -585,4 +585,4 @@ fn per_frame(
 
 ## 関連項目
 
-- [`ene-desktop` アプリケーション](../applications/desktop.md) — デスクトップランタイムが `ene-vrm` を駆動する方法（ウィンドウ/イベントループ、フレームごとの更新、AIブリッジ統合）
+- [`ene-desktop` アプリケーション](../../guide/apps/desktop.md) — デスクトップランタイムが `ene-vrm` を駆動する方法（ウィンドウ/イベントループ、フレームごとの更新、AIブリッジ統合）

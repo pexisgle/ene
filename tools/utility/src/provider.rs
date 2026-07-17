@@ -137,7 +137,7 @@ impl Default for UtilityState {
 /// Built-in utility tool provider.
 ///
 /// Built on [`ActionSetProvider`] (see the tool-ABI adapter documented in
-/// `docs/tools/sdk.md`): `list_specs`/`call_tool` dispatch is handled
+/// `docs/reference/tools/sdk.md`): `list_specs`/`call_tool` dispatch is handled
 /// generically, and the two utility-specific pieces of `ToolProvider`
 /// state — session ID and the DB sandbox socket/token — are threaded into
 /// `UtilityState` via hooks instead of a hand-written `ToolProvider` impl.

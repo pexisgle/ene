@@ -146,4 +146,4 @@ Removed from chat: `SpecialToken`, standalone `Expression`, `SessionSplit`, `Pip
 - Epic #111 and sub-issues #112–#118
 - [Cognitive Runtime ADR](cognitive-runtime.md)
 - [API Index](../api/index.md)
-- [Streaming Events](../core/streaming-events.md)
+- [Streaming Events](../runtime/streaming-events.md)

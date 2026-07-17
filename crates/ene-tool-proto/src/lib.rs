@@ -22,7 +22,7 @@
 //! ## Crate Boundaries
 //!
 //! Enforced by [AGENTS.md §4.1](../../AGENTS.md) and
-//! [API v2](../../docs/architecture/api-v2.md):
+//! [API v2](../../docs/reference/architecture/api-v2.md):
 //!
 //! - This crate is limited to **wire-protocol concerns only**: IPC request/response
 //!   types, the [`ToolProvider`] trait, the UDS/Named-Pipe [`transport`] layer,

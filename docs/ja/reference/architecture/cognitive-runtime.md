@@ -250,8 +250,8 @@ Phase 8 では、ツール呼び出し結果を安全に typed memory へ接続�
 
 - Epic: #63 — AI ランタイムを Ene Cognitive Runtime として再設計
 - 全 Phase & 依存関係マップ: `#63` issue body
-- 現行アーキテクチャ: `docs/architecture/overview.md`
-- 記憶システム: `docs/memory/memory.md`
-- プロンプト構築: `docs/core/prompt.md`
-- セッション分割: `docs/core/session-split.md`
-- 感情処理: `docs/core/emotions.md`
+- 現行アーキテクチャ: `docs/ja/reference/architecture/overview.md`
+- 記憶システム: `docs/ja/reference/memory/memory.md`
+- プロンプト構築: `docs/ja/reference/runtime/prompt.md`
+- セッション分割: `docs/ja/reference/runtime/session-split.md`
+- 感情処理: `docs/ja/reference/runtime/emotions.md`

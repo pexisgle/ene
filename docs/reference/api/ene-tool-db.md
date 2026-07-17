@@ -11,7 +11,7 @@ Tool binaries must **not** link `ene-store` directly. Instead, `ene-tool-db` pro
 
 All connection state (the underlying socket, plus the socket path and auth token needed to [`reconnect`](#reconnect)) lives behind `&mut self`: every CRUD method takes `&mut DbClient` because each call is a synchronous request/response round-trip over a single stream, and `reconnect` needs exclusive access to replace that stream after the server restarts.
 
-See also: [Memory System Rules in AGENTS.md §7.3](../../AGENTS.md) and [`ene-tool-host`](./ene-tool-host.md).
+See also: [Memory System Rules in AGENTS.md §7.3](../../../AGENTS.md) and [`ene-tool-host`](./ene-tool-host.md).
 
 ---
 

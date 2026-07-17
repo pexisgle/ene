@@ -3,7 +3,7 @@
 //! Proc-macro derive crate that generates `ToolSpec` implementations from
 //! declarative attributes on tool argument structs.
 //!
-//! See `docs/tools/derive-macro.md` for the full attribute reference.
+//! See `docs/reference/tools/derive-macro.md` for the full attribute reference.
 
 #![expect(
     clippy::needless_continue,

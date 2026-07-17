@@ -473,7 +473,7 @@ fn sample_cubic_spline_quat(sampler: &Sampler<Quat>, t: f32) -> Quat {
 ///
 /// Not currently called by `ene-desktop` (VRoid-style models sharing a common T-pose
 /// convention use the source local rotation directly); hidden from the crate's "Supported
-/// API" docs (see `docs/api/ene-vrm.md`) pending a consumer, but kept `pub` for other hosts
+/// API" docs (see `docs/reference/api/ene-vrm.md`) pending a consumer, but kept `pub` for other hosts
 /// that need cross-skeleton retargeting.
 #[doc(hidden)]
 pub fn retarget_rotation(

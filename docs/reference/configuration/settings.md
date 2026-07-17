@@ -729,7 +729,7 @@ fn auto_save(store: Res<ConfigStore>, character: Res<CharacterName>) {
 1. **Define the struct** with `define_config!(settings, "my_key", ...)` in the appropriate crate.
 2. **Run `cargo build`** — the `#[ctor]` auto-registers the schema.
 3. **Run `cargo run -p ene-cli`** once to regenerate `assets/schema/settings.schema.json`.
-4. **Document** the new section in `docs/configuration/settings.md` and `docs/ja/configuration/settings.md`.
+4. **Document** the new section in `docs/reference/configuration/settings.md` and `docs/ja/reference/configuration/settings.md`.
 5. **Access** via `config.get_section::<MyConfig>()` or `store.get_section::<MyConfig>()`.
 
 ## Debug Overlays (per-session, not persisted)

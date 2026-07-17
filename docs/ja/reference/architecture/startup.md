@@ -123,7 +123,7 @@ bevy `App` は `apps/ene-desktop/src/app.rs` で構成されます:
    `StatusChanged` 等) にマッピングして
    クロスサブシステムの `AppEventSender` に push する。
 3. フェーズ 3 のランタイムウォームアップを
-   [`ene_runtime::bootstrap_runtime`](../../crates/ene-runtime/src/bootstrap.rs)
+   [`ene_runtime::bootstrap_runtime`](../../../../crates/ene-runtime/src/bootstrap.rs)
    経由で非同期実行する (`CharacterSettings::discover` で既に
    ロード済みの config を渡す — ディスクの二重ロードや schema の
    重複書き込みなし)。
@@ -202,7 +202,7 @@ EneEvent::Performance → AiBridge → AppEvent::PerformanceCue
       → SetExpressions → VRM ブレンドシェイプ更新 (ene-vrm)
 ```
 
-詳細は [`docs/applications/desktop.md`](../applications/desktop.md)
+詳細は [`docs/ja/guide/apps/desktop.md`](../../guide/apps/desktop.md)
 を参照。
 
 ---
