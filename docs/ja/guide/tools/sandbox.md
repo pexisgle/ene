@@ -2,10 +2,10 @@
 
 サンドボックスシステムは、ツール操作を設定されたディレクトリセットに制限し、危険なシェルコマンドをブロックします。
 
-## 設定の配信
+## 設定の受け渡し
 
 1. `settings.json` → `sandbox` セクションから `SandboxConfigData` を作成
-2. `IpcRequest::Handshake` として各ツールバイナリに送信（sandbox + `tool_config` は v3 で旧 `Initialize` から吸収）
+2. `IpcRequest::Handshake` に含めて各ツールバイナリへ送信（sandbox と `tool_config` は v3 で旧 `Initialize` から統合）
 3. ツール側の `Sandbox` 型がすべてのアクセス制御を適用
 
 ## SandboxConfigData
@@ -34,7 +34,7 @@ Sandbox 有効?
   ├── いいえ → 直接実行
   └── はい
        ├── パス正規化 (read/write のみ)
-       ├── allowed_directories / writable_directories? → いいえ → 拒否
+       ├── 許可ディレクトリに含まれるか確認 → 含まれなければ拒否
        ├── シェル: blocked_commands パターン一致? → はい → 拒否
        └── サイズ/出力制限付きで実行
 ```
@@ -83,4 +83,4 @@ pub enum ToolError {
 }
 ```
 
-破壊的操作にユーザー承認が必要な場合、ツールは `request_id` 付きの `ToolError::PermissionRequired` を返し、`ToolProvider::approve_permission()` で承認できます。
+削除などの破壊的な操作にユーザー承認が必要な場合、ツールは `request_id` 付きの `ToolError::PermissionRequired` を返し、`ToolProvider::approve_permission()` で承認できます。

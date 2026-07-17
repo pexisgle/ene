@@ -1,6 +1,6 @@
 # CLI リファレンス (`ene-cli`)
 
-AI キャラクターとの対話、ツールテスト、メモリ/セッション管理のための対話型 REPL。
+AI キャラクターとの対話、ツールのテスト、記憶とセッションの管理を行う対話型 REPL。
 
 ## 起動
 
@@ -46,7 +46,7 @@ pub trait CliCommand: Send + Sync {
 | コマンド | 動作 |
 |---------|------|
 | `/quit` | REPL を終了 |
-| `/clear` | 次回実行時に会話履歴がリフレッシュされることを示す (このリリースでは手動クリアは no-op) |
+| `/clear` | 次回実行時に会話履歴を更新することを示す（このリリースでは手動クリアは no-op） |
 | `/history` | 会話履歴を表示 |
 | `/prompt` | 現在のシステムプロンプトを表示 (system, examples, memory, expression protocol) |
 
@@ -70,25 +70,25 @@ pub trait CliCommand: Send + Sync {
 
 | コマンド | 動作 |
 |---------|------|
-| `/memory list [--kind <kind>]` | typed memory を一覧表示 (kind フィルタ可) |
-| `/memory inspect <id>` | typed memory の詳細を表示 |
-| `/memory search <query>` | typed memory をハイブリッド検索 (スコア内訳付き) |
+| `/memory list [--kind <kind>]` | 型付き記憶（typed memory）を一覧表示（kind フィルタ可） |
+| `/memory inspect <id>` | 型付き記憶（typed memory）の詳細を表示 |
+| `/memory search <query>` | 型付き記憶（typed memory）をハイブリッド検索（スコア内訳付き） |
 | `/memory why <id>` | メモリの想起/ライフサイクル理由を表示 |
 | `/memory pin <id>` | メモリをピン留めし自然減衰対象から除外 |
 | `/memory archive <id>` | メモリを archived に遷移 |
 | `/memory forget <id>` | メモリを user_deleted に遷移 |
 | `/memory dispute <id>` | メモリを disputed に遷移 |
 | `/memory restore <id>` | メモリを active に戻す |
-| `/memory status` | legacy 移行状態と件数を表示 |
-| `/memory migrate legacy [--dry-run]` | legacy → typed の一括移行を実行 |
+| `/memory status` | レガシー記憶（legacy）の移行状態と件数を表示 |
+| `/memory migrate legacy [--dry-run]` | レガシー記憶（legacy）から型付き記憶（typed）への一括移行を実行 |
 | `/memory reset legacy --yes` | legacy/typed メモリを破壊的に初期化 |
 
 ### 感情コマンド
 
 | コマンド | 動作 |
 |---------|------|
-| `/affect show` | 現在の affect state を表示 |
-| `/affect reset` | affect state をニュートラルにリセット |
+| `/affect show` | 現在の感情状態（Affect）を表示 |
+| `/affect reset` | 感情状態（Affect）をニュートラルにリセット |
 
 ### コミットメントコマンド
 

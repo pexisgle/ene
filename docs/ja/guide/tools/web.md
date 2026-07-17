@@ -2,11 +2,11 @@
 
 **バイナリ:** `ene-tool-web` | **ステートフル:** いいえ
 
-URL フェッチと Web 検索機能を提供します。
+URL からのコンテンツ取得と Web 検索機能を提供します。
 
 ## ツール
 
-### `webfetch`
+### `web.fetch`
 
 URL からコンテンツを取得します。
 
@@ -25,11 +25,11 @@ URL からコンテンツを取得します。
 
 **キーワード:** fetch, url, web, download, html
 
-**カテゴリ:** Browser
+**カテゴリ:** WebFetch
 
 ---
 
-### `websearch`
+### `web.search`
 
 設定可能なバックエンドで Web 検索を実行します。
 

@@ -1,6 +1,6 @@
 # はじめに
 
-ene をローカルでビルドして動かし、LLM プロバイダを繋ぐまでの最短ルートです。
+ene をローカルでビルドして実行し、LLM プロバイダを設定するまでの最短手順です。
 
 ## 前提条件
 
@@ -33,13 +33,13 @@ cargo run -p ene-cli
 cargo run -p ene-desktop --release
 ```
 
-Desktop は必要時に設定を読み、`EneHandle` を開き、Performance キューで VRM を再生します。
+Desktop は必要なタイミングで設定を読み込み、`EneHandle` を開いて、Performance キューに従って VRM を再生します。
 
 ## プロバイダを設定する
 
 設定の読み込み順: コンパイル時デフォルト → OS ユーザー設定（または開発時のローカル `assets/settings.json`）→ `ENE_` 環境変数。
 
-まず触る項目:
+まず設定する項目:
 
 - `provider.base_url` / `provider.model` / `provider.api_key`
 - `character` — カード名またはパス

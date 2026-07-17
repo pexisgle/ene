@@ -2,8 +2,8 @@
 
 VRM キャラクターレンダリングと常時最前面オーバーレイを備えた
 winit + `wgpu` + `bevy_ecs 0.19` + `bevy_app 0.19` アプリ。
-毎フレームのロジックは `bevy_app::App` が所有し、winit
-`Runtime` はそのスケジュールを駆動するだけの薄いレイヤーです。
+毎フレームのロジックは `bevy_app::App` が所有し、winit の
+`Runtime` はスケジュールの実行だけを担う薄い実行層です。
 
 ## 起動
 
@@ -44,8 +44,8 @@ fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
   抜ける
 * フレーム毎のカーソル / ヒットテストパイプラインを実行
   (Linux: 入力領域 + クリックスルー、Windows:
-  `set_cursor_hittest`)。カーソルのソース・オブ・トゥルースは
-  `device_query` で、`update_char_window_cursor_and_hittest` 内で
+  `set_cursor_hittest`)。カーソル状態の正本（source of truth）は
+  `device_query` で取得し、`update_char_window_cursor_and_hittest` 内で
   読み込まれる。bevy 側 `update_cursor_state_system` は no-op
   スロットで、将来の `PointerMoved` ベース移行用に予約されている
 * キャラクターフレームと egui 設定フレームを取得 + エンコード +
@@ -97,8 +97,8 @@ fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
    ブロードキャスト `EneEvent` ストリームを購読。
 2. `EneEvent` → `AppEvent` (`AiStreamUpdate`, `PerformanceCue` / `EmoteToken`,
    `StatusChanged`, …) にマップして
-   クロスサブシステム `AppEventSender` に push するバックグラ
-   ウンドドレインタスクを spawn。
+   クロスサブシステム `AppEventSender` にイベントを送るバックグラウンドの
+   受信タスクを起動。
 3. `processing: Arc<AtomicBool>` フラグを所有
    (`run` でセット、`Terminal` でクリア)。
 
@@ -132,7 +132,7 @@ tokio EneActor (ene-runtime)
 | メッセージ | 生成元 | 消費側 |
 |-----------|--------|--------|
 | `AiTextDelta` | `pump_legacy_events` | `apply_ai_text_deltas_system` |
-| `AiStreamFinished` | `pump_legacy_events` | (AI ページ自身が消費) |
+| `AiStreamFinished` | `pump_legacy_events` | （AI ページの UI が消費） |
 | `AiPermissionRequested` | `pump_legacy_events` | `apply_ai_permission_system` |
 | `AiUserInputRequested` | `pump_legacy_events` | `apply_ai_user_input_system` |
 | `EmoteToken` | `pump_legacy_events` | `apply_emotions_system` |
