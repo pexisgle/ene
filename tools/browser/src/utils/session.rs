@@ -5,10 +5,6 @@ use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
 
 pub struct BrowserSession {
-    #[expect(
-        dead_code,
-        reason = "session fields retained for future browser state restore"
-    )]
     pub browser: chromiumoxide::browser::Browser,
     pub page: chromiumoxide::page::Page,
     pub handler_task: tokio::task::JoinHandle<()>,
@@ -187,5 +183,37 @@ impl BrowserSessionStore {
         // the same `session_id` will lazily re-insert
         // the lock on demand.
         self.creation_locks.remove(session_id);
+    }
+
+    pub async fn shutdown(&self) {
+        let keys: Vec<String> = self
+            .sessions
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+        for key in keys {
+            if let Some((_, session_arc)) = self.sessions.remove(&key) {
+                let mut session = session_arc.lock().await;
+                session.handler_task.abort();
+                let _ = session.browser.close().await;
+                let dir = session.user_data_dir.clone();
+                let _ = tokio::fs::remove_dir_all(&dir).await;
+            }
+        }
+        self.creation_locks.clear();
+    }
+}
+
+impl Drop for BrowserSessionStore {
+    fn drop(&mut self) {
+        let sessions = std::mem::take(&mut self.sessions);
+        tokio::spawn(async move {
+            for entry in sessions {
+                let mut session = entry.1.lock().await;
+                session.handler_task.abort();
+                let _ = session.browser.close().await;
+                let _ = tokio::fs::remove_dir_all(&session.user_data_dir).await;
+            }
+        });
     }
 }

@@ -13,7 +13,10 @@ use ene_tool_proto::run_tool_server;
 #[tokio::main]
 async fn main() {
     let provider = provider::BrowserToolProvider::new();
-    if let Err(e) = run_tool_server(Box::new(provider)).await {
+    let store = provider.store.clone();
+    let result = run_tool_server(Box::new(provider)).await;
+    store.shutdown().await;
+    if let Err(e) = result {
         eprintln!("[ene-tool-browser] Fatal error: {e}");
         std::process::exit(1);
     }

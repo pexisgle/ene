@@ -159,6 +159,15 @@ impl ToolRegistry for SupervisedIpcRegistry {
             return first_result;
         }
 
+        if guard.restart_count >= MAX_RESTARTS {
+            return Err(ToolHostError::ExecutionFailed {
+                message: format!(
+                    "Tool '{}' has exceeded max restarts ({}) and is disabled",
+                    guard.name, MAX_RESTARTS
+                ),
+            });
+        }
+
         tracing::warn!(
             "[SupervisedIpcRegistry] Tool '{}' process is dead, attempting restart",
             guard.name
@@ -178,7 +187,7 @@ impl ToolRegistry for SupervisedIpcRegistry {
         let tool_config = guard.tool_config.clone();
         drop(guard);
 
-        let new_registry = ToolHostManager::connect_with_retry(
+        let new_registry = match ToolHostManager::connect_with_retry(
             &socket_path,
             &sandbox,
             tool_config,
@@ -186,7 +195,18 @@ impl ToolRegistry for SupervisedIpcRegistry {
             CONNECT_DELAY_MS,
             self.timeout_ms,
         )
-        .await?;
+        .await
+        {
+            Ok(reg) => reg,
+            Err(e) => {
+                let mut guard = self.process.lock().await;
+                let _ = guard.child.kill();
+                let _ = guard.child.wait();
+                return Err(ToolHostError::ExecutionFailed {
+                    message: format!("Failed to connect to restarted tool '{name}': {e}"),
+                });
+            }
+        };
 
         let new_reg_arc = Arc::new(new_registry);
         {
@@ -506,7 +526,7 @@ impl ToolHostManager {
 
         let process = Arc::new(Mutex::new(process));
 
-        let registry = Self::connect_with_retry(
+        let registry = match Self::connect_with_retry(
             &socket_path,
             &tool_sandbox,
             tool_config,
@@ -514,7 +534,18 @@ impl ToolHostManager {
             CONNECT_DELAY_MS,
             timeout_ms,
         )
-        .await?;
+        .await
+        {
+            Ok(reg) => reg,
+            Err(e) => {
+                let mut guard = process.lock().await;
+                let _ = guard.child.kill();
+                let _ = guard.child.wait();
+                return Err(ToolHostError::ExecutionFailed {
+                    message: format!("Failed to connect to tool '{name}' on startup: {e}"),
+                });
+            }
+        };
 
         Ok(Arc::new(SupervisedIpcRegistry {
             process,

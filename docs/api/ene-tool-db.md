@@ -150,16 +150,28 @@ pub enum DbError {
     UnexpectedResponse(String),
     ConnectionClosed,
     Auth { code: DbErrorCode, message: String },
+    PermissionDenied { message: String },
+    UnknownTable { message: String },
+    UnknownColumn { message: String },
+    TypeMismatch { message: String },
+    InvalidFilter { message: String },
+    Internal { message: String },
 }
 ```
 
 | Variant | Meaning |
 |---|---|
 | `Transport(std::io::Error)` | Low-level transport failure (write/read/serialize/deserialize). Implements `#[from] std::io::Error`, so `?` on raw I/O converts automatically. |
-| `Server { code, message }` | The server returned an application-level error in response to a normal (post-handshake) request — e.g. a permission or schema violation. |
+| `Server { code, message }` | Server returned an error response (primarily retained for backwards compatibility; CRUD failures now return concrete variants). |
 | `UnexpectedResponse(String)` | The server sent a syntactically valid but semantically wrong response variant for the request that was sent (e.g. an `Insert` request got back a `Select` response). Indicates a client/server protocol mismatch, not a data error. |
 | `ConnectionClosed` | The IPC connection was closed unexpectedly (EOF while reading a response). Call [`reconnect`](#connection-management) to recover. |
-| `Auth { code, message }` | The server rejected the auth token presented during `Handshake`, either on initial `connect_with_token` or during `reconnect`. Distinct from `Server` so callers can special-case "my token is stale/invalid" versus "my query was rejected". |
+| `Auth { code, message }` | The server rejected the auth token presented during `Handshake`, either on initial `connect_with_token` or during `reconnect`. Distinct from other query errors so callers can special-case "my token is stale/invalid". |
+| `PermissionDenied { message }` | The tool does not have permission to access the requested resource (e.g., table name does not match the prefix). |
+| `UnknownTable { message }` | The specified table does not exist or was not declared via `declare_schema`. |
+| `UnknownColumn { message }` | The specified column does not exist in the table. |
+| `TypeMismatch { message }` | A value's type does not match the column's declared type. |
+| `InvalidFilter { message }` | The filter expression is invalid. |
+| `Internal { message }` | An internal server error occurred. |
 
 ### `DbErrorCode`
 

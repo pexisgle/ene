@@ -57,7 +57,15 @@ pub async fn run_tool_server(provider: Box<dyn ToolProvider>) -> Result<(), Tool
     let provider: Arc<dyn ToolProvider> = provider.into();
     let shutdown = Arc::new(tokio::sync::Notify::new());
 
+    #[cfg(unix)]
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
     loop {
+        #[cfg(unix)]
+        let sigterm_fut = sigterm.recv();
+        #[cfg(not(unix))]
+        let sigterm_fut = std::future::pending::<()>();
+
         tokio::select! {
             result = listener.accept() => {
                 let mut stream = result?;
@@ -93,6 +101,14 @@ pub async fn run_tool_server(provider: Box<dyn ToolProvider>) -> Result<(), Tool
                 });
             }
             () = shutdown.notified() => {
+                break;
+            }
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!(component = "ToolServer", "Received SIGINT, shutting down");
+                break;
+            }
+            _ = sigterm_fut => {
+                tracing::info!(component = "ToolServer", "Received SIGTERM, shutting down");
                 break;
             }
         }

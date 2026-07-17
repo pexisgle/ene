@@ -1,4 +1,4 @@
-use crate::commands::CliCommand;
+use crate::commands::{CliCommand, CliError};
 use crate::{context::AppContext, style};
 use async_trait::async_trait;
 
@@ -25,14 +25,14 @@ impl CliCommand for MemoryCommand {
         "/memory <list|inspect|search|why|pin|archive|forget|dispute|restore|status|migrate|reset>"
     }
 
-    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), String> {
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
         let (subcmd, tail) = parse_subcommand_and_tail(arg);
 
         let diag = ctx.handle.diagnostics();
         let snapshot = diag
             .get_snapshot()
             .await
-            .map_err(|e| format!("Failed to get actor state: {e}"))?;
+            .map_err(|e| CliError::ActorError(format!("Failed to get actor state: {e}")))?;
         let memory = diag.memory();
 
         match subcmd {
@@ -46,9 +46,9 @@ impl CliCommand for MemoryCommand {
                     tail,
                     &snapshot,
                     ene_store::MemoryStatus::Archived,
-                    "archived",
+                    "archive",
                 )
-                .await;
+                .await
             }
             "forget" => handle_forget(tail, &snapshot).await,
             "dispute" => {
@@ -56,37 +56,18 @@ impl CliCommand for MemoryCommand {
                     tail,
                     &snapshot,
                     ene_store::MemoryStatus::Disputed,
-                    "disputed",
+                    "dispute",
                 )
-                .await;
+                .await
             }
             "restore" => handle_restore(tail, &snapshot).await,
             "status" => handle_status(&snapshot).await,
             "migrate" => handle_migrate(tail, &snapshot).await,
             "reset" => handle_reset(tail, &snapshot).await,
-            _ => {
-                println!(
-                    "{}",
-                    style::warning(
-                        "Usage: /memory <list|inspect|search|why|pin|archive|forget|dispute|restore|status|migrate|reset>",
-                    )
-                );
-                println!("  list [--kind <kind>] - List typed memories");
-                println!("  inspect <id>         - Show full memory details");
-                println!("  search <query>       - Search typed memories (hybrid score)");
-                println!("  why <id>             - Explain memory lifecycle/debug context");
-                println!("  pin <id>             - Pin memory against natural decay");
-                println!("  archive <id>         - Mark memory archived");
-                println!("  forget <id>          - Mark memory as user_deleted");
-                println!("  dispute <id>         - Mark memory as disputed");
-                println!("  restore <id>         - Restore memory to active");
-                println!("  status               - Legacy row counts and migration marker");
-                println!("  migrate legacy       - One-shot legacy → typed migration");
-                println!("  migrate legacy --dry-run - Preview migration counts");
-                println!("  reset legacy --yes   - Truncate legacy + typed memory (destructive)");
-            }
+            _ => Err(CliError::UsageError {
+                usage: self.usage().to_string(),
+            }),
         }
-        Ok(())
     }
 }
 
@@ -94,95 +75,95 @@ async fn handle_search(
     query: &str,
     memory: &ene_runtime::MemoryQueryHandle,
     snapshot: &ene_runtime::EneStateSnapshot,
-) {
+) -> Result<(), CliError> {
     if query.is_empty() {
-        println!(
-            "{}",
-            style::warning("[Memory] Usage: /memory search <query>")
-        );
-        return;
+        return Err(CliError::UsageError {
+            usage: "/memory search <query>".to_string(),
+        });
     }
     if !memory.is_enabled() {
-        println!("{}", style::warning("[Memory] Memory is not enabled."));
-        return;
+        return Err(CliError::ExecutionFailed(
+            "Memory is not enabled.".to_string(),
+        ));
     }
     let card_name = snapshot.card_name.as_str();
-    match memory
+    let results = memory
         .search_typed_memories_hybrid(card_name, Some(&snapshot.config.user_name), query, 10)
         .await
-    {
-        Ok(results) => {
-            if results.is_empty() {
-                println!(
-                    "{}",
-                    style::warning("[Memory] No matching typed memories found.")
-                );
-            } else {
-                println!(
-                    "{}",
-                    style::success(format!("[Memory] {} matches:", results.len()))
-                );
-                for (i, scored) in results.iter().enumerate() {
-                    println!(
-                        "\n--- #{} id={} kind={} total={:.3} ---",
-                        i + 1,
-                        scored.item.id.unwrap_or_default(),
-                        scored.item.kind.as_str(),
-                        scored.breakdown.total
-                    );
-                    println!("  title: {}", scored.item.title);
-                    println!(
-                        "  why: vector={:.3} lexical={:.3} recency={:.3} salience={:.3} confidence={:.3}",
-                        scored.breakdown.vector_similarity,
-                        scored.breakdown.lexical_score,
-                        scored.breakdown.recency_score,
-                        scored.breakdown.salience,
-                        scored.breakdown.confidence
-                    );
-                }
-            }
+        .map_err(|e| CliError::ExecutionFailed(format!("Search error: {e}")))?;
+
+    if results.is_empty() {
+        println!(
+            "{}",
+            style::warning("[Memory] No matching typed memories found.")
+        );
+    } else {
+        println!(
+            "{}",
+            style::success(format!("[Memory] {} matches:", results.len()))
+        );
+        for (i, scored) in results.iter().enumerate() {
+            println!(
+                "\n--- #{} id={} kind={} total={:.3} ---",
+                i + 1,
+                scored.item.id.unwrap_or_default(),
+                scored.item.kind.as_str(),
+                scored.breakdown.total
+            );
+            println!("  title: {}", scored.item.title);
+            println!(
+                "  why: vector={:.3} lexical={:.3} recency={:.3} salience={:.3} confidence={:.3}",
+                scored.breakdown.vector_similarity,
+                scored.breakdown.lexical_score,
+                scored.breakdown.recency_score,
+                scored.breakdown.salience,
+                scored.breakdown.confidence
+            );
         }
-        Err(e) => println!("{}", style::error(format!("[Memory] Search error: {e}"))),
     }
+    Ok(())
 }
 
-async fn handle_list(args: &str, snapshot: &ene_runtime::EneStateSnapshot) {
+async fn handle_list(args: &str, snapshot: &ene_runtime::EneStateSnapshot) -> Result<(), CliError> {
     if !snapshot.memory.is_enabled() {
-        println!("{}", style::warning("[Memory] Memory is not enabled."));
-        return;
+        return Err(CliError::ExecutionFailed(
+            "Memory is not enabled.".to_string(),
+        ));
     }
     let card_name = snapshot.card_name.as_str();
     let kind = parse_kind_arg(args);
-    match snapshot
+    let memories = snapshot
         .memory
         .list_typed_memories(card_name, kind, 50)
         .await
-    {
-        Ok(memories) => {
-            if memories.is_empty() {
-                println!("[Memory] No typed memories found.");
-                return;
-            }
-            println!("--- Typed Memories ({}) ---", memories.len());
-            for memory in memories {
-                println!(
-                    "  id={} [{}|{}] {}",
-                    memory.id.unwrap_or_default(),
-                    memory.kind.as_str(),
-                    memory.status.as_str(),
-                    memory.title
-                );
-            }
-            println!("----------------------------");
-        }
-        Err(e) => println!("[Memory] Error: {e}"),
+        .map_err(|e| CliError::ExecutionFailed(format!("List error: {e}")))?;
+
+    if memories.is_empty() {
+        println!("[Memory] No typed memories found.");
+        return Ok(());
     }
+    println!("--- Typed Memories ({}) ---", memories.len());
+    for memory in memories {
+        println!(
+            "  id={} [{}|{}] {}",
+            memory.id.unwrap_or_default(),
+            memory.kind.as_str(),
+            memory.status.as_str(),
+            memory.title
+        );
+    }
+    println!("----------------------------");
+    Ok(())
 }
 
-async fn handle_inspect(id_arg: &str, snapshot: &ene_runtime::EneStateSnapshot) {
+async fn handle_inspect(
+    id_arg: &str,
+    snapshot: &ene_runtime::EneStateSnapshot,
+) -> Result<(), CliError> {
     let Some(id) = parse_id(id_arg) else {
-        println!("{}", style::warning("[Memory] Usage: /memory inspect <id>"));
-        return;
+        return Err(CliError::UsageError {
+            usage: "/memory inspect <id>".to_string(),
+        });
     };
     match snapshot.memory.inspect_typed_memory(id).await {
         Ok(Some(m)) => {
@@ -207,16 +188,21 @@ async fn handle_inspect(id_arg: &str, snapshot: &ene_runtime::EneStateSnapshot) 
                     .map_or_else(|| "-".to_string(), |ts| ts.to_rfc3339()),
                 m.access_count
             );
+            Ok(())
         }
-        Ok(None) => println!("{}", style::warning(format!("[Memory] id={id} not found"))),
-        Err(e) => println!("{}", style::error(format!("[Memory] Inspect error: {e}"))),
+        Ok(None) => Err(CliError::ExecutionFailed(format!("id={id} not found"))),
+        Err(e) => Err(CliError::ExecutionFailed(format!("Inspect error: {e}"))),
     }
 }
 
-async fn handle_why(id_arg: &str, snapshot: &ene_runtime::EneStateSnapshot) {
+async fn handle_why(
+    id_arg: &str,
+    snapshot: &ene_runtime::EneStateSnapshot,
+) -> Result<(), CliError> {
     let Some(id) = parse_id(id_arg) else {
-        println!("{}", style::warning("[Memory] Usage: /memory why <id>"));
-        return;
+        return Err(CliError::UsageError {
+            usage: "/memory why <id>".to_string(),
+        });
     };
     match snapshot.memory.inspect_typed_memory(id).await {
         Ok(Some(m)) => {
@@ -231,45 +217,67 @@ async fn handle_why(id_arg: &str, snapshot: &ene_runtime::EneStateSnapshot) {
                     .map_or_else(|| "never".to_string(), |ts| ts.to_rfc3339())
             );
             println!("  note: live recall score breakdown is shown by `/memory search <query>`");
+            Ok(())
         }
-        Ok(None) => println!("{}", style::warning(format!("[Memory] id={id} not found"))),
-        Err(e) => println!("{}", style::error(format!("[Memory] Why error: {e}"))),
+        Ok(None) => Err(CliError::ExecutionFailed(format!("id={id} not found"))),
+        Err(e) => Err(CliError::ExecutionFailed(format!("Why error: {e}"))),
     }
 }
 
-async fn handle_pin(id_arg: &str, snapshot: &ene_runtime::EneStateSnapshot) {
+async fn handle_pin(
+    id_arg: &str,
+    snapshot: &ene_runtime::EneStateSnapshot,
+) -> Result<(), CliError> {
     let Some(id) = parse_id(id_arg) else {
-        println!("{}", style::warning("[Memory] Usage: /memory pin <id>"));
-        return;
+        return Err(CliError::UsageError {
+            usage: "/memory pin <id>".to_string(),
+        });
     };
     match snapshot.memory.pin_typed_memory(id, true).await {
-        Ok(true) => println!("{}", style::success(format!("[Memory] Pinned id={id}"))),
-        Ok(false) => println!("{}", style::warning(format!("[Memory] id={id} not found"))),
-        Err(e) => println!("{}", style::error(format!("[Memory] Pin error: {e}"))),
+        Ok(true) => {
+            println!("{}", style::success(format!("[Memory] Pinned id={id}")));
+            Ok(())
+        }
+        Ok(false) => Err(CliError::ExecutionFailed(format!("id={id} not found"))),
+        Err(e) => Err(CliError::ExecutionFailed(format!("Pin error: {e}"))),
     }
 }
 
-async fn handle_forget(id_arg: &str, snapshot: &ene_runtime::EneStateSnapshot) {
+async fn handle_forget(
+    id_arg: &str,
+    snapshot: &ene_runtime::EneStateSnapshot,
+) -> Result<(), CliError> {
     let Some(id) = parse_id(id_arg) else {
-        println!("{}", style::warning("[Memory] Usage: /memory forget <id>"));
-        return;
+        return Err(CliError::UsageError {
+            usage: "/memory forget <id>".to_string(),
+        });
     };
     match snapshot.memory.user_forget_typed_memory(id).await {
-        Ok(true) => println!("{}", style::success(format!("[Memory] forgotten id={id}"))),
-        Ok(false) => println!("{}", style::warning(format!("[Memory] id={id} not found"))),
-        Err(e) => println!("{}", style::error(format!("[Memory] Forget error: {e}"))),
+        Ok(true) => {
+            println!("{}", style::success(format!("[Memory] forgotten id={id}")));
+            Ok(())
+        }
+        Ok(false) => Err(CliError::ExecutionFailed(format!("id={id} not found"))),
+        Err(e) => Err(CliError::ExecutionFailed(format!("Forget error: {e}"))),
     }
 }
 
-async fn handle_restore(id_arg: &str, snapshot: &ene_runtime::EneStateSnapshot) {
+async fn handle_restore(
+    id_arg: &str,
+    snapshot: &ene_runtime::EneStateSnapshot,
+) -> Result<(), CliError> {
     let Some(id) = parse_id(id_arg) else {
-        println!("{}", style::warning("[Memory] Usage: /memory restore <id>"));
-        return;
+        return Err(CliError::UsageError {
+            usage: "/memory restore <id>".to_string(),
+        });
     };
     match snapshot.memory.user_restore_typed_memory(id).await {
-        Ok(true) => println!("{}", style::success(format!("[Memory] restored id={id}"))),
-        Ok(false) => println!("{}", style::warning(format!("[Memory] id={id} not found"))),
-        Err(e) => println!("{}", style::error(format!("[Memory] Restore error: {e}"))),
+        Ok(true) => {
+            println!("{}", style::success(format!("[Memory] restored id={id}")));
+            Ok(())
+        }
+        Ok(false) => Err(CliError::ExecutionFailed(format!("id={id} not found"))),
+        Err(e) => Err(CliError::ExecutionFailed(format!("Restore error: {e}"))),
     }
 }
 
@@ -278,22 +286,23 @@ async fn handle_transition(
     snapshot: &ene_runtime::EneStateSnapshot,
     status: ene_store::MemoryStatus,
     label: &str,
-) {
+) -> Result<(), CliError> {
     let Some(id) = parse_id(id_arg) else {
-        println!(
-            "{}",
-            style::warning(format!("[Memory] Usage: /memory {label} <id>"))
-        );
-        return;
+        return Err(CliError::UsageError {
+            usage: format!("/memory {label} <id>"),
+        });
     };
     match snapshot
         .memory
         .transition_typed_memory_status(id, status)
         .await
     {
-        Ok(true) => println!("{}", style::success(format!("[Memory] {label} id={id}"))),
-        Ok(false) => println!("{}", style::warning(format!("[Memory] id={id} not found"))),
-        Err(e) => println!("{}", style::error(format!("[Memory] Update error: {e}"))),
+        Ok(true) => {
+            println!("{}", style::success(format!("[Memory] {label} id={id}")));
+            Ok(())
+        }
+        Ok(false) => Err(CliError::ExecutionFailed(format!("id={id} not found"))),
+        Err(e) => Err(CliError::ExecutionFailed(format!("Update error: {e}"))),
     }
 }
 
@@ -320,21 +329,24 @@ fn parse_kind_arg(args: &str) -> Option<ene_store::MemoryKind> {
     }
 }
 
-async fn handle_status(snapshot: &ene_runtime::EneStateSnapshot) {
+async fn handle_status(snapshot: &ene_runtime::EneStateSnapshot) -> Result<(), CliError> {
     if !snapshot.memory.is_enabled() {
-        println!("{}", style::warning("[Memory] Memory is not enabled."));
-        return;
+        return Err(CliError::ExecutionFailed(
+            "Memory is not enabled.".to_string(),
+        ));
     }
     let card_name = snapshot.card_name.as_str();
-    match snapshot.memory.count_legacy_rows(card_name).await {
-        Ok(counts) => {
-            println!("--- Legacy Memory Status ({card_name}) ---");
-            println!("  summaries: {}", counts.summaries);
-            println!("  keyfacts:  {}", counts.keyfacts);
-            println!("  logs:      {}", counts.logs);
-        }
-        Err(e) => println!("{}", style::error(format!("[Memory] Status error: {e}"))),
-    }
+    let counts = snapshot
+        .memory
+        .count_legacy_rows(card_name)
+        .await
+        .map_err(|e| CliError::ExecutionFailed(format!("Status error: {e}")))?;
+
+    println!("--- Legacy Memory Status ({card_name}) ---");
+    println!("  summaries: {}", counts.summaries);
+    println!("  keyfacts:  {}", counts.keyfacts);
+    println!("  logs:      {}", counts.logs);
+
     match snapshot.memory.migration_status(card_name).await {
         Ok(Some(status)) => {
             println!("  migrated: yes ({})", status.migrated_at);
@@ -346,19 +358,22 @@ async fn handle_status(snapshot: &ene_runtime::EneStateSnapshot) {
             style::error(format!("[Memory] Migration status error: {e}"))
         ),
     }
+    Ok(())
 }
 
-async fn handle_migrate(args: &str, snapshot: &ene_runtime::EneStateSnapshot) {
+async fn handle_migrate(
+    args: &str,
+    snapshot: &ene_runtime::EneStateSnapshot,
+) -> Result<(), CliError> {
     if args != "legacy" && args != "legacy --dry-run" {
-        println!(
-            "{}",
-            style::warning("[Memory] Usage: /memory migrate legacy [--dry-run]")
-        );
-        return;
+        return Err(CliError::UsageError {
+            usage: "/memory migrate legacy [--dry-run]".to_string(),
+        });
     }
     if !snapshot.memory.is_enabled() {
-        println!("{}", style::warning("[Memory] Memory is not enabled."));
-        return;
+        return Err(CliError::ExecutionFailed(
+            "Memory is not enabled.".to_string(),
+        ));
     }
     let dry_run = args.contains("--dry-run");
     let card_name = snapshot.card_name.as_str();
@@ -378,35 +393,39 @@ async fn handle_migrate(args: &str, snapshot: &ene_runtime::EneStateSnapshot) {
             println!("  keyfacts → typed:       {}", report.keyfacts_migrated);
             println!("  logs → spans:           {}", report.spans_migrated);
             println!("  skipped (existing):     {}", report.skipped_existing);
+            Ok(())
         }
-        Err(e) => println!(
-            "{}",
-            style::error(format!("[Memory] Migration failed: {e}"))
-        ),
+        Err(e) => Err(CliError::ExecutionFailed(format!("Migration failed: {e}"))),
     }
 }
 
-async fn handle_reset(args: &str, snapshot: &ene_runtime::EneStateSnapshot) {
+async fn handle_reset(
+    args: &str,
+    snapshot: &ene_runtime::EneStateSnapshot,
+) -> Result<(), CliError> {
     if args != "legacy --yes" {
-        println!(
-            "{}",
-            style::warning("[Memory] Usage: /memory reset legacy --yes")
-        );
         println!("  This permanently deletes legacy tables and typed memory for this card.");
-        return;
+        return Err(CliError::UsageError {
+            usage: "/memory reset legacy --yes".to_string(),
+        });
     }
     if !snapshot.memory.is_enabled() {
-        println!("{}", style::warning("[Memory] Memory is not enabled."));
-        return;
+        return Err(CliError::ExecutionFailed(
+            "Memory is not enabled.".to_string(),
+        ));
     }
     let card_name = snapshot.card_name.as_str();
-    match snapshot.memory.reset_legacy_memory(card_name).await {
-        Ok(()) => println!(
-            "{}",
-            style::success(format!("[Memory] Reset legacy memory for {card_name}"))
-        ),
-        Err(e) => println!("{}", style::error(format!("[Memory] Reset failed: {e}"))),
-    }
+    snapshot
+        .memory
+        .reset_legacy_memory(card_name)
+        .await
+        .map_err(|e| CliError::ExecutionFailed(format!("Reset failed: {e}")))?;
+
+    println!(
+        "{}",
+        style::success(format!("[Memory] Reset legacy memory for {card_name}"))
+    );
+    Ok(())
 }
 
 #[cfg(test)]

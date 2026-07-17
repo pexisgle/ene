@@ -385,18 +385,22 @@ impl SpringBoneSimulator {
                         let world_pos = node_world_positions
                             .get(&joint.node)
                             .copied()
+                            .filter(|v| v.is_finite())
                             .unwrap_or(Vec3::ZERO);
                         let world_rot = node_world_rotations
                             .get(&joint.node)
                             .copied()
+                            .filter(|q| q.is_finite())
                             .unwrap_or(Quat::IDENTITY);
                         let parent_world_rot = node_parent_world_rotations
                             .get(&joint.node)
                             .copied()
+                            .filter(|q| q.is_finite())
                             .unwrap_or(Quat::IDENTITY);
                         let local_rot = node_local_rotations
                             .get(&joint.node)
                             .copied()
+                            .filter(|q| q.is_finite())
                             .unwrap_or(Quat::IDENTITY);
 
                         // bone_axis: direction to child in local space
@@ -406,19 +410,29 @@ impl SpringBoneSimulator {
                             let child_world_pos = node_world_positions
                                 .get(&child_node)
                                 .copied()
+                                .filter(|v| v.is_finite())
                                 .unwrap_or(Vec3::ZERO);
                             let child_local = world_rot.inverse() * (child_world_pos - world_pos);
-                            let axis = if child_local.length_squared() > 1e-10 {
+                            let axis = if child_local.length_squared() > 1e-10
+                                && child_local.is_finite()
+                            {
                                 child_local.normalize()
                             } else {
                                 Vec3::Y
                             };
                             let len = (child_world_pos - world_pos).length();
+                            let len = if len.is_finite() { len } else { 0.0 };
                             (axis, len)
                         } else {
                             // Tail joint: use parent's world rotation to
                             // estimate a downward axis
-                            let axis = parent_world_rot.inverse() * (-Vec3::Y);
+                            let raw_axis = parent_world_rot.inverse() * (-Vec3::Y);
+                            let axis = if raw_axis.is_finite() && raw_axis.length_squared() > 1e-10
+                            {
+                                raw_axis.normalize()
+                            } else {
+                                -Vec3::Y
+                            };
                             let len = 0.07; // vrm0 fallback: 7 cm
                             (axis, len)
                         };
@@ -502,10 +516,12 @@ impl SpringBoneSimulator {
                     let world_pos = node_world_positions
                         .get(&joint.node)
                         .copied()
+                        .filter(|v| v.is_finite())
                         .unwrap_or(Vec3::ZERO);
                     let parent_world_rot = node_parent_world_rotations
                         .get(&joint.node)
                         .copied()
+                        .filter(|q| q.is_finite())
                         .unwrap_or(Quat::IDENTITY);
 
                     // Transform to center space if needed
@@ -518,6 +534,15 @@ impl SpringBoneSimulator {
                             (world_pos, parent_world_rot)
                         };
 
+                    // Heal state if NaN is present
+                    if !state.current_tail.is_finite() {
+                        state.current_tail =
+                            world_pos + parent_world_rot * (state.bone_axis * state.bone_length);
+                    }
+                    if !state.prev_tail.is_finite() {
+                        state.prev_tail = state.current_tail;
+                    }
+
                     // Verlet integration
                     let drag = joint.drag_force.clamp(0.0, 1.0);
                     let inertia = (state.current_tail - state.prev_tail) * (1.0 - drag);
@@ -529,13 +554,24 @@ impl SpringBoneSimulator {
                     let gravity = Vec3::from(joint.gravity_dir) * joint.gravity_power * dt;
 
                     let mut next_tail = state.current_tail + inertia + stiffness + gravity;
+                    if !next_tail.is_finite() {
+                        next_tail =
+                            world_pos + parent_world_rot * (state.bone_axis * state.bone_length);
+                    }
 
                     // Constrain bone length
                     let to_tail = next_tail - world_pos;
-                    if to_tail.length_squared() > 1e-10 {
+                    if to_tail.length_squared() > 1e-10 && to_tail.is_finite() {
                         next_tail = world_pos + to_tail.normalize() * state.bone_length;
                     } else {
-                        next_tail = world_pos + stiffness_dir * state.bone_length;
+                        let fallback_dir = if stiffness_dir.is_finite()
+                            && stiffness_dir.length_squared() > 1e-10
+                        {
+                            stiffness_dir.normalize()
+                        } else {
+                            parent_world_rot * state.initial_local_rotation * Vec3::Y
+                        };
+                        next_tail = world_pos + fallback_dir * state.bone_length;
                     }
 
                     // Collision resolution
@@ -544,10 +580,12 @@ impl SpringBoneSimulator {
                         let collider_pos = collider_world_positions
                             .get(&collider_node)
                             .copied()
+                            .filter(|v| v.is_finite())
                             .unwrap_or(Vec3::ZERO);
                         let collider_rot = collider_world_rotations
                             .get(&collider_node)
                             .copied()
+                            .filter(|q| q.is_finite())
                             .unwrap_or(Quat::IDENTITY);
 
                         let (distance, direction) = match shape {
@@ -556,7 +594,7 @@ impl SpringBoneSimulator {
                                 let sphere_center = collider_pos + world_offset;
                                 let delta = next_tail - sphere_center;
                                 let dist = delta.length() - radius - joint_radius;
-                                let dir = if delta.length_squared() > 1e-10 {
+                                let dir = if delta.length_squared() > 1e-10 && delta.is_finite() {
                                     delta.normalize()
                                 } else {
                                     Vec3::Y
@@ -576,7 +614,7 @@ impl SpringBoneSimulator {
                                 let axis_len_sq = capsule_axis.length_squared();
 
                                 let delta = next_tail - capsule_start;
-                                let t = if axis_len_sq > 1e-10 {
+                                let t = if axis_len_sq > 1e-10 && axis_len_sq.is_finite() {
                                     (delta.dot(capsule_axis) / axis_len_sq).clamp(0.0, 1.0)
                                 } else {
                                     0.0
@@ -585,7 +623,7 @@ impl SpringBoneSimulator {
                                 let closest = capsule_start + capsule_axis * t;
                                 let diff = next_tail - closest;
                                 let dist = diff.length() - radius - joint_radius;
-                                let dir = if diff.length_squared() > 1e-10 {
+                                let dir = if diff.length_squared() > 1e-10 && diff.is_finite() {
                                     diff.normalize()
                                 } else {
                                     Vec3::Y
@@ -594,11 +632,11 @@ impl SpringBoneSimulator {
                             }
                         };
 
-                        if distance < 0.0 {
+                        if distance.is_finite() && distance < 0.0 {
                             next_tail -= direction * distance;
                             // Re-constrain bone length
                             let to_tail = next_tail - world_pos;
-                            if to_tail.length_squared() > 1e-10 {
+                            if to_tail.length_squared() > 1e-10 && to_tail.is_finite() {
                                 next_tail = world_pos + to_tail.normalize() * state.bone_length;
                             }
                         }
@@ -610,10 +648,20 @@ impl SpringBoneSimulator {
 
                     // Compute rotation
                     let parent_world_matrix = parent_world_rot;
-                    let to_local =
-                        (parent_world_matrix.inverse() * (next_tail - world_pos)).normalize();
+                    let local_diff = parent_world_matrix.inverse() * (next_tail - world_pos);
+                    let to_local = if local_diff.length_squared() > 1e-10 && local_diff.is_finite()
+                    {
+                        local_diff.normalize()
+                    } else {
+                        state.bone_axis
+                    };
                     let from_to = Quat::from_rotation_arc(state.bone_axis, to_local);
                     let new_rotation = state.initial_local_rotation * from_to;
+                    let new_rotation = if new_rotation.is_finite() {
+                        new_rotation.normalize()
+                    } else {
+                        state.initial_local_rotation
+                    };
 
                     updated_rotations.insert(joint.node, new_rotation);
                 }

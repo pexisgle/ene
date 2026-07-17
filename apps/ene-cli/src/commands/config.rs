@@ -1,4 +1,4 @@
-use crate::commands::CliCommand;
+use crate::commands::{CliCommand, CliError};
 use crate::context::AppContext;
 use async_trait::async_trait;
 use ene_mind::MindConfig;
@@ -20,13 +20,13 @@ impl CliCommand for ConfigCommand {
         "/config"
     }
 
-    async fn execute(&self, _arg: &str, ctx: &mut AppContext) -> Result<(), String> {
+    async fn execute(&self, _arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
         let snapshot = ctx
             .handle
             .diagnostics()
             .get_snapshot()
             .await
-            .map_err(|e| format!("Failed to get actor state: {e}"))?;
+            .map_err(|e| CliError::ActorError(format!("Failed to get actor state: {e}")))?;
 
         let mem_config = snapshot
             .config

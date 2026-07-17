@@ -465,6 +465,28 @@ impl ToolRag {
         query: &str,
         query_embedding: &[f32],
     ) -> Vec<ToolSpec> {
+        let is_zero_norm = |emb: &[f32]| {
+            if emb.is_empty() {
+                return true;
+            }
+            let norm_sq: f32 = emb.iter().map(|&x| x * x).sum();
+            norm_sq == 0.0 || norm_sq.is_nan()
+        };
+
+        if is_zero_norm(query_embedding) {
+            let all_specs = self
+                .specs
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut result = Vec::new();
+            for forced_name in &self.opts.forced {
+                if let Some(spec) = all_specs.get(forced_name) {
+                    result.push(spec.clone());
+                }
+            }
+            return result;
+        }
+
         let t_start = std::time::Instant::now();
         let Some(store) = &self.store else {
             let map = self
@@ -545,11 +567,18 @@ impl ToolRag {
         let mut per_tool: HashMap<String, f32> = HashMap::new();
 
         for row in &field_rows {
+            if is_zero_norm(&row.embedding) {
+                continue;
+            }
             let sim = cosine_similarity(&query_vec, &row.embedding);
             let blended = if let Some(ref hv) = hyde_vec {
-                let hyde_sim = cosine_similarity(hv, &row.embedding);
-                let blend = w.hyde_blend.clamp(0.0, 1.0);
-                (hyde_sim * w.hyde).mul_add(blend, sim * (1.0 - blend))
+                if is_zero_norm(hv) {
+                    sim
+                } else {
+                    let hyde_sim = cosine_similarity(hv, &row.embedding);
+                    let blend = w.hyde_blend.clamp(0.0, 1.0);
+                    (hyde_sim * w.hyde).mul_add(blend, sim * (1.0 - blend))
+                }
             } else {
                 sim
             };

@@ -2586,6 +2586,7 @@ dependencies = [
  "i18n-embed-fl",
  "rust-embed",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tracing",

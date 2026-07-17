@@ -3226,6 +3226,10 @@ impl MemoryStore {
 mod tests {
     use super::*;
 
+    async fn setup_store() -> MemoryStore {
+        MemoryStore::open_in_memory(4).await.unwrap()
+    }
+
     #[test]
     fn test_roundtrip_bytes() {
         let original = vec![1.0_f32, 0.5, -0.25, 0.0];
@@ -3238,7 +3242,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_insert_and_search_summaries() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let emb_a = vec![1.0_f32, 0.0, 0.0, 0.0];
         let emb_b = vec![0.0_f32, 1.0, 0.0, 0.0];
 
@@ -3263,7 +3267,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_keyfacts_crud() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
 
         let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
         let summary_id = store
@@ -3315,7 +3319,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_summary_cascades() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
         let summary_id = store
             .insert_summary("s1", "char", "Summary", &[], &emb, Utc::now())
@@ -3341,7 +3345,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_insert_summary_with_empty_value_deletes_keyfact() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
         let summary_id = store
             .insert_summary("s1", "char", "Summary", &[], &emb, Utc::now())
@@ -3395,7 +3399,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_embedding_field_upsert_and_list() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
 
         store
@@ -3488,7 +3492,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_tool_embeddings_cascades() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
 
         for field in ["summary", "description", "negative"] {
@@ -3524,7 +3528,7 @@ mod tests {
     /// persisted and poisoning later cosine queries.
     #[tokio::test]
     async fn insert_summary_rejects_bad_embedding() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let now = Utc::now();
         let facts: Vec<KeyFact> = vec![];
 
@@ -3578,7 +3582,7 @@ mod tests {
     #[tokio::test]
     async fn pragmas_are_applied_on_open() {
         use sea_orm::ConnectionTrait;
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         // `execute_unprepared` returns a `ExecResult`
         // whose `rows_affected` field is populated for
         // some statements; for `PRAGMA foreign_keys` it
@@ -3600,7 +3604,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_insert_conversation_turn() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let session_id = "turn-test-session";
 
         let ids = store
@@ -3620,7 +3624,7 @@ mod tests {
 
     #[tokio::test]
     async fn affect_state_get_upsert() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
 
         let result = store.get_affect_state("ene").await.unwrap();
         assert!((result.valence - 0.0).abs() < f32::EPSILON);
@@ -3669,7 +3673,7 @@ mod tests {
 
     #[tokio::test]
     async fn typed_memory_crud() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
 
         let item = crate::NewMemoryItem {
             scope: crate::MemoryScope::Character,
@@ -3738,7 +3742,7 @@ mod tests {
 
     #[tokio::test]
     async fn typed_memory_search_with_embedding() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
 
         let item = crate::NewMemoryItem {
             scope: crate::MemoryScope::Character,
@@ -3781,7 +3785,7 @@ mod tests {
 
     #[tokio::test]
     async fn supersede_typed_memory_links_rows() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
 
         let old_item = crate::NewMemoryItem {
             scope: crate::MemoryScope::User,
@@ -3827,7 +3831,7 @@ mod tests {
 
     #[tokio::test]
     async fn supersede_typed_memory_rejects_terminal_status() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
 
         let item = crate::NewMemoryItem {
             scope: crate::MemoryScope::User,
@@ -3872,7 +3876,7 @@ mod tests {
 
     #[tokio::test]
     async fn commitment_crud_and_lifecycle() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
 
         let memory_id = store
             .insert_typed_memory(&crate::NewMemoryItem {
@@ -3944,7 +3948,7 @@ mod tests {
 
     #[tokio::test]
     async fn mark_stale_commitments_past_due() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let past = Utc::now() - chrono::Duration::days(1);
         let future = Utc::now() + chrono::Duration::days(1);
 
@@ -3984,7 +3988,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_active_commitments_orders_dated_before_undated() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let now = Utc::now();
 
         let later_id = store
@@ -4037,7 +4041,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_commitment_status_is_not_overwritten() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let past = Utc::now() - chrono::Duration::days(1);
 
         let done_id = store
@@ -4110,7 +4114,7 @@ mod tests {
 
     #[tokio::test]
     async fn hybrid_search_ranks_by_salience_and_recency_not_vector_alone() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let now = Utc::now();
         let query_emb = vec![1.0, 0.0, 0.0, 0.0];
 
@@ -4157,7 +4161,7 @@ mod tests {
 
     #[tokio::test]
     async fn hybrid_search_lexical_component_for_matching_query() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let now = Utc::now();
         let orthogonal = vec![0.0, 1.0, 0.0, 0.0];
 
@@ -4198,7 +4202,7 @@ mod tests {
 
     #[tokio::test]
     async fn hybrid_search_surfaces_active_commitment_with_low_vector_similarity() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let now = Utc::now();
         let query_emb = vec![1.0, 0.0, 0.0, 0.0];
 
@@ -4231,7 +4235,7 @@ mod tests {
 
     #[tokio::test]
     async fn hybrid_search_excludes_archived_superseded_and_user_deleted() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let now = Utc::now();
         let emb = vec![0.5, 0.5, 0.5, 0.5];
 
@@ -4275,7 +4279,7 @@ mod tests {
 
     #[tokio::test]
     async fn hybrid_search_faded_memory_has_stale_penalty() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let now = Utc::now();
         let emb = vec![1.0, 0.0, 0.0, 0.0];
 
@@ -4312,7 +4316,7 @@ mod tests {
 
     #[tokio::test]
     async fn hybrid_search_finds_old_lexical_match_outside_recent_pool() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let now = Utc::now();
         let query_emb = vec![0.0, 0.0, 1.0, 0.0];
         let orthogonal = vec![0.0, 1.0, 0.0, 0.0];
@@ -4383,7 +4387,7 @@ mod tests {
 
     #[tokio::test]
     async fn hybrid_search_excludes_unrelated_recent_without_fallback() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let now = Utc::now();
         let query_emb = vec![1.0, 0.0, 0.0, 0.0];
         let orthogonal = vec![0.0, 1.0, 0.0, 0.0];
@@ -4420,7 +4424,7 @@ mod tests {
 
     #[tokio::test]
     async fn hybrid_search_ranks_higher_confidence_when_other_signals_match() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let now = Utc::now();
         let query_emb = vec![1.0, 0.0, 0.0, 0.0];
 
@@ -4466,7 +4470,7 @@ mod tests {
 
     #[tokio::test]
     async fn hybrid_search_respects_user_id_scope() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let now = Utc::now();
         let query_emb = vec![1.0, 0.0, 0.0, 0.0];
 
@@ -4510,7 +4514,7 @@ mod tests {
 
     #[tokio::test]
     async fn hybrid_search_dedupes_multi_source_candidates() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let now = Utc::now();
         let emb = vec![1.0, 0.0, 0.0, 0.0];
 
@@ -4546,7 +4550,7 @@ mod tests {
 
     #[tokio::test]
     async fn transition_typed_memory_status_rejects_invalid_edge() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let id = store
             .insert_typed_memory(&crate::NewMemoryItem {
                 scope: crate::MemoryScope::Character,
@@ -4587,7 +4591,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_natural_decay_batch_fades_and_archives() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let now = Utc::now();
 
         let active_id = store
@@ -4664,7 +4668,7 @@ mod tests {
 
     #[tokio::test]
     async fn pin_typed_memory_excludes_from_natural_decay() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let id = store
             .insert_typed_memory(&crate::NewMemoryItem {
                 scope: crate::MemoryScope::Character,
@@ -4704,7 +4708,7 @@ mod tests {
 
     #[tokio::test]
     async fn transition_active_to_faded_sets_faded_at_from_decay_anchor() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let id = store
             .insert_typed_memory(&crate::NewMemoryItem {
                 scope: crate::MemoryScope::Character,
@@ -4746,7 +4750,7 @@ mod tests {
 
     #[tokio::test]
     async fn single_row_natural_decay_reaches_archived_in_two_passes() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let now = Utc::now();
 
         let id = store
@@ -4798,7 +4802,7 @@ mod tests {
 
     #[tokio::test]
     async fn hybrid_search_preserves_pinned_flag() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let now = Utc::now();
         let emb = vec![1.0, 0.0, 0.0, 0.0];
 
@@ -4834,7 +4838,7 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_migration_summaries_to_episodic() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
         store
             .insert_summary("s1", "char", "Legacy summary text", &[], &emb, Utc::now())
@@ -4864,7 +4868,7 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_write_forbidden_in_read_only_mode() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         store.set_legacy_write_mode(LegacyWriteMode::ReadOnly);
         let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
         let err = store
@@ -4876,7 +4880,7 @@ mod tests {
 
     #[tokio::test]
     async fn migration_idempotent_skips_existing_source_ref() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
         store
             .insert_summary("s1", "char", "Once", &[], &emb, Utc::now())
@@ -4896,7 +4900,7 @@ mod tests {
 
     #[tokio::test]
     async fn reset_legacy_clears_tables() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
         store
             .insert_summary("s1", "char", "x", &[], &emb, Utc::now())
@@ -4910,7 +4914,7 @@ mod tests {
 
     #[tokio::test]
     async fn reset_legacy_preserves_other_card_spans() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         store
             .insert_log("s-char", "char", "user", "hello")
             .await
@@ -4952,7 +4956,7 @@ mod tests {
 
     #[tokio::test]
     async fn require_migration_allows_logs_only() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         store
             .insert_log("s1", "char", "user", "hello")
             .await
@@ -4965,7 +4969,7 @@ mod tests {
 
     #[tokio::test]
     async fn require_migration_blocks_unmigrated_summaries() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
         store
             .insert_summary("s1", "char", "summary", &[], &emb, Utc::now())
@@ -4980,7 +4984,7 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_migration_keyfacts_to_preference_and_profile() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         store
             .upsert_keyfact("char", "pref_color", "blue")
             .await
@@ -5015,7 +5019,7 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_migration_logs_to_spans() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         store
             .insert_log("s1", "char", "user", "hello")
             .await
@@ -5046,7 +5050,7 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_migration_span_idempotent_on_retry_before_marker() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let store = setup_store().await;
         store
             .insert_log("s1", "char", "user", "once")
             .await

@@ -14,6 +14,26 @@ mod undo;
 use crate::context::AppContext;
 use async_trait::async_trait;
 
+/// Custom subcommand error representations.
+#[derive(Debug, thiserror::Error)]
+pub enum CliError {
+    /// Command was called with invalid or missing arguments
+    #[error("Usage: {usage}")]
+    UsageError {
+        /// The usage description of the command
+        usage: String,
+    },
+    /// The cognitive actor or runtime state failed
+    #[error("Actor error: {0}")]
+    ActorError(String),
+    /// Subcommand execution failed
+    #[error("Execution failed: {0}")]
+    ExecutionFailed(String),
+    /// Config or storage database error
+    #[error("Database error: {0}")]
+    DatabaseError(String),
+}
+
 /// The return value of a CLI command run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandOutcome {
@@ -36,7 +56,7 @@ pub trait CliCommand: Send + Sync {
     fn usage(&self) -> &'static str;
 
     /// Execute the command
-    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), String>;
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), CliError>;
 }
 
 /// Static registry containing all CLI command implementations except `/quit`
@@ -86,7 +106,7 @@ pub async fn execute(input: &str, ctx: &mut AppContext) -> CommandOutcome {
 
     if let Some(command) = COMMANDS.iter().find(|c| c.name() == cmd) {
         if let Err(err) = command.execute(arg, ctx).await {
-            eprintln!("{}", crate::style::error(err));
+            eprintln!("{}", crate::style::error(err.to_string()));
         }
     } else {
         eprintln!("{}", crate::style::error(format!("Unknown command: {cmd}")));

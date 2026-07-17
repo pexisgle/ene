@@ -620,7 +620,7 @@ struct EneActor {
     tool_rag: Option<Arc<ToolRag>>,
     cancel_token: CancellationToken,
     stream_handle: Option<tokio::task::JoinHandle<()>>,
-    stream_session_rx: Option<oneshot::Receiver<Result<ConversationSession, EneRuntimeError>>>,
+    stream_session_rx: Option<oneshot::Receiver<ConversationSession>>,
     active_turn: Option<TurnId>,
     pending_permissions: Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
     pending_user_inputs: Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
@@ -701,22 +701,9 @@ impl EneActor {
                     }
                     res = &mut *rx => {
                         // The stream task has finished (or the
-                        // sender was dropped). Mirror the
-                        // completion bookkeeping that used to
-                        // live in `check_stream_completion`.
-                        match res {
-                            Ok(Ok(updated_session)) => {
-                                self.session = updated_session;
-                            }
-                            Ok(Err(_error)) => {
-                                // `run_stream` already emitted the typed
-                                // prerequisite failure as the run's terminal
-                                // event. Keep the previous session intact.
-                            }
-                            Err(_) => {
-                                // Sender dropped without sending;
-                                // keep the previous session.
-                            }
+                        // sender was dropped).
+                        if let Ok(updated_session) = res {
+                            self.session = updated_session;
                         }
                         self.stream_handle = None;
                         self.stream_session_rx = None;
@@ -793,32 +780,10 @@ impl EneActor {
                 }
                 self.cancel_token.cancel();
 
-                // Cooperative join: give the stream up to 250ms to notice the
-                // CancellationToken and shut down gracefully (preserving in-flight
-                // session updates). If the timeout fires, hard-abort.
+                // Abort the stream task immediately.
                 if let Some(handle) = self.stream_handle.take() {
-                    tokio::pin!(handle);
-                    tokio::select! {
-                        res = &mut handle => {
-                            if let Err(e) = res {
-                                tracing::warn!(
-                                    component = "EneActor",
-                                    error = %e,
-                                    "Stream task join failed during cooperative cancel"
-                                );
-                            }
-                            // Peek the session result non-blockingly.
-                            if let Some(rx) = self.stream_session_rx.as_mut()
-                                && let Ok(Ok(updated)) = rx.try_recv()
-                            {
-                                self.session = updated;
-                            }
-                        }
-                        () = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
-                            handle.as_mut().abort();
-                            _ = handle.await;
-                        }
-                    }
+                    handle.abort();
+                    let _ = handle.await;
                 }
                 let _ = self.stream_session_rx.take();
 
@@ -1005,7 +970,7 @@ impl EneActor {
         self.stream_session_rx = Some(session_rx);
 
         let handle = tokio::spawn(async move {
-            let result = streaming::run_stream(streaming::StreamContext {
+            let updated_session = streaming::run_stream_cognitive(streaming::StreamContext {
                 config,
                 session,
                 user_input,
@@ -1023,7 +988,7 @@ impl EneActor {
                 classifier_tx,
             })
             .await;
-            let _ = session_tx.send(result);
+            let _ = session_tx.send(updated_session);
         });
         self.stream_handle = Some(handle);
     }
@@ -1459,5 +1424,85 @@ fn init_tool_rag(
 
 #[cfg(test)]
 mod tests {
-    // Contract tests for open/Busy/TurnId live in tests/api_v2_contract.rs.
+    use super::*;
+
+    fn test_config_memory_off() -> EneConfig {
+        let mut config = EneConfig::default();
+        let store = ene_store::StoreConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        config.set_section(&store).expect("store config merges");
+        let tools = ene_tool_host::ToolConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let _ = config.set_section(&tools);
+        let rag = ene_tool_rag::ToolRagConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let _ = config.set_section(&rag);
+        let mut provider = ene_ai::ProviderConfig::default();
+        provider.embedding.backend = "cloud".into();
+        let _ = config.set_section(&provider);
+        config
+    }
+
+    fn test_card() -> CharacterCardV3 {
+        CharacterCardV3::default()
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_channels_lag_and_overflow() {
+        let handle = EneHandle::open(test_config_memory_off(), test_card())
+            .await
+            .expect("open initializes handle");
+
+        // Test event_tx buffer overflow (capacity is 1024)
+        let mut event_rx = handle.subscribe();
+
+        // Send 1025 events to exceed the buffer capacity of 1024
+        for i in 0..1025 {
+            let _ = handle.event_tx.send(EneEvent::TextDelta {
+                turn: TurnId::new(),
+                delta: format!("delta {i}"),
+            });
+        }
+
+        // Try to receive and it should return RecvError::Lagged
+        let res = event_rx.recv().await;
+        assert!(
+            matches!(
+                res,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+            ),
+            "Expected RecvError::Lagged for event channel overflow, got {res:?}"
+        );
+
+        // Test diag_tx buffer overflow (capacity is 256)
+        let mut diag_rx = handle.diagnostics().subscribe();
+
+        // Send 257 events to exceed the buffer capacity of 256
+        for i in 0..257 {
+            let _ = handle
+                .diag_tx
+                .send(crate::diagnostics::DiagnosticEvent::PipelinePhase {
+                    turn: TurnId::new(),
+                    phase: format!("phase {i}"),
+                });
+        }
+
+        // Try to receive and it should return RecvError::Lagged
+        let res = diag_rx.recv().await;
+        assert!(
+            matches!(
+                res,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+            ),
+            "Expected RecvError::Lagged for diagnostics channel overflow, got {res:?}"
+        );
+
+        let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+    }
 }

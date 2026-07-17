@@ -12,7 +12,7 @@ use ene_ai::{
     EmbeddingKind, EmbeddingProvider, LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk,
 };
 use ene_config::{CharacterCardV3, EneConfig};
-use ene_runtime::streaming::{StreamContext, run_stream};
+use ene_runtime::streaming::{StreamContext, run_stream_cognitive};
 use ene_runtime::{EneEvent, TerminalReason};
 use ene_store::MemoryStore;
 use ene_tool_host::{ToolHostError, ToolRegistry};
@@ -139,7 +139,7 @@ async fn run_stream_cognitive_path_completes_with_logs() {
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
     };
 
-    let _session = run_stream(ctx).await;
+    let _session = run_stream_cognitive(ctx).await;
 
     let mut saw_done = false;
     while let Ok(event) = event_rx.try_recv() {

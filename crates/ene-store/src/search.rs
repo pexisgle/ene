@@ -78,7 +78,7 @@ pub(crate) fn recency_score(
     item: &MemoryItem,
     half_life_days: f64,
 ) -> f32 {
-    if half_life_days <= 0.0 {
+    if half_life_days <= 0.0 || half_life_days.is_nan() {
         return 1.0;
     }
     let anchor = item
@@ -102,13 +102,21 @@ pub(crate) fn emotional_match_score(
     let dv = query.valence - item_affect.valence;
     let da = query.arousal - item_affect.arousal;
     let dist = dv.hypot(da);
-    // Max distance in unit square diagonals ~2.83; map to similarity.
-    (1.0 - (dist / 2.83)).clamp(0.0, 1.0)
+    if dist.is_nan() {
+        0.0
+    } else {
+        // Max distance in unit square diagonals ~2.83; map to similarity.
+        (1.0 - (dist / 2.83)).clamp(0.0, 1.0)
+    }
 }
 
 /// Normalize relationship impact `[-1, 1]` to `[0, 1]`.
-pub(crate) const fn relationship_score(impact: f32) -> f32 {
-    f32::midpoint(impact, 1.0).clamp(0.0, 1.0)
+pub(crate) fn relationship_score(impact: f32) -> f32 {
+    if impact.is_nan() {
+        0.5
+    } else {
+        f32::midpoint(impact, 1.0).clamp(0.0, 1.0)
+    }
 }
 
 /// Diminishing returns boost from prior accesses.
@@ -201,6 +209,7 @@ pub(crate) fn score_candidate(
     };
 
     let total = (weighted + commitment_boost - contradiction - stale).max(0.0);
+    let total = if total.is_nan() { 0.0 } else { total };
 
     MemoryScoreBreakdown {
         vector_similarity: candidate.vector_similarity,
@@ -344,5 +353,50 @@ mod tests {
         let breakdown = score_candidate(&options, &candidate);
         assert!(breakdown.total >= 0.0);
         assert!(breakdown.stale_penalty > 0.0);
+    }
+
+    #[test]
+    fn nan_inputs_are_handled_gracefully() {
+        assert!((relationship_score(f32::NAN) - 0.5).abs() < f32::EPSILON);
+
+        let now = Utc::now();
+        let item = sample_item(MemoryStatus::Active);
+        assert!((recency_score(now, &item, f64::NAN) - 1.0).abs() < f32::EPSILON);
+
+        let q_affect = Some(AffectAnnotation {
+            valence: f32::NAN,
+            arousal: 0.0,
+        });
+        let item_affect = AffectAnnotation {
+            valence: 0.0,
+            arousal: 0.0,
+        };
+        assert!((emotional_match_score(q_affect, item_affect) - 0.0).abs() < f32::EPSILON);
+
+        let options = Query {
+            query_text: "pizza",
+            embedding: Some(&[0.1, 0.2, 0.3, 0.4]),
+            character_id: "ene",
+            user_id: None,
+            model_name: "test",
+            limit: 5,
+            similarity_threshold: 0.0,
+            candidate_pool_size: 50,
+            query_affect: None,
+            weights: HybridSearchWeights::default(),
+            decay_half_life_days: 30.0,
+            now,
+            min_score: 0.0,
+            commitment_boost: 0.25,
+            recent_fallback_limit: 5,
+        };
+        let candidate = GatheredCandidate {
+            item: sample_item(MemoryStatus::Active),
+            vector_similarity: f32::NAN,
+            sources: vec![MemoryCandidateSource::Vector],
+        };
+        let breakdown = score_candidate(&options, &candidate);
+        assert!(!breakdown.total.is_nan());
+        assert!(breakdown.total >= 0.0);
     }
 }

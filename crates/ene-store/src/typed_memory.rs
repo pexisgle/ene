@@ -223,9 +223,16 @@ impl MemoryConfidence {
     pub const MAX: Self = Self(1.0);
 
     /// Create a new confidence value, clamping to [0.0, 1.0].
+    ///
+    /// NaN inputs are mapped to 0.5 (default).
     #[must_use]
-    pub const fn new(raw: f32) -> Self {
-        Self(raw.clamp(0.0, 1.0))
+    pub fn new(raw: f32) -> Self {
+        let val = if raw.is_nan() {
+            0.5
+        } else {
+            raw.clamp(0.0, 1.0)
+        };
+        Self(val)
     }
 
     /// Unwrap to the raw `f32` value.
@@ -251,9 +258,16 @@ impl MemorySalience {
     pub const MAX: Self = Self(1.0);
 
     /// Create a new salience value, clamping to [0.0, 1.0].
+    ///
+    /// NaN inputs are mapped to 0.5 (default).
     #[must_use]
-    pub const fn new(raw: f32) -> Self {
-        Self(raw.clamp(0.0, 1.0))
+    pub fn new(raw: f32) -> Self {
+        let val = if raw.is_nan() {
+            0.5
+        } else {
+            raw.clamp(0.0, 1.0)
+        };
+        Self(val)
     }
 
     /// Unwrap to the raw `f32` value.
@@ -634,12 +648,14 @@ mod tests {
         assert!((MemoryConfidence::new(1.5).get() - 1.0).abs() < f32::EPSILON);
         assert!((MemoryConfidence::new(-0.3).get() - 0.0).abs() < f32::EPSILON);
         assert!((MemoryConfidence::new(0.73).get() - 0.73).abs() < f32::EPSILON);
+        assert!((MemoryConfidence::new(f32::NAN).get() - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]
     fn memory_salience_clamps() {
         assert!((MemorySalience::new(1.5).get() - 1.0).abs() < f32::EPSILON);
         assert!((MemorySalience::new(-0.3).get() - 0.0).abs() < f32::EPSILON);
+        assert!((MemorySalience::new(f32::NAN).get() - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]

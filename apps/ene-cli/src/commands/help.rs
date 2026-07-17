@@ -1,4 +1,4 @@
-use crate::commands::CliCommand;
+use crate::commands::{CliCommand, CliError};
 use crate::context::AppContext;
 use async_trait::async_trait;
 
@@ -18,7 +18,7 @@ impl CliCommand for HelpCommand {
         "/help"
     }
 
-    async fn execute(&self, _arg: &str, _ctx: &mut AppContext) -> Result<(), String> {
+    async fn execute(&self, _arg: &str, _ctx: &mut AppContext) -> Result<(), CliError> {
         println!("Commands:");
         println!("  {:<24} - Exit the CLI", "/quit");
         for cmd in crate::commands::COMMANDS {

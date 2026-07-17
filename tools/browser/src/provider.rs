@@ -9,6 +9,7 @@ use std::sync::Arc;
 /// Dispatch is handled by [`ActionSetProvider`] (#139).
 pub struct BrowserToolProvider {
     inner: ActionSetProvider,
+    pub store: Arc<crate::utils::session::BrowserSessionStore>,
 }
 
 impl BrowserToolProvider {
@@ -23,10 +24,11 @@ impl BrowserToolProvider {
             Box::new(action::ScreenshotAction::new(store.clone())),
             Box::new(action::GetContentAction::new(store.clone())),
             Box::new(action::ScrollAction::new(store.clone())),
-            Box::new(action::CloseAction::new(store)),
+            Box::new(action::CloseAction::new(store.clone())),
         ];
         Self {
             inner: ActionSetProvider::new(actions),
+            store,
         }
     }
 }

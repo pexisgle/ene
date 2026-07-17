@@ -36,6 +36,42 @@ pub enum DbError {
         /// Human-readable error message.
         message: String,
     },
+    /// The tool does not have permission to access the requested resource.
+    #[error("permission denied: {message}")]
+    PermissionDenied {
+        /// Human-readable error message.
+        message: String,
+    },
+    /// The specified table does not exist or is not declared.
+    #[error("unknown table: {message}")]
+    UnknownTable {
+        /// Human-readable error message.
+        message: String,
+    },
+    /// The specified column does not exist.
+    #[error("unknown column: {message}")]
+    UnknownColumn {
+        /// Human-readable error message.
+        message: String,
+    },
+    /// A value's type does not match the column's declared type.
+    #[error("type mismatch: {message}")]
+    TypeMismatch {
+        /// Human-readable error message.
+        message: String,
+    },
+    /// The filter expression is invalid.
+    #[error("invalid filter: {message}")]
+    InvalidFilter {
+        /// Human-readable error message.
+        message: String,
+    },
+    /// An internal server error occurred.
+    #[error("internal server error: {message}")]
+    Internal {
+        /// Human-readable error message.
+        message: String,
+    },
 }
 
 /// Client for communicating with the per-tool DB IPC server.
@@ -154,11 +190,16 @@ impl DbClient {
     }
 
     fn check_error(resp: DbResponse) -> Result<DbResponse, DbError> {
-        if let DbResponse::Error { code, message } = &resp {
-            return Err(DbError::Server {
-                code: code.clone(),
-                message: message.clone(),
-            });
+        if let DbResponse::Error { code, message } = resp {
+            let err = match code {
+                DbErrorCode::PermissionDenied => DbError::PermissionDenied { message },
+                DbErrorCode::UnknownTable => DbError::UnknownTable { message },
+                DbErrorCode::UnknownColumn => DbError::UnknownColumn { message },
+                DbErrorCode::TypeMismatch => DbError::TypeMismatch { message },
+                DbErrorCode::InvalidFilter => DbError::InvalidFilter { message },
+                DbErrorCode::Internal => DbError::Internal { message },
+            };
+            return Err(err);
         }
         Ok(resp)
     }
@@ -343,6 +384,60 @@ impl DbClient {
             other => Err(DbError::UnexpectedResponse(format!(
                 "expected Ack, got {other:?}"
             ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_check_error_mapping() {
+        let err_codes = vec![
+            (DbErrorCode::PermissionDenied, "Permission Denied message"),
+            (DbErrorCode::UnknownTable, "Unknown Table message"),
+            (DbErrorCode::UnknownColumn, "Unknown Column message"),
+            (DbErrorCode::TypeMismatch, "Type Mismatch message"),
+            (DbErrorCode::InvalidFilter, "Invalid Filter message"),
+            (DbErrorCode::Internal, "Internal message"),
+        ];
+
+        for (code, msg) in err_codes {
+            let resp = DbResponse::Error {
+                code: code.clone(),
+                message: msg.to_string(),
+            };
+            let res = DbClient::check_error(resp);
+            if let Err(err) = res {
+                match (code.clone(), err) {
+                    (DbErrorCode::PermissionDenied, DbError::PermissionDenied { message }) => {
+                        assert_eq!(message, "Permission Denied message");
+                    }
+                    (DbErrorCode::UnknownTable, DbError::UnknownTable { message }) => {
+                        assert_eq!(message, "Unknown Table message");
+                    }
+                    (DbErrorCode::UnknownColumn, DbError::UnknownColumn { message }) => {
+                        assert_eq!(message, "Unknown Column message");
+                    }
+                    (DbErrorCode::TypeMismatch, DbError::TypeMismatch { message }) => {
+                        assert_eq!(message, "Type Mismatch message");
+                    }
+                    (DbErrorCode::InvalidFilter, DbError::InvalidFilter { message }) => {
+                        assert_eq!(message, "Invalid Filter message");
+                    }
+                    (DbErrorCode::Internal, DbError::Internal { message }) => {
+                        assert_eq!(message, "Internal message");
+                    }
+                    _ => {
+                        let actual_code = format!("{code:?}");
+                        assert_eq!(actual_code, "None", "Unexpected error mapping");
+                    }
+                }
+            } else {
+                let got_error = false;
+                assert!(got_error, "Expected error response");
+            }
         }
     }
 }

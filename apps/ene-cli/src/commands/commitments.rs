@@ -1,4 +1,4 @@
-use crate::commands::CliCommand;
+use crate::commands::{CliCommand, CliError};
 use crate::{context::AppContext, style};
 use async_trait::async_trait;
 
@@ -22,7 +22,7 @@ impl CliCommand for CommitmentsCommand {
         "/commitments <list|done <id>>"
     }
 
-    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), String> {
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
         let parts = parse_parts(arg);
         let sub = parts.first().copied().unwrap_or("");
         let snapshot = ctx
@@ -30,7 +30,7 @@ impl CliCommand for CommitmentsCommand {
             .diagnostics()
             .get_snapshot()
             .await
-            .map_err(|e| format!("Failed to get actor state: {e}"))?;
+            .map_err(|e| CliError::ActorError(format!("Failed to get actor state: {e}")))?;
         let card_name = snapshot.card_name.as_str();
         let user_id = snapshot.config.user_name.as_str();
         match sub {
@@ -53,31 +53,32 @@ impl CliCommand for CommitmentsCommand {
                             );
                         }
                     }
+                    Ok(())
                 }
-                Err(e) => println!("{}", style::error(format!("[Commitments] List error: {e}"))),
+                Err(e) => Err(CliError::ExecutionFailed(format!("List error: {e}"))),
             },
             "done" => {
                 let id = parts.get(1).and_then(|raw| raw.parse::<i64>().ok());
                 let Some(id) = id else {
-                    println!("{}", style::warning("Usage: /commitments done <id>"));
-                    return Ok(());
+                    return Err(CliError::UsageError {
+                        usage: "Usage: /commitments done <id>".to_string(),
+                    });
                 };
                 match snapshot.memory.complete_commitment(id).await {
                     Ok(true) => {
                         println!("{}", style::success(format!("[Commitments] done id={id}")));
+                        Ok(())
                     }
-                    Ok(false) => println!(
-                        "{}",
-                        style::warning(format!("[Commitments] id={id} not found or not active"))
-                    ),
-                    Err(e) => {
-                        println!("{}", style::error(format!("[Commitments] Done error: {e}")));
-                    }
+                    Ok(false) => Err(CliError::ExecutionFailed(format!(
+                        "id={id} not found or not active"
+                    ))),
+                    Err(e) => Err(CliError::ExecutionFailed(format!("Done error: {e}"))),
                 }
             }
-            _ => println!("{}", style::warning("Usage: /commitments <list|done <id>>")),
+            _ => Err(CliError::UsageError {
+                usage: self.usage().to_string(),
+            }),
         }
-        Ok(())
     }
 }
 

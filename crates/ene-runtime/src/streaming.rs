@@ -110,11 +110,7 @@ pub struct StreamContext {
 /// no legacy streaming fallback. Opening with memory enabled still fails closed
 /// if the embedder cannot be initialized.
 #[doc(hidden)]
-pub async fn run_stream(
-    ctx: StreamContext,
-) -> Result<ConversationSession, crate::error::EneRuntimeError> {
-    Ok(crate::streaming_cognitive::run_stream_cognitive(ctx).await)
-}
+pub use crate::streaming_cognitive::run_stream_cognitive;
 
 /// Selects relevant tools using the `ToolRag` pipeline if available,
 /// otherwise falls back to the registry's `select_tools` or `list_tools`.

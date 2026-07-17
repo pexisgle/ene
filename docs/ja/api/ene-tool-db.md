@@ -150,16 +150,28 @@ pub enum DbError {
     UnexpectedResponse(String),
     ConnectionClosed,
     Auth { code: DbErrorCode, message: String },
+    PermissionDenied { message: String },
+    UnknownTable { message: String },
+    UnknownColumn { message: String },
+    TypeMismatch { message: String },
+    InvalidFilter { message: String },
+    Internal { message: String },
 }
 ```
 
 | バリアント | 意味 |
 |---|---|
 | `Transport(std::io::Error)` | 低レベルのトランスポート失敗（書き込み／読み取り／シリアライズ／デシリアライズ）。`#[from] std::io::Error` を実装しているため、生の I/O に対する `?` が自動的に変換される。 |
-| `Server { code, message }` | サーバーが（ハンドシェイク後の）通常のリクエストに対してアプリケーションレベルのエラーを返した — 例えば権限違反やスキーマ違反。 |
+| `Server { code, message }` | サーバーがエラーレスポンスを返した（主に後方互換性のために保持され、CRUDエラーは具体的なバリアントを返すようになりました）。 |
 | `UnexpectedResponse(String)` | サーバーが送ったリクエストに対して構文的には正しいが意味的には誤ったレスポンスバリアントを返した（例：`Insert` リクエストに対して `Select` レスポンスが返ってきた）。データエラーではなく、クライアント/サーバー間のプロトコル不整合を示す。 |
 | `ConnectionClosed` | IPC 接続が予期せず閉じられた（レスポンスの読み取り中に EOF）。回復するには [`reconnect`](#接続管理) を呼び出す。 |
-| `Auth { code, message }` | サーバーが、初回の `connect_with_token` 時、または `reconnect` 時に提示された認証トークンを拒否した。呼び出し元が「トークンが古い／無効」と「クエリが拒否された」を区別できるよう、`Server` とは別のバリアントになっている。 |
+| `Auth { code, message }` | サーバーが、初回の `connect_with_token` 時、または `reconnect` 時に提示された認証トークンを拒否した。他のクエリエラーと区別できるよう、呼び出し元が「トークンが古い／無効」であることを区別できるようにしています。 |
+| `PermissionDenied { message }` | ツールに要求されたリソースへのアクセス権限がない（例：プレフィックス外のテーブルへのアクセスなど）。 |
+| `UnknownTable { message }` | 指定されたテーブルが存在しない、または `declare_schema` で宣言されていない。 |
+| `UnknownColumn { message }` | 指定されたカラムがテーブルに存在しない。 |
+| `TypeMismatch { message }` | 値の型がカラムの宣言された型と一致しない。 |
+| `InvalidFilter { message }` | フィルタ式が無効。 |
+| `Internal { message }` | 内部サーバーエラーが発生した。 |
 
 ### `DbErrorCode`
 

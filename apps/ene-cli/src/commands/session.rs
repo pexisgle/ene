@@ -1,4 +1,4 @@
-use crate::commands::CliCommand;
+use crate::commands::{CliCommand, CliError};
 use crate::{context::AppContext, style};
 use async_trait::async_trait;
 use ene_config::Truncate;
@@ -19,7 +19,7 @@ impl CliCommand for SessionCommand {
         "/session <info|split|summaries>"
     }
 
-    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), String> {
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
         let parts: Vec<&str> = arg.splitn(2, ' ').collect();
         let subcmd = parts.first().copied().unwrap_or("");
 
@@ -28,22 +28,22 @@ impl CliCommand for SessionCommand {
             .diagnostics()
             .get_snapshot()
             .await
-            .map_err(|e| format!("Failed to get actor state: {e}"))?;
+            .map_err(|e| CliError::ActorError(format!("Failed to get actor state: {e}")))?;
 
         match subcmd {
-            "info" => handle_info(&snapshot),
-            "split" => {
-                handle_split(ctx, &snapshot).await;
+            "info" => {
+                handle_info(&snapshot);
+                Ok(())
             }
-            "summaries" => handle_summaries(&snapshot),
-            _ => {
-                println!(
-                    "{}",
-                    style::warning("Usage: /session <info|split|summaries>")
-                );
+            "split" => handle_split(ctx, &snapshot).await,
+            "summaries" => {
+                handle_summaries(&snapshot);
+                Ok(())
             }
+            _ => Err(CliError::UsageError {
+                usage: self.usage().to_string(),
+            }),
         }
-        Ok(())
     }
 }
 
@@ -69,17 +69,19 @@ fn handle_info(snapshot: &ene_runtime::EneStateSnapshot) {
     println!("--------------------");
 }
 
-async fn handle_split(ctx: &AppContext, snapshot: &ene_runtime::EneStateSnapshot) {
+async fn handle_split(
+    ctx: &AppContext,
+    snapshot: &ene_runtime::EneStateSnapshot,
+) -> Result<(), CliError> {
     if snapshot.history.is_empty() {
-        println!(
-            "{}",
-            style::warning("[Session] Cannot compress: No conversation history.")
-        );
-        return;
+        return Err(CliError::ExecutionFailed(
+            "Cannot compress: No conversation history.".to_string(),
+        ));
     }
     if !snapshot.memory.is_enabled() {
-        println!("{}", style::warning("[Session] Memory is not enabled."));
-        return;
+        return Err(CliError::ExecutionFailed(
+            "Memory is not enabled.".to_string(),
+        ));
     }
 
     println!(
@@ -106,10 +108,9 @@ async fn handle_split(ctx: &AppContext, snapshot: &ene_runtime::EneStateSnapshot
                 "{}",
                 style::warning("[Session] Context compression completed.")
             );
+            Ok(())
         }
-        Err(e) => {
-            println!("{}", style::error(format!("[Session] Compress error: {e}")));
-        }
+        Err(e) => Err(CliError::ExecutionFailed(format!("Compress error: {e}"))),
     }
 }
 

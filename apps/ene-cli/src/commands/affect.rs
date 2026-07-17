@@ -1,4 +1,4 @@
-use crate::commands::CliCommand;
+use crate::commands::{CliCommand, CliError};
 use crate::{context::AppContext, style};
 use async_trait::async_trait;
 
@@ -22,14 +22,14 @@ impl CliCommand for AffectCommand {
         "/affect <show|reset>"
     }
 
-    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), String> {
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
         let sub = parse_subcommand(arg);
         let snapshot = ctx
             .handle
             .diagnostics()
             .get_snapshot()
             .await
-            .map_err(|e| format!("Failed to get actor state: {e}"))?;
+            .map_err(|e| CliError::ActorError(format!("Failed to get actor state: {e}")))?;
         let card_name = snapshot.card_name.as_str();
         match sub {
             "show" => match snapshot.memory.show_affect_state(card_name).await {
@@ -38,18 +38,21 @@ impl CliCommand for AffectCommand {
                         "[Affect] mood={} valence={:.2} arousal={:.2} trust={:.2} affinity={:.2}",
                         state.mood_label, state.valence, state.arousal, state.trust, state.affinity
                     );
+                    Ok(())
                 }
-                Err(e) => println!("{}", style::error(format!("[Affect] Show error: {e}"))),
+                Err(e) => Err(CliError::ExecutionFailed(format!("Show error: {e}"))),
             },
             "reset" => match snapshot.memory.reset_affect_state(card_name).await {
-                Ok(()) => println!("{}", style::success("[Affect] Reset to neutral state")),
-                Err(e) => println!("{}", style::error(format!("[Affect] Reset error: {e}"))),
+                Ok(()) => {
+                    println!("{}", style::success("[Affect] Reset to neutral state"));
+                    Ok(())
+                }
+                Err(e) => Err(CliError::ExecutionFailed(format!("Reset error: {e}"))),
             },
-            _ => {
-                println!("{}", style::warning("Usage: /affect <show|reset>"));
-            }
+            _ => Err(CliError::UsageError {
+                usage: self.usage().to_string(),
+            }),
         }
-        Ok(())
     }
 }
 

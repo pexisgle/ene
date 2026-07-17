@@ -22,6 +22,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 rust-embed = { workspace = true }
 i18n-embed = { workspace = true }
 i18n-embed-fl = { workspace = true }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true

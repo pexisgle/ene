@@ -1,4 +1,4 @@
-use crate::commands::CliCommand;
+use crate::commands::{CliCommand, CliError};
 use crate::context::AppContext;
 use crate::style;
 use async_trait::async_trait;
@@ -19,7 +19,7 @@ impl CliCommand for ToolCommand {
         "/tool <list|help|call>"
     }
 
-    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), String> {
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
         let subparts: Vec<&str> = arg.splitn(3, ' ').collect();
         match subparts.first().copied() {
             Some("list") => match ctx.handle.diagnostics().list_tools().await {
@@ -29,17 +29,6 @@ impl CliCommand for ToolCommand {
                     } else {
                         println!("{}", style::success("Available tools:"));
                         for tool in tools {
-                            // Truncate at a UTF-8 char
-                            // boundary. The previous form
-                            // used a byte-index slice
-                            // (`&tool.description[..57]`)
-                            // which panics if offset 57
-                            // falls inside a multi-byte
-                            // UTF-8 character. Tool
-                            // descriptions are external
-                            // and routinely non-ASCII
-                            // (the `cl100k_base` tokenizer
-                            // happily encodes CJK).
                             let desc = if tool.description.chars().count() > 60 {
                                 let truncated: String = tool.description.chars().take(57).collect();
                                 format!("{truncated}...")
@@ -49,10 +38,11 @@ impl CliCommand for ToolCommand {
                             println!("  - {}: {}", style::header(tool.name.as_str()), desc);
                         }
                     }
+                    Ok(())
                 }
-                Err(e) => {
-                    println!("{}", style::error(format!("Failed to list tools: {e}")));
-                }
+                Err(e) => Err(CliError::ExecutionFailed(format!(
+                    "Failed to list tools: {e}"
+                ))),
             },
             Some("help") => {
                 if subparts.len() >= 2 {
@@ -71,16 +61,19 @@ impl CliCommand for ToolCommand {
                                     serde_json::to_string_pretty(&tool.parameters)
                                         .unwrap_or_default()
                                 );
+                                Ok(())
                             } else {
-                                println!("{}", style::error(format!("Tool not found: {name}")));
+                                Err(CliError::ExecutionFailed(format!("Tool not found: {name}")))
                             }
                         }
-                        Err(e) => {
-                            println!("{}", style::error(format!("Failed to retrieve tools: {e}")));
-                        }
+                        Err(e) => Err(CliError::ExecutionFailed(format!(
+                            "Failed to retrieve tools: {e}"
+                        ))),
                     }
                 } else {
-                    println!("{}", style::warning("Usage: /tool help <tool_name>"));
+                    Err(CliError::UsageError {
+                        usage: "Usage: /tool help <tool_name>".to_string(),
+                    })
                 }
             }
             Some("call") => {
@@ -97,10 +90,11 @@ impl CliCommand for ToolCommand {
                         Ok(res) => {
                             println!("{}", style::success("Tool execution result:"));
                             println!("{res}");
+                            Ok(())
                         }
-                        Err(e) => {
-                            println!("{}", style::error(format!("Tool execution failed: {e}")));
-                        }
+                        Err(e) => Err(CliError::ExecutionFailed(format!(
+                            "Tool execution failed: {e}"
+                        ))),
                     }
                 } else if subparts.len() == 2 {
                     let name = subparts[1];
@@ -114,24 +108,21 @@ impl CliCommand for ToolCommand {
                         Ok(res) => {
                             println!("{}", style::success("Tool execution result:"));
                             println!("{res}");
+                            Ok(())
                         }
-                        Err(e) => {
-                            println!("{}", style::error(format!("Tool execution failed: {e}")));
-                        }
+                        Err(e) => Err(CliError::ExecutionFailed(format!(
+                            "Tool execution failed: {e}"
+                        ))),
                     }
                 } else {
-                    println!("{}", style::warning("Usage: /tool call <name> <json>"));
+                    Err(CliError::UsageError {
+                        usage: "Usage: /tool call <name> <json>".to_string(),
+                    })
                 }
             }
-            _ => {
-                println!(
-                    "{}",
-                    style::warning(
-                        "Usage: /tool list | /tool help <name> | /tool call <name> <json>"
-                    )
-                );
-            }
+            _ => Err(CliError::UsageError {
+                usage: self.usage().to_string(),
+            }),
         }
-        Ok(())
     }
 }

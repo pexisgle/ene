@@ -105,11 +105,16 @@ impl LookAtRangeMap {
     /// direction-aware wrappers.
     #[must_use]
     pub fn apply(&self, input_degrees: f32) -> f32 {
+        let input_max_abs = self.input_max_value.abs();
+        if input_max_abs < 1e-10 {
+            return 0.0;
+        }
         let sign = input_degrees.signum();
         let abs = input_degrees.abs();
-        let clamped = abs.min(self.input_max_value);
-        let scaled = (clamped / self.input_max_value) * self.output_scale;
-        sign * scaled
+        let clamped = abs.min(input_max_abs);
+        let scaled = (clamped / input_max_abs) * self.output_scale;
+        let result = sign * scaled;
+        if result.is_finite() { result } else { 0.0 }
     }
 }
 
@@ -424,12 +429,37 @@ impl LookAtEvaluator {
                 // the *outer* / *down* maps for the positive
                 // sign, so we read the matching `output_scale`
                 // from the same map.
-                let yaw_weight =
-                    (yaw_deg / self.range_map.horizontal_outer.output_scale).clamp(-1.0, 1.0);
-                let pitch_weight = if pitch_deg >= 0.0 {
-                    (pitch_deg / self.range_map.vertical_down.output_scale).clamp(0.0, 1.0)
+                let horizontal_outer_scale = self.range_map.horizontal_outer.output_scale;
+                let yaw_weight = if horizontal_outer_scale.abs() > 1e-10 {
+                    (yaw_deg / horizontal_outer_scale).clamp(-1.0, 1.0)
                 } else {
-                    (pitch_deg / self.range_map.vertical_up.output_scale).clamp(-1.0, 0.0)
+                    0.0
+                };
+                let yaw_weight = if yaw_weight.is_finite() {
+                    yaw_weight
+                } else {
+                    0.0
+                };
+
+                let vertical_down_scale = self.range_map.vertical_down.output_scale;
+                let vertical_up_scale = self.range_map.vertical_up.output_scale;
+                let pitch_weight = if pitch_deg >= 0.0 {
+                    if vertical_down_scale.abs() > 1e-10 {
+                        (pitch_deg / vertical_down_scale).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    }
+                } else {
+                    if vertical_up_scale.abs() > 1e-10 {
+                        (pitch_deg / vertical_up_scale).clamp(-1.0, 0.0)
+                    } else {
+                        0.0
+                    }
+                };
+                let pitch_weight = if pitch_weight.is_finite() {
+                    pitch_weight
+                } else {
+                    0.0
                 };
                 // Per the spec: for `"expression"`-type
                 // models the `horizontalOuter` map drives
@@ -514,11 +544,20 @@ pub fn calc_yaw_pitch(
     // local-to-parent rotation; for a head with no parent
     // transform above (or with a parent transform we are
     // not tracking) the inverse is sufficient.
-    let dir_local = head_rest_rotation.inverse() * dir_world;
+    let dir_local = if head_rest_rotation.is_finite() && head_rest_rotation.length_squared() > 1e-6
+    {
+        head_rest_rotation.inverse() * dir_world
+    } else {
+        dir_world
+    };
 
     let z = dir_local.z;
     let x = dir_local.x;
-    let yaw = x.atan2(z).to_degrees();
+    let yaw = if x.is_finite() && z.is_finite() {
+        x.atan2(z).to_degrees()
+    } else {
+        0.0
+    };
 
     let xz = x.hypot(z);
     let y = dir_local.y;
@@ -526,11 +565,15 @@ pub fn calc_yaw_pitch(
     // into the spec's "look up = negative pitch,
     // look down = positive pitch" convention. Reference:
     // bevy_vrm1::calc_yaw_pitch line 234.
-    let pitch = (-y).atan2(xz).to_degrees();
+    let pitch = if y.is_finite() && xz.is_finite() {
+        (-y).atan2(xz).to_degrees()
+    } else {
+        0.0
+    };
 
     LookAtDirection {
-        yaw_degrees: yaw,
-        pitch_degrees: pitch,
+        yaw_degrees: if yaw.is_finite() { yaw } else { 0.0 },
+        pitch_degrees: if pitch.is_finite() { pitch } else { 0.0 },
     }
 }
 

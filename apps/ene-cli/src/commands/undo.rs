@@ -1,4 +1,4 @@
-use crate::commands::CliCommand;
+use crate::commands::{CliCommand, CliError};
 use crate::context::AppContext;
 use async_trait::async_trait;
 
@@ -18,7 +18,7 @@ impl CliCommand for UndoCommand {
         "/undo"
     }
 
-    async fn execute(&self, _arg: &str, _ctx: &mut AppContext) -> Result<(), String> {
+    async fn execute(&self, _arg: &str, _ctx: &mut AppContext) -> Result<(), CliError> {
         eprintln!("[Undo] Not yet supported with actor-based runtime. Use /tool call undo");
         Ok(())
     }
