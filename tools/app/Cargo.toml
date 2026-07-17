@@ -8,9 +8,9 @@ description = "OS-level GUI automation: window management, keyboard/mouse contro
 ene-tool-proto = { workspace = true }
 ene-tool-common = { workspace = true }
 ene-tool-derive = { workspace = true }
-enigo = { workspace = true }
-xcap = { workspace = true }
-active-win-pos-rs = { workspace = true }
+enigo = "0.6"
+xcap = "0.9.6"
+active-win-pos-rs = "0.11.0"
 base64 = { workspace = true, features = ["std"] }
 image = { workspace = true }
 tokio = { workspace = true }
@@ -19,15 +19,15 @@ serde = { workspace = true }
 async-trait = { workspace = true }
 schemars = { workspace = true }
 tracing = { workspace = true }
-arboard = { workspace = true }
+arboard = { version = "3.6", features = ["wayland-data-control"] }
 
 [[bin]]
 name = "ene-tool-app"
 path = "src/main.rs"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-ashpd = { workspace = true, features = ["tokio", "screenshot", "screencast", "pipewire"] }
-pipewire = { workspace = true }
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "screenshot", "screencast", "pipewire"] }
+pipewire = "0.9"
 
 [lints]
 workspace = true

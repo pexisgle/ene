@@ -13,7 +13,7 @@ ene-tool-derive = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
-websearch = { workspace = true }
+websearch = "0.1.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 reqwest = { workspace = true, features = ["rustls", "json", "query"] }
