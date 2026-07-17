@@ -203,17 +203,3 @@ impl BrowserSessionStore {
         self.creation_locks.clear();
     }
 }
-
-impl Drop for BrowserSessionStore {
-    fn drop(&mut self) {
-        let sessions = std::mem::take(&mut self.sessions);
-        tokio::spawn(async move {
-            for entry in sessions {
-                let mut session = entry.1.lock().await;
-                session.handler_task.abort();
-                let _ = session.browser.close().await;
-                let _ = tokio::fs::remove_dir_all(&session.user_data_dir).await;
-            }
-        });
-    }
-}

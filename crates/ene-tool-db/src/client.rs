@@ -111,7 +111,10 @@ impl DbClient {
             })
             .await?;
         match resp {
-            DbResponse::HandshakeAck => Ok(client),
+            DbResponse::HandshakeAck => {
+                client.auth_token = Some(token.to_string());
+                Ok(client)
+            }
             DbResponse::Error { code, message } => Err(DbError::Auth { code, message }),
             other => Err(DbError::Transport(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -438,6 +441,95 @@ mod tests {
                 let got_error = false;
                 assert!(got_error, "Expected error response");
             }
+        }
+    }
+
+    #[cfg(unix)]
+    #[expect(
+        clippy::expect_used,
+        reason = "reconnect harness panics on protocol or IO failure"
+    )]
+    mod reconnect_auth {
+        use super::*;
+        use ene_tool_proto::transport::{IpcListener, IpcStream, cleanup_path};
+        use std::path::PathBuf;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn read_framed(stream: &mut IpcStream) -> DbRequest {
+            let mut len_buf = [0u8; 4];
+            stream.read_exact(&mut len_buf).await.expect("read len");
+            let len = u32::from_le_bytes(len_buf) as usize;
+            let mut buf = vec![0u8; len];
+            stream.read_exact(&mut buf).await.expect("read body");
+            serde_json::from_slice(&buf).expect("decode request")
+        }
+
+        async fn write_framed(stream: &mut IpcStream, resp: &DbResponse) {
+            let json = serde_json::to_vec(resp).expect("encode response");
+            let len = json.len() as u32;
+            stream
+                .write_all(&len.to_le_bytes())
+                .await
+                .expect("write len");
+            stream.write_all(&json).await.expect("write body");
+            stream.flush().await.expect("flush");
+        }
+
+        async fn serve_authed_session(stream: &mut IpcStream, expected_token: &str) {
+            match read_framed(stream).await {
+                DbRequest::Handshake { token } => {
+                    assert_eq!(token, expected_token, "handshake token mismatch");
+                    write_framed(stream, &DbResponse::HandshakeAck).await;
+                }
+                other => panic!("expected Handshake, got {other:?}"),
+            }
+            match read_framed(stream).await {
+                DbRequest::Ping => write_framed(stream, &DbResponse::Pong).await,
+                other => panic!("expected Ping, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn connect_with_token_captures_token_for_reconnect() {
+            let socket_path: PathBuf = std::env::temp_dir()
+                .join(format!("ene-tool-db-reconnect-{}.sock", std::process::id()));
+            cleanup_path(&socket_path);
+
+            let expected_token = "test-token-secret";
+            let path_for_server = socket_path.clone();
+            let token_for_server = expected_token.to_string();
+
+            let server = tokio::spawn(async move {
+                let mut listener = IpcListener::bind(&path_for_server).expect("bind");
+                // First connection: initial connect_with_token + ping.
+                let mut stream = listener.accept().await.expect("accept first");
+                serve_authed_session(&mut stream, &token_for_server).await;
+                drop(stream);
+
+                // Second connection: reconnect + ping (must re-handshake).
+                let mut stream = listener.accept().await.expect("accept second");
+                serve_authed_session(&mut stream, &token_for_server).await;
+            });
+
+            // Wait briefly for the listener to be ready.
+            for _ in 0..50 {
+                if socket_path.exists() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+
+            let mut client = DbClient::connect_with_token(&socket_path, expected_token)
+                .await
+                .expect("connect_with_token");
+            client.ping().await.expect("ping after connect");
+
+            // Drop the first socket from the client side by reconnecting.
+            client.reconnect().await.expect("reconnect re-handshakes");
+            client.ping().await.expect("ping after reconnect");
+
+            server.await.expect("server task");
+            cleanup_path(&socket_path);
         }
     }
 }

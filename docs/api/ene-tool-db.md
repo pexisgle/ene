@@ -402,7 +402,7 @@ The `DbIpcServer` in `ene-runtime` enforces the following rule for every request
 
 > A tool may only access tables whose name begins with `<tool_prefix>_`.
 
-If a tool attempts to read or write a table outside its prefix, the server returns `DbError::Server { code: DbErrorCode::PermissionDenied, .. }`.
+If a tool attempts to read or write a table outside its prefix, the server returns `DbError::PermissionDenied { message }`.
 
 This isolation is intentional: tools are separate, untrusted processes and must not be able to read or corrupt each other's state.
 

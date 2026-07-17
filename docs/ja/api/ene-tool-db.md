@@ -401,7 +401,7 @@ impl DbOrderBy {
 
 > ツールは `<tool_prefix>_` で始まる名前のテーブルにのみアクセスできる。
 
-ツールがプレフィックス外のテーブルを読み書きしようとすると、サーバーは `DbError::Server { code: DbErrorCode::PermissionDenied, .. }` を返します。
+ツールがプレフィックス外のテーブルを読み書きしようとすると、サーバーは `DbError::PermissionDenied { message }` を返します。
 
 この分離は意図的なものです：ツールは互いに独立した信頼されないプロセスであり、互いの状態を読み取ったり破壊したりできてはなりません。
 

@@ -780,10 +780,31 @@ impl EneActor {
                 }
                 self.cancel_token.cancel();
 
-                // Abort the stream task immediately.
+                // Cooperative join: give the stream up to 250ms to notice the
+                // CancellationToken and shut down gracefully (preserving in-flight
+                // session updates). If the timeout fires, hard-abort.
                 if let Some(handle) = self.stream_handle.take() {
-                    handle.abort();
-                    let _ = handle.await;
+                    tokio::pin!(handle);
+                    tokio::select! {
+                        res = &mut handle => {
+                            if let Err(e) = res {
+                                tracing::warn!(
+                                    component = "EneActor",
+                                    error = %e,
+                                    "Stream task join failed during cooperative cancel"
+                                );
+                            }
+                            if let Some(rx) = self.stream_session_rx.as_mut()
+                                && let Ok(updated) = rx.try_recv()
+                            {
+                                self.session = updated;
+                            }
+                        }
+                        () = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+                            handle.as_mut().abort();
+                            let _ = handle.await;
+                        }
+                    }
                 }
                 let _ = self.stream_session_rx.take();
 

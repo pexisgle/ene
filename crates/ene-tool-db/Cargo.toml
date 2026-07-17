@@ -12,5 +12,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 ene-tool-proto = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "io-util", "net"] }
+
 [lints]
 workspace = true
