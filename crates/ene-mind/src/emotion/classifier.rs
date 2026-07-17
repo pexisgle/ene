@@ -81,7 +81,6 @@ pub async fn classify_for_config(
 }
 
 /// Map a classifier error to a short failure-reason label for logging.
-#[must_use]
 pub const fn classify_failure_reason(error: &CognitionError) -> &'static str {
     match error {
         CognitionError::Classifier(classifier_error) => classifier_failure_reason(classifier_error),
@@ -99,7 +98,6 @@ const fn classifier_failure_reason(error: &ClassifierError) -> &'static str {
 }
 
 /// JSON Schema for `response_format` with `strict: true` (OpenAI-compatible providers).
-#[must_use]
 fn proposal_json_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",

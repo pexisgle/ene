@@ -22,20 +22,17 @@ pub struct PromptPacket {
 
 impl PromptPacket {
     /// Look up a section by kind (first match).
-    #[must_use]
     pub fn section(&self, kind: PromptSectionKind) -> Option<&PromptSection> {
         self.sections.iter().find(|s| s.kind == kind)
     }
 
     /// Whether a section has non-empty content.
-    #[must_use]
     pub fn section_included(&self, kind: PromptSectionKind) -> bool {
         self.section(kind)
             .is_some_and(|s| !s.content.trim().is_empty())
     }
 
     /// Convert the packet into LLM messages (system + history + PHI + user).
-    #[must_use]
     pub fn to_llm_messages(&self) -> (Vec<LlmMessage>, PromptPacketMeta) {
         let mut system_parts = Vec::new();
 
@@ -126,7 +123,6 @@ impl PromptPacket {
     }
 
     /// Build a packet from composed inputs (legacy helper; prefer [`crate::context::pack_prompt`]).
-    #[must_use]
     pub fn compose(
         kernel: IdentityKernel,
         style_examples: Vec<StyleExample>,
@@ -238,7 +234,6 @@ impl PromptPacket {
 }
 
 /// Split recalled memories into semantic, profile, and episodic buckets.
-#[must_use]
 pub fn classify_recalled_memories(
     recalled: &[RecalledMemory],
 ) -> (
@@ -270,7 +265,6 @@ pub fn classify_recalled_memories(
 }
 
 /// Render active commitments as a bullet list body (without heading).
-#[must_use]
 pub fn render_commitments_block(commitments: &[ActiveCommitmentPrompt]) -> String {
     commitments
         .iter()

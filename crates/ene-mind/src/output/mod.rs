@@ -20,7 +20,6 @@ pub struct OutputArbiter;
 
 impl OutputArbiter {
     /// Resolve the final character expression for a completed assistant turn.
-    #[must_use]
     pub fn resolve(
         &self,
         config: &EmotionConfig,

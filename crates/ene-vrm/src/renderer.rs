@@ -1205,7 +1205,6 @@ impl VrmRenderer {
     /// the joint count of the renderer's skin
     /// palette. Zero for models built with the identity
     /// one-element palette (no skin).
-    #[must_use]
     pub const fn skin_joint_count(&self) -> u32 {
         self.skin.joint_count
     }

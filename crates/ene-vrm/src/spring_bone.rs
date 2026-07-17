@@ -146,7 +146,6 @@ pub struct SpringBoneProperties {
 /// Called internally by [`crate::loader::load_vrm`]; hidden from the "Supported API" docs —
 /// hosts get the result via [`VrmModel::spring_bones`](crate::model::VrmModel).
 #[doc(hidden)]
-#[must_use]
 pub fn load_spring_bones(gltf: &gltf::Gltf) -> Option<SpringBoneProperties> {
     let ext = gltf.document.extensions()?;
     let value = ext.get("VRMC_springBone")?;

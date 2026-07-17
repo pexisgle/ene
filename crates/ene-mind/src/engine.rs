@@ -383,7 +383,6 @@ impl CognitionEngine {
     }
 
     /// Resolve the final character expression after an assistant turn (#89).
-    #[must_use]
     pub fn resolve_expression_turn(
         &self,
         config: &MindConfig,
@@ -448,7 +447,6 @@ fn pending_to_affect_proposal(
 }
 
 /// Count user messages in a history snapshot (current turn user is already included).
-#[must_use]
 pub fn count_user_turns(history: &[crate::lifecycle::HistoryEntry]) -> i64 {
     history
         .iter()
@@ -460,7 +458,6 @@ pub fn count_user_turns(history: &[crate::lifecycle::HistoryEntry]) -> i64 {
 ///
 /// Uses the stream-start history snapshot, which already includes the current
 /// user message but not the assistant reply produced in this turn.
-#[must_use]
 pub fn completed_user_turn_at_post_turn(history: &[crate::lifecycle::HistoryEntry]) -> i64 {
     count_user_turns(history)
 }
@@ -482,7 +479,6 @@ pub struct ClassifierAffectSnapshot {
 
 impl ClassifierAffectSnapshot {
     /// Build a compact snapshot from persistent affect state.
-    #[must_use]
     pub fn from_affect_state(affect: &ene_store::AffectState) -> Self {
         Self {
             valence: affect.valence,
@@ -494,7 +490,6 @@ impl ClassifierAffectSnapshot {
     }
 
     /// Serialize for the classifier user prompt.
-    #[must_use]
     pub fn to_prompt_json(&self) -> String {
         serde_json::json!({
             "valence": self.valence,

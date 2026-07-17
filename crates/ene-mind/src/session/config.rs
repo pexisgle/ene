@@ -50,7 +50,6 @@ pub struct SummarizationConfig {
 
 impl SummarizationConfig {
     /// Resolves the effective summarisation model, falling back to the chat model.
-    #[must_use]
     pub fn resolve_summarization_model(&self, fallback_model: &str) -> String {
         if !self.model.trim().is_empty() {
             return self.model.clone();

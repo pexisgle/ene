@@ -25,13 +25,11 @@ pub enum CompressionLevel {
 
 impl CompressionLevel {
     /// Database value for this level.
-    #[must_use]
     pub const fn as_i32(self) -> i32 {
         self as i32
     }
 
     /// Parse from database value.
-    #[must_use]
     pub const fn from_i32(value: i32) -> Option<Self> {
         match value {
             0 => Some(Self::Scene),
@@ -108,7 +106,6 @@ pub struct CompressionResult {
 }
 
 /// Whether a compression result produced a usable summary for prompt injection.
-#[must_use]
 pub fn compression_has_usable_summary(result: &CompressionResult) -> bool {
     !result.summary.trim().is_empty()
 }
@@ -164,7 +161,6 @@ pub fn poll_compression_result(
 }
 
 /// Evaluate whether compression should run for the current turn.
-#[must_use]
 pub fn evaluate_compression_trigger(
     config: &ContextConfig,
     turn_count: usize,

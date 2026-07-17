@@ -459,7 +459,6 @@ impl ToolHostManager {
     }
 
     /// Consume the manager and return a unified [`CompositeToolRegistry`] containing all added registries.
-    #[must_use]
     pub fn into_registry(self) -> Arc<dyn ToolRegistry> {
         Arc::new(self)
     }

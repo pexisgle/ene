@@ -82,7 +82,6 @@ impl ExpressionCompositor {
     ///
     /// Override keys win over card keys. All weights are clamped
     /// to `[0, 1]`.
-    #[must_use]
     pub fn compose(&self) -> HashMap<String, f32> {
         let mut result = HashMap::new();
 
@@ -102,13 +101,11 @@ impl ExpressionCompositor {
     }
 
     /// Name of the currently active base expression, if any.
-    #[must_use]
     pub fn active_expression_name(&self) -> Option<&str> {
         self.active_base.as_deref()
     }
 
     /// Names of all loaded card expressions.
-    #[must_use]
     pub fn loaded_expression_names(&self) -> Vec<&str> {
         self.card_expressions
             .keys()

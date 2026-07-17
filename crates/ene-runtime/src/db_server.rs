@@ -95,7 +95,6 @@ impl DbIpcServer {
     /// open, has had its PRAGMAs applied, and has had migrations run.
     /// The caller is responsible for providing a connection from
     /// the same pool that `MemoryStore` uses.
-    #[must_use]
     pub const fn new(
         db: DatabaseConnection,
         socket_path: PathBuf,

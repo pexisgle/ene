@@ -124,7 +124,6 @@ pub use spring_bone::{
 };
 
 /// Returns the crate version. Useful for diagnostics and the `about` panel.
-#[must_use]
 pub const fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }

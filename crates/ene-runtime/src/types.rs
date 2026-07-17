@@ -6,18 +6,17 @@ pub struct RequestId(String);
 
 impl RequestId {
     /// Wraps the given string value.
+    #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
     /// Borrows the inner string.
-    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Consumes self and returns the inner string.
-    #[must_use]
     pub fn into_inner(self) -> String {
         self.0
     }

@@ -170,7 +170,6 @@ impl CommitmentLedger {
     }
 
     /// Map active commitments to lightweight prompt DTOs.
-    #[must_use]
     pub fn active_prompt_candidates(commitments: &[Commitment]) -> Vec<ActiveCommitmentPrompt> {
         commitments
             .iter()

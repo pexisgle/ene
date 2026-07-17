@@ -86,7 +86,6 @@ struct RawSystemPrompts {
 
 impl SystemPrompts {
     /// Renders the mascot context frame replacing `{char_name}` and `{user_name}` placeholders.
-    #[must_use]
     pub fn render_mascot_context(&self, char_name: &str, user_name: &str) -> String {
         substitute(
             &self.mascot_context,
@@ -149,13 +148,11 @@ pub struct MemoryPrompts {
 
 impl MemoryPrompts {
     /// Renders a summary item replacing `{age}` and `{text}` placeholders.
-    #[must_use]
     pub fn render_summary_item(&self, age: &str, text: &str) -> String {
         substitute(&self.summary_item, &[("age", age), ("text", text)])
     }
 
     /// Renders the facts header replacing `{user_name}` placeholder.
-    #[must_use]
     pub fn render_facts_header(&self, user_name: &str) -> String {
         substitute(&self.facts_header, &[("user_name", user_name)])
     }
@@ -185,7 +182,6 @@ struct RawSummarizerPrompts {
 
 impl SummarizerPrompts {
     /// Renders the summarizer system prompt.
-    #[must_use]
     pub fn render_system(
         &self,
         user_name: &str,
@@ -205,7 +201,6 @@ impl SummarizerPrompts {
     }
 
     /// Renders the summarizer user prompt.
-    #[must_use]
     pub fn render_user_prompt(
         &self,
         user_name: &str,
@@ -260,7 +255,6 @@ struct RawExtractorPrompts {
 impl ExtractorPrompts {
     /// Renders the extractor user prompt replacing `{conversation}` and
     /// `{pattern_hints}` placeholders.
-    #[must_use]
     pub fn render_user_prompt(&self, conversation: &str, pattern_hints: &str) -> String {
         substitute(
             &self.user_prompt,
@@ -307,7 +301,6 @@ fn default_natural_dialogue_contract_path_en() -> String {
 
 impl AffectClassifierPrompts {
     /// Renders the classifier user prompt replacing `{current_affect}` and `{conversation}`.
-    #[must_use]
     pub fn render_user_prompt(&self, current_affect: &str, conversation: &str) -> String {
         substitute(
             &self.user_prompt,
@@ -321,19 +314,16 @@ impl AffectClassifierPrompts {
 
 impl SplitPrompts {
     /// Renders the split reason timeout message.
-    #[must_use]
     pub fn render_reason_timeout(&self, minutes: &str) -> String {
         substitute(&self.reason_timeout, &[("minutes", minutes)])
     }
 
     /// Renders the split reason topic change message.
-    #[must_use]
     pub fn render_reason_topic(&self, similarity: &str) -> String {
         substitute(&self.reason_topic, &[("similarity", similarity)])
     }
 
     /// Renders the split reason composite score message.
-    #[must_use]
     pub fn render_reason_composite(&self, score: &str) -> String {
         substitute(&self.reason_composite, &[("score", score)])
     }
@@ -350,7 +340,6 @@ impl PromptLibrary {
     /// Loads the prompt library for the given language code (e.g. `"en"`).
     ///
     /// Falls back to the built-in English defaults if the language code is not supported.
-    #[must_use]
     pub fn load(lang: &str) -> Self {
         match lang {
             "ja" | "jp" => Self::built_in_japanese(),
@@ -363,7 +352,6 @@ impl PromptLibrary {
     /// These are the same strings shipped in `assets/prompts/en.json` but
     /// embedded at compile time as a fallback so the application works even
     /// when assets are missing (e.g. during unit tests or CI).
-    #[must_use]
     pub fn built_in_english() -> Self {
         // The bundled JSON is checked into the repository and is part of the
         // build artifact. A parse failure here is a release-blocker bug, not
@@ -468,7 +456,6 @@ impl PromptLibrary {
     ///
     /// These are the same strings shipped in `assets/prompts/ja.json` but
     /// embedded at compile time as a fallback.
-    #[must_use]
     pub fn built_in_japanese() -> Self {
         // The bundled JSON is checked into the repository and is part of the
         // build artifact. A parse failure here is a release-blocker bug, not
@@ -570,49 +557,41 @@ impl PromptLibrary {
     }
 
     /// Language code (`"en"` or `"ja"`) for this prompt library instance.
-    #[must_use]
     pub fn lang(&self) -> &str {
         &self.lang
     }
 
     /// System-level prompts for the configured language.
-    #[must_use]
     pub const fn system(&self) -> &SystemPrompts {
         &self.data.system
     }
 
     /// Returns reference to emotion prompts.
-    #[must_use]
     pub const fn emotion(&self) -> &EmotionPrompts {
         &self.data.emotion
     }
 
     /// Returns reference to memory prompts.
-    #[must_use]
     pub const fn memory(&self) -> &MemoryPrompts {
         &self.data.memory
     }
 
     /// Returns reference to summarizer prompts.
-    #[must_use]
     pub const fn summarizer(&self) -> &SummarizerPrompts {
         &self.data.summarizer
     }
 
     /// Returns reference to split prompts.
-    #[must_use]
     pub const fn split(&self) -> &SplitPrompts {
         &self.data.split
     }
 
     /// Returns reference to extractor prompts.
-    #[must_use]
     pub const fn extractor(&self) -> &ExtractorPrompts {
         &self.data.extractor
     }
 
     /// Returns reference to affect classifier prompts.
-    #[must_use]
     pub const fn affect_classifier(&self) -> &AffectClassifierPrompts {
         &self.data.affect_classifier
     }
@@ -620,7 +599,6 @@ impl PromptLibrary {
 
 /// Substitutes `{variable_name}` placeholders in `template` with the provided
 /// `(name, value)` pairs. Unknown variables are left untouched.
-#[must_use]
 pub fn substitute(template: &str, vars: &[(&str, &str)]) -> String {
     let mut result = template.to_string();
     for (name, value) in vars {

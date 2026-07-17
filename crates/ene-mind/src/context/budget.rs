@@ -27,7 +27,6 @@ pub struct ContextBudget {
 
 impl ContextBudget {
     /// Build a budget from [`ContextConfig`].
-    #[must_use]
     pub const fn from_config(config: &ContextConfig) -> Self {
         let mut section_budgets = [0usize; 12];
         section_budgets[PromptSectionKind::SceneState as usize] = config.scene_summary_tokens;
@@ -50,7 +49,6 @@ impl ContextBudget {
     }
 
     /// Build a budget from config, overriding memory section limits with recall hints (#72).
-    #[must_use]
     pub const fn from_config_and_hints(config: &ContextConfig, hints: &RecallBudgetHints) -> Self {
         let mut budget = Self::from_config(config);
         budget.section_budgets[PromptSectionKind::SemanticContext as usize] =

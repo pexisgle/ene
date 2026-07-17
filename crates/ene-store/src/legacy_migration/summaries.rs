@@ -6,7 +6,6 @@ use crate::typed_memory::{
 };
 
 /// Build a typed Episodic memory from a legacy summary row.
-#[must_use]
 pub fn summary_to_typed_memory(
     card_name: &str,
     user_id: &str,

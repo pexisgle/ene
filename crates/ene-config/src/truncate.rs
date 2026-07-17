@@ -14,7 +14,6 @@ pub struct TruncateResult {
 
 impl Truncate {
     /// Simply truncates text to a maximum number of Unicode characters and appends `...` if exceeded.
-    #[must_use]
     pub fn simple(text: &str, max_chars: usize) -> String {
         if text.chars().count() <= max_chars {
             text.to_string()
@@ -28,7 +27,6 @@ impl Truncate {
     }
 
     /// Truncates text to a maximum number of Unicode characters and appends a detailed notice when cut.
-    #[must_use]
     pub fn detailed(text: &str, max_chars: usize) -> String {
         let char_count = text.chars().count();
         if char_count <= max_chars {
@@ -47,13 +45,11 @@ impl Truncate {
     }
 
     /// Alias for detailed truncation, used by tools.
-    #[must_use]
     pub fn chars(text: &str, max_chars: usize) -> String {
         Self::detailed(text, max_chars)
     }
 
     /// Fits text within `max_lines` / `max_bytes` (head direction)
-    #[must_use]
     pub fn output(text: &str, max_lines: usize, max_bytes: usize) -> TruncateResult {
         let lines: Vec<&str> = text.lines().collect();
         let total_bytes = text.len();
@@ -97,7 +93,6 @@ impl Truncate {
     }
 
     /// Truncation from the tail direction
-    #[must_use]
     pub fn tail(text: &str, max_lines: usize, max_bytes: usize) -> TruncateResult {
         let lines: Vec<&str> = text.lines().collect();
         let total_bytes = text.len();

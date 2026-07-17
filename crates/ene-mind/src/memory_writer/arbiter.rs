@@ -64,7 +64,6 @@ impl Default for ArbiterOptions {
 
 impl ArbiterOptions {
     /// Build options from [`MindMemoryConfig`].
-    #[must_use]
     pub fn from_config(config: &MindMemoryConfig) -> Self {
         Self {
             min_confidence: config.min_confidence_to_persist as f32,
@@ -197,7 +196,6 @@ pub struct MemoryArbiter;
 
 impl MemoryArbiter {
     /// Evaluate all candidates against existing memories without touching the store.
-    #[must_use]
     pub fn evaluate_all(
         candidates: &[MemoryCandidate],
         existing: &[MemoryItem],

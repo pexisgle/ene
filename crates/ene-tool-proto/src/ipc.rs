@@ -141,7 +141,6 @@ pub struct ToolConfigAccessor {
 
 impl ToolConfigAccessor {
     /// Wraps an initial JSON config value for shared read/write access.
-    #[must_use]
     pub fn new(initial_config: serde_json::Value) -> Self {
         Self {
             config: std::sync::Arc::new(tokio::sync::RwLock::new(initial_config)),

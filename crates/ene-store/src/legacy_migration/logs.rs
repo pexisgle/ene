@@ -14,7 +14,6 @@ pub struct LegacyLogRow {
 }
 
 /// Group consecutive user/assistant log rows into memory spans.
-#[must_use]
 pub fn logs_to_spans(rows: &[LegacyLogRow]) -> Vec<NewMemorySpan> {
     let mut spans = Vec::new();
     let mut turn_index: i32 = 0;

@@ -17,7 +17,6 @@ ene_config::define_config!(
 impl StoreConfig {
     /// Resolves the effective database path, defaulting to a file inside the
     /// character's directory (`assets/characters/{name}/memory.db`).
-    #[must_use]
     pub fn resolve_memory_db_path(&self, character_name: &str) -> std::path::PathBuf {
         if !self.db_path.trim().is_empty() {
             return std::path::PathBuf::from(&self.db_path);

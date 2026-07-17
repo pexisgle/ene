@@ -59,7 +59,6 @@ pub struct StyleExampleSelector;
 
 impl StyleExampleSelector {
     /// Split `mes_example` into dialogue chunks.
-    #[must_use]
     pub fn chunk_mes_example(
         raw: &str,
         char_name: &str,
@@ -93,7 +92,6 @@ impl StyleExampleSelector {
     }
 
     /// Compile style chunks into typed memory items for indexing.
-    #[must_use]
     pub fn compile_items(card: &CharacterCardV3, user_name: &str) -> Vec<NewMemoryItem> {
         let char_name = card.data.get_character_name();
         let character_id = char_name.to_string();
@@ -231,7 +229,6 @@ const fn default_intent_for_index(index: usize) -> StyleIntent {
 }
 
 /// Infer style intent from user text using deterministic keyword heuristics.
-#[must_use]
 pub fn infer_style_intent(text: &str) -> Option<StyleIntent> {
     let lower = text.to_lowercase();
     if contains_any(

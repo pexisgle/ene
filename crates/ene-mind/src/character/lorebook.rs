@@ -18,7 +18,6 @@ pub struct LorebookIndexer;
 
 impl LorebookIndexer {
     /// Compile enabled lorebook entries into new memory items (no DB writes).
-    #[must_use]
     pub fn compile_entries(card: &CharacterCardV3, user_name: &str) -> Vec<NewMemoryItem> {
         let Some(book) = card.data.character_book.as_ref() else {
             return Vec::new();
@@ -36,7 +35,6 @@ impl LorebookIndexer {
     }
 
     /// Canonical hash of enabled lorebook entries for change detection.
-    #[must_use]
     pub fn content_hash(card: &CharacterCardV3) -> u64 {
         let mut hasher = DefaultHasher::new();
         let Some(book) = card.data.character_book.as_ref() else {
@@ -103,7 +101,6 @@ fn compile_entry(
 }
 
 /// Stable identifier for a lorebook entry across reindexes.
-#[must_use]
 pub fn stable_entry_id(entry: &LorebookEntry, _index: usize) -> String {
     if let Some(id) = &entry.id {
         let raw = id.to_string();
@@ -120,13 +117,11 @@ pub fn stable_entry_id(entry: &LorebookEntry, _index: usize) -> String {
 }
 
 /// Match lorebook trigger keys against scan text (case-insensitive by default).
-#[must_use]
 pub fn entry_keys_match(entry: &LorebookEntry, scan_text: &str) -> bool {
     entry_keys_match_with_cache(entry, 0, scan_text, None)
 }
 
 /// Match lorebook trigger keys, optionally using a precompiled regex cache.
-#[must_use]
 #[expect(
     clippy::implicit_hasher,
     reason = "HashMap key type is fixed to String in lorebook API"
@@ -174,7 +169,6 @@ pub fn entry_keys_match_with_cache(
 }
 
 /// Precompile regex patterns for enabled lorebook entries.
-#[must_use]
 pub fn compile_lorebook_regex_cache(
     book: &ene_config::Lorebook,
 ) -> std::collections::HashMap<String, regex::Regex> {
@@ -217,7 +211,6 @@ pub fn compile_lorebook_regex_cache(
 }
 
 /// Build scan text from recent turns and the current user message.
-#[must_use]
 pub fn build_lorebook_scan_text(
     user_input: &str,
     recent_turns: &[crate::recall::RecallTurn<'_>],

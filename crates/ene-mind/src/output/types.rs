@@ -22,7 +22,6 @@ pub enum ExpressionSource {
 
 impl ExpressionSource {
     /// Debug string for event emission (#91).
-    #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::AffectMapping => "affect",

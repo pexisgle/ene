@@ -35,7 +35,6 @@ pub struct CharacterProcessor;
 
 impl CharacterProcessor {
     /// Compile the identity kernel for a character card.
-    #[must_use]
     pub fn compile_kernel(
         card: &CharacterCardV3,
         user_name: &str,
@@ -45,7 +44,6 @@ impl CharacterProcessor {
     }
 
     /// Compile the identity kernel using default token budget.
-    #[must_use]
     pub fn compile_kernel_default(card: &CharacterCardV3, user_name: &str) -> IdentityKernel {
         Self::compile_kernel(card, user_name, DEFAULT_IDENTITY_KERNEL_MAX_TOKENS)
     }

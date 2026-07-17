@@ -72,7 +72,6 @@ impl ConfigStore {
     }
 
     /// Creates a store from an already-loaded [`EneConfig`].
-    #[must_use]
     pub fn from_config(config: EneConfig) -> Self {
         Self {
             config: RwLock::new(config),

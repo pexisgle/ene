@@ -7,7 +7,6 @@ use ene_store::typed_memory::MemoryKind;
 const SCREENSHOT_SENTINEL: &str = "[Screenshot successfully captured and sent to vision system]";
 
 /// Build a bounded, memory-safe summary for one tool result.
-#[must_use]
 pub fn summarize_tool_result(
     tool_name: &str,
     raw_output: &str,
@@ -28,7 +27,6 @@ pub fn summarize_tool_result(
 }
 
 /// Classify tool summaries into memory candidates with guardrails.
-#[must_use]
 pub fn extract_tool_candidates(
     tool_results: &[ToolResultSummary],
     cfg: &ToolGroundingConfig,

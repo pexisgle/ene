@@ -568,7 +568,6 @@ impl MemoryStore {
     }
 
     /// Returns the current legacy write mode (#98).
-    #[must_use]
     pub fn legacy_write_mode(&self) -> LegacyWriteMode {
         LegacyWriteMode::from_u8(self.legacy_write_mode.load(Ordering::Relaxed))
     }
@@ -586,19 +585,16 @@ impl MemoryStore {
     }
 
     /// Decode stored embedding bytes (used by legacy migration).
-    #[must_use]
     pub fn decode_embedding_bytes(&self, bytes: &[u8]) -> Vec<f32> {
         bytes_to_embedding(bytes)
     }
 
     /// Raw `sea-orm` connection — used by migration helpers.
-    #[must_use]
     pub const fn connection(&self) -> &DatabaseConnection {
         &self.db
     }
 
     /// Vector dimensionality for this store's embedding model.
-    #[must_use]
     pub const fn embedding_dim(&self) -> usize {
         self.embedding_dim
     }

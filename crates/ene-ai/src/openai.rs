@@ -172,7 +172,6 @@ pub struct OpenAiProvider {
 
 impl OpenAiProvider {
     /// Creates a new `OpenAI` provider with the given base URL, API key, and model.
-    #[must_use]
     pub fn new(base_url: &str, api_key: &str, model: &str) -> Self {
         Self {
             client: build_openai_client(base_url, api_key),
@@ -542,7 +541,6 @@ pub struct CloudEmbeddingProvider {
 
 impl CloudEmbeddingProvider {
     /// Creates a new `CloudEmbeddingProvider`.
-    #[must_use]
     pub fn new(
         base_url: &str,
         api_key: &str,

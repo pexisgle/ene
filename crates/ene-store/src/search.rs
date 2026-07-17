@@ -29,7 +29,6 @@ pub(crate) fn tokenize(text: &str) -> HashSet<String> {
 /// Jaccard similarity between two memory documents (title + content tokens).
 ///
 /// Used for duplicate clustering and MMR pairwise diversity (#78).
-#[must_use]
 pub fn document_lexical_similarity(
     title_a: &str,
     content_a: &str,

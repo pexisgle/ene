@@ -10,7 +10,6 @@ pub struct RecallResultMapper;
 
 impl RecallResultMapper {
     /// Convert hybrid search results into explainable recalled memories.
-    #[must_use]
     pub fn map(scored: Vec<ScoredMemory>) -> Vec<RecalledMemory> {
         explain_scored_memories(scored)
     }

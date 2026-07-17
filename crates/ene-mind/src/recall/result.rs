@@ -47,7 +47,6 @@ pub struct RecalledMemory {
 
 impl RecalledMemory {
     /// Build a recalled memory from a hybrid search result with inferred reason.
-    #[must_use]
     pub fn from_scored(scored: ScoredMemory) -> Self {
         let reason = infer_recall_reason(&scored);
         Self {
@@ -60,7 +59,6 @@ impl RecalledMemory {
 }
 
 /// Convert hybrid search results into explainable recalled memories.
-#[must_use]
 pub fn explain_scored_memories(scored: Vec<ScoredMemory>) -> Vec<RecalledMemory> {
     scored
         .into_iter()
@@ -69,7 +67,6 @@ pub fn explain_scored_memories(scored: Vec<ScoredMemory>) -> Vec<RecalledMemory>
 }
 
 /// Infer the primary recall reason from hybrid search signals.
-#[must_use]
 pub fn infer_recall_reason(scored: &ScoredMemory) -> RecallReason {
     let item = &scored.item;
     let breakdown = &scored.breakdown;

@@ -51,7 +51,6 @@ impl CompositeToolRegistry {
     /// # Panics
     /// Panics when two registries expose the same public tool name.
     /// Prefer [`try_new`](Self::try_new) at fallible call sites.
-    #[must_use]
     #[expect(
         clippy::panic,
         reason = "legacy infallible constructor; prefer try_new for fallible construction"

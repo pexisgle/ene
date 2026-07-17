@@ -205,7 +205,6 @@ impl LayerComposer {
         }
     }
 
-    #[must_use]
     #[cfg_attr(
         not(test),
         expect(
@@ -231,7 +230,6 @@ impl LayerComposer {
     ///
     /// The consumer uses this to know which clips to evaluate and
     /// which expressions to apply.
-    #[must_use]
     pub fn compose(&self) -> ComposedFrame {
         let full_body_active = self.full.is_some();
         let mut active_motions = Vec::with_capacity(2);
@@ -260,7 +258,6 @@ impl LayerComposer {
         }
     }
 
-    #[must_use]
     #[cfg_attr(
         not(test),
         expect(

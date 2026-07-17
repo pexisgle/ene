@@ -31,7 +31,6 @@ impl ContextManager {
     }
 
     /// Evaluate whether compression should be triggered for the current session state.
-    #[must_use]
     pub fn evaluate_compression_trigger(
         config: &ContextConfig,
         turn_count: usize,

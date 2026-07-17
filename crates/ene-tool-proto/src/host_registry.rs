@@ -16,7 +16,6 @@ pub struct HostRegistry {
 
 impl HostRegistry {
     /// Creates an empty registry.
-    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -71,7 +70,6 @@ impl HostRegistry {
     }
 
     /// Returns all tool specs from all registered providers.
-    #[must_use]
     pub fn list_specs(&self) -> Vec<ToolSpec> {
         let mut specs = Vec::with_capacity(self.tool_index.len());
         for provider in &self.providers {
@@ -81,7 +79,6 @@ impl HostRegistry {
     }
 
     /// Returns all RAG profiles from all registered providers.
-    #[must_use]
     pub fn list_rag_profiles(&self) -> Vec<ToolRagProfile> {
         let mut profiles = Vec::new();
         for provider in &self.providers {

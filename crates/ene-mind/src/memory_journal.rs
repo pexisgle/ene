@@ -72,7 +72,6 @@ impl MemoryJournal {
     /// (`recall_similarity_threshold`, `recall_min_score`). This is intentional:
     /// journal search is user-facing diagnostics (broader sweep, lower score
     /// floor), while recall is cognitive (stricter quality for LLM context).
-    #[must_use]
     pub fn to_query<'a>(
         mind_memory: &MindMemoryConfig,
         query_text: &'a str,

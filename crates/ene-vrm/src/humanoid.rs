@@ -148,7 +148,6 @@ pub struct VrmBone(pub String);
 
 impl VrmBone {
     /// Borrow the inner canonical string.
-    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -252,7 +251,6 @@ impl HumanoidBoneRegistry {
     /// Look up an entry by its canonical (lower-case) bone
     /// name. Use [`Self::by_name`] to accept the spec's
     /// mixed-case form too.
-    #[must_use]
     pub fn lookup(&self, bone: &VrmBone) -> Option<&HumanoidBoneEntry> {
         self.entries.get(bone)
     }
@@ -260,21 +258,18 @@ impl HumanoidBoneRegistry {
     /// Look up an entry by a possibly-mixed-case / mixed-
     /// separator bone name. `canonicalize_bone_name` does
     /// the heavy lifting; unknown names return `None`.
-    #[must_use]
     pub fn by_name(&self, raw_name: &str) -> Option<&HumanoidBoneEntry> {
         let bone = canonicalize_bone_name(raw_name)?;
         self.entries.get(&bone)
     }
 
     /// Convenience accessor for the `head` bone.
-    #[must_use]
     pub fn head(&self) -> Option<&HumanoidBoneEntry> {
         self.by_name("head")
     }
 
     /// Convenience accessor for the `hips` bone (the root
     /// of the humanoid chain).
-    #[must_use]
     pub fn hips(&self) -> Option<&HumanoidBoneEntry> {
         self.by_name("hips")
     }
@@ -282,25 +277,21 @@ impl HumanoidBoneRegistry {
     /// Convenience accessor for the `chest` bone. Used as the
     /// body-center fallback when the model has no `head` bone
     /// (see `apps/ene-desktop-v2::character::body_center_world`).
-    #[must_use]
     pub fn chest(&self) -> Option<&HumanoidBoneEntry> {
         self.by_name("chest")
     }
 
     /// Convenience accessor for the `jaw` bone.
-    #[must_use]
     pub fn jaw(&self) -> Option<&HumanoidBoneEntry> {
         self.by_name("jaw")
     }
 
     /// Convenience accessor for the `leftEye` bone.
-    #[must_use]
     pub fn left_eye(&self) -> Option<&HumanoidBoneEntry> {
         self.by_name("lefteye")
     }
 
     /// Convenience accessor for the `rightEye` bone.
-    #[must_use]
     pub fn right_eye(&self) -> Option<&HumanoidBoneEntry> {
         self.by_name("righteye")
     }
@@ -311,19 +302,16 @@ impl HumanoidBoneRegistry {
     }
 
     /// Sorted list of registered canonical bone names.
-    #[must_use]
     pub fn names(&self) -> Vec<VrmBone> {
         self.entries.keys().cloned().collect()
     }
 
     /// Number of registered bones.
-    #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// `true` when no bones are registered.
-    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -346,7 +334,6 @@ impl HumanoidBoneRegistry {
 /// `HumanoidBoneRegistry::by_name` lookup; hidden from the "Supported API" docs since
 /// `ene-desktop` never needs to canonicalize a raw bone name itself.
 #[doc(hidden)]
-#[must_use]
 pub fn canonicalize_bone_name(raw: &str) -> Option<VrmBone> {
     // First normalise: drop separators and lowercase. This
     // collapses "Hips" / "hips" / "HIPS" / "left_upper_arm" /

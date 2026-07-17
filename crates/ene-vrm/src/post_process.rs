@@ -311,13 +311,11 @@ impl PostProcessor {
     /// The view the model must be rendered into. Returned by
     /// value; the runtime passes it to the model's
     /// `renderer.render` call as the colour attachment.
-    #[must_use]
     pub const fn intermediate_view(&self) -> &wgpu::TextureView {
         &self.intermediate_view
     }
 
     /// The size the intermediate texture was built at.
-    #[must_use]
     pub const fn size(&self) -> (u32, u32) {
         self.intermediate_size
     }

@@ -26,7 +26,6 @@ impl DbValue {
         missing_docs,
         reason = "method name and return type are self-documenting"
     )]
-    #[must_use]
     pub const fn as_i64(&self) -> Option<i64> {
         match self {
             Self::Int(v) => Some(*v),
@@ -38,7 +37,6 @@ impl DbValue {
         missing_docs,
         reason = "method name and return type are self-documenting"
     )]
-    #[must_use]
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Self::Text(v) => Some(v),
@@ -50,7 +48,6 @@ impl DbValue {
         missing_docs,
         reason = "method name and return type are self-documenting"
     )]
-    #[must_use]
     pub const fn as_bool(&self) -> Option<bool> {
         match self {
             Self::Bool(v) => Some(*v),
@@ -62,7 +59,6 @@ impl DbValue {
         missing_docs,
         reason = "method name and return type are self-documenting"
     )]
-    #[must_use]
     pub const fn as_f64(&self) -> Option<f64> {
         match self {
             Self::Float(v) => Some(*v),
@@ -74,7 +70,6 @@ impl DbValue {
         missing_docs,
         reason = "method name and return type are self-documenting"
     )]
-    #[must_use]
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
             Self::Blob(v) => Some(v),
@@ -212,7 +207,6 @@ pub enum DbFilter {
 
 impl DbFilter {
     #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
-    #[must_use]
     pub fn eq(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
         Self::Eq {
             column: column.into(),
@@ -221,7 +215,6 @@ impl DbFilter {
     }
 
     #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
-    #[must_use]
     pub fn ne(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
         Self::Ne {
             column: column.into(),
@@ -230,7 +223,6 @@ impl DbFilter {
     }
 
     #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
-    #[must_use]
     pub fn lt(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
         Self::Lt {
             column: column.into(),
@@ -239,7 +231,6 @@ impl DbFilter {
     }
 
     #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
-    #[must_use]
     pub fn le(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
         Self::Le {
             column: column.into(),
@@ -248,7 +239,6 @@ impl DbFilter {
     }
 
     #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
-    #[must_use]
     pub fn gt(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
         Self::Gt {
             column: column.into(),
@@ -257,7 +247,6 @@ impl DbFilter {
     }
 
     #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
-    #[must_use]
     pub fn ge(column: impl Into<String>, value: impl Into<DbValue>) -> Self {
         Self::Ge {
             column: column.into(),
@@ -266,7 +255,6 @@ impl DbFilter {
     }
 
     #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
-    #[must_use]
     pub fn is_null(column: impl Into<String>) -> Self {
         Self::IsNull {
             column: column.into(),
@@ -274,7 +262,6 @@ impl DbFilter {
     }
 
     #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
-    #[must_use]
     pub fn is_not_null(column: impl Into<String>) -> Self {
         Self::IsNotNull {
             column: column.into(),
@@ -322,7 +309,6 @@ impl DbFilter {
     }
 
     /// Returns all column names referenced by this filter.
-    #[must_use]
     pub fn columns_referenced(&self) -> Vec<&str> {
         let mut cols = Vec::new();
         self.collect_columns(&mut cols);
@@ -374,7 +360,6 @@ pub struct DbOrderBy {
 
 impl DbOrderBy {
     #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
-    #[must_use]
     pub fn asc(column: impl Into<String>) -> Self {
         Self {
             column: column.into(),
@@ -383,7 +368,6 @@ impl DbOrderBy {
     }
 
     #[expect(missing_docs, reason = "SQL-like names are self-documenting")]
-    #[must_use]
     pub fn desc(column: impl Into<String>) -> Self {
         Self {
             column: column.into(),

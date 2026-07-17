@@ -24,7 +24,6 @@ pub enum CueSource {
 
 impl CueSource {
     /// Stable debug / log label.
-    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Affect => "affect",
@@ -78,7 +77,6 @@ pub struct PerformanceCue {
 
 impl PerformanceCue {
     /// Creates a cue from an expression or emotion name.
-    #[must_use]
     pub fn expression(name: impl Into<String>) -> Self {
         Self {
             kind: PerfKind::Expression,
@@ -90,7 +88,6 @@ impl PerformanceCue {
     }
 
     /// Creates an expression cue with explicit weight and hold.
-    #[must_use]
     pub fn expression_with(name: impl Into<String>, weight: f32, hold_secs: f64) -> Self {
         Self {
             kind: PerfKind::Expression,
@@ -102,7 +99,6 @@ impl PerformanceCue {
     }
 
     /// Creates a motion cue.
-    #[must_use]
     pub fn motion(name: impl Into<String>, layer: Option<MotionLayer>) -> Self {
         Self {
             kind: PerfKind::Motion,
@@ -114,7 +110,6 @@ impl PerformanceCue {
     }
 
     /// Creates a look-at cue.
-    #[must_use]
     pub fn look_at(target: impl Into<String>) -> Self {
         Self {
             kind: PerfKind::LookAt,
@@ -126,7 +121,6 @@ impl PerformanceCue {
     }
 
     /// Creates a cancel cue.
-    #[must_use]
     pub fn cancel(scope: impl Into<String>) -> Self {
         Self {
             kind: PerfKind::Cancel,

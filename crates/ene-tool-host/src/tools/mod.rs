@@ -11,7 +11,6 @@ pub use registry::ToolRegistry;
 /// Computes a stable hash of the tool definition used for cache invalidation
 /// of tool embeddings. Includes name, description, and parameters so that any
 /// meaningful change to the LLM-facing `ToolSpec` triggers re-embedding.
-#[must_use]
 pub fn compute_tool_version_hash(tool: &ene_tool_proto::ToolSpec) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(tool.name.as_str().as_bytes());

@@ -21,7 +21,6 @@ pub struct HistoryEntry {
 
 impl HistoryEntry {
     /// Stable string label for recall / logging (`user`, `assistant`, `system`).
-    #[must_use]
     pub const fn role_label(&self) -> &'static str {
         match self.role {
             Role::User => "user",
@@ -116,7 +115,6 @@ pub struct PostTurnInput<'a> {
 
 impl TurnContext<'_> {
     /// Build recall turns from history using configured recent turn limit.
-    #[must_use]
     pub fn recent_recall_turns(&self) -> Vec<RecallTurn<'_>> {
         let limit = self.config.context.recent_turns.max(1);
         self.history

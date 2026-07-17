@@ -430,7 +430,6 @@ impl std::fmt::Debug for MToonGpuTextures {
 ///
 /// Called internally by [`crate::renderer::VrmRenderer`]; hidden from the "Supported API" docs.
 #[doc(hidden)]
-#[must_use]
 pub const fn texture_flags(mat: &MToonMaterial, has_base_color: bool) -> u32 {
     let mut f = 0u32;
     if has_base_color {
@@ -509,7 +508,6 @@ impl MToonUniform {
     pub const SIZE: usize = std::mem::size_of::<Self>();
 
     /// Build a uniform from a material + flags + time.
-    #[must_use]
     pub const fn from_material(mat: &MToonMaterial, tex_flags: u32, time: f32) -> Self {
         Self {
             shade_color_and_shift: [

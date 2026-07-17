@@ -238,7 +238,6 @@ impl ConversationSession {
     }
 
     /// Returns `true` if a session split is currently in flight.
-    #[must_use]
     pub const fn is_split_pending(&self) -> bool {
         self.state.pending_split_snapshot_len.is_some()
     }
@@ -347,7 +346,6 @@ impl ConversationSession {
     }
 
     /// Elapsed time since the last expression change (for arbiter hysteresis).
-    #[must_use]
     pub fn expression_elapsed(&self) -> Option<std::time::Duration> {
         self.state.last_expression_changed_at.map(|ts| {
             Utc::now()
@@ -366,7 +364,6 @@ impl ConversationSession {
     }
 
     /// Last expression name resolved during this session.
-    #[must_use]
     pub fn last_resolved_expression(&self) -> &str {
         &self.state.last_resolved_expression
     }
@@ -375,7 +372,6 @@ impl ConversationSession {
     ///
     /// Falls back to persisted [`ene_store::AffectState::last_expression`] and
     /// `updated_at` when the in-session tracker is empty (e.g. after restart).
-    #[must_use]
     pub fn expression_context<'a>(
         &'a self,
         affect: &'a ene_store::AffectState,
@@ -399,7 +395,6 @@ impl ConversationSession {
     }
 
     /// Returns the current character name, or `"default"` if no card is loaded.
-    #[must_use]
     pub fn card_name(&self) -> &str {
         self.character_card
             .as_ref()
@@ -407,25 +402,21 @@ impl ConversationSession {
     }
 
     /// Returns a reference to the conversation history entries.
-    #[must_use]
     pub fn history(&self) -> &[HistoryEntry] {
         &self.history.conversation_history
     }
 
     /// Unique identifier for this session.
-    #[must_use]
     pub const fn session_id(&self) -> &SessionId {
         &self.memory.session_id
     }
 
     /// Timestamp when this session was created.
-    #[must_use]
     pub const fn session_started_at(&self) -> DateTime<Utc> {
         self.memory.session_started_at
     }
 
     /// Number of turns completed in this session.
-    #[must_use]
     pub const fn current_turn_count(&self) -> usize {
         self.state.current_turn_count
     }
@@ -439,13 +430,11 @@ impl ConversationSession {
     }
 
     /// Timestamp of the most recent user message.
-    #[must_use]
     pub const fn last_message_time(&self) -> Option<DateTime<Utc>> {
         self.state.last_message_time
     }
 
     /// Elapsed minutes since session start.
-    #[must_use]
     pub fn session_elapsed_minutes(&self) -> i64 {
         (Utc::now() - self.memory.session_started_at).num_minutes()
     }

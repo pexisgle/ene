@@ -31,7 +31,6 @@ pub enum MemoryKind {
 
 impl MemoryKind {
     /// Returns the `snake_case` string representation for storage/DB use.
-    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Episodic => "episodic",
@@ -89,7 +88,6 @@ pub enum MemoryStatus {
 
 impl MemoryStatus {
     /// Returns the `snake_case` string representation for storage/DB use.
-    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Active => "active",
@@ -135,7 +133,6 @@ pub enum MemoryScope {
 
 impl MemoryScope {
     /// Returns the `snake_case` string representation for storage/DB use.
-    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Character => "character",
@@ -181,7 +178,6 @@ pub enum MemorySource {
 
 impl MemorySource {
     /// Returns the `snake_case` string representation for storage/DB use.
-    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Conversation => "conversation",
@@ -236,7 +232,6 @@ impl MemoryConfidence {
     }
 
     /// Unwrap to the raw `f32` value.
-    #[must_use]
     pub const fn get(self) -> f32 {
         self.0
     }
@@ -271,7 +266,6 @@ impl MemorySalience {
     }
 
     /// Unwrap to the raw `f32` value.
-    #[must_use]
     pub const fn get(self) -> f32 {
         self.0
     }

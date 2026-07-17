@@ -68,7 +68,6 @@ pub fn split_text_and_special_tokens(
 ///
 /// Deprecated in favour of [`parse_performance_marker`] for the `<|perf:…|>` grammar.
 /// Kept for backward compatibility with LLMs that may still emit `<|emo:…|>` tokens.
-#[must_use]
 pub fn extract_emotion_from_token(token: &str) -> Option<String> {
     let upper = token.to_ascii_uppercase();
     if !upper.starts_with("<|EMO:") || !upper.ends_with("|>") {
@@ -86,7 +85,6 @@ pub fn extract_emotion_from_token(token: &str) -> Option<String> {
 ///
 /// All `<|perf:…|>` and `<|emo:…|>` tokens are removed; plain text between
 /// them is concatenated.
-#[must_use]
 pub fn strip_markers(text: &str) -> String {
     let mut carry = String::new();
     let (text_deltas, _tokens) = split_text_and_special_tokens(&mut carry, text);
@@ -113,7 +111,6 @@ pub fn strip_markers(text: &str) -> String {
 /// Returns `None` for non-performance tokens (including `<|emo:…|>`, plain text, etc.).
 /// Unknown keys are logged and silently dropped; the function still returns a best-effort
 /// cue from the recognised keys.
-#[must_use]
 pub fn parse_performance_marker(token: &str) -> Option<PerformanceCue> {
     let inner = strip_token_envelope(token)?;
 

@@ -187,7 +187,6 @@ fn apply_weighted_blend(
 }
 
 /// Derive a human-readable mood label from PAD dimensions.
-#[must_use]
 pub fn compute_mood_label(state: &AffectState) -> String {
     if state.irritation >= 0.6 {
         return "irritated".into();

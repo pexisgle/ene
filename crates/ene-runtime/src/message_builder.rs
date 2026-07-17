@@ -70,7 +70,6 @@ fn asst_msg(content: impl Into<String>) -> LlmMessage {
 /// ## Current Scene
 /// {card.scenario}
 /// ```
-#[must_use]
 pub fn build_system_prompt(
     card: &CharacterCardV3,
     runtime_rules: &str,
@@ -141,7 +140,6 @@ pub fn build_system_prompt(
 /// Produces a concise, command-tone instruction with concrete examples
 /// so that even lower-capability models reliably output the `<|perf:expr=NAME|>`
 /// or `<|emo:NAME|>` (shorthand) token in the right position.
-#[must_use]
 pub fn build_expression_phi(card: &CharacterCardV3, prompts: &PromptLibrary) -> Option<String> {
     let char_name = card.data.get_character_name();
     let resolved = resolve_expressions(card);
@@ -200,7 +198,6 @@ pub fn build_expression_phi(card: &CharacterCardV3, prompts: &PromptLibrary) -> 
 ///
 /// Instructs the LLM to respond in plain dialogue without inline emotion tokens.
 /// Expression is resolved by the cognitive runtime Output Arbiter after the turn.
-#[must_use]
 pub fn build_natural_dialogue_contract(
     card: &CharacterCardV3,
     prompts: &PromptLibrary,
@@ -223,7 +220,6 @@ pub fn build_natural_dialogue_contract(
 }
 
 /// Selects the post-history output block for the cognitive streaming path.
-#[must_use]
 pub fn build_cognitive_output_contract(
     card: &CharacterCardV3,
     prompts: &PromptLibrary,

@@ -34,7 +34,6 @@ pub enum PromptSectionKind {
 
 impl PromptSectionKind {
     /// Whether this section must survive budget overflow.
-    #[must_use]
     pub const fn is_required(self) -> bool {
         matches!(
             self,
@@ -43,7 +42,6 @@ impl PromptSectionKind {
     }
 
     /// Default markdown heading for system-block sections.
-    #[must_use]
     pub const fn heading(self) -> Option<&'static str> {
         match self {
             Self::PlatformContract
@@ -62,7 +60,6 @@ impl PromptSectionKind {
     }
 
     /// All kinds in deterministic render order.
-    #[must_use]
     pub const fn render_order() -> &'static [Self] {
         &[
             Self::PlatformContract,
@@ -96,7 +93,6 @@ pub struct PromptSection {
 
 impl PromptSection {
     /// Create a new section.
-    #[must_use]
     pub fn new(kind: PromptSectionKind, content: impl Into<String>, budget_tokens: usize) -> Self {
         let content = content.into();
         Self {
@@ -108,7 +104,6 @@ impl PromptSection {
     }
 
     /// Render the section for the system block (heading + body).
-    #[must_use]
     pub fn render_system_block(&self) -> Option<String> {
         if self.content.trim().is_empty() {
             return None;

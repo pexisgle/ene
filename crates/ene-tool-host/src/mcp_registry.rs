@@ -25,7 +25,6 @@ pub struct McpToolRegistry {
 
 impl McpToolRegistry {
     /// Creates a new empty MCP tool registry.
-    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }

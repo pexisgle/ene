@@ -401,7 +401,6 @@ impl DebugRenderer {
 
     /// Number of lines currently buffered (not yet flushed
     /// to the GPU).
-    #[must_use]
     pub const fn line_count(&self) -> usize {
         self.lines.len()
     }

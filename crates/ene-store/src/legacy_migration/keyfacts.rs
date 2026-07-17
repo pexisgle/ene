@@ -6,7 +6,6 @@ use crate::typed_memory::{
 };
 
 /// Classify a legacy keyfact key into `UserProfile` or Preference.
-#[must_use]
 pub fn keyfact_kind_for_key(key: &str) -> MemoryKind {
     let lower = key.to_lowercase();
     if lower.starts_with("pref_")
@@ -22,7 +21,6 @@ pub fn keyfact_kind_for_key(key: &str) -> MemoryKind {
 }
 
 /// Build a typed memory item from a legacy keyfact row.
-#[must_use]
 pub fn keyfact_to_typed_memory(
     card_name: &str,
     user_id: &str,

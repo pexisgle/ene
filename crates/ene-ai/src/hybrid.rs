@@ -49,7 +49,6 @@ impl HybridRerankProvider {
     }
 
     /// Returns true when an LLM-backed reranker is configured.
-    #[must_use]
     pub fn has_reranker(&self) -> bool {
         self.rerank_llm.is_some()
     }
@@ -75,7 +74,6 @@ impl HybridRerankProvider {
     }
 
     /// Access the inner embedder.
-    #[must_use]
     pub fn embedder(&self) -> &Arc<dyn EmbeddingProvider> {
         &self.embedder
     }

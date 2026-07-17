@@ -77,7 +77,6 @@ pub struct MemoryRerankOptions {
 
 impl MemoryRerankOptions {
     /// Build options from mind memory config.
-    #[must_use]
     pub fn from_config(config: &MindMemoryConfig) -> Self {
         Self {
             enabled: config.rerank_enabled,
@@ -130,7 +129,6 @@ pub struct LlmMemoryReranker {
 
 impl LlmMemoryReranker {
     /// Create a new LLM reranker with the given provider and timeout budget.
-    #[must_use]
     pub fn new(provider: Arc<dyn LlmProvider>, timeout_secs: u64) -> Self {
         Self {
             provider,
@@ -193,7 +191,6 @@ pub struct MemoryRerankPipeline {
 
 impl MemoryRerankPipeline {
     /// Create a pipeline. Pass `None` for LLM to always passthrough even when enabled.
-    #[must_use]
     pub fn new(llm: Option<Arc<dyn LlmProvider>>) -> Self {
         Self { llm }
     }
@@ -301,7 +298,6 @@ impl MemoryRerankPipeline {
 /// Build LLM messages for memory reranking.
 ///
 /// Only the recall question and candidate `content` strings are included.
-#[must_use]
 pub fn build_rerank_messages(
     recall_question: &str,
     candidates: &[ScoredMemory],

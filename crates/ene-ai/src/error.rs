@@ -4,7 +4,6 @@ use thiserror::Error;
 /// variant based on its HTTP status code (for `ApiErrorResponse`) or
 /// shape. `async_openai` itself doesn't have typed auth/rate-limit
 /// variants — the closest signal is the status code.
-#[must_use]
 pub fn map_openai_error(err: &async_openai::error::OpenAIError) -> LlmProviderError {
     use async_openai::error::OpenAIError;
     match err {

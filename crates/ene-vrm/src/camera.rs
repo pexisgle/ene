@@ -67,19 +67,16 @@ impl OrthographicCamera {
     }
 
     #[expect(missing_docs, reason = "field name is self-documenting")]
-    #[must_use]
     pub const fn eye(&self) -> [f32; 3] {
         self.eye
     }
 
     #[expect(missing_docs, reason = "field name is self-documenting")]
-    #[must_use]
     pub const fn target(&self) -> [f32; 3] {
         self.target
     }
 
     /// Diagnostic: returns `(eye, target, viewport_height, aspect)`.
-    #[must_use]
     pub const fn debug(&self) -> ([f32; 3], [f32; 3], f32, f32) {
         (self.eye, self.target, self.viewport_height, self.aspect)
     }
@@ -96,7 +93,6 @@ impl OrthographicCamera {
     /// the user's slider value, so `model_scale = 1.0` is "the
     /// model fits the viewport" rather than "1× whatever the
     /// loader happened to normalise to".
-    #[must_use]
     pub fn compute_auto_fit_scale(
         &self,
         aabb_min: [f32; 3],
@@ -134,7 +130,6 @@ impl OrthographicCamera {
     /// rotation+translation). Exposed so the runtime can dump
     /// it without having to plumb the private eye/target/up
     /// fields out to the desktop app.
-    #[must_use]
     pub fn debug_view(&self) -> Mat4 {
         glam::camera::rh::view::look_at_mat4(self.eye.into(), self.target.into(), self.up.into())
     }
@@ -142,7 +137,6 @@ impl OrthographicCamera {
     /// Diagnostic: just the orthographic projection
     /// matrix. Used by `runtime.rs` to verify the projection
     /// side isn't the source of a height-related bug.
-    #[must_use]
     pub fn debug_proj(&self) -> Mat4 {
         let half_h = self.viewport_height * 0.5;
         let half_w = half_h * self.aspect;
@@ -204,7 +198,6 @@ impl ModelUniform {
     /// showed the back of the character and mirrored `character_state.character_position.x`,
     /// which was what was making the model appear shifted to the
     /// right and half off-screen.
-    #[must_use]
     pub fn from_position_scale(position: [f32; 3], scale: f32) -> Self {
         let m = Mat4::from_scale_rotation_translation(
             glam::Vec3::splat(scale),
@@ -223,7 +216,6 @@ impl ModelUniform {
     /// Kept as a thin conversion so the renderer and the
     /// runtime can compose the matrix in `glam` space and
     /// hand the result off in one shot.
-    #[must_use]
     pub const fn from_mat4(m: Mat4) -> Self {
         Self {
             model: m.to_cols_array_2d(),
@@ -240,7 +232,6 @@ const MIN_ASPECT: f32 = 0.0001;
 /// Convert a window-pixel coordinate to normalised device
 /// coordinates (Y flipped to match the NDC convention, since
 /// winit's cursor origin is top-left and NDC's is bottom-left).
-#[must_use]
 pub fn pixel_to_ndc(px: f32, py: f32, viewport: (u32, u32)) -> Vec2 {
     let w = viewport.0.max(1) as f32;
     let h = viewport.1.max(1) as f32;
@@ -251,7 +242,6 @@ pub fn pixel_to_ndc(px: f32, py: f32, viewport: (u32, u32)) -> Vec2 {
 /// camera's near plane, deriving the aspect from `viewport`.
 /// Use this overload when you have the viewport but not the
 /// aspect pre-computed.
-#[must_use]
 pub fn ndc_to_view_pos(ndc: Vec2, viewport: (u32, u32), view_z: f32) -> Vec3 {
     let aspect = (viewport.0.max(1) as f32 / viewport.1.max(1) as f32).max(MIN_ASPECT);
     ndc_to_view_pos_with_aspect(ndc, aspect, view_z)
@@ -263,7 +253,6 @@ pub fn ndc_to_view_pos(ndc: Vec2, viewport: (u32, u32), view_z: f32) -> Vec3 {
 /// view axis to land (drag uses `0.0`, look-at uses
 /// `head_view.z + NEUTRAL_TARGET_Z`, debug overlays use a
 /// fixed `-3.0` so the wireframe sits in front of the model).
-#[must_use]
 pub fn ndc_to_view_pos_with_aspect(ndc: Vec2, aspect: f32, view_z: f32) -> Vec3 {
     let aspect = aspect.max(MIN_ASPECT);
     let half_h = VIEWPORT_HEIGHT * 0.5;
@@ -275,7 +264,6 @@ pub fn ndc_to_view_pos_with_aspect(ndc: Vec2, aspect: f32, view_z: f32) -> Vec3 
 /// using the camera's `view` matrix. Convenience wrapper around
 /// `view.inverse().transform_point3(p)` so callers do not have
 /// to think about the inverse.
-#[must_use]
 pub fn view_pos_to_world(view_pos: Vec3, view: Mat4) -> Vec3 {
     view.inverse().transform_point3(view_pos)
 }

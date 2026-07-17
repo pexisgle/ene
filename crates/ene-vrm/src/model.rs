@@ -96,7 +96,6 @@ impl AlphaMode {
     /// - `0` — opaque / mask (depth write on, drawn first).
     /// - `1` — blend (depth write off, drawn after opaque).
     #[inline]
-    #[must_use]
     pub const fn render_phase(self) -> u8 {
         match self {
             Self::Opaque | Self::Mask => 0,
@@ -168,7 +167,6 @@ pub struct Skeleton {
 
 impl Skeleton {
     /// Number of joints in the skeleton. Zero for models with no skin.
-    #[must_use]
     pub const fn joint_count(&self) -> usize {
         self.inverse_bind.len()
     }
@@ -246,14 +244,12 @@ pub struct NodeHierarchy {
 
 impl NodeHierarchy {
     /// Number of glTF nodes captured.
-    #[must_use]
     pub const fn len(&self) -> usize {
         self.local_rotations.len()
     }
 
     /// `true` when no nodes were captured (the model file
     /// had zero glTF `Node` objects — malformed).
-    #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.local_rotations.is_empty()
     }
@@ -362,7 +358,6 @@ impl VrmModel {
     /// Raw glTF AABB `(min, max)` of every vertex, in model-local
     /// space. The runtime's auto-fit scale and the
     /// `model.model` matrix both consume this.
-    #[must_use]
     pub const fn aabb(&self) -> ([f32; 3], [f32; 3]) {
         (self.aabb_min, self.aabb_max)
     }
@@ -370,7 +365,6 @@ impl VrmModel {
     /// AABB center in raw glTF space. The runtime subtracts
     /// this from every vertex (via the model matrix) so the
     /// character pivots around its own midpoint.
-    #[must_use]
     pub const fn center(&self) -> [f32; 3] {
         self.center
     }
@@ -378,7 +372,6 @@ impl VrmModel {
     /// `1.5 / max_extent` — the uniform scale the runtime
     /// applies to map the longest AABB axis to the canonical
     /// 1.5 m model size.
-    #[must_use]
     pub const fn normalize_scale(&self) -> f32 {
         self.normalize_scale
     }
@@ -389,7 +382,6 @@ impl VrmModel {
     /// longest extent equal to 1.5. The auto-fit helper
     /// consumes this; tests use it to avoid having to
     /// hard-code the raw AABB.
-    #[must_use]
     pub fn normalized_aabb(&self) -> ([f32; 3], [f32; 3]) {
         let s = self.normalize_scale;
         let c = self.center;
@@ -399,14 +391,12 @@ impl VrmModel {
     }
 
     /// Number of joints in the skeleton. Zero for models with no skin.
-    #[must_use]
     pub const fn joint_count(&self) -> usize {
         self.skeleton.joint_count()
     }
 
     /// Borrow the expression layer. The runtime writes into
     /// `expressions.weights` every frame; the renderer reads it.
-    #[must_use]
     pub const fn expressions(&self) -> &ExpressionLayer {
         &self.expressions
     }
@@ -424,7 +414,6 @@ impl VrmModel {
     /// VRM 0.x). The desktop runtime supplies the spec
     /// default in that case via
     /// [`LookAtProperties::default`].
-    #[must_use]
     pub const fn look_at(&self) -> Option<&LookAtProperties> {
         self.look_at.as_ref()
     }
@@ -763,7 +752,6 @@ impl MeshVertex {
     };
 
     /// Reinterpret a slice of vertices as `&[u8]` for buffer upload.
-    #[must_use]
     pub fn as_bytes(vertices: &[Self]) -> &[u8] {
         bytemuck::cast_slice(vertices)
     }

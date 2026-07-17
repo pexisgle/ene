@@ -26,7 +26,6 @@ pub struct MemoryJournalPresenter;
 
 impl MemoryJournalPresenter {
     /// Build a browse-mode row from a typed memory item.
-    #[must_use]
     pub fn row_from_item(item: &MemoryItem) -> MemoryJournalRow {
         MemoryJournalRow {
             id: item.id.unwrap_or_default(),
@@ -44,7 +43,6 @@ impl MemoryJournalPresenter {
     }
 
     /// Browse-mode metadata (source and access count).
-    #[must_use]
     pub fn browse_metadata(item: &MemoryItem) -> String {
         format!(
             "source={} access_count={}",
@@ -54,7 +52,6 @@ impl MemoryJournalPresenter {
     }
 
     /// Actions that should succeed for the given lifecycle state.
-    #[must_use]
     pub fn available_actions(status: MemoryStatus, pinned: bool) -> Vec<MemoryJournalAction> {
         let mut actions = Vec::new();
         if pinned {
@@ -85,7 +82,6 @@ impl MemoryJournalPresenter {
     }
 
     /// Build a recall-debug row from pre-mapped display fields.
-    #[must_use]
     pub fn recall_row(
         id: i64,
         title: impl Into<String>,
@@ -103,7 +99,6 @@ impl MemoryJournalPresenter {
 
 impl MemoryJournalAction {
     /// Fluent i18n key for this action label.
-    #[must_use]
     pub const fn i18n_key(self) -> &'static str {
         match self {
             Self::Pin => "memory-journal-action-pin",

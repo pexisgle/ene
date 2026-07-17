@@ -15,7 +15,6 @@ pub struct LegacyRowCounts {
 
 impl LegacyRowCounts {
     /// Returns true when any legacy table has rows for the card.
-    #[must_use]
     pub const fn has_legacy_data(self) -> bool {
         self.summaries > 0 || self.keyfacts > 0 || self.logs > 0
     }
@@ -24,7 +23,6 @@ impl LegacyRowCounts {
     ///
     /// Ongoing `conversation_logs` writes are excluded — they are expected on the
     /// cognitive path and must not block `require_migration` strict mode.
-    #[must_use]
     pub const fn requires_migration_gate(self) -> bool {
         self.summaries > 0 || self.keyfacts > 0
     }

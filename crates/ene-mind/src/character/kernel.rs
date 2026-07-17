@@ -13,7 +13,6 @@ pub struct IdentityKernel {
 
 impl IdentityKernel {
     /// Whether post-history instructions are available for downstream prompt sections.
-    #[must_use]
     pub fn has_post_history_instructions(&self) -> bool {
         self.post_history_instructions
             .as_ref()

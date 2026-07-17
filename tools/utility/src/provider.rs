@@ -28,7 +28,6 @@ impl UtilityState {
     }
 
     /// Returns the current session ID.
-    #[must_use]
     pub fn session_id(&self) -> String {
         self.session_id
             .read()

@@ -14,7 +14,6 @@ const SKIP_TAGS: &[&str] = &[
 /// gets a non-empty result instead of an empty string. The previous
 /// `unwrap_or_default()` returned an empty string on every failure, which
 /// silently dropped the page content.
-#[must_use]
 pub fn html_to_markdown(html: &str) -> String {
     htmd::convert(html).unwrap_or_else(|_| html.to_string())
 }
@@ -23,7 +22,6 @@ pub fn html_to_markdown(html: &str) -> String {
 ///
 /// * `extract` — Target selector: `"body"`, `"main"`, or `"full"`
 /// * `trim` — If true, removes non-semantic HTML noise (scripts, styles, etc.)
-#[must_use]
 pub fn extract_html(html: &str, extract: &str, trim: bool) -> String {
     let mut document = Html::parse_document(html);
     let target_id = select_target_id(&document, extract);
@@ -44,7 +42,6 @@ pub fn extract_html(html: &str, extract: &str, trim: bool) -> String {
 /// Extracts and converts a specific region of HTML to Markdown.
 ///
 /// Applies `extract_html` first, then converts the result to Markdown.
-#[must_use]
 pub fn extract_markdown(html: &str, extract: &str, trim: bool) -> String {
     let html_input = if trim || extract != "full" {
         extract_html(html, extract, trim)

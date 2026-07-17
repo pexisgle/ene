@@ -17,7 +17,6 @@ impl DiscreteEmotion {
     /// Create a new discrete emotion with intensity clamped to [0.0, 1.0].
     ///
     /// NaN and infinite inputs are clamped to 0.0.
-    #[must_use]
     pub fn new(label: impl Into<String>, intensity: f32) -> Self {
         let intensity = if intensity.is_finite() {
             intensity.clamp(0.0, 1.0)
@@ -106,7 +105,6 @@ pub struct PendingAffectProposal {
 
 impl AffectState {
     /// Create a neutral affect state.
-    #[must_use]
     pub fn neutral(character_id: impl Into<String>) -> Self {
         Self {
             character_id: character_id.into(),

@@ -496,13 +496,11 @@ impl EneHandle {
     }
 
     /// Subscribe to the chat event stream.
-    #[must_use]
     pub fn subscribe(&self) -> EneEventReceiver {
         EneEventReceiver(self.event_tx.subscribe())
     }
 
     /// Concrete diagnostics facade (pipeline detail, memory, tools).
-    #[must_use]
     pub const fn diagnostics(&self) -> &crate::diagnostics::EneDiagnostics {
         &self.diagnostics
     }

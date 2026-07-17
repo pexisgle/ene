@@ -40,7 +40,6 @@ pub struct RecallPlannerOptions {
 
 impl RecallPlannerOptions {
     /// Build recall-planner options from mind context and memory config.
-    #[must_use]
     pub fn from_config(context: &ContextConfig, memory: &MindMemoryConfig) -> Self {
         Self {
             memory_budget_tokens: context.memory_budget_tokens,
@@ -113,7 +112,6 @@ impl RecallPlanner {
     /// Multi-query expansion and `required_kinds` filtering remain the
     /// responsibility of downstream recall execution. `HyDE` blending is applied
     /// by [`crate::recall::execute_hybrid_recall`] when `plan.use_hyde` is set.
-    #[must_use]
     pub fn to_query<'a>(
         plan: &'a RecallPlan,
         embedding: Option<&'a [f32]>,
@@ -145,7 +143,6 @@ impl RecallPlanner {
     }
 
     /// Alias for [`Self::to_query`] kept for call-site clarity.
-    #[must_use]
     pub fn to_memory_search_options<'a>(
         plan: &'a RecallPlan,
         query_embedding: &'a [f32],
@@ -160,7 +157,6 @@ impl RecallPlanner {
     ///
     /// Cognition-side entry point for attaching recall reasons after
     /// `MemoryStore::search`.
-    #[must_use]
     pub fn explain_results(scored: Vec<ScoredMemory>) -> Vec<RecalledMemory> {
         super::executor::RecallResultMapper::map(scored)
     }

@@ -103,7 +103,6 @@ impl LookAtRangeMap {
     /// [`LookAtRangeMapSet::apply_horizontal`] /
     /// [`LookAtRangeMapSet::apply_vertical`] for the
     /// direction-aware wrappers.
-    #[must_use]
     pub fn apply(&self, input_degrees: f32) -> f32 {
         let input_max_abs = self.input_max_value.abs();
         if input_max_abs < 1e-10 {
@@ -155,7 +154,6 @@ impl LookAtRangeMapSet {
     /// Apply the appropriate horizontal range map to a signed
     /// yaw angle. The caller passes which side wins (the
     /// convergent or the divergent eye); we just pick the map.
-    #[must_use]
     pub fn apply_horizontal(&self, yaw_degrees: f32, outer: bool) -> f32 {
         if outer {
             self.horizontal_outer.apply(yaw_degrees)
@@ -167,7 +165,6 @@ impl LookAtRangeMapSet {
     /// Apply the appropriate vertical range map to a signed
     /// pitch angle. The convention matches the spec:
     /// `pitch > 0` = looking down, `pitch < 0` = looking up.
-    #[must_use]
     pub fn apply_vertical(&self, pitch_degrees: f32) -> f32 {
         if pitch_degrees >= 0.0 {
             self.vertical_down.apply(pitch_degrees)
@@ -356,7 +353,6 @@ impl LookAtEvaluator {
     /// For a target at the head's own position the
     /// decomposition is the zero vector and the result is the
     /// default (identity deltas / zero expression weights).
-    #[must_use]
     pub fn evaluate(
         &self,
         head_world: Vec3,
@@ -530,7 +526,6 @@ fn yaw_pitch_to_delta(
 /// decomposition happens in the head bone's local frame
 /// so a model whose head was authored with a non-identity
 /// rest rotation gets the right sign.
-#[must_use]
 pub fn calc_yaw_pitch(
     head_world: Vec3,
     target_world: Vec3,

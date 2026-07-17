@@ -137,7 +137,6 @@ pub enum NodeConstraint {
 
 impl NodeConstraint {
     /// The glTF node index of the source (driver) bone.
-    #[must_use]
     pub const fn source_node(&self) -> usize {
         match self {
             Self::Rotation { source_node, .. }
@@ -147,7 +146,6 @@ impl NodeConstraint {
     }
 
     /// Constraint weight in `[0.0, 1.0]`.
-    #[must_use]
     pub const fn weight(&self) -> f32 {
         match self {
             Self::Rotation { weight, .. }
@@ -179,13 +177,11 @@ pub struct NodeConstraintRegistry {
 
 impl NodeConstraintRegistry {
     /// Number of constraints in the registry.
-    #[must_use]
     pub const fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Whether the registry is empty.
-    #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -214,7 +210,6 @@ impl NodeConstraintRegistry {
     /// the updated rotations for every constrained destination.
     /// The caller is responsible for applying these to the
     /// skeleton / skin palette.
-    #[must_use]
     pub fn evaluate(
         &self,
         node_local_rotations: &HashMap<usize, Quat>,

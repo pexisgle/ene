@@ -165,7 +165,6 @@ impl ExpressionName {
     }
 
     /// Borrow the inner string.
-    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -285,7 +284,6 @@ impl ExpressionLayer {
     /// primitive of the model. De-duplicated. Used by the
     /// settings UI's "Manual Expressions (Test)" buttons and by
     /// the AI bridge to look up the next emotion's name.
-    #[must_use]
     pub fn expression_names(&self) -> Vec<ExpressionName> {
         self.weights.keys().cloned().collect()
     }
@@ -327,7 +325,6 @@ impl ExpressionLayer {
     }
 
     /// Number of primitives that have at least one morph target.
-    #[must_use]
     pub fn morphic_primitive_count(&self) -> usize {
         self.per_primitive.iter().filter(|p| p.is_some()).count()
     }

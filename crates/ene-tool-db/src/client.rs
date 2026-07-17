@@ -116,7 +116,6 @@ impl DbClient {
     }
 
     /// Path the IPC client connected to.
-    #[must_use]
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }

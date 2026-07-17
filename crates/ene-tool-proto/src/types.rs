@@ -87,19 +87,16 @@ impl ToolName {
 
     /// The namespace portion of the name (`"filesystem.read"` -> `"filesystem"`),
     /// or `None` for non-namespaced tools.
-    #[must_use]
     pub fn namespace(&self) -> Option<&str> {
         self.0.split_once('.').map(|(ns, _)| ns)
     }
 
     /// The action portion of the name (`"filesystem.read"` -> `"read"`).
-    #[must_use]
     pub fn action(&self) -> &str {
         self.0.rsplit_once('.').map_or(&self.0, |(_, a)| a)
     }
 
     /// Borrow the fully-qualified name (e.g. `"filesystem.read"`).
-    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -107,7 +104,6 @@ impl ToolName {
     /// Consumes the `ToolName` and returns the inner `String`.
     /// Use when handing the name to a non-`ToolName` consumer
     /// (e.g. an IPC error payload, a log line, a DB row key).
-    #[must_use]
     pub fn into_string(self) -> String {
         self.0
     }
@@ -212,7 +208,6 @@ impl KeywordSet {
     }
 
     /// Returns true if no keywords are present.
-    #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.primary.is_empty()
             && self.secondary.is_empty()
@@ -301,7 +296,6 @@ pub enum ToolCategory {
 
 impl ToolCategory {
     /// Human-readable label used in the embedding text for this category.
-    #[must_use]
     pub const fn label(&self) -> &'static str {
         match self {
             Self::Filesystem => "filesystem_tools",
@@ -318,7 +312,6 @@ impl ToolCategory {
     }
 
     /// Config-key form used by `tools.rag.per_category_limits` (e.g. `"Filesystem"`).
-    #[must_use]
     pub const fn config_key(&self) -> &'static str {
         match self {
             Self::Filesystem => "Filesystem",
@@ -373,7 +366,6 @@ pub struct ToolRagProfile {
 
 impl ToolRagProfile {
     /// Build a minimal profile from an LLM-facing [`ToolSpec`] (e.g. MCP tools).
-    #[must_use]
     pub fn from_tool_spec(spec: &ToolSpec) -> Self {
         let first_line = spec
             .description
@@ -409,7 +401,6 @@ impl ToolRagProfile {
     ///
     /// For [`EmbeddingField::Example`], pass `example_index` to select
     /// which example row to embed; other fields ignore it.
-    #[must_use]
     pub fn embedding_text(
         &self,
         field: EmbeddingField,
@@ -565,7 +556,6 @@ pub enum EmbeddingField {
 
 impl EmbeddingField {
     /// The index field name used in the tool RAG embedding store.
-    #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Summary => "summary",

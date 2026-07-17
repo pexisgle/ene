@@ -146,7 +146,6 @@ pub async fn embed_query<P: EmbeddingProvider + ?Sized>(
 
 /// Cosine similarity between two vectors. Returns 0.0 for empty or norm-zero
 /// inputs. Both vectors must have the same length for a meaningful result.
-#[must_use]
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.is_empty() || b.is_empty() || a.len() != b.len() {
         return 0.0;

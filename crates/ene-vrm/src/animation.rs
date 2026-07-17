@@ -98,13 +98,11 @@ pub struct Sampler<T: Clone> {
 
 impl<T: Clone> Sampler<T> {
     /// Duration of this sampler (last timestamp, or 0 if empty).
-    #[must_use]
     pub fn duration(&self) -> f32 {
         self.times.last().copied().unwrap_or(0.0)
     }
 
     /// Number of keyframes.
-    #[must_use]
     pub const fn keyframe_count(&self) -> usize {
         self.times.len()
     }
@@ -478,7 +476,6 @@ fn sample_cubic_spline_quat(sampler: &Sampler<Quat>, t: f32) -> Quat {
 /// API" docs (see `docs/api/ene-vrm.md`) pending a consumer, but kept `pub` for other hosts
 /// that need cross-skeleton retargeting.
 #[doc(hidden)]
-#[must_use]
 pub fn retarget_rotation(
     src_pose: Quat,
     src_rest_local: Quat,
@@ -501,7 +498,6 @@ pub fn retarget_rotation(
 /// See [`retarget_rotation`]'s note — not currently called by `ene-desktop`, hidden from the
 /// "Supported API" docs but kept `pub` for other hosts.
 #[doc(hidden)]
-#[must_use]
 pub fn retarget_hips_translation(
     src_pose: Vec3,
     src_rest_local: Vec3,
@@ -527,7 +523,6 @@ pub fn retarget_hips_translation(
 /// from the "Supported API" docs since `ene-desktop` consumes the resulting `VrmaFrame` field
 /// rather than calling this directly.
 #[doc(hidden)]
-#[must_use]
 pub fn quat_to_yaw_pitch(q: Quat) -> (f32, f32) {
     let (yaw, pitch, _roll) = q.to_euler(glam::EulerRot::ZXY);
     (yaw.to_degrees(), pitch.to_degrees())
@@ -543,7 +538,6 @@ pub fn quat_to_yaw_pitch(q: Quat) -> (f32, f32) {
 /// expression weights. The consumer is responsible for retargeting
 /// bone rotations onto the target VRM model's skeleton using
 /// [`retarget_rotation`] and [`retarget_hips_translation`].
-#[must_use]
 pub fn evaluate_clip(clip: &VrmaClip, t: f32) -> VrmaFrame {
     let mut frame = VrmaFrame::default();
 

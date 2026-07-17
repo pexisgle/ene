@@ -36,7 +36,6 @@ pub struct MemoryDiversifyOptions {
 
 impl MemoryDiversifyOptions {
     /// Build options from mind memory config.
-    #[must_use]
     pub const fn from_config(config: &MindMemoryConfig) -> Self {
         Self {
             enabled: config.mmr_enabled,
@@ -60,7 +59,6 @@ impl MemoryDiversifyPipeline {
     ///
     /// When disabled, returns the top `plan.budget.result_limit` candidates in
     /// their original score order.
-    #[must_use]
     pub fn diversify(
         candidates: Vec<ScoredMemory>,
         plan: &RecallPlan,

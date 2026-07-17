@@ -69,7 +69,6 @@ pub const GAZE_TARGET_NAMES: &[&str] = &["lookUp", "lookDown", "lookLeft", "look
 ///
 /// Used internally by [`apply_overrides`]; hidden from the "Supported API" docs.
 #[doc(hidden)]
-#[must_use]
 pub fn is_procedural(name: &str) -> bool {
     MOUTH_TARGET_NAMES.contains(&name)
         || BLINK_TARGET_NAMES.contains(&name)
@@ -95,7 +94,6 @@ impl ExpressionOverrideType {
     /// `"blend"`). Unknown strings silently fall back to `None`
     /// (the spec default) so a malformed file does not blow up
     /// the loader.
-    #[must_use]
     pub fn from_json_str(s: &str) -> Self {
         match s {
             "block" => Self::Block,

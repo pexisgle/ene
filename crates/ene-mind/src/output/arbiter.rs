@@ -6,7 +6,6 @@ use super::types::{ExpressionDecision, ExpressionInput, ExpressionSource};
 use crate::config::EmotionConfig;
 
 /// Map affect dimensions to a candidate expression name.
-#[must_use]
 pub fn affect_to_expression(state: &AffectState) -> &'static str {
     if state.irritation >= 0.55 {
         return "angry";
@@ -123,7 +122,6 @@ pub fn resolve_expression(
 }
 
 /// Normalize an expression name against available expressions; nearest match or neutral.
-#[must_use]
 pub fn normalize_expression(name: &str, available: &[String]) -> String {
     let lower = name.trim().to_lowercase();
     if lower.is_empty() {

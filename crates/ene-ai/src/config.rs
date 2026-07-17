@@ -96,7 +96,6 @@ impl ProviderConfig {
     }
 
     /// Resolves the API key from the configured source (inline or env).
-    #[must_use]
     pub fn resolve_api_key(&self) -> String {
         if self.api_key.source.as_str() == "env" {
             let var_name = if self.api_key.env.trim().is_empty() {

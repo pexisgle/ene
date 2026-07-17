@@ -27,7 +27,6 @@ impl CueSlot {
 }
 
 /// Map a [`CueSource`] to its numeric priority (higher = more important).
-#[must_use]
 pub const fn cue_source_priority(source: CueSource) -> u8 {
     match source {
         CueSource::LlmCommand => 5,
@@ -110,7 +109,6 @@ impl PerformanceArbiter {
     /// with their resolved sources.
     ///
     /// Clears internal state after resolution (ready for next turn).
-    #[must_use]
     pub fn resolve(&mut self) -> Vec<(PerformanceCue, CueSource)> {
         let mut result: Vec<(PerformanceCue, CueSource)> = Vec::with_capacity(5);
 
@@ -139,7 +137,6 @@ impl PerformanceArbiter {
     }
 
     /// Returns the current expression name, if any.
-    #[must_use]
     pub fn current_expression(&self) -> Option<&str> {
         self.expression.as_ref().map(|s| s.cue.name.as_str())
     }
@@ -147,7 +144,6 @@ impl PerformanceArbiter {
     /// Returns the current motion name, if any.
     ///
     /// Searches Full → Upper → Lower in priority order.
-    #[must_use]
     pub fn current_motion(&self) -> Option<&str> {
         self.motion_full
             .as_ref()

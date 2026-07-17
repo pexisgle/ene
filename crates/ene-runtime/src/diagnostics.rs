@@ -45,19 +45,16 @@ impl MemoryQueryHandle {
     }
 
     /// Whether memory is enabled and both store and embedder are available.
-    #[must_use]
     pub fn is_enabled(&self) -> bool {
         self.store.is_some() && self.embedder.is_some()
     }
 
     /// Returns the backing memory store when memory is configured.
-    #[must_use]
     pub const fn store(&self) -> Option<&Arc<ene_store::MemoryStore>> {
         self.store.as_ref()
     }
 
     /// Returns the embedding provider when memory is configured.
-    #[must_use]
     pub fn embedder(&self) -> Option<&Arc<dyn ene_ai::EmbeddingProvider>> {
         self.embedder.as_ref()
     }
@@ -380,13 +377,11 @@ impl std::fmt::Debug for EneDiagnostics {
 
 impl EneDiagnostics {
     /// Memory / journal query surface.
-    #[must_use]
     pub const fn memory(&self) -> &MemoryQueryHandle {
         &self.memory
     }
 
     /// Subscribe to diagnostic events (pipeline phases/metrics).
-    #[must_use]
     pub fn subscribe(&self) -> DiagnosticEventReceiver {
         DiagnosticEventReceiver(self.diag_tx.subscribe())
     }

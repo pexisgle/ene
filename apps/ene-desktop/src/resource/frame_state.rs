@@ -26,7 +26,6 @@ pub struct FrameState {
 
 impl FrameState {
     /// Returns the previous tick's [`Instant`], if any.
-    #[must_use]
     #[expect(dead_code, reason = "yet to be wired to frame system")]
     pub const fn last_instant(&self) -> Option<Instant> {
         self.last_instant
