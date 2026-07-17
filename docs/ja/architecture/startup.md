@@ -202,9 +202,7 @@ EneEvent::Performance → AiBridge → AppEvent::PerformanceCue
       → SetExpressions → VRM ブレンドシェイプ更新 (ene-vrm)
 ```
 
-詳細は
-[`docs/architecture/ene-desktop-ecs-migration.md`](ene-desktop-ecs-migration.md)
-および [`docs/applications/desktop.md`](../applications/desktop.md)
+詳細は [`docs/applications/desktop.md`](../applications/desktop.md)
 を参照。
 
 ---

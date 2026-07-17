@@ -57,3 +57,4 @@ User input
 
 - [API v2 ADR](api-v2.md)
 - [認知ランタイム ADR](cognitive-runtime.md)
+- [アバター Performance ADR](avatar-performance.md)

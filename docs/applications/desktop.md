@@ -183,6 +183,4 @@ The messages registered by `CorePlugin` include:
 
 ## File layout
 
-See `docs/architecture/ene-desktop-ecs-migration.md` for the
-full layout, plugin ordering, and the 9-line `about_to_wait`
-target.
+Plugin ordering and the ECS resource layout live under `apps/ene-desktop/src/plugin/` and `apps/ene-desktop/src/resource/`. The render path stays outside bevy systems because `CharacterRenderer` and wgpu types are `!Send + !Sync` — see [Startup Flow](../architecture/startup.md).

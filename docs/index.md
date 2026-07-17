@@ -8,7 +8,7 @@ ene is a local AI character platform implemented as a Rust workspace. It provide
 - [API v2](architecture/api-v2.md) — Locked host contract: `EneHandle::open`, `TurnId`, single-flight Busy, minimal events
 - [Startup Flow](architecture/startup.md) — Desktop (winit+wgpu+egui) and CLI boot sequences
 - [Cognitive Runtime Architecture](architecture/cognitive-runtime.md) — ADR for the Identity Kernel, typed memory, affect, and expression arbitration design
-- [API Refactor Plan](architecture/api-refactor-plan.md) — Historical restructuring notes (superseded by API v2 for host/crate map)
+- [Avatar Performance](architecture/avatar-performance.md) — ADR for `PerformanceCue` arbitration and VRM presentation
 - [Configuration](configuration/settings.md) — Full settings.json schema reference
 - [API Reference](api/index.md) — Public API documentation for every library crate
 

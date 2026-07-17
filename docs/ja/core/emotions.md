@@ -108,3 +108,8 @@ ene-runtime / mind ストリームパス
 | ene-cli | `Performance` | cue 名の表示 / ログ |
 
 デスクトップの保持時間は `mind.emotion.expression_hysteresis_seconds`（既定 4.0s）に従います。
+
+## 関連ドキュメント
+
+- [アバター Performance ADR](../architecture/avatar-performance.md) — `PerformanceCue` マーカー、調停、VRM LayerComposer
+- [ストリーミングイベント](streaming-events.md) — `EneEvent::Performance`

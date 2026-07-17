@@ -110,7 +110,7 @@ pub mod truncate {
 }
 ```
 
-`Truncate` は**静的メソッドを持つユニット構造体**です — トレイトではなく、`&str`/`String` に対して直接呼び出せるものはありません。所有は [`ene-config`](./ene-config.md)（旧 [`ene-common`](./ene-common.md) スタブも参照）。メソッドは `Truncate::simple`、`Truncate::detailed`、`Truncate::chars`、`Truncate::output`、`Truncate::tail`、および `TruncateResult`（`content: String`、`truncated: bool`）です。
+`Truncate` は**静的メソッドを持つユニット構造体**です — トレイトではなく、`&str`/`String` に対して直接呼び出せるものはありません。所有は [`ene-config`](./ene-config.md)。メソッドは `Truncate::simple`、`Truncate::detailed`、`Truncate::chars`、`Truncate::output`、`Truncate::tail`、および `TruncateResult`（`content: String`、`truncated: bool`）です。
 
 ツールでの典型的な使用例：
 
@@ -256,6 +256,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 - [`ene-tool-derive`](./ene-tool-derive.md) — プロシージャルマクロ：`#[derive(ToolAction)]`、`#[derive(ToolSpec)]`、`#[tool_action(args = T)]`
 - [`ene-tool-proto`](./ene-tool-proto.md) — `ToolSpec`、`ToolError`、`ToolProvider`、`run_tool_server`、`IpcRequest`/`IpcResponse`
-- [`ene-config`](./ene-config.md) — `Truncate`/`TruncateResult` の所有者（[`ene-common`](./ene-common.md) スタブも参照）
+- [`ene-config`](./ene-config.md) — `Truncate`/`TruncateResult` の所有者
 - [`ene-tool-host`](./ene-tool-host.md) — ホスト側のプロセス管理と `ToolRegistry`
 - [ツールの作成方法](../tools/sdk.md)

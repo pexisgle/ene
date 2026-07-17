@@ -11,8 +11,7 @@
 //! Everything else in the crate (spring bones, MToon material internals, node constraints,
 //! debug rendering, raw glTF sub-parsers, retargeting helpers, …) remains `pub` for advanced
 //! hosts that need it, but is intentionally left out of this module — see
-//! `docs/api/ene-vrm.md` ("Supported API" vs "Internal") and
-//! `docs/architecture/api-refactor-plan.md` (item 6) for why this module exists.
+//! `docs/api/ene-vrm.md` ("Supported API" vs "Internal").
 
 #[doc(no_inline)]
 pub use crate::animation::{VrmaAsset, VrmaClip, VrmaFrame, VrmaPlayer, evaluate_clip, load_vrma};

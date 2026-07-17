@@ -211,7 +211,7 @@ pub struct McpToolRegistry {
 | メソッド | シグネチャ | 説明 |
 |--------|-----------|-------------|
 | `new` | `pub fn new() -> Self` | 空のレジストリを作成する（`Self::default()` と同等）。 |
-| `connect_stdio` | `pub async fn connect_stdio(&self, name: &str, command: &str, args: &[&str]) -> Result<(), ToolHostError>` | `command` を子プロセスとして生成し、MCPのstdioトランスポート経由で接続し、そのツールを一覧取得して `name` の下にキャッシュする。内部の `rmcp` クライアントが返す文字列ベースのエラーは `ToolHostError::ExecutionFailed { message }` にラップされる（[APIリファクタリング計画](../../architecture/api-refactor-plan.md) の項目3を参照 — 以前は素の `Result<(), String>` を返していた）。 |
+| `connect_stdio` | `pub async fn connect_stdio(&self, name: &str, command: &str, args: &[&str]) -> Result<(), ToolHostError>` | `command` を子プロセスとして生成し、MCPのstdioトランスポート経由で接続し、そのツールを一覧取得して `name` の下にキャッシュする。内部の `rmcp` クライアントが返す文字列ベースのエラーは `ToolHostError::ExecutionFailed { message }` にラップされる（以前は素の `Result<(), String>` を返していた）。 |
 
 `ToolConfig::mcp_servers` 経由で設定される。`McpTransport::Http` は設定/スキーマ上は受け入れられますが、`ToolHostManager::start` ではまだ実装されていません（警告をログに記録してスキップされます）。
 

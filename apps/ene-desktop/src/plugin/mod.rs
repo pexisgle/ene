@@ -12,13 +12,13 @@
 //! `CharacterRenderer` and `wgpu::Device` / `wgpu::Queue` are
 //! `!Send + !Sync`, so the per-frame `character.update_*` /
 //! `character.render` / `cw.with_surface_view` calls cannot
-//! live in bevy systems. See the migration plan
-//! (`docs/architecture/ene-desktop-ecs-migration.md`) for the
-//! full rationale.
+//! live in bevy systems. The render path stays on `Runtime` for that
+//! reason; see `docs/architecture/startup.md` and
+//! `docs/applications/desktop.md`.
 //!
-//! - `WindowPlugin` (deferred — see plan)
-//! - `RenderPlugin` (cancelled — see plan)
-//! - `DebugPlugin` (deferred — see plan)
+//! - `WindowPlugin` (deferred)
+//! - `RenderPlugin` (cancelled — GPU work stays on `Runtime`)
+//! - `DebugPlugin` (deferred)
 pub mod ai_plugin;
 pub mod character_plugin;
 pub mod chat_plugin;

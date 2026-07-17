@@ -123,3 +123,8 @@ Merged with `post_history_instructions` before injection when that path is activ
 | ene-cli | `Performance` | Printed / logged cue names |
 
 Hold duration on desktop follows `mind.emotion.expression_hysteresis_seconds` (default 4.0s).
+
+## Related Documents
+
+- [Avatar Performance ADR](../architecture/avatar-performance.md) — `PerformanceCue` markers, arbiter, and VRM LayerComposer
+- [Streaming Events](streaming-events.md) — `EneEvent::Performance`

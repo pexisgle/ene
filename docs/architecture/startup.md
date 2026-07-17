@@ -192,9 +192,7 @@ EneEvent::Performance → AiBridge → AppEvent::PerformanceCue
       → SetExpressions → VRM blendshape update (ene-vrm)
 ```
 
-For more details see
-[`docs/architecture/ene-desktop-ecs-migration.md`](ene-desktop-ecs-migration.md)
-and the full file layout in
+For more details see the full file layout in
 [`docs/applications/desktop.md`](../applications/desktop.md).
 
 ---

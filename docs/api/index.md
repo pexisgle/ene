@@ -27,14 +27,14 @@ The host contract is **API v2**: `EneHandle::open`, mandatory `TurnId`, single-f
 | [`ene-tool-derive`](ene-tool-derive.md) | Proc-macros: `#[derive(ToolSpec)]`, `#[derive(ToolAction)]`. | [→](ene-tool-derive.md) |
 | [`ene-tool-db`](ene-tool-db.md) | Typed CRUD database client for tool binaries via IPC. | [→](ene-tool-db.md) |
 
-### Moved / absorbed stubs
+### Moved / absorbed
 
 | Former crate | Now |
 |---|---|
-| [`ene-provider`](ene-provider.md) | Merged into [`ene-ai`](ene-ai.md) |
-| [`ene-embedding`](ene-embedding.md) | Merged into [`ene-ai`](ene-ai.md) |
-| [`ene-session`](ene-session.md) | Absorbed into [`ene-mind`](ene-mind.md) |
-| [`ene-common`](ene-common.md) | Folded into [`ene-config`](ene-config.md) (`truncate`) + [`ene-tool-common`](ene-tool-common.md) re-export |
+| `ene-provider` | Merged into [`ene-ai`](ene-ai.md) |
+| `ene-embedding` | Merged into [`ene-ai`](ene-ai.md) |
+| `ene-session` | Absorbed into [`ene-mind`](ene-mind.md) |
+| `ene-common` | Folded into [`ene-config`](ene-config.md) (`truncate`) + [`ene-tool-common`](ene-tool-common.md) re-export |
 
 `ene-core` was renamed/replaced by [`ene-runtime`](ene-runtime.md). There is no separate `ene-cognition` / `ene-memory` crate; cognition lives in `ene-mind`, persistence in `ene-store`.
 
@@ -114,7 +114,7 @@ pub use ene_tool_proto::{ToolSpec, ToolError, IpcRequest, IpcResponse};
 
 ## Error & Async Conventions
 
-See also [API v2](../architecture/api-v2.md) and the historical [API refactor plan](../architecture/api-refactor-plan.md).
+See also [API v2](../architecture/api-v2.md).
 
 ### Async
 

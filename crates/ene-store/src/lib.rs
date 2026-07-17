@@ -12,8 +12,8 @@
 //!
 //! ## Crate Boundaries
 //!
-//! Enforced by [AGENTS.md §4.1](../../AGENTS.md) and reconfirmed by the
-//! [API refactor plan](../../docs/architecture/api-refactor-plan.md) (item 2):
+//! Enforced by [AGENTS.md §4.1](../../AGENTS.md) and
+//! [API v2](../../docs/architecture/api-v2.md):
 //!
 //! - `ene-store` is the **sole owner** of the `SQLite` / `sea-orm` connection and schema
 //!   for the entire workspace. No other crate (`ene-mind`, `ene-runtime`, tool

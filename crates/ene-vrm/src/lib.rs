@@ -1,13 +1,11 @@
 //! VRM 1.0 character renderer for the ene desktop app.
 //!
 //! Platform-agnostic, built on `wgpu` 29 and the `gltf` 1.4 crate.
-//! Full design in `docs/architecture/wgpu-migration.md`.
+//! See `docs/api/ene-vrm.md` for the supported API.
 //!
 //! ## Module map
 //!
-//! - [`prelude`] — curated "Supported API" re-exports (issue #6 of the [API refactor
-//!   plan](https://github.com/pexisgle/Ene/blob/main/docs/architecture/api-refactor-plan.md)).
-//!   Start here.
+//! - [`prelude`] — curated "Supported API" re-exports. Start here.
 //! - [`camera`] — orthographic camera uniform + view-projection helpers.
 //! - [`loader`] — read a `.vrm` from disk and produce a [`VrmModel`].
 //! - [`model`] — public data types: [`VrmModel`], [`VrmMesh`], etc.

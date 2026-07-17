@@ -38,8 +38,7 @@
 //!   require the `gltf` crate's `import` feature and ship as a
 //!   follow-up PR.
 //!
-//! See `docs/architecture/wgpu-migration.md` §22.6 for the
-//! status.
+//! See `docs/api/ene-vrm.md` for loader scope and supported formats.
 
 use std::path::Path;
 

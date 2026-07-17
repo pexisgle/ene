@@ -168,6 +168,4 @@ tokio EneActor (ene-runtime)
 
 ## ファイル構成
 
-プラグインの順序、システム境界、9 行版 `about_to_wait` ターゲッ
-トの全容は `docs/architecture/ene-desktop-ecs-migration.md` を
-参照してください。
+プラグイン順序と ECS リソース構成は `apps/ene-desktop/src/plugin/` および `apps/ene-desktop/src/resource/` にあります。レンダーパスは `CharacterRenderer` と wgpu 型が `!Send + !Sync` のため bevy システム外に残しています — [起動フロー](../architecture/startup.md) を参照。

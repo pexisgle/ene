@@ -111,7 +111,7 @@ pub mod truncate {
 }
 ```
 
-`Truncate` is a **unit struct with static methods** — it is not a trait, and there is nothing to call directly on `&str`/`String`. See [`ene-config`](./ene-config.md) / the former [`ene-common`](./ene-common.md) stub for ownership; methods are `Truncate::simple`, `Truncate::detailed`, `Truncate::chars`, `Truncate::output`, `Truncate::tail`, and `TruncateResult` (`content: String`, `truncated: bool`).
+`Truncate` is a **unit struct with static methods** — it is not a trait, and there is nothing to call directly on `&str`/`String`. See [`ene-config`](./ene-config.md) for ownership; methods are `Truncate::simple`, `Truncate::detailed`, `Truncate::chars`, `Truncate::output`, `Truncate::tail`, and `TruncateResult` (`content: String`, `truncated: bool`).
 
 Typical usage in a tool:
 
@@ -257,6 +257,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 - [`ene-tool-derive`](./ene-tool-derive.md) — Proc-macros: `#[derive(ToolAction)]`, `#[derive(ToolSpec)]`, `#[tool_action(args = T)]`
 - [`ene-tool-proto`](./ene-tool-proto.md) — `ToolSpec`, `ToolError`, `ToolProvider`, `run_tool_server`, `IpcRequest`/`IpcResponse`
-- [`ene-config`](./ene-config.md) — owns `Truncate`/`TruncateResult` (see also [`ene-common`](./ene-common.md) stub)
+- [`ene-config`](./ene-config.md) — owns `Truncate`/`TruncateResult`
 - [`ene-tool-host`](./ene-tool-host.md) — Host-side process management and `ToolRegistry`
 - [Writing a Tool](../tools/sdk.md)

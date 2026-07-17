@@ -21,8 +21,8 @@
 //!
 //! ## Crate Boundaries
 //!
-//! Enforced by [AGENTS.md §4.1](../../AGENTS.md) and reconfirmed by the
-//! [API refactor plan](../../docs/architecture/api-refactor-plan.md) (item 2):
+//! Enforced by [AGENTS.md §4.1](../../AGENTS.md) and
+//! [API v2](../../docs/architecture/api-v2.md):
 //!
 //! - This crate is limited to **wire-protocol concerns only**: IPC request/response
 //!   types, the [`ToolProvider`] trait, the UDS/Named-Pipe [`transport`] layer,

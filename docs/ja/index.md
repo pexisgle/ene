@@ -10,7 +10,7 @@ LLM 駆動の会話、アニメーションする VRM キャラクター、ツ�
 - [API v2](architecture/api-v2.md) — ロック済みホスト契約: `EneHandle::open`、`TurnId`、single-flight Busy、最小イベント
 - [起動フロー](architecture/startup.md) — デスクトップ (winit+wgpu+egui) と CLI のブートシーケンス
 - [認知ランタイムアーキテクチャ](architecture/cognitive-runtime.md) — Identity Kernel、型付きメモリ、感情、表情調停の設計に関するADR
-- [API リファクタリング計画](architecture/api-refactor-plan.md) — 歴史的な再構成メモ（ホスト/クレートマップは API v2 が優先）
+- [アバター Performance](architecture/avatar-performance.md) — `PerformanceCue` 調停と VRM 提示の ADR
 - [設定](configuration/settings.md) — settings.json の全スキーマリファレンス
 - [API リファレンス](api/index.md) — すべてのライブラリクレートの公開APIドキュメント
 

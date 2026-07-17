@@ -27,14 +27,14 @@
 | [`ene-tool-derive`](ene-tool-derive.md) | プロシージャルマクロ: `#[derive(ToolSpec)]`、`#[derive(ToolAction)]`。 | [→](ene-tool-derive.md) |
 | [`ene-tool-db`](ene-tool-db.md) | ツールバイナリ向けの型付き CRUD データベースクライアント（IPC 経由）。 | [→](ene-tool-db.md) |
 
-### 移動 / 吸収済みスタブ
+### 移動 / 吸収済み
 
 | 旧クレート | 現在 |
 |---|---|
-| [`ene-provider`](ene-provider.md) | [`ene-ai`](ene-ai.md) に統合 |
-| [`ene-embedding`](ene-embedding.md) | [`ene-ai`](ene-ai.md) に統合 |
-| [`ene-session`](ene-session.md) | [`ene-mind`](ene-mind.md) に吸収 |
-| [`ene-common`](ene-common.md) | [`ene-config`](ene-config.md)（`truncate`）+ [`ene-tool-common`](ene-tool-common.md) 再エクスポートへ吸収 |
+| `ene-provider` | [`ene-ai`](ene-ai.md) に統合 |
+| `ene-embedding` | [`ene-ai`](ene-ai.md) に統合 |
+| `ene-session` | [`ene-mind`](ene-mind.md) に吸収 |
+| `ene-common` | [`ene-config`](ene-config.md)（`truncate`）+ [`ene-tool-common`](ene-tool-common.md) 再エクスポートへ吸収 |
 
 `ene-core` は [`ene-runtime`](ene-runtime.md) に置換されました。独立した `ene-cognition` / `ene-memory` クレートはありません。認知は `ene-mind`、永続化は `ene-store` です。
 
@@ -114,7 +114,7 @@ pub use ene_tool_proto::{ToolSpec, ToolError, IpcRequest, IpcResponse};
 
 ## エラーと非同期の規約
 
-[API v2](../architecture/api-v2.md) および歴史的な [APIリファクタリング計画](../architecture/api-refactor-plan.md) も参照してください。
+[API v2](../architecture/api-v2.md) も参照してください。
 
 ### 非同期（Async）
 

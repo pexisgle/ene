@@ -211,7 +211,7 @@ pub struct McpToolRegistry {
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `new` | `pub fn new() -> Self` | Creates an empty registry (equivalent to `Self::default()`). |
-| `connect_stdio` | `pub async fn connect_stdio(&self, name: &str, command: &str, args: &[&str]) -> Result<(), ToolHostError>` | Spawns `command` as a child process and connects via MCP's stdio transport, then lists and caches its tools under `name`. The underlying `rmcp` client's string-based errors are wrapped as `ToolHostError::ExecutionFailed { message }` (see the [API refactor plan](../architecture/api-refactor-plan.md), item 3 — this used to return a bare `Result<(), String>`). |
+| `connect_stdio` | `pub async fn connect_stdio(&self, name: &str, command: &str, args: &[&str]) -> Result<(), ToolHostError>` | Spawns `command` as a child process and connects via MCP's stdio transport, then lists and caches its tools under `name`. The underlying `rmcp` client's string-based errors are wrapped as `ToolHostError::ExecutionFailed { message }` (formerly a bare `Result<(), String>`). |
 
 Configured via `ToolConfig::mcp_servers`; `McpTransport::Http` is accepted by config/schema but not yet implemented in `ToolHostManager::start` (logs a warning and is skipped).
 
