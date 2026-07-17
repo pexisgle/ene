@@ -146,7 +146,6 @@ async fn run() -> Result<(), ene_tool_db::DbError> {
 ```rust
 pub enum DbError {
     Transport(#[from] std::io::Error),
-    Server { code: DbErrorCode, message: String },
     UnexpectedResponse(String),
     ConnectionClosed,
     Auth { code: DbErrorCode, message: String },
@@ -162,7 +161,6 @@ pub enum DbError {
 | Variant | Meaning |
 |---|---|
 | `Transport(std::io::Error)` | Low-level transport failure (write/read/serialize/deserialize). Implements `#[from] std::io::Error`, so `?` on raw I/O converts automatically. |
-| `Server { code, message }` | Server returned an error response (primarily retained for backwards compatibility; CRUD failures now return concrete variants). |
 | `UnexpectedResponse(String)` | The server sent a syntactically valid but semantically wrong response variant for the request that was sent (e.g. an `Insert` request got back a `Select` response). Indicates a client/server protocol mismatch, not a data error. |
 | `ConnectionClosed` | The IPC connection was closed unexpectedly (EOF while reading a response). Call [`reconnect`](#connection-management) to recover. |
 | `Auth { code, message }` | The server rejected the auth token presented during `Handshake`, either on initial `connect_with_token` or during `reconnect`. Distinct from other query errors so callers can special-case "my token is stale/invalid". |

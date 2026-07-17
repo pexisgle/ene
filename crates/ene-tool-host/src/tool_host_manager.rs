@@ -144,12 +144,12 @@ impl ToolRegistry for SupervisedIpcRegistry {
             return first_result;
         }
 
-        // Supervision path: the call failed. Hold the
-        // process lock for the entire check-restart-retry
-        // sequence so a second concurrent caller cannot
-        // trigger a duplicate restart, and so the retry
-        // below uses the freshly installed registry (no
-        // TOCTOU window).
+        // Supervision path: the call failed. Hold the process
+        // lock through the alive-check and restart so a second
+        // concurrent caller cannot trigger a duplicate restart.
+        // Release before `connect_with_retry` (which may sleep
+        // for seconds) so other callers are not blocked; then
+        // install the new registry and retry on the fresh handle.
         let mut guard = self.process.lock().await;
 
         if guard.is_alive() {
@@ -217,11 +217,11 @@ impl ToolRegistry for SupervisedIpcRegistry {
             *reg_guard = Arc::clone(&new_reg_arc);
         }
 
-        // Retry the original call while we still hold the
-        // process lock. The new registry has just been
-        // installed under the same lock, so the retry is
-        // guaranteed to use the freshly restarted binary
-        // without any other caller racing in between.
+        // Retry on the freshly installed registry. The process
+        // lock is not held across connect/retry; concurrent
+        // callers that arrive while the child is already alive
+        // after restart surface their original error without a
+        // second restart.
         new_reg_arc.call_tool(name, arguments).await
     }
 

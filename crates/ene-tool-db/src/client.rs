@@ -14,14 +14,6 @@ pub enum DbError {
     /// IO or transport error.
     #[error("transport error: {0}")]
     Transport(#[from] std::io::Error),
-    /// Server returned an error response.
-    #[error("server error [{code}]: {message}")]
-    Server {
-        /// The error code from the server.
-        code: DbErrorCode,
-        /// Human-readable error message.
-        message: String,
-    },
     /// Server returned an unexpected response variant.
     #[error("unexpected response: {0}")]
     UnexpectedResponse(String),

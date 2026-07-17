@@ -146,7 +146,6 @@ async fn run() -> Result<(), ene_tool_db::DbError> {
 ```rust
 pub enum DbError {
     Transport(#[from] std::io::Error),
-    Server { code: DbErrorCode, message: String },
     UnexpectedResponse(String),
     ConnectionClosed,
     Auth { code: DbErrorCode, message: String },
@@ -162,7 +161,6 @@ pub enum DbError {
 | バリアント | 意味 |
 |---|---|
 | `Transport(std::io::Error)` | 低レベルのトランスポート失敗（書き込み／読み取り／シリアライズ／デシリアライズ）。`#[from] std::io::Error` を実装しているため、生の I/O に対する `?` が自動的に変換される。 |
-| `Server { code, message }` | サーバーがエラーレスポンスを返した（主に後方互換性のために保持され、CRUDエラーは具体的なバリアントを返すようになりました）。 |
 | `UnexpectedResponse(String)` | サーバーが送ったリクエストに対して構文的には正しいが意味的には誤ったレスポンスバリアントを返した（例：`Insert` リクエストに対して `Select` レスポンスが返ってきた）。データエラーではなく、クライアント/サーバー間のプロトコル不整合を示す。 |
 | `ConnectionClosed` | IPC 接続が予期せず閉じられた（レスポンスの読み取り中に EOF）。回復するには [`reconnect`](#接続管理) を呼び出す。 |
 | `Auth { code, message }` | サーバーが、初回の `connect_with_token` 時、または `reconnect` 時に提示された認証トークンを拒否した。他のクエリエラーと区別できるよう、呼び出し元が「トークンが古い／無効」であることを区別できるようにしています。 |
