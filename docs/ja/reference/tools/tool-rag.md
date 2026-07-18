@@ -11,22 +11,22 @@ Tool RAG（Retrieval-Augmented Generation）は、ベクトル埋め込みを使
   ↓
 1. クエリを埋め込み → query_embedding
   ↓
-2. 任意の HyDE: 仮説文書埋め込みを生成してクエリとブレンド
-  ↓
-3. 各ツールについて重み付き類似度を計算:
-   score = Σ (weight_i × cosine_sim(blended_query, tool_field_i))
+2. 各ツールについて重み付き類似度を計算:
+   score = Σ (weight_i × cosine_sim(query, tool_field_i))
    フィールド: summary, description, capability, example, negative
   ↓
-4. カテゴリ別上限を適用（例: Filesystem は最大 3 件）
+3. カテゴリ別上限を適用（例: Filesystem は最大 3 件）
   ↓
-5. スコア順に並べ、top_k 候補を取得
+4. スコア順に並べ、top_k 候補を取得
   ↓
-6. 候補が複数ある場合は任意の embedding rerank → final_n を選択
+5. `use_rerank` かつ候補が複数なら任意の cosine embedding rerank → final_n を選択
   ↓
-7. forced ツールはスコアに関係なく常に含める
+6. forced ツールはスコアに関係なく常に含める
   ↓
 Vec<ToolSpec> → LLM に渡す
 ```
+
+LLM HyDE は無効です（`use_hyde` は予約済み no-op）。リランクに LLM は使いません（description 埋め込みの cosine のみ）。
 
 ## 設定
 
@@ -35,9 +35,9 @@ Vec<ToolSpec> → LLM に渡す
 | オプション | 型 | 既定 | 説明 |
 |--------|------|---------|-------------|
 | `enabled` | bool | `true` | Tool RAG パイプラインを有効化 |
-| `use_hyde` | bool | `true` | 仮説文書埋め込みによるクエリ拡張 |
-| `use_rerank` | bool | `true` | 埋め込みベースの候補リランク |
-| `background_index_on_startup` | bool | `true` | 起動時にインデックスをウォームアップ |
+| `use_hyde` | bool | `false` | 予約済み。LLM HyDE は無効（no-op） |
+| `use_rerank` | bool | `false` | 候補の cosine 埋め込みリランク（LLM なし） |
+| `background_index_on_startup` | bool | `true` | 起動時にバックグラウンドでインデックスをウォームアップ |
 | `top_k` | int | `12` | リランク前の候補数 |
 | `final_n` | int | `6` | LLM に送る最終ツール数 |
 | `rerank_candidates` | int | `24` | embedding rerank で考慮する候補数 |

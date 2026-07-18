@@ -86,16 +86,20 @@ pub struct ToolRagStats {
 
 ## 設定型
 
-`ToolRagConfig` はコード既定値のみを保持（公開 `settings.json` には含まれない）。
+`ToolRagConfig` は `settings.json` の `tools.rag` にシリアライズされます（[設定](../configuration/settings.md) を参照）。
 
 ### `ToolRagConfig`
 
 ```rust
 pub struct ToolRagConfig {
+    pub enabled: bool,
     pub top_k: usize,
     pub final_n: usize,
+    pub use_hyde: bool,       // 予約済み。LLM HyDE は無効（no-op）
+    pub use_rerank: bool,     // true のとき cosine 埋め込みリランク
     pub rerank_candidates: usize,
     pub min_similarity: f32,
+    pub background_index_on_startup: bool,
     pub forced: Vec<String>,
     pub weights: FieldWeightsConfig,
     pub per_category_limits: HashMap<String, usize>,
@@ -111,6 +115,8 @@ pub struct FieldWeightsConfig {
     pub capability: f32,
     pub example: f32,
     pub negative: f32,
+    pub hyde: f32,
+    pub hyde_blend: f32,
 }
 ```
 
@@ -128,7 +134,7 @@ pub enum ToolRagError {
 }
 ```
 
-forced ツール名が無効なとき、`ToolRagOptions::try_from` と `ToolRag::from_config` から返る。
+`ToolRag::from_config` / `ToolRagOptions::from_config_lenient` は不正な forced 名をスキップし、パイプライン全体は失敗させません。
 
 ---
 

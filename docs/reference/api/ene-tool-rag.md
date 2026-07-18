@@ -86,16 +86,20 @@ pub struct ToolRagStats {
 
 ## Configuration Types
 
-`ToolRagConfig` holds code defaults only (not in public `settings.json`).
+`ToolRagConfig` is serialized under `tools.rag` in `settings.json` (see [Settings](../configuration/settings.md#toolsrag--tool-rag-pipeline)).
 
 ### `ToolRagConfig`
 
 ```rust
 pub struct ToolRagConfig {
+    pub enabled: bool,
     pub top_k: usize,
     pub final_n: usize,
+    pub use_hyde: bool,       // reserved; LLM HyDE disabled (no-op)
+    pub use_rerank: bool,     // cosine embedding rerank when true
     pub rerank_candidates: usize,
     pub min_similarity: f32,
+    pub background_index_on_startup: bool,
     pub forced: Vec<String>,
     pub weights: FieldWeightsConfig,
     pub per_category_limits: HashMap<String, usize>,
@@ -111,6 +115,8 @@ pub struct FieldWeightsConfig {
     pub capability: f32,
     pub example: f32,
     pub negative: f32,
+    pub hyde: f32,
+    pub hyde_blend: f32,
 }
 ```
 
@@ -128,7 +134,7 @@ pub enum ToolRagError {
 }
 ```
 
-Returned by `ToolRagOptions::try_from` and `ToolRag::from_config` when the config contains an invalid forced tool name.
+`ToolRag::from_config` / `ToolRagOptions::from_config_lenient` skip invalid forced names instead of failing the whole pipeline.
 
 ---
 

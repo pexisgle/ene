@@ -19,9 +19,9 @@ pub struct ToolRagConfig {
     pub top_k: usize,
     /// Final number of tools returned after reranking and filtering.
     pub final_n: usize,
-    /// Whether to use Hypothetical Document Embedding to expand the query.
+    /// Reserved for LLM `HyDE` expansion. Currently a no-op (LLM `HyDE` is disabled).
     pub use_hyde: bool,
-    /// Whether to use LLM-based reranking on the candidate set.
+    /// Whether to cosine-rerank candidates (embedding similarity; no LLM).
     pub use_rerank: bool,
     /// Number of candidates to pass to the reranker.
     pub rerank_candidates: usize,
@@ -46,8 +46,8 @@ impl Default for ToolRagConfig {
             enabled: true,
             top_k: 12,
             final_n: 6,
-            use_hyde: true,
-            use_rerank: true,
+            use_hyde: false,
+            use_rerank: false,
             rerank_candidates: 24,
             min_similarity: 0.25,
             background_index_on_startup: true,

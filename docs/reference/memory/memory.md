@@ -4,14 +4,16 @@ SQLite + sqlite-vec + Diesel powered episodic memory with vector similarity sear
 
 ## Initialization
 
-The `EneActor` initializes memory during `reconfigure()`:
+The runtime initializes memory during `EneHandle::open`:
 
-1. Create embedding provider from `embedding` config
+1. Create embedding provider from `embedding` / AI task config
 2. If `store.enabled == true`, call `MemoryStore::open()`
 3. Register sqlite-vec extension and run migrations
 4. Attach store and embedder to `session.memory`
 
-Memory is also available in snapshots (`EneStateSnapshot`) for CLI commands like `/memory search` and `/session summaries`.
+**Schema reset:** the store uses a single initial migration. Delete any pre-existing SQLite memory database under the user data directory before upgrading across the schema collapse; there is no in-place legacy migration path.
+
+Memory is also available in snapshots (`EneStateSnapshot`) for CLI commands like `/memory search`.
 
 ## MemoryStore
 
@@ -26,56 +28,15 @@ Uses `sea-orm` (backed by `sqlx`'s built-in connection pool) for async database 
 
 ### Database Tables
 
-```sql
-conversation_summaries (
-    id INTEGER PRIMARY KEY,
-    session_id TEXT,
-    card_name TEXT,
-    summary TEXT,
-    embedding BLOB,     -- f32 vector as binary
-    created_at TEXT,    -- RFC3339
-    ended_at TEXT       -- RFC3339
-)
+Core tables created by the initial schema migration:
 
-conversation_keyfacts (
-    id INTEGER PRIMARY KEY,
-    card_name TEXT,
-    summary_id INTEGER REFERENCES conversation_summaries(id),
-    key TEXT,
-    value TEXT,
-    created_at TEXT
-)
+- `conversation_logs` — raw turn transcripts
+- `typed_memories` / `memory_embeddings` / `memory_links` / `memory_spans` — cognitive typed memory
+- `affect_states` / `pending_affect_proposals` — affect ledger
+- `commitments` — companion commitment ledger
+- `tool_embedding_index` / `__tool_schemas` — Tool RAG + tool DB IPC metadata
 
-conversation_logs (
-    id INTEGER PRIMARY KEY,
-    session_id TEXT,
-    card_name TEXT,
-    role TEXT,          -- "user" or "assistant"
-    content TEXT,
-    created_at TEXT
-)
-
-tool_embedding_index (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tool_name TEXT NOT NULL,
-    field TEXT NOT NULL CHECK (field IN ('summary','description','capability','example','negative')),
-    field_key TEXT NOT NULL,        -- "" for single-row fields or ex_N for example rows from ToolRagProfile
-    version_hash TEXT NOT NULL,
-    model_name TEXT NOT NULL,
-    embedding BLOB NOT NULL,
-    created_at TEXT NOT NULL,
-    UNIQUE(tool_name, field, field_key, model_name)
-)
-
-__tool_schemas (
-    prefix TEXT PRIMARY KEY,    -- tool name prefix (e.g. "fs_", "utility_")
-    schema_json TEXT,           -- full JSON schema declaration
-    fingerprint TEXT,           -- blake3 hash of schema_json
-    created_at TEXT             -- RFC3339
-)
-```
-
-The `__tool_schemas` table is a metadata registry used by the Tool DB IPC server to track which tools have declared their table schemas. Tool-specific tables (e.g. `fs_undo_entries`, `utility_todo_items`) are created dynamically when tools connect and declare their schemas.
+See [Typed Memory & Memory Arbiter](#typed-memory--memory-arbiter-cognitive-runtime) and [Companion Commitment Ledger](#companion-commitment-ledger) for column-level detail.
 
 ### Conversation Logs
 

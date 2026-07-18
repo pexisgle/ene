@@ -351,13 +351,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_subcommand_and_tail_preserves_reset_confirmation() {
-        let (subcmd, tail) = parse_subcommand_and_tail("reset legacy --yes");
-        assert_eq!(subcmd, "reset");
-        assert_eq!(tail, "legacy --yes");
-    }
-
-    #[test]
     fn parse_kind_arg_reads_kind_flag_value_pair() {
         assert_eq!(
             parse_kind_arg("--kind preference"),

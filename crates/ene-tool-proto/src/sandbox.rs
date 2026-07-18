@@ -62,6 +62,34 @@ ene_config::define_tool_config!(
     }
 );
 
+impl SandboxConfigData {
+    /// Enforce safe floors: union default blocklist patterns and replace
+    /// zero-valued limits with code defaults. User-supplied patterns and
+    /// tighter (non-zero) limits are preserved.
+    pub fn sanitize(&mut self) {
+        for pattern in default_blocked_commands() {
+            if !self.blocked_commands.iter().any(|p| p == &pattern) {
+                self.blocked_commands.push(pattern);
+            }
+        }
+        if self.max_read_bytes == 0 {
+            self.max_read_bytes = default_max_read_bytes();
+        }
+        if self.max_write_bytes == 0 {
+            self.max_write_bytes = default_max_write_bytes();
+        }
+        if self.shell_timeout_ms == 0 {
+            self.shell_timeout_ms = default_shell_timeout_ms();
+        }
+        if self.max_shell_output_bytes == 0 {
+            self.max_shell_output_bytes = default_max_shell_output_bytes();
+        }
+        if self.max_shell_output_lines == 0 {
+            self.max_shell_output_lines = default_max_shell_output_lines();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,17 +115,46 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_config_data_default_enabled_false() {
+    fn sanitize_restores_safe_floors_from_zeros_and_empty_blocklist() {
         let json = r#"{"enabled":false,"allowed_directories":[],"writable_directories":[],"blocked_commands":[],"max_read_bytes":0,"max_write_bytes":0,"shell_timeout_ms":0,"max_shell_output_bytes":0,"max_shell_output_lines":0}"#;
-        let config: SandboxConfigData = serde_json::from_str(json).unwrap();
+        let mut config: SandboxConfigData = serde_json::from_str(json).unwrap();
+        config.sanitize();
         assert!(!config.enabled);
         assert!(config.allowed_directories.is_empty());
-        assert!(config.blocked_commands.is_empty());
-        assert_eq!(config.max_read_bytes, 0);
-        assert_eq!(config.max_write_bytes, 0);
-        assert_eq!(config.shell_timeout_ms, 0);
-        assert_eq!(config.max_shell_output_bytes, 0);
-        assert_eq!(config.max_shell_output_lines, 0);
-        assert!(config.db_socket.is_none());
+        let defaults = default_blocked_commands();
+        for pattern in &defaults {
+            assert!(
+                config.blocked_commands.contains(pattern),
+                "missing default block pattern: {pattern}"
+            );
+        }
+        assert_eq!(config.max_read_bytes, default_max_read_bytes());
+        assert_eq!(config.max_write_bytes, default_max_write_bytes());
+        assert_eq!(config.shell_timeout_ms, default_shell_timeout_ms());
+        assert_eq!(config.max_shell_output_bytes, default_max_shell_output_bytes());
+        assert_eq!(config.max_shell_output_lines, default_max_shell_output_lines());
+    }
+
+    #[test]
+    fn sanitize_keeps_user_patterns_and_non_zero_limits() {
+        let mut config = SandboxConfigData {
+            blocked_commands: vec!["custom_danger".into()],
+            max_read_bytes: 1024,
+            max_write_bytes: 2048,
+            shell_timeout_ms: 5_000,
+            max_shell_output_bytes: 4096,
+            max_shell_output_lines: 100,
+            ..SandboxConfigData::default()
+        };
+        config.sanitize();
+        assert!(config.blocked_commands.iter().any(|p| p == "custom_danger"));
+        for pattern in default_blocked_commands() {
+            assert!(config.blocked_commands.contains(&pattern));
+        }
+        assert_eq!(config.max_read_bytes, 1024);
+        assert_eq!(config.max_write_bytes, 2048);
+        assert_eq!(config.shell_timeout_ms, 5_000);
+        assert_eq!(config.max_shell_output_bytes, 4096);
+        assert_eq!(config.max_shell_output_lines, 100);
     }
 }

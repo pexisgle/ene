@@ -337,9 +337,10 @@ impl ToolHostManager {
                 serde_json::Value::Object(m) if m.is_empty() => None,
                 _ => Some(entry.config.clone()),
             };
-            let sandbox =
+            let mut sandbox =
                 serde_json::from_value::<ene_tool_proto::SandboxConfigData>(entry.config.clone())
                     .unwrap_or_default();
+            sandbox.sanitize();
             let db_token = db_tokens.remove(name);
             match Self::start_tool(name, &sandbox, tool_config, timeout_ms, db_token).await {
                 Ok(supervised_entry) => {

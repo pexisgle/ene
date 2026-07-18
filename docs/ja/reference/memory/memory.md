@@ -4,14 +4,16 @@ SQLite + sqlite-vec + Diesel ベースのエピソディック記憶。ベクト
 
 ## 初期化
 
-`EneActor` が `reconfigure()` 中に記憶を初期化:
+ランタイムは `EneHandle::open` 中に記憶を初期化します:
 
-1. `embedding` 設定から埋め込みプロバイダを作成
+1. `embedding` / AI タスク設定から埋め込みプロバイダを作成
 2. `store.enabled == true` なら `MemoryStore::open()` を呼び出し
 3. sqlite-vec 拡張を登録しマイグレーションを実行
 4. ストアと埋め込みを `session.memory` にアタッチ
 
-記憶は `EneStateSnapshot` 経由でも CLI コマンド (`/memory search`, `/session summaries`) で利用可能。
+**スキーマリセット:** ストアは単一の初期マイグレーションのみを持ちます。スキーマ統合をまたぐアップグレード前に、ユーザーデータディレクトリ下の既存 SQLite メモリ DB を削除してください。インプレースのレガシー移行パスはありません。
+
+記憶は `EneStateSnapshot` 経由でも CLI コマンド (`/memory search`) で利用可能。
 
 ## MemoryStore
 
@@ -26,56 +28,15 @@ pub struct MemoryStore {
 
 ### データベーステーブル
 
-```sql
-conversation_summaries (
-    id INTEGER PRIMARY KEY,
-    session_id TEXT,
-    card_name TEXT,
-    summary TEXT,
-    embedding BLOB,     -- f32 ベクトルとしてバイナリ
-    created_at TEXT,    -- RFC3339
-    ended_at TEXT       -- RFC3339
-)
+初期スキーママイグレーションが作成する主要テーブル:
 
-conversation_keyfacts (
-    id INTEGER PRIMARY KEY,
-    card_name TEXT,
-    summary_id INTEGER REFERENCES conversation_summaries(id),
-    key TEXT,
-    value TEXT,
-    created_at TEXT
-)
+- `conversation_logs` — 生のターン記録
+- `typed_memories` / `memory_embeddings` / `memory_links` / `memory_spans` — 認知型付きメモリ
+- `affect_states` / `pending_affect_proposals` — 感情レジャー
+- `commitments` — コンパニオンコミットメントレジャー
+- `tool_embedding_index` / `__tool_schemas` — Tool RAG + ツール DB IPC メタデータ
 
-conversation_logs (
-    id INTEGER PRIMARY KEY,
-    session_id TEXT,
-    card_name TEXT,
-    role TEXT,          -- "user" または "assistant"
-    content TEXT,
-    created_at TEXT
-)
-
-tool_embedding_index (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tool_name TEXT NOT NULL,
-    field TEXT NOT NULL CHECK (field IN ('summary','description','capability','example','negative')),
-    field_key TEXT NOT NULL,        -- 単一行フィールドは ""、ToolRagProfile の例行は ex_N
-    version_hash TEXT NOT NULL,
-    model_name TEXT NOT NULL,
-    embedding BLOB NOT NULL,
-    created_at TEXT NOT NULL,
-    UNIQUE(tool_name, field, field_key, model_name)
-)
-
-__tool_schemas (
-    prefix TEXT PRIMARY KEY,    -- ツール名プレフィックス (例: "fs_", "utility_")
-    schema_json TEXT,           -- 完全な JSON スキーマ宣言
-    fingerprint TEXT,           -- schema_json の blake3 ハッシュ
-    created_at TEXT             -- RFC3339
-)
-```
-
-`__tool_schemas` テーブルは、ツール DB IPC サーバーがどのツールがテーブルスキーマを宣言したかを追跡するためのメタデータレジストリです。ツール固有のテーブル (例: `fs_undo_entries`, `utility_todo_items`) は、ツールが接続してスキーマを宣言する際に動的に作成されます。
+列レベルの詳細は [型付きメモリと Memory Arbiter](#typed-memory--memory-arbiter-cognitive-runtime) およびコミットメント節を参照。
 
 ### 会話ログ
 

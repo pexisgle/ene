@@ -385,29 +385,63 @@ pub fn generate_schema_json() -> Result<String, serde_json::Error> {
                             .and_then(|d| d.get_mut("ToolConfig"))
                     };
                     if let Some(tool_config_def) = tool_config_def
-                        && let Some(tools_prop) = tool_config_def
+                        && let Some(props) = tool_config_def
                             .get_mut("properties")
-                            .and_then(|p| p.get_mut("tools"))
-                        && let Some(tools_obj) = tools_prop.as_object_mut()
-                        && let Some(properties) = tools_obj
-                            .entry("properties".to_string())
-                            .or_insert_with(|| serde_json::json!({}))
-                            .as_object_mut()
+                            .and_then(|p| p.as_object_mut())
+                    {
+                        let map_key = if props.contains_key("list") {
+                            "list"
+                        } else if props.contains_key("tools") {
+                            "tools"
+                        } else {
+                            ""
+                        };
+                        if !map_key.is_empty()
+                            && let Some(tools_prop) = props.get_mut(map_key)
+                            && let Some(tools_obj) = tools_prop.as_object_mut()
+                            && let Some(properties) = tools_obj
+                                .entry("properties".to_string())
+                                .or_insert_with(|| serde_json::json!({}))
+                                .as_object_mut()
+                        {
+                            let mut clean_entry = entry_val.clone();
+                            if let Some(obj) = clean_entry.as_object_mut() {
+                                obj.remove("definitions");
+                                obj.remove("$schema");
+                            }
+                            properties.insert(
+                                key.clone(),
+                                serde_json::json!({
+                                    "allOf": [
+                                        { "$ref": "#/definitions/ToolEntry" },
+                                        clean_entry
+                                    ]
+                                }),
+                            );
+                        }
+                    }
+                } else if parent_key == "tools" {
+                    // Nested under `tools.*` (e.g. `tools.rag`), sibling of `list`.
+                    let tool_config_def = if root_obj.contains_key("definitions") {
+                        root_obj
+                            .get_mut("definitions")
+                            .and_then(|d| d.get_mut("ToolConfig"))
+                    } else {
+                        root_obj
+                            .get_mut("$defs")
+                            .and_then(|d| d.get_mut("ToolConfig"))
+                    };
+                    if let Some(tool_config_def) = tool_config_def
+                        && let Some(properties) = tool_config_def
+                            .get_mut("properties")
+                            .and_then(|p| p.as_object_mut())
                     {
                         let mut clean_entry = entry_val.clone();
                         if let Some(obj) = clean_entry.as_object_mut() {
                             obj.remove("definitions");
                             obj.remove("$schema");
                         }
-                        properties.insert(
-                            key.clone(),
-                            serde_json::json!({
-                                "allOf": [
-                                    { "$ref": "#/definitions/ToolEntry" },
-                                    clean_entry
-                                ]
-                            }),
-                        );
+                        properties.insert(key.clone(), clean_entry);
                     }
                 }
             } else if let Some(properties) = root_obj

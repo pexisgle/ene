@@ -215,7 +215,8 @@ impl SandboxConfig {
 }
 
 impl From<ene_tool_proto::SandboxConfigData> for SandboxConfig {
-    fn from(data: ene_tool_proto::SandboxConfigData) -> Self {
+    fn from(mut data: ene_tool_proto::SandboxConfigData) -> Self {
+        data.sanitize();
         let canonicalize_dirs = |dirs: Vec<String>| -> Vec<PathBuf> {
             dirs.into_iter()
                 .map(|s| {

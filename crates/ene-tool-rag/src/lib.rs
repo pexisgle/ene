@@ -2,8 +2,8 @@
 //!
 //! Tool RAG (Retrieval-Augmented Generation) pipeline for the ene AI character platform.
 //!
-//! Provides multi-vector tool embedding with weighted field similarity scoring,
-//! optional `HyDE` (Hypothetical Document Embedding), and optional LLM-based reranking.
+//! Provides multi-vector tool embedding with weighted field similarity scoring
+//! and optional cosine reranking. LLM `HyDE` is disabled (`use_hyde` is a no-op).
 //!
 //! ## Key Types
 //!

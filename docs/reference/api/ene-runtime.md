@@ -216,20 +216,7 @@ pub struct MemoryQueryHandle { /* opaque */ }
 
 ### Conversation summaries & key facts (legacy)
 
-| Method | Signature | Description |
-|---|---|---|
-| `search_summaries` (removed) | — | `MemoryQueryHandle` no longer exposes this method. Use `search_summaries` on `MemoryStore` directly if needed (deprecated, prefer typed `Query::search`). |
-| `list_recent_summaries` | `async fn list_recent_summaries(&self, card_name: &str, limit: usize) -> Result<Vec<ConversationSummary>, EneRuntimeError>` | Most recent summaries for a character card, in recency order. |
-| `get_all_keyfacts` | `async fn get_all_keyfacts(&self, card_name: &str) -> Result<Vec<KeyFact>, EneRuntimeError>` | All legacy key facts stored for a character card. |
-
-### Legacy → typed migration
-
-| Method | Signature | Description |
-|---|---|---|
-| `count_legacy_rows` | `async fn count_legacy_rows(&self, card_name: &str) -> Result<LegacyRowCounts, EneRuntimeError>` | Counts legacy `conversation_summaries`/`conversation_keyfacts` rows for a card. |
-| `migration_status` | `async fn migration_status(&self, card_name: &str) -> Result<Option<MigrationStatus>, EneRuntimeError>` | Current legacy → typed migration status, if any migration has been run. |
-| `migrate_legacy` | `async fn migrate_legacy(&self, card_name: &str, user_id: &str, dry_run: bool) -> Result<LegacyMigrationReport, EneRuntimeError>` | Runs the one-shot legacy → typed memory migration. `dry_run` previews without writing. |
-| `reset_legacy_memory` | `async fn reset_legacy_memory(&self, card_name: &str) -> Result<(), EneRuntimeError>` | **Destructive.** Clears all legacy memory rows for a character card. |
+Removed. Legacy summary/keyfact APIs are no longer exposed on `MemoryQueryHandle`.
 
 ### Typed memory (`ene-mind` / `ene-store`)
 

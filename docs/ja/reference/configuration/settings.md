@@ -308,8 +308,8 @@ OpenRouter で chat + classifier、ローカル埋め込み:
 {
   "rag": {
     "enabled": true,
-    "use_hyde": true,
-    "use_rerank": true,
+    "use_hyde": false,
+    "use_rerank": false,
     "top_k": 12,
     "final_n": 6,
     "background_index_on_startup": true
@@ -320,11 +320,11 @@ OpenRouter で chat + classifier、ローカル埋め込み:
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
 | `enabled` | bool | `true` | Tool RAG を有効化（ツール有効時、これが true なら embedder 必須） |
-| `use_hyde` | bool | `true` | 仮説文書埋め込みによるクエリ拡張 |
-| `use_rerank` | bool | `true` | 埋め込みベースの候補リランク |
+| `use_hyde` | bool | `false` | 予約済み。LLM HyDE は無効（no-op） |
+| `use_rerank` | bool | `false` | 候補の cosine 埋め込みリランク（LLM なし） |
 | `top_k` | int | `12` | リランク前の候補数 |
 | `final_n` | int | `6` | 最終返却ツール数 |
-| `background_index_on_startup` | bool | `true` | 起動時にインデックスをウォームアップ |
+| `background_index_on_startup` | bool | `true` | 起動時にバックグラウンドでインデックスをウォームアップ（`false` でスキップ） |
 
 ##### `tools.list.web` — ウェブ検索 API キー
 

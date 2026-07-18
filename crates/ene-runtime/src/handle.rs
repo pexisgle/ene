@@ -457,12 +457,13 @@ impl EneHandle {
         if let Some(rag) = &tool_rag {
             let specs = registry.list_tools();
             let profiles = registry.list_rag_profiles();
-            tracing::info!(component = "Bootstrap", "Warming up Tool RAG index...");
-            if let Err(e) = rag.ensure_index(&specs, &profiles).await {
-                tracing::warn!(
+            if rag.opts().background_index_on_startup {
+                tracing::info!(component = "Bootstrap", "Warming up Tool RAG index in background...");
+                rag.start_background_indexer(specs, profiles);
+            } else {
+                tracing::debug!(
                     component = "Bootstrap",
-                    error = %e,
-                    "Failed to warmup tool RAG index"
+                    "Skipping Tool RAG startup warmup (background_index_on_startup=false)"
                 );
             }
         }
@@ -1769,12 +1770,8 @@ async fn init_memory_store(
 
 /// Builds the `ToolRag` pipeline from the current config, embedder, and session state.
 ///
-/// Returns `None` when the pipeline is disabled. Logs an error
-/// and returns `None` when the config has an invalid `forced`
-/// tool name (the malformed entry is dropped so a single bad
-/// name does not prevent the rest of the tool RAG from
-/// working — but the error is surfaced via `tracing` so the
-/// operator can see it in the logs).
+/// Returns `None` when the pipeline is disabled. Invalid `forced` tool
+/// names are skipped with an error log; all other RAG knobs are preserved.
 fn init_tool_rag(
     config: &EneConfig,
     embedder: &Arc<dyn ene_ai::EmbeddingProvider>,
@@ -1787,15 +1784,14 @@ fn init_tool_rag(
     }
 
     let store = session.memory.memory_store.clone();
-    let opts = match ToolRagOptions::try_from(rag_config) {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::error!(
-                "[ToolRag] Invalid tool name in rag.forced config: {e}; building pipeline without forced tools"
-            );
-            ToolRagOptions::default()
-        }
-    };
+    let (opts, invalid) = ToolRagOptions::from_config_lenient(rag_config);
+    for message in invalid {
+        tracing::error!(
+            component = "ToolRag",
+            error = %message,
+            "Invalid tool name in rag.forced; skipping entry"
+        );
+    }
     Some(Arc::new(ToolRag::new(embedder.clone(), store, opts)))
 }
 

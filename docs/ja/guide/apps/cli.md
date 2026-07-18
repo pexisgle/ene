@@ -79,9 +79,7 @@ pub trait CliCommand: Send + Sync {
 | `/memory forget <id>` | メモリを user_deleted に遷移 |
 | `/memory dispute <id>` | メモリを disputed に遷移 |
 | `/memory restore <id>` | メモリを active に戻す |
-| `/memory status` | レガシー記憶（legacy）の移行状態と件数を表示 |
-| `/memory migrate legacy [--dry-run]` | レガシー記憶（legacy）から型付き記憶（typed）への一括移行を実行 |
-| `/memory reset legacy --yes` | legacy/typed メモリを破壊的に初期化 |
+| `/memory status` | 型付きメモリストアが有効かどうかを表示 |
 
 ### 感情コマンド
 

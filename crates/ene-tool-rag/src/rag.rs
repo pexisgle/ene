@@ -1,5 +1,7 @@
 //! Tool RAG pipeline — multi-vector embedding, field-weighted similarity,
-//! optional HyDE, optional LLM rerank, and per-category limits.
+//! optional cosine rerank, and per-category limits.
+//!
+//! LLM `HyDE` is disabled; `use_hyde` is retained as a no-op config knob.
 
 use ene_ai::{EmbeddingError, EmbeddingProvider, cosine_similarity, embed, embed_query};
 use ene_store::MemoryStore;
@@ -76,9 +78,9 @@ pub struct ToolRagOptions {
     pub top_k: usize,
     /// Number of final tools to return after reranking.
     pub final_n: usize,
-    /// Whether to use `HyDE` (hypothetical document embeddings).
+    /// Reserved for LLM `HyDE`; currently ignored (always no blend).
     pub use_hyde: bool,
-    /// Whether to rerank candidates with a cross-encoder.
+    /// Whether to cosine-rerank candidates (no LLM).
     pub use_rerank: bool,
     /// Number of candidates to consider during reranking.
     pub rerank_candidates: usize,
@@ -100,8 +102,8 @@ impl Default for ToolRagOptions {
             enabled: true,
             top_k: 12,
             final_n: 6,
-            use_hyde: true,
-            use_rerank: true,
+            use_hyde: false,
+            use_rerank: false,
             rerank_candidates: 24,
             min_similarity: 0.25,
             background_index_on_startup: true,
@@ -120,32 +122,49 @@ impl TryFrom<crate::config::ToolRagConfig> for ToolRagOptions {
     type Error = crate::ToolRagError;
 
     fn try_from(c: crate::config::ToolRagConfig) -> Result<Self, Self::Error> {
+        Ok(Self::from_config_lenient(c).0)
+    }
+}
+
+impl ToolRagOptions {
+    /// Builds options from config, skipping invalid `forced` names.
+    ///
+    /// Returns the resolved options and the list of invalid forced-name
+    /// error messages (empty when every name is valid). Other knobs are
+    /// always preserved — a bad forced entry never resets `top_k` / weights.
+    #[must_use]
+    pub fn from_config_lenient(c: crate::config::ToolRagConfig) -> (Self, Vec<String>) {
         let mut forced = Vec::with_capacity(c.forced.len());
+        let mut invalid = Vec::new();
         for name in c.forced {
-            forced.push(
-                ToolName::try_new(name).map_err(|e| crate::ToolRagError::Config { message: e })?,
-            );
+            match ToolName::try_new(name) {
+                Ok(tn) => forced.push(tn),
+                Err(e) => invalid.push(e),
+            }
         }
-        Ok(Self {
-            enabled: c.enabled,
-            top_k: c.top_k,
-            final_n: c.final_n,
-            use_hyde: c.use_hyde,
-            use_rerank: c.use_rerank,
-            rerank_candidates: c.rerank_candidates,
-            min_similarity: c.min_similarity,
-            background_index_on_startup: c.background_index_on_startup,
-            forced,
-            weights: FieldWeights::from(c.weights),
-            per_category_limits: c.per_category_limits,
-        })
+        (
+            Self {
+                enabled: c.enabled,
+                top_k: c.top_k,
+                final_n: c.final_n,
+                use_hyde: c.use_hyde,
+                use_rerank: c.use_rerank,
+                rerank_candidates: c.rerank_candidates,
+                min_similarity: c.min_similarity,
+                background_index_on_startup: c.background_index_on_startup,
+                forced,
+                weights: FieldWeights::from(c.weights),
+                per_category_limits: c.per_category_limits,
+            },
+            invalid,
+        )
     }
 }
 
 // ── Pipeline ──────────────────────────────────────────────────────────────
 
-/// The Tool RAG pipeline: embed → `HyDE` → weighted field similarity →
-/// optional rerank → top-N.
+/// The Tool RAG pipeline: embed → weighted field similarity →
+/// optional cosine rerank → top-N.
 pub struct ToolRag {
     embedder: Arc<dyn EmbeddingProvider>,
     store: Option<Arc<MemoryStore>>,
@@ -183,16 +202,20 @@ impl ToolRag {
 
     /// Construct from a config-level `ToolRagConfig`.
     ///
-    /// Returns an error if `config.forced` contains a tool
-    /// name that does not satisfy [`ToolName::is_valid`]. The
-    /// error originates from the untrusted config file, not
-    /// from this crate.
+    /// Invalid `forced` names are skipped (never fail construction).
     pub fn from_config(
         embedder: Arc<dyn EmbeddingProvider>,
         store: Option<Arc<MemoryStore>>,
         config: crate::config::ToolRagConfig,
     ) -> Result<Self, crate::ToolRagError> {
-        let opts = ToolRagOptions::try_from(config)?;
+        let (opts, invalid) = ToolRagOptions::from_config_lenient(config);
+        for message in invalid {
+            tracing::error!(
+                component = "ToolRag",
+                error = %message,
+                "Invalid tool name in rag.forced; skipping entry"
+            );
+        }
         Ok(Self::new(embedder, store, opts))
     }
 
@@ -441,8 +464,9 @@ impl ToolRag {
 
     /// Select the most relevant tools for the given query.
     ///
-    /// Pipeline: embed query → optional `HyDE` → per-tool weighted field
-    /// similarity → category limits → `top_k` → optional rerank → `final_n` + forced.
+    /// Pipeline: embed query → per-tool weighted field similarity →
+    /// category limits → `top_k` → optional cosine rerank → `final_n` + forced.
+    /// LLM `HyDE` is disabled (`use_hyde` is ignored).
     pub async fn select(&self, query: &str) -> Vec<ToolSpec> {
         let query_vec = match embed_query(self.embedder.as_ref(), query).await {
             Ok(v) => v,
@@ -498,26 +522,13 @@ impl ToolRag {
 
         let query_vec = query_embedding.to_vec();
 
-        let hyde_vec = if self.opts.use_hyde {
-            match ene_ai::hyde_document(None, query).await {
-                Ok(hyde_text) => {
-                    if hyde_text == query {
-                        Some(query_vec.clone())
-                    } else {
-                        ene_ai::embed(
-                            self.embedder.as_ref(),
-                            &hyde_text,
-                            ene_ai::EmbeddingKind::Hyde,
-                        )
-                        .await
-                        .ok()
-                    }
-                }
-                Err(_) => None,
-            }
-        } else {
-            None
-        };
+        // LLM HyDE is disabled; `use_hyde` is a reserved no-op knob.
+        if self.opts.use_hyde {
+            tracing::debug!(
+                component = "ToolRag",
+                "use_hyde is set but LLM HyDE is disabled; skipping HyDE blend"
+            );
+        }
         let t_hyde = t_start.elapsed();
 
         let cached_rows = {
@@ -571,17 +582,6 @@ impl ToolRag {
                 continue;
             }
             let sim = cosine_similarity(&query_vec, &row.embedding);
-            let blended = if let Some(ref hv) = hyde_vec {
-                if is_zero_norm(hv) {
-                    sim
-                } else {
-                    let hyde_sim = cosine_similarity(hv, &row.embedding);
-                    let blend = w.hyde_blend.clamp(0.0, 1.0);
-                    (hyde_sim * w.hyde).mul_add(blend, sim * (1.0 - blend))
-                }
-            } else {
-                sim
-            };
 
             let weight = match row.field.as_str() {
                 "summary" => w.summary,
@@ -593,7 +593,7 @@ impl ToolRag {
                 _ => 1.0,
             };
 
-            *per_tool.entry(row.tool_name.clone()).or_insert(0.0) += blended * weight;
+            *per_tool.entry(row.tool_name.clone()).or_insert(0.0) += sim * weight;
         }
 
         let mut scored: Vec<(String, f32)> = per_tool
@@ -903,5 +903,42 @@ mod tests {
             compute_index_hash(&specs, &p1),
             compute_index_hash(&specs, &p2)
         );
+    }
+
+    #[test]
+    fn from_config_lenient_skips_invalid_forced_and_keeps_knobs() {
+        let cfg = crate::config::ToolRagConfig {
+            top_k: 3,
+            final_n: 2,
+            use_hyde: true,
+            use_rerank: true,
+            min_similarity: 0.5,
+            forced: vec![
+                "utility.question".into(),
+                "NOT A VALID NAME!!!".into(),
+                "utility.todo_add".into(),
+            ],
+            ..crate::config::ToolRagConfig::default()
+        };
+        let (opts, invalid) = ToolRagOptions::from_config_lenient(cfg);
+        assert_eq!(invalid.len(), 1);
+        assert_eq!(opts.top_k, 3);
+        assert_eq!(opts.final_n, 2);
+        assert!(opts.use_hyde);
+        assert!(opts.use_rerank);
+        assert!((opts.min_similarity - 0.5).abs() < f32::EPSILON);
+        assert_eq!(opts.forced.len(), 2);
+        assert_eq!(opts.forced[0].as_str(), "utility.question");
+        assert_eq!(opts.forced[1].as_str(), "utility.todo_add");
+    }
+
+    #[test]
+    fn defaults_disable_hyde_and_rerank() {
+        let cfg = crate::config::ToolRagConfig::default();
+        assert!(!cfg.use_hyde);
+        assert!(!cfg.use_rerank);
+        let opts = ToolRagOptions::default();
+        assert!(!opts.use_hyde);
+        assert!(!opts.use_rerank);
     }
 }

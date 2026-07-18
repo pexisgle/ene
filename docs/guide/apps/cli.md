@@ -79,9 +79,7 @@ Commands are entered with `/` prefix:
 | `/memory forget <id>` | Mark memory as user-deleted |
 | `/memory dispute <id>` | Mark memory as disputed |
 | `/memory restore <id>` | Restore memory status to active |
-| `/memory status` | Show legacy migration status and row counts |
-| `/memory migrate legacy [--dry-run]` | Run one-shot legacy to typed migration |
-| `/memory reset legacy --yes` | Destructively reset legacy and typed memory |
+| `/memory status` | Show whether the typed memory store is enabled |
 
 ### Affect Commands
 

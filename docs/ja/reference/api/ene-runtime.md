@@ -212,20 +212,7 @@ pub struct MemoryQueryHandle { /* 非公開 */ }
 
 ### 会話サマリー・キーファクト（レガシー）
 
-| メソッド | シグネチャ | 説明 |
-|---|---|---|
-| `search_summaries` (削除済) | — | `MemoryQueryHandle` はこのメソッドを提供していません。必要な場合は `MemoryStore` の `search_summaries` を直接使ってください（非推奨、型付き `Query::search` を推奨）。 |
-| `list_recent_summaries` | `async fn list_recent_summaries(&self, card_name: &str, limit: usize) -> Result<Vec<ConversationSummary>, EneRuntimeError>` | キャラクターカードの最近のサマリーを新しい順で返す。 |
-| `get_all_keyfacts` | `async fn get_all_keyfacts(&self, card_name: &str) -> Result<Vec<KeyFact>, EneRuntimeError>` | キャラクターカードに保存されている全レガシーキーファクト。 |
-
-### レガシー → 型付きメモリ移行
-
-| メソッド | シグネチャ | 説明 |
-|---|---|---|
-| `count_legacy_rows` | `async fn count_legacy_rows(&self, card_name: &str) -> Result<LegacyRowCounts, EneRuntimeError>` | カードのレガシー `conversation_summaries`/`conversation_keyfacts` 行数を数える。 |
-| `migration_status` | `async fn migration_status(&self, card_name: &str) -> Result<Option<MigrationStatus>, EneRuntimeError>` | 移行が実行済みの場合、現在のレガシー→型付き移行ステータス。 |
-| `migrate_legacy` | `async fn migrate_legacy(&self, card_name: &str, user_id: &str, dry_run: bool) -> Result<LegacyMigrationReport, EneRuntimeError>` | ワンショットのレガシー→型付きメモリ移行を実行する。`dry_run` は書き込みなしでプレビューする。 |
-| `reset_legacy_memory` | `async fn reset_legacy_memory(&self, card_name: &str) -> Result<(), EneRuntimeError>` | **破壊的操作。** キャラクターカードのレガシーメモリ行をすべてクリアする。 |
+削除済み。レガシー summary/keyfact API は `MemoryQueryHandle` にありません。
 
 ### 型付きメモリ（`ene-mind` / `ene-store`）
 

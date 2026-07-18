@@ -11,22 +11,22 @@ User query
   ↓
 1. Embed query → query_embedding
   ↓
-2. Optional HyDE: generate hypothetical document embedding and blend with query
-  ↓
-3. For each tool, compute weighted similarity:
-   score = Σ (weight_i × cosine_sim(blended_query, tool_field_i))
+2. For each tool, compute weighted similarity:
+   score = Σ (weight_i × cosine_sim(query, tool_field_i))
    where fields are: summary, description, capability, example, negative
   ↓
-4. Apply per-category limits (e.g. max 3 Filesystem tools)
+3. Apply per-category limits (e.g. max 3 Filesystem tools)
   ↓
-5. Sort by score, take top_k candidates
+4. Sort by score, take top_k candidates
   ↓
-6. Optional embedding rerank when multiple candidates remain → pick final_n
+5. Optional cosine embedding rerank when `use_rerank` and multiple candidates remain → pick final_n
   ↓
-7. Always include forced tools regardless of score
+6. Always include forced tools regardless of score
   ↓
 Vec<ToolSpec> → passed to LLM
 ```
+
+LLM HyDE is disabled: `use_hyde` is a reserved no-op. Rerank never uses an LLM (cosine over description embeddings only).
 
 ## Configuration
 
@@ -35,9 +35,9 @@ Configure under `tools.rag` in `settings.json` (see [Settings](../configuration/
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | bool | `true` | Enable the Tool RAG pipeline |
-| `use_hyde` | bool | `true` | Hypothetical document embedding expansion |
-| `use_rerank` | bool | `true` | Embedding-based candidate rerank |
-| `background_index_on_startup` | bool | `true` | Warm the index at startup |
+| `use_hyde` | bool | `false` | Reserved; LLM HyDE is disabled (no-op) |
+| `use_rerank` | bool | `false` | Cosine embedding rerank of candidates (no LLM) |
+| `background_index_on_startup` | bool | `true` | Warm the index in a background task at startup |
 | `top_k` | int | `12` | Number of candidates before reranking |
 | `final_n` | int | `6` | Final number of tools sent to LLM |
 | `rerank_candidates` | int | `24` | Number of candidates considered during embedding rerank |

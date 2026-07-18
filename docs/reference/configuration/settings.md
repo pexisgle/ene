@@ -308,8 +308,8 @@ The database path is resolved automatically (`assets/characters/{name}/memory.db
 {
   "rag": {
     "enabled": true,
-    "use_hyde": true,
-    "use_rerank": true,
+    "use_hyde": false,
+    "use_rerank": false,
     "top_k": 12,
     "final_n": 6,
     "background_index_on_startup": true
@@ -320,11 +320,11 @@ The database path is resolved automatically (`assets/characters/{name}/memory.db
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `true` | Enable Tool RAG (when tools are enabled, embedder is required if this is true) |
-| `use_hyde` | bool | `true` | Hypothetical document embedding expansion |
-| `use_rerank` | bool | `true` | Embedding-based candidate rerank |
+| `use_hyde` | bool | `false` | Reserved; LLM HyDE is disabled (no-op) |
+| `use_rerank` | bool | `false` | Cosine embedding rerank of candidates (no LLM) |
 | `top_k` | int | `12` | Pre-rerank candidate count |
 | `final_n` | int | `6` | Final tools returned |
-| `background_index_on_startup` | bool | `true` | Warm the index at startup |
+| `background_index_on_startup` | bool | `true` | Warm the index in a background task at startup (`false` skips warmup) |
 
 ##### `tools.list.web` — Web Search API Keys
 
