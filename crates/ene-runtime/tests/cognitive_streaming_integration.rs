@@ -160,6 +160,8 @@ async fn run_stream_cognitive_path_completes_with_logs() {
     }
     assert!(saw_done, "expected terminal Done event");
 
-    let counts = store.count_legacy_rows("Ene").await.unwrap();
-    assert!(counts.logs >= 2, "user and assistant logs should be saved");
+    let sessions = store.list_session_ids_for_card("Ene").await.unwrap();
+    assert!(!sessions.is_empty(), "conversation logs should be saved");
+    let logs = store.get_logs_by_session(&sessions[0]).await.unwrap();
+    assert!(logs.len() >= 2, "user and assistant logs should be saved");
 }

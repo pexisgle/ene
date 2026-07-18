@@ -370,7 +370,7 @@ pub enum DbServerError {
 
 `ene-runtime` は依存関係グラフ上で下位にある各クレートのアイテムを再エクスポートしており、コンシューマーは一般的な用途では `ene_runtime::*` だけで済みます。特記のない限りすべての再エクスポートには `#[doc(no_inline)]` が付与されており、rustdocのリンクは元のクレートを指します。
 
-[API v2](../architecture/api-v2.md) 以降、この一覧は厳選されています。`EneHandle` 自身の公開シグネチャ（`EneStateSnapshot`、`EneEvent`、`HistoryEntry` など）に現れる型、または `ene-cli`/`ene-desktop` 全体で使用頻度の高い型のみを残しています。`ene-runtime` の外では使用されていない型はルートから削除しました — 必要な場合は所有クレートから直接インポートしてください。
+[API v1](../architecture/api-v1.md) 以降、この一覧は厳選されています。`EneHandle` 自身の公開シグネチャ（`EneStateSnapshot`、`EneEvent`、`HistoryEntry` など）に現れる型、または `ene-cli`/`ene-desktop` 全体で使用頻度の高い型のみを残しています。`ene-runtime` の外では使用されていない型はルートから削除しました — 必要な場合は所有クレートから直接インポートしてください。
 
 | ソースクレート | 再エクスポートされるアイテム |
 |---|---|
@@ -531,7 +531,7 @@ async fn main() -> anyhow::Result<()> {
 
 - [`ene-mind`](./ene-mind.md) — ストリーミング認知ディスパッチパスが呼び出す認知ランタイムエンジン
 - [認知ランタイムアーキテクチャ（ADR）](../architecture/cognitive-runtime.md) — 認知ディスパッチの判断根拠となる設計の全体像
-- [API v2](../architecture/api-v2.md) — ホスト / イベント契約
+- [API v1](../architecture/api-v1.md) — ホスト / イベント契約
 - [`ene-ai`](./ene-ai.md) — LLMと埋め込みプロバイダーのトレイト
 - [`ene-store`](./ene-store.md) — 永続メモリストア
 - [`ene-tool-host`](./ene-tool-host.md) — ツールプロセスのライフサイクルとTool RAG

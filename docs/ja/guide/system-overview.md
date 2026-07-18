@@ -36,5 +36,5 @@ CLI や Desktop などのホストアプリは、チャットイベントバス�
 ## さらに深く
 
 - 概念: [ターン](concepts/turns.md)、[セッション](concepts/sessions.md)、[記憶](concepts/memory.md)、[感情](concepts/emotions.md)
-- 設計契約: [アーキテクチャ概要](../reference/architecture/overview.md)、[API v2](../reference/architecture/api-v2.md)
+- 設計契約: [アーキテクチャ概要](../reference/architecture/overview.md)、[API v1](../reference/architecture/api-v1.md)
 - 公開 API: [API インデックス](../reference/api/index.md)

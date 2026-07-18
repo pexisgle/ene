@@ -40,7 +40,7 @@ This project is an AI assistant application written in Rust that merges VTuber-l
 ## 4. Architecture & Philosophy
 
 ### 4.1 Crate Splits
-The workspace is highly granularly split to enforce strict boundaries and prevent circular dependencies (API v2).
+The workspace is highly granularly split to enforce strict boundaries and prevent circular dependencies (API v1).
 * **`ene-runtime`**: Host facade (`EneHandle::open`, `TurnId`, chat events, diagnostics). Ties together mind, store, AI providers, and tool host.
 * **`ene-mind`**: Cognitive turn pipeline (session, recall, affect, Performance arbitration, memory writing). Does **not** depend on `ene-runtime` or `ene-tool-host`.
 * **`ene-store`**: Exclusively owns `sea-orm` SQLite operations. Does **not** depend on `ene-ai` or `ene-mind`.

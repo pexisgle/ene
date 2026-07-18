@@ -63,11 +63,7 @@ pub fn split_text_and_special_tokens(
     (text_deltas, special_tokens)
 }
 
-/// Extracts the emotion name from an emotion token like `<|emo:happy|>`,
-/// returning `None` if the token is not a valid emotion token.
-///
-/// Deprecated in favour of [`parse_performance_marker`] for the `<|perf:…|>` grammar.
-/// Kept for backward compatibility with LLMs that may still emit `<|emo:…|>` tokens.
+/// Extracts the emotion name from an emotion token like `<|emo:happy|>`.
 pub fn extract_emotion_from_token(token: &str) -> Option<String> {
     let upper = token.to_ascii_uppercase();
     if !upper.starts_with("<|EMO:") || !upper.ends_with("|>") {
@@ -301,7 +297,7 @@ fn parse_motion_marker(rest: &str) -> Option<PerformanceCue> {
 mod tests {
     use super::*;
 
-    // ── extract_emotion_from_token (backward compat) ──
+    // ── extract_emotion_from_token ──
 
     #[test]
     fn test_extract_emotion_simple() {

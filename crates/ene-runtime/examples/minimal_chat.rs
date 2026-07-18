@@ -1,6 +1,6 @@
 //! # ene-runtime Minimal Chat Example
 //!
-//! Demonstrates the API v2 host path:
+//! Demonstrates the API v1 host path:
 //! 1. Load config + character card via `ene-config`
 //! 2. [`EneHandle::open`] — ready before return
 //! 3. [`EneHandle::run`] → [`TurnId`], subscribe to events, cancel by id

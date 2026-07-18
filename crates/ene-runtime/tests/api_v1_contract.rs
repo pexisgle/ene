@@ -1,4 +1,4 @@
-//! API v2 contract tests for the ready-handle facade (#111).
+//! API v1 contract tests for the ready-handle facade (#111).
 
 #![expect(
     clippy::unwrap_used,

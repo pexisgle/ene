@@ -22,10 +22,10 @@
 ## プロトコルバージョン
 
 ```rust
-pub const IPC_PROTOCOL_VERSION: u32 = 2;
+pub const IPC_PROTOCOL_VERSION: u32 = 1;
 ```
 
-双方が `Handshake` / `HandshakeAck` メッセージで自分のバージョンを送信します。サーバー（`run_tool_server`）はバージョンの不一致を**厳密に拒否**します — ダウングレードや交渉は行わず、`IpcResponse::Error` で接続を終了します。この定数は、ワイヤーフォーマットが後方互換性のない形で変更された場合にのみバンプしてください（[AGENTS.md §6 R3](../../../../AGENTS.md) を参照）。バージョン **4** は [`ToolRagProfile`](#toolragprofile) (#137) 用の `ListRagProfiles` / `RagProfiles` を追加します。`ToolSpec` は LLM 向けのみ（`name` / `description` / `parameters`）のままです。
+双方が `Handshake` / `HandshakeAck` メッセージで自分のバージョンを送信します。サーバー（`run_tool_server`）はバージョンの不一致を**厳密に拒否**します — ダウングレードや交渉は行わず、`IpcResponse::Error` で接続を終了します。この定数は、ワイヤーフォーマットが後方互換性のない形で変更された場合にのみバンプしてください（[AGENTS.md §6 R3](../../../../AGENTS.md) を参照）。現在のワイヤー形式は 9 リクエスト / 7 レスポンスバリアントを持ち、[`ToolRagProfile`](#toolragprofile)（#137）向けに `ListRagProfiles` / `RagProfiles` を含みます。`ToolSpec` は LLM 向けのみ（`name` / `description` / `parameters`）のままです。
 
 ---
 
@@ -75,7 +75,7 @@ pub trait ToolProvider: Send + Sync {
 | `set_sandbox(&self, sandbox: &SandboxConfigData)` | 任意 | no-op | サンドボックス設定を受け取る（ファイルシステム／シェルツールで使用）。 |
 | `approve_permission(&self, request_id: &str)` | 任意 | no-op | ID で保留中の破壊的操作の許可リクエストを承認する。 |
 | `allow_pattern(&self, action: &str, target_pattern: &str)` | 任意 | no-op | セッション全体の許可パターン（アクション + ターゲットのグロブ）を追加する。 |
-| `set_config(&self, config: &serde_json::Value)` | 任意 | no-op | ツール固有の設定を受け取る（`Initialize` または `SetMyConfig` 時に呼ばれる）。 |
+| `set_config(&self, config: &serde_json::Value)` | 任意 | no-op | `Handshake` でプッシュされるツール固有設定を受け取る。 |
 | `get_config(&self) -> serde_json::Value` | 任意 | `Value::Null` | ツールの現在の設定を返す。 |
 | `config_schema(&self) -> Option<serde_json::Value>` | 任意 | `None` | このツールが受け付ける設定の JSON スキーマを返す。 |
 
@@ -108,7 +108,7 @@ pub struct HostRegistry { /* private fields */ }
 
 impl HostRegistry {
     pub fn new() -> Self;
-    pub fn add_provider(&mut self, provider: Box<dyn ToolProvider>);
+    pub fn try_add_provider(&mut self, provider: Box<dyn ToolProvider>) -> Result<(), ToolError>;
     pub fn list_specs(&self) -> Vec<ToolSpec>;
     pub async fn call_tool(&self, name: &ToolName, arguments: &str) -> Result<String, ToolError>;
     pub fn set_session_id(&self, session_id: &str);
@@ -125,7 +125,7 @@ impl ToolProvider for HostRegistry { /* ... */ }
 | メソッド | 説明 |
 |---|---|
 | `new()` | 空のレジストリを作成する。 |
-| `add_provider(provider)` | プロバイダーを登録する。ツール名が競合した場合は先に登録されたプロバイダーが優先される。プロバイダーが公開する `ToolSpec::name` すべてをインデックス化する。 |
+| `try_add_provider(provider)` | プロバイダーを登録する。既に登録済みの名前と衝突した場合は `ToolError::DuplicateName` を返す。 |
 | `list_specs()` | 登録されたすべてのプロバイダーからのツールスペックを連結して返す。 |
 | `call_tool(name, arguments)` | `name` を登録したプロバイダーにディスパッチする。どのプロバイダーもその名前を所有していない場合は `ToolError::NotFound` を返す。 |
 | `set_session_id(session_id)` | セッション ID を登録済みの全プロバイダーにブロードキャストする。 |
@@ -333,7 +333,7 @@ pub struct SandboxConfigData {
 }
 ```
 
-`IpcRequest::Handshake` 時に送信され（v3 で旧 `Initialize` から吸収）、`ene_config::define_tool_config!` によって生成される、サンドボックスポリシーのシリアライズ可能な POD 表現です。フィールドの補足：
+`IpcRequest::Handshake` 時に送信され、`ene_config::define_tool_config!` によって生成される、サンドボックスポリシーのシリアライズ可能な POD 表現です。フィールドの補足：
 
 - `db_socket` — ツールごとの DB IPC ソケット（Unix ドメインソケット）へのパス。ツールバイナリはここに接続して、型付き CRUD 用のコア DB サーバーに到達します（[`ene-tool-db`](./ene-tool-db.md) を参照）。
 - `db_auth_token` — ツールバイナリが最初の `ene_tool_db::DbRequest::Handshake` で提示しなければならない事前共有トークン。`None` の場合、そのツールの DB アクセスは完全に無効化されます。
@@ -471,8 +471,8 @@ pub enum MultiAnswer {
 
 ```rust
 pub enum IpcRequest {
-    Handshake { version: u32 },
-    Initialize {
+    Handshake {
+        version: u32,
         sandbox: SandboxConfigData,
         tool_config: Option<serde_json::Value>,
     },
@@ -480,30 +480,23 @@ pub enum IpcRequest {
     ListRagProfiles,
     GetConfigSchema,
     CallTool { name: String, arguments: String },
-    SetSessionId { session_id: String },
+    SetCallContext { conversation_id: String, turn_id: String },
     ApprovePermission { request_id: String },
     AllowPattern { action: String, target_pattern: String },
-    GetMyConfig,
-    SetMyConfig(serde_json::Value),
-    Ping,
     Shutdown,
 }
 ```
 
 | バリアント | 用途 |
 |---|---|
-| `Handshake { version }` | プロトコルバージョンを交渉する。必ず最初のメッセージであること。 |
-| `Initialize { sandbox, tool_config }` | サンドボックスポリシーとツールごとの設定を提供する。 |
-| `ListTools` | ツールの完全なメタデータリストをリクエストする。 |
-| `ListRagProfiles` | ホスト/RAG メタデータプロファイルをリクエストする (#137)。 |
-| `GetConfigSchema` | ツールの設定 JSON スキーマをリクエストする。 |
+| `Handshake { version, sandbox, tool_config }` | プロトコルバージョンを交渉し、サンドボックス + ツール設定をプッシュする。 |
+| `ListTools` | ツールの LLM 向け `ToolSpec` リストをリクエストする。 |
+| `ListRagProfiles` | ホスト/RAG 向け `ToolRagProfile` リストをリクエストする（#137）。 |
+| `GetConfigSchema` | ツールの設定 JSON スキーマをリクエストする（#150 例外）。 |
 | `CallTool { name, arguments }` | 名前と JSON 引数でツールを起動する。 |
-| `SetSessionId { session_id }` | アクティブなセッション ID を伝播する。 |
+| `SetCallContext { conversation_id, turn_id }` | 会話 + ターン識別子を伝播する。 |
 | `ApprovePermission { request_id }` | 保留中のパーミッションリクエストを承認する。 |
 | `AllowPattern { action, target_pattern }` | サンドボックスの許可リストにパターンを追加する。 |
-| `GetMyConfig` | ツールの設定を取得する。 |
-| `SetMyConfig(value)` | ツールの設定を置き換える。 |
-| `Ping` | ヘルスチェック ping。 |
 | `Shutdown` | グレースフルシャットダウン。 |
 
 ---
@@ -520,8 +513,6 @@ pub enum IpcResponse {
     RagProfiles { profiles: Vec<ToolRagProfile> },
     ConfigSchema { schema: Option<serde_json::Value> },
     CallResult { result: Result<String, ToolError> },
-    MyConfig(serde_json::Value),
-    Pong,
     Error { message: String },
 }
 ```
@@ -529,13 +520,11 @@ pub enum IpcResponse {
 | バリアント | 用途 |
 |---|---|
 | `HandshakeAck { version }` | Handshake を受理し、交渉後のバージョンを返す。 |
-| `Ack` | 汎用の確認応答（`Initialize`、`SetSessionId` などへの応答）。 |
+| `Ack` | 汎用の確認応答（`SetCallContext`、パーミッションなど）。 |
 | `Tools { tools }` | `ListTools` への応答。 |
-| `RagProfiles { profiles }` | `ListRagProfiles` への応答。メガツールはアクションごとに1プロファイル。 |
+| `RagProfiles { profiles }` | `ListRagProfiles` への応答（#137）。 |
 | `ConfigSchema { schema }` | `GetConfigSchema` への応答。 |
 | `CallResult { result }` | `CallTool` への応答。 |
-| `MyConfig(value)` | `GetMyConfig` への応答。 |
-| `Pong` | `Ping` への応答。 |
 | `Error { message }` | 特定の呼び出し外で発生したツール側の回復不能エラー（例：ハンドシェイクのバージョン不一致）。 |
 
 ### メッセージシーケンス図
@@ -545,8 +534,6 @@ pub enum IpcResponse {
  │                             │
  │── Handshake ───────────────▶│
  │◀── HandshakeAck ────────────│
- │── Initialize ──────────────▶│
- │◀── Ack ─────────────────────│
  │── ListTools ───────────────▶│
  │◀── Tools([...]) ────────────│
  │                             │
@@ -558,7 +545,7 @@ pub enum IpcResponse {
  │    [ホストが承認]            │
  │── ApprovePermission(id) ───▶│
  │◀── Ack ─────────────────────│
- │── CallTool(name, args) ────▶│   再試行
+ │── CallTool(name, args) ────▶│   リトライ
  │◀── CallResult(Ok(str)) ─────│
 ```
 
@@ -685,18 +672,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 ```rust,no_run
 use ene_tool_proto::{HostRegistry, ToolProvider, run_tool_server};
 
-fn build_registry(a: Box<dyn ToolProvider>, b: Box<dyn ToolProvider>) -> HostRegistry {
+fn build_registry(a: Box<dyn ToolProvider>, b: Box<dyn ToolProvider>) -> Result<HostRegistry, ToolError> {
     let mut registry = HostRegistry::new();
-    registry.add_provider(a);
-    registry.add_provider(b);
-    registry
+    registry.try_add_provider(a)?;
+    registry.try_add_provider(b)?;
+    Ok(registry)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let a: Box<dyn ToolProvider> = unimplemented!();
     let b: Box<dyn ToolProvider> = unimplemented!();
-    let registry = build_registry(a, b);
+    let registry = build_registry(a, b)?;
     run_tool_server(Box::new(registry)).await?;
     Ok(())
 }

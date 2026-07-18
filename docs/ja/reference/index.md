@@ -6,7 +6,7 @@ AI エージェントと深いコントリビューション向けの設計契�
 
 ## 最初に読む（エージェント）
 
-1. [API v2](architecture/api-v2.md) — ロック済みホスト契約（`EneHandle::open`、`TurnId`、Busy、イベント）
+1. [API v1](architecture/api-v1.md) — ロック済みホスト契約（`EneHandle::open`、`TurnId`、Busy、イベント）
 2. [アーキテクチャ概要](architecture/overview.md) — クレートマップとターン流れ
 3. [API インデックス](api/index.md) — 各ライブラリクレートの公開面
 4. 以降は必要に応じて下のトピックへ
@@ -16,7 +16,7 @@ AI エージェントと深いコントリビューション向けの設計契�
 | ドキュメント | トピック |
 |--------------|----------|
 | [概要](architecture/overview.md) | クレートマップ、ターン流れ |
-| [API v2](architecture/api-v2.md) | ホスト契約 ADR |
+| [API v1](architecture/api-v1.md) | ホスト契約 ADR |
 | [起動](architecture/startup.md) | Desktop / CLI ブート |
 | [認知ランタイム](architecture/cognitive-runtime.md) | mind / 記憶 / 感情 ADR |
 | [Avatar Performance](architecture/avatar-performance.md) | `PerformanceCue` ADR |

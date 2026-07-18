@@ -67,14 +67,14 @@ pub struct ToolHostManager { /* private */ }
 
 | メソッド | シグネチャ | 説明 |
 |--------|-----------|-------------|
-| `start` | `pub async fn start(config: &EneConfig, db_tokens: HashMap<String, String>) -> Result<Self, ToolHostError>` | `config.tool` を読み取り、`enabled` な各ツールプロセスを（監視付き・自動再接続レジストリでラップして）生成し、設定済みのMCPサーバーへ接続する。`db_tokens` はツール名 → ツールごとのデータベース認証トークンをマッピングし、各ツールが生成される際にそのサンドボックス設定へ消費・転送される。`add_registry` で拡張可能な未開始のマネージャーを返す。 |
+| `start` | `pub async fn start(config: &EneConfig, db_tokens: HashMap<String, String>) -> Result<Self, ToolHostError>` | `config.tool` を読み取り、`enabled` な各ツールプロセスを（監視付き・自動再接続レジストリでラップして）生成し、設定済みのMCPサーバーへ接続する。`db_tokens` はツール名 → ツールごとのデータベース認証トークンをマッピングし、各ツールが生成される際にそのサンドボックス設定へ消費・転送される。`try_add_registry` で拡張可能な未開始のマネージャーを返す。 |
 | `start_full` | `pub async fn start_full(config: &EneConfig, db_tokens: HashMap<String, String>) -> Result<Arc<dyn ToolRegistry>, ToolHostError>` | 便利なラッパー: `start` を呼び出した後 `into_registry` を呼ぶ。ほとんどのアプリケーションではこちらを使用する。 |
 
 ### インスタンスメソッド
 
 | メソッド | シグネチャ | 説明 |
 |--------|-----------|-------------|
-| `add_registry` | `pub fn add_registry(&mut self, registry: Arc<dyn ToolRegistry>)` | 変換前に追加のレジストリ（例: カスタムのインプロセスレジストリ）を追加する。内部で `CompositeToolRegistry::add_registry` に委譲する。 |
+| `try_add_registry` | `pub fn try_add_registry(&mut self, registry: Arc<dyn ToolRegistry>) -> Result<(), ToolHostError>` | 変換前に追加のレジストリ（例: カスタムのインプロセスレジストリ）を追加する。名前衝突時は `ToolHostError::DuplicateToolName` を返す。 |
 | `into_registry` | `pub fn into_registry(self) -> Arc<dyn ToolRegistry>` | マネージャーを消費し、`Arc<dyn ToolRegistry>` として返す（自身がトレイトを実装し、内部の合成レジストリに委譲する）。 |
 
 ### 例
@@ -114,23 +114,20 @@ pub struct IpcToolRegistry { /* private */ }
 プロセス生成
      │
      ▼
-Handshake  { version: IPC_PROTOCOL_VERSION }
-     │
-     ▼
-Initialize { sandbox, tool_config }
+Handshake  { version, sandbox, tool_config }
      │
      ▼
 ListTools  → Vec<ToolSpec> をキャッシュ
      │
      ▼
-CallTool / SetSessionId / … の準備完了
+CallTool / SetCallContext / … の準備完了
 ```
 
 ### コンストラクタとメソッド
 
 | メソッド | シグネチャ | 説明 |
 |--------|-----------|-------------|
-| `new` | `pub async fn new(socket_path: PathBuf, sandbox: SandboxConfigData, tool_config: Option<serde_json::Value>, timeout_ms: u64) -> Result<Self, ToolHostError>` | ソケットに接続し、handshake/initialize/list-toolsの一連の流れを実行し、結果の `ToolSpec` をキャッシュする。`timeout_ms`（`ToolConfig::timeout_ms` から取得）は以降のすべてのリクエストに適用され、ハングしたツール呼び出しがホストを無期限にブロックしないようにする。 |
+| `new` | `pub async fn new(socket_path: PathBuf, sandbox: SandboxConfigData, tool_config: Option<serde_json::Value>, timeout_ms: u64) -> Result<Self, ToolHostError>` | ソケットに接続し、handshake/list-toolsの一連の流れを実行し、結果の `ToolSpec` をキャッシュする。`timeout_ms`（`ToolConfig::timeout_ms` から取得）は以降のすべてのリクエストに適用され、ハングしたツール呼び出しがホストを無期限にブロックしないようにする。 |
 | `refresh_tools` | `pub async fn refresh_tools(&self) -> Result<(), ToolHostError>` | `ListTools` を再送し、内部キャッシュを更新する。ホットリロード後に有用。 |
 | `socket_path` | `pub fn socket_path(&self) -> &PathBuf` | このレジストリが接続しているIPCソケットパスを返す。 |
 | `get_config_schema` | `pub async fn get_config_schema(&self) -> Option<serde_json::Value>` | `GetConfigSchema` を介してツールバイナリの設定スキーマを取得する。 |
@@ -170,7 +167,7 @@ pub struct CompositeToolRegistry {
 
 struct CompositeState {
     registries: Vec<Arc<dyn ToolRegistry>>,
-    /// tool_name -> registries内のインデックスへのマッピング。new/add_registry で構築される。
+    /// tool_name -> registries内のインデックスへのマッピング。new/try_add_registry で構築される。
     tool_index: HashMap<String, usize>,
 }
 ```
@@ -178,9 +175,9 @@ struct CompositeState {
 | メソッド | シグネチャ | 説明 |
 |--------|-----------|-------------|
 | `new` | `pub fn new(registries: Vec<Arc<dyn ToolRegistry>>) -> Self` | 与えられたレジストリから順に合成レジストリと `tool_index` を構築する。 |
-| `add_registry` | `pub fn add_registry(&self, registry: Arc<dyn ToolRegistry>)` | レジストリを追加し、そのツールをインデックス化する。`&self` を取る（内部の `RwLock` を使用）ため、合成レジストリが共有された後でも呼び出せる。 |
+| `try_add_registry` | `pub fn try_add_registry(&self, registry: Arc<dyn ToolRegistry>) -> Result<(), ToolHostError>` | レジストリを追加し、そのツールをインデックス化する。名前衝突時は `ToolHostError::DuplicateToolName` を返す。`&self` を取る（内部の `RwLock` を使用）ため、合成レジストリが共有された後でも呼び出せる。 |
 
-`call_tool` は、すべてのサブレジストリの `list_tools()` を走査する代わりに `tool_index.get(name)` を参照して所有レジストリをO(1)で見つけ、直接そこへディスパッチします — 名前がインデックスに存在しない場合は `ToolHostError::Protocol(ToolError::NotFound { .. })` を返します。名前衝突はハードエラーです — 複数のレジストリで同じツール名が重複すると、構築時に `ToolHostError::DuplicateToolName` が返ります。
+`call_tool` は、すべてのサブレジストリの `list_tools()` を走査する代わりに `tool_index.get(name)` を参照して所有レジストリをO(1)で見つけ、直接そこへディスパッチします — 名前がインデックスに存在しない場合は `ToolHostError::Protocol(ToolError::NotFound { .. })` を返します。名前衝突はハードエラーです — 複数のレジストリで同じツール名が重複すると、`try_add_registry` 時に `ToolHostError::DuplicateToolName` が返ります。
 
 ---
 

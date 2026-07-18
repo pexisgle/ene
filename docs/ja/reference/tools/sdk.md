@@ -422,27 +422,27 @@ pub enum ToolError {
 ツールバイナリ起動
   → ENE_TOOL_SOCKET で待機 (ToolHostManager が環境変数として提供)
   → IpcRequest::Handshake を受信 → HandshakeAck を応答
-  → Handshake が sandbox + tool_config を運ぶ (Initialize は v3 で吸収)
+  → Handshake が sandbox + tool_config を運ぶ
   → CallTool リクエストを処理可能に
 ```
 
 ## プロトコルバリアント
 
-`IPC_PROTOCOL_VERSION = 4` の IPC ワイヤープロトコルは、9 種類のリクエストバリアントと 7 種類のレスポンスバリアントを持ちます。`UserInput` は IPC バリアントでは**ありません** — `ToolError::UserInputRequired` を通じて表面化され、`ene-runtime` のストリーミングループで処理されます。
+`IPC_PROTOCOL_VERSION = 1` の IPC ワイヤープロトコルは、9 種類のリクエストバリアントと 7 種類のレスポンスバリアントを持ちます。`UserInput` は IPC バリアントでは**ありません** — `ToolError::UserInputRequired` を通じて表面化され、`ene-runtime` のストリーミングループで処理されます。
 
 ### リクエスト（ホスト → ツール）
 
-| バリアント | ペイロード | セマンティクス | Since |
-|---|---|---|---|
-| `Handshake` | `version: u32`, `sandbox: SandboxConfigData`, `tool_config: Option<Value>` | プロトコル交渉 + サンドボックス設定 + ツール設定プッシュ（Initialize は v3 で吸収） | v1 |
-| `ListTools` | — | プロバイダから全 `ToolSpec` を取得 | v1 |
-| `ListRagProfiles` | — | ホスト/RAG 用 `ToolRagProfile` メタデータを取得 (#137) | v4 |
-| `GetConfigSchema` | — | ツール設定の JSON Schema をリクエスト（#150 例外、「6 つの主要」リクエストには含まれない） | v2 |
-| `CallTool` | `name: String`, `arguments: String` | ツール名と JSON 引数でツールを実行 | v1 |
-| `SetCallContext` | `conversation_id: String`, `turn_id: String` | 会話・ターン識別子をツールに伝達（v2 `SetSessionId` を置換） | v2 |
-| `ApprovePermission` | `request_id: String` | ペンディング中の破壊的操作の権限リクエストを承認 | v1 |
-| `AllowPattern` | `action: String`, `target_pattern: String` | セッション全体の権限許可パターンを登録（アクション + ターゲットグロブ） | v1 |
-| `Shutdown` | — | 正常終了リクエスト | v1 |
+| バリアント | ペイロード | セマンティクス |
+|---|---|---|
+| `Handshake` | `version: u32`, `sandbox: SandboxConfigData`, `tool_config: Option<Value>` | プロトコル交渉 + サンドボックス設定 + ツール設定プッシュ |
+| `ListTools` | — | プロバイダから全 `ToolSpec` を取得 |
+| `ListRagProfiles` | — | ホスト/RAG 用 `ToolRagProfile` メタデータを取得 (#137) |
+| `GetConfigSchema` | — | ツール設定の JSON Schema をリクエスト（#150 例外） |
+| `CallTool` | `name: String`, `arguments: String` | ツール名と JSON 引数でツールを実行 |
+| `SetCallContext` | `conversation_id: String`, `turn_id: String` | 会話・ターン識別子をツールに伝達 |
+| `ApprovePermission` | `request_id: String` | ペンディング中の破壊的操作の権限リクエストを承認 |
+| `AllowPattern` | `action: String`, `target_pattern: String` | セッション全体の権限許可パターンを登録 |
+| `Shutdown` | — | 正常終了リクエスト |
 
 ### レスポンス（ツール → ホスト）
 
@@ -454,7 +454,7 @@ pub enum ToolError {
 | `RagProfiles` | `profiles: Vec<ToolRagProfile>` | `ListRagProfiles` |
 | `ConfigSchema` | `schema: Option<Value>` | `GetConfigSchema` |
 | `CallResult` | `result: Result<String, ToolError>` | `CallTool` |
-| `Error` | `error: String` | IPC レベルで失敗した任意のリクエスト |
+| `Error` | `message: String` | IPC レベルで失敗した任意のリクエスト |
 
 ## ABI 互換性
 

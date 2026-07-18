@@ -5,7 +5,7 @@ The sandbox system confines tool operations to a configured set of directories a
 ## Configuration Delivery
 
 1. `SandboxConfigData` is created from `settings.json` → `sandbox` section
-2. Sent to each tool binary via `IpcRequest::Handshake` (sandbox + `tool_config` folded from former `Initialize` at v3)
+2. Sent to each tool binary via `IpcRequest::Handshake` (sandbox + `tool_config` included in the handshake)
 3. Tool-side `Sandbox` struct enforces all access controls
 
 ## SandboxConfigData

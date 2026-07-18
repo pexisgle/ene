@@ -22,7 +22,7 @@
 
 ### チャットバスにないもの
 
-API v2 では次はチャット `EneEvent` ではありません。
+API v1 では次はチャット `EneEvent` ではありません。
 
 | 旧 / 診断 | 現在の置き場所 |
 |---|---|
@@ -45,7 +45,7 @@ API v2 では次はチャット `EneEvent` ではありません。
 ## 関連ドキュメント
 
 - [`ene-runtime` APIリファレンス](../api/ene-runtime.md) — `EneEvent` のフィールドとストリーミングディスパッチ
-- [API v2 ADR](../architecture/api-v2.md) — ホスト / イベント契約
+- [API v1 ADR](../architecture/api-v1.md) — ホスト / イベント契約
 - [セッション分割と圧縮](session-split.md) — ハード分割より圧縮を推奨する理由
 - [ストリーミングエンジン](streaming.md) — アクター/ハンドルアーキテクチャ
 - [認知ランタイムADR](../architecture/cognitive-runtime.md)

@@ -4,16 +4,15 @@
 //!
 //! ## Features
 //!
-//! - **Conversation summaries**: Persistent storage of conversation summaries with vector embeddings
-//! - **Key facts**: User-specific key-value facts with upsert and latest-value retrieval
-//! - **Vector similarity search**: Cosine-similarity-based recall of semantically relevant past conversations
+//! - **Key facts**: User-specific key-value facts (domain type for summarization output)
+//! - **Vector similarity search**: Cosine-similarity-based recall of semantically relevant memories
 //! - **Tool RAG**: Embedding-based tool selection (stored in `tool_embedding_index` table, multi-vector per tool)
 //! - **Conversation logging**: Full conversation history in `conversation_logs` for audit and replay
 //!
 //! ## Crate Boundaries
 //!
 //! Enforced by [AGENTS.md §4.1](../../AGENTS.md) and
-//! [API v2](../../docs/reference/architecture/api-v2.md):
+//! [API v1](../../docs/reference/architecture/api-v1.md):
 //!
 //! - `ene-store` is the **sole owner** of the `SQLite` / `sea-orm` connection and schema
 //!   for the entire workspace. No other crate (`ene-mind`, `ene-runtime`, tool
@@ -44,10 +43,6 @@
     clippy::option_if_let_else,
     reason = "nursery style; match/if-let clarity preferred locally"
 )]
-#![expect(
-    deprecated,
-    reason = "sea-orm migration API still uses deprecated items"
-)]
 #![cfg_attr(
     test,
     expect(
@@ -70,8 +65,6 @@ pub mod entities;
 pub mod error;
 /// Memory forgetting lifecycle (decay score and status transitions).
 pub mod forgetting;
-/// Legacy memory table migration (#98).
-pub mod legacy_migration;
 /// `SeaORM` schema migrations.
 pub mod migrator;
 /// Hybrid memory search scoring.
@@ -96,18 +89,10 @@ pub use forgetting::{
     emotional_impact, faded_decay_anchor, target_status_after_decay, user_restorable_statuses,
     validate_transition, validate_user_restore,
 };
-/// Legacy migration types and orchestration (#98).
-pub use legacy_migration::{
-    LegacyMigrationOptions, LegacyMigrationReport, LegacyRowCounts, MigrationStatus,
-    execute_legacy_migration, keyfact_kind_for_key,
-};
 /// Document-to-document lexical similarity for recall diversification.
 pub use search::document_lexical_similarity;
 /// Core memory types.
-pub use store::{
-    ActiveSceneSummaryRow, ConversationSummary, KeyFact, LegacyWriteMode, MemoryStore,
-    NaturalDecayReport, NewMemorySpan, RecalledSummary,
-};
+pub use store::{ActiveSceneSummaryRow, KeyFact, MemoryStore, NaturalDecayReport, NewMemorySpan};
 /// Typed memory domain types.
 pub use typed_memory::{
     AffectAnnotation, HybridSearchWeights, MemoryCandidateSource, MemoryConfidence, MemoryItem,

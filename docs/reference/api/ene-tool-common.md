@@ -249,7 +249,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 ```
 
-`run_tool_server` handles the full IPC lifecycle: handshake, initialize, list-tools, and dispatch loop. See [`ene-tool-proto`](./ene-tool-proto.md) for details.
+`run_tool_server` handles the full IPC lifecycle: handshake, list-tools, and dispatch loop. See [`ene-tool-proto`](./ene-tool-proto.md) for details.
 
 ---
 

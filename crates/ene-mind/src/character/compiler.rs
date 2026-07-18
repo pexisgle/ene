@@ -143,12 +143,6 @@ fn truncate_preserving_core(core_block: &str, max_chars: usize) -> String {
     truncate_chars(core_block, max_chars)
 }
 
-/// Back-compat wrapper used by older call sites.
-#[must_use]
-pub fn compile_identity_kernel(card: &CharacterCardV3, user_name: &str) -> IdentityKernel {
-    CharacterCompiler::compile(card, user_name, DEFAULT_IDENTITY_KERNEL_MAX_TOKENS)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

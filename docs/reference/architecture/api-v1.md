@@ -1,4 +1,4 @@
-# ADR: API v2 — Functional Redesign
+# ADR: API v1 — Functional Redesign
 
 - **Status:** Accepted
 - **Date:** 2026-07-13
@@ -6,7 +6,7 @@
 
 ## Context
 
-The library surface grew dual streaming pipelines (legacy + cognitive), an unready `EneHandle::new` lifecycle, chat-critical events mixed with diagnostics, parallel config knobs (`memory.*` vs `mind.memory.*`), and an `EmbeddingProvider` trait that also owned HyDE/rerank. API v2 collapses these into a minimal host contract with clear crate ownership.
+ene exposes a minimal host contract with clear crate ownership: a ready `EneHandle::open` lifecycle, mandatory `TurnId` correlation, a minimal chat event bus, opt-in diagnostics, and policy knobs owned by the correct crates (`store.*` for persistence toggles, `mind.*` for recall/write/decay/emotion/performance).
 
 ## Locked Decisions
 
@@ -14,7 +14,7 @@ The library surface grew dual streaming pipelines (legacy + cognitive), an unrea
 
 1. **`TurnId` is mandatory.** `run(input) -> Result<TurnId, Busy | ActorDead>`. Every turn-scoped event and `cancel(turn)` carry that id.
 2. **Concurrency:** single-flight. A second `run` while a turn is active returns `Busy` — never silent abort or broadcast-only correlation.
-3. **Lifecycle:** `EneHandle::open(config, card) -> Result<ReadyHandle, _>`. No public unready `new` + multi-step `load_config` / `load_character`. Config file I/O stays in `ConfigStore` / `ene-config`.
+3. **Lifecycle:** `EneHandle::open(config, card) -> Result<ReadyHandle, _>`. Config file I/O stays in `ConfigStore` / `ene-config`.
 4. **`Terminal` means chat-path turn completion** after conversation history commit and synchronous `finalize_turn` (affect persist). LLM memory extraction (`write_memories`), natural forgetting, and post-turn affect **classification** are fire-and-forget after `Terminal` and must not delay Done or keep the turn gate busy.
 
 ### Events
@@ -29,15 +29,15 @@ The library surface grew dual streaming pipelines (legacy + cognitive), an unrea
 
 ### Crate map
 
-| Target | Absorbs |
+| Crate | Role |
 |---|---|
-| `ene-runtime` | Former `ene-core` host / actor facade |
-| `ene-mind` | Cognitive engine + session (absorbs former `ene-session`) |
-| `ene-store` | Persistence (former memory store surface) |
-| `ene-ai` | `ene-provider` + `ene-embedding` |
-| `ene-tool` | `ene-tool-proto` + `ene-tool-common` + `ene-tool-derive` |
+| `ene-runtime` | Host / actor facade |
+| `ene-mind` | Cognitive engine + session |
+| `ene-store` | Persistence |
+| `ene-ai` | LLM + embedding providers |
+| `ene-tool` | Tool ABI facade (`ene-tool-proto` + `ene-tool-common` + `ene-tool-derive`) |
 | `ene-tool-db` | IPC CRUD client for tool binaries → `ene-runtime`'s `DbIpcServer`; depends only on `ene-tool-proto` |
-| `ene-tool-host` / `ene-tool-rag` / `ene-config` / `ene-vrm` | same (+ LayerComposer internal to vrm/desktop) |
+| `ene-tool-host` / `ene-tool-rag` / `ene-config` / `ene-vrm` | Tool orchestration, Tool RAG, configuration, VRM rendering |
 
 ### Dependency rules
 
@@ -47,7 +47,6 @@ The library surface grew dual streaming pipelines (legacy + cognitive), an unrea
 - `ene-tool-host` ↛ `ene-ai` / `ene-store` / `ene-mind` — Tool RAG lives in `ene-tool-rag`
 - `ene-tool-rag` depends on `ene-ai` (embedding, HyDE, rerank) + `ene-store` (persistent tool embeddings)
 - **`PerformanceCue` lives in `ene-mind`**; runtime re-exports; **`ene-vrm` does not depend on mind/runtime**
-- Fold `ene-common` into `ene-config` (`Truncate` / `TruncateResult` live in `ene_config::truncate`) and `ene-tool-common` (re-export); drop `schema_link` (runtime depends on mind normally)
 
 ### Config ownership
 
@@ -60,8 +59,8 @@ The library surface grew dual streaming pipelines (legacy + cognitive), an unrea
 - [#119](https://github.com/pexisgle/ene/issues/119) Memory — ledger sole SoT; store has no embedder
 - [#126](https://github.com/pexisgle/ene/issues/126) Performance — `PerformanceCue` in mind; no `CueSource::Host` without explicit `perform`
 - [#135](https://github.com/pexisgle/ene/issues/135) Tools — name collision = hard error at every registry layer; wire vs host traits; `ToolSpec` LLM-facing only (`name`, `description`, `parameters`), internal RAG fields `#[doc(hidden)]` + `#[serde(skip)]`
-- [#138](https://github.com/pexisgle/ene/issues/138) IPC — 8 request / 6 response variants (v3); `UserInput` surfaced through `ToolError`
-- [#158](https://github.com/pexisgle/ene/issues/158) ABI reconciliation — #135 contracts aligned with implementation: `CompositeToolRegistry` hard error, dead IPC variants removed, `SingleActionProvider` added
+- [#138](https://github.com/pexisgle/ene/issues/138) IPC — 9 request / 7 response variants; `UserInput` surfaced through `ToolError`
+- [#158](https://github.com/pexisgle/ene/issues/158) ABI reconciliation — #135 contracts aligned with implementation: `CompositeToolRegistry` hard error, `SingleActionProvider` added
 
 ## Target Dependency Graph
 
@@ -110,14 +109,14 @@ handle.diagnostics() -> &EneDiagnostics;
 | Variant | Notes |
 |---|---|
 | `TextDelta { turn, delta }` | Markers stripped |
-| `Performance { turn, cues, source }` | Replaces SpecialToken + Expression |
+| `Performance { turn, cues, source }` | Avatar cues for the UI |
 | `ToolCallStart` / `ToolCallResult` | Optional for UI |
 | `PermissionRequired` / `UserInputRequired` | Gates |
 | `ContextCompressed { turn, … }` | Thin signal; details on diagnostics |
 | `Terminal { turn, reason }` | Full turn done |
 | `StatusChanged { status }` | Idle / Running / Error |
 
-Removed from chat: `SpecialToken`, standalone `Expression`, `SessionSplit`, `PipelinePhase`, `PipelineMetrics`.
+Diagnostics-only (not on the chat bus): `PipelinePhase`, `PipelineMetrics`, and detailed arbiter/compression events.
 
 ## Error & Async Conventions
 
@@ -126,14 +125,6 @@ Removed from chat: `SpecialToken`, standalone `Expression`, `SessionSplit`, `Pip
 - One public `thiserror` enum per crate; no `anyhow` / bare `String` / `Box<dyn Error>` at library boundaries
 - No `unwrap` / `expect` outside tests
 
-## Migration Notes
-
-- No dual-pipeline fallback: missing embedder with memory features → fail closed
-- **Compression-only context boundary:** Context boundaries use rolling compression only. Hard session-ID minting / hard-split is not a product path; `ene-runtime` does not spawn hard-split tasks
-- **Cancel:** abort the stream task immediately and discard in-flight session updates; emit `Terminal::Cancelled` at most once
-- Single `HistoryEntry { role: Role, content: String }` across mind + runtime snapshots
-- No public compatibility aliases or migration feature flags — callers update in the same change
-- Chat without store is supported; enabling memory without store + embedder fails closed
 ## Acceptance
 
 - [ ] Sub-issues #112–#118 closed or explicitly deferred

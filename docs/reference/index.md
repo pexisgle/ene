@@ -6,7 +6,7 @@ Design contracts, crate APIs, and implementation detail for AI agents and deep c
 
 ## Read first (agents)
 
-1. [API v2](architecture/api-v2.md) — locked host contract (`EneHandle::open`, `TurnId`, Busy, events)
+1. [API v1](architecture/api-v1.md) — locked host contract (`EneHandle::open`, `TurnId`, Busy, events)
 2. [Architecture overview](architecture/overview.md) — crate map and turn flow
 3. [API index](api/index.md) — public surface of every library crate
 4. Then topic docs below as needed
@@ -16,7 +16,7 @@ Design contracts, crate APIs, and implementation detail for AI agents and deep c
 | Document | Topic |
 |----------|-------|
 | [Overview](architecture/overview.md) | Crate map, turn flow |
-| [API v2](architecture/api-v2.md) | Host contract ADR |
+| [API v1](architecture/api-v1.md) | Host contract ADR |
 | [Startup](architecture/startup.md) | Desktop and CLI boot |
 | [Cognitive runtime](architecture/cognitive-runtime.md) | Mind / memory / affect ADR |
 | [Avatar Performance](architecture/avatar-performance.md) | `PerformanceCue` ADR |

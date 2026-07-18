@@ -77,31 +77,12 @@ __tool_schemas (
 
 `__tool_schemas` テーブルは、ツール DB IPC サーバーがどのツールがテーブルスキーマを宣言したかを追跡するためのメタデータレジストリです。ツール固有のテーブル (例: `fs_undo_entries`, `utility_todo_items`) は、ツールが接続してスキーマを宣言する際に動的に作成されます。
 
-### 要約
+### 会話ログ
 
 | メソッド | 説明 |
 |---------|------|
 | `open(path, dims)` | 永続ストアを開き、マイグレーションを実行 |
 | `open_in_memory(dims)` | テスト用のインメモリストア |
-| `insert_summary(session_id, card, summary, facts, emb, ended)` | 要約 + キーファクトをトランザクションで挿入。空の `value` はファクトを削除。 |
-| `search_summaries(query_emb, card, limit, threshold)` | `vec_distance_cosine` によるコサイン類似度検索 |
-| `list_recent_summaries(card, limit)` | `created_at DESC` で最新順 |
-| `delete_summary(id)` | カスケード削除 (関連キーファクトも削除) |
-| `count_summaries(card)` | キャラクターの要約数をカウント |
-
-### キーファクト
-
-| メソッド | 説明 |
-|---------|------|
-| `get_all_keyfacts(card)` | キーごとの最新値 (`ROW_NUMBER() PARTITION BY key ORDER BY created_at DESC`) |
-| `upsert_keyfact(card, key, value)` | 新しい行を挿入 (クエリ時に最新が選択) |
-| `delete_keyfact(card, key)` | キーの全行を削除 |
-| `count_keyfacts(card)` | ユニークキー数をカウント |
-
-### 会話ログ
-
-| メソッド | 説明 |
-|---------|------|
 | `insert_log(id, card, role, content)` | 単一メッセージを記録 |
 | `get_logs_by_session(id)` | セッションの全メッセージを取得 |
 
@@ -299,8 +280,6 @@ score =
 - `user_id` 指定時は他ユーザーの user-specific memory を除外します。`user_id` が空の character scope 行は引き続き表示対象です。
 - 複数ソースから集めた候補は memory id で de-dupe してから順位付けします。
 
-ベクトル類似度のみが必要な既存呼び出し向けに `search_typed_memories(...)` は従来どおり残しています。
-
 ### 説明可能な想起理由（#74）
 
 `MemoryStore::search` は生の `ScoredMemory` を返します。理由付けは `ene-mind::recall` の責務で、後続の recall execution がそれを `RecalledMemory` DTO に変換します。各結果には次が含まれます。
@@ -411,45 +390,6 @@ retention =
 - `faded` 記憶（および低信頼度の `active`）に `[uncertain] `
 - `disputed` 記憶に `[disputed] `
 
-レガシー `conversation_keyfacts` には、明示的な移行で typed memory に変換した場合のみ同じ uncertain/disputed マーカーが付く。通常の mind recall は `recall_context` 行をマージしない。
-
-## レガシーテーブルからの移行
-
-mind ランタイムは **新規 memory を typed memory のみに書き込みます**。移行またはリセットを行うまで、レガシーテーブル（`conversation_summaries`, `conversation_keyfacts`）は **read-only** です。
-
-### マッピング規則（one-shot migration）
-
-| レガシーテーブル | 移行先 | 規則 |
-|------------------|--------|------|
-| `conversation_summaries` | `typed_memories` (`Episodic`) | `content` ← 要約本文; `confidence = 0.7`, `salience = 0.5`; embedding を `memory_embeddings` にコピー; `source_ref = legacy:summary:{id}` |
-| `conversation_keyfacts` | `UserProfile` または `Preference` | `pref_*`, `like`, `dislike` に一致 → `Preference`; それ以外 → `UserProfile`; `title` = key, `content` = value |
-| `conversation_logs` | `memory_spans` | user/assistant ペアごとに span; `raw_excerpt` に本文; `compressed_summary` は rolling compression（#79）でランタイム更新 |
-
-ランタイム（認知パス）では、`ene-mind::context::compression` が `mind.context` の閾値超過時にシーンレベル span を書き込む。アクティブなシーン要約は `MemoryStore::get_active_scene_summary` 経由で `PromptPacket` の **Current Scene** セクションに注入される。`conversation_logs` は常に保持される。
-
-移行状態はキャラクターごとに `memory_migration_meta` に記録されます。
-
-### ユーザー選択肢
-
-1. **何もしない（read-only レガシーデータ）** — 移行完了まで、レガシー summaries/keyfacts は通常の mind recall の外に残ります。新規抽出 memory は typed のみ。各ターンの raw log は引き続き `conversation_logs` に追記。
-2. **`/memory migrate legacy`** — 単一トランザクションで one-shot 変換 + migration marker 設定。以降 typed-only recall。
-3. **`/memory reset legacy --yes`** — レガシーテーブル truncate + typed memory クリア（破壊的操作、確認必須）。memory span は当該カードの log に紐づく session のみ削除。
-
-### strict モード
-
-`mind.memory.require_migration = true` にすると、**レガシー summaries または keyfacts** が残り migration 未完了の場合 recall をブロックします。通常チャットで増える `conversation_logs` だけではブロックされません。`LegacyMemoryNotMigrated` と reset/migrate ガイダンスを返します。
-
-### リセット手順
-
-移行せず初期化する場合:
-
-```bash
-ene-cli
-/memory reset legacy --yes
-```
-
-またはユーザーデータディレクトリの SQLite ファイルを削除して再起動（全キャラクターの memory が失われます）。
-
 ## Companion Commitment Ledger（約束・タスク台帳）
 
 「次回これを話そう」などのフォローアップは専用の `commitments` テーブルに保存する：
@@ -464,7 +404,6 @@ commitments (
     status TEXT NOT NULL DEFAULT 'active',  -- active | done | cancelled | stale
     due_at TEXT NULL,
     due_label TEXT NULL,                    -- 抽出時の生の期限ヒント（"tomorrow", "次回"）
-    source_memory_id INTEGER NULL REFERENCES typed_memories(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     completed_at TEXT NULL
@@ -475,7 +414,6 @@ commitments (
 |----------|------|
 | `insert_commitment(item)` | 新しい commitment 行を挿入 |
 | `get_commitment(id)` | 主キーで取得 |
-| `get_commitment_by_source_memory(memory_id)` | typed memory に紐づく ledger 行を検索 |
 | `list_active_commitments(character_id, user_id, limit)` | プロンプト注入用の active 行（ベクトル検索なし） |
 | `complete_commitment(id)` | `done` に遷移 |
 | `cancel_commitment(id)` | `cancelled` に遷移 |
@@ -483,7 +421,7 @@ commitments (
 
 **期限:** 抽出器は `MemoryCandidate::commitment_due` を生成し、ledger 行では `due_label` として保存する。自然言語の期限を `due_at` に parse する処理は未実装のため（[Cognitive Runtime ADR](../architecture/cognitive-runtime.md#companion-commitment-ledger) 参照）、`mark_stale_commitments` が対象にするのは `due_at` が明示的に入っている行のみ。
 
-**ランタイム接続:** `ene-mind::CommitmentLedger::arbitrate_apply_and_sync` は commitment 候補を **ledger-first**（唯一の SoT、#124）で書き込み、他 kind は Memory Arbiter で調停する — typed→ledger の dual-write / `sync_from_applied_decisions` はない。任意の typed 行は `typed_memories.commitment_id` で参照できる。`active_prompt_candidates` は Active Commitments `PromptPacket` セクション（#87）向けの軽量 DTO を生成する。CLI の list/complete コマンドは `/commitments`（#94）で利用できる。
+**ランタイム接続:** `ene-mind::CommitmentLedger::arbitrate_apply_and_sync` は commitment 候補を **ledger-first**（唯一の SoT、#124）で書き込み、他 kind は Memory Arbiter で調停する。任意の typed 行は `typed_memories.commitment_id` で参照できる。`active_prompt_candidates` は Active Commitments `PromptPacket` セクション（#87）向けの軽量 DTO を生成する。CLI の list/complete コマンドは `/commitments`（#94）で利用できる。
 
 ## メモリージャーナル（Desktop UX）
 

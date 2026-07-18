@@ -76,7 +76,7 @@ pub enum LlmProviderError {
     LocalLlm(String),
 }
 
-/// Single public error type for the `ene-ai` crate boundary (API v2 / #118).
+/// Single public error type for the `ene-ai` crate boundary (API v1 / #118).
 ///
 /// Domain-specific [`LlmProviderError`] and [`EmbeddingError`] remain available
 /// as nested payloads for typed matching via `AiError` variants.

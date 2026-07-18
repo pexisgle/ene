@@ -820,7 +820,8 @@ fn read_character_json_meta(
     let motions = (|| {
         let extensions = v.get("data")?.get("extensions")?;
         let ene = extensions.get("ene")?;
-        let motions_val = ene.get("motions")?;
+        let catalog = ene.get("motion_catalog")?;
+        let motions_val = catalog.get("motions")?;
         let motions: Vec<ene_config::MotionEntry> =
             serde_json::from_value(motions_val.clone()).ok()?;
         Some(motions)

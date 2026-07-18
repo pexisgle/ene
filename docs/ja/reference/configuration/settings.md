@@ -4,7 +4,7 @@ ene の設定は `assets/settings.json`（初回起動時は OS のユーザ設�
 
 読み込み: `ene_config::load_full_config()` / `ConfigStore` がデフォルト値、ファイル、環境変数を解決します。
 
-**API v2 の所有:** 永続化トグルは `store`（公開スキーマでは `enabled` のみ）。想起 / 書き込み / 減衰 / MMR / 感情の内部 / Performance 方針ノブは **`mind.*` のコードデフォルト** — ユーザー向けは `mind.emotion` と `mind.proactive` のポリシーフィールドのみ。トップレベルの `memory.*` 方針セクションや `cognition.enabled` 二重パイプラインスイッチはありません — mind パスが唯一のストリーミングパスです。
+**API v1 の所有:** 永続化トグルは `store`（公開スキーマでは `enabled` のみ）。想起 / 書き込み / 減衰 / MMR / 感情の内部 / Performance 方針ノブは **`mind.*` のコードデフォルト** — ユーザー向けは `mind.emotion` と `mind.proactive` のポリシーフィールドのみ。トップレベルの `memory.*` 方針セクションや `cognition.enabled` 二重パイプラインスイッチはありません — mind パスが唯一のストリーミングパスです。
 
 ## トップレベル構造 (`EneConfig`)
 
@@ -25,20 +25,6 @@ pub struct EneConfig {
 - 空文字 `""` → `assets_dir/characters/Alicia/character.json`（後方互換）。
 - パス区切りを含まない文字列 → `assets_dir/characters/{name}/character.json`。
 - `/` または `\` を含むパス → そのまま使用（絶対または相対のカードパス）。
-
-### マイグレーション（version 1 → 2）
-
-**自動移行はありません。** `settings.json` を手で書き換えてください。`"version": 2` を設定し、トップレベルの `provider` ブロックを `ai`（`providers` + `tasks`）に置き換えます。旧 `provider` キーは無視されます。
-
-| 旧 (`provider`) | 新 (`ai`) |
-|-----------------|-----------|
-| `name`, `base_url`, `api_key` | `"kind": "openai_compatible"` の `providers.<name>` |
-| `model`, `max_tokens` | `tasks.chat` |
-| `embedding.*` | `tasks.embedding`（任意で `query_prefix`） |
-| `proactive.generation_model` | `tasks.proactive`（任意の `TaskRef`；`null` = chat を使用） |
-| `proactive.decision.*` | `model_path` 付き `"kind": "local_gguf"` の `providers.<name>` を `tasks.proactive` から参照 |
-
-引き続きコードデフォルト中心（薄い公開 UI には出さないが、一部は JSON で設定可能）: トップレベル `session`、`web_config`、`tools.max_rounds` / `timeout_ms`、`mind.context`、大半の `mind.memory` / `mind.character`、拡張 `mind.proactive` / `mind.emotion` ノブ、`store.db_path`、`runtime_rules`。**再び設定可能:** `tools.rag`、`tools.list.fs` のサンドボックス制限。
 
 ## 完全な例
 

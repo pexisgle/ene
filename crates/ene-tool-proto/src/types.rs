@@ -479,7 +479,7 @@ fn format_keywords(keywords: &KeywordSet) -> String {
 
 /// The structured, LLM-facing tool specification.
 ///
-/// Per API v2 / #135 this is limited to the fields the model sees:
+/// Per API v1 / #135 this is limited to the fields the model sees:
 /// `name`, `description`, and `parameters` (JSON Schema).
 ///
 /// RAG metadata lives on [`ToolRagProfile`] (#137), not here.

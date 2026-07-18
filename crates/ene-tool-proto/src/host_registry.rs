@@ -48,27 +48,6 @@ impl HostRegistry {
         Ok(())
     }
 
-    /// Register a tool provider.
-    ///
-    /// # Panics
-    /// Panics on name collision. Prefer [`try_add_provider`](Self::try_add_provider)
-    /// at call sites where graceful error propagation is expected.
-    ///
-    /// See [`try_add_provider`](Self::try_add_provider) for the fallible variant.
-    #[expect(
-        clippy::panic,
-        reason = "legacy infallible API; prefer try_add_provider for fallible registration"
-    )]
-    pub fn add_provider(&mut self, provider: Box<dyn ToolProvider>) {
-        match self.try_add_provider(provider) {
-            Ok(()) => {}
-            Err(e) => {
-                tracing::error!(component = "HostRegistry", error = %e, "Failed to add provider");
-                panic!("HostRegistry::add_provider failed: {e}");
-            }
-        }
-    }
-
     /// Returns all tool specs from all registered providers.
     pub fn list_specs(&self) -> Vec<ToolSpec> {
         let mut specs = Vec::with_capacity(self.tool_index.len());
@@ -208,7 +187,8 @@ mod tests {
     #[test]
     fn host_registry_add_provider() {
         let mut reg = HostRegistry::new();
-        reg.add_provider(Box::new(MockProvider::new("alpha")));
+        reg.try_add_provider(Box::new(MockProvider::new("alpha")))
+            .unwrap();
         assert_eq!(reg.list_specs().len(), 1);
         assert_eq!(
             reg.list_specs().first().unwrap().name.as_str(),
@@ -219,8 +199,10 @@ mod tests {
     #[test]
     fn host_registry_aggregates_multiple_providers() {
         let mut reg = HostRegistry::new();
-        reg.add_provider(Box::new(MockProvider::new("alpha")));
-        reg.add_provider(Box::new(MockProvider::new("beta")));
+        reg.try_add_provider(Box::new(MockProvider::new("alpha")))
+            .unwrap();
+        reg.try_add_provider(Box::new(MockProvider::new("beta")))
+            .unwrap();
         let tools = reg.list_specs();
         assert_eq!(tools.len(), 2);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
@@ -245,7 +227,8 @@ mod tests {
     #[tokio::test]
     async fn host_registry_call_tool_found() {
         let mut reg = HostRegistry::new();
-        reg.add_provider(Box::new(MockProvider::new("alpha")));
+        reg.try_add_provider(Box::new(MockProvider::new("alpha")))
+            .unwrap();
         let result = reg
             .call_tool(&ToolName::new("tool_alpha"), "arg1")
             .await
@@ -269,7 +252,7 @@ mod tests {
         let mut reg = HostRegistry::new();
         let p1 = MockProvider::new("alpha");
         let ctx_ref = Arc::clone(&p1.call_ctx);
-        reg.add_provider(Box::new(p1));
+        reg.try_add_provider(Box::new(p1)).unwrap();
         let ctx = CallContext {
             conversation_id: "conv_xyz".into(),
             turn_id: "turn_1".into(),
@@ -286,7 +269,7 @@ mod tests {
         let mut reg = HostRegistry::new();
         let p1 = MockProvider::new("alpha");
         let sandbox_ref = Arc::clone(&p1.sandbox);
-        reg.add_provider(Box::new(p1));
+        reg.try_add_provider(Box::new(p1)).unwrap();
         let sandbox = SandboxConfigData {
             enabled: true,
             allowed_directories: vec![],

@@ -444,7 +444,6 @@ impl EneHandle {
                 .map_err(|e| {
                     EneRuntimeError::Memory(ene_store::MemoryError::MemoryStoreConnectionError(e))
                 })?;
-            store.set_legacy_write_mode(ene_store::LegacyWriteMode::ReadOnly);
             session.memory.memory_store = Some(store.clone());
             Some(store)
         } else {

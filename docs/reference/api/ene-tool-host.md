@@ -67,14 +67,14 @@ pub struct ToolHostManager { /* private */ }
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `start` | `pub async fn start(config: &EneConfig, db_tokens: HashMap<String, String>) -> Result<Self, ToolHostError>` | Reads `config.tool`, spawns every `enabled` tool process (wrapped in a supervised, auto-reconnecting registry), and connects configured MCP servers. `db_tokens` maps tool name → per-tool database auth token, consumed and forwarded into each tool's sandbox config as it is spawned. Returns an unstarted manager you can extend with `add_registry`. |
+| `start` | `pub async fn start(config: &EneConfig, db_tokens: HashMap<String, String>) -> Result<Self, ToolHostError>` | Reads `config.tool`, spawns every `enabled` tool process (wrapped in a supervised, auto-reconnecting registry), and connects configured MCP servers. `db_tokens` maps tool name → per-tool database auth token, consumed and forwarded into each tool's sandbox config as it is spawned. Returns an unstarted manager you can extend with `try_add_registry`. |
 | `start_full` | `pub async fn start_full(config: &EneConfig, db_tokens: HashMap<String, String>) -> Result<Arc<dyn ToolRegistry>, ToolHostError>` | Convenience wrapper: calls `start` then `into_registry`. Use this in most applications. |
 
 ### Instance methods
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `add_registry` | `pub fn add_registry(&mut self, registry: Arc<dyn ToolRegistry>)` | Appends an additional registry (e.g. a custom in-process registry) before conversion. Delegates to `CompositeToolRegistry::add_registry`. |
+| `try_add_registry` | `pub fn try_add_registry(&mut self, registry: Arc<dyn ToolRegistry>) -> Result<(), ToolHostError>` | Appends an additional registry (e.g. a custom in-process registry) before conversion. Returns `ToolHostError::DuplicateToolName` on name collision. |
 | `into_registry` | `pub fn into_registry(self) -> Arc<dyn ToolRegistry>` | Consumes the manager and returns it as `Arc<dyn ToolRegistry>` (it implements the trait itself, delegating to its internal composite). |
 
 ### Example
@@ -114,23 +114,20 @@ pub struct IpcToolRegistry { /* private */ }
 Spawn process
      │
      ▼
-Handshake  { version: IPC_PROTOCOL_VERSION }
-     │
-     ▼
-Initialize { sandbox, tool_config }
+Handshake  { version, sandbox, tool_config }
      │
      ▼
 ListTools  → caches Vec<ToolSpec>
      │
      ▼
-Ready for CallTool / SetSessionId / …
+Ready for CallTool / SetCallContext / …
 ```
 
 ### Constructor & methods
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `new` | `pub async fn new(socket_path: PathBuf, sandbox: SandboxConfigData, tool_config: Option<serde_json::Value>, timeout_ms: u64) -> Result<Self, ToolHostError>` | Connects to the socket, performs the handshake/initialize/list-tools sequence, and caches the resulting `ToolSpec`s. `timeout_ms` bounds every subsequent request (from `ToolConfig::timeout_ms`) so a hung tool call cannot block the host indefinitely. |
+| `new` | `pub async fn new(socket_path: PathBuf, sandbox: SandboxConfigData, tool_config: Option<serde_json::Value>, timeout_ms: u64) -> Result<Self, ToolHostError>` | Connects to the socket, performs the handshake/list-tools sequence, and caches the resulting `ToolSpec`s. `timeout_ms` bounds every subsequent request (from `ToolConfig::timeout_ms`) so a hung tool call cannot block the host indefinitely. |
 | `refresh_tools` | `pub async fn refresh_tools(&self) -> Result<(), ToolHostError>` | Re-sends `ListTools` and updates the internal cache. Useful after a hot-reload. |
 | `socket_path` | `pub fn socket_path(&self) -> &PathBuf` | Returns the IPC socket path this registry is connected to. |
 | `get_config_schema` | `pub async fn get_config_schema(&self) -> Option<serde_json::Value>` | Fetches the tool binary's config schema via `GetConfigSchema`. |
@@ -170,7 +167,7 @@ pub struct CompositeToolRegistry {
 
 struct CompositeState {
     registries: Vec<Arc<dyn ToolRegistry>>,
-    /// Maps tool_name -> index into `registries`, built in `new`/`add_registry`.
+    /// Maps tool_name -> index into `registries`, built in `new`/`try_add_registry`.
     tool_index: HashMap<String, usize>,
 }
 ```
@@ -178,9 +175,9 @@ struct CompositeState {
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `new` | `pub fn new(registries: Vec<Arc<dyn ToolRegistry>>) -> Self` | Builds the composite and its `tool_index` from the given registries in order. |
-| `add_registry` | `pub fn add_registry(&self, registry: Arc<dyn ToolRegistry>)` | Appends a registry and indexes its tools. Takes `&self` (uses an internal `RwLock`), so it can be called after the composite is shared. |
+| `try_add_registry` | `pub fn try_add_registry(&self, registry: Arc<dyn ToolRegistry>) -> Result<(), ToolHostError>` | Appends a registry and indexes its tools. Returns `ToolHostError::DuplicateToolName` on name collision. Takes `&self` (uses an internal `RwLock`), so it can be called after the composite is shared. |
 
-`call_tool` looks up `tool_index.get(name)` to find the owning registry in O(1) rather than scanning every sub-registry's `list_tools()`, then dispatches directly to it — returning `ToolHostError::Protocol(ToolError::NotFound { .. })` if the name isn't indexed. Name collision is a hard error — duplicate tool names across registries produce `ToolHostError::DuplicateToolName` at construction time.
+`call_tool` looks up `tool_index.get(name)` to find the owning registry in O(1) rather than scanning every sub-registry's `list_tools()`, then dispatches directly to it — returning `ToolHostError::Protocol(ToolError::NotFound { .. })` if the name isn't indexed. Name collision is a hard error — duplicate tool names across registries produce `ToolHostError::DuplicateToolName` at `try_add_registry` time.
 
 ---
 

@@ -12,7 +12,7 @@ use std::sync::Arc;
 /// and listens for requests over IPC.
 /// Shuts down upon receiving a `Shutdown` request.
 ///
-/// Returns [`ToolError`] (an alias for [`crate::EneToolProtoError`]) rather
+/// Returns [`ToolError`] rather
 /// than a boxed error trait object, so callers that want to `match` on the
 /// failure (e.g. distinguishing a bind failure from a transport error) can
 /// do so without downcasting. `ToolError` already has a `From<io::Error>`

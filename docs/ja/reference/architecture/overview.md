@@ -1,6 +1,6 @@
 # アーキテクチャ概要
 
-ene は API v2 ホスト契約（`ene-runtime`）と `ene-mind` 認知ターンパイプラインを中心としたモジュール型 Rust ワークスペースです。
+ene は API v1 ホスト契約（`ene-runtime`）と `ene-mind` 認知ターンパイプラインを中心としたモジュール型 Rust ワークスペースです。
 
 ## ランタイムアーキテクチャ
 
@@ -22,7 +22,7 @@ User input
 
 `ene-runtime` がこのフローを統合し、**最小**のチャットイベントバスを発行します。診断は別経路です。
 
-## 目標クレートマップ（API v2）
+## 目標クレートマップ（API v1）
 
 | クレート | 役割 |
 |---|---|
@@ -34,7 +34,7 @@ User input
 | `ene-config` | 設定、キャラクターカード、パス |
 | `ene-vrm` | VRM レンダリング（mind/runtime 依存なし） |
 
-ロック事項と依存グラフは [API v2](api-v2.md) を参照。
+ロック事項と依存グラフは [API v1](api-v1.md) を参照。
 
 ## メモリモデル
 
@@ -57,7 +57,7 @@ User input
 
 ## 参照
 
-- [API v2 ADR](api-v2.md)
+- [API v1 ADR](api-v1.md)
 - [認知ランタイム ADR](cognitive-runtime.md)
 - [アバター Performance ADR](avatar-performance.md)
 - [能動発話 ADR](proactive-speech.md)

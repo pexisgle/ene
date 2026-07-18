@@ -41,7 +41,7 @@ pub enum MultiAnswer {
 
 /// A prompt requesting interactive user input from a tool.
 ///
-/// Carried inside [`EneToolProtoError::UserInputRequired`] and surfaced to the
+/// Carried inside [`ToolError::UserInputRequired`] and surfaced to the
 /// UI as a structured question. The prompt always contains one or more
 /// [`QuestionItem`]s; the UI is expected to render one input control per item
 /// and return a `Vec<MultiAnswer>` with one entry per item in the same order.
@@ -74,7 +74,7 @@ impl std::fmt::Display for UserInputPrompt {
 ///
 /// Serializable over IPC and used uniformly across tool crates, core, and host
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum EneToolProtoError {
+pub enum ToolError {
     /// The requested tool was not found.
     NotFound {
         /// Name of the tool that was not found.
@@ -203,7 +203,7 @@ pub enum EneToolProtoError {
     },
 }
 
-impl std::fmt::Display for EneToolProtoError {
+impl std::fmt::Display for ToolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotFound { tool_name } => write!(f, "Tool not found: {tool_name}"),
@@ -285,19 +285,15 @@ impl std::fmt::Display for EneToolProtoError {
     }
 }
 
-impl std::error::Error for EneToolProtoError {}
+impl std::error::Error for ToolError {}
 
-impl From<std::io::Error> for EneToolProtoError {
+impl From<std::io::Error> for ToolError {
     fn from(e: std::io::Error) -> Self {
         Self::IoError {
             message: e.to_string(),
         }
     }
 }
-
-/// Type alias for backward compatibility and internal tool module usages.
-pub type ToolError = EneToolProtoError;
-
 #[cfg(test)]
 mod tests {
     use super::*;

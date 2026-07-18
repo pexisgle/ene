@@ -10,7 +10,7 @@
 //! - [`SandboxConfigData`] — Sandbox configuration shared across tool processes
 //! - [`run_tool_server`] — Helper to start an IPC server for a [`ToolProvider`]
 //!
-//! ## Two-layer ABI (API v2 / #135)
+//! ## Two-layer ABI (API v1 / #135)
 //!
 //! - **Wire:** [`ToolProvider`] in this crate (IPC / sandbox binaries)
 //! - **Host:** `ene_tool_host::ToolRegistry` (IPC + MCP + composite)
@@ -22,7 +22,7 @@
 //! ## Crate Boundaries
 //!
 //! Enforced by [AGENTS.md §4.1](../../AGENTS.md) and
-//! [API v2](../../docs/reference/architecture/api-v2.md):
+//! [API v1](../../docs/reference/architecture/api-v1.md):
 //!
 //! - This crate is limited to **wire-protocol concerns only**: IPC request/response
 //!   types, the [`ToolProvider`] trait, the UDS/Named-Pipe [`transport`] layer,
@@ -95,7 +95,6 @@ pub mod transport;
 pub mod types;
 
 /// Tool error type.
-pub use error::EneToolProtoError;
 pub use error::ToolError;
 /// Interactive user input prompt (used inside [`ToolError::UserInputRequired`]).
 pub use error::{MultiAnswer, QuestionItem, UserInputPrompt};

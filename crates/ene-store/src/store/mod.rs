@@ -4,7 +4,7 @@ use crate::migrator::Migrator;
 use chrono::{DateTime, Utc};
 use sea_orm::{
     ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, EntityTrait,
-    FromQueryResult, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    FromQueryResult, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 
 use sea_orm::sea_query::{Expr, OnConflict};
@@ -12,26 +12,6 @@ use sea_orm_migration::MigratorTrait;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
-
-/// Legacy table write policy for cognitive runtime integration (#98).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum LegacyWriteMode {
-    /// Legacy summaries/keyfacts/logs may be written (default).
-    #[default]
-    ReadWrite = 0,
-    /// Legacy writes rejected; tables remain for read-only recall.
-    ReadOnly = 1,
-}
-
-impl LegacyWriteMode {
-    const fn from_u8(v: u8) -> Self {
-        match v {
-            1 => Self::ReadOnly,
-            _ => Self::ReadWrite,
-        }
-    }
-}
 
 /// Input for inserting a compressed conversation span (#79 / #98).
 #[derive(Debug, Clone)]
@@ -178,41 +158,12 @@ pub struct KeyFact {
     pub value: String,
 }
 
-/// A stored conversation summary entry with its embedding vector.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConversationSummary {
-    /// Primary key.
-    pub id: i64,
-    /// Session identifier this summary belongs to.
-    pub session_id: String,
-    /// Character card name.
-    pub card_name: String,
-    /// The summary text.
-    pub summary: String,
-    /// Vector embedding of the summary.
-    pub embedding: Vec<f32>,
-    /// Creation timestamp.
-    pub created_at: DateTime<Utc>,
-    /// Timestamp when the session ended.
-    pub ended_at: DateTime<Utc>,
-}
-
-/// A recalled summary with its cosine similarity score.
-#[derive(Debug, Clone)]
-pub struct RecalledSummary {
-    /// The recalled conversation summary entry.
-    pub entry: ConversationSummary,
-    /// Cosine similarity score.
-    pub similarity: f32,
-}
-
 /// SQLite-backed long-term memory store with vector similarity search.
 ///
 /// Uses `SeaORM` for async database connection management and `sqlite-vec` for cosine-similarity queries.
 pub struct MemoryStore {
     db: DatabaseConnection,
     embedding_dim: usize,
-    legacy_write_mode: AtomicU8,
 }
 
 /// Result of a natural-decay batch run (#76).
@@ -278,7 +229,6 @@ fn model_to_commitment(m: entities::commitments::Model) -> Result<crate::Commitm
         status: crate::CommitmentStatus::from_db_str(&m.status),
         due_at: m.due_at,
         due_label: m.due_label,
-        source_memory_id: m.source_memory_id,
         created_at: m.created_at,
         updated_at: m.updated_at,
         completed_at: m.completed_at,
@@ -389,202 +339,12 @@ async fn list_session_ids_for_card_on_conn<C: ConnectionTrait>(
     Ok(rows)
 }
 
-async fn typed_memory_exists_by_source_ref_on<C: ConnectionTrait>(
-    conn: &C,
-    source_ref: &str,
-) -> Result<bool, MemoryError> {
-    use sea_orm::PaginatorTrait;
-
-    let count = entities::typed_memories::Entity::find()
-        .filter(entities::typed_memories::Column::SourceRef.eq(source_ref))
-        .count(conn)
-        .await?;
-    Ok(count > 0)
-}
-
-async fn insert_typed_memory_on<C: ConnectionTrait>(
-    conn: &C,
-    item: &crate::NewMemoryItem,
-) -> Result<i64, MemoryError> {
-    use sea_orm::ActiveModelTrait;
-    use sea_orm::ActiveValue::Set;
-
-    let now = Utc::now();
-    let created_at = item.created_at.unwrap_or(now);
-    let active = entities::typed_memories::ActiveModel {
-        scope: Set(item.scope.as_str().to_string()),
-        character_id: Set(item.character_id.clone()),
-        user_id: Set(item.user_id.clone()),
-        kind: Set(item.kind.as_str().to_string()),
-        title: Set(item.title.clone()),
-        content: Set(item.content.clone()),
-        source: Set(item.source.as_str().to_string()),
-        source_ref: Set(item.source_ref.clone()),
-        confidence: Set(item.confidence.get()),
-        salience: Set(item.salience.get()),
-        affective_valence: Set(item.affect.valence),
-        affective_arousal: Set(item.affect.arousal),
-        relationship_impact: Set(item.relationship_impact),
-        access_count: Set(0),
-        last_accessed_at: Set(None),
-        created_at: Set(created_at),
-        updated_at: Set(now),
-        valid_from: Set(item.valid_from),
-        valid_until: Set(item.valid_until),
-        status: Set(item.status.as_str().to_string()),
-        supersedes_id: Set(item.supersedes_id),
-        pinned: Set(i32::from(item.pinned)),
-        commitment_id: Set(item.commitment_id),
-        ..Default::default()
-    };
-    let res = active.insert(conn).await?;
-    Ok(res.id)
-}
-
-async fn patch_typed_memory_created_at_on<C: ConnectionTrait>(
-    conn: &C,
-    memory_id: i64,
-    created_at: DateTime<Utc>,
-) -> Result<(), MemoryError> {
-    use sea_orm::ActiveModelTrait;
-    use sea_orm::ActiveValue::Set;
-
-    let mut active: entities::typed_memories::ActiveModel =
-        entities::typed_memories::Entity::find_by_id(memory_id)
-            .one(conn)
-            .await?
-            .ok_or_else(|| MemoryError::Other(format!("memory {memory_id} not found")))?
-            .into();
-    active.created_at = Set(created_at);
-    active.update(conn).await?;
-    Ok(())
-}
-
-async fn upsert_memory_embedding_on<C: ConnectionTrait>(
-    conn: &C,
-    embedding_dim: usize,
-    memory_item_id: i64,
-    model_name: &str,
-    field: &str,
-    embedding: &[f32],
-) -> Result<(), MemoryError> {
-    use sea_orm::ActiveValue::Set;
-    use sea_orm::EntityTrait;
-
-    validate_embedding(embedding, embedding_dim)?;
-
-    let now = Utc::now();
-    let embedding_bytes = embedding_to_bytes(embedding);
-
-    let active = entities::memory_embeddings::ActiveModel {
-        memory_item_id: Set(memory_item_id),
-        model_name: Set(model_name.to_string()),
-        field: Set(field.to_string()),
-        embedding: Set(embedding_bytes),
-        created_at: Set(now),
-        ..Default::default()
-    };
-
-    entities::memory_embeddings::Entity::insert(active)
-        .on_conflict(
-            OnConflict::columns([
-                entities::memory_embeddings::Column::MemoryItemId,
-                entities::memory_embeddings::Column::ModelName,
-                entities::memory_embeddings::Column::Field,
-            ])
-            .update_column(entities::memory_embeddings::Column::Embedding)
-            .to_owned(),
-        )
-        .exec(conn)
-        .await?;
-
-    Ok(())
-}
-
-async fn memory_span_exists_on<C: ConnectionTrait>(
-    conn: &C,
-    session_id: &str,
-    turn_start: i32,
-) -> Result<bool, MemoryError> {
-    use sea_orm::PaginatorTrait;
-
-    let count = entities::memory_spans::Entity::find()
-        .filter(entities::memory_spans::Column::SessionId.eq(session_id))
-        .filter(entities::memory_spans::Column::TurnStart.eq(turn_start))
-        .count(conn)
-        .await?;
-    Ok(count > 0)
-}
-
-async fn insert_memory_span_on<C: ConnectionTrait>(
-    conn: &C,
-    span: &NewMemorySpan,
-) -> Result<i64, MemoryError> {
-    use sea_orm::ActiveModelTrait;
-    use sea_orm::ActiveValue::Set;
-
-    let active = entities::memory_spans::ActiveModel {
-        session_id: Set(span.session_id.clone()),
-        turn_start: Set(span.turn_start),
-        turn_end: Set(span.turn_end),
-        raw_excerpt: Set(span.raw_excerpt.clone()),
-        compressed_summary: Set(span.compressed_summary.clone()),
-        compression_level: Set(span.compression_level),
-        ..Default::default()
-    };
-    let res = active.insert(conn).await?;
-    Ok(res.id)
-}
-
-async fn mark_migration_complete_on<C: ConnectionTrait>(
-    conn: &C,
-    card_name: &str,
-    counts: crate::LegacyRowCounts,
-    strategy: &str,
-) -> Result<(), MemoryError> {
-    use sea_orm::ActiveModelTrait;
-    use sea_orm::ActiveValue::Set;
-
-    let now = Utc::now();
-    let active = entities::memory_migration_meta::ActiveModel {
-        card_name: Set(card_name.to_string()),
-        migrated_at: Set(now),
-        legacy_summaries_count: Set(counts.summaries as i32),
-        legacy_keyfacts_count: Set(counts.keyfacts as i32),
-        legacy_logs_count: Set(counts.logs as i32),
-        strategy: Set(strategy.to_string()),
-    };
-    active.insert(conn).await?;
-    Ok(())
-}
-
 impl MemoryStore {
     const fn init(db: DatabaseConnection, embedding_dim: usize) -> Self {
-        Self {
-            db,
-            embedding_dim,
-            legacy_write_mode: AtomicU8::new(LegacyWriteMode::ReadWrite as u8),
-        }
+        Self { db, embedding_dim }
     }
 
-    /// Returns the current legacy write mode (#98).
-    pub fn legacy_write_mode(&self) -> LegacyWriteMode {
-        LegacyWriteMode::from_u8(self.legacy_write_mode.load(Ordering::Relaxed))
-    }
-
-    /// Set legacy table write mode (read-only when the mind path is active).
-    pub fn set_legacy_write_mode(&self, mode: LegacyWriteMode) {
-        self.legacy_write_mode.store(mode as u8, Ordering::Relaxed);
-    }
-
-    fn ensure_legacy_writable(&self) -> Result<(), MemoryError> {
-        if self.legacy_write_mode() == LegacyWriteMode::ReadOnly {
-            return Err(MemoryError::LegacyWriteForbidden);
-        }
-        Ok(())
-    }
-
-    /// Decode stored embedding bytes (used by legacy migration).
+    /// Decode stored embedding bytes.
     pub fn decode_embedding_bytes(&self, bytes: &[u8]) -> Vec<f32> {
         bytes_to_embedding(bytes)
     }
@@ -645,327 +405,6 @@ impl MemoryStore {
         Migrator::up(&db, None).await?;
 
         Ok(Self::init(db, embedding_dim))
-    }
-
-    // ── Conversation Summaries ────────────────────────────────────────────────
-
-    /// Inserts a conversation summary and associated key facts in a single transaction.
-    ///
-    /// Facts with an empty `value` field are treated as deletions for that key.
-    /// Returns the new summary's auto-increment ID.
-    pub async fn insert_summary(
-        &self,
-        session_id: &str,
-        card_name: &str,
-        summary: &str,
-        key_facts: &[KeyFact],
-        embedding: &[f32],
-        ended_at: DateTime<Utc>,
-    ) -> Result<i64, MemoryError> {
-        self.ensure_legacy_writable()?;
-        use sea_orm::ActiveModelTrait;
-        use sea_orm::ActiveValue::Set;
-
-        validate_embedding(embedding, self.embedding_dim)?;
-
-        let now = Utc::now();
-
-        let session_id = session_id.to_string();
-        let card_name = card_name.to_string();
-        let summary = summary.to_string();
-        let key_facts = key_facts.to_vec();
-        let embedding_bytes = embedding_to_bytes(embedding);
-
-        let summary_id = self
-            .db
-            .transaction::<_, i64, MemoryError>(|txn| {
-                Box::pin(async move {
-                    let new_summary = entities::conversation_summaries::ActiveModel {
-                        session_id: Set(session_id),
-                        card_name: Set(card_name.clone()),
-                        summary: Set(summary),
-                        embedding: Set(embedding_bytes),
-                        created_at: Set(now),
-                        ended_at: Set(ended_at),
-                        ..Default::default()
-                    };
-
-                    let res = new_summary.insert(txn).await?;
-                    let summary_id = res.id;
-
-                    for fact in key_facts {
-                        if fact.value.is_empty() {
-                            entities::conversation_keyfacts::Entity::delete_many()
-                                .filter(
-                                    entities::conversation_keyfacts::Column::CardName
-                                        .eq(&card_name),
-                                )
-                                .filter(entities::conversation_keyfacts::Column::Key.eq(&fact.key))
-                                .exec(txn)
-                                .await?;
-                        } else {
-                            let new_fact = entities::conversation_keyfacts::ActiveModel {
-                                card_name: Set(card_name.clone()),
-                                summary_id: Set(Some(summary_id)),
-                                key: Set(fact.key),
-                                value: Set(fact.value),
-                                created_at: Set(now),
-                                ..Default::default()
-                            };
-                            new_fact.insert(txn).await?;
-                        }
-                    }
-
-                    Ok(summary_id)
-                })
-            })
-            .await
-            .map_err(|e| match e {
-                sea_orm::TransactionError::Connection(db_err) => {
-                    MemoryError::MemoryStoreError(db_err)
-                }
-                sea_orm::TransactionError::Transaction(e) => e,
-            })?;
-
-        Ok(summary_id)
-    }
-
-    /// Searches summaries by cosine similarity to the query embedding.
-    ///
-    /// Uses `vec_distance_cosine` for fast approximate matching.
-    /// Results are filtered by `card_name` and `similarity_threshold`.
-    ///
-    /// # Deprecated
-    ///
-    /// Use `MemoryStore::search(&Query::...)` for typed-memory search.
-    /// This legacy API reads from `conversation_summaries`, which is
-    /// retired after migration (#119).
-    #[deprecated(
-        since = "0.1.0",
-        note = "use `search(&Query::...)` for typed-memory search"
-    )]
-    pub async fn search_summaries(
-        &self,
-        query_embedding: &[f32],
-        card_name: &str,
-        limit: usize,
-        similarity_threshold: f32,
-    ) -> Result<Vec<RecalledSummary>, MemoryError> {
-        validate_embedding(query_embedding, self.embedding_dim)?;
-
-        #[derive(Debug, FromQueryResult)]
-        struct SearchSummaryResultRow {
-            id: i64,
-            session_id: String,
-            card_name: String,
-            summary: String,
-            embedding: Vec<u8>,
-            created_at: DateTime<Utc>,
-            ended_at: DateTime<Utc>,
-            similarity: f64,
-        }
-
-        let query_bytes = embedding_to_bytes(query_embedding);
-        let similarity_expr = cosine_similarity_expr("embedding", &query_bytes);
-
-        // SeaORM's `SimpleExpr` lacks a `gte` method, so the threshold
-        // filter re-evaluates the cosine similarity expression rather
-        // than referencing the projected `similarity` column.
-        let select = entities::conversation_summaries::Entity::find()
-            .filter(entities::conversation_summaries::Column::CardName.eq(card_name))
-            .expr_as(similarity_expr, "similarity")
-            .filter(cosine_similarity_filter(
-                "embedding",
-                &query_bytes,
-                f64::from(similarity_threshold),
-            ))
-            .order_by_desc(Expr::col("similarity"))
-            .limit(limit as u64);
-
-        let results = select
-            .into_model::<SearchSummaryResultRow>()
-            .all(&self.db)
-            .await?;
-
-        results
-            .into_iter()
-            .map(|row| {
-                Ok(RecalledSummary {
-                    entry: ConversationSummary {
-                        id: row.id,
-                        session_id: row.session_id,
-                        card_name: row.card_name,
-                        summary: row.summary,
-                        embedding: bytes_to_embedding(&row.embedding),
-                        created_at: row.created_at,
-                        ended_at: row.ended_at,
-                    },
-                    similarity: row.similarity as f32,
-                })
-            })
-            .collect()
-    }
-
-    /// Lists the most recent conversation summaries for a card.
-    pub async fn list_recent_summaries(
-        &self,
-        card_name: &str,
-        limit: usize,
-    ) -> Result<Vec<ConversationSummary>, MemoryError> {
-        let rows = entities::conversation_summaries::Entity::find()
-            .filter(entities::conversation_summaries::Column::CardName.eq(card_name))
-            .order_by_desc(entities::conversation_summaries::Column::CreatedAt)
-            .limit(limit as u64)
-            .all(&self.db)
-            .await?;
-
-        rows.into_iter()
-            .map(|row| {
-                Ok(ConversationSummary {
-                    id: row.id,
-                    session_id: row.session_id,
-                    card_name: row.card_name,
-                    summary: row.summary,
-                    embedding: bytes_to_embedding(&row.embedding),
-                    created_at: row.created_at,
-                    ended_at: row.ended_at,
-                })
-            })
-            .collect()
-    }
-
-    /// Counts the number of summaries for a card.
-    pub async fn count_summaries(&self, card_name: &str) -> Result<i64, MemoryError> {
-        let count = entities::conversation_summaries::Entity::find()
-            .filter(entities::conversation_summaries::Column::CardName.eq(card_name))
-            .count(&self.db)
-            .await?;
-        Ok(count as i64)
-    }
-
-    /// Deletes a summary and its associated keyfacts.
-    pub async fn delete_summary(&self, id: i64) -> Result<usize, MemoryError> {
-        let db = &self.db;
-        db.transaction::<_, usize, MemoryError>(|txn| {
-            Box::pin(async move {
-                entities::conversation_keyfacts::Entity::delete_many()
-                    .filter(entities::conversation_keyfacts::Column::SummaryId.eq(id))
-                    .exec(txn)
-                    .await?;
-
-                let res = entities::conversation_summaries::Entity::delete_by_id(id)
-                    .exec(txn)
-                    .await?;
-
-                Ok(res.rows_affected as usize)
-            })
-        })
-        .await
-        .map_err(|e| match e {
-            sea_orm::TransactionError::Connection(db_err) => MemoryError::MemoryStoreError(db_err),
-            sea_orm::TransactionError::Transaction(e) => e,
-        })
-    }
-
-    // ── Key Facts ─────────────────────────────────────────────────────────────
-
-    /// Returns all unique keyfacts for a card, with the latest value per key.
-    pub async fn get_all_keyfacts(&self, card_name: &str) -> Result<Vec<KeyFact>, MemoryError> {
-        let rows = entities::conversation_keyfacts::Entity::find()
-            .filter(entities::conversation_keyfacts::Column::CardName.eq(card_name))
-            .order_by_asc(entities::conversation_keyfacts::Column::Key)
-            .order_by_desc(entities::conversation_keyfacts::Column::CreatedAt)
-            .all(&self.db)
-            .await?;
-
-        let mut seen_keys = std::collections::HashSet::<String>::default();
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| {
-                if seen_keys.insert(row.key.clone()) {
-                    Some(KeyFact {
-                        key: row.key,
-                        value: row.value,
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect())
-    }
-
-    /// Inserts or updates a keyfact for a card.
-    pub async fn upsert_keyfact(
-        &self,
-        card_name: &str,
-        key: &str,
-        value: &str,
-    ) -> Result<(), MemoryError> {
-        self.ensure_legacy_writable()?;
-        use sea_orm::ActiveModelTrait;
-        use sea_orm::ActiveValue::Set;
-
-        let now = Utc::now();
-        let card_name = card_name.to_string();
-        let key = key.to_string();
-        let value = value.to_string();
-
-        self.db
-            .transaction::<_, (), MemoryError>(|txn| {
-                let card_name = card_name.clone();
-                let key = key.clone();
-                let value = value.clone();
-                Box::pin(async move {
-                    entities::conversation_keyfacts::Entity::delete_many()
-                        .filter(entities::conversation_keyfacts::Column::CardName.eq(&card_name))
-                        .filter(entities::conversation_keyfacts::Column::Key.eq(&key))
-                        .exec(txn)
-                        .await?;
-
-                    let new_fact = entities::conversation_keyfacts::ActiveModel {
-                        card_name: Set(card_name),
-                        summary_id: Set(Some(0)),
-                        key: Set(key),
-                        value: Set(value),
-                        created_at: Set(now),
-                        ..Default::default()
-                    };
-                    new_fact.insert(txn).await?;
-
-                    Ok(())
-                })
-            })
-            .await
-            .map_err(|e| match e {
-                sea_orm::TransactionError::Connection(db_err) => {
-                    MemoryError::MemoryStoreError(db_err)
-                }
-                sea_orm::TransactionError::Transaction(e) => e,
-            })?;
-
-        Ok(())
-    }
-
-    /// Deletes all entries for a specific keyfact key.
-    pub async fn delete_keyfact(&self, card_name: &str, key: &str) -> Result<usize, MemoryError> {
-        let res = entities::conversation_keyfacts::Entity::delete_many()
-            .filter(entities::conversation_keyfacts::Column::CardName.eq(card_name))
-            .filter(entities::conversation_keyfacts::Column::Key.eq(key))
-            .exec(&self.db)
-            .await?;
-        Ok(res.rows_affected as usize)
-    }
-
-    /// Counts the number of distinct keyfacts for a card.
-    pub async fn count_keyfacts(&self, card_name: &str) -> Result<i64, MemoryError> {
-        let count = entities::conversation_keyfacts::Entity::find()
-            .filter(entities::conversation_keyfacts::Column::CardName.eq(card_name))
-            .select_only()
-            .column(entities::conversation_keyfacts::Column::Key)
-            .distinct()
-            .count(&self.db)
-            .await?;
-        Ok(count as i64)
     }
 
     // ── Conversation Logs ─────────────────────────────────────────────────────
@@ -1250,38 +689,6 @@ impl MemoryStore {
         aggregated.truncate(limit);
 
         Ok(aggregated)
-    }
-
-    /// Recalls both relevant conversation summaries and key facts for a card in a single call.
-    ///
-    /// Combines [`search_summaries`](Self::search_summaries) and
-    /// [`get_all_keyfacts`](Self::get_all_keyfacts) for convenient prompt context assembly.
-    ///
-    /// # Deprecated
-    ///
-    /// Use `MemoryStore::search(&Query::...)` for typed-memory search.
-    #[deprecated(
-        since = "0.1.0",
-        note = "use `search(&Query::...)` for typed-memory search"
-    )]
-    pub async fn recall_context(
-        &self,
-        card_name: &str,
-        query_embedding: &[f32],
-        limit: usize,
-        similarity_threshold: f32,
-    ) -> Result<(Vec<RecalledSummary>, Vec<KeyFact>), MemoryError> {
-        if self.is_legacy_migrated(card_name).await? {
-            return Ok((vec![], vec![]));
-        }
-
-        let (summaries_result, key_facts_result) = tokio::join!(
-            self.search_summaries(query_embedding, card_name, limit, similarity_threshold),
-            self.get_all_keyfacts(card_name),
-        );
-        let summaries = summaries_result?;
-        let key_facts = key_facts_result?;
-        Ok((summaries, key_facts))
     }
 
     /// Retrieve the current [`crate::AffectState`] for a character.
@@ -2557,259 +1964,7 @@ impl MemoryStore {
         Ok(())
     }
 
-    // ── Legacy Migration & Memory Spans (#98) ─────────────────────────────────
-
-    /// Count legacy rows for a character card.
-    pub async fn count_legacy_rows(
-        &self,
-        card_name: &str,
-    ) -> Result<crate::LegacyRowCounts, MemoryError> {
-        use sea_orm::PaginatorTrait;
-
-        let summaries = entities::conversation_summaries::Entity::find()
-            .filter(entities::conversation_summaries::Column::CardName.eq(card_name))
-            .count(&self.db)
-            .await? as i64;
-
-        let keyfacts = entities::conversation_keyfacts::Entity::find()
-            .filter(entities::conversation_keyfacts::Column::CardName.eq(card_name))
-            .count(&self.db)
-            .await? as i64;
-
-        let logs = entities::conversation_logs::Entity::find()
-            .filter(entities::conversation_logs::Column::CardName.eq(card_name))
-            .count(&self.db)
-            .await? as i64;
-
-        Ok(crate::LegacyRowCounts {
-            summaries,
-            keyfacts,
-            logs,
-        })
-    }
-
-    /// Returns migration metadata when the card has been migrated.
-    pub async fn get_migration_status(
-        &self,
-        card_name: &str,
-    ) -> Result<Option<crate::MigrationStatus>, MemoryError> {
-        let row = entities::memory_migration_meta::Entity::find_by_id(card_name.to_string())
-            .one(&self.db)
-            .await?;
-
-        Ok(row.map(|m| crate::MigrationStatus {
-            card_name: m.card_name,
-            migrated_at: m.migrated_at,
-            legacy_summaries_count: m.legacy_summaries_count,
-            legacy_keyfacts_count: m.legacy_keyfacts_count,
-            legacy_logs_count: m.legacy_logs_count,
-            strategy: m.strategy,
-        }))
-    }
-
-    /// Returns true when one-shot migration has completed for the card.
-    pub async fn is_legacy_migrated(&self, card_name: &str) -> Result<bool, MemoryError> {
-        Ok(self.get_migration_status(card_name).await?.is_some())
-    }
-
-    /// Record migration completion for a character card.
-    pub async fn mark_migration_complete(
-        &self,
-        card_name: &str,
-        counts: crate::LegacyRowCounts,
-        strategy: &str,
-    ) -> Result<(), MemoryError> {
-        use sea_orm::ActiveModelTrait;
-        use sea_orm::ActiveValue::Set;
-
-        let now = Utc::now();
-        let active = entities::memory_migration_meta::ActiveModel {
-            card_name: Set(card_name.to_string()),
-            migrated_at: Set(now),
-            legacy_summaries_count: Set(counts.summaries as i32),
-            legacy_keyfacts_count: Set(counts.keyfacts as i32),
-            legacy_logs_count: Set(counts.logs as i32),
-            strategy: Set(strategy.to_string()),
-        };
-        active.insert(&self.db).await?;
-        Ok(())
-    }
-
-    /// Run one-shot legacy → typed migration.
-    pub async fn migrate_legacy(
-        &self,
-        options: &crate::LegacyMigrationOptions,
-    ) -> Result<crate::LegacyMigrationReport, MemoryError> {
-        crate::legacy_migration::execute_legacy_migration(self, options).await
-    }
-
-    /// Apply legacy migration writes inside a single database transaction.
-    pub(crate) async fn apply_legacy_migration_writes(
-        &self,
-        options: &crate::LegacyMigrationOptions,
-        counts: crate::LegacyRowCounts,
-        summary_rows: Vec<crate::legacy_migration::LegacySummaryRow>,
-        keyfact_rows: Vec<crate::legacy_migration::LegacyKeyfactRow>,
-        spans: Vec<NewMemorySpan>,
-    ) -> Result<crate::LegacyMigrationReport, MemoryError> {
-        use sea_orm::TransactionTrait;
-
-        let card_name = options.card_name.clone();
-        let user_id = options.user_id.clone();
-        let embedding_model = options.embedding_model.clone();
-        let embedding_dim = self.embedding_dim;
-
-        self.db
-            .transaction::<_, crate::LegacyMigrationReport, MemoryError>(|txn| {
-                let card_name = card_name.clone();
-                let user_id = user_id.clone();
-                let embedding_model = embedding_model.clone();
-                Box::pin(async move {
-                    let mut report = crate::LegacyMigrationReport {
-                        summaries_migrated: 0,
-                        keyfacts_migrated: 0,
-                        spans_migrated: 0,
-                        skipped_existing: 0,
-                    };
-
-                    for row in summary_rows {
-                        let source_ref = format!("legacy:summary:{}", row.id);
-                        if typed_memory_exists_by_source_ref_on(txn, &source_ref).await? {
-                            report.skipped_existing = report.skipped_existing.saturating_add(1);
-                            continue;
-                        }
-
-                        let item = crate::legacy_migration::summaries::summary_to_typed_memory(
-                            &card_name,
-                            &user_id,
-                            &row.summary,
-                            row.id,
-                        );
-                        let memory_id = insert_typed_memory_on(txn, &item).await?;
-                        patch_typed_memory_created_at_on(txn, memory_id, row.created_at).await?;
-
-                        let embedding = bytes_to_embedding(&row.embedding);
-                        if !embedding.is_empty() {
-                            upsert_memory_embedding_on(
-                                txn,
-                                embedding_dim,
-                                memory_id,
-                                &embedding_model,
-                                "content",
-                                &embedding,
-                            )
-                            .await?;
-                        }
-                        report.summaries_migrated = report.summaries_migrated.saturating_add(1);
-                    }
-
-                    for row in keyfact_rows {
-                        if row.value.is_empty() {
-                            continue;
-                        }
-                        let source_ref = format!("legacy:keyfact:{}", row.id);
-                        if typed_memory_exists_by_source_ref_on(txn, &source_ref).await? {
-                            report.skipped_existing = report.skipped_existing.saturating_add(1);
-                            continue;
-                        }
-
-                        let item = crate::legacy_migration::keyfacts::keyfact_to_typed_memory(
-                            &card_name, &user_id, &row.key, &row.value, row.id,
-                        );
-                        let memory_id = insert_typed_memory_on(txn, &item).await?;
-                        patch_typed_memory_created_at_on(txn, memory_id, row.created_at).await?;
-                        report.keyfacts_migrated = report.keyfacts_migrated.saturating_add(1);
-                    }
-
-                    for span in spans {
-                        if memory_span_exists_on(txn, &span.session_id, span.turn_start).await? {
-                            report.skipped_existing = report.skipped_existing.saturating_add(1);
-                            continue;
-                        }
-                        insert_memory_span_on(txn, &span).await?;
-                        report.spans_migrated = report.spans_migrated.saturating_add(1);
-                    }
-
-                    mark_migration_complete_on(txn, &card_name, counts, "one_shot").await?;
-                    Ok(report)
-                })
-            })
-            .await
-            .map_err(|e| match e {
-                sea_orm::TransactionError::Connection(db_err) => {
-                    MemoryError::MemoryStoreError(db_err)
-                }
-                sea_orm::TransactionError::Transaction(e) => e,
-            })
-    }
-
-    /// Truncate legacy tables and typed memory for a card (destructive reset).
-    pub async fn reset_legacy_memory(&self, card_name: &str) -> Result<(), MemoryError> {
-        use sea_orm::TransactionTrait;
-
-        let card_name = card_name.to_string();
-        self.db
-            .transaction::<_, (), MemoryError>(|txn| {
-                let card_name = card_name.clone();
-                Box::pin(async move {
-                    let card = card_name.as_str();
-                    entities::conversation_keyfacts::Entity::delete_many()
-                        .filter(entities::conversation_keyfacts::Column::CardName.eq(card))
-                        .exec(txn)
-                        .await?;
-                    entities::conversation_summaries::Entity::delete_many()
-                        .filter(entities::conversation_summaries::Column::CardName.eq(card))
-                        .exec(txn)
-                        .await?;
-                    let session_ids = list_session_ids_for_card_on_conn(txn, card).await?;
-                    entities::conversation_logs::Entity::delete_many()
-                        .filter(entities::conversation_logs::Column::CardName.eq(card))
-                        .exec(txn)
-                        .await?;
-                    entities::memory_migration_meta::Entity::delete_by_id(card_name.clone())
-                        .exec(txn)
-                        .await?;
-                    if !session_ids.is_empty() {
-                        entities::memory_spans::Entity::delete_many()
-                            .filter(entities::memory_spans::Column::SessionId.is_in(session_ids))
-                            .exec(txn)
-                            .await?;
-                    }
-                    entities::typed_memories::Entity::delete_many()
-                        .filter(entities::typed_memories::Column::CharacterId.eq(card))
-                        .exec(txn)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .await
-            .map_err(|e| match e {
-                sea_orm::TransactionError::Connection(db_err) => {
-                    MemoryError::MemoryStoreError(db_err)
-                }
-                sea_orm::TransactionError::Transaction(e) => e,
-            })?;
-
-        Ok(())
-    }
-
-    /// Returns an error when legacy data exists, migration is incomplete, and strict mode is on.
-    pub async fn ensure_legacy_migration_allowed(
-        &self,
-        card_name: &str,
-        require_migration: bool,
-    ) -> Result<(), MemoryError> {
-        if !require_migration {
-            return Ok(());
-        }
-        let counts = self.count_legacy_rows(card_name).await?;
-        if counts.requires_migration_gate() && !self.is_legacy_migrated(card_name).await? {
-            return Err(MemoryError::LegacyMemoryNotMigrated {
-                card_name: card_name.to_string(),
-            });
-        }
-        Ok(())
-    }
+    // ── Memory Spans ────────────────────────────────────────────────────────
 
     /// Distinct session IDs that have conversation logs for a character card.
     pub async fn list_session_ids_for_card(
@@ -2833,74 +1988,6 @@ impl MemoryStore {
             .count(&self.db)
             .await?;
         Ok(count > 0)
-    }
-
-    pub(crate) async fn list_legacy_summaries(
-        &self,
-        card_name: &str,
-    ) -> Result<Vec<crate::legacy_migration::LegacySummaryRow>, MemoryError> {
-        use sea_orm::QueryOrder;
-
-        let rows = entities::conversation_summaries::Entity::find()
-            .filter(entities::conversation_summaries::Column::CardName.eq(card_name))
-            .order_by_asc(entities::conversation_summaries::Column::Id)
-            .all(&self.db)
-            .await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|r| crate::legacy_migration::LegacySummaryRow {
-                id: r.id,
-                summary: r.summary,
-                embedding: r.embedding,
-                created_at: r.created_at,
-            })
-            .collect())
-    }
-
-    pub(crate) async fn list_legacy_keyfacts(
-        &self,
-        card_name: &str,
-    ) -> Result<Vec<crate::legacy_migration::LegacyKeyfactRow>, MemoryError> {
-        use sea_orm::QueryOrder;
-
-        let rows = entities::conversation_keyfacts::Entity::find()
-            .filter(entities::conversation_keyfacts::Column::CardName.eq(card_name))
-            .order_by_asc(entities::conversation_keyfacts::Column::Id)
-            .all(&self.db)
-            .await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|r| crate::legacy_migration::LegacyKeyfactRow {
-                id: r.id,
-                key: r.key,
-                value: r.value,
-                created_at: r.created_at,
-            })
-            .collect())
-    }
-
-    pub(crate) async fn list_legacy_logs(
-        &self,
-        card_name: &str,
-    ) -> Result<Vec<crate::legacy_migration::LegacyLogRowRaw>, MemoryError> {
-        use sea_orm::QueryOrder;
-
-        let rows = entities::conversation_logs::Entity::find()
-            .filter(entities::conversation_logs::Column::CardName.eq(card_name))
-            .order_by_asc(entities::conversation_logs::Column::Id)
-            .all(&self.db)
-            .await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|r| crate::legacy_migration::LegacyLogRowRaw {
-                session_id: r.session_id,
-                role: r.role,
-                content: r.content,
-            })
-            .collect())
     }
 
     /// Insert a memory span row.
@@ -3036,7 +2123,6 @@ impl MemoryStore {
             status: Set(item.status.as_str().to_string()),
             due_at: Set(item.due_at),
             due_label: Set(item.due_label.clone()),
-            source_memory_id: Set(item.source_memory_id),
             created_at: Set(now),
             updated_at: Set(now),
             completed_at: Set(None),
@@ -3049,21 +2135,6 @@ impl MemoryStore {
     /// Retrieve a commitment by its ID.
     pub async fn get_commitment(&self, id: i64) -> Result<Option<crate::Commitment>, MemoryError> {
         let maybe_model = entities::commitments::Entity::find_by_id(id)
-            .one(&self.db)
-            .await?;
-        match maybe_model {
-            Some(m) => model_to_commitment(m).map(Some),
-            None => Ok(None),
-        }
-    }
-
-    /// Look up a commitment linked to a typed memory row.
-    pub async fn get_commitment_by_source_memory(
-        &self,
-        source_memory_id: i64,
-    ) -> Result<Option<crate::Commitment>, MemoryError> {
-        let maybe_model = entities::commitments::Entity::find()
-            .filter(entities::commitments::Column::SourceMemoryId.eq(source_memory_id))
             .one(&self.db)
             .await?;
         match maybe_model {
@@ -3237,163 +2308,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_insert_and_search_summaries() {
-        let store = setup_store().await;
-        let emb_a = vec![1.0_f32, 0.0, 0.0, 0.0];
-        let emb_b = vec![0.0_f32, 1.0, 0.0, 0.0];
-
-        store
-            .insert_summary("s1", "char", "Summary A", &[], &emb_a, Utc::now())
-            .await
-            .unwrap();
-        store
-            .insert_summary("s2", "char", "Summary B", &[], &emb_b, Utc::now())
-            .await
-            .unwrap();
-
-        let results = store
-            .search_summaries(&emb_a, "char", 5, 0.5)
-            .await
-            .unwrap();
-        assert_eq!(results.len(), 1);
-        let top = results.first().expect("one summary result");
-        assert_eq!(top.entry.summary, "Summary A");
-        assert!((top.similarity - 1.0).abs() < 1e-5);
-    }
-
-    #[tokio::test]
-    async fn test_keyfacts_crud() {
-        let store = setup_store().await;
-
-        let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
-        let summary_id = store
-            .insert_summary("s1", "char", "Summary", &[], &emb, Utc::now())
-            .await
-            .unwrap();
-
-        let facts = vec![
-            KeyFact {
-                key: "job".to_string(),
-                value: "engineer".to_string(),
-            },
-            KeyFact {
-                key: "food".to_string(),
-                value: "ramen".to_string(),
-            },
-        ];
-        let now = Utc::now();
-
-        for f in &facts {
-            let new_fact = entities::conversation_keyfacts::ActiveModel {
-                card_name: sea_orm::ActiveValue::Set("char".to_string()),
-                summary_id: sea_orm::ActiveValue::Set(Some(summary_id)),
-                key: sea_orm::ActiveValue::Set(f.key.clone()),
-                value: sea_orm::ActiveValue::Set(f.value.clone()),
-                created_at: sea_orm::ActiveValue::Set(now.clone()),
-                ..Default::default()
-            };
-            use sea_orm::ActiveModelTrait;
-            new_fact.insert(&store.db).await.unwrap();
-        }
-
-        let all_facts = store.get_all_keyfacts("char").await.unwrap();
-        assert_eq!(all_facts.len(), 2);
-        let first_fact = all_facts.first().expect("first keyfact");
-        let second_fact = all_facts.get(1).expect("second keyfact");
-        assert_eq!(first_fact.key, "food");
-        assert_eq!(second_fact.key, "job");
-
-        store.upsert_keyfact("char", "food", "sushi").await.unwrap();
-        let all_facts = store.get_all_keyfacts("char").await.unwrap();
-        let food_fact = all_facts.iter().find(|f| f.key == "food").unwrap();
-        assert_eq!(food_fact.value, "sushi");
-
-        store.delete_keyfact("char", "food").await.unwrap();
-        let all_facts = store.get_all_keyfacts("char").await.unwrap();
-        assert_eq!(all_facts.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_delete_summary_cascades() {
-        let store = setup_store().await;
-        let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
-        let summary_id = store
-            .insert_summary("s1", "char", "Summary", &[], &emb, Utc::now())
-            .await
-            .unwrap();
-
-        let now = Utc::now();
-        let new_fact = entities::conversation_keyfacts::ActiveModel {
-            card_name: sea_orm::ActiveValue::Set("char".to_string()),
-            summary_id: sea_orm::ActiveValue::Set(Some(summary_id)),
-            key: sea_orm::ActiveValue::Set("job".to_string()),
-            value: sea_orm::ActiveValue::Set("engineer".to_string()),
-            created_at: sea_orm::ActiveValue::Set(now.clone()),
-            ..Default::default()
-        };
-        use sea_orm::ActiveModelTrait;
-        new_fact.insert(&store.db).await.unwrap();
-
-        store.delete_summary(summary_id).await.unwrap();
-        assert_eq!(store.count_summaries("char").await.unwrap(), 0);
-        assert_eq!(store.count_keyfacts("char").await.unwrap(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_insert_summary_with_empty_value_deletes_keyfact() {
-        let store = setup_store().await;
-        let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
-        let summary_id = store
-            .insert_summary("s1", "char", "Summary", &[], &emb, Utc::now())
-            .await
-            .unwrap();
-
-        let now = Utc::now();
-        for (k, v) in &[("job", "engineer"), ("hobby", "guitar")] {
-            let new_fact = entities::conversation_keyfacts::ActiveModel {
-                card_name: sea_orm::ActiveValue::Set("char".to_string()),
-                summary_id: sea_orm::ActiveValue::Set(Some(summary_id)),
-                key: sea_orm::ActiveValue::Set(k.to_string()),
-                value: sea_orm::ActiveValue::Set(v.to_string()),
-                created_at: sea_orm::ActiveValue::Set(now.clone()),
-                ..Default::default()
-            };
-            use sea_orm::ActiveModelTrait;
-            new_fact.insert(&store.db).await.unwrap();
-        }
-
-        assert_eq!(store.get_all_keyfacts("char").await.unwrap().len(), 2);
-
-        let emb2 = vec![0.0_f32, 1.0, 0.0, 0.0];
-        store
-            .insert_summary(
-                "s2",
-                "char",
-                "Summary 2",
-                &[
-                    KeyFact {
-                        key: "job".to_string(),
-                        value: "designer".to_string(),
-                    },
-                    KeyFact {
-                        key: "hobby".to_string(),
-                        value: String::new(),
-                    },
-                ],
-                &emb2,
-                Utc::now(),
-            )
-            .await
-            .unwrap();
-
-        let all_facts = store.get_all_keyfacts("char").await.unwrap();
-        assert_eq!(all_facts.len(), 1);
-        let job_fact = all_facts.first().expect("job keyfact");
-        assert_eq!(job_fact.key, "job");
-        assert_eq!(job_fact.value, "designer");
-    }
-
-    #[tokio::test]
     async fn test_tool_embedding_field_upsert_and_list() {
         let store = setup_store().await;
         let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
@@ -3523,15 +2437,36 @@ mod tests {
     /// error rather than letting the row be silently
     /// persisted and poisoning later cosine queries.
     #[tokio::test]
-    async fn insert_summary_rejects_bad_embedding() {
+    async fn upsert_memory_embedding_rejects_bad_embedding() {
         let store = setup_store().await;
-        let now = Utc::now();
-        let facts: Vec<KeyFact> = vec![];
+        let id = store
+            .insert_typed_memory(&crate::NewMemoryItem {
+                scope: crate::MemoryScope::Character,
+                character_id: "ene".into(),
+                user_id: String::new(),
+                kind: crate::MemoryKind::Semantic,
+                title: "fact".into(),
+                content: "content".into(),
+                source: crate::MemorySource::Conversation,
+                source_ref: None,
+                confidence: crate::MemoryConfidence::default(),
+                salience: crate::MemorySalience::default(),
+                affect: crate::AffectAnnotation::default(),
+                relationship_impact: 0.0,
+                valid_from: None,
+                valid_until: None,
+                status: crate::MemoryStatus::Active,
+                supersedes_id: None,
+                pinned: false,
+                created_at: None,
+                commitment_id: None,
+            })
+            .await
+            .unwrap();
 
-        // Length mismatch.
         let wrong_len = vec![0.1, 0.2, 0.3];
         let err = store
-            .insert_summary("s", "c", "summary", &facts, &wrong_len, now)
+            .upsert_memory_embedding(id, "test-model", "content", &wrong_len)
             .await
             .unwrap_err();
         assert!(
@@ -3539,10 +2474,9 @@ mod tests {
             "expected InvalidEmbedding, got {err:?}"
         );
 
-        // NaN.
         let with_nan = vec![0.1, f32::NAN, 0.3, 0.4];
         let err = store
-            .insert_summary("s", "c", "summary", &facts, &with_nan, now)
+            .upsert_memory_embedding(id, "test-model", "content", &with_nan)
             .await
             .unwrap_err();
         assert!(
@@ -3550,10 +2484,9 @@ mod tests {
             "expected InvalidEmbedding, got {err:?}"
         );
 
-        // Infinity.
         let with_inf = vec![0.1, 0.2, f32::INFINITY, 0.4];
         let err = store
-            .insert_summary("s", "c", "summary", &facts, &with_inf, now)
+            .upsert_memory_embedding(id, "test-model", "content", &with_inf)
             .await
             .unwrap_err();
         assert!(
@@ -3561,10 +2494,9 @@ mod tests {
             "expected InvalidEmbedding, got {err:?}"
         );
 
-        // Valid embedding still works.
         let ok = vec![0.1, 0.2, 0.3, 0.4];
         store
-            .insert_summary("s", "c", "summary", &facts, &ok, now)
+            .upsert_memory_embedding(id, "test-model", "content", &ok)
             .await
             .unwrap();
     }
@@ -3874,31 +2806,6 @@ mod tests {
     async fn commitment_crud_and_lifecycle() {
         let store = setup_store().await;
 
-        let memory_id = store
-            .insert_typed_memory(&crate::NewMemoryItem {
-                scope: crate::MemoryScope::Character,
-                character_id: "ene".into(),
-                user_id: "user1".into(),
-                kind: crate::MemoryKind::Commitment,
-                title: "design review".into(),
-                content: "Discuss the design next session".into(),
-                source: crate::MemorySource::Inferred,
-                source_ref: None,
-                confidence: crate::MemoryConfidence::new(0.8),
-                salience: crate::MemorySalience::new(0.7),
-                affect: crate::AffectAnnotation::default(),
-                relationship_impact: 0.0,
-                valid_from: None,
-                valid_until: None,
-                status: crate::MemoryStatus::Active,
-                supersedes_id: None,
-                pinned: false,
-                created_at: None,
-                commitment_id: None,
-            })
-            .await
-            .unwrap();
-
         let id = store
             .insert_commitment(&crate::NewCommitment {
                 character_id: "ene".into(),
@@ -3908,21 +2815,12 @@ mod tests {
                 status: crate::CommitmentStatus::Active,
                 due_at: None,
                 due_label: Some("next session".into()),
-                source_memory_id: Some(memory_id),
             })
             .await
             .unwrap();
 
         let loaded = store.get_commitment(id).await.unwrap().unwrap();
         assert_eq!(loaded.title, "design review");
-        assert_eq!(loaded.source_memory_id, Some(memory_id));
-
-        let by_source = store
-            .get_commitment_by_source_memory(memory_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(by_source.id, Some(id));
 
         let active = store
             .list_active_commitments("ene", Some("user1"), 10)
@@ -3957,7 +2855,6 @@ mod tests {
                 status: crate::CommitmentStatus::Active,
                 due_at: Some(past),
                 due_label: None,
-                source_memory_id: None,
             })
             .await
             .unwrap();
@@ -3970,7 +2867,6 @@ mod tests {
                 status: crate::CommitmentStatus::Active,
                 due_at: Some(future),
                 due_label: None,
-                source_memory_id: None,
             })
             .await
             .unwrap();
@@ -3996,7 +2892,6 @@ mod tests {
                 status: crate::CommitmentStatus::Active,
                 due_at: Some(now + chrono::Duration::days(2)),
                 due_label: None,
-                source_memory_id: None,
             })
             .await
             .unwrap();
@@ -4009,7 +2904,6 @@ mod tests {
                 status: crate::CommitmentStatus::Active,
                 due_at: Some(now + chrono::Duration::days(1)),
                 due_label: None,
-                source_memory_id: None,
             })
             .await
             .unwrap();
@@ -4022,7 +2916,6 @@ mod tests {
                 status: crate::CommitmentStatus::Active,
                 due_at: None,
                 due_label: Some("next time".into()),
-                source_memory_id: None,
             })
             .await
             .unwrap();
@@ -4049,7 +2942,6 @@ mod tests {
                 status: crate::CommitmentStatus::Active,
                 due_at: Some(past),
                 due_label: None,
-                source_memory_id: None,
             })
             .await
             .unwrap();
@@ -4211,7 +3103,6 @@ mod tests {
                 status: crate::CommitmentStatus::Active,
                 due_at: None,
                 due_label: Some("next time".into()),
-                source_memory_id: None,
             })
             .await
             .unwrap();
@@ -4830,245 +3721,5 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = results.first().expect("pinned search result");
         assert!(result.item.pinned);
-    }
-
-    #[tokio::test]
-    async fn legacy_migration_summaries_to_episodic() {
-        let store = setup_store().await;
-        let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
-        store
-            .insert_summary("s1", "char", "Legacy summary text", &[], &emb, Utc::now())
-            .await
-            .unwrap();
-
-        let report = store
-            .migrate_legacy(&crate::LegacyMigrationOptions {
-                card_name: "char".into(),
-                user_id: "user".into(),
-                embedding_model: "test".into(),
-                dry_run: false,
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(report.summaries_migrated, 1);
-        let typed = store
-            .get_typed_memories_by_character("char", Some(crate::MemoryKind::Episodic), 10, 0)
-            .await
-            .unwrap();
-        assert_eq!(typed.len(), 1);
-        let migrated = typed.first().expect("migrated typed memory");
-        assert!(migrated.content.contains("Legacy summary"));
-        assert!(store.is_legacy_migrated("char").await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn legacy_write_forbidden_in_read_only_mode() {
-        let store = setup_store().await;
-        store.set_legacy_write_mode(LegacyWriteMode::ReadOnly);
-        let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
-        let err = store
-            .insert_summary("s1", "char", "blocked", &[], &emb, Utc::now())
-            .await
-            .unwrap_err();
-        assert!(matches!(err, MemoryError::LegacyWriteForbidden));
-    }
-
-    #[tokio::test]
-    async fn migration_idempotent_skips_existing_source_ref() {
-        let store = setup_store().await;
-        let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
-        store
-            .insert_summary("s1", "char", "Once", &[], &emb, Utc::now())
-            .await
-            .unwrap();
-
-        let options = crate::LegacyMigrationOptions {
-            card_name: "char".into(),
-            user_id: "user".into(),
-            embedding_model: "test".into(),
-            dry_run: false,
-        };
-        store.migrate_legacy(&options).await.unwrap();
-        let err = store.migrate_legacy(&options).await.unwrap_err();
-        assert!(matches!(err, MemoryError::LegacyAlreadyMigrated { .. }));
-    }
-
-    #[tokio::test]
-    async fn reset_legacy_clears_tables() {
-        let store = setup_store().await;
-        let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
-        store
-            .insert_summary("s1", "char", "x", &[], &emb, Utc::now())
-            .await
-            .unwrap();
-        store.reset_legacy_memory("char").await.unwrap();
-        let counts = store.count_legacy_rows("char").await.unwrap();
-        assert_eq!(counts.summaries, 0);
-        assert_eq!(counts.keyfacts, 0);
-    }
-
-    #[tokio::test]
-    async fn reset_legacy_preserves_other_card_spans() {
-        let store = setup_store().await;
-        store
-            .insert_log("s-char", "char", "user", "hello")
-            .await
-            .unwrap();
-        store
-            .insert_log("s-other", "other", "user", "hi")
-            .await
-            .unwrap();
-        store
-            .insert_memory_span(&NewMemorySpan {
-                session_id: "s-char".into(),
-                turn_start: 0,
-                turn_end: 0,
-                raw_excerpt: Some("char span".into()),
-                compressed_summary: None,
-                compression_level: 0,
-            })
-            .await
-            .unwrap();
-        store
-            .insert_memory_span(&NewMemorySpan {
-                session_id: "s-other".into(),
-                turn_start: 0,
-                turn_end: 0,
-                raw_excerpt: Some("other span".into()),
-                compressed_summary: None,
-                compression_level: 0,
-            })
-            .await
-            .unwrap();
-
-        store.reset_legacy_memory("char").await.unwrap();
-
-        let char_spans = store.list_memory_spans_by_session("s-char").await.unwrap();
-        let other_spans = store.list_memory_spans_by_session("s-other").await.unwrap();
-        assert!(char_spans.is_empty());
-        assert_eq!(other_spans.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn require_migration_allows_logs_only() {
-        let store = setup_store().await;
-        store
-            .insert_log("s1", "char", "user", "hello")
-            .await
-            .unwrap();
-        store
-            .ensure_legacy_migration_allowed("char", true)
-            .await
-            .expect("logs alone should not block");
-    }
-
-    #[tokio::test]
-    async fn require_migration_blocks_unmigrated_summaries() {
-        let store = setup_store().await;
-        let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
-        store
-            .insert_summary("s1", "char", "summary", &[], &emb, Utc::now())
-            .await
-            .unwrap();
-        let err = store
-            .ensure_legacy_migration_allowed("char", true)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, MemoryError::LegacyMemoryNotMigrated { .. }));
-    }
-
-    #[tokio::test]
-    async fn legacy_migration_keyfacts_to_preference_and_profile() {
-        let store = setup_store().await;
-        store
-            .upsert_keyfact("char", "pref_color", "blue")
-            .await
-            .unwrap();
-        store
-            .upsert_keyfact("char", "job", "engineer")
-            .await
-            .unwrap();
-
-        let report = store
-            .migrate_legacy(&crate::LegacyMigrationOptions {
-                card_name: "char".into(),
-                user_id: "user".into(),
-                embedding_model: "test".into(),
-                dry_run: false,
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(report.keyfacts_migrated, 2);
-        let prefs = store
-            .get_typed_memories_by_character("char", Some(crate::MemoryKind::Preference), 10, 0)
-            .await
-            .unwrap();
-        let profiles = store
-            .get_typed_memories_by_character("char", Some(crate::MemoryKind::UserProfile), 10, 0)
-            .await
-            .unwrap();
-        assert_eq!(prefs.len(), 1);
-        assert_eq!(profiles.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn legacy_migration_logs_to_spans() {
-        let store = setup_store().await;
-        store
-            .insert_log("s1", "char", "user", "hello")
-            .await
-            .unwrap();
-        store
-            .insert_log("s1", "char", "assistant", "hi there")
-            .await
-            .unwrap();
-
-        let report = store
-            .migrate_legacy(&crate::LegacyMigrationOptions {
-                card_name: "char".into(),
-                user_id: "user".into(),
-                embedding_model: "test".into(),
-                dry_run: false,
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(report.spans_migrated, 1);
-        let spans = store.list_memory_spans_by_session("s1").await.unwrap();
-        assert_eq!(spans.len(), 1);
-        let span = spans.first().expect("migrated span");
-        let excerpt = span.raw_excerpt.as_ref().unwrap();
-        assert!(excerpt.contains("hello"));
-        assert!(excerpt.contains("hi there"));
-    }
-
-    #[tokio::test]
-    async fn legacy_migration_span_idempotent_on_retry_before_marker() {
-        let store = setup_store().await;
-        store
-            .insert_log("s1", "char", "user", "once")
-            .await
-            .unwrap();
-
-        let options = crate::LegacyMigrationOptions {
-            card_name: "char".into(),
-            user_id: "user".into(),
-            embedding_model: "test".into(),
-            dry_run: false,
-        };
-
-        let first = store.migrate_legacy(&options).await.unwrap();
-        assert_eq!(first.spans_migrated, 1);
-
-        entities::memory_migration_meta::Entity::delete_by_id("char".to_string())
-            .exec(store.connection())
-            .await
-            .unwrap();
-
-        let second = store.migrate_legacy(&options).await.unwrap();
-        assert_eq!(second.spans_migrated, 0);
-        assert_eq!(second.skipped_existing, 1);
     }
 }

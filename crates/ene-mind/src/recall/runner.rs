@@ -73,12 +73,6 @@ pub async fn execute_hybrid_recall(
     let options = RecallPlannerOptions::from_config(&config.context, &config.memory);
     let plan = RecallPlanner::plan(&planner_input, &options)?;
 
-    input
-        .store
-        .ensure_legacy_migration_allowed(input.character_id, config.memory.require_migration)
-        .await
-        .map_err(CognitionError::Memory)?;
-
     let search_options = RecallPlanner::to_memory_search_options(
         &plan,
         input.query_embedding,

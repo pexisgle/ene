@@ -98,7 +98,6 @@ Memory extraction, hybrid search, retention, and MMR diversification settings.
 | `mmr_duplicate_cluster_threshold` | `f32` | `0.75` | Lexical similarity for duplicate cluster merging |
 | `mmr_min_slots_semantic` / `_episodic` / `_user_profile` / `_commitment` | `usize` | `1` each | Minimum reserved recall slots per kind |
 | `mmr_source_diversity_bonus` | `f32` | `0.05` | Score bonus for introducing a new recall source |
-| `require_migration` | `bool` | `false` | Block recall if legacy rows exist and migration is incomplete |
 
 ### `ToolGroundingConfig`
 
@@ -270,7 +269,6 @@ Deterministically compiles a CCv3 character card into an `IdentityKernel`. Core 
 | Method | Signature | Description |
 |---|---|---|
 | `compile` | `fn compile(card: &CharacterCardV3, user_name: &str, max_tokens: usize) -> IdentityKernel` | Compiles the kernel with an explicit token budget. |
-| `compile_identity_kernel` (free fn) | `fn compile_identity_kernel(card: &CharacterCardV3, user_name: &str) -> IdentityKernel` | Back-compat wrapper using `DEFAULT_IDENTITY_KERNEL_MAX_TOKENS` (`400`). |
 
 `CharacterProcessor` (in `character::mod`) is the facade most callers use: `compile_kernel`, `compile_kernel_default`, `sync_card_memories`, `select_style_examples`.
 
@@ -686,7 +684,7 @@ Handles only time-based `Active → Faded → Archived` decay (via `MemoryStore:
 
 ## `commitments` — Companion Commitment Ledger
 
-Promises, tasks, and follow-ups tracked in a dedicated `commitments` table (`ene-store`), linked to typed memories (`MemoryKind::Commitment`) via `source_memory_id`. Surfaced in the prompt **independently** of vector recall similarity.
+Promises, tasks, and follow-ups tracked in a dedicated `commitments` table (`ene-store`). The ledger is the sole source of truth for lifecycle and prompt injection (#124). Optional typed `MemoryKind::Commitment` rows may reference a ledger row via `typed_memories.commitment_id`. Surfaced in the prompt **independently** of vector recall similarity.
 
 ```rust
 pub struct CommitmentLedger;
@@ -694,8 +692,8 @@ pub struct CommitmentLedger;
 
 | Method | Signature | Description |
 |---|---|---|
-| `sync_from_applied_decisions` | `async fn sync_from_applied_decisions(store: &MemoryStore, ctx: &CommitmentSyncContext<'_>, applied: &[AppliedDecision]) -> Result<Vec<i64>, CognitionError>` | Turns `MemoryArbiter` outcomes into ledger rows: `Persist`/`Supersede` on a `Commitment` candidate inserts an active row (marking any superseded row `Stale`); `MarkUserDeleted` cancels the linked row; `MarkDisputed` marks it `Stale`. Idempotent per `source_memory_id`. |
-| `arbitrate_apply_and_sync` | `async fn arbitrate_apply_and_sync(store, candidates, arbiter_ctx, sync_ctx) -> Result<(Vec<AppliedDecision>, Vec<i64>), CognitionError>` | Convenience: arbitrate + apply + sync in one call. |
+| `apply_commitment_candidates` | `async fn apply_commitment_candidates(store: &MemoryStore, ctx: &CommitmentSyncContext<'_>, candidates: &[MemoryCandidate]) -> Result<Vec<i64>, CognitionError>` | Ledger-first write for `MemoryKind::Commitment` candidates: inserts or supersedes active rows by normalized title; deletion-style candidates cancel matching active rows. |
+| `arbitrate_apply_and_sync` | `async fn arbitrate_apply_and_sync(store, candidates, arbiter_ctx, sync_ctx) -> Result<(Vec<AppliedDecision>, Vec<i64>), CognitionError>` | Writes commitment candidates to the ledger first, then runs the Memory Arbiter on all other kinds. |
 | `list_active` | `async fn list_active(store: &MemoryStore, character_id: &str, user_id: Option<&str>, limit: usize) -> Result<Vec<Commitment>, CognitionError>` | Lists active commitments (no similarity filtering). |
 | `active_prompt_candidates` | `fn active_prompt_candidates(commitments: &[Commitment]) -> Vec<ActiveCommitmentPrompt>` | Maps to the lightweight prompt DTO. |
 | `complete` / `cancel` | `async fn complete(store, id) -> Result<bool, CognitionError>` / `async fn cancel(...)` | Manual lifecycle transitions. |

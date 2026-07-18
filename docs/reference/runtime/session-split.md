@@ -24,7 +24,7 @@
 
 ## Related Docs
 
-- `docs/reference/architecture/api-v2.md`
+- `docs/reference/architecture/api-v1.md`
 - `docs/reference/architecture/cognitive-runtime.md`
 - `docs/reference/runtime/session.md`
 - `docs/reference/configuration/settings.md` (`mind.context.compression_*`)

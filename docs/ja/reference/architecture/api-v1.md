@@ -1,4 +1,4 @@
-# ADR: API v2 — 機能再設計
+# ADR: API v1 — 機能再設計
 
 - **Status:** Accepted
 - **Date:** 2026-07-13
@@ -6,7 +6,7 @@
 
 ## 背景
 
-ライブラリ表面に二重ストリーミング（legacy + cognitive）、未準備の `EneHandle::new` ライフサイクル、チャット必須イベントと診断の混在、並行する設定ノブ（`memory.*` と `mind.memory.*`）、HyDE/rerank まで抱えた `EmbeddingProvider` が積み上がっていた。API v2 は最小ホスト契約と明確なクレート所有へ畳み込む。
+ene は最小ホスト契約と明確なクレート所有を公開する: 準備済み `EneHandle::open` ライフサイクル、必須 `TurnId` 相関、最小チャットイベントバス、オプトイン診断、正しいクレートが所有するポリシーノブ（永続化は `store.*`、recall/write/decay/emotion/performance は `mind.*`）。
 
 ## ロック済み決定
 
@@ -14,7 +14,7 @@
 
 1. **`TurnId` は必須。** `run(input) -> Result<TurnId, Busy | ActorDead>`。ターンスコープのイベントと `cancel(turn)` はその id を運ぶ。
 2. **並行性:** single-flight。ターン実行中の二度目の `run` は `Busy` — 暗黙 abort や broadcast だけの相関はしない。
-3. **ライフサイクル:** `EneHandle::open(config, card) -> Result<ReadyHandle, _>`。公開の未準備 `new` + 多段 `load_config` / `load_character` は置かない。設定ファイル I/O は `ConfigStore` / `ene-config` 側。
+3. **ライフサイクル:** `EneHandle::open(config, card) -> Result<ReadyHandle, _>`。設定ファイル I/O は `ConfigStore` / `ene-config` 側。
 4. **`Terminal` はチャット経路のターン完了**を意味する（会話履歴のコミットと同期 `finalize_turn`（affect 永続化）の後）。LLM 記憶抽出（`write_memories`）、自然忘却、ポストターン affect **分類**は `Terminal` 後の fire-and-forget であり、Done を遅らせたりターンゲートを占有してはならない。
 
 ### イベント
@@ -29,15 +29,15 @@
 
 ### クレートマップ
 
-| ターゲット | 吸収元 |
+| クレート | 役割 |
 |---|---|
-| `ene-runtime` | 旧 `ene-core` ホスト / アクターファサード |
-| `ene-mind` | 認知エンジン + セッション（旧 `ene-session` を吸収） |
-| `ene-store` | 永続化（旧 memory ストア表面） |
-| `ene-ai` | `ene-provider` + `ene-embedding` |
-| `ene-tool` | `ene-tool-proto` + `ene-tool-common` + `ene-tool-derive` |
+| `ene-runtime` | ホスト / アクターファサード |
+| `ene-mind` | 認知エンジン + セッション |
+| `ene-store` | 永続化 |
+| `ene-ai` | LLM + 埋め込みプロバイダ |
+| `ene-tool` | ツール ABI ファサード（`ene-tool-proto` + `ene-tool-common` + `ene-tool-derive`） |
 | `ene-tool-db` | ツールバイナリ用 IPC CRUD クライアント → `ene-runtime` の `DbIpcServer`；依存は `ene-tool-proto` のみ |
-| `ene-tool-host` / `ene-tool-rag` / `ene-config` / `ene-vrm` | 同様（LayerComposer は vrm/desktop 内） |
+| `ene-tool-host` / `ene-tool-rag` / `ene-config` / `ene-vrm` | ツールオーケストレーション、Tool RAG、設定、VRM レンダリング |
 
 ### 依存ルール
 
@@ -47,7 +47,6 @@
 - `ene-tool-host` ↛ `ene-ai` / `ene-store` / `ene-mind` — Tool RAG は `ene-tool-rag` に配置
 - `ene-tool-rag` は `ene-ai`（埋め込み、HyDE、rerank）+ `ene-store`（永続ツール埋め込み）に依存
 - **`PerformanceCue` は `ene-mind` 所有**；runtime が再エクスポート；**`ene-vrm` は mind/runtime に依存しない**
-- `ene-common` は `ene-config`（`Truncate` / `TruncateResult` は `ene_config::truncate`）と `ene-tool-common`（再エクスポート）へ吸収；`schema_link` 削除（runtime が mind を通常依存）
 
 ### 設定所有
 
@@ -60,8 +59,8 @@
 - [#119](https://github.com/pexisgle/ene/issues/119) Memory — ledger が唯一の SoT；store に embedder なし
 - [#126](https://github.com/pexisgle/ene/issues/126) Performance — `PerformanceCue` は mind；明示 `perform` なしに `CueSource::Host` は置かない
 - [#135](https://github.com/pexisgle/ene/issues/135) Tools — name 衝突は全レジストリ層で hard error；wire / host トレイト分離；`ToolSpec` は LLM 向けのみ（`name`, `description`, `parameters`）、内部 RAG フィールドは `#[doc(hidden)]` + `#[serde(skip)]`
-- [#138](https://github.com/pexisgle/ene/issues/138) IPC — 8 request / 6 response バリアント（v3）；`UserInput` は `ToolError` 経由で送出
-- [#158](https://github.com/pexisgle/ene/issues/158) ABI 整合 — #135 契約を実装に一致：`CompositeToolRegistry` を hard error 化、dead IPC バリアントを削除、`SingleActionProvider` を追加
+- [#138](https://github.com/pexisgle/ene/issues/138) IPC — 9 request / 7 response バリアント；`UserInput` は `ToolError` 経由で送出
+- [#158](https://github.com/pexisgle/ene/issues/158) ABI 整合 — #135 契約を実装に一致：`CompositeToolRegistry` を hard error 化、`SingleActionProvider` を追加
 
 ## 目標依存グラフ
 
@@ -108,14 +107,14 @@ handle.diagnostics() -> &EneDiagnostics;
 | バリアント | 備考 |
 |---|---|
 | `TextDelta { turn, delta }` | marker 除去済み |
-| `Performance { turn, cues, source }` | SpecialToken + Expression を置換 |
+| `Performance { turn, cues, source }` | UI 向けアバターキュー |
 | `ToolCallStart` / `ToolCallResult` | UI 用に任意 |
 | `PermissionRequired` / `UserInputRequired` | ゲート |
 | `ContextCompressed { turn, … }` | 薄い信号；詳細は diagnostics |
 | `Terminal { turn, reason }` | ターン完了 |
 | `StatusChanged { status }` | Idle / Running / Error |
 
-チャットから除去: `SpecialToken`、単独の `Expression`、`SessionSplit`、`PipelinePhase`、`PipelineMetrics`。
+診断専用（チャットバス外）: `PipelinePhase`、`PipelineMetrics`、arbiter/compression の詳細イベント。
 
 ## エラーと非同期の規約
 
@@ -124,14 +123,6 @@ handle.diagnostics() -> &EneDiagnostics;
 - クレートごとに公開 `thiserror` 列挙を一つ；ライブラリ境界に `anyhow` / 生 `String` / `Box<dyn Error>` なし
 - テスト以外で `unwrap` / `expect` なし
 
-## 移行メモ
-
-- 二重パイプライン fallback なし: 埋め込み未初期化で memory 機能が必要な場合は fail closed
-- **文脈境界は compression-only:** 文脈境界はローリング圧縮のみを使用する。hard session-ID 発行 / hard-split は製品経路ではなく、`ene-runtime` は hard-split タスクを起動しない
-- **Cancel:** ストリームタスクを即 abort し、進行中の session 更新は破棄する。`Terminal::Cancelled` は最大一度
-- 単一の `HistoryEntry { role: Role, content: String }` を mind + runtime snapshot で共有
-- 公開互換 alias や移行用 feature/config は作らない — 呼び出し側を同一変更で更新
-- ストア無しチャットはサポート；メモリ有効化時に store + embedder が無ければ fail closed
 ## 受入
 
 - [ ] サブ issue #112–#118 がクローズまたは明示延期

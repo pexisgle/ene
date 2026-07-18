@@ -32,19 +32,18 @@ Performance システムは、表情、モーション、視線制御を単一�
 
 ### 1. ストリームマーカー解析（`#128`）
 
-LLM はストリーミングテキスト中に `<|perf:…|>` トークンをインラインで出力できます:
+LLM はストリーミングテキスト中に `<|perf:…|>` トークンをインラインで出力できます。`<|emo:NAME|>` は `<|perf:expr=NAME|>` の表情省略形です。
 
 | マーカー | 例 | 効果 |
 |--------|---------|--------|
+| Expression（省略形） | `<\|emo:happy\|>` | 表情ブレンドシェイプを設定 |
 | Expression | `<\|perf:expr=happy\|>` | 表情ブレンドシェイプを設定 |
 | Expression（重み付き） | `<\|perf:expr=happy,weight=0.8,hold=2.0\|>` | 重みと保持時間付き |
 | Motion | `<\|perf:motion=wave,layer=upper\|>` | 上半身モーションを再生 |
 | Look-at | `<\|perf:lookat=user\|>` | 対象への視線移動 |
 | Cancel | `<\|perf:cancel=expr\|>` / `<\|perf:cancel=motion\|>` / `<\|perf:cancel=all\|>` | スロットをクリア |
 
-後方互換性: `<|emo:NAME|>` は `<|perf:expr=NAME|>` として受け付けられます。
-
-`ene_mind::session::special_token::parse_performance_marker()` を参照。
+`ene_mind::session::special_token::parse_performance_marker()` と `extract_emotion_from_token()` を参照。
 
 ### 2. Performance Arbiter（`#129`）
 
@@ -156,4 +155,4 @@ Available expressions:
 
 - [感情と Performance](../runtime/emotions.md) — アフェクトエンジンと表情マッピング
 - [ストリーミングイベント](../runtime/streaming-events.md) — チャットイベントバス
-- [API v2 ADR](api-v2.md) — ホスト契約とクレートマップ
+- [API v1 ADR](api-v1.md) — ホスト契約とクレートマップ

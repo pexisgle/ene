@@ -5,7 +5,7 @@
 ## 設定の受け渡し
 
 1. `settings.json` → `sandbox` セクションから `SandboxConfigData` を作成
-2. `IpcRequest::Handshake` に含めて各ツールバイナリへ送信（sandbox と `tool_config` は v3 で旧 `Initialize` から統合）
+2. `IpcRequest::Handshake` に含めて各ツールバイナリへ送信（sandbox と `tool_config` は Handshake に含まれる）
 3. ツール側の `Sandbox` 型がすべてのアクセス制御を適用
 
 ## SandboxConfigData

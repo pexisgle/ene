@@ -28,28 +28,6 @@ pub enum EneMemoryError {
         to: crate::MemoryStatus,
     },
 
-    /// Legacy memory write attempted while tables are read-only (#98).
-    #[error(
-        "Legacy memory tables are read-only for this store. Run `/memory migrate legacy` or `/memory reset legacy`."
-    )]
-    LegacyWriteForbidden,
-
-    /// Legacy rows exist but migration has not completed (#98).
-    #[error(
-        "Legacy memory data exists for card '{card_name}' but migration is incomplete. Run `/memory migrate legacy` or set mind.memory.require_migration = false."
-    )]
-    LegacyMemoryNotMigrated {
-        /// Character card with unmigrated legacy data.
-        card_name: String,
-    },
-
-    /// Card was already migrated from legacy tables.
-    #[error("Legacy migration already completed for card '{card_name}'")]
-    LegacyAlreadyMigrated {
-        /// Character card name.
-        card_name: String,
-    },
-
     /// Catch-all error variant.
     #[error("Other error: {0}")]
     Other(String),

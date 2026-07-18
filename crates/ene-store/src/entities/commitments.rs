@@ -13,28 +13,12 @@ pub struct Model {
     pub status: String,
     pub due_at: Option<DateTime<Utc>>,
     pub due_label: Option<String>,
-    pub source_memory_id: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    #[sea_orm(
-        belongs_to = "super::typed_memories::Entity",
-        from = "Column::SourceMemoryId",
-        to = "super::typed_memories::Column::Id",
-        on_update = "NoAction",
-        on_delete = "SetNull"
-    )]
-    TypedMemories,
-}
-
-impl Related<super::typed_memories::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::TypedMemories.def()
-    }
-}
+pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}

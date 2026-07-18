@@ -1,7 +1,7 @@
 # `ene-store` — API Reference
 
 > **Crate:** `ene-store`
-> **Role:** Persistent long-term memory store — legacy summaries/key-facts/logs, typed memory (episodic/semantic/affective/etc.), affect state, companion commitments, and the tool-embedding index.
+> **Role:** Persistent long-term memory store — typed memory (episodic/semantic/affective/etc.), conversation logs, memory spans, affect state, companion commitments, and the tool-embedding index.
 
 ---
 
@@ -11,18 +11,18 @@
 
 > **Architecture constraint:** This crate uses `sea-orm` + `sqlite-vec` for **all** database access. It does **not** use Diesel or raw `rusqlite`. Tool binaries must not link `ene-store` directly — they access the database through the `DbIpcServer` / `ene-tool-db` IPC client instead.
 
-Each character has a separate namespace within the shared database, keyed by `card_name` (legacy tables) or `character_id` (typed memory / affect / commitments). The crate stores several kinds of data, layered from oldest to newest:
+Each character has a separate namespace within the shared database, keyed by `character_id` (typed memory / affect / commitments) and `card_name` (conversation logs). The crate stores:
 
-| Layer | Tables | Status |
+| Layer | Tables | Role |
 |---|---|---|
-| **Legacy** | `conversation_summaries`, `conversation_keyfacts`, `conversation_logs` | Read/write by default; becomes read-only once the cognitive runtime migrates a card |
+| **Conversation logs** | `conversation_logs` | Append-only raw turn history |
 | **Typed memory** | `typed_memories`, `memory_embeddings` | Primary store for the mind runtime |
 | **Affect** | `affect_states` | Per-character PAD (pleasure/arousal/dominance) emotional state |
 | **Commitments** | `commitments` | Companion promises / follow-ups ledger |
 | **Memory spans** | `memory_spans` | Rolling scene/chapter compression over raw logs |
 | **Tool index** | `tool_embedding_index` | Multi-vector embeddings for the Tool RAG pipeline |
 
-Almost every `MemoryStore` method is `async` (it acquires a connection from the `sea-orm`/`sqlx` pool). The only **synchronous** methods are `spawn_insert_log`, `connection`, `embedding_dim`, `decode_embedding_bytes`, `legacy_write_mode`, and `set_legacy_write_mode`.
+Almost every `MemoryStore` method is `async` (it acquires a connection from the `sea-orm`/`sqlx` pool). The only **synchronous** methods are `spawn_insert_log`, `connection`, `embedding_dim`, and `decode_embedding_bytes`.
 
 ---
 
@@ -54,83 +54,14 @@ impl MemoryStore {
 | `connection` | `pub fn connection(&self) -> &DatabaseConnection` | Returns the underlying `sea_orm::DatabaseConnection`, for advanced callers that need raw query access. |
 | `embedding_dim` | `pub fn embedding_dim(&self) -> usize` | Returns the configured embedding vector width. |
 | `decode_embedding_bytes` | `pub fn decode_embedding_bytes(&self, bytes: &[u8]) -> Vec<f32>` | Decodes a raw `BLOB` column into an `f32` vector. Useful when working with rows fetched outside the typed store methods. |
-| `legacy_write_mode` | `pub fn legacy_write_mode(&self) -> LegacyWriteMode` | Returns whether legacy-table writes are currently allowed. |
-| `set_legacy_write_mode` | `pub fn set_legacy_write_mode(&self, mode: LegacyWriteMode)` | Sets the legacy write policy (see below). |
-
-### `LegacyWriteMode`
-
-```rust
-/// Legacy table write policy for cognitive runtime integration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum LegacyWriteMode {
-    /// Legacy summaries/keyfacts/logs may be written (default).
-    #[default]
-    ReadWrite,
-    /// Legacy writes rejected; tables remain for read-only recall.
-    ReadOnly,
-}
-```
-
-When set to `ReadOnly`, `insert_summary` and `upsert_keyfact` return `MemoryError::LegacyWriteForbidden`. This is used once a character card has been migrated to typed memory (§ Legacy Migration), so nothing accidentally writes to the deprecated tables again. `insert_log` and `insert_conversation_turn` are **not** gated — raw conversation logging always continues, since it also feeds `memory_spans`.
 
 ---
 
-## Legacy Memory: Summaries, Key Facts, Logs
-
-The original (pre-typed-memory) memory model: one **summary** per completed session, a flat **key-fact** table per character, and an append-only **conversation log**.
-
-### Core types
-
-```rust
-pub struct KeyFact {
-    pub key: String,
-    pub value: String,
-}
-
-pub struct ConversationSummary {
-    pub id: i64,
-    pub session_id: String,
-    pub card_name: String,
-    pub summary: String,
-    pub embedding: Vec<f32>,
-    pub created_at: DateTime<Utc>,
-    pub ended_at: DateTime<Utc>,
-}
-
-pub struct RecalledSummary {
-    pub entry: ConversationSummary,
-    /// Cosine similarity, range `[-1.0, 1.0]` (raw angular distance, not normalized).
-    pub similarity: f32,
-}
-```
-
-### Summary methods
+## Conversation Logs
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `insert_summary` | `async fn insert_summary(&self, session_id: &str, card_name: &str, summary: &str, key_facts: &[KeyFact], embedding: &[f32], ended_at: DateTime<Utc>) -> Result<i64, MemoryError>` | Inserts a summary and its key facts in one transaction. Rejected with `LegacyWriteForbidden` in `ReadOnly` mode. |
-| `search_summaries` | `async fn search_summaries(&self, query_embedding: &[f32], card_name: &str, limit: usize, similarity_threshold: f32) -> Result<Vec<RecalledSummary>, MemoryError>` | **Deprecated.** Cosine-similarity search via `vec_distance_cosine`. Prefer typed memory `Query::search()` instead. |
-| `list_recent_summaries` | `async fn list_recent_summaries(&self, card_name: &str, limit: usize) -> Result<Vec<ConversationSummary>, MemoryError>` | Most recent summaries by `created_at DESC`. |
-| `count_summaries` | `async fn count_summaries(&self, card_name: &str) -> Result<i64, MemoryError>` | Total summaries for a character. |
-| `delete_summary` | `async fn delete_summary(&self, id: i64) -> Result<usize, MemoryError>` | Cascading delete (removes associated key facts too). |
-| `recall_context` | `async fn recall_context(&self, card_name: &str, query_embedding: &[f32], limit: usize, similarity_threshold: f32) -> Result<(Vec<RecalledSummary>, Vec<KeyFact>), MemoryError>` | **Deprecated.** Convenience call combining a summary search with all key facts. Returns empty vectors once the card has been migrated to typed memory. Prefer typed `Query::search()`. |
-
-### Key-fact methods
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `get_all_keyfacts` | `async fn get_all_keyfacts(&self, card_name: &str) -> Result<Vec<KeyFact>, MemoryError>` | Latest value per key. |
-| `upsert_keyfact` | `async fn upsert_keyfact(&self, card_name: &str, key: &str, value: &str) -> Result<(), MemoryError>` | Inserts a new row for the key (latest row wins on read). Rejected in `ReadOnly` mode. |
-| `delete_keyfact` | `async fn delete_keyfact(&self, card_name: &str, key: &str) -> Result<usize, MemoryError>` | Removes all rows for the key. |
-| `count_keyfacts` | `async fn count_keyfacts(&self, card_name: &str) -> Result<i64, MemoryError>` | Number of distinct keys for a character. |
-
-### Conversation log methods
-
-There is no plain `get_logs` — the accessor is `get_logs_by_session`, and it returns `DateTime<Utc>` timestamps (not RFC3339 strings):
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `insert_log` | `async fn insert_log(&self, session_id: &str, card_name: &str, role: &str, content: &str) -> Result<i64, MemoryError>` | Appends one log entry. Never gated by `LegacyWriteMode`. |
+| `insert_log` | `async fn insert_log(&self, session_id: &str, card_name: &str, role: &str, content: &str) -> Result<i64, MemoryError>` | Appends one log entry. |
 | `insert_conversation_turn` | `async fn insert_conversation_turn(&self, session_id: &str, card_name: &str, user_message: &str, assistant_response: &str) -> Result<(i64, i64), MemoryError>` | Convenience: inserts a user log entry and an assistant log entry as one call. Returns both row IDs. |
 | `spawn_insert_log` | `fn spawn_insert_log(store: &Arc<Self>, session_id: &str, card_name: &str, role: &str, content: &str)` | **Synchronous.** Fire-and-forget: spawns a `tokio` task that calls `insert_log`; errors are logged, not propagated. |
 | `get_logs_by_session` | `async fn get_logs_by_session(&self, session_id: &str) -> Result<Vec<(String, String, DateTime<Utc>)>, MemoryError>` | All `(role, content, created_at)` tuples for a session, ascending by `created_at`. |
@@ -139,7 +70,7 @@ There is no plain `get_logs` — the accessor is `get_logs_by_session`, and it r
 
 ## Tool Embeddings
 
-Powers the Tool RAG pipeline in `ene-tool-host`. Unlike the legacy/typed memory tables, each tool spec is embedded as **multiple rows** — one per field (`summary`, `description`, `capability`, `example`, `negative`) — enabling per-field weighting and max-pool aggregation at query time.
+Powers the Tool RAG pipeline in `ene-tool-host`. Each tool spec is embedded as **multiple rows** — one per field (`summary`, `description`, `capability`, `example`, `negative`) — enabling per-field weighting and max-pool aggregation at query time.
 
 ```rust
 /// `(tool_name, field, field_key, version_hash, model_name, embedding_vec, source_text)`
@@ -160,7 +91,7 @@ pub type ToolEmbeddingFieldRow = (String, String, String, String, String, Vec<f3
 
 ## Typed Memory
 
-The typed memory model is the primary store for the mind runtime. Each row has a `MemoryKind`, `MemoryStatus`, `MemorySource`, and independent confidence/salience scores, replacing the flat legacy summary/key-fact model with something queryable and lifecycle-aware.
+The typed memory model is the primary store for the mind runtime. Each row has a `MemoryKind`, `MemoryStatus`, `MemorySource`, and independent confidence/salience scores.
 
 ### `MemoryKind`
 
@@ -491,8 +422,6 @@ pub struct Commitment {
     pub due_at: Option<DateTime<Utc>>,
     /// Raw due hint from extraction (e.g. `"tomorrow"`, `"次回"`).
     pub due_label: Option<String>,
-    /// Linked typed memory row (`MemoryKind::Commitment`).
-    pub source_memory_id: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -507,7 +436,6 @@ pub struct NewCommitment {
     pub status: CommitmentStatus,
     pub due_at: Option<DateTime<Utc>>,
     pub due_label: Option<String>,
-    pub source_memory_id: Option<i64>,
 }
 
 /// Lightweight DTO for the Active Commitments prompt section.
@@ -526,7 +454,6 @@ pub struct ActiveCommitmentPrompt {
 |--------|-----------|-------------|
 | `insert_commitment` | `async fn insert_commitment(&self, item: &NewCommitment) -> Result<i64, MemoryError>` | Inserts a new commitment row. |
 | `get_commitment` | `async fn get_commitment(&self, id: i64) -> Result<Option<Commitment>, MemoryError>` | Fetch by primary key. |
-| `get_commitment_by_source_memory` | `async fn get_commitment_by_source_memory(&self, source_memory_id: i64) -> Result<Option<Commitment>, MemoryError>` | Look up the ledger row linked to a typed memory. |
 | `list_active_commitments` | `async fn list_active_commitments(&self, character_id: &str, user_id: Option<&str>, limit: usize) -> Result<Vec<Commitment>, MemoryError>` | `Active` rows for prompt injection — no vector search involved. |
 | `update_commitment_status` | `async fn update_commitment_status(&self, id: i64, new_status: CommitmentStatus) -> Result<bool, MemoryError>` | Generic status write. |
 | `complete_commitment` | `async fn complete_commitment(&self, id: i64) -> Result<bool, MemoryError>` | Marks `Done`. |
@@ -561,75 +488,6 @@ pub struct InvalidTransition {
 | `target_status_after_decay` | `fn target_status_after_decay(current: MemoryStatus, score: f32) -> Option<MemoryStatus>` | `Active` + score below `FADE_THRESHOLD` → `Some(Faded)`; `Faded` + score below `ARCHIVE_THRESHOLD` → `Some(Archived)`; otherwise `None`. |
 
 See [`docs/reference/memory/memory.md`](../memory/memory.md#memory-forgetting-lifecycle-76) for the exact decay formula and default thresholds used in production.
-
----
-
-## Legacy Migration
-
-One-shot conversion from the legacy tables into typed memory, used when a character card adopts the cognitive runtime.
-
-```rust
-pub struct LegacyMigrationOptions {
-    pub card_name: String,
-    pub user_id: String,
-    pub embedding_model: String,
-    /// When true, reports counts without writing anything.
-    pub dry_run: bool,
-}
-
-pub struct LegacyMigrationReport {
-    pub summaries_migrated: usize,
-    pub keyfacts_migrated: usize,
-    pub spans_migrated: usize,
-    /// Rows skipped because a matching `source_ref` already exists.
-    pub skipped_existing: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct LegacyRowCounts {
-    pub summaries: i64,
-    pub keyfacts: i64,
-    pub logs: i64,
-}
-
-impl LegacyRowCounts {
-    pub fn has_legacy_data(self) -> bool;
-    pub fn requires_migration_gate(self) -> bool;
-}
-
-pub struct MigrationStatus {
-    pub card_name: String,
-    pub migrated_at: DateTime<Utc>,
-    pub legacy_summaries_count: i32,
-    pub legacy_keyfacts_count: i32,
-    pub legacy_logs_count: i32,
-    /// e.g. `"one_shot"`.
-    pub strategy: String,
-}
-```
-
-| Item | Signature | Description |
-|------|-----------|-------------|
-| `execute_legacy_migration` | `async fn execute_legacy_migration(store: &MemoryStore, options: &LegacyMigrationOptions) -> Result<LegacyMigrationReport, MemoryError>` | Free function that does the actual conversion work; called by `MemoryStore::migrate_legacy`. |
-| `MemoryStore::migrate_legacy` | `async fn migrate_legacy(&self, options: &LegacyMigrationOptions) -> Result<LegacyMigrationReport, MemoryError>` | Thin wrapper: `crate::legacy_migration::execute_legacy_migration(self, options).await`. |
-| `keyfact_kind_for_key` | `fn keyfact_kind_for_key(key: &str) -> MemoryKind` | Maps `pref_*` / `like` / `dislike` keys to `Preference`; everything else to `UserProfile`. |
-| `logs_to_spans` | `fn logs_to_spans(rows: &[LegacyLogRow]) -> Vec<NewMemorySpan>` | Groups conversation-log rows into one span per user/assistant pair. |
-| `MemoryStore::count_legacy_rows` | `async fn count_legacy_rows(&self, card_name: &str) -> Result<LegacyRowCounts, MemoryError>` | Row counts across the three legacy tables. |
-| `MemoryStore::get_migration_status` | `async fn get_migration_status(&self, card_name: &str) -> Result<Option<MigrationStatus>, MemoryError>` | Reads `memory_migration_meta`. |
-| `MemoryStore::is_legacy_migrated` | `async fn is_legacy_migrated(&self, card_name: &str) -> Result<bool, MemoryError>` | Shorthand for `get_migration_status(..).is_some()`. |
-| `MemoryStore::mark_migration_complete` | `async fn mark_migration_complete(&self, card_name: &str, counts: LegacyRowCounts, strategy: &str) -> Result<(), MemoryError>` | Records completion in `memory_migration_meta`. |
-| `MemoryStore::reset_legacy_memory` | `async fn reset_legacy_memory(&self, card_name: &str) -> Result<(), MemoryError>` | **Destructive.** Truncates legacy tables and clears typed memory for the card. |
-| `MemoryStore::ensure_legacy_migration_allowed` | `async fn ensure_legacy_migration_allowed(&self, card_name: &str, require_migration: bool) -> Result<(), MemoryError>` | Returns `MemoryError::LegacyMemoryNotMigrated` when `require_migration` is set and unmigrated legacy rows exist. |
-
-**Migration mapping:**
-
-| Legacy table | Target | Rule |
-|---|---|---|
-| `conversation_summaries` | `typed_memories` (`Episodic`) | `source_ref = "legacy:summary:{id}"`, embedding copied to `memory_embeddings` |
-| `conversation_keyfacts` | `typed_memories` (`Preference` or `UserProfile`) | `source_ref = "legacy:keyfact:{id}"`, kind chosen via `keyfact_kind_for_key` |
-| `conversation_logs` | `memory_spans` | One span per user/assistant pair, via `logs_to_spans` |
-
-`Migrator` (in `pub mod migrator`) implements `sea_orm_migration::MigratorTrait` with 7 ordered migrations covering the initial schema, typed memory, affect fields, commitments, the `pinned` flag, `faded_at`, and migration metadata.
 
 ---
 
@@ -724,12 +582,6 @@ pub enum EneMemoryError {
     InvalidEmbedding(String),
     /// A memory lifecycle transition was not permitted (see `forgetting::validate_transition`).
     InvalidTransition { from: MemoryStatus, to: MemoryStatus },
-    /// A write to a legacy table was attempted while `LegacyWriteMode::ReadOnly` is set.
-    LegacyWriteForbidden,
-    /// Legacy rows exist but migration has not completed, and `require_migration` is set.
-    LegacyMemoryNotMigrated { card_name: String },
-    /// Migration was attempted on a card that already completed migration.
-    LegacyAlreadyMigrated { card_name: String },
     Other(String),
 }
 
@@ -796,8 +648,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - [Cognitive Runtime](../architecture/cognitive-runtime.md) — Memory Arbiter, recall planning, and reranking that build on typed memory
 - `ene-mind` — Owns the Memory Arbiter, `RecallPlanner`, and post-turn memory writer that call into this crate
 - [`ene-runtime`](./ene-runtime.md) — `MemoryQueryHandle` for external access and actor-level wiring
-- [`ene-mind`](./ene-mind.md) — Drives session splits that create legacy summaries via `execute_split`
+- [`ene-mind`](./ene-mind.md) — Drives session splits and rolling compression via `execute_split`
 - [`ene-ai`](./ene-ai.md) — Provides embeddings for storage and search
 - [Memory System](../memory/memory.md) — Full design doc: hybrid scoring, MMR diversification, migration, commitment ledger
-- [API v2](../architecture/api-v2.md) — Store ownership (`store.*` only; policy under `mind.*`)
+- [API v1](../architecture/api-v1.md) — Store ownership (`store.*` only; policy under `mind.*`)
 

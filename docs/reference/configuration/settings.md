@@ -4,7 +4,7 @@ ene settings are centralized in `assets/settings.json` (or the OS user config di
 
 Loading: `ene_config::load_full_config()` / `ConfigStore` resolves defaults, file, and environment variables.
 
-**API v2 ownership:** persistence toggles live under `store` (`enabled` only in the public schema). Recall / write / decay / MMR / emotion internals / performance policy knobs use **code defaults** under `mind.*` — only `mind.emotion` and `mind.proactive` policy fields are user-facing. There is no top-level `memory.*` policy section and no `cognition.enabled` dual-pipeline switch — the mind path is the only streaming path.
+**API v1 ownership:** persistence toggles live under `store` (`enabled` only in the public schema). Recall / write / decay / MMR / emotion internals / performance policy knobs use **code defaults** under `mind.*` — only `mind.emotion` and `mind.proactive` policy fields are user-facing. There is no top-level `memory.*` policy section and no `cognition.enabled` dual-pipeline switch — the mind path is the only streaming path.
 
 ## Top-Level Structure (`EneConfig`)
 
@@ -25,20 +25,6 @@ pub struct EneConfig {
 - Empty string `""` → `assets_dir/characters/Alicia/character.json` (backward compatibility).
 - Name without a path separator → `assets_dir/characters/{name}/character.json`.
 - Path with `/` or `\` → used as-is (absolute or relative card path).
-
-### Migration (version 1 → 2)
-
-**No automatic migration.** Rewrite `settings.json` by hand: set `"version": 2` and replace the top-level `provider` block with `ai` (`providers` + `tasks`). Old `provider` keys are ignored.
-
-| Old (`provider`) | New (`ai`) |
-|------------------|------------|
-| `name`, `base_url`, `api_key` | `providers.<name>` with `"kind": "openai_compatible"` |
-| `model`, `max_tokens` | `tasks.chat` |
-| `embedding.*` | `tasks.embedding` (+ optional `query_prefix`) |
-| `proactive.generation_model` | `tasks.proactive` (optional `TaskRef`; `null` = use chat) |
-| `proactive.decision.*` | `providers.<name>` with `"kind": "local_gguf"` and `model_path`, referenced from `tasks.proactive` |
-
-Still code-defaults only (not in the thin public UI surface, but some remain JSON-configurable): top-level `session`, `web_config`, `tools.max_rounds` / `timeout_ms`, `mind.context`, most of `mind.memory` / `mind.character`, extended `mind.proactive` / `mind.emotion` knobs, `store.db_path`, `runtime_rules`. **Configurable again:** `tools.rag`, filesystem sandbox limits under `tools.list.fs`.
 
 ## Complete Example
 

@@ -4,7 +4,7 @@
 
 - **Mind** (`streaming_cognitive::run_stream_cognitive`) — delegates prompt composition, recall, affect, and post-turn memory writing to `ene-mind`'s `CognitionEngine`.
 
-The dispatch requires an enabled and initialized store plus an embedding provider. Missing prerequisites return `EneRuntimeError::MindPrerequisite` and emit a failed `Terminal` event; the runtime never falls back to a legacy stream.
+The dispatch requires an enabled and initialized store plus an embedding provider. Missing prerequisites return `EneRuntimeError::MindPrerequisite` and emit a failed `Terminal` event.
 
 Every turn is identified by a [`TurnId`](../api/ene-runtime.md). `run` returns that id (or `RunError::Busy` if a turn is already in flight). Turn-scoped chat events carry the same `turn` field. `Terminal` is emitted after conversation history commit and synchronous `finalize_turn` (affect persist); deferred LLM memory extraction and forgetting may still be in flight.
 
@@ -22,7 +22,7 @@ Every turn is identified by a [`TurnId`](../api/ene-runtime.md). `run` returns t
 
 ### Not on the chat bus
 
-These are **not** chat `EneEvent` variants under API v2:
+These are **not** chat `EneEvent` variants under API v1:
 
 | Former / diagnostic | Where it lives now |
 |---|---|
@@ -45,7 +45,7 @@ Both `ene-cli` (`apps/ene-cli/src/stream.rs`) and `ene-desktop` (`apps/ene-deskt
 ## Related documentation
 
 - [`ene-runtime` API reference](../api/ene-runtime.md) — full `EneEvent` field reference and streaming dispatch
-- [API v2 ADR](../architecture/api-v2.md) — locked host / event contracts
+- [API v1 ADR](../architecture/api-v1.md) — locked host / event contracts
 - [Session Split and Compression](session-split.md) — why compression is preferred over hard splits
 - [Streaming Engine](streaming.md) — actor/handle architecture
 - [Cognitive Runtime ADR](../architecture/cognitive-runtime.md)

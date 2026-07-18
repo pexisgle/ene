@@ -8,34 +8,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 
 /// Current IPC protocol version.
-///
-/// Version 2:
-/// - `IpcResponse::Tools` carries `Vec<ToolSpec>`
-/// - `IpcRequest::CallTool` `name` field accepts the new `ToolName` (still
-///   a string on the wire)
-/// - `IpcRequest::SetCallContext` carries both conversation and turn identifiers
-///
-/// Version 3:
-/// - `IpcRequest::Handshake` folded `Initialize`: `Handshake` now carries
-///   `sandbox` + `tool_config`, eliminating a second round-trip.
-/// - Removed `IpcRequest::SetSessionId` — `SetCallContext` supersedes it.
-/// - Removed `IpcRequest::GetMyConfig`, `SetMyConfig` — runtime config is
-///   pushed through `Handshake` only.
-/// - Removed `IpcResponse::MyConfig`.
-/// - `IpcRequest::GetConfigSchema` is a **documented exception** (#150)
-///   retained for config schema discovery by `tool_host_manager`.
-///
-/// Version 4:
-/// - Added `IpcRequest::ListRagProfiles` / `IpcResponse::RagProfiles` for
-///   host/RAG metadata ([`ToolRagProfile`], #137).
-/// - `ToolSpec` remains LLM-only (`name`, `description`, `parameters`).
-pub const IPC_PROTOCOL_VERSION: u32 = 4;
+pub const IPC_PROTOCOL_VERSION: u32 = 1;
 
 /// IPC request — core → host
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum IpcRequest {
     /// Handshake to negotiate protocol version, exchange sandbox config,
-    /// and push tool-specific configuration (folded from v2 `Initialize`).
+    /// and push tool-specific configuration.
     Handshake {
         /// Client's supported protocol version.
         version: u32,
@@ -60,7 +39,7 @@ pub enum IpcRequest {
     },
     /// Set the call context (conversation + turn identifiers).
     ///
-    /// Supersedes v2 `SetSessionId`; tool-side session scoping should
+    /// Supersedes removed `SetSessionId`; tool-side session scoping should
     /// derive from `conversation_id`.
     SetCallContext {
         /// Conversation-level identifier (session ID).
@@ -94,7 +73,7 @@ pub enum IpcResponse {
     },
     /// Acknowledgment (for `ApprovePermission`, `AllowPattern`, etc.).
     Ack,
-    /// List of tool specs (v2).
+    /// List of tool specs.
     Tools {
         /// The structured tool specs.
         tools: Vec<ToolSpec>,
@@ -313,25 +292,6 @@ mod tests {
         let req = IpcRequest::ListTools;
         let got = send_recv_request(&req).await;
         assert_eq!(got, req);
-    }
-
-    #[tokio::test]
-    async fn ipc_request_handshake_v2_roundtrip() {
-        // v2 wire format is deserialisable as v3 — new fields deserialise
-        // as their serde defaults (SandboxConfigData::default() via
-        // #[serde(default)] + None for Option).
-        let v2_json = serde_json::json!({
-            "Handshake": { "version": 3 }
-        });
-        let req: IpcRequest = serde_json::from_value(v2_json).unwrap();
-        assert!(matches!(
-            req,
-            IpcRequest::Handshake {
-                version: 3,
-                sandbox: _,
-                tool_config: None,
-            }
-        ));
     }
 
     #[tokio::test]

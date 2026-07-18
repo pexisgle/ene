@@ -354,7 +354,6 @@ async fn scenario_active_commitments_are_prompt_candidates() {
             status: CommitmentStatus::Active,
             due_at: None,
             due_label: None,
-            source_memory_id: None,
         })
         .await
         .unwrap();

@@ -21,4 +21,4 @@ Diagnostics (snapshots, tool lists, manual session split) go through `diagnostic
 
 - [Streaming engine](../../reference/runtime/streaming.md)
 - [Streaming events](../../reference/runtime/streaming-events.md)
-- [API v2 ADR](../../reference/architecture/api-v2.md)
+- [API v1 ADR](../../reference/architecture/api-v1.md)

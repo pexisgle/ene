@@ -36,5 +36,5 @@ Hosts subscribe to a small chat event bus; diagnostics are a separate channel.
 ## Dig deeper
 
 - Concepts: [Turns](concepts/turns.md), [Sessions](concepts/sessions.md), [Memory](concepts/memory.md), [Emotions](concepts/emotions.md)
-- Design contracts: [Architecture overview](../reference/architecture/overview.md), [API v2](../reference/architecture/api-v2.md)
+- Design contracts: [Architecture overview](../reference/architecture/overview.md), [API v1](../reference/architecture/api-v1.md)
 - Public APIs: [API index](../reference/api/index.md)

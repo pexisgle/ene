@@ -24,7 +24,7 @@ pub enum AppEvent {
     Ai(AiStreamUpdate),
     /// Raw performance cue name from [`ene_runtime::EneEvent::Performance`].
     /// Desktop maps this to VRM playback; do not forward `SpecialToken` /
-    /// Expression events (removed in API v2).
+    /// Expression events (removed in API v1).
     #[cfg_attr(
         not(test),
         expect(

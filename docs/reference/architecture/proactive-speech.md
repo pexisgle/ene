@@ -123,4 +123,4 @@ GGUF weights are **not** bundled with the app; paths are configured by the user.
 - Epic [#103](https://github.com/pexisgle/ene/issues/103)
 - Sub-issues #162–#170
 - [Cognitive Runtime ADR](cognitive-runtime.md)
-- [API v2 ADR](api-v2.md)
+- [API v1 ADR](api-v1.md)

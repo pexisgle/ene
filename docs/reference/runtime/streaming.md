@@ -1,6 +1,6 @@
 # Streaming Engine
 
-ene uses an **actor-based message-passing architecture** for streaming LLM conversations with tool calling. The product path is **API v2**: ready `EneHandle::open`, mandatory `TurnId`, single-flight `Busy`, and a minimal chat event bus.
+ene uses an **actor-based message-passing architecture** for streaming LLM conversations with tool calling. The product path is **API v1**: ready `EneHandle::open`, mandatory `TurnId`, single-flight `Busy`, and a minimal chat event bus.
 
 ## Architecture
 
@@ -104,6 +104,6 @@ Tool resumes or aborts
 ## Related documentation
 
 - [Streaming Events](streaming-events.md)
-- [API v2](../architecture/api-v2.md)
+- [API v1](../architecture/api-v1.md)
 - [`ene-runtime` API](../api/ene-runtime.md)
 - [Cognitive Runtime ADR](../architecture/cognitive-runtime.md)

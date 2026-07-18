@@ -24,7 +24,7 @@
 
 ## 関連ドキュメント
 
-- `docs/ja/reference/architecture/api-v2.md`
+- `docs/ja/reference/architecture/api-v1.md`
 - `docs/ja/reference/architecture/cognitive-runtime.md`
 - `docs/ja/reference/runtime/session.md`
 - `docs/ja/reference/configuration/settings.md`（`mind.context.compression_*`）

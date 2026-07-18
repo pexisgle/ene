@@ -9,7 +9,7 @@ ene is a local AI character platform implemented as a Rust workspace: LLM chat, 
 | Path | Audience | Start here |
 |------|----------|------------|
 | **[Developer Guide](guide/index.md)** | Humans building or running ene | [Getting started](guide/getting-started.md) |
-| **[Reference](reference/index.md)** | AI agents and deep implementation work | [API v2](reference/architecture/api-v2.md) |
+| **[Reference](reference/index.md)** | AI agents and deep implementation work | [API v1](reference/architecture/api-v1.md) |
 
 - **Guide** — concepts, how to configure/run apps, tool catalog, practical recipes.
 - **Reference** — locked design (ADRs), crate APIs, runtime internals, IPC, full settings schema.

@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 1,
   "character": "Alicia",
   "user_name": "User",
   "$schema": "./schema/settings.schema.json",

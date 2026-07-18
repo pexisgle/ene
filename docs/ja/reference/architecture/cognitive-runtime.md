@@ -212,7 +212,7 @@ Phase 8 では、ツール呼び出し結果を安全に typed memory へ接続�
 | 永続化（`insert_commitment`, `list_active_commitments` など） | `ene-store::MemoryStore` |
 | Arbiter 結果からの同期 | `ene-mind::commitments::CommitmentLedger` |
 
-**`MemoryKind::Commitment` との関係:** 抽出器は `MemoryCandidate { kind: Commitment, commitment_due }` を生成する。Memory Arbiter が typed memory として保存した後、`CommitmentLedger::sync_from_applied_decisions`（または `arbitrate_apply_and_sync`）が `source_memory_id` で紐づく active な ledger 行を作成する。
+**`MemoryKind::Commitment` との関係:** 抽出器は `MemoryCandidate { kind: Commitment, commitment_due }` を生成する。`CommitmentLedger::apply_commitment_candidates`（または `arbitrate_apply_and_sync`）が active な ledger 行を ledger-first で書き込む。任意の型付き `MemoryKind::Commitment` 行は `typed_memories.commitment_id` で台帳を参照できる。
 
 **ライフサイクル:** `active` → `done` | `cancelled` | `stale`。`due_at` が設定され期限切れの active 行は `mark_stale_commitments` で `stale` に遷移できる。
 
@@ -239,7 +239,6 @@ Phase 8 では、ツール呼び出し結果を安全に typed memory へ接続�
   - 未移行の summaries/keyfacts は通常の mind recall にマージせず、`/memory migrate legacy` を明示的に実行する
   - 任意 one-shot CLI migration（トランザクション）で summaries → `Episodic`、keyfacts → `UserProfile`/`Preference`、logs → `memory_spans`
   - migration 完了後は typed-only recall。レガシー行は reset まで監査用に残る
-  - `mind.memory.require_migration` は summaries/keyfacts 未移行時のみ recall をブロック（logs のみではブロックしない）
   - affect **永続化**は毎ターン実行。affect **計算**は `EmotionEngine`（#86）、オプション LLM 分類器（#88）、`OutputArbiter` による表情解決（#89, #91）で実装済み
 - **#80** で自動セッション分割を rolling context compression トリガーに置き換え
 

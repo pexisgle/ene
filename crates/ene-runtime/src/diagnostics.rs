@@ -71,69 +71,6 @@ impl MemoryQueryHandle {
             .map_err(EneRuntimeError::from)
     }
 
-    /// Count legacy memory rows for a character card.
-    pub async fn count_legacy_rows(
-        &self,
-        card_name: &str,
-    ) -> Result<ene_store::LegacyRowCounts, EneRuntimeError> {
-        let store = self.require_store()?;
-        store
-            .count_legacy_rows(card_name)
-            .await
-            .map_err(EneRuntimeError::Memory)
-    }
-
-    /// Migration status for a character card.
-    pub async fn migration_status(
-        &self,
-        card_name: &str,
-    ) -> Result<Option<ene_store::MigrationStatus>, EneRuntimeError> {
-        let store = self.require_store()?;
-        store
-            .get_migration_status(card_name)
-            .await
-            .map_err(EneRuntimeError::Memory)
-    }
-
-    /// Run legacy → typed one-shot migration.
-    pub async fn migrate_legacy(
-        &self,
-        card_name: &str,
-        user_id: &str,
-        dry_run: bool,
-    ) -> Result<ene_store::LegacyMigrationReport, EneRuntimeError> {
-        let store = self.require_store()?;
-        let model = self
-            .embedder
-            .as_ref()
-            .ok_or_else(|| {
-                EneRuntimeError::from(ene_ai::EmbeddingError::Init(
-                    "Embedding provider not available".into(),
-                ))
-            })?
-            .model_name()
-            .to_string();
-        let options = ene_store::LegacyMigrationOptions {
-            card_name: card_name.to_string(),
-            user_id: user_id.to_string(),
-            embedding_model: model,
-            dry_run,
-        };
-        store
-            .migrate_legacy(&options)
-            .await
-            .map_err(EneRuntimeError::Memory)
-    }
-
-    /// Destructive legacy memory reset for a character card.
-    pub async fn reset_legacy_memory(&self, card_name: &str) -> Result<(), EneRuntimeError> {
-        let store = self.require_store()?;
-        store
-            .reset_legacy_memory(card_name)
-            .await
-            .map_err(EneRuntimeError::Memory)
-    }
-
     /// List typed memories for the current character.
     pub async fn list_typed_memories(
         &self,

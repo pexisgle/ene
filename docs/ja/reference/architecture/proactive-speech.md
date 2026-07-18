@@ -123,4 +123,4 @@ GGUF 重みはアプリに同梱しない。外部 `llama-server` も不要。�
 - Epic [#103](https://github.com/pexisgle/ene/issues/103)
 - Sub-issues #162–#170
 - [認知 Runtime ADR](cognitive-runtime.md)
-- [API v2 ADR](api-v2.md)
+- [API v1 ADR](api-v1.md)

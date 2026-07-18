@@ -5,7 +5,7 @@
 This section documents the public APIs of every library crate in the Ene workspace.
 All crates target **Rust edition 2024** and are compiled with `tokio` as the async runtime.
 
-The host contract is **API v2**: `EneHandle::open`, mandatory `TurnId`, single-flight `Busy`, minimal chat events, and `diagnostics()` for inspection. See [API v2](../architecture/api-v2.md).
+The host contract is **API v1**: `EneHandle::open`, mandatory `TurnId`, single-flight `Busy`, minimal chat events, and `diagnostics()` for inspection. See [API v1](../architecture/api-v1.md).
 
 ---
 
@@ -114,7 +114,7 @@ pub use ene_tool_proto::{ToolSpec, ToolError, IpcRequest, IpcResponse};
 
 ## Error & Async Conventions
 
-See also [API v2](../architecture/api-v2.md).
+See also [API v1](../architecture/api-v1.md).
 
 ### Async
 
@@ -135,7 +135,7 @@ See also [API v2](../architecture/api-v2.md).
 ## Related Documentation
 
 - [Architecture Overview](../architecture/overview.md)
-- [API v2](../architecture/api-v2.md)
+- [API v1](../architecture/api-v1.md)
 - [Cognitive Runtime Architecture (ADR)](../architecture/cognitive-runtime.md)
 - [Memory System](../memory/memory.md)
 - [Tool System](../tools/overview.md)

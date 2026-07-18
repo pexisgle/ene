@@ -422,27 +422,27 @@ pub enum ToolError {
 Tool binary starts
   → listens on ENE_TOOL_SOCKET (provided by ToolHostManager as env var)
   → receives IpcRequest::Handshake → responds HandshakeAck
-  → Handshake carries sandbox + tool_config (Initialize folded at v3)
+  → Handshake carries sandbox + tool_config
   → ready to handle CallTool requests
 ```
 
 ## Protocol Variants
 
-The IPC wire protocol at `IPC_PROTOCOL_VERSION = 4` carries 9 request variants and 7 response variants. `UserInput` is **not** an IPC variant — it is surfaced through `ToolError::UserInputRequired` and handled by `ene-runtime`'s streaming loop.
+The IPC wire protocol at `IPC_PROTOCOL_VERSION = 1` carries 9 request variants and 7 response variants. `UserInput` is **not** an IPC variant — it is surfaced through `ToolError::UserInputRequired` and handled by `ene-runtime`'s streaming loop.
 
 ### Requests (host → tool)
 
-| Variant | Payload | Semantics | Since |
-|---|---|---|---|
-| `Handshake` | `version: u32`, `sandbox: SandboxConfigData`, `tool_config: Option<Value>` | Protocol negotiation + sandbox config + tool config push (Initialize folded at v3) | v1 |
-| `ListTools` | — | Fetch all `ToolSpec`s from the provider | v1 |
-| `ListRagProfiles` | — | Fetch `ToolRagProfile`s for Tool RAG indexing (#137) | v4 |
-| `GetConfigSchema` | — | Request the tool's config JSON Schema (#150 exception) | v2 |
-| `CallTool` | `name: String`, `arguments: String` | Execute a tool by name with JSON arguments | v1 |
-| `SetCallContext` | `conversation_id: String`, `turn_id: String` | Thread conversation + turn identifiers into the tool | v2 |
-| `ApprovePermission` | `request_id: String` | Approve a pending destructive-operation permission request | v1 |
-| `AllowPattern` | `action: String`, `target_pattern: String` | Register a session-wide permission allow pattern | v1 |
-| `Shutdown` | — | Graceful shutdown request | v1 |
+| Variant | Payload | Semantics |
+|---|---|---|
+| `Handshake` | `version: u32`, `sandbox: SandboxConfigData`, `tool_config: Option<Value>` | Protocol negotiation + sandbox config + tool config push |
+| `ListTools` | — | Fetch all `ToolSpec`s from the provider |
+| `ListRagProfiles` | — | Fetch `ToolRagProfile`s for Tool RAG indexing (#137) |
+| `GetConfigSchema` | — | Request the tool's config JSON Schema (#150 exception) |
+| `CallTool` | `name: String`, `arguments: String` | Execute a tool by name with JSON arguments |
+| `SetCallContext` | `conversation_id: String`, `turn_id: String` | Thread conversation + turn identifiers into the tool |
+| `ApprovePermission` | `request_id: String` | Approve a pending destructive-operation permission request |
+| `AllowPattern` | `action: String`, `target_pattern: String` | Register a session-wide permission allow pattern |
+| `Shutdown` | — | Graceful shutdown request |
 
 ### Responses (tool → host)
 

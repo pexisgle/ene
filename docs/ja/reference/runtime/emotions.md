@@ -1,8 +1,8 @@
 # 感情と Performance
 
-Ene は mind ストリーム内で、**トークン互換モード**（`mind.emotion.enabled` が false）と **エンジン管理の感情**（Output Arbiter → `Performance` cue）の 2 つの提示機構をサポートします。
+Ene は mind ストリーム内で、**LLM Performance マーカー**（`mind.emotion.enabled` が false）と **エンジン管理の感情**（Output Arbiter → `Performance` cue）の 2 つの提示機構をサポートします。
 
-API v2 では、チャットコンシューマーは [`EneEvent::Performance`](streaming-events.md) を受け取ります — 単独の `SpecialToken` や `Expression` イベントではありません。
+API v1 では、チャットコンシューマーは [`EneEvent::Performance`](streaming-events.md) を受け取ります — 単独の `SpecialToken` や `Expression` イベントではありません。
 
 ## Mind ランタイムパス
 
@@ -58,18 +58,19 @@ API v2 では、チャットコンシューマーは [`EneEvent::Performance`](s
 
 分類器ログが無い場合は `mind.emotion.enabled` が true か、`ai.tasks.classifier` が設定されているか確認してください。
 
-## トークン互換パス
+## Performance マーカーパス
 
-感情エンジン無効時、LLM は依然として `<|emo:name|>` を出せます。ストリームタスクは `TextDelta` からマーカーを除去し、Performance パスがそれらを `Performance` cue として表面化することがあります（別チャットイベントではありません）。
+感情エンジン無効時、LLM は `<|emo:name|>` 省略形または完全な `<|perf:…|>` マーカーを出力できます。ストリームタスクは `TextDelta` からマーカーを除去し、Performance パスがそれらを `Performance` cue として表面化します。
 
-### トークン解析
+### マーカー解析
 
 mind の special-token ヘルパー:
 
 | 関数 | 説明 |
 |----------|-------------|
 | `split_text_and_special_tokens(carry, chunk)` | チャンクをテキストと `<\|...\|>` に分割。境界跨ぎは `carry` |
-| `extract_emotion_from_token(token)` | `<\|emo:name\|>` から感情名を抽出 |
+| `extract_emotion_from_token(token)` | `<\|emo:name\|>` から表情名を抽出 |
+| `parse_performance_marker(token)` | `<\|perf:…\|>` を `PerformanceCue` に解析 |
 
 ### データフロー
 
@@ -78,16 +79,16 @@ LLM ストリーム → 生テキスト
   ↓
 ene-runtime / mind ストリームパス
   ├── テキスト → EneEvent::TextDelta { turn, delta }
-  └── <|emo:name|> → テキストから除去。Performance cue になり得る
+  └── <|emo:name|> / <|perf:…|> → テキストから除去。Performance cue になる
        ↓
 コンシューマー:
   ├── CLI: TextDelta → 表示; Performance → cue 名ログ
   └── Desktop: TextDelta → AI テキスト; Performance → PerformanceCue / EmoteToken → VRM
 ```
 
-### Emotion Expression Protocol（PHI）
+### Performance Output Protocol（PHI）
 
-感情無効時、`build_expression_phi()` が利用可能な `<|emo:name|>` トークン一覧を注入することがあります（`card.data.extensions["expressions"]` 由来）。
+感情無効時、`build_expression_phi()` が `card.data.extensions["expressions"]` 由来の `<|emo:name|>` 省略形と `<|perf:…|>` 文法を列挙する指示ブロックを注入します。
 
 ## アプリ別処理
 

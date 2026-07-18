@@ -32,19 +32,18 @@ Character config ────┼────────────────
 
 ### 1. Stream Marker Parsing (`#128`)
 
-The LLM may emit `<|perf:…|>` tokens inline in streaming text:
+The LLM may emit `<|perf:…|>` tokens inline in streaming text. `<|emo:NAME|>` is the shorthand expression form of `<|perf:expr=NAME|>`.
 
 | Marker | Example | Effect |
 |--------|---------|--------|
+| Expression (shorthand) | `<\|emo:happy\|>` | Set expression blend-shape |
 | Expression | `<\|perf:expr=happy\|>` | Set expression blend-shape |
 | Expression (weighted) | `<\|perf:expr=happy,weight=0.8,hold=2.0\|>` | With weight and hold duration |
 | Motion | `<\|perf:motion=wave,layer=upper\|>` | Play upper-body motion |
 | Look-at | `<\|perf:lookat=user\|>` | Glance at target |
 | Cancel | `<\|perf:cancel=expr\|>` / `<\|perf:cancel=motion\|>` / `<\|perf:cancel=all\|>` | Clear slot |
 
-Backward compatibility: `<|emo:NAME|>` is accepted as `<|perf:expr=NAME|>`.
-
-See `ene_mind::session::special_token::parse_performance_marker()`.
+See `ene_mind::session::special_token::parse_performance_marker()` and `extract_emotion_from_token()`.
 
 ### 2. Performance Arbiter (`#129`)
 
@@ -156,4 +155,4 @@ When the emotion engine is **enabled**, the natural-dialogue contract instructs 
 
 - [Emotions](../runtime/emotions.md) — Affect engine and expression mapping
 - [Streaming Events](../runtime/streaming-events.md) — Chat event bus
-- [API v2 ADR](api-v2.md) — Host contract and crate map
+- [API v1 ADR](api-v1.md) — Host contract and crate map

@@ -13,7 +13,6 @@ use enigo::{Key, Keyboard};
 )]
 pub struct KeyComboAction {
     /// Key combination with '+' separator (e.g., 'ctrl+shift+s', 'ctrl+c').
-    #[serde(alias = "combo_str")]
     key_combo: String,
 }
 

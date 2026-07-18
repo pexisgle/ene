@@ -212,7 +212,7 @@ Promises, tasks, and follow-ups (e.g. “let’s discuss this next time”) are 
 | Persistence (`insert_commitment`, `list_active_commitments`, …) | `ene-store::MemoryStore` |
 | Sync from arbiter results | `ene-mind::commitments::CommitmentLedger` |
 
-**Relationship to `MemoryKind::Commitment`:** Extractors produce `MemoryCandidate { kind: Commitment, commitment_due }`. The Memory Arbiter persists these as typed memories. `CommitmentLedger::sync_from_applied_decisions` (or `arbitrate_apply_and_sync`) then creates an active ledger row linked via `source_memory_id`.
+**Relationship to `MemoryKind::Commitment`:** Extractors produce `MemoryCandidate { kind: Commitment, commitment_due }`. `CommitmentLedger::apply_commitment_candidates` (or `arbitrate_apply_and_sync`) writes active ledger rows ledger-first. Optional typed `MemoryKind::Commitment` rows may reference the ledger via `typed_memories.commitment_id`.
 
 **Lifecycle:** `active` → `done` | `cancelled` | `stale`. Overdue rows with a parsed `due_at` can be transitioned to `stale` via `mark_stale_commitments`.
 
@@ -239,7 +239,6 @@ Rolling compression that summarizes old conversation turns into compact memory s
   - Unmigrated legacy summaries/keyfacts are not merged into normal mind recall; use `/memory migrate legacy` explicitly
   - Optional one-shot CLI migration maps summaries → `Episodic`, keyfacts → `UserProfile`/`Preference`, logs → `memory_spans` (transactional)
   - After migration, recall uses typed memory only; legacy rows remain for audit unless reset
-  - `mind.memory.require_migration` blocks recall when summaries/keyfacts remain unmigrated (logs alone do not block)
   - Affect **persistence** runs each turn; affect **computation** is implemented by `EmotionEngine` (#86) with optional LLM classifier (#88) and `OutputArbiter` expression resolution (#89, #91)
 - **#80** replaces automatic session splits with rolling context compression triggers
 

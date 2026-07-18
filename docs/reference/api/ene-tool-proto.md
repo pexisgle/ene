@@ -22,10 +22,10 @@ See also: [`ene-tool-host`](./ene-tool-host.md) for the host-side connection man
 ## Protocol Version
 
 ```rust
-pub const IPC_PROTOCOL_VERSION: u32 = 4;
+pub const IPC_PROTOCOL_VERSION: u32 = 1;
 ```
 
-Both parties send their version in the `Handshake` / `HandshakeAck` messages. The server (`run_tool_server`) **strictly rejects** a mismatched version — it does not downgrade or negotiate — closing the connection with an `IpcResponse::Error`. Bump this constant only when the wire format changes in a backward-incompatible way (see [AGENTS.md §6 R3](../../../AGENTS.md)). Version **4** adds `ListRagProfiles` / `RagProfiles` for [`ToolRagProfile`](#toolragprofile) (#137). `ToolSpec` remains LLM-facing only (`name` / `description` / `parameters`).
+Both parties send their version in the `Handshake` / `HandshakeAck` messages. The server (`run_tool_server`) **strictly rejects** a mismatched version — it does not downgrade or negotiate — closing the connection with an `IpcResponse::Error`. Bump this constant only when the wire format changes in a backward-incompatible way (see [AGENTS.md §6 R3](../../../AGENTS.md)). The current wire format carries 9 request variants and 7 response variants, including `ListRagProfiles` / `RagProfiles` for [`ToolRagProfile`](#toolragprofile) (#137). `ToolSpec` remains LLM-facing only (`name` / `description` / `parameters`).
 
 ---
 
@@ -75,7 +75,7 @@ pub trait ToolProvider: Send + Sync {
 | `set_sandbox(&self, sandbox: &SandboxConfigData)` | Optional | no-op | Receives sandbox configuration (used by filesystem/shell tools). |
 | `approve_permission(&self, request_id: &str)` | Optional | no-op | Approves a pending destructive-operation permission request by ID. |
 | `allow_pattern(&self, action: &str, target_pattern: &str)` | Optional | no-op | Adds a session-wide permission allow pattern (action + target glob). |
-| `set_config(&self, config: &serde_json::Value)` | Optional | no-op | Receives tool-specific configuration (called during `Initialize` or `SetMyConfig`). |
+| `set_config(&self, config: &serde_json::Value)` | Optional | no-op | Receives tool-specific configuration pushed in `Handshake`. |
 | `get_config(&self) -> serde_json::Value` | Optional | `Value::Null` | Returns the tool's current configuration. |
 | `config_schema(&self) -> Option<serde_json::Value>` | Optional | `None` | Returns the JSON Schema for the configuration this tool accepts. |
 
@@ -108,7 +108,7 @@ pub struct HostRegistry { /* private fields */ }
 
 impl HostRegistry {
     pub fn new() -> Self;
-    pub fn add_provider(&mut self, provider: Box<dyn ToolProvider>);
+    pub fn try_add_provider(&mut self, provider: Box<dyn ToolProvider>) -> Result<(), ToolError>;
     pub fn list_specs(&self) -> Vec<ToolSpec>;
     pub async fn call_tool(&self, name: &ToolName, arguments: &str) -> Result<String, ToolError>;
     pub fn set_session_id(&self, session_id: &str);
@@ -125,7 +125,7 @@ A composite registry that aggregates multiple `ToolProvider`s and dispatches cal
 | Method | Description |
 |---|---|
 | `new()` | Creates an empty registry. |
-| `add_provider(provider)` | Registers a provider. First-registered provider wins on tool-name conflicts. Indexes every `ToolSpec::name` the provider exposes. |
+| `try_add_provider(provider)` | Registers a provider. Returns `ToolError::DuplicateName` when the provider exposes a name already registered by a previous provider. |
 | `list_specs()` | Returns all tool specs from all registered providers, concatenated. |
 | `call_tool(name, arguments)` | Dispatches to the provider that registered `name`. Returns `ToolError::NotFound` if no provider owns that name. |
 | `set_session_id(session_id)` | Broadcasts the session ID to every registered provider. |
@@ -333,7 +333,7 @@ pub struct SandboxConfigData {
 }
 ```
 
-A serializable, POD representation of the sandbox policy, sent during `IpcRequest::Handshake` (folded from former `Initialize` at v3) and generated via `ene_config::define_tool_config!`. Field notes:
+A serializable, POD representation of the sandbox policy, sent during `IpcRequest::Handshake` and generated via `ene_config::define_tool_config!`. Field notes:
 
 - `db_socket` — path to the per-tool DB IPC socket (Unix Domain Socket). Tool binaries connect here to reach the core DB server for typed CRUD (see [`ene-tool-db`](./ene-tool-db.md)).
 - `db_auth_token` — pre-shared token the tool binary must present in its very first `ene_tool_db::DbRequest::Handshake`. `None` disables DB access entirely for that tool.
@@ -489,9 +489,9 @@ pub enum IpcRequest {
 
 | Variant | Purpose |
 |---|---|
-| `Handshake { version, sandbox, tool_config }` | Negotiate protocol version and push sandbox + tool config (v3+). |
+| `Handshake { version, sandbox, tool_config }` | Negotiate protocol version and push sandbox + tool config. |
 | `ListTools` | Request the tool's LLM-facing `ToolSpec` list. |
-| `ListRagProfiles` | Request host/RAG `ToolRagProfile` list (#137 / IPC v4). |
+| `ListRagProfiles` | Request host/RAG `ToolRagProfile` list (#137). |
 | `GetConfigSchema` | Request the tool's configuration JSON Schema (#150 exception). |
 | `CallTool { name, arguments }` | Invoke a tool by name with JSON arguments. |
 | `SetCallContext { conversation_id, turn_id }` | Propagate conversation + turn identifiers. |
@@ -534,8 +534,6 @@ Host                          Tool
  │                             │
  │── Handshake ───────────────▶│
  │◀── HandshakeAck ────────────│
- │── Initialize ──────────────▶│
- │◀── Ack ─────────────────────│
  │── ListTools ───────────────▶│
  │◀── Tools([...]) ────────────│
  │                             │
@@ -684,18 +682,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 ```rust,no_run
 use ene_tool_proto::{HostRegistry, ToolProvider, run_tool_server};
 
-fn build_registry(a: Box<dyn ToolProvider>, b: Box<dyn ToolProvider>) -> HostRegistry {
+fn build_registry(a: Box<dyn ToolProvider>, b: Box<dyn ToolProvider>) -> Result<HostRegistry, ToolError> {
     let mut registry = HostRegistry::new();
-    registry.add_provider(a);
-    registry.add_provider(b);
-    registry
+    registry.try_add_provider(a)?;
+    registry.try_add_provider(b)?;
+    Ok(registry)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let a: Box<dyn ToolProvider> = unimplemented!();
     let b: Box<dyn ToolProvider> = unimplemented!();
-    let registry = build_registry(a, b);
+    let registry = build_registry(a, b)?;
     run_tool_server(Box::new(registry)).await?;
     Ok(())
 }

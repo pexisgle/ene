@@ -3,7 +3,7 @@
 > **クレート:** `ene-ai`
 > **パス:** `crates/ene-ai`
 
-`ene-ai` は LLM と埋め込みプロバイダーの統合レイヤーです（API v2 で旧 `ene-provider` + `ene-embedding` を統合）。チャット完了と埋め込みは `LlmProvider` / `EmbeddingProvider` 経由で流れます。クレート境界のエラーは [`AiError`](#aierror) です。入れ子のプロバイダ失敗は型付きペイロード（`LlmProviderError`、`EmbeddingError`）で報告されます。
+`ene-ai` は LLM と埋め込みプロバイダーの統合レイヤーです（API v1 で旧 `ene-provider` + `ene-embedding` を統合）。チャット完了と埋め込みは `LlmProvider` / `EmbeddingProvider` 経由で流れます。クレート境界のエラーは [`AiError`](#aierror) です。入れ子のプロバイダ失敗は型付きペイロード（`LlmProviderError`、`EmbeddingError`）で報告されます。
 
 ```mermaid
 flowchart LR
@@ -81,4 +81,4 @@ pub enum Role { System, User, Assistant }
 
 - [`ene-mind`](./ene-mind.md) — `HistoryEntry`、recall / compression
 - [`ene-tool-host`](./ene-tool-host.md)
-- [API v2 ADR](../architecture/api-v2.md)
+- [API v1 ADR](../architecture/api-v1.md)

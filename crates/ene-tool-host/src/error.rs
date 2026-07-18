@@ -20,7 +20,7 @@ pub enum EneToolHostError {
     },
     /// A tool name collision in [`CompositeToolRegistry`].
     ///
-    /// Per API v2 / #135, name collision is a hard error at every
+    /// Per API v1 / #135, name collision is a hard error at every
     /// registry layer. [`HostRegistry`] returns
     /// [`ToolError::DuplicateName`]; this variant covers the
     /// composite-level case.

@@ -1,7 +1,7 @@
 # `ene-store` — APIリファレンス
 
 > **クレート:** `ene-store`
-> **役割:** 長期記憶の永続化ストア — レガシーな要約/キーファクト/ログ、タイプ付きメモリ（エピソード記憶/意味記憶/感情記憶など）、感情状態、コンパニオンのコミットメント、およびツール埋め込みインデックス。
+> **役割:** 長期記憶の永続化ストア — タイプ付きメモリ（エピソード記憶/意味記憶/感情記憶など）、会話ログ、メモリスパン、感情状態、コンパニオンのコミットメント、およびツール埋め込みインデックス。
 
 ---
 
@@ -11,18 +11,18 @@
 
 > **アーキテクチャ上の制約:** このクレートはすべてのデータベースアクセスに `sea-orm` + `sqlite-vec` を使用します。Dieselや生の `rusqlite` は使用しません。ツールバイナリはこのクレートに直接リンクしてはいけません — `DbIpcServer` / `ene-tool-db` のIPCクライアント経由でデータベースにアクセスします。
 
-各キャラクターは、共有データベース内で `card_name`（レガシーテーブル）または `character_id`（タイプ付きメモリ / 感情 / コミットメント）をキーとした独立したネームスペースを持ちます。このクレートは以下のような複数階層のデータを保持します（古い順）:
+各キャラクターは、共有データベース内で `character_id`（タイプ付きメモリ / 感情 / コミットメント）および `card_name`（会話ログ）をキーとした独立したネームスペースを持ちます。このクレートは以下を保持します:
 
-| レイヤー | テーブル | 状態 |
+| レイヤー | テーブル | 役割 |
 |---|---|---|
-| **レガシー** | `conversation_summaries`, `conversation_keyfacts`, `conversation_logs` | 既定では読み書き可能。カードが認知runtimeに移行されると読み取り専用になる |
+| **会話ログ** | `conversation_logs` | 追記専用の生ターン履歴 |
 | **タイプ付きメモリ** | `typed_memories`, `memory_embeddings` | mind ランタイムの主ストア |
 | **感情** | `affect_states` | キャラクターごとのPAD（快-不快/覚醒/支配性）感情状態 |
 | **コミットメント** | `commitments` | コンパニオンの約束・フォローアップの台帳 |
 | **メモリスパン** | `memory_spans` | 生ログに対するローリングなシーン/チャプター圧縮 |
 | **ツールインデックス** | `tool_embedding_index` | Tool RAGパイプライン用のマルチベクトル埋め込み |
 
-`MemoryStore` のほぼすべてのメソッドは `async` です（`sea-orm`/`sqlx` プールからコネクションを取得するため）。**同期**メソッドは `spawn_insert_log`、`connection`、`embedding_dim`、`decode_embedding_bytes`、`legacy_write_mode`、`set_legacy_write_mode` のみです。
+`MemoryStore` のほぼすべてのメソッドは `async` です（`sea-orm`/`sqlx` プールからコネクションを取得するため）。**同期**メソッドは `spawn_insert_log`、`connection`、`embedding_dim`、`decode_embedding_bytes` のみです。
 
 ---
 
@@ -54,83 +54,14 @@ impl MemoryStore {
 | `connection` | `pub fn connection(&self) -> &DatabaseConnection` | 内部の `sea_orm::DatabaseConnection` を返す。生のクエリアクセスが必要な高度な呼び出し元向け。 |
 | `embedding_dim` | `pub fn embedding_dim(&self) -> usize` | 設定済みの埋め込みベクトル幅を返す。 |
 | `decode_embedding_bytes` | `pub fn decode_embedding_bytes(&self, bytes: &[u8]) -> Vec<f32>` | 生の `BLOB` カラムを `f32` ベクトルにデコードする。型付きストアメソッド以外で取得した行を扱う場合に有用。 |
-| `legacy_write_mode` | `pub fn legacy_write_mode(&self) -> LegacyWriteMode` | 現在レガシーテーブルへの書き込みが許可されているかを返す。 |
-| `set_legacy_write_mode` | `pub fn set_legacy_write_mode(&self, mode: LegacyWriteMode)` | レガシー書き込みポリシーを設定する（下記参照）。 |
-
-### `LegacyWriteMode`
-
-```rust
-/// 認知runtime統合のためのレガシーテーブル書き込みポリシー。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum LegacyWriteMode {
-    /// レガシーの要約/キーファクト/ログへの書き込みを許可（デフォルト）。
-    #[default]
-    ReadWrite,
-    /// レガシー書き込みを拒否。テーブルは読み取り専用の回想用に残る。
-    ReadOnly,
-}
-```
-
-`ReadOnly` に設定すると、`insert_summary` と `upsert_keyfact` は `MemoryError::LegacyWriteForbidden` を返します。これは、キャラクターカードがタイプ付きメモリへ移行された後に使われ、非推奨のテーブルへ誤って書き込まれることを防ぎます。`insert_log` と `insert_conversation_turn` は**このゲートの対象外**です — 生の会話ログは `memory_spans` にも供給されるため、常に継続して記録されます。
 
 ---
 
-## レガシーメモリ: 要約・キーファクト・ログ
-
-タイプ付きメモリ以前の元来のメモリモデル: 完了したセッションごとに1つの**要約**、キャラクターごとのフラットな**キーファクト**テーブル、追記専用の**会話ログ**。
-
-### コア型
-
-```rust
-pub struct KeyFact {
-    pub key: String,
-    pub value: String,
-}
-
-pub struct ConversationSummary {
-    pub id: i64,
-    pub session_id: String,
-    pub card_name: String,
-    pub summary: String,
-    pub embedding: Vec<f32>,
-    pub created_at: DateTime<Utc>,
-    pub ended_at: DateTime<Utc>,
-}
-
-pub struct RecalledSummary {
-    pub entry: ConversationSummary,
-    /// コサイン類似度。範囲 `[-1.0, 1.0]`（正規化されていない生の角距離）。
-    pub similarity: f32,
-}
-```
-
-### 要約メソッド
+## 会話ログ
 
 | メソッド | シグネチャ | 説明 |
 |--------|-----------|-------------|
-| `insert_summary` | `async fn insert_summary(&self, session_id: &str, card_name: &str, summary: &str, key_facts: &[KeyFact], embedding: &[f32], ended_at: DateTime<Utc>) -> Result<i64, MemoryError>` | 要約とキーファクトを1つのトランザクションで挿入する。`ReadOnly` モードでは `LegacyWriteForbidden` で拒否される。 |
-| `search_summaries` | `async fn search_summaries(&self, embedding: &[f32], card_name: &str, limit: usize, similarity_threshold: f32) -> Result<Vec<RecalledSummary>, MemoryError>` | **非推奨。** `vec_distance_cosine` によるコサイン類似度検索。代わりに型付き `Query::search()` を使ってください。 |
-| `list_recent_summaries` | `async fn list_recent_summaries(&self, card_name: &str, limit: usize) -> Result<Vec<ConversationSummary>, MemoryError>` | `created_at DESC` で最新の要約を取得する。 |
-| `count_summaries` | `async fn count_summaries(&self, card_name: &str) -> Result<i64, MemoryError>` | キャラクターの要約総数。 |
-| `delete_summary` | `async fn delete_summary(&self, id: i64) -> Result<usize, MemoryError>` | カスケード削除（関連するキーファクトも削除される）。 |
-| `recall_context` | `async fn recall_context(&self, card_name: &str, embedding: &[f32], limit: usize, similarity_threshold: f32) -> Result<(Vec<RecalledSummary>, Vec<KeyFact>), MemoryError>` | **非推奨。** 要約検索とすべてのキーファクトの取得を1回でまとめて行う便利メソッド。カードがタイプ付きメモリへ移行済みの場合は空のベクトルを返す。代わりに型付き `Query::search()` を使ってください。 |
-
-### キーファクトメソッド
-
-| メソッド | シグネチャ | 説明 |
-|--------|-----------|-------------|
-| `get_all_keyfacts` | `async fn get_all_keyfacts(&self, card_name: &str) -> Result<Vec<KeyFact>, MemoryError>` | キーごとの最新値を取得する。 |
-| `upsert_keyfact` | `async fn upsert_keyfact(&self, card_name: &str, key: &str, value: &str) -> Result<(), MemoryError>` | そのキーに新しい行を挿入する（読み取り時は最新行が優先される）。`ReadOnly` モードでは拒否される。 |
-| `delete_keyfact` | `async fn delete_keyfact(&self, card_name: &str, key: &str) -> Result<usize, MemoryError>` | そのキーの全ての行を削除する。 |
-| `count_keyfacts` | `async fn count_keyfacts(&self, card_name: &str) -> Result<i64, MemoryError>` | キャラクターの個別キー数。 |
-
-### 会話ログメソッド
-
-単純な `get_logs` は存在しません — アクセサは `get_logs_by_session` で、`DateTime<Utc>` タイムスタンプを返します（RFC3339文字列ではありません）:
-
-| メソッド | シグネチャ | 説明 |
-|--------|-----------|-------------|
-| `insert_log` | `async fn insert_log(&self, session_id: &str, card_name: &str, role: &str, content: &str) -> Result<i64, MemoryError>` | ログエントリを1件追記する。`LegacyWriteMode` によるゲートの対象外。 |
+| `insert_log` | `async fn insert_log(&self, session_id: &str, card_name: &str, role: &str, content: &str) -> Result<i64, MemoryError>` | ログエントリを1件追記する。 |
 | `insert_conversation_turn` | `async fn insert_conversation_turn(&self, session_id: &str, card_name: &str, user_message: &str, assistant_response: &str) -> Result<(i64, i64), MemoryError>` | 便利メソッド: ユーザーログエントリとアシスタントログエントリを1回の呼び出しで挿入する。両方の行IDを返す。 |
 | `spawn_insert_log` | `fn spawn_insert_log(store: &Arc<Self>, session_id: &str, card_name: &str, role: &str, content: &str)` | **同期メソッド。** Fire-and-forget: `insert_log` を呼び出す `tokio` タスクを生成する。エラーはログに記録されるが伝播しない。 |
 | `get_logs_by_session` | `async fn get_logs_by_session(&self, session_id: &str) -> Result<Vec<(String, String, DateTime<Utc>)>, MemoryError>` | セッションの全 `(role, content, created_at)` タプル。`created_at` の昇順。 |
@@ -139,7 +70,7 @@ pub struct RecalledSummary {
 
 ## ツール埋め込み
 
-`ene-tool-host` のTool RAGパイプラインを支えます。レガシー/タイプ付きメモリテーブルとは異なり、各ツール仕様は**複数の行**として埋め込まれます — フィールドごと（`summary`、`description`、`capability`、`example`、`negative`）に1行ずつ — これによりフィールド単位の重み付けとクエリ時のmaxプール集約が可能になります。
+`ene-tool-host` のTool RAGパイプラインを支えます。各ツール仕様は**複数の行**として埋め込まれます — フィールドごと（`summary`、`description`、`capability`、`example`、`negative`）に1行ずつ — これによりフィールド単位の重み付けとクエリ時のmaxプール集約が可能になります。
 
 ```rust
 /// `(tool_name, field, field_key, version_hash, model_name, embedding_vec, source_text)`
@@ -160,7 +91,7 @@ pub type ToolEmbeddingFieldRow = (String, String, String, String, String, Vec<f3
 
 ## タイプ付きメモリ
 
-タイプ付きメモリモデルは mind ランタイムの主ストアです。各行は `MemoryKind`、`MemoryStatus`、`MemorySource`、および独立した確信度/顕著性スコアを持ち、フラットなレガシー要約/キーファクトモデルを、クエリ可能でライフサイクルを意識したものに置き換えます。
+タイプ付きメモリモデルは mind ランタイムの主ストアです。各行は `MemoryKind`、`MemoryStatus`、`MemorySource`、および独立した確信度/顕著性スコアを持ちます。
 
 ### `MemoryKind`
 
@@ -492,8 +423,6 @@ pub struct Commitment {
     pub due_at: Option<DateTime<Utc>>,
     /// 抽出時の生の期限ヒント（例: `"tomorrow"`、`"次回"`）。
     pub due_label: Option<String>,
-    /// 連携するタイプ付きメモリ行（`MemoryKind::Commitment`）。
-    pub source_memory_id: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -508,7 +437,6 @@ pub struct NewCommitment {
     pub status: CommitmentStatus,
     pub due_at: Option<DateTime<Utc>>,
     pub due_label: Option<String>,
-    pub source_memory_id: Option<i64>,
 }
 
 /// アクティブコミットメントのプロンプトセクション用の軽量DTO。
@@ -527,7 +455,6 @@ pub struct ActiveCommitmentPrompt {
 |--------|-----------|-------------|
 | `insert_commitment` | `async fn insert_commitment(&self, item: &NewCommitment) -> Result<i64, MemoryError>` | 新しいコミットメント行を挿入する。 |
 | `get_commitment` | `async fn get_commitment(&self, id: i64) -> Result<Option<Commitment>, MemoryError>` | 主キーで取得する。 |
-| `get_commitment_by_source_memory` | `async fn get_commitment_by_source_memory(&self, source_memory_id: i64) -> Result<Option<Commitment>, MemoryError>` | タイプ付きメモリに連携する台帳行を検索する。 |
 | `list_active_commitments` | `async fn list_active_commitments(&self, character_id: &str, user_id: Option<&str>, limit: usize) -> Result<Vec<Commitment>, MemoryError>` | プロンプト注入用の `Active` 行 — ベクトル検索は関与しない。 |
 | `update_commitment_status` | `async fn update_commitment_status(&self, id: i64, new_status: CommitmentStatus) -> Result<bool, MemoryError>` | 汎用的なステータス書き込み。 |
 | `complete_commitment` | `async fn complete_commitment(&self, id: i64) -> Result<bool, MemoryError>` | `Done` にマークする。 |
@@ -562,75 +489,6 @@ pub struct InvalidTransition {
 | `target_status_after_decay` | `fn target_status_after_decay(current: MemoryStatus, score: f32) -> Option<MemoryStatus>` | `Active` かつスコアが `FADE_THRESHOLD` 未満 → `Some(Faded)`；`Faded` かつスコアが `ARCHIVE_THRESHOLD` 未満 → `Some(Archived)`；それ以外は `None`。 |
 
 正確な減衰式と本番で使われるデフォルトの閾値については、[`docs/reference/memory/memory.md`](../memory/memory.md#memory-forgetting-lifecycle-76) を参照してください。
-
----
-
-## レガシー移行
-
-キャラクターカードが認知runtimeを採用する際に使用される、レガシーテーブルからタイプ付きメモリへの一度限りの変換処理です。
-
-```rust
-pub struct LegacyMigrationOptions {
-    pub card_name: String,
-    pub user_id: String,
-    pub embedding_model: String,
-    /// trueの場合、何も書き込まずカウントのみ報告する。
-    pub dry_run: bool,
-}
-
-pub struct LegacyMigrationReport {
-    pub summaries_migrated: usize,
-    pub keyfacts_migrated: usize,
-    pub spans_migrated: usize,
-    /// 一致する `source_ref` が既に存在するためスキップされた行数。
-    pub skipped_existing: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct LegacyRowCounts {
-    pub summaries: i64,
-    pub keyfacts: i64,
-    pub logs: i64,
-}
-
-impl LegacyRowCounts {
-    pub fn has_legacy_data(self) -> bool;
-    pub fn requires_migration_gate(self) -> bool;
-}
-
-pub struct MigrationStatus {
-    pub card_name: String,
-    pub migrated_at: DateTime<Utc>,
-    pub legacy_summaries_count: i32,
-    pub legacy_keyfacts_count: i32,
-    pub legacy_logs_count: i32,
-    /// 例: `"one_shot"`。
-    pub strategy: String,
-}
-```
-
-| 項目 | シグネチャ | 説明 |
-|------|-----------|-------------|
-| `execute_legacy_migration` | `async fn execute_legacy_migration(store: &MemoryStore, options: &LegacyMigrationOptions) -> Result<LegacyMigrationReport, MemoryError>` | 実際の変換処理を行うフリー関数。`MemoryStore::migrate_legacy` から呼び出される。 |
-| `MemoryStore::migrate_legacy` | `async fn migrate_legacy(&self, options: &LegacyMigrationOptions) -> Result<LegacyMigrationReport, MemoryError>` | 薄いラッパー: `crate::legacy_migration::execute_legacy_migration(self, options).await`。 |
-| `keyfact_kind_for_key` | `fn keyfact_kind_for_key(key: &str) -> MemoryKind` | `pref_*` / `like` / `dislike` キーを `Preference` に、それ以外を `UserProfile` にマッピングする。 |
-| `logs_to_spans` | `fn logs_to_spans(rows: &[LegacyLogRow]) -> Vec<NewMemorySpan>` | 会話ログの行をユーザー/アシスタントのペアごとに1つのスパンへグループ化する。 |
-| `MemoryStore::count_legacy_rows` | `async fn count_legacy_rows(&self, card_name: &str) -> Result<LegacyRowCounts, MemoryError>` | 3つのレガシーテーブルにわたる行数。 |
-| `MemoryStore::get_migration_status` | `async fn get_migration_status(&self, card_name: &str) -> Result<Option<MigrationStatus>, MemoryError>` | `memory_migration_meta` を読み取る。 |
-| `MemoryStore::is_legacy_migrated` | `async fn is_legacy_migrated(&self, card_name: &str) -> Result<bool, MemoryError>` | `get_migration_status(..).is_some()` の省略形。 |
-| `MemoryStore::mark_migration_complete` | `async fn mark_migration_complete(&self, card_name: &str, counts: LegacyRowCounts, strategy: &str) -> Result<(), MemoryError>` | `memory_migration_meta` に完了を記録する。 |
-| `MemoryStore::reset_legacy_memory` | `async fn reset_legacy_memory(&self, card_name: &str) -> Result<(), MemoryError>` | **破壊的操作。** レガシーテーブルを truncate し、そのカードのタイプ付きメモリをクリアする。 |
-| `MemoryStore::ensure_legacy_migration_allowed` | `async fn ensure_legacy_migration_allowed(&self, card_name: &str, require_migration: bool) -> Result<(), MemoryError>` | `require_migration` が設定され、未移行のレガシー行が存在する場合に `MemoryError::LegacyMemoryNotMigrated` を返す。 |
-
-**移行マッピング:**
-
-| レガシーテーブル | 移行先 | ルール |
-|---|---|---|
-| `conversation_summaries` | `typed_memories`（`Episodic`） | `source_ref = "legacy:summary:{id}"`、埋め込みは `memory_embeddings` にコピーされる |
-| `conversation_keyfacts` | `typed_memories`（`Preference` または `UserProfile`） | `source_ref = "legacy:keyfact:{id}"`、kindは `keyfact_kind_for_key` で決定される |
-| `conversation_logs` | `memory_spans` | `logs_to_spans` によりユーザー/アシスタントのペアごとに1つのスパン |
-
-`Migrator`（`pub mod migrator` 内）は `sea_orm_migration::MigratorTrait` を実装し、初期スキーマ、タイプ付きメモリ、感情フィールド、コミットメント、`pinned` フラグ、`faded_at`、移行メタデータをカバーする7つの順序付きマイグレーションを持ちます。
 
 ---
 
@@ -725,12 +583,6 @@ pub enum EneMemoryError {
     InvalidEmbedding(String),
     /// メモリのライフサイクル遷移が許可されなかった（`forgetting::validate_transition` 参照）。
     InvalidTransition { from: MemoryStatus, to: MemoryStatus },
-    /// `LegacyWriteMode::ReadOnly` が設定されている間にレガシーテーブルへの書き込みが試みられた。
-    LegacyWriteForbidden,
-    /// レガシー行が存在するが移行が未完了で、`require_migration` が設定されている。
-    LegacyMemoryNotMigrated { card_name: String },
-    /// 既に移行が完了しているカードに対して移行が試みられた。
-    LegacyAlreadyMigrated { card_name: String },
     Other(String),
 }
 
@@ -797,7 +649,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - [認知Runtime](../architecture/cognitive-runtime.md) — タイプ付きメモリの上に構築されるMemory Arbiter、回想計画、リランキング
 - `ene-mind` — このクレートを呼び出すMemory Arbiter、`RecallPlanner`、ターン後メモリライターを所有する
 - [`ene-runtime`](./ene-runtime.md) — 外部アクセス用の `MemoryQueryHandle` とアクターレベルの結線
-- [`ene-mind`](./ene-mind.md) — `execute_split` を通じてレガシー要約を作成するセッション分割を駆動する
+- [`ene-mind`](./ene-mind.md) — `execute_split` を通じたセッション分割とローリング圧縮を駆動する
 - [`ene-ai`](./ene-ai.md) — ストレージと検索のための埋め込みを提供する
 - [メモリシステム](../memory/memory.md) — 完全な設計ドキュメント: ハイブリッドスコアリング、MMR多様化、移行、コミットメント台帳
-- [API v2](../architecture/api-v2.md) — ストア所有（`store.*` のみ；方針は `mind.*`）
+- [API v1](../architecture/api-v1.md) — ストア所有（`store.*` のみ；方針は `mind.*`）

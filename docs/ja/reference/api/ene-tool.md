@@ -1,7 +1,7 @@
 # `ene-tool` — APIリファレンス
 
 > **クレート:** `ene-tool`
-> **役割:** ツール ABI 表面のファサード（API v2）。新しいツールバイナリの推奨 import パス。
+> **役割:** ツール ABI 表面のファサード（API v1）。新しいツールバイナリの推奨 import パス。
 > **依存しないもの:** `ene-runtime`、`ene-mind`、`ene-store`。
 
 ---
@@ -37,4 +37,4 @@ use ene_tool::prelude::*;
 - [`ene-tool-derive`](ene-tool-derive.md) — derive マクロ
 - [`ene-tool-host`](ene-tool-host.md) — プロセス管理と Tool RAG
 - [ツールシステム概要](../tools/overview.md)
-- [API v2](../architecture/api-v2.md)
+- [API v1](../architecture/api-v1.md)

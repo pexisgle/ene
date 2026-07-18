@@ -1,6 +1,6 @@
 //! # ene-tool
 //!
-//! Facade crate that consolidates the tool ABI surface for API v2 (#135):
+//! Facade crate that consolidates the tool ABI surface for API v1 (#135):
 //!
 //! | Layer | Trait / types | Source crate |
 //! |---|---|---|

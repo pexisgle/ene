@@ -440,24 +440,6 @@ impl ToolHostManager {
         self.composite.try_add_registry(registry)
     }
 
-    /// Add a manual registry to the manager.
-    ///
-    /// # Panics
-    /// Panics on name collision. Prefer [`try_add_registry`](Self::try_add_registry).
-    #[expect(
-        clippy::panic,
-        reason = "legacy infallible API; prefer try_add_registry for fallible registration"
-    )]
-    pub fn add_registry(&mut self, registry: Arc<dyn ToolRegistry>) {
-        match self.try_add_registry(registry) {
-            Ok(()) => {}
-            Err(e) => {
-                tracing::error!(component = "ToolHostManager", error = %e, "Failed to add registry");
-                panic!("ToolHostManager::add_registry failed: {e}");
-            }
-        }
-    }
-
     /// Consume the manager and return a unified [`CompositeToolRegistry`] containing all added registries.
     pub fn into_registry(self) -> Arc<dyn ToolRegistry> {
         Arc::new(self)

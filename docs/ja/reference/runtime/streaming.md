@@ -1,6 +1,6 @@
 # ストリーミングエンジン
 
-ene は **アクターベースのメッセージパッシングアーキテクチャ** で、ツール呼び出し付きのストリーミング LLM 対話を実行します。プロダクトパスは **API v2** です: 準備済み `EneHandle::open`、必須の `TurnId`、単一飛行の `Busy`、最小チャットイベントバス。
+ene は **アクターベースのメッセージパッシングアーキテクチャ** で、ツール呼び出し付きのストリーミング LLM 対話を実行します。プロダクトパスは **API v1** です: 準備済み `EneHandle::open`、必須の `TurnId`、単一飛行の `Busy`、最小チャットイベントバス。
 
 ## アーキテクチャ
 
@@ -104,6 +104,6 @@ Run { input, turn }
 ## 関連ドキュメント
 
 - [ストリーミングイベント](streaming-events.md)
-- [API v2](../architecture/api-v2.md)
+- [API v1](../architecture/api-v1.md)
 - [`ene-runtime` API](../api/ene-runtime.md)
 - [認知ランタイムADR](../architecture/cognitive-runtime.md)

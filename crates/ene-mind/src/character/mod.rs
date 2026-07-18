@@ -6,9 +6,7 @@ mod lorebook;
 mod style;
 mod sync;
 
-pub use compiler::{
-    CharacterCompiler, DEFAULT_IDENTITY_KERNEL_MAX_TOKENS, compile_identity_kernel,
-};
+pub use compiler::{CharacterCompiler, DEFAULT_IDENTITY_KERNEL_MAX_TOKENS};
 pub use kernel::IdentityKernel;
 pub use lorebook::{
     LOREBOOK_SOURCE_PREFIX, LorebookIndexer, build_lorebook_scan_text,

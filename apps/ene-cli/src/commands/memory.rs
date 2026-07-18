@@ -22,7 +22,7 @@ impl CliCommand for MemoryCommand {
     }
 
     fn usage(&self) -> &'static str {
-        "/memory <list|inspect|search|why|pin|archive|forget|dispute|restore|status|migrate|reset>"
+        "/memory <list|inspect|search|why|pin|archive|forget|dispute|restore|status>"
     }
 
     async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
@@ -61,9 +61,7 @@ impl CliCommand for MemoryCommand {
                 .await
             }
             "restore" => handle_restore(tail, &snapshot).await,
-            "status" => handle_status(&snapshot).await,
-            "migrate" => handle_migrate(tail, &snapshot).await,
-            "reset" => handle_reset(tail, &snapshot).await,
+            "status" => handle_status(&snapshot),
             _ => Err(CliError::UsageError {
                 usage: self.usage().to_string(),
             }),
@@ -329,102 +327,15 @@ fn parse_kind_arg(args: &str) -> Option<ene_store::MemoryKind> {
     }
 }
 
-async fn handle_status(snapshot: &ene_runtime::EneStateSnapshot) -> Result<(), CliError> {
+fn handle_status(snapshot: &ene_runtime::EneStateSnapshot) -> Result<(), CliError> {
     if !snapshot.memory.is_enabled() {
         return Err(CliError::ExecutionFailed(
             "Memory is not enabled.".to_string(),
         ));
     }
     let card_name = snapshot.card_name.as_str();
-    let counts = snapshot
-        .memory
-        .count_legacy_rows(card_name)
-        .await
-        .map_err(|e| CliError::ExecutionFailed(format!("Status error: {e}")))?;
-
-    println!("--- Legacy Memory Status ({card_name}) ---");
-    println!("  summaries: {}", counts.summaries);
-    println!("  keyfacts:  {}", counts.keyfacts);
-    println!("  logs:      {}", counts.logs);
-
-    match snapshot.memory.migration_status(card_name).await {
-        Ok(Some(status)) => {
-            println!("  migrated: yes ({})", status.migrated_at);
-            println!("  strategy: {}", status.strategy);
-        }
-        Ok(None) => println!("  migrated: no"),
-        Err(e) => println!(
-            "{}",
-            style::error(format!("[Memory] Migration status error: {e}"))
-        ),
-    }
-    Ok(())
-}
-
-async fn handle_migrate(
-    args: &str,
-    snapshot: &ene_runtime::EneStateSnapshot,
-) -> Result<(), CliError> {
-    if args != "legacy" && args != "legacy --dry-run" {
-        return Err(CliError::UsageError {
-            usage: "/memory migrate legacy [--dry-run]".to_string(),
-        });
-    }
-    if !snapshot.memory.is_enabled() {
-        return Err(CliError::ExecutionFailed(
-            "Memory is not enabled.".to_string(),
-        ));
-    }
-    let dry_run = args.contains("--dry-run");
-    let card_name = snapshot.card_name.as_str();
-    let user_id = snapshot.config.user_name.as_str();
-    match snapshot
-        .memory
-        .migrate_legacy(card_name, user_id, dry_run)
-        .await
-    {
-        Ok(report) => {
-            if dry_run {
-                println!("[Memory] Dry run — would migrate:");
-            } else {
-                println!("{}", style::success("[Memory] Migration complete:"));
-            }
-            println!("  summaries → episodic: {}", report.summaries_migrated);
-            println!("  keyfacts → typed:       {}", report.keyfacts_migrated);
-            println!("  logs → spans:           {}", report.spans_migrated);
-            println!("  skipped (existing):     {}", report.skipped_existing);
-            Ok(())
-        }
-        Err(e) => Err(CliError::ExecutionFailed(format!("Migration failed: {e}"))),
-    }
-}
-
-async fn handle_reset(
-    args: &str,
-    snapshot: &ene_runtime::EneStateSnapshot,
-) -> Result<(), CliError> {
-    if args != "legacy --yes" {
-        println!("  This permanently deletes legacy tables and typed memory for this card.");
-        return Err(CliError::UsageError {
-            usage: "/memory reset legacy --yes".to_string(),
-        });
-    }
-    if !snapshot.memory.is_enabled() {
-        return Err(CliError::ExecutionFailed(
-            "Memory is not enabled.".to_string(),
-        ));
-    }
-    let card_name = snapshot.card_name.as_str();
-    snapshot
-        .memory
-        .reset_legacy_memory(card_name)
-        .await
-        .map_err(|e| CliError::ExecutionFailed(format!("Reset failed: {e}")))?;
-
-    println!(
-        "{}",
-        style::success(format!("[Memory] Reset legacy memory for {card_name}"))
-    );
+    println!("--- Memory Status ({card_name}) ---");
+    println!("  typed memory store: enabled");
     Ok(())
 }
 
@@ -437,13 +348,6 @@ mod tests {
         let (subcmd, tail) = parse_subcommand_and_tail("search what tea do i like");
         assert_eq!(subcmd, "search");
         assert_eq!(tail, "what tea do i like");
-    }
-
-    #[test]
-    fn parse_subcommand_and_tail_preserves_migrate_flags() {
-        let (subcmd, tail) = parse_subcommand_and_tail("migrate legacy --dry-run");
-        assert_eq!(subcmd, "migrate");
-        assert_eq!(tail, "legacy --dry-run");
     }
 
     #[test]

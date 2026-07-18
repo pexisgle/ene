@@ -591,7 +591,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                                 } else if let Some(name) =
                                     ene_mind::extract_emotion_from_token(&token)
                                 {
-                                    // Backward compat: `<|emo:NAME|>`.
                                     let source = if mind.emotion.llm_expression_is_advisory {
                                         CueSource::LlmAdvisory
                                     } else {

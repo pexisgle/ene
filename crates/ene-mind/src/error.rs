@@ -63,7 +63,7 @@ pub enum EneCognitionError {
 /// Type alias for internal module usage.
 pub type CognitionError = EneCognitionError;
 
-/// Single public error type for the `ene-mind` crate boundary (API v2 / #118).
+/// Single public error type for the `ene-mind` crate boundary (API v1 / #118).
 #[derive(Error, Debug)]
 pub enum MindError {
     /// Cognitive pipeline failure.

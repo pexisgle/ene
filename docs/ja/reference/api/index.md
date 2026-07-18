@@ -5,7 +5,7 @@
 このセクションでは、Ene ワークスペース内のすべてのライブラリクレートが公開する API を解説します。
 すべてのクレートは **Rust edition 2024** を対象とし、非同期ランタイムには `tokio` を使用します。
 
-ホスト契約は **API v2** です: `EneHandle::open`、必須の `TurnId`、単一飛行の `Busy`、最小チャットイベント、検査用の `diagnostics()`。[API v2](../architecture/api-v2.md) を参照してください。
+ホスト契約は **API v1** です: `EneHandle::open`、必須の `TurnId`、単一飛行の `Busy`、最小チャットイベント、検査用の `diagnostics()`。[API v1](../architecture/api-v1.md) を参照してください。
 
 ---
 
@@ -114,7 +114,7 @@ pub use ene_tool_proto::{ToolSpec, ToolError, IpcRequest, IpcResponse};
 
 ## エラーと非同期の規約
 
-[API v2](../architecture/api-v2.md) も参照してください。
+[API v1](../architecture/api-v1.md) も参照してください。
 
 ### 非同期（Async）
 
@@ -135,7 +135,7 @@ pub use ene_tool_proto::{ToolSpec, ToolError, IpcRequest, IpcResponse};
 ## 関連ドキュメント
 
 - [アーキテクチャ概要](../architecture/overview.md)
-- [API v2](../architecture/api-v2.md)
+- [API v1](../architecture/api-v1.md)
 - [認知ランタイムアーキテクチャ（ADR）](../architecture/cognitive-runtime.md)
 - [メモリシステム](../memory/memory.md)
 - [ツールシステム](../tools/overview.md)

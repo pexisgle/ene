@@ -10,7 +10,7 @@ use std::sync::Arc;
 /// Tool RAG indexing and selection is handled by [`ToolRag`](crate::ToolRag).
 /// This registry only handles dispatch (list, call, config).
 ///
-/// Name collision across sub-registries is a hard error — per API v2 / #135,
+/// Name collision across sub-registries is a hard error — per API v1 / #135,
 /// every tool must have a unique public name.
 pub struct CompositeToolRegistry {
     state: std::sync::RwLock<CompositeState>,
@@ -101,24 +101,6 @@ impl CompositeToolRegistry {
             state.registries.push(registry);
             Ok(())
         })
-    }
-
-    /// Adds a sub-registry to the composite.
-    ///
-    /// # Panics
-    /// Panics on name collision. Prefer [`try_add_registry`](Self::try_add_registry).
-    #[expect(
-        clippy::panic,
-        reason = "legacy infallible API; prefer try_add_registry for fallible registration"
-    )]
-    pub fn add_registry(&self, registry: Arc<dyn ToolRegistry>) {
-        match self.try_add_registry(registry) {
-            Ok(()) => {}
-            Err(e) => {
-                tracing::error!(component = "CompositeToolRegistry", error = %e, "Failed to add registry");
-                panic!("CompositeToolRegistry::add_registry failed: {e}");
-            }
-        }
     }
 }
 

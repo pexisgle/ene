@@ -35,18 +35,18 @@ DbIpcServer × N (ツール別 DB、Unix のみ)
 
 ```rust
 pub enum IpcRequest {
-    Handshake { version: u32 },
-    Initialize { sandbox: SandboxConfigData, tool_config: Option<Value> },
+    Handshake {
+        version: u32,
+        sandbox: SandboxConfigData,
+        tool_config: Option<Value>,
+    },
     ListTools,
     ListRagProfiles,
     GetConfigSchema,
     CallTool { name: String, arguments: String },
-    SetSessionId { session_id: String },
+    SetCallContext { conversation_id: String, turn_id: String },
     ApprovePermission { request_id: String },
     AllowPattern { action: String, target_pattern: String },
-    GetMyConfig,
-    SetMyConfig(Value),
-    Ping,
     Shutdown,
 }
 
@@ -57,13 +57,11 @@ pub enum IpcResponse {
     RagProfiles { profiles: Vec<ToolRagProfile> },
     ConfigSchema { schema: Option<Value> },
     CallResult { result: Result<String, ToolError> },
-    MyConfig(Value),
-    Pong,
     Error { message: String },
 }
 ```
 
-ワイヤ形式: 4 バイト little-endian 長プレフィックス + JSON。最大メッセージサイズ 64 MB。プロトコルバージョン: `IPC_PROTOCOL_VERSION = 2`（`crates/ene-tool-proto/src/ipc.rs`）。
+ワイヤ形式: 4 バイト little-endian 長プレフィックス + JSON。最大メッセージサイズ 64 MB。プロトコルバージョン: `IPC_PROTOCOL_VERSION = 1`（`crates/ene-tool-proto/src/ipc.rs`）。
 
 ## ToolHostManager
 
@@ -90,7 +88,7 @@ pub enum IpcResponse {
 | 層 | 挙動 |
 |----|------|
 | `SupervisedIpcRegistry`（プロセス） | 死亡検知 → 指数バックオフ再起動（最大 5: 500ms → 8s） |
-| `IpcToolRegistry`（接続） | 切断 → 指数バックオフ再接続（200ms 倍増、上限 10s、5 回）、Handshake + Initialize 再送 |
+| `IpcToolRegistry`（接続） | 切断 → 指数バックオフ再接続（200ms 倍増、上限 10s、5 回）、Handshake 再送 |
 | `ToolHostManager::connect_with_retry`（初期） | 定数 50ms、50 回リトライ |
 
 ## ToolAction / ToolProvider / ToolRegistry

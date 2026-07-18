@@ -2,7 +2,7 @@
 
 > **Crate:** `ene-runtime`
 > **Role:** Unified runtime facade integrating LLM streaming, tool orchestration, long-term memory, and session management through an actor-based message-passing architecture. Main entry point for all host applications (`ene-cli`, `ene-desktop`).
-> **API v2:** Product path is `EneHandle::open(config, card)` → ready handle. `run` returns `TurnId` (Busy on conflict). Chat events are minimal; use `diagnostics()` for pipeline/memory/tools.
+> **API v1:** Product path is `EneHandle::open(config, card)` → ready handle. `run` returns `TurnId` (Busy on conflict). Chat events are minimal; use `diagnostics()` for pipeline/memory/tools.
 
 
 ---
@@ -374,7 +374,7 @@ Maps to `ene_tool_db::DbResponse::Error { code, message }` via `DbErrorCode` (`P
 
 `ene-runtime` re-exports items from every crate below it in the dependency graph so consumers only need `ene_runtime::*` for the common path. All re-exports are annotated `#[doc(no_inline)]` except where noted, so rustdoc links point back to the source crate.
 
-As of [API v2](../architecture/api-v2.md), this list is curated: it keeps only types that appear in `EneHandle`'s own public signatures (`EneStateSnapshot`, `EneEvent`, `HistoryEntry`, …) or that are otherwise high-traffic across `ene-cli`/`ene-desktop`. Types unused outside `ene-runtime` were dropped from the root — import them from their owning crate directly if you need them.
+As of [API v1](../architecture/api-v1.md), this list is curated: it keeps only types that appear in `EneHandle`'s own public signatures (`EneStateSnapshot`, `EneEvent`, `HistoryEntry`, …) or that are otherwise high-traffic across `ene-cli`/`ene-desktop`. Types unused outside `ene-runtime` were dropped from the root — import them from their owning crate directly if you need them.
 
 | Source crate | Re-exported items |
 |---|---|
@@ -535,7 +535,7 @@ async fn main() -> anyhow::Result<()> {
 
 - [`ene-mind`](./ene-mind.md) — Cognitive runtime engine invoked by the streaming-cognitive dispatch path
 - [Cognitive Runtime Architecture (ADR)](../architecture/cognitive-runtime.md) — Full design rationale behind the cognitive dispatch decision
-- [API v2](../architecture/api-v2.md) — Locked host / event contracts
+- [API v1](../architecture/api-v1.md) — Locked host / event contracts
 - [`ene-ai`](./ene-ai.md) — LLM and embedding provider traits
 - [`ene-store`](./ene-store.md) — Persistent memory store
 - [`ene-tool-host`](./ene-tool-host.md) — Tool process lifecycle and Tool RAG

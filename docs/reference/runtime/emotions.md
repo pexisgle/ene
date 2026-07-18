@@ -1,8 +1,8 @@
 # Emotion & Performance
 
-Ene supports two presentation mechanisms within the mind stream: **token compatibility mode** (when `mind.emotion.enabled` is false) and **engine-managed affect** (Output Arbiter → `Performance` cues).
+Ene supports two presentation mechanisms within the mind stream: **LLM performance markers** (when `mind.emotion.enabled` is false) and **engine-managed affect** (Output Arbiter → `Performance` cues).
 
-Under API v2, chat consumers receive [`EneEvent::Performance`](streaming-events.md) — not standalone `SpecialToken` or `Expression` events.
+Under API v1, chat consumers receive [`EneEvent::Performance`](streaming-events.md) — not standalone `SpecialToken` or `Expression` events.
 
 ## Mind Runtime Path
 
@@ -60,36 +60,37 @@ If you see no classifier logs, check that `mind.emotion.enabled` is true and `ai
 
 The classifier uses a **dedicated provider instance** (not the main stream client), strict JSON Schema output (`response_format` with `strict: true`), and resilient transport fallbacks for OpenRouter compatibility.
 
-## Token Compatibility Path
+## Performance Marker Path
 
-When the emotion engine is disabled, the LLM may still produce `<|emo:name|>` special tokens. The stream task strips markers from `TextDelta` and the Output / performance path may surface them as `Performance` cues rather than separate chat events.
+When the emotion engine is disabled, the LLM may emit `<|emo:name|>` shorthand or full `<|perf:…|>` markers. The stream task strips markers from `TextDelta` and the Output / performance path surfaces them as `Performance` cues.
 
-### Token Parsing
+### Marker Parsing
 
 Implemented in mind special-token helpers:
 
 | Function | Description |
 |----------|-------------|
 | `split_text_and_special_tokens(carry, chunk)` | Splits stream chunks into text fragments and `<\|...\|>` tokens. Tokens spanning chunk boundaries are held in `carry` |
-| `extract_emotion_from_token(token)` | Extracts emotion name from `<\|emo:name\|>` (case-insensitive) |
+| `extract_emotion_from_token(token)` | Extracts expression name from `<\|emo:name\|>` (case-insensitive) |
+| `parse_performance_marker(token)` | Parses `<\|perf:…\|>` into a `PerformanceCue` |
 
-### Token Data Flow
+### Marker Data Flow
 
 ```
 LLM stream → raw text chunks
   ↓
 ene-runtime / mind stream path
   ├── Text → EneEvent::TextDelta { turn, delta }
-  └── <|emo:name|> → stripped from text; may become Performance cues
+  └── <|emo:name|> / <|perf:…|> → stripped from text; become Performance cues
        ↓
 Consumer:
   ├── CLI: TextDelta → print; Performance → "[Performance: name]" (or similar)
   └── Desktop: TextDelta → AI text; Performance → PerformanceCue / EmoteToken → VRM
 ```
 
-### Emotion Expression Protocol (PHI)
+### Performance Output Protocol (PHI)
 
-When emotion is disabled, `build_expression_phi()` may inject an instruction block listing available `<|emo:name|>` tokens derived from `card.data.extensions["expressions"]`.
+When emotion is disabled, `build_expression_phi()` injects an instruction block listing available `<|emo:name|>` shorthand and `<|perf:…|>` grammar derived from `card.data.extensions["expressions"]`.
 
 Default expressions (can be disabled per-card):
 

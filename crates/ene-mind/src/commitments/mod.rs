@@ -108,8 +108,6 @@ impl CommitmentLedger {
                 status: CommitmentStatus::Active,
                 due_at: None,
                 due_label: candidate.commitment_due.clone(),
-                // Deprecated dual-write link; new rows leave this unset (#124).
-                source_memory_id: None,
             };
 
             let id = store
@@ -317,7 +315,6 @@ mod tests {
             .unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].status, CommitmentStatus::Active);
-        assert_eq!(active[0].source_memory_id, None);
         assert_eq!(active[0].due_label.as_deref(), Some("Next time"));
 
         let prompts = CommitmentLedger::active_prompt_candidates(&active);
@@ -449,7 +446,6 @@ mod tests {
             .unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].title, "discuss design");
-        assert_eq!(active[0].source_memory_id, None);
     }
 
     #[tokio::test]
@@ -464,7 +460,6 @@ mod tests {
                 status: CommitmentStatus::Active,
                 due_at: None,
                 due_label: None,
-                source_memory_id: None,
             })
             .await
             .unwrap();
@@ -483,7 +478,6 @@ mod tests {
                 status: CommitmentStatus::Active,
                 due_at: None,
                 due_label: None,
-                source_memory_id: None,
             })
             .await
             .unwrap();

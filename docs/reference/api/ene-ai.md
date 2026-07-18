@@ -3,7 +3,7 @@
 > **Crate:** `ene-ai`
 > **Path:** `crates/ene-ai`
 
-`ene-ai` is the unified LLM and embedding provider layer (API v2 merge of the former `ene-provider` + `ene-embedding` crates). Chat completions and embeddings flow through `LlmProvider` and `EmbeddingProvider`. The crate-boundary error is [`AiError`](#aierror); nested provider failures use typed payloads (`LlmProviderError`, `EmbeddingError`).
+`ene-ai` is the unified LLM and embedding provider layer (API v1 merge of the former `ene-provider` + `ene-embedding` crates). Chat completions and embeddings flow through `LlmProvider` and `EmbeddingProvider`. The crate-boundary error is [`AiError`](#aierror); nested provider failures use typed payloads (`LlmProviderError`, `EmbeddingError`).
 
 ```mermaid
 flowchart LR
@@ -86,4 +86,4 @@ Crate-boundary error enum (`thiserror`). Prefer matching on `AiError` at host/mi
 
 - [`ene-mind`](./ene-mind.md) — `HistoryEntry`, recall / compression
 - [`ene-tool-host`](./ene-tool-host.md) — Tool RAG uses `hyde_document` / `rerank_tool_specs`
-- [API v2 ADR](../architecture/api-v2.md)
+- [API v1 ADR](../architecture/api-v1.md)

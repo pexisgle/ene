@@ -1,7 +1,7 @@
 # `ene-tool` — API Reference
 
 > **Crate:** `ene-tool`
-> **Role:** Facade for the tool ABI surface (API v2). Preferred import path for new tool binaries.
+> **Role:** Facade for the tool ABI surface (API v1). Preferred import path for new tool binaries.
 > **Does not depend on:** `ene-runtime`, `ene-mind`, or `ene-store`.
 
 ---
@@ -37,4 +37,4 @@ use ene_tool::prelude::*;
 - [`ene-tool-derive`](ene-tool-derive.md) — derive macros
 - [`ene-tool-host`](ene-tool-host.md) — process manager and Tool RAG
 - [Tool System Overview](../tools/overview.md)
-- [API v2](../architecture/api-v2.md)
+- [API v1](../architecture/api-v1.md)

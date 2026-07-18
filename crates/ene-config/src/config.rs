@@ -165,7 +165,7 @@ pub struct EneConfig {
 impl Default for EneConfig {
     fn default() -> Self {
         Self {
-            version: 2,
+            version: 1,
             character: "Alicia".to_string(),
             user_name: "User".to_string(),
             runtime_rules: DEFAULT_RUNTIME_RULES.to_string(),

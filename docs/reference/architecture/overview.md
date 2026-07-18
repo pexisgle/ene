@@ -1,6 +1,6 @@
 # Architecture Overview
 
-ene is a modular Rust workspace centered on the API v2 host contract (`ene-runtime`) and the `ene-mind` cognitive turn pipeline.
+ene is a modular Rust workspace centered on the API v1 host contract (`ene-runtime`) and the `ene-mind` cognitive turn pipeline.
 
 ## Runtime Architecture
 
@@ -22,7 +22,7 @@ User input
 
 `ene-runtime` integrates this flow and emits a **minimal** chat event bus; diagnostics are separate.
 
-## Target Crate Map (API v2)
+## Target Crate Map (API v1)
 
 | Crate | Role |
 |---|---|
@@ -34,7 +34,7 @@ User input
 | `ene-config` | Settings, character cards, paths |
 | `ene-vrm` | VRM rendering (no mind/runtime dependency) |
 
-See [API v2](api-v2.md) for locked decisions and the dependency graph.
+See [API v1](api-v1.md) for locked decisions and the dependency graph.
 
 ## Memory Model
 
@@ -57,7 +57,7 @@ Prompt construction is sectioned (`PromptPacket`) with explicit budgets. Identit
 
 ## Reference
 
-- [API v2 ADR](api-v2.md)
+- [API v1 ADR](api-v1.md)
 - [Cognitive Runtime ADR](cognitive-runtime.md)
 - [Avatar Performance ADR](avatar-performance.md)
 - [Proactive Companion Speech ADR](proactive-speech.md)

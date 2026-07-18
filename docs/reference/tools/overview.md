@@ -35,18 +35,18 @@ All tools use namespaced names: `<namespace>.<action>`. Namespace tables live in
 
 ```rust
 pub enum IpcRequest {
-    Handshake { version: u32 },
-    Initialize { sandbox: SandboxConfigData, tool_config: Option<Value> },
+    Handshake {
+        version: u32,
+        sandbox: SandboxConfigData,
+        tool_config: Option<Value>,
+    },
     ListTools,
     ListRagProfiles,
     GetConfigSchema,
     CallTool { name: String, arguments: String },
-    SetSessionId { session_id: String },
+    SetCallContext { conversation_id: String, turn_id: String },
     ApprovePermission { request_id: String },
     AllowPattern { action: String, target_pattern: String },
-    GetMyConfig,
-    SetMyConfig(Value),
-    Ping,
     Shutdown,
 }
 
@@ -57,13 +57,11 @@ pub enum IpcResponse {
     RagProfiles { profiles: Vec<ToolRagProfile> },
     ConfigSchema { schema: Option<Value> },
     CallResult { result: Result<String, ToolError> },
-    MyConfig(Value),
-    Pong,
     Error { message: String },
 }
 ```
 
-Wire format: 4-byte little-endian length prefix + JSON payload. Max message size: 64 MB. Protocol version: `IPC_PROTOCOL_VERSION = 2` (see `crates/ene-tool-proto/src/ipc.rs`).
+Wire format: 4-byte little-endian length prefix + JSON payload. Max message size: 64 MB. Protocol version: `IPC_PROTOCOL_VERSION = 1` (see `crates/ene-tool-proto/src/ipc.rs`).
 
 ## ToolHostManager
 
@@ -90,7 +88,7 @@ Wire format: 4-byte little-endian length prefix + JSON payload. Max message size
 | Layer | Behavior |
 |-------|----------|
 | `SupervisedIpcRegistry` (process) | Process death detection → exponential backoff restart (max 5: 500ms → 8s) |
-| `IpcToolRegistry` (connection) | Connection loss → exponential backoff reconnect (base 200ms doubling, cap 10s, 5 retries), re-sends Handshake + Initialize |
+| `IpcToolRegistry` (connection) | Connection loss → exponential backoff reconnect (base 200ms doubling, cap 10s, 5 retries), re-sends Handshake |
 | `ToolHostManager::connect_with_retry` (initial) | Constant 50ms delay, 50 retries (`CONNECT_RETRIES = 50`, `CONNECT_DELAY_MS = 50`) |
 
 ## ToolAction Trait

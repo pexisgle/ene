@@ -77,31 +77,12 @@ __tool_schemas (
 
 The `__tool_schemas` table is a metadata registry used by the Tool DB IPC server to track which tools have declared their table schemas. Tool-specific tables (e.g. `fs_undo_entries`, `utility_todo_items`) are created dynamically when tools connect and declare their schemas.
 
-### Summaries
+### Conversation Logs
 
 | Method | Description |
 |--------|-------------|
 | `open(path, dims)` | Opens persistent store, runs migrations |
 | `open_in_memory(dims)` | In-memory store for testing |
-| `insert_summary(session_id, card, summary, facts, emb, ended)` | Insert summary + key facts in transaction. Empty `value` deletes the fact. |
-| `search_summaries(query_emb, card, limit, threshold)` | Cosine similarity search via `vec_distance_cosine` |
-| `list_recent_summaries(card, limit)` | Most recent by `created_at DESC` |
-| `delete_summary(id)` | Cascading delete (removes associated key facts) |
-| `count_summaries(card)` | Count summaries for a character |
-
-### Key Facts
-
-| Method | Description |
-|--------|-------------|
-| `get_all_keyfacts(card)` | Latest value per key (`ROW_NUMBER() PARTITION BY key ORDER BY created_at DESC`) |
-| `upsert_keyfact(card, key, value)` | Insert new row (latest is selected on query) |
-| `delete_keyfact(card, key)` | Remove all rows for key |
-| `count_keyfacts(card)` | Count distinct keys |
-
-### Conversation Logs
-
-| Method | Description |
-|--------|-------------|
 | `insert_log(id, card, role, content)` | Record a single message |
 | `get_logs_by_session(id)` | Retrieve all messages for a session |
 
@@ -306,8 +287,6 @@ Behavior:
 - When `user_id` is set, user-specific memories from other users are excluded; character-scoped rows with an empty `user_id` remain visible.
 - Candidates gathered from multiple sources are de-duplicated by memory id before ranking.
 
-`search_typed_memories(...)` remains available as the legacy vector-only API for callers that only need cosine similarity.
-
 ### Explainable Recall Reasons (#74)
 
 `MemoryStore::search` returns raw [`ScoredMemory`](../../../crates/ene-store/src/typed_memory.rs) values. Reason assignment lives in `ene-mind::recall`: downstream recall execution converts those results into `RecalledMemory` DTOs. Each result includes:
@@ -418,45 +397,6 @@ Post-turn `ForgettingLifecycle::apply` runs from `streaming_cognitive.rs` after 
 - `[uncertain] ` for `faded` memories (and low-confidence `active` memories)
 - `[disputed] ` for `disputed` memories
 
-Legacy `conversation_keyfacts` receive these markers only when explicitly converted by the migration tooling; normal mind recall does not merge `recall_context` rows.
-
-## Migration from Legacy Tables
-
-The mind runtime writes new memories to typed memory only. Legacy tables (`conversation_summaries`, `conversation_keyfacts`) are **read-only** until you migrate or reset.
-
-### Mapping rules (one-shot migration)
-
-| Legacy table | Target | Rules |
-|--------------|--------|-------|
-| `conversation_summaries` | `typed_memories` (`Episodic`) | `content` ← summary text; `confidence = 0.7`, `salience = 0.5`; embedding copied to `memory_embeddings`; `source_ref = legacy:summary:{id}` |
-| `conversation_keyfacts` | `UserProfile` or `Preference` | Keys matching `pref_*`, `like`, or `dislike` → `Preference`; otherwise → `UserProfile`; `title` = key, `content` = value; `source_ref = legacy:keyfact:{id}` |
-| `conversation_logs` | `memory_spans` | One span per user/assistant pair (or single message when unpaired); `raw_excerpt` holds message text; `compressed_summary` filled by rolling compression (#79) at runtime |
-
-At runtime (cognitive path), `ene-mind::context::compression` writes scene-level spans when turn count or context pressure exceeds `mind.context` thresholds. Active scene summaries are injected into the **Current Scene** section of `PromptPacket` via `MemoryStore::get_active_scene_summary`. Raw `conversation_logs` are always preserved.
-
-Migration progress is recorded in `memory_migration_meta` per character card.
-
-### User options
-
-1. **Do nothing (read-only legacy data)** — Until you migrate, legacy summaries and key facts remain outside normal mind recall. New extracted memories go to typed tables only. Raw conversation logs continue to append to `conversation_logs` on each turn.
-2. **`/memory migrate legacy`** — One-shot conversion inside a single transaction; sets the migration marker. After migration, recall uses typed memory only for that card.
-3. **`/memory reset legacy --yes`** — Truncates legacy tables and clears typed memory for the card (destructive; requires confirmation). Memory spans are removed only for sessions linked to that card's logs.
-
-### Strict mode
-
-Set `mind.memory.require_migration = true` to block recall when **legacy summaries or keyfacts** exist but migration has not completed. Ongoing `conversation_logs` from normal chat do **not** trigger this gate. The store returns `LegacyMemoryNotMigrated` with reset/migrate guidance.
-
-### Reset guidance
-
-To start fresh without migrating:
-
-```bash
-ene-cli
-/memory reset legacy --yes
-```
-
-Or delete the SQLite file under your user data directory and restart (all memory for all characters is lost).
-
 ## Companion Commitment Ledger
 
 User and companion follow-ups (e.g. “next time let’s talk about X”) are stored in a dedicated `commitments` table:
@@ -471,7 +411,6 @@ commitments (
     status TEXT NOT NULL DEFAULT 'active',  -- active | done | cancelled | stale
     due_at TEXT NULL,
     due_label TEXT NULL,                    -- raw hint from extraction ("tomorrow", "次回")
-    source_memory_id INTEGER NULL REFERENCES typed_memories(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     completed_at TEXT NULL
@@ -482,7 +421,6 @@ commitments (
 |--------|-------------|
 | `insert_commitment(item)` | Insert a new commitment row |
 | `get_commitment(id)` | Fetch by primary key |
-| `get_commitment_by_source_memory(memory_id)` | Lookup ledger row for a typed memory |
 | `list_active_commitments(character_id, user_id, limit)` | Active rows for prompt injection (no vector search) |
 | `complete_commitment(id)` | Mark `done` |
 | `cancel_commitment(id)` | Mark `cancelled` |
@@ -490,7 +428,7 @@ commitments (
 
 **Due dates:** Extractors populate `MemoryCandidate::commitment_due`, which is stored as `due_label` on the ledger row. Natural-language due-date parsing into `due_at` is not implemented yet (see Memory Arbiter notes in [Cognitive Runtime ADR](../architecture/cognitive-runtime.md#companion-commitment-ledger)), so `mark_stale_commitments` only affects rows with an explicit `due_at`.
 
-**Runtime wiring:** `CommitmentLedger::arbitrate_apply_and_sync` writes commitment candidates **ledger-first** (sole SoT, #124) and arbitrates other kinds via the Memory Arbiter — there is no typed→ledger dual-write / `sync_from_applied_decisions`. Optional typed rows may reference `typed_memories.commitment_id`. `active_prompt_candidates` produces lightweight DTOs for the Active Commitments `PromptPacket` section (#87). CLI list/complete commands are available via `/commitments` (#94).
+**Runtime wiring:** `CommitmentLedger::arbitrate_apply_and_sync` writes commitment candidates **ledger-first** (sole SoT, #124) and arbitrates other kinds via the Memory Arbiter. Optional typed rows may reference `typed_memories.commitment_id`. `active_prompt_candidates` produces lightweight DTOs for the Active Commitments `PromptPacket` section (#87). CLI list/complete commands are available via `/commitments` (#94).
 
 ## Memory Journal (Desktop UX)
 

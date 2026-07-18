@@ -98,7 +98,6 @@ pub struct MindConfig {
 | `mmr_duplicate_cluster_threshold` | `f32` | `0.75` | 重複クラスタ結合のための語彙的類似度 |
 | `mmr_min_slots_semantic` / `_episodic` / `_user_profile` / `_commitment` | `usize` | 各 `1` | 種類ごとの最小予約リコールスロット数 |
 | `mmr_source_diversity_bonus` | `f32` | `0.05` | 新しいリコールソースを導入した場合のスコアボーナス |
-| `require_migration` | `bool` | `false` | レガシー行が存在し移行未完了の場合にリコールをブロックする |
 
 ### `ToolGroundingConfig`
 
@@ -270,7 +269,6 @@ CCv3キャラクターカードを決定論的に `IdentityKernel` にコンパ�
 | メソッド | シグネチャ | 説明 |
 |---|---|---|
 | `compile` | `fn compile(card: &CharacterCardV3, user_name: &str, max_tokens: usize) -> IdentityKernel` | 明示的なトークン予算でカーネルをコンパイルする。 |
-| `compile_identity_kernel`（フリー関数） | `fn compile_identity_kernel(card: &CharacterCardV3, user_name: &str) -> IdentityKernel` | `DEFAULT_IDENTITY_KERNEL_MAX_TOKENS`（`400`）を使う後方互換ラッパー。 |
 
 `CharacterProcessor`（`character::mod` 内）は、ほとんどの呼び出し元が使うファサードです: `compile_kernel`、`compile_kernel_default`、`sync_card_memories`、`select_style_examples`。
 
@@ -686,7 +684,7 @@ pub struct ForgettingReport {
 
 ## `commitments` — コンパニオン・コミットメント台帳
 
-約束、タスク、フォローアップを専用の `commitments` テーブル（`ene-store`）で追跡し、`source_memory_id` を介して型付きメモリ（`MemoryKind::Commitment`）にリンクします。ベクトルリコールの類似度とは**独立して**プロンプトに表示されます。
+約束、タスク、フォローアップを専用の `commitments` テーブル（`ene-store`）で追跡します。台帳はライフサイクルとプロンプト注入の唯一の正（SoT、#124）です。任意の型付き `MemoryKind::Commitment` 行は `typed_memories.commitment_id` で台帳行を参照できます。ベクトルリコールの類似度とは**独立して**プロンプトに表示されます。
 
 ```rust
 pub struct CommitmentLedger;
@@ -694,8 +692,8 @@ pub struct CommitmentLedger;
 
 | メソッド | シグネチャ | 説明 |
 |---|---|---|
-| `sync_from_applied_decisions` | `async fn sync_from_applied_decisions(store: &MemoryStore, ctx: &CommitmentSyncContext<'_>, applied: &[AppliedDecision]) -> Result<Vec<i64>, CognitionError>` | `MemoryArbiter` の判定結果を台帳の行に変換する: `Commitment` 候補に対する `Persist`/`Supersede` はアクティブな行を挿入する（上書きされた行があれば `Stale` にする）。`MarkUserDeleted` はリンクされた行をキャンセルする。`MarkDisputed` は `Stale` にする。`source_memory_id` ごとに冪等。 |
-| `arbitrate_apply_and_sync` | `async fn arbitrate_apply_and_sync(store, candidates, arbiter_ctx, sync_ctx) -> Result<(Vec<AppliedDecision>, Vec<i64>), CognitionError>` | 便利関数: 調停 + 適用 + 同期を1回の呼び出しで行う。 |
+| `apply_commitment_candidates` | `async fn apply_commitment_candidates(store: &MemoryStore, ctx: &CommitmentSyncContext<'_>, candidates: &[MemoryCandidate]) -> Result<Vec<i64>, CognitionError>` | `MemoryKind::Commitment` 候補の ledger-first 書き込み: 正規化タイトルで active 行を挿入または supersede し、削除スタイルの候補は一致する active 行をキャンセルする。 |
+| `arbitrate_apply_and_sync` | `async fn arbitrate_apply_and_sync(store, candidates, arbiter_ctx, sync_ctx) -> Result<(Vec<AppliedDecision>, Vec<i64>), CognitionError>` | commitment 候補を台帳に先に書き込み、他の kind は Memory Arbiter で調停する。 |
 | `list_active` | `async fn list_active(store: &MemoryStore, character_id: &str, user_id: Option<&str>, limit: usize) -> Result<Vec<Commitment>, CognitionError>` | アクティブなコミットメントを一覧表示する（類似度フィルタリングなし）。 |
 | `active_prompt_candidates` | `fn active_prompt_candidates(commitments: &[Commitment]) -> Vec<ActiveCommitmentPrompt>` | 軽量なプロンプトDTOにマッピングする。 |
 | `complete` / `cancel` | `async fn complete(store, id) -> Result<bool, CognitionError>` / `async fn cancel(...)` | 手動でのライフサイクル遷移。 |
