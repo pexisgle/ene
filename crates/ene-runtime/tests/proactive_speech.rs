@@ -1,15 +1,15 @@
 //! Proactive speech runtime integration tests (#169).
 
+use async_trait::async_trait;
 use ene_ai::{LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk, Role};
 use ene_config::{CharacterCardV3, EneConfig};
 use ene_mind::MindConfig;
 use ene_runtime::streaming::{StreamContext, run_stream_cognitive};
-use ene_runtime::{TurnId, TurnOrigin};
+use ene_runtime::{TerminalReason, TurnId, TurnOrigin};
 use ene_store::MemoryStore;
-use async_trait::async_trait;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use tokio_stream::Stream;
 use tokio_util::sync::CancellationToken;
 
@@ -91,6 +91,7 @@ async fn proactive_stream_does_not_add_user_history() {
         last_messages: Mutex::new(Vec::new()),
         response: "Hey there!".into(),
     });
+    let provider_for_assert = Arc::clone(&provider);
     let (event_tx, _event_rx) = tokio::sync::broadcast::channel(8);
     let (diag_tx, _diag_rx) = tokio::sync::broadcast::channel(8);
     let history_before = session.history().len();
@@ -117,15 +118,75 @@ async fn proactive_stream_does_not_add_user_history() {
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
     };
 
-    let updated = run_stream_cognitive(ctx).await;
+    let outcome = run_stream_cognitive(ctx).await;
+    assert_eq!(outcome.terminal, TerminalReason::Done);
+    let updated = outcome.session;
     assert_eq!(updated.history().len(), history_before + 1);
     assert!(
-        !updated
-            .history()
-            .iter()
-            .any(|e| e.role == Role::User),
+        !updated.history().iter().any(|e| e.role == Role::User),
         "proactive turn must not add synthetic user history"
     );
+    let messages = provider_for_assert.last_messages.lock().expect("lock");
+    let has_synthetic_user = messages.iter().any(|m| {
+        let LlmMessage::User { parts } = m else {
+            return false;
+        };
+        parts.iter().any(
+            |p| matches!(p, ene_ai::UserMessagePart::Text { text } if text.contains("unprompted")),
+        )
+    });
+    assert!(
+        !has_synthetic_user,
+        "proactive directive must not inject synthetic user messages"
+    );
+}
+
+#[tokio::test]
+async fn proactive_stream_without_memory_store() {
+    let mut card = CharacterCardV3::default();
+    card.data.name = "Ene".into();
+    card.data.system_prompt = "Be helpful.".into();
+
+    let mut session = ene_mind::ConversationSession::new();
+    session.character_card = Some(card);
+
+    let mut config = EneConfig::default();
+    let mut mind = MindConfig::default();
+    mind.proactive.enabled = true;
+    config.set_section(&mind).expect("mind");
+
+    let provider = Arc::new(EchoProvider {
+        last_messages: Mutex::new(Vec::new()),
+        response: "Hi!".into(),
+    });
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel(8);
+    let (diag_tx, _diag_rx) = tokio::sync::broadcast::channel(8);
+
+    let ctx = StreamContext {
+        config,
+        session,
+        user_input: String::new(),
+        embedder: None,
+        registry: Arc::new(EmptyRegistry) as Arc<dyn ene_tool_host::ToolRegistry>,
+        tool_rag: None,
+        provider,
+        event_tx,
+        diag_tx,
+        cancel_token: CancellationToken::new(),
+        pending_permissions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        pending_user_inputs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        terminal_emitted: Arc::new(AtomicBool::new(false)),
+        turn: TurnId::new(),
+        origin: TurnOrigin::Proactive,
+        allow_tools: false,
+        runtime_directive: Some("Check in briefly.".into()),
+        generation_timeout: Some(std::time::Duration::from_secs(30)),
+        classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
+    };
+
+    let outcome = run_stream_cognitive(ctx).await;
+    assert_eq!(outcome.terminal, TerminalReason::Done);
+    assert_eq!(outcome.session.history().len(), 1);
 }
 
 #[test]

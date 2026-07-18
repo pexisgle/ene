@@ -3,7 +3,10 @@
 use ene_ai::LlmToolCallChunk;
 use ene_config::PromptLibrary;
 use ene_mind::memory_writer::candidate::{ToolResultSummary, TurnInput};
-use ene_mind::{CognitionEngine, CognitionError, EngineMode, HistoryEntry, MindConfig, PostTurnInput, TurnContext};
+use ene_mind::{
+    CognitionEngine, EngineMode, HistoryEntry, MindConfig, PostTurnInput,
+    TurnContext,
+};
 use tokio_stream::StreamExt;
 
 use crate::diagnostics::{DiagnosticEvent, emit_diag};
@@ -11,9 +14,9 @@ use crate::empty_response_log::{EmptyResponseContext, log_empty_response_if_need
 use crate::handle::{EneEvent, TerminalReason};
 use crate::message_builder::build_cognitive_output_contract;
 use crate::streaming::{
-    PHASE_CONTEXT_SEARCH, PHASE_EMBEDDING, PHASE_PROMPT_BUILDING, StreamContext,
-    accumulate_tool_calls, emit_terminal, finalize_tool_calls, perform_tool_executions,
-    select_relevant_tools,
+    PHASE_CONTEXT_SEARCH, PHASE_EMBEDDING, PHASE_PROMPT_BUILDING, StreamContext, StreamOutcome,
+    accumulate_tool_calls, finalize_tool_calls, perform_tool_executions, select_relevant_tools,
+    stream_finish,
 };
 use crate::types::TurnOrigin;
 use ene_ai::{LlmMessage, UserMessagePart};
@@ -69,16 +72,11 @@ fn apply_proactive_prompt(messages: &mut Vec<LlmMessage>, directive: Option<&str
         messages.push(LlmMessage::System {
             content: format!("[Companion directive]\n{dir}"),
         });
-        messages.push(LlmMessage::User {
-            parts: vec![UserMessagePart::Text {
-                text: "(The companion speaks unprompted; respond in character.)".into(),
-            }],
-        });
     }
 }
 
 /// Run the streaming loop using the cognitive runtime lifecycle.
-pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationSession {
+pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     let StreamContext {
         config,
         mut session,
@@ -125,7 +123,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
         .unwrap_or_default();
 
     let Some(card) = session.character_card.clone() else {
-        emit_terminal(
+        return stream_finish(
+            session,
             &event_tx,
             &terminal_emitted,
             &turn,
@@ -134,7 +133,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                 message: "No character card loaded".into(),
             },
         );
-        return session;
     };
 
     let card_name = session.card_name().to_string();
@@ -162,7 +160,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                 Some(emb)
             }
             Err(e) => {
-                emit_terminal(
+                return stream_finish(
+                    session,
                     &event_tx,
                     &terminal_emitted,
                     &turn,
@@ -171,7 +170,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                         message: format!("Embedding failed: {e}"),
                     },
                 );
-                return session;
             }
         }
     } else {
@@ -179,7 +177,11 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
     };
 
     let history: Vec<HistoryEntry> = session.history().to_vec();
-    let recall_query = if is_proactive { "" } else { user_input.as_str() };
+    let recall_query = if is_proactive {
+        ""
+    } else {
+        user_input.as_str()
+    };
     let compose_query = recall_query;
 
     let prompts = PromptLibrary::load(&mind.emotion.classifier_language);
@@ -269,13 +271,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
 
     tracing::info!(%turn, "Retrieving memory recall context and selecting relevant tools...");
     let (pre_turn_result, tools) = if is_proactive {
-        let pre = if mem_store.is_some() {
-            engine.before_proactive_turn(turn_ctx).await
-        } else {
-            Err(CognitionError::Other(
-                "Memory store required for proactive cognitive path".into(),
-            ))
-        };
+        let pre = engine.before_proactive_turn(turn_ctx).await;
         (pre, Vec::new())
     } else {
         tokio::join!(
@@ -296,7 +292,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
             v
         }
         Err(e) => {
-            emit_terminal(
+            return stream_finish(
+                session,
                 &event_tx,
                 &terminal_emitted,
                 &turn,
@@ -305,7 +302,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                     message: e.to_string(),
                 },
             );
-            return session;
         }
     };
 
@@ -365,7 +361,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
             v
         }
         Err(e) => {
-            emit_terminal(
+            return stream_finish(
+                session,
                 &event_tx,
                 &terminal_emitted,
                 &turn,
@@ -374,7 +371,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                     message: e.to_string(),
                 },
             );
-            return session;
         }
     };
 
@@ -389,18 +385,19 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
 
     loop {
         if cancel_token.is_cancelled() {
-            emit_terminal(
+            return stream_finish(
+                session,
                 &event_tx,
                 &terminal_emitted,
                 &turn,
                 origin,
                 TerminalReason::Cancelled,
             );
-            return session;
         }
 
         if round >= max_rounds {
-            emit_terminal(
+            return stream_finish(
+                session,
                 &event_tx,
                 &terminal_emitted,
                 &turn,
@@ -409,14 +406,14 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                     message: "Max tool call rounds exceeded".into(),
                 },
             );
-            return session;
         }
 
         tracing::info!(%turn, round, "Requesting LLM response stream...");
         let mut stream = match provider.create_chat_stream(&messages, &tools).await {
             Ok(s) => s,
             Err(e) => {
-                emit_terminal(
+                return stream_finish(
+                    session,
                     &event_tx,
                     &terminal_emitted,
                     &turn,
@@ -425,7 +422,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                         message: e.to_string(),
                     },
                 );
-                return session;
             }
         };
 
@@ -439,14 +435,14 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
         let mut is_first_chunk = true;
         while let Some(chunk_res) = stream.next().await {
             if cancel_token.is_cancelled() {
-                emit_terminal(
+                return stream_finish(
+                    session,
                     &event_tx,
                     &terminal_emitted,
                     &turn,
                     origin,
                     TerminalReason::Cancelled,
                 );
-                return session;
             }
 
             if is_first_chunk {
@@ -509,7 +505,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                     }
                 }
                 Err(e) => {
-                    emit_terminal(
+                    return stream_finish(
+                        session,
                         &event_tx,
                         &terminal_emitted,
                         &turn,
@@ -518,7 +515,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                             message: e.to_string(),
                         },
                     );
-                    return session;
                 }
             }
         }
@@ -595,7 +591,11 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
             }
 
             if let Some(store) = mem_store.as_deref() {
-                let post_user = if is_proactive { "" } else { user_input.as_str() };
+                let post_user = if is_proactive {
+                    ""
+                } else {
+                    user_input.as_str()
+                };
                 let post = PostTurnInput {
                     turn: TurnInput {
                         user_message: post_user,
@@ -648,13 +648,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
             // from history.
             session.finalize_response();
             session.record_assistant_response();
-            emit_terminal(
-                &event_tx,
-                &terminal_emitted,
-                &turn,
-                origin,
-                TerminalReason::Done,
-            );
 
             if !is_proactive
                 && let Some(classifier_store) = mem_store.clone()
@@ -761,7 +754,14 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                 let _ = classifier_tx.send(classifier_handle);
             }
 
-            return session;
+            return stream_finish(
+                session,
+                &event_tx,
+                &terminal_emitted,
+                &turn,
+                origin,
+                TerminalReason::Done,
+            );
         }
 
         let tool_calls = finalize_tool_calls(current_tool_calls);
@@ -787,7 +787,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                 round += 1;
             }
             Err(e) => {
-                emit_terminal(
+                return stream_finish(
+                    session,
                     &event_tx,
                     &terminal_emitted,
                     &turn,
@@ -796,7 +797,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                         message: e.to_string(),
                     },
                 );
-                return session;
             }
         }
     }

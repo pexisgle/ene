@@ -269,34 +269,7 @@ impl CognitionEngine {
         &self,
         ctx: TurnContext<'_>,
     ) -> Result<PreTurnOutput, CognitionError> {
-        use crate::recall::{
-            RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHints,
-        };
-
-        let store = ctx.store.ok_or_else(|| {
-            CognitionError::Other("Memory store required for cognitive path".into())
-        })?;
-
-        let affect = store
-            .get_affect_state(ctx.character_id)
-            .await
-            .map_err(CognitionError::Memory)?;
-
-        let commitment_rows =
-            match CommitmentLedger::list_active(store, ctx.character_id, Some(ctx.user_name), 16)
-                .await
-            {
-                Ok(rows) => rows,
-                Err(error) => {
-                    tracing::warn!(
-                        component = "CognitionEngine",
-                        error = %error,
-                        "Failed to list active commitments for proactive pre-turn"
-                    );
-                    vec![]
-                }
-            };
-        let commitments = CommitmentLedger::active_prompt_candidates(&commitment_rows);
+        use crate::recall::{RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHints};
 
         let recall_plan = RecallPlan {
             current_topic: "proactive".to_string(),
@@ -321,6 +294,37 @@ impl CognitionEngine {
             },
             use_hyde: false,
         };
+
+        let Some(store) = ctx.store else {
+            return Ok(PreTurnOutput {
+                recall_plan,
+                affect: ene_store::AffectState::neutral(ctx.character_id),
+                recalled: Vec::new(),
+                commitments: Vec::new(),
+                classifier_expression_hint: None,
+            });
+        };
+
+        let affect = store
+            .get_affect_state(ctx.character_id)
+            .await
+            .map_err(CognitionError::Memory)?;
+
+        let commitment_rows =
+            match CommitmentLedger::list_active(store, ctx.character_id, Some(ctx.user_name), 16)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(error) => {
+                    tracing::warn!(
+                        component = "CognitionEngine",
+                        error = %error,
+                        "Failed to list active commitments for proactive pre-turn"
+                    );
+                    vec![]
+                }
+            };
+        let commitments = CommitmentLedger::active_prompt_candidates(&commitment_rows);
 
         Ok(PreTurnOutput {
             recall_plan,

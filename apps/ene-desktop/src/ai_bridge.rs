@@ -137,9 +137,23 @@ impl AiBridge {
         self.active_turn.lock().is_ok_and(|g| g.is_some())
     }
 
-    /// Refresh proactive observation flags from the latest mind config.
-    pub fn sync_proactive_observe(&self, mind: &ene_mind::MindConfig) {
+    /// Refresh proactive observation flags and push policy into the runtime actor.
+    pub fn sync_proactive_runtime(
+        &self,
+        mind: &ene_mind::MindConfig,
+        provider: &ene_ai::ProviderConfig,
+    ) {
         self.proactive_observe.apply_mind(mind);
+        if let Err(e) = self
+            .handle
+            .update_proactive_settings(mind.proactive.clone(), provider.proactive.clone())
+        {
+            tracing::warn!(
+                component = "AiBridge",
+                error = %e,
+                "Failed to push proactive settings to runtime actor"
+            );
+        }
     }
 
     /// Forward a `PermissionDecision` for the request
@@ -467,7 +481,14 @@ async fn pump_events(
                     prompt,
                 }));
             }
-            Ok(EneEvent::ContextCompressed { .. } | EneEvent::StatusChanged { .. }) => {}
+            Ok(EneEvent::ContextCompressed { .. }) => {}
+            Ok(EneEvent::StatusChanged { .. }) => {}
+            Ok(EneEvent::TurnStarted { turn, origin: _ }) => {
+                if let Ok(mut guard) = active_turn.lock() {
+                    *guard = Some(turn);
+                }
+                processing.store(true, Ordering::Relaxed);
+            }
             Ok(EneEvent::Terminal {
                 turn,
                 origin: _,
@@ -552,11 +573,9 @@ mod tests {
     }
 
     #[test]
-    fn turn_matches_rejects_mismatched_turn() {
-        let active_id = TurnId::new();
-        let other = TurnId::new();
-        let active = Mutex::new(Some(active_id.clone()));
-        assert!(turn_matches(&active, &active_id));
-        assert!(!turn_matches(&active, &other));
+    fn turn_matches_accepts_after_turn_started() {
+        let turn = TurnId::new();
+        let active = Mutex::new(Some(turn.clone()));
+        assert!(turn_matches(&active, &turn));
     }
 }

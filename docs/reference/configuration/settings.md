@@ -483,7 +483,7 @@ Policy for unsolicited companion utterances. Default is **off**. See [Proactive 
 | `enabled` | bool | `false` | Master switch |
 | `interval_seconds` | int | `60` | Decision tick interval (minimum 1) |
 | `min_idle_seconds` | int | `120` | Suppress until this idle after last user input |
-| `cooldown_seconds` | int | `300` | Suppress after a proactive utterance |
+| `cooldown_seconds` | int | `300` | Suppress after a successful proactive utterance (`TerminalReason::Done`) |
 | `max_turns_per_session` | int | `6` | Cap per conversation session |
 | `decision_timeout_seconds` | int | `15` | Lightweight decision timeout |
 | `generation_timeout_seconds` | int | `60` | High-quality generation timeout |

@@ -487,7 +487,7 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 | `enabled` | bool | `false` | 機能全体の on/off |
 | `interval_seconds` | int | `60` | 判定 tick 間隔（最小 1） |
 | `min_idle_seconds` | int | `120` | 最後のユーザー入力からの最低待機 |
-| `cooldown_seconds` | int | `300` | 能動発話後の抑制時間 |
+| `cooldown_seconds` | int | `300` | 成功した能動発話（`TerminalReason::Done`）後の抑制時間 |
 | `max_turns_per_session` | int | `6` | セッションあたりの上限 |
 | `decision_timeout_seconds` | int | `15` | 軽量判定のタイムアウト |
 | `generation_timeout_seconds` | int | `60` | 発話生成のタイムアウト |

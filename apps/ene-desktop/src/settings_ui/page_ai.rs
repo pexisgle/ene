@@ -282,7 +282,7 @@ pub fn render(
                 mind.proactive.enabled = enabled;
                 let _ = settings.ai.ai.set_section(&mind);
                 settings.mark_dirty();
-                ai.sync_proactive_observe(&mind);
+                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
             }
         });
 
@@ -296,7 +296,7 @@ pub fn render(
                 mind.proactive.interval_seconds = value.max(1) as u64;
                 let _ = settings.ai.ai.set_section(&mind);
                 settings.mark_dirty();
-                ai.sync_proactive_observe(&mind);
+                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
             }
         });
 
@@ -310,6 +310,7 @@ pub fn render(
                 mind.proactive.cooldown_seconds = value.max(0) as u64;
                 let _ = settings.ai.ai.set_section(&mind);
                 settings.mark_dirty();
+                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
             }
         });
 
@@ -323,6 +324,7 @@ pub fn render(
                 mind.proactive.min_idle_seconds = value.max(0) as u64;
                 let _ = settings.ai.ai.set_section(&mind);
                 settings.mark_dirty();
+                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
             }
         });
 
@@ -336,6 +338,7 @@ pub fn render(
                 mind.proactive.sources.conversation = conversation;
                 let _ = settings.ai.ai.set_section(&mind);
                 settings.mark_dirty();
+                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
             }
         });
         ui.horizontal(|ui| {
@@ -345,7 +348,7 @@ pub fn render(
                 mind.proactive.sources.activity = activity;
                 let _ = settings.ai.ai.set_section(&mind);
                 settings.mark_dirty();
-                ai.sync_proactive_observe(&mind);
+                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
             }
         });
         ui.horizontal(|ui| {
@@ -355,9 +358,10 @@ pub fn render(
                 mind.proactive.sources.screen_summary = screen;
                 let _ = settings.ai.ai.set_section(&mind);
                 settings.mark_dirty();
-                ai.sync_proactive_observe(&mind);
+                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
             }
         });
+        ui.label(crate::i18n::proactive_source_screen_hint());
 
         ui.horizontal(|ui| {
             ui.label(crate::i18n::proactive_decision_backend());
@@ -383,6 +387,7 @@ pub fn render(
                 };
                 let _ = settings.ai.ai.set_section(&provider_for_proactive);
                 settings.mark_dirty();
+                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
             }
         });
 
@@ -407,6 +412,7 @@ pub fn render(
                 };
                 let _ = settings.ai.ai.set_section(&provider_for_proactive);
                 settings.mark_dirty();
+                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
             }
         });
 
@@ -420,6 +426,7 @@ pub fn render(
                 provider_for_proactive.proactive.decision.model_path = path.trim().to_string();
                 let _ = settings.ai.ai.set_section(&provider_for_proactive);
                 settings.mark_dirty();
+                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
             }
         });
 
@@ -434,6 +441,7 @@ pub fn render(
                     generation_model.trim().to_string();
                 let _ = settings.ai.ai.set_section(&provider_for_proactive);
                 settings.mark_dirty();
+                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
             }
         });
     });

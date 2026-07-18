@@ -108,6 +108,13 @@ pub enum EneCommand {
         /// Normalized observation from desktop (no raw screenshots).
         observation: ene_mind::ProactiveObservation,
     },
+    /// Hot-update proactive policy and provider routing (#103).
+    UpdateProactiveSettings {
+        /// Mind proactive policy.
+        mind: ene_mind::ProactiveConfig,
+        /// Provider proactive routing.
+        provider: ene_ai::ProactiveProviderConfig,
+    },
 }
 
 /// Events emitted from the actor to all consumers via broadcast channel.
@@ -206,6 +213,13 @@ pub enum EneEvent {
     StatusChanged {
         /// New status value.
         status: EneStatus,
+    },
+    /// A turn has started streaming (after provider open succeeds).
+    TurnStarted {
+        /// Active turn.
+        turn: TurnId,
+        /// Who initiated this turn.
+        origin: crate::types::TurnOrigin,
     },
 }
 
@@ -632,6 +646,17 @@ impl EneHandle {
             .send(EneCommand::UpdateProactiveObservation { observation })
             .map_err(|_| ActorDeadError)
     }
+
+    /// Hot-update proactive policy and provider routing in the running actor.
+    pub fn update_proactive_settings(
+        &self,
+        mind: ene_mind::ProactiveConfig,
+        provider: ene_ai::ProactiveProviderConfig,
+    ) -> Result<(), ActorDeadError> {
+        self.cmd_tx
+            .send(EneCommand::UpdateProactiveSettings { mind, provider })
+            .map_err(|_| ActorDeadError)
+    }
 }
 
 impl Drop for EneHandle {
@@ -655,7 +680,7 @@ struct EneActor {
     tool_rag: Option<Arc<ToolRag>>,
     cancel_token: CancellationToken,
     stream_handle: Option<tokio::task::JoinHandle<()>>,
-    stream_session_rx: Option<oneshot::Receiver<ConversationSession>>,
+    stream_session_rx: Option<oneshot::Receiver<streaming::StreamOutcome>>,
     active_turn: Option<TurnId>,
     pending_permissions: Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
     pending_user_inputs: Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
@@ -747,11 +772,13 @@ impl EneActor {
                     res = &mut *rx => {
                         // The stream task has finished (or the
                         // sender was dropped).
-                        if let Ok(updated_session) = res {
-                            self.session = updated_session;
-                        }
-                        if self.active_origin == crate::types::TurnOrigin::Proactive {
-                            self.proactive.on_proactive_completed();
+                        if let Ok(outcome) = res {
+                            self.session = outcome.session;
+                            if self.active_origin == crate::types::TurnOrigin::Proactive
+                                && outcome.terminal == TerminalReason::Done
+                            {
+                                self.proactive.on_proactive_completed();
+                            }
                         }
                         self.stream_handle = None;
                         self.stream_session_rx = None;
@@ -785,6 +812,7 @@ impl EneActor {
                         }
                         decision = &mut *rx => {
                             self.proactive_decision_rx = None;
+                            self.proactive_decision_handle = None;
                             if let Ok(result) = decision {
                                 self.handle_proactive_decision(result).await;
                             }
@@ -1047,9 +1075,9 @@ impl EneActor {
                                 );
                             }
                             if let Some(rx) = self.stream_session_rx.as_mut()
-                                && let Ok(updated) = rx.try_recv()
+                                && let Ok(outcome) = rx.try_recv()
                             {
-                                self.session = updated;
+                                self.session = outcome.session;
                             }
                         }
                         () = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
@@ -1105,6 +1133,26 @@ impl EneActor {
             }
             EneCommand::UpdateProactiveObservation { observation } => {
                 self.proactive.observation = observation;
+                true
+            }
+            EneCommand::UpdateProactiveSettings { mind, provider } => {
+                let provider_changed = self
+                    .config
+                    .get_section::<ene_ai::ProviderConfig>()
+                    .ok()
+                    .is_none_or(|p| p.proactive != provider);
+                if let Ok(mut mind_cfg) = self.config.get_section::<ene_mind::MindConfig>() {
+                    mind_cfg.proactive = mind;
+                    let _ = self.config.set_section(&mind_cfg);
+                }
+                if let Ok(mut provider_cfg) = self.config.get_section::<ene_ai::ProviderConfig>() {
+                    provider_cfg.proactive = provider;
+                    let _ = self.config.set_section(&provider_cfg);
+                }
+                self.abort_proactive_decision();
+                if provider_changed && let Some(handles) = self.proactive_llm.take() {
+                    handles.shutdown().await;
+                }
                 true
             }
             EneCommand::PermissionDecision {
@@ -1262,15 +1310,20 @@ impl EneActor {
         let pending_permissions = self.pending_permissions.clone();
         let pending_user_inputs = self.pending_user_inputs.clone();
         let terminal_emitted = self.terminal_emitted.clone();
-        let turn_for_stream = turn;
+        let turn_for_stream = turn.clone();
         let classifier_tx = self.classifier_tx.clone();
         self.active_origin = origin;
+
+        let _ = self.event_tx.send(EneEvent::TurnStarted {
+            turn: turn_for_stream.clone(),
+            origin,
+        });
 
         let (session_tx, session_rx) = oneshot::channel();
         self.stream_session_rx = Some(session_rx);
 
         let handle = tokio::spawn(async move {
-            let updated_session = streaming::run_stream_cognitive(streaming::StreamContext {
+            let outcome = streaming::run_stream_cognitive(streaming::StreamContext {
                 config,
                 session,
                 user_input,
@@ -1292,7 +1345,7 @@ impl EneActor {
                 classifier_tx,
             })
             .await;
-            let _ = session_tx.send(updated_session);
+            let _ = session_tx.send(outcome);
         });
         self.stream_handle = Some(handle);
     }

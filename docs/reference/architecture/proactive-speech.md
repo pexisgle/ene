@@ -24,7 +24,7 @@ Adopt proactive companion speech with the following fixed contracts.
 ### Dependency rules
 
 - `ene-mind` does **not** depend on `ene-runtime`, `ene-tool-host`, or OS observation crates.
-- `ene-ai` embeds llama-cpp-2 for local decision (and local embedding); it does not spawn `llama-server` or implement Candle graphs for chat/embedding.
+- `ene-ai` embeds llama-cpp-2 for local decision (and local embedding); it does not spawn `llama-server` or implement Candle graphs for chat/embedding. All llama-cpp inference is serialized behind a process-wide lock.
 - Desktop observation stays in `ene-desktop` (or a desktop-local platform module). Raw screenshots never enter `ene-mind` / `ene-store`.
 
 ### Decision → utterance flow
@@ -35,7 +35,7 @@ Timer / observation update
   -> mind builds ProactiveContext (respecting source flags)
   -> lightweight decision model returns structured Decision JSON
   -> if should_speak and TurnGate free, runtime invokes normal generation
-  -> TextDelta / Performance / Terminal emit with TurnOrigin::Proactive
+  -> TurnStarted + TextDelta / Performance / Terminal emit with TurnOrigin::Proactive
   -> assistant response only is appended to session history and conversation_logs
 ```
 
@@ -72,7 +72,7 @@ Unknown fields are ignored. Parse / timeout / provider failures are fail-closed:
 | Feature off | `mind.proactive.enabled` default `false` |
 | User / tool / permission busy | No decision and no generation while a user turn, tool call, or permission/input wait is active |
 | Min idle | Suppress if last user input was less than `min_idle_seconds` ago |
-| Cooldown | After a proactive utterance, suppress for `cooldown_seconds` |
+| Cooldown | After a **successful** proactive utterance (`TerminalReason::Done`), suppress for `cooldown_seconds` |
 | Session cap | At most `max_turns_per_session` proactive utterances per session |
 | No sources | If every input source is disabled (or unavailable), skip decision |
 | Confidence | Proceed to generation only when `confidence >= decision.min_confidence` |
@@ -111,7 +111,8 @@ GGUF weights are **not** bundled with the app; paths are configured by the user.
 
 - Default settings preserve existing chat behavior (proactive off).
 - Desktop must own OS-specific observation and pass a normalized `ProactiveObservation` into runtime.
-- CLI/desktop `EneEvent` consumers must accept `TurnOrigin` without breaking existing match arms (additive fields / new variants handled carefully).
+- CLI/desktop `EneEvent` consumers must handle `TurnStarted` and `TurnOrigin` without breaking existing match arms (additive fields / new variants handled carefully).
+- Desktop settings changes push `UpdateProactiveSettings` into the actor (no restart required).
 - Guide docs must document local model placement, Vulkan/RADV requirements, and privacy implications.
 
 ## Related

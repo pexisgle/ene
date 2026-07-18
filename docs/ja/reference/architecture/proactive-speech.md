@@ -24,7 +24,7 @@ Companion / AITuber 体験では、ユーザーが明示的に話しかけたと
 ### 依存ルール
 
 - `ene-mind` は `ene-runtime` / `ene-tool-host` / OS 観測クレートに依存しない。
-- `ene-ai` は判定（およびローカル embedding）に llama-cpp-2 を埋め込む。`llama-server` を起動せず、Candle グラフも持たない。
+- `ene-ai` は判定（およびローカル embedding）に llama-cpp-2 を埋め込む。`llama-server` を起動せず、Candle グラフも持たない。llama-cpp 推論はプロセス全体のロックで直列化する。
 - Desktop 観測は `ene-desktop`（または desktop 内 platform module）に閉じる。raw screenshot は `ene-mind` / `ene-store` に入らない。
 
 ### 判定から発話まで
@@ -35,7 +35,7 @@ Timer / observation update
   -> mind が ProactiveContext を構築（source flag を尊重）
   -> 軽量判定モデルが Decision JSON を返す
   -> should_speak かつ TurnGate が空なら通常の生成経路を起動
-  -> TextDelta / Performance / Terminal を TurnOrigin::Proactive 付きで emit
+  -> TurnStarted + TextDelta / Performance / Terminal を TurnOrigin::Proactive 付きで emit
   -> assistant 応答のみを session history と conversation_logs へ追加
 ```
 
@@ -72,7 +72,7 @@ Timer / observation update
 | 機能オフ | `mind.proactive.enabled` の default は `false` |
 | ユーザー / tool / permission busy | ユーザー turn・tool call・permission/input 待ち中は判定も生成もしない |
 | 最低 idle | 最後のユーザー入力から `min_idle_seconds` 未満は抑制 |
-| cooldown | 能動発話後 `cooldown_seconds` の間は再発話しない |
+| cooldown | **成功した**能動発話（`TerminalReason::Done`）後 `cooldown_seconds` の間は再発話しない |
 | セッション上限 | 1 セッションあたり最大 `max_turns_per_session` 回 |
 | source なし | 全入力ソースが無効（または利用不可）なら判定しない |
 | 信頼度 | `confidence >= decision.min_confidence` のときのみ生成へ進む |
@@ -111,7 +111,8 @@ GGUF 重みはアプリに同梱しない。外部 `llama-server` も不要。�
 
 - デフォルト設定では既存の通常会話挙動が変わらない（能動発話オフ）。
 - Desktop が OS 固有の観測を正規化した `ProactiveObservation` として runtime へ渡す。
-- CLI / desktop の `EneEvent` 消費者は `TurnOrigin` を壊さずに扱える必要がある（加算的な拡張）。
+- CLI / desktop の `EneEvent` 消費者は `TurnStarted` と `TurnOrigin` を壊さずに扱える必要がある（加算的な拡張）。
+- デスクトップの設定変更は `UpdateProactiveSettings` で actor に即時反映される（再起動不要）。
 - Guide にローカルモデル配置、Vulkan/RADV 要件、プライバシー注意を記載する。
 
 ## 関連

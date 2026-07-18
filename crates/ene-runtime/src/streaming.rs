@@ -56,6 +56,32 @@ pub(crate) struct ToolExecutionOutput {
     pub summaries: Vec<ToolResultSummary>,
 }
 
+/// Result of a cognitive streaming run (session snapshot + terminal reason).
+#[derive(Debug)]
+#[doc(hidden)]
+pub struct StreamOutcome {
+    /// Updated conversation session.
+    pub session: ene_mind::ConversationSession,
+    /// Why the stream ended (for proactive cooldown accounting).
+    pub terminal: TerminalReason,
+}
+
+/// Emit terminal and return [`StreamOutcome`] for the actor oneshot.
+pub(crate) fn stream_finish(
+    session: ene_mind::ConversationSession,
+    event_tx: &broadcast::Sender<EneEvent>,
+    guard: &AtomicBool,
+    turn: &TurnId,
+    origin: TurnOrigin,
+    reason: TerminalReason,
+) -> StreamOutcome {
+    emit_terminal(event_tx, guard, turn, origin, reason.clone());
+    StreamOutcome {
+        session,
+        terminal: reason,
+    }
+}
+
 /// Atomically claim the right to emit the terminal event for the
 /// current run, and emit [`EneEvent::Terminal`] if the claim
 /// succeeds. If the cancel command (or another emit site) has

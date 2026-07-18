@@ -16,6 +16,8 @@ Proactive speech (#103) uses a **lightweight decision model** and the normal cha
 4. For local: set `model_path` to a Gemma 4 E2B/E4B (or other) GGUF. Optional `acceleration` / `gpu_layers` for Vulkan/CUDA.
 5. Optional: set `provider.proactive.generation_model` to use a different chat model for proactive utterances.
 
+Desktop settings apply to the running actor immediately (no restart). The desktop observer and runtime scheduler both receive updates via `UpdateProactiveSettings`.
+
 Weights are **not** bundled. Local inference is **in-process llama-cpp-2** (no `llama-server` subprocess). See [spike notes](../reference/architecture/proactive-local-llm-spike.md) and the [ADR](../reference/architecture/proactive-speech.md).
 
 ## Smoke test (optional)
@@ -31,3 +33,9 @@ direnv exec . rtk cargo test -p ene-ai --lib local_llm::routing::smoke
 - Desktop never writes raw screenshots to disk, logs, or SQLite.
 - Screen summary is optional; when enabled, V1 desktop reports the source as **unavailable** until a summarizer is integrated (no silent empty summaries).
 - Activity uses **application name only** (no raw window titles; no keylogging).
+
+## Desktop integration
+
+- Proactive turns emit `EneEvent::TurnStarted` before streaming; desktop sets `active_turn` from this event so `TextDelta` / `Terminal` reach the chat UI.
+- Cooldown and session caps apply only after a proactive turn ends with `TerminalReason::Done` (failed or cancelled generations do not consume cooldown).
+- Local llama-cpp embedding and decision paths share a process-wide inference lock (serialized, not concurrent).

@@ -15,14 +15,20 @@ pub async fn process_stream(
     handle: &EneHandle,
     active_turn: Option<&TurnId>,
 ) {
+    let mut subscribed_turn = active_turn.cloned();
     loop {
         match rx.recv().await {
+            Ok(EneEvent::TurnStarted { turn, origin }) => {
+                if subscribed_turn.is_none() && origin == ene_runtime::TurnOrigin::Proactive {
+                    subscribed_turn = Some(turn);
+                }
+            }
             Ok(EneEvent::TextDelta {
                 turn,
                 origin: _,
                 delta,
             }) => {
-                if !turn_matches(active_turn, &turn) {
+                if !turn_matches(subscribed_turn.as_ref(), &turn) {
                     continue;
                 }
                 print!("{delta}");
@@ -34,7 +40,7 @@ pub async fn process_stream(
                 cues,
                 source,
             }) => {
-                if !turn_matches(active_turn, &turn) {
+                if !turn_matches(subscribed_turn.as_ref(), &turn) {
                     continue;
                 }
                 for cue in cues {
@@ -61,7 +67,7 @@ pub async fn process_stream(
                 name,
                 arguments,
             }) => {
-                if !turn_matches(active_turn, &turn) {
+                if !turn_matches(subscribed_turn.as_ref(), &turn) {
                     continue;
                 }
                 tracing::info!(%turn, tool = %name, arguments = %arguments, "Tool calling started");
@@ -72,13 +78,13 @@ pub async fn process_stream(
                 name,
                 result,
             }) => {
-                if !turn_matches(active_turn, &turn) {
+                if !turn_matches(subscribed_turn.as_ref(), &turn) {
                     continue;
                 }
                 tracing::info!(%turn, tool = %name, result = %result, "Tool result");
             }
             Ok(EneEvent::ContextCompressed { turn, level, .. }) => {
-                if !turn_matches(active_turn, &turn) {
+                if !turn_matches(subscribed_turn.as_ref(), &turn) {
                     continue;
                 }
                 tracing::info!(%turn, level = %level, "Context compressed");
@@ -88,7 +94,7 @@ pub async fn process_stream(
                 origin: _,
                 reason,
             }) => {
-                if !turn_matches(active_turn, &turn) {
+                if !turn_matches(subscribed_turn.as_ref(), &turn) {
                     continue;
                 }
                 if let ene_runtime::TerminalReason::Failed { message } = &reason {
@@ -106,7 +112,7 @@ pub async fn process_stream(
                 target,
                 description,
             }) => {
-                if !turn_matches(active_turn, &turn) {
+                if !turn_matches(subscribed_turn.as_ref(), &turn) {
                     continue;
                 }
                 tracing::info!(
@@ -145,7 +151,7 @@ pub async fn process_stream(
                 request_id,
                 prompt,
             }) => {
-                if !turn_matches(active_turn, &turn) {
+                if !turn_matches(subscribed_turn.as_ref(), &turn) {
                     continue;
                 }
                 let total = prompt.items.len();
@@ -218,5 +224,5 @@ pub async fn process_stream(
 }
 
 fn turn_matches(active: Option<&TurnId>, event_turn: &TurnId) -> bool {
-    active.is_none_or(|t| t == event_turn)
+    active.is_some_and(|t| t == event_turn)
 }
