@@ -26,7 +26,7 @@ User query
 Vec<ToolSpec> → passed to LLM
 ```
 
-LLM HyDE is disabled: `use_hyde` is a reserved no-op. Rerank never uses an LLM (cosine over description embeddings only).
+LLM HyDE is **deprecated** and disabled: `use_hyde` is a no-op scheduled for removal. Invalid `rag.forced` names fail startup. Embed/store failures return forced tools only (not the full catalog). Rerank never uses an LLM (cosine over description embeddings only).
 
 ## Configuration
 
@@ -35,7 +35,7 @@ Configure under `tools.rag` in `settings.json` (see [Settings](../configuration/
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | bool | `true` | Enable the Tool RAG pipeline |
-| `use_hyde` | bool | `false` | Reserved; LLM HyDE is disabled (no-op) |
+| `use_hyde` | bool | `false` | **Deprecated** (no-op; scheduled for removal) |
 | `use_rerank` | bool | `false` | Cosine embedding rerank of candidates (no LLM) |
 | `background_index_on_startup` | bool | `true` | Warm the index in a background task at startup |
 | `top_k` | int | `12` | Number of candidates before reranking |

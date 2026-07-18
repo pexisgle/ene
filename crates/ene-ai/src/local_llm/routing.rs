@@ -214,7 +214,7 @@ fn cloud_decision_from_resolved(chat: &ResolvedChat) -> OpenAiProvider {
 #[cfg(test)]
 mod smoke {
     use super::*;
-    use crate::config::{AiConfig, LocalModelDef, ProactiveAcceleration, TaskRef, LOCAL_PROVIDER};
+    use crate::config::{AiConfig, LOCAL_PROVIDER, LocalModelDef, ProactiveAcceleration, TaskRef};
 
     fn env_smoke_enabled() -> Option<(String, ProactiveAcceleration)> {
         let model = std::env::var("ENE_LOCAL_LLM_MODEL").ok()?;

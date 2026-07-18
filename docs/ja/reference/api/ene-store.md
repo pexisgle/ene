@@ -595,49 +595,63 @@ pub type MemoryError = EneMemoryError;
 
 ```rust,no_run
 use chrono::Utc;
-use ene_store::{KeyFact, MemoryStore, RecalledSummary};
+use ene_store::{
+    AffectAnnotation, HybridSearchWeights, MemoryConfidence, MemoryKind, MemorySalience,
+    MemoryScope, MemorySource, MemoryStatus, MemoryStore, NewMemoryItem, Query,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 4次元の埋め込みでインメモリストアを開く。
     let store = MemoryStore::open_in_memory(4).await?;
-    let card_name = "Alicia";
 
-    // キーファクト付きで会話の要約を挿入する。
-    let embedding = vec![1.0_f32, 0.0, 0.0, 0.0];
-    let key_facts = vec![
-        KeyFact { key: "user_name".into(), value: "Alice".into() },
-        KeyFact { key: "favorite_color".into(), value: "blue".into() },
-    ];
-
-    let summary_id = store
-        .insert_summary(
-            "session-001",
-            card_name,
-            "User Alice said she loves blue and works as a designer.",
-            &key_facts,
-            &embedding,
-            Utc::now(),
-        )
+    let id = store
+        .insert_typed_memory(&NewMemoryItem {
+            scope: MemoryScope::Shared,
+            character_id: "Alicia".to_string(),
+            user_id: "user1".to_string(),
+            kind: MemoryKind::Semantic,
+            title: "user_name".to_string(),
+            content: "Alice is a designer who loves blue.".to_string(),
+            source: MemorySource::Conversation,
+            source_ref: Some("session-001".to_string()),
+            confidence: MemoryConfidence::new(0.9),
+            salience: MemorySalience::new(0.7),
+            affect: AffectAnnotation {
+                valence: 0.5,
+                arousal: 0.0,
+            },
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            created_at: None,
+            commitment_id: None,
+        })
         .await?;
-    println!("Inserted summary with ID: {summary_id}");
 
-    // 関連する要約を検索する。
-    let query_emb = vec![0.9_f32, 0.1, 0.0, 0.0];
-    let results: Vec<RecalledSummary> =
-        store.search_summaries(&query_emb, card_name, 5, 0.5).await?;
-
-    for (i, rs) in results.iter().enumerate() {
-        println!("  {}. [score: {:.3}] {}", i + 1, rs.similarity, rs.entry.summary);
-    }
-
-    // キーファクトの取得・更新・削除。
-    let facts = store.get_all_keyfacts(card_name).await?;
-    println!("Key facts: {facts:?}");
-
-    store.upsert_keyfact(card_name, "favorite_color", "green").await?;
-    store.delete_keyfact(card_name, "favorite_color").await?;
-
+    let results = store
+        .search(&Query {
+            query_text: "Alice loves blue",
+            embedding: None,
+            character_id: "Alicia",
+            user_id: Some("user1"),
+            model_name: "demo",
+            limit: 5,
+            similarity_threshold: 0.0,
+            candidate_pool_size: 16,
+            query_affect: None,
+            weights: HybridSearchWeights::default(),
+            decay_half_life_days: 30.0,
+            now: Utc::now(),
+            min_score: 0.0,
+            commitment_boost: 0.0,
+            recent_fallback_limit: 5,
+        })
+        .await?;
+    println!("hits: {}", results.len());
+    let _ = id;
     Ok(())
 }
 ```
@@ -651,5 +665,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - [`ene-runtime`](./ene-runtime.md) — 外部アクセス用の `MemoryQueryHandle` とアクターレベルの結線
 - [`ene-mind`](./ene-mind.md) — `execute_split` を通じたセッション分割とローリング圧縮を駆動する
 - [`ene-ai`](./ene-ai.md) — ストレージと検索のための埋め込みを提供する
-- [メモリシステム](../memory/memory.md) — 完全な設計ドキュメント: ハイブリッドスコアリング、MMR多様化、移行、コミットメント台帳
+- [メモリシステム](../memory/memory.md) — 完全な設計ドキュメント: ハイブリッドスコアリング、MMR多様化、コミットメント台帳
 - [API v1](../architecture/api-v1.md) — ストア所有（`store.*` のみ；方針は `mind.*`）

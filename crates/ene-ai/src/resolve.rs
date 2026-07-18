@@ -1,7 +1,7 @@
 //! Resolved provider settings from [`AiConfig`] task routing.
 
 use crate::config::{
-    AiConfig, AiProviderDef, ApiKeyConfig, LocalModelDef, TaskRef, LOCAL_PROVIDER,
+    AiConfig, AiProviderDef, ApiKeyConfig, LOCAL_PROVIDER, LocalModelDef, TaskRef,
 };
 use crate::error::LlmProviderError;
 
@@ -201,11 +201,15 @@ impl AiConfig {
                 task.provider, LOCAL_PROVIDER
             )));
         }
-        let name = task.model.as_deref().filter(|m| !m.trim().is_empty()).ok_or_else(|| {
-            LlmProviderError::Provider(format!(
-                "task with provider {LOCAL_PROVIDER:?} requires model (local_models key)"
-            ))
-        })?;
+        let name = task
+            .model
+            .as_deref()
+            .filter(|m| !m.trim().is_empty())
+            .ok_or_else(|| {
+                LlmProviderError::Provider(format!(
+                    "task with provider {LOCAL_PROVIDER:?} requires model (local_models key)"
+                ))
+            })?;
         let def = self.get_local_model(name)?;
         Ok(ResolvedLocalModel::from_named(name, def))
     }

@@ -63,14 +63,23 @@ ene_config::define_tool_config!(
 );
 
 impl SandboxConfigData {
-    /// Enforce safe floors: union default blocklist patterns and replace
-    /// zero-valued limits with code defaults. User-supplied patterns and
-    /// tighter (non-zero) limits are preserved.
+    /// Enforce safe floors for tool sandbox settings.
+    ///
+    /// - Unions the default dangerous-command blocklist into `blocked_commands`
+    ///   (user patterns are kept).
+    /// - Replaces zero-valued size/timeout limits with code defaults.
+    /// - When `enabled` is true and `allowed_directories` is empty, inserts
+    ///   `["."]` so path checks have a usable allowlist.
+    ///
+    /// Does **not** force `enabled = true` or cap user-inflated limits.
     pub fn sanitize(&mut self) {
         for pattern in default_blocked_commands() {
             if !self.blocked_commands.iter().any(|p| p == &pattern) {
                 self.blocked_commands.push(pattern);
             }
+        }
+        if self.enabled && self.allowed_directories.is_empty() {
+            self.allowed_directories.push(".".to_string());
         }
         if self.max_read_bytes == 0 {
             self.max_read_bytes = default_max_read_bytes();
@@ -131,8 +140,25 @@ mod tests {
         assert_eq!(config.max_read_bytes, default_max_read_bytes());
         assert_eq!(config.max_write_bytes, default_max_write_bytes());
         assert_eq!(config.shell_timeout_ms, default_shell_timeout_ms());
-        assert_eq!(config.max_shell_output_bytes, default_max_shell_output_bytes());
-        assert_eq!(config.max_shell_output_lines, default_max_shell_output_lines());
+        assert_eq!(
+            config.max_shell_output_bytes,
+            default_max_shell_output_bytes()
+        );
+        assert_eq!(
+            config.max_shell_output_lines,
+            default_max_shell_output_lines()
+        );
+    }
+
+    #[test]
+    fn sanitize_fills_allowed_directories_when_enabled_and_empty() {
+        let mut config = SandboxConfigData {
+            enabled: true,
+            allowed_directories: vec![],
+            ..SandboxConfigData::default()
+        };
+        config.sanitize();
+        assert_eq!(config.allowed_directories, vec![".".to_string()]);
     }
 
     #[test]

@@ -590,7 +590,7 @@ pub async fn execute_hybrid_recall(
 ) -> Result<(RecallPlan, Vec<RecalledMemory>), CognitionError>
 ```
 
-End-to-end pipeline used by `CognitionEngine::before_turn`: plan → hybrid vector+lexical search → MMR diversification (`MemoryDiversifyPipeline`) → map to `RecalledMemory` → merge lorebook key/constant matches → bump access counters. Legacy summaries and key facts are not merged; migrate them explicitly through the store/CLI migration API.
+End-to-end pipeline used by `CognitionEngine::before_turn`: plan → hybrid vector+lexical search → MMR diversification (`MemoryDiversifyPipeline`) → map to `RecalledMemory` → merge lorebook key/constant matches → bump access counters. Legacy conversation summaries and key facts are unsupported; delete any pre-schema-collapse memory database if present.
 
 ---
 

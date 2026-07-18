@@ -336,6 +336,9 @@ fn handle_status(snapshot: &ene_runtime::EneStateSnapshot) -> Result<(), CliErro
     let card_name = snapshot.card_name.as_str();
     println!("--- Memory Status ({card_name}) ---");
     println!("  typed memory store: enabled");
+    println!(
+        "  note: legacy summaries/keyfacts migration was removed; delete any pre-schema-collapse memory.db if open fails"
+    );
     Ok(())
 }
 

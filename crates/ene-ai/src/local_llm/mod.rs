@@ -117,7 +117,7 @@ impl LlmProvider for LocalLlamaCppProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AiConfig, LocalModelDef, ProactiveAcceleration, TaskRef, LOCAL_PROVIDER};
+    use crate::config::{AiConfig, LOCAL_PROVIDER, LocalModelDef, ProactiveAcceleration, TaskRef};
     use crate::local_llm::routing::build_proactive_llm_handles;
 
     fn test_config() -> AiConfig {

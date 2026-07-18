@@ -95,7 +95,7 @@ pub struct ToolRagConfig {
     pub enabled: bool,
     pub top_k: usize,
     pub final_n: usize,
-    pub use_hyde: bool,       // 予約済み。LLM HyDE は無効（no-op）
+    pub use_hyde: bool,       // 非推奨。LLM HyDE 無効（no-op、削除予定）
     pub use_rerank: bool,     // true のとき cosine 埋め込みリランク
     pub rerank_candidates: usize,
     pub min_similarity: f32,
@@ -115,8 +115,8 @@ pub struct FieldWeightsConfig {
     pub capability: f32,
     pub example: f32,
     pub negative: f32,
-    pub hyde: f32,
-    pub hyde_blend: f32,
+    pub hyde: f32,            // 非推奨。未使用
+    pub hyde_blend: f32,      // 非推奨。未使用
 }
 ```
 
@@ -134,7 +134,7 @@ pub enum ToolRagError {
 }
 ```
 
-`ToolRag::from_config` / `ToolRagOptions::from_config_lenient` は不正な forced 名をスキップし、パイプライン全体は失敗させません。
+`ToolRag::from_config` / `ToolRagOptions::from_config` は不正な forced 名で **失敗**します（起動時ハードエラー）。埋め込み／ストア失敗時は forced のみを返します。
 
 ---
 

@@ -2,8 +2,7 @@
 //!
 //! Demonstrates the current typed-memory API: inserting memories via
 //! `NewMemoryItem`, searching via `Query`, and lifecycle management.
-//! The legacy `search_summaries` / `get_all_keyfacts` APIs have been
-//! retired from the product path (#125).
+//! Legacy conversation summaries / keyfacts APIs are unsupported.
 
 use chrono::Utc;
 use ene_store::{

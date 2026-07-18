@@ -8,6 +8,8 @@
 2. `IpcRequest::Handshake` に含めて各ツールバイナリへ送信（sandbox と `tool_config` は Handshake に含まれる）
 3. ツール側の `Sandbox` 型がすべてのアクセス制御を適用
 
+Handshake / ツール起動時に `SandboxConfigData::sanitize()` が既定の危険コマンド blocklist を union し、サイズ／タイムアウトが `0` ならコード既定へ戻し、`enabled` かつ `allowed_directories` が空なら `["."]` を入れます。サンドボックス自体を強制オンにはしません。
+
 ## SandboxConfigData
 
 ```rust

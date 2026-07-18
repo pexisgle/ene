@@ -18,9 +18,8 @@ use crate::resolve::ResolvedLocalModel;
 pub fn create_local_provider(
     local: &ResolvedLocalModel,
 ) -> Result<Box<dyn crate::EmbeddingProvider>, EneEmbeddingError> {
-    let gguf_path = crate::gguf::resolve_local_gguf_path(local).map_err(|e| {
-        EneEmbeddingError::LocalLlm(e.to_string())
-    })?;
+    let gguf_path = crate::gguf::resolve_local_gguf_path(local)
+        .map_err(|e| EneEmbeddingError::LocalLlm(e.to_string()))?;
     let gguf_str = gguf_path.to_str().ok_or_else(|| {
         EneEmbeddingError::LocalLlm(format!(
             "GGUF path is not valid UTF-8: {}",

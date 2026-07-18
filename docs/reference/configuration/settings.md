@@ -123,7 +123,7 @@ The `ai` section replaces the legacy `provider` block. Named providers are defin
 
 #### `ai.local_models` — Local GGUF Registry
 
-Named local GGUF models referenced by tasks with `provider: "local"`. Weights are downloaded from `url` into `{assets_dir}/models/gguf/` on first use (prefetched in parallel during `EneHandle::open`). In debug builds `assets_dir` is the source-tree `assets/` folder; in release it is the OS app data directory.
+Named local GGUF models referenced by tasks with `provider: "local"`. Weights are downloaded from an **HTTPS** `url` into `{assets_dir}/models/gguf/` on first use (prefetched in parallel during `EneHandle::open`). Cache filenames are `{safe_stem}-{blake3_12}.gguf` (query strings stripped; same basename from different URLs do not collide). Downloads refuse non-HTTPS URLs and HTTP redirects, require `Content-Length` (max 30 GiB), verify byte count and GGUF magic, and delete incomplete `.part` files on failure. In debug builds `assets_dir` is the source-tree `assets/` folder; in release it is the OS app data directory.
 
 ```json
 {
@@ -139,7 +139,7 @@ Named local GGUF models referenced by tasks with `provider: "local"`. Weights ar
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `url` | string | `""` | HTTPS URL for the GGUF weights |
+| `url` | string | `""` | HTTPS-only URL for GGUF weights (no redirects; Content-Length + GGUF magic verified) |
 | `quantization` | string | `"F16"` | Quantization label (embedding metadata) |
 | `model_path` | string | `""` | Explicit filesystem path override (skips download) |
 | `acceleration` | string | `"auto"` | `"auto"`, `"vulkan"`, `"cuda"`, or `"cpu"` |
@@ -183,7 +183,7 @@ Cloud chat, embedding, classifier, and cloud proactive decision via an OpenAI-co
 - `tasks.proactive: null` → proactive **generation** reuses `tasks.chat`.
 - Proactive **decision**: when `tasks.proactive` uses `provider: "local"`, the named `local_models` entry runs in-process via llama-cpp-2 (load failure falls back to cloud when an OpenAI-compatible chat/proactive task exists). When `tasks.proactive` uses `openai_compatible`, that task's model is used for the cloud decision call; otherwise `tasks.chat` is used. See [Proactive Speech ADR](../architecture/proactive-speech.md).
 
-GGUF weights are **not** bundled. Set `url` in `ai.local_models` (or explicit `model_path`) — files download into `{assets_dir}/models/gguf/` on first startup with progress logged as `[GgufDownload]`. No external `llama-server` binary is required.
+GGUF weights are **not** bundled. Set an HTTPS `url` in `ai.local_models` (or explicit `model_path`) — files download into `{assets_dir}/models/gguf/` on first startup with progress logged as `[GgufDownload]`. Non-HTTPS URLs and redirects are refused; downloads require Content-Length, verify GGUF magic, and use hash-suffixed cache names. No external `llama-server` binary is required.
 
 #### Multi-Provider Example
 
@@ -300,14 +300,14 @@ The database path is resolved automatically (`assets/characters/{name}/memory.db
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `allowed_directories` | string[] | `["."]` | Directories allowed for read access |
+| `allowed_directories` | string[] | `["."]` | Directories allowed for read access (`sanitize` fills `["."]` when enabled and empty) |
 | `writable_directories` | string[] | `["."]` | Directories allowed for write access |
-| `blocked_commands` | string[] | (dangerous-command regexes) | Regex patterns for blocked shell commands |
-| `max_read_bytes` | int | `51200` | Maximum bytes per read |
-| `max_write_bytes` | int | `1048576` | Maximum bytes per write |
-| `shell_timeout_ms` | int | `120000` | Shell command timeout |
-| `max_shell_output_bytes` | int | `51200` | Maximum shell output bytes |
-| `max_shell_output_lines` | int | `2000` | Maximum shell output lines |
+| `blocked_commands` | string[] | (dangerous-command regexes) | Regex patterns for blocked shell commands (`sanitize` unions code defaults) |
+| `max_read_bytes` | int | `51200` | Maximum bytes per read (`0` restored to default by `sanitize`) |
+| `max_write_bytes` | int | `1048576` | Maximum bytes per write (`0` restored to default by `sanitize`) |
+| `shell_timeout_ms` | int | `120000` | Shell command timeout (`0` restored to default by `sanitize`) |
+| `max_shell_output_bytes` | int | `51200` | Maximum shell output bytes (`0` restored to default by `sanitize`) |
+| `max_shell_output_lines` | int | `2000` | Maximum shell output lines (`0` restored to default by `sanitize`) |
 
 ##### `tools.rag` — Tool RAG Pipeline
 
@@ -327,10 +327,11 @@ The database path is resolved automatically (`assets/characters/{name}/memory.db
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `true` | Enable Tool RAG (when tools are enabled, embedder is required if this is true) |
-| `use_hyde` | bool | `false` | Reserved; LLM HyDE is disabled (no-op) |
+| `use_hyde` | bool | `false` | **Deprecated** (no-op; scheduled for removal). LLM HyDE is disabled |
 | `use_rerank` | bool | `false` | Cosine embedding rerank of candidates (no LLM) |
 | `top_k` | int | `12` | Pre-rerank candidate count |
 | `final_n` | int | `6` | Final tools returned |
+| `forced` | string[] | (utility defaults) | Always include these tools; **invalid names fail startup** |
 | `background_index_on_startup` | bool | `true` | Warm the index in a background task at startup (`false` skips warmup) |
 
 ##### `tools.list.web` — Web Search API Keys

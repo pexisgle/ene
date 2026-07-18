@@ -5,7 +5,7 @@ mod download;
 use crate::config::{AiConfig, LOCAL_PROVIDER};
 use crate::error::LlmProviderError;
 use crate::resolve::ResolvedLocalModel;
-use download::download_gguf;
+use download::{download_gguf, file_has_gguf_magic};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use tokio::task::JoinSet;
@@ -13,10 +13,26 @@ use tokio::task::JoinSet;
 pub use download::{filename_from_url, gguf_cache_dir};
 
 /// Ensure a local model's GGUF weights are present on disk (may download).
-pub async fn ensure_gguf_available(local: &ResolvedLocalModel) -> Result<PathBuf, LlmProviderError> {
+pub async fn ensure_gguf_available(
+    local: &ResolvedLocalModel,
+) -> Result<PathBuf, LlmProviderError> {
     let path = resolve_target_path(local)?;
     if path.is_file() {
-        return Ok(path);
+        if file_has_gguf_magic(&path).await {
+            return Ok(path);
+        }
+        if !local.model_path.trim().is_empty() {
+            return Err(LlmProviderError::Provider(format!(
+                "local model_path is not a GGUF (missing magic): {}",
+                local.model_path
+            )));
+        }
+        tracing::warn!(
+            component = "GgufDownload",
+            path = %path.display(),
+            "cached file lacks GGUF magic; re-downloading"
+        );
+        let _ = tokio::fs::remove_file(&path).await;
     }
     if !local.model_path.trim().is_empty() {
         return Err(LlmProviderError::Provider(format!(
@@ -81,9 +97,7 @@ fn collect_prefetch_targets(
     if prefetch_embedding {
         push_task(&config.tasks.embedding);
     }
-    if prefetch_decision
-        && let Some(proactive) = config.tasks.proactive.as_ref()
-    {
+    if prefetch_decision && let Some(proactive) = config.tasks.proactive.as_ref() {
         push_task(proactive);
     }
     out

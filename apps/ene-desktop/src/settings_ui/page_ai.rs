@@ -8,7 +8,7 @@ use crate::character_state::AnimationControl;
 use crate::settings::CharacterSettings;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
-use ene_ai::{AiConfig, AiProviderDef, LocalModelDef, LOCAL_PROVIDER};
+use ene_ai::{AiConfig, AiProviderDef, LOCAL_PROVIDER, LocalModelDef};
 use std::sync::Arc;
 
 const DEFAULT_LOCAL_EMBED_MODEL: &str = "jina-v5-small";

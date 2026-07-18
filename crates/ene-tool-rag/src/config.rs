@@ -19,7 +19,10 @@ pub struct ToolRagConfig {
     pub top_k: usize,
     /// Final number of tools returned after reranking and filtering.
     pub final_n: usize,
-    /// Reserved for LLM `HyDE` expansion. Currently a no-op (LLM `HyDE` is disabled).
+    /// Reserved for LLM `HyDE` expansion.
+    ///
+    /// Deprecated: no-op; scheduled for removal.
+    #[deprecated(note = "LLM HyDE is disabled (no-op); this knob is scheduled for removal")]
     pub use_hyde: bool,
     /// Whether to cosine-rerank candidates (embedding similarity; no LLM).
     pub use_rerank: bool,
@@ -41,6 +44,10 @@ pub struct ToolRagConfig {
 }
 
 impl Default for ToolRagConfig {
+    #[expect(
+        deprecated,
+        reason = "initialize deprecated use_hyde until it is removed"
+    )]
     fn default() -> Self {
         Self {
             enabled: true,
@@ -73,6 +80,9 @@ pub struct FieldWeightsConfig {
     /// Weight for the negative/unwanted embedding (penalizes matches).
     pub negative: f32,
     /// Weight for the `HyDE` (hypothetical document embedding).
+    ///
+    /// Deprecated: unused; scheduled for removal.
+    #[deprecated(note = "LLM HyDE is disabled; this weight is unused and scheduled for removal")]
     pub hyde: f32,
     /// Weight for the `HyDE` blend factor — the fraction
     /// of the final score contributed by the `HyDE`
@@ -80,6 +90,11 @@ pub struct FieldWeightsConfig {
     /// per-field cosine similarity. Range `[0.0, 1.0]`;
     /// 0.0 disables `HyDE` blending, 1.0 uses only the
     /// `HyDE` similarity.
+    ///
+    /// Deprecated: unused; scheduled for removal.
+    #[deprecated(
+        note = "LLM HyDE is disabled; this blend factor is unused and scheduled for removal"
+    )]
     #[serde(default = "default_hyde_blend")]
     pub hyde_blend: f32,
 }
@@ -89,6 +104,10 @@ const fn default_hyde_blend() -> f32 {
 }
 
 impl Default for FieldWeightsConfig {
+    #[expect(
+        deprecated,
+        reason = "initialize deprecated HyDE weight fields until they are removed"
+    )]
     fn default() -> Self {
         Self {
             summary: 1.0,

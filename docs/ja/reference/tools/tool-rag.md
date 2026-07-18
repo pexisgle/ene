@@ -26,7 +26,7 @@ Tool RAG（Retrieval-Augmented Generation）は、ベクトル埋め込みを使
 Vec<ToolSpec> → LLM に渡す
 ```
 
-LLM HyDE は無効です（`use_hyde` は予約済み no-op）。リランクに LLM は使いません（description 埋め込みの cosine のみ）。
+LLM HyDE は **非推奨**で無効です（`use_hyde` は no-op、削除予定）。不正な `rag.forced` 名は起動失敗になります。埋め込み／ストア失敗時は全ツールではなく forced のみを返します。リランクに LLM は使いません（description 埋め込みの cosine のみ）。
 
 ## 設定
 
@@ -35,14 +35,14 @@ LLM HyDE は無効です（`use_hyde` は予約済み no-op）。リランクに
 | オプション | 型 | 既定 | 説明 |
 |--------|------|---------|-------------|
 | `enabled` | bool | `true` | Tool RAG パイプラインを有効化 |
-| `use_hyde` | bool | `false` | 予約済み。LLM HyDE は無効（no-op） |
+| `use_hyde` | bool | `false` | **非推奨**（no-op。削除予定） |
 | `use_rerank` | bool | `false` | 候補の cosine 埋め込みリランク（LLM なし） |
 | `background_index_on_startup` | bool | `true` | 起動時にバックグラウンドでインデックスをウォームアップ |
 | `top_k` | int | `12` | リランク前の候補数 |
 | `final_n` | int | `6` | LLM に送る最終ツール数 |
 | `rerank_candidates` | int | `24` | embedding rerank で考慮する候補数 |
 | `min_similarity` | float | `0.25` | 最小類似度しきい値 |
-| `forced` | string[] | `["utility.question", "utility.todo_add", "utility.get_current_time"]` | 常に含めるツール |
+| `forced` | string[] | `["utility.question", "utility.todo_add", "utility.get_current_time"]` | 常に含めるツール（不正名は起動失敗） |
 | `per_category_limits` | map | `{}` | `ToolCategory::config_key` ごとの最大数（例: `"Filesystem"`） |
 
 ## マルチベクトル埋め込み

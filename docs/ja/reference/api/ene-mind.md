@@ -590,7 +590,7 @@ pub async fn execute_hybrid_recall(
 ) -> Result<(RecallPlan, Vec<RecalledMemory>), CognitionError>
 ```
 
-`CognitionEngine::before_turn` から使用されるエンドツーエンドのパイプラインです: 計画 → ハイブリッドベクトル＋字句検索 → MMR多様化（`MemoryDiversifyPipeline`） → `RecalledMemory` へのマッピング → ロアブックのキー/定数マッチのマージ → アクセスカウンターの更新。レガシーの要約とキーファクトはマージせず、必要な場合は store/CLI の移行 API を明示的に実行します。
+`CognitionEngine::before_turn` から使用されるエンドツーエンドのパイプラインです: 計画 → ハイブリッドベクトル＋字句検索 → MMR多様化（`MemoryDiversifyPipeline`） → `RecalledMemory` へのマッピング → ロアブックのキー/定数マッチのマージ → アクセスカウンターの更新。レガシーの会話要約・キーファクトは非対応です。スキーマ崩壊前の memory DB があれば削除してください。
 
 ---
 

@@ -2375,6 +2375,7 @@ version = "0.1.0"
 dependencies = [
  "async-openai",
  "async-trait",
+ "blake3",
  "ctor",
  "encoding_rs",
  "ene-config",
@@ -2384,6 +2385,7 @@ dependencies = [
  "reqwest 0.13.4",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -2398,6 +2400,7 @@ dependencies = [
  "async-trait",
  "console",
  "dialoguer",
+ "ene-ai",
  "ene-config",
  "ene-mind",
  "ene-runtime",

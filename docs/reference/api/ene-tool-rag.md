@@ -95,7 +95,7 @@ pub struct ToolRagConfig {
     pub enabled: bool,
     pub top_k: usize,
     pub final_n: usize,
-    pub use_hyde: bool,       // reserved; LLM HyDE disabled (no-op)
+    pub use_hyde: bool,       // deprecated; LLM HyDE disabled (no-op, removal planned)
     pub use_rerank: bool,     // cosine embedding rerank when true
     pub rerank_candidates: usize,
     pub min_similarity: f32,
@@ -115,8 +115,8 @@ pub struct FieldWeightsConfig {
     pub capability: f32,
     pub example: f32,
     pub negative: f32,
-    pub hyde: f32,
-    pub hyde_blend: f32,
+    pub hyde: f32,            // deprecated; unused
+    pub hyde_blend: f32,      // deprecated; unused
 }
 ```
 
@@ -134,7 +134,7 @@ pub enum ToolRagError {
 }
 ```
 
-`ToolRag::from_config` / `ToolRagOptions::from_config_lenient` skip invalid forced names instead of failing the whole pipeline.
+`ToolRag::from_config` / `ToolRagOptions::from_config` **fail** on invalid forced names (startup hard-error). Embed or store failures return forced tools only.
 
 ---
 

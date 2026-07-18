@@ -123,7 +123,7 @@ pub struct EneConfig {
 
 #### `ai.local_models` — ローカル GGUF レジストリ
 
-`provider: "local"` のタスクが参照する名前付きローカル GGUF。`url` から初回利用時に `{assets_dir}/models/gguf/` へダウンロード（`EneHandle::open` で並列プリフェッチ）。デバッグビルドでは `assets_dir` はソースツリーの `assets/`、リリースでは OS のアプリデータディレクトリ。
+`provider: "local"` のタスクが参照する名前付きローカル GGUF。**HTTPS** の `url` から初回利用時に `{assets_dir}/models/gguf/` へダウンロード（`EneHandle::open` で並列プリフェッチ）。キャッシュ名は `{safe_stem}-{blake3_12}.gguf`（クエリ除去・同名 basename の衝突回避）。非 HTTPS・リダイレクト拒否、`Content-Length` 必須（上限 30 GiB）、バイト数と GGUF magic を検証し、失敗時は `.part` を削除。デバッグビルドでは `assets_dir` はソースツリーの `assets/`、リリースでは OS のアプリデータディレクトリ。
 
 ```json
 {
@@ -139,7 +139,7 @@ pub struct EneConfig {
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
-| `url` | string | `""` | GGUF 重みの HTTPS URL |
+| `url` | string | `""` | GGUF 重みの HTTPS 専用 URL（リダイレクト不可。Content-Length + GGUF magic を検証） |
 | `quantization` | string | `"F16"` | 量子化ラベル（埋め込みメタデータ） |
 | `model_path` | string | `""` | 明示的なファイルシステムパス（ダウンロードをスキップ） |
 | `acceleration` | string | `"auto"` | `"auto"` / `"vulkan"` / `"cuda"` / `"cpu"` |
@@ -183,7 +183,7 @@ pub struct EneConfig {
 - `tasks.proactive: null` → 能動発話の**生成**は `tasks.chat` を再利用。
 - 能動**判定**: `tasks.proactive` が `provider: "local"` の場合、指定した `local_models` エントリをプロセス内 GGUF で実行（ロード失敗時は OpenAI 互換の chat/proactive があればクラウドへフォールバック）。`tasks.proactive` が `openai_compatible` の場合はそのモデルでクラウド判定；それ以外は `tasks.chat`。[能動発話 ADR](../architecture/proactive-speech.md) を参照。
 
-GGUF は **同梱されません**。`ai.local_models` の `url`（または明示 `model_path`）を設定すると、初回起動時に `{assets_dir}/models/gguf/` へダウンロードされます（`[GgufDownload]` として進捗ログ出力）。外部 `llama-server` バイナリは不要です。
+GGUF は **同梱されません**。`ai.local_models` の HTTPS `url`（または明示 `model_path`）を設定すると、初回起動時に `{assets_dir}/models/gguf/` へダウンロードされます（`[GgufDownload]` として進捗ログ出力）。非 HTTPS・リダイレクトは拒否し、Content-Length / GGUF magic を検証し、ハッシュ付きキャッシュ名を使います。外部 `llama-server` バイナリは不要です。
 
 #### マルチプロバイダの例
 
@@ -300,14 +300,14 @@ OpenRouter で chat + classifier、ローカル埋め込みと能動判定:
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
-| `allowed_directories` | string[] | `["."]` | 読み取りアクセスが許可されたディレクトリ |
-| `writable_directories` | string[] | `["."]` | 書き込みアクセスが許可されたディレクトリ |
-| `blocked_commands` | string[] | （危険コマンドの正規表現） | ブロックするシェルコマンドの正規表現 |
-| `max_read_bytes` | int | `51200` | 1 回の読み取り上限バイト |
-| `max_write_bytes` | int | `1048576` | 1 回の書き込み上限バイト |
-| `shell_timeout_ms` | int | `120000` | シェルコマンドのタイムアウト |
-| `max_shell_output_bytes` | int | `51200` | シェル出力の最大バイト数 |
-| `max_shell_output_lines` | int | `2000` | シェル出力の最大行数 |
+| `allowed_directories` | string[] | `["."]` | 読み取り許可ディレクトリ（`enabled` かつ空のとき `sanitize` が `["."]` を入れる） |
+| `writable_directories` | string[] | `["."]` | 書き込み許可ディレクトリ |
+| `blocked_commands` | string[] | （危険コマンドの正規表現） | ブロックするシェルコマンドの正規表現（`sanitize` がコード既定を union） |
+| `max_read_bytes` | int | `51200` | 1 回の読み取り上限バイト（`0` は `sanitize` で既定に戻す） |
+| `max_write_bytes` | int | `1048576` | 1 回の書き込み上限バイト（`0` は `sanitize` で既定に戻す） |
+| `shell_timeout_ms` | int | `120000` | シェルコマンドのタイムアウト（`0` は `sanitize` で既定に戻す） |
+| `max_shell_output_bytes` | int | `51200` | シェル出力の最大バイト数（`0` は `sanitize` で既定に戻す） |
+| `max_shell_output_lines` | int | `2000` | シェル出力の最大行数（`0` は `sanitize` で既定に戻す） |
 
 ##### `tools.rag` — Tool RAG パイプライン
 
@@ -327,10 +327,11 @@ OpenRouter で chat + classifier、ローカル埋め込みと能動判定:
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
 | `enabled` | bool | `true` | Tool RAG を有効化（ツール有効時、これが true なら embedder 必須） |
-| `use_hyde` | bool | `false` | 予約済み。LLM HyDE は無効（no-op） |
+| `use_hyde` | bool | `false` | **非推奨**（no-op。削除予定）。LLM HyDE は無効 |
 | `use_rerank` | bool | `false` | 候補の cosine 埋め込みリランク（LLM なし） |
 | `top_k` | int | `12` | リランク前の候補数 |
 | `final_n` | int | `6` | 最終返却ツール数 |
+| `forced` | string[] | （utility 既定） | 常に含めるツール。**不正名は起動失敗** |
 | `background_index_on_startup` | bool | `true` | 起動時にバックグラウンドでインデックスをウォームアップ（`false` でスキップ） |
 
 ##### `tools.list.web` — ウェブ検索 API キー

@@ -426,12 +426,9 @@ impl EneHandle {
         if let Ok(ai_config) = config.get_section::<ene_ai::AiConfig>() {
             let needs_decision = mind.proactive.enabled;
             if (needs_embedder || needs_decision)
-                && let Err(e) = ene_ai::prefetch_configured_gguf(
-                    &ai_config,
-                    needs_embedder,
-                    needs_decision,
-                )
-                .await
+                && let Err(e) =
+                    ene_ai::prefetch_configured_gguf(&ai_config, needs_embedder, needs_decision)
+                        .await
             {
                 tracing::warn!(
                     component = "GgufPrefetch",
@@ -470,14 +467,18 @@ impl EneHandle {
         };
 
         let registry = build_tool_registry(&config, memory_store.clone()).await?;
-        let tool_rag = embedder
-            .as_ref()
-            .and_then(|emb| init_tool_rag(&config, emb, &session));
+        let tool_rag = match embedder.as_ref() {
+            Some(emb) => init_tool_rag(&config, emb, &session)?,
+            None => None,
+        };
         if let Some(rag) = &tool_rag {
             let specs = registry.list_tools();
             let profiles = registry.list_rag_profiles();
             if rag.opts().background_index_on_startup {
-                tracing::info!(component = "Bootstrap", "Warming up Tool RAG index in background...");
+                tracing::info!(
+                    component = "Bootstrap",
+                    "Warming up Tool RAG index in background..."
+                );
                 rag.start_background_indexer(specs, profiles);
             } else {
                 tracing::debug!(
@@ -1786,28 +1787,21 @@ async fn init_memory_store(
 /// Builds the `ToolRag` pipeline from the current config, embedder, and session state.
 ///
 /// Returns `None` when the pipeline is disabled. Invalid `forced` tool
-/// names are skipped with an error log; all other RAG knobs are preserved.
+/// names fail `EneHandle::open`.
 fn init_tool_rag(
     config: &EneConfig,
     embedder: &Arc<dyn ene_ai::EmbeddingProvider>,
     session: &ConversationSession,
-) -> Option<Arc<ToolRag>> {
+) -> Result<Option<Arc<ToolRag>>, EneRuntimeError> {
     let rag_config = config.get_section::<ToolRagConfig>().unwrap_or_default();
 
     if !rag_config.enabled {
-        return None;
+        return Ok(None);
     }
 
     let store = session.memory.memory_store.clone();
-    let (opts, invalid) = ToolRagOptions::from_config_lenient(rag_config);
-    for message in invalid {
-        tracing::error!(
-            component = "ToolRag",
-            error = %message,
-            "Invalid tool name in rag.forced; skipping entry"
-        );
-    }
-    Some(Arc::new(ToolRag::new(embedder.clone(), store, opts)))
+    let opts = ToolRagOptions::from_config(rag_config)?;
+    Ok(Some(Arc::new(ToolRag::new(embedder.clone(), store, opts))))
 }
 
 #[cfg(test)]

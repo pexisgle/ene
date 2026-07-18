@@ -6,11 +6,15 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex as AsyncMutex;
 
 const PROGRESS_BAR_WIDTH: usize = 10;
 const UPDATE_INTERVAL: Duration = Duration::from_millis(500);
+/// Hard cap on a single GGUF download (30 GiB).
+const MAX_DOWNLOAD_BYTES: u64 = 30 * 1024 * 1024 * 1024;
+const GGUF_MAGIC: &[u8; 4] = b"GGUF";
+const CACHE_HASH_HEX_LEN: usize = 12;
 
 type InflightSlot = std::sync::Arc<AsyncMutex<Option<Result<(), String>>>>;
 
@@ -44,7 +48,9 @@ impl ProgressState {
     }
 
     fn is_tty(&mut self) -> bool {
-        *self.tty.get_or_insert_with(|| std::io::stderr().is_terminal())
+        *self
+            .tty
+            .get_or_insert_with(|| std::io::stderr().is_terminal())
     }
 }
 
@@ -53,6 +59,7 @@ fn http_client() -> Result<&'static reqwest::Client, LlmProviderError> {
         .get_or_init(|| {
             reqwest::Client::builder()
                 .timeout(Duration::from_hours(1))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|e| e.to_string())
         })
@@ -154,7 +161,9 @@ fn log_throttled(state: &mut ProgressState, filename: &str, downloaded: u64, tot
 
 fn report_progress(filename: &str, downloaded: u64, total: Option<u64>, force: bool) {
     let pct_byte = pct_of(downloaded, total) as u8;
-    let mut state = PROGRESS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut state = PROGRESS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let entry = state
         .active
@@ -183,7 +192,9 @@ fn report_progress(filename: &str, downloaded: u64, total: Option<u64>, force: b
 }
 
 fn finish_progress(filename: &str) {
-    let mut state = PROGRESS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut state = PROGRESS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     state.active.remove(filename);
 
     if !state.is_tty() {
@@ -222,15 +233,148 @@ impl Drop for ProgressSession {
     }
 }
 
-/// Download `url` to `dest`, skipping when the file already exists.
+/// Removes `path` on drop unless [`PartCleanup::disarm`] is called.
+struct PartCleanup {
+    path: Option<PathBuf>,
+}
+
+impl PartCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn disarm(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for PartCleanup {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// Reject non-HTTPS URLs (docs require HTTPS; blocks `file://` / cleartext MITM).
+pub(crate) fn validate_https_url(url: &str) -> Result<(), LlmProviderError> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err(LlmProviderError::Provider(
+            "local model url is empty".to_string(),
+        ));
+    }
+    let Some(rest) = trimmed.strip_prefix("https://") else {
+        return Err(LlmProviderError::Provider(format!(
+            "local model url must be https:// (got {trimmed:?})"
+        )));
+    };
+    if rest.is_empty() || !rest.contains('.') {
+        return Err(LlmProviderError::Provider(format!(
+            "local model url is not a valid https URL: {trimmed:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// True when `path` exists and starts with the GGUF magic bytes.
+pub async fn file_has_gguf_magic(path: &Path) -> bool {
+    let Ok(mut file) = tokio::fs::File::open(path).await else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic).await.is_ok() && magic == *GGUF_MAGIC
+}
+
+fn strip_url_path(url: &str) -> &str {
+    let without_scheme = url
+        .trim()
+        .strip_prefix("https://")
+        .or_else(|| url.trim().strip_prefix("http://"))
+        .unwrap_or(url.trim());
+    let path = without_scheme
+        .split_once('/')
+        .map_or(without_scheme, |(_, path)| path);
+    let path = path.split_once('?').map_or(path, |(p, _)| p);
+    path.split_once('#').map_or(path, |(p, _)| p)
+}
+
+fn sanitize_basename(segment: &str) -> Result<String, LlmProviderError> {
+    if segment.is_empty()
+        || segment.contains("..")
+        || segment.contains('/')
+        || segment.contains('\\')
+        || segment.contains('\0')
+    {
+        return Err(LlmProviderError::Provider(format!(
+            "GGUF URL path segment is unsafe: {segment:?}"
+        )));
+    }
+    let stem = Path::new(segment)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            LlmProviderError::Provider(format!(
+                "cannot derive GGUF basename from segment: {segment:?}"
+            ))
+        })?;
+    let safe: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe.is_empty() {
+        return Err(LlmProviderError::Provider(format!(
+            "GGUF basename sanitized to empty from {segment:?}"
+        )));
+    }
+    Ok(safe)
+}
+
+/// Derive a stable cache filename from an HTTPS URL (`{stem}-{hash12}.gguf`).
+pub fn filename_from_url(url: &str) -> Result<String, LlmProviderError> {
+    validate_https_url(url)?;
+    let path = strip_url_path(url);
+    let segment = path
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty() && s.contains('.'))
+        .ok_or_else(|| {
+            LlmProviderError::Provider(format!("cannot derive GGUF filename from URL: {url}"))
+        })?;
+    let stem = sanitize_basename(segment)?;
+    let hash = blake3::hash(url.trim().as_bytes());
+    let hex = hash.to_hex();
+    // blake3 hex is ASCII; take a fixed prefix without UTF-8 slicing risk.
+    let short: String = hex.chars().take(CACHE_HASH_HEX_LEN).collect();
+    Ok(format!("{stem}-{short}.gguf"))
+}
+
+/// Download `url` to `dest`, skipping when a valid GGUF already exists.
 pub async fn download_gguf(url: &str, dest: &Path) -> Result<(), LlmProviderError> {
+    validate_https_url(url)?;
+
     if dest.is_file() {
-        tracing::debug!(
+        if file_has_gguf_magic(dest).await {
+            tracing::debug!(
+                component = "GgufDownload",
+                path = %dest.display(),
+                "GGUF already present; skipping download"
+            );
+            return Ok(());
+        }
+        tracing::warn!(
             component = "GgufDownload",
             path = %dest.display(),
-            "GGUF already present; skipping download"
+            "cached file lacks GGUF magic; re-downloading"
         );
-        return Ok(());
+        let _ = tokio::fs::remove_file(dest).await;
     }
 
     let key = dest.to_string_lossy().into_owned();
@@ -266,11 +410,7 @@ pub async fn download_gguf(url: &str, dest: &Path) -> Result<(), LlmProviderErro
 }
 
 async fn download_gguf_inner(url: &str, dest: &Path) -> Result<(), LlmProviderError> {
-    if url.trim().is_empty() {
-        return Err(LlmProviderError::Provider(
-            "local model url is empty".to_string(),
-        ));
-    }
+    validate_https_url(url)?;
 
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|e| {
@@ -286,11 +426,17 @@ async fn download_gguf_inner(url: &str, dest: &Path) -> Result<(), LlmProviderEr
         .and_then(|n| n.to_str())
         .unwrap_or("model.gguf");
 
-    let response = http_client()?
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| LlmProviderError::Provider(format!("GGUF download request failed: {e}")))?;
+    let response =
+        http_client()?.get(url.trim()).send().await.map_err(|e| {
+            LlmProviderError::Provider(format!("GGUF download request failed: {e}"))
+        })?;
+
+    if response.status().is_redirection() {
+        return Err(LlmProviderError::Provider(format!(
+            "GGUF download refused HTTP redirect ({}): redirects are disabled",
+            response.status()
+        )));
+    }
 
     if !response.status().is_success() {
         return Err(LlmProviderError::Provider(format!(
@@ -299,8 +445,25 @@ async fn download_gguf_inner(url: &str, dest: &Path) -> Result<(), LlmProviderEr
         )));
     }
 
-    let total = response.content_length();
+    let total = response.content_length().ok_or_else(|| {
+        LlmProviderError::Provider(
+            "GGUF download response missing Content-Length; refusing incomplete transfer"
+                .to_string(),
+        )
+    })?;
+    if total == 0 {
+        return Err(LlmProviderError::Provider(
+            "GGUF download Content-Length is zero".to_string(),
+        ));
+    }
+    if total > MAX_DOWNLOAD_BYTES {
+        return Err(LlmProviderError::Provider(format!(
+            "GGUF download Content-Length {total} exceeds max {MAX_DOWNLOAD_BYTES}"
+        )));
+    }
+
     let part_path = dest.with_extension("part");
+    let mut cleanup = PartCleanup::new(part_path.clone());
     let mut file = tokio::fs::File::create(&part_path).await.map_err(|e| {
         LlmProviderError::Provider(format!(
             "failed to create GGUF part file {}: {e}",
@@ -308,24 +471,44 @@ async fn download_gguf_inner(url: &str, dest: &Path) -> Result<(), LlmProviderEr
         ))
     })?;
 
-    let progress = ProgressSession::begin(filename, 0, total);
+    let progress = ProgressSession::begin(filename, 0, Some(total));
 
     let mut downloaded: u64 = 0;
     let mut response = response;
-    while let Some(chunk) = response.chunk().await.map_err(|e| {
-        LlmProviderError::Provider(format!("GGUF download stream error: {e}"))
-    })? {
-        file.write_all(&chunk).await.map_err(|e| {
-            LlmProviderError::Provider(format!("failed to write GGUF chunk: {e}"))
-        })?;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| LlmProviderError::Provider(format!("GGUF download stream error: {e}")))?
+    {
         downloaded = downloaded.saturating_add(chunk.len() as u64);
-        progress.update(downloaded, total, false);
+        if downloaded > total {
+            return Err(LlmProviderError::Provider(format!(
+                "GGUF download exceeded Content-Length ({downloaded} > {total})"
+            )));
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| LlmProviderError::Provider(format!("failed to write GGUF chunk: {e}")))?;
+        progress.update(downloaded, Some(total), false);
     }
 
-    file.flush().await.map_err(|e| {
-        LlmProviderError::Provider(format!("failed to flush GGUF part file: {e}"))
-    })?;
+    if downloaded != total {
+        return Err(LlmProviderError::Provider(format!(
+            "GGUF download incomplete: got {downloaded} bytes, expected Content-Length {total}"
+        )));
+    }
+
+    file.flush()
+        .await
+        .map_err(|e| LlmProviderError::Provider(format!("failed to flush GGUF part file: {e}")))?;
     drop(file);
+
+    if !file_has_gguf_magic(&part_path).await {
+        return Err(LlmProviderError::Provider(format!(
+            "downloaded file is not a GGUF (missing magic) at {}",
+            part_path.display()
+        )));
+    }
 
     tokio::fs::rename(&part_path, dest).await.map_err(|e| {
         LlmProviderError::Provider(format!(
@@ -333,8 +516,9 @@ async fn download_gguf_inner(url: &str, dest: &Path) -> Result<(), LlmProviderEr
             dest.display()
         ))
     })?;
+    cleanup.disarm();
 
-    progress.update(downloaded, total.or(Some(downloaded)), true);
+    progress.update(downloaded, Some(total), true);
     tracing::info!(
         component = "GgufDownload",
         path = %dest.display(),
@@ -344,21 +528,93 @@ async fn download_gguf_inner(url: &str, dest: &Path) -> Result<(), LlmProviderEr
     Ok(())
 }
 
-/// Derive a stable cache filename from an HTTPS URL.
-pub fn filename_from_url(url: &str) -> Result<String, LlmProviderError> {
-    let segment = url
-        .rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty() && s.contains('.'))
-        .ok_or_else(|| {
-            LlmProviderError::Provider(format!(
-                "cannot derive GGUF filename from URL: {url}"
-            ))
-        })?;
-    Ok(segment.to_string())
-}
-
 /// Directory where downloaded GGUF weights are stored.
 pub fn gguf_cache_dir() -> PathBuf {
     ene_config::models_dir().join("gguf")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn validate_https_rejects_http_and_file() {
+        assert!(validate_https_url("https://cdn.example/model.gguf").is_ok());
+        assert!(validate_https_url("http://cdn.example/model.gguf").is_err());
+        assert!(validate_https_url("file:///tmp/model.gguf").is_err());
+        assert!(validate_https_url("").is_err());
+    }
+
+    #[test]
+    fn filename_rejects_traversal_and_separators() {
+        assert!(filename_from_url("https://cdn.example/foo/..evil.gguf").is_err());
+        assert!(filename_from_url("https://cdn.example/foo/..%2Fevil.gguf").is_err());
+        assert!(filename_from_url("https://cdn.example/foo/bar\\baz.gguf").is_err());
+        let ok = filename_from_url("https://cdn.example/models/safe.gguf").expect("safe");
+        assert!(!ok.contains(".."));
+        assert!(!ok.contains('/'));
+        assert!(!ok.contains('\\'));
+    }
+
+    #[test]
+    fn filename_strips_query_and_is_stable_per_url() {
+        let a = filename_from_url("https://cdn.example/models/v5-small.gguf?download=true")
+            .expect("url");
+        let b = filename_from_url("https://cdn.example/models/v5-small.gguf?download=true")
+            .expect("url");
+        assert_eq!(a, b);
+        assert!(a.starts_with("v5-small-"));
+        assert!(a.ends_with(".gguf"));
+        assert!(!a.contains('?'));
+    }
+
+    #[test]
+    fn filename_differs_for_same_basename_different_urls() {
+        let a = filename_from_url("https://cdn.example/repo-a/model.gguf").expect("a");
+        let b = filename_from_url("https://cdn.example/repo-b/model.gguf").expect("b");
+        assert_ne!(a, b);
+        assert!(a.starts_with("model-"));
+        assert!(b.starts_with("model-"));
+    }
+
+    #[tokio::test]
+    async fn file_has_gguf_magic_detects_header() {
+        let dir = tempdir().expect("tempdir");
+        let good = dir.path().join("good.gguf");
+        let bad = dir.path().join("bad.gguf");
+        {
+            let mut f = std::fs::File::create(&good).expect("create");
+            f.write_all(b"GGUF\x00\x00\x00\x01").expect("write");
+        }
+        {
+            let mut f = std::fs::File::create(&bad).expect("create");
+            f.write_all(b"NOTG").expect("write");
+        }
+        assert!(file_has_gguf_magic(&good).await);
+        assert!(!file_has_gguf_magic(&bad).await);
+    }
+
+    #[tokio::test]
+    async fn part_cleanup_removes_file_on_drop() {
+        let dir = tempdir().expect("tempdir");
+        let part = dir.path().join("x.part");
+        std::fs::write(&part, b"partial").expect("write");
+        {
+            let _cleanup = PartCleanup::new(part.clone());
+        }
+        assert!(!part.exists());
+    }
+
+    #[tokio::test]
+    async fn part_cleanup_disarm_keeps_file() {
+        let dir = tempdir().expect("tempdir");
+        let part = dir.path().join("x.part");
+        std::fs::write(&part, b"ok").expect("write");
+        {
+            let mut cleanup = PartCleanup::new(part.clone());
+            cleanup.disarm();
+        }
+        assert!(part.exists());
+    }
 }

@@ -8,6 +8,8 @@ The sandbox system confines tool operations to a configured set of directories a
 2. Sent to each tool binary via `IpcRequest::Handshake` (sandbox + `tool_config` included in the handshake)
 3. Tool-side `Sandbox` struct enforces all access controls
 
+On handshake / tool start, `SandboxConfigData::sanitize()` unions the default dangerous-command blocklist, restores zero-valued size/timeout limits to code defaults, and — when `enabled` is true with an empty `allowed_directories` — inserts `["."]`. It does not force the sandbox on.
+
 ## SandboxConfigData
 
 ```rust

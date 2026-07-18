@@ -3,7 +3,8 @@
 //! Tool RAG (Retrieval-Augmented Generation) pipeline for the ene AI character platform.
 //!
 //! Provides multi-vector tool embedding with weighted field similarity scoring
-//! and optional cosine reranking. LLM `HyDE` is disabled (`use_hyde` is a no-op).
+//! Provides multi-vector tool embedding with weighted field similarity scoring
+//! and optional cosine reranking. LLM `HyDE` (`use_hyde`) is deprecated and a no-op.
 //!
 //! ## Key Types
 //!
@@ -43,7 +44,7 @@ pub mod config;
 /// Tool RAG error types.
 pub mod error;
 /// Tool RAG pipeline — multi-vector tool embedding, weighted field similarity,
-/// optional HyDE and LLM rerank.
+/// and optional cosine reranking. LLM HyDE is deprecated (no-op).
 pub mod rag;
 
 /// Tool RAG configuration types.

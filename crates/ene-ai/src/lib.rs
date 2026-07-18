@@ -26,6 +26,8 @@ pub mod config;
 pub mod embedding;
 /// Typed `LlmProviderError` enum returned at the library boundary.
 pub mod error;
+/// GGUF download and path resolution (#171).
+pub mod gguf;
 /// Hybrid HyDE / rerank helpers (primary embedder + optional LLM).
 pub mod hybrid;
 /// Shared llama-cpp-2 adapter (decision + embedding).
@@ -40,17 +42,20 @@ pub mod openai;
 pub mod resolve;
 /// Provider traits and registry.
 pub mod traits;
-/// GGUF download and path resolution (#171).
-pub mod gguf;
 
 pub mod role;
 
 pub use config::{
-    AiConfig, AiProviderDef, AiTasksConfig, ApiKeyConfig, LocalModelDef, ProactiveAcceleration,
-    TaskRef, LOCAL_PROVIDER,
+    AiConfig, AiProviderDef, AiTasksConfig, ApiKeyConfig, LOCAL_PROVIDER, LocalModelDef,
+    ProactiveAcceleration, TaskRef,
 };
 pub use embedding::{EneEmbeddingError, GgufEmbeddingProvider, create_local_provider};
 pub use error::{AiError, LlmProviderError};
+pub use gguf::{
+    ensure_gguf_available, prefetch_configured_gguf, prefetch_decision_gguf,
+    prefetch_embedding_gguf, resolve_decision_gguf_path, resolve_embedding_gguf_path,
+    resolve_local_gguf_path,
+};
 pub use hybrid::{HybridRerankProvider, hyde_document, rerank_tool_specs};
 pub use local_llm::{
     DecisionProviderKind, DisabledDecisionProvider, LocalGgufLoadParams, LocalLlamaCppProvider,
@@ -60,11 +65,6 @@ pub use message::{LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, U
 pub use openai::{
     AiTaskKind, CloudEmbeddingProvider, OpenAiProvider, OpenAiProviderFactory,
     create_chat_provider_from_resolved, create_task_chat_provider,
-};
-pub use gguf::{
-    ensure_gguf_available, prefetch_configured_gguf, prefetch_decision_gguf,
-    prefetch_embedding_gguf, resolve_decision_gguf_path, resolve_embedding_gguf_path,
-    resolve_local_gguf_path,
 };
 pub use resolve::{
     ResolvedChat, ResolvedEmbedding, ResolvedLocalModel, ResolvedTaskRef, resolve_base_url,

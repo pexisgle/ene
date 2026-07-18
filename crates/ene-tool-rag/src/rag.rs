@@ -1,7 +1,8 @@
 //! Tool RAG pipeline — multi-vector embedding, field-weighted similarity,
 //! optional cosine rerank, and per-category limits.
 //!
-//! LLM `HyDE` is disabled; `use_hyde` is retained as a no-op config knob.
+//! LLM `HyDE` is deprecated and disabled; `use_hyde` is retained as a no-op
+//! config knob scheduled for removal.
 
 use ene_ai::{EmbeddingError, EmbeddingProvider, cosine_similarity, embed, embed_query};
 use ene_store::MemoryStore;
@@ -29,16 +30,28 @@ pub struct FieldWeights {
     /// Weight for the negative/unwanted embedding (penalizes matches).
     pub negative: f32,
     /// Weight for the `HyDE` (hypothetical document embedding).
+    ///
+    /// Deprecated: LLM `HyDE` is disabled; this weight is unused and scheduled for removal.
+    #[deprecated(note = "LLM HyDE is disabled; this weight is unused and scheduled for removal")]
     pub hyde: f32,
     /// Weight for the `HyDE` blend factor — the fraction
     /// of the final score contributed by the `HyDE`
     /// similarity, with the remainder from the direct
     /// per-field cosine similarity. Replaces the
     /// previously hardcoded 0.6 factor.
+    ///
+    /// Deprecated: LLM `HyDE` is disabled; unused and scheduled for removal.
+    #[deprecated(
+        note = "LLM HyDE is disabled; this blend factor is unused and scheduled for removal"
+    )]
     pub hyde_blend: f32,
 }
 
 impl Default for FieldWeights {
+    #[expect(
+        deprecated,
+        reason = "initialize deprecated HyDE weight fields until they are removed"
+    )]
     fn default() -> Self {
         Self {
             summary: 1.0,
@@ -53,6 +66,10 @@ impl Default for FieldWeights {
 }
 
 impl From<crate::config::FieldWeightsConfig> for FieldWeights {
+    #[expect(
+        deprecated,
+        reason = "copy deprecated HyDE weight fields until they are removed"
+    )]
     fn from(c: crate::config::FieldWeightsConfig) -> Self {
         Self {
             summary: c.summary,
@@ -78,7 +95,8 @@ pub struct ToolRagOptions {
     pub top_k: usize,
     /// Number of final tools to return after reranking.
     pub final_n: usize,
-    /// Reserved for LLM `HyDE`; currently ignored (always no blend).
+    /// Deprecated: LLM `HyDE` expansion. Currently a no-op; scheduled for removal.
+    #[deprecated(note = "LLM HyDE is disabled (no-op); this knob is scheduled for removal")]
     pub use_hyde: bool,
     /// Whether to cosine-rerank candidates (no LLM).
     pub use_rerank: bool,
@@ -97,6 +115,10 @@ pub struct ToolRagOptions {
 }
 
 impl Default for ToolRagOptions {
+    #[expect(
+        deprecated,
+        reason = "initialize deprecated use_hyde until it is removed"
+    )]
     fn default() -> Self {
         Self {
             enabled: true,
@@ -122,42 +144,44 @@ impl TryFrom<crate::config::ToolRagConfig> for ToolRagOptions {
     type Error = crate::ToolRagError;
 
     fn try_from(c: crate::config::ToolRagConfig) -> Result<Self, Self::Error> {
-        Ok(Self::from_config_lenient(c).0)
+        Self::from_config(c)
     }
 }
 
 impl ToolRagOptions {
-    /// Builds options from config, skipping invalid `forced` names.
-    ///
-    /// Returns the resolved options and the list of invalid forced-name
-    /// error messages (empty when every name is valid). Other knobs are
-    /// always preserved — a bad forced entry never resets `top_k` / weights.
-    #[must_use]
-    pub fn from_config_lenient(c: crate::config::ToolRagConfig) -> (Self, Vec<String>) {
+    /// Builds options from config. Invalid `forced` names fail construction.
+    #[expect(deprecated, reason = "copy deprecated use_hyde until it is removed")]
+    pub fn from_config(c: crate::config::ToolRagConfig) -> Result<Self, crate::ToolRagError> {
         let mut forced = Vec::with_capacity(c.forced.len());
-        let mut invalid = Vec::new();
         for name in c.forced {
             match ToolName::try_new(name) {
                 Ok(tn) => forced.push(tn),
-                Err(e) => invalid.push(e),
+                Err(e) => {
+                    return Err(crate::ToolRagError::Config {
+                        message: format!("invalid tool name in rag.forced: {e}"),
+                    });
+                }
             }
         }
-        (
-            Self {
-                enabled: c.enabled,
-                top_k: c.top_k,
-                final_n: c.final_n,
-                use_hyde: c.use_hyde,
-                use_rerank: c.use_rerank,
-                rerank_candidates: c.rerank_candidates,
-                min_similarity: c.min_similarity,
-                background_index_on_startup: c.background_index_on_startup,
-                forced,
-                weights: FieldWeights::from(c.weights),
-                per_category_limits: c.per_category_limits,
-            },
-            invalid,
-        )
+        if c.use_hyde {
+            tracing::warn!(
+                component = "ToolRag",
+                "tools.rag.use_hyde is deprecated and ignored (LLM HyDE disabled; scheduled for removal)"
+            );
+        }
+        Ok(Self {
+            enabled: c.enabled,
+            top_k: c.top_k,
+            final_n: c.final_n,
+            use_hyde: c.use_hyde,
+            use_rerank: c.use_rerank,
+            rerank_candidates: c.rerank_candidates,
+            min_similarity: c.min_similarity,
+            background_index_on_startup: c.background_index_on_startup,
+            forced,
+            weights: FieldWeights::from(c.weights),
+            per_category_limits: c.per_category_limits,
+        })
     }
 }
 
@@ -202,21 +226,28 @@ impl ToolRag {
 
     /// Construct from a config-level `ToolRagConfig`.
     ///
-    /// Invalid `forced` names are skipped (never fail construction).
+    /// Invalid `forced` names fail construction.
     pub fn from_config(
         embedder: Arc<dyn EmbeddingProvider>,
         store: Option<Arc<MemoryStore>>,
         config: crate::config::ToolRagConfig,
     ) -> Result<Self, crate::ToolRagError> {
-        let (opts, invalid) = ToolRagOptions::from_config_lenient(config);
-        for message in invalid {
-            tracing::error!(
-                component = "ToolRag",
-                error = %message,
-                "Invalid tool name in rag.forced; skipping entry"
-            );
-        }
+        let opts = ToolRagOptions::from_config(config)?;
         Ok(Self::new(embedder, store, opts))
+    }
+
+    fn forced_only_specs(&self) -> Vec<ToolSpec> {
+        let all_specs = self
+            .specs
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut result = Vec::new();
+        for forced_name in &self.opts.forced {
+            if let Some(spec) = all_specs.get(forced_name) {
+                result.push(spec.clone());
+            }
+        }
+        result
     }
 
     /// Returns a reference to the runtime options.
@@ -466,17 +497,18 @@ impl ToolRag {
     ///
     /// Pipeline: embed query → per-tool weighted field similarity →
     /// category limits → `top_k` → optional cosine rerank → `final_n` + forced.
-    /// LLM `HyDE` is disabled (`use_hyde` is ignored).
+    /// On embed failure, returns forced tools only (fail-closed).
+    /// LLM `HyDE` is deprecated and ignored (`use_hyde` is a no-op).
     pub async fn select(&self, query: &str) -> Vec<ToolSpec> {
         let query_vec = match embed_query(self.embedder.as_ref(), query).await {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!(component = "ToolRag", error = %e, "Query embedding failed");
-                let map = self
-                    .specs
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                return map.values().cloned().collect();
+                tracing::warn!(
+                    component = "ToolRag",
+                    error = %e,
+                    "Query embedding failed; returning forced tools only"
+                );
+                return self.forced_only_specs();
             }
         };
 
@@ -484,6 +516,10 @@ impl ToolRag {
     }
 
     /// Select the most relevant tools using a pre-computed query embedding.
+    #[expect(
+        deprecated,
+        reason = "read deprecated use_hyde / hyde weight for warn and scoring match arms"
+    )]
     pub async fn select_with_embedding(
         &self,
         query: &str,
@@ -498,35 +534,24 @@ impl ToolRag {
         };
 
         if is_zero_norm(query_embedding) {
-            let all_specs = self
-                .specs
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut result = Vec::new();
-            for forced_name in &self.opts.forced {
-                if let Some(spec) = all_specs.get(forced_name) {
-                    result.push(spec.clone());
-                }
-            }
-            return result;
+            return self.forced_only_specs();
         }
 
         let t_start = std::time::Instant::now();
         let Some(store) = &self.store else {
-            let map = self
-                .specs
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            return map.values().cloned().collect();
+            tracing::warn!(
+                component = "ToolRag",
+                "No memory store; returning forced tools only"
+            );
+            return self.forced_only_specs();
         };
 
         let query_vec = query_embedding.to_vec();
 
-        // LLM HyDE is disabled; `use_hyde` is a reserved no-op knob.
         if self.opts.use_hyde {
-            tracing::debug!(
+            tracing::warn!(
                 component = "ToolRag",
-                "use_hyde is set but LLM HyDE is disabled; skipping HyDE blend"
+                "use_hyde is deprecated and ignored (LLM HyDE disabled; scheduled for removal)"
             );
         }
         let t_hyde = t_start.elapsed();
@@ -906,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn from_config_lenient_skips_invalid_forced_and_keeps_knobs() {
+    fn from_config_rejects_invalid_forced() {
         let cfg = crate::config::ToolRagConfig {
             top_k: 3,
             final_n: 2,
@@ -920,13 +945,24 @@ mod tests {
             ],
             ..crate::config::ToolRagConfig::default()
         };
-        let (opts, invalid) = ToolRagOptions::from_config_lenient(cfg);
-        assert_eq!(invalid.len(), 1);
+        let err = ToolRagOptions::from_config(cfg).expect_err("invalid forced");
+        assert!(
+            err.to_string().contains("rag.forced"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn from_config_accepts_valid_forced() {
+        let cfg = crate::config::ToolRagConfig {
+            top_k: 3,
+            final_n: 2,
+            forced: vec!["utility.question".into(), "utility.todo_add".into()],
+            ..crate::config::ToolRagConfig::default()
+        };
+        let opts = ToolRagOptions::from_config(cfg).expect("valid");
         assert_eq!(opts.top_k, 3);
         assert_eq!(opts.final_n, 2);
-        assert!(opts.use_hyde);
-        assert!(opts.use_rerank);
-        assert!((opts.min_similarity - 0.5).abs() < f32::EPSILON);
         assert_eq!(opts.forced.len(), 2);
         assert_eq!(opts.forced[0].as_str(), "utility.question");
         assert_eq!(opts.forced[1].as_str(), "utility.todo_add");
@@ -938,7 +974,10 @@ mod tests {
         assert!(!cfg.use_hyde);
         assert!(!cfg.use_rerank);
         let opts = ToolRagOptions::default();
-        assert!(!opts.use_hyde);
+        #[expect(deprecated, reason = "assert deprecated default")]
+        {
+            assert!(!opts.use_hyde);
+        }
         assert!(!opts.use_rerank);
     }
 }

@@ -29,6 +29,7 @@ ctor = { workspace = true }
 thiserror = { workspace = true }
 llama-cpp-2 = { workspace = true, default-features = false, features = ["common"] }
 encoding_rs = { workspace = true }
+blake3 = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 async-openai = { workspace = true, default-features = false, features = ["rustls", "byot"] }
@@ -37,6 +38,10 @@ reqwest = { workspace = true, features = ["rustls", "json", "stream"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 async-openai = { workspace = true, default-features = false, features = ["native-tls", "byot"] }
 reqwest = { workspace = true, features = ["native-tls", "json", "stream"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "fs"] }
 
 [lints]
 workspace = true

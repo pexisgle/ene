@@ -32,6 +32,12 @@ pub enum EneRuntimeError {
     Bootstrap(String),
 }
 
+impl From<ene_tool_rag::ToolRagError> for EneRuntimeError {
+    fn from(value: ene_tool_rag::ToolRagError) -> Self {
+        Self::Bootstrap(value.to_string())
+    }
+}
+
 impl From<ene_ai::LlmProviderError> for EneRuntimeError {
     fn from(value: ene_ai::LlmProviderError) -> Self {
         Self::Ai(value.into())
