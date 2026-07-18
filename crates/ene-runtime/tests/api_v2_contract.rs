@@ -27,12 +27,8 @@ fn test_config_memory_off() -> EneConfig {
     let mut tools = ene_tool_host::ToolConfig::default();
     tools.enabled = false;
     let _ = config.set_section(&tools);
-    let mut rag = ene_tool_rag::ToolRagConfig::default();
-    rag.enabled = false;
-    let _ = config.set_section(&rag);
-    let mut provider = ene_ai::ProviderConfig::default();
-    provider.embedding.backend = "cloud".into();
-    let _ = config.set_section(&provider);
+    let ai = ene_ai::AiConfig::default();
+    let _ = config.set_section(&ai);
     config
 }
 
@@ -148,13 +144,9 @@ async fn memory_enabled_without_embedder_fails_closed_on_open() {
     let mut tools = ene_tool_host::ToolConfig::default();
     tools.enabled = false;
     let _ = config.set_section(&tools);
-    let mut rag = ene_tool_rag::ToolRagConfig::default();
-    rag.enabled = false;
-    let _ = config.set_section(&rag);
     // Cloud embedder with no base URL → init fails → open fails closed.
-    let mut provider = ene_ai::ProviderConfig::default();
-    provider.embedding.backend = "cloud".into();
-    let _ = config.set_section(&provider);
+    let ai = ene_ai::AiConfig::default();
+    let _ = config.set_section(&ai);
 
     let err = EneHandle::open(config, test_card()).await;
     assert!(err.is_err(), "expected open to fail closed, got {err:?}");
@@ -236,17 +228,12 @@ async fn snapshot_history_is_history_entry() {
 }
 
 #[tokio::test]
-async fn open_rejects_compression_disabled() {
-    let mut config = test_config_memory_off();
-    let mut mind = ene_mind::MindConfig::default();
-    mind.context.compression_enabled = false;
-    config.set_section(&mind).expect("mind config merges");
-
-    let err = EneHandle::open(config, test_card()).await;
-    assert!(
-        err.is_err(),
-        "expected open to fail when compression_enabled=false, got {err:?}"
-    );
+async fn open_accepts_default_mind_compression() {
+    // `mind.context` is code-default only (not public settings); compression stays on.
+    let handle = EneHandle::open(test_config_memory_off(), test_card())
+        .await
+        .expect("open initializes handle with default compression");
+    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
 }
 
 #[tokio::test(flavor = "current_thread")]

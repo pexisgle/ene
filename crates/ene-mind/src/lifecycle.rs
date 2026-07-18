@@ -53,7 +53,7 @@ pub struct TurnContext<'a> {
     pub query_embedding: Option<&'a [f32]>,
     /// Embedding provider for model name.
     pub embedder: Option<&'a Arc<dyn EmbeddingProvider>>,
-    /// LLM provider for optional reranking.
+    /// LLM provider for memory extraction and other cognitive calls.
     pub llm_provider: Option<Arc<dyn LlmProvider>>,
     /// Expression PHI block (emotion protocol + card post-history instructions).
     pub post_history_block: Option<&'a str>,

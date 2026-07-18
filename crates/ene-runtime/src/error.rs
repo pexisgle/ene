@@ -27,11 +27,6 @@ pub enum EneRuntimeError {
     /// A required mind-streaming dependency is unavailable.
     #[error("Mind streaming prerequisite missing: {0}")]
     MindPrerequisite(&'static str),
-    /// Context boundary requires compression; hard session split is not a product path.
-    #[error(
-        "Context compression is disabled; enable mind.context.compression_enabled (hard session split is not available)"
-    )]
-    CompressionRequired,
     /// Bootstrap misconfiguration or internal failure.
     #[error("Bootstrap error: {0}")]
     Bootstrap(String),

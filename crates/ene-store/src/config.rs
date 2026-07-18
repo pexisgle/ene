@@ -10,6 +10,8 @@ ene_config::define_config!(
         /// Whether the store is enabled.
         pub enabled: bool = false,
         /// Database path.
+        #[serde(skip_deserializing, default, skip_serializing)]
+        #[schemars(skip)]
         pub db_path: String = default_string(),
     }
 );

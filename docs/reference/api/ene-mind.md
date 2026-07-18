@@ -76,7 +76,6 @@ Token budget allocation, compression triggers, and rolling summarization. Sub-bu
 | `memory_budget_tokens` | `usize` | `1_800` | Budget for recalled episodic/profile memories |
 | `semantic_budget_tokens` | `usize` | `1_200` | Budget for semantic/lorebook memories |
 | `style_example_budget_tokens` | `usize` | `600` | Budget for CCv3 style examples |
-| `compression_enabled` | `bool` | `true` | Enable rolling compression instead of session splits |
 | `scene_turn_threshold` | `usize` | `12` | Turn count that triggers scene-level compression |
 | `chapter_span_threshold` | `usize` | `5` | Scene spans before a chapter rollup |
 | `arc_span_threshold` | `usize` | `3` | Chapter spans before an arc rollup |
@@ -88,22 +87,13 @@ Memory extraction, hybrid search, retention, and MMR diversification settings.
 
 | Field | Type | Default | Purpose |
 |---|---|---|---|
-| `write_every_turn` | `bool` | `true` | Extract/persist candidate memories every turn |
-| `hybrid_search` | `bool` | `true` | Use vector + recency + salience + confidence hybrid search |
-| `decay_enabled` | `bool` | `true` | Enable `Active → Faded → Archived` natural decay |
 | `default_forgetting_half_life_days` | `f64` | `30.0` | Half-life for decay and recency scoring |
 | `min_confidence_to_persist` | `f64` | `0.65` | Minimum confidence to persist a candidate (clamped to `0.0..=1.0` on load) |
 | `extraction_timeout_secs` | `u64` | `30` | Timeout for one LLM extraction call |
 | `tool_grounding` | `ToolGroundingConfig` | — | Tool-result grounding settings |
-| `use_hyde` | `bool` | `false` | When true, `execute_hybrid_recall` generates a HyDE document, embeds it, and blends with the query vector |
-| `hyde_blend` | `f32` | `0.6` | Fraction of the search vector from the HyDE embedding (`0.0..=1.0`) |
 | `recall_result_limit` | `usize` | `8` | Max typed memories requested per plan |
 | `recall_similarity_threshold` | `f32` | `0.35` | Minimum vector similarity |
 | `recall_min_score` | `f32` | `0.20` | Minimum hybrid total score |
-| `rerank_enabled` | `bool` | `false` | Enable optional LLM reranking of recall candidates |
-| `rerank_candidate_limit` | `usize` | `16` | Max candidates sent to the reranker |
-| `rerank_timeout_secs` | `u64` | `10` | Timeout for one LLM rerank call |
-| `mmr_enabled` | `bool` | `true` | Enable MMR diversification after hybrid search |
 | `mmr_lambda` | `f32` | `0.7` | MMR relevance-vs-diversity tradeoff (`0.0..=1.0`) |
 | `mmr_duplicate_cluster_threshold` | `f32` | `0.75` | Lexical similarity for duplicate cluster merging |
 | `mmr_min_slots_semantic` / `_episodic` / `_user_profile` / `_commitment` | `usize` | `1` each | Minimum reserved recall slots per kind |
@@ -114,11 +104,7 @@ Memory extraction, hybrid search, retention, and MMR diversification settings.
 
 | Field | Type | Default | Purpose |
 |---|---|---|---|
-| `enabled` | `bool` | `true` | Ground tool call results into cognitive memory |
 | `max_summary_chars` | `usize` | `500` | Max characters kept per tool summary |
-| `persist_success_procedure` | `bool` | `false` | Persist successful tool calls as `Procedure` memories (LLM-extraction fallback) |
-| `persist_failure_reflection` | `bool` | `true` | Persist failed tool calls as `Reflection` memories (LLM-extraction fallback) |
-| `persist_user_visible_episodic` | `bool` | `false` | Persist short user-visible outcomes as `Episodic` memories (LLM-extraction fallback) |
 | `min_confidence` | `f32` | `0.60` | Minimum confidence for tool-derived candidates |
 
 ### `EmotionConfig`
@@ -126,7 +112,6 @@ Memory extraction, hybrid search, retention, and MMR diversification settings.
 | Field | Type | Default | Purpose |
 |---|---|---|---|
 | `enabled` | `bool` | `true` | Enable emotion processing |
-| `engine` | `EngineMode` | `Hybrid` | Affect computation strategy |
 | `decay_half_life_minutes` | `f64` | `30.0` | Half-life for affect decay |
 | `expression_hysteresis_seconds` | `f64` | `4.0` | Minimum seconds between expression changes |
 | `llm_can_propose_expression` | `bool` | `true` | Allow the LLM to propose an expression token |
@@ -135,26 +120,10 @@ Memory extraction, hybrid search, retention, and MMR diversification settings.
 | `classifier_min_confidence` | `f32` | `0.5` | Minimum confidence to blend LLM absolute affect estimates |
 | `classifier_language` | `String` | `"en"` | Prompt library language (`en` or `ja`) for the classifier and output contract |
 
-### `EngineMode`
-
-```rust
-pub enum EngineMode {
-    /// Rules-based affect with no LLM participation.
-    Deterministic,
-    /// Pure LLM-driven emotion inference.
-    Llm,
-    /// Combine deterministic rules with LLM proposals (default).
-    Hybrid,
-}
-```
-
 ### `CharacterMemoryConfig`
 
 | Field | Type | Default | Purpose |
 |---|---|---|---|
-| `compile_ccv3_to_semantic_memory` | `bool` | `true` | Index CCv3 lorebook entries into semantic memory |
-| `always_include_identity_kernel` | `bool` | `true` | Always inject the Identity Kernel |
-| `style_retrieval` | `bool` | `true` | Enable CCv3 `mes_example` style-example retrieval |
 | `identity_kernel_max_tokens` | `usize` | `400` | Approximate max token budget for the Identity Kernel |
 
 ---
@@ -580,7 +549,6 @@ pub struct RecallPlan {
     pub scope: RecallScopeFilter,
     pub budget: RecallBudgetHints,
     pub search: RecallSearchHints,
-    pub use_hyde: bool,
 }
 ```
 
@@ -590,7 +558,7 @@ pub struct RecallPlan {
 | `to_memory_search_options` | `fn to_memory_search_options<'a>(plan: &'a RecallPlan, query_embedding: &'a [f32], model_name: &'a str, now: DateTime<Utc>, memory: &MindMemoryConfig) -> Query<'a>` | Maps the plan's primary query onto `ene-store::Query`, filling hybrid weights / commitment boost from `mind.memory.*` (#123). |
 | `explain_results` | `fn explain_results(scored: Vec<ScoredMemory>) -> Vec<RecalledMemory>` | Attaches a `RecallReason` and score breakdown to each hybrid-search result. |
 
-`RecallPlannerOptions::from_config(context: &ContextConfig, memory: &MindMemoryConfig) -> Self` derives planner options (budgets, thresholds, `use_hyde`) from the two config sections.
+`RecallPlannerOptions::from_config(context: &ContextConfig, memory: &MindMemoryConfig) -> Self` derives planner options (budgets, thresholds) from the two config sections.
 
 ### `RecalledMemory` / `RecallReason`
 
@@ -624,9 +592,7 @@ pub async fn execute_hybrid_recall(
 ) -> Result<(RecallPlan, Vec<RecalledMemory>), CognitionError>
 ```
 
-End-to-end pipeline used by `CognitionEngine::before_turn`: plan → (if `hybrid_search`) optional HyDE blend when `use_hyde` → hybrid vector+lexical search → MMR diversification (`MemoryDiversifyPipeline`, gated by `mmr_enabled`) → optional LLM rerank (`MemoryRerankPipeline`, gated by `rerank_enabled`) → map to `RecalledMemory` → merge lorebook key/constant matches → bump access counters. Legacy summaries and key facts are not merged; migrate them explicitly through the store/CLI migration API.
-
-`ExecuteRecallInput` carries an optional `embedder` used for HyDE embedding when `plan.use_hyde` is set; without an embedder or LLM the runner falls back to the query embedding.
+End-to-end pipeline used by `CognitionEngine::before_turn`: plan → hybrid vector+lexical search → MMR diversification (`MemoryDiversifyPipeline`) → map to `RecalledMemory` → merge lorebook key/constant matches → bump access counters. Legacy summaries and key facts are not merged; migrate them explicitly through the store/CLI migration API.
 
 ---
 
@@ -645,7 +611,7 @@ impl MemoryWriter {
 }
 ```
 
-`after_turn` = `write_memories` (LLM-first; remember/forget safety net + tool grounding → `MemoryArbiter` → `CommitmentLedger` sync) then `apply_forgetting` then `finalize_turn` (`upsert_affect_state` only). Extraction is skipped when `mind.memory.write_every_turn` is `false` (forgetting + affect persist still run from `after_turn`). Production streaming in `ene-runtime` awaits `finalize_turn_post` (affect only) before `Terminal` and spawns `write_memories_deferred` (extraction + forgetting) afterward. Hosts must call `CognitionEngine` methods — not `MemoryWriter` directly (#121).
+`after_turn` = `write_memories` (LLM-first; remember/forget safety net + tool grounding → `MemoryArbiter` → `CommitmentLedger` sync) then `apply_forgetting` then `finalize_turn` (`upsert_affect_state` only). Production streaming in `ene-runtime` awaits `finalize_turn_post` (affect only) before `Terminal` and spawns `write_memories_deferred` (extraction + forgetting) afterward. Hosts must call `CognitionEngine` methods — not `MemoryWriter` directly (#121).
 
 ### `MemoryCandidate`
 

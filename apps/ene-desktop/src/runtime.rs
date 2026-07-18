@@ -287,7 +287,12 @@ impl ApplicationHandler for Runtime {
                         );
                     }
                     if world.resource::<MaskCapture>().0.is_none() {
-                        let downsample = self.state.settings.graphics.mask_render_downsample;
+                        let downsample = self
+                            .state
+                            .settings
+                            .graphics
+                            .resolved()
+                            .mask_render_downsample;
                         if let Some(cam) =
                             crate::platform::wayland_mask_capture::new_mask_capture_state(
                                 &self.state.gpu.device,
@@ -417,7 +422,7 @@ impl Runtime {
     /// `apply_linux_click_through_system` can read them.
     fn sync_runtime_to_bevy(&mut self) {
         let drag_active = self.state.character.drag.is_dragging();
-        let debug_fps = self.state.settings.graphics.debug_fps;
+        let debug_fps = self.state.settings.graphics.resolved().debug_fps;
         let transparent = self.transparent;
         self.state.app.world_mut().insert_resource(
             crate::system::platform::should_render_debug::DragActive(drag_active),
@@ -655,7 +660,7 @@ impl Runtime {
     /// `settings.graphics.target_fps`. `0` means "poll
     /// continuously".
     fn set_frame_deadline(&mut self, event_loop: &ActiveEventLoop) {
-        let target_fps = self.state.settings.graphics.target_fps;
+        let target_fps = self.state.settings.graphics.resolved().target_fps;
         if target_fps == 0 {
             event_loop.set_control_flow(ControlFlow::Poll);
             return;
@@ -696,7 +701,12 @@ impl Runtime {
                     use crate::resource::platform_state::resources::MaskCapture;
                     let world = self.state.app.world();
                     if let Some(mask) = world.resource::<MaskCapture>().0.as_ref() {
-                        let downsample = self.state.settings.graphics.mask_render_downsample;
+                        let downsample = self
+                            .state
+                            .settings
+                            .graphics
+                            .resolved()
+                            .mask_render_downsample;
                         let mut guard = mask.lock();
                         let _ =
                             guard.resize(&gpu.device, new_size.width, new_size.height, downsample);
@@ -1087,7 +1097,7 @@ impl Runtime {
 
         let result = cw.with_surface_view(|view| {
             let swapchain_size = (cw.config.width, cw.config.height);
-            let aa_mode = settings.graphics.antialiasing_mode;
+            let aa_mode = settings.graphics.resolved().antialiasing_mode;
             character.render(
                 device,
                 queue,
@@ -1285,7 +1295,7 @@ impl Runtime {
             let world = self.state.app.world();
             if let Some(mask) = world.resource::<MaskCapture>().0.as_ref() {
                 let mut mask_guard = mask.lock();
-                let downsample = settings.graphics.mask_render_downsample;
+                let downsample = settings.graphics.resolved().mask_render_downsample;
                 let _ = mask_guard.resize(device, cw.config.width, cw.config.height, downsample);
                 let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("mask.encoder"),

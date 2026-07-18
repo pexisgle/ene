@@ -26,7 +26,7 @@ chat-empty-history = まだメッセージがありません。話しかけて�
 
 # Graphics
 graphics = グラフィックス
-target-fps = ターゲットFPS
+graphics-quality = グラフィック品質
 shadow-quality = 影の品質
 antialiasing = アンチエイリアス
 language = 言語

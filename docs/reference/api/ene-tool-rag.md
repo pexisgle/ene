@@ -1,8 +1,8 @@
 # ene-tool-rag — Tool RAG Pipeline
 
-Tool RAG (Retrieval-Augmented Generation) pipeline for dynamic tool selection. When the number of available tools exceeds the LLM's context budget, `ToolRag` runs a retrieval-augmented selection step: embed → optional HyDE expansion → weighted multi-field similarity → optional cross-encoder rerank → top-N.
+Tool RAG (Retrieval-Augmented Generation) pipeline for dynamic tool selection. When the number of available tools exceeds the LLM's context budget, `ToolRag` runs a retrieval-augmented selection step: embed → weighted multi-field similarity → embedding cosine rerank → top-N.
 
-**Dependencies**: `ene-ai` (embedding providers, HyDE, rerank), `ene-store` (persistent tool embedding storage), `ene-tool-proto` (wire types), `ene-config`.
+**Dependencies**: `ene-ai` (embedding providers), `ene-store` (persistent tool embedding storage), `ene-tool-proto` (wire types), `ene-config`.
 
 ---
 
@@ -22,10 +22,10 @@ pub struct ToolRag {
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `new` | `pub fn new(embedder: Arc<dyn EmbeddingProvider>, store: Option<Arc<MemoryStore>>, opts: ToolRagOptions) -> Self` | Direct constructor when you already have a resolved `ToolRagOptions`. |
-| `from_config` | `pub fn from_config(embedder: Arc<dyn EmbeddingProvider>, store: Option<Arc<MemoryStore>>, config: ToolRagConfig) -> Result<Self, ToolRagError>` | Builds `ToolRagOptions` from the settings-facing `ToolRagConfig` (converting `Vec<String>` → `Vec<ToolName>` for `forced`) and constructs the pipeline. |
+| `from_config` | `pub fn from_config(embedder: Arc<dyn EmbeddingProvider>, store: Option<Arc<MemoryStore>>, config: ToolRagConfig) -> Result<Self, ToolRagError>` | Builds `ToolRagOptions` from `ToolRagConfig` (converting `Vec<String>` → `Vec<ToolName>` for `forced`) and constructs the pipeline. |
 | `ensure_index` | `pub async fn ensure_index(&self, specs: &[ToolSpec], profiles: &[ToolRagProfile]) -> Result<(), EmbeddingError>` | Computes a BLAKE3 hash over specs + profiles; if unchanged since the last call, this is a fast no-op. Otherwise (re-)embeds and stores per-field vectors (`summary`, `description`, `capability`, `example`, `negative`) from each `ToolRagProfile`. |
 | `select` | `pub async fn select(&self, query: &str) -> Vec<ToolSpec>` | Embeds `query` internally, then delegates to `select_with_embedding`. |
-| `select_with_embedding` | `pub async fn select_with_embedding(&self, query: &str, query_embedding: &[f32]) -> Vec<ToolSpec>` | Runs weighted per-field similarity scoring (using `query_embedding`) plus optional HyDE blending, per-category limits, `top_k` cut, and reranking, and returns the top `opts.final_n` tools above `opts.min_similarity`, always including any `opts.forced` tools. |
+| `select_with_embedding` | `pub async fn select_with_embedding(&self, query: &str, query_embedding: &[f32]) -> Vec<ToolSpec>` | Runs weighted per-field similarity scoring (using `query_embedding`), per-category limits, `top_k` cut, embedding cosine rerank when multiple candidates remain, and returns the top `opts.final_n` tools above `opts.min_similarity`, always including any `opts.forced` tools. |
 | `start_background_indexer` | `pub fn start_background_indexer(self: &Arc<Self>, specs: Vec<ToolSpec>, profiles: Vec<ToolRagProfile>)` | Spawns a background task that calls `ensure_index` to warm the cache; returns immediately. |
 | `stats` | `pub async fn stats(&self) -> ToolRagStats` | Snapshot of the last `select`/`select_with_embedding` call: hit count, index size, and top similarity. |
 | `opts` | `pub fn opts(&self) -> &ToolRagOptions` | Returns the resolved options. |
@@ -38,14 +38,10 @@ pub struct ToolRag {
 ```rust
 #[derive(Debug, Clone)]
 pub struct ToolRagOptions {
-    pub enabled: bool,
     pub top_k: usize,
     pub final_n: usize,
-    pub use_hyde: bool,
-    pub use_rerank: bool,
     pub rerank_candidates: usize,
     pub min_similarity: f32,
-    pub background_index_on_startup: bool,
     pub forced: Vec<ToolName>,
     pub weights: FieldWeights,
     pub per_category_limits: HashMap<String, usize>,
@@ -68,8 +64,6 @@ pub struct FieldWeights {
     pub capability: f32,
     pub example: f32,
     pub negative: f32,
-    pub hyde: f32,
-    pub hyde_blend: f32,
 }
 ```
 
@@ -92,20 +86,16 @@ pub struct ToolRagStats {
 
 ## Configuration Types
 
-These mirror the `[tools.rag]` section of `settings.json`, loaded via `ene-config`'s `HasConfigKey` trait with path `&["tools", "rag"]`.
+`ToolRagConfig` holds code defaults only (not in public `settings.json`).
 
 ### `ToolRagConfig`
 
 ```rust
 pub struct ToolRagConfig {
-    pub enabled: bool,
     pub top_k: usize,
     pub final_n: usize,
-    pub use_hyde: bool,
-    pub use_rerank: bool,
     pub rerank_candidates: usize,
     pub min_similarity: f32,
-    pub background_index_on_startup: bool,
     pub forced: Vec<String>,
     pub weights: FieldWeightsConfig,
     pub per_category_limits: HashMap<String, usize>,
@@ -121,8 +111,6 @@ pub struct FieldWeightsConfig {
     pub capability: f32,
     pub example: f32,
     pub negative: f32,
-    pub hyde: f32,
-    pub hyde_blend: f32,
 }
 ```
 
@@ -146,10 +134,10 @@ Returned by `ToolRagOptions::try_from` and `ToolRag::from_config` when the confi
 
 ## Usage
 
-Constructed by `ene-runtime` during `EneHandle::open`:
+Constructed by `ene-runtime` during `EneHandle::open` when tools and an embedder are available:
 
 ```rust
-let rag_config = config.get_section::<ToolRagConfig>().unwrap_or_default();
+let rag_config = ToolRagConfig::default();
 let opts = ToolRagOptions::try_from(rag_config)?;
 let rag = Arc::new(ToolRag::new(embedder.clone(), store, opts));
 ```
@@ -168,8 +156,8 @@ let tools = match &tool_rag {
 ## See Also
 
 - [`ene-tool-host`](./ene-tool-host.md) — Tool process lifecycle manager (RAG consumer)
-- [`ene-ai`](./ene-ai.md) — Embedding / rerank providers used by the pipeline
+- [`ene-ai`](./ene-ai.md) — Embedding providers used by the pipeline
 - [`ene-store`](./ene-store.md) — Persistent embedding storage (`tool_embedding_index` table)
 - [`ene-tool-proto`](./ene-tool-proto.md) — `ToolSpec`, `ToolName`, `EmbeddingField` types
-- [`ene-config`](./ene-config.md) — Configuration loading (`ToolRagConfig`, `HasConfigKey`)
+- [`ene-config`](./ene-config.md) — Configuration loading
 - [Tool System Overview](../tools/overview.md)

@@ -77,15 +77,15 @@ pub use diagnostics::{
 pub use ene_config::EneConfig;
 
 // ── Provider types ──
+/// AI provider registry and task routing config.
+#[doc(no_inline)]
+pub use ene_ai::AiConfig;
 /// LLM message types (re-exported from `ene-ai`).
 #[doc(no_inline)]
 pub use ene_ai::LlmMessage;
 /// LLM provider trait (re-exported from `ene-ai`).
 #[doc(no_inline)]
 pub use ene_ai::LlmProvider;
-/// OpenAI-compatible provider config.
-#[doc(no_inline)]
-pub use ene_ai::ProviderConfig;
 
 // ── Memory types ──
 /// Memory configuration (re-exported from `ene-store`).

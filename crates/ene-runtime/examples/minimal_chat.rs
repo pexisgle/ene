@@ -24,12 +24,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = load_config()?;
     let card = load_character_card(&config.character)?;
-    let provider_cfg = config
-        .get_section::<ene_runtime::ProviderConfig>()
+    let ai_cfg = config
+        .get_section::<ene_runtime::AiConfig>()
         .unwrap_or_default();
+    let model = ai_cfg.tasks.chat.model.as_deref().unwrap_or("unknown");
     println!(
         "[Setup] provider: {}, model: {}",
-        provider_cfg.name, provider_cfg.model,
+        ai_cfg.tasks.chat.provider, model,
     );
 
     let handle = EneHandle::open(config, card).await?;

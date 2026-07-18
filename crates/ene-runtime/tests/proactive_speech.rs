@@ -198,8 +198,18 @@ async fn proactive_stream_without_memory_store() {
 }
 
 #[test]
-fn proactive_generation_model_override_resolves() {
-    let mut cfg = ene_ai::ProviderConfig::default();
-    cfg.proactive.generation_model = "gpt-4o".into();
-    assert_eq!(cfg.proactive_generation_model(), "gpt-4o");
+fn proactive_generation_task_override_resolves() {
+    let mut cfg = ene_ai::AiConfig::default();
+    if let Some(ene_ai::AiProviderDef::OpenaiCompatible { base_url, .. }) =
+        cfg.providers.get_mut("default")
+    {
+        *base_url = "https://api.openai.com/v1".to_string();
+    }
+    cfg.tasks.proactive = Some(ene_ai::TaskRef {
+        provider: "default".to_string(),
+        model: Some("gpt-4o".to_string()),
+        ..Default::default()
+    });
+    let resolved = cfg.resolve_proactive_generation().expect("resolve");
+    assert_eq!(resolved.model, "gpt-4o");
 }

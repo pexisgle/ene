@@ -32,13 +32,16 @@ pub fn log_empty_response_if_needed(ctx: &EmptyResponseContext<'_>) {
         return;
     }
 
-    let (provider_name, model) = ctx
-        .config
-        .get_section::<ene_ai::ProviderConfig>()
-        .map_or_else(
-            |_| ("unknown".to_string(), "unknown".to_string()),
-            |provider| (provider.name.clone(), provider.model),
-        );
+    let (provider_name, model) = match ctx.config.get_section::<ene_ai::AiConfig>() {
+        Ok(ai) => {
+            let provider = ai.tasks.chat.provider.clone();
+            match ai.resolve_chat() {
+                Ok(chat) => (provider, chat.model),
+                Err(_) => ("unknown".to_string(), "unknown".to_string()),
+            }
+        }
+        Err(_) => ("unknown".to_string(), "unknown".to_string()),
+    };
 
     let (system_chars, system_preview) = system_prompt_excerpt(ctx.messages);
     let outline = message_outline(ctx.messages);

@@ -37,20 +37,10 @@ pub async fn sync_character_memories(
     character_id: &str,
     user_name: &str,
     card: &CharacterCardV3,
-    config: &CharacterMemoryConfig,
+    _config: &CharacterMemoryConfig,
     previous_card_memory_hash: Option<u64>,
 ) -> Result<(CharacterMemorySyncReport, u64), CognitionError> {
     let hash = compute_card_memory_hash(card);
-
-    if !config.compile_ccv3_to_semantic_memory && !config.style_retrieval {
-        return Ok((
-            CharacterMemorySyncReport {
-                skipped: true,
-                ..Default::default()
-            },
-            hash,
-        ));
-    }
 
     if previous_card_memory_hash == Some(hash) {
         return Ok((
@@ -63,12 +53,8 @@ pub async fn sync_character_memories(
     }
 
     let mut desired: Vec<NewMemoryItem> = Vec::new();
-    if config.compile_ccv3_to_semantic_memory {
-        desired.extend(LorebookIndexer::compile_entries(card, user_name));
-    }
-    if config.style_retrieval {
-        desired.extend(StyleExampleSelector::compile_items(card, user_name));
-    }
+    desired.extend(LorebookIndexer::compile_entries(card, user_name));
+    desired.extend(StyleExampleSelector::compile_items(card, user_name));
 
     let desired_refs: HashSet<String> = desired
         .iter()

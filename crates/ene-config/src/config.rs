@@ -133,6 +133,14 @@ pub fn register_runtime_schema(key: &str, schema: serde_json::Value) {
     }
 }
 
+/// Default overlay-oriented behavioural rules when none are configured.
+pub const DEFAULT_RUNTIME_RULES: &str =
+    "Keep responses relatively short and sweet, suitable for displaying on a screen overlay.";
+
+fn runtime_rules_is_default(rules: &str) -> bool {
+    rules.is_empty() || rules == DEFAULT_RUNTIME_RULES
+}
+
 /// Top-level settings configuration for the Ene platform.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
@@ -145,6 +153,7 @@ pub struct EneConfig {
     /// Display name shown to the user.
     pub user_name: String,
     /// Behavioural rules injected into every system prompt.
+    #[serde(default, skip_serializing_if = "runtime_rules_is_default")]
     pub runtime_rules: String,
 
     #[serde(flatten)]
@@ -156,10 +165,10 @@ pub struct EneConfig {
 impl Default for EneConfig {
     fn default() -> Self {
         Self {
-            version: 1,
-            character: String::new(),
+            version: 2,
+            character: "Alicia".to_string(),
             user_name: "User".to_string(),
-            runtime_rules: "Keep responses relatively short and sweet, suitable for displaying on a screen overlay.".to_string(),
+            runtime_rules: DEFAULT_RUNTIME_RULES.to_string(),
             extra: BTreeMap::new(),
         }
     }

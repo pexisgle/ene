@@ -76,7 +76,6 @@ pub struct MindConfig {
 | `memory_budget_tokens` | `usize` | `1_800` | リコールされたエピソード/プロフィールメモリの予算 |
 | `semantic_budget_tokens` | `usize` | `1_200` | セマンティック/ロアブックメモリの予算 |
 | `style_example_budget_tokens` | `usize` | `600` | CCv3スタイル例の予算 |
-| `compression_enabled` | `bool` | `true` | セッション分割ではなくローリング圧縮を有効化する |
 | `scene_turn_threshold` | `usize` | `12` | シーンレベル圧縮をトリガーするターン数 |
 | `chapter_span_threshold` | `usize` | `5` | チャプターロールアップ前のシーンスパン数 |
 | `arc_span_threshold` | `usize` | `3` | アークロールアップ前のチャプタースパン数 |
@@ -88,22 +87,13 @@ pub struct MindConfig {
 
 | フィールド | 型 | デフォルト | 用途 |
 |---|---|---|---|
-| `write_every_turn` | `bool` | `true` | ターンごとに候補メモリを抽出/永続化する |
-| `hybrid_search` | `bool` | `true` | ベクトル + 新しさ + 顕著性 + 確信度によるハイブリッド検索を使用する |
-| `decay_enabled` | `bool` | `true` | `Active → Faded → Archived` の自然減衰を有効化する |
 | `default_forgetting_half_life_days` | `f64` | `30.0` | 減衰と新しさスコアリングの半減期 |
 | `min_confidence_to_persist` | `f64` | `0.65` | 候補を永続化する最小確信度（ロード時に `0.0..=1.0` にクランプ） |
 | `extraction_timeout_secs` | `u64` | `30` | 1回のLLM抽出呼び出しのタイムアウト |
 | `tool_grounding` | `ToolGroundingConfig` | — | ツール結果のグラウンディング設定 |
-| `use_hyde` | `bool` | `false` | true のとき `execute_hybrid_recall` が HyDE 文書を生成・埋め込みし query ベクトルと混合する |
-| `hyde_blend` | `f32` | `0.6` | 検索ベクトルのうち HyDE 埋め込みが占める割合（`0.0..=1.0`） |
 | `recall_result_limit` | `usize` | `8` | 1つの計画で要求される型付きメモリの最大数 |
 | `recall_similarity_threshold` | `f32` | `0.35` | 最小ベクトル類似度 |
 | `recall_min_score` | `f32` | `0.20` | 最小ハイブリッド合計スコア |
-| `rerank_enabled` | `bool` | `false` | リコール候補のオプションのLLM再ランキングを有効化する |
-| `rerank_candidate_limit` | `usize` | `16` | 再ランカーに送られる候補の最大数 |
-| `rerank_timeout_secs` | `u64` | `10` | 1回のLLM再ランク呼び出しのタイムアウト |
-| `mmr_enabled` | `bool` | `true` | ハイブリッド検索後のMMR多様化を有効化する |
 | `mmr_lambda` | `f32` | `0.7` | MMRの関連性と多様性のトレードオフ（`0.0..=1.0`） |
 | `mmr_duplicate_cluster_threshold` | `f32` | `0.75` | 重複クラスタ結合のための語彙的類似度 |
 | `mmr_min_slots_semantic` / `_episodic` / `_user_profile` / `_commitment` | `usize` | 各 `1` | 種類ごとの最小予約リコールスロット数 |
@@ -114,11 +104,7 @@ pub struct MindConfig {
 
 | フィールド | 型 | デフォルト | 用途 |
 |---|---|---|---|
-| `enabled` | `bool` | `true` | ツール呼び出し結果を認知メモリにグラウンディングする |
 | `max_summary_chars` | `usize` | `500` | ツール要約1件あたりの最大文字数 |
-| `persist_success_procedure` | `bool` | `false` | 成功したツール呼び出しを `Procedure` メモリとして永続化する（LLM 抽出フォールバック） |
-| `persist_failure_reflection` | `bool` | `true` | 失敗したツール呼び出しを `Reflection` メモリとして永続化する（LLM 抽出フォールバック） |
-| `persist_user_visible_episodic` | `bool` | `false` | ユーザーに見える短い成功結果を `Episodic` メモリとして永続化する（LLM 抽出フォールバック） |
 | `min_confidence` | `f32` | `0.60` | ツール由来の候補の最小確信度 |
 
 ### `EmotionConfig`
@@ -126,7 +112,6 @@ pub struct MindConfig {
 | フィールド | 型 | デフォルト | 用途 |
 |---|---|---|---|
 | `enabled` | `bool` | `true` | 感情処理を有効化する |
-| `engine` | `EngineMode` | `Hybrid` | アフェクト計算の戦略 |
 | `decay_half_life_minutes` | `f64` | `30.0` | アフェクト減衰の半減期 |
 | `expression_hysteresis_seconds` | `f64` | `4.0` | 表情変更間の最小秒数 |
 | `llm_can_propose_expression` | `bool` | `true` | LLMが表情トークンを提案することを許可する |
@@ -135,26 +120,10 @@ pub struct MindConfig {
 | `classifier_min_confidence` | `f32` | `0.5` | LLMの絶対感情推定をブレンド適用する最小確信度 |
 | `classifier_language` | `String` | `"en"` | 分類器と出力コントラクトのプロンプトライブラリ言語（`en` または `ja`） |
 
-### `EngineMode`
-
-```rust
-pub enum EngineMode {
-    /// LLMの参加なしのルールベースアフェクト。
-    Deterministic,
-    /// 純粋なLLM駆動の感情推論。
-    Llm,
-    /// 決定論的ルールとLLM提案を組み合わせる（デフォルト）。
-    Hybrid,
-}
-```
-
 ### `CharacterMemoryConfig`
 
 | フィールド | 型 | デフォルト | 用途 |
 |---|---|---|---|
-| `compile_ccv3_to_semantic_memory` | `bool` | `true` | CCv3ロアブックエントリをセマンティックメモリにインデックスする |
-| `always_include_identity_kernel` | `bool` | `true` | 常にIdentity Kernelを注入する |
-| `style_retrieval` | `bool` | `true` | CCv3 `mes_example` のスタイル例検索を有効化する |
 | `identity_kernel_max_tokens` | `usize` | `400` | Identity Kernelの概算トークン予算上限 |
 
 ---
@@ -580,7 +549,6 @@ pub struct RecallPlan {
     pub scope: RecallScopeFilter,
     pub budget: RecallBudgetHints,
     pub search: RecallSearchHints,
-    pub use_hyde: bool,
 }
 ```
 
@@ -590,7 +558,7 @@ pub struct RecallPlan {
 | `to_memory_search_options` | `fn to_memory_search_options<'a>(plan: &'a RecallPlan, query_embedding: &'a [f32], model_name: &'a str, now: DateTime<Utc>, memory: &MindMemoryConfig) -> Query<'a>` | プランのプライマリクエリを `ene-store::Query` にマッピングし、`mind.memory.*` からハイブリッド重み / commitment boost を埋める（#123）。 |
 | `explain_results` | `fn explain_results(scored: Vec<ScoredMemory>) -> Vec<RecalledMemory>` | 各ハイブリッド検索結果に `RecallReason` とスコアの詳細を付加する。 |
 
-`RecallPlannerOptions::from_config(context: &ContextConfig, memory: &MindMemoryConfig) -> Self` は、この2つの設定セクションからプランナーオプション（予算、しきい値、`use_hyde`）を導出します。
+`RecallPlannerOptions::from_config(context: &ContextConfig, memory: &MindMemoryConfig) -> Self` は、この2つの設定セクションからプランナーオプション（予算、しきい値）を導出します。
 
 ### `RecalledMemory` / `RecallReason`
 
@@ -624,9 +592,7 @@ pub async fn execute_hybrid_recall(
 ) -> Result<(RecallPlan, Vec<RecalledMemory>), CognitionError>
 ```
 
-`CognitionEngine::before_turn` から使用されるエンドツーエンドのパイプラインです: 計画 → （`hybrid_search` が有効なら）`use_hyde` 時のオプション HyDE 混合 → ハイブリッドベクトル＋字句検索 → MMR多様化（`MemoryDiversifyPipeline`、`mmr_enabled` でゲート） → オプションのLLM再ランク（`MemoryRerankPipeline`、`rerank_enabled` でゲート） → `RecalledMemory` へのマッピング → ロアブックのキー/定数マッチのマージ → アクセスカウンターの更新。レガシーの要約とキーファクトはマージせず、必要な場合は store/CLI の移行 API を明示的に実行します。
-
-`ExecuteRecallInput` は `plan.use_hyde` 時の HyDE 埋め込み用にオプションの `embedder` を持ちます。embedder または LLM が無い場合は query embedding にフォールバックします。
+`CognitionEngine::before_turn` から使用されるエンドツーエンドのパイプラインです: 計画 → ハイブリッドベクトル＋字句検索 → MMR多様化（`MemoryDiversifyPipeline`） → `RecalledMemory` へのマッピング → ロアブックのキー/定数マッチのマージ → アクセスカウンターの更新。レガシーの要約とキーファクトはマージせず、必要な場合は store/CLI の移行 API を明示的に実行します。
 
 ---
 
@@ -645,7 +611,7 @@ impl MemoryWriter {
 }
 ```
 
-`after_turn` = `write_memories`（LLM 主経路、覚えて／忘れて安全ネット、ツールグラウンディングを含む → `MemoryArbiter` → `CommitmentLedger` 同期）に続いて `apply_forgetting`、続けて `finalize_turn`（`upsert_affect_state` のみ）です。`mind.memory.write_every_turn` が `false` の場合、抽出のみがスキップされます（forgetting + affect 永続化は `after_turn` から常に実行されます）。本番ストリーミングの `ene-runtime` は `Terminal` の前に `finalize_turn_post`（affect のみ）を await し、その後 `write_memories_deferred`（抽出 + forgetting）を spawn します。ホストは `MemoryWriter` ではなく `CognitionEngine` のメソッドのみを呼びます（#121）。
+`after_turn` = `write_memories`（LLM 主経路、覚えて／忘れて安全ネット、ツールグラウンディングを含む → `MemoryArbiter` → `CommitmentLedger` 同期）に続いて `apply_forgetting`、続けて `finalize_turn`（`upsert_affect_state` のみ）です。本番ストリーミングの `ene-runtime` は `Terminal` の前に `finalize_turn_post`（affect のみ）を await し、その後 `write_memories_deferred`（抽出 + forgetting）を spawn します。ホストは `MemoryWriter` ではなく `CognitionEngine` のメソッドのみを呼びます（#121）。
 
 ### `MemoryCandidate`
 

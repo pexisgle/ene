@@ -18,8 +18,6 @@ pub struct RecallPlan {
     pub budget: RecallBudgetHints,
     /// Hybrid-search compatible hints.
     pub search: RecallSearchHints,
-    /// Whether the downstream recall executor should run `HyDE` expansion.
-    pub use_hyde: bool,
 }
 
 /// Scope filter attached to a recall plan.

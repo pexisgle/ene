@@ -65,10 +65,6 @@ impl MemoryWriter {
         input: &PostTurnInput<'_>,
         providers: MemoryWriteProviders<'_>,
     ) -> Result<(), CognitionError> {
-        if !config.memory.write_every_turn {
-            return Ok(());
-        }
-
         let locale = locale_from_classifier_language(&config.emotion.classifier_language);
         let turn = candidate::TurnInput {
             user_message: input.turn.user_message,
@@ -95,7 +91,6 @@ impl MemoryWriter {
             character_id = %input.character_id,
             user_id = %input.user_id,
             locale = ?locale,
-            llm_extraction_enabled = config.memory.llm_extraction_enabled,
             pattern_hint_count = pattern_candidates.len(),
             tool_candidate_count = tool_candidates.len(),
             "Post-turn memory extraction starting"
@@ -104,23 +99,14 @@ impl MemoryWriter {
         let mut batches: Vec<(Vec<candidate::MemoryCandidate>, CandidateProvenance)> = Vec::new();
         let mut used_llm = false;
 
-        if config.memory.llm_extraction_enabled {
-            if let Some(provider) = providers.llm {
-                // Same extraction call judges conversation + tool outcomes.
-                // Soft tool hints include successes even when auto-persist is off.
-                let mut llm_hints = pattern_candidates.clone();
-                let tool_hint_cfg = crate::config::ToolGroundingConfig {
-                    persist_success_procedure: true,
-                    persist_failure_reflection: true,
-                    persist_user_visible_episodic: false,
-                    ..config.memory.tool_grounding.clone()
-                };
-                llm_hints.extend(tool_grounding::extract_tool_candidates(
-                    turn.tool_results,
-                    &tool_hint_cfg,
-                ));
+        if let Some(provider) = providers.llm {
+            let mut llm_hints = pattern_candidates.clone();
+            llm_hints.extend(tool_grounding::extract_tool_candidates(
+                turn.tool_results,
+                &config.memory.tool_grounding,
+            ));
 
-                match llm::extract_with_timeout(
+            match llm::extract_with_timeout(
                     provider,
                     &turn,
                     locale,
@@ -161,13 +147,12 @@ impl MemoryWriter {
                         );
                     }
                 }
-            } else {
-                tracing::warn!(
-                    component = "MemoryWriter",
-                    character_id = %input.character_id,
-                    "LLM memory extraction enabled but no provider available"
-                );
-            }
+        } else {
+            tracing::warn!(
+                component = "MemoryWriter",
+                character_id = %input.character_id,
+                "No LLM provider available for memory extraction"
+            );
         }
 
         // Remember/forget patterns fall back when LLM did not own the turn.
@@ -235,29 +220,25 @@ impl MemoryWriter {
         };
 
         for (candidates, provenance) in batches {
-            let semantic_matches = if config.memory.semantic_dedup_enabled {
-                build_semantic_matches(
-                    store,
-                    providers.embedder,
-                    &config.memory,
-                    input.character_id,
-                    input.user_id,
-                    &candidates,
-                    options.semantic_similarity_threshold,
-                )
-                .await
-                .unwrap_or_else(|error| {
-                    tracing::warn!(
-                        component = "MemoryWriter",
-                        error = %error,
-                        character_id = %input.character_id,
-                        "Semantic dedup lookup failed; continuing without matches"
-                    );
-                    HashMap::new()
-                })
-            } else {
+            let semantic_matches = build_semantic_matches(
+                store,
+                providers.embedder,
+                &config.memory,
+                input.character_id,
+                input.user_id,
+                &candidates,
+                options.semantic_similarity_threshold,
+            )
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    component = "MemoryWriter",
+                    error = %error,
+                    character_id = %input.character_id,
+                    "Semantic dedup lookup failed; continuing without matches"
+                );
                 HashMap::new()
-            };
+            });
 
             let base_ctx = ArbiterContext {
                 turn: turn.clone(),
@@ -585,10 +566,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finalize_turn_runs_when_write_every_turn_disabled() {
+    async fn finalize_turn_runs() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let mut config = MindConfig::default();
-        config.memory.write_every_turn = false;
+        let config = MindConfig::default();
 
         let affect = AffectState::neutral("ene");
         let post = PostTurnInput {
@@ -611,11 +591,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_forgetting_runs_when_write_every_turn_disabled() {
+    async fn apply_forgetting_runs() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let mut config = MindConfig::default();
-        config.memory.write_every_turn = false;
-        config.memory.decay_enabled = true;
+        let config = MindConfig::default();
 
         let post = PostTurnInput {
             turn: TurnInput {
@@ -639,8 +617,6 @@ mod tests {
         // → only the LLM item should be persisted (remember is hint-only).
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
-        config.memory.llm_extraction_enabled = true;
-        config.memory.semantic_dedup_enabled = false;
         config.emotion.classifier_language = "en".into();
 
         let json = r#"{
@@ -692,8 +668,6 @@ mod tests {
     async fn llm_empty_falls_back_to_remember_pattern() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
-        config.memory.llm_extraction_enabled = true;
-        config.memory.semantic_dedup_enabled = false;
         config.emotion.classifier_language = "en".into();
 
         let provider = MockProvider::new(r#"{"candidates": []}"#);
@@ -731,8 +705,6 @@ mod tests {
     async fn llm_empty_does_not_persist_soft_signals_without_remember() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
-        config.memory.llm_extraction_enabled = true;
-        config.memory.semantic_dedup_enabled = false;
         config.emotion.classifier_language = "en".into();
 
         let provider = MockProvider::new(r#"{"candidates": []}"#);
@@ -770,8 +742,6 @@ mod tests {
     async fn llm_success_persists_llm_candidates() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
-        config.memory.llm_extraction_enabled = true;
-        config.memory.semantic_dedup_enabled = false;
         config.emotion.classifier_language = "en".into();
 
         let json = r#"{
@@ -823,8 +793,6 @@ mod tests {
     async fn llm_failure_falls_back_to_remember_pattern() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
-        config.memory.llm_extraction_enabled = true;
-        config.memory.semantic_dedup_enabled = false;
         config.emotion.classifier_language = "en".into();
 
         let provider = FailingProvider;
@@ -859,11 +827,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn llm_disabled_uses_remember_pattern() {
+    async fn no_llm_provider_uses_remember_pattern() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
-        config.memory.llm_extraction_enabled = false;
-        config.memory.semantic_dedup_enabled = false;
         config.emotion.classifier_language = "en".into();
 
         let post = PostTurnInput {
@@ -889,8 +855,6 @@ mod tests {
     async fn forget_safety_net_applies_when_llm_owns_turn() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
-        config.memory.llm_extraction_enabled = true;
-        config.memory.semantic_dedup_enabled = false;
         config.emotion.classifier_language = "en".into();
 
         let existing_id = store

@@ -5,7 +5,7 @@ use crate::error::EneRuntimeError;
 use crate::streaming::{self, PermissionDecision, UserInputResponse};
 use crate::types::{CancelError, RequestId, RunError, TurnId};
 use chrono::{DateTime, Utc};
-use ene_ai::{LlmProviderRegistry, create_openai_compatible_chat_provider};
+use ene_ai::{AiTaskKind, LlmProviderRegistry, create_task_chat_provider};
 use ene_config::CharacterCardV3;
 use ene_config::EneConfig;
 use ene_mind::commitments::CommitmentLedger;
@@ -108,12 +108,10 @@ pub enum EneCommand {
         /// Normalized observation from desktop (no raw screenshots).
         observation: ene_mind::ProactiveObservation,
     },
-    /// Hot-update proactive policy and provider routing (#103).
+    /// Hot-update proactive policy (#103). Provider routing comes from [`AiConfig`].
     UpdateProactiveSettings {
         /// Mind proactive policy.
         mind: ene_mind::ProactiveConfig,
-        /// Provider proactive routing.
-        provider: ene_ai::ProactiveProviderConfig,
     },
 }
 
@@ -421,8 +419,7 @@ impl EneHandle {
         let tool_config = config
             .get_section::<ene_tool_host::ToolConfig>()
             .unwrap_or_default();
-        let rag_config = config.get_section::<ToolRagConfig>().unwrap_or_default();
-        let needs_embedder = mem_config.enabled || (tool_config.enabled && rag_config.enabled);
+        let needs_embedder = mem_config.enabled || tool_config.enabled;
 
         // Fail-closed: memory / tool-RAG features require a working embedder.
         let embedder = if needs_embedder {
@@ -651,14 +648,13 @@ impl EneHandle {
             .map_err(|_| ActorDeadError)
     }
 
-    /// Hot-update proactive policy and provider routing in the running actor.
+    /// Hot-update proactive policy in the running actor.
     pub fn update_proactive_settings(
         &self,
         mind: ene_mind::ProactiveConfig,
-        provider: ene_ai::ProactiveProviderConfig,
     ) -> Result<(), ActorDeadError> {
         self.cmd_tx
-            .send(EneCommand::UpdateProactiveSettings { mind, provider })
+            .send(EneCommand::UpdateProactiveSettings { mind })
             .map_err(|_| ActorDeadError)
     }
 }
@@ -933,18 +929,18 @@ impl EneActor {
         }
 
         if self.proactive_llm.is_none() {
-            let provider_cfg = match self.config.get_section::<ene_ai::ProviderConfig>() {
+            let ai_cfg = match self.config.get_section::<ene_ai::AiConfig>() {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::debug!(
                         component = "Proactive",
                         error = %e,
-                        "Proactive provider config unavailable"
+                        "AI config unavailable for proactive handles"
                     );
                     return;
                 }
             };
-            match ene_ai::build_proactive_llm_handles(&provider_cfg).await {
+            match ene_ai::build_proactive_llm_handles(&ai_cfg).await {
                 Ok(handles) => self.proactive_llm = Some(handles),
                 Err(e) => {
                     tracing::warn!(
@@ -1169,24 +1165,12 @@ impl EneActor {
                 self.proactive.observation = observation;
                 true
             }
-            EneCommand::UpdateProactiveSettings { mind, provider } => {
-                let provider_changed = self
-                    .config
-                    .get_section::<ene_ai::ProviderConfig>()
-                    .ok()
-                    .is_none_or(|p| p.proactive != provider);
+            EneCommand::UpdateProactiveSettings { mind } => {
                 if let Ok(mut mind_cfg) = self.config.get_section::<ene_mind::MindConfig>() {
                     mind_cfg.proactive = mind;
                     let _ = self.config.set_section(&mind_cfg);
                 }
-                if let Ok(mut provider_cfg) = self.config.get_section::<ene_ai::ProviderConfig>() {
-                    provider_cfg.proactive = provider;
-                    let _ = self.config.set_section(&provider_cfg);
-                }
                 self.abort_proactive_decision();
-                if provider_changed && let Some(handles) = self.proactive_llm.take() {
-                    handles.shutdown().await;
-                }
                 true
             }
             EneCommand::PermissionDecision {
@@ -1387,16 +1371,13 @@ impl EneActor {
     }
 
     fn create_provider(&self) -> Result<Arc<dyn ene_ai::LlmProvider>, EneRuntimeError> {
-        let provider_config = self.config.get_section::<ene_ai::ProviderConfig>()?;
-        LlmProviderRegistry::create_provider(&provider_config.name, &self.config)
+        create_task_chat_provider(&self.config, AiTaskKind::Chat)
             .map(Arc::from)
             .map_err(EneRuntimeError::from)
     }
 
     fn create_proactive_provider(&self) -> Result<Arc<dyn ene_ai::LlmProvider>, EneRuntimeError> {
-        let provider_config = self.config.get_section::<ene_ai::ProviderConfig>()?;
-        let model = provider_config.proactive_generation_model();
-        create_openai_compatible_chat_provider(&self.config, Some(model), None)
+        create_task_chat_provider(&self.config, AiTaskKind::Proactive)
             .map(Arc::from)
             .map_err(EneRuntimeError::from)
     }
@@ -1404,13 +1385,6 @@ impl EneActor {
     // ── Split management ──
 
     async fn handle_manual_split(&mut self) -> Result<SplitResult, EneRuntimeError> {
-        let mind = self
-            .config
-            .get_section::<ene_mind::MindConfig>()
-            .unwrap_or_default();
-        if !mind.context.compression_enabled {
-            return Err(EneRuntimeError::CompressionRequired);
-        }
         if self.session.history().is_empty() {
             return Err(EneRuntimeError::from(EneSessionError::SplitNotNeeded));
         }
@@ -1453,8 +1427,6 @@ impl EneActor {
     }
 
     fn check_and_perform_split(&mut self, _user_input: &str) {
-        // Product path is compression-only; hard session-ID minting is not used.
-        // compression_enabled is required by MindConfig validation at open.
         self.check_and_trigger_compression();
     }
 
@@ -1462,12 +1434,12 @@ impl EneActor {
         let Ok(mem_config) = self.config.get_section::<ene_store::StoreConfig>() else {
             return;
         };
+        if !mem_config.enabled {
+            return;
+        }
         let Ok(mind) = self.config.get_section::<ene_mind::MindConfig>() else {
             return;
         };
-        if !mem_config.enabled || !mind.context.compression_enabled {
-            return;
-        }
         if self.pending_compression.is_some() {
             return;
         }
@@ -1734,33 +1706,36 @@ async fn build_tool_registry(
 fn init_embedding(
     config: &EneConfig,
 ) -> Result<Arc<dyn ene_ai::EmbeddingProvider>, ene_ai::EmbeddingError> {
-    let provider_config = config
-        .get_section::<ene_ai::ProviderConfig>()
-        .map_err(|e| {
-            ene_ai::EmbeddingError::Init(format!("Failed to load provider config: {e}"))
-        })?;
+    use ene_ai::ResolvedEmbedding;
 
-    if provider_config.embedding.backend.as_str() == "local" {
-        let local_cfg = &provider_config.embedding.local;
-        let model_dir = ene_config::models_dir();
-        let provider =
-            ene_ai::create_local_provider(&local_cfg.model, &local_cfg.quantization, model_dir)?;
-        Ok(Arc::from(provider))
-    } else {
-        let base_url = provider_config.resolve_base_url().map_err(|e| {
-            ene_ai::EmbeddingError::Init(format!(
-                "Failed to resolve base URL for cloud embedding: {e}"
-            ))
-        })?;
-        let api_key = provider_config.resolve_api_key();
-        let query_prefix = provider_config.embedding.query_prefix.clone();
-        Ok(Arc::new(ene_ai::CloudEmbeddingProvider::new(
+    let ai_config = config
+        .get_section::<ene_ai::AiConfig>()
+        .map_err(|e| ene_ai::EmbeddingError::Init(format!("Failed to load AI config: {e}")))?;
+    match ai_config
+        .resolve_embedding()
+        .map_err(|e| ene_ai::EmbeddingError::Init(e.to_string()))?
+    {
+        ResolvedEmbedding::Local {
+            model,
+            quantization,
+        } => {
+            let model_dir = ene_config::models_dir();
+            let provider = ene_ai::create_local_provider(&model, &quantization, model_dir)?;
+            Ok(Arc::from(provider))
+        }
+        ResolvedEmbedding::Cloud {
+            base_url,
+            api_key,
+            model,
+            dimensions,
+            query_prefix,
+        } => Ok(Arc::new(ene_ai::CloudEmbeddingProvider::new(
             &base_url,
             &api_key,
-            &provider_config.embedding.cloud.model,
-            provider_config.embedding.cloud.dimensions,
+            &model,
+            dimensions,
             query_prefix,
-        )))
+        ))),
     }
 }
 
@@ -1790,7 +1765,7 @@ async fn init_memory_store(
 
 /// Builds the `ToolRag` pipeline from the current config, embedder, and session state.
 ///
-/// Returns `None` when the pipeline is disabled. Logs an error
+/// Returns `None` when tool calling is disabled. Logs an error
 /// and returns `None` when the config has an invalid `forced`
 /// tool name (the malformed entry is dropped so a single bad
 /// name does not prevent the rest of the tool RAG from
@@ -1801,11 +1776,14 @@ fn init_tool_rag(
     embedder: &Arc<dyn ene_ai::EmbeddingProvider>,
     session: &ConversationSession,
 ) -> Option<Arc<ToolRag>> {
-    let rag_config = config.get_section::<ToolRagConfig>().unwrap_or_default();
-
-    if !rag_config.enabled {
+    let tool_config = config
+        .get_section::<ene_tool_host::ToolConfig>()
+        .unwrap_or_default();
+    if !tool_config.enabled {
         return None;
     }
+
+    let rag_config = ToolRagConfig::default();
 
     let store = session.memory.memory_store.clone();
     let opts = match ToolRagOptions::try_from(rag_config) {
@@ -1839,14 +1817,8 @@ mod tests {
             ..Default::default()
         };
         let _ = config.set_section(&tools);
-        let rag = ene_tool_rag::ToolRagConfig {
-            enabled: false,
-            ..Default::default()
-        };
-        let _ = config.set_section(&rag);
-        let mut provider = ene_ai::ProviderConfig::default();
-        provider.embedding.backend = "cloud".into();
-        let _ = config.set_section(&provider);
+        let ai = ene_ai::AiConfig::default();
+        let _ = config.set_section(&ai);
         config
     }
 

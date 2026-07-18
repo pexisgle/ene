@@ -5,7 +5,6 @@
 ## 現行ポリシー
 
 - **圧縮（必須の製品経路）**
-  - `mind.context.compression_enabled` は `true` 必須。さもなくば `EneHandle::open` の validation が失敗する。
   - 古いターンは `memory_spans` に圧縮される。
   - 連続性のため Session ID は安定したまま。
   - 手動 `/session split` は **コンテキスト圧縮**を起動する（同じ session id）。

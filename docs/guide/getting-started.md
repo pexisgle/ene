@@ -35,14 +35,15 @@ cargo run -p ene-desktop --release
 
 Desktop loads config softly when needed, opens an `EneHandle`, and plays VRM from Performance cues.
 
-## Configure a provider
+## Configure AI providers
 
 Settings load in order: compile-time defaults → OS user config (or local `assets/settings.json`) → `ENE_` environment variables.
 
 Minimum useful knobs:
 
-- `provider.base_url` / `provider.model` / `provider.api_key`
-- `character` — card name or path
+- `ai.providers.default` — `base_url` and `api_key` for your OpenAI-compatible API
+- `ai.tasks.chat` — `provider`, `model`, and optional `max_tokens`
+- `character` — folder name (e.g. `"Alicia"`) or card path
 - `store.enabled` — turn long-term memory on/off
 
 See [Configure](configure.md) for the short tour, and the [full settings reference](../reference/configuration/settings.md) for every field.

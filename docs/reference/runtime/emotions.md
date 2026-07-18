@@ -33,18 +33,17 @@ See `mind.emotion` in [settings.md](../configuration/settings.md):
 | Key | Role |
 |-----|------|
 | `enabled` | Master switch for engine-managed emotion |
-| `engine` | `deterministic`, `llm`, or `hybrid` (classifier) — see [Engine modes](#engine-modes) |
 | `decay_half_life_minutes` | PAD decay toward neutral between turns |
 | `expression_hysteresis_seconds` | Minimum hold time before expression / cue changes |
 | `llm_expression_is_advisory` | When true, stream tokens are accumulated for the arbiter instead of driving cues immediately |
 | `classifier_timeout_secs` / `classifier_min_confidence` | Post-turn async classifier budget and merge gate (#88) |
 | `classifier_language` | Prompt library locale for classifier and natural-dialogue contract (`en` / `ja`) |
-| `classifier_model` | Chat model for the classifier (default `google/gemini-2.5-flash-lite` on OpenRouter) |
-| `classifier_max_tokens` | Max completion tokens for classifier calls (`0` = no cap) |
+
+Classifier model and provider are resolved from `ai.tasks.classifier` (see [settings.md](../configuration/settings.md)).
 
 ### Post-turn async classifier
 
-When `engine` is `llm` or `hybrid`, Ene runs the affect classifier **after** the assistant response is produced.
+When `mind.emotion.enabled` is true, Ene runs the affect classifier **after** the assistant response is produced.
 
 - Input: turn-start `AffectState` snapshot + recent conversation history (including the current `user + assistant` exchange)
 - Output: absolute post-conversation estimates for `valence`, `arousal`, `irritation`, and `affinity`
@@ -57,19 +56,9 @@ At **INFO** level you should see:
 - `Post-turn affect classifier estimate complete` with the full estimate when classification succeeds
 - `Blended post-turn classifier estimate into affect` at the **next** turn start when the pending proposal is merged
 
-If you see no classifier logs, check that `mind.emotion.engine` is `hybrid` or `llm` (not `deterministic`).
+If you see no classifier logs, check that `mind.emotion.enabled` is true and `ai.tasks.classifier` is configured.
 
-### Engine modes
-
-| Mode | Pre-turn rules | Post-turn classifier |
-|------|----------------|----------------------|
-| `deterministic` | Yes (gratitude, insult, decay, …) | **No** |
-| `hybrid` (default) | Yes | Yes — estimate blended next turn |
-| `llm` | **No** (decay only) | Yes — estimate blended next turn |
-
-Use `hybrid` unless you explicitly want to disable either the rule-based path or the classifier.
-
-The classifier uses a **dedicated provider instance** (not the main stream client), strict JSON Schema output (`response_format` with `strict: true`), optional `classifier_max_tokens`, and resilient transport fallbacks for OpenRouter compatibility.
+The classifier uses a **dedicated provider instance** (not the main stream client), strict JSON Schema output (`response_format` with `strict: true`), and resilient transport fallbacks for OpenRouter compatibility.
 
 ## Token Compatibility Path
 

@@ -34,8 +34,6 @@ pub struct RecallPlannerOptions {
     pub min_score: f32,
     /// Half-life in days for recency decay.
     pub decay_half_life_days: f64,
-    /// Whether the downstream recall executor should run `HyDE` expansion.
-    pub use_hyde: bool,
 }
 
 impl RecallPlannerOptions {
@@ -48,7 +46,6 @@ impl RecallPlannerOptions {
             similarity_threshold: memory.recall_similarity_threshold.clamp(0.0, 1.0),
             min_score: memory.recall_min_score.clamp(0.0, 1.0),
             decay_half_life_days: memory.default_forgetting_half_life_days.max(0.0),
-            use_hyde: memory.use_hyde,
         }
     }
 }
@@ -101,7 +98,6 @@ impl RecallPlanner {
                 decay_half_life_days: options.decay_half_life_days,
                 query_affect: input.affect.and_then(query_affect),
             },
-            use_hyde: options.use_hyde,
         })
     }
 
@@ -110,8 +106,7 @@ impl RecallPlanner {
     /// Maps [`RecallSearchHints`] and scope fields onto [`Query`], filling
     /// hybrid weights / commitment boost from [`MindMemoryConfig`] (#123).
     /// Multi-query expansion and `required_kinds` filtering remain the
-    /// responsibility of downstream recall execution. `HyDE` blending is applied
-    /// by [`crate::recall::execute_hybrid_recall`] when `plan.use_hyde` is set.
+    /// responsibility of downstream recall execution.
     pub fn to_query<'a>(
         plan: &'a RecallPlan,
         embedding: Option<&'a [f32]>,
@@ -500,18 +495,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn use_hyde_hint_is_recorded_on_plan() {
-        let options = RecallPlannerOptions {
-            use_hyde: true,
-            ..RecallPlannerOptions::default()
-        };
-        let plan = RecallPlanner::plan(
-            &input_with_defaults("Tell me about our project", &[], None, &[]),
-            &options,
-        )
-        .expect("plan");
-
-        assert!(plan.use_hyde);
-    }
 }

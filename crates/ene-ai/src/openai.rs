@@ -4,9 +4,10 @@ use std::pin::Pin;
 use std::sync::OnceLock;
 use tokio_stream::{Stream, StreamExt};
 
-use crate::config::ProviderConfig;
+use crate::config::AiConfig;
 use crate::error::{LlmProviderError, map_openai_error};
 use crate::message::{LlmMessage, LlmResponseChunk, LlmToolCallChunk, UserMessagePart};
+use crate::resolve::ResolvedChat;
 use crate::traits::{
     EmbeddingError, EmbeddingKind, EmbeddingProvider, LlmProvider, LlmProviderFactory,
 };
@@ -471,6 +472,17 @@ impl LlmProvider for OpenAiProvider {
 /// Factory for the default `OpenAI` provider.
 pub struct OpenAiProviderFactory;
 
+/// Cognitive task kinds that map to [`AiConfig::tasks`] entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiTaskKind {
+    /// Main conversation chat.
+    Chat,
+    /// Post-turn affect classifier.
+    Classifier,
+    /// Proactive speech generation.
+    Proactive,
+}
+
 impl LlmProviderFactory for OpenAiProviderFactory {
     fn provider_name(&self) -> &'static str {
         "openai-compatible"
@@ -480,54 +492,36 @@ impl LlmProviderFactory for OpenAiProviderFactory {
         &self,
         config: &ene_config::EneConfig,
     ) -> Result<Box<dyn LlmProvider>, LlmProviderError> {
-        let provider_config = config.get_section::<ProviderConfig>().map_err(|e| {
-            LlmProviderError::Provider(format!("Failed to parse provider config: {e}"))
-        })?;
-
-        let base_url = provider_config
-            .resolve_base_url()
-            .map_err(|e| LlmProviderError::Provider(format!("Failed to resolve base URL: {e}")))?;
-
-        let api_key = provider_config.resolve_api_key();
-
-        Ok(Box::new(new_openai_chat_provider(
-            &base_url,
-            &api_key,
-            &provider_config.model,
-            provider_config.max_tokens,
-        )))
+        create_task_chat_provider(config, AiTaskKind::Chat)
     }
 }
 
-/// Create an OpenAI-compatible chat provider, optionally overriding the model name.
-///
-/// Used by the post-turn affect classifier so it can target a faster/cheaper model
-/// than the main conversation stream.
-pub fn create_openai_compatible_chat_provider(
+/// Build an OpenAI-compatible chat provider from resolved settings.
+#[must_use]
+pub fn create_chat_provider_from_resolved(resolved: &ResolvedChat) -> OpenAiProvider {
+    let max_tokens = resolved.max_tokens.unwrap_or(0);
+    new_openai_chat_provider(
+        &resolved.base_url,
+        &resolved.api_key,
+        &resolved.model,
+        max_tokens,
+    )
+}
+
+/// Build a chat provider for a named cognitive task.
+pub fn create_task_chat_provider(
     config: &ene_config::EneConfig,
-    model_override: Option<&str>,
-    max_tokens: Option<u32>,
+    task: AiTaskKind,
 ) -> Result<Box<dyn LlmProvider>, LlmProviderError> {
-    let provider_config = config
-        .get_section::<ProviderConfig>()
-        .map_err(|e| LlmProviderError::Provider(format!("Failed to parse provider config: {e}")))?;
-
-    let base_url = provider_config
-        .resolve_base_url()
-        .map_err(|e| LlmProviderError::Provider(format!("Failed to resolve base URL: {e}")))?;
-
-    let api_key = provider_config.resolve_api_key();
-    let model = model_override
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or(provider_config.model.as_str());
-
-    // Classifier/other overrides win when set; otherwise honor provider.max_tokens.
-    let effective_max = max_tokens
-        .filter(|&n| n > 0)
-        .unwrap_or(provider_config.max_tokens);
-    let provider = new_openai_chat_provider(&base_url, &api_key, model, effective_max);
-
-    Ok(Box::new(provider))
+    let ai_config = config
+        .get_section::<AiConfig>()
+        .map_err(|e| LlmProviderError::Provider(format!("Failed to parse AI config: {e}")))?;
+    let resolved = match task {
+        AiTaskKind::Chat => ai_config.resolve_chat()?,
+        AiTaskKind::Classifier => ai_config.resolve_classifier()?,
+        AiTaskKind::Proactive => ai_config.resolve_proactive_generation()?,
+    };
+    Ok(Box::new(create_chat_provider_from_resolved(&resolved)))
 }
 
 /// Cloud embedding provider.

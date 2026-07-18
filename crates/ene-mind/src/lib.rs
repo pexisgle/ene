@@ -101,7 +101,7 @@ pub mod lifecycle;
 pub use commitments::{CommitmentLedger, CommitmentSyncContext};
 /// Mind configuration section.
 pub use config::{
-    CharacterMemoryConfig, ContextConfig, EmotionConfig, EngineMode, MindConfig, MindMemoryConfig,
+    CharacterMemoryConfig, ContextConfig, EmotionConfig, MindConfig, MindMemoryConfig,
     ProactiveConfig, ProactiveDecisionConfig, ProactiveSourcesConfig, ToolGroundingConfig,
 };
 /// Context budget and compression types.
@@ -161,23 +161,19 @@ pub use prompt_packet::{PromptPacket, PromptSection, PromptSectionKind};
 /// Recall planning types.
 #[doc(no_inline)]
 pub use recall::{
-    EMOTIONAL_MATCH_REASON_THRESHOLD, LlmMemoryReranker, MemoryDiversifyOptions,
-    MemoryDiversifyPipeline, MemoryRerankError, MemoryRerankInput, MemoryRerankOptions,
-    MemoryRerankPipeline, MemoryReranker, PassthroughMemoryReranker, RecallBudgetHints, RecallPlan,
-    RecallPlanner, RecallPlannerInput, RecallPlannerOptions, RecallReason, RecallResultMapper,
-    RecallScopeFilter, RecallSearchHints, RecallTurn, RecalledMemory, explain_scored_memories,
-    format_recalled_content, infer_recall_reason, recall_content_qualifier,
+    EMOTIONAL_MATCH_REASON_THRESHOLD, MemoryDiversifyOptions, MemoryDiversifyPipeline,
+    RecallBudgetHints, RecallPlan, RecallPlanner, RecallPlannerInput, RecallPlannerOptions,
+    RecallReason, RecallResultMapper, RecallScopeFilter, RecallSearchHints, RecallTurn,
+    RecalledMemory, explain_scored_memories, format_recalled_content, infer_recall_reason,
+    recall_content_qualifier,
 };
 /// Session types absorbed from the former standalone session crate.
 #[doc(no_inline)]
 pub use session::{
     CardName, CharacterAsset, CharacterCardData, CharacterCardV3, ConversationSession,
-    EneSessionError, ExpressionDefinition, PendingSplitTask, ResolvedExpression, Role,
-    SessionBoundary, SessionConfig, SessionId, SplitReason, SplitResult, SplitScore,
-    SplitScoreWeights, SplitTaskInput, SummarizationConfig, Truncate, check_boundary,
-    compute_split_score, execute_split, expand_cbs_macros, extract_emotion_from_token,
-    generate_session_id, parse_performance_marker, poll_split_result, resolve_expressions,
-    spawn_split_task, split_text_and_special_tokens, strip_markers,
+    EneSessionError, ExpressionDefinition, ResolvedExpression, Role, SessionId, SplitReason,
+    SplitResult, Truncate, expand_cbs_macros, extract_emotion_from_token, generate_session_id,
+    parse_performance_marker, resolve_expressions, split_text_and_special_tokens, strip_markers,
 };
 /// Conversation summary result and LLM summarization entry point.
 #[doc(no_inline)]

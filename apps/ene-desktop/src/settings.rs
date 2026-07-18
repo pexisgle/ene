@@ -37,10 +37,18 @@ ene_config::define_label_enum!(
     }
 );
 
-#[derive(Debug, Clone, Serialize, Deserialize, ene_config::schemars::JsonSchema)]
-#[serde(default)]
-#[schemars(crate = "::ene_config::schemars")]
-pub struct GraphicsSection {
+ene_config::define_label_enum!(
+    pub enum GraphicsQuality {
+        Low => "Low",
+        #[default]
+        Medium => "Medium",
+        High => "High",
+    }
+);
+
+/// Resolved per-knob graphics settings derived from [`GraphicsQuality`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphicsResolved {
     pub mask_render_downsample: u32,
     pub target_fps: u32,
     pub shadow_quality: ShadowQuality,
@@ -48,15 +56,48 @@ pub struct GraphicsSection {
     pub debug_fps: u32,
 }
 
-impl Default for GraphicsSection {
-    fn default() -> Self {
-        Self {
-            mask_render_downsample: DEFAULT_MASK_RENDER_DOWNSAMPLE,
-            target_fps: DEFAULT_TARGET_FPS,
-            shadow_quality: DEFAULT_SHADOW_QUALITY,
-            antialiasing_mode: DEFAULT_ANTIALIASING_MODE,
-            debug_fps: DEFAULT_DEBUG_FPS,
+impl GraphicsQuality {
+    /// Maps a quality preset to concrete renderer settings.
+    #[must_use]
+    pub const fn resolved(self) -> GraphicsResolved {
+        match self {
+            Self::Low => GraphicsResolved {
+                mask_render_downsample: 8,
+                target_fps: 30,
+                shadow_quality: ShadowQuality::Low,
+                antialiasing_mode: AntialiasingMode::Off,
+                debug_fps: 15,
+            },
+            Self::Medium => GraphicsResolved {
+                mask_render_downsample: 6,
+                target_fps: 60,
+                shadow_quality: ShadowQuality::Medium,
+                antialiasing_mode: AntialiasingMode::Fxaa,
+                debug_fps: 30,
+            },
+            Self::High => GraphicsResolved {
+                mask_render_downsample: 4,
+                target_fps: 120,
+                shadow_quality: ShadowQuality::High,
+                antialiasing_mode: AntialiasingMode::Taa,
+                debug_fps: 60,
+            },
         }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ene_config::schemars::JsonSchema)]
+#[serde(default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct GraphicsSection {
+    pub quality: GraphicsQuality,
+}
+
+impl GraphicsSection {
+    /// Resolves the quality preset into concrete renderer knobs.
+    #[must_use]
+    pub fn resolved(&self) -> GraphicsResolved {
+        self.quality.resolved()
     }
 }
 
@@ -112,41 +153,29 @@ pub const WINDOW_WIDTH: u32 = 560;
     reason = "legacy window constants retained for transitional callers"
 )]
 pub const WINDOW_HEIGHT: u32 = 980;
-pub const MASK_RENDER_DOWNSAMPLE_CHOICES: [u32; 3] = [4, 6, 8];
-pub const DEFAULT_MASK_RENDER_DOWNSAMPLE: u32 = 8;
-pub const TARGET_FPS_CHOICES: [u32; 5] = [15, 30, 60, 120, 0];
-pub const DEFAULT_TARGET_FPS: u32 = 60;
-pub const SHADOW_QUALITY_CHOICES: [ShadowQuality; 3] = [
-    ShadowQuality::Low,
-    ShadowQuality::Medium,
-    ShadowQuality::High,
+pub const GRAPHICS_QUALITY_CHOICES: [GraphicsQuality; 3] = [
+    GraphicsQuality::Low,
+    GraphicsQuality::Medium,
+    GraphicsQuality::High,
 ];
-pub const DEFAULT_SHADOW_QUALITY: ShadowQuality = ShadowQuality::Medium;
-pub const ANTIALIASING_MODE_CHOICES: [AntialiasingMode; 4] = [
-    AntialiasingMode::Off,
-    AntialiasingMode::Fxaa,
-    AntialiasingMode::Smaa,
-    AntialiasingMode::Taa,
-];
-pub const DEFAULT_ANTIALIASING_MODE: AntialiasingMode = AntialiasingMode::Fxaa;
-pub const DEBUG_FPS_CHOICES: [u32; 4] = [15, 30, 60, 0];
-pub const DEFAULT_DEBUG_FPS: u32 = 30;
+
+pub fn cycle_graphics_quality(current: GraphicsQuality, step: isize) -> GraphicsQuality {
+    cycle_choice(&GRAPHICS_QUALITY_CHOICES, current, step)
+}
+
+pub fn graphics_quality_label(lang: Language, quality: GraphicsQuality) -> String {
+    let _ = lang;
+    match quality {
+        GraphicsQuality::Low => crate::i18n::low(),
+        GraphicsQuality::Medium => crate::i18n::medium(),
+        GraphicsQuality::High => crate::i18n::high(),
+    }
+}
+
 pub const LANGUAGE_CHOICES: [Language; 2] = [Language::En, Language::Ja];
 
 pub fn cycle_language(current: Language, step: isize) -> Language {
     cycle_choice(&LANGUAGE_CHOICES, current, step)
-}
-
-pub fn cycle_mask_render_downsample(current: u32, step: isize) -> u32 {
-    cycle_choice(&MASK_RENDER_DOWNSAMPLE_CHOICES, current, step)
-}
-
-pub fn cycle_target_fps(current: u32, step: isize) -> u32 {
-    cycle_choice(&TARGET_FPS_CHOICES, current, step)
-}
-
-pub fn cycle_debug_fps(current: u32, step: isize) -> u32 {
-    cycle_choice(&DEBUG_FPS_CHOICES, current, step)
 }
 
 pub fn debug_fps_label(lang: Language, debug_fps: u32) -> String {
@@ -158,28 +187,11 @@ pub fn debug_fps_label(lang: Language, debug_fps: u32) -> String {
     }
 }
 
-pub fn cycle_shadow_quality(current: ShadowQuality, step: isize) -> ShadowQuality {
-    cycle_choice(&SHADOW_QUALITY_CHOICES, current, step)
-}
-
-pub fn cycle_antialiasing_mode(current: AntialiasingMode, step: isize) -> AntialiasingMode {
-    cycle_choice(&ANTIALIASING_MODE_CHOICES, current, step)
-}
-
 fn cycle_choice<T: Copy + PartialEq>(choices: &[T], current: T, step: isize) -> T {
     let index = choices.iter().position(|c| *c == current).unwrap_or(1);
     let len = choices.len() as isize;
     let next = (index as isize + step).rem_euclid(len) as usize;
     choices[next]
-}
-
-pub fn target_fps_label(lang: Language, target_fps: u32) -> String {
-    let _ = lang;
-    if target_fps == 0 {
-        crate::i18n::unlimited()
-    } else {
-        format!("{target_fps} FPS")
-    }
 }
 
 // ── CLI parsing ──
@@ -489,10 +501,7 @@ impl CharacterSettings {
             self.character_state.character_position.z.clamp(-4.0, 3.0);
         self.character_state.look_at_strength =
             self.character_state.look_at_strength.clamp(0.0, 1.0);
-        self.graphics.mask_render_downsample =
-            cycle_mask_render_downsample(self.graphics.mask_render_downsample, 0);
-        self.graphics.target_fps = cycle_target_fps(self.graphics.target_fps, 0);
-        self.graphics.debug_fps = cycle_debug_fps(self.graphics.debug_fps, 0);
+        self.graphics.quality = cycle_graphics_quality(self.graphics.quality, 0);
     }
 
     pub fn save_per_character_settings(&self) {

@@ -1,8 +1,8 @@
 # ene-tool-rag — Tool RAG パイプライン
 
-動的ツール選択のための Tool RAG（Retrieval-Augmented Generation）パイプライン。利用可能なツールの数がLLMのコンテキスト予算を超える場合、`ToolRag` は検索拡張生成（RAG）による選択ステップを実行します: 埋め込み → オプションのHyDE拡張 → 重み付き多フィールド類似度 → オプションのクロスエンコーダーによるリランク → 上位N件。
+利用可能なツール数が LLM のコンテキスト予算を超える場合、`ToolRag` が retrieval-augmented 選択を実行します: 埋め込み → 重み付きマルチフィールド類似度 → embedding cosine rerank → 上位 N 件。
 
-**依存関係**: `ene-ai`（埋め込みプロバイダー、HyDE、リランク）、`ene-store`（永続ツール埋め込みストレージ）、`ene-tool-proto`（ワイヤー型）、`ene-config`。
+**依存**: `ene-ai`（埋め込みプロバイダ）、`ene-store`（永続ツール埋め込みストレージ）、`ene-tool-proto`（ワイヤ型）、`ene-config`。
 
 ---
 
@@ -21,15 +21,15 @@ pub struct ToolRag {
 
 | メソッド | シグネチャ | 説明 |
 |--------|-----------|-------------|
-| `new` | `pub fn new(embedder: Arc<dyn EmbeddingProvider>, store: Option<Arc<MemoryStore>>, opts: ToolRagOptions) -> Self` | すでに解決済みの `ToolRagOptions` がある場合の直接コンストラクタ。 |
-| `from_config` | `pub fn from_config(embedder: Arc<dyn EmbeddingProvider>, store: Option<Arc<MemoryStore>>, config: ToolRagConfig) -> Result<Self, ToolRagError>` | 設定向けの `ToolRagConfig` から `ToolRagOptions` を構築する（`forced` 用に `Vec<String>` → `Vec<ToolName>` へ変換）し、パイプラインを構築する。 |
-| `ensure_index` | `pub async fn ensure_index(&self, specs: &[ToolSpec], profiles: &[ToolRagProfile]) -> Result<(), EmbeddingError>` | specs + profiles に対して BLAKE3 ハッシュを計算する。前回の呼び出しから変化がなければ高速な no-op になる。変化があれば、各 `ToolRagProfile` からフィールドごとのベクトル（`summary`、`description`、`capability`、`example`、`negative`）を（再）埋め込みして保存する。 |
+| `new` | `pub fn new(embedder: Arc<dyn EmbeddingProvider>, store: Option<Arc<MemoryStore>>, opts: ToolRagOptions) -> Self` | 解決済み `ToolRagOptions` があるときの直接コンストラクタ。 |
+| `from_config` | `pub fn from_config(embedder: Arc<dyn EmbeddingProvider>, store: Option<Arc<MemoryStore>>, config: ToolRagConfig) -> Result<Self, ToolRagError>` | `ToolRagConfig` から `ToolRagOptions` を構築（`forced` の `Vec<String>` → `Vec<ToolName>` 変換を含む）し、パイプラインを構築する。 |
+| `ensure_index` | `pub async fn ensure_index(&self, specs: &[ToolSpec], profiles: &[ToolRagProfile]) -> Result<(), EmbeddingError>` | specs + profiles の BLAKE3 ハッシュを計算。前回から変化がなければ高速 no-op。変化があれば各 `ToolRagProfile` のフィールドベクトル（`summary`, `description`, `capability`, `example`, `negative`）を（再）埋め込み・保存する。 |
 | `select` | `pub async fn select(&self, query: &str) -> Vec<ToolSpec>` | 内部で `query` を埋め込み、`select_with_embedding` に委譲する。 |
-| `select_with_embedding` | `pub async fn select_with_embedding(&self, query: &str, query_embedding: &[f32]) -> Vec<ToolSpec>` | （`query_embedding` を使った）重み付きフィールド単位の類似度スコアリングに加え、オプションの HyDE ブレンディング、カテゴリごとの制限、`top_k` カット、リランクを実行し、`opts.min_similarity` を上回る上位 `opts.final_n` 件のツールを返す。`opts.forced` のツールは常に含まれる。 |
-| `start_background_indexer` | `pub fn start_background_indexer(self: &Arc<Self>, specs: Vec<ToolSpec>, profiles: Vec<ToolRagProfile>)` | `ensure_index` を呼び出してキャッシュをウォームアップするバックグラウンドタスクを生成する。即座に処理を返す。 |
-| `stats` | `pub async fn stats(&self) -> ToolRagStats` | 直前の `select`/`select_with_embedding` 呼び出しのスナップショット: ヒット数、インデックスサイズ、最高類似度。 |
-| `opts` | `pub fn opts(&self) -> &ToolRagOptions` | 解決済みのオプションを返す。 |
-| `has_store` | `pub fn has_store(&self) -> bool` | バックの `MemoryStore` が存在するかどうか（RAGは再起動後も埋め込みを永続化するために必要）。 |
+| `select_with_embedding` | `pub async fn select_with_embedding(&self, query: &str, query_embedding: &[f32]) -> Vec<ToolSpec>` | `query_embedding` を使った重み付きフィールド類似度スコアリング、カテゴリ別上限、`top_k` 切り詰め、候補が複数ある場合の embedding cosine rerank を実行し、`opts.min_similarity` 以上の上位 `opts.final_n` ツールと `opts.forced` を返す。 |
+| `start_background_indexer` | `pub fn start_background_indexer(self: &Arc<Self>, specs: Vec<ToolSpec>, profiles: Vec<ToolRagProfile>)` | `ensure_index` でキャッシュを温めるバックグラウンドタスクを spawn し、即座に戻る。 |
+| `stats` | `pub async fn stats(&self) -> ToolRagStats` | 直近の `select` / `select_with_embedding` のスナップショット（ヒット数、インデックスサイズ、最高類似度）。 |
+| `opts` | `pub fn opts(&self) -> &ToolRagOptions` | 解決済みオプションを返す。 |
+| `has_store` | `pub fn has_store(&self) -> bool` | バックエンド `MemoryStore` が付いているか（再起動後も埋め込みを保持するには必要）。 |
 
 ---
 
@@ -38,27 +38,23 @@ pub struct ToolRag {
 ```rust
 #[derive(Debug, Clone)]
 pub struct ToolRagOptions {
-    pub enabled: bool,
     pub top_k: usize,
     pub final_n: usize,
-    pub use_hyde: bool,
-    pub use_rerank: bool,
     pub rerank_candidates: usize,
     pub min_similarity: f32,
-    pub background_index_on_startup: bool,
     pub forced: Vec<ToolName>,
     pub weights: FieldWeights,
     pub per_category_limits: HashMap<String, usize>,
 }
 ```
 
-`TryFrom<ToolRagConfig>` を実装 — すべての強制ツール名が有効な `ToolName` であることを検証する。
+`TryFrom<ToolRagConfig>` を実装。forced ツール名が無効な `ToolName` の場合はエラー。
 
 ---
 
 ## `FieldWeights`
 
-各埋め込みフィールドがツールの関連性スコアにどれだけ寄与するかを制御する。マイナスの重み（例: `negative`）は、ハードな除外ではなくソフトなペナルティとして機能する。
+各埋め込みフィールドがツール関連度スコアに与える重み。`negative` のような負の重みはハード除外ではなくソフトペナルティとして働く。
 
 ```rust
 #[derive(Debug, Clone)]
@@ -68,12 +64,10 @@ pub struct FieldWeights {
     pub capability: f32,
     pub example: f32,
     pub negative: f32,
-    pub hyde: f32,
-    pub hyde_blend: f32,
 }
 ```
 
-シリアライズ可能な設定型からの変換用に `From<FieldWeightsConfig>` を実装する。
+シリアライズ可能な設定型からの変換に `From<FieldWeightsConfig>` を実装。
 
 ---
 
@@ -92,20 +86,16 @@ pub struct ToolRagStats {
 
 ## 設定型
 
-`settings.json` の `[tools.rag]` セクションに対応し、`HasConfigKey` トレイトを用いてパス `&["tools", "rag"]` で読み込まれる。
+`ToolRagConfig` はコード既定値のみを保持（公開 `settings.json` には含まれない）。
 
 ### `ToolRagConfig`
 
 ```rust
 pub struct ToolRagConfig {
-    pub enabled: bool,
     pub top_k: usize,
     pub final_n: usize,
-    pub use_hyde: bool,
-    pub use_rerank: bool,
     pub rerank_candidates: usize,
     pub min_similarity: f32,
-    pub background_index_on_startup: bool,
     pub forced: Vec<String>,
     pub weights: FieldWeightsConfig,
     pub per_category_limits: HashMap<String, usize>,
@@ -121,12 +111,10 @@ pub struct FieldWeightsConfig {
     pub capability: f32,
     pub example: f32,
     pub negative: f32,
-    pub hyde: f32,
-    pub hyde_blend: f32,
 }
 ```
 
-`FieldWeights` のシリアライズ可能なカウンターパート — `impl From<FieldWeightsConfig> for FieldWeights` で変換される。
+`FieldWeights` のシリアライズ可能な対応型。`impl From<FieldWeightsConfig> for FieldWeights` で相互変換。
 
 ---
 
@@ -140,21 +128,21 @@ pub enum ToolRagError {
 }
 ```
 
-設定に無効な強制ツール名が含まれている場合に `ToolRagOptions::try_from` および `ToolRag::from_config` から返される。
+forced ツール名が無効なとき、`ToolRagOptions::try_from` と `ToolRag::from_config` から返る。
 
 ---
 
-## 使い方
+## 使用例
 
-`ene-runtime` が `EneHandle::open` 時に構築する:
+`ene-runtime` が `EneHandle::open` 時に、ツールと embedder が利用可能な場合に構築する:
 
 ```rust
-let rag_config = config.get_section::<ToolRagConfig>().unwrap_or_default();
+let rag_config = ToolRagConfig::default();
 let opts = ToolRagOptions::try_from(rag_config)?;
 let rag = Arc::new(ToolRag::new(embedder.clone(), store, opts));
 ```
 
-ストリーミングエンジンがLLM推論の前に関連ツールを選択するために使用する:
+ストリーミングエンジンが LLM 推論前に関連ツールを選ぶ:
 
 ```rust
 let tools = match &tool_rag {
@@ -165,11 +153,11 @@ let tools = match &tool_rag {
 
 ---
 
-## 関連ドキュメント
+## 関連
 
-- [`ene-tool-host`](./ene-tool-host.md) — ツールプロセスライフサイクル管理（RAGのコンシューマ）
-- [`ene-ai`](./ene-ai.md) — パイプラインが使用する埋め込み・リランクプロバイダー
+- [`ene-tool-host`](./ene-tool-host.md) — ツールプロセスライフサイクル管理（RAG 利用側）
+- [`ene-ai`](./ene-ai.md) — パイプラインで使う埋め込みプロバイダ
 - [`ene-store`](./ene-store.md) — 永続埋め込みストレージ（`tool_embedding_index` テーブル）
-- [`ene-tool-proto`](./ene-tool-proto.md) — `ToolSpec`、`ToolName`、`EmbeddingField` 型
-- [`ene-config`](./ene-config.md) — 設定読み込み（`ToolRagConfig`、`HasConfigKey`）
+- [`ene-tool-proto`](./ene-tool-proto.md) — `ToolSpec`, `ToolName`, `EmbeddingField` 型
+- [`ene-config`](./ene-config.md) — 設定読み込み
 - [ツールシステム概要](../tools/overview.md)

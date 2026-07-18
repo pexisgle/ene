@@ -1,6 +1,14 @@
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 
+const fn default_max_rounds() -> usize {
+    10
+}
+
+const fn default_timeout_ms() -> u64 {
+    60_000
+}
+
 fn default_tools() -> HashMap<String, ToolEntry> {
     ["fs", "web", "browser", "utility", "app"]
         .into_iter()
@@ -36,9 +44,13 @@ ene_config::define_config!(
         /// Whether tool calling is enabled globally.
         pub enabled: bool = true,
         /// Maximum number of sequential tool calls per turn.
-        pub max_rounds: usize = 10,
+        #[serde(skip_deserializing, default = "default_max_rounds", skip_serializing)]
+        #[schemars(skip)]
+        pub max_rounds: usize = default_max_rounds(),
         /// Tool call execution timeout in milliseconds.
-        pub timeout_ms: u64 = 60_000,
+        #[serde(skip_deserializing, default = "default_timeout_ms", skip_serializing)]
+        #[schemars(skip)]
+        pub timeout_ms: u64 = default_timeout_ms(),
         /// Per-tool enable/disable map with optional extra config.
         pub list: HashMap<String, ToolEntry> = default_tools(),
         /// MCP servers.

@@ -59,7 +59,7 @@ Unknown fields are ignored. Parse / timeout / provider failures are fail-closed:
 - Proactive turns **must not** insert a synthetic user message into `ConversationSession`.
 - Only the assistant response is written to history / `conversation_logs` so later user turns can see it.
 - `PostTurnInput` / memory writer must not treat an empty user message as a memory candidate.
-- Proactive generation uses `provider.proactive.generation_model` when set (via OpenAI-compatible chat provider override); otherwise `provider.model`.
+- Proactive generation is routed via `ai.tasks.proactive` when set; otherwise `ai.tasks.chat` (see **Model routing** below).
 - Internal companion directives are injected as **system** messages during generation; they are not stored as user history, not embedded, and not passed to memory writers.
 - `generation_timeout_seconds` caps proactive generation wall time (outer timeout wins over provider defaults).
 - In-flight decision tasks are aborted when a user turn starts or the actor shuts down.
@@ -90,12 +90,15 @@ Each source has an independent enable flag. When disabled, desktop must not capt
 
 ### Model routing
 
-| Role | Backend |
-|---|---|
-| Decision | `provider.proactive.decision.backend`: `llama_cpp` \| `cloud` \| `disabled` |
-| Generation | `provider.proactive.generation_model` if set, else `provider.model` |
+Model routing lives under `ai.tasks` in settings (see [Configuration](../configuration/settings.md#ai--provider-registry-and-task-routing)):
 
-`llama_cpp` loads a GGUF in-process via llama-cpp-2. `acceleration` is `auto` / `vulkan` / `cuda` / `cpu`. On local failure, follow configured `fallback` (`disabled` or `cloud`) — never silently upload observation context to the cloud when fallback is `disabled`.
+| Role | Config |
+|---|---|
+| Generation | `ai.tasks.proactive` if set, else `ai.tasks.chat` |
+| Classifier (affect) | `ai.tasks.classifier` if set, else `ai.tasks.chat` |
+| Decision | Provider referenced by `ai.tasks.proactive` (or chat provider when `proactive` is `null`): `local_gguf` with non-empty `model_path` → in-process GGUF; otherwise cloud decision via the chat provider |
+
+`local_gguf` loads a GGUF in-process via llama-cpp-2. `acceleration` is `auto` / `vulkan` / `cuda` / `cpu`. On local load failure the decision backend falls back to disabled (fail-closed) — never silently upload observation context to the cloud.
 
 GGUF weights are **not** bundled with the app; paths are configured by the user. No external `llama-server` binary is required.
 

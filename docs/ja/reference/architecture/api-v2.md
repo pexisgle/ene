@@ -127,7 +127,7 @@ handle.diagnostics() -> &EneDiagnostics;
 ## 移行メモ
 
 - 二重パイプライン fallback なし: 埋め込み未初期化で memory 機能が必要な場合は fail closed
-- **文脈境界は compression-only:** `mind.context.compression_enabled` は `EneHandle::open` 時点で `true` 必須（さもなくば validation 失敗）。hard session-ID 発行 / hard-split は製品経路ではなく、`ene-runtime` は hard-split タスクを起動しない
+- **文脈境界は compression-only:** 文脈境界はローリング圧縮のみを使用する。hard session-ID 発行 / hard-split は製品経路ではなく、`ene-runtime` は hard-split タスクを起動しない
 - **Cancel:** ストリームタスクを即 abort し、進行中の session 更新は破棄する。`Terminal::Cancelled` は最大一度
 - 単一の `HistoryEntry { role: Role, content: String }` を mind + runtime snapshot で共有
 - 公開互換 alias や移行用 feature/config は作らない — 呼び出し側を同一変更で更新

@@ -35,14 +35,15 @@ cargo run -p ene-desktop --release
 
 Desktop は必要なタイミングで設定を読み込み、`EneHandle` を開いて、Performance キューに従って VRM を再生します。
 
-## プロバイダを設定する
+## AI プロバイダを設定する
 
 設定の読み込み順: コンパイル時デフォルト → OS ユーザー設定（または開発時のローカル `assets/settings.json`）→ `ENE_` 環境変数。
 
 まず設定する項目:
 
-- `provider.base_url` / `provider.model` / `provider.api_key`
-- `character` — カード名またはパス
+- `ai.providers.default` — OpenAI 互換 API の `base_url` と `api_key`
+- `ai.tasks.chat` — `provider`、`model`、任意の `max_tokens`
+- `character` — フォルダ名（例: `"Alicia"`）またはカードパス
 - `store.enabled` — 長期記憶の有効/無効
 
 短い案内は [設定](configure.md)、全フィールドは [設定リファレンス](../reference/configuration/settings.md)。

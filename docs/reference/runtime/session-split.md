@@ -5,7 +5,6 @@
 ## Current Policy
 
 - **Compression (required product path)**
-  - `mind.context.compression_enabled` must be `true`. `EneHandle::open` fails validation otherwise.
   - Old turns are compressed into `memory_spans`.
   - Session ID remains stable for continuity.
   - Manual `/session split` triggers **context compression** (same session id).

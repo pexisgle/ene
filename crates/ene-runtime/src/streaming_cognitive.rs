@@ -4,7 +4,7 @@ use ene_ai::LlmToolCallChunk;
 use ene_config::PromptLibrary;
 use ene_mind::memory_writer::candidate::{ToolResultSummary, TurnInput};
 use ene_mind::{
-    CognitionEngine, ComposePrefetch, EngineMode, HistoryEntry, MindConfig, OwnedPostTurnInput,
+    CognitionEngine, ComposePrefetch, HistoryEntry, MindConfig, OwnedPostTurnInput,
     OwnedTurnInput, PostTurnInput, TurnContext, character::CharacterProcessor,
     character::compute_card_memory_hash, load_active_scene_summary,
 };
@@ -801,12 +801,9 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             if !is_proactive
                 && let Some(classifier_store) = mem_store.clone()
                 && mind.emotion.enabled
-                && matches!(mind.emotion.engine, EngineMode::Llm | EngineMode::Hybrid)
                 && !assistant_content.trim().is_empty()
             {
                 let classifier_config = config.clone();
-                let classifier_model = mind.emotion.classifier_model.clone();
-                let classifier_max_tokens = mind.emotion.classifier_max_tokens;
                 let classifier_lang = mind.emotion.classifier_language.clone();
                 let classifier_timeout_secs = mind.emotion.classifier_timeout_secs;
                 let classifier_character_id = card_name.clone();
@@ -831,8 +828,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     let started = std::time::Instant::now();
                     match ene_mind::emotion::classifier::classify_for_config(
                         &classifier_config,
-                        classifier_model.as_deref(),
-                        classifier_max_tokens,
+                        None,
+                        0,
                         &classifier_context,
                         classifier_timeout_secs,
                         &classifier_lang,

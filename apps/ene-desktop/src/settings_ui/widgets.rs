@@ -7,11 +7,8 @@
 use crate::ai_bridge::AiBridge;
 use crate::character_state::{AnimationControl, EmotionCommand, EmotionQueue};
 use crate::component::ui::UiStateComponent;
-#[cfg(target_os = "linux")]
-use crate::settings::cycle_mask_render_downsample;
 use crate::settings::{
-    AntialiasingMode, CharacterSettings, ShadowQuality, cycle_antialiasing_mode, cycle_debug_fps,
-    cycle_shadow_quality, cycle_target_fps, target_fps_label,
+    CharacterSettings, GraphicsQuality, cycle_graphics_quality, graphics_quality_label,
 };
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
@@ -28,16 +25,8 @@ pub enum SettingsAction {
     TogglePlay,
     #[cfg(target_os = "linux")]
     ToggleDebugOverlay,
-    #[cfg(target_os = "linux")]
-    MaskDownsampleDown,
-    #[cfg(target_os = "linux")]
-    MaskDownsampleUp,
-    TargetFpsDown,
-    TargetFpsUp,
-    ShadowQualityDown,
-    ShadowQualityUp,
-    AntialiasingModeDown,
-    AntialiasingModeUp,
+    GraphicsQualityDown,
+    GraphicsQualityUp,
     LookAtStrengthDown,
     LookAtStrengthUp,
     ModelScaleDown,
@@ -58,8 +47,6 @@ pub enum SettingsAction {
     /// colliders (debug)" checkbox on the Character page.
     ToggleColliderDebug,
     ToggleInputRegionDebug,
-    DebugFpsDown,
-    DebugFpsUp,
     LanguageDown,
     LanguageUp,
 }
@@ -121,44 +108,12 @@ pub fn apply_action(
             }
             settings.mark_dirty();
         }
-        #[cfg(target_os = "linux")]
-        SettingsAction::MaskDownsampleDown => {
-            settings.graphics.mask_render_downsample =
-                cycle_mask_render_downsample(settings.graphics.mask_render_downsample, -1);
+        SettingsAction::GraphicsQualityDown => {
+            settings.graphics.quality = cycle_graphics_quality(settings.graphics.quality, -1);
             settings.mark_dirty();
         }
-        #[cfg(target_os = "linux")]
-        SettingsAction::MaskDownsampleUp => {
-            settings.graphics.mask_render_downsample =
-                cycle_mask_render_downsample(settings.graphics.mask_render_downsample, 1);
-            settings.mark_dirty();
-        }
-        SettingsAction::TargetFpsDown => {
-            settings.graphics.target_fps = cycle_target_fps(settings.graphics.target_fps, -1);
-            settings.mark_dirty();
-        }
-        SettingsAction::TargetFpsUp => {
-            settings.graphics.target_fps = cycle_target_fps(settings.graphics.target_fps, 1);
-            settings.mark_dirty();
-        }
-        SettingsAction::ShadowQualityDown => {
-            settings.graphics.shadow_quality =
-                cycle_shadow_quality(settings.graphics.shadow_quality, -1);
-            settings.mark_dirty();
-        }
-        SettingsAction::ShadowQualityUp => {
-            settings.graphics.shadow_quality =
-                cycle_shadow_quality(settings.graphics.shadow_quality, 1);
-            settings.mark_dirty();
-        }
-        SettingsAction::AntialiasingModeDown => {
-            settings.graphics.antialiasing_mode =
-                cycle_antialiasing_mode(settings.graphics.antialiasing_mode, -1);
-            settings.mark_dirty();
-        }
-        SettingsAction::AntialiasingModeUp => {
-            settings.graphics.antialiasing_mode =
-                cycle_antialiasing_mode(settings.graphics.antialiasing_mode, 1);
+        SettingsAction::GraphicsQualityUp => {
+            settings.graphics.quality = cycle_graphics_quality(settings.graphics.quality, 1);
             settings.mark_dirty();
         }
         SettingsAction::LookAtStrengthDown => {
@@ -205,14 +160,6 @@ pub fn apply_action(
                 ui_state.0.show_input_region_debug = !ui_state.0.show_input_region_debug;
             }
         }
-        SettingsAction::DebugFpsDown => {
-            settings.graphics.debug_fps = cycle_debug_fps(settings.graphics.debug_fps, -1);
-            settings.mark_dirty();
-        }
-        SettingsAction::DebugFpsUp => {
-            settings.graphics.debug_fps = cycle_debug_fps(settings.graphics.debug_fps, 1);
-            settings.mark_dirty();
-        }
         SettingsAction::LanguageDown => {
             settings.language = crate::settings::cycle_language(settings.language, -1);
             crate::i18n::select_language(settings.language);
@@ -244,27 +191,8 @@ fn adjust_f32(value: &mut f32, delta: f32) {
     *value += delta;
 }
 
-pub fn format_fps_label(lang: crate::settings::Language, fps: u32) -> String {
-    target_fps_label(lang, fps)
-}
-
-pub fn format_shadow_label(lang: crate::settings::Language, quality: ShadowQuality) -> String {
-    let _ = lang;
-    match quality {
-        ShadowQuality::Low => crate::i18n::low(),
-        ShadowQuality::Medium => crate::i18n::medium(),
-        ShadowQuality::High => crate::i18n::high(),
-    }
-}
-
-pub fn format_aa_label(lang: crate::settings::Language, mode: AntialiasingMode) -> String {
-    let _ = lang;
-    match mode {
-        AntialiasingMode::Off => crate::i18n::off(),
-        AntialiasingMode::Fxaa => "FXAA".to_string(),
-        AntialiasingMode::Smaa => "SMAA".to_string(),
-        AntialiasingMode::Taa => "TAA".to_string(),
-    }
+pub fn format_quality_label(lang: crate::settings::Language, quality: GraphicsQuality) -> String {
+    graphics_quality_label(lang, quality)
 }
 
 /// Push the per-character default expression into the

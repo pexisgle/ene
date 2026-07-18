@@ -166,9 +166,6 @@ pub fn evaluate_compression_trigger(
     turn_count: usize,
     history_len: usize,
 ) -> Option<CompressionReason> {
-    if !config.compression_enabled {
-        return None;
-    }
     if turn_count >= config.scene_turn_threshold {
         return Some(CompressionReason::TurnThreshold { turn_count });
     }
@@ -381,15 +378,6 @@ mod tests {
             reason,
             Some(CompressionReason::TurnThreshold { .. })
         ));
-    }
-
-    #[test]
-    fn trigger_disabled_when_compression_off() {
-        let config = ContextConfig {
-            compression_enabled: false,
-            ..Default::default()
-        };
-        assert!(evaluate_compression_trigger(&config, 100, 100).is_none());
     }
 
     #[test]

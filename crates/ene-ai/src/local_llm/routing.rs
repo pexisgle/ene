@@ -1,18 +1,21 @@
 //! Decision provider routing for proactive speech (#165 / #171).
 
-use super::LocalLlamaCppProvider;
-use crate::config::{
-    ProactiveDecisionBackend, ProactiveDecisionFallback, ProactiveDecisionProviderConfig,
-    ProviderConfig,
-};
+use super::{LocalGgufLoadParams, LocalLlamaCppProvider};
+use crate::config::{AiConfig, AiProviderDef};
 use crate::error::LlmProviderError;
 use crate::message::{LlmMessage, LlmResponseChunk};
 use crate::openai::OpenAiProvider;
+use crate::resolve::ResolvedChat;
 use crate::traits::LlmProvider;
 use async_trait::async_trait;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_stream::Stream;
+
+const LOCAL_STARTUP_TIMEOUT_SECS: u64 = 60;
+const LOCAL_REQUEST_TIMEOUT_SECS: u64 = 20;
+const DECISION_MAX_TOKENS: u32 = 256;
 
 /// Which decision backend is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,7 +24,7 @@ pub enum DecisionProviderKind {
     LlamaCpp,
     /// Cloud OpenAI-compatible.
     Cloud,
-    /// Always silent.
+    /// Always silent (local load failed with disabled fallback).
     Disabled,
 }
 
@@ -84,25 +87,59 @@ impl ProactiveLlmHandles {
     }
 }
 
-/// Build decision + generation routing from [`ProviderConfig`].
+/// Build decision + generation routing from [`AiConfig`].
 ///
-/// Local failures respect `fallback`: `disabled` → error (caller fail-closes);
-/// `cloud` → cloud decision provider when credentials allow.
+/// Local GGUF load failures fall back to [`DisabledDecisionProvider`] (fail-closed).
 pub async fn build_proactive_llm_handles(
-    provider: &ProviderConfig,
+    config: &AiConfig,
 ) -> Result<ProactiveLlmHandles, LlmProviderError> {
-    let generation_model = provider.proactive_generation_model().to_string();
-    let decision_cfg = &provider.proactive.decision;
+    let generation = config.resolve_proactive_generation()?;
+    let generation_model = generation.model.clone();
 
-    match decision_cfg.backend {
-        ProactiveDecisionBackend::Disabled => Ok(ProactiveLlmHandles {
-            decision: Arc::new(DisabledDecisionProvider),
-            decision_kind: DecisionProviderKind::Disabled,
-            local: None,
-            generation_model,
-        }),
-        ProactiveDecisionBackend::Cloud => {
-            let cloud = build_cloud_decision_provider(provider, decision_cfg)?;
+    let decision_provider = decision_provider_def(config)?;
+    match decision_provider {
+        AiProviderDef::LocalGguf {
+            model_path,
+            acceleration,
+            gpu_layers,
+            context_size,
+            ..
+        } if !model_path.trim().is_empty() => {
+            let params = LocalGgufLoadParams {
+                model_path: model_path.clone(),
+                acceleration: *acceleration,
+                gpu_layers: gpu_layers.clone(),
+                context_size: *context_size,
+                request_timeout_seconds: LOCAL_REQUEST_TIMEOUT_SECS,
+            };
+            match start_local(&params).await {
+                Ok(local) => {
+                    let arc = Arc::new(local);
+                    let decision: Arc<dyn LlmProvider> = arc.clone();
+                    Ok(ProactiveLlmHandles {
+                        decision,
+                        decision_kind: DecisionProviderKind::LlamaCpp,
+                        local: Some(arc),
+                        generation_model,
+                    })
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        component = "LocalLlamaCpp",
+                        error = %e,
+                        "Local decision backend failed; falling back to disabled"
+                    );
+                    Ok(ProactiveLlmHandles {
+                        decision: Arc::new(DisabledDecisionProvider),
+                        decision_kind: DecisionProviderKind::Disabled,
+                        local: None,
+                        generation_model,
+                    })
+                }
+            }
+        }
+        _ => {
+            let cloud = build_cloud_decision_provider(config)?;
             Ok(ProactiveLlmHandles {
                 decision: cloud,
                 decision_kind: DecisionProviderKind::Cloud,
@@ -110,43 +147,23 @@ pub async fn build_proactive_llm_handles(
                 generation_model,
             })
         }
-        ProactiveDecisionBackend::LlamaCpp => match start_local(decision_cfg).await {
-            Ok(local) => {
-                let arc = Arc::new(local);
-                let decision: Arc<dyn LlmProvider> = arc.clone();
-                Ok(ProactiveLlmHandles {
-                    decision,
-                    decision_kind: DecisionProviderKind::LlamaCpp,
-                    local: Some(arc),
-                    generation_model,
-                })
-            }
-            Err(e) => match decision_cfg.fallback {
-                ProactiveDecisionFallback::Disabled => Err(e),
-                ProactiveDecisionFallback::Cloud => {
-                    tracing::warn!(
-                        component = "LocalLlamaCpp",
-                        error = %e,
-                        "Local decision backend failed; falling back to cloud"
-                    );
-                    let cloud = build_cloud_decision_provider(provider, decision_cfg)?;
-                    Ok(ProactiveLlmHandles {
-                        decision: cloud,
-                        decision_kind: DecisionProviderKind::Cloud,
-                        local: None,
-                        generation_model,
-                    })
-                }
-            },
-        },
     }
 }
 
+fn decision_provider_def(config: &AiConfig) -> Result<&AiProviderDef, LlmProviderError> {
+    if let Some(proactive) = config.tasks.proactive.as_ref()
+        && let Ok(provider) = config.get_provider(&proactive.provider)
+    {
+        return Ok(provider);
+    }
+    config.get_provider(&config.tasks.chat.provider)
+}
+
 async fn start_local(
-    decision_cfg: &ProactiveDecisionProviderConfig,
+    params: &LocalGgufLoadParams,
 ) -> Result<LocalLlamaCppProvider, LlmProviderError> {
-    let cfg = decision_cfg.clone();
-    let load_timeout = std::time::Duration::from_secs(cfg.startup_timeout_seconds.max(1));
+    let cfg = params.clone();
+    let load_timeout = Duration::from_secs(LOCAL_STARTUP_TIMEOUT_SECS.max(1));
     let join = tokio::task::spawn_blocking(move || LocalLlamaCppProvider::load(&cfg));
     match tokio::time::timeout(load_timeout, join).await {
         Ok(Ok(result)) => result,
@@ -160,32 +177,23 @@ async fn start_local(
 }
 
 fn build_cloud_decision_provider(
-    provider: &ProviderConfig,
-    decision_cfg: &ProactiveDecisionProviderConfig,
+    config: &AiConfig,
 ) -> Result<Arc<dyn LlmProvider>, LlmProviderError> {
-    let base_url = provider
-        .resolve_base_url()
-        .map_err(|e| LlmProviderError::Provider(e.to_string()))?;
-    let api_key = provider.resolve_api_key();
-    let model = if decision_cfg.cloud_model.trim().is_empty() {
-        provider.model.as_str()
-    } else {
-        decision_cfg.cloud_model.trim()
-    };
-    let cloud = OpenAiProvider::new(&base_url, &api_key, model)
-        .with_chat_max_tokens(256)
-        .with_thinking_disabled(true);
-    Ok(Arc::new(cloud))
+    let chat = config.resolve_chat()?;
+    Ok(Arc::new(cloud_decision_from_resolved(&chat)))
+}
+
+fn cloud_decision_from_resolved(chat: &ResolvedChat) -> OpenAiProvider {
+    OpenAiProvider::new(&chat.base_url, &chat.api_key, &chat.model)
+        .with_chat_max_tokens(DECISION_MAX_TOKENS)
+        .with_thinking_disabled(true)
 }
 
 /// Optional env-gated smoke: only runs when `ENE_LOCAL_LLM_MODEL` is set.
 #[cfg(test)]
 mod smoke {
     use super::*;
-    use crate::config::{
-        ProactiveAcceleration, ProactiveDecisionBackend, ProactiveDecisionFallback,
-        ProactiveDecisionProviderConfig, ProactiveProviderConfig, ProviderConfig,
-    };
+    use crate::config::{AiConfig, AiProviderDef, ProactiveAcceleration, TaskRef};
     use crate::message::UserMessagePart;
 
     fn env_smoke_enabled() -> Option<(String, ProactiveAcceleration)> {
@@ -210,23 +218,25 @@ mod smoke {
         let Some((model, accel)) = env_smoke_enabled() else {
             return;
         };
-        let provider_cfg = ProviderConfig {
-            proactive: ProactiveProviderConfig {
-                decision: ProactiveDecisionProviderConfig {
-                    backend: ProactiveDecisionBackend::LlamaCpp,
-                    model_path: model,
-                    acceleration: accel,
-                    fallback: ProactiveDecisionFallback::Disabled,
-                    context_size: 1024,
-                    startup_timeout_seconds: 120,
-                    request_timeout_seconds: 30,
-                    ..ProactiveDecisionProviderConfig::default()
-                },
-                generation_model: String::new(),
+        let mut cfg = AiConfig::default();
+        cfg.tasks.proactive = Some(TaskRef {
+            provider: "local".to_string(),
+            model: None,
+            max_tokens: None,
+            dimensions: None,
+        });
+        cfg.providers.insert(
+            "local".to_string(),
+            AiProviderDef::LocalGguf {
+                model: String::new(),
+                quantization: "F16".to_string(),
+                model_path: model,
+                acceleration: accel,
+                gpu_layers: "auto".to_string(),
+                context_size: 1024,
             },
-            ..ProviderConfig::default()
-        };
-        let handles = build_proactive_llm_handles(&provider_cfg)
+        );
+        let handles = build_proactive_llm_handles(&cfg)
             .await
             .expect("local llama smoke start");
         assert_eq!(handles.decision_kind, DecisionProviderKind::LlamaCpp);

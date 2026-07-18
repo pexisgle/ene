@@ -76,6 +76,11 @@ pub fn build_system_prompt(
     user_name: &str,
     prompts: &PromptLibrary,
 ) -> String {
+    let runtime_rules = if runtime_rules.trim().is_empty() {
+        ene_config::DEFAULT_RUNTIME_RULES
+    } else {
+        runtime_rules
+    };
     let char_name = card.data.get_character_name();
     let mut parts: Vec<String> = Vec::new();
 

@@ -259,7 +259,7 @@ Cognitive Runtime は長期事実を `typed_memories` に保存し、明示的�
 - `mind.context` 由来の `RecallBudgetHints`
 - `Query` 互換の `RecallSearchHints`（`similarity_threshold`, `min_score`, recency half-life, optional query affect）
 
-`RecallPlanner::to_memory_search_options` は、plan と単一の query embedding から `MemoryStore::search` 用の `Query` を組み立てる helper です。使用するのは `plan.search.primary_query_text`（最初の semantic query）のみです。`semantic_queries` / `episodic_queries` / `required_kinds` は plan hints として残り、multi-query 展開・kind フィルタは後続の recall execution が担当します。`plan.use_hyde` が true のとき、`execute_hybrid_recall` は `ene_ai::hyde_document` で假説文書を生成し `EmbeddingKind::Hyde` で埋め込み、`mind.memory.hyde_blend` で query embedding と線形混合してから検索します。
+`RecallPlanner::to_memory_search_options` は、plan と単一の query embedding から `MemoryStore::search` 用の `Query` を組み立てる helper です。使用するのは `plan.search.primary_query_text`（最初の semantic query）のみです。`semantic_queries` / `episodic_queries` / `required_kinds` は plan hints として残り、multi-query 展開・kind フィルタは後続の recall execution が担当します。
 
 ### ハイブリッド記憶検索（#73）
 
@@ -349,34 +349,16 @@ mind ランタイムの `CognitionEngine::sync_character_memories` が CCv3 カ�
 
 これにより recall に有用な情報を残しつつ、巨大な生ツール出力の丸ごと保存を防ぐ。
 
-### Optional Memory Reranking（#77）
-
-ハイブリッド検索の後、downstream recall execution は `RecalledMemory` への変換前に optional な rerank を実行できます。
-
-1. `MemoryStore::search` が hybrid `total` 順の `ScoredMemory` を返す。
-2. `mind.memory.rerank_enabled` が `false`（既定）の場合、順序は変更されない。
-3. 有効時、`MemoryRerankPipeline` が上位 `rerank_candidate_limit` 件を LLM reranker に渡す。prompt には recall question と各候補の `content` のみを含め、title / source / kind / user metadata は含めない。limit を超える候補は hybrid 順序のまま rerank 対象の末尾に追加される。
-4. timeout、provider error、structured output の不正時は hybrid search 順序にフォールバックする。
-5. `RecallResultMapper::map` が（rerank 後の）リストを説明可能な `RecalledMemory` に変換する。
-
-**順序とスコア:** rerank はリスト順序のみを変更する。各結果の `score_breakdown.total` は hybrid-search スコアのままなので、先頭の recalled item が下位より低い `total` を表示することがある。
-
-**プライバシーとコスト:** rerank を有効にすると、複数候補がある recall のたびに保存済み memory content が設定された LLM provider に送信されます。候補数と content 長に比例して latency と token コストが増えます。専用 rerank model を使わない場合は `rerank_candidate_limit` を控えめに保つことを推奨します。parse 失敗時のログには構造的なエラー詳細と response 長のみを記録し、LLM payload 全文は含めません。
-
-**トレース:** rerank latency と状態は `component = "MemoryRerank"`（`elapsed_ms`, `candidate_count`, `reranked_count`, `tail_count`, `outcome`、skip 時は `skip_reason`）でログ出力されます。
-
 ### MMR Diversification（#78）
 
-ハイブリッド検索の後、optional LLM rerank の前に、downstream recall execution は `MemoryDiversifyPipeline` による決定論的 MMR 多様化を適用します。
+ハイブリッド検索の後、downstream recall execution は `MemoryDiversifyPipeline` による決定論的 MMR 多様化を適用します。
 
 1. `MemoryStore::search` が hybrid `total` 順の `ScoredMemory` を返す。
 2. **クラスタ dedup** で近傍重複候補（title + content の lexical Jaccard 類似度 ≥ `mmr_duplicate_cluster_threshold`）をマージし、クラスタ内最高スコアの代表 1 件のみを残す。
 3. **Greedy MMR** で `RecallPlan.budget.result_limit` 件まで選択する。`λ * relevance - (1-λ) * max_similarity_to_selected` を用い、`relevance` は pool 内最大値で正規化した `score_breakdown.total`、pairwise 類似度は同じ lexical 指標。selected set に未登場の recall source 種別を持つ候補には `mmr_source_diversity_bonus` を小幅加算する。
 4. **Kind quota** で semantic / episodic / user profile / commitment の最低枠（`mmr_min_slots_*`）を確保する。`RecallPlan.required_kinds` に含まれる kind（`preference` / `relationship` / `affective` / `procedure` など）も予算が許せば最低 1 枠を確保する。minimum の合計が `result_limit` を超える場合は、commitment → user profile → preference → semantic → episodic → relationship → affective → procedure → reflection の優先順で枠を割り当てる。
-5. `mind.memory.mmr_enabled` が `false` の場合、`result_limit` で truncate するのみで順序は変更しない。
-6. optional LLM rerank（#77）は多様化後のリストに対して実行される。各 `ScoredMemory` の hybrid スコアは変更されない。
 
-**順序とスコア:** MMR と rerank はリスト順序のみを変更する。各結果の `score_breakdown.total` は hybrid-search スコアのまま。
+**順序とスコア:** MMR はリスト順序のみを変更する。各結果の `score_breakdown.total` は hybrid-search スコアのまま。
 
 **トレース:** 多様化は `component = "Recall"`, `stage = "diversify"`（`input_count`, `pool_count`, `output_count`, `clusters_merged`, `kind_distribution`）でログ出力されます。
 

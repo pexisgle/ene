@@ -129,10 +129,10 @@ impl StyleExampleSelector {
         user_input: &str,
         store: Option<&MemoryStore>,
         embedder: Option<&Arc<dyn EmbeddingProvider>>,
-        config: &CharacterMemoryConfig,
+        _config: &CharacterMemoryConfig,
         max_examples: usize,
     ) -> Vec<StyleExample> {
-        if !config.style_retrieval || max_examples == 0 {
+        if max_examples == 0 {
             return Vec::new();
         }
 

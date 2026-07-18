@@ -31,9 +31,7 @@ pub fn extract_tool_candidates(
     tool_results: &[ToolResultSummary],
     cfg: &ToolGroundingConfig,
 ) -> Vec<MemoryCandidate> {
-    if !cfg.enabled {
-        return Vec::new();
-    }
+    let _ = cfg;
     let mut out = Vec::new();
     for tr in tool_results {
         let summary = tr.summary.trim();
@@ -42,7 +40,7 @@ pub fn extract_tool_candidates(
         }
         let summary_lower = summary.to_lowercase();
 
-        if tr.success && cfg.persist_success_procedure {
+        if tr.success {
             out.push(MemoryCandidate {
                 kind: MemoryKind::Procedure,
                 title: format!("tool:{}", tr.tool_name),
@@ -55,7 +53,7 @@ pub fn extract_tool_candidates(
             });
         }
 
-        if !tr.success && cfg.persist_failure_reflection {
+        if !tr.success {
             out.push(MemoryCandidate {
                 kind: MemoryKind::Reflection,
                 title: format!("tool failure:{}", tr.tool_name),
@@ -72,7 +70,6 @@ pub fn extract_tool_candidates(
         }
 
         if tr.success
-            && cfg.persist_user_visible_episodic
             && summary.chars().count() <= 200
             && summary != SCREENSHOT_SENTINEL
             && !summary_lower.starts_with("error")

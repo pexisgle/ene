@@ -59,7 +59,7 @@ Timer / observation update
 - 能動発話は偽の user message を `ConversationSession` に追加しない。
 - assistant 応答のみを history / `conversation_logs` に書き、以降の通常対話の文脈にする。
 - `PostTurnInput` / memory writer は空の user message を記憶候補にしない。
-- 能動発話の生成は `provider.proactive.generation_model`（設定時）を OpenAI 互換チャットの model override で使用。未設定なら `provider.model`。
+- 能動発話の生成は `ai.tasks.proactive` でルーティング（設定時）。未設定なら `ai.tasks.chat`（下記 **モデルルーティング** 参照）。
 - 内部 companion 指示は生成時に **system** メッセージとして注入。ユーザー履歴・embedding・memory writer には渡さない。
 - `generation_timeout_seconds` が能動発話生成の壁時計上限（外側 timeout が優先）。
 - ユーザー turn 開始または actor 終了時に進行中の decision タスクを abort する。
@@ -90,12 +90,15 @@ Timer / observation update
 
 ### モデルルーティング
 
-| 役割 | バックエンド |
-|---|---|
-| 判定 | `provider.proactive.decision.backend`: `llama_cpp` \| `cloud` \| `disabled` |
-| 生成 | `provider.proactive.generation_model` があればそれ、なければ `provider.model` |
+モデルルーティングは設定の `ai.tasks` 配下（[設定](../configuration/settings.md#ai--プロバイダレジストリとタスクルーティング) 参照）:
 
-`llama_cpp` は llama-cpp-2 で GGUF をプロセス内ロードする。`acceleration` は `auto` / `vulkan` / `cuda` / `cpu`。ローカル失敗時は設定された `fallback`（`disabled` または `cloud`）のみに従う。fallback が `disabled` のとき、観測コンテキストを黙ってクラウドへ送らない。
+| 役割 | 設定 |
+|---|---|
+| 生成 | `ai.tasks.proactive` があればそれ、なければ `ai.tasks.chat` |
+| 分類器（感情） | `ai.tasks.classifier` があればそれ、なければ `ai.tasks.chat` |
+| 判定 | `ai.tasks.proactive` が参照するプロバイダ（`proactive` が `null` のときは chat プロバイダ）: 非空 `model_path` 付き `local_gguf` → プロセス内 GGUF；それ以外は chat プロバイダ経由のクラウド判定 |
+
+`local_gguf` は llama-cpp-2 で GGUF をプロセス内ロードする。`acceleration` は `auto` / `vulkan` / `cuda` / `cpu`。ローカル load 失敗時は判定バックエンドが disabled にフォールバック（fail-closed）— 観測コンテキストを黙ってクラウドへ送らない。
 
 GGUF 重みはアプリに同梱しない。外部 `llama-server` も不要。パスはユーザー設定。
 

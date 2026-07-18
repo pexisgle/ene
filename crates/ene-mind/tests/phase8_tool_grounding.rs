@@ -46,7 +46,7 @@ fn failed_tool_yields_reflection_candidate() {
 }
 
 #[test]
-fn default_tool_grounding_does_not_auto_persist_success() {
+fn tool_success_yields_procedure_candidate() {
     let cfg = MindConfig::default();
     let tool_results = vec![ToolResultSummary {
         tool_name: "fs".to_string(),
@@ -55,17 +55,17 @@ fn default_tool_grounding_does_not_auto_persist_success() {
     }];
     let candidates = extract_tool_candidates(&tool_results, &cfg.memory.tool_grounding);
     assert!(
-        candidates.is_empty(),
-        "successes should not auto-persist by default: {candidates:?}"
+        candidates
+            .iter()
+            .any(|c| c.kind == MemoryKind::Procedure),
+        "successes should produce procedure candidates: {candidates:?}"
     );
 }
 
 #[tokio::test]
-async fn memory_writer_persists_tool_grounded_procedure_when_enabled() {
+async fn memory_writer_persists_tool_grounded_procedure_without_llm() {
     let store = MemoryStore::open_in_memory(4).await.expect("open store");
-    let mut config = MindConfig::default();
-    config.memory.llm_extraction_enabled = false;
-    config.memory.tool_grounding.persist_success_procedure = true;
+    let config = MindConfig::default();
     let affect = AffectState::neutral("ene");
     let tools = vec![ToolResultSummary {
         tool_name: "fs".to_string(),
@@ -99,13 +99,10 @@ async fn memory_writer_persists_tool_grounded_procedure_when_enabled() {
 }
 
 #[tokio::test]
-async fn memory_writer_persists_tool_grounded_episodic_when_enabled() {
+async fn memory_writer_persists_tool_grounded_episodic_without_llm() {
     let store = MemoryStore::open_in_memory(4).await.expect("open store");
     let mut config = MindConfig::default();
-    config.memory.llm_extraction_enabled = false;
     config.memory.min_confidence_to_persist = 0.60;
-    config.memory.tool_grounding.persist_success_procedure = false;
-    config.memory.tool_grounding.persist_user_visible_episodic = true;
     let affect = AffectState::neutral("ene");
     let tools = vec![ToolResultSummary {
         tool_name: "web".to_string(),
@@ -135,40 +132,5 @@ async fn memory_writer_persists_tool_grounded_episodic_when_enabled() {
     assert!(
         rows.iter().any(|m| m.kind == MemoryKind::Episodic),
         "expected episodic memory from tool grounding, got {rows:?}"
-    );
-}
-
-#[tokio::test]
-async fn memory_writer_default_does_not_persist_successful_tools_without_llm() {
-    let store = MemoryStore::open_in_memory(4).await.expect("open store");
-    let mut config = MindConfig::default();
-    config.memory.llm_extraction_enabled = false;
-    let tools = vec![ToolResultSummary {
-        tool_name: "shell.execute".to_string(),
-        success: true,
-        summary: "ls output here".to_string(),
-    }];
-    let input = PostTurnInput {
-        turn: TurnInput {
-            user_message: "list files",
-            assistant_message: Some("done"),
-            tool_results: &tools,
-        },
-        affect: AffectState::neutral("ene"),
-        character_id: "ene",
-        user_id: "user",
-    };
-
-    MemoryWriter::write_memories(&store, &config, &input, MemoryWriteProviders::default())
-        .await
-        .expect("write memories");
-
-    let rows = store
-        .list_typed_memories_by_source_prefix("ene", "tool:", 16)
-        .await
-        .expect("list");
-    assert!(
-        rows.is_empty(),
-        "default config must not auto-persist successful tools: {rows:?}"
     );
 }

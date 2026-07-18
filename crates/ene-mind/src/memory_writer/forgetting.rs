@@ -24,8 +24,6 @@ pub struct ForgettingContext<'a> {
 /// Summary of a forgetting lifecycle run.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ForgettingReport {
-    /// When `true`, `decay_enabled` was off and no store work ran.
-    pub skipped: bool,
     /// Memories transitioned to `faded`.
     pub faded_count: usize,
     /// Memories transitioned to `archived`.
@@ -35,7 +33,6 @@ pub struct ForgettingReport {
 impl From<NaturalDecayReport> for ForgettingReport {
     fn from(report: NaturalDecayReport) -> Self {
         Self {
-            skipped: false,
             faded_count: report.faded_count,
             archived_count: report.archived_count,
         }
@@ -56,18 +53,6 @@ impl ForgettingLifecycle {
         ctx: &ForgettingContext<'_>,
         config: &MindMemoryConfig,
     ) -> Result<ForgettingReport, CognitionError> {
-        if !config.decay_enabled {
-            debug!(
-                component = "ForgettingLifecycle",
-                character_id = ctx.character_id,
-                "Skipping natural decay because decay_enabled is false"
-            );
-            return Ok(ForgettingReport {
-                skipped: true,
-                ..ForgettingReport::default()
-            });
-        }
-
         let half_life = config.default_forgetting_half_life_days.max(0.0);
         let report = store
             .apply_natural_decay_batch(
@@ -98,27 +83,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn apply_skips_when_decay_disabled() {
-        let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let config = MindMemoryConfig {
-            decay_enabled: false,
-            ..MindMemoryConfig::default()
-        };
-        let ctx = ForgettingContext {
-            character_id: "ene",
-            user_id: Some("user1"),
-            now: Utc::now(),
-        };
-
-        let report = ForgettingLifecycle::apply(&store, &ctx, &config)
-            .await
-            .unwrap();
-        assert!(report.skipped);
-        assert_eq!(report.faded_count, 0);
-    }
-
-    #[tokio::test]
-    async fn apply_runs_natural_decay_when_enabled() {
+    async fn apply_runs_natural_decay() {
         use ene_store::{
             AffectAnnotation, MemoryConfidence, MemoryKind, MemorySalience, MemoryScope,
             MemorySource, MemoryStatus, NewMemoryItem,
@@ -152,10 +117,7 @@ mod tests {
             .unwrap();
         store.test_backdate_typed_memory(id, 120).await.unwrap();
 
-        let config = MindMemoryConfig {
-            decay_enabled: true,
-            ..MindMemoryConfig::default()
-        };
+        let config = MindMemoryConfig::default();
         let ctx = ForgettingContext {
             character_id: "ene",
             user_id: Some("user1"),
@@ -165,7 +127,6 @@ mod tests {
         let report = ForgettingLifecycle::apply(&store, &ctx, &config)
             .await
             .unwrap();
-        assert!(!report.skipped);
         assert!(report.faded_count >= 1);
     }
 }

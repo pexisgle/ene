@@ -26,7 +26,7 @@ chat-empty-history = No messages yet. Say hello!
 
 # Graphics
 graphics = Graphics
-target-fps = Target FPS
+graphics-quality = Graphics Quality
 shadow-quality = Shadow Quality
 antialiasing = Antialiasing
 language = Language

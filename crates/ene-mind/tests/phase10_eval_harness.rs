@@ -430,7 +430,6 @@ async fn scenario_before_turn_does_not_block_on_classifier() {
     let llm: Arc<dyn LlmProvider> = Arc::new(PanicLlm);
     let engine = CognitionEngine::new();
     let mut config = MindConfig::default();
-    config.emotion.engine = ene_mind::EngineMode::Hybrid;
     let card = eval_card();
 
     let pre = run_before_turn(
@@ -559,7 +558,6 @@ async fn scenario_stale_pending_classifier_proposal_is_dropped() {
     let llm: Arc<dyn LlmProvider> = Arc::new(EvalLlm);
     let engine = CognitionEngine::new();
     let mut config = MindConfig::default();
-    config.emotion.engine = ene_mind::EngineMode::Hybrid;
     let card = eval_card();
     store
         .upsert_pending_affect_proposal(&PendingAffectProposal {
@@ -628,7 +626,6 @@ async fn scenario_future_pending_classifier_proposal_is_dropped() {
     let llm: Arc<dyn LlmProvider> = Arc::new(EvalLlm);
     let engine = CognitionEngine::new();
     let mut config = MindConfig::default();
-    config.emotion.engine = ene_mind::EngineMode::Hybrid;
     let card = eval_card();
     store
         .upsert_pending_affect_proposal(&PendingAffectProposal {

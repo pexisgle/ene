@@ -107,7 +107,6 @@ async fn terminal_does_not_wait_for_deferred_memory_extraction() {
 
     let mut config = EneConfig::default();
     let mut mind = MindConfig::default();
-    mind.memory.llm_extraction_enabled = true;
     mind.emotion.enabled = false;
     config.set_section(&mind).expect("mind config");
     let mut mem_config = ene_store::StoreConfig::default();

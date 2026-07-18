@@ -1,5 +1,5 @@
 //! Tool RAG pipeline — multi-vector embedding, field-weighted similarity,
-//! optional HyDE, optional LLM rerank, and per-category limits.
+//! embedding rerank, and per-category limits.
 
 use ene_ai::{EmbeddingError, EmbeddingProvider, cosine_similarity, embed, embed_query};
 use ene_store::MemoryStore;
@@ -26,14 +26,6 @@ pub struct FieldWeights {
     pub example: f32,
     /// Weight for the negative/unwanted embedding (penalizes matches).
     pub negative: f32,
-    /// Weight for the `HyDE` (hypothetical document embedding).
-    pub hyde: f32,
-    /// Weight for the `HyDE` blend factor — the fraction
-    /// of the final score contributed by the `HyDE`
-    /// similarity, with the remainder from the direct
-    /// per-field cosine similarity. Replaces the
-    /// previously hardcoded 0.6 factor.
-    pub hyde_blend: f32,
 }
 
 impl Default for FieldWeights {
@@ -44,8 +36,6 @@ impl Default for FieldWeights {
             capability: 0.8,
             example: 0.4,
             negative: -0.5,
-            hyde: 0.7,
-            hyde_blend: 0.6,
         }
     }
 }
@@ -58,8 +48,6 @@ impl From<crate::config::FieldWeightsConfig> for FieldWeights {
             capability: c.capability,
             example: c.example,
             negative: c.negative,
-            hyde: c.hyde,
-            hyde_blend: c.hyde_blend,
         }
     }
 }
@@ -70,22 +58,14 @@ impl From<crate::config::FieldWeightsConfig> for FieldWeights {
 /// [`crate::config::ToolRagConfig`].
 #[derive(Debug, Clone)]
 pub struct ToolRagOptions {
-    /// Whether the RAG pipeline is enabled.
-    pub enabled: bool,
     /// Number of top candidates to retrieve from vector search (pre-rerank).
     pub top_k: usize,
     /// Number of final tools to return after reranking.
     pub final_n: usize,
-    /// Whether to use `HyDE` (hypothetical document embeddings).
-    pub use_hyde: bool,
-    /// Whether to rerank candidates with a cross-encoder.
-    pub use_rerank: bool,
     /// Number of candidates to consider during reranking.
     pub rerank_candidates: usize,
     /// Minimum similarity score for a tool to be included.
     pub min_similarity: f32,
-    /// Whether to index tools in the background on startup.
-    pub background_index_on_startup: bool,
     /// Tools that are always included regardless of RAG scoring.
     pub forced: Vec<ToolName>,
     /// Per-field embedding weights used for scoring.
@@ -97,14 +77,10 @@ pub struct ToolRagOptions {
 impl Default for ToolRagOptions {
     fn default() -> Self {
         Self {
-            enabled: true,
             top_k: 12,
             final_n: 6,
-            use_hyde: true,
-            use_rerank: true,
             rerank_candidates: 24,
             min_similarity: 0.25,
-            background_index_on_startup: true,
             forced: vec![
                 ToolName::new("utility.question"),
                 ToolName::new("utility.todo_add"),
@@ -127,14 +103,10 @@ impl TryFrom<crate::config::ToolRagConfig> for ToolRagOptions {
             );
         }
         Ok(Self {
-            enabled: c.enabled,
             top_k: c.top_k,
             final_n: c.final_n,
-            use_hyde: c.use_hyde,
-            use_rerank: c.use_rerank,
             rerank_candidates: c.rerank_candidates,
             min_similarity: c.min_similarity,
-            background_index_on_startup: c.background_index_on_startup,
             forced,
             weights: FieldWeights::from(c.weights),
             per_category_limits: c.per_category_limits,
@@ -144,8 +116,7 @@ impl TryFrom<crate::config::ToolRagConfig> for ToolRagOptions {
 
 // ── Pipeline ──────────────────────────────────────────────────────────────
 
-/// The Tool RAG pipeline: embed → `HyDE` → weighted field similarity →
-/// optional rerank → top-N.
+/// The Tool RAG pipeline: embed → weighted field similarity → rerank → top-N.
 pub struct ToolRag {
     embedder: Arc<dyn EmbeddingProvider>,
     store: Option<Arc<MemoryStore>>,
@@ -441,8 +412,8 @@ impl ToolRag {
 
     /// Select the most relevant tools for the given query.
     ///
-    /// Pipeline: embed query → optional `HyDE` → per-tool weighted field
-    /// similarity → category limits → `top_k` → optional rerank → `final_n` + forced.
+    /// Pipeline: embed query → per-tool weighted field similarity → category
+    /// limits → `top_k` → rerank → `final_n` + forced.
     pub async fn select(&self, query: &str) -> Vec<ToolSpec> {
         let query_vec = match embed_query(self.embedder.as_ref(), query).await {
             Ok(v) => v,
@@ -487,7 +458,6 @@ impl ToolRag {
             return result;
         }
 
-        let t_start = std::time::Instant::now();
         let Some(store) = &self.store else {
             let map = self
                 .specs
@@ -497,28 +467,6 @@ impl ToolRag {
         };
 
         let query_vec = query_embedding.to_vec();
-
-        let hyde_vec = if self.opts.use_hyde {
-            match ene_ai::hyde_document(None, query).await {
-                Ok(hyde_text) => {
-                    if hyde_text == query {
-                        Some(query_vec.clone())
-                    } else {
-                        ene_ai::embed(
-                            self.embedder.as_ref(),
-                            &hyde_text,
-                            ene_ai::EmbeddingKind::Hyde,
-                        )
-                        .await
-                        .ok()
-                    }
-                }
-                Err(_) => None,
-            }
-        } else {
-            None
-        };
-        let t_hyde = t_start.elapsed();
 
         let cached_rows = {
             let cache = self
@@ -561,7 +509,6 @@ impl ToolRag {
                 }
             },
         };
-        let t_load = t_start.elapsed();
 
         let w = &self.opts.weights;
         let mut per_tool: HashMap<String, f32> = HashMap::new();
@@ -571,17 +518,6 @@ impl ToolRag {
                 continue;
             }
             let sim = cosine_similarity(&query_vec, &row.embedding);
-            let blended = if let Some(ref hv) = hyde_vec {
-                if is_zero_norm(hv) {
-                    sim
-                } else {
-                    let hyde_sim = cosine_similarity(hv, &row.embedding);
-                    let blend = w.hyde_blend.clamp(0.0, 1.0);
-                    (hyde_sim * w.hyde).mul_add(blend, sim * (1.0 - blend))
-                }
-            } else {
-                sim
-            };
 
             let weight = match row.field.as_str() {
                 "summary" => w.summary,
@@ -589,11 +525,10 @@ impl ToolRag {
                 "capability" => w.capability,
                 "example" => w.example,
                 "negative" => w.negative,
-                "hyde" => w.hyde,
                 _ => 1.0,
             };
 
-            *per_tool.entry(row.tool_name.clone()).or_insert(0.0) += blended * weight;
+            *per_tool.entry(row.tool_name.clone()).or_insert(0.0) += sim * weight;
         }
 
         let mut scored: Vec<(String, f32)> = per_tool
@@ -657,9 +592,7 @@ impl ToolRag {
                 }
             }
         }
-        let t_score = t_start.elapsed();
-
-        if self.opts.use_rerank && candidates.len() > 1 {
+        if candidates.len() > 1 {
             let rerank_specs: Vec<ToolSpec> = candidates.iter().map(|(s, _)| s.clone()).collect();
             match ene_ai::rerank_tool_specs(self.embedder.as_ref(), None, query, &rerank_specs)
                 .await
@@ -687,16 +620,6 @@ impl ToolRag {
             }
             result.push(spec.clone());
         }
-
-        let t_rerank = t_start.elapsed();
-        tracing::debug!(
-            component = "ToolRag",
-            "Timings: hyde={:?}, load={:?}, score={:?}, rerank={:?}",
-            t_hyde,
-            t_load.checked_sub(t_hyde).unwrap_or_default(),
-            t_score.checked_sub(t_load).unwrap_or_default(),
-            t_rerank.checked_sub(t_score).unwrap_or_default()
-        );
 
         {
             let result_names: Vec<ToolName> = result.iter().map(|s| s.name.clone()).collect();

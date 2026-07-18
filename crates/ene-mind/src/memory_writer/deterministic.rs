@@ -517,8 +517,8 @@ mod tests {
 
     // ── Tool procedure ────────────────────────────────────────────────
 
-    #[test]
-    fn tool_success_extracts_procedure_when_enabled() {
+#[test]
+fn tool_success_extracts_procedure() {
         let tools = vec![ToolResultSummary {
             tool_name: "fs".to_string(),
             success: true,
@@ -529,34 +529,15 @@ mod tests {
             assistant_message: None,
             tool_results: &tools,
         };
-        let cfg = ToolGroundingConfig {
-            persist_success_procedure: true,
-            ..Default::default()
-        };
-        let out = extract_with_tool_grounding(&turn, Locale::Ja, 0.0, &cfg)
-            .expect("deterministic extraction always succeeds");
+        let out = extract_with_tool_grounding(
+            &turn,
+            Locale::Ja,
+            0.0,
+            &ToolGroundingConfig::default(),
+        )
+        .expect("deterministic extraction always succeeds");
         assert!(out.iter().any(|c| c.kind == MemoryKind::Procedure));
         assert!(out.iter().any(|c| c.content.contains("fs")));
-    }
-
-    #[test]
-    fn tool_success_skipped_by_default() {
-        let tools = vec![ToolResultSummary {
-            tool_name: "fs".to_string(),
-            success: true,
-            summary: "wrote file.txt".to_string(),
-        }];
-        let turn = TurnInput {
-            user_message: "",
-            assistant_message: None,
-            tool_results: &tools,
-        };
-        let out =
-            extract(&turn, Locale::Ja, 0.0).expect("deterministic extraction always succeeds");
-        assert!(
-            out.is_empty(),
-            "default tool grounding must not auto-keep successes: {out:?}"
-        );
     }
 
     // ── Edge cases ────────────────────────────────────────────────────

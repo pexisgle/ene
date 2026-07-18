@@ -162,13 +162,10 @@ Recall Planner が生成するクエリ計画：
 - 記憶種別フィルタ（後続 recall execution 向けの hint）
 - 想起コンテンツに割り当てられたトークン予算
 - vector similarity threshold、minimum total score、recency half-life、optional query affect などのハイブリッド検索ヒント
-- `execute_hybrid_recall` が適用するオプションの HyDE クエリ拡張（`use_hyde` / `hyde_blend`）
 
 後続の recall execution は `MemoryStore::search` の結果を `RecallResultMapper::map` または `RecallPlanner::explain_results` 経由で、主 `RecallReason` と score breakdown 付きの `RecalledMemory` に変換し、debug / UX / prompt introspection に使う（#74）。
 
-`mind.memory.rerank_enabled` が true の場合、マッピング前に optional な LLM rerank stage（`MemoryRerankPipeline`）が上位 hybrid-search 候補の順序を調整することがあります。無効時または rerank 失敗時は hybrid search の順序にフォールバックし、`MemoryScoreBreakdown::total` は変更しません（#77）。
-
-`mind.memory.mmr_enabled` が true（既定）の場合、hybrid search の後・optional rerank の前に決定論的 MMR 多様化 stage（`MemoryDiversifyPipeline`）が実行されます。近傍重複クラスタのマージ、greedy MMR 選択、kind 別 minimum slot の確保、recall source 多様性ボーナスを行います。hybrid スコアは変更されません（#78）。
+hybrid search の後に決定論的 MMR 多様化 stage（`MemoryDiversifyPipeline`）が実行されます。近傍重複クラスタのマージ、greedy MMR 選択、kind 別 minimum slot の確保、recall source 多様性ボーナスを行います。hybrid スコアは変更されません（#78）。
 
 ### Expression Arbiter（表現調停器）
 現在の `AffectState`、オプションの LLM 表情ヒント、キャラクター表情定義を受け取り、解決された表情を出力する：
@@ -202,7 +199,7 @@ Phase 8 では、ツール呼び出し結果を安全に typed memory へ接続�
 - `ene-runtime::streaming::perform_tool_executions` が各呼び出しごとに境界付き `ToolResultSummary` を生成する。
 - `ene-mind::memory_writer::tool_grounding` が生の出力を sanitize/truncate（`max_summary_chars`）し、スクリーンショット payload などの巨大データをそのまま保存しない。
 - LLM 抽出がターンを担当するときは、**同じ**抽出呼び出しでツール結果の要否も判断する（会話文脈 + ソフトヒント）。日常的な成功結果は自動永続化しない。
-- 決定論的な `persist_success_procedure` / `persist_user_visible_episodic` の既定は `false`。`persist_failure_reflection` は LLM 抽出がターンを担当しないときのフォールバック。
+- 決定論的ツールグラウンディングは、成功呼び出しを `Procedure`、失敗呼び出しを `Reflection`、短いユーザー可視の成功を適切な場合に `Episodic` として永続化する。
 - cognitive streaming path がターン単位の `tool_results` を `PostTurnInput` に渡し、候補が残った場合に Memory Writer / Arbiter が `tool:` プレフィックス付き `source_ref` で永続化できる。
 
 ### Companion Commitment Ledger（約束・タスク台帳）

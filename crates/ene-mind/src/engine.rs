@@ -6,7 +6,7 @@ use ene_store::MemoryStore;
 
 use crate::character::CharacterProcessor;
 use crate::commitments::CommitmentLedger;
-use crate::config::{EngineMode, MindConfig};
+use crate::config::MindConfig;
 use crate::context::{
     ContextBudget, ContextManager, PackInput, load_active_scene_summary, pack_prompt,
     validate_context_config,
@@ -128,45 +128,40 @@ impl CognitionEngine {
                 recent_turn_count,
                 classifier_proposal: None,
                 classifier_min_confidence: ctx.config.emotion.classifier_min_confidence,
-                llm_only: ctx.config.emotion.engine == EngineMode::Llm,
+                llm_only: false,
             };
 
             // Consume a pending post-turn classifier proposal from the previous turn.
             let mut classifier_estimate_for_log = None;
-            if matches!(
-                ctx.config.emotion.engine,
-                EngineMode::Llm | EngineMode::Hybrid
-            ) {
-                let current_user_turn = count_user_turns(ctx.history);
-                if let Some(pending) = store
-                    .take_pending_affect_proposal(ctx.character_id, ctx.user_name)
-                    .await
-                    .map_err(CognitionError::Memory)?
-                {
-                    if pending.source_turn_id >= current_user_turn {
-                        tracing::warn!(
-                            component = "EmotionEngine",
-                            source_turn_id = pending.source_turn_id,
-                            current_user_turn,
-                            "Dropping future pending classifier proposal"
-                        );
-                    } else if pending.source_turn_id < current_user_turn - 1 {
-                        tracing::warn!(
-                            component = "EmotionEngine",
-                            source_turn_id = pending.source_turn_id,
-                            current_user_turn,
-                            "Dropping stale pending classifier proposal"
-                        );
-                    } else {
-                        let proposal = pending_to_affect_proposal(pending);
-                        if proposal.confidence >= ctx.config.emotion.classifier_min_confidence {
-                            classifier_expression_hint =
-                                Some(proposal.recommended_expression.clone());
-                        }
-                        if proposal.confidence > 0.0 {
-                            classifier_estimate_for_log = Some(proposal.clone());
-                            turn_input = turn_input.with_proposal(proposal);
-                        }
+            let current_user_turn = count_user_turns(ctx.history);
+            if let Some(pending) = store
+                .take_pending_affect_proposal(ctx.character_id, ctx.user_name)
+                .await
+                .map_err(CognitionError::Memory)?
+            {
+                if pending.source_turn_id >= current_user_turn {
+                    tracing::warn!(
+                        component = "EmotionEngine",
+                        source_turn_id = pending.source_turn_id,
+                        current_user_turn,
+                        "Dropping future pending classifier proposal"
+                    );
+                } else if pending.source_turn_id < current_user_turn - 1 {
+                    tracing::warn!(
+                        component = "EmotionEngine",
+                        source_turn_id = pending.source_turn_id,
+                        current_user_turn,
+                        "Dropping stale pending classifier proposal"
+                    );
+                } else {
+                    let proposal = pending_to_affect_proposal(pending);
+                    if proposal.confidence >= ctx.config.emotion.classifier_min_confidence {
+                        classifier_expression_hint =
+                            Some(proposal.recommended_expression.clone());
+                    }
+                    if proposal.confidence > 0.0 {
+                        classifier_estimate_for_log = Some(proposal.clone());
+                        turn_input = turn_input.with_proposal(proposal);
                     }
                 }
             }
@@ -220,8 +215,6 @@ impl CognitionEngine {
             recent_turns: &recent_turns,
             query_embedding: embedding,
             embedding_model: embedder.model_name(),
-            embedder: Some(embedder.as_ref()),
-            llm_provider: ctx.llm_provider.clone(),
             affect: Some(&affect),
             card: Some(ctx.card),
         };
@@ -294,7 +287,6 @@ impl CognitionEngine {
                 decay_half_life_days: 30.0,
                 query_affect: None,
             },
-            use_hyde: false,
         };
 
         let Some(store) = ctx.store else {
@@ -361,15 +353,8 @@ impl CognitionEngine {
         Self::validate_config(ctx.config)?;
 
         let max_kernel_tokens = ctx.config.character.identity_kernel_max_tokens;
-        let kernel = if ctx.config.character.always_include_identity_kernel {
-            CharacterProcessor::compile_kernel(ctx.card, ctx.user_name, max_kernel_tokens)
-        } else {
-            crate::character::IdentityKernel {
-                name: ctx.card.data.get_character_name().to_string(),
-                text: String::new(),
-                post_history_instructions: None,
-            }
-        };
+        let kernel =
+            CharacterProcessor::compile_kernel(ctx.card, ctx.user_name, max_kernel_tokens);
 
         let style_examples = if let Some(examples) = prefetch.style_examples {
             examples
@@ -729,7 +714,6 @@ mod turn_id_tests {
                     decay_half_life_days: 30.0,
                     query_affect: None,
                 },
-                use_hyde: false,
             },
             affect: AffectState::neutral("ene"),
             recalled: Vec::new(),

@@ -100,37 +100,14 @@ pub fn render(
 
         ui.horizontal(|ui| {
             ui.label(crate::i18n::debug_update_fps());
-            if ui.button("<").clicked() {
-                apply_action(
-                    SettingsAction::DebugFpsDown,
-                    settings,
-                    animation,
-                    ai,
-                    world,
-                    ui_entity,
-                    None,
-                    0.0,
-                );
-            }
+            let resolved = settings.graphics.resolved();
             ui.add_sized(
                 [220.0, 0.0],
                 egui::Label::new(crate::settings::debug_fps_label(
                     settings.language,
-                    settings.graphics.debug_fps,
+                    resolved.debug_fps,
                 )),
             );
-            if ui.button(">").clicked() {
-                apply_action(
-                    SettingsAction::DebugFpsUp,
-                    settings,
-                    animation,
-                    ai,
-                    world,
-                    ui_entity,
-                    None,
-                    0.0,
-                );
-            }
         });
 
         render_linux_only(ui, settings, animation, ai, world, ui_entity);
@@ -179,34 +156,11 @@ fn render_linux_only(
 
     ui.horizontal(|ui| {
         ui.label(crate::i18n::mask_downsample());
-        if ui.button("<").clicked() {
-            apply_action(
-                SettingsAction::MaskDownsampleDown,
-                settings,
-                animation,
-                ai,
-                world,
-                ui_entity,
-                None,
-                0.0,
-            );
-        }
+        let resolved = settings.graphics.resolved();
         ui.add_sized(
             [220.0, 0.0],
-            egui::Label::new(format!("{}x", settings.graphics.mask_render_downsample)),
+            egui::Label::new(format!("{}x", resolved.mask_render_downsample)),
         );
-        if ui.button(">").clicked() {
-            apply_action(
-                SettingsAction::MaskDownsampleUp,
-                settings,
-                animation,
-                ai,
-                world,
-                ui_entity,
-                None,
-                0.0,
-            );
-        }
     });
 }
 

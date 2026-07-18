@@ -18,42 +18,25 @@ ene_config::define_config!(
     /// character compilation, and proactive companion speech.
     pub struct MindConfig {
         /// Context and token budget management.
+        #[serde(skip_deserializing, default, skip_serializing)]
+        #[schemars(skip)]
         pub context: ContextConfig,
 
         /// Memory extraction, search, and retention settings.
+        #[serde(skip_deserializing, default, skip_serializing)]
+        #[schemars(skip)]
         pub memory: MindMemoryConfig,
 
         /// Emotion and expression processing settings.
         pub emotion: EmotionConfig,
 
         /// Character card compilation settings.
+        #[serde(skip_deserializing, default, skip_serializing)]
+        #[schemars(skip)]
         pub character: CharacterMemoryConfig,
 
         /// Proactive companion speech policy (#103).
         pub proactive: ProactiveConfig,
-    }
-);
-
-// ────────────────────────────────────────────
-// Emotion engine mode
-// ────────────────────────────────────────────
-
-ene_config::define_label_enum!(
-    /// Selects how pre-turn affect is computed each turn.
-    ///
-    /// - **`deterministic`**: Rule-based appraisal (gratitude, insult, etc.) and time decay only.
-    ///   No post-turn LLM classifier runs.
-    /// - **`hybrid`** (default): Same deterministic path **plus** an async post-turn LLM classifier
-    ///   whose estimate is blended at the **next** turn start (weighted by `classifier_min_confidence`).
-    /// - **`llm`**: Skips deterministic appraisal; decay and the post-turn classifier drive affect.
-    pub enum EngineMode {
-        /// Rules-based affect with no LLM participation.
-        Deterministic => "Deterministic",
-        /// Pure LLM-driven emotion inference.
-        Llm => "LLM",
-        /// Combine deterministic rules with LLM proposals (default).
-        #[default]
-        Hybrid => "Hybrid",
     }
 );
 
@@ -84,8 +67,6 @@ pub struct ContextConfig {
     pub semantic_budget_tokens: usize,
     /// Token budget for style examples from `CCv3` lorebook.
     pub style_example_budget_tokens: usize,
-    /// Enable rolling context compression instead of session splits (#79).
-    pub compression_enabled: bool,
     /// Turn count threshold before scene-level compression runs.
     pub scene_turn_threshold: usize,
     /// Number of scene spans before chapter rollup.
@@ -105,7 +86,6 @@ impl Default for ContextConfig {
             memory_budget_tokens: 1_800,
             semantic_budget_tokens: 1_200,
             style_example_budget_tokens: 600,
-            compression_enabled: true,
             scene_turn_threshold: 12,
             chapter_span_threshold: 5,
             arc_span_threshold: 3,
@@ -119,19 +99,6 @@ impl Default for ContextConfig {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct MindMemoryConfig {
-    /// Extract and persist memory on every turn.
-    pub write_every_turn: bool,
-    /// Enable LLM memory candidate extraction (primary path). Deterministic
-    /// patterns are passed as hints; on provider failure, deterministic
-    /// candidates fall back to the arbiter.
-    pub llm_extraction_enabled: bool,
-    /// Pre-arbitration semantic duplicate detection via embedding search (#75).
-    pub semantic_dedup_enabled: bool,
-    /// Use hybrid search (vector + recency + salience + confidence).
-    pub hybrid_search: bool,
-    /// Enable post-turn natural decay (`Active → Faded → Archived`) via
-    /// `ForgettingLifecycle` (#76).
-    pub decay_enabled: bool,
     /// Half-life in days for lifecycle decay score and recall recency scoring.
     pub default_forgetting_half_life_days: f64,
     /// Minimum confidence threshold for persisting a memory. This is a
@@ -145,15 +112,6 @@ pub struct MindMemoryConfig {
     pub extraction_timeout_secs: u64,
     /// Tool-result grounding and guardrail settings (#92).
     pub tool_grounding: ToolGroundingConfig,
-    /// When true, `execute_hybrid_recall` generates a hypothetical document via
-    /// the LLM (when available), embeds it as [`ene_ai::EmbeddingKind::Hyde`],
-    /// and blends it with the query embedding before hybrid search.
-    pub use_hyde: bool,
-    /// Fraction of the search vector taken from the `HyDE` embedding when
-    /// [`Self::use_hyde`] is enabled (`0.0`–`1.0`). `0.0` keeps the query
-    /// embedding only; `1.0` uses the `HyDE` embedding only.
-    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
-    pub hyde_blend: f32,
     /// Maximum number of typed memories requested by recall planning.
     pub recall_result_limit: usize,
     /// Minimum vector similarity for cognitive recall candidates.
@@ -168,15 +126,6 @@ pub struct MindMemoryConfig {
     /// cutoff (default 0.20 vs 0.10 for journal) to ensure high-quality
     /// memories for LLM context injection.
     pub recall_min_score: f32,
-    /// Enable optional LLM reranking of hybrid recall candidates.
-    pub rerank_enabled: bool,
-    /// Maximum number of top hybrid-search candidates sent to the reranker.
-    pub rerank_candidate_limit: usize,
-    /// Timeout in seconds for a single LLM memory-rerank call. On timeout or
-    /// provider failure the pipeline falls back to hybrid search order (#77).
-    pub rerank_timeout_secs: u64,
-    /// Enable MMR diversification after hybrid search (#78).
-    pub mmr_enabled: bool,
     /// MMR relevance-vs-diversity tradeoff in `[0.0, 1.0]`; higher favors relevance.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub mmr_lambda: f32,
@@ -224,25 +173,8 @@ pub struct MindMemoryConfig {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct ToolGroundingConfig {
-    /// Enable grounding tool call results into cognitive memory (#92).
-    pub enabled: bool,
     /// Maximum characters kept for each tool summary stored in memory.
     pub max_summary_chars: usize,
-    /// Persist successful tool calls as procedure memories.
-    ///
-    /// Default `false`: lasting value is decided by the post-turn LLM
-    /// extractor. Enable only as a deterministic fallback when LLM extraction
-    /// is disabled or returns nothing.
-    pub persist_success_procedure: bool,
-    /// Persist failed tool calls as reflection memories.
-    ///
-    /// Used as a fallback when LLM extraction does not own the turn; the LLM
-    /// path may still choose to persist important failures itself.
-    pub persist_failure_reflection: bool,
-    /// Persist concise user-visible tool outcomes as episodic memories.
-    ///
-    /// Default `false` for the same reason as [`Self::persist_success_procedure`].
-    pub persist_user_visible_episodic: bool,
     /// Minimum confidence for tool-derived candidates.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub min_confidence: f32,
@@ -272,24 +204,13 @@ where
 impl Default for MindMemoryConfig {
     fn default() -> Self {
         Self {
-            write_every_turn: true,
-            llm_extraction_enabled: true,
-            semantic_dedup_enabled: true,
-            hybrid_search: true,
-            decay_enabled: true,
             default_forgetting_half_life_days: 30.0,
             min_confidence_to_persist: 0.65,
             extraction_timeout_secs: 30,
             tool_grounding: ToolGroundingConfig::default(),
-            use_hyde: false,
-            hyde_blend: 0.6,
             recall_result_limit: 8,
             recall_similarity_threshold: 0.35,
             recall_min_score: 0.20,
-            rerank_enabled: false,
-            rerank_candidate_limit: 16,
-            rerank_timeout_secs: 10,
-            mmr_enabled: true,
             mmr_lambda: 0.7,
             mmr_duplicate_cluster_threshold: 0.75,
             mmr_min_slots_semantic: 1,
@@ -311,13 +232,7 @@ impl Default for MindMemoryConfig {
 impl Default for ToolGroundingConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
             max_summary_chars: 500,
-            // Successes are judged by the post-turn LLM extractor by default.
-            // These flags are fallbacks when LLM extraction is off/empty/failed.
-            persist_success_procedure: false,
-            persist_failure_reflection: true,
-            persist_user_visible_episodic: false,
             min_confidence: 0.60,
         }
     }
@@ -330,35 +245,62 @@ impl Default for ToolGroundingConfig {
 pub struct EmotionConfig {
     /// Enable emotion processing.
     pub enabled: bool,
-    /// Engine mode.
-    pub engine: EngineMode,
     /// Half-life in minutes for affect decay.
+    #[serde(
+        skip_deserializing,
+        default = "default_decay_half_life_minutes",
+        skip_serializing
+    )]
+    #[schemars(skip)]
     pub decay_half_life_minutes: f64,
     /// Minimum seconds between expression changes (hysteresis).
+    #[serde(
+        skip_deserializing,
+        default = "default_expression_hysteresis_seconds",
+        skip_serializing
+    )]
+    #[schemars(skip)]
     pub expression_hysteresis_seconds: f64,
     /// Allow the LLM to propose expression tokens.
+    #[serde(
+        skip_deserializing,
+        default = "default_llm_can_propose_expression",
+        skip_serializing
+    )]
+    #[schemars(skip)]
     pub llm_can_propose_expression: bool,
     /// Treat LLM expression proposals as advisory only (not commands).
+    #[serde(
+        skip_deserializing,
+        default = "default_llm_expression_is_advisory",
+        skip_serializing
+    )]
+    #[schemars(skip)]
     pub llm_expression_is_advisory: bool,
     /// Timeout in seconds for a single LLM affect-classifier call (#88).
+    #[serde(
+        skip_deserializing,
+        default = "default_classifier_timeout_secs",
+        skip_serializing
+    )]
+    #[schemars(skip)]
     pub classifier_timeout_secs: u64,
     /// Minimum classifier confidence to apply LLM affect deltas (#88).
-    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    #[serde(
+        skip_deserializing,
+        default = "default_classifier_min_confidence",
+        skip_serializing
+    )]
+    #[schemars(skip)]
     pub classifier_min_confidence: f32,
     /// Prompt library language for affect classifier and cognitive output contract (`en` or `ja`).
     pub classifier_language: String,
-    /// Chat model for the affect classifier (defaults to [`crate::emotion::classifier::DEFAULT_CLASSIFIER_MODEL`]).
-    #[serde(default = "default_classifier_model")]
-    pub classifier_model: Option<String>,
-    /// Max completion tokens for classifier LLM calls (`0` = no cap).
-    pub classifier_max_tokens: u32,
 }
 
 impl Default for EmotionConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            engine: EngineMode::default(),
             decay_half_life_minutes: 30.0,
             expression_hysteresis_seconds: 4.0,
             llm_can_propose_expression: true,
@@ -366,18 +308,32 @@ impl Default for EmotionConfig {
             classifier_timeout_secs: crate::emotion::classifier::DEFAULT_CLASSIFIER_TIMEOUT_SECS,
             classifier_min_confidence: 0.5,
             classifier_language: "en".into(),
-            classifier_model: default_classifier_model(),
-            classifier_max_tokens: 0,
         }
     }
 }
 
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "default factory must return Option to match field type"
-)]
-fn default_classifier_model() -> Option<String> {
-    Some(crate::emotion::classifier::DEFAULT_CLASSIFIER_MODEL.to_owned())
+const fn default_decay_half_life_minutes() -> f64 {
+    30.0
+}
+
+const fn default_expression_hysteresis_seconds() -> f64 {
+    4.0
+}
+
+const fn default_llm_can_propose_expression() -> bool {
+    true
+}
+
+const fn default_llm_expression_is_advisory() -> bool {
+    true
+}
+
+const fn default_classifier_timeout_secs() -> u64 {
+    crate::emotion::classifier::DEFAULT_CLASSIFIER_TIMEOUT_SECS
+}
+
+const fn default_classifier_min_confidence() -> f32 {
+    0.5
 }
 
 /// Character card compilation settings.
@@ -387,12 +343,6 @@ fn default_classifier_model() -> Option<String> {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct CharacterMemoryConfig {
-    /// Compile `CCv3` lorebook entries into the semantic memory index.
-    pub compile_ccv3_to_semantic_memory: bool,
-    /// Always include the Identity Kernel at the top of every prompt.
-    pub always_include_identity_kernel: bool,
-    /// Enable retrieval of character style examples from lorebook.
-    pub style_retrieval: bool,
     /// Maximum approximate token budget for the Identity Kernel section.
     pub identity_kernel_max_tokens: usize,
 }
@@ -400,9 +350,6 @@ pub struct CharacterMemoryConfig {
 impl Default for CharacterMemoryConfig {
     fn default() -> Self {
         Self {
-            compile_ccv3_to_semantic_memory: true,
-            always_include_identity_kernel: true,
-            style_retrieval: true,
             identity_kernel_max_tokens: 400,
         }
     }
@@ -479,28 +426,64 @@ pub struct ProactiveConfig {
     #[serde(deserialize_with = "deserialize_non_negative_u64")]
     pub cooldown_seconds: u64,
     /// Maximum proactive utterances per conversation session.
-    #[serde(deserialize_with = "deserialize_positive_usize")]
+    #[serde(
+        skip_deserializing,
+        default = "default_max_turns_per_session",
+        skip_serializing
+    )]
+    #[schemars(skip)]
     pub max_turns_per_session: usize,
     /// Timeout for the lightweight decision call.
-    #[serde(deserialize_with = "deserialize_positive_u64")]
+    #[serde(
+        skip_deserializing,
+        default = "default_decision_timeout_seconds",
+        skip_serializing
+    )]
+    #[schemars(skip)]
     pub decision_timeout_seconds: u64,
     /// Timeout for high-quality proactive generation.
-    #[serde(deserialize_with = "deserialize_positive_u64")]
+    #[serde(
+        skip_deserializing,
+        default = "default_generation_timeout_seconds",
+        skip_serializing
+    )]
+    #[schemars(skip)]
     pub generation_timeout_seconds: u64,
     /// Per-source enable flags.
+    #[serde(skip_deserializing, default, skip_serializing)]
+    #[schemars(skip)]
     pub sources: ProactiveSourcesConfig,
     /// Decision confidence gate.
+    #[serde(skip_deserializing, default, skip_serializing)]
+    #[schemars(skip)]
     pub decision: ProactiveDecisionConfig,
     /// When true, proactive generation may select tools (default false).
+    #[serde(skip_deserializing, default, skip_serializing)]
+    #[schemars(skip)]
     pub allow_tools: bool,
     /// Max characters of conversation history included in the decision prompt.
-    #[serde(deserialize_with = "deserialize_positive_usize")]
+    #[serde(
+        skip_deserializing,
+        default = "default_max_conversation_chars",
+        skip_serializing
+    )]
+    #[schemars(skip)]
     pub max_conversation_chars: usize,
     /// Max characters of activity snapshot text.
-    #[serde(deserialize_with = "deserialize_positive_usize")]
+    #[serde(
+        skip_deserializing,
+        default = "default_max_activity_chars",
+        skip_serializing
+    )]
+    #[schemars(skip)]
     pub max_activity_chars: usize,
     /// Max characters of screen summary text.
-    #[serde(deserialize_with = "deserialize_positive_usize")]
+    #[serde(
+        skip_deserializing,
+        default = "default_max_screen_summary_chars",
+        skip_serializing
+    )]
+    #[schemars(skip)]
     pub max_screen_summary_chars: usize,
 }
 
@@ -541,6 +524,31 @@ where
     u64::deserialize(deserializer)
 }
 
+const fn default_max_turns_per_session() -> usize {
+    6
+}
+
+const fn default_decision_timeout_seconds() -> u64 {
+    15
+}
+
+const fn default_generation_timeout_seconds() -> u64 {
+    60
+}
+
+const fn default_max_conversation_chars() -> usize {
+    4_000
+}
+
+const fn default_max_activity_chars() -> usize {
+    500
+}
+
+const fn default_max_screen_summary_chars() -> usize {
+    800
+}
+
+#[expect(dead_code, reason = "retained for future proactive schema fields")]
 fn deserialize_positive_usize<'de, D>(deserializer: D) -> Result<usize, D::Error>
 where
     D: ::ene_config::serde::Deserializer<'de>,
@@ -629,9 +637,17 @@ mod tests {
     }
 
     #[test]
-    fn proactive_decision_confidence_is_clamped() {
+    fn proactive_decision_confidence_uses_default() {
         let cfg: ProactiveConfig =
             serde_json::from_str(r#"{"decision":{"min_confidence": 1.5}}"#).expect("deserialize");
-        assert!((cfg.decision.min_confidence - 1.0).abs() < f64::EPSILON);
+        assert!((cfg.decision.min_confidence - 0.55).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn emotion_config_skipped_fields_use_struct_defaults() {
+        let cfg: EmotionConfig = serde_json::from_str(r#"{"enabled":false}"#).expect("deserialize");
+        assert!(!cfg.enabled);
+        assert!((cfg.decay_half_life_minutes - 30.0).abs() < f64::EPSILON);
+        assert_eq!(cfg.classifier_language, "en");
     }
 }

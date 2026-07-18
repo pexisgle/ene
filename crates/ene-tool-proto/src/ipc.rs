@@ -295,14 +295,9 @@ mod tests {
             enabled: true,
             allowed_directories: vec![],
             writable_directories: vec![],
-            blocked_commands: vec![],
-            max_read_bytes: 0,
-            max_write_bytes: 0,
-            shell_timeout_ms: 0,
-            max_shell_output_bytes: 0,
-            max_shell_output_lines: 0,
             db_socket: None,
             db_auth_token: None,
+            ..SandboxConfigData::default()
         };
         let req = IpcRequest::Handshake {
             version: IPC_PROTOCOL_VERSION,

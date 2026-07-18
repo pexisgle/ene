@@ -138,15 +138,11 @@ impl AiBridge {
     }
 
     /// Refresh proactive observation flags and push policy into the runtime actor.
-    pub fn sync_proactive_runtime(
-        &self,
-        mind: &ene_mind::MindConfig,
-        provider: &ene_ai::ProviderConfig,
-    ) {
+    pub fn sync_proactive_runtime(&self, mind: &ene_mind::MindConfig) {
         self.proactive_observe.apply_mind(mind);
         if let Err(e) = self
             .handle
-            .update_proactive_settings(mind.proactive.clone(), provider.proactive.clone())
+            .update_proactive_settings(mind.proactive.clone())
         {
             tracing::warn!(
                 component = "AiBridge",

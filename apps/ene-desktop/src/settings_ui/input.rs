@@ -6,6 +6,7 @@
 //! `sync_from_settings` is called whenever the settings window
 //! transitions from hidden → visible.
 use crate::settings::CharacterSettings;
+use ene_ai::AiProviderDef;
 
 #[derive(Debug, Default)]
 pub struct SettingsInputState {
@@ -15,24 +16,25 @@ pub struct SettingsInputState {
     pub character_pos_y: String,
     pub character_pos_z: String,
     pub ai_user_name: String,
-    pub ai_runtime_rules: String,
+    pub ai_chat_model: String,
     pub ai_base_url: String,
+    pub ai_api_key_source: String,
     pub ai_api_key: String,
+    pub ai_api_key_env: String,
     pub ai_memory_enabled: bool,
     pub ai_embedding_provider: String,
     pub ai_embedding_model: String,
     pub ai_embedding_dimensions: String,
-    pub ai_provider_name: String,
-    pub ai_model: String,
-    pub ai_api_key_env: String,
 }
 
 impl SettingsInputState {
     pub fn new() -> Self {
         Self {
             ai_embedding_provider: "cloud".to_string(),
-            ai_embedding_model: "jina-embeddings-v5-text-small".to_string(),
-            ai_embedding_dimensions: "auto".to_string(),
+            ai_embedding_model: "text-embedding-3-small".to_string(),
+            ai_embedding_dimensions: "1536".to_string(),
+            ai_api_key_source: "env".to_string(),
+            ai_api_key_env: "OPENAI_API_KEY".to_string(),
             ..Self::default()
         }
     }
@@ -51,35 +53,45 @@ impl SettingsInputState {
         self.character_pos_y = format!("{:+.2}", settings.character_state.character_position.y);
         self.character_pos_z = format!("{:+.2}", settings.character_state.character_position.z);
         self.ai_user_name.clone_from(&settings.ai.ai.user_name);
-        self.ai_runtime_rules
-            .clone_from(&settings.ai.ai.runtime_rules);
-        let provider = settings
+        let ai_cfg = settings
             .ai
             .ai
-            .get_section::<ene_runtime::ProviderConfig>()
+            .get_section::<ene_runtime::AiConfig>()
             .unwrap_or_default();
-        self.ai_base_url.clone_from(&provider.base_url);
-        self.ai_api_key.clone_from(&provider.api_key.inline);
         let mem = settings
             .ai
             .ai
             .get_section::<ene_store::StoreConfig>()
             .unwrap_or_default();
         self.ai_memory_enabled = mem.enabled;
-        self.ai_embedding_provider
-            .clone_from(&provider.embedding.backend);
-        self.ai_embedding_model = if provider.embedding.backend == "local" {
-            provider.embedding.local.model.clone()
+        self.ai_chat_model = ai_cfg.tasks.chat.model.clone().unwrap_or_default();
+        if let Some(AiProviderDef::OpenaiCompatible { base_url, api_key }) =
+            ai_cfg.providers.get(&ai_cfg.tasks.chat.provider)
+        {
+            self.ai_base_url.clone_from(base_url);
+            self.ai_api_key_source.clone_from(&api_key.source);
+            self.ai_api_key.clone_from(&api_key.inline);
+            self.ai_api_key_env.clone_from(&api_key.env);
         } else {
-            provider.embedding.cloud.model.clone()
+            self.ai_base_url.clear();
+            self.ai_api_key_source = "env".to_string();
+            self.ai_api_key.clear();
+            self.ai_api_key_env = "OPENAI_API_KEY".to_string();
+        }
+        self.ai_embedding_provider = match ai_cfg.get_provider(&ai_cfg.tasks.embedding.provider) {
+            Ok(AiProviderDef::LocalGguf { .. }) => "local".to_string(),
+            Ok(AiProviderDef::OpenaiCompatible { .. }) => "cloud".to_string(),
+            Err(_) => "cloud".to_string(),
         };
-        self.ai_embedding_dimensions = if provider.embedding.backend == "local" {
+        self.ai_embedding_model = ai_cfg.tasks.embedding.model.clone().unwrap_or_default();
+        self.ai_embedding_dimensions = if self.ai_embedding_provider == "local" {
             "auto".to_string()
         } else {
-            provider.embedding.cloud.dimensions.to_string()
+            ai_cfg
+                .tasks
+                .embedding
+                .dimensions
+                .map_or_else(|| "1536".to_string(), |d| d.to_string())
         };
-        self.ai_provider_name.clone_from(&provider.name);
-        self.ai_model.clone_from(&provider.model);
-        self.ai_api_key_env = provider.api_key.env;
     }
 }

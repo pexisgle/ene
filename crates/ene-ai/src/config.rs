@@ -2,15 +2,17 @@ const fn default_string() -> String {
     String::new()
 }
 
+use std::collections::BTreeMap;
+
 use ene_config::schemars;
 
 ene_config::define_config!(
-    ProviderConfig,
+    AiConfig,
     "api_key",
     /// Configuration for API key retrieval.
     pub struct ApiKeyConfig {
         /// Key source: `"inline"` or `"env"`.
-        pub source: String = "inline".to_string(),
+        pub source: String = "env".to_string(),
         /// API key (inline — use with caution).
         pub inline: String = default_string(),
         /// Environment variable name when `source = "env"`.
@@ -18,59 +20,11 @@ ene_config::define_config!(
     }
 );
 
-ene_config::define_config!(
-    EmbeddingConfig,
-    "cloud",
-    /// Configuration for the cloud embedding backend.
-    pub struct CloudEmbeddingConfig {
-        /// Cloud embedding model name (used when `backend = "cloud"`).
-        pub model: String = "text-embedding-3-small".to_string(),
-        /// Expected dimensions for cloud embedding vectors.
-        pub dimensions: usize = 1536,
+impl PartialEq for ApiKeyConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source && self.inline == other.inline && self.env == other.env
     }
-);
-
-ene_config::define_config!(
-    EmbeddingConfig,
-    "local",
-    /// Configuration for the local GGUF embedding backend.
-    pub struct LocalEmbeddingConfig {
-        /// Local GGUF embedding model name (e.g. `"jina-embeddings-v5-text-small"`).
-        pub model: String = "jina-embeddings-v5-text-small".to_string(),
-        /// Quantization level (e.g. `"F16"`, `"Q4_K_M"`).
-        pub quantization: String = "F16".to_string(),
-    }
-);
-
-ene_config::define_config!(
-    ProviderConfig,
-    "embedding",
-    /// Configuration for the embedding system.
-    pub struct EmbeddingConfig {
-        /// Embedding backend: `"cloud"` uses the same provider's embedding API;
-        /// `"local"` uses a local GGUF model via `ene-ai`.
-        pub backend: String = "cloud".to_string(),
-        /// Optional query prefix to prepend to search queries (e.g. "Query: ").
-        pub query_prefix: Option<String> = None,
-        /// Cloud embedding configuration.
-        pub cloud: CloudEmbeddingConfig,
-        /// Local embedding configuration.
-        pub local: LocalEmbeddingConfig,
-    }
-);
-
-ene_config::define_label_enum!(
-    /// Backend used for proactive speech decisions (#103 / #165 / #171).
-    pub enum ProactiveDecisionBackend {
-        /// In-process llama-cpp-2 (GGUF on `model_path`).
-        LlamaCpp => "llama_cpp",
-        /// Existing cloud OpenAI-compatible provider with an optional model override.
-        Cloud => "cloud",
-        /// Decision path disabled (no proactive speech).
-        #[default]
-        Disabled => "disabled",
-    }
-);
+}
 
 ene_config::define_label_enum!(
     /// GPU / CPU acceleration preference for local llama.cpp (#165).
@@ -87,174 +41,238 @@ ene_config::define_label_enum!(
     }
 );
 
-ene_config::define_label_enum!(
-    /// Fallback when the local decision backend fails (#165).
-    pub enum ProactiveDecisionFallback {
-        /// Do not speak; never silently upload to cloud.
-        #[default]
-        Disabled => "disabled",
-        /// Retry decision via the cloud OpenAI-compatible provider.
-        Cloud => "cloud",
-    }
-);
+/// Provider definition: cloud OpenAI-compatible API or local GGUF weights.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
+#[serde(crate = "::ene_config::serde", tag = "kind", rename_all = "snake_case")]
+#[schemars(crate = "::ene_config::schemars")]
+pub enum AiProviderDef {
+    /// OpenAI-compatible HTTP API (chat, embedding, cloud decision).
+    OpenaiCompatible {
+        /// API base URL (empty → `OPENAI_BASE_URL` env).
+        #[serde(default = "default_string")]
+        base_url: String,
+        /// API key configuration.
+        api_key: ApiKeyConfig,
+    },
+    /// Local GGUF model via llama-cpp-2 (embedding and/or proactive decision).
+    LocalGguf {
+        /// Hub model name for embedding (e.g. `"jina-embeddings-v5-text-small"`).
+        #[serde(default = "default_local_gguf_model")]
+        model: String,
+        /// Quantization level (e.g. `"F16"`, `"Q4_K_M"`).
+        #[serde(default = "default_local_gguf_quantization")]
+        quantization: String,
+        /// Filesystem path for local decision LLM GGUF (empty = embedding-only / HF Hub).
+        #[serde(default = "default_string")]
+        model_path: String,
+        /// Preferred acceleration backend.
+        #[serde(default)]
+        acceleration: ProactiveAcceleration,
+        /// GPU layer offload: `"auto"` or an integer string (e.g. `"33"`).
+        #[serde(default = "default_gpu_layers")]
+        gpu_layers: String,
+        /// Context size for the decision model (small is preferred).
+        #[serde(default = "default_context_size")]
+        context_size: u32,
+    },
+}
 
-/// Local / cloud decision model settings for proactive speech (#103 / #165 / #171).
+fn default_local_gguf_model() -> String {
+    "jina-embeddings-v5-text-small".to_string()
+}
+
+fn default_local_gguf_quantization() -> String {
+    "F16".to_string()
+}
+
+fn default_gpu_layers() -> String {
+    "auto".to_string()
+}
+
+const fn default_context_size() -> u32 {
+    2048
+}
+
+/// Task routing: which provider and model to use for a cognitive workload.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
-pub struct ProactiveDecisionProviderConfig {
-    /// Decision backend: `llama_cpp`, `cloud`, or `disabled`.
-    pub backend: ProactiveDecisionBackend,
-    /// Absolute or relative path to the decision GGUF weights.
-    pub model_path: String,
-    /// Preferred acceleration backend.
-    pub acceleration: ProactiveAcceleration,
-    /// GPU layer offload: `"auto"` or an integer string (e.g. `"33"`).
-    pub gpu_layers: String,
-    /// Context size for the decision model (small is preferred).
-    pub context_size: u32,
-    /// Bounded wait for local GGUF model load.
-    pub startup_timeout_seconds: u64,
-    /// Per-request timeout for decision completion.
-    pub request_timeout_seconds: u64,
-    /// What to do when the local backend fails.
-    pub fallback: ProactiveDecisionFallback,
-    /// Optional cloud model override when `backend` or `fallback` is cloud.
-    pub cloud_model: String,
+pub struct TaskRef {
+    /// Named entry in [`AiConfig::providers`].
+    pub provider: String,
+    /// Model override (empty / absent → provider default or error at resolve time).
+    pub model: Option<String>,
+    /// Max completion tokens for chat workloads.
+    pub max_tokens: Option<u32>,
+    /// Expected embedding dimensions (cloud workloads).
+    pub dimensions: Option<usize>,
 }
 
-impl Default for ProactiveDecisionProviderConfig {
+impl Default for TaskRef {
     fn default() -> Self {
         Self {
-            backend: ProactiveDecisionBackend::Disabled,
-            model_path: String::new(),
-            acceleration: ProactiveAcceleration::Auto,
-            gpu_layers: "auto".to_string(),
-            context_size: 2048,
-            startup_timeout_seconds: 60,
-            request_timeout_seconds: 20,
-            fallback: ProactiveDecisionFallback::Disabled,
-            cloud_model: String::new(),
+            provider: "default".to_string(),
+            model: None,
+            max_tokens: None,
+            dimensions: None,
         }
     }
 }
 
-/// Proactive speech model routing under `provider.proactive` (#103).
-#[derive(
-    Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq,
-)]
+/// Per-task AI routing under [`AiConfig::tasks`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
-pub struct ProactiveProviderConfig {
-    /// Lightweight decision model settings.
-    pub decision: ProactiveDecisionProviderConfig,
-    /// Optional generation model override (empty = use `provider.model`).
-    pub generation_model: String,
+pub struct AiTasksConfig {
+    /// Main conversation chat model.
+    pub chat: TaskRef,
+    /// Embedding model.
+    pub embedding: TaskRef,
+    /// Optional lightweight classifier (falls back to chat).
+    pub classifier: Option<TaskRef>,
+    /// Optional proactive speech generation override (falls back to chat).
+    pub proactive: Option<TaskRef>,
+}
+
+impl Default for AiTasksConfig {
+    fn default() -> Self {
+        Self {
+            chat: TaskRef {
+                provider: "default".to_string(),
+                model: Some("gpt-4o-mini".to_string()),
+                max_tokens: Some(8192),
+                dimensions: None,
+            },
+            embedding: TaskRef {
+                provider: "default".to_string(),
+                model: Some("text-embedding-3-small".to_string()),
+                max_tokens: None,
+                dimensions: Some(1536),
+            },
+            classifier: None,
+            proactive: None,
+        }
+    }
+}
+
+fn default_providers() -> BTreeMap<String, AiProviderDef> {
+    let mut providers = BTreeMap::new();
+    providers.insert(
+        "default".to_string(),
+        AiProviderDef::OpenaiCompatible {
+            base_url: String::new(),
+            api_key: ApiKeyConfig::default(),
+        },
+    );
+    providers
 }
 
 ene_config::define_config!(
     settings,
-    "provider",
-    /// AI provider connection config, including embedding backend settings.
-    pub struct ProviderConfig {
-        /// Provider name (e.g. `"openai-compatible"`).
-        pub name: String = "openai-compatible".to_string(),
-        /// Chat model name (e.g. `"gpt-4o-mini"`).
-        pub model: String = "gpt-4o-mini".to_string(),
-        /// API base URL.
-        pub base_url: String = default_string(),
-        /// Max completion tokens for chat (`0` = omit; providers like OpenRouter
-        /// then reserve the model max, which can trigger HTTP 402 on low balance).
-        pub max_tokens: u32 = 8192,
-        /// API key configuration.
-        pub api_key: ApiKeyConfig,
-        /// Embedding configuration.
-        pub embedding: EmbeddingConfig,
-        /// Proactive companion speech model routing (#103).
-        pub proactive: ProactiveProviderConfig,
+    "ai",
+    /// AI provider registry and per-task routing.
+    pub struct AiConfig {
+        /// Named provider definitions.
+        pub providers: BTreeMap<String, AiProviderDef> = default_providers(),
+        /// Task → provider/model routing.
+        pub tasks: AiTasksConfig,
     }
 );
-
-impl ProviderConfig {
-    /// Resolves the effective base URL, falling back to defaults.
-    pub fn resolve_base_url(&self) -> Result<String, ene_config::ConfigError> {
-        if !self.base_url.trim().is_empty() {
-            return Ok(self.base_url.clone());
-        }
-        // Fall back to OPENAI_BASE_URL env var for cloud API providers.
-        if let Ok(url) = std::env::var("OPENAI_BASE_URL")
-            && !url.trim().is_empty()
-        {
-            return Ok(url);
-        }
-        Err(ene_config::ConfigError::MissingBaseUrl {
-            env_var: "OPENAI_BASE_URL".to_string(),
-        })
-    }
-
-    /// Resolves the API key from the configured source (inline or env).
-    pub fn resolve_api_key(&self) -> String {
-        if self.api_key.source.as_str() == "env" {
-            let var_name = if self.api_key.env.trim().is_empty() {
-                "OPENAI_API_KEY"
-            } else {
-                self.api_key.env.trim()
-            };
-            std::env::var(var_name).unwrap_or_default()
-        } else {
-            if !self.api_key.inline.trim().is_empty() {
-                return self.api_key.inline.clone();
-            }
-            #[cfg(debug_assertions)]
-            {
-                if let Ok(token) = std::env::var("API_TOKEN")
-                    && !token.trim().is_empty()
-                {
-                    return token;
-                }
-            }
-            String::new()
-        }
-    }
-
-    /// Effective chat model for proactive generation (empty override → `model`).
-    #[must_use]
-    pub fn proactive_generation_model(&self) -> &str {
-        let override_model = self.proactive.generation_model.trim();
-        if override_model.is_empty() {
-            self.model.as_str()
-        } else {
-            override_model
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resolve::{ResolvedEmbedding, resolve_base_url};
+
+    fn test_config() -> AiConfig {
+        let mut cfg = AiConfig::default();
+        if let Some(AiProviderDef::OpenaiCompatible { base_url, .. }) =
+            cfg.providers.get_mut("default")
+        {
+            *base_url = "https://api.openai.com/v1".to_string();
+        }
+        cfg
+    }
 
     #[test]
-    fn proactive_provider_defaults_are_disabled() {
-        let cfg = ProviderConfig::default();
+    fn ai_config_defaults() {
+        let cfg = AiConfig::default();
+        assert_eq!(cfg.providers.len(), 1);
+        assert!(matches!(
+            cfg.providers.get("default"),
+            Some(AiProviderDef::OpenaiCompatible { .. })
+        ));
+        assert_eq!(cfg.tasks.chat.model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(cfg.tasks.chat.max_tokens, Some(8192));
         assert_eq!(
-            cfg.proactive.decision.backend,
-            ProactiveDecisionBackend::Disabled
+            cfg.tasks.embedding.model.as_deref(),
+            Some("text-embedding-3-small")
         );
-        assert!(cfg.proactive.generation_model.is_empty());
-        assert_eq!(cfg.proactive_generation_model(), "gpt-4o-mini");
+        assert_eq!(cfg.tasks.embedding.dimensions, Some(1536));
+        assert!(cfg.tasks.classifier.is_none());
+        assert!(cfg.tasks.proactive.is_none());
+        assert_eq!(ApiKeyConfig::default().source, "env");
     }
 
     #[test]
-    fn proactive_generation_model_override() {
-        let mut cfg = ProviderConfig::default();
-        cfg.proactive.generation_model = "gpt-4o".to_string();
-        assert_eq!(cfg.proactive_generation_model(), "gpt-4o");
+    fn resolve_chat_and_embedding() {
+        let cfg = test_config();
+        let chat = cfg.resolve_chat().expect("resolve chat");
+        assert_eq!(chat.model, "gpt-4o-mini");
+        assert_eq!(chat.max_tokens, Some(8192));
+
+        let embed = cfg.resolve_embedding().expect("resolve embedding");
+        match embed {
+            ResolvedEmbedding::Cloud {
+                model, dimensions, ..
+            } => {
+                assert_eq!(model, "text-embedding-3-small");
+                assert_eq!(dimensions, 1536);
+            }
+            ResolvedEmbedding::Local { .. } => panic!("expected cloud embedding"),
+        }
     }
 
     #[test]
-    fn proactive_decision_backend_deserializes() {
-        let cfg: ProactiveDecisionProviderConfig =
-            serde_json::from_str(r#"{"backend":"llama_cpp"}"#).expect("deserialize");
-        assert_eq!(cfg.backend, ProactiveDecisionBackend::LlamaCpp);
+    fn resolve_classifier_falls_back_to_chat() {
+        let cfg = test_config();
+        let classifier = cfg.resolve_classifier().expect("resolve classifier");
+        let chat = cfg.resolve_chat().expect("resolve chat");
+        assert_eq!(classifier.model, chat.model);
+        assert_eq!(classifier.base_url, chat.base_url);
+    }
+
+    #[test]
+    fn two_providers_different_base_url() {
+        let mut cfg = AiConfig::default();
+        cfg.providers.insert(
+            "alt".to_string(),
+            AiProviderDef::OpenaiCompatible {
+                base_url: "https://api.example.com/v1".to_string(),
+                api_key: ApiKeyConfig::default(),
+            },
+        );
+        cfg.tasks.chat.provider = "alt".to_string();
+        let chat = cfg.resolve_chat().expect("resolve chat");
+        assert_eq!(chat.base_url, "https://api.example.com/v1");
+    }
+
+    #[test]
+    fn resolve_base_url_from_explicit() {
+        let url = resolve_base_url("https://custom.example/v1").expect("url");
+        assert_eq!(url, "https://custom.example/v1");
+    }
+
+    #[test]
+    fn ai_provider_def_deserializes_tagged() {
+        let def: AiProviderDef =
+            serde_json::from_str(r#"{"kind":"local_gguf","model_path":"/tmp/m.gguf"}"#)
+                .expect("deserialize");
+        match def {
+            AiProviderDef::LocalGguf { model_path, .. } => {
+                assert_eq!(model_path, "/tmp/m.gguf");
+            }
+            AiProviderDef::OpenaiCompatible { .. } => panic!("expected local_gguf"),
+        }
     }
 }

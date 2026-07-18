@@ -36,15 +36,15 @@ pub mod local_llm;
 pub mod message;
 /// Built-in OpenAI-compatible provider and cloud embedding provider.
 pub mod openai;
+/// Resolved settings from [`config::AiConfig`] task routing.
+pub mod resolve;
 /// Provider traits and registry.
 pub mod traits;
 
 pub mod role;
 
 pub use config::{
-    ApiKeyConfig, CloudEmbeddingConfig, EmbeddingConfig, LocalEmbeddingConfig,
-    ProactiveAcceleration, ProactiveDecisionBackend, ProactiveDecisionFallback,
-    ProactiveDecisionProviderConfig, ProactiveProviderConfig, ProviderConfig,
+    AiConfig, AiProviderDef, AiTasksConfig, ApiKeyConfig, ProactiveAcceleration, TaskRef,
 };
 pub use embedding::{
     EneEmbeddingError, GgufEmbeddingProvider, create_local_provider, resolve_gguf_path,
@@ -53,14 +53,15 @@ pub use embedding::{
 pub use error::{AiError, LlmProviderError};
 pub use hybrid::{HybridRerankProvider, hyde_document, rerank_tool_specs};
 pub use local_llm::{
-    DecisionProviderKind, DisabledDecisionProvider, LocalLlamaCppProvider, ProactiveLlmHandles,
-    build_proactive_llm_handles,
+    DecisionProviderKind, DisabledDecisionProvider, LocalGgufLoadParams, LocalLlamaCppProvider,
+    ProactiveLlmHandles, build_proactive_llm_handles,
 };
 pub use message::{LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart};
 pub use openai::{
-    CloudEmbeddingProvider, OpenAiProvider, OpenAiProviderFactory,
-    create_openai_compatible_chat_provider,
+    AiTaskKind, CloudEmbeddingProvider, OpenAiProvider, OpenAiProviderFactory,
+    create_chat_provider_from_resolved, create_task_chat_provider,
 };
+pub use resolve::{ResolvedChat, ResolvedEmbedding, ResolvedTaskRef, resolve_base_url};
 pub use role::Role;
 pub use traits::{
     EmbeddingError, EmbeddingKind, EmbeddingProvider, LlmProvider, LlmProviderFactory,

@@ -7,7 +7,7 @@ pub use routing::{
     build_proactive_llm_handles,
 };
 
-use crate::config::ProactiveDecisionProviderConfig;
+use crate::config::ProactiveAcceleration;
 use crate::error::LlmProviderError;
 use crate::llama_cpp::{LoadSpec, LoadedModel, generate_chat};
 use crate::message::{LlmMessage, LlmResponseChunk};
@@ -19,6 +19,21 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::Stream;
 
+/// Parameters for loading a local GGUF decision model.
+#[derive(Debug, Clone)]
+pub struct LocalGgufLoadParams {
+    /// Absolute or relative path to GGUF weights.
+    pub model_path: String,
+    /// Preferred acceleration backend.
+    pub acceleration: ProactiveAcceleration,
+    /// GPU layer offload: `"auto"` or an integer string.
+    pub gpu_layers: String,
+    /// Context size for inference.
+    pub context_size: u32,
+    /// Per-request timeout for decision completion.
+    pub request_timeout_seconds: u64,
+}
+
 /// Local decision provider backed by an in-process llama.cpp model.
 pub struct LocalLlamaCppProvider {
     model: Arc<Mutex<LoadedModel>>,
@@ -26,19 +41,19 @@ pub struct LocalLlamaCppProvider {
 }
 
 impl LocalLlamaCppProvider {
-    /// Load GGUF weights from `cfg` and wrap as an [`LlmProvider`].
-    pub fn load(cfg: &ProactiveDecisionProviderConfig) -> Result<Self, LlmProviderError> {
-        let model_path = LoadSpec::validate_model_path(&cfg.model_path)?;
+    /// Load GGUF weights from `params` and wrap as an [`LlmProvider`].
+    pub fn load(params: &LocalGgufLoadParams) -> Result<Self, LlmProviderError> {
+        let model_path = LoadSpec::validate_model_path(&params.model_path)?;
         let spec = LoadSpec {
             model_path,
-            acceleration: cfg.acceleration,
-            gpu_layers: cfg.gpu_layers.clone(),
-            context_size: cfg.context_size.max(256),
+            acceleration: params.acceleration,
+            gpu_layers: params.gpu_layers.clone(),
+            context_size: params.context_size.max(256),
         };
         let loaded = LoadedModel::load(&spec)?;
         Ok(Self {
             model: Arc::new(Mutex::new(loaded)),
-            request_timeout: Duration::from_secs(cfg.request_timeout_seconds.max(1)),
+            request_timeout: Duration::from_secs(params.request_timeout_seconds.max(1)),
         })
     }
 
@@ -102,57 +117,68 @@ impl LlmProvider for LocalLlamaCppProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{
-        ProactiveAcceleration, ProactiveDecisionBackend, ProactiveDecisionFallback,
-        ProactiveDecisionProviderConfig, ProactiveProviderConfig, ProviderConfig,
-    };
+    use crate::config::{AiConfig, AiProviderDef, ProactiveAcceleration, TaskRef};
     use crate::local_llm::routing::build_proactive_llm_handles;
 
+    fn test_config() -> AiConfig {
+        let mut cfg = AiConfig::default();
+        if let Some(crate::config::AiProviderDef::OpenaiCompatible { base_url, .. }) =
+            cfg.providers.get_mut("default")
+        {
+            *base_url = "https://api.openai.com/v1".to_string();
+        }
+        cfg
+    }
+
     #[tokio::test]
-    async fn disabled_backend_returns_disabled_provider() {
-        let provider_cfg = ProviderConfig {
-            proactive: ProactiveProviderConfig {
-                decision: ProactiveDecisionProviderConfig {
-                    backend: ProactiveDecisionBackend::Disabled,
-                    ..ProactiveDecisionProviderConfig::default()
-                },
-                generation_model: String::new(),
-            },
-            ..ProviderConfig::default()
-        };
-        let handles = build_proactive_llm_handles(&provider_cfg)
-            .await
-            .expect("build");
-        assert_eq!(handles.decision_kind, DecisionProviderKind::Disabled);
-        let out = handles
-            .decision
-            .chat_completion(&[], None)
-            .await
-            .expect("disabled returns silent json");
-        assert!(out.contains("should_speak"));
-        assert!(out.contains("false"));
+    async fn cloud_provider_returns_cloud_decision() {
+        let cfg = test_config();
+        let handles = build_proactive_llm_handles(&cfg).await.expect("build");
+        assert_eq!(handles.decision_kind, DecisionProviderKind::Cloud);
+        assert_eq!(handles.generation_model, "gpt-4o-mini");
         handles.shutdown().await;
     }
 
     #[tokio::test]
     async fn missing_model_path_fails_closed_for_llama_cpp() {
-        let provider_cfg = ProviderConfig {
-            proactive: ProactiveProviderConfig {
-                decision: ProactiveDecisionProviderConfig {
-                    backend: ProactiveDecisionBackend::LlamaCpp,
-                    model_path: String::new(),
-                    acceleration: ProactiveAcceleration::Cpu,
-                    fallback: ProactiveDecisionFallback::Disabled,
-                    ..ProactiveDecisionProviderConfig::default()
-                },
-                generation_model: String::new(),
+        let mut cfg = test_config();
+        cfg.tasks.proactive = Some(TaskRef {
+            provider: "local".to_string(),
+            model: None,
+            max_tokens: None,
+            dimensions: None,
+        });
+        cfg.providers.insert(
+            "local".to_string(),
+            AiProviderDef::LocalGguf {
+                model: String::new(),
+                quantization: "F16".to_string(),
+                model_path: String::new(),
+                acceleration: ProactiveAcceleration::Cpu,
+                gpu_layers: "auto".to_string(),
+                context_size: 2048,
             },
-            ..ProviderConfig::default()
+        );
+        let handles = build_proactive_llm_handles(&cfg)
+            .await
+            .expect("empty model_path falls back to cloud");
+        assert_eq!(handles.decision_kind, DecisionProviderKind::Cloud);
+        handles.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn local_load_rejects_empty_model_path() {
+        let params = LocalGgufLoadParams {
+            model_path: String::new(),
+            acceleration: ProactiveAcceleration::Cpu,
+            gpu_layers: "auto".to_string(),
+            context_size: 2048,
+            request_timeout_seconds: 20,
         };
-        let err = match build_proactive_llm_handles(&provider_cfg).await {
-            Ok(_) => panic!("expected empty model path to fail"),
+        let err = match LocalLlamaCppProvider::load(&params) {
+            Ok(_) => panic!("expected empty path to fail"),
             Err(e) => e,
         };
-        assert!(matches!(err, LlmProviderError::LocalLlm(_)), "got {err:?}");
+        assert!(matches!(err, LlmProviderError::LocalLlm(_)));
     }
 }

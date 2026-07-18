@@ -110,12 +110,6 @@ pub struct PackInput {
 
 /// Validate that configured sub-budgets do not exceed the total ceiling.
 pub fn validate_context_config(config: &ContextConfig) -> Result<(), CognitionError> {
-    if !config.compression_enabled {
-        return Err(CognitionError::Other(
-            "mind.context.compression_enabled must be true (hard session split is not a product path)"
-                .into(),
-        ));
-    }
     let dynamic_sum = config.scene_summary_tokens
         + config.memory_budget_tokens
         + config.semantic_budget_tokens
@@ -469,7 +463,6 @@ mod tests {
             memory_budget_tokens: 1_800,
             semantic_budget_tokens: 1_200,
             style_example_budget_tokens: 600,
-            compression_enabled: true,
             scene_turn_threshold: 12,
             chapter_span_threshold: 5,
             arc_span_threshold: 3,
@@ -534,20 +527,10 @@ mod tests {
             memory_budget_tokens: 1_800,
             semantic_budget_tokens: 1_200,
             style_example_budget_tokens: 600,
-            compression_enabled: true,
             scene_turn_threshold: 12,
             chapter_span_threshold: 5,
             arc_span_threshold: 3,
             compression_timeout_secs: 60,
-        };
-        assert!(validate_context_config(&config).is_err());
-    }
-
-    #[test]
-    fn validate_context_config_requires_compression() {
-        let config = ContextConfig {
-            compression_enabled: false,
-            ..Default::default()
         };
         assert!(validate_context_config(&config).is_err());
     }
@@ -563,7 +546,6 @@ mod tests {
             memory_budget_tokens: 1_800,
             semantic_budget_tokens: 1_200,
             style_example_budget_tokens: 600,
-            compression_enabled: true,
             scene_turn_threshold: 12,
             chapter_span_threshold: 5,
             arc_span_threshold: 3,

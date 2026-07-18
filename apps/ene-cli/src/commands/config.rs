@@ -38,13 +38,20 @@ impl CliCommand for ConfigCommand {
             .unwrap_or_default();
         let provider_config = snapshot
             .config
-            .get_section::<ene_runtime::ProviderConfig>()
+            .get_section::<ene_runtime::AiConfig>()
             .unwrap_or_default();
 
         println!("--- Current Config ---");
-        println!("Provider: {}", provider_config.name);
-        println!("Model: {}", provider_config.model);
-        println!("Base URL: {}", provider_config.base_url);
+        let chat = provider_config.resolve_chat().ok();
+        println!("Provider: {}", provider_config.tasks.chat.provider);
+        println!(
+            "Model: {}",
+            chat.as_ref()
+                .map_or_else(|| "unknown".to_string(), |c| c.model.clone())
+        );
+        if let Some(chat) = &chat {
+            println!("Base URL: {}", chat.base_url);
+        }
         println!("Card Path: {}", snapshot.config.character);
         let tool_config = snapshot
             .config
@@ -52,19 +59,20 @@ impl CliCommand for ConfigCommand {
             .unwrap_or_default();
         println!("Tool Calling: {}", tool_config.enabled);
         println!("Memory Enabled: {}", mem_config.enabled);
-        println!("Embedding Backend: {}", provider_config.embedding.backend);
-        if provider_config.embedding.backend.as_str() == "local" {
-            let local_emb = &provider_config.embedding.local;
-            println!("Local Embedding Model: {}", local_emb.model);
-        } else {
-            println!(
-                "Cloud Embedding Model: {}",
-                provider_config.embedding.cloud.model
-            );
-            println!(
-                "Cloud Embedding Dims: {}",
-                provider_config.embedding.cloud.dimensions
-            );
+        match provider_config.resolve_embedding() {
+            Ok(embed) => {
+                let (local_model, _) = embed.local_fields();
+                if local_model.is_empty() {
+                    let (_, _, cloud_model, dimensions, _) = embed.cloud_fields();
+                    println!("Embedding Backend: cloud");
+                    println!("Cloud Embedding Model: {cloud_model}");
+                    println!("Cloud Embedding Dims: {dimensions}");
+                } else {
+                    println!("Embedding Backend: local");
+                    println!("Local Embedding Model: {local_model}");
+                }
+            }
+            Err(_) => println!("Embedding Backend: unknown"),
         }
         if mem_config.enabled {
             println!(

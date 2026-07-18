@@ -12,7 +12,6 @@ mod lorebook_boost;
 mod plan;
 mod planner;
 mod prompt_qualifier;
-mod rerank;
 mod result;
 mod runner;
 mod topic;
@@ -31,11 +30,6 @@ pub use plan::{RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHin
 pub use planner::{RecallPlanner, RecallPlannerOptions};
 /// Prompt qualifiers for recalled memory content (#76).
 pub use prompt_qualifier::{format_recalled_content, recall_content_qualifier};
-/// Optional memory reranking after hybrid search.
-pub use rerank::{
-    LlmMemoryReranker, MemoryRerankError, MemoryRerankInput, MemoryRerankOptions,
-    MemoryRerankPipeline, MemoryReranker, PassthroughMemoryReranker,
-};
 /// Explainable recall result DTOs and helpers.
 pub use result::{
     EMOTIONAL_MATCH_REASON_THRESHOLD, RecallReason, RecalledMemory, explain_scored_memories,

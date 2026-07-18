@@ -61,7 +61,7 @@ fn handle_info(snapshot: &ene_runtime::EneStateSnapshot) {
         .config
         .get_section::<ene_mind::MindConfig>()
         .unwrap_or_default();
-    println!("Context compression: {}", mind.context.compression_enabled);
+    println!("Context compression: enabled");
     println!(
         "Scene turn threshold: {}",
         mind.context.scene_turn_threshold

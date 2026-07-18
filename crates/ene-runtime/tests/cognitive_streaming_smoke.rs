@@ -397,7 +397,6 @@ async fn persist_affect_snapshot_writes_before_finalize() {
 async fn post_turn_tool_results_persist_procedure_memory() {
     let store = MemoryStore::open_in_memory(4).await.unwrap();
     let mut mind = MindConfig::default();
-    mind.memory.tool_grounding.persist_success_procedure = true;
     let engine = CognitionEngine::new();
     let affect = AffectState::neutral("ene");
     let tool_results = vec![ene_mind::memory_writer::ToolResultSummary {

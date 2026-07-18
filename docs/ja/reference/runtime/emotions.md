@@ -33,18 +33,17 @@ API v2 では、チャットコンシューマーは [`EneEvent::Performance`](s
 | キー | 役割 |
 |-----|------|
 | `enabled` | エンジン管理感情のマスタースイッチ |
-| `engine` | `deterministic` / `llm` / `hybrid`（分類器）— [エンジンモード](#エンジンモード) 参照 |
 | `decay_half_life_minutes` | ターン間の PAD 中立への減衰 |
 | `expression_hysteresis_seconds` | 表情 / cue 変更前の最小保持時間 |
 | `llm_expression_is_advisory` | true のときストリームトークンは arbiter 用に蓄積 |
 | `classifier_timeout_secs` / `classifier_min_confidence` | post-turn 非同期分類器の予算とマージゲート (#88) |
 | `classifier_language` | 分類器と自然対話契約のロケール（`en` / `ja`） |
-| `classifier_model` | 分類器用チャットモデル |
-| `classifier_max_tokens` | 分類器の最大 completion トークン（`0` = 上限なし） |
+
+分類器のモデルとプロバイダは `ai.tasks.classifier` から解決されます（[settings.md](../configuration/settings.md) 参照）。
 
 ### Post-turn 非同期分類器
 
-`engine` が `llm` または `hybrid` のとき、アシスタント応答の **後** に affect 分類器を実行します。
+`mind.emotion.enabled` が true のとき、アシスタント応答の **後** に affect 分類器を実行します。
 
 - 入力: ターン開始時の `AffectState` スナップショット + 最近の会話履歴（現在の `user + assistant` を含む）
 - 出力: `valence` / `arousal` / `irritation` / `affinity` の絶対推定
@@ -57,17 +56,7 @@ API v2 では、チャットコンシューマーは [`EneEvent::Performance`](s
 - `Post-turn affect classifier estimate complete`
 - `Blended post-turn classifier estimate into affect`（次ターン開始時）
 
-分類器ログが無い場合は `mind.emotion.engine` が `hybrid` または `llm` か確認してください。
-
-### エンジンモード
-
-| モード | プレターン規則 | Post-turn 分類器 |
-|------|----------------|----------------------|
-| `deterministic` | あり | **なし** |
-| `hybrid`（既定） | あり | あり — 次ターンでブレンド |
-| `llm` | **なし**（減衰のみ） | あり — 次ターンでブレンド |
-
-明示的に片方を切らない限り `hybrid` を使ってください。
+分類器ログが無い場合は `mind.emotion.enabled` が true か、`ai.tasks.classifier` が設定されているか確認してください。
 
 ## トークン互換パス
 

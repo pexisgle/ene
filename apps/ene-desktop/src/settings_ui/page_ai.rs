@@ -1,4 +1,4 @@
-//! AI settings page — provider, embedding, and memory configuration.
+//! AI settings page — embedding, memory, and proactive speech configuration.
 //!
 //! Chat lives in the dedicated chat window (F2); see #109.
 
@@ -8,7 +8,38 @@ use crate::character_state::AnimationControl;
 use crate::settings::CharacterSettings;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
+use ene_ai::{AiConfig, AiProviderDef, ProactiveAcceleration};
 use std::sync::Arc;
+
+const LOCAL_EMBED_PROVIDER: &str = "embedding_local";
+
+fn ensure_local_embedding_provider(ai: &mut AiConfig) {
+    if !ai.providers.contains_key(LOCAL_EMBED_PROVIDER) {
+        ai.providers.insert(
+            LOCAL_EMBED_PROVIDER.to_string(),
+            AiProviderDef::LocalGguf {
+                model: "jina-embeddings-v5-text-small".to_string(),
+                quantization: "F16".to_string(),
+                model_path: String::new(),
+                acceleration: ProactiveAcceleration::default(),
+                gpu_layers: "auto".to_string(),
+                context_size: 2048,
+            },
+        );
+    }
+    ai.tasks.embedding.provider = LOCAL_EMBED_PROVIDER.to_string();
+    if ai.tasks.embedding.model.is_none() {
+        ai.tasks.embedding.model = Some("jina-embeddings-v5-text-small".to_string());
+    }
+}
+
+fn set_embedding_cloud(ai: &mut AiConfig) {
+    ai.tasks.embedding.provider = "default".to_string();
+    if ai.tasks.embedding.model.is_none() {
+        ai.tasks.embedding.model = Some("text-embedding-3-small".to_string());
+    }
+    ai.tasks.embedding.dimensions = Some(1536);
+}
 
 pub fn render(
     ui: &mut egui::Ui,
@@ -19,10 +50,10 @@ pub fn render(
     _world: &mut World,
     _ui_entity: Entity,
 ) {
-    let mut provider = settings
+    let mut ai_cfg = settings
         .ai
         .ai
-        .get_section::<ene_runtime::ProviderConfig>()
+        .get_section::<ene_runtime::AiConfig>()
         .unwrap_or_default();
     let mut memory = settings
         .ai
@@ -53,42 +84,17 @@ pub fn render(
             }
         });
 
-        ui.horizontal(|ui| {
-            ui.label(crate::i18n::runtime_rules());
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut input.ai_runtime_rules)
-                    .desired_width(f32::INFINITY),
-            );
-            if response.changed() {
-                settings
-                    .ai
-                    .ai
-                    .runtime_rules
-                    .clone_from(&input.ai_runtime_rules);
-                settings.mark_dirty();
-            }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label(crate::i18n::provider_name());
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut input.ai_provider_name)
-                    .desired_width(f32::INFINITY),
-            );
-            if response.changed() {
-                provider.name = input.ai_provider_name.trim().to_string();
-                let _ = settings.ai.ai.set_section(&provider);
-                settings.mark_dirty();
-            }
-        });
+        ui.separator();
+        ui.label("Chat");
 
         ui.horizontal(|ui| {
             ui.label(crate::i18n::model());
-            let response = ui
-                .add(egui::TextEdit::singleline(&mut input.ai_model).desired_width(f32::INFINITY));
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut input.ai_chat_model).desired_width(f32::INFINITY),
+            );
             if response.changed() {
-                provider.model = input.ai_model.trim().to_string();
-                let _ = settings.ai.ai.set_section(&provider);
+                ai_cfg.tasks.chat.model = Some(input.ai_chat_model.trim().to_string());
+                let _ = settings.ai.ai.set_section(&ai_cfg);
                 settings.mark_dirty();
             }
         });
@@ -99,15 +105,30 @@ pub fn render(
                 egui::TextEdit::singleline(&mut input.ai_base_url).desired_width(f32::INFINITY),
             );
             if response.changed() {
-                provider.base_url = input.ai_base_url.trim().to_string();
-                let _ = settings.ai.ai.set_section(&provider);
+                let url = input.ai_base_url.trim().to_string();
+                let provider_key = ai_cfg.tasks.chat.provider.clone();
+                match ai_cfg.providers.get_mut(&provider_key) {
+                    Some(AiProviderDef::OpenaiCompatible { base_url, .. }) => {
+                        *base_url = url;
+                    }
+                    _ => {
+                        ai_cfg.providers.insert(
+                            provider_key,
+                            AiProviderDef::OpenaiCompatible {
+                                base_url: url,
+                                api_key: ene_ai::ApiKeyConfig::default(),
+                            },
+                        );
+                    }
+                }
+                let _ = settings.ai.ai.set_section(&ai_cfg);
                 settings.mark_dirty();
             }
         });
 
         ui.horizontal(|ui| {
             ui.label(crate::i18n::api_key_source());
-            let mut current_source = provider.api_key.source.clone();
+            let mut current_source = input.ai_api_key_source.clone();
             egui::ComboBox::from_id_salt("api_key_source")
                 .selected_text(current_source.as_str())
                 .show_ui(ui, |ui| {
@@ -122,14 +143,20 @@ pub fn render(
                         crate::i18n::environment(),
                     );
                 });
-            if current_source != provider.api_key.source {
-                provider.api_key.source = current_source;
-                let _ = settings.ai.ai.set_section(&provider);
+            if current_source != input.ai_api_key_source {
+                input.ai_api_key_source.clone_from(&current_source);
+                let provider_key = ai_cfg.tasks.chat.provider.clone();
+                if let Some(AiProviderDef::OpenaiCompatible { api_key, .. }) =
+                    ai_cfg.providers.get_mut(&provider_key)
+                {
+                    api_key.source = current_source;
+                }
+                let _ = settings.ai.ai.set_section(&ai_cfg);
                 settings.mark_dirty();
             }
         });
 
-        if provider.api_key.source == "env" {
+        if input.ai_api_key_source == "env" {
             ui.horizontal(|ui| {
                 ui.label(crate::i18n::api_key_env_var());
                 let response = ui.add(
@@ -137,9 +164,14 @@ pub fn render(
                         .desired_width(f32::INFINITY),
                 );
                 if response.changed() {
-                    provider.api_key.env = input.ai_api_key_env.trim().to_string();
-                    let _ = settings.ai.ai.set_section(&provider);
-                    settings.mark_dirty();
+                    let provider_key = ai_cfg.tasks.chat.provider.clone();
+                    if let Some(AiProviderDef::OpenaiCompatible { api_key, .. }) =
+                        ai_cfg.providers.get_mut(&provider_key)
+                    {
+                        api_key.env = input.ai_api_key_env.trim().to_string();
+                        let _ = settings.ai.ai.set_section(&ai_cfg);
+                        settings.mark_dirty();
+                    }
                 }
             });
         } else {
@@ -151,9 +183,14 @@ pub fn render(
                         .desired_width(f32::INFINITY),
                 );
                 if response.changed() {
-                    provider.api_key.inline = input.ai_api_key.trim().to_string();
-                    let _ = settings.ai.ai.set_section(&provider);
-                    settings.mark_dirty();
+                    let provider_key = ai_cfg.tasks.chat.provider.clone();
+                    if let Some(AiProviderDef::OpenaiCompatible { api_key, .. }) =
+                        ai_cfg.providers.get_mut(&provider_key)
+                    {
+                        api_key.inline = input.ai_api_key.trim().to_string();
+                        let _ = settings.ai.ai.set_section(&ai_cfg);
+                        settings.mark_dirty();
+                    }
                 }
             });
         }
@@ -180,22 +217,34 @@ pub fn render(
                 });
             if current_provider != input.ai_embedding_provider {
                 input.ai_embedding_provider.clone_from(&current_provider);
-                provider.embedding.backend.clone_from(&current_provider);
                 if current_provider.as_str() == "local" {
-                    provider.embedding.local.model = "jina-embeddings-v5-text-small".to_string();
-                    input
-                        .ai_embedding_model
-                        .clone_from(&provider.embedding.local.model);
+                    ensure_local_embedding_provider(&mut ai_cfg);
+                    input.ai_embedding_model.clone_from(
+                        ai_cfg
+                            .tasks
+                            .embedding
+                            .model
+                            .as_ref()
+                            .unwrap_or(&String::new()),
+                    );
                     input.ai_embedding_dimensions = "auto".to_string();
                 } else {
-                    provider.embedding.cloud.model = "text-embedding-3-small".to_string();
-                    provider.embedding.cloud.dimensions = 1536;
-                    input
-                        .ai_embedding_model
-                        .clone_from(&provider.embedding.cloud.model);
-                    input.ai_embedding_dimensions = provider.embedding.cloud.dimensions.to_string();
+                    set_embedding_cloud(&mut ai_cfg);
+                    input.ai_embedding_model.clone_from(
+                        ai_cfg
+                            .tasks
+                            .embedding
+                            .model
+                            .as_ref()
+                            .unwrap_or(&String::new()),
+                    );
+                    input.ai_embedding_dimensions = ai_cfg
+                        .tasks
+                        .embedding
+                        .dimensions
+                        .map_or_else(|| "1536".to_string(), |d| d.to_string());
                 }
-                let _ = settings.ai.ai.set_section(&provider);
+                let _ = settings.ai.ai.set_section(&ai_cfg);
                 settings.mark_dirty();
             }
         });
@@ -207,20 +256,14 @@ pub fn render(
                     .desired_width(f32::INFINITY),
             );
             if response.changed() {
-                if input.ai_embedding_provider == "local" {
-                    provider
-                        .embedding
-                        .local
-                        .model
-                        .clone_from(&input.ai_embedding_model);
-                } else {
-                    provider
-                        .embedding
-                        .cloud
-                        .model
-                        .clone_from(&input.ai_embedding_model);
+                ai_cfg.tasks.embedding.model = Some(input.ai_embedding_model.trim().to_string());
+                if input.ai_embedding_provider == "local"
+                    && let Some(AiProviderDef::LocalGguf { model, .. }) =
+                        ai_cfg.providers.get_mut(LOCAL_EMBED_PROVIDER)
+                {
+                    *model = input.ai_embedding_model.trim().to_string();
                 }
-                let _ = settings.ai.ai.set_section(&provider);
+                let _ = settings.ai.ai.set_section(&ai_cfg);
                 settings.mark_dirty();
             }
         });
@@ -240,8 +283,8 @@ pub fn render(
                 if response.changed()
                     && let Ok(dims) = input.ai_embedding_dimensions.parse::<usize>()
                 {
-                    provider.embedding.cloud.dimensions = dims;
-                    let _ = settings.ai.ai.set_section(&provider);
+                    ai_cfg.tasks.embedding.dimensions = Some(dims);
+                    let _ = settings.ai.ai.set_section(&ai_cfg);
                     settings.mark_dirty();
                 }
             }
@@ -269,11 +312,6 @@ pub fn render(
             .ai
             .get_section::<ene_mind::MindConfig>()
             .unwrap_or_default();
-        let mut provider_for_proactive = settings
-            .ai
-            .ai
-            .get_section::<ene_runtime::ProviderConfig>()
-            .unwrap_or_default();
 
         ui.horizontal(|ui| {
             let mut enabled = mind.proactive.enabled;
@@ -282,7 +320,7 @@ pub fn render(
                 mind.proactive.enabled = enabled;
                 let _ = settings.ai.ai.set_section(&mind);
                 settings.mark_dirty();
-                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
+                ai.sync_proactive_runtime(&mind);
             }
         });
 
@@ -296,7 +334,7 @@ pub fn render(
                 mind.proactive.interval_seconds = value.max(1) as u64;
                 let _ = settings.ai.ai.set_section(&mind);
                 settings.mark_dirty();
-                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
+                ai.sync_proactive_runtime(&mind);
             }
         });
 
@@ -310,7 +348,7 @@ pub fn render(
                 mind.proactive.cooldown_seconds = value.max(0) as u64;
                 let _ = settings.ai.ai.set_section(&mind);
                 settings.mark_dirty();
-                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
+                ai.sync_proactive_runtime(&mind);
             }
         });
 
@@ -324,124 +362,7 @@ pub fn render(
                 mind.proactive.min_idle_seconds = value.max(0) as u64;
                 let _ = settings.ai.ai.set_section(&mind);
                 settings.mark_dirty();
-                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
-            }
-        });
-
-        ui.horizontal(|ui| {
-            let mut conversation = mind.proactive.sources.conversation;
-            ui.checkbox(
-                &mut conversation,
-                crate::i18n::proactive_source_conversation(),
-            );
-            if conversation != mind.proactive.sources.conversation {
-                mind.proactive.sources.conversation = conversation;
-                let _ = settings.ai.ai.set_section(&mind);
-                settings.mark_dirty();
-                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
-            }
-        });
-        ui.horizontal(|ui| {
-            let mut activity = mind.proactive.sources.activity;
-            ui.checkbox(&mut activity, crate::i18n::proactive_source_activity());
-            if activity != mind.proactive.sources.activity {
-                mind.proactive.sources.activity = activity;
-                let _ = settings.ai.ai.set_section(&mind);
-                settings.mark_dirty();
-                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
-            }
-        });
-        ui.horizontal(|ui| {
-            let mut screen = mind.proactive.sources.screen_summary;
-            ui.checkbox(&mut screen, crate::i18n::proactive_source_screen());
-            if screen != mind.proactive.sources.screen_summary {
-                mind.proactive.sources.screen_summary = screen;
-                let _ = settings.ai.ai.set_section(&mind);
-                settings.mark_dirty();
-                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
-            }
-        });
-        ui.label(crate::i18n::proactive_source_screen_hint());
-
-        ui.horizontal(|ui| {
-            ui.label(crate::i18n::proactive_decision_backend());
-            let mut backend = match provider_for_proactive.proactive.decision.backend {
-                ene_ai::ProactiveDecisionBackend::Disabled => "disabled",
-                ene_ai::ProactiveDecisionBackend::LlamaCpp => "llama_cpp",
-                ene_ai::ProactiveDecisionBackend::Cloud => "cloud",
-            }
-            .to_string();
-            let before = backend.clone();
-            egui::ComboBox::from_id_salt("proactive_decision_backend")
-                .selected_text(backend.as_str())
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut backend, "disabled".into(), "disabled");
-                    ui.selectable_value(&mut backend, "llama_cpp".into(), "llama_cpp");
-                    ui.selectable_value(&mut backend, "cloud".into(), "cloud");
-                });
-            if backend != before {
-                provider_for_proactive.proactive.decision.backend = match backend.as_str() {
-                    "llama_cpp" => ene_ai::ProactiveDecisionBackend::LlamaCpp,
-                    "cloud" => ene_ai::ProactiveDecisionBackend::Cloud,
-                    _ => ene_ai::ProactiveDecisionBackend::Disabled,
-                };
-                let _ = settings.ai.ai.set_section(&provider_for_proactive);
-                settings.mark_dirty();
-                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
-            }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label(crate::i18n::proactive_fallback());
-            let mut fallback = match provider_for_proactive.proactive.decision.fallback {
-                ene_ai::ProactiveDecisionFallback::Disabled => "disabled",
-                ene_ai::ProactiveDecisionFallback::Cloud => "cloud",
-            }
-            .to_string();
-            let before = fallback.clone();
-            egui::ComboBox::from_id_salt("proactive_fallback")
-                .selected_text(fallback.as_str())
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut fallback, "disabled".into(), "disabled");
-                    ui.selectable_value(&mut fallback, "cloud".into(), "cloud");
-                });
-            if fallback != before {
-                provider_for_proactive.proactive.decision.fallback = match fallback.as_str() {
-                    "cloud" => ene_ai::ProactiveDecisionFallback::Cloud,
-                    _ => ene_ai::ProactiveDecisionFallback::Disabled,
-                };
-                let _ = settings.ai.ai.set_section(&provider_for_proactive);
-                settings.mark_dirty();
-                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
-            }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label(crate::i18n::proactive_model_path());
-            let mut path = provider_for_proactive.proactive.decision.model_path.clone();
-            if ui
-                .add(egui::TextEdit::singleline(&mut path).desired_width(f32::INFINITY))
-                .changed()
-            {
-                provider_for_proactive.proactive.decision.model_path = path.trim().to_string();
-                let _ = settings.ai.ai.set_section(&provider_for_proactive);
-                settings.mark_dirty();
-                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
-            }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label(crate::i18n::proactive_generation_model());
-            let mut generation_model = provider_for_proactive.proactive.generation_model.clone();
-            if ui
-                .add(egui::TextEdit::singleline(&mut generation_model).desired_width(f32::INFINITY))
-                .changed()
-            {
-                provider_for_proactive.proactive.generation_model =
-                    generation_model.trim().to_string();
-                let _ = settings.ai.ai.set_section(&provider_for_proactive);
-                settings.mark_dirty();
-                ai.sync_proactive_runtime(&mind, &provider_for_proactive);
+                ai.sync_proactive_runtime(&mind);
             }
         });
     });

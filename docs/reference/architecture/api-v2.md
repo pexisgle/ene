@@ -129,7 +129,7 @@ Removed from chat: `SpecialToken`, standalone `Expression`, `SessionSplit`, `Pip
 ## Migration Notes
 
 - No dual-pipeline fallback: missing embedder with memory features → fail closed
-- **Compression-only context boundary:** `mind.context.compression_enabled` must be `true` at `EneHandle::open` (validation fails otherwise). Hard session-ID minting / hard-split is not a product path; `ene-runtime` does not spawn hard-split tasks
+- **Compression-only context boundary:** Context boundaries use rolling compression only. Hard session-ID minting / hard-split is not a product path; `ene-runtime` does not spawn hard-split tasks
 - **Cancel:** abort the stream task immediately and discard in-flight session updates; emit `Terminal::Cancelled` at most once
 - Single `HistoryEntry { role: Role, content: String }` across mind + runtime snapshots
 - No public compatibility aliases or migration feature flags — callers update in the same change

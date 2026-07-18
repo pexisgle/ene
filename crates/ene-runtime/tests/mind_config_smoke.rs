@@ -1,35 +1,13 @@
 //! Smoke tests for the mind runtime configuration wiring.
 //!
-//! These tests guard the fix for issue #95: `ene_mind::MindConfig`
-//! is declared in the `ene-mind` crate via the `define_config!` macro,
-//! which expands to a `#[ctor::ctor(unsafe)] fn register()` that pushes the
-//! schema into the global `SCHEMA_REGISTRY`. That `ctor` only fires when
-//! the `ene-mind` crate is actually linked into the running binary —
-//! i.e. when some downstream crate (`ene-runtime`, `ene-cli`, `ene-desktop`)
-//! declares a hard dependency on it.
+//! Public `MindConfig` only exposes `emotion` and `proactive`;
+//! `context` / `memory` / `character` are code defaults (serde-skipped).
 //!
 #![expect(
     clippy::expect_used,
     clippy::panic,
     reason = "integration tests use expect/panic for schema wiring assertions"
 )]
-//!
-//! Without this dependency, the JSON schema shipped to users would be
-//! missing the `mind` section even though the struct exists in
-//! source and the docs (`docs/reference/configuration/settings.md`) already describe
-//! it. The tests below assert both halves of the wiring:
-//!
-//! 1. The generated schema exposes a top-level `mind` property
-//!    AND the inner sub-types appear in `$defs` / `definitions`
-//!    (proves the `ctor` ran and `generate_schema_json` walked the
-//!    registry correctly).
-//! 2. `EneConfig::get_section::<MindConfig>()` returns the
-//!    macro-defined defaults when the key is absent (proves the
-//!    deserialisation path works against `EneConfig::extra`).
-//!
-//! Note: `ene-mind` is a non-optional dependency of `ene-runtime` as of
-//! the fix, so simply compiling this test binary is enough to link the
-//! crate and trigger the `ctor`.
 
 use ene_config::EneConfig;
 use ene_mind::{ContextConfig, EmotionConfig, MindConfig, MindMemoryConfig};
@@ -54,27 +32,28 @@ fn mind_schema_appears_as_top_level_property_when_ene_mind_is_linked() {
         )
     });
 
-    // The registered `MindConfig` schema should be a plain object
-    // with nested `context` / `memory` / `emotion` / `character` sub-properties.
     let mind_properties = mind_prop
         .get("properties")
         .and_then(|p| p.as_object())
         .expect("`mind` property should be a struct with sub-properties");
-    for sub in ["context", "memory", "emotion", "character"] {
+    for sub in ["emotion", "proactive"] {
         assert!(
             mind_properties.contains_key(sub),
             "mind.{sub} should appear in the registered schema; got keys: {:?}",
             mind_properties.keys().cloned().collect::<Vec<_>>()
         );
     }
-    assert!(
-        !mind_properties.contains_key("enabled"),
-        "removed mind.enabled must not appear in the schema"
-    );
+    for hidden in ["context", "memory", "character", "enabled"] {
+        assert!(
+            !mind_properties.contains_key(hidden),
+            "internal/removed mind.{hidden} must not appear in the schema; got keys: {:?}",
+            mind_properties.keys().cloned().collect::<Vec<_>>()
+        );
+    }
 }
 
 #[test]
-fn mind_subtypes_appear_in_schema_definitions() {
+fn mind_public_subtypes_appear_in_schema_definitions() {
     let schema_json =
         ene_config::generate_schema_json().expect("schema generation should not fail");
     let value: serde_json::Value =
@@ -85,19 +64,7 @@ fn mind_subtypes_appear_in_schema_definitions() {
         .or_else(|| value.get("definitions"))
         .expect("schema must expose a definitions map");
 
-    // `MindConfig` is the *root* of the registered entry, so it
-    // appears as a top-level property (covered by the sibling test).
-    // The sub-types — `ContextConfig`, `MindMemoryConfig`,
-    // `EmotionConfig`, `CharacterMemoryConfig`, and the `EngineMode`
-    // enum used by `emotion.engine` — are pulled in as referenced
-    // types and must end up in the `$defs` map.
-    for sub_type in [
-        "ContextConfig",
-        "MindMemoryConfig",
-        "EmotionConfig",
-        "CharacterMemoryConfig",
-        "EngineMode",
-    ] {
+    for sub_type in ["EmotionConfig", "ProactiveConfig"] {
         assert!(
             defs.get(sub_type).is_some(),
             "expected `{sub_type}` to be registered as a referenced sub-type; got defs keys: {:?}",
@@ -110,13 +77,6 @@ fn mind_subtypes_appear_in_schema_definitions() {
 
 #[test]
 fn mind_section_is_absent_from_default_ene_config() {
-    // Sanity check: the on-disk `settings.json` shipped with the project
-    // does not contain a `mind` block (it falls through to the
-    // macro-defined defaults). If a future change starts emitting
-    // `mind` into `EneConfig::default()`, downstream test
-    // `mind_section_defaults_match_macro_definition` still passes
-    // because it compares against the macro default, but reviewers
-    // should know that the `extra` map is no longer empty.
     let cfg = EneConfig::default();
     assert!(
         !cfg.extra.contains_key("mind"),
@@ -127,10 +87,6 @@ fn mind_section_is_absent_from_default_ene_config() {
 
 #[test]
 fn mind_section_defaults_match_macro_definition() {
-    // Reproduce the defaults defined in `ene-mind::config.rs`. If
-    // those defaults change, this test must change in lockstep — that
-    // is the point: the test pins the contract documented in
-    // `docs/reference/configuration/settings.md`.
     let cfg = EneConfig::default();
     let mind: MindConfig = cfg
         .get_section::<MindConfig>()
@@ -138,7 +94,7 @@ fn mind_section_defaults_match_macro_definition() {
     assert_eq!(
         mind.context,
         ContextConfig::default(),
-        "mind.context should equal the macro-defined defaults"
+        "mind.context should equal the code defaults"
     );
     assert_eq!(
         mind.emotion,
@@ -148,123 +104,67 @@ fn mind_section_defaults_match_macro_definition() {
     assert_eq!(
         mind.memory,
         MindMemoryConfig::default(),
-        "mind.memory should equal the macro-defined defaults"
+        "mind.memory should equal the code defaults"
     );
-    assert!(
-        mind.context.max_prompt_tokens > 0,
-        "mind.context.max_prompt_tokens must be a positive budget"
-    );
-    assert_eq!(
-        mind.context.max_prompt_tokens, 12_000,
-        "mind.context.max_prompt_tokens should be 12_000 per docs"
-    );
-    assert_eq!(
-        mind.context.recent_turns, 8,
-        "mind.context.recent_turns should be 8 per docs"
-    );
-    assert_eq!(
-        mind.memory.recall_result_limit, 8,
-        "mind.memory.recall_result_limit should be 8 per docs"
-    );
-    assert!(
-        !mind.memory.use_hyde,
-        "mind.memory.use_hyde should default to false"
-    );
-    assert!(
-        (mind.memory.hyde_blend - 0.6).abs() < f32::EPSILON,
-        "mind.memory.hyde_blend should default to 0.6"
-    );
-    assert!(
-        mind.memory.mmr_enabled,
-        "mind.memory.mmr_enabled should default to true"
-    );
-    assert!(
-        (mind.memory.mmr_lambda - 0.7).abs() < f32::EPSILON,
-        "mind.memory.mmr_lambda should default to 0.7"
-    );
-    assert!(
-        (mind.memory.mmr_duplicate_cluster_threshold - 0.75).abs() < f32::EPSILON,
-        "mind.memory.mmr_duplicate_cluster_threshold should default to 0.75"
-    );
-    assert_eq!(
-        mind.memory.mmr_min_slots_semantic, 1,
-        "mind.memory.mmr_min_slots_semantic should default to 1"
-    );
-    assert_eq!(
-        mind.memory.mmr_min_slots_episodic, 1,
-        "mind.memory.mmr_min_slots_episodic should default to 1"
-    );
-    assert_eq!(
-        mind.memory.mmr_min_slots_user_profile, 1,
-        "mind.memory.mmr_min_slots_user_profile should default to 1"
-    );
-    assert_eq!(
-        mind.memory.mmr_min_slots_commitment, 1,
-        "mind.memory.mmr_min_slots_commitment should default to 1"
-    );
-    assert!(
-        (mind.memory.mmr_source_diversity_bonus - 0.05).abs() < f32::EPSILON,
-        "mind.memory.mmr_source_diversity_bonus should default to 0.05"
-    );
+    assert_eq!(mind.context.max_prompt_tokens, 12_000);
+    assert!(mind.emotion.enabled);
+    assert!(!mind.proactive.enabled);
+    assert_eq!(mind.proactive.interval_seconds, 60);
+    assert_eq!(mind.proactive.min_idle_seconds, 120);
+    assert_eq!(mind.proactive.cooldown_seconds, 300);
 }
 
 #[test]
-fn mind_section_round_trips_through_ene_config_extra() {
-    // Write a custom mind block, load it back, and confirm the
-    // sub-fields survive. This proves the section path inside `extra`
-    // (key `mind` → nested object) is fully wired.
+fn mind_section_round_trips_public_fields_only() {
     let mut cfg = EneConfig::default();
-    let custom = MindConfig {
-        context: ContextConfig {
-            max_prompt_tokens: 16_384,
-            recent_turns: 12,
-            ..ContextConfig::default()
-        },
-        ..MindConfig::default()
-    };
+    let mut custom = MindConfig::default();
+    custom.proactive.enabled = true;
+    custom.proactive.interval_seconds = 90;
+    custom.emotion.enabled = false;
+    // Mutating skipped fields must not survive JSON round-trip.
+    custom.context.max_prompt_tokens = 16_384;
     cfg.set_section(&custom)
         .expect("set_section should succeed for settings-target");
 
-    // Serialise → reparse → read back
     let json = serde_json::to_string(&cfg).expect("serialise EneConfig");
     let reparsed: EneConfig = serde_json::from_str(&json).expect("reparse EneConfig");
 
     let loaded: MindConfig = reparsed
         .get_section::<MindConfig>()
         .expect("mind should be retrievable after round-trip");
-    assert_eq!(loaded.context.max_prompt_tokens, 16_384);
-    assert_eq!(loaded.context.recent_turns, 12);
+    assert!(loaded.proactive.enabled);
+    assert_eq!(loaded.proactive.interval_seconds, 90);
+    assert!(!loaded.emotion.enabled);
+    assert_eq!(
+        loaded.context.max_prompt_tokens,
+        ContextConfig::default().max_prompt_tokens,
+        "skipped context fields reset to code defaults on deserialize"
+    );
 }
 
 #[test]
 fn mind_section_survives_in_serialised_settings_json() {
-    // Validate the end-to-end shape: a `settings.json` produced by
-    // serialising `EneConfig` with a populated mind block must be
-    // valid JSON Schema-acceptable input (i.e. the generated schema
-    // would accept it). We assert both that the section shows up in
-    // the JSON and that the schema's `properties.mind` matches.
     let mut cfg = EneConfig::default();
-    let custom = MindConfig::default();
+    let mut custom = MindConfig::default();
+    custom.proactive.enabled = true;
     cfg.set_section(&custom)
         .expect("set_section should succeed");
 
     let json = serde_json::to_value(&cfg).expect("serialise EneConfig");
-    // `EneConfig::extra` is `#[serde(flatten)]`, so the `mind`
-    // block appears at the top level of the serialised JSON, not
-    // under an `extra` key.
     let mind = json
         .get("mind")
         .and_then(|v| v.as_object())
         .expect("`mind` should appear as a top-level object after set_section");
 
-    // The defaults are documented in `docs/reference/configuration/settings.md`;
-    // pin the contract here as well.
+    assert!(
+        mind.get("context").is_none(),
+        "context must not be serialized"
+    );
     assert_eq!(
-        mind.get("context").and_then(|v| v.get("max_prompt_tokens")),
-        Some(&serde_json::json!(12_000))
+        mind.get("proactive").and_then(|v| v.get("enabled")),
+        Some(&serde_json::json!(true))
     );
 
-    // The same shape should be visible in the generated schema.
     let schema_json =
         ene_config::generate_schema_json().expect("schema generation should not fail");
     let schema_value: serde_json::Value =
@@ -276,34 +176,21 @@ fn mind_section_survives_in_serialised_settings_json() {
     assert!(
         schema_mind
             .get("properties")
-            .and_then(|p| p.get("context"))
+            .and_then(|p| p.get("proactive"))
             .is_some(),
-        "schema should report `mind.context`"
+        "schema should report `mind.proactive`"
     );
     assert!(
         schema_mind
             .get("properties")
-            .and_then(|p| p.get("enabled"))
+            .and_then(|p| p.get("context"))
             .is_none(),
-        "schema must not expose removed `mind.enabled`"
+        "schema must not expose internal `mind.context`"
     );
 }
 
 #[test]
 fn mind_section_is_present_in_written_settings_schema_file() {
-    // End-to-end check: write the schema to the real on-disk
-    // `assets/schema/settings.schema.json` (this file is gitignored
-    // per AGENTS.md §4.2 and is auto-regenerated by the CLI on
-    // startup, so mutating it from a test is intentional and safe)
-    // and confirm the `mind` section made it through.
-    //
-    // This is a regression guard for issue #95. If a future change
-    // removes `ene-mind` from `ene-runtime`'s dependencies, the
-    // `ctor::ctor(unsafe) fn register()` from `define_config!` will
-    // stop firing, the registry will no longer contain
-    // `MindConfig`, and the on-disk schema will silently lose
-    // the `mind` block — the docs would then describe a section
-    // the schema doesn't validate.
     ene_config::write_schemas(&ene_config::paths::assets_dir());
 
     let schema_path = ene_config::paths::assets_dir()
@@ -329,15 +216,17 @@ fn mind_section_is_present_in_written_settings_schema_file() {
         .get("properties")
         .and_then(|p| p.as_object())
         .expect("`mind` property should be a struct with sub-properties");
-    for sub in ["context", "memory", "emotion", "character"] {
+    for sub in ["emotion", "proactive"] {
         assert!(
             mind_properties.contains_key(sub),
             "on-disk schema: `mind.{sub}` should be present; got keys: {:?}",
             mind_properties.keys().cloned().collect::<Vec<_>>()
         );
     }
-    assert!(
-        !mind_properties.contains_key("enabled"),
-        "on-disk schema must not include removed `mind.enabled`"
-    );
+    for hidden in ["context", "memory", "character"] {
+        assert!(
+            !mind_properties.contains_key(hidden),
+            "on-disk schema must not include internal `mind.{hidden}`"
+        );
+    }
 }
